@@ -55,6 +55,7 @@ Three Docker services behind nginx gateway:
 - `AgentConfig` has `full_access: bool` field (persisted in config.toml). When enabled, runner adds `--dangerously-skip-permissions` (Claude), `--full-auto` (Codex), `--trust-all-tools` (Kiro), `--allow-all-tools` (Copilot).
 - API: `GET/POST /api/config/agent-access` to read/set the full_access flag. UI toggle in Config > Agents card.
 - **Agent lifecycle**: agents can be uninstalled (`POST /api/agents/uninstall`) or toggled on/off (`POST /api/agents/toggle`). Disabled agents tracked in `AppConfig.disabled_agents: Vec<AgentType>`. `AgentDetection` includes `enabled: bool`. Uninstall uses platform-specific commands (npm for Claude/Codex/Copilot, uv/pipx/pip3 for Vibe).
+- **Pre-launch readiness** (KT-1107): `POST /api/agents/readiness` checks the agents of a multi-agent start in parallel, model-free: detection, native full access, CLI sign-in status, and an ACP `initialize` + `session/new` without prompt for native agents (`agents::readiness`, `runner::probe_native_acp_session`). Unknown is never reported as ready; results are cached 3 min per agent+project, keyed by a fingerprint of the agent settings, key and project MCP servers. Not on the bridge-token route list. `[src: file: backend/src/agents/readiness.rs:1]`
 - **Cross-platform HOME resolution**: in Docker, `KRONN_HOST_HOME` overrides `HOME` for all spawned agents so they find their auth config (`~/.claude/`, `~/.codex/`, `~/.copilot/`, etc.). On native (Tauri desktop), HOME is already correct. `COPILOT_HOME` is also set explicitly for Copilot CLI.
 - **Windows binary detection**: `find_binary()` matches `.cmd`, `.exe`, `.ps1` extensions in addition to exact names (npm installs create `.cmd` wrappers on Windows).
 - **WSL detection**: uses `WSL_DISTRO_NAME` env var first (most reliable), then `/proc/version` fallback.
@@ -364,8 +365,13 @@ Unified automation system: `Trigger → Steps`. Kronn and OpenAI Symphony overla
 - Sequential execution, each step runs an agent with optional per-step MCPs (resolved and synced before execution).
 - LiteLLM and Ollama Agent steps also receive a bounded Kronn-native catalogue:
   configured API/Quick API discovery and execution, plus read-only Planning for
-  project workflows. Scope is enforced server-side and persisted receipts keep
+  project workflows and the five Page tools ([Native Page tools](../operations/native-page-tools.md)).
+  Scope is enforced server-side and persisted receipts keep
   only tool names and outcomes, never arguments or credentials.
+- A Claude Code or Codex Agent step can declare `read_only_repos`: absolute
+  paths of linked Git checkouts it may read but never write, enforced by the
+  CLI's own sandbox and permission rules
+  ([Workflow Agent read-only repositories](../operations/workflow-read-only-repos.md)).
 - Steps can use `mode: debate` for multi-agent discussion at any point.
 - Context flows between steps via Kronn's purpose-built `{{variable}}` syntax: `{{issue.title}}`, `{{issue.body}}`, `{{issue.number}}`, `{{issue.url}}`, `{{issue.labels}}`, `{{previous_step.output}}`, `{{steps.<name>.output}}`, `{{run.id}}`. It is not Liquid; its only filters are the run-anchored `time.now` grammar. Runtime rendering rejects unknown variables, filters and unclosed placeholders before executing the step, while preview rendering keeps them visible. `{{path ?? "text"}}` (or `'text'`) is the one explicit fallback: it renders the literal when the path is absent or JSON null, such as a step a `Goto` skipped. An `Exec` step's `---STATE:` and `---ARTIFACT:` markers are read from its raw stdout, where a `STATE` value may span lines. `[src: file: backend/src/workflows/template.rs:527]`
 - Deterministic Page pipelines can fan out over saved Quick APIs and

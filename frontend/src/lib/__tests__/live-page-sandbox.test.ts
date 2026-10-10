@@ -24,6 +24,7 @@ const detail = {
     updated_at: '2026-08-13T10:00:00Z',
     points: [{ id: 'pt-1', dataset_id: 'data-1', observed_at: '2026-08-13T10:00:00Z', payload: { ms: 87 }, workflow_run_id: null }],
   }],
+  slug_aliases: [],
 } satisfies LivePageDetail;
 
 describe('Live Page sandbox', () => {

@@ -2068,6 +2068,7 @@ mod orchestrate_validation_tests {
             rtk_hook_configured: false,
             runtime_warning: None,
             shadowed_installs: None,
+            fallback_command: None,
         }
     }
 

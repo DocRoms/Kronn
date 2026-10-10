@@ -114,6 +114,12 @@ repair prompt. A corrected reference establishes existence, not factual truth.
 [src: file: backend/src/api/audit/document_repair.rs:26]
 [src: file: backend/src/db/audit_runs.rs:620]
 
+A `TypedSchema` step sends its envelope schema as `response_format` with
+`strict: false` on the OpenAI wire: the envelope does not satisfy OpenAI's
+strict subset, and Kronn validates the extracted data itself. See
+[TypedSchema on the OpenAI wire](../gotchas/typed-schema-openai-strict-mode.md).
+[src: file: backend/src/agents/chat_codec.rs:205-212]
+
 ## Pre-dispatch capability check
 
 If a named connection's live catalogue (Settings → test a connection) tags a

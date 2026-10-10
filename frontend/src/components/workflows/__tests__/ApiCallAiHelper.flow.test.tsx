@@ -233,6 +233,43 @@ describe('ApiCallAiHelper — send message', () => {
     expect(screen.getByRole('button', { name: /wf.apicall.helper.apply$/ })).toBeTruthy();
   });
 
+  it('surfaces a card when the agent fences the marker on its own', async () => {
+    streamMock.mockImplementation((_id, _req, onChunk, onDone) => {
+      onChunk('```json\nKRONN:APPLY\n```\n```json\n{ "endpoint": "/live/toppages/v4" }\n```');
+      onDone();
+      return Promise.resolve();
+    });
+    const { onApply } = await openChat();
+    const textarea = screen.getByPlaceholderText(/wf.apicall.helper.inputPlaceholder/) as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: 'help' } });
+    await act(async () => {
+      fireEvent.keyDown(textarea, { key: 'Enter' });
+    });
+    fireEvent.click(await screen.findByRole('button', { name: /wf.apicall.helper.apply$/ }));
+    expect(onApply.mock.calls[0][0]).toEqual({ api_endpoint_path: '/live/toppages/v4' });
+  });
+
+  it('shows an unreadable-proposal notice whose Retry re-asks the agent', async () => {
+    streamMock.mockImplementation((_id, _req, onChunk, onDone) => {
+      onChunk('KRONN:APPLY\n```json\n{ "endpoint": /x }\n```');
+      onDone();
+      return Promise.resolve();
+    });
+    await openChat();
+    const textarea = screen.getByPlaceholderText(/wf.apicall.helper.inputPlaceholder/) as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: 'help' } });
+    await act(async () => {
+      fireEvent.keyDown(textarea, { key: 'Enter' });
+    });
+    await screen.findByText(/aiHelper.apply.unreadable/);
+    expect(screen.queryByRole('button', { name: /wf.apicall.helper.apply$/ })).toBeNull();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /aiHelper.apply.retry$/ }));
+    });
+    await waitFor(() => expect(streamMock).toHaveBeenCalledTimes(2));
+    expect(streamMock.mock.calls[1][1].content).toContain('aiHelper.apply.retryPrompt');
+  });
+
   it('Apply forwards a mapped Partial<WorkflowStep> to onApply and disables the button', async () => {
     streamMock.mockImplementation((_id, _req, onChunk, onDone) => {
       onChunk('KRONN:APPLY\n```json\n{ "endpoint": "/live/toppages/v4", "method": "get" }\n```');

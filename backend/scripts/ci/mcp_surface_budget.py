@@ -71,6 +71,8 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # declaration (the agent detail lives in its manual); ceiling lowered by 6 B.
 # KT-1037: enabling became human-only, so `workflow_set_enabled` lost its
 # `force` input and its enable guidance; ceiling lowered by 400 B.
+# KT-1098: `page_update_html` gained `slug` (rename), paid for inside its own
+# declaration; ceiling unchanged.
 # Keep the declaration budget at the measured payload size. Extended contracts
 # are loaded through tool_manual and are excluded from this wire-size budget.
 CATALOGUE_MAX_BYTES = 85_735

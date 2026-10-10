@@ -183,6 +183,9 @@ describe('api.agents', () => {
   it('install', async () => { await exec(agents.install('ClaudeCode'), 'POST', '/agents/install'); });
   it('uninstall', async () => { await exec(agents.uninstall('ClaudeCode'), 'POST', '/agents/uninstall'); });
   it('toggle', async () => { await exec(agents.toggle('ClaudeCode'), 'POST', '/agents/toggle'); });
+  it('readiness', async () => {
+    await exec(agents.readiness({ project_id: null, agents: ['ClaudeCode', 'Codex'], force: false }), 'POST', '/agents/readiness');
+  });
 });
 
 // ════════════════════════════════════════════════════════════════════════════

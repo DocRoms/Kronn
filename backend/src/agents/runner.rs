@@ -3521,12 +3521,36 @@ fn resolve_reasoning_effort(
             "Cannot apply reasoning effort '{candidate}': no available model is resolved for this run. Choose an available catalogue model or clear the effort setting."
         )
     })?;
-    crate::core::model_catalog::reasoning_modes_for_agent_model(agent_type, &model)
-        .filter(|modes| effort_is_advertised(&candidate, modes))
-        .map(|_| Some(candidate.clone()))
-        .ok_or_else(|| format!(
-            "Cannot apply reasoning effort '{candidate}' to model '{model}': the current catalogue does not list that available model/mode combination. Refresh the model catalogue or choose a supported effort."
-        ))
+    let modes = crate::core::model_catalog::reasoning_modes_for_agent_model(agent_type, &model);
+    effort_catalogue_decision(&candidate, &model, modes.as_deref())
+}
+
+/// A near-miss (case, or stray whitespace on the catalogue side) is refused
+/// with the actual mismatch named, instead of the generic "absent" reason.
+fn effort_catalogue_decision(
+    candidate: &str,
+    model: &str,
+    modes: Option<&[String]>,
+) -> Result<Option<String>, String> {
+    match modes {
+        Some(modes) if effort_is_advertised(candidate, modes) => Ok(Some(candidate.to_owned())),
+        Some(modes) => Err(match effort_close_match(candidate, modes) {
+            Some(EffortNearMiss::Case(actual)) => format!(
+                "Cannot apply reasoning effort '{candidate}' to model '{model}': the catalogue lists '{actual}', not '{candidate}'. A free-text override (workflow step or Quick Prompt) must match the catalogue value exactly, including case and spacing — use '{actual}'."
+            ),
+            Some(EffortNearMiss::CatalogueWhitespace) => format!(
+                "Cannot apply reasoning effort '{candidate}' to model '{model}': the catalogue entry carries extraneous whitespace, so no override can ever match it exactly. Refresh the model catalogue or correct the stored entry — retyping the override will not help."
+            ),
+            None => effort_catalogue_absent_error(candidate, model),
+        }),
+        None => Err(effort_catalogue_absent_error(candidate, model)),
+    }
+}
+
+fn effort_catalogue_absent_error(candidate: &str, model: &str) -> String {
+    format!(
+        "Cannot apply reasoning effort '{candidate}' to model '{model}': the current catalogue does not list that available model/mode combination. Refresh the model catalogue or choose a supported effort."
+    )
 }
 
 /// Pure precedence portion of effort resolution. The catalogue validation is
@@ -3555,6 +3579,42 @@ pub(crate) fn reasoning_effort_candidate(
 
 pub(crate) fn effort_is_advertised(candidate: &str, modes: &[String]) -> bool {
     modes.iter().any(|mode| mode == candidate)
+}
+
+/// Diagnostic-only classification of a near-miss catalogue mode: never
+/// applied to the run, since actual matching stays exact in
+/// `effort_is_advertised` above.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum EffortNearMiss<'a> {
+    /// The catalogue mode matches once case is ignored — name that spelling.
+    Case(&'a str),
+    /// The catalogue mode matches once trimmed — the catalogue entry itself,
+    /// not the override, carries the stray whitespace an override can never
+    /// reproduce (candidates are already trimmed before this check runs).
+    CatalogueWhitespace,
+}
+
+pub(crate) fn effort_close_match<'a>(
+    candidate: &str,
+    modes: &'a [String],
+) -> Option<EffortNearMiss<'a>> {
+    modes.iter().map(String::as_str).find_map(|mode| {
+        if mode == candidate {
+            None
+        } else if mode.trim() == candidate {
+            Some(EffortNearMiss::CatalogueWhitespace)
+        } else if mode.trim().eq_ignore_ascii_case(candidate) {
+            // A padded entry cannot be matched, whatever the case: suggesting
+            // its spelling would name a value that never passes.
+            Some(if mode.trim() == mode {
+                EffortNearMiss::Case(mode)
+            } else {
+                EffortNearMiss::CatalogueWhitespace
+            })
+        } else {
+            None
+        }
+    })
 }
 
 fn missing_ollama_model_error() -> String {
@@ -4465,6 +4525,19 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         Err(e) => {
             tracing::info!("Direct binary '{}' failed ({}), trying npx...", binary, e);
             if let Some(pkg) = npx_pkg {
+                let runtime = super::probe_npx_runtime(pkg, false, &work_dir).await;
+                tracing::warn!(
+                    binary,
+                    command = ?runtime.command,
+                    version = ?runtime.version,
+                    direct_error = %e,
+                    "Agent CLI npx fallback"
+                );
+                provenance::record_npx_fallback(
+                    config.provenance.as_ref(),
+                    runtime.command,
+                    runtime.version,
+                );
                 try_spawn(
                     "npx",
                     Some(pkg),
@@ -4479,7 +4552,10 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                     config.workflow_step_context,
                     &github_env,
                     bridge_value.as_deref(),
-                )?
+                )
+                .map_err(|error| {
+                    format!("Direct CLI launch failed: {e}; npx fallback failed: {error}")
+                })?
             } else {
                 return Err(e);
             }
@@ -4826,6 +4902,165 @@ async fn start_adapted_acp(
     .await
 }
 
+/// Bounds of a readiness probe's ACP handshake (KT-1107).
+#[derive(Debug, Clone, Copy)]
+pub struct AcpProbeBounds {
+    pub initialize: Duration,
+    pub session: Duration,
+    pub shutdown: Duration,
+}
+
+impl AcpProbeBounds {
+    /// A launch's own budgets, so the probe fails exactly where a launch would.
+    pub const LAUNCH: Self = Self {
+        initialize: Duration::from_secs(30),
+        session: crate::acp::SESSION_SETUP_TIMEOUT,
+        shutdown: Duration::from_secs(5),
+    };
+}
+
+/// The provider key a launch of `agent` would receive, if any.
+pub(crate) fn configured_api_key(agent: &AgentType, tokens: &TokensConfig) -> Option<String> {
+    crate::core::child_env::AgentFamily::from_agent_type(agent)
+        .provider_key_env()
+        .and_then(|env_key| get_api_key(env_key, tokens))
+}
+
+/// The project MCP servers an ACP session of `agent` would declare here.
+pub(crate) fn probe_mcp_servers(
+    agent: &AgentType,
+    project_path: &str,
+) -> Vec<crate::acp::AcpMcpServer> {
+    acp_project_mcp_servers(project_path, *agent == AgentType::ClaudeCode)
+}
+
+/// Start `agent`'s native ACP runtime the way a launch does, run `initialize`
+/// and `session/new` without any prompt, then stop it (KT-1107). It takes no
+/// prompt at all, so it cannot reach the model.
+pub(crate) async fn probe_native_acp_session(
+    agent_type: &AgentType,
+    project_path: &str,
+    project_id: Option<&str>,
+    tokens: &TokensConfig,
+    bounds: AcpProbeBounds,
+) -> Result<(), super::acp_start::AcpStartFailure> {
+    use super::acp_start::{AcpStartFailure, AcpStartPhase};
+    use crate::acp::{AcpCapability, AcpHost, AcpInitialize, AcpSessionScope, AcpTransport};
+
+    let failed = |phase, error: String| AcpStartFailure::failed(phase, &error);
+    let work_dir = resolve_agent_work_dir(None, project_path)
+        .map_err(|error| failed(AcpStartPhase::Start, error))?;
+    let mcp_servers = probe_mcp_servers(agent_type, project_path);
+    let project_servers: Vec<String> = mcp_servers
+        .iter()
+        .filter(|server| !crate::acp::is_bridge_like(&server.id))
+        .map(|server| server.id.clone())
+        .collect();
+    // Held for the whole probe: the bridge the session starts uses it.
+    let mut _bridge = None;
+    #[cfg(test)]
+    let routed = test_acp_routes::transport_at(&work_dir);
+    #[cfg(not(test))]
+    let routed: Option<Arc<dyn AcpTransport>> = None;
+    let transport: Arc<dyn AcpTransport> = match routed {
+        Some(transport) => transport,
+        None => {
+            let kind = crate::acp::acp_agent(agent_type).ok_or_else(|| {
+                failed(
+                    AcpStartPhase::Start,
+                    format!("{agent_type:?} is not an ACP agent"),
+                )
+            })?;
+            let bridge = crate::core::bridge_token::mint(crate::core::bridge_token::BridgeScope {
+                project_id: project_id.map(str::to_owned),
+                ..Default::default()
+            })
+            .map_err(|error| failed(AcpStartPhase::Start, error))?;
+            let native_env = crate::acp::NativeLaunchEnv {
+                api_key: configured_api_key(agent_type, tokens),
+                bridge_token: Some(bridge.value().to_owned()),
+                github_env: crate::core::github_connection::env_for_launch(project_id).await,
+                ..Default::default()
+            };
+            _bridge = Some(bridge);
+            let project_root = (!project_path.is_empty()).then(|| work_dir.clone());
+            let spawned = crate::acp::AcpJsonRpcTransport::spawn_native(
+                kind,
+                &work_dir.to_string_lossy(),
+                true,
+                native_env,
+                AcpSessionScope::new(project_root, "readiness-probe"),
+                mcp_servers.clone(),
+            )
+            .await
+            .map_err(|error| {
+                failed(
+                    AcpStartPhase::Initialize,
+                    format!("{agent_type:?} ACP spawn failed: {error}"),
+                )
+            })?;
+            Arc::new(spawned)
+        }
+    };
+    let mut host = AcpHost::new(1, transport);
+    let outcome = async {
+        let started = Instant::now();
+        let initialize = AcpInitialize {
+            protocol_version: 1,
+            cwd: work_dir.to_string_lossy().into_owned(),
+            mcp_servers: mcp_servers.clone(),
+        };
+        match tokio::time::timeout(bounds.initialize, host.negotiate(initialize)).await {
+            Err(_) | Ok(Err(crate::acp::AcpError::Timeout(_))) => {
+                return Err(AcpStartFailure::new(
+                    AcpStartPhase::Initialize,
+                    started.elapsed(),
+                    Vec::new(),
+                ))
+            }
+            Ok(Err(error)) => {
+                return Err(failed(
+                    AcpStartPhase::Initialize,
+                    format!("{agent_type:?} ACP initialize failed: {error}"),
+                ))
+            }
+            Ok(Ok(_)) => {}
+        }
+        if !mcp_servers.is_empty() {
+            if let Err(error) = host.require_capability(AcpCapability::McpInjection) {
+                return Err(failed(
+                    AcpStartPhase::Initialize,
+                    format!(
+                        "{agent_type:?} ACP cannot start with the project MCP registry: {error}"
+                    ),
+                ));
+            }
+        }
+        let started = Instant::now();
+        match tokio::time::timeout(bounds.session, host.create_session()).await {
+            Err(_) | Ok(Err(crate::acp::AcpError::Timeout(_))) => Err(AcpStartFailure::new(
+                AcpStartPhase::Session,
+                started.elapsed(),
+                project_servers.clone(),
+            )),
+            Ok(Err(error)) => Err(failed(
+                AcpStartPhase::Session,
+                format!("{agent_type:?} ACP session creation failed: {error}"),
+            )),
+            Ok(Ok(_)) => Ok(()),
+        }
+    }
+    .await;
+    // A shutdown that hangs is abandoned: dropping the transport kills the group.
+    if tokio::time::timeout(bounds.shutdown, host.shutdown())
+        .await
+        .is_err()
+    {
+        tracing::warn!(agent = ?agent_type, "readiness probe: ACP shutdown timed out");
+    }
+    outcome
+}
+
 /// Test-only routing of every ACP launch in one working directory to a
 /// fixture transport, so tests can drive callers that build their own
 /// `AgentStartConfig` (workflow steps, discussion turns).
@@ -4861,6 +5096,10 @@ pub(crate) mod test_acp_routes {
 
     pub(crate) fn is_routed(work_dir: &Path) -> bool {
         ROUTES.lock().unwrap().contains_key(work_dir)
+    }
+
+    pub(crate) fn transport_at(work_dir: &Path) -> Option<Transport> {
+        ROUTES.lock().unwrap().get(work_dir).cloned()
     }
 
     pub(super) fn transport_for(
@@ -12890,12 +13129,7 @@ fn resolve_agent_invocation(
     args: &[String],
 ) -> Result<(String, Vec<String>, bool), String> {
     if let Some(package) = npx_package {
-        let mut npx_args = vec!["--yes".to_string(), package.to_string()];
-        npx_args.extend_from_slice(args);
-        let via_wsl = super::find_binary("npx")
-            .map(|location| location.via_wsl)
-            .unwrap_or(false);
-        Ok(("npx".to_string(), npx_args, via_wsl))
+        Ok(super::npx_invocation(package, args))
     } else {
         let location =
             super::find_binary(binary).ok_or_else(|| format!("Binary '{binary}' not found"))?;

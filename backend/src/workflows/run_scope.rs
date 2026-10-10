@@ -18,17 +18,17 @@ pub fn is_literal(template: &str) -> bool {
 }
 
 /// The project of the page an id or slug resolves to, as the publisher
-/// resolves it: by id first, else by slug.
+/// resolves it: by id, else by slug, else by a renamed page's former slug.
 pub fn page_projects(
     conn: &rusqlite::Connection,
     page: &str,
 ) -> anyhow::Result<Vec<Option<String>>> {
-    let mut statement = conn.prepare(
-        "SELECT project_id FROM live_pages WHERE id = ?1 OR slug = ?1 \
-         ORDER BY (id = ?1) DESC LIMIT 1",
-    )?;
+    let Some(page_id) = crate::db::live_pages::resolve_live_page_id(conn, page)? else {
+        return Ok(Vec::new());
+    };
+    let mut statement = conn.prepare("SELECT project_id FROM live_pages WHERE id = ?1")?;
     let projects = statement
-        .query_map([page], |row| row.get::<_, Option<String>>(0))?
+        .query_map([page_id], |row| row.get::<_, Option<String>>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(projects)
 }

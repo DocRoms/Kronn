@@ -87,6 +87,13 @@ declared in the MCP bridge and an HTTP agent structurally cannot reach it. The c
 existed and was announced to CLI agents by `kronn_intro`; the HTTP half of the fleet was
 told about a feature it had no way to invoke.
 
+And, since 0.15.0, the five Page tools: `page_list`, `page_get`, `page_create`,
+`page_update_html` and `page_add_dataset`. They call the same handlers as the MCP bridge,
+so validation, immutable revisions and inert action blocks are shared. A workflow Agent
+step has them as well; its catalogue still refuses every other mutating tool. See
+[Native Page tools](../operations/native-page-tools.md).
+[src: file: backend/src/api/agent_page_tools.rs:15]
+
 ## The one capability that spends money
 
 `media_generate` is different in kind from every other tool above, and the difference is

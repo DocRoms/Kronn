@@ -20,7 +20,8 @@ vi.mock('../../../lib/api', () => buildApiMock({
 }));
 
 import { ApiCallAiHelper } from '../ApiCallAiHelper';
-import { applyToStep, buildContextBlock, parseApplyBlocks } from '../apiCallAiHelperUtils';
+import { applyToStep, buildContextBlock } from '../apiCallAiHelperUtils';
+import { parseApplyBlocks } from '../../../lib/kronnApply';
 
 const t = (key: string, ...args: (string | number)[]) =>
   args.length > 0 ? `${key}:${args.join(',')}` : key;

@@ -10,6 +10,99 @@ mod tests {
     use std::collections::BTreeSet;
     use std::sync::{Arc, Mutex};
 
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn npx_fallback_preserves_output_records_provenance_and_reuses_probe() {
+        use std::os::unix::fs::PermissionsExt;
+        struct RestoreEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for RestoreEnv {
+            fn drop(&mut self) {
+                for (name, value) in &self.0 {
+                    match value {
+                        Some(value) => std::env::set_var(name, value),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("bin with spaces");
+        std::fs::create_dir(&bin).unwrap();
+        let codex = bin.join("codex");
+        std::fs::write(&codex, "#!/kronn-kt665-missing-interpreter\n").unwrap();
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let npx = bin.join("npx");
+        std::fs::write(
+            &npx,
+            r#"#!/bin/sh
+[ "$1" = --yes ] && [ "$2" = @openai/codex ] || exit 1
+if [ "$3" = --version ]; then
+    echo probe >> probe-count
+    echo 'codex-cli 0.154.0'
+else
+    echo '{"data":{"ok":true},"status":"OK"}'
+fi
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&npx, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let saved = RestoreEnv(
+            ["PATH", "KRONN_ACP_ADAPTER_CODEX"]
+                .into_iter()
+                .map(|name| (name, std::env::var_os(name)))
+                .collect(),
+        );
+        let mut paths = vec![bin];
+        if let Some(value) = &saved.0[0].1 {
+            paths.extend(std::env::split_paths(value));
+        }
+        std::env::set_var("PATH", std::env::join_paths(paths).unwrap());
+        std::env::set_var("KRONN_ACP_ADAPTER_CODEX", "0");
+        let tokens = crate::models::setup::TokensConfig {
+            anthropic: None,
+            openai: None,
+            google: None,
+            keys: Vec::new(),
+            disabled_overrides: Vec::new(),
+        };
+        for _ in 0..2 {
+            let capture = crate::agents::provenance::AgentProvenanceCapture::default();
+            let mut process = start_agent_with_config(AgentStartConfig {
+                provenance: Some(capture.clone()),
+                mcp_context_override: Some(""),
+                ..AgentStartConfig::new(
+                    &AgentType::Codex,
+                    root.path().to_str().unwrap(),
+                    "fixture prompt",
+                    &tokens,
+                )
+            })
+            .await
+            .unwrap();
+            let mut output = Vec::new();
+            while let Some(line) = process.next_line().await {
+                output.push(line);
+            }
+            assert!(process.child.wait().await.unwrap().success());
+            assert_eq!(output, [r#"{"data":{"ok":true},"status":"OK"}"#]);
+            let provenance = capture.lock().unwrap();
+            assert_eq!(
+                provenance.npx_fallback_command,
+                Some(vec![
+                    npx.to_string_lossy().into_owned(),
+                    "--yes".into(),
+                    "@openai/codex".into(),
+                ])
+            );
+            assert_eq!(provenance.npx_fallback_version.as_deref(), Some("0.154.0"));
+        }
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("probe-count")).unwrap(),
+            "probe\n"
+        );
+    }
+
     struct NativeRouteFixture {
         created: std::sync::atomic::AtomicUsize,
         resumed: std::sync::atomic::AtomicUsize,
@@ -2808,8 +2901,10 @@ mod tests {
         // Paths over an extract's output are not paths over the response the next
         // `extract` runs on: offering them would send the model to empty results.
         let response = speedcurve_tests_page(100);
+        // The window leaves the list room beside the full catalogue, Page tools
+        // included; the object case below is shortened at any size.
         let run = |extracted: serde_json::Value| {
-            let mut body = discussion_body(32_768);
+            let mut body = discussion_body(36_864);
             push_api_call_round(
                 &mut body,
                 "c1",
@@ -2820,7 +2915,7 @@ mod tests {
                 }),
                 extracted,
             );
-            clamp_ollama_tool_results(&mut body, 32_768);
+            clamp_ollama_tool_results(&mut body, 36_864);
             last_tool_content(&body)
         };
 
@@ -12136,6 +12231,103 @@ Suite de la réponse.";
             "{error}"
         );
         assert!(error.contains("manual-model"), "{error}");
+    }
+
+    // ─── Catalogue near-miss refusal: case or whitespace mismatch ─────────────
+
+    #[test]
+    fn effort_close_match_finds_a_case_insensitive_near_miss() {
+        assert_eq!(
+            effort_close_match("High", &["low".into(), "high".into()]),
+            Some(EffortNearMiss::Case("high")),
+        );
+    }
+
+    #[test]
+    fn effort_close_match_finds_a_catalogue_side_whitespace_near_miss() {
+        // Residual whitespace on the catalogue side. `candidate` is already
+        // trimmed by `reasoning_effort_candidate`, so this can only mean the
+        // stored catalogue entry itself carries the stray whitespace.
+        assert_eq!(
+            effort_close_match("high", &["low".into(), "high ".into()]),
+            Some(EffortNearMiss::CatalogueWhitespace),
+        );
+    }
+
+    #[test]
+    fn effort_close_match_never_suggests_a_padded_spelling_for_a_case_mismatch() {
+        assert_eq!(
+            effort_close_match("High", &["high ".into()]),
+            Some(EffortNearMiss::CatalogueWhitespace),
+        );
+        let error = effort_catalogue_decision("High", "manual-model", Some(&["high ".into()]))
+            .expect_err("a padded catalogue entry can never match");
+        assert!(error.contains("extraneous whitespace"), "{error}");
+        assert!(!error.contains("use 'high '"), "{error}");
+    }
+
+    #[test]
+    fn effort_close_match_returns_none_when_nothing_is_close() {
+        assert_eq!(
+            effort_close_match("extreme", &["low".into(), "high".into()]),
+            None,
+            "a genuinely unsupported effort must not surface a fabricated near-miss",
+        );
+    }
+
+    #[test]
+    fn effort_catalogue_decision_refuses_a_mistyped_case_override_with_an_accurate_reason() {
+        let error = effort_catalogue_decision("High", "manual-model", Some(&["high".into()]))
+            .expect_err("a case mismatch must still be refused, never silently normalized");
+        assert!(
+            error.contains("the catalogue lists 'high', not 'High'"),
+            "the refusal must name the actual mismatch, not claim the mode is absent: {error}"
+        );
+    }
+
+    #[test]
+    fn effort_catalogue_decision_refuses_a_catalogue_whitespace_mismatch_without_an_unfollowable_suggestion(
+    ) {
+        // A trimmed candidate can never equal a catalogue entry with stray
+        // whitespace, no matter how the user retypes it — the advice must
+        // point at the catalogue, not ask for a value that will be trimmed
+        // away again.
+        let error = effort_catalogue_decision("high", "manual-model", Some(&["high ".into()]))
+            .expect_err("a whitespace mismatch must still be refused, never silently applied");
+        assert!(
+            error.contains("catalogue entry carries extraneous whitespace"),
+            "{error}"
+        );
+        assert!(
+            !error.contains("use 'high '"),
+            "must not advise retyping a value the trim will erase again: {error}"
+        );
+    }
+
+    #[test]
+    fn effort_catalogue_decision_keeps_the_original_reason_for_a_genuinely_unsupported_effort() {
+        // Untouched guard: no near miss exists, so the reason must stay the
+        // original "does not list that combination" message.
+        let error = effort_catalogue_decision(
+            "extreme",
+            "manual-model",
+            Some(&["low".into(), "high".into()]),
+        )
+        .expect_err("an effort absent from the catalogue must still be refused");
+        assert!(
+            error.contains(
+                "the current catalogue does not list that available model/mode combination"
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn effort_catalogue_decision_applies_an_exact_match() {
+        assert_eq!(
+            effort_catalogue_decision("high", "manual-model", Some(&["high".into()])),
+            Ok(Some("high".into())),
+        );
     }
 
     // ─── Codex CLI arg construction: reasoning effort transmission ────────────

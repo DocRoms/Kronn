@@ -8,11 +8,11 @@ import type { AgentType, McpServer, WorkflowStep } from '../../types/generated';
 import { authSlotsForServer } from './apiCallAuth';
 import { tipsForSlug } from './apiCallPluginTips';
 import {
-  KRONN_APPLY_RX,
   applyToStep,
   buildContextBlock,
-  parseApplyBlocks,
 } from './apiCallAiHelperUtils';
+import { parseKronnApply } from '../../lib/kronnApply';
+import { KronnApplyNotice } from '../KronnApplyNotice';
 
 type Translator = (key: string, ...args: (string | number)[]) => string;
 
@@ -298,8 +298,8 @@ export function ApiCallAiHelper({
     startWithAgentRef.current = startWithAgent;
   }, [startWithAgent]);
 
-  const sendMessage = useCallback(async () => {
-    const userText = input.trim();
+  const sendMessage = useCallback(async (overrideText?: string) => {
+    const userText = (overrideText ?? input).trim();
     if (!userText || !discussionId || streamingRef.current) return;
     streamingRef.current = true;
     setInput('');
@@ -546,8 +546,11 @@ export function ApiCallAiHelper({
               <ChatMessageView
                 key={idx}
                 msg={msg}
+                streaming={streaming && idx === messages.length - 1}
                 appliedSignatures={appliedSignatures}
                 onApply={handleApply}
+                onRetry={() => void sendMessage(t('aiHelper.apply.retryPrompt'))}
+                retryDisabled={streaming || !discussionId}
                 t={t}
               />
             ))}
@@ -630,8 +633,12 @@ export function ApiCallAiHelper({
 
 interface ChatMessageViewProps {
   msg: ChatMessage;
+  /** True while this message is still being streamed: a partial block is not yet an error. */
+  streaming: boolean;
   appliedSignatures: Set<string>;
   onApply: (sig: string, parsed: Record<string, unknown>) => void;
+  onRetry: () => void;
+  retryDisabled: boolean;
   t: (key: string, ...args: (string | number)[]) => string;
 }
 
@@ -639,15 +646,13 @@ interface ChatMessageViewProps {
  *  KRONN:APPLY blocks and replace them with inline Apply cards — this keeps
  *  the chat tidy: the user sees the prose explanation followed by a clear
  *  one-click button, instead of a wall of fenced JSON. */
-function ChatMessageView({ msg, appliedSignatures, onApply, t }: ChatMessageViewProps) {
-  const blocks = useMemo(
-    () => (msg.role === 'assistant' ? parseApplyBlocks(msg.text) : []),
-    [msg.role, msg.text],
-  );
-  // Strip the KRONN:APPLY chunks from the displayed prose — the SuggestionCard
+function ChatMessageView({ msg, streaming, appliedSignatures, onApply, onRetry, retryDisabled, t }: ChatMessageViewProps) {
+  // The parser strips the KRONN:APPLY chunks from the prose; the SuggestionCard
   // takes their place visually.
-  const prose = useMemo(
-    () => msg.role === 'assistant' ? msg.text.replace(KRONN_APPLY_RX, '').trim() : msg.text,
+  const { blocks, prose, unreadable } = useMemo(
+    () => (msg.role === 'assistant'
+      ? parseKronnApply(msg.text)
+      : { blocks: [], prose: msg.text, unreadable: null }),
     [msg.role, msg.text],
   );
 
@@ -663,6 +668,9 @@ function ChatMessageView({ msg, appliedSignatures, onApply, t }: ChatMessageView
           t={t}
         />
       ))}
+      {unreadable !== null && !streaming && (
+        <KronnApplyNotice raw={unreadable} onRetry={onRetry} retryDisabled={retryDisabled} t={t} />
+      )}
     </div>
   );
 }

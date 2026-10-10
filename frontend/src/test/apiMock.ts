@@ -510,6 +510,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       get: resolve(null),
       workflows: resolve([]),
       create: resolve({}),
+      update: resolve({}),
       updateHtml: resolve({}),
       publish: resolve({}),
     },

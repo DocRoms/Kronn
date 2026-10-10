@@ -12530,6 +12530,7 @@ mod tests {
                 rtk_hook_configured: false,
                 runtime_warning: None,
                 shadowed_installs: None,
+                fallback_command: None,
             }
         };
         let available = available_agent_types(vec![
@@ -12566,6 +12567,7 @@ mod tests {
                 rtk_hook_configured: false,
                 runtime_warning: None,
                 shadowed_installs: None,
+                fallback_command: None,
             };
         let detections = vec![
             detection(AgentType::Ollama, true, true, true),
@@ -12989,6 +12991,7 @@ mod tests {
             rtk_hook_configured: false,
             runtime_warning: None,
             shadowed_installs: None,
+            fallback_command: None,
         };
         assert!(
             bounded_cli_worker_preflight(std::slice::from_ref(&detection))
@@ -13021,6 +13024,7 @@ mod tests {
             rtk_hook_configured: false,
             runtime_warning: None,
             shadowed_installs: None,
+            fallback_command: None,
         };
         let catalogue = build_task_worker_catalogue(
             &crate::core::config::default_config(),
@@ -13106,6 +13110,7 @@ mod tests {
             rtk_hook_configured: false,
             runtime_warning: None,
             shadowed_installs: None,
+            fallback_command: None,
         }
     }
 

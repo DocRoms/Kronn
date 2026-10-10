@@ -797,11 +797,7 @@ fn create_imported_page(
         serde_json::from_value(remap_value(&item.source, map, project_id)?)?;
     let now = Utc::now();
     let mut slug = exported.slug;
-    while tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM live_pages WHERE slug = ?1)",
-        [&slug],
-        |row| row.get::<_, bool>(0),
-    )? {
+    while crate::db::live_pages::slug_is_taken(tx, &slug)? {
         let stem = item.source.value["slug"].as_str().unwrap();
         let stem = &stem[..stem.len().min(87)]; // validated ASCII slug
         slug = format!("{}-{}", stem.trim_end_matches('-'), Uuid::new_v4().simple());

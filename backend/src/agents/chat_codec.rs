@@ -202,11 +202,12 @@ pub(crate) fn build_openai_chat_body(
     if stream {
         body["stream_options"] = serde_json::json!({ "include_usage": true });
     }
-    // Same envelope-wrapped schema Ollama gets, in OpenAI's spelling.
+    // Author schemas and the optional envelope summary need not satisfy OpenAI's
+    // strict subset. Preserve them; workflows validate the extracted data.
     if let Some(schema) = format {
         body["response_format"] = serde_json::json!({
             "type": "json_schema",
-            "json_schema": { "name": "kronn_envelope", "strict": true, "schema": schema },
+            "json_schema": { "name": "kronn_envelope", "strict": false, "schema": schema },
         });
     }
     body
@@ -510,6 +511,7 @@ mod tests {
         assert_eq!(b["stream_options"]["include_usage"], true);
         assert_eq!(b["messages"][0]["role"], "system");
         assert_eq!(b["messages"][1]["role"], "user");
+        assert!(b.get("response_format").is_none());
     }
 
     #[test]
@@ -517,13 +519,54 @@ mod tests {
         let b = build_openai_chat_body("m", "", "hi", None, false);
         assert!(b["stream_options"].is_null());
         assert_eq!(b["messages"][0]["role"], "user", "empty system is dropped");
+        assert!(b.get("response_format").is_none());
     }
 
     #[test]
-    fn openai_body_maps_schema_to_response_format() {
-        let schema = serde_json::json!({"type":"object"});
-        let b = build_openai_chat_body("m", "", "hi", Some(&schema), false);
-        assert_eq!(b["response_format"]["type"], "json_schema");
-        assert_eq!(b["response_format"]["json_schema"]["schema"], schema);
+    fn openai_body_preserves_schema_without_strict_mode() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "object",
+                    "properties": {
+                        "items": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "score": { "type": "integer" },
+                                    "note": { "type": "string" }
+                                },
+                                "required": ["score"]
+                            }
+                        },
+                        "labels": {
+                            "type": "object",
+                            "additionalProperties": { "type": "string" }
+                        }
+                    },
+                    "required": ["items"]
+                },
+                "status": { "type": "string" },
+                "summary": { "type": "string" }
+            },
+            "required": ["data", "status"]
+        });
+        for stream in [false, true] {
+            let body = build_openai_chat_body("m", "", "hi", Some(&schema), stream);
+            assert_eq!(
+                body["response_format"],
+                serde_json::json!({
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "kronn_envelope",
+                        "strict": false,
+                        "schema": schema
+                    }
+                })
+            );
+            assert_eq!(body["stream"], stream);
+        }
     }
 }

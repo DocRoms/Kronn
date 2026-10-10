@@ -6922,6 +6922,61 @@ class LivePageToolTests(unittest.TestCase):
             },
         )
 
+    def test_page_update_html_renames_the_slug_without_a_revision(self):
+        page = {"id": "page-1", "title": "T", "slug": "team-front",
+                "slug_aliases": ["team-v2"], "project_id": None, "updated_at": "x",
+                "revision": {"html": "big"}}
+        with mock.patch.object(self.mod, "_http", return_value=self._env(page)) as http:
+            result = self.mod.call_page_update_html({"page_id": "team-v2", "slug": "team-front"})
+        http.assert_called_once_with("PATCH", "/api/pages/team-v2", {"slug": "team-front"})
+        self.assertEqual(result["slug_aliases"], ["team-v2"])
+        self.assertNotIn("revision", result)
+
+    def test_page_update_html_renames_then_revises_by_id(self):
+        responses = [self._env({"id": "page-1", "slug": "new"}), self._env({"revision": 3})]
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"), \
+             mock.patch.object(self.mod, "_http", side_effect=responses) as http:
+            result = self.mod.call_page_update_html(
+                {"page_id": "old", "slug": "new", "html": "<p>x</p>"})
+        self.assertEqual(result["revision"], 3)
+        self.assertEqual(http.call_args_list[1].args[:2], ("PUT", "/api/pages/page-1/html"))
+
+    def test_page_update_html_refuses_invalid_html_before_any_rename(self):
+        for html in ["", "  \n\t", 3, "é" * 500_001]:
+            with self.subTest(html=repr(html)[:20]), \
+                 mock.patch.object(self.mod, "_http") as http:
+                with self.assertRaisesRegex(RuntimeError, "html"):
+                    self.mod.call_page_update_html(
+                        {"page_id": "old", "slug": "new", "html": html})
+                http.assert_not_called()
+
+    def test_page_update_html_says_the_slug_changed_when_the_revision_fails(self):
+        responses = [
+            self._env({"id": "page-1", "slug": "new"}),
+            {"success": False, "error": "Page HTML must be non-empty and at most 1 MB"},
+        ]
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"), \
+             mock.patch.object(self.mod, "_http", side_effect=responses):
+            with self.assertRaisesRegex(RuntimeError, "page 'page-1' was already renamed to slug 'new'.*1 MB"):
+                self.mod.call_page_update_html(
+                    {"page_id": "old", "slug": "new", "html": "<p>x</p>"})
+
+    def test_page_update_html_html_only_keeps_its_contract(self):
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"), \
+             mock.patch.object(self.mod, "_http", return_value=self._env({"revision": 2})) as http:
+            self.assertEqual(
+                self.mod.call_page_update_html({"page_id": "old", "html": "<p>ok</p>"}),
+                {"revision": 2})
+        self.assertEqual(http.call_args.args[:2], ("PUT", "/api/pages/old/html"))
+        with self.assertRaisesRegex(RuntimeError, "html"):
+            self.mod.call_page_update_html({"page_id": "old", "html": "   "})
+
+    def test_page_update_html_needs_html_or_slug(self):
+        with self.assertRaisesRegex(RuntimeError, "html.*slug"):
+            self.mod.call_page_update_html({"page_id": "p"})
+        with self.assertRaisesRegex(RuntimeError, "slug.*string"):
+            self.mod.call_page_update_html({"page_id": "p", "slug": 3})
+
     def test_page_add_dataset_sends_the_full_contract(self):
         with mock.patch.object(
             self.mod, "_http",

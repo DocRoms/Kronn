@@ -28,6 +28,8 @@ class MockUtterance {
 
 // Mock API — DiscussionsPage uses discussions, projects, and skills APIs
 vi.mock('../../lib/api', () => ({
+  // KT-1107 — a multi-agent start checks its agents first.
+  agents: { readiness: vi.fn().mockResolvedValue([]) },
   // 0.10.0 — ChatHeader renders <LearningsBadge> which polls learnings.pending().
   learnings: {
     pending: vi.fn().mockResolvedValue({ count: 0 }),
@@ -202,6 +204,7 @@ vi.mock('../../hooks/useWebSocket', () => ({
 }));
 
 import {
+  agents as agentsApi,
   discussions as discussionsApi,
   externalApi as externalApiConnections,
   media,
@@ -3595,6 +3598,57 @@ describe('DiscussionsPage', () => {
       expect(successToast, 'expected a success toast').toBeDefined();
       expect(successToast![0]).toContain('Discussion créée');
     }, { timeout: 1000 });
+  });
+
+  it('KT-1107 — a multi-agent room shows the agent check it was started with', async () => {
+    const createdDisc: Discussion = { ...makeListDiscussion('disc-checked', 1), messages: [] };
+    vi.mocked(discussionsApi.create).mockReset();
+    vi.mocked(discussionsApi.create).mockResolvedValue(createdDisc);
+    vi.mocked(discussionsApi.get).mockResolvedValue(createdDisc);
+    vi.mocked(agentsApi.readiness).mockResolvedValueOnce([
+      {
+        agent_type: 'Codex', status: 'ready', reason: 'ready', message_key: 'readiness.reason.ready',
+        servers: [], secs: null, detail: null, cached: false, checked_at: '2026-10-09T10:00:00Z',
+      },
+      {
+        agent_type: 'ClaudeCode', status: 'unknown', reason: 'login_unverified',
+        message_key: 'readiness.reason.login_unverified',
+        servers: [], secs: null, detail: null, cached: true, checked_at: '2026-10-09T10:00:00Z',
+      },
+    ]);
+    const agent = (agent_type: AgentType, name: string): AgentDetection => ({
+      name, agent_type, installed: true, enabled: true, path: `/usr/bin/${name}`, version: '1.0.0',
+      latest_version: null, origin: 'host', install_command: null, host_managed: false, host_label: null,
+      runtime_available: false, rtk_available: false, rtk_hook_configured: false,
+    });
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[agent('ClaudeCode', 'claude'), agent('Codex', 'codex')]}
+        allDiscussions={[]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={vi.fn()}
+        {...liftedProps()}
+      />
+    );
+    await act(async () => { fireEvent.click(screen.getAllByText(/Nouvelle/)[0]); });
+    const prompt = document.querySelector('.disc-new-prompt-wrap textarea') as HTMLTextAreaElement;
+    await act(async () => {
+      fireEvent.change(prompt, { target: { value: '@codex @claude vérifiez ceci.' } });
+    });
+    await act(async () => {
+      fireEvent.click(document.querySelector('.disc-create-btn') as HTMLButtonElement);
+    });
+    const notice = await screen.findByTestId('agent-readiness-notice');
+    expect(notice).toHaveTextContent('Agents vérifiés avant le démarrage');
+    expect(notice).toHaveTextContent('✅ Codex');
+    expect(notice).toHaveTextContent('❔ Claude Code');
+    await act(async () => { fireEvent.click(notice.querySelector('button') as HTMLButtonElement); });
+    expect(screen.queryByTestId('agent-readiness-notice')).toBeNull();
   });
 
   it('creates one no-agent room for a media-only connection before launching media', async () => {

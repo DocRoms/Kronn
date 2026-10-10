@@ -1677,6 +1677,104 @@ async fn live_page_workflows_returns_configured_publishers() {
     assert_eq!(missing["error_code"], "not_found");
 }
 
+/// KT-1098 — a slug is renamed under the creation rules, and the old one keeps
+/// opening the page without ever being claimable by another page.
+#[tokio::test]
+async fn a_renamed_page_slug_keeps_its_old_links_and_cannot_be_hijacked() {
+    let app = build_router_with_auth(test_state(), false);
+    let create = |slug: &str| serde_json::json!({"title": slug, "slug": slug, "html": "<p>x</p>", "datasets": []});
+    let (_, team) = post_json(app.clone(), "/api/pages", create("team-v2")).await;
+    let team_id = team["data"]["id"]
+        .as_str()
+        .expect("page created")
+        .to_string();
+    let (_, other) = post_json(app.clone(), "/api/pages", create("other-page")).await;
+    let other_id = other["data"]["id"]
+        .as_str()
+        .expect("page created")
+        .to_string();
+    let page_url = |id: &str| format!("/api/pages/{id}");
+
+    for bad in [
+        "Team V2",
+        "team--v2",
+        "-team",
+        "",
+        "0b8f5c2e-3a7d-4f1e-9c6b-2d4e8a1f7c3b",
+    ] {
+        let (_, refused) = patch_json(
+            app.clone(),
+            &page_url(&team_id),
+            serde_json::json!({"slug": bad}),
+        )
+        .await;
+        assert_eq!(refused["error_code"], "validation", "{bad}: {refused}");
+    }
+    let (_, clash) = patch_json(
+        app.clone(),
+        &page_url(&team_id),
+        serde_json::json!({"slug": "other-page"}),
+    )
+    .await;
+    assert_eq!(clash["error_code"], "conflict", "{clash}");
+    let (_, unknown) = patch_json(
+        app.clone(),
+        "/api/pages/no-such-page",
+        serde_json::json!({"slug": "anything"}),
+    )
+    .await;
+    assert_eq!(unknown["error_code"], "not_found", "{unknown}");
+
+    let (_, renamed) = patch_json(
+        app.clone(),
+        &page_url(&team_id),
+        serde_json::json!({"slug": " suivi-team-front "}),
+    )
+    .await;
+    assert_eq!(renamed["data"]["slug"], "suivi-team-front", "{renamed}");
+    assert_eq!(
+        renamed["data"]["slug_aliases"],
+        serde_json::json!(["team-v2"])
+    );
+    for link in ["team-v2", "suivi-team-front"] {
+        let (_, opened) = get_json(app.clone(), &page_url(link)).await;
+        assert_eq!(opened["data"]["id"], team_id.as_str(), "{link}: {opened}");
+    }
+
+    // Neither a new page nor a rename may take the retired slug.
+    let (_, squat) = post_json(app.clone(), "/api/pages", create("team-v2")).await;
+    assert_eq!(squat["error_code"], "conflict", "{squat}");
+    let (_, steal) = patch_json(
+        app.clone(),
+        &page_url(&other_id),
+        serde_json::json!({"slug": "team-v2"}),
+    )
+    .await;
+    assert_eq!(steal["error_code"], "conflict", "{steal}");
+    let (_, still) = get_json(app.clone(), &page_url("team-v2")).await;
+    assert_eq!(still["data"]["id"], team_id.as_str());
+
+    // The page itself may take its old slug back.
+    let (_, back) = patch_json(
+        app.clone(),
+        &page_url("suivi-team-front"),
+        serde_json::json!({"slug": "team-v2", "title": "Team"}),
+    )
+    .await;
+    assert_eq!(back["data"]["slug"], "team-v2", "{back}");
+    assert_eq!(back["data"]["title"], "Team");
+    assert_eq!(
+        back["data"]["slug_aliases"],
+        serde_json::json!(["suivi-team-front"])
+    );
+
+    // Deleting the page frees every slug it held.
+    let (_, deleted) = delete_json(app.clone(), &page_url("suivi-team-front")).await;
+    assert_eq!(deleted["success"], true, "{deleted}");
+    let (_, reused) = post_json(app.clone(), "/api/pages", create("suivi-team-front")).await;
+    assert_eq!(reused["success"], true, "{reused}");
+}
+
 async fn workflow_portability_fixture() -> (AppState, Value) {
     let state = test_state();
     let now = chrono::Utc::now();
@@ -15029,6 +15127,39 @@ async fn agents_detect_returns_list() {
         "Expected at least 6 agents, got {}",
         agents.len()
     );
+}
+
+/// KT-1107 — the readiness endpoint answers per agent, in request order and
+/// deduplicated; an HTTP provider is reported unknown, never ready.
+#[tokio::test]
+async fn agent_readiness_reports_each_selected_agent() {
+    let (status, json) = post_json(
+        test_app(),
+        "/api/agents/readiness",
+        serde_json::json!({ "project_id": null, "agents": ["Ollama", "Ollama", "LiteLlm"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true, "{json}");
+    let results = json["data"].as_array().unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0]["agent_type"], "Ollama");
+    assert_eq!(results[1]["agent_type"], "LiteLlm");
+    for result in results {
+        assert_eq!(result["status"], "unknown");
+        assert_eq!(result["reason"], "not_probed");
+        assert_eq!(result["message_key"], "readiness.reason.not_probed");
+    }
+
+    let (status, json) = post_json(
+        test_app(),
+        "/api/agents/readiness",
+        serde_json::json!({ "project_id": "no-such-project", "agents": ["OpenCode"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], false);
+    assert_eq!(json["error"], "Project not found");
 }
 
 // ─── Compare-agents mode (POST /api/quick-prompts/:id/compare-agents) ───

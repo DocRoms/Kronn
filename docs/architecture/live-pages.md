@@ -120,6 +120,15 @@ links. The library deliberately reuses the Discussion sidebar interaction
 model: search, favorite shortcuts, a canonical active section, multi-selection
 actions and a collapsed archive section.
 
+A Page's slug can be renamed (`PATCH /api/pages/{id}` with `slug`, the Page
+header, or `page_update_html` with `slug`) under the creation rules: same ASCII
+format, unique across all projects. The former slug is kept in
+`live_page_slug_aliases`, so links, workflow steps and API calls that still
+name it reach the Page. Resolution tries the id, then a live slug, then a
+former slug, so an alias never shadows another Page. A former slug stays
+reserved for its Page (only that Page may take it back) until the Page is
+deleted, so no other Page, import included, can capture its old links.
+
 Multi-selection can also open two or more Pages in one external mosaic route.
 Two-Page presets support columns or rows; three-Page presets place the first
 selected Page above, below, left or right of the other two; four or more Pages
@@ -677,7 +686,8 @@ coupling the template to every upstream provider response.
 ## Agent and MCP authoring contract
 
 The built-in Workflow Architect and the `kronn-internal` MCP expose the same
-thirteen-step taxonomy. For a Page pipeline, an agent must discover dependencies
+thirteen-step taxonomy. HTTP agents reach the same five Page tools through their
+native catalogue ([Native Page tools](../operations/native-page-tools.md)). For a Page pipeline, an agent must discover dependencies
 before composing the workflow:
 
 1. `qa_list` resolves every saved Quick API used by `CollectApiData`; `qe_list`

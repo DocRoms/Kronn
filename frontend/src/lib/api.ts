@@ -79,6 +79,8 @@ import type {
   RetryAgentDispatchResponse,
   OrchestrationRequest,
   AgentDetection,
+  AgentReadiness,
+  AgentReadinessRequest,
   RtkVersionInfo,
   AgentType,
   Contact,
@@ -1601,6 +1603,8 @@ export const agents = {
   install: (agentType: AgentType) => api<string>('POST', '/agents/install', agentType),
   uninstall: (agentType: AgentType) => api<string>('POST', '/agents/uninstall', agentType),
   toggle: (agentType: AgentType) => api<boolean>('POST', '/agents/toggle', agentType),
+  readiness: (request: AgentReadinessRequest) =>
+    api<AgentReadiness[]>('POST', '/agents/readiness', request),
 };
 
 // ─── MCPs ───────────────────────────────────────────────────────────────────

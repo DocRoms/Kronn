@@ -11,6 +11,72 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+### Added
+
+- HTTP agents (Ollama, LiteLLM, NVIDIA, custom connections) can find, create
+  and update Pages: `page_list`, `page_get`, `page_create`, `page_update_html`
+  and `page_add_dataset` join their native catalogue and call the same handlers
+  as the MCP bridge, within the same scope: project-less Pages and the current
+  project's Pages, never another project's. A discussion agent gets them in
+  the full catalogue (or in the `pages` family with `KRONN_TIERED_TOOLS=1`); a
+  workflow Agent step gets them too, while Planning mutations stay out of its
+  catalogue. Asked to find a Page, create one and draft the workflow that
+  feeds it, a local `qwen3.8:27b` did all three; the workflow published to the
+  new Page on its first run.
+- Before a multi-agent discussion or room starts, Kronn checks every selected
+  agent in parallel without calling any model (KT-1107): installed, full access
+  on for the native ACP agents, signed in where the CLI has a status command
+  (`claude auth status`, `codex login status`, `kiro-cli whoami`), and, for the
+  native ACP agents, a real `initialize` + `session/new` with no prompt, in the
+  project directory, so a project MCP server that blocks the start is caught
+  within the launch's own 90 s bound. The form shows ✅/❌/❔ with the reason;
+  if an agent is not ready, nothing starts until you fix it, remove it, or
+  launch anyway, and the room shows the same state in a compact notice. Results
+  are cached for 3 minutes per agent and project, and dropped when the agent's
+  settings, full access, key or the project's MCP servers change. A check that
+  cannot be made without the model (OpenCode, Gemini, Copilot and Vibe sign-in)
+  is reported unknown, never ready. `POST /api/agents/readiness` is not open to
+  a launched agent's bridge token.
+- Settings → Agents shows the command Kronn actually runs for each agent (the
+  installed CLI's path, or the `npx` command it falls back to) and the version
+  that command reports, with a warning when it is the `npx` fallback. A run
+  that falls back to `npx` records the command and version in its provenance,
+  never in the agent's output.
+- A Live Page's slug can be renamed: from the slug pill in the Page header
+  (with a preview of the new link), through `PATCH /api/pages/{id}` with
+  `slug`, or by an agent with `page_update_html({page_id, slug})` (MCP or
+  native tools). The new slug
+  follows the creation rules (lowercase ASCII, unique across all projects). The
+  former slug keeps opening the Page, so links, workflow steps and API calls
+  that name it still work, and it stays reserved for that Page until the Page is
+  deleted: no other Page, import included, can take over its old links.
+  Exports name the Page by id where a workflow still used an old slug, so the
+  bundle imports cleanly (KT-1098).
+
+### Fixed
+
+- On a native macOS backend, an agent CLI installed under a `KRONN_HOST_BIN`
+  directory is run instead of being skipped for `npx`: the Darwin host-binary
+  guard now applies only inside a container. In a container, resolution goes
+  on through the `PATH` after a skipped host copy, so a later Linux copy wins.
+- A workflow step with a `TypedSchema` output on an OpenAI-compatible provider
+  sends `strict: false`. The envelope schema does not satisfy OpenAI's strict
+  subset (every object `additionalProperties: false`, every property
+  required), so a provider enforcing it refused the request.
+- A reasoning-effort override that differs from the catalogue only by case
+  (`High` for `high`) is still refused, and the refusal now names the
+  catalogue's spelling. When the catalogue entry itself carries stray
+  whitespace, the refusal says so instead of asking to retype the value.
+- The custom API helper and the workflow API call helper now show an Apply
+  card when the agent wraps the `KRONN:APPLY` marker in its own code fence,
+  puts it on the first line inside the json fence, or writes it in another
+  letter case, with LF or CRLF line endings (KT-1110). Both helpers share one
+  parser, which only accepts a JSON object and ignores the word used inside a
+  sentence. When a proposal block cannot be read, even next to a valid one,
+  the chat shows a notice with a Retry action and the raw JSON instead of
+  dropping it silently. The system prompts in the 4 locales now say that the
+  marker is a bare text line outside any code fence.
+
 ## [0.14.3] - 2026-10-07
 
 ### Upgrade notes

@@ -239,7 +239,11 @@ gate_status: string, override_value?: string | null,
  */
 code_locations?: string | null, created_at: string, resolved_at?: string | null, };
 
-export type AgentDetection = { name: string, agent_type: AgentType, installed: boolean, enabled: boolean, path: string | null, version: string | null, latest_version: string | null,
+export type AgentDetection = { name: string, agent_type: AgentType, installed: boolean, enabled: boolean, path: string | null,
+/**
+ * Resolved package-runner executable and argv when no installed CLI was found.
+ */
+fallback_command?: Array<string>, version: string | null, latest_version: string | null,
 /**
  * Time at which the official release source was last checked (RFC 3339).
  */
@@ -320,6 +324,37 @@ export type AgentProfile = { id: string, name: string, persona_name: string, rol
 token_estimate: number, };
 
 export type AgentProjectUsage = { project_id: string, project_name: string, tokens_used: number, message_count: number, };
+
+export type AgentReadiness = { agent_type: AgentType, status: AgentReadinessStatus, reason: AgentReadinessReason,
+/**
+ * The UI's i18n key for `reason`.
+ */
+message_key: string,
+/**
+ * Project MCP servers the session was starting when it stalled.
+ */
+servers: Array<string>,
+/**
+ * The bound that elapsed, for a timeout.
+ */
+secs: number | null,
+/**
+ * The runtime's own error, redacted and bounded.
+ */
+detail: string | null, cached: boolean, checked_at: string, };
+
+export type AgentReadinessReason = "ready" | "not_installed" | "full_access_required" | "not_logged_in" | "login_unverified" | "session_timeout" | "session_failed" | "not_probed";
+
+export type AgentReadinessRequest = { project_id?: string | null, agents: Array<AgentType>,
+/**
+ * Ignore cached results.
+ */
+force?: boolean, };
+
+/**
+ * Readiness of one agent before a multi-agent launch (KT-1107).
+ */
+export type AgentReadinessStatus = "ready" | "not_ready" | "unknown";
 
 export type AgentResumeFailureKind = "command_failed" | "backend_restarted" | "dispatch_stalled" | "quota_exhausted" | "runtime_unavailable";
 
@@ -4191,7 +4226,11 @@ export type LivePageDatasetView = { points: Array<LivePageDatasetPoint>,
  */
 data_size_bytes: number, id: string, page_id: string, name: string, kind: LivePageDatasetKind, current: any, schema: any, max_points: number, max_age_days: number | null, updated_at: string, };
 
-export type LivePageDetail = { revision: LivePageRevision, datasets: Array<LivePageDatasetView>, id: string, project_id: string | null, title: string, slug: string, current_revision_id: string, data_revision: number, created_at: string, updated_at: string, last_published_at: string | null,
+export type LivePageDetail = { revision: LivePageRevision, datasets: Array<LivePageDatasetView>,
+/**
+ * Former slugs that still open this Page after a rename.
+ */
+slug_aliases: Array<string>, id: string, project_id: string | null, title: string, slug: string, current_revision_id: string, data_revision: number, created_at: string, updated_at: string, last_published_at: string | null,
 /**
  * User-pinned / favorite Page — favorites surface first in the library.
  */
@@ -8579,7 +8618,11 @@ execution_variable_retention_days?: number | null | null, };
 
 export type UpdateLivePageHtmlRequest = { html: string, created_by_agent?: string | null, };
 
-export type UpdateLivePageRequest = { title?: string | null, pinned?: boolean | null, archived?: boolean | null, };
+export type UpdateLivePageRequest = { title?: string | null,
+/**
+ * New slug; the previous one keeps resolving to this Page.
+ */
+slug?: string | null, pinned?: boolean | null, archived?: boolean | null, };
 
 export type UpdateMcpConfigRequest = { label?: string | null, env?: Record<string, string> | null, args_override?: Array<string> | null, is_global?: boolean | null, include_general?: boolean | null, host_sync?: HostSyncMode | null, preferred_interface?: PluginInterface | null, };
 
@@ -8990,7 +9033,15 @@ model_applied: boolean | null,
  * Distinct model identifiers reported by structured runtime responses.
  * Empty means unreported; never inferred from generated prose or config.
  */
-observed_models: Array<string>, format_fallback: boolean, started_at: string, duration_ms: number, succeeded: boolean,
+observed_models: Array<string>, format_fallback: boolean,
+/**
+ * Resolved npx executable and package arguments when direct CLI launch failed.
+ */
+npx_fallback_command?: Array<string>,
+/**
+ * Last successful version probe for that command in the run's working directory.
+ */
+npx_fallback_version?: string, started_at: string, duration_ms: number, succeeded: boolean,
 /**
  * Prompt tokens read from the provider's prompt cache, on top of the
  * uncached input counted in `tokens_used`. `None` when not reported.

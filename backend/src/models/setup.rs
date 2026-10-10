@@ -815,6 +815,10 @@ pub struct AgentDetection {
     #[serde(default = "default_true")]
     pub enabled: bool,
     pub path: Option<String>,
+    /// Resolved package-runner executable and argv when no installed CLI was found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub fallback_command: Option<Vec<String>>,
     pub version: Option<String>,
     pub latest_version: Option<String>,
     /// Time at which the official release source was last checked (RFC 3339).
@@ -889,6 +893,66 @@ pub struct ShadowedInstall {
 
 fn default_true() -> bool {
     true
+}
+
+/// Readiness of one agent before a multi-agent launch (KT-1107).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum AgentReadinessStatus {
+    Ready,
+    NotReady,
+    /// Nothing failed, but a check could not be made without the model.
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum AgentReadinessReason {
+    Ready,
+    NotInstalled,
+    FullAccessRequired,
+    NotLoggedIn,
+    /// The session opens; sign-in has no status command to ask.
+    LoginUnverified,
+    /// `initialize` or `session/new` did not answer within its bound.
+    SessionTimeout,
+    SessionFailed,
+    /// HTTP model providers are not probed.
+    NotProbed,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AgentReadiness {
+    pub agent_type: AgentType,
+    pub status: AgentReadinessStatus,
+    pub reason: AgentReadinessReason,
+    /// The UI's i18n key for `reason`.
+    pub message_key: String,
+    /// Project MCP servers the session was starting when it stalled.
+    #[serde(default)]
+    pub servers: Vec<String>,
+    /// The bound that elapsed, for a timeout.
+    #[serde(default)]
+    pub secs: Option<u64>,
+    /// The runtime's own error, redacted and bounded.
+    #[serde(default)]
+    pub detail: Option<String>,
+    pub cached: bool,
+    pub checked_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+pub struct AgentReadinessRequest {
+    #[serde(default)]
+    pub project_id: Option<String>,
+    pub agents: Vec<AgentType>,
+    /// Ignore cached results.
+    #[serde(default)]
+    pub force: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, Default)]

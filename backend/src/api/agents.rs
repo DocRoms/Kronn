@@ -160,3 +160,51 @@ pub async fn toggle(
         Err(e) => Json(ApiResponse::err(format!("Failed to save: {}", e))),
     }
 }
+
+/// POST /api/agents/readiness
+/// Pre-launch readiness of the selected agents for one project (KT-1107):
+/// model-free, bounded, cached. Not on the bridge-token list: it spawns
+/// agents, so only the operator may call it.
+pub async fn readiness(
+    State(state): State<AppState>,
+    Json(request): Json<AgentReadinessRequest>,
+) -> Json<ApiResponse<Vec<AgentReadiness>>> {
+    let project_path = match request.project_id.clone() {
+        None => String::new(),
+        Some(id) => {
+            let project = state
+                .db
+                .with_conn(move |conn| crate::db::projects::get_project(conn, &id))
+                .await;
+            match project {
+                Ok(Some(project)) => project.path,
+                Ok(None) => return Json(ApiResponse::err("Project not found")),
+                Err(error) => return Json(ApiResponse::err(format!("{error}"))),
+            }
+        }
+    };
+    let mut detections = agents::detect_all_cached(false).await;
+    let (tokens, agents_config) = {
+        let config = state.config.read().await;
+        agents::apply_configured_status(&mut detections, &config);
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(
+            &serde_json::to_string(&config.agents).unwrap_or_default(),
+            &mut hasher,
+        );
+        (config.tokens.clone(), std::hash::Hasher::finish(&hasher))
+    };
+    let context = agents::readiness::ProbeContext {
+        project_id: request.project_id,
+        project_path,
+        detections,
+        tokens,
+        agents_config,
+        bounds: agents::runner::AcpProbeBounds::LAUNCH,
+        login_timeout: agents::readiness::LOGIN_STATUS_TIMEOUT,
+        force: request.force,
+    };
+    Json(ApiResponse::ok(
+        agents::readiness::check_agents(&context, &request.agents).await,
+    ))
+}

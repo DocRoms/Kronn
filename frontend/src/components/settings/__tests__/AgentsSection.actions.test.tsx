@@ -873,7 +873,7 @@ describe('AgentsSection — runtime-available rendering', () => {
   it('offers Install (not the enable toggle) for a runtime-only agent, keeping the via-npx hint', () => {
     // npx-reachable but not installed in the container: the user never
     // installed it, so it must be offered for install — never shown as
-    // "Activé" with a toggle. The "runtime OK — via npx" hint stays so the
+    // "Activé" with a toggle. The fallback hint stays so the
     // info that it's still usable isn't lost.
     renderSection({
       agents: [makeAgent({
@@ -882,7 +882,7 @@ describe('AgentsSection — runtime-available rendering', () => {
       })],
     });
     expect(screen.getByText(/Installer/)).toBeTruthy();
-    expect(screen.getByText(/runtime OK/)).toBeTruthy();
+    expect(screen.getByText('config.agentRuntimeAvailable')).toBeTruthy();
     expect(screen.queryByTitle('config.toggleDisable')).toBeNull();
     expect(screen.queryByTitle('config.toggleEnable')).toBeNull();
   });
@@ -918,6 +918,39 @@ describe('AgentsSection — runtime-available rendering', () => {
       })],
     });
     expect(screen.getByText(/agentRuntimeWarning\.vibe\.sdk_fallback/)).toBeTruthy();
+  });
+
+  it('shows the resolved installed command and its version', () => {
+    renderSection({ agents: [makeAgent({
+      name: 'AgentCodex', agent_type: 'Codex', path: '/Users/u/.local/bin/codex', version: '0.154.0',
+    })] });
+    expect(screen.getByText('/Users/u/.local/bin/codex')).toBeTruthy();
+    expect(screen.getByText('v0.154.0')).toBeTruthy();
+    expect(screen.queryByText('agentRuntimeWarning.npxFallback')).toBeNull();
+  });
+
+  it('shows the npx command, measured CLI version and fallback warning', () => {
+    renderSection({ agents: [makeAgent({
+      name: 'AgentCodex', agent_type: 'Codex', installed: false, runtime_available: true,
+      path: null, version: '0.154.0',
+      fallback_command: ['/tools with spaces/npx', '--yes', '@openai/codex'],
+    })] });
+    expect(screen.getByText('"/tools with spaces/npx" --yes @openai/codex')).toBeTruthy();
+    expect(screen.getByText('v0.154.0')).toBeTruthy();
+    expect(screen.getByText('agentRuntimeWarning.npxFallback')).toBeTruthy();
+    expect(screen.queryByText('config.agentFallbackUnavailable')).toBeNull();
+  });
+
+  it('shows an unknown version and unsuccessful fallback check explicitly', () => {
+    renderSection({ agents: [makeAgent({
+      name: 'AgentCodex', agent_type: 'Codex', installed: false, runtime_available: false,
+      path: null, version: null,
+      fallback_command: ['npx', '--yes', '@openai/codex'],
+    })] });
+    expect(screen.getByText('npx --yes @openai/codex')).toBeTruthy();
+    expect(screen.getByText(/config.agentVersionUnknown/)).toBeTruthy();
+    expect(screen.getByText(/config.agentFallbackUnavailable/)).toBeTruthy();
+    expect(screen.getByText(/agentRuntimeWarning.npxFallback/)).toBeTruthy();
   });
 
   it('names the CLI copy Kronn runs and the one it shadows', () => {

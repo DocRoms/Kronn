@@ -882,9 +882,23 @@ export function AgentsSection({
                         <code className="set-code">{agent.install_command}</code>
                       </div>
                     )}
-                    {!agent.installed && agent.runtime_available && (
-                      <div className="text-xs mt-2" style={{ color: 'var(--kr-success)' }}>
-                        runtime OK <span className="text-ghost">— via npx</span>
+                    {(agent.path || agent.fallback_command?.length) && (
+                      <div className="text-xs mt-2">
+                        {t('config.agentCommand')} <code className="set-code">{agent.fallback_command
+                          ? agent.fallback_command.map(arg => /\s/.test(arg) ? JSON.stringify(arg) : arg).join(' ')
+                          : agent.path}</code>
+                        {!agent.version && <span> — {t('config.agentVersionUnknown')}</span>}
+                      </div>
+                    )}
+                    {agent.fallback_command && (
+                      <div className="set-agent-runtime-warning" role="note">
+                        {t('agentRuntimeWarning.npxFallback')}
+                        {!agent.runtime_available && <span> {t('config.agentFallbackUnavailable')}</span>}
+                      </div>
+                    )}
+                    {!agent.installed && agent.runtime_available && !agent.fallback_command && (
+                      <div className="set-agent-runtime-warning" role="note">
+                        {t('config.agentRuntimeAvailable')}
                       </div>
                     )}
                     {agent.runtime_warning && (

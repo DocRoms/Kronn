@@ -66,6 +66,8 @@ pub fn resolve_id(conn: &Connection, id: &str) -> Result<Option<ResolvedId>> {
         .filter(|prefix| prefix.eq_ignore_ascii_case("KT-"))
         .and_then(|_| id.get(3..))
         .and_then(|number| number.parse::<i64>().ok());
+    // Pages resolve as their own handlers do: id, live slug, then former slug.
+    let page_id = crate::db::live_pages::resolve_live_page_id(conn, id)?;
     let mut statement = conn.prepare(
         r#"
         WITH resolved(
@@ -174,7 +176,7 @@ pub fn resolve_id(conn: &Connection, id: &str) -> Result<Option<ResolvedId>> {
                 p.id, p.name, 'page_get'
             FROM live_pages lp
             LEFT JOIN projects p ON p.id = lp.project_id
-            WHERE lp.id = :id OR lp.slug = :id
+            WHERE lp.id = :page_id
 
             UNION ALL
             SELECT
@@ -218,7 +220,7 @@ pub fn resolve_id(conn: &Connection, id: &str) -> Result<Option<ResolvedId>> {
     )?;
 
     let rows = statement.query_map(
-        named_params! {":id": id, ":task_number": task_number},
+        named_params! {":id": id, ":task_number": task_number, ":page_id": page_id},
         |row| {
             let parent_kind: Option<String> = row.get(5)?;
             let parent_id: Option<String> = row.get(6)?;
@@ -535,6 +537,32 @@ mod tests {
             published.summary.as_deref(),
             Some("published 2026-08-25T00:00:00Z")
         );
+    }
+
+    /// KT-1098 — a live slug and a renamed page's former slug both resolve to
+    /// the page, with the same output as its id.
+    #[test]
+    fn resolves_live_page_by_slug_and_former_slug() {
+        let connection = connection();
+        seed_project_and_discussion(&connection);
+        connection
+            .execute_batch(
+                "INSERT INTO live_pages
+                 (id, project_id, title, slug, data_revision, created_at, updated_at)
+                 VALUES ('page-1', 'project-1', 'Latency dashboard', 'latency-v2', 0, 'now', 'now');
+                 INSERT INTO live_page_slug_aliases (slug, page_id, created_at)
+                 VALUES ('latency-v1', 'page-1', 'now');",
+            )
+            .unwrap();
+        let by_id = resolve_id(&connection, "page-1").unwrap().unwrap();
+        for selector in ["latency-v2", "latency-v1"] {
+            let resolved = resolve_id(&connection, selector).unwrap().unwrap();
+            assert_eq!(resolved.kind, "page", "{selector}");
+            assert_eq!(resolved.id, "page-1", "{selector}");
+            assert_eq!(resolved.title, by_id.title);
+            assert_eq!(resolved.suggested_tool.as_deref(), Some("page_get"));
+        }
+        assert!(resolve_id(&connection, "latency-v0").unwrap().is_none());
     }
 
     #[test]
