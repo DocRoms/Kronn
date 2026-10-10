@@ -11,6 +11,21 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+### Added
+
+- A repository that already has its own docs can now receive the AI-doc
+  template v2 by merge (KT-1172). `GET /api/projects/:id/template-merge/plan`
+  shows, without writing anything, a correspondence table that maps each
+  existing doc, section by section, to a v2 file, plus one diff per file.
+  `POST /api/projects/:id/template-merge` (`{"base": "local"}` or
+  `"remote"` for the fetched default branch) applies it in a
+  `kronn/template-v2-merge` worktree: mapped sections are copied verbatim into
+  the v2 files that do not exist yet, existing files are never rewritten,
+  moved or quarantined, and the merge stops if any existing doc changes.
+  Unmapped sections are listed and stay where they are. Calling it again
+  resumes the same worktree. `.../accept` commits the files you keep on that
+  branch, and `DELETE` drops the worktree.
+
 ### Fixed
 
 - The release body no longer mentions GitHub accounts by accident (KT-1179).
@@ -51,6 +66,10 @@ Release notes for 0.9.3 and earlier are available in the
   on project status) and for the startup sweep over all projects.
   A `.kronn/` line that an older version already added to a `.gitignore` is
   left in place: Kronn never removes lines from your files.
+- The legacy-docs check recognises the v2 template's `docs/AGENTS.md` again
+  (KT-1172). It compared the first line with the template heading, but the v2
+  file opens with `<!-- kronn:doc-version -->` comments, so a Kronn-managed
+  `docs/` was taken for hand-written docs.
 - `kronn dev` stops on Ctrl-C or TERM in every phase (KT-1145). Under bash
   5.2 the backend supervisor could drop a TERM that arrived while it expanded
   a command substitution, right after its Cargo build, and keep running. It

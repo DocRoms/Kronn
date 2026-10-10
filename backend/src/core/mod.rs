@@ -23,6 +23,7 @@ pub mod default_todo;
 pub mod dependency_updates;
 pub mod desktop_port;
 pub mod directives;
+pub mod docs_merge;
 pub mod docs_migration;
 pub mod docs_sidecar;
 pub mod docs_write_filter;

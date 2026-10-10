@@ -1801,6 +1801,19 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/projects/{id}/install-template",
             post(api::projects::install_template),
         )
+        .route(
+            "/api/projects/{id}/template-merge",
+            post(api::projects::template_merge::template_merge_start)
+                .delete(api::projects::template_merge::template_merge_discard),
+        )
+        .route(
+            "/api/projects/{id}/template-merge/plan",
+            get(api::projects::template_merge::template_merge_plan),
+        )
+        .route(
+            "/api/projects/{id}/template-merge/accept",
+            post(api::projects::template_merge::template_merge_accept),
+        )
         // 0.8.7 anti-hallu migration : inject the canonical section into
         // pre-existing projects + re-sync redirectors. Both idempotent.
         .route(
