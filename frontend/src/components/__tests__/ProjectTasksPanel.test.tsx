@@ -120,4 +120,45 @@ describe('ProjectTasksPanel', () => {
     });
     expect(screen.getByText('projects.tasks.empty')).toBeInTheDocument();
   });
+
+  it('opens a task in a new tab on Ctrl-click, without opening planning here', async () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const onOpenPlanning = vi.fn();
+    render(
+      <ProjectTasksPanel
+        projectId="project-1"
+        onOpenPlanning={onOpenPlanning}
+        toast={vi.fn()}
+      />,
+    );
+    await screen.findByText('Ship planning');
+
+    fireEvent.click(screen.getByRole('button', { name: 'projects.tasks.openTask KT-42' }), { ctrlKey: true });
+
+    expect(open).toHaveBeenCalledWith(
+      `${window.location.origin}/planning/task-uuid`, '_blank', 'noopener,noreferrer',
+    );
+    expect(onOpenPlanning).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
+  it('opens global planning in a new tab on Ctrl-click, without opening it here', async () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const onOpenPlanning = vi.fn();
+    render(
+      <ProjectTasksPanel
+        projectId="project-1"
+        onOpenPlanning={onOpenPlanning}
+        toast={vi.fn()}
+      />,
+    );
+    await screen.findByText('Ship planning');
+
+    fireEvent.click(screen.getByRole('button', { name: /projects.tasks.openPlanning/ }), { ctrlKey: true });
+
+    expect(open).toHaveBeenCalledWith(
+      `${window.location.origin}/planning`, '_blank', 'noopener,noreferrer',
+    );
+    expect(onOpenPlanning).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
 });

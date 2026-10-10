@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ChevronDown, ChevronRight, ChevronUp, Code2, FileCode2, Folder, FolderX, GitBranch,
@@ -23,16 +23,25 @@ interface SourceCodeViewerProps {
   /** KT-75 — open the full patch of a commit in the panel's temporary tab.
    *  Absent when the host has no tab to open it in. */
   onOpenCommit?: (sha: string) => void;
+  /** The reader opened another file — from the tree, or the next/previous
+   *  match — so the address can follow it. The default file the viewer opens
+   *  on its own while the address names none is said with `replace`: the
+   *  address names it in place, without a step of history. A deep link is
+   *  not said: the address already names it. */
+  onPathChange?: (path: string, options?: { replace?: boolean }) => void;
 }
 
-export function SourceCodeViewer({ projectId, initialPath, initialLine, onOpenCommit }: SourceCodeViewerProps) {
+export function SourceCodeViewer({ projectId, initialPath, initialLine, onOpenCommit, onPathChange }: SourceCodeViewerProps) {
+  // One viewer per project: a new deep link into the same project is
+  // followed in place, with its tree and its folders as they were.
   return (
     <SourceCodeViewerProject
-      key={`${projectId}:${initialPath ?? ''}:${initialLine ?? ''}`}
+      key={projectId}
       projectId={projectId}
       initialPath={initialPath}
       initialLine={initialLine}
       onOpenCommit={onOpenCommit}
+      onPathChange={onPathChange}
     />
   );
 }
@@ -67,7 +76,7 @@ interface SearchResult {
 
 const EMPTY_SEARCH_RESULTS = new Map<string, number>();
 const HTML_FILE_PATH = /\.html?$/i;
-function SourceCodeViewerProject({ projectId, initialPath, initialLine, onOpenCommit }: SourceCodeViewerProps) {
+function SourceCodeViewerProject({ projectId, initialPath, initialLine, onOpenCommit, onPathChange }: SourceCodeViewerProps) {
   const { t } = useT();
   const [tree, setTree] = useState<SourceFileNode[]>([]);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
@@ -100,6 +109,34 @@ function SourceCodeViewerProject({ projectId, initialPath, initialLine, onOpenCo
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const treeLoadRef = useRef(0);
+  /// The file the address names now — or none: a tree that arrives opens it,
+  /// whatever the address named when it was asked for. A later address is
+  /// followed below, without loading the tree again.
+  const addressPathRef = useRef(initialPath);
+  useLayoutEffect(() => { addressPathRef.current = initialPath; }, [initialPath]);
+  // The address moved under the viewer — Back, Forward, a link from another
+  // view: the file it names opens in the tree as it is, with the folders on
+  // the way to it. What the reader just opened is already on screen. State
+  // that follows a prop is adjusted during render, as React asks.
+  const [followedPath, setFollowedPath] = useState(initialPath);
+  // The file an address that names none shows: the one the tree offers first.
+  const [defaultPath, setDefaultPath] = useState<string | null>(null);
+  if (initialPath !== followedPath) {
+    setFollowedPath(initialPath);
+    // An address that stops naming a file shows the default file again.
+    const shownPath = initialPath || defaultPath;
+    if (shownPath) {
+      setSelectedPath(shownPath);
+      if (!HTML_FILE_PATH.test(shownPath)) setContentView('code');
+      setCurrentMatchIdx(0);
+      const onTheWay = ancestorDirs(shownPath);
+      if (onTheWay.length > 0) setExpandedDirs(previous => new Set([...previous, ...onTheWay]));
+    } else {
+      // No file named and no default known yet (the tree is on its way): the
+      // file the address named before is let go, the tree opens the default.
+      setSelectedPath(null);
+    }
+  }
   /// Folders already asked for, and the request that asked. A second expand
   /// must not re-request what is already on screen — that is the cost this
   /// change removes — but it must be able to WAIT for a request in flight.
@@ -145,7 +182,9 @@ function SourceCodeViewerProject({ projectId, initialPath, initialLine, onOpenCo
         // rather than inherited: the first folder to come back with a file
         // offers it, and a choice already made — a deep link, or a click —
         // always wins.
-        setSelectedPath(previous => previous ?? findPreferredSourceFile(children)?.path ?? null);
+        const preferred = findPreferredSourceFile(children)?.path ?? null;
+        setSelectedPath(previous => previous ?? preferred);
+        setDefaultPath(previous => previous ?? preferred);
         setDirStatus(current => {
           const next = { ...current };
           // A folder that hit the answer's bound keeps a state, because it is
@@ -176,13 +215,16 @@ function SourceCodeViewerProject({ projectId, initialPath, initialLine, onOpenCo
     setTree(rootFiles);
     if (root.truncated) setDirStatus(current => ({ ...current, [ROOT_KEY]: 'truncated' }));
     setExclusions(savedExclusions);
+    const deepLinkPath = addressPathRef.current;
+    const preferred = findPreferredSourceFile(rootFiles)?.path ?? null;
     setSelectedPath(previous => {
       if (previous) return previous;
       // Only what is loaded can be preferred. A deep link names its own file,
       // and the folders on the way to it are fetched below.
-      if (initialPath) return initialPath;
-      return findPreferredSourceFile(rootFiles)?.path ?? null;
+      if (deepLinkPath) return deepLinkPath;
+      return preferred;
     });
+    setDefaultPath(previous => previous ?? preferred);
     setTreeLoading(false);
 
     // The folders open on arrival, in parallel — they are siblings.
@@ -193,7 +235,7 @@ function SourceCodeViewerProject({ projectId, initialPath, initialLine, onOpenCo
     // receive its children before its own parent has placed it in the tree.
     // Fetched AND opened — a deep link that loads its file into a folded tree
     // leaves the reader looking at a root listing.
-    const onTheWay = ancestorDirs(initialPath);
+    const onTheWay = ancestorDirs(deepLinkPath);
     if (onTheWay.length > 0) {
       setExpandedDirs(previous => new Set([...previous, ...onTheWay]));
     }
@@ -202,7 +244,26 @@ function SourceCodeViewerProject({ projectId, initialPath, initialLine, onOpenCo
       Promise.resolve(),
     );
     return Promise.all([...open, deepLink]).then(() => {});
-  }, [initialPath, loadDirectory]);
+  }, [loadDirectory]);
+
+  // The folders on the way to the file the address names, fetched in order
+  // once the tree is there. Until then the tree load itself opens them, and
+  // a folder already asked for is not asked again.
+  useEffect(() => {
+    if (treeLoading || !followedPath) return;
+    void ancestorDirs(followedPath).reduce(
+      (chain, path) => chain.then(() => loadDirectory(path)),
+      Promise.resolve(),
+    );
+  }, [followedPath, treeLoading, loadDirectory]);
+
+  // The default file on screen while the address names none: the address
+  // names it in place, so that Back to it opens it again. A file the reader
+  // picks is said by the gesture that picks it.
+  useEffect(() => {
+    if (followedPath || !selectedPath || selectedPath !== defaultPath) return;
+    onPathChange?.(selectedPath, { replace: true });
+  }, [followedPath, selectedPath, defaultPath, onPathChange]);
 
   const fetchTree = useCallback(() => {
     const generation = treeLoadRef.current + 1;
@@ -430,9 +491,10 @@ function SourceCodeViewerProject({ projectId, initialPath, initialLine, onOpenCo
     ];
     if (!previousFile) return;
     setSelectedPath(previousFile);
+    onPathChange?.(previousFile);
     if (!HTML_FILE_PATH.test(previousFile)) setContentView('code');
     setCurrentMatchIdx((searchResults.get(previousFile) ?? 1) - 1);
-  }, [currentMatchIdx, filesWithMatches, searchResults, selectedPath, totalMatches]);
+  }, [currentMatchIdx, filesWithMatches, onPathChange, searchResults, selectedPath, totalMatches]);
 
   const goToNextMatch = useCallback(() => {
     if (!selectedPath || totalMatches === 0) return;
@@ -447,9 +509,10 @@ function SourceCodeViewerProject({ projectId, initialPath, initialLine, onOpenCo
     ];
     if (!nextFile) return;
     setSelectedPath(nextFile);
+    onPathChange?.(nextFile);
     if (!HTML_FILE_PATH.test(nextFile)) setContentView('code');
     setCurrentMatchIdx(0);
-  }, [currentMatchIdx, filesWithMatches, searchResults, selectedPath, totalMatches]);
+  }, [currentMatchIdx, filesWithMatches, onPathChange, searchResults, selectedPath, totalMatches]);
 
   useEffect(() => {
     const container = contentRef.current;
@@ -572,6 +635,7 @@ function SourceCodeViewerProject({ projectId, initialPath, initialLine, onOpenCo
               searchResults={searchResults}
               isSearching={searchQuery.trim().length > 0}
               onSelect={path => {
+                if (path !== selectedPath) onPathChange?.(path);
                 setSelectedPath(path);
                 if (!HTML_FILE_PATH.test(path)) setContentView('code');
                 setCurrentMatchIdx(0);

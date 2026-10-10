@@ -167,6 +167,27 @@ describe('ProjectList — missing-path banner', () => {
     expect(onSetExpandedId).toHaveBeenCalledWith('p2');
   });
 
+  it('opens a project row in a new tab on Ctrl-click, without selecting it here', () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const onSetExpandedId = vi.fn();
+    render(
+      <ProjectList
+        projects={[proj('p1', 'Alpha', '/repos/alpha', true), proj('p2', 'Beta', '/repos/beta', true)]}
+        discussions={[]} discussionsByProject={{}} driftByProject={{}} agents={[]} allSkills={[]} mcpConfigs={[]} workflows={[]}
+        configLanguage="fr" toast={noop} onNavigate={noop} onSetDiscPrefill={noop} onAutoRunDiscussion={noop}
+        onOpenDiscussion={noop} onRefetch={noop} onRefetchDiscussions={noop} onRefetchSkills={noop} onRefetchDrift={noop}
+        expandedId={null} onSetExpandedId={onSetExpandedId}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId('project-list-item-p2').querySelector('.disc-item-open')!, { ctrlKey: true });
+
+    expect(open).toHaveBeenCalledWith(`${window.location.origin}/projects/p2`, '_blank', 'noopener,noreferrer');
+    // The list auto-selects its first project on mount; the Ctrl-clicked one stays unselected.
+    expect(onSetExpandedId).not.toHaveBeenCalledWith('p2');
+    open.mockRestore();
+  });
+
   it('hides the banner when every path resolves', () => {
     renderList([
       proj('p1', 'Alpha', '/repos/alpha', true),

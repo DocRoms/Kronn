@@ -1,4 +1,6 @@
 import { ArrowLeft, ArrowRight, BarChart3, Clock3, ExternalLink, Hash, Loader2, RefreshCw, Scale, X } from 'lucide-react';
+import { newTabClickProps } from '../lib/newTabNavigation';
+import { discussionPath } from '../lib/routes';
 import { useMemo, useState } from 'react';
 import { MarkdownContent } from './MessageBubble';
 import { AGENT_LABELS, MODEL_TIER_ICONS, agentTextColor } from '../lib/constants';
@@ -255,6 +257,7 @@ export function BatchComparePanel({
                   <button
                     type="button"
                     className="btn btn-xs btn-ghost disc-compare-open"
+                    {...newTabClickProps(discussionPath(discussion.id))}
                     onClick={() => onOpenDiscussion(discussion.id)}
                   >
                     <ExternalLink size={13} /> {t('disc.compare.openDiscussion')}

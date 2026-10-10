@@ -123,6 +123,11 @@ describe('StandaloneLivePage', () => {
   it('republishes new view parameters without a reload, and identical ones not at all', async () => {
     const view = render(<StandaloneLivePage pageId="page-1" params={{ scene: 'standup' }} />);
     const frame = await screen.findByTestId('standalone-live-page-frame') as HTMLIFrameElement;
+    // The frame's own load posts the data once (`onLoad`). The DOM fires that
+    // load on the next animation frame after the frame is inserted, which can
+    // still be ahead when the frame is found: let that frame pass, so that only
+    // what is posted from now on is counted as a republication.
+    await act(async () => { await new Promise(resolve => requestAnimationFrame(resolve)); });
     const documentBefore = frame.getAttribute('srcdoc');
     const post = vi.spyOn(frame.contentWindow!, 'postMessage');
     const dataPosts = () => post.mock.calls.filter(([message]) => (message as { type?: string }).type === 'kronn:page-data');
@@ -250,12 +255,10 @@ describe('StandaloneLivePage', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: /disc\.action\.openDiscussion/ }));
 
-    expect(sessionStorage.getItem('kronn:navigation:page')).toBe('discussions');
-    expect(sessionStorage.getItem('kronn:navigation:discussion')).toBe('disc-99');
     // The address carries the discussion, so the new tab needs nothing cloned
     // from this one — which is what lets it open with no opener at all.
     const openedUrl = openSpy.mock.calls[0][0] as string;
-    expect(openedUrl.startsWith(`${window.location.origin}${window.location.pathname}#discussion-`)).toBe(true);
+    expect(openedUrl.startsWith(`${window.location.origin}/discussions/`)).toBe(true);
     expect(openSpy.mock.calls[0].slice(1)).toEqual(['_blank', 'noopener,noreferrer']);
   });
 

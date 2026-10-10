@@ -1,29 +1,24 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import {
-  readActiveDiscussionId,
-  readDashboardPage,
-  writeActiveDiscussionId,
-  writeDashboardPage,
-} from '../dashboard-navigation';
+import { readActiveDiscussionId, writeActiveDiscussionId } from '../dashboard-navigation';
 
 afterEach(() => {
   sessionStorage.clear();
 });
 
-describe('dashboard reload navigation checkpoint', () => {
-  it('round-trips the active page and discussion inside the tab session', () => {
-    writeDashboardPage('discussions');
+describe('open discussion reload checkpoint', () => {
+  it('round-trips the open discussion inside the tab session', () => {
     writeActiveDiscussionId('disc-42');
 
-    expect(readDashboardPage()).toBe('discussions');
     expect(readActiveDiscussionId()).toBe('disc-42');
   });
 
-  it('falls back safely when stored navigation was tampered with', () => {
-    sessionStorage.setItem('kronn:navigation:page', 'not-a-page');
+  it('starts without a discussion', () => {
+    expect(readActiveDiscussionId()).toBeNull();
+  });
+
+  it('falls back safely when the stored discussion was tampered with', () => {
     sessionStorage.setItem('kronn:navigation:discussion', '   ');
 
-    expect(readDashboardPage()).toBe('projects');
     expect(readActiveDiscussionId()).toBeNull();
   });
 
@@ -32,5 +27,11 @@ describe('dashboard reload navigation checkpoint', () => {
     writeActiveDiscussionId(null);
 
     expect(readActiveDiscussionId()).toBeNull();
+  });
+
+  it('never keeps a page: the address is what restores it', () => {
+    writeActiveDiscussionId('disc-42');
+
+    expect(sessionStorage.getItem('kronn:navigation:page')).toBeNull();
   });
 });

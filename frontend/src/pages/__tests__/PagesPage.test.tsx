@@ -167,7 +167,7 @@ describe('PagesPage', () => {
     }]);
     render(<PagesPage />);
     const link = await screen.findByRole('link', { name: 'Original discussion · pages.sourceMessage' });
-    expect(link).toHaveAttribute('href', expect.stringContaining('#discussion-source-disc?message=source-message'));
+    expect(link).toHaveAttribute('href', `${window.location.origin}/discussions/source-disc?message=source-message`);
     expect(link).toHaveAttribute('target', '_blank');
     expect(link).toHaveAttribute('rel', 'noopener noreferrer');
   });
@@ -357,6 +357,24 @@ describe('PagesPage', () => {
     expect(pagesApi.get).toHaveBeenCalledTimes(1);
   });
 
+  it('opens a Page row in a new tab on a Ctrl-click, without selecting it', async () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const other: LivePage = { ...page, id: 'page-2', title: 'Second' };
+    vi.mocked(pagesApi.list).mockResolvedValue([page, other]);
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    // No mockClear: a later test reads this mock's first recorded call.
+    const callsBefore = vi.mocked(pagesApi.get).mock.calls.length;
+
+    fireEvent.click(getCanonicalPageRow('Second'), { ctrlKey: true });
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+
+    expect(open).toHaveBeenCalledWith(`${window.location.origin}/pages/page-2`, '_blank', 'noopener,noreferrer');
+    expect(vi.mocked(pagesApi.get).mock.calls.slice(callsBefore).map(([id]) => id)).not.toContain('page-2');
+    expect(screen.queryByRole('heading', { name: 'Second' })).toBeNull();
+    open.mockRestore();
+  });
+
   it('uses checkbox semantics for transient Page bulk selection', async () => {
     render(<PagesPage />);
     await screen.findByTestId('live-page-frame');
@@ -422,7 +440,7 @@ describe('PagesPage', () => {
     const auto = screen.getByRole('link', { name: 'pages.mosaic.layout.auto' });
     expect(auto).toHaveAttribute(
       'href',
-      `${window.location.origin}${window.location.pathname}#pages/mosaic?page=page-1&page=page-2&page=page-3&layout=auto`,
+      `${window.location.origin}/standalone/pages/mosaic?page=page-1&page=page-2&page=page-3&layout=auto`,
     );
     expect(auto).toHaveAttribute('target', '_blank');
     expect(auto).toHaveAttribute('rel', 'noopener noreferrer');
@@ -445,7 +463,7 @@ describe('PagesPage', () => {
     expect(frame.getAttribute('srcdoc')).toContain('<h1>Adobe</h1>');
     expect(linkRelay.connect).toHaveBeenCalledWith((frame as HTMLIFrameElement).contentWindow);
     const standaloneLink = screen.getByRole('link', { name: 'pages.openInNewTab:Adobe Signals' });
-    expect(standaloneLink).toHaveAttribute('href', `${window.location.origin}${window.location.pathname}#page/page-1`);
+    expect(standaloneLink).toHaveAttribute('href', `${window.location.origin}/standalone/pages/page-1`);
     expect(standaloneLink).toHaveAttribute('target', '_blank');
     expect(standaloneLink).toHaveAttribute('rel', 'noopener noreferrer');
     expect(screen.getByText('data r3 · HTML r2')).toBeInTheDocument();
@@ -458,9 +476,9 @@ describe('PagesPage', () => {
     fireEvent.click(screen.getByLabelText('pages.autoRefresh'));
     expect(refreshMenu).toHaveAttribute('open');
     expect(refreshDetails).toBeVisible();
-    expect(screen.getByRole('button', { name: 'Adobe cron' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Adobe cron' })).toHaveAttribute('href', '/workflows/wf-1');
     expect(screen.getByText('#page-1')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Adobe cron' }));
+    fireEvent.click(screen.getByRole('link', { name: 'Adobe cron' }));
     expect(onNavigateWorkflow).toHaveBeenCalledWith('wf-1');
   });
 
@@ -479,8 +497,47 @@ describe('PagesPage', () => {
     expect(screen.getByText('pages.refreshUnchanged')).toBeInTheDocument();
     expect(screen.getByText('pages.unchangedDataset:summary')).toBeInTheDocument();
 
-    fireEvent.click(screen.getAllByLabelText('pages.openRefreshRun:Adobe cron')[0]);
+    const runs = screen.getAllByRole('link', { name: 'pages.openRefreshRun:Adobe cron' });
+    expect(runs.map(run => run.getAttribute('href'))).toEqual([
+      '/workflows/wf-1/runs/run-3', '/workflows/wf-1/runs/run-2', '/workflows/wf-1/runs/run-1',
+    ]);
+    fireEvent.click(runs[0]);
     expect(onNavigateWorkflow).toHaveBeenCalledWith('wf-1', 'run-3');
+  });
+
+  it('links the related discussion, workflow and runs: a plain click stays in the app, a modified click is the browser\'s', async () => {
+    vi.mocked(pagesApi.discussions).mockResolvedValue([{
+      discussion_id: 'linked-disc', title: 'Linked discussion', relation: 'attached', archived: false,
+    }]);
+    const onNavigateDiscussion = vi.fn();
+    const onNavigateWorkflow = vi.fn();
+    render(<PagesPage onNavigateDiscussion={onNavigateDiscussion} onNavigateWorkflow={onNavigateWorkflow} />);
+    const discussion = await screen.findByRole('link', { name: 'Linked discussion' });
+    expect(discussion).toHaveAttribute('href', '/discussions/linked-disc');
+    expect(discussion).not.toHaveAttribute('target');
+
+    // A modified or middle click: the browser opens a new tab, this one stays.
+    for (const init of [{ ctrlKey: true }, { metaKey: true }, { shiftKey: true }, { button: 1 }]) {
+      const click = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0, ...init });
+      discussion.dispatchEvent(click);
+      expect(click.defaultPrevented).toBe(false);
+    }
+    expect(onNavigateDiscussion).not.toHaveBeenCalled();
+
+    const plain = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 });
+    discussion.dispatchEvent(plain);
+    expect(plain.defaultPrevented).toBe(true);
+    expect(onNavigateDiscussion).toHaveBeenCalledExactlyOnceWith('linked-disc');
+
+    fireEvent.click(screen.getByLabelText('pages.autoRefresh'));
+    const workflow = screen.getByRole('link', { name: 'Adobe cron' });
+    const run = screen.getAllByRole('link', { name: 'pages.openRefreshRun:Adobe cron' })[0];
+    for (const link of [workflow, run]) {
+      const click = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0, ctrlKey: true });
+      link.dispatchEvent(click);
+      expect(click.defaultPrevented).toBe(false);
+    }
+    expect(onNavigateWorkflow).not.toHaveBeenCalled();
   });
 
   it('creates an immutable HTML revision from the Page editor', async () => {
@@ -813,6 +870,56 @@ describe('PagesPage', () => {
     await waitFor(() => expect(pagesApi.update).toHaveBeenCalledWith(page.id, { archived: true }));
   });
 
+  it('reports the Page it opens on its own, then opens the one the address names', async () => {
+    const second: LivePage = { ...page, id: 'page-2', title: 'Beta Board', slug: 'beta-board' };
+    vi.mocked(pagesApi.list).mockResolvedValue([page, second]);
+    vi.mocked(pagesApi.get).mockImplementation(async id => id === second.id ? { ...detail, ...second } : detail);
+    const onSelectedPageChange = vi.fn();
+    const view = render(<PagesPage selectedPageId={null} onSelectedPageChange={onSelectedPageChange} />);
+
+    // Nothing named by the address: the library opens its first Page and says so.
+    await waitFor(() => expect(onSelectedPageChange).toHaveBeenLastCalledWith(page.id));
+    expect(getCanonicalPageRow('Adobe Signals')).toHaveAttribute('aria-current', 'true');
+
+    // Back, a link: the address changes without a click in the page.
+    view.rerender(<PagesPage selectedPageId={second.id} onSelectedPageChange={onSelectedPageChange} />);
+
+    await waitFor(() => expect(pagesApi.get).toHaveBeenCalledWith(second.id));
+    await waitFor(() => expect(getCanonicalPageRow('Beta Board')).toHaveAttribute('aria-current', 'true'));
+    expect(onSelectedPageChange).toHaveBeenLastCalledWith(second.id);
+  });
+
+  it('comes back to the address when the reader moved away and it is set again', async () => {
+    const second: LivePage = { ...page, id: 'page-2', title: 'Beta Board', slug: 'beta-board' };
+    vi.mocked(pagesApi.list).mockResolvedValue([page, second]);
+    vi.mocked(pagesApi.get).mockImplementation(async id => id === second.id ? { ...detail, ...second } : detail);
+    const props = { onSelectedPageChange: vi.fn() };
+    const view = render(<PagesPage selectedPageId={page.id} {...props} />);
+    await waitFor(() => expect(getCanonicalPageRow('Adobe Signals')).toHaveAttribute('aria-current', 'true'));
+
+    // The reader opens the second Page; the address is then set to the first
+    // again (Back) while its id, as a prop, never changed.
+    fireEvent.click(getCanonicalPageRow('Beta Board'));
+    await waitFor(() => expect(getCanonicalPageRow('Beta Board')).toHaveAttribute('aria-current', 'true'));
+    view.rerender(<PagesPage selectedPageId={page.id} {...props} />);
+
+    await waitFor(() => expect(getCanonicalPageRow('Adobe Signals')).toHaveAttribute('aria-current', 'true'));
+  });
+
+  it('opens the Page the address names, not the last visit', async () => {
+    const second: LivePage = { ...page, id: 'page-2', title: 'Beta Board', slug: 'beta-board' };
+    localStorage.setItem('kronn:pageNavigation', JSON.stringify({ resourceId: page.id }));
+    vi.mocked(pagesApi.list).mockResolvedValue([page, second]);
+    vi.mocked(pagesApi.get).mockImplementation(async id => id === second.id ? { ...detail, ...second } : detail);
+
+    render(<PagesPage selectedPageId={second.id} onSelectedPageChange={vi.fn()} />);
+
+    await waitFor(() => expect(pagesApi.get).toHaveBeenCalledWith(second.id));
+    expect(vi.mocked(pagesApi.get).mock.calls[0][0]).toBe(second.id);
+    await waitFor(() => expect(getCanonicalPageRow('Beta Board')).toHaveAttribute('aria-current', 'true'));
+    expect(getCanonicalPageRow('Adobe Signals')).not.toHaveAttribute('aria-current', 'true');
+  });
+
   it('uses the shared row menu and complete keyboard footer', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
@@ -970,9 +1077,9 @@ describe('PagesPage — popover dismiss (KT-463)', () => {
     await screen.findByTestId('live-page-frame');
     fireEvent.click(screen.getByLabelText('pages.autoRefresh'));
 
-    fireEvent.mouseDown(screen.getByRole('button', { name: 'Adobe cron' }));
+    fireEvent.mouseDown(screen.getByRole('link', { name: 'Adobe cron' }));
     expect(screen.getByTestId('live-page-refresh-menu')).toHaveAttribute('open');
-    fireEvent.click(screen.getByRole('button', { name: 'Adobe cron' }));
+    fireEvent.click(screen.getByRole('link', { name: 'Adobe cron' }));
     expect(onNavigateWorkflow).toHaveBeenCalledWith('wf-1');
   });
 

@@ -1,10 +1,11 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import type { ToastFn } from '../../hooks/useToast';
 import { mcps as mcpsApi, apiCallLogs, type EndpointDrift } from '../../lib/api';
 import { useAsyncGuard } from '../../hooks/useAsyncGuard';
 import { usePersistentIdSet } from '../../hooks/usePersistentIdSet';
 import { usePersistentSidebarOpen } from '../../hooks/usePersistentSidebarOpen';
 import { userError } from '../../lib/userError';
+import type { SelectionReason } from '../../lib/routes';
 import type { McpConfigDisplay, McpDefinition, McpOverview, McpProbeResponse, McpRescanReport, HostSyncMode, PluginInterface, PluginKind, Project } from '../../types/generated';
 import { compactPluginCredentials } from '../../lib/pluginCredentials';
 import { hasAgentScope, slugify } from './mcpPageHelpers';
@@ -27,8 +28,11 @@ interface UsePluginListStateArgs {
   mcpOverview: McpOverview;
   mcpRegistry: McpDefinition[];
   refetchMcps: () => void;
-  favoritesReady: boolean;
+  overviewLoaded: boolean;
   initialSelectedConfigId?: string | null;
+  /** Owned selection: see `McpPageProps`. */
+  selectedConfigId?: string | null;
+  onSelectedConfigChange?: (configId: string | null, reason: SelectionReason) => void;
   t: (key: string, ...args: (string | number)[]) => string;
   toast: ToastFn;
   isMobile: boolean;
@@ -40,7 +44,7 @@ interface UsePluginListStateArgs {
  *  delete) and the derived `visibleConfigs` list. Split out of the
  *  monolithic `useMcpPageState` (KT-830) to stay under the page's
  *  per-file line budget — this is the "liste + fiche" half. */
-export function usePluginListState({ projects, mcpOverview, mcpRegistry, refetchMcps, favoritesReady, initialSelectedConfigId, t, toast, isMobile }: UsePluginListStateArgs) {
+export function usePluginListState({ projects, mcpOverview, mcpRegistry, refetchMcps, overviewLoaded, initialSelectedConfigId, selectedConfigId: ownedConfigId, onSelectedConfigChange, t, toast, isMobile }: UsePluginListStateArgs) {
   const [editingLabelId, setEditingLabelId] = useState<string | null>(null);
   const [editingLabelText, setEditingLabelText] = useState('');
 
@@ -60,7 +64,7 @@ export function usePluginListState({ projects, mcpOverview, mcpRegistry, refetch
   const [collapsedMcpGroups, setCollapsedMcpGroups] = useState<Set<string>>(readCollapsedMcpGroups);
   const [selectedConfigIds, setSelectedConfigIds] = useState<Set<string>>(new Set());
   const availableConfigIds = useMemo(() => mcpOverview.configs.map(config => config.id), [mcpOverview.configs]);
-  const { ids: favoriteConfigIds, toggle: toggleConfigFavorite } = usePersistentIdSet('kronn:collection-favorites:plugins', availableConfigIds, favoritesReady);
+  const { ids: favoriteConfigIds, toggle: toggleConfigFavorite } = usePersistentIdSet('kronn:collection-favorites:plugins', availableConfigIds, overviewLoaded);
   useEffect(() => {
     try {
       localStorage.setItem('kronn:mcpSort', mcpSortReversed ? 'za' : 'az');
@@ -71,7 +75,12 @@ export function usePluginListState({ projects, mcpOverview, mcpRegistry, refetch
       localStorage.setItem(MCP_COLLAPSED_GROUPS_STORAGE_KEY, JSON.stringify([...collapsedMcpGroups]));
     } catch { /* localStorage may be unavailable in private/restricted browser modes. */ }
   }, [collapsedMcpGroups]);
-  const [selectedConfigId, setSelectedConfigId] = useState<string | null>(initialSelectedConfigId ?? null);
+  const [ownSelectedConfigId, setOwnSelectedConfigId] = useState<string | null>(initialSelectedConfigId ?? null);
+  const selectedConfigId = ownedConfigId !== undefined ? ownedConfigId : ownSelectedConfigId;
+  const setSelectedConfigId = useCallback((configId: string | null, reason: SelectionReason = 'change') => {
+    setOwnSelectedConfigId(configId);
+    onSelectedConfigChange?.(configId, reason);
+  }, [onSelectedConfigChange]);
   const [storedProjectId, setSelectedProjectId] = useState(() => {
     try {
       const saved = localStorage.getItem('kronn:mcpSelectedProject') ?? '__all__';
@@ -505,12 +514,17 @@ export function usePluginListState({ projects, mcpOverview, mcpRegistry, refetch
     && selectedProjectId === '__all__' && mcpHealthFilter === 'all' && mcpSyncFilter === 'all'
     && (!mcpSearch || t('mcp.builtin.tileTitle').toLowerCase().includes(mcpSearch.toLowerCase()));
 
+  // The open config leaves when the list no longer shows it. Until the
+  // overview has answered, the list is empty for every config: a direct link
+  // keeps its target through that wait. A config the loaded overview does not
+  // know is an address that names nothing, let go in place of that address;
+  // one the reader's filters hide is a step Back can undo.
   useEffect(() => {
-    const selectedMatchesQuery = matchingConfigs.some(config => config.id === selectedConfigId);
-    if (selectedConfigId && !selectedMatchesQuery) {
-      setSelectedConfigId(null);
-    }
-  }, [matchingConfigs, selectedConfigId]);
+    if (!selectedConfigId || !overviewLoaded) return;
+    if (matchingConfigs.some(config => config.id === selectedConfigId)) return;
+    const known = mcpOverview.configs.some(config => config.id === selectedConfigId);
+    setSelectedConfigId(null, known ? 'change' : 'restore');
+  }, [matchingConfigs, mcpOverview.configs, overviewLoaded, selectedConfigId, setSelectedConfigId]);
 
   return {
     editingLabelId, setEditingLabelId, editingLabelText, setEditingLabelText, handleSaveLabel,

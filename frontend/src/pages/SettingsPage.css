@@ -120,6 +120,8 @@
 }
 
 .set-nav-btn {
+  /* A link (Ctrl/Cmd-click opens the section in a new tab) styled as before. */
+  text-decoration: none;
   position: relative;
   display: flex;
   align-items: center;

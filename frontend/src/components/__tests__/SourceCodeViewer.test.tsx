@@ -156,6 +156,90 @@ describe('SourceCodeViewer', () => {
     expect(await screen.findByText(/services:/)).toBeInTheDocument();
   });
 
+  it('says which file the reader opens, not the one a deep link opened', async () => {
+    mockDirectories(() => [
+      { path: 'compose.yaml', name: 'compose.yaml', is_dir: false },
+      { path: 'README.md', name: 'README.md', is_dir: false },
+    ]);
+    vi.mocked(projects.readSourceFile).mockImplementation(async (_id, path) => ({ path, content: `# ${path}` }));
+    const onPathChange = vi.fn();
+
+    render(<SourceCodeViewer projectId="project-1" initialPath="compose.yaml" onPathChange={onPathChange} />);
+    expect(await screen.findByText('# compose.yaml')).toBeInTheDocument();
+    expect(onPathChange).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'README.md' }));
+    expect(onPathChange).toHaveBeenCalledExactlyOnceWith('README.md');
+    expect(await screen.findByText('# README.md')).toBeInTheDocument();
+
+    // The file already open is not opened again.
+    fireEvent.click(screen.getByRole('button', { name: 'README.md' }));
+    expect(onPathChange).toHaveBeenCalledTimes(1);
+  });
+
+  it('names the default file it opens on its own in place, once, and never a deep link', async () => {
+    mockDirectories(() => [
+      { path: 'README.md', name: 'README.md', is_dir: false },
+      { path: 'NOTES.md', name: 'NOTES.md', is_dir: false },
+    ]);
+    vi.mocked(projects.readSourceFile).mockImplementation(async (_id, path) => ({ path, content: `# ${path}` }));
+    const onPathChange = vi.fn();
+
+    const view = render(<SourceCodeViewer projectId="project-1" onPathChange={onPathChange} />);
+    expect(await screen.findByText('# README.md')).toBeInTheDocument();
+    expect(onPathChange).toHaveBeenCalledExactlyOnceWith('README.md', { replace: true });
+
+    // The address now names it: nothing more to say.
+    view.rerender(<SourceCodeViewer projectId="project-1" initialPath="README.md" onPathChange={onPathChange} />);
+    fireEvent.click(screen.getByRole('button', { name: 'NOTES.md' }));
+    expect(onPathChange).toHaveBeenLastCalledWith('NOTES.md');
+    expect(onPathChange).toHaveBeenCalledTimes(2);
+  });
+
+  it('follows a new address in place: the tree and its open folders stay', async () => {
+    vi.mocked(projects.readSourceFile).mockImplementation(async (_id, path) => ({ path, content: `// ${path}` }));
+    const onPathChange = vi.fn();
+    const view = render(<SourceCodeViewer projectId="project-1" initialPath="src/main.rs" onPathChange={onPathChange} />);
+    expect(await screen.findByText('// src/main.rs')).toBeInTheDocument();
+    const treeRequests = vi.mocked(projects.listSourceFiles).mock.calls.length;
+
+    // Back, Forward, a link: the address names another file of the same folder.
+    view.rerender(<SourceCodeViewer projectId="project-1" initialPath="src/local.rules" onPathChange={onPathChange} />);
+
+    expect(await screen.findByText('// src/local.rules')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /local\.rules/ })).toHaveAttribute('data-selected', 'true');
+    expect(vi.mocked(projects.listSourceFiles).mock.calls).toHaveLength(treeRequests);
+    expect(onPathChange).not.toHaveBeenCalled();
+
+    // The address naming the file already open changes nothing.
+    view.rerender(<SourceCodeViewer projectId="project-1" initialPath="src/local.rules" onPathChange={onPathChange} />);
+    expect(vi.mocked(projects.readSourceFile)).toHaveBeenCalledTimes(2);
+  });
+
+  it('says which file the next and previous matches open', async () => {
+    mockDirectories(() => [
+      { path: 'a.rs', name: 'a.rs', is_dir: false },
+      { path: 'b.rs', name: 'b.rs', is_dir: false },
+    ]);
+    vi.mocked(projects.readSourceFile).mockImplementation(async (_id, path) => ({ path, content: `needle in ${path}` }));
+    vi.mocked(projects.searchSourceFiles).mockResolvedValue([
+      { path: 'a.rs', match_count: 1 },
+      { path: 'b.rs', match_count: 1 },
+    ]);
+    const onPathChange = vi.fn();
+    render(<SourceCodeViewer projectId="project-1" initialPath="a.rs" onPathChange={onPathChange} />);
+    const input = await screen.findByRole('textbox', { name: 'projects.source.search' });
+    fireEvent.change(input, { target: { value: 'needle' } });
+    const next = await screen.findByTitle('Enter');
+    await waitFor(() => expect(screen.getByTitle('a.rs')).toHaveAttribute('data-selected', 'true'));
+
+    fireEvent.click(next);
+    expect(onPathChange).toHaveBeenLastCalledWith('b.rs');
+    fireEvent.click(screen.getByTitle('Shift+Enter'));
+    expect(onPathChange).toHaveBeenLastCalledWith('a.rs');
+    expect(onPathChange).toHaveBeenCalledTimes(2);
+  });
+
   it('lands a deep link on its line: scrolled into view and marked', async () => {
     mockDirectories(() => [
       { path: 'compose.yaml', name: 'compose.yaml', is_dir: false },

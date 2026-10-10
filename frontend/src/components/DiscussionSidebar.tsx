@@ -1,4 +1,6 @@
 import { Fragment, useState, useMemo, useRef, useEffect, useCallback } from 'react';
+import { newTabClickProps } from '../lib/newTabNavigation';
+import { workflowPath } from '../lib/routes';
 import type { ReactNode } from 'react';
 import { P2pOffNotice } from './P2pOffNotice';
 import '../pages/DiscussionsPage.css';
@@ -915,6 +917,7 @@ export function DiscussionSidebar({
                                             {parentLabel && parentWorkflowId && onNavigateWorkflow && (
                                               <button
                                                 type="button"
+                                                {...newTabClickProps(workflowPath(parentWorkflowId))}
                                                 onClick={() => {
                                                   setOpenBatchMenuRunId(null);
                                                   onNavigateWorkflow(parentWorkflowId);

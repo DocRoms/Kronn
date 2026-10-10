@@ -42,12 +42,12 @@ import { invalidateCachedResource, projectGitCacheKey } from '../hooks/useCached
 import { ProjectAgentFilesSetting } from './ProjectAgentFilesSetting';
 import { ProjectRepositoryResourcesPanel } from './ProjectRepositoryResourcesPanel';
 import { rememberProjectRepositoryResourcesTab } from '../lib/projectRepositoryResourcesTab';
+import { PAGE_PATHS, PROJECT_VIEWS, discussionPath, projectPath, type ProjectLocation, type ProjectView } from '../lib/routes';
+import { newTabClickProps } from '../lib/newTabNavigation';
 
-type ProjectDetailView = 'overview' | 'discussions' | 'tasks' | 'audit' | 'docs' | 'code' | 'docker' | 'git' | 'resources';
+type ProjectDetailView = ProjectView;
 
-const PROJECT_DETAIL_VIEWS: ProjectDetailView[] = [
-  'overview', 'discussions', 'tasks', 'audit', 'docs', 'code', 'docker', 'git', 'resources',
-];
+const PROJECT_DETAIL_VIEWS = PROJECT_VIEWS;
 const PROJECT_DETAIL_VIEW_STORAGE_KEY = 'kronn:projectDetailView';
 
 function readProjectDetailView(): ProjectDetailView {
@@ -89,12 +89,20 @@ export interface ProjectCardProps {
   toast: (msg: string, type: 'success' | 'error' | 'warning' | 'info') => void;
   onNavigate: (page: string) => void;
   onSetDiscPrefill: (prefill: { projectId: string; title: string; prompt: string; locked?: boolean }) => void;
+  /** Opens the discussion and runs its agent: lands on the Discussions page. */
   onAutoRunDiscussion: (discId: string) => void;
+  /** Opens the discussion: lands on the Discussions page. */
   onOpenDiscussion: (discId: string) => void;
   onRefetch: () => void;
   onRefetchDiscussions: () => void;
   onRefetchSkills: () => void;
   onRefetchDrift: (projectId: string) => void;
+  /** What the address names inside this project: a view, and the code file or
+   * docs folder it shows. Absent, the card keeps its own view. */
+  location?: ProjectLocation | null;
+  /** Reports a view the reader picks, and the code file they open in it, so
+   * the address follows them. */
+  onLocationChange?: (location: ProjectLocation, options?: { replace?: boolean }) => void;
 }
 
 export function ProjectCard({
@@ -119,21 +127,56 @@ export function ProjectCard({
   onRefetch,
   onRefetchDiscussions,
   onRefetchDrift,
+  location = null,
+  onLocationChange,
 }: ProjectCardProps) {
   const { t, locale } = useT();
   const isMobile = useIsMobile();
-  const [detailView, setDetailView] = useState<ProjectDetailView>(readProjectDetailView);
-  const [codeInitialPath, setCodeInitialPath] = useState<string | null>(null);
-  const [codeInitialLine, setCodeInitialLine] = useState<number | null>(null);
+  // The address owns the view when it names one (`/projects/<id>/<view>`);
+  // a bare project address opens on the view the reader used last.
+  const [ownDetailView, setOwnDetailView] = useState<ProjectDetailView>(readProjectDetailView);
+  const detailView = location?.view ?? ownDetailView;
+  // The code file and line to open: named by the address when it names a
+  // view, else the one this card was asked to open.
+  const [ownCodeFile, setOwnCodeFile] = useState<{ path: string; line: number | null } | null>(null);
+  const codeFile = location?.view
+    ? (location.view === 'code' && location.file ? { path: location.file, line: location.line ?? null } : null)
+    : ownCodeFile;
+  const codeInitialPath = codeFile?.path ?? null;
+  const codeInitialLine = codeFile?.line ?? null;
   const [expandedTab, setExpandedTab] = useState<string | undefined>(undefined);
   const selectDetailView = useCallback((view: ProjectDetailView) => {
-    setDetailView(view);
+    setOwnDetailView(view);
     try {
       localStorage.setItem(PROJECT_DETAIL_VIEW_STORAGE_KEY, view);
     } catch {
       // localStorage may be unavailable in private/restricted browser modes.
     }
-  }, []);
+    onLocationChange?.({ view });
+  }, [onLocationChange]);
+  const openCodeFile = useCallback((path: string, line: number | null = null) => {
+    setOwnCodeFile({ path, line });
+    setOwnDetailView('code');
+    try {
+      localStorage.setItem(PROJECT_DETAIL_VIEW_STORAGE_KEY, 'code');
+    } catch {
+      // localStorage may be unavailable in private/restricted browser modes.
+    }
+    onLocationChange?.({ view: 'code', file: path, line });
+  }, [onLocationChange]);
+  // The reader opened another file in the code view: the address names it,
+  // without the line of the link that brought them here. The default file
+  // the view opened on its own is named in place, and only by an address of
+  // the code view: a bare project address stays as it is.
+  const addressedView = location?.view ?? null;
+  const followCodeFile = useCallback((path: string, options?: { replace?: boolean }) => {
+    if (options?.replace) {
+      if (addressedView === 'code') onLocationChange?.({ view: 'code', file: path, line: null }, { replace: true });
+      return;
+    }
+    setOwnCodeFile({ path, line: null });
+    onLocationChange?.({ view: 'code', file: path, line: null });
+  }, [addressedView, onLocationChange]);
   const reportDockerRunning = useCallback(
     (running: boolean) => onDockerRunningChange?.(proj.id, running),
     [onDockerRunningChange, proj.id],
@@ -286,7 +329,9 @@ export function ProjectCard({
   // useEffect-less pattern (the prop only matters at mount time of the
   // viewer because of the dep on `projectId, initialExpandFolder` in
   // the load effect — see AiDocViewer L37).
-  const [docDeepLink, setDocDeepLink] = useState<string | undefined>(undefined);
+  const [ownDocDeepLink, setDocDeepLink] = useState<string | undefined>(undefined);
+  // A docs folder named by the address (`/projects/<id>/docs?folder=…`) wins.
+  const docDeepLink = (location?.view === 'docs' ? location.folder : null) ?? ownDocDeepLink;
 
   // 0.8.7 — anti-hallu section status. Lazily fetched at mount + after every
   // explicit inject so the badge reflects current state. `null` = not yet
@@ -324,78 +369,6 @@ export function ProjectCard({
       setAntiHalluBusy(false);
     }
   }, [proj.id, antiHalluBusy]);
-
-  // 0.8.3 (#314) — post-validation deep-link consumer. MessageBubble
-  // writes `kronn:postValidation:<projectId>` to sessionStorage when
-  // the user clicks the "View Tech Debts" CTA in the validation
-  // discussion. We read + clear it on every render where the card is
-  // open AND the AI Context tab is exposable; the value is the
-  // folder path to deep-link into (e.g. `docs/tech-debt`). One-shot:
-  // we always remove the key so a manual reload doesn't re-trigger.
-  useEffect(() => {
-    if (!isOpen) return;
-    let cancelled = false;
-    let target: string | null = null;
-    try {
-      target = sessionStorage.getItem(`kronn:postValidation:${proj.id}`);
-      if (target) sessionStorage.removeItem(`kronn:postValidation:${proj.id}`);
-    } catch { /* private mode / quota — no deep-link */ }
-    if (target) {
-      queueMicrotask(() => {
-        if (cancelled) return;
-        selectDetailView('docs');
-        setExpandedTab('docAi');
-        setDocDeepLink(target);
-      });
-    }
-    return () => { cancelled = true; };
-  }, [isOpen, proj.id, selectDetailView]);
-
-  // KT-954 — a project path an agent cited in a discussion opens here, on its
-  // file and line. Same one-shot sessionStorage contract as the links above.
-  useEffect(() => {
-    if (!isOpen) return;
-    let cancelled = false;
-    let target: { path?: unknown; line?: unknown } | null = null;
-    try {
-      const raw = sessionStorage.getItem(`kronn:codeView:${proj.id}`);
-      if (raw) {
-        sessionStorage.removeItem(`kronn:codeView:${proj.id}`);
-        target = JSON.parse(raw) as { path?: unknown; line?: unknown };
-      }
-    } catch { /* private mode / quota / malformed — no deep-link */ }
-    if (target && typeof target.path === 'string' && target.path) {
-      const path = target.path;
-      const line = typeof target.line === 'number' && target.line > 0 ? target.line : null;
-      queueMicrotask(() => {
-        if (cancelled) return;
-        setCodeInitialPath(path);
-        setCodeInitialLine(line);
-        selectDetailView('code');
-      });
-    }
-    return () => { cancelled = true; };
-  }, [isOpen, proj.id, selectDetailView]);
-
-  // Generic one-shot project-tab deep-link. The validation discussion uses
-  // this after "Mark audit as validated" so the user lands on the Audit tab
-  // and sees the new validated state instead of staying on Discussions.
-  useEffect(() => {
-    if (!isOpen) return;
-    let cancelled = false;
-    let target: string | null = null;
-    try {
-      target = sessionStorage.getItem(`kronn:projectView:${proj.id}`);
-      if (target) sessionStorage.removeItem(`kronn:projectView:${proj.id}`);
-    } catch { /* private mode / quota — no deep-link */ }
-    if (target === 'automationArtifacts') target = 'resources';
-    if (target && PROJECT_DETAIL_VIEWS.includes(target as ProjectDetailView)) {
-      queueMicrotask(() => {
-        if (!cancelled) selectDetailView(target as ProjectDetailView);
-      });
-    }
-    return () => { cancelled = true; };
-  }, [isOpen, proj.id, selectDetailView]);
 
   // ── Audit state ──
   const [auditActive, setAuditActive] = useState(false);
@@ -880,7 +853,6 @@ export function ProjectCard({
             // the failed-steps toast already told the user what is left.
             if (status !== 'interrupted') toast(t('audit.fullAuditDone'), 'success');
             onAutoRunDiscussion(discussionId);
-            onNavigate('discussions');
           }
         },
         onError: (error) => {
@@ -910,7 +882,7 @@ export function ProjectCard({
     } finally {
       setAuditAbortController(null);
     }
-  }, [selectedAuditAgent, auditTierChoice, auditConnectionId, proj.id, t, toast, onRefetch, onRefetchDiscussions, onAutoRunDiscussion, onNavigate, resumableAudit]);
+  }, [selectedAuditAgent, auditTierChoice, auditConnectionId, proj.id, t, toast, onRefetch, onRefetchDiscussions, onAutoRunDiscussion, resumableAudit]);
 
   const startPartialAudit = useCallback(async (drift: DriftCheckResponse) => {
     if (auditActiveRef.current) return;
@@ -969,10 +941,9 @@ export function ProjectCard({
           // never reaches here (refused as malformed, no legacy fallback).
           if (info?.status === 'complete' && info.discussionId) {
             toast(t('audit.partialValidationCreated', String(info.succeededSteps.length)), 'success');
-            // Open AND navigate — same UX as the Full validation flow; no
-            // auto-run (the backend already spawned the agent post-commit).
+            // Open — same UX as the Full validation flow; no auto-run (the
+            // backend already spawned the agent post-commit).
             onOpenDiscussion(info.discussionId);
-            onNavigate('discussions');
           } else if (info?.status === 'no_change') {
             // Honest: nothing was rewritten, sections stay stale — and NO
             // "just relaunch" nudge (manual review/acceptance is a future
@@ -1006,7 +977,7 @@ export function ProjectCard({
     } finally {
       setAuditAbortController(null);
     }
-  }, [selectedAuditAgent, auditTierChoice, auditConnectionId, proj.id, t, toast, onRefetch, onRefetchDrift, onRefetchDiscussions, onOpenDiscussion, onNavigate]);
+  }, [selectedAuditAgent, auditTierChoice, auditConnectionId, proj.id, t, toast, onRefetch, onRefetchDrift, onRefetchDiscussions, onOpenDiscussion]);
 
   // ─── Audit resume on mount ───────────────────────────────────────────────
   // When a local checkpoint indicates an audit was in-flight (tab switch, page
@@ -1349,6 +1320,7 @@ export function ProjectCard({
                 key={view}
                 type="button"
                 data-active={detailView === view}
+                {...newTabClickProps(projectPath(proj.id, { view }))}
                 onClick={() => selectDetailView(view)}
               >
                 <Icon size={13} /> {label}
@@ -1435,7 +1407,7 @@ export function ProjectCard({
             {!auditActive && proj.audit_status === 'Validated' ? (
               <span className="dash-badge-green"><ShieldCheck size={9} /> Validated</span>
             ) : !auditActive && validationInProgress ? (
-              <span className="dash-badge-orange cursor-pointer" onClick={(e) => { e.stopPropagation(); if (validationDisc) onOpenDiscussion(validationDisc.id); onNavigate('discussions'); }}>
+              <span className="dash-badge-orange cursor-pointer" {...newTabClickProps(validationDisc ? discussionPath(validationDisc.id) : PAGE_PATHS.discussions)} onClick={(e) => { e.stopPropagation(); if (validationDisc) onOpenDiscussion(validationDisc.id); else onNavigate('discussions'); }}>
                 <Loader2 size={9} style={{ animation: 'spin 1s linear infinite' }} /> Validation
               </span>
             ) : !auditActive && (proj.audit_status === 'Audited' || proj.audit_status === 'TemplateInstalled') ? (
@@ -1906,17 +1878,17 @@ export function ProjectCard({
                 enabled={detailMode && isOpen && detailView === 'overview' && proj.path_exists !== false}
               />
               <div className="project-overview-grid">
-                <button type="button" onClick={() => selectDetailView('discussions')}>
+                <button type="button" {...newTabClickProps(projectPath(proj.id, { view: 'discussions' }))} onClick={() => selectDetailView('discussions')}>
                   <MessageSquare size={16} />
                   <strong>{projDiscussions.length}</strong>
                   <span>{t('projects.master.tab.discussions')}</span>
                 </button>
-                <button type="button" onClick={() => selectDetailView('tasks')}>
+                <button type="button" {...newTabClickProps(projectPath(proj.id, { view: 'tasks' }))} onClick={() => selectDetailView('tasks')}>
                   <ListTodo size={16} />
                   <strong>{t('projects.master.overview.browse')}</strong>
                   <span>{t('projects.master.tab.tasks')}</span>
                 </button>
-                <button type="button" onClick={() => selectDetailView('audit')}>
+                <button type="button" {...newTabClickProps(projectPath(proj.id, { view: 'audit' }))} onClick={() => selectDetailView('audit')}>
                   <Cpu size={16} />
                   <strong>
                     {proj.audit_status === 'Validated'
@@ -1931,12 +1903,12 @@ export function ProjectCard({
                   </strong>
                   <span>{t('projects.master.tab.audit')}</span>
                 </button>
-                <button type="button" onClick={() => selectDetailView('docs')}>
+                <button type="button" {...newTabClickProps(projectPath(proj.id, { view: 'docs' }))} onClick={() => selectDetailView('docs')}>
                   <BookOpen size={16} />
                   <strong>{t('projects.master.overview.browse')}</strong>
                   <span>{t('projects.master.tab.docs')}</span>
                 </button>
-                <button type="button" onClick={() => selectDetailView('code')}>
+                <button type="button" {...newTabClickProps(projectPath(proj.id, { view: 'code' }))} onClick={() => selectDetailView('code')}>
                   <Code2 size={16} />
                   <strong>{t('projects.master.overview.browse')}</strong>
                   <span>{t('projects.master.tab.code')}</span>
@@ -1975,7 +1947,7 @@ export function ProjectCard({
                   <strong>{proj.tech_debt_count ?? 0}</strong>
                   <span>{t('projects.master.sort.techDebt')}</span>
                 </button>
-                <button type="button" onClick={() => selectDetailView('audit')}>
+                <button type="button" {...newTabClickProps(projectPath(proj.id, { view: 'audit' }))} onClick={() => selectDetailView('audit')}>
                   <RefreshCw size={16} />
                   <strong>{driftStatus?.stale_sections.length ?? 0}</strong>
                   <span>{t('projects.master.overview.stale')}</span>
@@ -2056,6 +2028,7 @@ export function ProjectCard({
                 projectId={proj.id}
                 initialPath={codeInitialPath}
                 initialLine={codeInitialLine}
+                onPathChange={followCodeFile}
               />
             </section>
           )}
@@ -2065,11 +2038,7 @@ export function ProjectCard({
                 projectId={proj.id}
                 toast={toast}
                 onRunningChange={reportDockerRunning}
-                onOpenConfig={(path) => {
-                  setCodeInitialPath(path);
-                  setCodeInitialLine(null);
-                  selectDetailView('code');
-                }}
+                onOpenConfig={(path) => openCodeFile(path)}
               />
             </section>
           )}
@@ -2178,7 +2147,7 @@ export function ProjectCard({
                     {t('config.enabled')}
                   </span>
                 </div>
-                <div className="flex-1 cursor-pointer" onClick={() => { onOpenDiscussion(disc.id); onNavigate('discussions'); }}>
+                <div className="flex-1 cursor-pointer" {...newTabClickProps(discussionPath(disc.id))} onClick={() => onOpenDiscussion(disc.id)}>
                   <span className="dash-row-disc-title">
                     {isValidationDisc(disc.title) && <ShieldCheck size={10} className="text-accent" />}
                     {disc.title}
@@ -2187,7 +2156,7 @@ export function ProjectCard({
                     {unseenBasis(disc)} msg · {disc.agent}
                   </span>
                 </div>
-                <button className="dash-icon-btn" onClick={() => { onOpenDiscussion(disc.id); onNavigate('discussions'); }} aria-label="Open discussion">
+                <button className="dash-icon-btn" {...newTabClickProps(discussionPath(disc.id))} onClick={() => onOpenDiscussion(disc.id)} aria-label="Open discussion">
                   <ChevronRight size={12} />
                 </button>
               </div>
@@ -2348,7 +2317,8 @@ export function ProjectCard({
                     </p>
                     <button
                       className="dash-icon-btn dash-btn-accent-border"
-                      onClick={() => { onOpenDiscussion(bootstrapDisc.id); onNavigate('discussions'); }}
+                      {...newTabClickProps(discussionPath(bootstrapDisc.id))}
+                      onClick={() => onOpenDiscussion(bootstrapDisc.id)}
                     >
                       <MessageSquare size={12} /> {t('audit.resumeBootstrap')}
                     </button>
@@ -2369,7 +2339,7 @@ export function ProjectCard({
                       💡 {t('audit.trackerHint')}
                     </span>
                     <div className="dash-tracker-hint-actions">
-                      <button className="dash-icon-btn" onClick={() => onNavigate('mcps')}>
+                      <button className="dash-icon-btn" {...newTabClickProps(PAGE_PATHS.mcps)} onClick={() => onNavigate('mcps')}>
                         <Plug size={12} /> {t('audit.trackerHintConfigure')}
                       </button>
                       <button
@@ -2413,7 +2383,7 @@ export function ProjectCard({
                     liveStepBreakdown={auditStepBreakdown}
                     liveTotalTokens={auditTotalTokens}
                     onResumeBriefingDiscussion={briefingDisc && !briefingDone
-                      ? () => { onOpenDiscussion(briefingDisc.id); onNavigate('discussions'); }
+                      ? () => onOpenDiscussion(briefingDisc.id)
                       : null}
                     onCancel={handleCancelAudit}
                     resumable={resumableAudit}
@@ -2422,7 +2392,6 @@ export function ProjectCard({
                     onValidate={() => {
                       if (validationInProgress && validationDisc) {
                         onOpenDiscussion(validationDisc.id);
-                        onNavigate('discussions');
                         return;
                       }
                       onSetDiscPrefill({

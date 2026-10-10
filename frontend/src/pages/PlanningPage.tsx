@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { discussionPath, planningTaskPath } from '../lib/routes';
+import { newTabClickProps } from '../lib/newTabNavigation';
 import {
   Archive,
   Check,
@@ -16,7 +18,6 @@ import {
   X,
 } from 'lucide-react';
 import { planning } from '../lib/api';
-import { queueDiscussionWorkspaceTarget } from '../lib/discussion-navigation';
 import { useT } from '../lib/I18nContext';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { userError } from '../lib/userError';
@@ -40,11 +41,20 @@ import './DiscussionsPage.css';
 import './PlanningPage.css';
 
 interface Props {
+  /** The task to open on mount, when the page keeps its own selection. */
   initialSelectedTaskId?: string | null;
+  /**
+   * The open task, when the caller owns the selection (the address does):
+   * the page reports every change through `onSelectedTaskChange` and follows
+   * whatever it is then given. Leave undefined to let the page keep its own.
+   */
+  selectedTaskId?: string | null;
+  onSelectedTaskChange?: (taskId: string | null) => void;
   projects: Project[];
   discussions: Discussion[];
   toast: ToastFn;
-  onNavigateDiscussion: (discussionId: string) => void;
+  /** Opens a discussion; with a workspace, its Git panel on that workspace. */
+  onNavigateDiscussion: (discussionId: string, options?: { gitWorkspaceId?: string }) => void;
 }
 
 const PRIORITIES: PlanningTaskPriority[] = ['critical', 'high', 'normal', 'low'];
@@ -81,6 +91,8 @@ function titleTokens(value: string): Set<string> {
 
 export function PlanningPage({
   initialSelectedTaskId,
+  selectedTaskId,
+  onSelectedTaskChange,
   projects,
   discussions,
   toast,
@@ -100,9 +112,17 @@ export function PlanningPage({
   const [quickPriority, setQuickPriority] = useState<PlanningTaskPriority>('normal');
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [creating, setCreating] = useState(false);
-  const [selectedId, setSelectedId] = useState<string | null>(initialSelectedTaskId ?? null);
-  const [detail, setDetail] = useState<PlanningTaskDetail | null>(null);
-  const [detailLoading, setDetailLoading] = useState(Boolean(initialSelectedTaskId));
+  const [ownSelectedId, setOwnSelectedId] = useState<string | null>(initialSelectedTaskId ?? null);
+  const selectedId = selectedTaskId !== undefined ? selectedTaskId : ownSelectedId;
+  const setSelectedId = useCallback((taskId: string | null) => {
+    setOwnSelectedId(taskId);
+    onSelectedTaskChange?.(taskId);
+  }, [onSelectedTaskChange]);
+  const [loadedDetail, setDetail] = useState<PlanningTaskDetail | null>(null);
+  // The pane shows the selected task only once it is loaded: a selection made
+  // elsewhere (Back, a link) must not show the previous task's detail.
+  const detail = loadedDetail && loadedDetail.id === selectedId ? loadedDetail : null;
+  const detailLoading = selectedId !== null && detail === null;
   const [saving, setSaving] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [tasksLoaded, setTasksLoaded] = useState(false);
@@ -182,15 +202,10 @@ export function PlanningPage({
       .catch(cause => {
         if (cancelled) return;
         setSelectedId(null);
-        setDetail(null);
-        setDetailLoading(false);
         toast(userError(cause), 'error');
-      })
-      .finally(() => {
-        if (!cancelled) setDetailLoading(false);
       });
     return () => { cancelled = true; };
-  }, [selectedId, toast]);
+  }, [selectedId, setSelectedId, toast]);
 
   useEffect(() => {
     if (createModalOpen) {
@@ -227,8 +242,6 @@ export function PlanningPage({
   }, [quickTitle, tasks]);
 
   const selectTask = (taskId: string) => {
-    setDetail(null);
-    setDetailLoading(true);
     setSelectedId(taskId);
   };
 
@@ -293,10 +306,7 @@ export function PlanningPage({
       const archived = await Promise.all(selected.map(task => planning.update(task.id, { status: 'archived' })));
       const archivedIds = new Set(archived.map(task => task.id));
       setTasks(previous => previous.map(task => archived.find(item => item.id === task.id) ?? task));
-      if (selectedId && archivedIds.has(selectedId)) {
-        setSelectedId(null);
-        setDetail(null);
-      }
+      if (selectedId && archivedIds.has(selectedId)) setSelectedId(null);
       toast(t('collection.archiveSuccess', selected.length), 'success');
     } catch (cause) {
       toast(t('collection.deleteError', userError(cause)), 'error');
@@ -309,6 +319,7 @@ export function PlanningPage({
       <div className="planning-shell">
         <CollectionShell<PlanningTaskSummary>
           ariaLabel={t('planning.title')}
+          getItemPath={task => planningTaskPath(task.id)}
           title={<><Target size={17} /> {t('planning.title')}</>}
           titleCount={tasks.length}
           headerActions={<>
@@ -544,7 +555,7 @@ export function PlanningPage({
               searchLabel={t('disc.sidebar.searchShortcut')}
             />,
             renderDetail: () => {
-              if (!selectedId && !detailLoading) {
+              if (!selectedId) {
                 return <div className="collection-shell-detail-empty-hint">{t('planning.selectHint')}</div>;
               }
               return (
@@ -557,11 +568,7 @@ export function PlanningPage({
                         title={t('planning.copyTaskId', detail.reference)}
                       />
                     )}
-                    <button type="button" className="planning-detail-close" onClick={() => {
-                      setSelectedId(null);
-                      setDetail(null);
-                      setDetailLoading(false);
-                    }} aria-label={t('common.close')}><X size={16} /></button>
+                    <button type="button" className="planning-detail-close" onClick={() => setSelectedId(null)} aria-label={t('common.close')}><X size={16} /></button>
                   </header>
                   {detailLoading && <div className="planning-state"><Loader2 size={16} className="spin" /></div>}
                   {detail && (
@@ -753,7 +760,8 @@ interface DetailProps {
   onRemoveBlocker: (blockerTaskId: string) => Promise<void>;
   onLinkDiscussion: (discussionId: string) => Promise<void>;
   onOpenTask: (taskId: string) => void;
-  onNavigateDiscussion: (discussionId: string) => void;
+  /** Opens a discussion; with a workspace, its Git panel on that workspace. */
+  onNavigateDiscussion: (discussionId: string, options?: { gitWorkspaceId?: string }) => void;
 }
 
 function PlanningDetailForm({
@@ -799,6 +807,7 @@ function PlanningDetailForm({
         <button
           type="button"
           className="planning-parent-link"
+          {...newTabClickProps(planningTaskPath(task.parent_id))}
           onClick={() => onOpenTask(task.parent_id as string)}
         >
           <ChevronRight size={12} />
@@ -859,9 +868,9 @@ function PlanningDetailForm({
             <button
               type="button"
               key={workspace.id}
+              {...newTabClickProps(discussionPath(workspace.disc_id))}
               onClick={() => {
-                queueDiscussionWorkspaceTarget(workspace.disc_id, workspace.id);
-                onNavigateDiscussion(workspace.disc_id);
+                onNavigateDiscussion(workspace.disc_id, { gitWorkspaceId: workspace.id });
               }}
               title={t('planning.workspaceViewFiles')}
             >
@@ -999,7 +1008,7 @@ function PlanningDetailForm({
       <section className="planning-detail-subtasks">
         <h3>{t('planning.subtasks')} · {task.completed_subtasks}/{task.total_subtasks}</h3>
         {task.subtasks.map(subtask => (
-          <button type="button" key={subtask.id} onClick={() => onOpenTask(subtask.id)}>
+          <button type="button" key={subtask.id} {...newTabClickProps(planningTaskPath(subtask.id))} onClick={() => onOpenTask(subtask.id)}>
             {subtask.status === 'done' ? <Check size={13} /> : <Circle size={13} />}
             <span data-done={subtask.status === 'done'}>{subtask.title}</span>
             <small>{subtask.reference}</small>
@@ -1029,7 +1038,7 @@ function PlanningDetailForm({
         <section className="planning-detail-links">
           <h3>{t('planning.linkedDiscussions')}</h3>
           {task.discussion_ids.map(id => (
-            <button type="button" key={id} onClick={() => onNavigateDiscussion(id)}>
+            <button type="button" key={id} {...newTabClickProps(discussionPath(id))} onClick={() => onNavigateDiscussion(id)}>
               <Link2 size={12} />
               {discussions.find(discussion => discussion.id === id)?.title ?? id}
               <ChevronRight size={12} />
@@ -1059,7 +1068,7 @@ function PlanningDetailForm({
         <h3>{t('planning.blockers')}</h3>
         {task.blockers.map(blocker => (
           <div className="planning-blocker-row" key={blocker.id}>
-            <button type="button" onClick={() => onOpenTask(blocker.id)}>
+            <button type="button" {...newTabClickProps(planningTaskPath(blocker.id))} onClick={() => onOpenTask(blocker.id)}>
               <Circle size={12} /> {blocker.reference} · {blocker.title}
               <ChevronRight size={12} />
             </button>

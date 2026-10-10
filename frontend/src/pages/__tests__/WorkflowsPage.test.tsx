@@ -7,9 +7,11 @@ import {
   quickApis as quickApisApi,
   quickExecs as quickExecsApi,
   quickPrompts as quickPromptsApi,
+  skills as skillsApi,
 } from '../../lib/api';
 import { WorkflowsPage } from '../WorkflowsPage';
-import type { AgentsConfig, QuickApi, QuickExec, QuickPrompt, Workflow, WorkflowSummary } from '../../types/generated';
+import { readAutomationLastVisit } from '../../lib/automationNavigation';
+import type { AgentsConfig, QuickApi, QuickExec, QuickPrompt, Skill, Workflow, WorkflowSummary } from '../../types/generated';
 
 const mockWorkflowsApi = vi.hoisted(() => ({
   list: vi.fn().mockResolvedValue([]),
@@ -191,7 +193,6 @@ const fullConfig: AgentsConfig = {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
-  sessionStorage.removeItem('kronn:postQpImproved');
   localStorage.removeItem('kronn:automationNavigation');
   localStorage.removeItem('kronn:automationCollapsedSections');
   localStorage.removeItem('kronn:automationGroupBy');
@@ -461,6 +462,22 @@ describe('WorkflowsPage', () => {
       .map(button => button.getAttribute('aria-label'));
     const groupHeaders = (sidebar: HTMLElement) => Array.from(sidebar.querySelectorAll('.automation-group-header'))
       .map(header => header.getAttribute('aria-label'));
+
+    it('opens a workflow or a Quick Prompt row in a new tab on a Ctrl-click, without selecting it', async () => {
+      const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+      const { sidebar } = await showLibrary();
+      expect(document.querySelector('.automation-page')).toHaveAttribute('data-has-selection', 'false');
+
+      fireEvent.click(within(sidebar).getByRole('button', { name: 'Ouvrir Beta flow' }), { ctrlKey: true });
+      expect(open).toHaveBeenLastCalledWith(`${window.location.origin}/workflows/wf-beta`, '_blank', 'noopener,noreferrer');
+      fireEvent.click(within(sidebar).getByRole('button', { name: 'Ouvrir Gamma prompt' }), { ctrlKey: true });
+      expect(open).toHaveBeenLastCalledWith(`${window.location.origin}/workflows/qp/qp-gamma`, '_blank', 'noopener,noreferrer');
+
+      expect(open).toHaveBeenCalledTimes(2);
+      expect(document.querySelector('.automation-page')).toHaveAttribute('data-has-selection', 'false');
+      expect(localStorage.getItem('kronn:automationLastOpened')).toBeNull();
+      open.mockRestore();
+    });
 
     it('groups by type at first, with a dot and a count per group, then by project, then flat', async () => {
       const { sidebar, groupBy } = await showLibrary();
@@ -898,7 +915,10 @@ describe('WorkflowsPage', () => {
     expect(execsGroup).toHaveAttribute('aria-expanded', 'false');
     first.unmount();
 
-    await wrap(<WorkflowsPage projects={[]} />);
+    // The route reopens the bare address on the visit the page recorded.
+    const lastVisit = readAutomationLastVisit();
+    expect(lastVisit).toEqual({ tab: 'quickExecs', resourceId: 'qe-persisted' });
+    await wrap(<WorkflowsPage projects={[]} selection={{ ...lastVisit, runId: null }} />);
     const restoredSidebar = screen.getByRole('complementary', { name: 'Automatisation' });
     expect(within(restoredSidebar).getByRole('button', { name: 'Workflows 1' }))
       .toHaveAttribute('aria-expanded', 'false');
@@ -907,13 +927,8 @@ describe('WorkflowsPage', () => {
     expect(await screen.findByRole('heading', { name: 'Shared CLI' })).toBeInTheDocument();
   });
 
-  it('drops a persisted automation selection when its resource no longer exists', async () => {
-    localStorage.setItem('kronn:automationNavigation', JSON.stringify({
-      tab: 'quickExecs',
-      resourceId: 'qe-deleted',
-    }));
-
-    await wrap(<WorkflowsPage projects={[]} />);
+  it('drops an addressed automation whose resource no longer exists, and records the tab alone', async () => {
+    await wrap(<WorkflowsPage projects={[]} selection={{ tab: 'quickExecs', resourceId: 'qe-deleted', runId: null }} />);
 
     await waitFor(() => {
       expect(JSON.parse(localStorage.getItem('kronn:automationNavigation') ?? '{}'))
@@ -922,7 +937,7 @@ describe('WorkflowsPage', () => {
     expect(document.querySelector('.automation-page')).toHaveAttribute('data-has-selection', 'false');
   });
 
-  it('reloads the persisted workflow detail instead of only highlighting its row', async () => {
+  it('loads the addressed workflow detail instead of only highlighting its row', async () => {
     const summary = {
       id: 'wf-persisted', name: 'Persisted workflow', project_id: null, project_name: null,
       trigger_type: 'manual', step_count: 0, misconfigured_step_count: 0, unsafe_step_count: 0,
@@ -935,14 +950,10 @@ describe('WorkflowsPage', () => {
       workspace_config: null, concurrency_limit: null, enabled: true, pinned: false,
       created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
     } as Workflow;
-    localStorage.setItem('kronn:automationNavigation', JSON.stringify({
-      tab: 'workflows',
-      resourceId: summary.id,
-    }));
     mockWorkflowsApi.list.mockResolvedValueOnce([summary]);
     mockWorkflowsApi.get.mockResolvedValueOnce(workflow);
 
-    await wrap(<WorkflowsPage projects={[]} />);
+    await wrap(<WorkflowsPage projects={[]} selection={{ tab: 'workflows', resourceId: summary.id, runId: null }} />);
 
     await waitFor(() => expect(mockWorkflowsApi.get).toHaveBeenCalledWith(summary.id));
     expect(screen.getByTestId('workflow-detail-pane')).toBeInTheDocument();
@@ -982,13 +993,13 @@ describe('WorkflowsPage', () => {
     ));
   });
 
-  it('opens the Quick Prompts tab from the one-shot deploy target without an effect redirect', async () => {
-    sessionStorage.setItem('kronn:postQpImproved', 'qp-deployed');
+  it('opens the Quick Prompts tab on the improved Quick Prompt it arrives for, and acknowledges it', async () => {
+    const onHighlightConsumed = vi.fn();
 
-    await wrap(<WorkflowsPage projects={[]} />);
+    await wrap(<WorkflowsPage projects={[]} highlightQuickPromptId="qp-deployed" onHighlightConsumed={onHighlightConsumed} />);
 
     expect(automationTypeChip()).toHaveAttribute('data-value', 'quickPrompts');
-    expect(sessionStorage.getItem('kronn:postQpImproved')).toBeNull();
+    expect(onHighlightConsumed).toHaveBeenCalledTimes(1);
   });
 
   it('renders with various agentAccess configs and shows create button', async () => {
@@ -1164,10 +1175,6 @@ describe('WorkflowsPage', () => {
   });
 
   it('keeps the pinned workflow, starred and highlighted, in the sidebar while its detail is selected', async () => {
-    localStorage.setItem('kronn:automationNavigation', JSON.stringify({
-      tab: 'workflows',
-      resourceId: 'wf-pin',
-    }));
     const summary: WorkflowSummary = {
       id: 'wf-pin', name: 'Pinned detail', project_id: null, project_name: null,
       trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0, unsafe_step_count: 0,
@@ -1182,7 +1189,7 @@ describe('WorkflowsPage', () => {
       created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
     } as Workflow);
 
-    await wrap(<WorkflowsPage projects={[]} />);
+    await wrap(<WorkflowsPage projects={[]} selection={{ tab: 'workflows', resourceId: 'wf-pin', runId: null }} />);
 
     const sidebar = screen.getByRole('complementary', { name: 'Automatisation' });
     const row = within(sidebar).getByRole('button', { name: 'Ouvrir Pinned detail' });
@@ -1762,44 +1769,209 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     enabled: true, pinned: false, last_run: null, created_at: '2026-01-01T00:00:00Z', ...over,
   });
 
-  it('switches back to workflows when an external workflow selection arrives', async () => {
+  it('follows the address when it changes under the page, and reports what it shows', async () => {
     mockWorkflowsApi.list.mockResolvedValue([labSummary()]);
     mockWorkflowsApi.get.mockResolvedValue(labWorkflow());
     mockWorkflowsApi.listRuns.mockResolvedValue([]);
     mockWorkflowsApi.countRuns.mockResolvedValue(0);
     mockWorkflowsApi.getRun.mockResolvedValue(null);
-    const onInitialSelectionConsumed = vi.fn();
+    const onSelectionChange = vi.fn();
+    const props = { projects: [], installedAgentTypes: ['ClaudeCode' as const], agentAccess: fullConfig, onSelectionChange };
     const page = await wrap(
-      <WorkflowsPage
-        projects={[]}
-        installedAgentTypes={['ClaudeCode']}
-        agentAccess={fullConfig}
-      />
+      <WorkflowsPage {...props} selection={{ tab: 'quickPrompts', resourceId: null, runId: null }} />,
     );
+    // The page's first word restores what the address named.
+    expect(onSelectionChange).toHaveBeenCalledWith({ tab: 'quickPrompts', resourceId: null, runId: null }, 'restore');
+    expect(JSON.parse(localStorage.getItem('kronn:automationNavigation') ?? '{}')).toEqual({ tab: 'quickPrompts', resourceId: null });
 
-    await chooseAutomationType(/Quick Prompts/);
-    expect(automationTypeChip()).toHaveAttribute('data-value', 'quickPrompts');
-
+    // Back, a link, a jump from another page: the address names a run.
     await act(async () => {
       page.rerender(
         <I18nProvider>
-          <WorkflowsPage
-            projects={[]}
-            installedAgentTypes={['ClaudeCode']}
-            agentAccess={fullConfig}
-            initialSelectedWorkflowId="wf-lab"
-            initialSelectedWorkflowRunId="run-from-page"
-            onInitialSelectionConsumed={onInitialSelectionConsumed}
-          />
-        </I18nProvider>
+          <WorkflowsPage {...props} selection={{ tab: 'workflows', resourceId: 'wf-lab', runId: 'run-from-page' }} />
+        </I18nProvider>,
       );
     });
 
     await waitFor(() => expect(mockWorkflowsApi.get).toHaveBeenCalledWith('wf-lab'));
     expect(mockWorkflowsApi.getRun).toHaveBeenCalledWith('wf-lab', 'run-from-page');
-    await waitFor(() => expect(onInitialSelectionConsumed).toHaveBeenCalledTimes(1));
     expect(automationTypeChip()).toHaveAttribute('data-value', 'workflows');
     expect(screen.getByText('Éditer')).toBeInTheDocument();
+    await waitFor(() => expect(onSelectionChange).toHaveBeenLastCalledWith(
+      { tab: 'workflows', resourceId: 'wf-lab', runId: 'run-from-page' }, 'change',
+    ));
+
+    // The reader's own choice is reported as such, with the run let go.
+    await chooseAutomationType(/Quick Prompts/);
+    await waitFor(() => expect(onSelectionChange).toHaveBeenLastCalledWith(
+      { tab: 'quickPrompts', resourceId: null, runId: null }, 'change',
+    ));
+  });
+
+  it('gives the workflow wizard an address: opening it, reopening it from the address, closing it', async () => {
+    const onSelectionChange = vi.fn();
+    const props = { projects: [], installedAgentTypes: ['ClaudeCode' as const], agentAccess: fullConfig, onSelectionChange };
+    const page = await wrap(<WorkflowsPage {...props} selection={{ tab: 'workflows', resourceId: null, runId: null }} />);
+
+    chooseAutomationAction('Nouveau workflow');
+    await waitFor(() => expect(onSelectionChange).toHaveBeenLastCalledWith(
+      { tab: 'workflows', resourceId: null, runId: null, editor: 'create' }, 'change',
+    ));
+    expect(screen.getByPlaceholderText('ex: Auto-fix 5xx errors')).toBeInTheDocument();
+
+    // Back: the address no longer names the wizard, so it closes.
+    await act(async () => {
+      page.rerender(
+        <I18nProvider>
+          <WorkflowsPage {...props} selection={{ tab: 'workflows', resourceId: null, runId: null }} addressToken={{}} />
+        </I18nProvider>,
+      );
+    });
+    await waitFor(() => expect(screen.queryByPlaceholderText('ex: Auto-fix 5xx errors')).toBeNull());
+  });
+
+  it('opens the wizard straight from its address, and reports it unchanged', async () => {
+    const onSelectionChange = vi.fn();
+    await wrap(
+      <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} onSelectionChange={onSelectionChange}
+        selection={{ tab: 'workflows', resourceId: null, runId: null, editor: 'create' }} />,
+    );
+    expect(screen.getByPlaceholderText('ex: Auto-fix 5xx errors')).toBeInTheDocument();
+    // A reload on `/workflows/new` must not be rewritten to the bare list.
+    expect(onSelectionChange).toHaveBeenCalledWith({ tab: 'workflows', resourceId: null, runId: null, editor: 'create' }, 'restore');
+  });
+
+  it('opens the edit wizard on the workflow its address names, once it is loaded', async () => {
+    mockWorkflowsApi.list.mockResolvedValue([labSummary()]);
+    mockWorkflowsApi.get.mockResolvedValue(labWorkflow());
+    mockWorkflowsApi.listRuns.mockResolvedValue([]);
+    mockWorkflowsApi.countRuns.mockResolvedValue(0);
+    const onSelectionChange = vi.fn();
+    await wrap(
+      <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} onSelectionChange={onSelectionChange}
+        selection={{ tab: 'workflows', resourceId: 'wf-lab', runId: null, editor: 'edit' }} />,
+    );
+    await waitFor(() => expect(mockWorkflowsApi.get).toHaveBeenCalledWith('wf-lab'));
+    await waitFor(() => expect(screen.getByDisplayValue(labWorkflow().name)).toBeInTheDocument());
+    // Never reported as anything but the edit it was asked for.
+    for (const [reported] of onSelectionChange.mock.calls) {
+      expect(reported).toEqual({ tab: 'workflows', resourceId: 'wf-lab', runId: null, editor: 'edit' });
+    }
+  });
+
+  it('applies the address again under a new token, even when its fields did not change', async () => {
+    // Back after a click: the address goes A → B → A. The page may have moved
+    // to B on its own (the click) while the B render never committed; the
+    // token tells it the address was set again.
+    const onSelectionChange = vi.fn();
+    const props = { projects: [], onSelectionChange };
+    const tokenA = {};
+    const page = await wrap(<WorkflowsPage {...props} selection={{ tab: 'quickPrompts', resourceId: null, runId: null }} addressToken={tokenA} />);
+
+    await chooseAutomationType(/Quick APIs/);
+    await waitFor(() => expect(onSelectionChange).toHaveBeenLastCalledWith({ tab: 'quickApis', resourceId: null, runId: null }, 'change'));
+    expect(automationTypeChip()).toHaveAttribute('data-value', 'quickApis');
+
+    await act(async () => {
+      page.rerender(
+        <I18nProvider>
+          <WorkflowsPage {...props} selection={{ tab: 'quickPrompts', resourceId: null, runId: null }} addressToken={{}} />
+        </I18nProvider>,
+      );
+    });
+
+    await waitFor(() => expect(automationTypeChip()).toHaveAttribute('data-value', 'quickPrompts'));
+    await waitFor(() => expect(onSelectionChange).toHaveBeenLastCalledWith({ tab: 'quickPrompts', resourceId: null, runId: null }, 'change'));
+  });
+
+  it('opens on the address it is given, says so once, and records it as the last visit', async () => {
+    // What the previous visit left behind is the route's to restore, not the page's.
+    localStorage.setItem('kronn:automationNavigation', JSON.stringify({ tab: 'quickApis', resourceId: 'qa-old' }));
+    const onSelectionChange = vi.fn();
+
+    await wrap(<WorkflowsPage projects={[]} onSelectionChange={onSelectionChange}
+      selection={{ tab: 'skills', resourceId: null, runId: null }} />);
+
+    expect(onSelectionChange).toHaveBeenCalledExactlyOnceWith({ tab: 'skills', resourceId: null, runId: null }, 'restore');
+    expect(JSON.parse(localStorage.getItem('kronn:automationNavigation') ?? '{}')).toEqual({ tab: 'skills', resourceId: null });
+  });
+
+  it('opens on the workflows list without an address', async () => {
+    localStorage.setItem('kronn:automationNavigation', JSON.stringify({ tab: 'quickApis', resourceId: 'qa-old' }));
+    const onSelectionChange = vi.fn();
+
+    await wrap(<WorkflowsPage projects={[]} onSelectionChange={onSelectionChange} />);
+
+    expect(onSelectionChange).toHaveBeenCalledExactlyOnceWith({ tab: 'workflows', resourceId: null, runId: null }, 'restore');
+  });
+
+  it('lets go of a resource the loaded list does not know as its own word, not the reader\'s', async () => {
+    vi.mocked(quickPromptsApi.list).mockResolvedValueOnce([]);
+    const onSelectionChange = vi.fn();
+
+    await wrap(<WorkflowsPage projects={[]} onSelectionChange={onSelectionChange}
+      selection={{ tab: 'quickPrompts', resourceId: 'qp-gone', runId: null }} />);
+
+    await waitFor(() => expect(onSelectionChange).toHaveBeenLastCalledWith({ tab: 'quickPrompts', resourceId: null, runId: null }, 'restore'));
+    // Said once each: the first word, then the one that let go.
+    expect(onSelectionChange.mock.calls).toEqual([
+      [{ tab: 'quickPrompts', resourceId: 'qp-gone', runId: null }, 'restore'],
+      [{ tab: 'quickPrompts', resourceId: null, runId: null }, 'restore'],
+    ]);
+  });
+
+  // Review #227 — choosing a type from a resource's detail is the reader's
+  // step, even when it lands on the list of the same type: Back must bring
+  // the resource back, for every type.
+  it.each([
+    ['workflows', 'wf-lab', () => {
+      mockWorkflowsApi.list.mockResolvedValue([labSummary()]);
+      mockWorkflowsApi.get.mockResolvedValue(labWorkflow());
+      mockWorkflowsApi.listRuns.mockResolvedValue([]);
+      mockWorkflowsApi.countRuns.mockResolvedValue(0);
+    }],
+    ['quickPrompts', 'qp-open', () => {
+      vi.mocked(quickPromptsApi.list).mockResolvedValueOnce([{
+        id: 'qp-open', name: 'Prompt ouvert', icon: '✍️', prompt_template: 'Résume',
+        variables: [], agent: 'ClaudeCode', project_id: null, skill_ids: [], profile_ids: [],
+        directive_ids: [], tier: 'default', description: '', pinned: false,
+        created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+      } satisfies QuickPrompt]);
+    }],
+    ['quickApis', 'qa-open', () => {
+      vi.mocked(quickApisApi.list).mockResolvedValueOnce([{
+        id: 'qa-open', name: 'API ouverte', icon: '🔌', description: '', project_id: null,
+        api_plugin_slug: 'demo', api_config_id: 'cfg', api_endpoint_path: '/items',
+        variables: [], profile_ids: [], directive_ids: [], pinned: false,
+        created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+      } satisfies QuickApi]);
+    }],
+    ['quickExecs', 'qe-open', () => {
+      vi.mocked(quickExecsApi.list).mockResolvedValueOnce([{
+        id: 'qe-open', name: 'Exec ouvert', icon: '⌘', description: '', project_id: null,
+        command: 'git', args: ['status'], timeout_secs: 30, output_format: 'text',
+        variables: [], pinned: false,
+        created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+      } satisfies QuickExec]);
+    }],
+    ['skills', 'skill-open', () => {
+      vi.mocked(skillsApi.list).mockResolvedValueOnce([{
+        id: 'skill-open', name: 'Skill ouvert', description: '', icon: '🧩', category: 'Domain',
+        content: '# Skill\n', is_builtin: false, token_estimate: 10,
+      } satisfies Skill]);
+    }],
+  ] as const)('reports choosing the %s type from one of its resources as the reader\'s step', async (tab, resourceId, mockList) => {
+    mockList();
+    const onSelectionChange = vi.fn();
+    await wrap(<WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig}
+      onSelectionChange={onSelectionChange} selection={{ tab, resourceId, runId: null }} />);
+    expect(onSelectionChange).toHaveBeenCalledWith({ tab, resourceId, runId: null }, 'restore');
+
+    fireEvent.click(automationTypeChip());
+    await act(async () => { fireEvent.click(document.querySelector<HTMLElement>(`[data-kind-option="${tab}"]`)!); });
+
+    await waitFor(() => expect(onSelectionChange).toHaveBeenLastCalledWith({ tab, resourceId: null, runId: null }, 'change'));
+    expect(onSelectionChange.mock.calls.filter(([, reason]) => reason === 'restore')).toHaveLength(1);
   });
 
   it('keeps the full focused run when the compact page already contains its id', async () => {
@@ -1817,7 +1989,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     mockWorkflowsApi.countRuns.mockResolvedValue(1);
     mockWorkflowsApi.getRun.mockResolvedValue({ ...summary, step_results: [{ ...summary.step_results[0], output: cause }] });
     await wrap(<WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig}
-      initialSelectedWorkflowId="wf-lab" initialSelectedWorkflowRunId="run-focused" />);
+      selection={{ tab: 'workflows', resourceId: 'wf-lab', runId: 'run-focused' }} />);
     expect(await screen.findByText(cause)).toBeInTheDocument();
     expect(mockWorkflowsApi.getRun).toHaveBeenCalledTimes(1);
   });

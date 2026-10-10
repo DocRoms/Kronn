@@ -211,7 +211,7 @@ Project-specific terms. For deep dives, follow the linked `docs/architecture/` f
 
 ## UI
 
-**Dashboard** — Main UI shell (~1625 lines, `Dashboard.tsx`) with tabs: Projets, Discussions, MCPs, Workflows, Config. Each tab delegates to a sub-page. Project cards have collapsible accordion sections (Discussions, Doc AI, MCPs, Workflows, Skills, AI Context) with smart defaults based on audit status. Bootstrap modal for creating new projects from scratch.
+**Dashboard** — Main UI shell (~1280 lines, `Dashboard.tsx`) with tabs: Projets, Discussions, Planification, Automatisation, Pages, Plugins, Config. Each tab is a page at its own address, rendered in the shell's outlet (see `docs/architecture/ui-structure.md` § Routing). Project cards have collapsible accordion sections (Discussions, Doc AI, MCPs, Workflows, Skills, AI Context) with smart defaults based on audit status. Bootstrap modal for creating new projects from scratch.
 
 **SettingsPage** — Settings page (~1830 lines, `SettingsPage.tsx`): UI/output language, voice (STT model + TTS voice selection), agents config, multi-key token management, usage stats, DB management. Sticky section navigation with anchor pills.
 

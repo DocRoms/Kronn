@@ -417,6 +417,29 @@ describe('RunDetail — step_kind snapshot badges (run history honesty)', () => 
     expect(onNavWf).not.toHaveBeenCalled();
   });
 
+  it('opens the exact child run in a new tab on a Ctrl-click, without navigating in the app', async () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const envelope = JSON.stringify({
+      data: { mode: 'foreach', total: 1, succeeded: 1, failed: 0,
+        items: [{ item: 0, id: 'brand-enum', status: 'Success', child_run_id: 'aaaabbbb-1111' }] },
+      status: 'OK', summary: 'ok',
+    });
+    const run = mkRun({
+      step_results: [mkResult({ step_name: 'feasibility_impl', step_kind: 'SubWorkflow',
+        output: `---STEP_OUTPUT---\n${envelope}\n---END_STEP_OUTPUT---` })],
+    });
+    const steps = [mkStep({ name: 'feasibility_impl', step_type: { type: 'SubWorkflow' }, sub_workflow_id: 'child-wf-99' })];
+    const onNavRun = vi.fn();
+    const onNavWf = vi.fn();
+    render(<RunDetail run={run} workflowSteps={steps} onNavigateToWorkflow={onNavWf} onNavigateToRun={onNavRun} onDelete={() => {}} />);
+    await act(async () => { screen.getByText('feasibility_impl').click(); });
+    fireEvent.click(screen.getByTitle('wf.openSubRun'), { ctrlKey: true });
+    expect(open).toHaveBeenCalledWith(`${window.location.origin}/workflows/child-wf-99/runs/aaaabbbb-1111`, '_blank', 'noopener,noreferrer');
+    expect(onNavRun).not.toHaveBeenCalled();
+    expect(onNavWf).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
+
   it('shows no foreach chip for a single-child SubWorkflow envelope', () => {
     const run = mkRun({
       step_results: [mkResult({
@@ -1158,6 +1181,22 @@ describe('RunDetail — sub-workflow provenance', () => {
     expect(pill).toBeInTheDocument();
     fireEvent.click(pill);
     expect(onNav).toHaveBeenCalledWith('cron-wf');
+  });
+
+  it('opens the parent workflow in a new tab on a Ctrl-click, without navigating in the app', () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const onNav = vi.fn();
+    const run = mkRun({
+      run_type: 'subworkflow',
+      parent_run_id: 'parent-run-9',
+      parent_workflow_id: 'cron-wf',
+      parent_workflow_name: 'PR Review cron v2',
+    });
+    render(<RunDetail run={run} onDelete={() => {}} onNavigateToWorkflow={onNav} />);
+    fireEvent.click(screen.getByText('PR Review cron v2'), { ctrlKey: true });
+    expect(open).toHaveBeenCalledWith(`${window.location.origin}/workflows/cron-wf`, '_blank', 'noopener,noreferrer');
+    expect(onNav).not.toHaveBeenCalled();
+    open.mockRestore();
   });
 
   it('renders no provenance pill for a top-level run', () => {

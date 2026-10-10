@@ -12,6 +12,7 @@ import { ListControls } from './ListControls';
 import { CollectionShell, type CollectionFilter } from './CollectionShell';
 import { projects as projectsApi } from '../lib/api';
 import { usePersistentIdSet } from '../hooks/usePersistentIdSet';
+import { projectPath, type ProjectLocation } from '../lib/routes';
 import type { Project, AgentDetection, AuditProgress, DriftCheckResponse, Discussion, Skill, McpConfigDisplay, ModelTiersConfig, WorkflowSummary } from '../types/generated';
 import {
   Folder, ChevronRight, AlertTriangle,
@@ -66,7 +67,9 @@ export interface ProjectListProps {
   toast: (msg: string, type: 'success' | 'error' | 'warning' | 'info') => void;
   onNavigate: (page: string) => void;
   onSetDiscPrefill: (prefill: { projectId: string; title: string; prompt: string; locked?: boolean }) => void;
+  /** Opens the discussion and runs its agent: lands on the Discussions page. */
   onAutoRunDiscussion: (discId: string) => void;
+  /** Opens the discussion: lands on the Discussions page. */
   onOpenDiscussion: (discId: string) => void;
   onRefetch: () => void;
   onRefetchDiscussions: () => void;
@@ -78,6 +81,10 @@ export interface ProjectListProps {
   favoritesReady?: boolean;
   expandedId: string | null;
   onSetExpandedId: (id: string | null) => void;
+  /** What the address names inside the open project (its view, a file, a folder). */
+  projectLocation?: ProjectLocation | null;
+  /** Reports a view picked in the open project, so the address follows. */
+  onProjectLocationChange?: (location: ProjectLocation, options?: { replace?: boolean }) => void;
 }
 
 export function ProjectList({
@@ -105,6 +112,8 @@ export function ProjectList({
   favoritesReady = true,
   expandedId,
   onSetExpandedId,
+  projectLocation,
+  onProjectLocationChange,
 }: ProjectListProps) {
   const { t } = useT();
   const isMobile = useIsMobile();
@@ -307,6 +316,7 @@ export function ProjectList({
           titleCount={visibleProjects.length}
           items={sortedProjects}
           getId={project => project.id}
+          getItemPath={project => projectPath(project.id)}
           getLabel={project => `${project.name} ${project.path}`}
           isFavorite={project => favoriteIds.has(project.id)}
           onToggleFavorite={project => toggleFavorite(project.id)}
@@ -454,6 +464,8 @@ export function ProjectList({
                   onRefetchDiscussions={onRefetchDiscussions}
                   onRefetchSkills={onRefetchSkills}
                   onRefetchDrift={onRefetchDrift}
+                  location={projectLocation}
+                  onLocationChange={onProjectLocationChange}
                 />
               ) : (
                 <div className="project-detail-empty">

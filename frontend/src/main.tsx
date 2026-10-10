@@ -1,7 +1,8 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
+import { RouterProvider } from 'react-router/dom';
 import './styles/index.css';
-import { App } from './App';
+import { createAppRouter } from './router';
 import { I18nProvider } from './lib/I18nContext';
 import { ThemeProvider } from './lib/ThemeContext';
 import { LayoutDensityProvider } from './lib/LayoutDensityContext';
@@ -34,6 +35,7 @@ async function bootstrap() {
   await Promise.all([loadInitialLocale(), bootUiPreferences()]);
   const rootEl = document.getElementById('root');
   if (!rootEl) throw new Error('Missing #root element in index.html');
+  const router = createAppRouter();
   ReactDOM.createRoot(rootEl).render(
     <React.StrictMode>
       <ThemeProvider>
@@ -41,7 +43,12 @@ async function bootstrap() {
           <I18nProvider>
             <LocalIdentityProvider>
               <ThemeEffects />
-              <App />
+              {/* Router state updates are applied synchronously, like a plain
+                  state change: wrapped in a transition, a navigation render
+                  could be interrupted by the next one — Back right after a
+                  click — and never commit, leaving the page on an address it
+                  no longer has. See `docs/architecture/ui-structure.md`. */}
+              <RouterProvider router={router} useTransitions={false} />
             </LocalIdentityProvider>
           </I18nProvider>
         </LayoutDensityProvider>

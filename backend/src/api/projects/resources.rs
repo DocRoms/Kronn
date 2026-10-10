@@ -2442,9 +2442,9 @@ fn native_skill_relative_path_ok(relative_path: &str) -> bool {
                 .strip_prefix(&format!("{root}/"))
                 .and_then(|rest| rest.strip_suffix("/SKILL.md"))
                 .is_some_and(|slug| {
-                    !slug.is_empty()
-                        && !slug.contains('/')
-                        && !(*root == ".agents/skills" && slug == "kronn")
+                    !(slug.is_empty()
+                        || slug.contains('/')
+                        || (*root == ".agents/skills" && slug == "kronn"))
                 })
         })
 }

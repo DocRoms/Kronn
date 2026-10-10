@@ -1,4 +1,6 @@
 import { stripAcpToolMarkers } from '../lib/acpToolMarkers';
+import { PAGE_PATHS, projectPath, settingsSectionPath, type ProjectLocation, type SettingsIntent } from '../lib/routes';
+import { newTabClickProps } from '../lib/newTabNavigation';
 import { queueMarkdownUpgrade } from '../lib/markdownUpgradeQueue';
 import {
   createContext,
@@ -271,7 +273,7 @@ export interface MessageBubbleProps {
   onRetry: () => void;
   onRetryAgentDispatch?: (dispatchId: string, agentType: AgentType) => void;
   onExpandSummary: (msgId: string) => void;
-  onNavigate: (page: string, opts?: { scrollTo?: string }) => void;
+  onNavigate: (page: string, opts?: { projectId?: string; projectAt?: ProjectLocation; scrollTo?: string; modelTier?: SettingsIntent['modelTier'] }) => void;
   /** Discussion id, threaded through to MarkdownContent so the
    *  `kronn-doc-preview` fence handler knows which generated-files
    *  directory to target when the user clicks "Export PDF". */
@@ -330,14 +332,13 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
     onOpenProjectFile: projectId
       ? async (path, line) => {
           try { await projectsApi.readSourceFile(projectId, path); } catch { return false; }
-          // Read once by the project card when it opens (see ProjectCard).
-          try {
-            sessionStorage.setItem(`kronn:codeView:${projectId}`, JSON.stringify({ path, line }));
-          } catch { /* private mode / quota — the card still opens */ }
-          window.location.hash = `#project-${projectId}`;
-          onNavigate('projects');
+          // The project's code view, on the file and line: an address of its own.
+          onNavigate('projects', { projectId, projectAt: { view: 'code', file: path, line } });
           return true;
         }
+      : undefined,
+    projectFilePath: projectId
+      ? (path, line) => projectPath(projectId, { view: 'code', file: path, line })
       : undefined,
   }), [attachments, discussionMedia, projectId, onNavigate]);
   const editTextareaRef = useRef<HTMLTextAreaElement>(null);
@@ -1194,7 +1195,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
         )}
         {!modelError && RE_AUTH_ERROR.test(msg.content) && (
           <div className="disc-auth-error-cta">
-            <button className="disc-scan-btn" style={{ fontSize: 11, padding: '5px 12px' }} onClick={() => onNavigate('settings')}>
+            <button className="disc-scan-btn" style={{ fontSize: 11, padding: '5px 12px' }} {...newTabClickProps(PAGE_PATHS.settings)} onClick={() => onNavigate('settings')}>
               <Key size={11} /> {t('disc.overrideKey')}
             </button>
             <span className="disc-auth-error-hint">{t('disc.orCheckAgent')}</span>
@@ -1202,7 +1203,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
         )}
         {RE_PARTIAL_RESPONSE.test(msg.content) && (
           <div className="disc-auth-error-cta">
-            <button className="disc-scan-btn" style={{ fontSize: 11, padding: '5px 12px', borderColor: 'rgba(var(--kr-warning-amber-rgb), 0.3)', background: 'rgba(var(--kr-warning-amber-rgb), 0.08)', color: 'var(--kr-warning-amber)' }} onClick={() => onNavigate('settings', { scrollTo: 'settings-server' })}>
+            <button className="disc-scan-btn" style={{ fontSize: 11, padding: '5px 12px', borderColor: 'rgba(var(--kr-warning-amber-rgb), 0.3)', background: 'rgba(var(--kr-warning-amber-rgb), 0.08)', color: 'var(--kr-warning-amber)' }} {...newTabClickProps(settingsSectionPath('settings-server'))} onClick={() => onNavigate('settings', { scrollTo: 'settings-server' })}>
               <Settings size={11} /> {t('disc.editTimeout')}
             </button>
           </div>
@@ -1226,14 +1227,16 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             <button
               className="disc-scan-btn"
               style={{ fontSize: 11, padding: '5px 12px' }}
+              // A new tab gets the section's address; the tier to point at is
+              // an arrival intent, which only this tab can carry.
+              {...newTabClickProps(settingsSectionPath('settings-agent-config'))}
               onClick={() => {
-                try {
-                  sessionStorage.setItem('kronn:model-config-target', JSON.stringify({
-                    agentType: msg.agent_type,
-                    tier: modelError.tier,
-                  }));
-                } catch { /* private mode / quota: section navigation still works */ }
-                onNavigate('settings', { scrollTo: 'settings-agent-config' });
+                // The agent and tier travel with the navigation: Configuration
+                // unfolds that agent's card and points at the tier's picker.
+                onNavigate('settings', {
+                  scrollTo: 'settings-agent-config',
+                  modelTier: msg.agent_type ? { agentType: msg.agent_type, tier: modelError.tier } : undefined,
+                });
               }}
             >
               <Settings size={11} />
@@ -1250,9 +1253,8 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             KRONN:VALIDATION_COMPLETE in a project-bound discussion,
             surface a one-click jump to the TD index. Pattern: same
             as the auth-error / timeout CTAs above (button below the
-            bubble, before the footer). The hash + onNavigate combo
-            re-uses Dashboard's existing `#project-<id>` deep-link so
-            we don't need new plumbing in the Dashboard state machine. */}
+            bubble, before the footer). `onNavigate` lands on the
+            project's own address, so no extra plumbing is needed. */}
         {projectId && /KRONN:VALIDATION_COMPLETE/i.test(msg.content) && (
           <div className="disc-auth-error-cta">
             <button
@@ -1260,18 +1262,13 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
               style={{ fontSize: 11, padding: '5px 12px' }}
               onClick={() => {
                 // 0.8.3 (#314) — deep-link directly to the tech-debt folder.
-                // Pre-fix the CTA only navigated to the project (via hash
-                // #project-<id>) and the user landed on the AI Context
-                // tab but had to manually expand + click into docs/tech-debt/.
-                // The sessionStorage flag is read by ProjectCard on mount
-                // and triggers `setExpandedTab('docAi') + setDocDeepLink`
-                // automatically, so a single click takes the user from
-                // "validation finished" to "looking at the TDs".
-                try {
-                  sessionStorage.setItem(`kronn:postValidation:${projectId}`, 'docs/tech-debt');
-                } catch { /* private-mode / quota — fall through */ }
-                window.location.hash = `#project-${projectId}`;
-                onNavigate('projects');
+                // Pre-fix the CTA only navigated to the project and the
+                // user landed on the AI Context tab but had to manually
+                // expand + click into docs/tech-debt/.
+                // The project's docs view, on the tech-debt folder: a single
+                // click takes the user from "validation finished" to
+                // "looking at the TDs".
+                onNavigate('projects', { projectId, projectAt: { view: 'docs', folder: 'docs/tech-debt' } });
               }}
             >
               <ShieldCheck size={11} /> {t('audit.viewTechDebtsAfterValidation')}
@@ -1705,6 +1702,7 @@ function MarkdownLink({ href, children }: MdProps) {
         kind={kind}
         attachment={attachmentForLink(href, fileLinks.attachments)}
         onOpenProjectFile={fileLinks.onOpenProjectFile}
+        projectFilePath={fileLinks.projectFilePath}
         onOpenAttachment={fileLinks.onOpenAttachment}
       >
         {children}
@@ -1716,11 +1714,12 @@ function MarkdownLink({ href, children }: MdProps) {
 
 // A path on the agent's machine means nothing to the browser: open the
 // attachment it names, or say plainly that the file is not here.
-function FileLink({ href, kind, attachment, onOpenProjectFile, onOpenAttachment, children }: {
+function FileLink({ href, kind, attachment, onOpenProjectFile, projectFilePath, onOpenAttachment, children }: {
   href: string;
   kind: 'local' | 'project';
   attachment?: ContextFile;
   onOpenProjectFile?: MessageFileLinkContextValue['onOpenProjectFile'];
+  projectFilePath?: MessageFileLinkContextValue['projectFilePath'];
   onOpenAttachment?: (file: ContextFile) => void;
   children?: MdProps['children'];
 }) {
@@ -1739,6 +1738,7 @@ function FileLink({ href, kind, attachment, onOpenProjectFile, onOpenAttachment,
           className="disc-md-file-link-open"
           title={t('disc.localFile.openInProject')}
           aria-label={t('disc.localFile.openInProject')}
+          {...newTabClickProps(projectFilePath?.(path, line))}
           onClick={() => {
             if (opening.current) return;
             opening.current = true;

@@ -15,6 +15,8 @@ interface ProjectCodePanelProps {
   projectId: string;
   initialPath?: string | null;
   initialLine?: number | null;
+  /** The reader opened another source file: see `SourceCodeViewer`. */
+  onPathChange?: (path: string, options?: { replace?: boolean }) => void;
 }
 
 interface SelectedDiff {
@@ -22,7 +24,7 @@ interface SelectedDiff {
   committed: boolean;
 }
 
-export function ProjectCodePanel({ projectId, initialPath, initialLine }: ProjectCodePanelProps) {
+export function ProjectCodePanel({ projectId, initialPath, initialLine, onPathChange }: ProjectCodePanelProps) {
   const { t } = useT();
   const [mode, setMode] = useState<'source' | 'diff' | 'commit'>('source');
   // KT-75 — ONE temporary commit tab, deliberately: opening another commit
@@ -272,6 +274,7 @@ export function ProjectCodePanel({ projectId, initialPath, initialLine }: Projec
           initialPath={initialPath}
           initialLine={initialLine}
           onOpenCommit={sha => void openCommit(sha)}
+          onPathChange={onPathChange}
         />
       ) : statusLoading && !status ? (
         <div className="project-code-state"><Loader2 size={18} className="spin" /></div>

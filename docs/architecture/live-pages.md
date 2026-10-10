@@ -3,7 +3,7 @@
 ## Product naming and compatibility
 
 The UI calls this library **Artifacts**. Existing `page_*` MCP tools,
-`/api/pages` endpoints, `#page/…` and `#pages/mosaic?…` URLs, `PublishPageData`
+`/api/pages` endpoints, `/standalone/pages/…` and `/standalone/pages/mosaic?…` URLs, `PublishPageData`
 workflow steps, stored IDs and sandbox event names keep their established
 contracts. An Artifact is the same persisted resource; renaming its product
 label does not migrate or duplicate it. Historical code and documentation use
@@ -182,7 +182,7 @@ normalization per observation and retain `observed_at` plus
 `workflow_run_id`. `[src: file: frontend/src/lib/live-page-csv.ts:1-106]` The
 export uses a semicolon for French and Spanish UI locales so spreadsheet tools
 configured with those regional separators open columns directly; other locales
-keep the standard comma. `[src: file: frontend/src/pages/PagesPage.tsx:300-329]`
+keep the standard comma. `[src: file: frontend/src/pages/PagesPage.tsx:306-346]`
 
 ## Theme and refresh behavior
 
@@ -196,8 +196,9 @@ Custom theme names can use the Page's own fallback rules.
 
 ## View parameters
 
-The standalone tab accepts display hints after the Page id:
-`#page/<id>?tv=1&scene=standup`. The id stays percent-encoded by
+The standalone address accepts display hints in its query:
+`/standalone/pages/<id>?tv=1&scene=standup` (a legacy `#page/<id>?…` link
+redirects there with them). The id stays percent-encoded by
 `standaloneLivePageUrl`, so a literal `?` can only start the parameters.
 They reach the Page as `KronnPageData.page.params` (and in every
 `kronn:page-data` event), for example to open a wall-screen layout. Only plain
@@ -520,11 +521,14 @@ grammar, URL length; a malformed clip becomes an empty one, never none)
 allowed origin gets a player (at most 8); a valid URL from another site gets a
 warning drawn by Kronn (at most 8), naming the origin, with a "Configure
 allowed domains" button that opens the settings with that origin typed in,
-never added. Inside the app the current tab navigates
-(`#settings/artifacts?origin=…`); a standalone Page or mosaic keeps running and
-opens the settings in a new tab.
+never added. Inside the app the current tab navigates to
+`/config/artifacts?origin=…`, an arrival consumed into `/config` so a reload
+or a Back never types it in again (the legacy `#settings/artifacts?origin=…`
+redirects there); a standalone Page or mosaic keeps running and opens the
+settings in a new tab.
 [src: file: frontend/src/lib/live-page-embeds.ts:71]
-[src: file: frontend/src/lib/live-page-navigation.ts:185]
+[src: file: frontend/src/lib/live-page-navigation.ts:140-158]
+[src: file: frontend/src/routes/SettingsRoute.tsx:16-35]
 [src: file: frontend/src/pages/Dashboard.tsx:243]
 `LivePageEmbedOverlay` renders a layer sized to the iframe's content box with
 `overflow: hidden`, so content is clipped to the Page and can never cover host
@@ -629,7 +633,7 @@ the full run even when the compact list already contains its id.
 [src: file: backend/src/workflows/collect_api_data_step.rs:60-67]
 [src: file: backend/src/workflows/collect_api_data_step.rs:508-529]
 [src: file: frontend/src/components/workflows/LoadedRunDetail.tsx:1]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:804-807]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:814-817]
 
 Rolling windows use the common run-anchored time grammar in source variables,
 for example

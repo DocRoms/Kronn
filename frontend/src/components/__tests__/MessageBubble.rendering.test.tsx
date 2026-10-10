@@ -996,7 +996,6 @@ describe('MessageBubble — inline CTAs', () => {
       detail: 'LiteLLM error 404 Not Found: nested upstream details',
       tier: 'default',
     });
-    sessionStorage.removeItem('kronn:model-config-target');
     renderBubble(makeMessage({
       role: 'System',
       content,
@@ -1010,11 +1009,12 @@ describe('MessageBubble — inline CTAs', () => {
     expect(screen.getByText(/nested upstream details/)).toBeInTheDocument();
     fireEvent.click(screen.getByText('disc.changeTierModel'));
 
-    expect(onNavigate).toHaveBeenCalledWith('settings', { scrollTo: 'settings-agent-config' });
-    expect(JSON.parse(sessionStorage.getItem('kronn:model-config-target') ?? '{}')).toEqual({
-      agentType: 'LiteLlm',
-      tier: 'default',
+    // The agent and tier travel with the navigation, not through storage.
+    expect(onNavigate).toHaveBeenCalledWith('settings', {
+      scrollTo: 'settings-agent-config',
+      modelTier: { agentType: 'LiteLlm', tier: 'default' },
     });
+    expect(sessionStorage.getItem('kronn:model-config-target')).toBeNull();
   });
 
   it('renders an unreachable LiteLLM failure with a targeted one-agent retry', () => {
@@ -1072,8 +1072,9 @@ describe('MessageBubble — inline CTAs', () => {
 
     expect(screen.getByTestId('disc-model-error-content')).toHaveTextContent('disc.modelErrorSummary');
     fireEvent.click(screen.getByText('disc.changeTierModel'));
-    expect(JSON.parse(sessionStorage.getItem('kronn:model-config-target') ?? '{}')).toEqual({
-      agentType: 'LiteLlm', tier: 'default',
+    expect(onNavigate).toHaveBeenCalledWith('settings', {
+      scrollTo: 'settings-agent-config',
+      modelTier: { agentType: 'LiteLlm', tier: 'default' },
     });
   });
 
@@ -1196,5 +1197,52 @@ describe('MessageBubble — role exhaustiveness sanity', () => {
   ])('role %s → data-role %s', (role, expected) => {
     const { container } = renderBubble(makeMessage({ role, content: 'x' }));
     expect(container.querySelector('.disc-msg-row')?.getAttribute('data-role')).toBe(expected);
+  });
+});
+
+describe('MessageBubble — inline CTAs open their Configuration address in a new tab', () => {
+  const expectNewTab = (label: string, onNavigate: ReturnType<typeof vi.fn>, path: string) => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    fireEvent.click(screen.getByText(label), { ctrlKey: true });
+    expect(open).toHaveBeenCalledWith(`${window.location.origin}${path}`, '_blank', 'noopener,noreferrer');
+    expect(onNavigate).not.toHaveBeenCalled();
+    open.mockRestore();
+  };
+
+  it('the override-key CTA opens /config', () => {
+    const onNavigate = vi.fn();
+    renderBubble(
+      makeMessage({ role: 'Agent', content: 'Error: invalid API key, please authenticate.' }),
+      { onNavigate },
+    );
+    expectNewTab('disc.overrideKey', onNavigate, '/config');
+  });
+
+  it('the edit-timeout CTA opens /config#settings-server', () => {
+    const onNavigate = vi.fn();
+    renderBubble(
+      makeMessage({ role: 'Agent', content: "Réponse partielle — l'agent a été interrompu." }),
+      { onNavigate },
+    );
+    expectNewTab('disc.editTimeout', onNavigate, '/config#settings-server');
+  });
+
+  it('the model-error tier shortcut opens /config#settings-agent-config', () => {
+    const onNavigate = vi.fn();
+    const content = '[kronn:model-error]\n' + JSON.stringify({
+      kind: 'model_error',
+      status: 404,
+      summary: 'LiteLlm returned HTTP 404 for model-a.',
+      detail: 'LiteLLM error 404 Not Found',
+      tier: 'default',
+    });
+    renderBubble(makeMessage({
+      role: 'System',
+      content,
+      agent_type: 'LiteLlm',
+      model: 'model-a',
+      model_tier: 'default',
+    }), { onNavigate });
+    expectNewTab('disc.changeTierModel', onNavigate, '/config#settings-agent-config');
   });
 });

@@ -85,7 +85,7 @@ suffix bypassed entirely. The judge/improver pickers in
 The fix removes the manual `suffix` override so the Compare selector reuses
 the same catalogue+identity resolution as every other `AgentSwitchPicker`
 caller.
-[src: file: frontend/src/pages/WorkflowsPage.tsx:3203-3232]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:3222-3251]
 [src: file: frontend/src/components/AgentSwitchPicker.tsx:108-123]
 [src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:343-354]
 

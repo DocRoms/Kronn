@@ -25,7 +25,7 @@ beforeEach(() => { vi.clearAllMocks(); window.location.hash = ''; });
 describe('discussion mosaic', () => {
   it('selects one tile at a time and binds the composer to it', () => {
     monitor([{ id: 'a', preview: preview('Alpha'), error: null }, { id: 'b', preview: preview('Beta'), error: null }]);
-    render(<StandaloneDiscussionMosaic discussionIds={['a', 'b']} layout="two-columns" />);
+    render(<StandaloneDiscussionMosaic discussionIds={['a', 'b']} layout="two-columns" onLayoutChange={vi.fn()} />);
     expect(screen.getByTestId('mosaic-composer')).toHaveTextContent('none|');
     fireEvent.click(screen.getByRole('button', { name: 'disc.mosaic.replyIn:Alpha' }));
     expect(screen.getByRole('article', { name: 'Alpha' })).toHaveAttribute('data-selected', 'true');
@@ -38,7 +38,7 @@ describe('discussion mosaic', () => {
   it('shows plan progress, author provenance and isolated missing discussion without executable content', () => {
     monitor([{ id: 'a', preview: preview('Alpha', { pending_question_count: 1 }), error: null }, { id: 'b', preview: null, error: 'not_found' }]);
     const previous = document.title;
-    const view = render(<StandaloneDiscussionMosaic discussionIds={['a', 'b']} layout="two-columns" />);
+    const view = render(<StandaloneDiscussionMosaic discussionIds={['a', 'b']} layout="two-columns" onLayoutChange={vi.fn()} />);
     const alpha = within(screen.getByRole('article', { name: 'Alpha' }));
     expect(alpha.getByText('disc.mosaic.question')).toBeInTheDocument();
     expect(alpha.getByText('disc.mosaic.plan:2,6')).toBeInTheDocument();
@@ -53,29 +53,34 @@ describe('discussion mosaic', () => {
     expect(within(screen.getByRole('article', { name: 'b' })).getByRole('alert')).toHaveTextContent('disc.mosaic.notFound');
     view.unmount(); expect(document.title).toBe(previous);
   });
-  it('preserves independent scroll positions, resumes following and persists the chosen layout in the URL', () => {
+  it('preserves independent scroll positions, resumes following and hands the chosen layout to its address', () => {
     const first = preview('Alpha'); const second = preview('Beta');
     monitor([{ id: 'a', preview: first, error: null }, { id: 'b', preview: second, error: null }]);
-    const view = render(<StandaloneDiscussionMosaic discussionIds={['a', 'b']} layout="two-columns" />);
+    const onLayoutChange = vi.fn();
+    const view = render(<StandaloneDiscussionMosaic discussionIds={['a', 'b']} layout="two-columns" onLayoutChange={onLayoutChange} />);
     const a = screen.getByLabelText('disc.mosaic.messages:Alpha'); const b = screen.getByLabelText('disc.mosaic.messages:Beta');
     for (const element of [a, b]) {
       Object.defineProperties(element, { scrollHeight: { configurable: true, value: 1000 }, clientHeight: { configurable: true, value: 200 } });
     }
     fireEvent.scroll(a, { target: { scrollTop: 100 } });
     monitor([{ id: 'a', preview: { ...first, updated_at: 'new' }, error: null }, { id: 'b', preview: { ...second, updated_at: 'new' }, error: null }]);
-    view.rerender(<StandaloneDiscussionMosaic discussionIds={['a', 'b']} layout="two-columns" />);
+    view.rerender(<StandaloneDiscussionMosaic discussionIds={['a', 'b']} layout="two-columns" onLayoutChange={onLayoutChange} />);
     expect(a.scrollTop).toBe(100); expect(b.scrollTop).toBe(1000);
     expect(screen.getAllByRole('button', { name: 'disc.mosaic.follow' })).toHaveLength(1);
     fireEvent.click(screen.getByRole('button', { name: 'disc.mosaic.follow' }));
     expect(a.scrollTop).toBe(1000);
+    // The layout belongs to the address: the view asks, the route writes it
+    // back, and the view follows what it is given.
     fireEvent.change(screen.getByLabelText('pages.mosaic.chooseLayout'), { target: { value: 'two-rows' } });
-    expect(window.location.hash).toContain('discussion=a&discussion=b&layout=two-rows');
+    expect(onLayoutChange).toHaveBeenCalledWith('two-rows');
+    expect(view.container.querySelector('.discussion-mosaic-grid')).toHaveAttribute('data-layout', 'two-columns');
+    view.rerender(<StandaloneDiscussionMosaic discussionIds={['a', 'b']} layout="two-rows" onLayoutChange={onLayoutChange} />);
     expect(view.container.querySelector('.discussion-mosaic-grid')).toHaveAttribute('data-layout', 'two-rows');
   });
   it('shows partial checkpoints and their bounded tail, keeps previous content after refresh failure', () => {
     const base = preview('Alpha');
     monitor([{ id: 'a', preview: { ...base, agent_running: true, progress_phase: 'upstream_wait', partial_response: { ...base.messages[0], id: 'partial', content: 'latest answer', truncated: true } }, error: null }], true);
-    render(<StandaloneDiscussionMosaic discussionIds={['a', 'b']} layout="auto" />);
+    render(<StandaloneDiscussionMosaic discussionIds={['a', 'b']} layout="auto" onLayoutChange={vi.fn()} />);
     expect(screen.getByText('disc.mosaic.checkpoint')).toBeInTheDocument();
     expect(screen.getByText('disc.mosaic.tail')).toBeInTheDocument();
     expect(screen.getByText('latest answer')).toBeInTheDocument();

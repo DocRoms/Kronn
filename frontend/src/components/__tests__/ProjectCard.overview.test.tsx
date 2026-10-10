@@ -1,3 +1,4 @@
+import type { ComponentProps } from 'react';
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { buildApiMock } from '../../test/apiMock';
@@ -79,8 +80,13 @@ vi.mock('../../lib/I18nContext', () => ({
 }));
 vi.mock('../../hooks/useMediaQuery', () => ({ useIsMobile: () => false }));
 vi.mock('../ProjectCodePanel', () => ({
-  ProjectCodePanel: ({ projectId, initialPath }: { projectId: string; initialPath?: string | null }) => (
-    <div data-testid="project-code-panel">{projectId}:{initialPath ?? 'root'}</div>
+  ProjectCodePanel: ({ projectId, initialPath, onPathChange }: {
+    projectId: string; initialPath?: string | null; onPathChange?: (path: string) => void;
+  }) => (
+    <div data-testid="project-code-panel">
+      {projectId}:{initialPath ?? 'root'}
+      <button type="button" onClick={() => onPathChange?.('src/other.ts')}>open other</button>
+    </div>
   ),
 }));
 vi.mock('../ProjectDockerPanel', () => ({
@@ -127,9 +133,52 @@ describe('ProjectCard — repository overview', () => {
     sessionStorage.clear();
   });
 
-  it('separates audit and docs, keeps the active tab, and consumes an audit deep-link', async () => {
-    const renderCard = (project: Project) => render(
+  it('reports the file the reader opens in the code view, so the address follows it', () => {
+    const onLocationChange = vi.fn();
+    const card = (location: ComponentProps<typeof ProjectCard>['location']) => (
       <ProjectCard
+        project={PROJECT}
+        dockerRunning
+        detailMode
+        isOpen
+        onToggleOpen={noop}
+        discussions={[]}
+        driftStatus={undefined}
+        agents={[]}
+        allSkills={[]}
+        mcpConfigs={[]}
+        workflows={[]}
+        configLanguage="fr"
+        toast={vi.fn()}
+        onNavigate={noop}
+        onSetDiscPrefill={noop}
+        onAutoRunDiscussion={noop}
+        onOpenDiscussion={noop}
+        onRefetch={noop}
+        onRefetchDiscussions={noop}
+        onRefetchSkills={noop}
+        onRefetchDrift={noop}
+        location={location}
+        onLocationChange={onLocationChange}
+      />
+    );
+    const view = render(card({ view: 'code', file: 'README.md', line: 4 }));
+    expect(screen.getByTestId('project-code-panel')).toHaveTextContent('README.md');
+
+    fireEvent.click(screen.getByRole('button', { name: 'open other' }));
+
+    // Said without the line of the link that brought the reader here.
+    expect(onLocationChange).toHaveBeenCalledExactlyOnceWith({ view: 'code', file: 'src/other.ts', line: null });
+
+    // The address follows, and the panel is given the file it already shows.
+    view.rerender(card({ view: 'code', file: 'src/other.ts', line: null }));
+    expect(screen.getByTestId('project-code-panel')).toHaveTextContent('src/other.ts');
+  });
+
+  it('separates audit and docs, keeps the active tab, and consumes an audit deep-link', async () => {
+    const renderCard = (project: Project, extra: Partial<ComponentProps<typeof ProjectCard>> = {}) => render(
+      <ProjectCard
+        {...extra}
         project={project}
         dockerRunning
         detailMode
@@ -220,11 +269,10 @@ describe('ProjectCard — repository overview', () => {
       .toHaveAttribute('data-active', 'true');
     third.unmount();
 
-    sessionStorage.setItem('kronn:projectView:p-deep', 'audit');
-    renderCard({ ...PROJECT, id: 'p-deep', name: 'Deep-linked project' });
+    // A view named by the address wins over the remembered one.
+    renderCard({ ...PROJECT, id: 'p-deep', name: 'Deep-linked project' }, { location: { view: 'audit' } });
     await waitFor(() => expect(screen.getByRole('button', { name: 'projects.master.tab.audit' }))
       .toHaveAttribute('data-active', 'true'));
-    expect(sessionStorage.getItem('kronn:projectView:p-deep')).toBeNull();
   });
 
   it('keeps linked MCPs, linked repositories, and project deletion in Overview', async () => {
@@ -731,5 +779,100 @@ describe('ProjectCard — repository overview', () => {
     }));
 
     expect(onNavigate).toHaveBeenCalledWith('planning:task-42');
+  });
+
+  it('opens a detail tab or an overview shortcut in a new tab on Ctrl-click, without switching view', () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    render(
+      <ProjectCard
+        project={PROJECT}
+        detailMode
+        isOpen
+        onToggleOpen={noop}
+        discussions={[]}
+        driftStatus={undefined}
+        agents={[]}
+        allSkills={[]}
+        mcpConfigs={[]}
+        workflows={[]}
+        configLanguage="fr"
+        toast={vi.fn()}
+        onNavigate={noop}
+        onSetDiscPrefill={noop}
+        onAutoRunDiscussion={noop}
+        onOpenDiscussion={noop}
+        onRefetch={noop}
+        onRefetchDiscussions={noop}
+        onRefetchSkills={noop}
+        onRefetchDrift={noop}
+      />,
+    );
+    const detailBody = document.querySelector('.dash-card-body');
+    expect(detailBody).toHaveAttribute('data-detail-view', 'overview');
+
+    const gitTab = screen.getByRole('button', { name: 'projects.master.tab.git' });
+    fireEvent.click(gitTab, { ctrlKey: true });
+    expect(open).toHaveBeenLastCalledWith(
+      `${window.location.origin}/projects/p-overview/git`, '_blank', 'noopener,noreferrer',
+    );
+    expect(gitTab).toHaveAttribute('data-active', 'false');
+
+    const codeShortcut = document.querySelector('.project-overview-grid')!;
+    fireEvent.click(within(codeShortcut as HTMLElement).getByRole('button', { name: /projects\.master\.tab\.code/ }), { ctrlKey: true });
+    expect(open).toHaveBeenLastCalledWith(
+      `${window.location.origin}/projects/p-overview/code`, '_blank', 'noopener,noreferrer',
+    );
+    expect(open).toHaveBeenCalledTimes(2);
+    expect(detailBody).toHaveAttribute('data-detail-view', 'overview');
+    open.mockRestore();
+  });
+
+  it('opens a project discussion row in a new tab on Ctrl-click, without opening it here', () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const onOpenDiscussion = vi.fn();
+    const discussions = [{
+      id: 'disc-new-tab',
+      project_id: PROJECT.id,
+      title: 'Release notes',
+      agent: 'Codex',
+      messages: [],
+      message_count: 1,
+      non_system_message_count: 1,
+      archived: false,
+      updated_at: '2026-07-25T00:00:00Z',
+    }] as unknown as Discussion[];
+    render(
+      <ProjectCard
+        project={PROJECT}
+        detailMode
+        isOpen
+        onToggleOpen={noop}
+        discussions={discussions}
+        driftStatus={undefined}
+        agents={[]}
+        allSkills={[]}
+        mcpConfigs={[]}
+        workflows={[]}
+        configLanguage="fr"
+        toast={vi.fn()}
+        onNavigate={noop}
+        onSetDiscPrefill={noop}
+        onAutoRunDiscussion={noop}
+        onOpenDiscussion={onOpenDiscussion}
+        onRefetch={noop}
+        onRefetchDiscussions={noop}
+        onRefetchSkills={noop}
+        onRefetchDrift={noop}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /projects\.master\.tab\.discussions 1/ }));
+    fireEvent.click(screen.getByText('Release notes'), { ctrlKey: true });
+
+    expect(open).toHaveBeenCalledWith(
+      `${window.location.origin}/discussions/disc-new-tab`, '_blank', 'noopener,noreferrer',
+    );
+    expect(onOpenDiscussion).not.toHaveBeenCalled();
+    open.mockRestore();
   });
 });

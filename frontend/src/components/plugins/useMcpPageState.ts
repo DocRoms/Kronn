@@ -5,6 +5,7 @@ import { useIsMobile } from '../../hooks/useMediaQuery';
 import { useToast } from '../../hooks/useToast';
 import type { ToastFn } from '../../hooks/useToast';
 import { userError } from '../../lib/userError';
+import type { SelectionReason } from '../../lib/routes';
 import type { AgentType, McpDefinition, McpOverview, Project } from '../../types/generated';
 import { compactPluginCredentials } from '../../lib/pluginCredentials';
 import { usePluginListState } from './usePluginListState';
@@ -18,10 +19,20 @@ export interface McpPageProps {
   mcpOverview: McpOverview;
   mcpRegistry: McpDefinition[];
   refetchMcps: () => void;
-  /** False until the overview request has completed; protects restored
-   * favorites from its initial empty fallback. */
-  favoritesReady?: boolean;
+  /** False until the overview request has completed: restored favorites and
+   * the config a direct link names both wait for it rather than for its
+   * initial empty fallback. */
+  overviewLoaded?: boolean;
+  /** The config to open on mount, when the page keeps its own selection. */
   initialSelectedConfigId?: string | null;
+  /**
+   * The open config, when the caller owns the selection (the address does):
+   * the page reports every change through `onSelectedConfigChange` and follows
+   * whatever it is then given. Leave undefined to let the page keep its own.
+   */
+  selectedConfigId?: string | null;
+  /** `restore` lets go of a config the loaded overview does not know. */
+  onSelectedConfigChange?: (configId: string | null, reason: SelectionReason) => void;
   /** Installed agent types — threaded through to the Custom API AI
    *  helper bubble so the user can pick which local agent runs the
    *  helper conversation. Optional: when empty, the helper trigger
@@ -63,12 +74,12 @@ export type McpPageState =
     showBuiltinFallback: boolean;
   };
 
-export function useMcpPageState({ projects, mcpOverview, mcpRegistry, refetchMcps, favoritesReady = true, initialSelectedConfigId, installedAgentTypes, configLanguage }: McpPageProps): McpPageState {
+export function useMcpPageState({ projects, mcpOverview, mcpRegistry, refetchMcps, overviewLoaded = true, initialSelectedConfigId, selectedConfigId: ownedConfigId, onSelectedConfigChange, installedAgentTypes, configLanguage }: McpPageProps): McpPageState {
   const { t } = useT();
   const isMobile = useIsMobile();
   const { toast, ToastContainer } = useToast();
 
-  const list = usePluginListState({ projects, mcpOverview, mcpRegistry, refetchMcps, favoritesReady, initialSelectedConfigId, t, toast, isMobile });
+  const list = usePluginListState({ projects, mcpOverview, mcpRegistry, refetchMcps, overviewLoaded, initialSelectedConfigId, selectedConfigId: ownedConfigId, onSelectedConfigChange, t, toast, isMobile });
   const addRegistry = useAddPluginRegistryState({ mcpOverview, mcpRegistry });
   const customForm = useCustomApiFormState();
 

@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { newTabClickProps } from '../lib/newTabNavigation';
+import { PAGE_PATHS, planningTaskPath } from '../lib/routes';
 import {
   Check,
   ChevronRight,
@@ -150,6 +152,7 @@ export function ProjectTasksPanel({
       <button
         type="button"
         className="dash-icon-btn project-task-open"
+        {...newTabClickProps(planningTaskPath(task.id))}
         onClick={() => onOpenPlanning(task.id)}
         aria-label={t('projects.tasks.openTask', task.reference)}
         title={t('projects.tasks.openTask', task.reference)}
@@ -166,7 +169,7 @@ export function ProjectTasksPanel({
           <h3><ListTodo size={17} /> {t('planning.title')}</h3>
           <p>{t('projects.tasks.subtitle')}</p>
         </div>
-        <button type="button" className="btn btn-sm" onClick={() => onOpenPlanning()}>
+        <button type="button" className="btn btn-sm" {...newTabClickProps(PAGE_PATHS.planning)} onClick={() => onOpenPlanning()}>
           <ExternalLink size={13} /> {t('projects.tasks.openPlanning')}
         </button>
       </header>

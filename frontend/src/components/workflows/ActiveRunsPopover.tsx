@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type RefObject } from 'react';
+import { newTabClickProps } from '../../lib/newTabNavigation';
+import { workflowPath } from '../../lib/routes';
 import { createPortal } from 'react-dom';
 import { useActivityPopover } from '../../hooks/useActivityPopover';
 import { Loader2, Square, X, ChevronRight } from 'lucide-react';
@@ -14,7 +16,7 @@ export interface ActiveRunsPopoverProps {
   onViewAllWorkflows: () => void;
   onAfterCancel?: () => void;
   triggerRef?: RefObject<HTMLButtonElement | null>;
-  focusFallbackRef?: RefObject<HTMLButtonElement | null>;
+  focusFallbackRef?: RefObject<HTMLElement | null>;
 }
 
 function formatElapsed(ms: number, t: (k: string, ...a: (string | number)[]) => string): string {
@@ -116,6 +118,7 @@ export function ActiveRunsPopover({
                 <button
                   type="button"
                   className="wf-active-runs-item-body"
+                  {...newTabClickProps(workflowPath(wf.id))}
                   onClick={() => onNavigateToWorkflow(wf.id)}
                 >
                   <Loader2 size={12} className="spin text-accent" />

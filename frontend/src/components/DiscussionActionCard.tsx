@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { newTabClickProps } from '../lib/newTabNavigation';
+import { discussionPath } from '../lib/routes';
 import { AlertTriangle, CheckCircle2, ChevronDown, ExternalLink, FolderGit2, Loader2, Play, RotateCcw, X } from 'lucide-react';
 import { discussionActions as discussionActionsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
@@ -414,6 +416,7 @@ export function KronnActionCard<T extends KronnAction>({
           <button
             type="button"
             className="discussion-action-card__open"
+            {...newTabClickProps(discussionPath(resultDiscussionId))}
             onClick={() => onOpenDiscussion(resultDiscussionId)}
           >
             <ExternalLink size={13} aria-hidden /> {t('disc.action.openDiscussion')}

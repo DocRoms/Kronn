@@ -1,4 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
+import { AppLink } from '../AppLink';
+import { newTabClickProps } from '../../lib/newTabNavigation';
+import { PAGE_PATHS, livePagePath } from '../../lib/routes';
 import { ArtifactImportDialog } from '../ArtifactImportDialog';
 import { buildBlankStep, jsonPathToTarget, splitToolList, withStepTools } from '../../lib/workflowUiUtils';
 import { useT } from '../../lib/I18nContext';
@@ -262,9 +265,11 @@ export interface WorkflowWizardProps {
   /** Leave the wizard and open the selected Page. The Page id remains
    * copyable when navigation is not provided (embedded/test contexts). */
   onNavigatePage?: (pageId: string) => void;
+  /** Leave the wizard for Settings, where an agent's access is granted. */
+  onNavigateSettings?: () => void;
 }
 
-export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAgentTypes, agentChoices, agentAccess, configLanguage, initialPresetId, initialProjectId, initialStepId, focusedStepOnly = false, onNavigatePage }: WorkflowWizardProps) {
+export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAgentTypes, agentChoices, agentAccess, configLanguage, initialPresetId, initialProjectId, initialStepId, focusedStepOnly = false, onNavigatePage, onNavigateSettings }: WorkflowWizardProps) {
   const { t } = useT();
   const availableAgents = (installedAgentTypes && installedAgentTypes.length > 0
     ? installedAgentTypes
@@ -2175,9 +2180,9 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                     <span>{requiresFullAccessToRun(agentAccess, step.agent)
                       ? t('config.fullAccessRequired', AGENT_LABELS[step.agent] ?? step.agent)
                       : t('config.restrictedStep')}</span>
-                    <span className="cursor-pointer" style={{ textDecoration: 'underline', marginLeft: 4 }}
-                      onClick={() => window.location.hash = '#config'}
-                    >{t('config.restrictedAgentLink')}</span>
+                    <AppLink className="kr-inline-link" style={{ marginLeft: 4 }} to={PAGE_PATHS.settings}
+                      onNavigate={onNavigateSettings ? () => onNavigateSettings() : undefined}
+                    >{t('config.restrictedAgentLink')}</AppLink>
                   </div>
                 )}
                 {/* ── BatchQuickPrompt form ── */}
@@ -3613,7 +3618,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                           </div>
                           <CopyIdPill id={selectedPage.id} title={t('wiz.publishPageCopyId', selectedPage.title)} />
                           {onNavigatePage && (
-                            <button type="button" className="wf-btn-ghost" onClick={() => onNavigatePage(selectedPage.id)}>
+                            <button type="button" className="wf-btn-ghost" {...newTabClickProps(livePagePath(selectedPage.id))} onClick={() => onNavigatePage(selectedPage.id)}>
                               <FileText size={12} /> {t('wiz.publishPageOpen')}
                             </button>
                           )}

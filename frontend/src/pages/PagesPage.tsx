@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { discussionPath, livePagePath, workflowPath } from '../lib/routes';
 import {
   Activity, Archive, CheckCircle2, CheckSquare2, ChevronDown, ChevronRight,
   Braces, Clock3, Database, Download, ExternalLink, FileCode2, FileDown, GitCompare,
@@ -25,6 +26,7 @@ import { ArtifactImportDialog } from '../components/ArtifactImportDialog';
 import { triggerDownload } from '../lib/downloadBlob';
 import { exportRedactionNotice } from '../lib/redactedFields';
 import { standaloneDiscussionMessageUrl } from '../lib/live-page-navigation';
+import { AppLink } from '../components/AppLink';
 import { CopyIdPill } from '../components/CopyIdPill';
 import { RunStatusCard } from '../components/RunStatusCard';
 import { LivePageActionOverlay } from '../components/LivePageActionOverlay';
@@ -143,8 +145,16 @@ function useDismissibleDetails<T extends HTMLDetailsElement>() {
 
 interface PagesPageProps {
   projects?: Project[];
+  /** A Page to open once the library is loaded, when the page keeps its own selection. */
   initialSelectedPageId?: string | null;
   onInitialSelectionConsumed?: () => void;
+  /**
+   * The open Page, when the caller owns the selection (the address does):
+   * the page reports every change through `onSelectedPageChange` and opens
+   * whatever it is then given. Leave undefined to let the page keep its own.
+   */
+  selectedPageId?: string | null;
+  onSelectedPageChange?: (pageId: string | null) => void;
   onNavigateWorkflow?: (workflowId: string, runId?: string) => void;
   onNavigateDiscussion?: (discussionId: string) => void;
 }
@@ -153,6 +163,8 @@ export function PagesPage({
   projects = [],
   initialSelectedPageId,
   onInitialSelectionConsumed,
+  selectedPageId,
+  onSelectedPageChange,
   onNavigateWorkflow,
   onNavigateDiscussion,
 }: PagesPageProps) {
@@ -161,7 +173,7 @@ export function PagesPage({
   const [initialPageNavigation] = useState(readPageNavigation);
   const [pages, setPages] = useState<LivePage[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(
-    initialSelectedPageId ?? initialPageNavigation.resourceId,
+    selectedPageId ?? initialSelectedPageId ?? initialPageNavigation.resourceId,
   );
   const [detail, setDetail] = useState<LivePageDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -227,13 +239,8 @@ export function PagesPage({
     reload: reloadPageActions,
   } = useLivePageActions(() => setError(t('disc.action.unavailablePageAction')));
   const [bridgeChannel] = useState(channelId);
-  const requestedPageIdRef = useRef(initialSelectedPageId);
+  const requestedPageIdRef = useRef(selectedPageId ?? initialSelectedPageId);
   const selectionConsumedRef = useRef(onInitialSelectionConsumed);
-
-  useEffect(() => {
-    if (initialSelectedPageId) requestedPageIdRef.current = initialSelectedPageId;
-    selectionConsumedRef.current = onInitialSelectionConsumed;
-  }, [initialSelectedPageId, onInitialSelectionConsumed]);
 
   useEffect(() => {
     try {
@@ -241,7 +248,8 @@ export function PagesPage({
     } catch {
       // localStorage may be unavailable in private/restricted browser modes.
     }
-  }, [selectedId]);
+    onSelectedPageChange?.(selectedId);
+  }, [selectedId, onSelectedPageChange]);
 
   useEffect(() => {
     try {
@@ -318,6 +326,19 @@ export function PagesPage({
   // Initial remote-library synchronization; the state updates happen after
   // the request resolves, not synchronously in the effect body.
   useEffect(() => { void refreshRef.current(); }, []);
+
+  // A Page asked for by the caller — the address, or a one-shot request —
+  // is opened by the next library refresh, which also runs right away when
+  // the request and the open Page disagree: the request changed under the
+  // page (Back, a link, a jump from another page), or the page moved on its
+  // own while the address was set again. The state updates happen after the
+  // request resolves.
+  useEffect(() => {
+    const requested = selectedPageId ?? initialSelectedPageId ?? null;
+    if (requested) requestedPageIdRef.current = requested;
+    selectionConsumedRef.current = onInitialSelectionConsumed;
+    if (requested && requested !== selectedId) void refreshRef.current();
+  }, [selectedPageId, initialSelectedPageId, onInitialSelectionConsumed, selectedId]);
   useEffect(() => {
     if (editingHtml) return undefined;
     const timer = window.setInterval(() => { void refreshRef.current(); }, REFRESH_MS);
@@ -684,6 +705,7 @@ export function PagesPage({
         ariaLabel={t('pages.title')}
         items={pages}
         getId={page => page.id}
+        getItemPath={page => livePagePath(page.id)}
         getLabel={page => `${page.title} ${page.slug}`}
         persistence={{ query, onQueryChange: setQuery, favoritesOnly: false, onFavoritesOnlyChange: () => {} }}
         selectedId={selectedId}
@@ -1031,9 +1053,13 @@ export function PagesPage({
                       <div><Workflow size={12} /><span>{t('pages.linkedWorkflows')}</span></div>
                       {linkedWorkflows.length > 0 ? linkedWorkflows.map(workflow => (
                         <span key={workflow.id} className="live-pages-linked-workflow">
-                          <button type="button" className="live-pages-linked-workflow-open" onClick={() => onNavigateWorkflow?.(workflow.id)} disabled={!onNavigateWorkflow}>
+                          <AppLink
+                            to={workflowPath(workflow.id)}
+                            className="live-pages-linked-workflow-open"
+                            onNavigate={onNavigateWorkflow ? () => onNavigateWorkflow(workflow.id) : undefined}
+                          >
                             {workflow.name}{workflow.enabled ? '' : ` ${t('pages.disabledSuffix')}`}
-                          </button>
+                          </AppLink>
                           <button
                             type="button"
                             className="live-pages-linked-workflow-run"
@@ -1127,22 +1153,22 @@ export function PagesPage({
                                 )}
                               </span>
                             </span>
-                            {workflowId && onNavigateWorkflow && <ChevronRight size={14} className="live-pages-refresh-open" />}
+                            {workflowId && <ChevronRight size={14} className="live-pages-refresh-open" />}
                           </>
                         );
-                        return workflowId && onNavigateWorkflow ? (
-                          <button
+                        // A publication by a workflow is a link to that run.
+                        return workflowId ? (
+                          <AppLink
                             key={publication.id}
-                            type="button"
+                            to={workflowPath(workflowId, publication.workflow_run_id)}
                             className="live-pages-refresh-row"
-                            onClick={() => onNavigateWorkflow(
-                              workflowId,
-                              publication.workflow_run_id ?? undefined,
-                            )}
+                            onNavigate={onNavigateWorkflow
+                              ? () => onNavigateWorkflow(workflowId, publication.workflow_run_id ?? undefined)
+                              : undefined}
                             aria-label={t('pages.openRefreshRun', workflowName)}
                           >
                             {content}
-                          </button>
+                          </AppLink>
                         ) : (
                           <div key={publication.id} className="live-pages-refresh-row">{content}</div>
                         );
@@ -1172,9 +1198,13 @@ export function PagesPage({
                     discussion.source_message_id ? <a key={discussion.discussion_id}
                       href={standaloneDiscussionMessageUrl(discussion.discussion_id, discussion.source_message_id)} target="_blank" rel="noopener noreferrer">
                       {discussion.title} · {t('pages.sourceMessage')} <ExternalLink size={12} />
-                    </a> : <button key={discussion.discussion_id} type="button" onClick={() => onNavigateDiscussion?.(discussion.discussion_id)} disabled={!onNavigateDiscussion}>
+                    </a> : <AppLink
+                      key={discussion.discussion_id}
+                      to={discussionPath(discussion.discussion_id)}
+                      onNavigate={onNavigateDiscussion ? () => onNavigateDiscussion(discussion.discussion_id) : undefined}
+                    >
                       {discussion.title}{discussion.relation === 'created_from' ? ` · ${t('pages.createdFrom')}` : ''}
-                    </button>
+                    </AppLink>
                   ))}
                 </div>
               )}

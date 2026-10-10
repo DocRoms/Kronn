@@ -866,3 +866,11 @@ select.input option {
   margin: var(--kr-sp-3) 0 var(--kr-sp-5);
   color: var(--kr-text-secondary);
 }
+
+/* An inline text link to an address of the app (AppLink): the surrounding
+   text's colour, underlined. A real <a>, so Ctrl/Cmd-click opens a new tab. */
+.kr-inline-link {
+  color: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}

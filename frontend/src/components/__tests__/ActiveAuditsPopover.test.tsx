@@ -94,6 +94,20 @@ describe('ActiveAuditsPopover (0.8.3 #288)', () => {
     expect(onNav).toHaveBeenCalledWith('p1');
   });
 
+  it('Ctrl-click on a row opens the project in a new tab, without navigating here', () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const onNav = vi.fn();
+    wrap(<ActiveAuditsPopover
+      audits={[audit('p1')]} projects={[proj('p1', 'kronn')]}
+      onClose={() => {}} onNavigateToProject={onNav}
+      onViewAllProjects={() => {}}
+    />);
+    fireEvent.click(screen.getByText('kronn').closest('button')!, { ctrlKey: true });
+    expect(open).toHaveBeenCalledWith(`${window.location.origin}/projects/p1`, '_blank', 'noopener,noreferrer');
+    expect(onNav).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
+
   it('Stop button calls cancelAudit and fires onAfterCancel', async () => {
     const onAfter = vi.fn();
     vi.mocked(projectsApi.cancelAudit).mockResolvedValue('NoTemplate');

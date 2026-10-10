@@ -136,6 +136,7 @@ vi.mock('../../lib/api', () => ({
   },
   workflows: {
     listBatchRunSummaries: vi.fn().mockResolvedValue([]),
+    getBatchCompareDetails: vi.fn(),
   },
   quickPrompts: {
     list: vi.fn().mockResolvedValue([]),
@@ -197,12 +198,19 @@ vi.mock('../../lib/api', () => ({
 }));
 
 // Mock useWebSocket hook (WS not available in jsdom)
+vi.mock('../../components/GitPanel', () => ({
+  GitPanel: ({ initialWorkspaceId }: { initialWorkspaceId?: string }) => (
+    <div data-testid="git-panel" data-workspace={initialWorkspaceId ?? ''} />
+  ),
+}));
+
 vi.mock('../../hooks/useWebSocket', () => ({
   useWebSocket: vi.fn(() => ({ connected: false, connectionState: 'connecting' })),
 }));
 
 import {
   discussions as discussionsApi,
+  workflows as workflowsApi,
   externalApi as externalApiConnections,
   media,
   planning as planningApi,
@@ -327,18 +335,37 @@ describe('DiscussionsPage', () => {
     const other = makeListDiscussion('d-native-required', 0);
     vi.mocked(discussionsApi.get).mockImplementation(async id => id === discussion.id ? discussion : other);
     const lifted = liftedProps();
-    const page = (openDiscussionId?: string) => (
+    const page = (openDiscussionId?: string, addressToken?: object) => (
       <DiscussionsPage
         projects={[]} agents={[unavailableNative]} allDiscussions={[discussion, other]}
         configLanguage="fr" agentAccess={null}
         refetchDiscussions={noop} refetchProjects={noop} onNavigate={noop}
         toast={toastFn} initialActiveDiscussionId={discussion.id} {...lifted}
         openDiscussionId={openDiscussionId}
+        addressToken={addressToken}
       />
     );
     const view = await wrap(page());
     return { view, page, discussion, other };
   }
+
+  it('opens the address again under a new token, even when its id did not change', async () => {
+    // Back after a click: the address goes A → B → A while the page moved to
+    // B on its own. As a prop the id never changed; the token says the
+    // address was set again.
+    const { view, page, discussion, other } = await renderWithoutNativeProvider();
+    const row = (id: string) => document.querySelector(`[data-tour-disc-id="${id}"]`);
+    await act(async () => { view.rerender(<I18nProvider>{page(discussion.id, {})}</I18nProvider>); });
+    await waitFor(() => expect(row(discussion.id)).toHaveAttribute('data-active', 'true'));
+
+    fireEvent.click(document.querySelector(`[data-tour-disc-id="${other.id}"] .disc-item-open`) as HTMLElement);
+    await waitFor(() => expect(row(other.id)).toHaveAttribute('data-active', 'true'));
+
+    await act(async () => { view.rerender(<I18nProvider>{page(discussion.id, {})}</I18nProvider>); });
+
+    await waitFor(() => expect(row(discussion.id)).toHaveAttribute('data-active', 'true'));
+    expect(row(other.id)).toHaveAttribute('data-active', 'false');
+  });
 
   it('shows why a discussion could not be opened and loads it on retry', async () => {
     const discussion = makeListDiscussion('d-load-failed', 0);
@@ -392,6 +419,35 @@ describe('DiscussionsPage', () => {
     if (mode === 'unknown') vi.mocked(discussionsApi.nativeAgentMode).mockImplementation(() => new Promise(() => {}));
     await renderWithoutNativeProvider();
     expect(document.querySelector('.disc-composer-textarea')).toBeDisabled();
+  });
+
+  it('links the disabled-agent banner to /config, opening it in this tab only on a plain click', async () => {
+    vi.mocked(discussionsApi.nativeAgentMode).mockResolvedValue({ disabled: false });
+    const discussion = makeListDiscussion('d-agent-disabled-link', 0);
+    vi.mocked(discussionsApi.get).mockResolvedValue(discussion);
+    const onNavigate = vi.fn();
+    await wrap(
+      <DiscussionsPage
+        projects={[]} agents={[unavailableNative]} allDiscussions={[discussion]}
+        configLanguage="fr" agentAccess={null}
+        refetchDiscussions={noop} refetchProjects={noop} onNavigate={onNavigate}
+        toast={toastFn} initialActiveDiscussionId={discussion.id} {...liftedProps()}
+      />,
+    );
+    const link = await waitFor(() => {
+      const found = document.querySelector('.disc-agent-disabled-banner a');
+      expect(found).not.toBeNull();
+      return found as HTMLAnchorElement;
+    });
+    expect(link).toHaveAttribute('href', '/config');
+
+    const modified = new MouseEvent('click', { bubbles: true, cancelable: true, ctrlKey: true });
+    link.dispatchEvent(modified);
+    expect(modified.defaultPrevented).toBe(false);
+    expect(onNavigate).not.toHaveBeenCalled();
+
+    fireEvent.click(link);
+    expect(onNavigate).toHaveBeenCalledWith('settings');
   });
 
   it('does not carry no_agent permission into another room before its mode has loaded', async () => {
@@ -4621,6 +4677,21 @@ describe('DiscussionsPage', () => {
     expect(onNav).toHaveBeenCalledWith('projects', { projectId: 'p8' });
   });
 
+  it('unaudited banner: a Ctrl-click on the CTA opens /projects/<id> in a new tab', async () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const proj = makeProject('p-1', 'NoTemplate');
+    const disc = makeProjectDisc('d-cta-new-tab', 'p-1');
+    const onNav = vi.fn();
+    await renderWithDisc(proj, disc, onNav);
+    const btn = Array.from(document.body.querySelectorAll('button.disc-cta-btn'))
+      .find(b => b.textContent?.includes('Faire le briefing'));
+    expect(btn).toBeTruthy();
+    fireEvent.click(btn!, { ctrlKey: true });
+    expect(open).toHaveBeenCalledWith(`${window.location.origin}/projects/p-1`, '_blank', 'noopener,noreferrer');
+    expect(onNav).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
+
   it('validation CTA validates, records the Audit deep-link, refreshes, and opens the project', async () => {
     const proj = makeProject('p-validation', 'Audited', 'context');
     const disc: Discussion = {
@@ -4655,10 +4726,9 @@ describe('DiscussionsPage', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: /Marquer l'audit comme valide/i }));
     await waitFor(() => expect(projectsApi.validateAudit).toHaveBeenCalledWith(proj.id));
-    expect(sessionStorage.getItem(`kronn:projectView:${proj.id}`)).toBe('audit');
     expect(refetchProjects).toHaveBeenCalled();
     expect(refetchDiscussions).toHaveBeenCalled();
-    expect(onNavigate).toHaveBeenCalledWith('projects', { projectId: proj.id });
+    expect(onNavigate).toHaveBeenCalledWith('projects', { projectId: proj.id, projectAt: { view: 'audit' } });
   });
 
   it('validation CTA still shows in the auto-archived validation discussion', async () => {
@@ -4790,5 +4860,114 @@ describe('DiscussionsPage', () => {
     await act(async () => { await new Promise(r => setTimeout(r, 50)); });
     const body = document.body.textContent ?? '';
     expect(body).not.toMatch(/Audit IA en cours sur ce projet/i);
+  });
+});
+
+describe('DiscussionsPage — comparison address', () => {
+  const renderPage = (props: { compareRunId?: string | null; onCompareChange?: (runId: string | null) => void }) => render(
+    <I18nProvider>
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[makeListDiscussion('disc-a', 1), makeListDiscussion('disc-b', 1)]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={vi.fn()}
+        refetchProjects={vi.fn()}
+        onNavigate={vi.fn()}
+        toast={vi.fn()}
+        {...liftedProps()}
+        {...props}
+      />
+    </I18nProvider>,
+  );
+
+  it('opens the comparison its address names, from its run, and closes it on request', async () => {
+    vi.mocked(workflowsApi.getBatchCompareDetails).mockResolvedValue({
+      run_id: 'run-c',
+      evaluations: [{ discussion_id: 'disc-a' }, { discussion_id: 'disc-b' }],
+    } as never);
+    vi.mocked(discussionsApi.get).mockImplementation(async (id: string) => makeListDiscussion(id, 1));
+    const onCompareChange = vi.fn();
+
+    renderPage({ compareRunId: 'run-c', onCompareChange });
+
+    await waitFor(() => expect(workflowsApi.getBatchCompareDetails).toHaveBeenCalledWith('run-c'));
+    const workspace = await waitFor(() => {
+      const found = document.querySelector('.disc-compare-workspace');
+      expect(found).not.toBeNull();
+      return found as HTMLElement;
+    });
+    await waitFor(() => expect(discussionsApi.get).toHaveBeenCalledWith('disc-b'));
+    // Opened from the address: nothing to report back.
+    expect(onCompareChange).not.toHaveBeenCalled();
+
+    const close = workspace.querySelector<HTMLButtonElement>('.btn-icon[aria-label]');
+    await act(async () => { close?.click(); });
+    expect(onCompareChange).toHaveBeenLastCalledWith(null);
+    expect(document.querySelector('.disc-compare-workspace')).toBeNull();
+  });
+
+  it('closes the comparison when the address no longer names one (Back)', async () => {
+    vi.mocked(workflowsApi.getBatchCompareDetails).mockResolvedValue({
+      run_id: 'run-c',
+      evaluations: [{ discussion_id: 'disc-a' }, { discussion_id: 'disc-b' }],
+    } as never);
+    vi.mocked(discussionsApi.get).mockImplementation(async (id: string) => makeListDiscussion(id, 1));
+    const onCompareChange = vi.fn();
+    const page = renderPage({ compareRunId: 'run-c', onCompareChange });
+    await waitFor(() => expect(document.querySelector('.disc-compare-workspace')).not.toBeNull());
+
+    page.rerender(
+      <I18nProvider>
+        <DiscussionsPage
+          projects={[]}
+          agents={[]}
+          allDiscussions={[makeListDiscussion('disc-a', 1), makeListDiscussion('disc-b', 1)]}
+          configLanguage="fr"
+          agentAccess={null}
+          refetchDiscussions={vi.fn()}
+          refetchProjects={vi.fn()}
+          onNavigate={vi.fn()}
+          toast={vi.fn()}
+          {...liftedProps()}
+          compareRunId={null}
+          onCompareChange={onCompareChange}
+          addressToken={{}}
+        />
+      </I18nProvider>,
+    );
+
+    await waitFor(() => expect(document.querySelector('.disc-compare-workspace')).toBeNull());
+    expect(onCompareChange).not.toHaveBeenCalled();
+  });
+});
+
+describe('DiscussionsPage — Git workspace arrival', () => {
+  it('opens the Git panel of the addressed discussion on the workspace it arrives for, and acknowledges it', async () => {
+    vi.mocked(discussionsApi.get).mockImplementation(async (id: string) => makeListDiscussion(id, 1));
+    const onGitWorkspaceConsumed = vi.fn();
+    render(
+      <I18nProvider>
+        <DiscussionsPage
+          projects={[]}
+          agents={[]}
+          allDiscussions={[makeListDiscussion('disc-a', 1)]}
+          configLanguage="fr"
+          agentAccess={null}
+          refetchDiscussions={vi.fn()}
+          refetchProjects={vi.fn()}
+          onNavigate={vi.fn()}
+          toast={vi.fn()}
+          {...liftedProps()}
+          initialActiveDiscussionId="disc-a"
+          gitWorkspaceTarget={{ discussionId: 'disc-a', workspaceId: 'ws-1' }}
+          onGitWorkspaceConsumed={onGitWorkspaceConsumed}
+        />
+      </I18nProvider>,
+    );
+
+    await waitFor(() => expect(screen.getByTestId('git-panel')).toHaveAttribute('data-workspace', 'ws-1'));
+    expect(onGitWorkspaceConsumed).toHaveBeenCalledTimes(1);
   });
 });

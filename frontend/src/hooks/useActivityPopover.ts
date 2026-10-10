@@ -3,7 +3,7 @@ import { useCallback, useLayoutEffect, useRef, type RefObject } from 'react';
 interface ActivityPopoverOptions {
   onClose: () => void;
   triggerRef?: RefObject<HTMLButtonElement | null>;
-  focusFallbackRef?: RefObject<HTMLButtonElement | null>;
+  focusFallbackRef?: RefObject<HTMLElement | null>;
 }
 
 export function useActivityPopover(options: ActivityPopoverOptions) {

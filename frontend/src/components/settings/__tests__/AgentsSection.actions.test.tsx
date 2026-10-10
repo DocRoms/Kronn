@@ -196,14 +196,12 @@ beforeEach(() => {
       created_at: '2026-09-09T00:00:00Z', updated_at: '2026-09-09T00:00:00Z',
     })),
   }] });
-  sessionStorage.removeItem('kronn:model-config-target');
 });
 
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   cleanup();
-  sessionStorage.removeItem('kronn:model-config-target');
 });
 
 describe('AgentsSection — release checks', () => {
@@ -226,11 +224,8 @@ describe('AgentsSection — release checks', () => {
 });
 
 describe('AgentsSection — model-error deep link', () => {
-  it('focuses the exact agent and reasoning-tier picker left by a System CTA', async () => {
-    sessionStorage.setItem('kronn:model-config-target', JSON.stringify({
-      agentType: 'ClaudeCode',
-      tier: 'reasoning',
-    }));
+  it('focuses the exact agent and reasoning-tier picker a System CTA arrives for, and acknowledges it', async () => {
+    const onModelTierTargetConsumed = vi.fn();
     renderSection({
       agents: [makeAgent({
         name: 'AgentClaude',
@@ -238,7 +233,11 @@ describe('AgentsSection — model-error deep link', () => {
         installed: true,
         enabled: true,
       })],
+      modelTierTarget: { agentType: 'ClaudeCode', tier: 'reasoning' },
+      onModelTierTargetConsumed,
     });
+    // Acknowledged at once, so a reload or a Back never replays it…
+    expect(onModelTierTargetConsumed).toHaveBeenCalledTimes(1);
 
     await waitFor(() => {
       const select = document.querySelector<HTMLSelectElement>(
@@ -248,7 +247,46 @@ describe('AgentsSection — model-error deep link', () => {
       expect(document.activeElement).toBe(select);
       expect(select?.classList.contains('set-model-tier-focus')).toBe(true);
     });
-    expect(sessionStorage.getItem('kronn:model-config-target')).toBeNull();
+  });
+
+  it('keeps the target after the acknowledgement, until the picker has loaded', async () => {
+    // …yet the picker still appears only once the catalogue is in: the intent
+    // going away from the props must not lose the target.
+    const view = renderSection({
+      agents: [makeAgent({ name: 'AgentClaude', agent_type: 'ClaudeCode', installed: true, enabled: true })],
+      modelTierTarget: { agentType: 'ClaudeCode', tier: 'reasoning' },
+    });
+    view.rerender(
+      <AgentsSection
+        agents={[makeAgent({ name: 'AgentClaude', agent_type: 'ClaudeCode', installed: true, enabled: true })]}
+        agentAccess={null}
+        configLanguage="fr"
+        refetchAgents={vi.fn()}
+        refetchAgentAccess={vi.fn()}
+        toast={vi.fn()}
+        t={t}
+        modelTierTarget={null}
+      />,
+    );
+    await waitFor(() => {
+      const select = document.querySelector('[data-model-tier-agent="ClaudeCode"][data-model-tier="reasoning"]');
+      expect(document.activeElement).toBe(select);
+    });
+  });
+
+  it('gives up on a target that never appears, and never points at it later', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      renderSection({
+        agents: [makeAgent({ name: 'AgentClaude', agent_type: 'ClaudeCode', installed: true, enabled: true })],
+        modelTierTarget: { agentType: 'Vibe', tier: 'reasoning' },
+      });
+      await act(async () => { await vi.advanceTimersByTimeAsync(7_000); });
+      // The arrival is over: a ClaudeCode picker focused later is not this test's doing.
+      expect(document.querySelector('.set-model-tier-focus')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -1020,17 +1058,13 @@ describe('AgentsSection — CLI / Local / External zones', () => {
   /// fold. Without this the focus effect retries against a card that never
   /// renders, and the user lands on the settings page with nothing selected.
   it('opens the fold the deep link points into, before any effect runs', () => {
-    sessionStorage.setItem(
-      'kronn:model-config-target',
-      JSON.stringify({ agentType: 'Codex', tier: 'reasoning' }),
-    );
     renderSection({
       agents: [makeAgent({ name: 'AgentCodex', agent_type: 'Codex', installed: true, enabled: true })],
+      modelTierTarget: { agentType: 'Codex', tier: 'reasoning' },
     });
 
     expect(document.querySelector('#agent-config-Codex')).not.toBeNull();
     expect(screen.getByTestId('agent-configure-Codex').getAttribute('aria-expanded')).toBe('true');
-    sessionStorage.removeItem('kronn:model-config-target');
   });
 
   /// The card carried its agent's name twice: as the title, and again inside

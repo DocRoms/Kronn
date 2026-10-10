@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 
 const mocks = vi.hoisted(() => ({
   list: vi.fn(),
@@ -427,6 +427,90 @@ describe('PlanningPage', () => {
     expect(container.querySelector('.collection-shell-detail > .planning-detail')).toBe(panel);
   });
 
+  it('opens a task row in a new tab on a Ctrl-click, without selecting it', async () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    render(
+      <PlanningPage
+        projects={[]}
+        discussions={[]}
+        toast={vi.fn()}
+        onNavigateDiscussion={vi.fn()}
+      />,
+    );
+    fireEvent.click(await findCanonicalTaskRow('Upgrade PHP'), { ctrlKey: true });
+    expect(open).toHaveBeenCalledWith(`${window.location.origin}/planning/task-1`, '_blank', 'noopener,noreferrer');
+    expect(mocks.get).not.toHaveBeenCalled();
+    expect(screen.queryByRole('complementary', { name: 'planning.taskActions' })).toBeNull();
+    open.mockRestore();
+  });
+
+  it('opens a linked discussion of a task in a new tab on a Ctrl-click, without navigating in the app', async () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    mocks.get.mockResolvedValue(detail(summary({ discussion_ids: ['disc-7'] })));
+    const onNavigateDiscussion = vi.fn();
+    render(
+      <PlanningPage
+        initialSelectedTaskId="task-1"
+        projects={[]}
+        discussions={[]}
+        toast={vi.fn()}
+        onNavigateDiscussion={onNavigateDiscussion}
+      />,
+    );
+    const link = await screen.findByRole('button', { name: 'disc-7' });
+    fireEvent.click(link, { ctrlKey: true });
+    expect(open).toHaveBeenCalledWith(`${window.location.origin}/discussions/disc-7`, '_blank', 'noopener,noreferrer');
+    expect(onNavigateDiscussion).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
+
+  it('opens the parent, a subtask, a blocker and a workspace of a task in a new tab on a Ctrl-click, without moving in the app', async () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const child = detail(summary({
+      parent_id: 'task-parent',
+      parent_reference: 'KT-0',
+      parent_title: 'Platform upgrade',
+    }));
+    child.subtasks = [summary({ id: 'task-sub', reference: 'KT-5', title: 'Bump composer' })];
+    child.blockers = [summary({ id: 'task-blocker', reference: 'KT-9', title: 'Dependency' })];
+    child.workspaces = [{
+      id: 'workspace-3',
+      disc_id: 'disc-3',
+      branch: 'feature/kt-141',
+      state: 'attached',
+      ownership: 'external',
+      session_agent_type: 'Codex',
+    }];
+    mocks.get.mockResolvedValue(child);
+    const onNavigateDiscussion = vi.fn();
+    const { container } = render(
+      <PlanningPage
+        initialSelectedTaskId="task-1"
+        projects={[]}
+        discussions={[]}
+        toast={vi.fn()}
+        onNavigateDiscussion={onNavigateDiscussion}
+      />,
+    );
+    const workspace = (await screen.findByText('feature/kt-141')).closest('button') as HTMLElement;
+    const loads = mocks.get.mock.calls.length;
+
+    fireEvent.click(container.querySelector('.planning-parent-link') as HTMLElement, { ctrlKey: true });
+    fireEvent.click(screen.getByText('Bump composer').closest('button') as HTMLElement, { ctrlKey: true });
+    fireEvent.click(container.querySelector('.planning-blocker-row button') as HTMLElement, { ctrlKey: true });
+    fireEvent.click(workspace, { ctrlKey: true });
+
+    expect(open.mock.calls).toEqual([
+      [`${window.location.origin}/planning/task-parent`, '_blank', 'noopener,noreferrer'],
+      [`${window.location.origin}/planning/task-sub`, '_blank', 'noopener,noreferrer'],
+      [`${window.location.origin}/planning/task-blocker`, '_blank', 'noopener,noreferrer'],
+      [`${window.location.origin}/discussions/disc-3`, '_blank', 'noopener,noreferrer'],
+    ]);
+    expect(mocks.get).toHaveBeenCalledTimes(loads);
+    expect(onNavigateDiscussion).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
+
   it('opens a directly linked task detail on mount', async () => {
     render(
       <PlanningPage
@@ -463,6 +547,66 @@ describe('PlanningPage', () => {
     await waitFor(() => expect(mocks.get).toHaveBeenCalledWith(outsideFirstPage.id));
     expect(await screen.findByDisplayValue('Move the runtime forward.')).toBeInTheDocument();
     expect(screen.getByRole('complementary', { name: 'planning.taskActions' })).toBeInTheDocument();
+  });
+
+  it('reports every selection to the owner of the address, and follows what it is given', async () => {
+    const onSelectedTaskChange = vi.fn();
+    const view = render(
+      <PlanningPage
+        selectedTaskId={null}
+        onSelectedTaskChange={onSelectedTaskChange}
+        projects={[]}
+        discussions={[]}
+        toast={vi.fn()}
+        onNavigateDiscussion={vi.fn()}
+      />,
+    );
+    const row = await findCanonicalTaskRow('Upgrade PHP');
+
+    fireEvent.click(row);
+
+    // Controlled: the page asks, and shows nothing until it is given the task.
+    expect(onSelectedTaskChange).toHaveBeenCalledWith('task-1');
+    expect(screen.getByText('planning.selectHint')).toBeInTheDocument();
+    expect(mocks.get).not.toHaveBeenCalled();
+
+    view.rerender(
+      <PlanningPage
+        selectedTaskId="task-1"
+        onSelectedTaskChange={onSelectedTaskChange}
+        projects={[]}
+        discussions={[]}
+        toast={vi.fn()}
+        onNavigateDiscussion={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(mocks.get).toHaveBeenCalledWith('task-1'));
+    expect(await screen.findByDisplayValue('Move the runtime forward.')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'common.close' }));
+    expect(onSelectedTaskChange).toHaveBeenLastCalledWith(null);
+  });
+
+  it('shows the task the address names, never the previous one while it loads', async () => {
+    const first = detail(summary());
+    const second = detail(summary({ id: 'task-2', reference: 'KT-2', title: 'Second' }));
+    second.description = 'The second description.';
+    let releaseSecond!: () => void;
+    mocks.get.mockImplementation((id: string) => id === 'task-1'
+      ? Promise.resolve(first)
+      : new Promise(resolve => { releaseSecond = () => resolve(second); }));
+    const props = { onSelectedTaskChange: vi.fn(), projects: [], discussions: [], toast: vi.fn(), onNavigateDiscussion: vi.fn() };
+    const view = render(<PlanningPage selectedTaskId="task-1" {...props} />);
+    expect(await screen.findByDisplayValue('Move the runtime forward.')).toBeInTheDocument();
+
+    // Back, a link: the address changes without a click in the page.
+    view.rerender(<PlanningPage selectedTaskId="task-2" {...props} />);
+
+    expect(screen.queryByDisplayValue('Move the runtime forward.')).toBeNull();
+    expect(screen.getByRole('complementary', { name: 'planning.taskActions' }).querySelector('.planning-state')).not.toBeNull();
+    await act(async () => { releaseSecond(); });
+    expect(await screen.findByDisplayValue('The second description.')).toBeInTheDocument();
+    expect(props.onSelectedTaskChange).not.toHaveBeenCalled();
   });
 
   it('clears a directly linked selection when its detail cannot be loaded', async () => {
@@ -508,13 +652,8 @@ describe('PlanningPage', () => {
     fireEvent.click(await findCanonicalTaskRow('Upgrade PHP'));
     fireEvent.click(await screen.findByText('feature/kt-140'));
 
-    expect(onNavigateDiscussion).toHaveBeenCalledWith('disc-2');
-    expect(JSON.parse(
-      sessionStorage.getItem('kronn:discussion-workspace-target') ?? '{}',
-    )).toEqual({
-      discussionId: 'disc-2',
-      workspaceId: 'workspace-2',
-    });
+    expect(onNavigateDiscussion).toHaveBeenCalledWith('disc-2', { gitWorkspaceId: 'workspace-2' });
+    expect(sessionStorage.getItem('kronn:discussion-workspace-target')).toBeNull();
   });
 
   it('creates a subtask from the detail panel with inherited priority and project links', async () => {

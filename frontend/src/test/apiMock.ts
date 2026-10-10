@@ -271,6 +271,14 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       validateAudit: resolve('NoTemplate'),
       cancelAudit: resolve('NoTemplate'),
       checkDrift: resolve({ stale_steps: [], checksums_outdated: false }),
+      // The code view: a source tree with nothing in it, until a test says otherwise.
+      listSourceFiles: resolve({ entries: [], truncated: false }),
+      readSourceFile: resolve({ path: '', content: '' }),
+      searchSourceFiles: resolve([]),
+      getSourceExclusions: resolve([]),
+      setSourceExclusions: resolve([]),
+      gitBlame: resolve({ path: '', lines: [] }),
+      gitCommitDetail: resolve(null),
       getBriefing: resolve(null),
       startBriefing: resolve({ discussion_id: '' }),
       saveBriefing: resolve({}),
@@ -711,6 +719,8 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       list: resolve([]),
       get: resolve(null),
       purge: resolve(0),
+      // The Plugins page asks which endpoints keep failing.
+      drift: resolve([]),
     },
 
     orchestration: {

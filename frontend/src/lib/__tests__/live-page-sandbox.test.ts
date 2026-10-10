@@ -115,7 +115,7 @@ describe('Live Page sandbox', () => {
     relay.dispose();
   });
 
-  it('navigates internal discussion and Page links in the current tab', async () => {
+  it('resolves an internal link to its address and navigates there, in the current tab', async () => {
     const postMessage = vi.fn();
     const openExternal = vi.fn();
     const navigateInternal = vi.fn();
@@ -124,17 +124,100 @@ describe('Live Page sandbox', () => {
     const port = (postMessage.mock.calls[0][2] as MessagePort[])[0];
     const appUrl = `${window.location.origin}${window.location.pathname}`;
 
-    port.postMessage({
-      type: 'kronn:page-open-link', version: 1, channel_id: 'channel-1',
-      url: `${appUrl}#discussion-disc-42`,
-    });
-    port.postMessage({
-      type: 'kronn:page-open-link', version: 1, channel_id: 'channel-1',
-      url: `${appUrl}#page/page-7`,
-    });
+    port.postMessage({ type: 'kronn:page-open-link', version: 1, channel_id: 'channel-1', url: `${appUrl}#discussion-disc-42` });
+    port.postMessage({ type: 'kronn:page-open-link', version: 1, channel_id: 'channel-1', url: `${appUrl}#page/page-7` });
+    port.postMessage({ type: 'kronn:page-open-link', version: 1, channel_id: 'channel-1', url: `${appUrl}#pages/mosaic?page=a&page=b&layout=auto` });
+    port.postMessage({ type: 'kronn:page-open-link', version: 1, channel_id: 'channel-1', url: `${window.location.origin}/standalone/pages/page-9` });
+    port.postMessage({ type: 'kronn:page-open-link', version: 1, channel_id: 'channel-1', url: `${window.location.origin}/workflows?tab=qp#anchor` });
 
-    await vi.waitFor(() => expect(navigateInternal).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(navigateInternal.mock.calls.map(call => call[0])).toEqual([
+      '/discussions/disc-42',
+      '/standalone/pages/page-7',
+      '/standalone/pages/mosaic?page=a&page=b&layout=auto',
+      '/standalone/pages/page-9',
+      // Any address of the app is in the app: it stays in this tab.
+      '/workflows?tab=qp#anchor',
+    ]));
     expect(openExternal).not.toHaveBeenCalled();
+    relay.dispose();
+  });
+
+  it('by default drives the browser history so the router follows', async () => {
+    const postMessage = vi.fn();
+    const openExternal = vi.fn();
+    const popstate = vi.fn();
+    window.addEventListener('popstate', popstate);
+    const relay = createLivePageOpenLinkRelay('channel-1', { openExternal });
+    relay.connect({ postMessage } as unknown as Window);
+    const port = (postMessage.mock.calls[0][2] as MessagePort[])[0];
+    try {
+      port.postMessage({ type: 'kronn:page-open-link', version: 1, channel_id: 'channel-1', url: `${window.location.origin}/#page/page-7` });
+
+      await vi.waitFor(() => expect(window.location.pathname).toBe('/standalone/pages/page-7'));
+      expect(popstate).toHaveBeenCalledOnce();
+      expect(openExternal).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener('popstate', popstate);
+      window.history.replaceState(null, '', '/');
+      relay.dispose();
+    }
+  });
+
+  it('keeps a stored internal link internal whatever page the reader is on', async () => {
+    // A Page keeps the link it was authored with. Its path is where the author
+    // stood (the app root before pages had addresses, any page since), which
+    // is rarely where the reader opens it.
+    window.history.replaceState(null, '', '/pages');
+    try {
+      const postMessage = vi.fn();
+      const openExternal = vi.fn();
+      const navigateInternal = vi.fn();
+      const relay = createLivePageOpenLinkRelay('channel-1', { openExternal, navigateInternal });
+      relay.connect({ postMessage } as unknown as Window);
+      const port = (postMessage.mock.calls[0][2] as MessagePort[])[0];
+      const internal = [
+        `${window.location.origin}/#discussion-disc-42`,
+        `${window.location.origin}/#page/page-7`,
+        `${window.location.origin}/discussions#discussion-disc-42`,
+        `${window.location.origin}/workflows/wf-1#page/page-7`,
+      ];
+      for (const url of internal) {
+        port.postMessage({ type: 'kronn:page-open-link', version: 1, channel_id: 'channel-1', url });
+      }
+
+      await vi.waitFor(() => expect(navigateInternal.mock.calls.map(call => call[0])).toEqual([
+        '/discussions/disc-42',
+        '/standalone/pages/page-7',
+        '/discussions/disc-42',
+        '/standalone/pages/page-7',
+      ]));
+      expect(openExternal).not.toHaveBeenCalled();
+      relay.dispose();
+    } finally {
+      window.history.replaceState(null, '', '/');
+    }
+  });
+
+  it('opens a same-origin address that is not a page of the app in a new tab', async () => {
+    const postMessage = vi.fn();
+    const openExternal = vi.fn();
+    const navigateInternal = vi.fn();
+    const relay = createLivePageOpenLinkRelay('channel-1', { openExternal, navigateInternal });
+    relay.connect({ postMessage } as unknown as Window);
+    const port = (postMessage.mock.calls[0][2] as MessagePort[])[0];
+    const external = [
+      `${window.location.origin}/api/health#discussion-disc-42`,
+      `${window.location.origin}/projectsfoo#page/page-7`,
+      `${window.location.origin}/`,
+      `${window.location.origin}/#settings-api-audit`,
+      `${window.location.origin}/assets/index-abc.js`,
+    ];
+    for (const url of external) {
+      port.postMessage({ type: 'kronn:page-open-link', version: 1, channel_id: 'channel-1', url });
+    }
+
+    await vi.waitFor(() => expect(openExternal).toHaveBeenCalledTimes(external.length));
+    expect(navigateInternal).not.toHaveBeenCalled();
     relay.dispose();
   });
 

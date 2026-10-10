@@ -255,21 +255,55 @@ describe('RunStatusCard', () => {
     act(() => { MockIntersectionObserver.instances[MockIntersectionObserver.instances.length - 1].setIntersecting(true); });
     const cards = screen.getAllByTestId('run-status-card');
     const workflowCard = cards[cards.length - 1];
-    await waitFor(() => expect(workflowCard.querySelector('.run-status-card-link')).toHaveAttribute('href', '/workflows/wf-1?run=run-wf'));
+    await waitFor(() => expect(workflowCard.querySelector('.run-status-card-link')).toHaveAttribute('href', '/workflows/wf-1/runs/run-wf'));
+  });
+
+  it('follows its address in this tab on a plain click, and leaves a modified click to the browser', async () => {
+    vi.mocked(runsApi.get).mockResolvedValueOnce(sharedRun({ id: 'run-wf', kind: 'workflow', status: 'success', source_id: 'wf 1', discussion_id: null }));
+    const popstate = vi.fn();
+    window.addEventListener('popstate', popstate);
+    render(<RunStatusCard runId="run-wf" />);
+    act(() => { MockIntersectionObserver.instances[0].setIntersecting(true); });
+    const link = await waitFor(() => {
+      const found = screen.getByTestId('run-status-card').querySelector<HTMLAnchorElement>('.run-status-card-link');
+      expect(found).toHaveAttribute('href', '/workflows/wf%201/runs/run-wf');
+      return found!;
+    });
+
+    const modified = new MouseEvent('click', { bubbles: true, cancelable: true, ctrlKey: true });
+    link.dispatchEvent(modified);
+    expect(modified.defaultPrevented).toBe(false);
+    expect(popstate).not.toHaveBeenCalled();
+
+    const plain = new MouseEvent('click', { bubbles: true, cancelable: true });
+    act(() => { link.dispatchEvent(plain); });
+    expect(plain.defaultPrevented).toBe(true);
+    expect(window.location.pathname).toBe('/workflows/wf%201/runs/run-wf');
+    expect(popstate).toHaveBeenCalledTimes(1);
+    window.removeEventListener('popstate', popstate);
+    window.history.replaceState(null, '', '/');
+  });
+
+  it('gives a media run with no discussion no link: it has no page of its own', async () => {
+    vi.mocked(runsApi.get).mockResolvedValueOnce(sharedRun({ id: 'run-media', kind: 'media', status: 'success', source_id: 'media-1', discussion_id: null }));
+    render(<RunStatusCard runId="run-media" />);
+    act(() => { MockIntersectionObserver.instances[0].setIntersecting(true); });
+    await waitFor(() => expect(screen.getByTestId('run-status-card')).toHaveAttribute('data-kind', 'media'));
+    expect(screen.getByTestId('run-status-card').querySelector('.run-status-card-link')).toBeNull();
   });
 
   it('deep-links a standalone QA/QE run (no discussion) to its source in the workflows list', async () => {
     vi.mocked(runsApi.get).mockResolvedValueOnce(sharedRun({ id: 'run-qa', kind: 'quick_api', status: 'success', source_id: 'qa-7', discussion_id: null }));
     render(<RunStatusCard runId="run-qa" />);
     act(() => { MockIntersectionObserver.instances[0].setIntersecting(true); });
-    await waitFor(() => expect(screen.getByTestId('run-status-card').querySelector('.run-status-card-link')).toHaveAttribute('href', '/workflows?kind=quick_api&source=qa-7&run=run-qa'));
+    await waitFor(() => expect(screen.getByTestId('run-status-card').querySelector('.run-status-card-link')).toHaveAttribute('href', '/workflows/qa/qa-7'));
 
     vi.mocked(runsApi.get).mockResolvedValueOnce(sharedRun({ id: 'run-qe', kind: 'quick_exec', status: 'failed', source_id: 'qe-3', discussion_id: null }));
     render(<RunStatusCard runId="run-qe" />);
     act(() => { MockIntersectionObserver.instances[MockIntersectionObserver.instances.length - 1].setIntersecting(true); });
     const cards = screen.getAllByTestId('run-status-card');
     const qeCard = cards[cards.length - 1];
-    await waitFor(() => expect(qeCard.querySelector('.run-status-card-link')).toHaveAttribute('href', '/workflows?kind=quick_exec&source=qe-3&run=run-qe'));
+    await waitFor(() => expect(qeCard.querySelector('.run-status-card-link')).toHaveAttribute('href', '/workflows/qe/qe-3'));
   });
 
   it('isolates two concurrent runs over one shared WebSocket — each hydrates only on its own SharedRunUpdated event', async () => {

@@ -13,6 +13,145 @@ Moved out of `docs/AGENTS.md` (KT-191): it weighed 53 167 bytes — 63,6 % of a
 file every session reads in full — while being needed only when actually
 touching the UI. The content below is unchanged; load it on demand.
 
+## Routing
+
+Every dashboard page has an address; the address decides which page is shown,
+so back, forward and reload follow it. React Router 8 runs in Data mode.
+
+| Page | Path |
+|------|------|
+| Projets | `/projects`, `/projects/:projectId` for the project open in the master/detail workspace (picking one is a history step; the first one the page opens on its own replaces the bare address), `/projects/:projectId/:view` for one of its views (`overview`, `discussions`, `tasks`, `audit`, `docs`, `code`, `docker`, `git`, `resources`) — `code?file=<path>&line=<n>` opens a file at a line and the file the reader then opens in the tree, or reaches through the next/previous match, rewrites `?file=` (a history step, without the line), `docs?folder=<path>` a docs folder. A bare project address opens on the view the reader used last (localStorage) |
+| Discussions | `/discussions`, `/discussions/:discussionId` for the open discussion, `?message=<id>` to reveal one of its messages, `/discussions/compare/:runId` for a comparison (a Compare batch or a free selection), restored from its run. A bare `/discussions` reopens where the previous visit left off (sessionStorage checkpoint) |
+| Planification | `/planning`, `/planning/:taskId` for the task open in the detail pane |
+| Automatisation | `/workflows`, `/workflows/:workflowId`, `/workflows/:workflowId/runs/:runId`, the workflow wizard at `/workflows/new` (create) and `/workflows/:workflowId/edit`, and one segment per tab — `/workflows/qp/:qpId?`, `/workflows/qa/:qaId?`, `/workflows/qe/:qeId?`, `/workflows/skills/:skillId?`. A bare `/workflows` reopens where the previous visit left off (localStorage record, read by the route, which replaces the bare address with it); an explicit address, Back and Forward are what they say, and a preset arriving at the bare address opens the wizard on the workflows list instead. A remembered resource the loaded list no longer knows is let go in place of its address |
+| Pages (Artifacts) | `/pages`, `/pages/:pageId` for the open Page — redirects to `/projects` until the capability is activated. A bare `/pages` reopens where the previous visit left off (localStorage checkpoint), else the first Page |
+| Plugins | `/plugins`, `/plugins/:configId` for the config open in the detail panel — kept while the overview is still loading; a config the loaded overview does not know is let go in place of the address |
+| Config | `/config`, `/config#<anchor>` — a section (`#settings-server`) or a setting (`#run-payload-retention`) — brought into view on arrival once the page has settled: the anchor must exist, a setting must be enabled (its value loaded) and its position must hold still, then a section scrolls to the top and a setting to the centre with the focus; content still loading above it is followed for a short while, until the reader scrolls. The side menu's entries are links to these addresses: a click scrolls in the page and replaces the address, Ctrl/Cmd-click opens a new tab; the highlight of the visible section never writes the address, and after an arrival on an anchor it stays on that anchor's section until the reader scrolls (a setting at the bottom of the page ends the scroll where the highlight would otherwise name the last section); `/config/artifacts?origin=<site>` opens the allowed-sites section with a site typed in (never added) — an arrival, consumed into `/config` so a reload or a Back never replays it |
+
+`/` and any unknown address redirect to `/projects`, keeping the hash and the
+query. `[src: file: frontend/src/lib/routes.ts:21-29]`
+`[src: file: frontend/src/routes/HomeRedirect.tsx:8-11]`
+
+Views that take the whole window, outside the dashboard shell:
+
+| View | Path |
+|------|------|
+| A Live Page on its own | `/standalone/pages/:pageId`, with optional view parameters in the query (`?tv=1&scene=…`, handed to the Page as `page.params`) |
+| Mosaic of Live Pages | `/standalone/pages/mosaic?page=…&page=…&layout=…` |
+| Mosaic of discussions | `/standalone/discussions/mosaic?discussion=…&discussion=…&layout=…` |
+
+A mosaic's members and layout are its query string; changing the layout
+rewrites the address in place. An invalid mosaic (fewer than two members)
+redirects to `/projects`. `[src: file: frontend/src/lib/routes.ts:146-172]`
+`[src: file: frontend/src/routes/StandaloneDiscussionsMosaicRoute.tsx:7-19]`
+
+**Legacy `#…` deep links keep working, permanently.** They are stored in Live
+Pages, in messages, in bookmarks and in the CLI, so each one redirects to the
+address that replaced it, from one place: `legacyHashToPath` in
+`lib/legacyRoutes.ts`, applied by the app root whatever path it was opened
+on. `#discussion-<id>?message=…`, `#project-<id>`, `#page/<id>?…`,
+`#pages/mosaic?…`, `#discussions/mosaic?…`, `#settings/artifacts?…` and
+`#config` are all mapped. An id that cannot be decoded (`#page/%E0%A4%A`)
+names nothing: the link lands on its page, bare, rather than on an address
+the router cannot read; the same id in a direct address is handed to the
+page as it is, like any unknown id. Any other hash is left alone: it routes
+nowhere, and only Configuration reads it, as the anchor (a section or a
+setting) to bring into view. A hash is an in-page anchor, never a route.
+When one of Configuration's own links sets the anchor, the page has already
+scrolled: the route is told so in memory, for that one move only, never in
+the history entry, so a reload, Back or Forward to the entry is an arrival
+like any other.
+`[src: file: frontend/src/routes/SettingsRoute.tsx:37-60]`
+`[src: file: frontend/src/lib/revealWhenSettled.ts:1-93]`
+`[src: file: frontend/src/lib/legacyRoutes.ts:11-50]`
+`[src: file: frontend/src/App.tsx:159-162]`
+
+- **Route table** — `App` is the root route (setup gate, legacy redirect)
+  and renders its outlet: the dashboard layout around its pages, or a
+  whole-window view. The dashboard shell renders the matched page in its own
+  `<Outlet>`.
+  `[src: file: frontend/src/router.tsx:13-17]`
+  `[src: file: frontend/src/routes/appRoutes.tsx:14-31]`
+  `[src: file: frontend/src/routes/dashboardRoutes.tsx:21-31]`
+- **Paths** — spelled out once, in `lib/routes.ts`. Components navigate with
+  `useKronnNavigate()`, never with a literal path.
+  `[src: file: frontend/src/hooks/useKronnNavigate.ts:22-29]`
+- **Route components** — one per page under `routes/`, each its own lazy chunk.
+  It reads the shell's outlet context and maps it to the page's props; the
+  pages themselves do not know the router.
+  `[src: file: frontend/src/lib/dashboardContext.ts:33-100]`
+  `[src: file: frontend/src/routes/lazyRoutes.ts:6-12]`
+- **Page shell** — every page renders inside its own error zone and loader,
+  keyed by page so a crashed page does not take the next one down.
+  `[src: file: frontend/src/routes/dashboardRoutes.tsx:12-17]`
+- **Live Page links** — a sandboxed Page asks the parent to open a link; the
+  relay resolves any same-origin address of the app (a legacy hash included)
+  to its canonical path and follows it in the current tab, and opens anything
+  else in a new one. `[src: file: frontend/src/lib/live-page-sandbox.ts:720-736]`
+- **Arrival intents** — what a navigation asks the page to do once it lands
+  (run the agent, focus a batch group, open a discussion's Git panel on a
+  workspace, flash a just-improved Quick Prompt, point Configuration at the
+  agent tier a model error names) travels as history state and is
+  consumed by replacing the entry without it, so a reload or a Back never
+  replays it. `[src: file: frontend/src/routes/useLocationIntent.ts:9-20]`
+- **Every selection has an address** — the shell's outlet context carries
+  fleet data and services, plus one hand-off: the prefill of a new
+  discussion (`discPrefill`), a one-shot the Discussions page copies into its
+  form and clears at once. Nothing else is handed from page to page. A page that can be owned by its caller takes the open resource and a
+  change callback (`selectedTaskId`/`onSelectedTaskChange`, `selection`/
+  `onSelectionChange`, a project's `location`/`onLocationChange`,
+  `compareRunId`/`onCompareChange`, …) and still works alone, keeping its own
+  selection. A change callback says why (`SelectionReason`): `change` is the
+  reader's, a step Back can undo; `restore` is the page's own word — its first,
+  or a resource the loaded list does not know let go — and replaces the
+  address instead. What a view opens on its own while its address names
+  nothing (the default file of a project's code view) is written into the
+  address in place, so the entry names what it shows; content that arrives
+  late follows the address of the moment, not the one it was asked for.
+  `[src: file: frontend/src/components/SourceCodeViewer.tsx:260-266]`
+  The bare address of a page that remembers its last visit
+  is resolved by the route, never by the page. Nothing crosses pages through
+  `sessionStorage`: a deep link is an address, plus an arrival intent for
+  what it does once. The tab of the page already open is not a navigation.
+- **Back must win, three rules** (found in a real browser, each one tested):
+  the router applies its state synchronously (`useTransitions={false}` on
+  `RouterProvider`), because a navigation render wrapped in a transition can
+  be interrupted by the next one — Back right after a click — and never
+  commit; a route's change callback keeps its identity across navigations and
+  reads the address through a ref, because the page lists it in an effect's
+  dependencies and a new identity would make that effect restate the previous
+  selection over the address Back just restored; and the pages whose
+  following of the address is an effect receive `addressToken`, the router's
+  location object, new on every navigation — the id alone looks unchanged
+  when A → B → A never committed B, and Back to the first entry keeps its key.
+  `[src: file: frontend/src/main.tsx:44-49]`
+  `[src: file: frontend/src/routes/DiscussionsRoute.tsx:20-32]`
+  `[src: file: frontend/src/pages/DiscussionsPage.tsx:364-368]`
+- **Open in a new tab** — anything that opens a view with an address opens it
+  in a new tab on Ctrl/Cmd/Shift-click or a middle click, and in this tab on a
+  plain click. The dashboard tabs, the run-card links and an Artifact's
+  links to its related discussion, workflows and publication runs are real
+  `<a href>` links (`components/AppLink.tsx` for anything rendered outside a
+  router), so the context menu and the URL preview work too. Every other row,
+  card or button keeps its element, and so its exact look: it spreads
+  `newTabClickProps(path)`, which opens the modified clicks itself and leaves a
+  click on a control nested in it (favourite, menu, checkbox) to that control.
+  `CollectionShell` does it for every list through `getItemPath`. When a jump also
+  carries an arrival intent (the agent tier a model error names, the workspace
+  whose Git panel to open), the new tab gets the address alone: the intent
+  lives in this tab's history. Not covered: a jump that is only an intent (a
+  batch group to focus, on the bare Discussions address), rows in
+  multi-selection, where a click ticks, and actions that merely end on a page
+  (create a discussion, a bundle, a workflow). Inline text links to an address
+  are `AppLink`s with the shared `kr-inline-link` look.
+  `[src: file: frontend/src/lib/newTabNavigation.ts:1-63]`
+  `[src: file: frontend/src/components/CollectionShell.tsx:435-440]`
+- **Serving** — a reload on a deep address needs the server to answer it with
+  `index.html`: nginx does under Docker, the embedded desktop server does
+  through `frontend_spa_service`. Unknown `/api/…` and `/assets/…` paths stay
+  plain 404s. `[src: file: frontend/nginx.conf:17-19]`
+  `[src: file: backend/src/core/frontend_spa.rs:20-50]`
+
 Dashboard tabs (current / planned):
 
 | Tab | Status | Content |
@@ -87,15 +226,15 @@ Automation has no additional page-title band: the selected workflow, Quick
 Prompt, Quick API or Quick Exec header is the single visible content header.
 `[src: file: frontend/src/components/CollectionShell.css:2-5]`
 `[src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1712-1716]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:2139-2142]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:2621-2631]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:3157-3167]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:3568-3580]`
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:2158-2161]`
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:2640-2650]`
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:3176-3186]`
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:3587-3599]`
 
 The Projects initial loading state keeps the complete master/detail shell
 mounted. Its indicators render inside the sidebar and detail slots rather than
 as a sibling above the layout, so asynchronous fleet loading cannot shift the
-page structure. `[src: file: frontend/src/pages/Dashboard.tsx:1314-1319]`
+page structure. `[src: file: frontend/src/routes/ProjectsRoute.tsx:24-25]`
 `[src: file: frontend/src/components/ProjectList.tsx:391-438]`
 
 **Task orchestration (0.11.0):** an actionable task in a discussion plan exposes
@@ -110,16 +249,16 @@ and the [operator guide](../guides/task-orchestration.md).
 
 Navigation preferences are local UI state. Automatisation restores its active
 resource and collapsed resource categories, while search expands matching
-categories only temporarily. `[src: file: frontend/src/pages/WorkflowsPage.tsx:49-90]`
+categories only temporarily. `[src: file: frontend/src/pages/WorkflowsPage.tsx:50-91]`
 `[src: file: frontend/src/pages/WorkflowsPage.tsx:156-275]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:604-622]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:1633-1659]` Pages follows the
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:614-632]`
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:1652-1678]` Pages follows the
 same contract for its active Page and sidebar categories, including a safe
 fallback when a saved Page was removed. `[src: file: frontend/src/pages/PagesPage.tsx:23-52]`
 `[src: file: frontend/src/pages/PagesPage.tsx:80-135]`
-`[src: file: frontend/src/pages/PagesPage.tsx:154-168]`
-`[src: file: frontend/src/pages/PagesPage.tsx:377-395]`
-`[src: file: frontend/src/pages/PagesPage.tsx:490-520]` Project detail
+`[src: file: frontend/src/pages/PagesPage.tsx:164-178]`
+`[src: file: frontend/src/pages/PagesPage.tsx:394-412]`
+`[src: file: frontend/src/pages/PagesPage.tsx:507-537]` Project detail
 restores the last valid tab across project switches and falls back to Overview
 when a stale value is found. `[src: file: frontend/src/components/ProjectCard.tsx:40-56]`
 `[src: file: frontend/src/components/ProjectCard.tsx:135-143]`

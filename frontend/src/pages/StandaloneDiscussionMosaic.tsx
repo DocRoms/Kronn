@@ -7,7 +7,7 @@ import { AGENT_LABELS } from '../lib/constants';
 import { useDiscussionMonitor } from '../hooks/useDiscussionMonitor';
 import { useToast } from '../hooks/useToast';
 import { DiscussionMosaicComposer } from '../components/DiscussionMosaicComposer';
-import { discussionMosaicUrl, type DiscussionMosaicLayout } from '../lib/discussion-mosaic-navigation';
+import type { DiscussionMosaicLayout } from '../lib/discussion-mosaic-navigation';
 import { livePageMosaicLayouts, standaloneDiscussionUrl } from '../lib/live-page-navigation';
 import type { DiscussionMonitorItem, DiscussionMonitorMessage } from '../types/generated';
 import './StandaloneLivePageMosaic.css';
@@ -101,10 +101,14 @@ const layoutKeys: Record<DiscussionMosaicLayout, string> = {
   'three-left': 'pages.mosaic.layout.threeLeft', 'three-right': 'pages.mosaic.layout.threeRight',
 };
 
-export function StandaloneDiscussionMosaic({ discussionIds, layout: initialLayout }: { discussionIds: string[]; layout: DiscussionMosaicLayout }) {
+export function StandaloneDiscussionMosaic({ discussionIds, layout, onLayoutChange }: {
+  discussionIds: string[];
+  layout: DiscussionMosaicLayout;
+  /** The layout is part of the address: the route owns it and writes it back. */
+  onLayoutChange: (layout: DiscussionMosaicLayout) => void;
+}) {
   const { t } = useT();
   const layoutId = useId();
-  const [layout, setLayout] = useState(initialLayout);
   const { items, error, updatedAt, connectionState, refresh } = useDiscussionMonitor(discussionIds);
   const { toast, ToastContainer } = useToast();
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -118,11 +122,7 @@ export function StandaloneDiscussionMosaic({ discussionIds, layout: initialLayou
     <header className="discussion-mosaic-toolbar">
       <h1>{t('disc.mosaic.title')} <span>{discussionIds.length}</span></h1>
       <label htmlFor={layoutId}>{t('pages.mosaic.chooseLayout')}</label>
-      <select id={layoutId} value={layout} onChange={event => {
-        const next = event.target.value as DiscussionMosaicLayout;
-        setLayout(next);
-        window.history.replaceState(window.history.state, '', discussionMosaicUrl(discussionIds, next));
-      }}>{livePageMosaicLayouts(discussionIds.length).map(option => <option key={option} value={option}>{t(layoutKeys[option])}</option>)}</select>
+      <select id={layoutId} value={layout} onChange={event => onLayoutChange(event.target.value as DiscussionMosaicLayout)}>{livePageMosaicLayouts(discussionIds.length).map(option => <option key={option} value={option}>{t(layoutKeys[option])}</option>)}</select>
       <span className="discussion-mosaic-sync" role={error ? 'alert' : 'status'}>
         {error ? t('disc.mosaic.refreshError') : t(connectionState === 'connected' ? 'disc.mosaic.live' : 'disc.mosaic.reconnecting')}
         {updatedAt && <time>{timeLabel(updatedAt)}</time>}

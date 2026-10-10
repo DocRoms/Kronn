@@ -18,6 +18,7 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, act, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
+import { withDashboardRoutes } from '../../test/routerWrapper';
 
 // `vi.mock` is hoisted above top-level `const`s, so we use `vi.hoisted`
 // to share the spy with the test body without tripping the hoist guard.
@@ -105,7 +106,7 @@ afterEach(() => {
 
 const wrap = async (ui: React.ReactElement) => {
   let result: ReturnType<typeof render>;
-  await act(async () => { result = render(<I18nProvider>{ui}</I18nProvider>); });
+  await act(async () => { result = render(<I18nProvider>{withDashboardRoutes(ui)}</I18nProvider>); });
   await act(async () => { await new Promise(r => setTimeout(r, 0)); });
   return result!;
 };

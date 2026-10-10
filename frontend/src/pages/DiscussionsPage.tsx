@@ -1,5 +1,8 @@
 import { Fragment, useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, useDeferredValue } from 'react';
 import { workflowExecLines } from '../lib/agentExecLines';
+import { PAGE_PATHS, projectPath, type ProjectLocation, type SettingsIntent } from '../lib/routes';
+import { AppLink } from '../components/AppLink';
+import { newTabClickProps } from '../lib/newTabNavigation';
 import './DiscussionsPage.css';
 import { MessageBubble, MarkdownContent } from '../components/MessageBubble';
 import { DiscussionNote } from '../components/DiscussionNote';
@@ -53,7 +56,6 @@ import { clearReplyDraft, loadReplyDraft, saveReplyDraft } from '../lib/chat-rep
 import { publishMessageSendSettled } from '../lib/messageSendLifecycle';
 import { findRenderedTextRanges } from '../lib/discussionMessageSearch';
 import { triggerDownload } from '../lib/downloadBlob';
-import { consumeDiscussionWorkspaceTarget } from '../lib/discussion-navigation';
 import { buildBatchTriageRows, buildContinuationDraft, type BatchTriageRow } from '../lib/batchTriage';
 import { useT } from '../lib/I18nContext';
 import { useSustainedFlag } from '../hooks/useSustainedFlag';
@@ -347,7 +349,7 @@ export interface DiscussionsPageProps {
   agentAccess: AgentsConfig | null;
   refetchDiscussions: () => void;
   refetchProjects: () => void;
-  onNavigate: (page: string, opts?: { projectId?: string; scrollTo?: string; workflowId?: string }) => void;
+  onNavigate: (page: string, opts?: { projectId?: string; projectAt?: ProjectLocation; scrollTo?: string; workflowId?: string; quickPromptId?: string; modelTier?: SettingsIntent['modelTier'] }) => void;
   prefill?: { projectId: string; title: string; prompt: string; locked?: boolean } | null;
   initialActiveDiscussionId?: string | null;
   initialMessageId?: string | null;
@@ -363,6 +365,19 @@ export interface DiscussionsPageProps {
   onAutoRunConsumed?: () => void;
   /** Open a specific discussion without triggering agent (e.g. Resume Validation) */
   openDiscussionId?: string | null;
+  /** The router's location, new on every navigation — even one that comes
+   *  back to the same address, whose key is unchanged. Listed with the
+   *  request above so it is renewed each time: the router renders in a
+   *  transition, and a request that goes A → B → A may never commit B. */
+  addressToken?: object;
+  /** The comparison the address names (`/discussions/compare/<runId>`); the
+   *  page reports one it opens or closes through `onCompareChange`. */
+  compareRunId?: string | null;
+  onCompareChange?: (runId: string | null) => void;
+  /** Open the Git panel of the addressed discussion on this workspace (an
+   *  arrival from Planning). Ack via `onGitWorkspaceConsumed`. */
+  gitWorkspaceTarget?: { discussionId: string; workspaceId: string } | null;
+  onGitWorkspaceConsumed?: () => void;
   onOpenDiscConsumed?: () => void;
   /** When clicking "📋 N conversations" on a workflow run, the parent passes
    *  the batch run id here. We auto-uncollapse the matching project + batch
@@ -456,6 +471,11 @@ export function DiscussionsPage({
   autoRunDiscussionId,
   onAutoRunConsumed,
   openDiscussionId,
+  addressToken,
+  compareRunId = null,
+  onCompareChange,
+  gitWorkspaceTarget = null,
+  onGitWorkspaceConsumed,
   onOpenDiscConsumed,
   focusBatchId,
   focusBatchMode = 'batch',
@@ -689,18 +709,34 @@ export function DiscussionsPage({
     return () => window.removeEventListener('keydown', closePanel);
   }, [showGitPanel, showTerminalPanel, showPlanPanel, showSettingsPanel, showAssetsPanel, showNotesPanel]);
 
+  // A workspace to open the Git panel on, once its discussion is the active one:
+  // handed over by the plan panel, or by an arrival from Planning.
+  const [pendingGitWorkspace, setPendingGitWorkspace] = useState<{ discussionId: string; workspaceId: string } | null>(gitWorkspaceTarget);
+  const [takenGitWorkspaceTarget, setTakenGitWorkspaceTarget] = useState(gitWorkspaceTarget);
+  if (gitWorkspaceTarget !== takenGitWorkspaceTarget) {
+    setTakenGitWorkspaceTarget(gitWorkspaceTarget);
+    if (gitWorkspaceTarget) setPendingGitWorkspace(gitWorkspaceTarget);
+  }
+  useEffect(() => {
+    if (gitWorkspaceTarget) onGitWorkspaceConsumed?.();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gitWorkspaceTarget]);
+  // Another discussion: its Git panel starts on no particular workspace…
   useEffect(() => {
     setInitialGitWorkspaceId(undefined);
-    if (!activeDiscussionId) return;
-    const workspaceId = consumeDiscussionWorkspaceTarget(activeDiscussionId);
-    if (!workspaceId) return;
+  }, [activeDiscussionId]);
+  // …unless one was handed over for it.
+  useEffect(() => {
+    if (!activeDiscussionId || pendingGitWorkspace?.discussionId !== activeDiscussionId) return;
+    const { workspaceId } = pendingGitWorkspace;
+    setPendingGitWorkspace(null);
     setInitialGitWorkspaceId(workspaceId);
     setShowPlanPanel(false);
     setShowSettingsPanel(false);
     setShowAssetsPanel(false);
     setShowTerminalPanel(false);
     setShowGitPanel(true);
-  }, [activeDiscussionId]);
+  }, [activeDiscussionId, pendingGitWorkspace]);
 
   const clearMessageSearchHighlights = useCallback(() => {
     const registry = cssHighlightRegistry();
@@ -1051,11 +1087,20 @@ export function DiscussionsPage({
       setBatchCompareLoading(false);
     }
   }, []);
-  const openBatchCompare = useCallback((runId: string, label: string, discIds: string[]) => {
+  const showBatchCompare = useCallback((runId: string, label: string, discIds: string[]) => {
     setBatchCompare({ runId, label, discIds });
     setBatchCompareDiscs([]);
     void refreshBatchCompare(discIds, true);
   }, [refreshBatchCompare]);
+  // A comparison the reader opens or closes has an address: report it.
+  const openBatchCompare = useCallback((runId: string, label: string, discIds: string[]) => {
+    showBatchCompare(runId, label, discIds);
+    onCompareChange?.(runId);
+  }, [showBatchCompare, onCompareChange]);
+  const closeBatchCompare = useCallback(() => {
+    setBatchCompare(null);
+    onCompareChange?.(null);
+  }, [onCompareChange]);
   const openSelectedComparison = useCallback(async (discIds: string[]) => {
     const comparison = await workflowsApi.createAdHocComparison({ discussion_ids: discIds });
     openBatchCompare(comparison.run_id, t('disc.compare.freeSelection'), discIds);
@@ -2338,7 +2383,7 @@ export function DiscussionsPage({
     ensureDiscussionVisible(openDiscussionId);
     onOpenDiscConsumed?.();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [openDiscussionId, allDiscussions.length]);
+  }, [openDiscussionId, addressToken, allDiscussions.length]);
 
   // ── Cross-page navigation: WorkflowDetail "📋 N conversations" → here ──
   // The chip click sets `focusBatchId` on Dashboard, which lands as a prop here.
@@ -2386,6 +2431,38 @@ export function DiscussionsPage({
     onFocusBatchConsumed?.();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusBatchId, focusBatchMode, allDiscussions.length, batchSummaries, openBatchCompare, t]);
+
+  // The address names a comparison (Back, a reload, a shared link): open it
+  // from its run, which knows the discussions it compares; an address without
+  // one closes the comparison. What the page itself just opened or closed is
+  // already in place.
+  const shownCompareRunId = batchCompare?.runId ?? null;
+  const shownCompareRef = useRef(shownCompareRunId);
+  useEffect(() => { shownCompareRef.current = shownCompareRunId; }, [shownCompareRunId]);
+  useEffect(() => {
+    if (!onCompareChange || compareRunId === shownCompareRef.current) return;
+    if (!compareRunId) {
+      setBatchCompare(null);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const details = await workflowsApi.getBatchCompareDetails(compareRunId);
+        if (cancelled) return;
+        const summary = batchSummaries.find(item => item.run_id === compareRunId);
+        showBatchCompare(
+          compareRunId,
+          summary?.batch_name || summary?.quick_prompt_name || t('disc.compare.title'),
+          details.evaluations.map(evaluation => evaluation.discussion_id),
+        );
+      } catch (error) {
+        if (!cancelled) toast(userError(error), 'error');
+      }
+    })();
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [compareRunId, addressToken]);
 
   // Child answers arrive independently. Refresh the open cockpit whenever a
   // child's durable message count changes, without replacing it by N chats.
@@ -3344,11 +3421,12 @@ export function DiscussionsPage({
 
   // Stable sidebar callbacks (avoid breaking SwipeableDiscItem memo)
   const handleDiscSelect = useCallback((discId: string, msgCount: number) => {
-    setBatchCompare(null);
+    // Read through a ref: this callback must keep its identity (memoized sidebar rows).
+    if (shownCompareRef.current) closeBatchCompare();
     setActiveDiscussionId(discId);
     markDiscussionSeen(discId, msgCount);
     if (isMobile) setSidebarOpen(false);
-  }, [isMobile, markDiscussionSeen]);
+  }, [closeBatchCompare, isMobile, markDiscussionSeen]);
   const handleDiscArchive = useCallback(async (discId: string) => {
     await discussionsApi.update(discId, { archived: true });
     setActiveDiscussionId(prev => prev === discId ? null : prev);
@@ -4327,11 +4405,11 @@ export function DiscussionsPage({
             ])}
             onRefresh={() => { void refreshBatchCompare(batchCompare.discIds, true); }}
             onOpenDiscussion={(discussionId) => {
-              setBatchCompare(null);
+              closeBatchCompare();
               setActiveDiscussionId(discussionId);
               ensureDiscussionVisible(discussionId);
             }}
-            onClose={() => setBatchCompare(null)}
+            onClose={closeBatchCompare}
             t={t}
           />
         ) : activeDiscussion && !showNewDiscussion ? (
@@ -4514,6 +4592,7 @@ export function DiscussionsPage({
                   <button
                     className="disc-cta-btn"
                     data-variant="warning"
+                    {...newTabClickProps(projectPath(projectId))}
                     onClick={() => onNavigate('projects', { projectId })}
                   >
                     {hasBriefing ? (
@@ -4700,7 +4779,7 @@ export function DiscussionsPage({
                       <p className="disc-cta-text" data-variant="warning">
                         <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> {t('audit.auditInProgress')}
                       </p>
-                      <button className="disc-cta-btn" data-variant="warning" onClick={() => { if (activeDiscussion.project_id) onNavigate('projects', { projectId: activeDiscussion.project_id }); }}>
+                      <button className="disc-cta-btn" data-variant="warning" {...newTabClickProps(activeDiscussion.project_id ? projectPath(activeDiscussion.project_id) : null)} onClick={() => { if (activeDiscussion.project_id) onNavigate('projects', { projectId: activeDiscussion.project_id }); }}>
                         <Play size={12} /> {t('audit.goToProject')}
                       </button>
                     </div>
@@ -4713,7 +4792,7 @@ export function DiscussionsPage({
                     <p className="disc-cta-text" data-variant="info">
                       <Check size={14} /> {t('audit.briefingDone')}
                     </p>
-                    <button className="disc-cta-btn" data-variant="info" onClick={() => { if (activeDiscussion.project_id) onNavigate('projects', { projectId: activeDiscussion.project_id }); }}>
+                    <button className="disc-cta-btn" data-variant="info" {...newTabClickProps(activeDiscussion.project_id ? projectPath(activeDiscussion.project_id) : null)} onClick={() => { if (activeDiscussion.project_id) onNavigate('projects', { projectId: activeDiscussion.project_id }); }}>
                       <Play size={12} /> {t('audit.goToProject')}
                     </button>
                   </div>
@@ -4740,21 +4819,15 @@ export function DiscussionsPage({
                       onClick={async () => {
                         try {
                           await projectsApi.validateAudit(proj.id);
-                          // One-shot deep-link consumed by ProjectCard once the
-                          // Projects page has opened the matching card. Keep it
-                          // separate from the post-validation docs deep-link:
-                          // this CTA confirms the audit, so its natural landing
-                          // place is the Audit tab where the validated state is
+                          // This CTA confirms the audit, so it lands on the
+                          // project's Audit view, where the validated state is
                           // immediately visible.
-                          try {
-                            sessionStorage.setItem(`kronn:projectView:${proj.id}`, 'audit');
-                          } catch { /* restricted storage — navigation still works */ }
                           await Promise.all([
                             Promise.resolve(refetchProjects()),
                             Promise.resolve(refetchDiscussions()),
                           ]);
                           toast(t('audit.done'), 'success');
-                          onNavigate('projects', { projectId: proj.id });
+                          onNavigate('projects', { projectId: proj.id, projectAt: { view: 'audit' } });
                         } catch (error) {
                           toast(userError(error), 'error');
                         }
@@ -5031,14 +5104,10 @@ export function DiscussionsPage({
                             setDeployedVersion(activeDiscussion.id, newVersion);
                             toast(t('qp.deploySuccess', String(newVersion)), 'success');
                           }
-                          // 0.8.5 follow-up — deep-link to the QP card on
-                          // the Quick Prompts tab. WorkflowsPage reads
-                          // this key on mount: switches tab + scrolls
-                          // to the matching card + flashes a highlight.
-                          try {
-                            sessionStorage.setItem('kronn:postQpImproved', qpTargetId);
-                          } catch { /* private-mode / quota — fall through */ }
-                          onNavigate('workflows');
+                          // 0.8.5 follow-up — the improved QP at its own
+                          // address on the Quick Prompts tab, scrolled to and
+                          // flashed on arrival.
+                          onNavigate('workflows', { quickPromptId: qpTargetId });
                         } catch (e) {
                           // 0.8.4 follow-up — pre-fix this was a silent
                           // `console.warn`, so a 400 from the backend
@@ -5180,7 +5249,7 @@ export function DiscussionsPage({
                           <Play size={12} /> {t('bootstrap.startDev')}
                         </button>
                       )}
-                      <button className="disc-cta-btn" data-variant="accent" onClick={() => {
+                      <button className="disc-cta-btn" data-variant="accent" {...newTabClickProps(proj ? projectPath(proj.id) : null)} onClick={() => {
                         if (proj) onNavigate('projects', { projectId: proj.id });
                       }}>
                         <Check size={12} /> {t('bootstrap.viewProject')}
@@ -5332,10 +5401,9 @@ export function DiscussionsPage({
                 <span className="disc-agent-disabled-text">
                   {t('disc.agentDisabled', AGENT_LABELS[activeDiscussion.agent] ?? activeDiscussion.agent)}
                   {' — '}
-                  <span
-                    style={{ cursor: 'pointer', textDecoration: 'underline' }}
-                    onClick={() => onNavigate('settings')}
-                  >{t('disc.agentDisabledLink')}</span>
+                  <AppLink className="kr-inline-link" to={PAGE_PATHS.settings} onNavigate={() => onNavigate('settings')}>
+                    {t('disc.agentDisabledLink')}
+                  </AppLink>
                 </span>
               </div>
             )}
@@ -5622,7 +5690,10 @@ export function DiscussionsPage({
                 initialTaskId={planTaskTarget?.discussionId === activeDiscussion.id ? planTaskTarget.taskId : undefined}
                 onClose={() => setShowPlanPanel(false)}
                 onChanged={setDiscussionPlan}
-                onNavigateDiscussion={(targetDiscussionId) => {
+                onNavigateDiscussion={(targetDiscussionId, options) => {
+                  if (options?.gitWorkspaceId) {
+                    setPendingGitWorkspace({ discussionId: targetDiscussionId, workspaceId: options.gitWorkspaceId });
+                  }
                   setActiveDiscussionId(targetDiscussionId);
                   ensureDiscussionVisible(targetDiscussionId);
                   reloadDiscussion(targetDiscussionId);

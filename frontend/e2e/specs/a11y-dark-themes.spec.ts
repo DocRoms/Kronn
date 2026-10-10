@@ -284,7 +284,7 @@ test.describe('a11y — no contrast violation in the dark themes', () => {
         json: { success: true, data: action, error: null },
       }));
 
-      await page.goto(`/#discussion-${anchor.id}`);
+      await page.goto(`/discussions/${encodeURIComponent(anchor.id)}`);
       await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
       const card = page.locator(`[data-testid="discussion-action-${action.id}"]`);
       await expect(card).toBeVisible({ timeout: 15_000 });

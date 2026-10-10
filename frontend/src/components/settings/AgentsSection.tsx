@@ -91,6 +91,10 @@ interface AgentsSectionProps {
    *  container, not on the host. We disable the Install button and point to
    *  the host-side `kronn` CLI instead. Default false (native/Tauri). */
   inDocker?: boolean;
+  /** An agent tier to point at, from a model error: one-shot, acknowledged
+   *  via `onModelTierTargetConsumed` once taken. */
+  modelTierTarget?: { agentType: string; tier: string } | null;
+  onModelTierTargetConsumed?: () => void;
 }
 
 // KT-586 — hoisted so the card can show a read-only tier preview outside the
@@ -143,7 +147,22 @@ export function AgentsSection({
   t,
   usagePanel,
   inDocker = false,
+  modelTierTarget = null,
+  onModelTierTargetConsumed,
 }: AgentsSectionProps) {
+  // The tier to point at, kept until it is found: the arrival intent is
+  // acknowledged at once (a reload or a Back must not replay it), while the
+  // picker only renders once the agents and the catalogue have loaded.
+  const [pendingTierTarget, setPendingTierTarget] = useState(modelTierTarget);
+  const [takenTierTarget, setTakenTierTarget] = useState(modelTierTarget);
+  if (modelTierTarget !== takenTierTarget) {
+    setTakenTierTarget(modelTierTarget);
+    if (modelTierTarget) setPendingTierTarget(modelTierTarget);
+  }
+  useEffect(() => {
+    if (modelTierTarget) onModelTierTargetConsumed?.();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modelTierTarget]);
   const [checkingVersions, setCheckingVersions] = useState(false);
   const recheckVersions = useAsyncGuard(async () => {
     setCheckingVersions(true);
@@ -168,12 +187,7 @@ export function AgentsSection({
     // A System CTA deep-links to one agent's tier picker, which lives in the
     // fold. Opening it at mount means the focus effect below finds its target
     // on the first try instead of retrying against a card that never renders.
-    try {
-      const target = JSON.parse(sessionStorage.getItem('kronn:model-config-target') ?? 'null');
-      return typeof target?.agentType === 'string' ? new Set([target.agentType]) : new Set();
-    } catch {
-      return new Set();
-    }
+    return modelTierTarget ? new Set([modelTierTarget.agentType]) : new Set();
   });
   const [tierEditing, setTierEditing] = useState<Record<string, {
     economy: string; default: string; reasoning: string;
@@ -506,16 +520,13 @@ export function AgentsSection({
     return () => { cancelled = true; };
   }, []);
 
-  // System model-error messages leave a short-lived deep-link target before
-  // navigating here. The dedicated LiteLLM/Ollama cards load asynchronously,
-  // so retry briefly, then focus + animate the exact agent/tier picker rather
-  // than dropping the user at the top of a long settings section.
+  // A system model-error message navigates here with the agent and tier to
+  // fix. The dedicated LiteLLM/Ollama cards load asynchronously, so retry
+  // briefly, then focus + animate the exact agent/tier picker rather than
+  // dropping the user at the top of a long settings section.
   useEffect(() => {
     if (Object.keys(tierEditing).length === 0 || catalog.loading) return;
-    let target: { agentType?: string; tier?: string } | null = null;
-    try {
-      target = JSON.parse(sessionStorage.getItem('kronn:model-config-target') ?? 'null');
-    } catch { /* malformed/stale browser state: ignore */ }
+    const target = pendingTierTarget;
     if (!target?.agentType || !['economy', 'default', 'reasoning'].includes(target.tier ?? '')) return;
 
     let attempts = 0;
@@ -528,16 +539,19 @@ export function AgentsSection({
         timer = setTimeout(focusTarget, 200);
         return;
       }
+      // Found or given up on: either way this arrival is over.
+      setPendingTierTarget(null);
       if (!select) return;
-      try { sessionStorage.removeItem('kronn:model-config-target'); } catch { /* ignore */ }
       select.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
       select.focus({ preventScroll: true });
       select.classList.add('set-model-tier-focus');
       timer = setTimeout(() => select.classList.remove('set-model-tier-focus'), 2200);
     };
-    focusTarget();
+    // First attempt on the next tick: it may close the arrival (state), which
+    // an effect body must not do synchronously.
+    timer = setTimeout(focusTarget, 0);
     return () => { if (timer) clearTimeout(timer); };
-  }, [tierEditing, catalog.loading]);
+  }, [tierEditing, catalog.loading, pendingTierTarget]);
 
   // Synchronous re-entry guard — `setInstalling(...)` is async-rendered,
   // so two fast clicks on the same install button (or two different ones)

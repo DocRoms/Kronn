@@ -1,6 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, fireEvent, act } from '@testing-library/react';
-import { App } from '../App';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { render, screen, waitFor, fireEvent, act, cleanup } from '@testing-library/react';
+import { RouterProvider } from 'react-router/dom';
+import { createAppRouter } from '../router';
 import {
   cacheSetupStatus,
   clearCachedSetupStatus,
@@ -28,8 +29,8 @@ vi.mock('../pages/Dashboard', () => ({
 }));
 
 vi.mock('../pages/StandaloneLivePage', () => ({
-  StandaloneLivePage: ({ pageId }: { pageId: string }) => (
-    <div data-testid="standalone-page">{pageId}</div>
+  StandaloneLivePage: ({ pageId, params }: { pageId: string; params?: Record<string, string> }) => (
+    <div data-testid="standalone-page" data-params={JSON.stringify(params ?? {})}>{pageId}</div>
   ),
 }));
 
@@ -40,10 +41,17 @@ vi.mock('../pages/StandaloneLivePageMosaic', () => ({
 }));
 
 vi.mock('../pages/StandaloneDiscussionMosaic', () => ({
-  StandaloneDiscussionMosaic: ({ discussionIds, layout }: { discussionIds: string[]; layout: string }) => (
-    <div data-testid="standalone-discussion-mosaic">{layout}:{discussionIds.join(',')}</div>
+  StandaloneDiscussionMosaic: ({ discussionIds, layout, onLayoutChange }: { discussionIds: string[]; layout: string; onLayoutChange: (layout: string) => void }) => (
+    <div data-testid="standalone-discussion-mosaic">
+      {layout}:{discussionIds.join(',')}
+      <button onClick={() => onLayoutChange('two-columns')}>two columns</button>
+    </div>
   ),
 }));
+
+// The banners around the dashboard poll the backend; inert here.
+vi.mock('../components/UpdateBanner', () => ({ UpdateBanner: () => null }));
+vi.mock('../components/BackendStatus', () => ({ BackendStatus: () => null }));
 
 // Mock the API
 vi.mock('../lib/api', () => ({
@@ -76,9 +84,29 @@ vi.mock('../lib/api', () => ({
 
 import { setup as setupApi, config as configApi } from '../lib/api';
 
+type AppRouter = ReturnType<typeof createAppRouter>;
+let router: AppRouter | null = null;
+
+/** The whole app, as `main.tsx` mounts it, opened at `path`. */
+function renderApp(path = '/') {
+  window.history.replaceState(null, '', path);
+  router = createAppRouter();
+  return render(<RouterProvider router={router} useTransitions={false} />);
+}
+
+const setupComplete = {
+  is_first_run: false,
+  current_step: 'Complete' as const,
+  agents_detected: [],
+  scan_paths_set: true,
+  scan_paths_explored: [],
+  config_set_aside: null,
+  repos_detected: [],
+  default_scan_path: '/home',
+};
+
 beforeEach(() => {
   vi.clearAllMocks();
-  window.location.hash = '';
   clearCachedSetupStatus();
   setRetryDelay(0); // instant retries in tests
   resetBootScreenForTests();
@@ -88,13 +116,20 @@ beforeEach(() => {
   (configApi.getLanguage as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('down'));
 });
 
+afterEach(() => {
+  cleanup();
+  router?.dispose();
+  router = null;
+  window.history.replaceState(null, '', '/');
+});
+
 describe('App', () => {
   it('shows the key-restore screen, not the loader, when the API is auth locked', async () => {
     const { ApiRequestError } = await import('../lib/apiRequestError');
     (setupApi.getStatus as ReturnType<typeof vi.fn>).mockRejectedValue(
       new ApiRequestError('API authentication is locked', 'auth_locked'),
     );
-    render(<App />);
+    renderApp();
     await waitFor(() => expect(screen.getByTestId('auth-locked-screen')).toBeTruthy());
     // The panel appears once the screen has read the recovery status.
     expect(await screen.findByTestId('recovery-restore-panel')).toBeTruthy();
@@ -104,7 +139,7 @@ describe('App', () => {
 
   it('shows loading screen initially', () => {
     (setupApi.getStatus as ReturnType<typeof vi.fn>).mockReturnValue(new Promise(() => {}));
-    render(<App />);
+    renderApp();
     expect(screen.getByRole('status')).toHaveTextContent(bootMessage('connecting'));
     const status = screen.getByRole('status');
     const mark = status.querySelector('svg');
@@ -124,7 +159,7 @@ describe('App', () => {
       default_scan_path: null,
     });
 
-    render(<App />);
+    renderApp();
     await waitFor(() => expect(screen.getByTestId('setup-wizard')).toBeDefined());
   });
 
@@ -140,7 +175,7 @@ describe('App', () => {
     (setupApi.reset as ReturnType<typeof vi.fn>).mockRejectedValue(
       new Error('Reset cleared the data but not the stored keys: disk full'),
     );
-    render(<App />);
+    renderApp();
     fireEvent.click(await screen.findByText('Reset'));
     await waitFor(() =>
       expect(screen.getByTestId('reset-error').textContent).toContain('not the stored keys'),
@@ -157,7 +192,7 @@ describe('App', () => {
       default_scan_path: '/home',
     });
 
-    render(<App />);
+    renderApp();
     await waitFor(() => expect(screen.getByTestId('dashboard')).toBeDefined());
   });
 
@@ -167,7 +202,7 @@ describe('App', () => {
       config_set_aside: 'config.toml could not be read and was kept as config.toml.corrupt.1',
     } as never);
     vi.mocked(setupApi.getStatus).mockResolvedValue({ is_first_run: false, current_step: 'Complete', agents_detected: [], scan_paths_set: true, scan_paths_explored: [], config_set_aside: null, repos_detected: [], default_scan_path: '/home' });
-    render(<App />);
+    renderApp();
     await waitFor(() => expect(screen.getByTestId('dashboard')).toBeInTheDocument());
     await waitFor(() => expect(screen.getByTestId('config-set-aside-banner')).toHaveTextContent('config.toml.corrupt.1'));
   });
@@ -187,7 +222,7 @@ describe('App', () => {
     let finishRefresh!: (status: typeof cached) => void;
     vi.mocked(setupApi.getStatus).mockReturnValue(new Promise(resolve => { finishRefresh = resolve; }));
 
-    render(<App />);
+    renderApp();
 
     await waitFor(() => expect(screen.getByTestId('dashboard')).toBeInTheDocument());
     expect(screen.queryByText(bootMessage('connecting'))).not.toBeInTheDocument();
@@ -195,33 +230,109 @@ describe('App', () => {
     await act(async () => { finishRefresh(cached); });
   });
 
-  it('opens a direct Live Page URL without mounting the dashboard chrome', async () => {
-    window.location.hash = '#page/page-1';
-    (setupApi.getStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
-      is_first_run: false,
-      current_step: 'Complete',
-      agents_detected: [],
-      scan_paths_set: true,
-      repos_detected: [],
-      default_scan_path: '/home',
-    });
+  it('opens a direct Live Page address without mounting the dashboard chrome', async () => {
+    vi.mocked(setupApi.getStatus).mockResolvedValue(setupComplete);
 
-    render(<App />);
-    await waitFor(() => expect(screen.getByTestId('standalone-page')).toHaveTextContent('page-1'));
+    renderApp('/standalone/pages/page%2F%C3%A9quipe');
+
+    await waitFor(() => expect(screen.getByTestId('standalone-page')).toHaveTextContent('page/équipe'));
     expect(screen.queryByTestId('dashboard')).toBeNull();
   });
 
-  it('opens an internal Live Page link in the current application tab', async () => {
-    vi.mocked(setupApi.getStatus).mockResolvedValue({
-      is_first_run: false,
-      current_step: 'Complete',
-      agents_detected: [],
-      scan_paths_set: true,
-      scan_paths_explored: [], config_set_aside: null,
-      repos_detected: [],
-      default_scan_path: '/home',
+  it('hands a Live Page the view parameters its address carries, and only safe ones', async () => {
+    vi.mocked(setupApi.getStatus).mockResolvedValue(setupComplete);
+
+    renderApp('/standalone/pages/wall?tv=1&scene=standup&x=%3Cb%3E');
+
+    await waitFor(() => expect(screen.getByTestId('standalone-page')).toHaveTextContent('wall'));
+    expect(screen.getByTestId('standalone-page')).toHaveAttribute('data-params', JSON.stringify({ tv: '1', scene: 'standup' }));
+  });
+
+  it('keeps the view parameters of a legacy #page/ link', async () => {
+    vi.mocked(setupApi.getStatus).mockResolvedValue(setupComplete);
+
+    renderApp('/#page/wall?tv=1');
+
+    await waitFor(() => expect(screen.getByTestId('standalone-page')).toHaveAttribute('data-params', JSON.stringify({ tv: '1' })));
+    expect(window.location.pathname).toBe('/standalone/pages/wall');
+    expect(window.location.search).toBe('?tv=1');
+  });
+
+  it.each([
+    ['#page/page-1', '/standalone/pages/page-1', 'standalone-page', 'page-1'],
+    ['#pages/mosaic?page=page-1&page=page-2&layout=two-columns', '/standalone/pages/mosaic', 'standalone-page-mosaic', 'two-columns:page-1,page-2'],
+    ['#discussions/mosaic?discussion=a&discussion=b&layout=two-rows', '/standalone/discussions/mosaic', 'standalone-discussion-mosaic', 'two-rows:a,b'],
+  ])('still honours the legacy %s deep link, at its new address', async (hash, path, testId, content) => {
+    vi.mocked(setupApi.getStatus).mockResolvedValue(setupComplete);
+
+    renderApp(`/${hash}`);
+
+    await waitFor(() => expect(screen.getByTestId(testId)).toHaveTextContent(content));
+    expect(window.location.pathname).toBe(path);
+    expect(window.location.hash).toBe('');
+    expect(screen.queryByTestId('dashboard')).toBeNull();
+  });
+
+  it.each([
+    ['#config', '/config', ''],
+    ['#settings/artifacts?origin=https%3A%2F%2Fvimeo.com', '/config/artifacts', '?origin=https%3A%2F%2Fvimeo.com'],
+    ['#project-proj-7', '/projects/proj-7', ''],
+    ['#discussion-disc-42', '/discussions/disc-42', ''],
+    ['#discussion-disc%2F42?message=msg-1', '/discussions/disc%2F42', '?message=msg-1'],
+    // An id that cannot be decoded names nothing: its page, without a crash.
+    ['#discussion-%E0%A4%A', '/discussions', ''],
+    ['#project-%E0%A4%A', '/projects', ''],
+    ['#page/%E0%A4%A', '/pages', ''],
+  ])('sends the legacy %s link to %s, on the dashboard', async (hash, path, search) => {
+    vi.mocked(setupApi.getStatus).mockResolvedValue(setupComplete);
+
+    renderApp(`/planning${hash}`);
+
+    await waitFor(() => expect(window.location.pathname).toBe(path));
+    expect(window.location.search).toBe(search);
+    expect(window.location.hash).toBe('');
+    expect(screen.getByTestId('dashboard')).toBeInTheDocument();
+  });
+
+  it('follows a legacy link set while the app is open', async () => {
+    vi.mocked(setupApi.getStatus).mockResolvedValue(setupComplete);
+    renderApp('/projects');
+    await waitFor(() => expect(screen.getByTestId('dashboard')).toBeInTheDocument());
+
+    // What `window.location.hash = '#config'` does in a browser.
+    await act(async () => {
+      window.history.pushState(null, '', '#config');
+      window.dispatchEvent(new PopStateEvent('popstate'));
     });
-    render(<App />);
+
+    await waitFor(() => expect(window.location.pathname).toBe('/config'));
+  });
+
+  it('leaves a bad Live Page address for the default page', async () => {
+    vi.mocked(setupApi.getStatus).mockResolvedValue(setupComplete);
+
+    renderApp('/standalone/pages/mosaic?page=only-one');
+
+    await waitFor(() => expect(screen.getByTestId('dashboard')).toBeInTheDocument());
+    expect(window.location.pathname).toBe('/projects');
+  });
+
+  it('writes a mosaic layout change back into the address, in place', async () => {
+    vi.mocked(setupApi.getStatus).mockResolvedValue(setupComplete);
+    renderApp('/standalone/discussions/mosaic?discussion=a&discussion=b&layout=two-rows');
+    await screen.findByTestId('standalone-discussion-mosaic');
+    const depth = window.history.length;
+
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'two columns' })); });
+
+    await waitFor(() => expect(screen.getByTestId('standalone-discussion-mosaic')).toHaveTextContent('two-columns:a,b'));
+    expect(window.location.search).toBe('?discussion=a&discussion=b&layout=two-columns');
+    expect(window.history.length).toBe(depth);
+  });
+
+  it('opens an internal Live Page link in the current application tab', async () => {
+    vi.mocked(setupApi.getStatus).mockResolvedValue(setupComplete);
+    renderApp('/pages');
     await waitFor(() => expect(screen.getByTestId('dashboard')).toBeInTheDocument());
 
     const postMessage = vi.fn();
@@ -237,33 +348,41 @@ describe('App', () => {
     });
 
     expect(await screen.findByTestId('standalone-page')).toHaveTextContent('page-in-place');
+    expect(window.location.pathname).toBe('/standalone/pages/page-in-place');
     expect(openExternal).not.toHaveBeenCalled();
     relay.dispose();
   });
 
-  it('opens a direct Page mosaic URL without mounting the dashboard chrome', async () => {
-    window.location.hash = '#pages/mosaic?page=page-1&page=page-2&layout=two-columns';
-    (setupApi.getStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
-      is_first_run: false,
-      current_step: 'Complete',
-      agents_detected: [],
-      scan_paths_set: true,
-      repos_detected: [],
-      default_scan_path: '/home',
-    });
+  it('opens a direct Page mosaic address without mounting the dashboard chrome', async () => {
+    vi.mocked(setupApi.getStatus).mockResolvedValue(setupComplete);
 
-    render(<App />);
+    renderApp('/standalone/pages/mosaic?page=page-1&page=page-2&layout=two-columns');
+
     await waitFor(() => expect(screen.getByTestId('standalone-page-mosaic'))
       .toHaveTextContent('two-columns:page-1,page-2'));
     expect(screen.queryByTestId('dashboard')).toBeNull();
   });
 
   it('opens a direct discussion mosaic without mounting the dashboard', async () => {
-    window.location.hash = '#discussions/mosaic?discussion=a&discussion=b&layout=two-rows';
-    vi.mocked(setupApi.getStatus).mockResolvedValue({ is_first_run: false, current_step: 'Complete', agents_detected: [], scan_paths_set: true, scan_paths_explored: [], config_set_aside: null, repos_detected: [], default_scan_path: '/home' });
-    render(<App />);
+    vi.mocked(setupApi.getStatus).mockResolvedValue(setupComplete);
+
+    renderApp('/standalone/discussions/mosaic?discussion=a&discussion=b&layout=two-rows');
+
     await waitFor(() => expect(screen.getByTestId('standalone-discussion-mosaic')).toHaveTextContent('two-rows:a,b'));
     expect(screen.queryByTestId('dashboard')).toBeNull();
+  });
+
+  it('starts the setup over from the dashboard', async () => {
+    vi.mocked(setupApi.getStatus).mockResolvedValue(setupComplete);
+    vi.mocked(setupApi.reset).mockResolvedValue(undefined);
+    renderApp('/projects');
+    await waitFor(() => expect(screen.getByTestId('dashboard')).toBeInTheDocument());
+    vi.mocked(setupApi.getStatus).mockResolvedValue({ ...setupComplete, is_first_run: true, current_step: 'Agents' });
+
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Reset' })); });
+
+    expect(setupApi.reset).toHaveBeenCalledOnce();
+    await waitFor(() => expect(screen.getByTestId('setup-wizard')).toBeInTheDocument());
   });
 
   it('keeps the loading screen and keeps retrying while the backend is unreachable', async () => {
@@ -271,7 +390,7 @@ describe('App', () => {
     // seeing Kronn starting, never an error that reads as a crash.
     (setupApi.getStatus as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('Network error'));
 
-    render(<App />);
+    renderApp();
 
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(bootMessage('slow')));
     expect(screen.queryByText('Cannot connect to backend')).toBeNull();
@@ -285,7 +404,7 @@ describe('App', () => {
   it('opens the app on its own once the backend answers after a long start', async () => {
     const mockGetStatus = setupApi.getStatus as ReturnType<typeof vi.fn>;
     mockGetStatus.mockRejectedValue(new Error('Network error'));
-    render(<App />);
+    renderApp();
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(bootMessage('slow')));
 
     mockGetStatus.mockResolvedValue({
@@ -307,7 +426,7 @@ describe('App', () => {
     (setupApi.getStatus as ReturnType<typeof vi.fn>).mockReturnValue(new Promise(() => {})); // hang
     (configApi.getLanguage as ReturnType<typeof vi.fn>).mockResolvedValue('fr'); // backend up
 
-    render(<App />);
+    renderApp();
     await waitFor(() => expect(screen.getByTestId('dashboard')).toBeDefined());
     expect(screen.queryByText('Cannot connect to backend')).toBeNull();
   });
@@ -315,7 +434,7 @@ describe('App', () => {
   it('keeps the loading screen when setup/status hangs AND the backend is unreachable', async () => {
     (setupApi.getStatus as ReturnType<typeof vi.fn>).mockReturnValue(new Promise(() => {})); // hang
     // configApi.getLanguage rejects by default (beforeEach) → backend down.
-    render(<App />);
+    renderApp();
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(bootMessage('slow')));
     expect(screen.queryByTestId('dashboard')).toBeNull();
   });
@@ -323,7 +442,7 @@ describe('App', () => {
   it('retries at once when the user clicks Retry under a slow start', async () => {
     const mockGetStatus = setupApi.getStatus as ReturnType<typeof vi.fn>;
     mockGetStatus.mockRejectedValue(new Error('Network error'));
-    render(<App />);
+    renderApp();
     await waitFor(() => expect(screen.getByRole('button', { name: bootMessage('retry') })).toBeDefined());
     // Automatic retries out of the way: from here only the click can retry.
     setRetryDelay(60_000);

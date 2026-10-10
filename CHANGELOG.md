@@ -11,6 +11,47 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+### Changed
+
+- Every view has its own address, and the browser's Back, Forward and reload
+  follow it: the pages (`/projects`, `/discussions`, `/planning`,
+  `/workflows`, `/pages`, `/plugins`, `/config`), what is open in them
+  (`/projects/<id>`, `/discussions/<id>?message=<id>`, `/planning/<id>`,
+  `/workflows/<id>/runs/<id>`, `/workflows/qp/<id>` and the other Automation
+  tabs, `/pages/<id>`, `/plugins/<id>`) and the whole-window views
+  (`/standalone/pages/<id>`, with its view parameters such as `?tv=1`, the
+  Page and discussion mosaics). An address can be copied, sent and reopened.
+  The links written before — `#discussion-<id>`, `#project-<id>`,
+  `#page/<id>?…`, the mosaics' `#…/mosaic?…`, `#settings/artifacts?…` and
+  `#config` —
+  keep working for good, from Live Pages, messages, bookmarks and the `kronn`
+  CLI alike. The desktop app's embedded server answers a reload on any of these
+  addresses with the app.
+- Ctrl/Cmd-click, Shift-click or a middle click opens a page in a new tab:
+  the navigation tabs, an Artifact's related discussion, workflows and
+  publication runs, and the rows and links that open a discussion, a
+  project and its views, a workflow and its runs, a Quick Prompt/API/Exec, a
+  task, a plugin or an Artifact. A plain click still opens it in place; the
+  look of every element is unchanged.
+- Views inside a page have their own address too: a project's view
+  (`/projects/<id>/code?file=<path>&line=<n>`, `/projects/<id>/git`, …), the
+  workflow wizard (`/workflows/new`, `/workflows/<id>/edit`), a comparison of
+  discussions (`/discussions/compare/<run>`) and a Configuration section
+  (`/config#<section>`). A file an agent cites, a just-validated audit or a
+  just-improved Quick Prompt now opens at such an address, so Back, a reload
+  and a shared link land on the same view. A code view opened without a file
+  names the file it shows in its address, so Back to it reopens that file;
+  choosing a type's list from one of its Automation resources is a step Back
+  undoes; a reload, Back or Forward on a Configuration section brings it
+  into view again.
+- "Open the retention setting" on the run-retention banner (Automation and
+  Configuration) lands on the setting, centred and focused, at its address
+  `/config#run-payload-retention`; it used to stop short of it while the page
+  was still loading. Every Configuration anchor (`/config#<section>`) waits
+  for the page to settle the same way, and the sections in Configuration's
+  side menu are links: Ctrl/Cmd-click opens one in a new tab.
+
+
 ## [0.14.3] - 2026-10-07
 
 ### Upgrade notes

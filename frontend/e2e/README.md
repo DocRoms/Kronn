@@ -238,3 +238,32 @@ officielle alignée sur `@playwright/test`. Le backend Rust et Vite sont démarr
 dans le job, et les artefacts de diagnostic sont conservés en cas d'échec. Les
 canaris agents réels restent désactivés tant que le job ne fournit pas
 explicitement `KRONN_REAL_AGENT_E2E=1` et les credentials correspondants.
+
+## Adresses et routage (`routing-addresses.spec.ts`)
+
+Depuis le routage côté client (React Router 8), chaque page et chaque ressource
+ouverte a une adresse. `routing-addresses.spec.ts` les pilote dans un vrai
+navigateur : les sept pages, `/discussions/<id>`, `/planning/<id>`,
+`/workflows/qp/<id>`, `/projects/<id>`, précédent/suivant, rechargement, et les
+anciens liens `#discussion-`, `#project-`, `#config`, `#…/mosaic?`, et
+l'ouverture dans un nouvel onglet (Ctrl/Cmd-clic et clic molette sur un onglet
+de navigation et sur une discussion, l'onglet courant ne bougeant pas). Elle crée
+ce qu'elle ouvre par l'API ; la partie projet a besoin de `KRONN_REPOS_DIR`
+(le dossier de dépôts du lanceur bac à sable) et s'ignore sinon.
+
+Deux pièges rencontrés en la jouant contre un bac à sable neuf :
+
+- **Un backend vierge affiche l'assistant de première installation.** Les specs
+  qui n'importent pas `kronn-fixture` (pas de stub de `/api/setup/status`)
+  attendent la nav du dashboard et échouent toutes au même endroit. Marquer
+  le bac à sable configuré avant de lancer la suite :
+
+  ```bash
+  curl -s -X POST -H 'Content-Type: application/json' \
+    -d "{\"paths\":[\"$SANDBOX/repos\"]}" http://127.0.0.1:$PORT/api/setup/scan-paths
+  curl -s -X POST http://127.0.0.1:$PORT/api/setup/complete
+  ```
+
+- **Le mode `--headed` veut le Chromium complet**, pas seulement le
+  `chromium_headless_shell` que `ensure-browser.mjs` installe :
+  `pnpm exec playwright install chromium`.

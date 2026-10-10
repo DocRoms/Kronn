@@ -1,4 +1,6 @@
 import { useState, useEffect } from 'react';
+import { newTabClickProps } from '../../lib/newTabNavigation';
+import { workflowPath } from '../../lib/routes';
 import { useT } from '../../lib/I18nContext';
 import { workflows as workflowsApi } from '../../lib/api';
 import type { WorkflowRun, WorkflowStep, DecideRunRequest, ProducedBranch } from '../../types/generated';
@@ -708,6 +710,7 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
             type="button"
             className="wf-run-provenance"
             disabled={!run.parent_workflow_id || !onNavigateToWorkflow}
+            {...newTabClickProps(run.parent_workflow_id && onNavigateToWorkflow ? workflowPath(run.parent_workflow_id) : null)}
             onClick={() => run.parent_workflow_id && onNavigateToWorkflow?.(run.parent_workflow_id)}
             title={t('wf.run.provenanceHint', run.parent_workflow_name)}
           >
@@ -1137,6 +1140,7 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
                                       ? <button
                                           type="button"
                                           className="wf-subrun-link"
+                                          {...newTabClickProps(it.child_run_id ? workflowPath(childWorkflowId, it.child_run_id) : workflowPath(childWorkflowId))}
                                           onClick={() => {
                                             const childRunId = it.child_run_id;
                                             if (onNavigateToRun && childRunId) {
