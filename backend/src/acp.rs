@@ -127,7 +127,11 @@ for line in sys.stdin:
 
     pub(crate) fn write_fixture_script(dir: &Path, body: &str) -> PathBuf {
         let path = dir.join("fixture-cli");
-        fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write fixture script");
+        fs::write(
+            &path,
+            format!("#!/bin/sh\n[ -n \"$KRONN_FIXTURE_WARMUP\" ] && exit 0\n{body}\n"),
+        )
+        .expect("write fixture script");
         #[cfg(unix)]
         {
             let mut perms = fs::metadata(&path)
@@ -135,6 +139,14 @@ for line in sys.stdin:
                 .permissions();
             perms.set_mode(0o755);
             fs::set_permissions(&path, perms).expect("chmod fixture script");
+            // A fresh executable's first exec waits for the host's scan (about
+            // 0.2 s idle, seconds under load); pay it here, not inside the
+            // timeout a test measures.
+            let warmed = std::process::Command::new(&path)
+                .env("KRONN_FIXTURE_WARMUP", "1")
+                .status()
+                .expect("warm fixture script");
+            assert!(warmed.success(), "fixture script did not run");
         }
         path
     }

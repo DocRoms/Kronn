@@ -1045,11 +1045,12 @@ async fn stopping_during_startup_ends_the_start_and_kills_the_runtime() {
     );
 }
 
-/// The delay a reasoning-only turn must outlive. The fixtures beat every
-/// 0.5 s for 6 s: a 6× margin per gap holds on a loaded machine, and the
-/// turn still lasts twice the delay.
+/// The delay a reasoning-only turn must outlive. The fixtures beat as soon as
+/// they start, then every 0.5 s for 12 s: the start (adapter, shell, a fresh
+/// script) gets the whole delay, each gap a 10x margin, and the turn still
+/// lasts more than twice the delay. A 3 s delay was cut on 4 loaded cores.
 #[cfg(unix)]
-const REASONING_DELAY: Duration = Duration::from_secs(3);
+const REASONING_DELAY: Duration = Duration::from_secs(5);
 
 /// An adapted turn that only reasons — thinking deltas, reasoning items —
 /// for longer than the delay is alive, not silent: it is not cut.
@@ -1089,7 +1090,7 @@ async fn a_reasoning_only_adapted_turn_outlives_the_delay(
     // says after how many beats.
     assert_eq!(text, answer, "{agent:?}: {}", stderr_of(&running));
     assert!(
-        started.elapsed() > REASONING_DELAY + Duration::from_secs(2),
+        started.elapsed() > REASONING_DELAY * 2,
         "{agent:?}: reasoned well past the delay, {:?}",
         started.elapsed()
     );
@@ -1108,9 +1109,11 @@ async fn a_claude_turn_that_only_thinks_is_not_cut() {
         project.path(),
         r#"
 cat >/dev/null
-for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
-  sleep 0.5
+i=0
+while [ "$i" -le 24 ]; do
   printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"hmm"}}}'
+  sleep 0.5
+  i=$((i + 1))
 done
 printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"thought it through"}}}'
 printf '%s\n' '{"type":"result","subtype":"success","usage":{"input_tokens":1,"output_tokens":2}}'
@@ -1143,9 +1146,11 @@ async fn a_codex_turn_that_only_reasons_is_not_cut() {
         r#"
 cat >/dev/null
 printf '%s\n' '{"type":"thread.started","thread_id":"th-reasoning"}'
-for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
-  sleep 0.5
+i=0
+while [ "$i" -le 24 ]; do
   printf '%s\n' "{\"type\":\"item.updated\",\"item\":{\"id\":\"r1\",\"type\":\"reasoning\",\"text\":\"step $i\"}}"
+  sleep 0.5
+  i=$((i + 1))
 done
 printf '%s\n' '{"type":"item.completed","item":{"id":"m1","type":"agent_message","text":"reasoned it out"}}'
 printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":2}}'

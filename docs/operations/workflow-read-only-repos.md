@@ -178,7 +178,7 @@ Run the opt-in host probe with authenticated Claude Code and Codex installations
 and OS sandbox privileges:
 
 ```sh
-cargo test --manifest-path backend/Cargo.toml --test workflow_read_only_repos_probe -- --ignored --nocapture
+cargo test --manifest-path backend/Cargo.toml --test it workflow_read_only_repos_probe -- --ignored --nocapture
 ```
 
 It canonicalizes the probe root before creating disposable repositories,

@@ -10,8 +10,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 use tower::ServiceExt;
 
-#[path = "support/publication_fixture.rs"]
-mod fixture_env;
+use crate::fixture_env;
 
 async fn post(app: &Router, path: &str, body: Value) -> Value {
     let mut request = Request::builder()

@@ -16,6 +16,12 @@ pub fn config_dir() -> Result<PathBuf> {
     if let Ok(dir) = crate::core::child_env::var("KRONN_DATA_DIR") {
         return Ok(PathBuf::from(dir));
     }
+    // A unit test that forgot KRONN_DATA_DIR must not touch the real install
+    // (the operator secret and the encryption key live here); one directory
+    // per process, so parallel test processes never share it either.
+    if cfg!(test) {
+        return Ok(std::env::temp_dir().join(format!("kronn-test-data-{}", std::process::id())));
+    }
 
     ProjectDirs::from("com", "kronn", "kronn")
         .map(|d| d.config_dir().to_path_buf())
@@ -999,6 +1005,21 @@ mod tests {
         assert!(
             !cfg.encryption_secret.as_ref().unwrap().is_empty(),
             "encryption_secret must be non-empty"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn a_unit_test_without_a_data_dir_gets_its_own_temporary_one() {
+        let previous = crate::core::child_env::var_os("KRONN_DATA_DIR");
+        crate::core::child_env::remove_var("KRONN_DATA_DIR");
+        let dir = config_dir();
+        if let Some(value) = previous {
+            crate::core::child_env::set_var("KRONN_DATA_DIR", value);
+        }
+        assert_eq!(
+            dir.unwrap(),
+            std::env::temp_dir().join(format!("kronn-test-data-{}", std::process::id()))
         );
     }
 

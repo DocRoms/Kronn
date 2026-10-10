@@ -13,8 +13,7 @@ use serde_json::{json, Value};
 use tokio::sync::RwLock;
 use tower::ServiceExt;
 
-#[path = "support/publication_fixture.rs"]
-mod fixture_env;
+use crate::fixture_env;
 
 async fn post(app: &Router, path: &str, body: Value) -> (u16, Value) {
     let mut request = Request::builder()

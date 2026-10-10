@@ -47,7 +47,8 @@ Run from the repository root unless a working directory is shown.
 | Diff hygiene | `make check-diff` (`scripts/check-diff.sh`: `git diff --check` from the merge base with `origin/main`, plus staged and unstaged changes; CI job `diff-hygiene`) | No whitespace errors or conflict markers |
 | Rust formatting | `cd backend && cargo fmt --all -- --check` | Clean |
 | Rust lint | `cd backend && cargo clippy --all-targets -- -D warnings` | Zero warnings (third-party code-generation parser notices are not clippy diagnostics) |
-| Backend tests | `make test-backend` (`cd backend && cargo test -- --skip export_bindings`: library, every `backend/tests/*.rs` integration binary and doctests, as CI's `cargo test`) | Entire Rust suite passes |
+| Backend tests | `make test-backend` (`cd backend && cargo nextest run --workspace`: library, binary and integration tests, one process per test, with CI's runner and `backend/.config/nextest.toml`, then `cargo test --doc`) | Entire Rust suite passes |
+| Backend coverage | `make test-backend-cov` (`cargo llvm-cov nextest` with CI's 83 % floors, then `scripts/check-keymgmt-coverage.sh`) | Both floors hold |
 | Python helpers | `make test-python` | Entire helper suite passes |
 | Shell | `make test-shell` | Entire bats suite passes |
 | Frontend native TS | `cd frontend && pnpm typecheck:native` | Clean |
@@ -61,9 +62,18 @@ Run from the repository root unless a working directory is shown.
 | Browser E2E | `make test-e2e` | Entire Playwright suite passes against the expected backend fixture |
 
 `make test-backend-lib` runs the library unit tests only: a quick loop, not
-evidence for the gate. `export_bindings` is skipped locally so the ts-rs
-bindings stay untouched; CI runs it in its generated-type drift check.
-`[src: file: Makefile:352-362]`
+evidence for the gate. `export_bindings` is skipped locally (the default
+nextest profile filters it) so the ts-rs bindings stay untouched; CI's `ci`
+profile runs it and checks generated-type drift. `make install-dev-tools`
+installs cargo-nextest and cargo-llvm-cov; without nextest, `make test-backend`
+stops and says so rather than fall back to `cargo test`: the integration tests
+share one binary and assume a process per test. Under nextest every test is its own
+process: an in-process lock (`#[serial]`, `ENV_LOCK`) no longer protects a
+fixed path shared with another test or another run, so a test creates its own
+directory (a temporary one, or a fixed name suffixed with the process id), and
+`config_dir()` in a unit test without `KRONN_DATA_DIR` is a per-process
+temporary directory, never the real install.
+`[src: file: Makefile:352-390]` `[src: file: backend/.config/nextest.toml:1]`
 A local green does not prove a CI green for tests that read the machine
 (installed CLIs such as LiteLLM, RTK or `npx`, the agent preflight): reproduce
 a CI-only failure in `rust:1-bookworm` before concluding.

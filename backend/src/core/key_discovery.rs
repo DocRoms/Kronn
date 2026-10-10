@@ -257,7 +257,7 @@ mod tests {
     #[test]
     #[serial]
     fn read_codex_key_parses_auth_json() {
-        let tmp = std::env::temp_dir().join("kronn-test-codex-key");
+        let tmp = std::env::temp_dir().join(format!("kronn-test-codex-key-{}", std::process::id()));
         let _ = std::fs::create_dir_all(tmp.join(".codex"));
         std::fs::write(
             tmp.join(".codex/auth.json"),
@@ -279,7 +279,8 @@ mod tests {
     #[test]
     #[serial]
     fn read_codex_key_ignores_empty_value() {
-        let tmp = std::env::temp_dir().join("kronn-test-codex-empty");
+        let tmp =
+            std::env::temp_dir().join(format!("kronn-test-codex-empty-{}", std::process::id()));
         let _ = std::fs::create_dir_all(tmp.join(".codex"));
         std::fs::write(tmp.join(".codex/auth.json"), r#"{"OPENAI_API_KEY":""}"#).unwrap();
 
@@ -304,7 +305,8 @@ mod tests {
     #[test]
     #[serial]
     fn read_gemini_key_parses_settings_json() {
-        let tmp = std::env::temp_dir().join("kronn-test-gemini-key");
+        let tmp =
+            std::env::temp_dir().join(format!("kronn-test-gemini-key-{}", std::process::id()));
         let _ = std::fs::create_dir_all(tmp.join(".gemini"));
         std::fs::write(
             tmp.join(".gemini/settings.json"),
@@ -326,7 +328,8 @@ mod tests {
     #[test]
     #[serial]
     fn read_vibe_key_strips_quotes() {
-        let tmp = std::env::temp_dir().join("kronn-test-vibe-quotes");
+        let tmp =
+            std::env::temp_dir().join(format!("kronn-test-vibe-quotes-{}", std::process::id()));
         let _ = std::fs::create_dir_all(tmp.join(".vibe"));
         // Double-quoted value
         std::fs::write(
@@ -353,7 +356,7 @@ mod tests {
     #[test]
     #[serial]
     fn read_vibe_key_parses_env_file() {
-        let tmp = std::env::temp_dir().join("kronn-test-vibe-key");
+        let tmp = std::env::temp_dir().join(format!("kronn-test-vibe-key-{}", std::process::id()));
         let _ = std::fs::create_dir_all(tmp.join(".vibe"));
         std::fs::write(
             tmp.join(".vibe/.env"),
@@ -395,7 +398,10 @@ mod tests {
     #[test]
     #[serial]
     fn write_gemini_key_starts_from_empty_when_file_missing() {
-        let tmp = std::env::temp_dir().join("kronn-test-gemini-write-missing");
+        let tmp = std::env::temp_dir().join(format!(
+            "kronn-test-gemini-write-missing-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
 
@@ -415,7 +421,10 @@ mod tests {
     #[test]
     #[serial]
     fn write_gemini_key_preserves_other_fields() {
-        let tmp = std::env::temp_dir().join("kronn-test-gemini-write-preserve");
+        let tmp = std::env::temp_dir().join(format!(
+            "kronn-test-gemini-write-preserve-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join(".gemini")).unwrap();
         std::fs::write(
@@ -449,7 +458,10 @@ mod tests {
     #[test]
     #[serial]
     fn write_gemini_key_refuses_to_overwrite_corrupt_settings() {
-        let tmp = std::env::temp_dir().join("kronn-test-gemini-write-corrupt");
+        let tmp = std::env::temp_dir().join(format!(
+            "kronn-test-gemini-write-corrupt-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join(".gemini")).unwrap();
         let corrupt = "{ not json — user's mcpServers live here";

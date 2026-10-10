@@ -171,6 +171,13 @@ pub(crate) fn build_step_prompt(
     Ok(prompt)
 }
 
+/// One retry step of an agent step's backoff (15 s, 30 s, 45 s… capped at 90 s).
+#[cfg(not(test))]
+const RETRY_BACKOFF_UNIT: Duration = Duration::from_secs(15);
+/// Unit tests check the retry order, not the wait: same shape, in milliseconds.
+#[cfg(test)]
+const RETRY_BACKOFF_UNIT: Duration = Duration::from_millis(15);
+
 /// Execute a single workflow step.
 ///
 /// - `project_path`: original project path for MCP context resolution
@@ -409,7 +416,7 @@ pub async fn execute_step(
             // rarely outlived a 429 window; 15s·attempt (15s/30s/45s, capped
             // 90s) gives a per-minute limit time to clear without stalling a
             // legitimate transient retry for minutes.
-            let delay = Duration::from_secs((15 * attempt as u64).min(90));
+            let delay = (RETRY_BACKOFF_UNIT * attempt).min(RETRY_BACKOFF_UNIT * 6);
             tracing::info!(
                 "Step '{}' retry {}/{} after {:?}",
                 step.name,

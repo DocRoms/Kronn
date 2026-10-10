@@ -3298,7 +3298,9 @@ mod tests {
                     command.to_str().unwrap(),
                     &[],
                     &env,
-                    Duration::from_secs(5),
+                    // The fake exits once it has written its environment, so
+                    // the probe returns then; the deadline only bounds a hang.
+                    Duration::from_secs(60),
                 ))
         });
         let seen = probe::read_dump(&out);

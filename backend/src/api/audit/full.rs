@@ -5384,7 +5384,7 @@ mod severity_tests {
 
     #[test]
     fn count_td_severities_tallies_canonical_values() {
-        let tmp = std::env::temp_dir().join("kronn-test-sev-count");
+        let tmp = std::env::temp_dir().join(format!("kronn-test-sev-count-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         std::fs::write(tmp.join("TD-001.md"), "# X\n- **Severity**: Critical\n").unwrap();
@@ -5454,7 +5454,8 @@ mod severity_tests {
         use super::super::reconciliation::TdSnapshot;
         use std::path::PathBuf;
 
-        let tmp = std::env::temp_dir().join("kronn-test-recon-counts");
+        let tmp =
+            std::env::temp_dir().join(format!("kronn-test-recon-counts-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
 

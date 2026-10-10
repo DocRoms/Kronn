@@ -126,7 +126,11 @@ pub struct BuildArtifactTarget {
 /// walking it took over 44 minutes — on a machine that was already unusable.
 /// A partial answer delivered now beats an exact one delivered after the disk
 /// has filled, so the walk stops and says so rather than finishing at any cost.
+#[cfg(not(test))]
 const SCAN_ENTRY_BUDGET: usize = 20_000;
+/// Same walk, a budget a unit test can exceed without writing 20,000 files.
+#[cfg(test)]
+const SCAN_ENTRY_BUDGET: usize = 500;
 
 /// An entry that exists and must not be reclaimed, carried into the inventory
 /// so a dry run never hides what it refuses to touch.

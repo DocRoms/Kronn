@@ -14,7 +14,8 @@ mod tests {
 
     #[test]
     fn detect_audit_status_no_ai_dir() {
-        let tmp = std::env::temp_dir().join("kronn-test-audit-no-dir");
+        let tmp =
+            std::env::temp_dir().join(format!("kronn-test-audit-no-dir-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
         // No ai/ dir → NoTemplate
         let status = detect_audit_status(&tmp.to_string_lossy());
@@ -24,7 +25,8 @@ mod tests {
 
     #[test]
     fn detect_audit_status_with_bootstrap() {
-        let tmp = std::env::temp_dir().join("kronn-test-audit-bootstrap");
+        let tmp =
+            std::env::temp_dir().join(format!("kronn-test-audit-bootstrap-{}", std::process::id()));
         let ai_dir = tmp.join("ai");
         let _ = std::fs::create_dir_all(&ai_dir);
         std::fs::write(
@@ -57,7 +59,10 @@ mod tests {
 
     #[test]
     fn detect_audit_status_bootstrapped_and_validated() {
-        let tmp = std::env::temp_dir().join("kronn-test-audit-bootstrapped-validated");
+        let tmp = std::env::temp_dir().join(format!(
+            "kronn-test-audit-bootstrapped-validated-{}",
+            std::process::id()
+        ));
         let ai_dir = tmp.join("ai");
         let _ = std::fs::create_dir_all(&ai_dir);
         std::fs::write(ai_dir.join("index.md"), "# Project\n<!-- KRONN:BOOTSTRAPPED:2026-03-14 -->\n<!-- KRONN:VALIDATED:2026-03-14 -->\n").unwrap();
@@ -68,7 +73,10 @@ mod tests {
 
     #[test]
     fn detect_audit_status_with_placeholder() {
-        let tmp = std::env::temp_dir().join("kronn-test-audit-placeholder");
+        let tmp = std::env::temp_dir().join(format!(
+            "kronn-test-audit-placeholder-{}",
+            std::process::id()
+        ));
         let ai_dir = tmp.join("ai");
         let _ = std::fs::create_dir_all(&ai_dir);
         std::fs::write(ai_dir.join("index.md"), "# {{PROJECT_NAME}}\n").unwrap();
@@ -85,7 +93,10 @@ mod tests {
         // Text that mentions {{...}} as an instruction (not a real placeholder) should NOT
         // trigger the placeholder check. When combined with a real audit record in
         // .kronn.json the project should resolve to Audited.
-        let tmp = std::env::temp_dir().join("kronn-test-audit-instr-braces");
+        let tmp = std::env::temp_dir().join(format!(
+            "kronn-test-audit-instr-braces-{}",
+            std::process::id()
+        ));
         let ai_dir = tmp.join("ai");
         let _ = std::fs::create_dir_all(&ai_dir);
         std::fs::write(
@@ -105,7 +116,8 @@ mod tests {
 
     #[test]
     fn detect_audit_status_validated() {
-        let tmp = std::env::temp_dir().join("kronn-test-audit-validated");
+        let tmp =
+            std::env::temp_dir().join(format!("kronn-test-audit-validated-{}", std::process::id()));
         let ai_dir = tmp.join("ai");
         let _ = std::fs::create_dir_all(&ai_dir);
         std::fs::write(ai_dir.join("index.md"), "# Project\nKRONN:VALIDATED\n").unwrap();
@@ -120,7 +132,8 @@ mod tests {
         // or a legacy `checksums.json`, or a legacy KRONN: marker.
         // A plain `index.md` no longer counts (that was the bug: any project
         // with a pre-existing `docs/AGENTS.md` was tagged green).
-        let tmp = std::env::temp_dir().join("kronn-test-audit-audited");
+        let tmp =
+            std::env::temp_dir().join(format!("kronn-test-audit-audited-{}", std::process::id()));
         let ai_dir = tmp.join("ai");
         let _ = std::fs::create_dir_all(&ai_dir);
         std::fs::write(ai_dir.join("index.md"), "# My Project\nFilled content\n").unwrap();
@@ -137,7 +150,10 @@ mod tests {
         // (no .kronn.json, no checksums.json, no KRONN: marker) must NOT be
         // reported as Audited — that was the symptom on AMP_EASY_BACKO and
         // DEMOCRATISCORE_WEB before this fix.
-        let tmp = std::env::temp_dir().join("kronn-test-audit-plain-docs");
+        let tmp = std::env::temp_dir().join(format!(
+            "kronn-test-audit-plain-docs-{}",
+            std::process::id()
+        ));
         let docs_dir = tmp.join("docs");
         let _ = std::fs::create_dir_all(&docs_dir);
         std::fs::write(
@@ -156,7 +172,10 @@ mod tests {
 
     #[test]
     fn detect_audit_status_kronn_state_validated() {
-        let tmp = std::env::temp_dir().join("kronn-test-audit-state-validated");
+        let tmp = std::env::temp_dir().join(format!(
+            "kronn-test-audit-state-validated-{}",
+            std::process::id()
+        ));
         let docs_dir = tmp.join("docs");
         let _ = std::fs::create_dir_all(&docs_dir);
         std::fs::write(docs_dir.join("AGENTS.md"), "# Project\nContent\n").unwrap();
@@ -172,7 +191,10 @@ mod tests {
 
     #[test]
     fn detect_audit_status_kronn_state_bootstrapped() {
-        let tmp = std::env::temp_dir().join("kronn-test-audit-state-bootstrapped");
+        let tmp = std::env::temp_dir().join(format!(
+            "kronn-test-audit-state-bootstrapped-{}",
+            std::process::id()
+        ));
         let docs_dir = tmp.join("docs");
         let _ = std::fs::create_dir_all(&docs_dir);
         std::fs::write(docs_dir.join("AGENTS.md"), "# Project\nContent\n").unwrap();
@@ -208,7 +230,10 @@ mod tests {
         // A project audited before `.kronn.json` existed has `docs/checksums.json`
         // but no state file. We must keep recognising it as Audited so the badge
         // doesn't regress on upgrade.
-        let tmp = std::env::temp_dir().join("kronn-test-audit-legacy-checksums");
+        let tmp = std::env::temp_dir().join(format!(
+            "kronn-test-audit-legacy-checksums-{}",
+            std::process::id()
+        ));
         let docs_dir = tmp.join("docs");
         let _ = std::fs::create_dir_all(&docs_dir);
         std::fs::write(docs_dir.join("AGENTS.md"), "# Project\nFilled\n").unwrap();
@@ -281,7 +306,8 @@ mod tests {
 
     #[test]
     fn count_ai_todos_empty() {
-        let tmp = std::env::temp_dir().join("kronn-test-todos-empty");
+        let tmp =
+            std::env::temp_dir().join(format!("kronn-test-todos-empty-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
         assert_eq!(count_ai_todos(&tmp.to_string_lossy()), 0);
         let _ = std::fs::remove_dir_all(&tmp);
@@ -289,7 +315,8 @@ mod tests {
 
     #[test]
     fn count_ai_todos_with_markers() {
-        let tmp = std::env::temp_dir().join("kronn-test-todos-markers");
+        let tmp =
+            std::env::temp_dir().join(format!("kronn-test-todos-markers-{}", std::process::id()));
         let ai_dir = tmp.join("ai");
         let _ = std::fs::create_dir_all(&ai_dir);
         std::fs::write(
@@ -306,7 +333,7 @@ mod tests {
     #[test]
     fn count_tech_debt_no_docs() {
         // No docs/ → 0 (graceful empty).
-        let tmp = std::env::temp_dir().join("kronn-test-td-none");
+        let tmp = std::env::temp_dir().join(format!("kronn-test-td-none-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let _ = std::fs::create_dir_all(&tmp);
         assert_eq!(count_tech_debt(&tmp.to_string_lossy()), 0);
@@ -322,7 +349,7 @@ mod tests {
         //   = {one, two, three, extra-1, extra-2} = 5
         // The README.md and TEMPLATE.md in the same folder must NOT
         // be counted (they're scaffolding, not actual debt items).
-        let tmp = std::env::temp_dir().join("kronn-test-td-mix");
+        let tmp = std::env::temp_dir().join(format!("kronn-test-td-mix-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let docs = tmp.join("docs");
         let td = docs.join("tech-debt");
@@ -354,7 +381,7 @@ mod tests {
         // row (the well-documented common case), the count is the
         // number of files, NOT files + rows. This catches the 0.8.1
         // double-counting regression flagged by the user.
-        let tmp = std::env::temp_dir().join("kronn-test-td-dedupe");
+        let tmp = std::env::temp_dir().join(format!("kronn-test-td-dedupe-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let docs = tmp.join("docs");
         let td = docs.join("tech-debt");
@@ -375,7 +402,7 @@ mod tests {
     fn count_tech_debt_legacy_ai_folder() {
         // Path-agnostic: a project still on the pre-0.7.1 layout
         // (legacy `ai/` directory) should still get its TDs counted.
-        let tmp = std::env::temp_dir().join("kronn-test-td-legacy");
+        let tmp = std::env::temp_dir().join(format!("kronn-test-td-legacy-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let docs = tmp.join("ai"); // legacy layout
         let td = docs.join("tech-debt");
@@ -392,7 +419,8 @@ mod tests {
 
     #[tokio::test]
     async fn scan_skips_ignored_directories() {
-        let tmp = std::env::temp_dir().join("kronn-test-scan-ignore");
+        let tmp =
+            std::env::temp_dir().join(format!("kronn-test-scan-ignore-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join("Library/some-app/.git")).unwrap();
         std::fs::create_dir_all(tmp.join("real-project/.git")).unwrap();
@@ -419,7 +447,7 @@ mod tests {
 
     #[tokio::test]
     async fn scan_ignore_is_case_insensitive() {
-        let tmp = std::env::temp_dir().join("kronn-test-scan-case");
+        let tmp = std::env::temp_dir().join(format!("kronn-test-scan-case-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join("NODE_MODULES/foo/.git")).unwrap();
         std::fs::create_dir_all(tmp.join("my-repo/.git")).unwrap();
@@ -694,7 +722,8 @@ mod tests {
 
     #[test]
     fn count_ai_todos_with_ask_user_markers() {
-        let tmp = std::env::temp_dir().join("kronn-test-todos-ask-user");
+        let tmp =
+            std::env::temp_dir().join(format!("kronn-test-todos-ask-user-{}", std::process::id()));
         let ai_dir = tmp.join("ai");
         let _ = std::fs::create_dir_all(&ai_dir);
         std::fs::write(
@@ -707,7 +736,8 @@ mod tests {
 
     #[test]
     fn count_ai_todos_in_tech_debt_subdir() {
-        let tmp = std::env::temp_dir().join("kronn-test-todos-techdebt");
+        let tmp =
+            std::env::temp_dir().join(format!("kronn-test-todos-techdebt-{}", std::process::id()));
         let td_dir = tmp.join("ai/tech-debt");
         let _ = std::fs::create_dir_all(&td_dir);
         std::fs::write(
@@ -728,7 +758,10 @@ mod tests {
 
     #[test]
     fn needs_migration_when_legacy_ai_only() {
-        let tmp = std::env::temp_dir().join("kronn-test-needs-mig-legacy");
+        let tmp = std::env::temp_dir().join(format!(
+            "kronn-test-needs-mig-legacy-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join("ai")).unwrap();
         std::fs::write(tmp.join("ai/index.md"), "# legacy\n").unwrap();
@@ -738,7 +771,10 @@ mod tests {
 
     #[test]
     fn needs_migration_false_when_docs_agents_exists() {
-        let tmp = std::env::temp_dir().join("kronn-test-needs-mig-migrated");
+        let tmp = std::env::temp_dir().join(format!(
+            "kronn-test-needs-mig-migrated-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join("docs")).unwrap();
         std::fs::write(tmp.join("docs/AGENTS.md"), "# agents\n").unwrap();
@@ -752,7 +788,8 @@ mod tests {
 
     #[test]
     fn needs_migration_false_for_fresh_project() {
-        let tmp = std::env::temp_dir().join("kronn-test-needs-mig-fresh");
+        let tmp =
+            std::env::temp_dir().join(format!("kronn-test-needs-mig-fresh-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         // No ai/ and no docs/ — fresh, no banner.
@@ -762,7 +799,10 @@ mod tests {
 
     #[test]
     fn needs_migration_false_for_doc_agents_layout() {
-        let tmp = std::env::temp_dir().join("kronn-test-needs-mig-doc-variant");
+        let tmp = std::env::temp_dir().join(format!(
+            "kronn-test-needs-mig-doc-variant-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join("doc")).unwrap();
         std::fs::write(tmp.join("doc/AGENTS.md"), "# agents\n").unwrap();
@@ -776,7 +816,8 @@ mod tests {
 
     #[test]
     fn detect_audit_status_ai_dir_no_index() {
-        let tmp = std::env::temp_dir().join("kronn-test-audit-no-index");
+        let tmp =
+            std::env::temp_dir().join(format!("kronn-test-audit-no-index-{}", std::process::id()));
         let ai_dir = tmp.join("ai");
         let _ = std::fs::create_dir_all(&ai_dir);
         // ai/ dir exists but no index.md → TemplateInstalled

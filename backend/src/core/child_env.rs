@@ -1091,6 +1091,11 @@ pub(crate) mod probe {
         )
         .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // The first exec of a fresh file can take seconds on a loaded machine
+        // (macOS scans it); pay it here, outside the deadline under test.
+        let warmed = std::process::Command::new(&script).status().unwrap();
+        assert!(warmed.success(), "{} did not run", script.display());
+        std::fs::remove_file(&out).unwrap();
         out
     }
 

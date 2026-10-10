@@ -16697,7 +16697,7 @@ async fn fetch_file_scoped_to_shared_disc_serves_bytes_and_rejects_unknown() {
         })
         .await
         .unwrap();
-    let tmp = std::env::temp_dir().join("kronn_f8_fetch_test.bin");
+    let tmp = std::env::temp_dir().join(format!("kronn_f8_fetch_test.bin-{}", std::process::id()));
     std::fs::write(&tmp, b"hello-doc-bytes").unwrap();
     let path = tmp.to_string_lossy().to_string();
     state
@@ -17232,6 +17232,15 @@ fn test_state_without_fixture() -> AppState {
     )
 }
 
+/// The libtest name of a test in this file, whichever binary holds it: libtest
+/// drops the crate name from `module_path!()`, and `--exact` matches the rest.
+fn libtest_path(test: &str) -> String {
+    match module_path!().split_once("::") {
+        Some((_, module)) => format!("{module}::{test}"),
+        None => test.to_string(),
+    }
+}
+
 /// Runs the real MCP creation endpoint in a fresh test process. The parent
 /// gives that process a synthetic host-home sentinel; `test_state` must replace
 /// it with its owned fixture before the endpoint reaches the host-sync adapters.
@@ -17261,7 +17270,7 @@ async fn mcp_host_sync_router_confines_an_inherited_host_home() {
             let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
-                    "mcp_host_sync_router_confines_an_inherited_host_home",
+                    &libtest_path("mcp_host_sync_router_confines_an_inherited_host_home"),
                     "--nocapture",
                 ])
                 .env(MCP_HOST_ISOLATION_CHILD, "1")
@@ -23190,7 +23199,7 @@ Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what 
     );
     envelope_get!(
         disc_wait_unknown_id,
-        "/api/discussions/nope/wait?timeout_s=1"
+        "/api/discussions/nope/wait?timeout_secs=1"
     );
     envelope_post!(
         disc_invite_peer_unknown_id,
@@ -23559,7 +23568,7 @@ Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what 
     );
     envelope_get!(
         disc_invite_wait_unknown,
-        "/api/discussions/nope/wait?timeout_s=1"
+        "/api/discussions/nope/wait?timeout_secs=1"
     );
     envelope_post!(
         disc_invite_peer_join_no_disc,

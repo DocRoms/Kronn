@@ -1,0 +1,24 @@
+# One configuration for local runs (`make test-backend`) and CI
+# (`--profile ci`): the same runner, the same isolation, the same timeouts.
+# Every test runs in its own process, so a test that needs exclusive access to
+# something outside its process (a fixed path, a port) must create its own.
+
+[profile.default]
+# Show every failure of a run, not just the first one.
+fail-fast = false
+retries = 0
+# Report a test after 30 s, kill it after 5 min instead of hanging the run.
+slow-timeout = { period = "30s", terminate-after = 10 }
+# The ts-rs exports rewrite frontend bindings; `make typegen` runs them.
+default-filter = "not test(export_bindings)"
+
+[profile.ci]
+fail-fast = false
+retries = 0
+slow-timeout = { period = "30s", terminate-after = 10 }
+failure-output = "immediate-final"
+# CI regenerates the bindings in the same run, then checks generated.ts drifts.
+default-filter = "all()"
+
+[profile.ci.junit]
+path = "junit.xml"
