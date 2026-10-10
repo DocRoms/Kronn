@@ -25,6 +25,15 @@ Release notes for 0.9.3 and earlier are available in the
   Unmapped sections are listed and stay where they are. Calling it again
   resumes the same worktree. `.../accept` commits the files you keep on that
   branch, and `DELETE` drops the worktree.
+- The project's Audit tab now offers this merge (KT-1181). On a documented
+  repository that was never merged, "Lancer l'audit" first opens the merge
+  panel, which also lets you run the audit without merging. The panel shows
+  the correspondence table with a badge per action, with unmapped sections
+  highlighted as left in place, and warns about docs that git does not track
+  yet so you commit them first. You pick the local or remote base, then get
+  one diff per file that you accept one by one or all at once. You can also
+  resume or abandon the merge. Every error says what to fix and offers
+  "Reprendre".
 
 ### Fixed
 

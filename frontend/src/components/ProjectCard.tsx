@@ -10,6 +10,8 @@ import { AiDocViewer } from './AiDocViewer';
 import { unseenBasis } from '../lib/discussionUiUtils';
 import AuditRecapPanel from './AuditRecapPanel';
 import { AuditTimeline } from './AuditTimeline';
+import { TemplateMergeOfferSlot } from './TemplateMergePanel';
+import { useTemplateMergeOffer } from '../hooks/useTemplateMergeOffer';
 import type { AuditKind } from '../types/AuditKind';
 import { ProjectLinkedRepos } from './ProjectLinkedRepos';
 import {
@@ -495,6 +497,13 @@ export function ProjectCard({
     }).catch(() => { /* idle on error — button stays "Lancer" */ });
     return () => { cancelled = true; };
   }, [proj.id, proj.audit_status, auditActive]);
+
+  // KT-1181 — a documented repo never merged gets the template v2 merge before its audit.
+  const templateMerge = useTemplateMergeOffer(
+    proj.id,
+    proj.audit_status,
+    !auditActive && (detailMode ? detailView === 'audit' : isSectionOpen('aiContext')),
+  );
 
   // Keep the latest terminal result visible on an opened project card. The
   // live tracker owns the in-progress state; history owns the durable result
@@ -2381,6 +2390,9 @@ export function ProjectCard({
                     </div>
                   </div>
                 )}
+                {!bootstrapInProgress && !auditActive && (
+                  <TemplateMergeOfferSlot offer={templateMerge} projectId={proj.id} />
+                )}
                 {!bootstrapInProgress && (
                   <AuditTimeline
                     projectId={proj.id}
@@ -2416,7 +2428,9 @@ export function ProjectCard({
                       : null}
                     onCancel={handleCancelAudit}
                     resumable={resumableAudit}
-                    onLaunch={() => void handleFullAudit()}
+                    onLaunch={() => resumableAudit
+                      ? void handleFullAudit()
+                      : void templateMerge.gateLaunch(() => void handleFullAudit())}
                     validationInProgress={validationInProgress}
                     onValidate={() => {
                       if (validationInProgress && validationDisc) {
