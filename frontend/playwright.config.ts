@@ -57,7 +57,8 @@ export default defineConfig({
   // state is consistent.
   retries: 1,
   workers: 1,
-  reporter: process.env.CI ? 'github' : 'list',
+  // CI shards each write a blob report; `test-e2e` merges them on failure.
+  reporter: process.env.CI ? [['github'], ['blob']] : 'list',
   // Default action timeout (click, fill, etc.) — Kronn's API can be slow on
   // first cold-cache request, 10s leaves margin without making tests sleep.
   timeout: 30_000,

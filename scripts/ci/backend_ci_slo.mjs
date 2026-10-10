@@ -2,8 +2,12 @@
 /** Publishes backend CI timing evidence without changing functional gates. */
 import assert from "node:assert/strict";
 
+// The backend chain: one instrumented build, N test partitions, then the
+// aggregate that merges coverage and keeps the `test-backend` check name.
+export const BACKEND_BUILD_JOB = "build-backend-tests";
+export const BACKEND_PARTITION_PREFIX = "test-backend-partition";
 export const BACKEND_JOB = "test-backend";
-// The one backend test pass (nextest + coverage) on a hot cache.
+// Build start to aggregate end, on a hot cache.
 export const SLO_MS = 10 * 60 * 1000;
 export const HISTORY_LIMIT = 20;
 export const HOT_CACHE_HIT_STEP = "Record compiled cache hit";
@@ -15,15 +19,56 @@ function milliseconds(startedAt, completedAt) {
   return Number.isFinite(start) && Number.isFinite(end) && end >= start ? end - start : null;
 }
 
-/** Trigger to the aggregate gate's verdict: what a pull request waits. */
-export function fastLoopDurationMs(run, jobs) {
-  const gate = jobs.find((job) => job.name === GATE_JOB);
-  return gate ? milliseconds(run?.created_at, gate.completed_at) : null;
+function attemptOf(run) {
+  return Number(run?.run_attempt ?? 1) || 1;
 }
 
-/** Billed runner time: every job of the run that started, summed. */
-export function runnerMilliseconds(jobs) {
-  return jobs.reduce((total, job) => total + (milliseconds(job.started_at, job.completed_at) ?? 0), 0);
+/** Jobs a partial re-run copied from an earlier attempt: they did not run in this one. */
+export function copiedJobs(run, jobs) {
+  const attempt = attemptOf(run);
+  if (attempt < 2) return [];
+  const attemptStart = Date.parse(run?.run_started_at ?? "");
+  return jobs.filter((job) => (
+    (job.run_attempt !== undefined && Number(job.run_attempt) < attempt)
+    || (Number.isFinite(attemptStart) && Date.parse(job.started_at ?? "") < attemptStart)
+  ));
+}
+
+/**
+ * Trigger to the aggregate gate's verdict: what a pull request waits. A re-run
+ * is measured from its own attempt's start, never from the first trigger, so
+ * the wait between attempts is never counted; a partial re-run has no loop.
+ */
+export function fastLoopDurationMs(run, jobs) {
+  const gate = jobs.find((job) => job.name === GATE_JOB);
+  if (!gate || copiedJobs(run, jobs).length > 0) return null;
+  const start = attemptOf(run) > 1 ? run?.run_started_at : run?.created_at;
+  return milliseconds(start, gate.completed_at);
+}
+
+/** Billed runner time of this attempt: every job that ran in it, summed. */
+export function runnerMilliseconds(jobs, run = {}) {
+  const copied = new Set(copiedJobs(run, jobs));
+  return jobs.filter((job) => !copied.has(job))
+    .reduce((total, job) => total + (milliseconds(job.started_at, job.completed_at) ?? 0), 0);
+}
+
+/**
+ * Build start to aggregate end in RUN's current attempt, or null when the
+ * build or the aggregate is missing, or when any job of the chain was copied
+ * from an earlier attempt (the span would include the wait, or not be current).
+ */
+export function backendChain(jobs, run = {}) {
+  const builds = jobs.filter((job) => job.name === BACKEND_BUILD_JOB);
+  const aggregates = jobs.filter((job) => job.name === BACKEND_JOB);
+  if (builds.length !== 1 || aggregates.length !== 1) return null;
+  const partitions = jobs.filter((job) => job.name?.startsWith(BACKEND_PARTITION_PREFIX));
+  const chain = [builds[0], ...partitions, aggregates[0]];
+  const copied = new Set(copiedJobs(run, jobs));
+  if (chain.some((job) => copied.has(job))) return null;
+  if (new Set(chain.map((job) => Number(job.run_attempt ?? 1))).size !== 1) return null;
+  const durationMs = milliseconds(builds[0].started_at, aggregates[0].completed_at);
+  return durationMs === null ? null : { build: builds[0], partitions, aggregate: aggregates[0], durationMs };
 }
 
 export function formatDuration(durationMs) {
@@ -38,10 +83,11 @@ export function percentile(values, percentileValue) {
   return sorted[Math.ceil(sorted.length * percentileValue) - 1];
 }
 
-export function summarizeBackendJobs(jobs) {
-  const samples = jobs.filter((job) => job.name === BACKEND_JOB)
-    .map((job) => ({ ...job, durationMs: milliseconds(job.started_at, job.completed_at) }))
-    .filter((job) => job.durationMs !== null);
+/** History of hot chains: one { run, jobs } per earlier run, kept when its build restored the cache. */
+export function summarizeBackendRuns(runs) {
+  const samples = runs.map(({ run, jobs }) => backendChain(jobs, run))
+    .filter((chain) => chain !== null && hasRestoredCompiledCache(chain.build))
+    .map((chain) => ({ completed_at: chain.aggregate.completed_at, durationMs: chain.durationMs }));
   const durations = samples.map((sample) => sample.durationMs);
   const newestFirst = [...samples].sort((left, right) => Date.parse(right.completed_at) - Date.parse(left.completed_at));
   let consecutiveBreaches = 0;
@@ -80,20 +126,30 @@ export function timingStatus(durationMs) {
   return durationMs > SLO_MS ? "breach" : "within SLO";
 }
 
-export function requireCurrentBackendJob(jobs) {
-  const matches = jobs.filter((job) => job.name === BACKEND_JOB);
-  if (matches.length !== 1) {
-    throw new Error(`Expected exactly one ${BACKEND_JOB} job, found ${matches.length}`);
+/**
+ * The current attempt's backend chain, or { chain: null, unavailable } when a
+ * re-run copied part or all of it from an earlier attempt: a normal outcome,
+ * published as unavailable. Missing, duplicate or unfinished jobs, or a chain
+ * of this attempt without a valid duration, are invalid data and throw.
+ */
+export function currentBackendChain(jobs, run = {}) {
+  for (const name of [BACKEND_BUILD_JOB, BACKEND_JOB]) {
+    const matches = jobs.filter((job) => job.name === name);
+    if (matches.length !== 1) throw new Error(`Expected exactly one ${name} job, found ${matches.length}`);
+    if (matches[0].status && matches[0].status !== "completed") {
+      throw new Error(`${name} is not complete (status: ${matches[0].status})`);
+    }
   }
-  const job = matches[0];
-  if (job.status && job.status !== "completed") {
-    throw new Error(`${BACKEND_JOB} is not complete (status: ${job.status})`);
+  const copied = new Set(copiedJobs(run, jobs));
+  const chainJobs = jobs.filter((job) => job.name === BACKEND_BUILD_JOB || job.name === BACKEND_JOB
+    || job.name?.startsWith(BACKEND_PARTITION_PREFIX));
+  const copiedNames = chainJobs.filter((job) => copied.has(job)).map((job) => job.name);
+  if (copiedNames.length > 0) {
+    return { chain: null, unavailable: `partial re-run: ${copiedNames.join(", ")} copied from an earlier attempt` };
   }
-  const durationMs = milliseconds(job.started_at, job.completed_at);
-  if (durationMs === null) {
-    throw new Error(`${BACKEND_JOB} has no valid completed duration`);
-  }
-  return { ...job, durationMs };
+  const chain = backendChain(jobs, run);
+  if (chain === null) throw new Error(`${BACKEND_BUILD_JOB} to ${BACKEND_JOB} has no valid duration within one attempt`);
+  return { chain, unavailable: null };
 }
 
 export function validateCompiledCacheState(requestedMode, state, compiledCacheHit) {
@@ -122,15 +178,34 @@ async function jobsForRun(runId) {
   return payload.jobs ?? [];
 }
 
-export function markdown(summary, currentJob, mode, compiledCacheHit, runTotals = { fastLoopMs: null, runnerMs: null }) {
-  const currentDuration = currentJob?.durationMs ?? null;
-  const status = timingStatus(currentDuration);
+const durationRow = (item) => `| ${item.name} | ${formatDuration(milliseconds(item.started_at, item.completed_at))} |`;
+
+export function markdown(summary, chain, mode, compiledCacheHit, runTotals = { fastLoopMs: null, runnerMs: null, attempt: 1 }, unavailable = null) {
+  const currentDuration = chain?.durationMs ?? null;
+  const status = unavailable ?? timingStatus(currentDuration);
   const cacheState = mode === "cold" ? "not applicable" : compiledCacheHit ? "hit" : "miss";
-  const stepRows = (currentJob?.steps ?? []).map((step) => `| ${step.name} | ${formatDuration(milliseconds(step.started_at, step.completed_at))} |`);
+  const attempt = runTotals.attempt ?? 1;
+  const loopLabel = `Trigger to ${GATE_JOB}, attempt ${attempt}${attempt > 1 ? " (from the attempt's start)" : ""}`;
+  const jobRows = (chain ? [chain.build, ...chain.partitions, chain.aggregate] : []).map(durationRow);
+  const stepRows = (chain?.build.steps ?? []).map(durationRow);
   const historyDescription = mode === "cold"
     ? "Current run only; cold measurements are intentionally excluded from historical hot-cache statistics."
     : "Successful pull-request runs from the same head branch whose compiled cache was restored; manual, failed, cancelled, cold, warmup/miss, and other-branch runs are excluded.";
-  return ["## Backend CI timing", "", `Effective measurement mode: **${mode}**. Compiled cache: **${cacheState}**. The SLO is ${formatDuration(SLO_MS)} for \`${BACKEND_JOB}\`; this report never changes a functional gate.`, `Historical evidence: ${historyDescription}`, "", "| Metric | Value |", "| --- | --- |", `| Current backend critical path | ${formatDuration(currentDuration)} (${status}; ${mode}) |`, `| Trigger to ${GATE_JOB} | ${formatDuration(runTotals.fastLoopMs)} |`, `| Runner time, all jobs of this run | ${formatDuration(runTotals.runnerMs)} |`, `| Historical hot sample size | ${summary.samples.length} completed runs |`, `| Historical hot median | ${formatDuration(summary.medianMs)} |`, `| Historical hot P95 | ${formatDuration(summary.p95Ms)} |`, `| Historical hot consecutive SLO breaches | ${summary.consecutiveBreaches} |`, "", "### Current backend job steps", "", "| Step | Duration |", "| --- | --- |", ...stepRows, ""].join("\n");
+  return [
+    "## Backend CI timing", "",
+    `Effective measurement mode: **${mode}**. Compiled cache: **${cacheState}**. The SLO is ${formatDuration(SLO_MS)} from \`${BACKEND_BUILD_JOB}\` start to \`${BACKEND_JOB}\` end; this report never changes a functional gate.`,
+    `Historical evidence: ${historyDescription}`, "",
+    "| Metric | Value |", "| --- | --- |",
+    `| Current backend critical path | ${formatDuration(currentDuration)} (${status}; ${mode}) |`,
+    `| ${loopLabel} | ${runTotals.fastLoopMs === null && attempt > 1 ? "unavailable (partial re-run)" : formatDuration(runTotals.fastLoopMs)} |`,
+    `| Runner time, jobs run in this attempt | ${formatDuration(runTotals.runnerMs)} |`,
+    `| Historical hot sample size | ${summary.samples.length} completed runs |`,
+    `| Historical hot median | ${formatDuration(summary.medianMs)} |`,
+    `| Historical hot P95 | ${formatDuration(summary.p95Ms)} |`,
+    `| Historical hot consecutive SLO breaches | ${summary.consecutiveBreaches} |`, "",
+    "### Current backend chain", "", "| Job | Duration |", "| --- | --- |", ...jobRows, "",
+    "### Build job steps", "", "| Step | Duration |", "| --- | --- |", ...stepRows, "",
+  ].join("\n");
 }
 
 async function main() {
@@ -149,15 +224,18 @@ async function main() {
   const comparableRuns = mode === "hot"
     ? comparableSuccessfulHotRuns(history.workflow_runs ?? [], currentRun)
     : [];
-  const priorRunIds = comparableRuns.map((run) => String(run.id));
-  const priorJobs = await Promise.all(priorRunIds.map(jobsForRun));
-  const currentJob = requireCurrentBackendJob(currentJobs);
-  const summary = summarizeBackendJobs(priorJobs.flat().filter(hasRestoredCompiledCache));
-  const runTotals = { fastLoopMs: fastLoopDurationMs(currentRun, currentJobs), runnerMs: runnerMilliseconds(currentJobs) };
-  const report = markdown(summary, currentJob, mode, compiledCacheHit, runTotals);
+  const priorRuns = await Promise.all(comparableRuns.map(async (run) => ({ run, jobs: await jobsForRun(String(run.id)) })));
+  const { chain, unavailable } = currentBackendChain(currentJobs, currentRun);
+  const summary = summarizeBackendRuns(priorRuns);
+  const runTotals = {
+    fastLoopMs: fastLoopDurationMs(currentRun, currentJobs),
+    runnerMs: runnerMilliseconds(currentJobs, currentRun),
+    attempt: attemptOf(currentRun),
+  };
+  const report = markdown(summary, chain, mode, compiledCacheHit, runTotals, unavailable);
   process.stdout.write(`${report}\n`);
   if (process.env.GITHUB_STEP_SUMMARY) await (await import("node:fs/promises")).appendFile(process.env.GITHUB_STEP_SUMMARY, `${report}\n`);
-  if (currentJob.durationMs > SLO_MS) console.log(`::warning title=Backend CI SLO exceeded::${BACKEND_JOB} took ${formatDuration(currentJob.durationMs)} (SLO ${formatDuration(SLO_MS)}); functional gates remain authoritative.`);
+  if (chain && chain.durationMs > SLO_MS) console.log(`::warning title=Backend CI SLO exceeded::the backend chain took ${formatDuration(chain.durationMs)} (SLO ${formatDuration(SLO_MS)}); functional gates remain authoritative.`);
 }
 
 if (process.argv[1] === new URL(import.meta.url).pathname) main().catch((error) => {

@@ -11,6 +11,18 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+### Changed
+
+- **CI: the backend suite runs in partitions, the E2E specs in shards
+  (KT-1118).** One job builds the instrumented backend tests once as a nextest
+  archive; partition jobs each run a share of it, and `test-backend` fails
+  unless every partition, artifact and test of the archive's inventory is
+  there, then checks the coverage floors once on the merged profiles, with no
+  fallback test run. The Playwright specs run in shards against one shared
+  dev build. Partition and shard counts, sccache and a fallback Cargo cache are
+  measurement settings. The timing report measures a re-run from its own
+  attempt, so it no longer counts the wait between attempts.
+
 ## [0.14.3] - 2026-10-07
 
 ### Upgrade notes
