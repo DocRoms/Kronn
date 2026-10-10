@@ -684,47 +684,92 @@ command = "manual-command"
         cleanup(&tmp);
     }
 
-    // ─── ensure_gitignore ──────────────────────────────────────────────────
+    // ─── ensure_local_exclude ──────────────────────────────────────────────
+
+    fn git_repo_with_gitignore(name: &str, gitignore: Option<&[u8]>) -> std::path::PathBuf {
+        let tmp = setup_tmp(name);
+        let git = |args: &[&str]| {
+            let ok = crate::core::cmd::git_cmd()
+                .args(args)
+                .current_dir(&tmp)
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        if let Some(body) = gitignore {
+            std::fs::write(tmp.join(".gitignore"), body).unwrap();
+            git(&["add", ".gitignore"]);
+        }
+        std::fs::write(tmp.join("README.md"), "x\n").unwrap();
+        git(&["add", "README.md"]);
+        git(&["commit", "-q", "-m", "init"]);
+        tmp
+    }
+
+    fn status(tmp: &std::path::Path) -> String {
+        let out = crate::core::cmd::git_cmd()
+            .args(["status", "--porcelain"])
+            .current_dir(tmp)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).to_string()
+    }
 
     #[test]
-    fn ensure_gitignore_adds_kiro_and_gemini_patterns() {
-        let tmp = setup_tmp("gitignore");
-        // Create empty .gitignore
-        std::fs::write(tmp.join(".gitignore"), ".mcp.json\n").unwrap();
-
-        ensure_gitignore_public(&tmp.to_string_lossy(), ".kiro/settings/");
-        ensure_gitignore_public(&tmp.to_string_lossy(), ".gemini/");
-
-        let content = std::fs::read_to_string(tmp.join(".gitignore")).unwrap();
-        assert!(
-            content.contains(".kiro/settings/"),
-            "Should contain .kiro/settings/"
+    fn local_exclude_ignores_paths_without_touching_gitignore() {
+        let tmp = git_repo_with_gitignore("excl-tracked", Some(b"target/\nno-newline"));
+        let root = tmp.to_string_lossy().to_string();
+        for pattern in [".kiro/settings/", ".mcp.json", "/.claude/agents/x.md"] {
+            ensure_local_exclude(&root, pattern);
+        }
+        std::fs::create_dir_all(tmp.join(".kiro/settings")).unwrap();
+        std::fs::write(tmp.join(".kiro/settings/mcp.json"), "{}").unwrap();
+        std::fs::write(tmp.join(".mcp.json"), "{}").unwrap();
+        std::fs::create_dir_all(tmp.join(".claude/agents")).unwrap();
+        std::fs::write(tmp.join(".claude/agents/x.md"), "x").unwrap();
+        assert_eq!(status(&tmp), "");
+        assert_eq!(
+            std::fs::read(tmp.join(".gitignore")).unwrap(),
+            b"target/\nno-newline"
         );
-        assert!(content.contains(".gemini/"), "Should contain .gemini/");
-        assert!(
-            content.contains(".mcp.json"),
-            "Should still contain .mcp.json"
-        );
-
         cleanup(&tmp);
     }
 
     #[test]
-    fn ensure_gitignore_idempotent() {
-        let tmp = setup_tmp("gitignore-idem");
-        std::fs::write(tmp.join(".gitignore"), "").unwrap();
+    fn local_exclude_creates_no_gitignore_and_is_idempotent() {
+        let tmp = git_repo_with_gitignore("excl-absent", None);
+        let root = tmp.to_string_lossy().to_string();
+        ensure_local_exclude(&root, ".kronn/");
+        ensure_local_exclude(&root, ".kronn/");
+        assert!(!tmp.join(".gitignore").exists());
+        let exclude = std::fs::read_to_string(tmp.join(".git/info/exclude")).unwrap();
+        assert_eq!(exclude.lines().filter(|l| *l == ".kronn/").count(), 1);
+        std::fs::create_dir_all(tmp.join(".kronn/tmp")).unwrap();
+        std::fs::write(tmp.join(".kronn/tmp/a"), "x").unwrap();
+        assert_eq!(status(&tmp), "");
+        cleanup(&tmp);
+    }
 
-        // Add same pattern twice
-        ensure_gitignore_public(&tmp.to_string_lossy(), ".kiro/settings/");
-        ensure_gitignore_public(&tmp.to_string_lossy(), ".kiro/settings/");
+    #[test]
+    fn local_exclude_skips_a_rule_the_gitignore_already_has() {
+        let tmp = git_repo_with_gitignore("excl-present", Some(b".kronn/\n"));
+        ensure_local_exclude(&tmp.to_string_lossy(), ".kronn/");
+        let exclude = std::fs::read_to_string(tmp.join(".git/info/exclude")).unwrap_or_default();
+        assert!(!exclude.lines().any(|l| l == ".kronn/"));
+        assert_eq!(std::fs::read(tmp.join(".gitignore")).unwrap(), b".kronn/\n");
+        cleanup(&tmp);
+    }
 
-        let content = std::fs::read_to_string(tmp.join(".gitignore")).unwrap();
-        let count = content
-            .lines()
-            .filter(|l| l.trim() == ".kiro/settings/")
-            .count();
-        assert_eq!(count, 1, "Pattern should appear exactly once");
-
+    #[test]
+    fn local_exclude_in_a_non_git_directory_writes_nothing() {
+        let tmp = setup_tmp("excl-nogit");
+        ensure_local_exclude(&tmp.to_string_lossy(), ".kronn/");
+        assert!(!tmp.join(".gitignore").exists());
         cleanup(&tmp);
     }
 

@@ -673,6 +673,20 @@ fn worktree_base_dir(repo_path: &Path) -> PathBuf {
 /// tracked `.gitignore`. Provisioning must not make the target dirty itself — a
 /// dirty target is (correctly) refused later by the integration preflight.
 pub(crate) fn ensure_local_git_exclude(repo_path: &Path, pattern: &str) -> Result<(), String> {
+    // Already ignored (a committed rule, or a previous run): write nothing.
+    if crate::core::cmd::git_cmd()
+        .args([
+            "check-ignore",
+            "-q",
+            "--no-index",
+            pattern.trim_start_matches('/'),
+        ])
+        .current_dir(repo_path)
+        .status()
+        .is_ok_and(|status| status.success())
+    {
+        return Ok(());
+    }
     let output = crate::core::cmd::git_cmd()
         .args(["rev-parse", "--git-path", "info/exclude"])
         .current_dir(repo_path)

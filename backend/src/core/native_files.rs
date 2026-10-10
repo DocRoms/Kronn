@@ -482,7 +482,7 @@ fn sync_impl(
                     && !gitignore_negates_under(root, dir)
                 {
                     // Only the file Kronn wrote, never the agent's whole folder.
-                    crate::core::mcp_scanner::ensure_gitignore_public(
+                    crate::core::mcp_scanner::ensure_local_exclude(
                         project_path,
                         &format!("/{rel}"),
                     );

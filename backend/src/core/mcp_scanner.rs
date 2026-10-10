@@ -433,7 +433,7 @@ pub(crate) fn write_kronn_internal_only(project_path: &str) -> Result<bool, Stri
         return Ok(false);
     }
     write_owned_mcp_json_to_subpath(project_path, ".mcp.json", &only_internal)?;
-    ensure_gitignore(project_path, ".mcp.json");
+    ensure_local_exclude(project_path, ".mcp.json");
     let merged = read_mcp_json(project_path).unwrap_or_else(|| only_internal.clone());
     sync_claude_enabled_servers(project_path, &merged.mcp_servers);
     for (subpath, ignore, agent) in [
@@ -450,7 +450,7 @@ pub(crate) fn write_kronn_internal_only(project_path: &str) -> Result<bool, Stri
             continue;
         }
         write_owned_mcp_json_to_subpath(project_path, subpath, &only_internal)?;
-        ensure_gitignore(project_path, ignore);
+        ensure_local_exclude(project_path, ignore);
     }
     Ok(true)
 }
@@ -488,7 +488,7 @@ fn backup_before_refusal(project_path: &str, file: &Path) -> Result<(), String> 
         }
         return Ok(());
     }
-    ensure_gitignore(project_path, ".kronn/");
+    ensure_local_exclude(project_path, ".kronn/");
     let redacted = crate::core::mcp_secret_refs::enabled()
         .then(|| std::fs::read_to_string(file).ok())
         .flatten()
@@ -596,7 +596,7 @@ fn save_mcp_ownership(project_path: &str, state: &McpOwnershipState) -> Result<(
     let path = ownership_state_path(project_path);
     ensure_safe_kronn_state_dir(project_path)?;
     refuse_project_symlink_chain(project_path, &path, "MCP ownership state")?;
-    ensure_gitignore(project_path, ".kronn/");
+    ensure_local_exclude(project_path, ".kronn/");
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
             format!(
@@ -1609,7 +1609,7 @@ pub fn sync_project_mcps_to_disk(
         // the agent process env (KRONN_DISCUSSION_ID) — see runner.rs.
         inject_kronn_internal(&mut claude_data);
         write_owned_mcp_json_to_subpath(&target, ".mcp.json", &claude_data)?;
-        ensure_gitignore(&target, ".mcp.json");
+        ensure_local_exclude(&target, ".mcp.json");
         tracing::info!(
             "Synced .mcp.json for {} ({} stdio MCPs)",
             project.path,
@@ -1690,7 +1690,7 @@ pub fn sync_project_mcps_to_disk(
         let kiro = crate::agents::installed_or_unknown(&AgentType::Kiro);
         if kiro {
             write_owned_mcp_json_to_subpath(&target, ".kiro/settings/mcp.json", &kiro_data)?;
-            ensure_gitignore(&target, ".kiro/settings/");
+            ensure_local_exclude(&target, ".kiro/settings/");
         }
         tracing::info!(
             "Synced .kiro/settings/mcp.json for {} ({} servers, {} excluded)",
@@ -1704,14 +1704,14 @@ pub fn sync_project_mcps_to_disk(
         inject_kronn_internal(&mut gemini_data);
         if crate::agents::installed_or_unknown(&AgentType::GeminiCli) {
             write_owned_mcp_json_to_subpath(&target, ".gemini/settings.json", &gemini_data)?;
-            ensure_gitignore(&target, ".gemini/");
+            ensure_local_exclude(&target, ".gemini/");
         }
         tracing::info!("Synced .gemini/settings.json for {}", project.path);
 
         // ── Kiro (new format): .ai/mcp/mcp.json ──
         if kiro {
             write_owned_mcp_json_to_subpath(&target, ".ai/mcp/mcp.json", &kiro_data)?;
-            ensure_gitignore(&target, ".ai/mcp/");
+            ensure_local_exclude(&target, ".ai/mcp/");
         }
         tracing::info!("Synced .ai/mcp/mcp.json for {}", project.path);
 
@@ -2031,7 +2031,7 @@ fn sync_vibe_project_config(
         }
         save_mcp_ownership(project_path, &state)?;
     }
-    ensure_gitignore(project_path, ".vibe/");
+    ensure_local_exclude(project_path, ".vibe/");
     tracing::info!("Safely merged .vibe/config.toml for {}", project_path);
     warn_if_vibe_trust_blocks(&vibe_dir);
     Ok(())
@@ -3781,9 +3781,21 @@ pub fn sync_all_projects(conn: &rusqlite::Connection, secret: &str) {
     }
 }
 
-// ─── .gitignore safety ───────────────────────────────────────────────────────
+// ─── local exclude (never the operator's .gitignore) ────────────────────────
+
+/// Keep a Kronn-private path out of `git status` through the repository's
+/// local `info/exclude` (one implementation: `worktree::ensure_local_git_exclude`).
+pub fn ensure_local_exclude(project_path: &str, pattern: &str) {
+    let resolved = resolve_host_path(project_path);
+    if let Err(e) = crate::core::worktree::ensure_local_git_exclude(Path::new(&resolved), pattern) {
+        tracing::debug!("local exclude of '{pattern}' skipped for {project_path}: {e}");
+    }
+}
 
 /// Ensure a pattern is present in the project's .gitignore (public API).
+///
+/// Audit-only (`api/audit/full.rs`, KT-1165): every other caller uses
+/// [`ensure_local_exclude`]. Remove with the audit migration.
 pub fn ensure_gitignore_public(project_path: &str, pattern: &str) {
     ensure_gitignore(project_path, pattern);
 }

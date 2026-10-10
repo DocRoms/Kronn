@@ -40,6 +40,17 @@ Release notes for 0.9.3 and earlier are available in the
   (KT-1149). Only the standalone backend armed it, so on desktop the setting
   was ignored until it was saved again in Settings. The arming moved into the
   shared startup config load, so both boot paths run it and cannot diverge.
+- Creating an isolated worktree no longer edits the operator's checkout
+  (KT-1125). It used to create or append to the project `.gitignore` to hide
+  `.kronn/`, which left a new file or a modified tracked file in `git status`.
+  The rule now goes into the repository's local `info/exclude` (the shared git
+  common dir), once, and nothing at all when `.kronn/` is already ignored.
+  The same holds for every other private path Kronn used to add to the project
+  `.gitignore` (`.kronn/tmp/`, `.kronn/context-files/`, generated `.mcp.json`,
+  `.kiro/`, `.gemini/`, `.vibe/`, `.ai/mcp/`, agent profile files, `docs/var/`
+  on project status) and for the startup sweep over all projects.
+  A `.kronn/` line that an older version already added to a `.gitignore` is
+  left in place: Kronn never removes lines from your files.
 - `kronn dev` stops on Ctrl-C or TERM in every phase (KT-1145). Under bash
   5.2 the backend supervisor could drop a TERM that arrived while it expanded
   a command substitution, right after its Cargo build, and keep running. It

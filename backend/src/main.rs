@@ -700,7 +700,7 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
         }
     }
 
-    // Ensure .kronn/ is gitignored in all projects
+    // Keep .kronn/ out of git status in all projects (local exclude, never .gitignore)
     // (retroactive fix — also migrates old .kronn-tmp/ and .kronn-worktrees/ patterns)
     {
         let db = state.db.clone();
@@ -713,7 +713,7 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
                         || resolved.join(".kronn-tmp").exists()
                         || resolved.join(".kronn-worktrees").exists()
                     {
-                        mcp_scanner::ensure_gitignore_public(&p.path, ".kronn/");
+                        mcp_scanner::ensure_local_exclude(&p.path, ".kronn/");
                     }
                 }
                 Ok(())
