@@ -11,6 +11,23 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+### Fixed
+
+- A Kronn backend started on its own `KRONN_DATA_DIR`, for a test or a bench,
+  no longer rewrites the CLI MCP configs in your home directory (KT-1144):
+  `~/.copilot/mcp-config.json`, `~/.codex/config.toml`, `~/.claude.json` and
+  `~/.gemini/settings.json` are left as they are, and the log says why. The
+  desktop app, `kronn start` and the Docker container sync as before, and so
+  does a backend whose `KRONN_DATA_DIR` names the default data directory or
+  that sets `KRONN_HOST_HOME`. `KRONN_HOST_MCP_SYNC=1` writes them anyway,
+  and `KRONN_HOST_MCP_SYNC=0` still turns the sync off.
+- The Codex and Copilot syncs keep the MCP servers you added yourself. They
+  used to replace the whole `[mcp_servers]` table and the whole
+  `mcp-config.json`; Kronn now records the servers it wrote in
+  `kronn-mcp-state.json` beside each file and replaces only those. Servers
+  left there by an older Kronn whose MCP has since been deleted are not
+  recognised as Kronn's, so they stay until you remove them.
+
 ## [0.15.0] - 2026-10-10
 
 ### Upgrade notes
