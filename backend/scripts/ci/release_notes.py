@@ -15,6 +15,11 @@ from pathlib import Path
 
 REPO_URL = "https://github.com/DocRoms/Kronn"
 
+# Fallback handles kept as real mentions when no contributor list is given
+# (the human maintainer). Every other bare @name is wrapped in a code span:
+# GitHub would otherwise notify that account and list it under Contributors.
+MENTION_ALLOWLIST = frozenset({"docroms"})
+
 INSTALLER_SUFFIXES = (".exe", ".dmg", ".deb")
 
 # (label, min version, file-name endings in display order); mirrors
@@ -69,7 +74,73 @@ def changelog_section(text: str, version: str) -> str:
     return body
 
 
-def build_body(tag: str, changelog: str, assets: list[str]) -> str:
+_FENCE = re.compile(r"^\s*(`{3,}|~{3,})")
+_CODE_SPAN = re.compile(r"(?<!`)(`+)(?!`).*?(?<!`)\1(?!`)", re.DOTALL)
+# URLs are skipped whole; an @ glued to a word (e-mail) never matches.
+_URL_OR_MENTION = re.compile(
+    r"(?P<url>https?://[^\s<>)\]]+)"
+    r"|(?:(?P<tick>`+)|(?<![\w@/.\-]))(?P<mention>@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:/[\w.-]+)?)"
+)
+
+
+def _wrap_mentions(text: str, allow: frozenset[str]) -> str:
+    def repl(m: re.Match[str]) -> str:
+        mention = m.group("mention")
+        if mention is None or mention[1:].lower() in allow:
+            return m.group(0)
+        # Text outside valid spans: a backtick here is a lone one. Escape it so
+        # it cannot pair with the wrapper's backtick and leave the mention bare.
+        tick = "\\`" * len(m.group("tick") or "")
+        return f"{tick}`{mention}`"
+
+    out: list[str] = []
+    pos = 0
+    for span in _CODE_SPAN.finditer(text):
+        out.append(_URL_OR_MENTION.sub(repl, text[pos : span.start()]))
+        out.append(span.group(0))
+        pos = span.end()
+    out.append(_URL_OR_MENTION.sub(repl, text[pos:]))
+    return "".join(out)
+
+
+def neutralize_mentions(text: str, allow: frozenset[str] = MENTION_ALLOWLIST) -> str:
+    """Wrap every bare @name outside fences and code spans; other text is untouched."""
+    out: list[str] = []
+    prose: list[str] = []
+    fence: str | None = None
+
+    def flush() -> None:
+        if prose:
+            out.append(_wrap_mentions("".join(prose), allow))
+            prose.clear()
+
+    for line in text.splitlines(keepends=True):
+        m = _FENCE.match(line)
+        if fence is None:
+            if m:
+                flush()
+                fence = m.group(1)
+                out.append(line)
+            else:
+                prose.append(line)
+        else:
+            out.append(line)
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence):
+                fence = None
+    flush()
+    return "".join(out)
+
+
+def parse_allowlist(handles: list[str]) -> frozenset[str]:
+    """Normalise handles (case-insensitive, optional @); empty falls back to the maintainer."""
+    names = {h.strip().lstrip("@").lower() for h in handles if h.strip()}
+    if not names:
+        print("warning: no contributor handle given, allowing the maintainer only", file=sys.stderr)
+        return MENTION_ALLOWLIST
+    return frozenset(names)
+
+
+def build_body(tag: str, changelog: str, assets: list[str], allow: frozenset[str] = MENTION_ALLOWLIST) -> str:
     version = tag[1:] if tag.startswith("v") else tag
     names = sorted({name for name in assets if name.lower().endswith(INSTALLER_SUFFIXES)})
     rows: list[str] = []
@@ -87,7 +158,7 @@ def build_body(tag: str, changelog: str, assets: list[str]) -> str:
     linux = WEBKIT_NOTE + ", so upgrade."
     return "\n".join(
         [
-            changelog_section(changelog, version),
+            neutralize_mentions(changelog_section(changelog, version), allow),
             "",
             "## Installation",
             "",
@@ -109,9 +180,18 @@ def main() -> None:
     parser.add_argument("--changelog", type=Path, required=True)
     parser.add_argument("--assets-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--allow-mention", action="append", default=[], metavar="LOGIN")
+    parser.add_argument("--allow-mentions-file", type=Path, help="one login per line")
     args = parser.parse_args()
+    handles = list(args.allow_mention)
+    if args.allow_mentions_file:
+        try:
+            handles += args.allow_mentions_file.read_text(encoding="utf-8").split()
+        except OSError as err:
+            print(f"warning: cannot read {args.allow_mentions_file}: {err}", file=sys.stderr)
+    allow = parse_allowlist(handles)
     assets = [p.name for p in args.assets_dir.rglob("*") if p.is_file() and p.stat().st_size > 0]
-    body = build_body(args.tag, args.changelog.read_text(encoding="utf-8"), assets)
+    body = build_body(args.tag, args.changelog.read_text(encoding="utf-8"), assets, allow)
     if args.output:
         args.output.write_text(body, encoding="utf-8")
     else:

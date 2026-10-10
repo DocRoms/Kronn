@@ -11,6 +11,17 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+### Fixed
+
+- The release body no longer mentions GitHub accounts by accident (KT-1179).
+  Multi-agent syntax examples in the CHANGELOG (an `at` sign followed by an
+  agent alias) were read by GitHub as mentions of real accounts, listed under
+  Contributors and notified. `release_notes.py` now wraps every bare mention
+  outside code, e-mail addresses and URLs in a code span, including one
+  that follows a lone backtick. Real human contributors, listed at release
+  time from the repository contributors API (bots dropped), stay mentions;
+  the maintainer is the fallback when the lookup fails or returns nothing.
+
 ### Changed
 
 - CI no longer reruns the whole suite on a tree a pull request already
