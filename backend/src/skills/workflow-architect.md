@@ -107,7 +107,7 @@ Runs a binary listed in `Workflow.exec_allowlist` directly from the Rust engine,
 }
 ```
 
-The output exposes `{{steps.run-tests.data.exit_code}}` (number), `{{steps.run-tests.data.stdout}}` (truncated to 100 KB), `{{steps.run-tests.data.stderr}}`, and `{{steps.run-tests.data.duration_ms}}`. Downstream `Agent` steps can read these.
+The output exposes `{{steps.run-tests.data.exit_code}}` (number), `{{steps.run-tests.data.stdout}}` (truncated to 100 KB, or 2 MiB when a `PublishPageData` write reads the step; `data.stdout_truncated` says if it was cut), `{{steps.run-tests.data.stderr}}`, and `{{steps.run-tests.data.duration_ms}}`. Downstream `Agent` steps can read these.
 
 **Large input → `exec_stdin` (not args).** A single argv string is capped at ~128 KB by the OS (`ARG_MAX`), so a big reshaped payload (e.g. an enriched ticket backlog) blows up `exec_args`. Set `"exec_stdin": "{{steps.fetch.data_json}}"` instead — templated like args but piped to the command's **stdin** (no size ceiling), streamed concurrently so a `jq`/`cat`-style command can't deadlock. Omitted → stdin stays `/dev/null` (unchanged).
 
@@ -667,7 +667,7 @@ Allowed operations: `copy`, `count`, `sum`, `average`, `min`, `max`, `first`, `l
 | `page_publish.page_id` | string | **REQUIRED.** Real Page id or slug from `page_list()` / `page_create()`. A Page is a shared destination and may be targeted by several workflows. |
 | `page_publish.writes` | array | **REQUIRED.** One or more `{ dataset, operation, value_from, observed_at?, dedupe_key?, key_field? }` writes. The named dataset must already exist on the Page. |
 
-`operation` is `replace`, `append`, or `upsert`. `upsert` requires `key_field`; `append` accepts an optional `observed_at` and `dedupe_key`. `value_from` is one typed context path such as `steps.shape-report.data`, with or without `{{...}}`.
+`operation` is `replace`, `append`, or `upsert`. `upsert` requires `key_field`; `append` accepts an optional `observed_at` and `dedupe_key`. `value_from` is one typed context path such as `steps.shape-report.data`, with or without `{{...}}`. An Exec stdout holding JSON is published as that JSON value; a truncated or unparsable one fails the step and the Page keeps its data.
 
 ### Fields specific to `SubWorkflow`
 
@@ -741,7 +741,7 @@ The optional `control` is `{ "type": "text" }`, `{ "type": "textarea" }`, or
 ### Template variables (any step's `prompt_template` / `notify_config.body` / `api_*` / `exec_args` / `gate_message`)
 
 - `{{previous_step.output}}` — raw text output from the previous step (every step type, always available)
-- `{{previous_step.data}}` — structured payload. 0.8.5+: emitted by EVERY step type via the canonical Kronn envelope (see below). Exceptions: `Gate` and `Agent` with `output_format: FreeText` don't emit data, so consumers can only read `.output` from them
+- `{{previous_step.data}}` — structured payload. 0.8.5+: emitted by EVERY step type via the canonical Kronn envelope (see below). Exceptions: `Gate` and `Agent` with `output_format: FreeText` don't emit data, so consumers can only read `.output` from them. After such a step `previous_step.data` is empty: name the earlier producer with `steps.<producer>.data`
 - `{{previous_step.summary}}` — one-line summary; same coverage as `.data`
 - `{{previous_step.status}}` — `OK`, `NO_RESULTS`, `ERROR`, `PARTIAL`, `PENDING`…; same coverage as `.data`
 - `{{steps.STEP_NAME.output}}` — output from any named step

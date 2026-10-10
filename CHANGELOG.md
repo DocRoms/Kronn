@@ -101,6 +101,13 @@ Release notes for 0.9.3 and earlier are available in the
   Exports name the Page by id where a workflow still used an old slug, so the
   bundle imports cleanly (KT-1098).
 
+### Changed
+
+- `{{previous_step.data…}}` and `{{steps.<name>.data…}}` no longer read an
+  older step's data after a step that produced no envelope (KT-1105). To read
+  an earlier producer, name it with `steps.<producer>.data`, which works as
+  long as that producer has not been re-run without an envelope.
+
 ### Fixed
 
 - The reply bubble's Logs panel follows the same no-leak rule as the run
@@ -111,6 +118,23 @@ Release notes for 0.9.3 and earlier are available in the
   a fixed `⚠ Diagnostic` notice once, never the text: it can name paths and
   URLs. A failed run's error message still carries that text, and the tool
   calls recorded in the transcript are unchanged.
+- A `PublishPageData` write fed by an `Exec` stdout no longer publishes a
+  truncated document (KT-1105). An `Exec` step a publish reads now keeps up to
+  2 MiB of output instead of 100 KB; a stdout cut at that limit, or one that
+  looks like JSON but does not parse, fails the publish step with an explicit
+  message and the Page keeps its previous data. A JSON stdout is stored as the
+  JSON value rather than a string (pages that `JSON.parse` a string keep
+  working). The Exec envelope now flags `stdout_truncated` and
+  `stderr_truncated`, and Exec output is scrubbed of the project's GitHub
+  token by value.
+- `Exec` and `ApiCall` no longer read a whole command output or JSON response
+  into memory before cutting it (KT-1047). An Exec step drains stdout and
+  stderr as they come, keeps its limit plus a small margin and counts the
+  rest, so a command writing tens of MB stays bounded and its output ends with
+  the truncation marker. An ApiCall JSON response is read chunk by chunk and a
+  body past 16 MiB fails the step with an explicit message instead of being
+  loaded; an error body is read only as far as its excerpt needs.
+
 - `agent_list`, `task_exec_prepare`, `task_exec_launch` and the tier pickers
   now read the launch preflight's own catalogue decision (KT-860). A tier the
   preflight would refuse is listed with the reason (`model_unavailable`) and
