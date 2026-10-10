@@ -243,6 +243,13 @@ Release notes for 0.9.3 and earlier are available in the
   nothing, and only the first choice taken runs. A native reply that names an agent in prose without launching it now
   carries a discreet note saying so and why: already scheduled on this turn,
   or a plain mention with no handoff.
+- The orchestrate-or-parallel choice is also offered when the first named
+  agent is given a role or job over the others (KT-1152): "@opencode tu es
+  juge des blagues de @codex et @litellm", "compare les réponses de",
+  "arbitre entre", "you are the judge of", "eres el juez de", "评判"… The role
+  must reach the next agent within one clause, so a plain list, a parallel
+  ask ("@a et @b donnez votre avis") or "@a compare X, @b aussi" still
+  launches everyone in parallel without asking.
 - The configuration assistants (custom API plugin, workflow and Quick API
   ApiCall step) keep their conversation when closed instead of deleting it
   (KT-1111). Each one is created and filed in one transaction as an assistant
@@ -434,6 +441,15 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- In a multi-agent room, a native agent that posts through MCP during its own
+  run no longer starts agents a second time, cancels itself or runs out of turn
+  (KT-1151). Its post now belongs to its turn: it replies to the message that
+  started the turn and carries the turn's job. Agents already scheduled on the
+  same human message are not started again. The bridge sends the turn it was
+  launched for, and Kronn checks it against the running job. After a restart,
+  the agent's own post no longer cancels its turn, but a newer human message
+  still does. Turns in one discussion now run in the order of their messages
+  (then creation). Before, whichever turn won a race ran first.
 - Under Vibe, Kronn's bridge now knows its discussion: `disc_meta` no longer
   fails with "no disc bound" (KT-1082). Vibe starts MCP servers without its own
   environment, so Kronn declares the discussion id and backend URL for the

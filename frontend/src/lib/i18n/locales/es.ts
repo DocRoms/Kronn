@@ -231,6 +231,7 @@ const es: TranslationDict = {
   'pages.pointsAdded': '+{0} punto(s)',
   'pages.pointsRemoved': '{0} punto(s) antiguo(s) eliminado(s)',
   'pages.openRefreshRun': 'Abrir la ejecución «{0}» de esta actualización',
+  'pages.frameRegion': 'Artifact «{0}»',
   'pages.htmlTitle': 'HTML del Artifact',
   'pages.htmlRevisionHint': 'Cada guardado crea una nueva revisión.',
   'pages.saving': 'Guardando…',

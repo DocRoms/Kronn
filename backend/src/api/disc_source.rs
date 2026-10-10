@@ -274,6 +274,28 @@ pub struct DiscAppendRequest {
     /// field that is not sensitive; it is still useless without the grant.
     #[serde(default)]
     pub publication_proof: Option<String>,
+    /// KT-1151 — the room agent context Kronn injected into a native runner's
+    /// bridge (`KRONN_ROOM_AGENT_CONTEXT`), never offered as a tool parameter.
+    /// Verified against the running dispatch job before it means anything.
+    #[serde(default)]
+    #[ts(skip)]
+    pub room_agent: Option<RoomAgentAppendContext>,
+}
+
+/// A native runner's own turn, as its bridge names it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RoomAgentAppendContext {
+    pub discussion_id: String,
+    pub agent_type: String,
+    pub dispatch_job_id: String,
+    pub source_message_id: String,
+}
+
+/// The verified running turn a native runner's append belongs to.
+struct NativeRunnerTurn {
+    job_id: String,
+    trigger_message_id: String,
+    root_turn_agents: Vec<AgentType>,
 }
 
 /// Compact lint feedback echoed to the POSTING agent (tool result), so it can
@@ -464,6 +486,59 @@ pub async fn disc_append(
     } else {
         None
     };
+    // KT-1151 — a native runner posting through MCP during its own run is still
+    // inside that turn. Only a context matching the RUNNING job, its trigger
+    // and its agent counts; a joined CLI session never holds one.
+    let native_turn = match (
+        req.room_agent.as_ref(),
+        req.messages.first().and_then(|m| m.agent_type.clone()),
+    ) {
+        (Some(context), Some(agent))
+            if live_agent_append
+                && author_cli_session_id.is_none()
+                && context.discussion_id == req.disc_id =>
+        {
+            let did = req.disc_id.clone();
+            let context = context.clone();
+            state
+                .db
+                .with_read_conn(move |conn| {
+                    let declared =
+                        crate::db::orchestration::agent_type_from_db(context.agent_type.trim())
+                            .ok();
+                    if declared.as_ref() != Some(&agent) {
+                        return Ok(None);
+                    }
+                    let Some(job) = crate::db::agent_dispatch::running_room_agent_job(
+                        conn,
+                        &did,
+                        &context.dispatch_job_id,
+                        &context.source_message_id,
+                        &agent,
+                    )?
+                    else {
+                        return Ok(None);
+                    };
+                    let root_turn_agents =
+                        crate::db::discussions::native_agents_scheduled_for_root_turn(
+                            conn,
+                            &did,
+                            Some(&job.trigger_message_id),
+                        )?;
+                    Ok(Some(NativeRunnerTurn {
+                        job_id: job.id,
+                        trigger_message_id: job.trigger_message_id,
+                        root_turn_agents,
+                    }))
+                })
+                .await
+                .unwrap_or_else(|error| {
+                    tracing::warn!("disc_append: native runner turn lookup failed: {error}");
+                    None
+                })
+        }
+        _ => None,
+    };
     // An explicit typed target or legacy one-shot target always wins. With no
     // explicit responder, replying to a CLI-authored message targets that
     // exact session — never the provider's native agent or a sibling CLI.
@@ -581,6 +656,23 @@ pub async fn disc_append(
             }
         }
     }
+    // Agents already scheduled on the root turn answer it on their own: the
+    // native runner mentioning them must not start them a second time. Same
+    // rule as the handoff path.
+    if let Some(turn) = native_turn.as_ref() {
+        requested_targets.retain(|target| {
+            !matches!(
+                target.kind,
+                MessageTargetKind::Agent | MessageTargetKind::DiscussionAgent
+            ) || !turn.root_turn_agents.contains(&target.agent_type)
+        });
+    }
+    let legacy_requested_target = match native_turn.as_ref() {
+        Some(turn) => {
+            legacy_requested_target.filter(|target| !turn.root_turn_agents.contains(target))
+        }
+        None => legacy_requested_target,
+    };
     // Resolve the whole presence snapshot in one DB turn, then feed the pure
     // shared routing policy. On lookup failure we fail closed as a no-agent
     // room: this live MCP caller is already a proven peer, so duplicate native
@@ -757,8 +849,13 @@ pub async fn disc_append(
                 .first()
                 .map(|target| target.agent_type.clone())
                 .or_else(|| legacy_requested_target.clone()),
-            reply_to_message_id: incoming.reply_to_message_id.clone(),
+            reply_to_message_id: incoming.reply_to_message_id.clone().or_else(|| {
+                native_turn
+                    .as_ref()
+                    .map(|turn| turn.trigger_message_id.clone())
+            }),
         };
+        let stamp_job_id = native_turn.as_ref().map(|turn| turn.job_id.clone());
         let did_insert = did_for_loop.clone();
         let msg_clone = msg.clone();
         let typed_targets = requested_targets.clone();
@@ -804,6 +901,12 @@ pub async fn disc_append(
                         &dispatches,
                         author_cli_session_id,
                     )?;
+                if let Some(job_id) = stamp_job_id.as_deref() {
+                    tx.execute(
+                        "UPDATE messages SET agent_dispatch_job_id = ?2 WHERE id = ?1",
+                        rusqlite::params![msg_clone.id, job_id],
+                    )?;
+                }
 
                 let ingest = if msg_clone.content.contains("kronn-important") {
                     let label = if matches!(msg_clone.role, crate::models::MessageRole::User) {
@@ -1776,6 +1879,7 @@ mod tests {
                 session_credential: None,
                 publication_grant: None,
                 publication_proof: None,
+                room_agent: None,
             }),
         )
         .await;
@@ -1845,6 +1949,7 @@ mod tests {
                 publication_grant: grant
                     .map(|g| serde_json::from_value(serde_json::json!(g)).unwrap()),
                 publication_proof: proof.map(str::to_owned),
+                room_agent: None,
             }),
         )
         .await;
@@ -1868,6 +1973,7 @@ mod tests {
                     .map(|c| serde_json::from_value(serde_json::json!(c)).unwrap()),
                 publication_grant: None,
                 publication_proof: None,
+                room_agent: None,
             }),
         )
         .await;
@@ -1892,6 +1998,7 @@ mod tests {
                     .map(|c| serde_json::from_value(serde_json::json!(c)).unwrap()),
                 publication_grant: None,
                 publication_proof: None,
+                room_agent: None,
             }),
         )
         .await;
@@ -2043,6 +2150,7 @@ mod tests {
                 session_credential: None,
                 publication_grant: None,
                 publication_proof: None,
+                room_agent: None,
             }),
         )
         .await
@@ -2086,6 +2194,7 @@ mod tests {
                 session_credential: None,
                 publication_grant: None,
                 publication_proof: None,
+                room_agent: None,
             }),
         )
         .await
@@ -2163,6 +2272,7 @@ mod tests {
                 session_credential: None,
                 publication_grant: None,
                 publication_proof: None,
+                room_agent: None,
             }),
         )
         .await
@@ -2236,6 +2346,7 @@ mod tests {
                 session_credential: None,
                 publication_grant: None,
                 publication_proof: None,
+                room_agent: None,
             }),
         )
         .await
@@ -2302,6 +2413,7 @@ mod tests {
                 session_credential: None,
                 publication_grant: None,
                 publication_proof: None,
+                room_agent: None,
             }),
         )
         .await;
@@ -2495,6 +2607,198 @@ mod tests {
             })
             .await
             .unwrap();
+    }
+
+    /// KT-1151 — the judge room: a human turn targets OpenCode (principal),
+    /// Codex and Ollama. OpenCode's job is running; the other two are queued on
+    /// the same root turn. Returns OpenCode's job id.
+    async fn judge_room(state: &crate::AppState) -> String {
+        state
+            .db
+            .with_conn(|conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "UPDATE discussions SET no_agent = 0, agent = 'OpenCode',
+                            next_message_seq = 2
+                     WHERE id = 'd-lint'",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO messages
+                     (id, discussion_id, role, content, timestamp, sort_order, received_at)
+                     VALUES ('root', 'd-lint', 'User',
+                             '@opencode juge les blagues de @codex et @ollama', ?1, 1, ?1)",
+                    [&now],
+                )?;
+                crate::db::discussions::replace_message_targets(
+                    conn,
+                    "root",
+                    &[
+                        MessageTarget::discussion_agent(AgentType::OpenCode),
+                        MessageTarget::agent(AgentType::Codex),
+                        MessageTarget::agent(AgentType::Ollama),
+                    ],
+                )?;
+                for (id, agent) in [
+                    ("job-judge", None),
+                    ("job-codex", Some(AgentType::Codex)),
+                    ("job-ollama", Some(AgentType::Ollama)),
+                ] {
+                    crate::db::agent_dispatch::enqueue(
+                        conn,
+                        crate::db::agent_dispatch::NewAgentDispatchJob {
+                            id,
+                            discussion_id: "d-lint",
+                            trigger_message_id: "root",
+                            trigger_sort_order: 1,
+                            dedupe_key: &format!("force:root:{id}"),
+                            agent_override: agent.as_ref(),
+                            chain_prompt_ids: &[],
+                            batch_item: None,
+                            group_id: None,
+                            group_concurrency_limit: None,
+                        },
+                    )?;
+                }
+                crate::db::agent_dispatch::claim(conn, "job-judge")?.expect("the judge runs first");
+                Ok(())
+            })
+            .await
+            .unwrap();
+        "job-judge".to_string()
+    }
+
+    /// `legacy` sends the pre-KT-116 one-shot `target_agent` instead of typed
+    /// targets: both shapes must stay inside the runner's turn.
+    async fn append_from_native_runner(
+        state: &crate::AppState,
+        room_agent: Option<RoomAgentAppendContext>,
+        legacy: bool,
+    ) {
+        let mut message = agent_msg("judge-mcp-post", "@codex et @ollama déposez une blague");
+        message.agent_type = Some(AgentType::OpenCode);
+        if legacy {
+            message.target_agent = Some(AgentType::Codex);
+        } else {
+            message.targets = vec![
+                MessageTarget::agent(AgentType::Codex),
+                MessageTarget::agent(AgentType::Ollama),
+            ];
+        }
+        let response = disc_append(
+            axum::extract::State(state.clone()),
+            Json(DiscAppendRequest {
+                disc_id: "d-lint".into(),
+                messages: vec![message],
+                session_id: Some("opencode-runtime-session".into()),
+                since_sort_order: None,
+                session_credential: None,
+                publication_grant: None,
+                publication_proof: None,
+                room_agent,
+            }),
+        )
+        .await;
+        assert_eq!(response.0.data.expect("append succeeds").appended, 1);
+    }
+
+    /// (job count, reply_to, agent_dispatch_job_id, native targets) of the post.
+    async fn judge_post_state(
+        state: &crate::AppState,
+    ) -> (i64, Option<String>, Option<String>, Vec<AgentType>) {
+        state
+            .db
+            .with_read_conn(|conn| {
+                let jobs = conn.query_row(
+                    "SELECT COUNT(*) FROM agent_dispatch_jobs WHERE discussion_id = 'd-lint'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?;
+                let (id, reply_to, job_id) = conn.query_row(
+                    "SELECT id, reply_to_message_id, agent_dispatch_job_id FROM messages
+                     WHERE source_msg_id = 'judge-mcp-post'",
+                    [],
+                    |row| Ok((row.get::<_, String>(0)?, row.get(1)?, row.get(2)?)),
+                )?;
+                let native_targets = crate::db::discussions::list_message_targets(conn, &id)?
+                    .into_iter()
+                    .filter(|target| target.kind != MessageTargetKind::Cli)
+                    .map(|target| target.agent_type)
+                    .collect();
+                Ok((jobs, reply_to, job_id, native_targets))
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_native_runner_post_joins_its_turn_without_restarting_scheduled_agents() {
+        crate::core::anti_halluc::set_mode("off");
+        for legacy in [false, true] {
+            let (state, _tmp) = lint_state(false).await;
+            let job_id = judge_room(&state).await;
+
+            append_from_native_runner(
+                &state,
+                Some(RoomAgentAppendContext {
+                    discussion_id: "d-lint".into(),
+                    agent_type: "OpenCode".into(),
+                    dispatch_job_id: job_id.clone(),
+                    source_message_id: "root".into(),
+                }),
+                legacy,
+            )
+            .await;
+
+            let (jobs, reply_to, stamped, native_targets) = judge_post_state(&state).await;
+            assert_eq!(
+                jobs, 3,
+                "legacy={legacy}: Codex and Ollama already own a job"
+            );
+            assert_eq!(
+                reply_to.as_deref(),
+                Some("root"),
+                "the post joins the root turn"
+            );
+            assert_eq!(stamped.as_deref(), Some(job_id.as_str()));
+            assert!(
+                !native_targets.contains(&AgentType::Codex)
+                    && !native_targets.contains(&AgentType::Ollama),
+                "legacy={legacy}: no stored native target without its job: {native_targets:?}"
+            );
+        }
+    }
+
+    /// The control: a context that does not match the running job carries no
+    /// authority, so the append keeps the historical peer routing.
+    #[tokio::test]
+    #[serial]
+    async fn an_unverified_runner_context_keeps_the_peer_routing() {
+        crate::core::anti_halluc::set_mode("off");
+        for forged in [
+            None,
+            Some(RoomAgentAppendContext {
+                discussion_id: "d-lint".into(),
+                agent_type: "OpenCode".into(),
+                dispatch_job_id: "job-judge".into(),
+                source_message_id: "not-the-trigger".into(),
+            }),
+            Some(RoomAgentAppendContext {
+                discussion_id: "d-lint".into(),
+                agent_type: "OpenCode".into(),
+                dispatch_job_id: "job-codex".into(),
+                source_message_id: "root".into(),
+            }),
+        ] {
+            let (state, _tmp) = lint_state(false).await;
+            judge_room(&state).await;
+            append_from_native_runner(&state, forged, false).await;
+            let (jobs, reply_to, stamped, _) = judge_post_state(&state).await;
+            assert_eq!(jobs, 5, "unverified: the mentions still dispatch");
+            assert_eq!(reply_to, None);
+            assert_eq!(stamped, None);
+        }
     }
 
     #[tokio::test]
@@ -4012,6 +4316,7 @@ mod tests {
                 ),
                 publication_grant: Some(serde_json::from_value(serde_json::json!(grant)).unwrap()),
                 publication_proof: Some(proof),
+                room_agent: None,
             }),
         )
         .await;
@@ -4158,6 +4463,7 @@ mod tests {
                 serde_json::from_value(serde_json::json!("kr-human-also-never-appears")).unwrap(),
             ),
             publication_proof: Some("proof-visible-and-harmless".into()),
+            room_agent: None,
         };
         let printed = format!("{request:?}");
         assert!(
@@ -4250,6 +4556,7 @@ mod tests {
                 ),
                 publication_grant: Some(serde_json::from_value(serde_json::json!(grant)).unwrap()),
                 publication_proof: Some(proof),
+                room_agent: None,
             }),
         )
         .await;

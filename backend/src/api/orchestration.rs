@@ -22963,6 +22963,7 @@ pub(crate) mod tests {
                 session_credential: None,
                 publication_grant: None,
                 publication_proof: None,
+                room_agent: None,
                 since_sort_order: None,
                 messages: vec![crate::api::disc_source::DiscAppendMessage {
                     source_msg_id: "kt624-worker-status".into(),

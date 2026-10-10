@@ -17,4 +17,3 @@ export function SkillGroupBadges({ traits }: { traits: SkillTraits }) {
     </>
   );
 }
-

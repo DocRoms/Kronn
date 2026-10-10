@@ -63,6 +63,11 @@ async function readOnly(page: Page, theme: string) {
   await page.route('**/api/pages/capability', route => route.fulfill({
     json: { success: true, data: { activated: true, activated_at: '2026-08-29T00:00:00Z' }, error: null },
   }));
+  // A fresh origin hydrates its theme from the server mirror (KT-972): a theme
+  // a previous test leaked there would replace the one set above.
+  await page.route('**/api/ui-preferences', route => route.fulfill({
+    json: { success: true, data: route.request().method() === 'GET' ? {} : null, error: null },
+  }));
 }
 
 /** axe leaves text over a decorative layer (a gradient tint, a pseudo-element

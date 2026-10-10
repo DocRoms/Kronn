@@ -532,6 +532,35 @@ class DiscAppendCredentialInjectionTests(unittest.TestCase):
             self._append()
         self.assertNotIn("session_credential", self._body())
 
+    ROOM_AGENT = {
+        "discussion_id": "disc-1",
+        "agent_type": "OpenCode",
+        "dispatch_job_id": "job-judge",
+        "source_message_id": "root",
+    }
+
+    def test_a_native_runner_names_its_running_turn(self):
+        """KT-1151 — the runner's own turn rides the append so the backend can
+        attach the post to it instead of starting a second branch."""
+        env = {"KRONN_ROOM_AGENT_CONTEXT": json.dumps(self.ROOM_AGENT)}
+        with mock.patch.dict(os.environ, env):
+            self._append()
+        self.assertEqual(self._body().get("room_agent"), self.ROOM_AGENT)
+
+    def test_no_room_agent_context_for_another_room_or_a_broken_one(self):
+        other = dict(self.ROOM_AGENT, discussion_id="disc-other")
+        for raw in (json.dumps(other), "{not json", json.dumps({"discussion_id": "disc-1"})):
+            self.fake_http.reset_mock()
+            with mock.patch.dict(os.environ, {"KRONN_ROOM_AGENT_CONTEXT": raw}):
+                self._append()
+            self.assertNotIn("room_agent", self._body())
+
+    def test_the_room_agent_context_is_absent_from_the_tool_schemas(self):
+        schemas = json.dumps(self.mod.tool_definitions()
+                             if hasattr(self.mod, "tool_definitions")
+                             else self.mod.TOOLS)
+        self.assertNotIn("room_agent", schemas)
+
     def test_the_credential_is_absent_from_the_tool_schemas(self):
         """A model cannot set what it is never offered. If this ever fails,
         the field became a parameter and the whole contract is void."""
