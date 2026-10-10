@@ -10,7 +10,7 @@ import { composerMentions, positionedTargetsFromComposerText } from '../messageT
 const labels = { discussionAgent: 'principal', punctualAgent: 'punctual', cli: 'CLI', all: 'all' };
 const mentions = composerMentions(
   'ClaudeCode',
-  ['ClaudeCode', 'Codex', 'OpenCode'],
+  ['ClaudeCode', 'Codex', 'OpenCode', 'LiteLlm'],
   [],
   labels,
 );
@@ -62,6 +62,41 @@ describe('detectDelegation', () => {
     expect(detect(text)).toBeNull();
   });
 
+  it('proposes orchestration when the first agent is made judge of the others (KT-1152)', () => {
+    const proposal = detect('@opencode tu es juge des blagues de @codex et @litellm');
+    expect(proposal?.orchestrator.agent_type).toBe('OpenCode');
+    expect(proposal?.delegated.map(target => target.agent_type)).toEqual(['Codex', 'LiteLlm']);
+  });
+
+  it.each([
+    '@opencode compare les réponses de @codex et @claude',
+    '@opencode, sois l\'arbitre entre @codex et @claude',
+    '@opencode départage @codex et @claude',
+    '@opencode tu es le coordinateur de @codex et @claude',
+    '@opencode synthétise les avis de @codex et @claude',
+    '@opencode you are the judge of @codex and @claude',
+    '@opencode please compare the answers from @codex and @claude',
+    '@opencode act as reviewer of @codex and @claude',
+    '@opencode eres el juez de los chistes de @codex y @claude',
+    '@opencode compara las respuestas de @codex y @claude',
+    '@opencode 你来当裁判，评判 @codex 和 @claude 的笑话',
+    '@opencode 比较一下 @codex 和 @claude',
+  ])('detects the role assignment "%s"', text => {
+    expect(detect(text)?.orchestrator.agent_type).toBe('OpenCode');
+  });
+
+  it.each([
+    '@opencode @codex @claude répondez',
+    '@opencode et @codex donnez votre avis',
+    '@opencode explique ce que @codex a fait hier',
+    '@opencode compare les deux options, @codex aussi',
+    '@opencode supervise le déploiement et @codex écrit les tests',
+    '@opencode review this PR, @codex too',
+    '@opencode `juge de @codex` est un exemple',
+  ])('stays silent without a role over the others: "%s"', text => {
+    expect(detect(text)).toBeNull();
+  });
+
   it('never proposes orchestration for @all', () => {
     expect(detect('@all lance @codex')).toBeNull();
   });
@@ -107,6 +142,11 @@ describe('orchestratedAgents', () => {
   it('names the delegated agents of a single-target delegation', () => {
     const user = message({ id: 'u1', role: 'User', content: '@opencode lance @codex et @claude' });
     expect(orchestratedAgents(user, [agent('OpenCode')])).toEqual(['Codex', 'ClaudeCode']);
+  });
+
+  it('names the agents a single target was made judge of', () => {
+    const user = message({ id: 'u4', role: 'User', content: '@opencode tu es juge des blagues de @codex et @litellm' });
+    expect(orchestratedAgents(user, [agent('OpenCode')])).toEqual(['Codex', 'LiteLlm']);
   });
 
   it('is empty for a parallel turn or a passing mention', () => {

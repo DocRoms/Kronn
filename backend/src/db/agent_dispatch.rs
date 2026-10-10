@@ -202,6 +202,46 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<AgentDispatchJob>> {
     .map_err(Into::into)
 }
 
+/// The running native turn a room agent's bridge context names, when it is
+/// genuinely that turn: same room, same trigger, still Running, not a delegated
+/// worker's dispatch, and run by `agent`. Anything else is `None`, so a forged
+/// or stale context simply carries no authority.
+pub fn running_room_agent_job(
+    conn: &Connection,
+    discussion_id: &str,
+    dispatch_job_id: &str,
+    source_message_id: &str,
+    agent: &AgentType,
+) -> Result<Option<AgentDispatchJob>> {
+    let Some(job) = get(conn, dispatch_job_id)? else {
+        return Ok(None);
+    };
+    if job.discussion_id != discussion_id
+        || job.trigger_message_id != source_message_id
+        || job.status != DispatchStatus::Running
+        || super::orchestration::get_execution_for_dispatch(conn, dispatch_job_id)?.is_some()
+    {
+        return Ok(None);
+    }
+    let effective = match job.agent_override.clone() {
+        Some(agent) => agent,
+        None => {
+            let room_agent: Option<String> = conn
+                .query_row(
+                    "SELECT agent FROM discussions WHERE id = ?1",
+                    [discussion_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            match room_agent {
+                Some(value) => super::orchestration::agent_type_from_db(&value)?,
+                None => return Ok(None),
+            }
+        }
+    };
+    Ok((&effective == agent).then_some(job))
+}
+
 pub fn find_active_for_discussion(
     conn: &Connection,
     discussion_id: &str,
@@ -416,8 +456,27 @@ pub fn mark_error_retried(conn: &Connection, failed_dispatch_id: &str) -> Result
     Ok(())
 }
 
+/// One discussion runs one job at a time, so its jobs are served in turn order
+/// (trigger, then creation) rather than by whichever claim wins a race. An
+/// older job still waiting on a backoff holds its place; an exhausted one does
+/// not, since only the failure scan will ever take it.
+fn older_runnable_in_discussion(alias: &str) -> String {
+    format!(
+        "EXISTS (
+             SELECT 1 FROM agent_dispatch_jobs AS older
+             WHERE older.discussion_id = {alias}.discussion_id
+               AND older.id <> {alias}.id
+               AND older.status = 'Pending'
+               AND older.attempts < {MAX_DISPATCH_ATTEMPTS}
+               AND (older.trigger_sort_order, older.created_at, older.rowid)
+                   < ({alias}.trigger_sort_order, {alias}.created_at, {alias}.rowid)
+         )"
+    )
+}
+
 pub fn list_runnable_ids(conn: &Connection, limit: usize) -> Result<Vec<String>> {
-    let mut statement = conn.prepare(
+    let older = older_runnable_in_discussion("candidate");
+    let mut statement = conn.prepare(&format!(
         "SELECT candidate.id
          FROM agent_dispatch_jobs AS candidate
          JOIN discussions AS discussion ON discussion.id = candidate.discussion_id
@@ -432,8 +491,9 @@ pub fn list_runnable_ids(conn: &Connection, limit: usize) -> Result<Vec<String>>
                      AND owner.worker_target_kind = 'cli'
                )
            )
+           AND NOT {older}
          ORDER BY candidate.created_at, candidate.id LIMIT ?3",
-    )?;
+    ))?;
     let rows = statement.query_map(
         params![
             Utc::now().to_rfc3339(),
@@ -509,6 +569,7 @@ pub fn claim_with_limits(
     let candidate_agent = effective_agent("candidate");
     let family_agent = effective_agent("family");
     let local_family_agent = effective_agent("local_family");
+    let older = older_runnable_in_discussion("candidate");
     conn.query_row(
         &format!(
             "UPDATE agent_dispatch_jobs AS candidate
@@ -539,6 +600,7 @@ pub fn claim_with_limits(
                    WHERE same_discussion.discussion_id = candidate.discussion_id
                      AND same_discussion.status = 'Running'
                )
+               AND NOT {older}
                AND (
                     group_id IS NULL
                     OR group_concurrency_limit IS NULL
@@ -696,8 +758,14 @@ pub fn recover_after_restart(conn: &Connection) -> Result<AgentDispatchRestartRe
     // "newer" than their trigger. They were answering the very same question.
     // So a newer message only retires a turn when it does not come from a job
     // triggered by that same message.
+    // Nor does the job's own agent speaking mid-turn (KT-1151): a native runner
+    // posting through MCP is still inside its turn. A stamped post is covered by
+    // the sibling rule; an unstamped one is recognised as the job's agent with
+    // no joined-CLI author.
+    let own_agent = effective_agent("agent_dispatch_jobs");
     let superseded = tx.execute(
-        "UPDATE agent_dispatch_jobs
+        &format!(
+            "UPDATE agent_dispatch_jobs
          SET status = 'Cancelled', completed_at = ?1, updated_at = ?1,
              claimed_at = NULL, agent_started_at = NULL,
              last_error = 'superseded_by_newer_turns'
@@ -713,7 +781,17 @@ pub fn recover_after_restart(conn: &Connection) -> Result<AgentDispatchRestartRe
                      OR sibling.trigger_message_id
                         IS NOT agent_dispatch_jobs.trigger_message_id
                   )
-           )",
+                  AND NOT COALESCE((
+                        newer.role = 'Agent'
+                    AND newer.agent_dispatch_job_id IS NULL
+                    AND newer.agent_type = ({own_agent})
+                    AND NOT EXISTS (
+                        SELECT 1 FROM message_cli_authors author
+                         WHERE author.message_id = newer.id
+                    )
+                  ), 0)
+           )"
+        ),
         [&now],
     )?;
     // Leaving `awaiting_agent` set would park the room on an answer that is
@@ -1435,6 +1513,212 @@ mod tests {
             recovery.superseded, 1,
             "a reply to a different trigger is a genuinely newer turn",
         );
+    }
+
+    /// KT-1151 — the judge posts through MCP during its own run, then the
+    /// backend restarts. Its own post, stamped or not, is not the room
+    /// speaking past the turn; a later human turn still is.
+    #[test]
+    fn a_restart_never_retires_a_job_for_its_own_agents_post() {
+        for stamped in [true, false] {
+            let connection = connection();
+            connection
+                .execute(
+                    "UPDATE discussions SET agent = 'OpenCode' WHERE id = 'd1'",
+                    [],
+                )
+                .unwrap();
+            enqueue_default(&connection, "judge", "force:u1:OpenCode");
+            claim(&connection, "judge").unwrap().unwrap();
+            mark_agent_started(&connection, "judge").unwrap();
+            let now = Utc::now().to_rfc3339();
+            connection
+                .execute(
+                    "INSERT INTO messages
+                     (id, discussion_id, role, content, agent_type, timestamp, sort_order,
+                      received_at, agent_dispatch_job_id)
+                     VALUES ('judge-post', 'd1', 'Agent', '@codex déposez une blague',
+                             'OpenCode', ?1, 2, ?1, ?2)",
+                    params![now, stamped.then_some("judge")],
+                )
+                .unwrap();
+
+            let recovery = recover_after_restart(&connection).unwrap();
+            assert_eq!(recovery.superseded, 0, "stamped={stamped}");
+            assert_eq!(recovery.requeued, 1, "stamped={stamped}");
+
+            // The control on the same room: a genuinely newer human turn.
+            claim(&connection, "judge").unwrap().unwrap();
+            connection
+                .execute(
+                    "INSERT INTO messages
+                     (id, discussion_id, role, content, timestamp, sort_order, received_at)
+                     VALUES ('u2', 'd1', 'User', 'autre chose', ?1, 3, ?1)",
+                    [&now],
+                )
+                .unwrap();
+            assert_eq!(recover_after_restart(&connection).unwrap().superseded, 1);
+        }
+    }
+
+    /// Another agent's unstamped post is still the room moving on.
+    #[test]
+    fn another_agents_unstamped_post_still_retires_the_turn() {
+        let connection = connection();
+        connection
+            .execute(
+                "UPDATE discussions SET agent = 'OpenCode' WHERE id = 'd1'",
+                [],
+            )
+            .unwrap();
+        enqueue_default(&connection, "judge", "force:u1:OpenCode");
+        claim(&connection, "judge").unwrap().unwrap();
+        let now = Utc::now().to_rfc3339();
+        connection
+            .execute(
+                "INSERT INTO messages
+                 (id, discussion_id, role, content, agent_type, timestamp, sort_order,
+                  received_at)
+                 VALUES ('codex-post', 'd1', 'Agent', 'blague', 'Codex', ?1, 2, ?1)",
+                [&now],
+            )
+            .unwrap();
+        assert_eq!(recover_after_restart(&connection).unwrap().superseded, 1);
+    }
+
+    fn user_turn(connection: &Connection, id: &str, sort_order: i64) {
+        let now = Utc::now().to_rfc3339();
+        connection
+            .execute(
+                "INSERT INTO messages
+                 (id, discussion_id, role, content, timestamp, sort_order, received_at)
+                 VALUES (?1, 'd1', 'User', 'tour', ?2, ?3, ?2)",
+                params![id, now, sort_order],
+            )
+            .unwrap();
+    }
+
+    fn enqueue_on(connection: &Connection, id: &str, trigger: &str, sort_order: i64) {
+        enqueue(
+            connection,
+            NewAgentDispatchJob {
+                id,
+                discussion_id: "d1",
+                trigger_message_id: trigger,
+                trigger_sort_order: sort_order,
+                dedupe_key: &format!("order:{id}"),
+                agent_override: None,
+                chain_prompt_ids: &[],
+                batch_item: None,
+                group_id: None,
+                group_concurrency_limit: None,
+            },
+        )
+        .unwrap();
+    }
+
+    /// KT-1151 — the dispatcher spawns a claim per runnable job and whichever
+    /// wins used to run. Every claim order must now yield the same, oldest
+    /// job: newer peer relaunches never overtake the user turn's own jobs.
+    #[test]
+    fn jobs_of_one_discussion_run_oldest_first_whatever_the_claim_order() {
+        let orders: [[&str; 3]; 6] = [
+            ["late", "peer", "user"],
+            ["late", "user", "peer"],
+            ["peer", "late", "user"],
+            ["peer", "user", "late"],
+            ["user", "late", "peer"],
+            ["user", "peer", "late"],
+        ];
+        for order in orders {
+            let connection = connection();
+            user_turn(&connection, "u2", 2);
+            user_turn(&connection, "u3", 3);
+            // Created newest-trigger first, the way a peer relaunch lands after
+            // the root turn's jobs were already queued for a later message.
+            enqueue_on(&connection, "late", "u3", 3);
+            enqueue_on(&connection, "peer", "u2", 2);
+            enqueue_on(&connection, "user", "u1", 1);
+            // A second discussion keeps its own head: no cross-room blocking.
+            connection
+                .execute(
+                    "INSERT INTO discussions (id, title, created_at, updated_at)
+                     VALUES ('d2', 'Other', datetime('now'), datetime('now'))",
+                    [],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO messages
+                     (id, discussion_id, role, content, timestamp, sort_order, received_at)
+                     VALUES ('o1', 'd2', 'User', 'x', datetime('now'), 9, datetime('now'))",
+                    [],
+                )
+                .unwrap();
+            enqueue(
+                &connection,
+                NewAgentDispatchJob {
+                    id: "other",
+                    discussion_id: "d2",
+                    trigger_message_id: "o1",
+                    trigger_sort_order: 9,
+                    dedupe_key: "order:other",
+                    agent_override: None,
+                    chain_prompt_ids: &[],
+                    batch_item: None,
+                    group_id: None,
+                    group_concurrency_limit: None,
+                },
+            )
+            .unwrap();
+
+            let mut served: Vec<String> = Vec::new();
+            for _ in 0..3 {
+                let mut runnable = list_runnable_ids(&connection, 10).unwrap();
+                runnable.sort();
+                assert_eq!(runnable.len(), 2, "one head per discussion: {runnable:?}");
+                let winners = order
+                    .iter()
+                    .filter(|id| !served.iter().any(|done| done == *id))
+                    .filter_map(|id| claim(&connection, id).unwrap())
+                    .map(|job| job.id)
+                    .collect::<Vec<_>>();
+                assert_eq!(winners.len(), 1, "order {order:?}");
+                assert!(runnable.contains(&winners[0]));
+                mark_completed(&connection, &winners[0]).unwrap();
+                served.push(winners[0].clone());
+            }
+            assert_eq!(served, ["user", "peer", "late"], "order {order:?}");
+            assert!(claim(&connection, "other").unwrap().is_some());
+        }
+    }
+
+    /// An older job waiting on a backoff holds its place; an exhausted one,
+    /// which only the failure scan will ever take, does not block the room.
+    #[test]
+    fn a_backoff_holds_the_turn_order_and_an_exhausted_job_does_not() {
+        let connection = connection();
+        user_turn(&connection, "u2", 2);
+        enqueue_on(&connection, "older", "u1", 1);
+        enqueue_on(&connection, "newer", "u2", 2);
+        let later = (Utc::now() + Duration::minutes(5)).to_rfc3339();
+        connection
+            .execute(
+                "UPDATE agent_dispatch_jobs SET available_at = ?1 WHERE id = 'older'",
+                [&later],
+            )
+            .unwrap();
+        assert!(list_runnable_ids(&connection, 10).unwrap().is_empty());
+        assert!(claim(&connection, "newer").unwrap().is_none());
+
+        connection
+            .execute(
+                "UPDATE agent_dispatch_jobs SET attempts = ?1 WHERE id = 'older'",
+                [i64::from(MAX_DISPATCH_ATTEMPTS)],
+            )
+            .unwrap();
+        assert_eq!(list_runnable_ids(&connection, 10).unwrap(), vec!["newer"]);
+        assert!(claim(&connection, "newer").unwrap().is_some());
     }
 
     #[test]

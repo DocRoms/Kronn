@@ -28,6 +28,33 @@ const DELEGATION_PATTERN = new RegExp(
   'iu',
 );
 
+// A coordinating role or job given to the first agent over the others:
+// "tu es juge des blagues de @b", "@a compare les réponses de @b".
+const ROLE_WORDS = [
+  // fr
+  'juge[rz]?', 'arbitre[rz]?', 'coordinat(?:eur|rice)', 'superviseu(?:r|se)', 'chef', 'modérat(?:eur|rice)',
+  'relect(?:eur|rice)', 'évaluat(?:eur|rice)', 'coordonne[rz]?', 'supervise[rz]?', 'compare[rz]?',
+  'évalue[rz]?', 'départage[rz]?', 'synthétise[rz]?',
+  // en
+  'judge', 'referee', 'arbiter', 'coordinator', 'supervisor', 'moderator', 'reviewer', 'evaluator',
+  'supervise', 'compare', 'evaluate', 'review', 'summari[sz]e',
+  // es
+  'juez', 'árbitro', 'coordinador(?:a)?', 'supervisor(?:a)?', 'moderador(?:a)?', 'revisor(?:a)?',
+  'evaluador(?:a)?', 'jefe', 'juzga(?:r)?', 'arbitra(?:r)?', 'supervisa(?:r)?', 'compara(?:r)?',
+  'evalúa', 'evaluar', 'revisa(?:r)?', 'resume', 'resumir', 'sintetiza(?:r)?',
+];
+const ZH_ROLE_WORDS = '裁判|评委|评判|仲裁|协调|监督|主持|比较|评估|审阅|总结';
+// Words that hand the role over to the next agent: "de", "of", "entre"...
+const ROLE_CONNECTORS = ['de', 'des', 'du', 'entre', 'sur', 'aux?', 'of', 'between', 'among', 'from', 'on', 'del', 'sobre'];
+// The role must reach the next agent within one clause, ending on a connector
+// or right before it: "juge, @b aussi" or "compare X et @b" stay parallel.
+const ROLE_ASSIGNMENT = new RegExp(
+  `(?:${WORD_START}(?:${ROLE_WORDS.join('|')})${WORD_END}|${ZH_ROLE_WORDS})`
+  + `(?:[^\\n.,;:!?。，；：！？]*?(?:${WORD_START}(?:${ROLE_CONNECTORS.join('|')})${WORD_END}|d['’]|一下|的))?`
+  + `\\s*(?=@|$)`,
+  'iu',
+);
+
 function isNative(target: MessageTarget): boolean {
   return target.kind === 'discussion_agent' || target.kind === 'agent';
 }
@@ -45,7 +72,7 @@ export function detectDelegation(
   if (!targets.every(entry => isNative(entry.target))) return null;
   const [first, second] = targets;
   const between = proseOnly(text).slice(first.end, second.start);
-  if (!DELEGATION_PATTERN.test(between)) return null;
+  if (!DELEGATION_PATTERN.test(between) && !ROLE_ASSIGNMENT.test(between)) return null;
   return {
     orchestrator: first.target,
     delegated: targets.slice(1).map(entry => entry.target),
@@ -137,7 +164,7 @@ export function orchestratedAgents(
   if (message.role !== 'User' || targets.length !== 1 || !isNative(targets[0])) return [];
   const prose = proseOnly(message.content);
   // An unavailable agent named in passing is not an orchestration.
-  if (!DELEGATION_PATTERN.test(prose)) return [];
+  if (!DELEGATION_PATTERN.test(prose) && !ROLE_ASSIGNMENT.test(prose)) return [];
   const addressed = targets[0].agent_type;
   return mentionedAgents(prose).filter(agent => agent !== addressed);
 }

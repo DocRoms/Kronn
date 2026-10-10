@@ -2,8 +2,10 @@ import type { Route } from '@playwright/test';
 import { test, expect } from '../fixtures/kronn-fixture';
 import type {
   AgentDetection,
+  CatalogModelEntry,
   Discussion,
   DiscussionMessage,
+  ModelCatalogSnapshot,
   SendMessageRequest,
 } from '../../src/types/generated';
 import { DashboardPage } from '../pages/DashboardPage';
@@ -78,6 +80,28 @@ const agents: AgentDetection[] = [
   },
 ] as AgentDetection[];
 
+// The tier buttons follow the backend's launch verdict. Without this stub the
+// verdict comes from the e2e backend, whose PATH has no codex: every tier that
+// names a model is then refused as `cli_missing`, whatever `/api/agents` says.
+const CODEX_ECONOMY_MODEL = 'gpt-e2e-economy';
+const codexEconomyEntry: CatalogModelEntry = {
+  id: 'e2e-codex-economy', runtime_target_id: 'agent:codex', agent_type: 'Codex',
+  model_id: CODEX_ECONOMY_MODEL, display_name: CODEX_ECONOMY_MODEL, provenance: 'live',
+  availability: 'available', capabilities: [], reasoning_modes: [], tier_assignment: 'economy',
+  manual_origin: false, first_seen_at: '2026-08-10T10:00:00Z', last_checked_at: '2026-08-10T10:00:00Z',
+  created_at: '2026-08-10T10:00:00Z', updated_at: '2026-08-10T10:00:00Z',
+};
+const modelCatalog: ModelCatalogSnapshot = {
+  targets: [{
+    runtime_target_id: 'agent:codex', target_label: 'Codex', agent_type: 'Codex',
+    models: [codexEconomyEntry], live_refresh_ok: true, stale: false,
+    tier_verdicts: [
+      { tier: 'economy', requested_model: CODEX_ECONOMY_MODEL, effective_model: CODEX_ECONOMY_MODEL, launchable: true },
+      { tier: 'default', launchable: true },
+    ],
+  }],
+};
+
 test.describe('Discussion chat — multi-model reply lifecycle', () => {
   test('keeps the explicitly requested agent tier visible on the sent message', async ({ page }) => {
     let sentBody: SendMessageRequest | null = null;
@@ -124,6 +148,10 @@ test.describe('Discussion chat — multi-model reply lifecycle', () => {
     await page.route('**/api/agents', route => {
       if (route.request().method() !== 'GET') return route.continue();
       return route.fulfill({ status: 200, contentType: 'application/json', body: envelope(agents) });
+    });
+    await page.route('**/api/model-catalogs', route => {
+      if (route.request().method() !== 'GET') return route.continue();
+      return route.fulfill({ status: 200, contentType: 'application/json', body: envelope(modelCatalog) });
     });
     await page.route('**/api/discussions', route => {
       if (route.request().method() !== 'GET') return route.continue();

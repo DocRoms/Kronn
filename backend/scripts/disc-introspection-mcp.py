@@ -5412,6 +5412,16 @@ def call_disc_append(args):
     _binding = _read_binding()
     if isinstance(_binding, dict) and _binding.get("resume_token"):
         append_body["session_credential"] = _binding["resume_token"]
+    # KT-1151 — a native runner's live post belongs to its own running turn.
+    # The backend verifies this env-injected context against the running job;
+    # a missing or broken one keeps the ordinary peer routing.
+    if is_live_single:
+        try:
+            room_agent = _room_agent_context("disc_append")
+        except RuntimeError:
+            room_agent = None
+        if room_agent is not None and room_agent["discussion_id"] == disc_id:
+            append_body["room_agent"] = room_agent
     # KT-619 — a `kronn-important` card also needs a publication GRANT and a
     # single-use proof issued over this exact body. The grant lives in a 0600
     # file the operator placed; it is never a tool parameter, never logged, and

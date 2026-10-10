@@ -231,6 +231,7 @@ const en: TranslationDict = {
   'pages.pointsAdded': '+{0} point(s)',
   'pages.pointsRemoved': '{0} old point(s) removed',
   'pages.openRefreshRun': 'Open run “{0}” for this refresh',
+  'pages.frameRegion': 'Artifact “{0}”',
   'pages.htmlTitle': 'Artifact HTML',
   'pages.htmlRevisionHint': 'Each save creates a new revision.',
   'pages.saving': 'Saving…',

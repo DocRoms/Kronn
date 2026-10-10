@@ -1315,7 +1315,13 @@ export function PagesPage({
                 )}
               </div>
             ) : (
-              <div className={frameHeight ? "live-pages-frame-shell is-content-sized" : "live-pages-frame-shell"}>
+              <div
+                className={frameHeight ? "live-pages-frame-shell is-content-sized" : "live-pages-frame-shell"}
+                // A content-sized shell scrolls the Page, so the keyboard must be able to reach it.
+                role={frameHeight ? 'region' : undefined}
+                tabIndex={frameHeight ? 0 : undefined}
+                aria-label={frameHeight ? t('pages.frameRegion', detail.title) : undefined}
+              >
                 <iframe
                   ref={iframeRef}
                   style={frameHeight ? { height: frameHeight } : undefined}

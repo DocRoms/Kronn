@@ -230,6 +230,7 @@ const zh: TranslationDict = {
   "pages.pointsAdded": "+{0} 个数据点",
   "pages.pointsRemoved": "已删除 {0} 个旧数据点",
   "pages.openRefreshRun": "打开此次刷新的运行“{0}”",
+  "pages.frameRegion": "Artifact「{0}」",
   "pages.htmlTitle": "Artifact HTML",
   "pages.htmlRevisionHint": "每次保存都会创建新修订版。",
   "pages.saving": "保存中…",
