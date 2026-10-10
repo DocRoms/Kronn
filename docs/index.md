@@ -7,7 +7,25 @@ This folder is the project's living knowledge base, shared by humans and AI agen
 - **[AGENTS.md](AGENTS.md)** — Tiered context loader read by Claude Code, Codex, Gemini, Vibe, Copilot, Kiro and any agent that follows the `AGENTS.md` convention. Start here if you're an LLM.
 - **This file (`index.md`)** — Plain landing page for humans browsing the folder. Extend it with whatever helps onboarding.
 
-## Current release: 0.14.3
+## Current release: 0.15.0
+
+- A Live Page action can run without its card once a human approves it, and
+  Kronn ships « Ma Todo », a task board that runs without an agent. See
+  [Live Pages](architecture/live-pages.md).
+- A workflow run executes only the revision it started with, a stopped run
+  keeps uncommitted work, the Security settings take effect, and every save
+  says whether the workflow can start. Workflows gain a `Watch` trigger, a
+  Kronn timezone and runs without changes that are hidden and purged. See the
+  [architecture overview](architecture/overview.md).
+- A plugin's API can be limited per agent and per endpoint, a repository
+  profile (`kronn/project.toml`) feeds `{{project.<path>}}`, and the
+  `kronn-internal` bridge takes requests up to 8 MiB. See the
+  [project profile guide](guides/project-profile.md),
+  [kronn-internal](operations/mcp-servers/kronn-internal.md) and the
+  [0.15.0 release notes](../CHANGELOG.md), with their upgrade notes and known
+  limitations.
+
+## Earlier releases
 
 - Every process Kronn starts gets a built environment, each agent launch gets
   its own bridge token scoped to its project, and secrets leave `config.toml`
@@ -20,11 +38,7 @@ This folder is the project's living knowledge base, shared by humans and AI agen
 - The WebSocket checks `Origin`, P2P is off by default, outbound HTTP goes
   through one guarded transport, and only a human turns a workflow on. See
   [auth and TLS](operations/auth-and-tls.md) and the
-  [0.14.3 release notes](../CHANGELOG.md), with their upgrade notes and known
-  limitations.
-
-## Earlier releases
-
+  [0.14.3 release notes](../CHANGELOG.md).
 - An audit on OpenCode or another ACP agent reads the versioned environment
   templates (`.env.dist`, `.env.example`), is stopped by "Cancel" in seconds,
   and records the tokens its steps consumed — in the Full audit and in the
