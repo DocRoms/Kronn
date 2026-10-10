@@ -7617,4 +7617,208 @@ mod tests {
             );
         }
     }
+
+    // ─── Home credential gate (KT-1162) ──────────────────────────────────────
+
+    mod home_credential_gate {
+        use super::*;
+        use crate::core::mcp_scanner::host_sync_tests::{tree_digest, EnvRestore};
+        use crate::models::ApiKey;
+        use std::path::{Path, PathBuf};
+
+        const ENV: [&str; 5] = [
+            "HOME",
+            "KRONN_DATA_DIR",
+            "KRONN_HOST_HOME",
+            "KRONN_HOST_MCP_SYNC",
+            "KRONN_IN_DOCKER",
+        ];
+        const OPENAI_KEY: &str = "sk-kt1162-openai-never-leaks";
+        const GOOGLE_KEY: &str = "AIza-kt1162-google-never-leaks";
+
+        fn keyed_state() -> AppState {
+            let mut config = default_config();
+            for (provider, value) in [("openai", OPENAI_KEY), ("google", GOOGLE_KEY)] {
+                config.tokens.keys.push(ApiKey {
+                    id: format!("kt1162-{provider}"),
+                    name: "kt1162".into(),
+                    provider: provider.into(),
+                    value: value.into(),
+                    active: true,
+                });
+            }
+            let db = Arc::new(Database::open_in_memory().expect("in-memory DB"));
+            AppState::new_defaults(
+                Arc::new(RwLock::new(config)),
+                db,
+                DEFAULT_MAX_CONCURRENT_AGENTS,
+            )
+        }
+
+        /// A home holding the user's own Codex login and Gemini settings.
+        fn user_home(root: &Path, name: &str) -> PathBuf {
+            let home = root.join(name);
+            std::fs::create_dir_all(home.join(".codex")).unwrap();
+            std::fs::create_dir_all(home.join(".gemini")).unwrap();
+            std::fs::write(
+                home.join(".codex/auth.json"),
+                r#"{"auth_mode":"chatgpt","tokens":{"refresh_token":"user-rt"}}"#,
+            )
+            .unwrap();
+            std::fs::write(home.join(".gemini/settings.json"), r#"{"theme":"dark"}"#).unwrap();
+            home
+        }
+
+        fn env(home: &Path, data_dir: Option<&Path>, host_home: Option<&Path>, sync: Option<&str>) {
+            crate::core::child_env::set_var("HOME", home);
+            crate::core::child_env::remove_var("KRONN_IN_DOCKER");
+            match data_dir {
+                Some(dir) => crate::core::child_env::set_var("KRONN_DATA_DIR", dir),
+                None => crate::core::child_env::remove_var("KRONN_DATA_DIR"),
+            }
+            match host_home {
+                Some(dir) => crate::core::child_env::set_var("KRONN_HOST_HOME", dir),
+                None => crate::core::child_env::remove_var("KRONN_HOST_HOME"),
+            }
+            match sync {
+                Some(value) => crate::core::child_env::set_var("KRONN_HOST_MCP_SYNC", value),
+                None => crate::core::child_env::remove_var("KRONN_HOST_MCP_SYNC"),
+            }
+        }
+
+        async fn post(state: &AppState, uri: &str, provider: Option<&str>) -> (StatusCode, Value) {
+            let builder = Request::builder().method("POST").uri(uri);
+            let req = match provider {
+                Some(p) => builder
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(p).unwrap()))
+                    .unwrap(),
+                None => builder.body(Body::empty()).unwrap(),
+            };
+            send(state.clone(), false, req).await
+        }
+
+        fn assert_refused(status: StatusCode, body: &Value) {
+            assert_eq!(status, StatusCode::CONFLICT, "{body}");
+            assert_eq!(body["success"], false, "{body}");
+            let error = body["error"].as_str().unwrap_or_default();
+            assert!(error.contains("KRONN_HOST_HOME"), "{error}");
+            assert!(error.contains("KRONN_HOST_MCP_SYNC=1"), "{error}");
+            let text = body.to_string();
+            assert!(
+                !text.contains(OPENAI_KEY) && !text.contains(GOOGLE_KEY),
+                "{text}"
+            );
+        }
+
+        fn json(path: &Path) -> Value {
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn an_isolated_instance_refuses_every_key_write_and_leaves_home_byte_identical() {
+            let _restore = EnvRestore::capture(&ENV);
+            let root = tempfile::tempdir().unwrap();
+            let home = user_home(root.path(), "home");
+            let before = tree_digest(&home);
+            let state = keyed_state();
+
+            // `=0` is the MCP off switch: it must not skip the isolation check.
+            for sync in [None, Some("0")] {
+                env(&home, Some(&root.path().join("data")), None, sync);
+                let (status, body) = post(&state, "/api/config/sync-agent-tokens", None).await;
+                assert_refused(status, &body);
+                for provider in ["openai", "google"] {
+                    let (status, body) =
+                        post(&state, "/api/config/toggle-token-override", Some(provider)).await;
+                    assert_refused(status, &body);
+                }
+                let error = crate::core::key_discovery::write_gemini_key(Some(GOOGLE_KEY))
+                    .expect_err("the writer itself refuses");
+                assert!(error.contains("KRONN_HOST_HOME") && !error.contains(GOOGLE_KEY));
+                crate::core::key_discovery::write_gemini_key(None).expect_err("removal too");
+            }
+
+            assert_eq!(tree_digest(&home), before, "no file under HOME may change");
+            assert!(
+                state
+                    .config
+                    .read()
+                    .await
+                    .tokens
+                    .disabled_overrides
+                    .is_empty(),
+                "a refused toggle changes nothing"
+            );
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn kronn_host_home_receives_the_keys_and_home_stays_untouched() {
+            let _restore = EnvRestore::capture(&ENV);
+            let root = tempfile::tempdir().unwrap();
+            let home = user_home(root.path(), "home");
+            let host = user_home(root.path(), "host");
+            let before = tree_digest(&home);
+            env(&home, Some(&root.path().join("data")), Some(&host), None);
+            let state = keyed_state();
+
+            let (status, body) = post(&state, "/api/config/sync-agent-tokens", None).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["data"], serde_json::json!(["Codex", "Gemini CLI"]));
+            let codex = json(&host.join(".codex/auth.json"));
+            assert_eq!(codex["OPENAI_API_KEY"], OPENAI_KEY);
+            assert_eq!(codex["tokens"]["refresh_token"], "user-rt");
+            let gemini = json(&host.join(".gemini/settings.json"));
+            assert_eq!(gemini["apiKey"], GOOGLE_KEY);
+            assert_eq!(gemini["theme"], "dark");
+
+            let (status, body) =
+                post(&state, "/api/config/toggle-token-override", Some("openai")).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["data"], false);
+            assert!(json(&host.join(".codex/auth.json"))
+                .get("OPENAI_API_KEY")
+                .is_none());
+
+            assert_eq!(
+                tree_digest(&home),
+                before,
+                "HOME is not the redirected home"
+            );
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn the_default_instance_and_the_opt_in_still_write_into_home() {
+            let _restore = EnvRestore::capture(&ENV);
+            let root = tempfile::tempdir().unwrap();
+            let state = keyed_state();
+            let isolated = root.path().join("data");
+            let cases: [(&str, Option<&Path>, Option<&str>); 3] = [
+                ("default", None, None),
+                ("default-mcp-off", None, Some("0")),
+                ("opt-in", Some(isolated.as_path()), Some("1")),
+            ];
+            for (name, data_dir, sync) in cases {
+                let home = user_home(root.path(), name);
+                env(&home, data_dir, None, sync);
+                let (status, body) = post(&state, "/api/config/sync-agent-tokens", None).await;
+                assert_eq!(status, StatusCode::OK, "{name}: {body}");
+                assert_eq!(
+                    body["data"],
+                    serde_json::json!(["Codex", "Gemini CLI"]),
+                    "{name}"
+                );
+                let codex = json(&home.join(".codex/auth.json"));
+                assert_eq!(codex["OPENAI_API_KEY"], OPENAI_KEY, "{name}");
+                assert_eq!(codex["auth_mode"], "chatgpt", "{name}");
+                assert_eq!(
+                    json(&home.join(".gemini/settings.json"))["apiKey"],
+                    GOOGLE_KEY
+                );
+            }
+        }
+    }
 }

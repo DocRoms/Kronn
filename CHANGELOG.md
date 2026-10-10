@@ -21,6 +21,14 @@ Release notes for 0.9.3 and earlier are available in the
   does a backend whose `KRONN_DATA_DIR` names the default data directory or
   that sets `KRONN_HOST_HOME`. `KRONN_HOST_MCP_SYNC=1` writes them anyway,
   and `KRONN_HOST_MCP_SYNC=0` still turns the sync off.
+- The same isolated backend no longer writes your API keys into
+  `~/.codex/auth.json` or `~/.gemini/settings.json` (KT-1162). "Sync agent
+  tokens" and the OpenAI and Google override toggles answer HTTP 409 with a
+  message naming `KRONN_HOST_HOME` and `KRONN_HOST_MCP_SYNC=1`, and change
+  nothing. With `KRONN_HOST_HOME` set, both files are written under that home
+  only; Codex used to ignore it outside Docker. The default instance syncs as
+  before, `KRONN_HOST_MCP_SYNC=0` included, and "Sync agent tokens" now lists
+  only the files it actually wrote.
 - The Codex and Copilot syncs keep the MCP servers you added yourself. They
   used to replace the whole `[mcp_servers]` table and the whole
   `mcp-config.json`; Kronn now records the servers it wrote in

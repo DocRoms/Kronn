@@ -168,8 +168,14 @@ fn default_key_name() -> String {
 
 /// Write the Google API key to ~/.gemini/settings.json
 /// Used by sync_agent_tokens to push Kronn keys to Gemini CLI.
-pub fn write_gemini_key(key: Option<&str>) {
-    let Some(home) = home_dir() else { return };
+/// Errors name the file only, never the key.
+pub fn write_gemini_key(key: Option<&str>) -> Result<(), String> {
+    if let Some(refusal) = crate::core::mcp_scanner::home_credential_write_refusal() {
+        return Err(refusal.to_string());
+    }
+    let Some(home) = home_dir() else {
+        return Err("Not syncing Google key: no home directory".into());
+    };
     let gemini_dir = home.join(".gemini");
     let settings_path = gemini_dir.join("settings.json");
 
@@ -184,20 +190,18 @@ pub fn write_gemini_key(key: Option<&str>) {
                 Ok(c) => match serde_json::from_str::<serde_json::Value>(&c) {
                     Ok(v) => v,
                     Err(e) => {
-                        tracing::warn!(
+                        return Err(format!(
                             "Not syncing Google key: {} is not valid JSON ({e}); refusing to overwrite it",
                             settings_path.display()
-                        );
-                        return;
+                        ));
                     }
                 },
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
                 Err(e) => {
-                    tracing::warn!(
+                    return Err(format!(
                         "Not syncing Google key: cannot read {}: {e}; refusing to overwrite it",
                         settings_path.display()
-                    );
-                    return;
+                    ));
                 }
             };
             settings["apiKey"] = serde_json::Value::String(k.to_string());
@@ -205,8 +209,15 @@ pub fn write_gemini_key(key: Option<&str>) {
                 &settings_path,
                 serde_json::to_string_pretty(&settings).unwrap(),
             ) {
-                Ok(_) => tracing::info!("Synced Google key to {}", settings_path.display()),
-                Err(e) => tracing::warn!("Failed to write {}: {}", settings_path.display(), e),
+                Ok(_) => {
+                    tracing::info!("Synced Google key to {}", settings_path.display());
+                    Ok(())
+                }
+                Err(e) => Err(format!(
+                    "Failed to write {}: {}",
+                    settings_path.display(),
+                    e
+                )),
             }
         }
         None => {
@@ -215,22 +226,26 @@ pub fn write_gemini_key(key: Option<&str>) {
                 if let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(&content) {
                     if let Some(obj) = settings.as_object_mut() {
                         obj.remove("apiKey");
-                        match std::fs::write(
+                        return match std::fs::write(
                             &settings_path,
                             serde_json::to_string_pretty(&settings).unwrap(),
                         ) {
-                            Ok(_) => tracing::info!(
-                                "Removed Google key from {}",
-                                settings_path.display()
-                            ),
-                            Err(e) => tracing::warn!(
+                            Ok(_) => {
+                                tracing::info!(
+                                    "Removed Google key from {}",
+                                    settings_path.display()
+                                );
+                                Ok(())
+                            }
+                            Err(e) => Err(format!(
                                 "Failed to remove Google key from {}: {e}",
                                 settings_path.display()
-                            ),
-                        }
+                            )),
+                        };
                     }
                 }
             }
+            Ok(())
         }
     }
 }
@@ -395,6 +410,19 @@ mod tests {
 
     // ─── write_gemini_key ────────────────────────────────────────────────────
 
+    /// Runs `f` with `KRONN_HOST_HOME` on a scratch home, the explicit
+    /// redirect that lets an isolated test instance write there.
+    fn with_host_home<T>(home: &std::path::Path, f: impl FnOnce() -> T) -> T {
+        let old = crate::core::child_env::var_os("KRONN_HOST_HOME");
+        crate::core::child_env::set_var("KRONN_HOST_HOME", home);
+        let out = f();
+        match old {
+            Some(v) => crate::core::child_env::set_var("KRONN_HOST_HOME", v),
+            None => crate::core::child_env::remove_var("KRONN_HOST_HOME"),
+        }
+        out
+    }
+
     #[test]
     #[serial]
     fn write_gemini_key_starts_from_empty_when_file_missing() {
@@ -405,12 +433,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
 
-        let old_home = crate::core::child_env::var("HOME").ok();
-        crate::core::child_env::set_var("HOME", &tmp);
-        write_gemini_key(Some("AIza-new"));
-        if let Some(h) = old_home {
-            crate::core::child_env::set_var("HOME", h);
-        }
+        let result = with_host_home(&tmp, || write_gemini_key(Some("AIza-new")));
+        result.unwrap();
 
         let content = std::fs::read_to_string(tmp.join(".gemini/settings.json")).unwrap();
         let v: serde_json::Value = serde_json::from_str(&content).unwrap();
@@ -433,12 +457,8 @@ mod tests {
         )
         .unwrap();
 
-        let old_home = crate::core::child_env::var("HOME").ok();
-        crate::core::child_env::set_var("HOME", &tmp);
-        write_gemini_key(Some("AIza-new"));
-        if let Some(h) = old_home {
-            crate::core::child_env::set_var("HOME", h);
-        }
+        let result = with_host_home(&tmp, || write_gemini_key(Some("AIza-new")));
+        result.unwrap();
 
         let content = std::fs::read_to_string(tmp.join(".gemini/settings.json")).unwrap();
         let v: serde_json::Value = serde_json::from_str(&content).unwrap();
@@ -467,12 +487,8 @@ mod tests {
         let corrupt = "{ not json — user's mcpServers live here";
         std::fs::write(tmp.join(".gemini/settings.json"), corrupt).unwrap();
 
-        let old_home = crate::core::child_env::var("HOME").ok();
-        crate::core::child_env::set_var("HOME", &tmp);
-        write_gemini_key(Some("AIza-new"));
-        if let Some(h) = old_home {
-            crate::core::child_env::set_var("HOME", h);
-        }
+        let result = with_host_home(&tmp, || write_gemini_key(Some("AIza-new")));
+        assert!(result.is_err());
 
         let content = std::fs::read_to_string(tmp.join(".gemini/settings.json")).unwrap();
         assert_eq!(

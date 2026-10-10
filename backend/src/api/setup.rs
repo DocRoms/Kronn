@@ -379,7 +379,12 @@ pub async fn activate_api_key(
 pub async fn toggle_token_override(
     State(state): State<AppState>,
     Json(provider): Json<String>,
-) -> Json<ApiResponse<bool>> {
+) -> (StatusCode, Json<ApiResponse<bool>>) {
+    if matches!(provider.as_str(), "openai" | "google") {
+        if let Some(refused) = refuse_home_credential_write() {
+            return refused;
+        }
+    }
     let mut config = state.config.write().await;
     let disabled = &mut config.tokens.disabled_overrides;
     let is_now_enabled = if disabled.contains(&provider) {
@@ -391,24 +396,29 @@ pub async fn toggle_token_override(
     };
 
     // Sync agent auth files: write key if enabled, remove if disabled
-    if provider == "openai" {
-        sync_codex_auth(if is_now_enabled {
+    let synced = match provider.as_str() {
+        "openai" => sync_codex_auth(if is_now_enabled {
             config.tokens.active_key_for("openai")
         } else {
             None
-        });
-    }
-    if provider == "google" {
-        crate::core::key_discovery::write_gemini_key(if is_now_enabled {
+        }),
+        "google" => crate::core::key_discovery::write_gemini_key(if is_now_enabled {
             config.tokens.active_key_for("google")
         } else {
             None
-        });
+        }),
+        _ => Ok(()),
+    };
+    if let Err(e) = synced {
+        tracing::warn!("{e}");
     }
 
     match config::save(&config).await {
-        Ok(_) => Json(ApiResponse::ok(is_now_enabled)),
-        Err(e) => Json(ApiResponse::err(format!("Failed to save: {}", e))),
+        Ok(_) => (StatusCode::OK, Json(ApiResponse::ok(is_now_enabled))),
+        Err(e) => (
+            StatusCode::OK,
+            Json(ApiResponse::err(format!("Failed to save: {}", e))),
+        ),
     }
 }
 
@@ -1146,14 +1156,33 @@ pub async fn get_auth_token(State(state): State<AppState>) -> Json<ApiResponse<O
 }
 
 /// Write or remove the OpenAI key from ~/.codex/auth.json
-fn sync_codex_auth(key: Option<&str>) {
-    let home = crate::core::child_env::var("HOME").unwrap_or_else(|_| "/root".into());
-    let codex_auth_path = std::path::PathBuf::from(home)
-        .join(".codex")
-        .join("auth.json");
-    if let Err(e) = sync_codex_auth_at(&codex_auth_path, key) {
-        tracing::warn!("{e}");
+fn sync_codex_auth(key: Option<&str>) -> Result<(), String> {
+    if let Some(refusal) = crate::core::mcp_scanner::home_credential_write_refusal() {
+        return Err(refusal.to_string());
     }
+    sync_codex_auth_at(&codex_auth_path(), key)
+}
+
+/// In Docker `KRONN_HOST_HOME` is a host path absent from the container, and
+/// the container `HOME/.codex` is the bind-mounted host directory.
+fn codex_auth_path() -> std::path::PathBuf {
+    let host_home = crate::core::child_env::var("KRONN_HOST_HOME")
+        .ok()
+        .filter(|home| !home.is_empty() && !crate::core::env::is_docker());
+    let home = host_home
+        .or_else(|| crate::core::child_env::var("HOME").ok())
+        .unwrap_or_else(|| "/root".into());
+    std::path::PathBuf::from(home)
+        .join(".codex")
+        .join("auth.json")
+}
+
+/// 409 before anything changes: an isolated instance must not report a key
+/// sync it refused to perform.
+fn refuse_home_credential_write<T: serde::Serialize>() -> Option<(StatusCode, Json<ApiResponse<T>>)>
+{
+    crate::core::mcp_scanner::home_credential_write_refusal()
+        .map(|refusal| (StatusCode::CONFLICT, Json(ApiResponse::err(refusal))))
 }
 
 /// Merge Kronn's OpenAI key into (or out of) a Codex `auth.json`.
@@ -1267,7 +1296,12 @@ fn sync_codex_auth_at(codex_auth_path: &std::path::Path, key: Option<&str>) -> R
 
 /// POST /api/config/sync-agent-tokens
 /// Write API tokens into agent-specific auth files (e.g. ~/.codex/auth.json)
-pub async fn sync_agent_tokens(State(state): State<AppState>) -> Json<ApiResponse<Vec<String>>> {
+pub async fn sync_agent_tokens(
+    State(state): State<AppState>,
+) -> (StatusCode, Json<ApiResponse<Vec<String>>>) {
+    if let Some(refused) = refuse_home_credential_write() {
+        return refused;
+    }
     let config = state.config.read().await;
     let mut synced: Vec<String> = Vec::new();
 
@@ -1278,8 +1312,10 @@ pub async fn sync_agent_tokens(State(state): State<AppState>) -> Json<ApiRespons
             .disabled_overrides
             .contains(&"openai".to_string())
         {
-            sync_codex_auth(Some(openai_key));
-            synced.push("Codex".into());
+            match sync_codex_auth(Some(openai_key)) {
+                Ok(()) => synced.push("Codex".into()),
+                Err(e) => tracing::warn!("{e}"),
+            }
         }
     }
 
@@ -1290,12 +1326,14 @@ pub async fn sync_agent_tokens(State(state): State<AppState>) -> Json<ApiRespons
             .disabled_overrides
             .contains(&"google".to_string())
         {
-            crate::core::key_discovery::write_gemini_key(Some(google_key));
-            synced.push("Gemini CLI".into());
+            match crate::core::key_discovery::write_gemini_key(Some(google_key)) {
+                Ok(()) => synced.push("Gemini CLI".into()),
+                Err(e) => tracing::warn!("{e}"),
+            }
         }
     }
 
-    Json(ApiResponse::ok(synced))
+    (StatusCode::OK, Json(ApiResponse::ok(synced)))
 }
 
 /// POST /api/config/discover-keys
@@ -3460,6 +3498,36 @@ mod tests {
 
         sync_codex_auth_at(&path, None).unwrap();
         assert!(!path.exists());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn codex_writer_refuses_an_isolated_instance_and_names_no_key() {
+        let _restore = crate::core::mcp_scanner::host_sync_tests::EnvRestore::capture(&[
+            "HOME",
+            "KRONN_DATA_DIR",
+            "KRONN_HOST_HOME",
+            "KRONN_HOST_MCP_SYNC",
+            "KRONN_IN_DOCKER",
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        crate::core::child_env::set_var("HOME", dir.path());
+        crate::core::child_env::set_var("KRONN_DATA_DIR", dir.path().join("data"));
+        for name in ["KRONN_HOST_HOME", "KRONN_HOST_MCP_SYNC", "KRONN_IN_DOCKER"] {
+            crate::core::child_env::remove_var(name);
+        }
+
+        for key in [Some("sk-kt1162-never-leaks"), None] {
+            let error = sync_codex_auth(key).unwrap_err();
+            assert!(error.contains("KRONN_HOST_HOME"), "{error}");
+            assert!(!error.contains("sk-kt1162"), "{error}");
+        }
+        assert!(!dir.path().join(".codex").exists());
+
+        // The explicit redirect is honoured outside Docker.
+        let host = dir.path().join("host");
+        crate::core::child_env::set_var("KRONN_HOST_HOME", &host);
+        assert_eq!(codex_auth_path(), host.join(".codex/auth.json"));
     }
 
     #[cfg(unix)]

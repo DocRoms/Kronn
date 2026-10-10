@@ -2680,12 +2680,38 @@ fn host_sync_gate(env: &HostSyncEnv<'_>) -> HostSyncGate {
 }
 
 fn current_host_sync_gate() -> HostSyncGate {
+    host_sync_gate_from_env(|_| true)
+}
+
+/// Refusal shown when an isolated instance is asked to write an API key into
+/// a home-directory CLI file.
+pub(crate) const HOME_CREDENTIAL_WRITE_REFUSED: &str =
+    "This Kronn instance runs on an isolated KRONN_DATA_DIR, so it does not write API keys \
+     into the CLI files of the home directory. Set KRONN_HOST_HOME to the home to write into, \
+     or KRONN_HOST_MCP_SYNC=1 to write into this home anyway.";
+
+/// Same rule as the MCP host sync, but `KRONN_HOST_MCP_SYNC=0` switches off
+/// MCP entries only: it must neither stop the default instance from syncing
+/// keys nor let an isolated one skip the isolation check.
+pub(crate) fn home_credential_write_refusal() -> Option<&'static str> {
+    let opt_in = |value: &str| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true");
+    match host_sync_gate_from_env(opt_in) {
+        HostSyncGate::Enabled => None,
+        HostSyncGate::SwitchedOff | HostSyncGate::IsolatedDataDir => {
+            Some(HOME_CREDENTIAL_WRITE_REFUSED)
+        }
+    }
+}
+
+fn host_sync_gate_from_env(keep_switch: fn(&str) -> bool) -> HostSyncGate {
     let non_empty = |name: &str| {
         crate::core::child_env::var_os(name)
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
     };
-    let switch = crate::core::child_env::var("KRONN_HOST_MCP_SYNC").ok();
+    let switch = crate::core::child_env::var("KRONN_HOST_MCP_SYNC")
+        .ok()
+        .filter(|value| keep_switch(value));
     let data_dir = non_empty("KRONN_DATA_DIR");
     let default_data_dir = crate::core::config::default_config_dir();
     host_sync_gate(&HostSyncEnv {
@@ -4648,7 +4674,7 @@ mod inject_context_tests {
 }
 
 #[cfg(test)]
-mod host_sync_tests {
+pub(crate) mod host_sync_tests {
     use super::*;
     use serial_test::serial;
     use std::collections::{HashMap, HashSet};
@@ -4731,10 +4757,10 @@ mod host_sync_tests {
 
     /// Restores the test process environment even if an assertion panics.
     /// Callers are `#[serial]` because Rust process environments are global.
-    struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+    pub(crate) struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
 
     impl EnvRestore {
-        fn capture(names: &[&'static str]) -> Self {
+        pub(crate) fn capture(names: &[&'static str]) -> Self {
             Self(
                 names
                     .iter()
@@ -5949,7 +5975,9 @@ Always send emails from contact@example.com
         home
     }
 
-    fn tree_digest(dir: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    pub(crate) fn tree_digest(
+        dir: &Path,
+    ) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
         use sha2::Digest;
         let mut out = std::collections::BTreeMap::new();
         let mut stack = vec![dir.to_path_buf()];
