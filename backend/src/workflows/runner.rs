@@ -240,6 +240,8 @@ fn uncertain_side_effect_type(step_type: &StepType) -> Option<&'static str> {
         StepType::PublishPageData => Some("PublishPageData"),
         StepType::CollectApiData => Some("CollectApiData"),
         StepType::TriggerWorkflow => Some("TriggerWorkflow"),
+        // Replaying an add would create the task twice.
+        StepType::TaskBoard => Some("TaskBoard"),
         StepType::Agent
         | StepType::BatchQuickPrompt
         | StepType::Gate
@@ -2696,6 +2698,15 @@ async fn execute_run_body(
                     )
                     .await
                 }
+                StepType::TaskBoard => {
+                    super::task_board_step::execute_task_board_step(
+                        step,
+                        &workflow.id,
+                        &state,
+                        &ctx,
+                    )
+                    .await
+                }
                 StepType::SubWorkflow => {
                     // Phase 1b-i — re-entrant: runs the target workflow as a
                     // child run (Box::pin recursion inside the executor),
@@ -2971,6 +2982,7 @@ async fn execute_run_body(
             | StepType::CollectApiData
             | StepType::TransformData
             | StepType::PublishPageData
+            | StepType::TaskBoard
             // A triggered run has its own budget.
             | StepType::TriggerWorkflow
             // Counts each review call itself, as it happens.
@@ -3745,6 +3757,15 @@ async fn execute_run_body(
                         &workflow.id,
                         &run.id,
                         run.project_id.as_deref().or(workflow.project_id.as_deref()),
+                        &state,
+                        &ctx,
+                    )
+                    .await
+                }
+                StepType::TaskBoard => {
+                    super::task_board_step::execute_task_board_step(
+                        rb_step,
+                        &workflow.id,
                         &state,
                         &ctx,
                     )
@@ -4716,6 +4737,7 @@ pub(crate) fn apply_step_snapshot(
         StepType::SubWorkflow => "SubWorkflow",
         StepType::TriggerWorkflow => "TriggerWorkflow",
         StepType::DelegateSubtasks => "DelegateSubtasks",
+        StepType::TaskBoard => "TaskBoard",
     };
     result.step_kind = Some(kind.into());
     if matches!(step.step_type, StepType::Agent) {
@@ -5109,6 +5131,7 @@ mod tests {
             collect_api_data: None,
             transform_data: None,
             page_publish: None,
+            task_board: None,
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
@@ -5461,6 +5484,7 @@ mod tests {
             collect_api_data: None,
             transform_data: None,
             page_publish: None,
+            task_board: None,
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
@@ -10451,6 +10475,7 @@ mod tests {
     mod gate_guard_runs;
     mod quota_wait_runs;
     mod run_pin_runs;
+    mod task_board_runs;
     mod workflow_safety_runs;
 }
 

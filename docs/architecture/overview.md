@@ -360,6 +360,36 @@ Unified automation system: `Trigger → Steps`. Kronn and OpenAI Symphony overla
   scheduler crate's Sunday-first numbering at evaluation time.
 - **Tracker** — polls an issue tracker API (GitHub, Linear...) at a cron interval. Each new matching issue = 1 separate run with issue context injected via Kronn's `{{variable}}` templates. Pull-based (polling), not push (webhooks). Tracks processed issue IDs for reconciliation (no duplicate runs).
 - **Manual** — triggered from dashboard UI or CLI.
+- **Watch** (`workflows/watch_trigger.rs`) — on a cron interval, the scheduler
+  GETs a source through the API broker (`execute_watch_poll`: stored
+  credentials, the API's default headers, guarded transport, no retry, no
+  `api_call_logs` row) and creates a run only when the source changed. The
+  stored ETag / Last-Modified go out as `If-None-Match` / `If-Modified-Since`
+  (a 304 is "unchanged"); a 200 is compared by validators (`Validators`, body
+  fingerprint when the server sends none), body fingerprint (`Body`) or the
+  fingerprint of a JSONPath result (`JsonPath`). A poll writes
+  `workflow_watch_state` (validators, fingerprint, unchanged/changed/error
+  counters, consecutive failures; 3 in a row show the workflow as failing),
+  never `workflow_runs`. The first poll of a source records a baseline without
+  a run. A change is identified by the baseline it departs from and the state
+  it reaches; each served project's admission is recorded in
+  `workflow_watch_occurrences` in the transaction that inserts its run, and
+  the baseline advances only once every served project has its run. A change
+  detected again (restart before the acknowledgment, a project still refused)
+  therefore runs once per project, never twice. The source is identified
+  after its Quick API fills it, so a human edit of that Quick API starts a
+  new baseline, and an agent's edit disables the workflow (KT-1037) as for a
+  Quick API a step uses. The run receives `{{trigger.body}}` (credentials
+  removed, cut at 64 KiB), `{{trigger.status}}`, `{{trigger.fingerprint}}`
+  and, when present, `{{trigger.etag}}`, `{{trigger.last_modified}}`,
+  `{{trigger.extract}}`. Watch intervals have five fields (at most once a
+  minute).
+
+Cron and Watch intervals are read in UTC unless the trigger sets an IANA
+`timezone` (e.g. `Europe/Paris`), in which case the schedule follows local
+time across DST changes. Workflows saved without one keep UTC. On the DST change days, a local time the spring change skips does not fire
+that day, and a local time the autumn change repeats fires once, at its first
+pass (a frequent schedule adds no fire during the repeated hour).
 
 **Steps:**
 - Sequential execution, each step runs an agent with optional per-step MCPs (resolved and synced before execution).

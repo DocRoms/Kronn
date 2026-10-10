@@ -52,6 +52,8 @@ vi.mock('../../lib/api', () => ({
     actions: vi.fn(), actionLaunches: vi.fn(() => Promise.resolve([])), getAction: vi.fn(), cancelAction: vi.fn(), launchAction: vi.fn(),
     update: vi.fn(), delete: vi.fn(), updateHtml: vi.fn(),
     exportArtifact: vi.fn(), previewImport: vi.fn(), importArtifact: vi.fn(),
+    defaultTodo: vi.fn(() => Promise.resolve({ state: 'installed', page_id: null, workflow_ids: [], own_page_id: null })),
+    installDefaultTodo: vi.fn(),
   },
   // The card reads a workflow's Agent steps (KT-1025); none here.
   workflows: { triggerStream: vi.fn(), get: vi.fn(() => Promise.resolve({ steps: [] })) },

@@ -108,6 +108,31 @@ describe('StandaloneLivePage', () => {
     }
   });
 
+  it('follows a publish at once, without its poll and without rebuilding the frame', async () => {
+    const { useWebSocket } = await import('../../hooks/useWebSocket');
+    render(<StandaloneLivePage pageId="page-1" />);
+    const frame = await screen.findByTestId('standalone-live-page-frame') as HTMLIFrameElement;
+    const documentBefore = frame.getAttribute('srcdoc');
+    const post = vi.spyOn(frame.contentWindow!, 'postMessage');
+    vi.mocked(pagesApi.get).mockResolvedValue({ ...detail, data_revision: 7 });
+    const handlers = vi.mocked(useWebSocket).mock.calls.map(([handler]) => handler);
+    await act(async () => {
+      handlers.forEach(handler => handler({ type: 'live_page_data_changed', page_id: 'other', data_revision: 9 }));
+    });
+    expect(post).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'kronn:page-data' }), '*');
+    await act(async () => {
+      handlers.forEach(handler => handler({ type: 'live_page_data_changed', page_id: 'page-1', data_revision: 7 }));
+    });
+    await waitFor(() => expect(post).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'kronn:page-data',
+        data: expect.objectContaining({ page: expect.objectContaining({ data_revision: 7 }) }),
+      }),
+      '*',
+    ));
+    expect(frame.getAttribute('srcdoc')).toBe(documentBefore);
+  });
+
   it('hands the URL view parameters to the Page with its data', async () => {
     render(<StandaloneLivePage pageId="page-1" params={{ tv: '1' }} />);
     const frame = await screen.findByTestId('standalone-live-page-frame') as HTMLIFrameElement;

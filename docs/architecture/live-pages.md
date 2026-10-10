@@ -203,6 +203,88 @@ explicit light value, for example with `:root:not([data-theme="light"])`.
 Custom theme names can use the Page's own fallback rules.
 `[src: file: frontend/src/lib/live-page-sandbox.ts:1]`
 
+A publish that changes a Page (API `POST /api/pages/{id}/publish` or a
+`PublishPageData` step) broadcasts the local WebSocket event
+`live_page_data_changed { page_id, data_revision }`. The Pages view and the
+standalone tab re-read that Page at once and post `kronn:page-data` to the
+open frame without rebuilding it; their 30 s poll stays as a fallback.
+`[src: file: backend/src/api/live_pages.rs:647]`
+`[src: file: frontend/src/hooks/useLivePageDataPush.ts:1]`
+
+## « Ma Todo », the default board (KT-1030)
+
+Kronn installs one board Page and six workflows at boot, once
+(`core::default_todo::install_on_boot`, from both the standalone and the
+desktop mains). The install goes through the Artifact import machinery
+(fresh copies, ids remapped) and is recorded in `default_contents`
+(migration 240). Rules:
+
+- **Once.** A `default_contents` row means "handled"; a restart, an upgrade or
+  a deleted board never installs it again. `GET /api/defaults/todo` reports
+  `installed`, `removed`, `kept_existing` or `not_installed`;
+  `POST /api/defaults/todo/install` (human only, absent from the bridge-token
+  list) installs a fresh copy, refused while Kronn's board page exists. The
+  Pages sidebar offers it when the board is absent.
+- **An own todo is never touched.** A Page titled « Ma Todo » / « My Todo » /
+  « Mi Todo » / « 我的待办 » or slugged `ma-todo`, `my-todo`, `mi-todo`, `todo`
+  makes boot record `kept_existing` and create nothing; the sidebar proposes
+  to install Kronn's board next to it.
+- **Portable.** Every workflow is `TaskBoard` + `PublishPageData`: no Exec, no
+  HTTP, no URL or id in the shipped text. A task's discussion link is the
+  instance-relative `#discussion-<id>`.
+- **Enabled, not trusted.** The workflows arrive enabled (first-party,
+  agentless, needed for the board to work without configuration); no trust is
+  approved. The page asks the human to approve `todo-move` once in its details
+  (KT-1029) to drop without a card; `todo-toggle` is eligible too, `todo-add`
+  and `todo-edit` take typed values and keep their card.
+- **No polling.** No workflow has a schedule: every action publishes the board
+  it changed, which reaches open views through `live_page_data_changed`.
+  `todo-refresh` is a manual button for changes made elsewhere.
+- **Drag and drop.** The drop moves the card at once and clicks the move CTA
+  inside the gesture. The Page watches that CTA's `data-kronn-action-state`:
+  a failed launch puts the card back with the reason, a published board
+  confirms it, a refused trusted launch leaves the card proposed with
+  « Confirm / Cancel » while Kronn's card is open. States marked before the
+  launch (an older identical move) are ignored by launch id.
+- **First-view notice.** One dismissible notice says the page runs on
+  Kronn's Tasks and Workflows and can be edited (by hand or by an agent), with
+  the trust hint. Closing it is display-only and remembered by the host (see
+  Page preferences below).
+- **Editing never cuts.** Rows carry the whole description (the card derives
+  its one-line preview), and `edit` writes only the fields that differ from
+  the stored task, compared trimmed, so an untouched description keeps its
+  exact bytes. A description over 20 000 characters is refused, never cut.
+- **Cards.** Title, priority badge (not for `normal`), relative update date,
+  linked-discussion link, first-line description preview, tag chips (the
+  task's tags minus the board tag), actions. An empty column says so.
+- **Search.** A display-only filter over title, description, reference and
+  tags, case- and accent-insensitive; each column shows `matches of total`;
+  `/` focuses it, × or Escape clears it, a tag chip fills it.
+- **Details.** A chevron expands a card's description rendered as Markdown
+  (headings, lists, emphasis, code, http(s) links only). The text is escaped
+  before any tag is built; opening it launches nothing.
+
+### Page preferences
+
+The opaque sandbox (`allow-scripts`, no `allow-same-origin`) has no storage.
+The bridge exposes `window.KronnPagePref(key, value)`: after a live click it
+posts `kronn:page-pref { page_id, key, value }` on the private port. The host
+relay (`createLivePageOpenLinkRelay`, option `pageId`) accepts it only for an
+allow-listed key (`LIVE_PAGE_PREF_KEYS`, today `notice-dismissed`), a boolean
+value and the Page the frame shows; it stores it in the host's `localStorage`
+(`kronn:page-pref:<page id>:<key>`, errors swallowed) and never acts on it.
+`runtimeData` hands the stored flags back as `KronnPageData.prefs`.
+`[src: file: frontend/src/lib/live-page-sandbox.ts:1]`
+
+`TaskBoard` (zero tokens) reads or changes the planning tasks carrying the
+board tag; it refuses any task without it. The order of open cards lives in
+`task_board_orders` per tag, because the planning `rank` is renumbered across
+a priority band. Its `data.rows` ends with one `__col_<column>__` marker per
+column, which the Page binds to for "end of column" moves.
+`[src: file: backend/src/core/default_todo.rs:1]`
+`[src: file: backend/src/workflows/task_board_step.rs:1]`
+`[src: file: backend/src/core/default_todo/board.html:1]`
+
 ## View parameters
 
 The standalone tab accepts display hints after the Page id:

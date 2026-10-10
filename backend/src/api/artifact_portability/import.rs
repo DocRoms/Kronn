@@ -977,6 +977,41 @@ fn commit_plan(
     })
 }
 
+/// Import a bundle Kronn ships itself, inside the caller's transaction: every
+/// dependency is a fresh copy, so nothing the user already has is reused or
+/// changed. Workflows land disabled, as for any import.
+pub(crate) fn import_shipped_in_transaction(
+    tx: &rusqlite::Transaction<'_>,
+    content: String,
+) -> Result<ArtifactImportResult> {
+    let mut request = ArtifactImportRequest {
+        content,
+        project_id: None,
+        choices: Vec::new(),
+        approved_quick_exec_ids: Vec::new(),
+        preview_digest: None,
+        allow_embed_origins: Vec::new(),
+    };
+    request.choices = parse_resources(&request)?
+        .into_iter()
+        .skip(1)
+        .map(|resource| ArtifactImportChoice {
+            kind: resource.kind,
+            source_id: resource.id,
+            action: ArtifactImportAction::Create,
+            target_id: None,
+        })
+        .collect();
+    let plan = prepare_plan(tx, &request)?;
+    if !plan.preview.can_import {
+        bail!(
+            "Shipped Artifact cannot be imported: {}",
+            plan.preview.issues.join("; ")
+        );
+    }
+    commit_plan(tx, plan, &request)
+}
+
 pub async fn import(
     State(state): State<AppState>,
     Json(request): Json<ArtifactImportRequest>,

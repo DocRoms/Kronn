@@ -273,6 +273,11 @@ pub enum GuardKind {
 pub enum WorkflowTrigger {
     Cron {
         schedule: String,
+        /// IANA timezone the schedule is read in; absent means UTC, so
+        /// workflows saved before the field keep their hours.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        timezone: Option<String>,
     },
     Tracker {
         source: TrackerSourceConfig,
@@ -281,6 +286,91 @@ pub enum WorkflowTrigger {
         interval: String,
     },
     Manual,
+    /// Polls a source through the API broker and creates a run only when it
+    /// changed (KT-1099).
+    Watch(WatchTrigger),
+}
+
+/// What a `Watch` trigger polls, how often, and how it detects a change.
+/// The source is an API configured in Kronn, or a saved Quick API whose
+/// fields fill the ones left empty here; the request is always a GET.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct WatchTrigger {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub quick_api_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub api_plugin_slug: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub api_config_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub api_endpoint_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub api_query: Option<std::collections::HashMap<String, String>>,
+    /// Cron expression of the poll cadence.
+    pub interval: String,
+    /// IANA timezone `interval` is read in; absent means UTC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub timezone: Option<String>,
+    #[serde(default)]
+    pub detection: WatchDetection,
+}
+
+/// How a `Watch` poll decides the source changed. Every mode sends the
+/// stored `If-None-Match` / `If-Modified-Since` first: a 304 is "unchanged".
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "type")]
+pub enum WatchDetection {
+    /// A 200 is a change when its ETag / Last-Modified differ from the
+    /// stored ones; without either header, the body fingerprint decides.
+    #[default]
+    Validators,
+    /// A 200 is a change when the body's fingerprint differs.
+    Body,
+    /// A 200 is a change when the fingerprint of this JSONPath's result differs.
+    JsonPath { path: String },
+}
+
+/// Outcome of the latest `Watch` poll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum WatchPollResult {
+    /// First poll of this source: its state was recorded, no run.
+    Baseline,
+    Unchanged,
+    Changed,
+    /// A change no run could be admitted for (concurrency limit, preflight);
+    /// the next poll detects it again.
+    Deferred,
+    Error,
+}
+
+/// Poll history of a `Watch` workflow, shown on its card.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct WatchStatus {
+    pub last_poll_at: Option<DateTime<Utc>>,
+    pub last_result: Option<WatchPollResult>,
+    pub last_http_status: Option<u16>,
+    pub last_error: Option<String>,
+    pub last_change_at: Option<DateTime<Utc>>,
+    #[ts(type = "number")]
+    pub unchanged_count: u64,
+    #[ts(type = "number")]
+    pub changed_count: u64,
+    #[ts(type = "number")]
+    pub error_count: u64,
+    pub consecutive_failures: u32,
+    /// `consecutive_failures` reached the alert threshold.
+    pub failing: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -762,6 +852,11 @@ pub struct WorkflowStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_publish: Option<PublishPageDataConfig>,
 
+    /// KT-1030 — for `StepType::TaskBoard`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub task_board: Option<TaskBoardConfig>,
+
     /// 2026-06-11 (Phase 1) — for `StepType::SubWorkflow`: the id of the
     /// workflow to run as a nested child. Required for that step type
     /// (enforced at save). `None` for every other step type. Mirrors the
@@ -1132,6 +1227,60 @@ pub enum StepType {
     /// orchestrator agent: launch, wait mechanically, and call the step's
     /// agent once per delivery, only to review it. Config: `delegate_subtasks`.
     DelegateSubtasks,
+    /// KT-1030 — read or change the planning tasks that share one tag, as a
+    /// board (to do / in progress / done) with an order Kronn stores. Zero
+    /// tokens, no network: config in `WorkflowStep.task_board`.
+    TaskBoard,
+}
+
+/// What a `TaskBoard` step does before returning the board's rows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum TaskBoardOperation {
+    /// Only read the board.
+    #[default]
+    Read,
+    /// Create a task (`title`, `description`, `tags`) at the top of "to do".
+    Add,
+    /// Done becomes to do (back on top), anything else becomes done (`task`).
+    Toggle,
+    /// Move `task` into `column` before `before` (a task id, or the column's
+    /// end marker `__col_<column>__`).
+    Move,
+    /// Change the `title` and `description` of `task`.
+    Edit,
+    /// Create a discussion about `task` and link it, once per task. The
+    /// discussion uses the step's `agent`.
+    Discuss,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TaskBoardConfig {
+    /// The tag every task of the board carries. A step never touches a task
+    /// without it.
+    pub tag: String,
+    #[serde(default)]
+    pub operation: TaskBoardOperation,
+    /// Runtime templates, each read only by the operations that name it.
+    #[serde(default)]
+    pub task: String,
+    #[serde(default)]
+    pub before: String,
+    #[serde(default)]
+    pub column: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    /// Extra tags for `add`, comma separated.
+    #[serde(default)]
+    pub tags: String,
+    /// Recently done tasks the board shows (default 15, at most 100).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub done_limit: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
@@ -2088,6 +2237,10 @@ pub struct WorkflowSummary {
     #[serde(default)]
     pub pinned: bool,
     pub last_run: Option<WorkflowRunSummary>,
+    /// Poll history of a `Watch` trigger; absent for other triggers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub watch: Option<WatchStatus>,
     pub created_at: DateTime<Utc>,
 }
 

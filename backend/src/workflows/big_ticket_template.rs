@@ -348,6 +348,7 @@ fn blank_step(name: &str, kind: StepType, agent: AgentType) -> WorkflowStep {
         collect_api_data: None,
         transform_data: None,
         page_publish: None,
+        task_board: None,
         sub_workflow_id: None,
         sub_workflow_foreach_file: None,
         multi_agent_review: None,

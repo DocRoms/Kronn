@@ -6,9 +6,9 @@ import type { AutoDisabledWorkflow } from '../../types/generated';
 import { AUTO_DISABLE_REASON_KEY } from '../../lib/autoDisableReason';
 import './AutoDisabledReview.css';
 
-/** A Cron or Tracker trigger runs on its own once enabled: always confirmed. */
+/** A Cron, Tracker or Watch trigger runs on its own once enabled: always confirmed. */
 function isScheduled(item: AutoDisabledWorkflow): boolean {
-  return item.trigger.type === 'Cron' || item.trigger.type === 'Tracker';
+  return item.trigger.type === 'Cron' || item.trigger.type === 'Tracker' || item.trigger.type === 'Watch';
 }
 
 interface Props {

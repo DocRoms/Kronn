@@ -532,7 +532,10 @@ pub async fn publish(
         .with_conn(move |conn| crate::db::live_pages::publish_live_page(conn, &id, &request))
         .await;
     match result {
-        Ok(publication) => Json(ApiResponse::ok(publication)),
+        Ok(publication) => {
+            announce_page_data_changed(&state, &publication);
+            Json(ApiResponse::ok(publication))
+        }
         Err(error) => {
             let message = error.to_string();
             let code = if message == "Page not found" {
@@ -640,6 +643,21 @@ pub async fn embed_frame_src(
 
 /// Tell every open tab that the allowed sites changed: they re-read the list
 /// and take down what was revoked. The event names the change, never the list.
+/// Tell open views of the Page its data changed; nothing when it did not.
+pub fn announce_page_data_changed(
+    state: &AppState,
+    publication: &crate::models::PublishLivePageResult,
+) {
+    if publication.content_changed || publication.points_added > 0 {
+        let _ = state
+            .ws_broadcast
+            .send(crate::models::WsMessage::LivePageDataChanged {
+                page_id: publication.page_id.clone(),
+                data_revision: publication.data_revision,
+            });
+    }
+}
+
 pub fn announce_embed_origins_changed(state: &AppState) {
     let _ = state
         .ws_broadcast

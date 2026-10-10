@@ -15,6 +15,7 @@ pub mod compare;
 pub mod contacts;
 pub mod context_audit;
 pub mod debug;
+pub mod default_contents;
 pub mod delivery_publication;
 pub mod desktop_port;
 pub mod directives;

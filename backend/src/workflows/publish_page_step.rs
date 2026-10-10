@@ -66,6 +66,7 @@ pub async fn execute_publish_page_data_step(
         Ok(result) => result,
         Err(error) => return fail(step, started, format!("Page publication failed: {error}")),
     };
+    crate::api::live_pages::announce_page_data_changed(state, &result);
 
     let summary = format!(
         "Page '{}' published at data revision {} ({} changed, {} unchanged, {} point(s) added)",

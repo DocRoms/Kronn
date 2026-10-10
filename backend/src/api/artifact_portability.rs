@@ -1,6 +1,7 @@
 //! Artifact portability: a bounded, versioned graph of content and automation
 //! definitions. Export and preview are read-only; import never starts a run.
 mod import;
+pub(crate) use import::import_shipped_in_transaction;
 pub use import::{import, preview};
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};

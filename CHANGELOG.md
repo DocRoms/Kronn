@@ -27,6 +27,26 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- « Ma Todo » ships with Kronn (KT-1030): a board Page (to do / in progress /
+  done) over the planning tasks tagged `todo`, with add, edit, ⤒ ▶ ◀ ✓ ↺,
+  tags, one discussion per task, and a chevron that shows a card's
+  description as rendered Markdown. It is installed once at first launch,
+  never again after you delete it, and never over a todo page of your own;
+  the Pages sidebar offers to (re)install it. Its six workflows use only the
+  new zero-token `TaskBoard` step and `PublishPageData` (no Python, no URL),
+  arrive enabled, and no action is pre-approved: approve « todo-move » once in
+  the Page's details to save a drag and drop without its card. A drop moves
+  the card at once and puts it back with the reason if the launch fails. A
+  first-view notice, dismissible, says the page runs on Kronn's Tasks and
+  Workflows and can be edited by hand or by an agent.
+  Editing a task writes only what changed, so a long description is never
+  cut. Closing the notice is remembered by Kronn for that Page (a sandboxed
+  Page has no storage of its own).
+  Cards show tags as chips, a priority badge, a relative date, a description
+  preview and the linked discussion; a search bar filters the board live by
+  title, description or tag, ignoring case and accents.
+- An open Page follows a publish at once (`live_page_data_changed` WebSocket
+  event) instead of waiting for its 30-second refresh (KT-1030).
 - A skill can belong to one project (KT-1128). "Nouveau skill" joins the
   Automation page's create menu, and a custom skill's sheet gets "Modifier";
   the form takes an optional project (the page's project filter by default).
@@ -95,6 +115,37 @@ Release notes for 0.9.3 and earlier are available in the
   is applied without a new review, a reassignment interrupted midway is
   applied once instead of escalating, and boot recovery no longer wakes a paid
   principal turn in the step's room.
+- Workflows can use a `Watch` trigger (KT-1099): on its interval, the
+  scheduler polls a source with a GET through the API broker (an API
+  configured in Kronn, or a saved Quick API; stored credentials, the API's
+  default headers, guarded outbound HTTP) and creates a run only when the
+  source changed. The stored ETag / Last-Modified go out as a conditional
+  request, so a 304 costs nothing; a 200 is then compared by its validators,
+  by a fingerprint of the body, or by a fingerprint of a JSONPath result, so
+  volatile fields can be ignored. A poll creates no `workflow_runs` row: the
+  validators, fingerprint and unchanged/changed/error counters live in
+  `workflow_watch_state` (migration 237) and show on the workflow card, and
+  three failed polls in a row show the workflow as failing. The first poll of
+  a source records a baseline without a run. Each served project's admission
+  of a change is recorded with its run, and the baseline advances only once
+  every project has its run, so a change detected again (a restart before
+  the poll was acknowledged, a project refused by its concurrency limit or
+  preflight) runs once per project and never twice. A Quick API the trigger
+  polls counts as a dependency: an agent's edit of it disables the workflow,
+  it cannot be deleted while named, it travels with the workflow's export,
+  and a human edit of it starts a new baseline. The run receives the triggering response as `{{trigger.body}}`
+  (credentials removed, cut at 64 KiB) with `{{trigger.status}}`,
+  `{{trigger.fingerprint}}`, `{{trigger.etag}}`, `{{trigger.last_modified}}`
+  and, in JSONPath mode, `{{trigger.extract}}`. The trigger is editable in the
+  wizard and through MCP `workflow_update`; as for any trigger, an agent's
+  edit disables an enabled workflow until a human turns it back on, and
+  `workflow_create_draft` defaults a Watch to one concurrent run. Watch
+  intervals take five cron fields (at most one poll a minute).
+- Cron and Watch triggers take an optional IANA `timezone` (KT-1099), so
+  "7h–21h Paris" is `0 7-21 * * *` with `Europe/Paris` and follows the DST
+  change. Without one the schedule stays in UTC, as before, and the editor
+  says so. On the change days, a local time that does not exist (spring) does
+  not fire that day, and a repeated one (autumn) fires once, at its first pass.
 - Multi-agent discussions now say who is launched and how (KT-1109). While a
   draft names several agents, the composer shows "N agents launched in
   parallel" with one chip per agent, and the sent message's routing line adds

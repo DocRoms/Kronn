@@ -505,6 +505,16 @@ fn every_agent_running_step_type_is_an_unknown_audience() {
 }
 
 #[test]
+fn a_task_board_step_is_an_agentless_audience() {
+    // The default Todo's board steps must not fall in the unknown, remote slot.
+    assert!(audience_slot(&WorkflowStep {
+        step_type: StepType::TaskBoard,
+        ..WorkflowStep::default()
+    })
+    .is_none());
+}
+
+#[test]
 fn rules_and_requests_share_one_canonical_form() {
     assert_eq!(canonical_segment("caf\u{e9}").as_deref(), Some("caf%C3%A9"));
     assert_eq!(canonical_segment("caf%c3%a9").as_deref(), Some("caf%C3%A9"));
@@ -1633,5 +1643,78 @@ mod broker {
         assert!(unbound.contains("Access policy"), "{unbound}");
         let ran_a = text(native_api_call(&state, Some("model-a")).await);
         assert!(!ran_a.contains("Access policy"), "{ran_a}");
+    }
+
+    // ─── A Watch poll passes the same gate (KT-1026 × KT-1099) ───
+
+    async fn watch(
+        state: &crate::AppState,
+        workflow: &crate::models::Workflow,
+    ) -> Result<crate::workflows::api_call_executor::WatchPollResponse, String> {
+        crate::workflows::api_call_executor::execute_watch_poll(
+            state,
+            SecurityPolicy::allow_loopback_for_tests(),
+            crate::workflows::api_call_executor::WatchPollRequest {
+                source: &step("GET", "/users/me"),
+                workflow,
+                project_id: None,
+                if_none_match: None,
+                if_modified_since: None,
+                max_body_bytes: 1 << 20,
+                timeout: std::time::Duration::from_secs(5),
+            },
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_watch_whose_audience_may_not_call_the_api_sends_nothing() {
+        let server = server().await;
+        let state = state_with_plugin(&server.uri()).await;
+        set_policy(&state, codex_only()).await;
+        let workflow = pinned_run(
+            &state,
+            vec![agent_step("main", AgentType::ClaudeCode)],
+            vec![],
+        )
+        .await;
+        let refused = watch(&state, &workflow).await.expect_err("must be refused");
+        assert!(refused.contains("Access policy"), "{refused}");
+        assert!(!refused.contains(TOKEN), "{refused}");
+        assert_eq!(sent(&server).await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_watch_redirect_to_a_blocked_endpoint_is_refused_at_the_hop() {
+        use wiremock::matchers::path;
+        let server = MockServer::start().await;
+        Mock::given(path("/v1/users/me"))
+            .respond_with(ResponseTemplate::new(302).insert_header("Location", "/v1/pages/secret"))
+            .mount(&server)
+            .await;
+        Mock::given(path("/v1/pages/secret"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+        let state = state_with_plugin(&server.uri()).await;
+        set_policy(&state, pages_blocked()).await;
+        let workflow = pinned_run(&state, vec![], vec![]).await;
+        let refused = watch(&state, &workflow)
+            .await
+            .expect_err("hop must be refused");
+        assert!(refused.contains("redirect refused"), "{refused}");
+        assert_eq!(requests_to(&server, "/v1/users/me").await, 1);
+        assert_eq!(requests_to(&server, "/v1/pages/secret").await, 0);
+    }
+
+    #[tokio::test]
+    async fn an_allowed_watch_still_polls() {
+        let server = server().await;
+        let state = state_with_plugin(&server.uri()).await;
+        set_policy(&state, pages_blocked()).await;
+        let workflow = pinned_run(&state, vec![], vec![]).await;
+        let response = watch(&state, &workflow).await.expect("allowed poll");
+        assert_eq!(response.status, 200);
+        assert_eq!(sent(&server).await, 1);
     }
 }

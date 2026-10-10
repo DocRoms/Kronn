@@ -11,6 +11,7 @@ pub(crate) mod cli_worker_bindings;
 pub mod compare;
 pub mod contacts;
 pub mod context_audits;
+pub mod default_contents;
 pub mod delivery_summaries;
 pub mod disc_source;
 pub mod discussion_actions;
@@ -59,12 +60,14 @@ pub mod run_retention;
 pub mod run_state;
 pub mod shared_runs;
 pub mod stored_credentials;
+pub mod task_boards;
 pub mod ui_preferences;
 pub mod worker_deliveries;
 pub mod worker_offers;
 pub mod worker_reviews;
 pub mod workflow_run_pins;
 pub mod workflow_step_rooms;
+pub mod workflow_watch_state;
 pub mod workflows;
 
 #[cfg(test)]

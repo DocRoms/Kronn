@@ -73,6 +73,7 @@ import type {
   LivePageAction,
   LivePageActionTrust,
   LivePageActionTrustState,
+  DefaultTodoStatus,
   DiscussionMeta,
   WsMessage,
   DiscussionSession,
@@ -2811,6 +2812,8 @@ export const pages = {
     api<LivePageActionTrust>('POST', `/live-page-actions/${encodeURIComponent(actionId)}/trust`, { fingerprint }),
   revokeActionTrust: (actionId: string) =>
     api<boolean>('DELETE', `/live-page-actions/${encodeURIComponent(actionId)}/trust`),
+  defaultTodo: () => api<DefaultTodoStatus>('GET', '/defaults/todo'),
+  installDefaultTodo: () => api<DefaultTodoStatus>('POST', '/defaults/todo/install', {}),
 };
 
 // ─── Quick Prompts ─────────────────────────────────────────────────────────

@@ -27659,3 +27659,55 @@ async fn bundle_refuses_a_foreach_file_leaving_the_worktree() {
         );
     }
 }
+
+/// KT-1030 — Kronn's todo board: its status, an explicit (re)install that is
+/// never duplicated, and a publish that reaches open Pages at once.
+#[tokio::test]
+async fn the_default_todo_board_installs_on_request_once_and_pushes_its_publishes() {
+    let state = test_state();
+    let app = build_router_with_auth(state.clone(), false);
+    let (_, fresh) = get_json(app.clone(), "/api/defaults/todo").await;
+    assert_eq!(fresh["data"]["state"], "not_installed", "{fresh}");
+
+    let (_, installed) = post_json(
+        app.clone(),
+        "/api/defaults/todo/install",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(installed["data"]["state"], "installed", "{installed}");
+    assert_eq!(
+        installed["data"]["workflow_ids"].as_array().unwrap().len(),
+        6
+    );
+    let page_id = installed["data"]["page_id"].as_str().unwrap().to_string();
+
+    let (_, again) = post_json(
+        app.clone(),
+        "/api/defaults/todo/install",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(again["error_code"], "conflict", "{again}");
+
+    let (_, trusts) = get_json(app.clone(), &format!("/api/pages/{page_id}/action-trusts")).await;
+    assert!(trusts["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|state| state["active"] == false && state["trust"].is_null()));
+
+    let mut events = state.ws_broadcast.subscribe();
+    let (_, published) = post_json(
+        app.clone(),
+        &format!("/api/pages/{page_id}/publish"),
+        serde_json::json!({"writes": [{"dataset": "todo", "operation": "replace", "value": [{"id": "x", "title": "x", "column": "todo"}]}]}),
+    )
+    .await;
+    assert_eq!(published["success"], true, "{published}");
+    let mut pushed = false;
+    while let Ok(event) = events.try_recv() {
+        pushed |= matches!(event, WsMessage::LivePageDataChanged { ref page_id, .. } if *page_id == published["data"]["page_id"]);
+    }
+    assert!(pushed, "an open page hears about the publish at once");
+}

@@ -294,6 +294,12 @@ pub enum WsMessage {
     /// The allowed embed sites changed: open tabs re-read the list. Carries
     /// no origin. Local only: never relayed to a peer.
     EmbedOriginsChanged,
+    /// A Page's datasets changed: open views of that Page re-read it at once
+    /// instead of waiting for their poll (KT-1030). Local only.
+    LivePageDataChanged {
+        page_id: String,
+        data_revision: u64,
+    },
 }
 
 impl WsMessage {

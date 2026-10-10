@@ -12,7 +12,7 @@ use std::collections::{BTreeSet, HashMap};
 use rusqlite::Connection;
 
 use crate::db::resource_identities::{resolve_symbolic_reference, REFERENCE_KINDS};
-use crate::models::{StepType, Workflow, WorkflowStep};
+use crate::models::{StepType, Workflow, WorkflowStep, WorkflowTrigger};
 
 /// The prefix of a symbolic reference in a template or a structured field.
 pub const REF_PREFIX: &str = "ref:";
@@ -318,26 +318,35 @@ pub fn apply_structured_reference_map(
 
 /// Whether `workflow` names the Quick Prompt (`kind` "prompt") or Quick API
 /// ("qa") `id` anywhere (steps and rollback; direct, batch, chained or
-/// collection fields), by its literal id or by a `ref:` of that kind whose
+/// collection fields; a Watch trigger's source), by its literal id or by a `ref:` of that kind whose
 /// slug is one of `slugs`. No project resolution on purpose: a slug match is
 /// a conservative superset of every project a reference could resolve in.
 pub fn workflow_names(workflow: &Workflow, kind: &str, id: &str, slugs: &[String]) -> bool {
-    workflow
-        .steps
-        .iter()
-        .chain(workflow.on_failure.iter())
-        .any(|step| {
-            let mut step = step.clone();
-            structured_fields(&mut step)
-                .into_iter()
-                .filter(|(field_kind, _)| *field_kind == kind)
-                .any(|(_, value)| match parse_reference(value) {
-                    Some((ref_kind, slug)) => {
-                        ref_kind == kind && slugs.iter().any(|s| s.eq_ignore_ascii_case(slug))
-                    }
-                    None => value.trim() == id,
-                })
-        })
+    let names = |value: &str| match parse_reference(value) {
+        Some((ref_kind, slug)) => {
+            ref_kind == kind && slugs.iter().any(|s| s.eq_ignore_ascii_case(slug))
+        }
+        None => value.trim() == id,
+    };
+    // A Watch trigger's Quick API decides what the scheduler polls (KT-1099).
+    let trigger_names = match &workflow.trigger {
+        WorkflowTrigger::Watch(watch) if kind == "qa" => {
+            watch.quick_api_id.as_deref().is_some_and(names)
+        }
+        _ => false,
+    };
+    trigger_names
+        || workflow
+            .steps
+            .iter()
+            .chain(workflow.on_failure.iter())
+            .any(|step| {
+                let mut step = step.clone();
+                structured_fields(&mut step)
+                    .into_iter()
+                    .filter(|(field_kind, _)| *field_kind == kind)
+                    .any(|(_, value)| names(value))
+            })
 }
 
 /// The enabled workflows that name `kind`/`id` or one of `slugs` (see
@@ -665,5 +674,28 @@ mod tests {
             Some("ref:prompt:absent"),
             "left for the step to fail on, naming it"
         );
+    }
+
+    /// KT-1099: a Watch trigger's Quick API is a dependency like a step's, by
+    /// id or by `ref:` slug, so an agent's edit or an import shadowing it
+    /// disables the workflow.
+    #[test]
+    fn a_watch_trigger_names_its_quick_api() {
+        let watching = |quick_api_id: &str| -> Workflow {
+            serde_json::from_value(serde_json::json!({
+                "id": "wf", "name": "wf", "project_id": null,
+                "trigger": {"type": "Watch", "quick_api_id": quick_api_id, "interval": "*/5 * * * *"},
+                "steps": [], "actions": [],
+                "safety": {"sandbox": false, "max_files": null, "max_lines": null, "require_approval": false},
+                "workspace_config": null, "concurrency_limit": null, "enabled": true,
+                "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+            }))
+            .unwrap()
+        };
+        assert!(workflow_names(&watching("qa-1"), "qa", "qa-1", &[]));
+        assert!(!workflow_names(&watching("qa-1"), "qa", "qa-2", &[]));
+        assert!(!workflow_names(&watching("qa-1"), "prompt", "qa-1", &[]));
+        let by_slug = watching("ref:qa:status");
+        assert!(workflow_names(&by_slug, "qa", "qa-new", &["status".into()]));
     }
 }

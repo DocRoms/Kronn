@@ -967,6 +967,41 @@ fn validate_step_required_fields(s: &WorkflowStep) -> Result<(), String> {
                 }
             }
         }
+        StepType::TaskBoard => {
+            use crate::models::TaskBoardOperation as Op;
+            let Some(config) = s.task_board.as_ref() else {
+                return Err(format!(
+                    "Step TaskBoard « {} » : `task_board` est obligatoire.",
+                    s.name
+                ));
+            };
+            let tag = config.tag.trim();
+            if tag.is_empty()
+                || (!tag.contains("{{")
+                    && crate::workflows::task_board_step::validate_tag(tag).is_err())
+            {
+                return Err(format!(
+                    "Step TaskBoard « {} » : `task_board.tag` doit être un tag de 1 à 80 caractères, sans virgule.",
+                    s.name
+                ));
+            }
+            let missing = match config.operation {
+                Op::Read => None,
+                Op::Add => config.title.trim().is_empty().then_some("title"),
+                Op::Toggle | Op::Edit | Op::Discuss => {
+                    config.task.trim().is_empty().then_some("task")
+                }
+                Op::Move => (config.task.trim().is_empty()
+                    || (config.before.trim().is_empty() && config.column.trim().is_empty()))
+                .then_some("task, et before ou column"),
+            };
+            if let Some(field) = missing {
+                return Err(format!(
+                    "Step TaskBoard « {} » : cette opération requiert `{field}`.",
+                    s.name
+                ));
+            }
+        }
         StepType::TransformData => {
             let Some(config) = s.transform_data.as_ref() else {
                 return Err(format!(
@@ -1791,6 +1826,7 @@ pub(crate) async fn list_with_visibility(
             let mut last_runs =
                 crate::db::workflows::get_last_run_summaries_visible(conn, visibility.as_ref())?;
             let project_names = crate::db::projects::get_project_names(conn)?;
+            let mut watch_statuses = crate::db::workflow_watch_state::list_statuses(conn)?;
 
             let summaries = workflows
                 .into_iter()
@@ -1806,8 +1842,11 @@ pub(crate) async fn list_with_visibility(
                         WorkflowTrigger::Cron { .. } => "cron",
                         WorkflowTrigger::Tracker { .. } => "tracker",
                         WorkflowTrigger::Manual => "manual",
+                        WorkflowTrigger::Watch(_) => "watch",
                     }
                     .to_string();
+                    let watch = matches!(wf.trigger, WorkflowTrigger::Watch(_))
+                        .then(|| watch_statuses.remove(&wf.id).unwrap_or_default());
 
                     WorkflowSummary {
                         id: wf.id,
@@ -1825,6 +1864,7 @@ pub(crate) async fn list_with_visibility(
                         enabled: wf.enabled,
                         pinned: wf.pinned,
                         last_run,
+                        watch,
                         created_at: wf.created_at,
                     }
                 })
@@ -2413,6 +2453,9 @@ async fn create_written(
     if let Err(e) = crate::models::validate_prompt_variables(&req.variables) {
         return Json(ApiResponse::err(e));
     }
+    if let Err(e) = crate::workflows::trigger::validate_trigger(&req.trigger) {
+        return Json(ApiResponse::err(e));
+    }
     if let Err(errors) = crate::workflows::template::validate_step_references(&req.steps) {
         return Json(ApiResponse::err(format!(
             "Références d'étapes invalides :\n- {}",
@@ -2821,6 +2864,11 @@ async fn update_written(
             return Json(ApiResponse::err(e));
         }
     }
+    if let Some(ref trigger) = req.trigger {
+        if let Err(e) = crate::workflows::trigger::validate_trigger(trigger) {
+            return Json(ApiResponse::err(e));
+        }
+    }
 
     // `guards` follows the same opt-in semantics as `safety`: if the
     // caller doesn't include it in the patch, the existing value is
@@ -3178,6 +3226,15 @@ pub(crate) fn workflow_dependency_ids<'a>(
 ) -> WorkflowDependencyIds {
     let mut dependencies = WorkflowDependencyIds::default();
     for workflow in workflows {
+        if let WorkflowTrigger::Watch(watch) = &workflow.trigger {
+            if let Some(id) = watch
+                .quick_api_id
+                .as_deref()
+                .filter(|id| !id.trim().is_empty())
+            {
+                dependencies.quick_apis.insert(id.to_string());
+            }
+        }
         for step in workflow.steps.iter().chain(workflow.on_failure.iter()) {
             if let Some(id) = step
                 .quick_prompt_id
@@ -3870,6 +3927,15 @@ async fn import_workflow_written(
                     return Json(ApiResponse::err(error));
                 }
                 s.gate_notify_url = None;
+            }
+        }
+        if let WorkflowTrigger::Watch(watch) = &mut w.trigger {
+            if let Some(nid) = watch
+                .quick_api_id
+                .as_ref()
+                .and_then(|id| qa_id_remap.get(id))
+            {
+                watch.quick_api_id = Some(nid.clone());
             }
         }
         w.id = new_id;
@@ -6070,7 +6136,7 @@ const CATALOGUE: &[CatalogueEntry] = &[
         required_mcps: &["github", "jira"],
         audience: "dev",
         complexity: "simple",
-        trigger: || WorkflowTrigger::Cron { schedule: "0 9 * * 1-5".to_string() },
+        trigger: || WorkflowTrigger::Cron { schedule: "0 9 * * 1-5".to_string(), timezone: None },
         step_prompts: &[
             ("collect-prs", "List all open pull requests on the repository. For each PR, return: title, author, url, branch_name, description (first 200 chars). data must be a JSON array of objects with these fields.", true),
             ("check-tickets", "For each PR in {{previous_step.data}}, check if the title, description, or branch_name contains a Jira ticket reference (pattern: uppercase letters followed by a dash and digits, e.g. PROJ-123). Return only the PRs that have NO ticket reference. data must be an array of {title, author, url}.", true),
@@ -6085,7 +6151,7 @@ const CATALOGUE: &[CatalogueEntry] = &[
         required_mcps: &["jira", "slack"],
         audience: "pm",
         complexity: "simple",
-        trigger: || WorkflowTrigger::Cron { schedule: "0 17 * * 5".to_string() },
+        trigger: || WorkflowTrigger::Cron { schedule: "0 17 * * 5".to_string(), timezone: None },
         step_prompts: &[
             ("collect-tickets", "Query Jira for all tickets resolved or closed in the last 7 days. For each: key, summary, type (Bug/Feature/Task), assignee. data must be a JSON array of these objects.", true),
             ("format-digest", "From the tickets in {{previous_step.data}}, generate a concise sprint digest grouped by type (Bug fixes, Features, Tasks). Include counts per category and the top 3 highlights.", false),
@@ -6115,7 +6181,7 @@ const CATALOGUE: &[CatalogueEntry] = &[
         required_mcps: &["github", "slack"],
         audience: "dev",
         complexity: "simple",
-        trigger: || WorkflowTrigger::Cron { schedule: "0 10 * * 1-5".to_string() },
+        trigger: || WorkflowTrigger::Cron { schedule: "0 10 * * 1-5".to_string(), timezone: None },
         step_prompts: &[
             ("find-stale", "List all open pull requests with zero reviews AND created more than 48 hours ago. For each: title, author, created_at, url. data must be a JSON array. If none found, use status NO_RESULTS with data as empty array [].", true),
             ("notify", "From the stale PRs in {{previous_step.data}}: format a notification listing each one with title, author, and days waiting. If {{previous_step.status}} is NO_RESULTS, just output 'No stale PRs found.'", false),
@@ -6130,7 +6196,7 @@ const CATALOGUE: &[CatalogueEntry] = &[
         required_mcps: &["jira", "confluence"],
         audience: "pm",
         complexity: "simple",
-        trigger: || WorkflowTrigger::Cron { schedule: "0 9 1 * *".to_string() },
+        trigger: || WorkflowTrigger::Cron { schedule: "0 9 1 * *".to_string(), timezone: None },
         step_prompts: &[
             ("query-bugs", "Query Jira for all open issues of type Bug. For each: key, summary, priority (Critical/High/Medium/Low), created_date, assignee. data must be a JSON array.", true),
             ("generate-report", "From the bugs in {{previous_step.data}}: count by priority, list the top 5 oldest, note trends if visible. Generate a Markdown report.", false),
@@ -6166,7 +6232,7 @@ const CATALOGUE: &[CatalogueEntry] = &[
         required_mcps: &["cloudwatch", "github"],
         audience: "ops",
         complexity: "advanced",
-        trigger: || WorkflowTrigger::Cron { schedule: "*/15 * * * *".to_string() },
+        trigger: || WorkflowTrigger::Cron { schedule: "*/15 * * * *".to_string(), timezone: None },
         step_prompts: &[
             ("check-errors", "Query CloudWatch for HTTP 5xx error count in the last 15 minutes. data must be {count: number, endpoints: [{path, count}]}. If count is 0: status NO_RESULTS, data {count: 0, endpoints: []}.", true),
             ("find-deploys", "List the last 3 merged PRs on main (recent deployments). For each: title, author, merged_at, changed_files. data must be a JSON array.", true),
@@ -6182,7 +6248,7 @@ const CATALOGUE: &[CatalogueEntry] = &[
         required_mcps: &["jira", "github", "confluence"],
         audience: "pm",
         complexity: "advanced",
-        trigger: || WorkflowTrigger::Cron { schedule: "0 16 * * 5".to_string() },
+        trigger: || WorkflowTrigger::Cron { schedule: "0 16 * * 5".to_string(), timezone: None },
         step_prompts: &[
             ("collect-sprint", "Get the current active sprint from Jira. List all tickets: key, summary, status, assignee, story_points. data must be a JSON array.", true),
             ("check-prs", "For each ticket in {{previous_step.data}}, check if there is a linked GitHub PR. data must be an array of {ticket_key, pr_status: 'merged'|'open'|'none', pr_url}.", true),
@@ -6199,7 +6265,7 @@ const CATALOGUE: &[CatalogueEntry] = &[
         required_mcps: &["cloudwatch", "slack"],
         audience: "ops",
         complexity: "advanced",
-        trigger: || WorkflowTrigger::Cron { schedule: "*/30 * * * *".to_string() },
+        trigger: || WorkflowTrigger::Cron { schedule: "*/30 * * * *".to_string(), timezone: None },
         step_prompts: &[
             ("collect-metrics", "Query CloudWatch for: latency_p99_ms, error_rate_percent, cpu_percent — last 30 min. data must be {latency_p99_ms: number, error_rate_percent: number, cpu_percent: number}.", true),
             ("detect-anomalies", "Current metrics: {{previous_step.data}}. Compare against 7-day average for same time window. data must be an array of {metric, current, baseline, factor}. If all normal: status NO_RESULTS, data [].", true),
@@ -6215,7 +6281,7 @@ const CATALOGUE: &[CatalogueEntry] = &[
         required_mcps: &["github", "confluence"],
         audience: "dev",
         complexity: "advanced",
-        trigger: || WorkflowTrigger::Cron { schedule: "0 10 * * 1".to_string() },
+        trigger: || WorkflowTrigger::Cron { schedule: "0 10 * * 1".to_string(), timezone: None },
         step_prompts: &[
             ("find-api-changes", "List PRs merged in the last 7 days that modified **/routes/**, **/api/**, **/models/**, **/schema/**. For each: pr_title, changed_files. data must be a JSON array.", true),
             ("check-docs", "For each PR in {{previous_step.data}}, search Confluence for related pages. Check if updated in last 7 days. data must be [{pr_title, page_title, page_url, last_updated, is_stale: bool}].", true),
@@ -6389,6 +6455,7 @@ pub async fn suggestions(
                     collect_api_data: None,
                     transform_data: None,
                     page_publish: None,
+                    task_board: None,
                     sub_workflow_id: None,
                     sub_workflow_foreach_file: None,
                     multi_agent_review: None,
@@ -7336,6 +7403,7 @@ mod tests {
             collect_api_data: None,
             transform_data: None,
             page_publish: None,
+            task_board: None,
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
@@ -8972,6 +9040,70 @@ mod tests {
             .unwrap()
     }
 
+    /// KT-1099: an agent turning an enabled workflow's trigger into a Watch
+    /// (or editing its watched source) disables it; an invalid Watch is refused.
+    #[tokio::test]
+    async fn an_agent_edit_of_the_trigger_disables_the_workflow() {
+        let state = agent_state();
+        let request: CreateWorkflowRequest = serde_json::from_value(serde_json::json!({
+            "name": "watched", "project_id": null, "enabled": true,
+            "trigger": {"type": "Cron", "schedule": "0 7 * * *", "timezone": "Europe/Paris"},
+            "steps": [{"name": "emit", "step_type": {"type": "JsonData"}, "json_data_payload": {"a": 1}}]
+        }))
+        .unwrap();
+        let Json(created) = create_as(state.clone(), request, WorkflowWriter::Human).await;
+        let created = created
+            .data
+            .expect("a human may create an enabled workflow");
+        assert!(created.enabled);
+
+        let invalid: UpdateWorkflowRequest = serde_json::from_value(serde_json::json!({
+            "trigger": {"type": "Watch", "interval": "*/5 * * * *"}
+        }))
+        .unwrap();
+        let Json(refused) = update_as(
+            state.clone(),
+            created.id.clone(),
+            invalid,
+            WorkflowWriter::Agent,
+        )
+        .await;
+        assert!(!refused.success, "a Watch without a source is refused");
+
+        let watch: UpdateWorkflowRequest = serde_json::from_value(serde_json::json!({
+            "trigger": {"type": "Watch", "api_plugin_slug": "github", "api_config_id": "cfg",
+                        "api_endpoint_path": "/repos/o/r/commits", "interval": "*/5 * * * *",
+                        "detection": {"type": "JsonPath", "path": "$[0].sha"}}
+        }))
+        .unwrap();
+        let Json(edited) = update_as_labeled(
+            state.clone(),
+            created.id.clone(),
+            watch,
+            WorkflowWriter::Agent,
+            Some("Claude".into()),
+        )
+        .await;
+        let edited = edited.data.expect("a valid Watch is saved");
+        assert!(
+            !edited.enabled,
+            "the agent's trigger edit disables the workflow"
+        );
+        assert!(matches!(edited.trigger, WorkflowTrigger::Watch(_)));
+        let listed = auto_disabled(&state).await;
+        assert_eq!(listed[0].reason, AutoDisableReason::AgentEdit);
+        assert_eq!(listed[0].summary, "trigger changed by Claude");
+
+        let Json(enable) = update_as(
+            state.clone(),
+            created.id.clone(),
+            serde_json::from_value(serde_json::json!({"enabled": true})).unwrap(),
+            WorkflowWriter::Agent,
+        )
+        .await;
+        assert!(!enable.success, "only a human turns it back on");
+    }
+
     /// KT-1037: every automatic disable records why; a human re-enable
     /// clears it; the re-enable route refuses a bridge token.
     #[tokio::test]
@@ -9479,6 +9611,7 @@ mod tests {
         wf.project_id = None;
         wf.trigger = WorkflowTrigger::Cron {
             schedule: "* * * * *".into(),
+            timezone: None,
         };
         let mut emit = mk_step("emit", StepType::JsonData);
         emit.json_data_payload = Some(serde_json::json!({"a": 1}));
