@@ -1115,7 +1115,7 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
     vec![
         tool(
             "agent_list",
-            "List the worker identities this principal room can pass verbatim to task_exec_prepare, and the media connections `media_generate` can be billed on. Separates configured, reachable and available with stable secret-free reason codes; availability proves transport readiness only, never task or model success.",
+            "List the worker identities this principal room can pass verbatim to task_exec_prepare, and the media connections `media_generate` can be billed on. Separates configured, probed reachable and available with stable secret-free reason codes; availability proves transport readiness only, never task or model success.",
             json!({}),
             json!([]),
         ),

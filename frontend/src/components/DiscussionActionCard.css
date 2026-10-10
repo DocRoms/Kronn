@@ -6,6 +6,8 @@
   background: linear-gradient(145deg, color-mix(in srgb, var(--kr-accent) 7%, var(--kr-bg-surface)), var(--kr-bg-surface));
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
   overflow: visible;
+  /* Its layout follows its own width: a Page can open it in a narrow column. */
+  container-type: inline-size;
 }
 
 .discussion-action-card__toggle {
@@ -230,8 +232,9 @@
 /* The row a Page card is about (the ticket, the item): without it, forty cards
    opened from forty buttons of the same block all read the same. */
 .discussion-action-card__row {
-  display: inline-flex;
-  align-items: center;
+  /* A block, not a flex box: the ellipsis works and the " · " spaces survive. */
+  display: inline-block;
+  vertical-align: middle;
   max-width: 24ch;
   overflow: hidden;
   padding: 1px 6px;
@@ -303,4 +306,22 @@
 .discussion-action-card__step-agent-head small {
   color: var(--kr-text-dim);
   font-size: var(--kr-fs-2xs);
+}
+
+/* Narrow card (a Page column): title on its own line, state below, the row
+   chip wraps instead of cutting its text. Last, so it overrides the base rules. */
+@container (max-width: 420px) {
+  .discussion-action-card__header { flex-wrap: wrap; row-gap: 6px; }
+  .discussion-action-card__heading { flex-basis: 100%; }
+  .discussion-action-card__chevron { margin-inline-start: auto; }
+  .discussion-action-card__title-row { align-items: flex-start; flex-direction: column; gap: 4px; }
+  .discussion-action-card__row {
+    max-width: 100%;
+    border-radius: var(--kr-r-sm);
+    line-height: 1.5;
+    white-space: normal;
+  }
+  .discussion-action-card__row-part { display: inline-block; max-width: 100%; overflow-wrap: anywhere; }
+  .discussion-action-card__actions { align-items: stretch; flex-direction: column-reverse; }
+  .discussion-action-card__actions button { justify-content: center; width: 100%; }
 }

@@ -1164,7 +1164,8 @@ async fn discussion_action_launch_context_resolves_project_env_for_a_global_targ
     // A real, existing directory — the exec step validates `work_dir` exists
     // on disk before spawning, and a global target now resolves the
     // discussion's project as its worktree (KT-476 LaunchContext).
-    let project_path = std::env::temp_dir().to_string_lossy().into_owned();
+    let project_dir = tempfile::tempdir().unwrap();
+    let project_path = project_dir.path().to_string_lossy().into_owned();
     state
         .db
         .with_conn({
@@ -10779,8 +10780,8 @@ async fn projects_list_empty() {
 async fn projects_add_folder_creates_project_with_no_repo_url() {
     let state = test_state();
     // Use the actual temp directory (always exists).
-    let tmp = std::env::temp_dir();
-    let path = tmp.to_str().unwrap().to_string();
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().to_str().unwrap().to_string();
 
     let (status, json) = post_json(
         build_router_with_auth(state.clone(), false),
@@ -10827,8 +10828,8 @@ async fn projects_add_folder_rejects_path_traversal() {
 #[tokio::test]
 async fn projects_add_folder_rejects_duplicate_path() {
     let state = test_state();
-    let tmp = std::env::temp_dir();
-    let path = tmp.to_str().unwrap().to_string();
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().to_str().unwrap().to_string();
 
     // First add succeeds.
     let (_, json1) = post_json(
@@ -11902,13 +11903,16 @@ async fn bootstrap_find_common_parent_logic() {
     // then verifying bootstrap doesn't complain about missing scan paths.
     let state = test_state();
 
-    // Insert two projects at known paths under /tmp/kronn-test-parent
+    // Insert two projects under one parent that does not exist, inside a private
+    // directory so parallel test processes never share it.
+    let scratch = tempfile::tempdir().unwrap();
+    let parent = scratch.path().join("bootstrap-parent");
     let now = chrono::Utc::now();
     for (name, subdir) in &[("Project A", "project-a"), ("Project B", "project-b")] {
         let project = kronn::models::Project {
             id: uuid::Uuid::new_v4().to_string(),
             name: name.to_string(),
-            path: format!("/tmp/kronn-test-bootstrap-parent/{}", subdir),
+            path: parent.join(subdir).to_string_lossy().into_owned(),
             repo_url: None,
             token_override: None,
             ai_config: kronn::models::AiConfigStatus {
@@ -11938,7 +11942,7 @@ async fn bootstrap_find_common_parent_logic() {
             .unwrap();
     }
 
-    // Now bootstrap should use common parent /tmp/kronn-test-bootstrap-parent
+    // Now bootstrap should use that common parent.
     // It will fail on filesystem ops (dir doesn't exist), but the error should
     // mention "Parent directory not found" or "Directory already exists" — NOT "No scan path".
     let body = serde_json::json!({

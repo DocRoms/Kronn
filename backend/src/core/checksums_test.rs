@@ -32,7 +32,8 @@ fn compute_sha256_known_content() {
 
 #[test]
 fn compute_sha256_missing_file() {
-    let result = compute_sha256(Path::new("/tmp/kronn_nonexistent_file_xyz.txt"));
+    let dir = tempfile::tempdir().unwrap();
+    let result = compute_sha256(&dir.path().join("missing.txt"));
     assert!(result.is_none());
 }
 

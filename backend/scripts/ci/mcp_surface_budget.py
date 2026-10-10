@@ -78,7 +78,8 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # lowered by 9 B.
 # KT-1100: retention became human-only on a stored workflow, so
 # `workflow_update` lost its `retention` input (its shortened description
-# stays); ceiling lowered by 109 B.
+# stays). That removal took back the 109 B the input had added after
+# KT-1138's 85_354; net zero, ceiling unchanged.
 # Keep the declaration budget at the measured payload size. Extended contracts
 # are loaded through tool_manual and are excluded from this wire-size budget.
 # KT-1138: `workflow_validate` (a workflow's ready/blockers verdict) was paid
@@ -88,8 +89,11 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # KT-1139: `workflow_update_step` and a one-step `workflow_get` (large
 # workflows are edited step by step) were paid for by tightening
 # workflow_step_schema/active_runs/runs/run_discussions; ceiling lowered by
-# 6 B (85_354 -> 85_348).
-CATALOGUE_MAX_BYTES = 85_348
+# 6 B (85_354 -> 85_348). Re-measured on the 0.15.0 integration head
+# (KT-1138 + KT-1100 + KT-1139 + KT-800): exactly 85_348 B.
+# KT-697: `agent_list` says reachability is probed, in 5 B less; re-measured
+# on the 0.15.0 integration head: exactly 85_343 B.
+CATALOGUE_MAX_BYTES = 85_343
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is

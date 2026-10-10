@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, CheckCircle2, ChevronDown, ExternalLink, FolderGit2, Loader2, Play, RotateCcw, X } from 'lucide-react';
 import { discussionActions as discussionActionsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
@@ -38,6 +38,8 @@ interface KronnActionCardProps<T extends KronnAction> {
   onChanged: (action: T) => void;
   onOpenDiscussion: (discussionId: string) => void;
   bindings?: Record<string, string>;
+  /** Display text a Page gives its bindings; the raw selector stays visible in tooltips. */
+  bindingLabels?: Record<string, string>;
   /** Starting values for editable fields, drawn from where the card was opened. */
   prefill?: Record<string, string>;
   initiallyExpanded?: boolean;
@@ -103,14 +105,36 @@ function initialValues(action: KronnAction, prefill?: Record<string, string>): R
     .map(value => [value.name, prefill?.[value.name] ?? value.value ?? value.suggested_value ?? '']));
 }
 
+/** A binding as the reader knows it: the Page's label when it gives one. */
+function bindingText(selector: string, label?: string): string {
+  return label ? `${label} (${selector})` : selector;
+}
+
 /** The row a Page card is about, as the reader knows it: the selectors the
- * click carried, or those recorded on the launch when it was reopened. */
-function boundRow(action: KronnAction, bindings?: Record<string, string>): string | null {
-  const fromClick = Object.values(bindings ?? {});
-  if (fromClick.length > 0) return fromClick.join(' · ');
+ * click carried (or the Page's labels for them, in the action's value order),
+ * or those recorded on the launch when it was reopened. */
+function boundRow(
+  action: KronnAction,
+  bindings?: Record<string, string>,
+  labels?: Record<string, string>,
+): { parts: string[]; raw: string } | null {
+  const entries = Object.entries(bindings ?? {});
+  if (entries.length > 0) {
+    const order = action.values.map(value => value.name);
+    const rank = (name: string) => {
+      const index = order.indexOf(name);
+      return index < 0 ? order.length : index;
+    };
+    entries.sort(([left], [right]) => rank(left) - rank(right));
+    return {
+      parts: entries.map(([name, selector]) => labels?.[name] || selector),
+      raw: entries.map(([, selector]) => selector).join(' · '),
+    };
+  }
   const key = 'binding_key' in action ? action.binding_key : null;
   if (!key) return null;
-  return key.split('\u001f').map(pair => pair.slice(pair.indexOf('=') + 1)).join(' · ');
+  const raw = key.split('\u001f').map(pair => pair.slice(pair.indexOf('=') + 1)).join(' · ');
+  return { parts: [raw], raw };
 }
 
 function provenanceLabel(
@@ -147,6 +171,7 @@ export function KronnActionCard<T extends KronnAction>({
   onChanged,
   onOpenDiscussion,
   bindings,
+  bindingLabels,
   prefill,
   initiallyExpanded = false,
   testIdPrefix = 'discussion-action',
@@ -223,7 +248,12 @@ export function KronnActionCard<T extends KronnAction>({
   const kindLabel = t(`disc.action.kind.${current.kind}`);
   const resultDiscussionId = current.result_discussion_id;
   const stalePageSource = 'stale_source' in current && current.stale_source;
-  const row = boundRow(current, bindings);
+  const row = boundRow(current, bindings, bindingLabels);
+  const rowText = row?.parts.join(' · ');
+  const boundText = (name: string) => {
+    const selector = bindings?.[name];
+    return selector === undefined ? undefined : bindingText(selector, bindingLabels?.[name]);
+  };
   const relaunch = operations.relaunch;
   // Once launched, what the run produced is told here — including the
   // discussion a workflow step opened, which the run itself does not carry.
@@ -256,8 +286,18 @@ export function KronnActionCard<T extends KronnAction>({
                 </span>
               )}
               {row && (
-                <span className="discussion-action-card__row" data-testid="action-card-row" title={t('disc.action.row', row)}>
-                  {row}
+                <span
+                  className="discussion-action-card__row"
+                  data-testid="action-card-row"
+                  title={t('disc.action.row', rowText === row.raw ? row.raw : `${rowText} (${row.raw})`)}
+                >
+                  {/* Each part wraps as a unit in a narrow card. */}
+                  {row.parts.map((part, index) => (
+                    <Fragment key={index}>
+                      {index > 0 && ' · '}
+                      <span className="discussion-action-card__row-part">{part}</span>
+                    </Fragment>
+                  ))}
                 </span>
               )}
             </span>
@@ -276,7 +316,7 @@ export function KronnActionCard<T extends KronnAction>({
       {expanded && current.state === 'proposed' && current.values.length > 0 && (
         <div className="discussion-action-card__fields">
           {editableValues.map(value => {
-            const provenance = provenanceLabel(value, t, bindings?.[value.name]);
+            const provenance = provenanceLabel(value, t, boundText(value.name));
             return (
               <div key={value.name} className="discussion-action-card__field">
                 <span className="discussion-action-card__label">
@@ -321,7 +361,7 @@ export function KronnActionCard<T extends KronnAction>({
               </summary>
               <ul className="discussion-action-card__resolved-list">
                 {resolvedValues.map(value => {
-                  const provenance = provenanceLabel(value, t, bindings?.[value.name]);
+                  const provenance = provenanceLabel(value, t, boundText(value.name));
                   return (
                     <li key={value.name}>
                       <strong>{value.label || value.name}</strong>

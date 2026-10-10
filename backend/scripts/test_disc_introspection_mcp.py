@@ -10053,7 +10053,7 @@ class PlanningToolTests(unittest.TestCase):
         resp = self.mod._handle(
             {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
         )
-        self.assertEqual(resp["result"]["serverInfo"]["version"], "0.3.10")
+        self.assertEqual(resp["result"]["serverInfo"]["version"], "0.3.11")
 
     def test_plan_get_defaults_to_current_discussion(self):
         with mock.patch.object(self.mod, "_http", self.fake_http):

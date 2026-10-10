@@ -367,6 +367,13 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Changed
 
+- "Invite" in a discussion now copies the `kr-join-…` token alone as soon as
+  it is minted, and the modal says so (KT-1146). Three tabs replace the "Full
+  handoff" checkbox: Token only (default), Simple instruction and Detailed
+  instruction, each with its own copy button. When the browser refuses the
+  clipboard, the modal says the copy failed and leaves the text selected for a
+  manual copy. The token itself is unchanged. The copy is started inside the
+  click, so the desktop app's WebKit view accepts it even when minting is slow.
 - A task description in Planning, and in the discussion plan panel, now shows
   as rendered Markdown by default, with the same safe renderer as discussion
   messages (no raw HTML, safe links), instead of raw source (KT-1137). A "Raw"
@@ -393,6 +400,26 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- Kronn's action card names the row in words a Page gives it (KT-1030). A
+  Page can add `data-kronn-binding-labels` next to `data-kronn-bindings`; the
+  card shows those labels instead of raw selectors such as
+  `__col_in_progress__`, with the selectors still in the tooltip and in the
+  resolved values. Labels are display only: they never reach the server, and
+  the action block and its trust approvals are unchanged. « Ma Todo » labels
+  its moves in four languages (task title, position, column). In a narrow
+  column the card now puts its title on its own line and wraps the row
+  instead of cutting it.
+- `agent_list` no longer reports a named HTTP connection as reachable just
+  because an address is saved (KT-697). Each connection now gets a short
+  network probe (an unauthenticated `GET /v1/models`, 3 s max, all connections
+  in parallel, results cached 30 s). A connection whose host does not resolve,
+  refuses, times out, fails TLS or answers 5xx is `reachable: false`, not
+  `available`, with the `endpoint_unreachable` code the legacy LiteLLM family
+  already used. A new `connectivity` field tells `verified`, `unreachable`
+  (with `unreachable_reason`: `dns`, `refused`, `timeout`, `tls`,
+  `http_status`, ...) and `unverified` (no probe, or a result older than 60 s)
+  apart. The connection stays listed with its id and media slots either way.
+  The field never contains the address or a credential.
 - The desktop app no longer blocks allowed third-party players in Live Pages
   by its own headers (KT-1123). It sent
   `Cross-Origin-Embedder-Policy: require-corp` and

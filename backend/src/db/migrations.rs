@@ -909,6 +909,14 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "240_task_boards_and_default_contents",
         include_str!("sql/240_task_boards_and_default_contents.sql"),
     ),
+    (
+        "241_trust_trigger_workflow_retention",
+        include_str!("sql/241_trust_trigger_workflow_retention.sql"),
+    ),
+    (
+        "244_trust_trigger_without_retention",
+        include_str!("sql/244_trust_trigger_without_retention.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup` (owner-only) without the auth

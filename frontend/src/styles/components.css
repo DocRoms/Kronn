@@ -812,18 +812,54 @@ select.input option {
   flex-wrap: wrap;
 }
 
-/* Handoff form picker — enriched by default, bare call on demand (KT-52). */
-.disc-invite-handoff-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
+/* KT-1146 — what the click copied, and its manual fallback when refused. */
+.disc-invite-notice {
+  margin: 0 0 8px;
+  padding: 6px 10px;
+  border-radius: 4px;
   font-size: var(--kr-fs-xs);
+  border: 1px solid var(--kr-success);
+  background: var(--kr-success-bg);
+  color: var(--kr-text-primary);
+}
+
+.disc-invite-notice[data-ok="false"] {
+  border-color: var(--kr-warning);
+  background: var(--kr-warning-bg);
+}
+
+.disc-invite-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 8px;
+  border-bottom: 1px solid var(--kr-border-light);
+}
+
+.disc-invite-tabs button {
+  margin-bottom: -1px;
+  padding: 6px 10px;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 8px 8px 0 0;
   color: var(--kr-text-secondary);
+  background: transparent;
+  font: inherit;
+  font-size: var(--kr-fs-xs);
   cursor: pointer;
 }
 
+.disc-invite-tabs button:hover { color: var(--kr-text-primary); }
+
+.disc-invite-tabs button[data-active="true"] {
+  border-color: var(--kr-border-light);
+  color: var(--kr-accent-ink);
+  background: var(--kr-bg-surface);
+}
+
 .disc-invite-handoff-hint {
-  margin: 6px 0 0;
+  flex: 1 1 200px;
+  margin: 0;
   font-size: var(--kr-fs-2xs);
   color: var(--kr-text-muted);
   line-height: 1.45;

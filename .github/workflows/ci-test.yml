@@ -283,6 +283,10 @@ jobs:
         run: |
           python3 scripts/ci/test_lint_with_conn_unwrap.py
           python3 scripts/ci/lint_with_conn_unwrap.py
+      - name: Lint — no fixed path under the system temp dir
+        run: |
+          python3 scripts/ci/test_lint_fixed_temp_paths.py
+          python3 scripts/ci/lint_fixed_temp_paths.py
       - name: Context Budget Gate — agent bootstrap size
         run: |
           python3 scripts/ci/test_context_budget.py

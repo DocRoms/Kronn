@@ -4811,8 +4811,8 @@ mod host_sync_tests {
 
     #[test]
     fn load_json_empty_for_missing_file() {
-        let path = std::env::temp_dir().join("kronn-host-sync-nonexistent-12345");
-        let _ = std::fs::remove_file(&path);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing.json");
         match load_json_config_for_merge(&path) {
             JsonLoadOutcome::Empty => {}
             other => panic!("Expected Empty, got {:?}", other),

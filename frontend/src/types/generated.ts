@@ -8595,7 +8595,13 @@ declared_model: string | null, configured: boolean, reachable: boolean, availabl
  * modality. Empty when none is configured — an agent must never be told
  * it can produce a video the request would then refuse.
  */
-media: Array<TaskWorkerModality>, reasons: Array<CampaignTaskReason>, warnings: Array<CampaignTaskReason>, };
+media: Array<TaskWorkerModality>, reasons: Array<CampaignTaskReason>, warnings: Array<CampaignTaskReason>,
+/**
+ * HTTP workers only: what the bounded network probe observed. `reachable`
+ * is true only when this says `verified`; absent for host CLIs and joined
+ * sessions, whose reachability is not a network fact.
+ */
+connectivity?: WorkerConnectivity, };
 
 /**
  * A media generation slot a worker can actually serve.
@@ -9367,6 +9373,23 @@ timezone?: string, detection: WatchDetection, };
 export type WeightLevel = "green" | "amber" | "red";
 
 export type WeightThresholds = { amber_bytes: number, red_bytes: number, };
+
+/**
+ * Observed network connectivity, kept apart from `configured` (an address is
+ * saved) and `available` (Kronn would attempt a launch).
+ */
+export type WorkerConnectivity = { state: WorkerConnectivityState,
+/**
+ * `dns` | `refused` | `timeout` | `tls` | `http_status` |
+ * `invalid_endpoint` | `connect`. Never an address or upstream text.
+ */
+unreachable_reason?: string, http_status?: number,
+/**
+ * RFC 3339 instant of the observation, when one is reported.
+ */
+checked_at?: string, };
+
+export type WorkerConnectivityState = "verified" | "unreachable" | "unverified";
 
 /**
  * Lifecycle of a CLI worker control offer (KT-328). `pending` is the published,

@@ -1,6 +1,8 @@
 // Proof test for the runtime write guard: an integration test that FORGOT
 // isolate_config_dir() must be refused, not silently clobber the real config.
+// Serial: the test below restores KRONN_DATA_DIR, which would let this save pass.
 #[tokio::test]
+#[serial_test::serial]
 async fn unisolated_config_write_is_refused() {
     // Deliberately NO isolate_config_dir() and KRONN_DATA_DIR cleared.
     kronn::core::child_env::remove_var("KRONN_DATA_DIR");

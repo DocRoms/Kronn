@@ -115,6 +115,19 @@ describe('a drag and drop', () => {
     expect(JSON.parse(confirm.getAttribute('data-kronn-bindings')!)).toEqual({ task: 'a', before: '__col_in_progress__', column: '__col_in_progress__' });
   });
 
+  it('gives Kronn\'s card a readable label for every binding', () => {
+    mount([A, B]);
+    const top = document.querySelector('li[data-id="b"] [data-kronn-action="todo-move"][title^="Top"]')!;
+    expect(JSON.parse(top.getAttribute('data-kronn-binding-labels')!))
+      .toEqual({ task: 'Ship it', before: 'Before “Write the doc”', column: 'To do' });
+    const toggle = document.querySelector('li[data-id="b"] [data-kronn-action="todo-toggle"]')!;
+    expect(JSON.parse(toggle.getAttribute('data-kronn-binding-labels')!)).toEqual({ task: 'Ship it' });
+    drag('a', 'in_progress');
+    const confirm = document.querySelector('.carte.en-attente .placer')!;
+    expect(JSON.parse(confirm.getAttribute('data-kronn-binding-labels')!))
+      .toEqual({ task: 'Write the doc', before: 'At the end of the column', column: 'In progress' });
+  });
+
   it('is confirmed by the published board', async () => {
     mount([A, B]);
     drag('a', 'in_progress');

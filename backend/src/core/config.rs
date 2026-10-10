@@ -23,13 +23,6 @@ pub fn config_dir() -> Result<PathBuf> {
         return Ok(std::env::temp_dir().join(format!("kronn-test-data-{}", std::process::id())));
     }
 
-    // A unit test that forgot KRONN_DATA_DIR must not touch the real install
-    // (the operator secret and the encryption key live here); one directory
-    // per process, so parallel test processes never share it either.
-    if cfg!(test) {
-        return Ok(std::env::temp_dir().join(format!("kronn-test-data-{}", std::process::id())));
-    }
-
     ProjectDirs::from("com", "kronn", "kronn")
         .map(|d| d.config_dir().to_path_buf())
         .context("Cannot determine config directory")

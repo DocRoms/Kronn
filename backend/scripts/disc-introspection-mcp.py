@@ -52,7 +52,7 @@ import uuid
 
 MAX_DISC_APPEND_ATTACHMENTS = 8
 MAX_DISC_APPEND_ATTACHMENT_BYTES = 10 * 1024 * 1024
-BRIDGE_TOOL_SURFACE_VERSION = "0.3.10"
+BRIDGE_TOOL_SURFACE_VERSION = "0.3.11"
 
 
 class BridgeStaleError(RuntimeError):
@@ -860,9 +860,9 @@ TOOLS = [
         "description": (
             "List the worker identities this principal room can pass verbatim to "
             "task_exec_prepare: native HTTP providers, host CLIs and exact joined CLI "
-            "sessions. Reports configured/reachable/available separately with stable, "
-            "secret-free reason codes. Call this before choosing a worker; then preflight "
-            "the selected `worker` object."
+            "sessions. Reports configured, probed reachable and available separately with "
+            "secret-free reason codes. Call this before choosing a worker, then preflight its "
+            "`worker` object."
         ),
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
@@ -9798,6 +9798,12 @@ TOOL_MANUALS = {
         "read-only discovery call. For Ollama, discovery also does not prove that the exact "
         "resolved tag is already pulled locally; a missing tag fails explicitly at `/api/chat`, "
         "so treat catalogue availability and model presence as separate facts.\n\n"
+        "HTTP entries carry `connectivity.state`: `verified` (a bounded probe answered), "
+        "`unreachable` (with `unreachable_reason`: dns, refused, timeout, tls, http_status, "
+        "invalid_endpoint or connect) or `unverified` (no fresh probe). `reachable` is true "
+        "only when verified: a saved address is configuration, never connectivity. A named "
+        "connection that is not verified stays listed, media included, but is not "
+        "`available`.\n\n"
         "Unavailable entries remain visible with stable `reasons[].code`; details are fixed "
         "backend phrases and never contain keys, endpoints, hostnames or raw upstream errors. "
         "Provider probes run in parallel under a short global bound. After choosing an "

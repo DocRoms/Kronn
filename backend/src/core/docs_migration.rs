@@ -1589,9 +1589,10 @@ mod tests {
         // The two unknown placeholders (DO_NOT_1/2) stay untouched —
         // those are for the agent to fill during bootstrap step 1.
         let (_tmp, generic_root) = write_rust_with_placeholders();
-        // Rename to a meaningful directory name so PROJECT_NAME comes out right.
-        let parent = generic_root.parent().unwrap();
-        let renamed = parent.join("amp-easy-backo");
+        // Rename to a meaningful directory name so PROJECT_NAME comes out right,
+        // inside a private parent: parallel test processes never share the name.
+        let parent = tempfile::tempdir().unwrap();
+        let renamed = parent.path().join("amp-easy-backo");
         std::fs::rename(&generic_root, &renamed).unwrap();
 
         let modified = prefill_all_for_tests(&renamed);
@@ -1612,8 +1613,6 @@ mod tests {
         // Unknown placeholders we don't touch — bootstrap agent's job.
         assert!(body.contains("{{DO_NOT_1}}"));
         assert!(body.contains("{{DO_NOT_2}}"));
-        // Cleanup so the rename doesn't leak.
-        std::fs::remove_dir_all(&renamed).ok();
     }
 
     #[test]
