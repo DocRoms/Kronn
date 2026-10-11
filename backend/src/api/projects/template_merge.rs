@@ -15,6 +15,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use crate::core::docs_location::DocsRoot;
 use crate::core::docs_merge::{self, Correspondence, MergePlan, WriteOutcome};
 use crate::core::scanner;
 use crate::models::ApiResponse;
@@ -163,13 +164,30 @@ fn templates_docs_dir() -> Result<PathBuf, String> {
     }
 }
 
+/// The project's configured docs root when it is not `docs/` (KT-1192):
+/// the merge then writes there, with the templates' references relocated.
+fn configured_root(repo: &Path) -> Result<Option<DocsRoot>, String> {
+    let docs_root = DocsRoot::for_project(repo)?;
+    Ok((!docs_root.is_default()).then_some(docs_root))
+}
+
 fn plan_on(
     root: &Path,
     existing: &BTreeSet<String>,
     template_docs: &Path,
+    configured: Option<&DocsRoot>,
 ) -> Result<MergePlan, String> {
-    let template = docs_merge::load_template(template_docs)?;
-    let docs_dir = docs_merge::choose_docs_dir(existing, None);
+    let mut template = docs_merge::load_template(template_docs)?;
+    if let Some(docs_root) = configured {
+        for file in &mut template {
+            if file.rel.ends_with(".md") {
+                if let Ok(text) = std::str::from_utf8(&file.bytes) {
+                    file.bytes = docs_root.relocate(text).into_owned().into_bytes();
+                }
+            }
+        }
+    }
+    let docs_dir = docs_merge::choose_docs_dir(existing, configured.map(DocsRoot::rel));
     docs_merge::plan_merge(root, existing, &template, &docs_dir)
 }
 
@@ -203,7 +221,12 @@ pub fn preview_plan(repo: &Path, template_docs: &Path) -> Result<TemplateMergeVi
     } else {
         (docs_merge::snapshot_tree(repo)?, Vec::new())
     };
-    let plan = plan_on(repo, &existing, template_docs)?;
+    let plan = plan_on(
+        repo,
+        &existing,
+        template_docs,
+        configured_root(repo)?.as_ref(),
+    )?;
     let merge = merge_state(repo);
     let files = plan
         .writes
@@ -264,11 +287,11 @@ fn merge_branch_ahead(repo: &Path) -> u32 {
         .unwrap_or(0)
 }
 
-fn pending_files(worktree: &Path) -> u32 {
+fn pending_files(worktree: &Path, configured: Option<&DocsRoot>) -> u32 {
     let Ok(existing) = tracked_files(worktree) else {
         return 0;
     };
-    let docs_dir = docs_merge::choose_docs_dir(&existing, None);
+    let docs_dir = docs_merge::choose_docs_dir(&existing, configured.map(DocsRoot::rel));
     untracked_under(worktree, &docs_dir).map_or(0, |files| files.len() as u32)
 }
 
@@ -287,7 +310,8 @@ pub fn merge_state(repo: &Path) -> TemplateMergeState {
         .filter(|b| !b.is_empty());
     if let Some(worktree) = existing_merge_worktree(repo) {
         state.worktree_exists = true;
-        state.pending_files = pending_files(&worktree);
+        state.pending_files =
+            pending_files(&worktree, configured_root(repo).ok().flatten().as_ref());
         state.worktree_path = Some(worktree.to_string_lossy().into_owned());
     }
     state.branch_exists = branch_exists(repo);
@@ -420,7 +444,12 @@ pub fn run_merge_in_worktree(
     }
 
     let existing = tracked_files(&worktree)?;
-    let plan = plan_on(&worktree, &existing, template_docs)?;
+    let plan = plan_on(
+        &worktree,
+        &existing,
+        template_docs,
+        configured_root(repo)?.as_ref(),
+    )?;
     let sources = docs_merge::source_paths(&existing);
     let before = docs_merge::fingerprint(&worktree, &sources);
     let outcomes = docs_merge::apply_plan(&worktree, &plan)?;
@@ -482,7 +511,8 @@ pub fn accept_merge(repo: &Path, paths: &[String]) -> Result<TemplateMergeAccept
         return Err("no file accepted: pick at least one file to commit".into());
     }
     let existing = tracked_files(&worktree)?;
-    let docs_dir = docs_merge::choose_docs_dir(&existing, None);
+    let configured = configured_root(repo)?;
+    let docs_dir = docs_merge::choose_docs_dir(&existing, configured.as_ref().map(DocsRoot::rel));
     let proposed: BTreeSet<String> = untracked_under(&worktree, &docs_dir)?.into_iter().collect();
     let refused: Vec<&String> = paths.iter().filter(|p| !proposed.contains(*p)).collect();
     if !refused.is_empty() {
@@ -578,7 +608,6 @@ pub async fn template_merge_start(
     let result = match project_root(&state, id).await {
         Ok((root, name)) => {
             blocking(move || {
-                crate::core::docs_location::guard_docs_pipeline(&root)?;
                 let template = templates_docs_dir()?;
                 run_merge_in_worktree(&root, &name, base, &template)
             })

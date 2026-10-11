@@ -82,9 +82,20 @@ impl DocumentaryOptimizationReport {
     }
 }
 
+/// The project's docs root (KT-1192): every `docs/` path below is relative
+/// to it, written for the default and relocated per project.
+fn docs_root(project: &Path) -> crate::core::docs_location::DocsRoot {
+    crate::core::docs_location::DocsRoot::of(project)
+}
+
+/// A `docs/…` path of this module under the project's root.
+fn under_root(project: &Path, default_path: &'static str) -> &'static str {
+    docs_root(project).relocate_static(default_path)
+}
+
 pub fn analyze(project: &Path) -> Result<DocumentaryOptimizationReport, String> {
     let budgets = load_budgets(project)?;
-    let docs = markdown_files(&project.join("docs"))?;
+    let docs = markdown_files(&docs_root(project).dir(project))?;
     let adapters = root_adapters(project)?;
     let mut diagnostics = Vec::new();
     let mut agents = Vec::new();
@@ -128,7 +139,7 @@ pub fn analyze(project: &Path) -> Result<DocumentaryOptimizationReport, String> 
             routed.extend(routed_markdown(project, adapter, text, &mut found));
             demote_human_section(&adapter_rel, name, found, &mut diagnostics);
         }
-        let entry = project.join("docs/AGENTS.md");
+        let entry = project.join(under_root(project, "docs/AGENTS.md"));
         if entry.is_file() && adapter != &entry && !routed.contains(&entry) {
             routed.insert(0, entry);
         }
@@ -213,10 +224,10 @@ const LEGACY_DOCS_PREFIX: &str = "docs/legacy/";
 /// outside Kronn's managed block belong to their authors: an audit reports
 /// their dead links but never fails on them.
 pub fn kronn_owns(project: &Path, rel: &str) -> bool {
-    if rel.starts_with(LEGACY_DOCS_PREFIX) {
+    if rel.starts_with(under_root(project, LEGACY_DOCS_PREFIX)) {
         return false;
     }
-    if rel.starts_with("docs/") {
+    if docs_root(project).contains(rel) {
         return true;
     }
     read(&project.join(rel)).is_ok_and(|content| {
@@ -226,7 +237,7 @@ pub fn kronn_owns(project: &Path, rel: &str) -> bool {
 
 /// The same bounded, symlink-filtered surface used by the final audit gate.
 pub(crate) fn document_paths(project: &Path) -> Result<Vec<PathBuf>, String> {
-    let mut paths = markdown_files(&project.join("docs"))?;
+    let mut paths = markdown_files(&docs_root(project).dir(project))?;
     paths.extend(root_adapters(project)?);
     paths.sort();
     paths.dedup();
@@ -234,7 +245,7 @@ pub(crate) fn document_paths(project: &Path) -> Result<Vec<PathBuf>, String> {
 }
 
 fn load_budgets(project: &Path) -> Result<DocumentBudgets, String> {
-    let path = project.join(CONFIG_FILE);
+    let path = project.join(under_root(project, CONFIG_FILE));
     if !path.exists() {
         return Ok(DocumentBudgets::default());
     }
@@ -309,7 +320,9 @@ fn inspect_docs(
     for path in docs {
         let Ok(content) = read(path) else { continue };
         let rel = relative(project, path);
-        if rel == "docs/AGENTS.md" && word_count(&content) > budgets.agents_md_max_words {
+        if rel == under_root(project, "docs/AGENTS.md")
+            && word_count(&content) > budgets.agents_md_max_words
+        {
             out.push(diag(
                 "agents_md_budget",
                 &rel,
@@ -377,10 +390,10 @@ fn inspect_docs(
     }
     for path in docs {
         let rel = relative(project, path);
-        if rel != "docs/AGENTS.md"
-            && !rel.starts_with("docs/tech-debt/")
-            && !rel.starts_with("docs/reports/")
-            && !rel.starts_with(LEGACY_DOCS_PREFIX)
+        if rel != under_root(project, "docs/AGENTS.md")
+            && !rel.starts_with(under_root(project, "docs/tech-debt/"))
+            && !rel.starts_with(under_root(project, "docs/reports/"))
+            && !rel.starts_with(under_root(project, LEGACY_DOCS_PREFIX))
             && !linked.contains(&normalize(path))
         {
             out.push(diag(
@@ -397,8 +410,8 @@ fn inspect_docs(
 /// from a dimension index the central index links. Settled sheets
 /// (rejected, accepted decision) leave the index on purpose.
 fn unindexed_tds(project: &Path, docs: &[PathBuf], out: &mut Vec<Diagnostic>) {
-    let central = project
-        .join("docs")
+    let central = docs_root(project)
+        .dir(project)
         .join(crate::core::td_index::CENTRAL_INDEX);
     let mut linked = BTreeSet::new();
     if let Ok(content) = read(&central) {
@@ -421,7 +434,7 @@ fn unindexed_tds(project: &Path, docs: &[PathBuf], out: &mut Vec<Diagnostic>) {
     for path in docs {
         let rel = relative(project, path);
         let Some(id) = rel
-            .strip_prefix("docs/tech-debt/")
+            .strip_prefix(under_root(project, "docs/tech-debt/"))
             .and_then(|name| name.strip_suffix(".md"))
             .filter(|id| crate::core::td_index::is_td_id(id))
         else {
@@ -434,8 +447,8 @@ fn unindexed_tds(project: &Path, docs: &[PathBuf], out: &mut Vec<Diagnostic>) {
                 "unindexed_td",
                 &rel,
                 format!(
-                    "tech-debt sheet is not listed in docs/{}",
-                    crate::core::td_index::CENTRAL_INDEX
+                    "tech-debt sheet is not listed in {}",
+                    docs_root(project).path(crate::core::td_index::CENTRAL_INDEX)
                 ),
             ));
         }
@@ -604,8 +617,9 @@ fn root_adapters(project: &Path) -> Result<Vec<PathBuf>, String> {
                 .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
         })
         .collect();
-    if found.is_empty() && project.join("docs/AGENTS.md").is_file() {
-        found.push(project.join("docs/AGENTS.md"));
+    let entry = project.join(under_root(project, "docs/AGENTS.md"));
+    if found.is_empty() && entry.is_file() {
+        found.push(entry);
     }
     Ok(found)
 }

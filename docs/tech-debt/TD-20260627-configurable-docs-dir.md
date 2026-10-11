@@ -68,14 +68,13 @@
   historical detection). Every `scanner::detect_docs_dir` caller reads it;
   containment (relative, no `..`, no symlink out) is checked on save (HTTP 400)
   and on each resolution (a refused override yields an unusable path).
-- Residual: the audit pipeline (`api/audit/full.rs`, `helpers.rs`,
-  `validation.rs`, `validate.rs`, `drift.rs`, `document_optimization.rs`,
-  step targets such as `FOUNDING_STEP_TARGET`), bootstrap and template
-  reinstall/merge still write `docs/` by name. Until they read the resolver,
-  `docs_location::guard_docs_pipeline` refuses full/partial audits,
-  revalidation, migration and template reinstall/merge when the resolved
-  folder is configured and is not `docs/`. Reading, badge and human
-  attestation work.
+- KT-1192 made the audit pipeline relocatable: `docs_location::DocsRoot` is
+  resolved once per run and every artefact, step target and quoted prompt
+  path derives from it (`steps_for`, `DocsRoot::relocate`). `docs/` stays
+  the root of every project without an override, with identical prompts.
+- Residual: the human reading mode and doc-site generator adapters (delivery
+  steps 2-3), and `GET /api/audit/steps`, which has no project and lists the
+  default labels.
 
 ## Notes
 

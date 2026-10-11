@@ -44,6 +44,7 @@ fn rules_step() -> usize {
     owning_step(
         &super::super::assemble_chained_steps(AuditKind::Full),
         RULES,
+        &crate::core::docs_location::DocsRoot::default(),
     )
     .unwrap()
 }

@@ -919,7 +919,7 @@ pub(crate) fn check_ai_dir_permissions(ai_dir: &std::path::Path) -> Result<(), S
     for entry in walkdir::WalkDir::new(ai_dir).max_depth(5).into_iter() {
         let entry = match entry {
             Ok(e) => e,
-            Err(e) => return Err(format!("Cannot traverse docs/ directory: {}", e)),
+            Err(e) => return Err(format!("Cannot traverse {}: {}", ai_dir.display(), e)),
         };
         let path = entry.path();
         if path.is_file() {
@@ -1006,17 +1006,38 @@ pub(super) fn remove_bootstrap_block(index_file: &std::path::Path) {
 /// When `prefilled_notes` is `None`, the agent runs the legacy 6-Q
 /// flow (kept for backwards-compat — callers that never wrote to the
 /// form still work).
+#[cfg(test)]
 pub(crate) fn build_briefing_prompt(language: &str, prefilled_notes: Option<&str>) -> String {
+    build_briefing_prompt_in(
+        language,
+        prefilled_notes,
+        &crate::core::docs_location::DocsRoot::default_root(),
+    )
+}
+
+/// `build_briefing_prompt` with Kronn's text pointing at `docs_root`
+/// (KT-1192). The user's own answers are inserted after the relocation.
+pub(crate) fn build_briefing_prompt_in(
+    language: &str,
+    prefilled_notes: Option<&str>,
+    docs_root: &crate::core::docs_location::DocsRoot,
+) -> String {
     // 0.8.7 anti-hallu: prefix the discipline reminder on every briefing
     // path (review + legacy). Briefing produces `docs/briefing.md` which is
     // then injected as project context — a hallucinated assertion here
     // ships into every future agent prompt for this project.
-    let body = if let Some(notes) = prefilled_notes {
-        build_briefing_review_prompt(language, notes)
+    const NOTES_SLOT: &str = "\u{0}kronn-briefing-notes\u{0}";
+    let body = if prefilled_notes.is_some() {
+        build_briefing_review_prompt(language, NOTES_SLOT)
     } else {
         build_briefing_legacy_prompt(language)
     };
-    format!("{}{}", anti_halluc_doc_writer_block(language), body)
+    let prompt = format!("{}{}", anti_halluc_doc_writer_block(language), body);
+    let prompt = docs_root.relocate(&prompt);
+    match prefilled_notes {
+        Some(notes) => prompt.replace(NOTES_SLOT, notes),
+        None => prompt.into_owned(),
+    }
 }
 
 /// 0.8.4 (#285+UX) — review prompt fired after the form has been

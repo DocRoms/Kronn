@@ -24,7 +24,8 @@ pub(crate) async fn convert_project_tds(
     actor: PlanningActor,
 ) -> anyhow::Result<TdTasksOutcome> {
     let sources = tokio::task::spawn_blocking(move || {
-        td_tasks::load_sources(&crate::core::scanner::detect_docs_dir(&project_path))
+        let docs_root = crate::core::docs_location::DocsRoot::of(&project_path);
+        td_tasks::load_sources_rel(&docs_root.dir(&project_path), docs_root.rel())
     })
     .await?;
     db.with_conn(move |conn| td_tasks::convert(conn, &project_id, &sources, &actor))

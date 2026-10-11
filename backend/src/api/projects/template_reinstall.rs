@@ -137,9 +137,14 @@ fn prepare(project: &Path, template_docs: &Path) -> Result<(PathBuf, Vec<Prepare
             template_docs.display()
         ));
     }
-    crate::core::docs_location::guard_docs_pipeline(project)?;
-    // Unconfigured, a missing folder resolves to `docs/` (fresh project).
-    let docs_dir = scanner::detect_docs_dir(project);
+    // The project's docs root (KT-1192); unconfigured, the detected folder
+    // (`docs/` for a fresh project), as before.
+    let docs_root = crate::core::docs_location::DocsRoot::for_project(project)?;
+    let docs_dir = if docs_root.is_default() {
+        scanner::detect_docs_dir(project)
+    } else {
+        docs_root.dir(project)
+    };
     let validated: Vec<String> = crate::core::doc_provenance::report(project, false)
         .map(|r| {
             r.docs
@@ -161,7 +166,13 @@ fn prepare(project: &Path, template_docs: &Path) -> Result<(PathBuf, Vec<Prepare
             .map_err(|e| e.to_string())?
             .to_string_lossy()
             .replace('\\', "/");
-        let new = std::fs::read(&source).map_err(|e| format!("read {}: {e}", source.display()))?;
+        let mut new =
+            std::fs::read(&source).map_err(|e| format!("read {}: {e}", source.display()))?;
+        if !docs_root.is_default() && source.extension().is_some_and(|ext| ext == "md") {
+            if let Ok(text) = std::str::from_utf8(&new) {
+                new = docs_root.relocate(text).into_owned().into_bytes();
+            }
+        }
         let (old, action, kind, new, human) = match std::fs::symlink_metadata(&dst) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 (None, ReinstallAction::Create, None, new, Vec::new())

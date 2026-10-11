@@ -16,8 +16,6 @@ use uuid::Uuid;
 use crate::models::*;
 use crate::AppState;
 
-use super::helpers::build_briefing_prompt;
-
 /// GET /api/projects/:id/briefing
 /// Returns the briefing notes for a project.
 pub async fn get_briefing(
@@ -119,7 +117,10 @@ pub(crate) const BRIEFING_PROMPT_MAX_CHARS: usize = 6_000;
 /// at [`BRIEFING_PROMPT_MAX_CHARS`] with an explicit truncation marker. The
 /// machine copy of the project answers is dropped: the readable facts above
 /// it say the same thing. The documentation section stays out (KT-999).
-pub(crate) fn briefing_prompt_section(notes: &str) -> String {
+pub(crate) fn briefing_prompt_section(
+    notes: &str,
+    docs_root: &crate::core::docs_location::DocsRoot,
+) -> String {
     let notes = super::briefing_docs::strip_section(notes);
     let notes = super::briefing_rules::strip_section(&notes);
     let notes = super::project_doc::strip_answers_line(&notes);
@@ -137,7 +138,8 @@ pub(crate) fn briefing_prompt_section(notes: &str) -> String {
         }
         let shown = cut.chars().count();
         format!(
-            "{cut}\n\n[Briefing truncated by Kronn: {shown} of {total} characters shown. Read docs/briefing.md for the rest.]"
+            "{cut}\n\n[Briefing truncated by Kronn: {shown} of {total} characters shown. Read {} for the rest.]",
+            docs_root.path("briefing.md")
         )
     };
     format!("\n\n## Project briefing (from the user)\n{body}\n")
@@ -229,7 +231,11 @@ pub async fn start_briefing(
         crate::api::projects::resolve_briefing_notes(&project_path, &project.briefing_notes);
     // The documentation section is put back by `reattach_facts` after the review.
     let prefilled = prefilled.map(|notes| super::briefing_docs::strip_section(&notes));
-    let briefing_prompt = build_briefing_prompt(&language, prefilled.as_deref());
+    let briefing_prompt = super::helpers::build_briefing_prompt_in(
+        &language,
+        prefilled.as_deref(),
+        &crate::core::docs_location::DocsRoot::of(&project_path),
+    );
 
     // 4. Create discussion
     let now = Utc::now();

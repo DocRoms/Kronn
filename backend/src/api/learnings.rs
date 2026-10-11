@@ -356,7 +356,13 @@ pub async fn validate_learning(
     let scope = route_scope(learning.kind, learning.project_id.as_deref());
     let target = match scope {
         LearningScope::Project => match project_root.as_deref() {
-            Some(root) => std::path::PathBuf::from(root).join(promotion_target(scope)),
+            Some(root) => {
+                // Under the project's docs root (KT-1192).
+                let resolved = crate::core::scanner::resolve_host_path(root);
+                let rel = crate::core::docs_location::DocsRoot::of(&resolved)
+                    .relocate_static(promotion_target(scope));
+                std::path::PathBuf::from(root).join(rel)
+            }
             None => return Json(ApiResponse::err("scope=project mais projet sans chemin")),
         },
         LearningScope::User => user_context::user_context_dir().join(promotion_target(scope)),

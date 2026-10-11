@@ -63,7 +63,15 @@ pub fn sync(project_path: &Path, enabled: bool) -> std::io::Result<LearningDocOu
         return Ok(LearningDocOutcome::FileMissing);
     }
     let original = std::fs::read_to_string(&agents_md)?;
-    let (new_content, outcome) = transform(&original, enabled);
+    let (mut new_content, outcome) = transform(&original, enabled);
+    // The pointer names the project's docs root (KT-1192).
+    let docs_root = crate::core::docs_location::DocsRoot::of(project_path);
+    if !docs_root.is_default() {
+        new_content = new_content.replace(
+            "[`docs/learnings.md`](learnings.md)",
+            &format!("[`{}`](learnings.md)", docs_root.path("learnings.md")),
+        );
+    }
     if !matches!(outcome, LearningDocOutcome::NoOp) {
         std::fs::write(&agents_md, new_content)?;
     }

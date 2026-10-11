@@ -297,10 +297,12 @@ pub async fn full_audit(
     let project_id = project.id.clone();
     let project_path_str = project.path.clone();
     let project_path = scanner::resolve_host_path(&project.path);
-    // The steps write `docs/` by name: a relocated AI doc is refused (KT-263).
-    if let Err(reason) = crate::core::docs_location::guard_docs_pipeline(&project_path) {
-        return sse_error(reason);
-    }
+    // Every artefact derives from this one root (KT-1192); a configured
+    // folder failing containment refuses the run.
+    let docs_root = match crate::core::docs_location::DocsRoot::for_project(&project_path) {
+        Ok(docs_root) => docs_root,
+        Err(reason) => return sse_error(reason),
+    };
     let project_default_skill_ids = project.default_skill_ids.clone();
     let briefing_notes =
         crate::api::projects::resolve_briefing_notes(&project_path, &project.briefing_notes);
@@ -502,7 +504,7 @@ pub async fn full_audit(
         // on-demand (French legal norm, superset of the chained a11y pass).
         // Sub-audits remain individually launchable via `kind` for surgical
         // re-scans (the recommendations engine keeps suggesting those).
-        let steps: Vec<super::AnalysisStep> = super::assemble_chained_steps(kind);
+        let steps: Vec<super::AnalysisStep> = super::steps_for(kind, &docs_root);
         // Index of the first chained sub-audit step (1-based), used to inject
         // the relevance gate into the prompt at build time.
         let first_chained_step = super::ANALYSIS_STEPS.len() + 1;
@@ -665,7 +667,7 @@ pub async fn full_audit(
         // them: only those settle a TD at the end. A resume keeps its
         // predecessor's.
         let adr_baseline = {
-            let docs = project_path.join("docs");
+            let docs = docs_root.dir(&project_path);
             let found = tokio::task::spawn_blocking(move || crate::core::adr::StartOfRun::capture(&docs))
                 .await.unwrap_or_default();
             let (run_id, previous_id, fallback) = (audit_run_id.clone(), resume_run_id_req.clone(), found.clone());
@@ -749,6 +751,7 @@ pub async fn full_audit(
 
         if template_installed {
             let pp = project_path_str.clone();
+            let install_root = docs_root.clone();
             let install_result = tokio::task::spawn_blocking(move || -> Result<(crate::core::legacy_docs::LegacyMigrationReport,), String> {
                 let project_path = scanner::resolve_host_path(&pp);
                 if !project_path.exists() {
@@ -781,7 +784,7 @@ pub async fn full_audit(
                 // as the PRIMARY source of truth when filling fresh
                 // Kronn templates. Idempotent: already-Kronn-managed
                 // docs/ → no-op (the signature check returns true).
-                let legacy_report = crate::core::legacy_docs::migrate_user_docs_to_legacy(&docs_target)
+                let legacy_report = crate::core::legacy_docs::migrate_user_docs_to_legacy_in(&docs_target, &install_root)
                     .map_err(|e| format!("legacy docs migration failed: {}", e))?;
 
                 let template_dir = crate::api::projects::resolve_templates_dir();
@@ -791,7 +794,7 @@ pub async fn full_audit(
 
                 let docs_template = template_dir.join("docs");
                 if docs_template.is_dir() {
-                    crate::api::projects::copy_dir_nondestructive(&docs_template, &docs_target)?;
+                    crate::api::projects::copy_dir_nondestructive_in(&docs_template, &docs_target, &install_root)?;
                 }
                 // The anti-hallucination section STEP 0 writes links to this
                 // spec: without it the documentary gate blocks step 1 of a
@@ -813,8 +816,8 @@ pub async fn full_audit(
                 // no-op on empty list (file is removed if present).
                 if let Err(e) = crate::api::projects::sync_linked_repos_doc_in(&docs_target, &project.linked_repos) {
                     tracing::warn!(
-                        "Failed to seed docs/linked-repos.md during audit Phase 1 (project {}): {}",
-                        project.name, e
+                        "Failed to seed {} during audit Phase 1 (project {}): {}",
+                        install_root.path("linked-repos.md"), project.name, e
                     );
                 }
 
@@ -860,6 +863,7 @@ pub async fn full_audit(
                         &project_path,
                         filename,
                         template_body.as_deref(),
+                        &install_root,
                     ) {
                         Ok(outcome) => {
                             tracing::debug!(
@@ -892,7 +896,7 @@ pub async fn full_audit(
                 Ok((report,)) => report,
             };
 
-            crate::core::mcp_scanner::ensure_local_exclude(&project_path_str, "docs/var/");
+            crate::core::mcp_scanner::ensure_local_exclude(&project_path_str, &docs_root.path("var/"));
 
             // 0.8.3 (#272) — surface the legacy-docs migration so the
             // frontend can show a toast + list of moved entries. The
@@ -916,7 +920,7 @@ pub async fn full_audit(
                 &state, &project_id, &project_path, project.repo_url.as_deref(), briefing_notes.as_deref(),
             ).await;
             if !report.mismatches.is_empty() || report.error.is_some() {
-                tracing::warn!("docs/project.md for project {project_id}: {report:?}");
+                tracing::warn!("{} for project {project_id}: {report:?}", docs_root.path("project.md"));
             }
             yield Event::default().event("project_doc").data(
                 serde_json::to_string(&report).unwrap_or_else(|_| "{}".into())
@@ -961,7 +965,7 @@ pub async fn full_audit(
 
         // ── Phase 2: Run the assembled audit chain ──
         // Remove bootstrap prompt
-        let index_file = project_path.join("docs/AGENTS.md");
+        let index_file = docs_root.file(&project_path, "AGENTS.md");
         if index_file.exists() {
             remove_bootstrap_block(&index_file);
         }
@@ -1017,7 +1021,7 @@ pub async fn full_audit(
         // a fresh project (empty Vec). Runs AFTER the pre-agent redaction
         // above so a one-time sanitization doesn't read as spurious drift.
         let pre_audit_td_snapshot = super::reconciliation::snapshot_tech_debt_dir(
-            &project_path.join("docs"),
+            &docs_root.dir(&project_path),
         );
 
         // chantier 4 (2026-06-04) — Option C re-audit dedup list. When the
@@ -1028,7 +1032,7 @@ pub async fn full_audit(
         // full pass (see `render_known_debt_block`). Empty on a first audit
         // → block is never injected → unchanged from-scratch behaviour.
         let prior_td_digests = super::reconciliation::digest_prior_tech_debt(
-            &project_path.join("docs"),
+            &docs_root.dir(&project_path),
         );
 
         // 0.8.3 (#274) — cumulative token counter surfaced on each
@@ -1107,7 +1111,7 @@ pub async fn full_audit(
                 let ev = serde_json::json!({
                     "step": "anti-hallu",
                     "result": "inserted",
-                    "file": "docs/AGENTS.md",
+                    "file": docs_root.path("AGENTS.md"),
                 });
                 yield Event::default().event("anti_hallu_step").data(ev.to_string());
             }
@@ -1115,7 +1119,7 @@ pub async fn full_audit(
                 let ev = serde_json::json!({
                     "step": "anti-hallu",
                     "result": "refreshed",
-                    "file": "docs/AGENTS.md",
+                    "file": docs_root.path("AGENTS.md"),
                 });
                 yield Event::default().event("anti_hallu_step").data(ev.to_string());
             }
@@ -1280,10 +1284,10 @@ pub async fn full_audit(
             // full agent pass.
             let gate = super::gate_for_step(step, first_chained_step);
             let reverify = super::reverifies_target(&project_path, step, analysis_step);
-            let mut full_prompt = super::dated_step_prompt(gate, &super::step_prompt_body(analysis_step, reverify), Utc::now());
+            let mut full_prompt = super::dated_step_prompt(gate, &super::step_prompt_body(analysis_step, reverify), Utc::now(), &docs_root);
 
             if let Some(ref notes) = briefing_notes {
-                full_prompt.push_str(&super::briefing::briefing_prompt_section(notes));
+                full_prompt.push_str(&super::briefing::briefing_prompt_section(notes, &docs_root));
             }
             // chantier 1 (2026-06-03) — inject deterministic detector signals
             // ONLY into the tech-debt step (Step 8). They anchor the dimension
@@ -1292,12 +1296,12 @@ pub async fn full_audit(
             if analysis_step.target_file.ends_with("inconsistencies-tech-debt.md") {
                 // Shared with the partial pipeline (Codex lot-3 #4): the
                 // detector signals and the known-debt digests travel together.
-                full_prompt.push_str(&super::step8_context_block(&detector_signals, &ecosystems, &prior_td_digests));
+                full_prompt.push_str(&super::step8_context_block(&detector_signals, &ecosystems, &prior_td_digests, &docs_root));
             }
             if let Some(block) = version_ctx.block_for(analysis_step.target_file) {
                 full_prompt.push_str(&block);
             }
-            full_prompt.push_str(&super::decisions_context_block(&project_path, analysis_step, &adr_baseline.decisions));
+            full_prompt.push_str(&super::decisions_context_block(&project_path, analysis_step, &adr_baseline.decisions, &docs_root));
             full_prompt.push_str(&super::briefing_rules::prompt_block(analysis_step.target_file, project_rules.as_ref()));
             // 0.8.3 (#272) — pre-existing user docs are migrated to
             // docs/legacy/ before the audit runs. Tell the agent to
@@ -1306,9 +1310,9 @@ pub async fn full_audit(
             // when docs/legacy/ actually exists (a fresh project or
             // a re-audit on already-Kronn-managed docs has no
             // legacy/ subdir).
-            let legacy_dir_exists = project_path.join("docs/legacy").is_dir();
+            let legacy_dir_exists = docs_root.file(&project_path, "legacy").is_dir();
             if legacy_dir_exists {
-                full_prompt.push_str("\n\n## Legacy docs (PRIMARY SOURCE for this audit)\nThis project had a hand-curated `docs/` folder BEFORE Kronn was bootstrapped. We moved that content under `docs/legacy/` so the freshly-installed Kronn templates don't collide with it. **READ every `*.md` under `docs/legacy/` BEFORE filling the Kronn templates.** That content is the human-curated knowledge — the README and source code alone would lose 6 months of accumulated context.\n\nWhen filling each Kronn template, cite the legacy source inline (`see docs/legacy/installation.md`, `cf docs/legacy/architecture/overview.md`) so the user can verify the mapping and decide what to keep / discard after the audit. After the audit, the user reviews `docs/legacy/` and either deletes it or migrates remaining pieces into the Kronn structure manually.\n\n**Navigation requirement for `docs/AGENTS.md` ONLY (Step 1):** when filling `docs/AGENTS.md`, add ONE line in the appropriate section (or a small dedicated `## Legacy docs (pre-Kronn snapshot)` section if none fits) that points future agents to `docs/legacy/` — wording like `> Hand-curated docs from before Kronn — see [docs/legacy/README.md](legacy/README.md) for context preserved from the previous structure.` Without this pointer the folder is invisible to anyone re-reading `AGENTS.md` next week. Do NOT add this line to other Kronn templates (`glossary.md`, `repo-map.md`, etc.) — the entry point is enough.\n");
+                full_prompt.push_str(&docs_root.relocate("\n\n## Legacy docs (PRIMARY SOURCE for this audit)\nThis project had a hand-curated `docs/` folder BEFORE Kronn was bootstrapped. We moved that content under `docs/legacy/` so the freshly-installed Kronn templates don't collide with it. **READ every `*.md` under `docs/legacy/` BEFORE filling the Kronn templates.** That content is the human-curated knowledge — the README and source code alone would lose 6 months of accumulated context.\n\nWhen filling each Kronn template, cite the legacy source inline (`see docs/legacy/installation.md`, `cf docs/legacy/architecture/overview.md`) so the user can verify the mapping and decide what to keep / discard after the audit. After the audit, the user reviews `docs/legacy/` and either deletes it or migrates remaining pieces into the Kronn structure manually.\n\n**Navigation requirement for `docs/AGENTS.md` ONLY (Step 1):** when filling `docs/AGENTS.md`, add ONE line in the appropriate section (or a small dedicated `## Legacy docs (pre-Kronn snapshot)` section if none fits) that points future agents to `docs/legacy/` — wording like `> Hand-curated docs from before Kronn — see [docs/legacy/README.md](legacy/README.md) for context preserved from the previous structure.` Without this pointer the folder is invisible to anyone re-reading `AGENTS.md` next week. Do NOT add this line to other Kronn templates (`glossary.md`, `repo-map.md`, etc.) — the entry point is enough.\n"));
             }
             if let Some(ref block) = linked_repos_block {
                 full_prompt.push_str(&format!("\n\n{}\n", block));
@@ -2542,8 +2546,8 @@ pub async fn full_audit(
                 );
                 let today = Utc::now().format("%Y-%m-%d").to_string();
                 let report = render_report(&entries, &today, "Full");
-                let report_path = project_path_for_recon
-                    .join("docs/tech-debt")
+                let report_path = crate::core::docs_location::DocsRoot::of(&project_path_for_recon)
+                    .file(&project_path_for_recon, "tech-debt")
                     .join(format!("_reconciliation-{}.md", today));
                 // Re-emitted priors (Updated refreshed OR Carried re-listed) are
                 // healthy, not candidates.
@@ -2569,8 +2573,8 @@ pub async fn full_audit(
                         let ev = serde_json::json!({
                             "candidates": candidates,
                             "updated": updated,
-                            "report_path": format!("docs/tech-debt/{}",
-                                report_path.file_name().and_then(|n| n.to_str()).unwrap_or("")),
+                            "report_path": docs_root.path(&format!("tech-debt/{}",
+                                report_path.file_name().and_then(|n| n.to_str()).unwrap_or(""))),
                         });
                         yield Event::default().event("reconciliation").data(ev.to_string());
                     }
@@ -2584,7 +2588,7 @@ pub async fn full_audit(
         // ── Phase 2.55: Tech-debt index resync (KT-949) ──
         // Lists every TD sheet, sub-audits included, in the central index.
         if outcome != RunOutcome::Nothing && should_optimize_documents(kind) {
-            let docs = project_path.join("docs");
+            let docs = docs_root.dir(&project_path);
             let baseline = adr_baseline.clone();
             match tokio::task::spawn_blocking(move || crate::core::td_index::resync(&docs, baseline.trust())).await {
                 Ok(Ok(td)) => {
@@ -2601,7 +2605,7 @@ pub async fn full_audit(
             }
         } else if outcome != RunOutcome::Nothing {
             // A standalone sub-audit rebuilds no index, but an accepted ADR still settles its sheets.
-            let (docs, baseline) = (project_path.join("docs"), adr_baseline.clone());
+            let (docs, baseline) = (docs_root.dir(&project_path), adr_baseline.clone());
             if let Ok(Err(e)) = tokio::task::spawn_blocking(move || crate::core::adr::settle_covered_sheets(&docs, baseline.trust())).await {
                 tracing::warn!("ADR check after the sub-audit failed: {e} — audit continues");
             }
@@ -2783,7 +2787,7 @@ pub async fn full_audit(
             };
             match baseline_outcome {
                 Ok(n) => {
-                    tracing::info!("Wrote docs/checksums.json with {n} mappings");
+                    tracing::info!("Wrote {} with {n} mappings", docs_root.path("checksums.json"));
                     // KT-920 — the draft stays with the run; the checkout is not touched.
                     if let Err(e) = crate::core::project_profile::record_audit_draft(
                         &db, &audit_run_id, project_path.clone(),
@@ -2863,6 +2867,8 @@ pub async fn full_audit(
         } else {
             build_validation_prompt(&language, &audit_info, has_issue_tracker_mcp, &run_td_ids)
         };
+        // Kronn's protocol text names the project's docs root (KT-1192).
+        let validation_prompt = docs_root.relocate(&validation_prompt).into_owned();
         // KT-931 — a partial run says which steps are NOT being validated.
         let validation_prompt = if td_scope.all_decided() {
             format!("{}{validation_prompt}", all_tds_decided_block(&language))
@@ -3024,7 +3030,8 @@ pub async fn full_audit(
         let db_for_complete = db.clone();
         let ended_at = Utc::now();
         let completion_counts = tokio::task::spawn_blocking(move || {
-            let td_dir = project_path_for_count.join("docs/tech-debt");
+            let td_dir = crate::core::docs_location::DocsRoot::of(&project_path_for_count)
+                .file(&project_path_for_count, "tech-debt");
             let counts = count_td_severities(&td_dir);
             let (resolved, new, carried) = compute_reconciliation_counts(
                 &snapshot_for_count, &td_dir,
@@ -3208,7 +3215,8 @@ pub(crate) enum RunOutcome {
 }
 
 /// KT-931 — the target file of the founding step of a Full chain: the entry
-/// point every other document hangs off.
+/// point every other document hangs off. Relocated with the chain (KT-1192),
+/// so it is matched by file name under whatever root the chain uses.
 pub(crate) const FOUNDING_STEP_TARGET: &str = "docs/AGENTS.md";
 
 /// KT-931 — the 1-based position in `steps` of the founding step, found by its
@@ -3218,7 +3226,10 @@ pub(crate) const FOUNDING_STEP_TARGET: &str = "docs/AGENTS.md";
 pub(crate) fn founding_step_index(steps: &[super::AnalysisStep]) -> Option<u32> {
     steps
         .iter()
-        .position(|step| step.target_file == FOUNDING_STEP_TARGET)
+        .position(|step| {
+            step.target_file == FOUNDING_STEP_TARGET
+                || step.target_file.rsplit('/').next() == FOUNDING_STEP_TARGET.rsplit('/').next()
+        })
         .map(|position| position as u32 + 1)
 }
 
@@ -3789,7 +3800,12 @@ pub fn cleanup_audit_files(project_path: &std::path::Path) -> Result<(), String>
     // The combined check is intentionally pessimistic — false negatives
     // (skip a dir we could have wiped) are harmless, false positives
     // (wipe a dir we shouldn't) are catastrophic.
-    for folder in ["docs", "doc", "ai"] {
+    let configured = crate::core::docs_location::DocsRoot::of(project_path);
+    let mut folders = vec!["docs", "doc", "ai"];
+    if !folders.contains(&configured.rel()) {
+        folders.push(configured.rel());
+    }
+    for folder in folders {
         let dir = project_path.join(folder);
         if !dir.exists() || !dir.is_dir() || dir.is_symlink() {
             continue;

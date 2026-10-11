@@ -149,7 +149,7 @@ fn the_section_stays_out_of_the_prompt_copy() {
     assert!(!stripped.contains(DOCS_ANSWERS_PREFIX));
     assert!(stripped.contains("## Purpose\nP"));
     assert!(stripped.contains("## Kronn options\n- Turn audit"));
-    let prompt = super::super::briefing::briefing_prompt_section(&notes);
+    let prompt = super::super::briefing::briefing_prompt_section(&notes, &crate::core::docs_location::DocsRoot::default_root());
     assert!(!prompt.contains("Existing documentation"), "{prompt}");
     assert!(!prompt.contains("`docs`"), "{prompt}");
 }

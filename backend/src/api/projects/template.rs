@@ -86,7 +86,12 @@ pub async fn install_template(
         let docs_target = existing_docs;
         let mut created_files = Vec::new();
         if docs_template.is_dir() {
-            created_files.extend(copy_dir_nondestructive(&docs_template, &docs_target)?);
+            let docs_root = crate::core::docs_location::DocsRoot::for_project(&project_path)?;
+            created_files.extend(copy_dir_nondestructive_in(
+                &docs_template,
+                &docs_target,
+                &docs_root,
+            )?);
         }
         // 0.8.7 — copy the anti-hallu spec embedded in the binary into
         // the project's `docs/conventions/` so any agent running on this
@@ -284,9 +289,24 @@ pub(crate) fn ensure_agent_writable_subfolders(
 /// allowed to touch. Existing files are never inspected or rewritten:
 /// a 0-byte or placeholder-bearing destination is user state until a
 /// manifest proves otherwise (Codex A2).
+#[cfg(test)]
 pub(crate) fn copy_dir_nondestructive(
     src: &std::path::Path,
     dst: &std::path::Path,
+) -> Result<Vec<std::path::PathBuf>, String> {
+    copy_dir_nondestructive_in(
+        src,
+        dst,
+        &crate::core::docs_location::DocsRoot::default_root(),
+    )
+}
+
+/// `copy_dir_nondestructive` with the markdown templates' `docs/` references
+/// rewritten to `docs_root` (KT-1192); byte copies under the default root.
+pub(crate) fn copy_dir_nondestructive_in(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+    docs_root: &crate::core::docs_location::DocsRoot,
 ) -> Result<Vec<std::path::PathBuf>, String> {
     // The destination root itself must not be a symlink: `exists()` and
     // `create_dir_all` follow links, so a symlinked docs/ would route the
@@ -324,13 +344,21 @@ pub(crate) fn copy_dir_nondestructive(
         }
 
         if src_path.is_dir() {
-            created.extend(copy_dir_nondestructive(&src_path, &dst_path)?);
+            created.extend(copy_dir_nondestructive_in(&src_path, &dst_path, docs_root)?);
         } else if dst_lstat.is_err() {
             // An existing destination is NEVER touched (Codex A2) — not
             // even 0 B or placeholder-bearing: neither proves Kronn owns
             // the current content, and recovery of a corrupt skeleton is
             // an explicit operation, not an implicit side effect.
-            std::fs::copy(&src_path, &dst_path).map_err(|e| {
+            let markdown = src_path.extension().is_some_and(|ext| ext == "md");
+            let copied = if docs_root.is_default() || !markdown {
+                std::fs::copy(&src_path, &dst_path).map(|_| ())
+            } else {
+                std::fs::read_to_string(&src_path).and_then(|text| {
+                    std::fs::write(&dst_path, docs_root.relocate(&text).as_bytes())
+                })
+            };
+            copied.map_err(|e| {
                 format!(
                     "copy {} -> {}: {}",
                     src_path.display(),

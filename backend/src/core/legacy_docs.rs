@@ -132,6 +132,17 @@ fn first_content_line(content: &str) -> &str {
 /// would move the freshly-installed Kronn templates into legacy/ on
 /// every audit.
 pub fn migrate_user_docs_to_legacy(docs_dir: &Path) -> std::io::Result<LegacyMigrationReport> {
+    migrate_user_docs_to_legacy_in(
+        docs_dir,
+        &crate::core::docs_location::DocsRoot::default_root(),
+    )
+}
+
+/// `migrate_user_docs_to_legacy` whose README names `docs_root` (KT-1192).
+pub fn migrate_user_docs_to_legacy_in(
+    docs_dir: &Path,
+    docs_root: &crate::core::docs_location::DocsRoot,
+) -> std::io::Result<LegacyMigrationReport> {
     if !docs_dir.exists() {
         return Ok(LegacyMigrationReport::skipped("no-docs-dir"));
     }
@@ -185,7 +196,7 @@ pub fn migrate_user_docs_to_legacy(docs_dir: &Path) -> std::io::Result<LegacyMig
     // an explanation of why this folder exists and what to do with
     // it. Token cost = 0 (deterministic write). Idempotent : if the
     // user has hand-edited the file post-audit, we don't clobber.
-    write_legacy_readme_if_absent(&legacy_dir)?;
+    write_legacy_readme_if_absent(&legacy_dir, docs_root)?;
 
     let moved_count = moved_entries.len();
     // Cap the surfaced list to keep SSE payloads small on legacy
@@ -243,12 +254,15 @@ where your changes will survive Kronn updates.\n\
 /// already exist. Idempotent : a hand-edited copy (the user added
 /// their own notes) is never clobbered. The file name `README.md`
 /// matches Git/GitHub convention so it surfaces in folder views.
-fn write_legacy_readme_if_absent(legacy_dir: &Path) -> std::io::Result<()> {
+fn write_legacy_readme_if_absent(
+    legacy_dir: &Path,
+    docs_root: &crate::core::docs_location::DocsRoot,
+) -> std::io::Result<()> {
     let readme = legacy_dir.join("README.md");
     if readme.exists() {
         return Ok(());
     }
-    fs::write(&readme, LEGACY_README_BODY)
+    fs::write(&readme, docs_root.relocate(LEGACY_README_BODY).as_bytes())
 }
 
 /// If `dst` exists, return `dst-1`, `dst-2`, … so a re-run after a

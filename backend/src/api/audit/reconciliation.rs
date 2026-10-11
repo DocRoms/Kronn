@@ -293,7 +293,10 @@ fn severity_rank(s: &str) -> u8 {
 /// them (Carried + anti-repetition) — into an explicit "fresh full pass,
 /// these are just a dedup list" contract. Returns "" when there are no
 /// priors (caller guards on this, but defensive).
-pub fn render_known_debt_block(priors: &[PriorDigest]) -> String {
+pub fn render_known_debt_block(
+    priors: &[PriorDigest],
+    docs_root: &crate::core::docs_location::DocsRoot,
+) -> String {
     if priors.is_empty() {
         return String::new();
     }
@@ -303,9 +306,10 @@ pub fn render_known_debt_block(priors: &[PriorDigest]) -> String {
     let mut block = String::new();
     block.push_str("## RE-AUDIT MODE — fresh full pass, dedup against known debt\n\n");
     block.push_str(&format!(
-        "This project was audited before — `docs/tech-debt/` already holds {} entr{} (listed below). \
+        "This project was audited before — `{}` already holds {} entr{} (listed below). \
 **This list is NOT a reason to skip scanning.** Re-run the COMPLETE dimensional pass (all dimensions) \
 from the SOURCE CODE, exactly as if auditing from scratch.\n\n",
+        docs_root.path("tech-debt/"),
         priors.len(),
         if priors.len() == 1 { "y" } else { "ies" }
     ));
@@ -336,11 +340,11 @@ Otherwise this step is INCOMPLETE — it means you re-read the existing files in
         block.push_str(&format!("- `{}` — {} — {}{decided}\n", p.id, sev, p.title));
     }
     if !settled_out.is_empty() {
-        block.push_str(
+        block.push_str(&docs_root.relocate(
             "\n### Settled by the user — do NOT list these in the index, do NOT recreate them\n\
 The user rejected these findings or accepted them as intentional trade-offs (`docs/decisions.md`). \
 Leave their detail files as they are.\n",
-        );
+        ));
         for p in settled_out {
             let why = if p.decision == Some(TdDecision::Rejected) {
                 "rejected"
@@ -373,7 +377,8 @@ pub(crate) fn td_validation_scope(
     project_path: &Path,
     index_files: &[String],
 ) -> TdValidationScope {
-    let td_dir = project_path.join("docs").join("tech-debt");
+    let td_dir =
+        crate::core::docs_location::DocsRoot::of(project_path).file(project_path, "tech-debt");
     let listed: std::collections::BTreeSet<String> = index_files
         .iter()
         .filter_map(|f| std::fs::read_to_string(project_path.join(f)).ok())
@@ -1460,7 +1465,8 @@ also not interesting (this `path/that:1` should be ignored)
                 decision: None,
             },
         ];
-        let block = render_known_debt_block(&priors);
+        let block =
+            render_known_debt_block(&priors, &crate::core::docs_location::DocsRoot::default());
         assert!(block.contains("RE-AUDIT MODE"));
         // Soft "zero new" pressure: incomplete UNLESS matrix + detectors
         // justify it (Codex finding 2 — no hallucination incentive).
@@ -1491,13 +1497,16 @@ also not interesting (this `path/that:1` should be ignored)
             title: format!("title {id}"),
             decision,
         };
-        let block = render_known_debt_block(&[
-            prior("TD-20260901-open", None),
-            prior("TD-20260901-ok", Some(TdDecision::Confirmed)),
-            prior("TD-20260901-later", Some(TdDecision::Deferred)),
-            prior("TD-20260901-no", Some(TdDecision::Rejected)),
-            prior("TD-20260901-tradeoff", Some(TdDecision::AcceptedDecision)),
-        ]);
+        let block = render_known_debt_block(
+            &[
+                prior("TD-20260901-open", None),
+                prior("TD-20260901-ok", Some(TdDecision::Confirmed)),
+                prior("TD-20260901-later", Some(TdDecision::Deferred)),
+                prior("TD-20260901-no", Some(TdDecision::Rejected)),
+                prior("TD-20260901-tradeoff", Some(TdDecision::AcceptedDecision)),
+            ],
+            &crate::core::docs_location::DocsRoot::default(),
+        );
         let (carry, settled) = block.split_once("### Settled by the user").unwrap();
         for id in ["open", "ok", "later"] {
             assert!(carry.contains(&format!("TD-20260901-{id}")), "{id}");
@@ -1565,6 +1574,9 @@ also not interesting (this `path/that:1` should be ignored)
 
     #[test]
     fn render_known_debt_block_empty_priors_is_empty_string() {
-        assert_eq!(render_known_debt_block(&[]), "");
+        assert_eq!(
+            render_known_debt_block(&[], &crate::core::docs_location::DocsRoot::default()),
+            ""
+        );
     }
 }

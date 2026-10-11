@@ -84,9 +84,17 @@ pub async fn migrate_docs(
     };
 
     let project_path = scanner::resolve_host_path(&project.path);
-    // ai/ → docs/ only makes sense under the detected layout (KT-263).
-    if let Err(reason) = crate::core::docs_location::guard_docs_pipeline(&project_path) {
-        return Json(ApiResponse::err(reason));
+    // The legacy `ai/` → `docs/` move belongs to the historical layout; a
+    // configured folder is the operator's choice and is not moved (KT-1192).
+    match crate::core::docs_location::DocsRoot::for_project(&project_path) {
+        Err(reason) => return Json(ApiResponse::err(reason)),
+        Ok(docs_root) if !docs_root.is_default() => {
+            return Json(ApiResponse::err(format!(
+                "this project keeps its AI doc in `{docs_root}/`: the legacy ai/ → docs/ \
+                 migration does not apply to a configured folder."
+            )))
+        }
+        Ok(_) => {}
     }
     let outcome =
         crate::core::docs_migration::migrate_project(&project_path, req.create_symlink).await;

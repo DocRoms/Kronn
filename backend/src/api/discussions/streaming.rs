@@ -2915,8 +2915,9 @@ pub(super) async fn make_agent_stream_inner(
                 let root = crate::core::scanner::resolve_host_path(
                     workspace_path.as_deref().unwrap_or(&project_path),
                 );
+                let docs_root = crate::core::docs_location::DocsRoot::of(&root);
                 let targets: Vec<String> =
-                    crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full)
+                    crate::api::audit::steps_for(crate::models::AuditKind::Full, &docs_root)
                         .into_iter()
                         .map(|step| step.target_file.to_string())
                         .collect();

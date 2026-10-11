@@ -110,7 +110,15 @@ pub fn apply(project_path: &Path) -> std::io::Result<AntiHalluApplyResult> {
     }
 
     let original = std::fs::read_to_string(&agents_md)?;
-    let (new_content, result) = transform(&original);
+    let (mut new_content, result) = transform(&original);
+    // The inserted Kronn blocks name the project's docs root (KT-1192).
+    let docs_root = crate::core::docs_location::DocsRoot::of(project_path);
+    if !docs_root.is_default() {
+        let body = ANTI_HALLU_SECTION_BODY.trim_end();
+        new_content = new_content
+            .replace(SPEC_HEADER, &docs_root.relocate(SPEC_HEADER))
+            .replace(body, &docs_root.relocate(body));
+    }
     if !matches!(result, AntiHalluApplyResult::NoOp) {
         std::fs::write(&agents_md, new_content)?;
     }

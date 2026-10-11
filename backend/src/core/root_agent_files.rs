@@ -142,7 +142,10 @@ pub fn desired_agent_template_paths(detected: &BTreeSet<AgentAdapter>) -> Vec<&'
 /// carry raw `{{...}}` placeholders: many agents load them before the audit
 /// gets a chance to refine `docs/AGENTS.md`.
 pub fn render_agent_template(project_root: &Path, template: &str) -> Result<String, String> {
-    let mut rendered = template.to_string();
+    // Kronn's own text points at the project's docs root (KT-1192); the
+    // repository facts substituted below are left as they are.
+    let docs_root = crate::core::docs_location::DocsRoot::of(project_root);
+    let mut rendered = docs_root.relocate(template).into_owned();
     for (token, value) in crate::core::docs_migration::compute_replacements(project_root) {
         rendered = rendered.replace(token, &value);
     }
@@ -170,15 +173,11 @@ pub fn render_agent_template(project_root: &Path, template: &str) -> Result<Stri
             "DO NOT change code before locating the repository's documented checks.",
         ),
     ] {
-        rendered = rendered.replace(token, fallback);
+        rendered = rendered.replace(token, &docs_root.relocate(fallback));
     }
     rendered = rendered
         .replace(" [ex: \"cargo test && npm test\"]", "")
         .replace(" [ex: \"cargo clippy && npx tsc --noEmit\"]", "");
-    // Point at the configured AI doc entry, not the template's `docs/` (KT-263).
-    if let Some(entry) = crate::core::docs_location::configured_entry(project_root) {
-        rendered = rendered.replace("docs/AGENTS.md", &entry);
-    }
     if rendered.contains("{{") || rendered.contains("}}") {
         return Err("instruction template contains an unresolved placeholder".into());
     }
@@ -209,8 +208,7 @@ fn repair_generated_agent_file(project_root: &Path, path: &Path) -> Result<bool,
         return Ok(false);
     };
     let more_start = critical_start + more_rel;
-    let entry = crate::core::docs_location::configured_entry(project_root)
-        .unwrap_or_else(|| "docs/AGENTS.md".to_string());
+    let entry = crate::core::docs_location::DocsRoot::of(project_root).path("AGENTS.md");
     if !original[more_start..].contains("docs/AGENTS.md")
         && !original[more_start..].contains(&entry)
     {
@@ -343,11 +341,11 @@ pub enum InjectOutcome {
 /// Build the full managed block as it appears on disk: opening
 /// marker + body + closing marker + trailing blank line so the next
 /// chunk of content starts cleanly.
-fn render_block() -> String {
+fn render_block(docs_root: &crate::core::docs_location::DocsRoot) -> String {
     format!(
         "{start}\n{body}\n{end}\n\n",
         start = KRONN_BLOCK_START,
-        body = KRONN_BLOCK_BODY,
+        body = docs_root.relocate(KRONN_BLOCK_BODY),
         end = KRONN_BLOCK_END,
     )
 }
@@ -391,17 +389,23 @@ fn find_marker_zone(content: &str) -> Option<(usize, usize)> {
 }
 
 /// `inject_or_update` for `filename` under `project_root`, only when the
-/// block's target (`docs/AGENTS.md`) exists: a project documented under
-/// `doc/` or legacy `ai/` gets no redirector pointing at nothing.
+/// block's target (`<docs root>/AGENTS.md`) exists: a project documented
+/// under `doc/` or legacy `ai/` gets no redirector pointing at nothing.
 pub fn inject_or_update_if_entry_exists(
     project_root: &Path,
     filename: &str,
     template_body: Option<&str>,
+    docs_root: &crate::core::docs_location::DocsRoot,
 ) -> std::io::Result<InjectOutcome> {
-    if !project_root.join("docs/AGENTS.md").is_file() {
+    if !docs_root.file(project_root, "AGENTS.md").is_file() {
         return Ok(InjectOutcome::SkippedMissingEntry);
     }
-    inject_or_update(&project_root.join(filename), template_body)
+    let template_body = template_body.map(|body| docs_root.relocate(body));
+    inject_or_update_in(
+        &project_root.join(filename),
+        template_body.as_deref(),
+        docs_root,
+    )
 }
 
 /// Inject or update the Kronn block in `target_path`. If
@@ -416,7 +420,20 @@ pub fn inject_or_update(
     target_path: &Path,
     template_body: Option<&str>,
 ) -> std::io::Result<InjectOutcome> {
-    let block = render_block();
+    inject_or_update_in(
+        target_path,
+        template_body,
+        &crate::core::docs_location::DocsRoot::default_root(),
+    )
+}
+
+/// `inject_or_update` with the block pointing at `docs_root` (KT-1192).
+pub fn inject_or_update_in(
+    target_path: &Path,
+    template_body: Option<&str>,
+    docs_root: &crate::core::docs_location::DocsRoot,
+) -> std::io::Result<InjectOutcome> {
+    let block = render_block(docs_root);
 
     // Case 1: file missing → create it. If template provided, the
     // block goes ABOVE the template body (matches the prepend
@@ -1021,13 +1038,25 @@ Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what 
         let root = tmp.path();
         std::fs::create_dir_all(root.join("doc")).unwrap();
         std::fs::write(root.join("doc/AGENTS.md"), "# Entrée\n").unwrap();
-        let outcome = inject_or_update_if_entry_exists(root, "CLAUDE.md", Some("body")).unwrap();
+        let outcome = inject_or_update_if_entry_exists(
+            root,
+            "CLAUDE.md",
+            Some("body"),
+            &crate::core::docs_location::DocsRoot::default(),
+        )
+        .unwrap();
         assert_eq!(outcome, InjectOutcome::SkippedMissingEntry);
         assert!(!root.join("CLAUDE.md").exists());
 
         std::fs::create_dir_all(root.join("docs")).unwrap();
         std::fs::write(root.join("docs/AGENTS.md"), "# Entry\n").unwrap();
-        let outcome = inject_or_update_if_entry_exists(root, "CLAUDE.md", Some("body")).unwrap();
+        let outcome = inject_or_update_if_entry_exists(
+            root,
+            "CLAUDE.md",
+            Some("body"),
+            &crate::core::docs_location::DocsRoot::default(),
+        )
+        .unwrap();
         assert_eq!(outcome, InjectOutcome::Created);
         assert!(std::fs::read_to_string(root.join("CLAUDE.md"))
             .unwrap()

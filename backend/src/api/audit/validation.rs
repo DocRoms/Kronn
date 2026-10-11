@@ -32,6 +32,7 @@
 //! survive as legacy fields so old recap rows still render — new
 //! runs always emit `false`.
 
+use crate::core::docs_location::DocsRoot;
 use std::path::{Path, PathBuf};
 
 /// The minimum dest/template size ratio (in %) below which a step's
@@ -95,7 +96,7 @@ const COVERAGE_WARNING_PREFIX: &str = "dimension coverage incomplete";
 /// Recompute the coverage failure from the current index, including on resume.
 /// This is feedback for the agent, never a relaxation or an in-place repair.
 pub(crate) fn coverage_repair_feedback(project_path: &Path, target_file: &str) -> Option<String> {
-    if target_file != "docs/inconsistencies-tech-debt.md" {
+    if DocsRoot::of(project_path).strip(target_file) != Some("inconsistencies-tech-debt.md") {
         return None;
     }
     let (_, warning) = validate_step_output(true, project_path, target_file);
@@ -176,14 +177,14 @@ pub fn validate_step_output(
         return (cli_success, None);
     }
 
-    // We only validate paths that live under the project's `docs/`
-    // directory — other targets are out of scope.
-    if !target_file.starts_with("docs/") {
+    // We only validate paths that live under the project's docs root
+    // (KT-1192) — other targets are out of scope.
+    let Some(within_root) = DocsRoot::of(project_path).strip(target_file) else {
         return (cli_success, None);
-    }
+    };
 
     let dst_path = project_path.join(target_file);
-    let template_path = template_source_for(target_file);
+    let template_path = template_source_for(&DocsRoot::default_root().path(within_root));
 
     // Get the on-disk size, treating "missing" as 0.
     let dst_size = std::fs::metadata(&dst_path).map(|m| m.len()).unwrap_or(0);
@@ -353,12 +354,13 @@ pub fn check_detector_disposition(
     // masking-by-history we're fighting (Codex 1b review 2026-06-04). We
     // gate the detail files through `parse_index_td_ids` so only the
     // current run's live findings contribute to disposition.
+    let docs_root = DocsRoot::of(project_path);
     let index_content =
-        std::fs::read_to_string(project_path.join("docs/inconsistencies-tech-debt.md"))
+        std::fs::read_to_string(docs_root.file(project_path, "inconsistencies-tech-debt.md"))
             .unwrap_or_default();
     let listed_ids = super::reconciliation::parse_index_td_ids(&index_content);
     let mut combined = index_content;
-    let td_dir = project_path.join("docs/tech-debt");
+    let td_dir = docs_root.file(project_path, "tech-debt");
     if let Ok(entries) = std::fs::read_dir(&td_dir) {
         for e in entries.flatten() {
             let p = e.path();
@@ -459,7 +461,7 @@ pub(crate) fn fill_kronn_owned_placeholders(content: &str, today: &str) -> Strin
 
 /// Apply [`fill_kronn_owned_placeholders`] to this step's own target file.
 pub(crate) fn fill_step_owned_placeholders(project_path: &Path, target_file: &str, today: &str) {
-    if !target_file.starts_with("docs/") {
+    if !DocsRoot::of(project_path).contains(target_file) {
         return;
     }
     let path = project_path.join(target_file);

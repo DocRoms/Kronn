@@ -3882,9 +3882,13 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // never attached the skill. Idempotent (skipped when already in skill_ids)
     // and inert outside enforce. The content is injected inline (the skill isn't
     // in skill_ids, so the native-files path wouldn't write it to disk).
+    // The project's AI doc entry, under its docs root (KT-1192).
+    let docs_root =
+        crate::core::docs_location::DocsRoot::of(std::path::Path::new(config.project_path));
+    let entry_rel = docs_root.path("AGENTS.md");
     let project_has_agents_md = !config.project_path.is_empty()
         && std::path::Path::new(config.project_path)
-            .join("docs/AGENTS.md")
+            .join(&entry_rel)
             .exists();
     let doc_author_prompt = if crate::core::anti_halluc::should_auto_attach_doc_author(
         crate::core::anti_halluc::current_mode(),
@@ -3977,7 +3981,9 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // when they discover stable facts, names the writable subfolders,
     // forbids `docs/AGENTS.md` direct edits, references the anti-secret
     // filter. Universal text, no per-agent customisation.
-    let memory_prelude = crate::core::user_context::build_memory_prelude_prompt();
+    let memory_prelude = docs_root
+        .relocate(&crate::core::user_context::build_memory_prelude_prompt())
+        .into_owned();
 
     // Combine all context parts with explicit section markers
     // (helps non-Claude agents distinguish instructions from task)
@@ -3988,7 +3994,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // chokepoint covers every agent surface (disc, audit, architect, QP
     // improver, batch, summarization, orchestration) — see core::anti_halluc.
     if let Some(preamble) = crate::core::anti_halluc::preamble_if_active() {
-        parts.push(preamble.to_string());
+        parts.push(docs_root.relocate(preamble).into_owned());
     }
     if !prelocalized_http_worker && !user_context.is_empty() {
         parts.push(format!(
@@ -4024,21 +4030,21 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 // Inline section headings to guide discovery; file-capable agents read the full
                 // entry document on demand.
                 let index = std::fs::read_to_string(
-                    std::path::Path::new(config.project_path).join("docs/AGENTS.md"),
+                    std::path::Path::new(config.project_path).join(&entry_rel),
                 )
                 .map(|doc| doc_section_index(&doc))
                 .unwrap_or_default();
                 parts.push(format!(
                     "=== PROJECT DOCUMENTATION ===\n\nThis project documents itself for agents \
-                     in `docs/AGENTS.md`. Call `read_file` on exactly that path, in ONE call, \
+                     in `{entry_rel}`. Call `read_file` on exactly that path, in ONE call, \
                      before working on the project. The file is there: do not go looking for it \
                      with `list_files`, `find_files` or `git_log`. It covers:\n\n{index}\n\n\
                      Open the files it points to the same way. Never describe this project from \
                      memory when the doc can be read."
                 ));
-            } else if let Ok(mut doc) = std::fs::read_to_string(
-                std::path::Path::new(config.project_path).join("docs/AGENTS.md"),
-            ) {
+            } else if let Ok(mut doc) =
+                std::fs::read_to_string(std::path::Path::new(config.project_path).join(&entry_rel))
+            {
                 // No workspace tools: inlining the entry doc is the only project
                 // grounding this agent can get.
                 const MAX_INLINE_DOC: usize = 24_000;
@@ -4057,10 +4063,11 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 // accessible" and cites files it never saw (observed 2026-07-01).
                 parts.push(format!(
                     "=== PROJECT DOCUMENTATION ===\n\nThe following is the ONLY project file \
-                     you have. Other files it mentions (docs/*, source code) are NOT available: \
+                     you have. Other files it mentions ({}/*, source code) are NOT available: \
                      you can NOT read or open them, and if asked you must say so. You may cite \
                      their paths as pointers for the USER to open, but never present their \
                      content as known to you.\n\n{}",
+                    docs_root.rel(),
                     doc
                 ));
             }

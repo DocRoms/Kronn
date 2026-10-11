@@ -378,18 +378,6 @@ pub fn docs_dir(root: &Path) -> PathBuf {
     resolved.dir
 }
 
-/// The entry file of a configured folder, relative to `root` (`.ai/AGENTS.md`).
-/// `None` under the historical detection, so its redirectors stay unchanged.
-pub fn configured_entry(root: &Path) -> Option<String> {
-    let resolved = resolution(root);
-    if resolved.source == DocsDirSource::Detected {
-        return None;
-    }
-    let rel = resolved.relative(root)?;
-    let entry = entry_name(&rel);
-    Some(format!("{rel}/{entry}"))
-}
-
 /// For a flow about to write documentation: refuses a project override that
 /// fails containment instead of writing anywhere else.
 pub fn guard_write(root: &Path) -> Result<PathBuf, String> {
@@ -400,21 +388,173 @@ pub fn guard_write(root: &Path) -> Result<PathBuf, String> {
     }
 }
 
-/// For flows whose steps still write `docs/` by name (audits, migration,
-/// template reinstall/merge): a configured folder elsewhere is refused rather
-/// than split across two trees.
-pub fn guard_docs_pipeline(root: &Path) -> Result<(), String> {
-    let dir = guard_write(root)?;
-    let resolved = resolution(root);
-    if resolved.source != DocsDirSource::Detected && dir != root.join("docs") {
-        let rel = resolved.relative(root).unwrap_or_default();
-        return Err(format!(
-            "this project keeps its AI doc in `{rel}/`: Kronn's audit and template \
-             pipeline still write `docs/`, so it is not run here. The doc can still be \
-             read, badged and attested."
-        ));
+// ─── The audit pipeline's root (KT-1192) ────────────────────────────────────
+
+/// The folder every audit artefact derives from: step targets, TD sheets,
+/// `decisions.md`, checksums, template install, redirectors and the paths the
+/// prompts quote. Always relative to the project root, resolved per use.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DocsRoot {
+    rel: String,
+}
+
+/// Interned relocations of `'static` prompt text: one leak per (root, text),
+/// bounded by the number of distinct roots times Kronn's own step strings.
+static RELOCATED: LazyLock<std::sync::Mutex<HashMap<(String, &'static str), &'static str>>> =
+    LazyLock::new(Default::default);
+
+impl DocsRoot {
+    pub const DEFAULT: &'static str = "docs";
+
+    /// `docs/`, the root of every project without an override.
+    pub fn default_root() -> Self {
+        Self {
+            rel: Self::DEFAULT.to_string(),
+        }
     }
-    Ok(())
+
+    /// A root from an already-normalized relative folder (tests, fixtures).
+    pub fn from_rel(rel: &str) -> Result<Self, String> {
+        Ok(Self {
+            rel: normalize_relative(rel)?,
+        })
+    }
+
+    /// The project's configured folder, else `docs/` (what the pipeline wrote
+    /// before KT-1192). A configured folder failing containment is an error:
+    /// the run is refused rather than written anywhere else.
+    pub fn for_project(root: &Path) -> Result<Self, String> {
+        let resolved = resolution(root);
+        if let Some(reason) = resolved
+            .refused
+            .filter(|_| resolved.source == DocsDirSource::ProjectOverride)
+        {
+            return Err(reason);
+        }
+        if resolved.source == DocsDirSource::Detected {
+            return Ok(Self::default_root());
+        }
+        let rel = Resolution {
+            dir: resolved.dir,
+            source: resolved.source,
+            refused: None,
+        }
+        .relative(root)
+        .ok_or_else(|| "the AI doc folder cannot be resolved under the project".to_string())?;
+        Ok(Self { rel })
+    }
+
+    /// `for_project` for helpers deep in a run: the run's entry already
+    /// refused a broken override, so a refusal here falls back inside the
+    /// project rather than outside it.
+    pub fn of(root: &Path) -> Self {
+        Self::for_project(root).unwrap_or_default()
+    }
+
+    pub fn rel(&self) -> &str {
+        &self.rel
+    }
+
+    pub fn is_default(&self) -> bool {
+        self.rel == Self::DEFAULT
+    }
+
+    /// `<project>/<root>`.
+    pub fn dir(&self, project: &Path) -> PathBuf {
+        project.join(&self.rel)
+    }
+
+    /// `<root>/<sub>`, repository-relative.
+    pub fn path(&self, sub: &str) -> String {
+        format!("{}/{sub}", self.rel)
+    }
+
+    /// `<project>/<root>/<sub>`.
+    pub fn file(&self, project: &Path, sub: &str) -> PathBuf {
+        self.dir(project).join(sub)
+    }
+
+    /// Whether a repository-relative path lies under the root.
+    pub fn contains(&self, rel_path: &str) -> bool {
+        self.strip(rel_path).is_some()
+    }
+
+    /// `x` for `<root>/x`.
+    pub fn strip<'a>(&self, rel_path: &'a str) -> Option<&'a str> {
+        rel_path.strip_prefix(self.rel.as_str())?.strip_prefix('/')
+    }
+
+    /// Kronn's own text with every `docs/` path rewritten to this root. A
+    /// `docs/` glued to a word or a path (`mydocs/`, `/repo/docs/`, a URL) is
+    /// not a reference to the root and stays. Identity for `docs/`.
+    pub fn relocate<'a>(&self, text: &'a str) -> std::borrow::Cow<'a, str> {
+        if self.is_default() {
+            return std::borrow::Cow::Borrowed(text);
+        }
+        let mut out = String::new();
+        let mut last = 0;
+        for (at, _) in text.match_indices("docs/") {
+            let glued = text[..at].chars().next_back().is_some_and(|c| {
+                c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | '~' | '$' | '@' | ':')
+            });
+            if glued {
+                continue;
+            }
+            out.push_str(&text[last..at]);
+            out.push_str(&self.rel);
+            out.push('/');
+            last = at + "docs/".len();
+        }
+        if last == 0 {
+            return std::borrow::Cow::Borrowed(text);
+        }
+        out.push_str(&text[last..]);
+        std::borrow::Cow::Owned(out)
+    }
+
+    /// `relocate` for `'static` text, interned so step definitions keep their
+    /// `&'static str` shape.
+    pub fn relocate_static(&self, text: &'static str) -> &'static str {
+        if self.is_default() {
+            return text;
+        }
+        let key = (self.rel.clone(), text);
+        let mut cache = RELOCATED.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(found) = cache.get(&key) {
+            return found;
+        }
+        let relocated: &'static str = match self.relocate(text) {
+            std::borrow::Cow::Borrowed(same) => same,
+            std::borrow::Cow::Owned(owned) => Box::leak(owned.into_boxed_str()),
+        };
+        cache.insert(key, relocated);
+        relocated
+    }
+}
+
+/// The repository-relative name of a docs directory, for text that quotes
+/// it (`.ai`, `packages/x/docs`): the project is the nearest ancestor whose
+/// root resolves to `docs_dir`. `docs` when none does.
+pub fn rel_label_for_dir(docs_dir: &Path) -> String {
+    for project in docs_dir.ancestors().skip(1) {
+        let docs_root = DocsRoot::of(project);
+        if docs_root.dir(project) == docs_dir {
+            return docs_root.rel().to_string();
+        }
+    }
+    DocsRoot::DEFAULT.to_string()
+}
+
+impl Default for DocsRoot {
+    fn default() -> Self {
+        Self::default_root()
+    }
+}
+
+impl std::fmt::Display for DocsRoot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.rel)
+    }
 }
 
 #[cfg(test)]
@@ -627,21 +767,69 @@ mod tests {
     }
 
     #[test]
-    fn guards_refuse_a_broken_override_and_a_relocated_pipeline() {
+    fn the_pipeline_root_follows_the_override_and_defaults_to_docs() {
         let t = tmp();
+        let root = t.path().join("repo");
+        std::fs::create_dir_all(root.join("ai")).unwrap();
+        std::fs::write(root.join("ai/index.md"), "# legacy\n").unwrap();
+        let path = root.to_string_lossy().into_owned();
+        // A detected legacy layout keeps the historical `docs/` pipeline.
+        assert_eq!(
+            DocsRoot::for_project(&root).unwrap(),
+            DocsRoot::default_root()
+        );
+
+        set_project_override(&path, Some(".ai"));
+        let docs_root = DocsRoot::for_project(&root).unwrap();
+        set_project_override(&path, None);
+        assert_eq!(docs_root.rel(), ".ai");
+        assert_eq!(docs_root.dir(&root), root.join(".ai"));
+        assert_eq!(docs_root.path("tech-debt/TD-1.md"), ".ai/tech-debt/TD-1.md");
+        assert_eq!(docs_root.strip(".ai/decisions.md"), Some("decisions.md"));
+        assert!(!docs_root.contains(".aix/decisions.md"));
+        assert!(!docs_root.contains("docs/decisions.md"));
+    }
+
+    #[test]
+    fn relocation_rewrites_root_references_only() {
+        let ai = DocsRoot::from_rel(".ai").unwrap();
+        assert_eq!(
+            ai.relocate("Read `docs/AGENTS.md`, then [x](docs/x.md) and docs/tech-debt/."),
+            "Read `.ai/AGENTS.md`, then [x](.ai/x.md) and .ai/tech-debt/."
+        );
+        for kept in [
+            "https://github.com/o/r/blob/main/docs/x.md",
+            "<repo-path>/docs/AGENTS.md",
+            "mydocs/x",
+            "../docs/x",
+            "api-docs/x",
+        ] {
+            assert_eq!(ai.relocate(kept), kept, "{kept}");
+        }
+        let docs = DocsRoot::default_root();
+        let text = "Read `docs/AGENTS.md`.";
+        assert!(
+            matches!(docs.relocate(text), std::borrow::Cow::Borrowed(t) if std::ptr::eq(t, text))
+        );
+        assert!(std::ptr::eq(docs.relocate_static("docs/a"), "docs/a"));
+        let interned = ai.relocate_static("docs/AGENTS.md");
+        assert_eq!(interned, ".ai/AGENTS.md");
+        assert!(std::ptr::eq(interned, ai.relocate_static("docs/AGENTS.md")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_override_refuses_the_pipeline_root() {
+        let t = tmp();
+        let outside = tmp();
         let root = t.path().join("repo");
         std::fs::create_dir_all(&root).unwrap();
         let path = root.to_string_lossy().into_owned();
-        assert!(guard_docs_pipeline(&root).is_ok());
-
+        std::os::unix::fs::symlink(outside.path(), root.join(".ai")).unwrap();
         set_project_override(&path, Some(".ai"));
-        assert_eq!(guard_write(&root).unwrap(), root.join(".ai"));
-        let err = guard_docs_pipeline(&root).unwrap_err();
-        assert!(err.contains("`.ai/`"), "{err}");
-
-        set_project_override(&path, Some("docs"));
-        assert!(guard_docs_pipeline(&root).is_ok());
+        let refused = DocsRoot::for_project(&root);
         set_project_override(&path, None);
+        assert!(refused.unwrap_err().contains("symlink"));
     }
 
     #[cfg(unix)]
@@ -655,7 +843,6 @@ mod tests {
         set_project_override(&path, Some(".ai"));
         std::os::unix::fs::symlink(outside.path(), root.join(".ai")).unwrap();
         assert!(guard_write(&root).unwrap_err().contains("symlink"));
-        assert!(guard_docs_pipeline(&root).is_err());
         set_project_override(&path, None);
     }
 }

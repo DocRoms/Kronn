@@ -56,7 +56,8 @@ pub fn managed_targets(
         }
         out.push(project_path.join(relative));
     }
-    let td_dir = project_path.join("docs/tech-debt");
+    let td_dir =
+        crate::core::docs_location::DocsRoot::of(project_path).file(project_path, "tech-debt");
     refuse_symlink_chain(project_path, &td_dir)?;
     match std::fs::symlink_metadata(&td_dir) {
         Ok(meta) if meta.file_type().is_symlink() => {

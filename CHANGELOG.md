@@ -219,9 +219,15 @@ Release notes for 0.9.3 and earlier are available in the
   redirectors and the doc viewer all read the same resolver. A folder that is
   absolute, uses `..`, points into `.git` or reaches outside the project
   through a symlink is refused with a 400 when saved and fails closed when
-  used. Kronn's audit, migration and template reinstall still write `docs/`,
-  so they refuse a project whose doc lives elsewhere instead of creating a
-  second tree. New column `projects.docs_dir` (migration 258).
+  used. New column `projects.docs_dir` (migration 258).
+- The audit pipeline writes under the project's AI doc folder (KT-1192). One
+  root, resolved per run: step targets, TD sheets, `decisions.md`,
+  `briefing.md`, `project.md`, the `inconsistencies-*.md` indexes, checksums,
+  the installed templates, the root redirectors and every path the step,
+  validation and briefing prompts quote follow it, for Full and partial
+  audits, sub-audits, revalidation, template reinstall and merge. A project
+  without an override keeps `docs/` with byte-identical prompts. The legacy
+  `ai/` → `docs/` migration still applies only to unconfigured projects.
 - Audit versions and standards are judged from dated sources (KT-1000). The
   tech-debt step and the security pass get a « Technologies and standards »
   block: the project's stored dependency watch (version in place, latest,
