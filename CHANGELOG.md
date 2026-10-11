@@ -57,6 +57,28 @@ Release notes for 0.9.3 and earlier are available in the
   does not count as verified evidence for a `fact` until reconfirmed. The
   audit prompts let an audit correct a human section where the code
   contradicts it. No database change.
+- Settle the audit's tech debt from the project card (KT-982). A "Dette
+  technique" block shows the progress (confirmed, kept on purpose, deferred,
+  rejected, remaining), the remaining count per severity and the Validated
+  rule, and opens a review screen built for a hundred items and more: filters
+  (to settle, deferred included; settled; all), severity chips, a search over
+  id, title and cited files, a list grouped by severity with a checkbox on
+  every row, and a bulk bar that settles the whole selection in one atomic
+  request (one unknown id writes nothing). The detail shows the problem, the
+  clickable `file:line` pointers (opened in the code viewer), the verification
+  criterion and four decisions; keeping an item on purpose records the reason
+  in the project's decision log, trusted as a human decision like a validation
+  card. Each item links its Kronn task or creates one (the KT-1167 conversion
+  for one sheet); GitHub and Jira are disabled placeholders. "Discuter de cette
+  TD" shows the validation messages that name the item and the item's own
+  discussion, created with the agents picked in the comparative Quick Prompt
+  selector (now a shared component). New endpoints:
+  `GET /api/projects/{id}/audit/tds`, `POST …/audit/tds/decide`,
+  `POST …/audit/tds/{td_id}/task`, `GET|POST …/audit/tds/{td_id}/talk`.
+- A project can be validated without the validation discussion's terminal
+  marker once every Critical and High tech-debt sheet is confirmed, rejected
+  or kept on purpose (a deferral does not count) and the other gates pass
+  (KT-982). The discussion path still works.
 - CI checks the `[src: file:]` citations of Kronn's own docs (KT-1059). A
   test (`cargo test docs_citations`, run by the backend suite) walks
   `docs/**/*.md` (except the historical `docs/releases/`) and `backend/docs/`

@@ -9164,6 +9164,85 @@ requested_model?: string,
  */
 warning?: CampaignTaskReason, };
 
+export type TdDecideOutcome = { results: Array<TdDecisionResult>, gate: TdValidationGate, };
+
+/**
+ * `POST /api/projects/:id/audit/tds/decide`: settled together or not at all.
+ */
+export type TdDecideRequest = { items: Array<TdDecisionItem>, };
+
+export type TdDecisionItem = { td_id: string, decision: TdReviewDecision, reason?: string, };
+
+export type TdDecisionResult = { td_id: string, state: TdReviewState, };
+
+/**
+ * The Kronn task tracking a sheet (`audit:<project>:<TD-id>`).
+ */
+export type TdLinkedTask = { id: string, reference: string, };
+
+/**
+ * A `file[:line]` the sheet's "Where" section cites.
+ */
+export type TdPointer = { path: string, line: number | null, };
+
+/**
+ * A decision taken from the review screen.
+ */
+export type TdReviewDecision = "confirm" | "accept_decision" | "defer" | "reject";
+
+export type TdReviewItem = { id: string, title: string, area: string,
+/**
+ * `Critical`, `High`, `Medium`, `Low` or `Unknown`.
+ */
+severity: string, status: string, effort: string | null, blast_radius: string | null, state: TdReviewState, problem: string | null, impact: string | null, verification: string | null, pointers: Array<TdPointer>, source_path: string, task: TdLinkedTask | null,
+/**
+ * Messages about this sheet: validation mentions plus its own discussion.
+ */
+talk_count: number, talk_discussion_id: string | null, };
+
+/**
+ * `GET /api/projects/:id/audit/tds`.
+ */
+export type TdReviewList = { items: Array<TdReviewItem>, counts: TdStateCounts, by_severity: Array<TdSeverityCount>, gate: TdValidationGate, validated: boolean, audit_date: string | null, validation_discussion_id: string | null, };
+
+/**
+ * KT-982 — where a tech-debt sheet stands in the human review.
+ */
+export type TdReviewState = "pending" | "confirmed" | "accepted_decision" | "deferred" | "rejected";
+
+export type TdSeverityCount = { severity: string, total: number,
+/**
+ * Pending or deferred.
+ */
+remaining: number, };
+
+export type TdStateCounts = { pending: number, confirmed: number, accepted_decision: number, deferred: number, rejected: number, };
+
+/**
+ * `GET /api/projects/:id/audit/tds/:td_id/talk`.
+ */
+export type TdTalk = { validation_discussion_id: string | null, discussion_id: string | null, messages: Array<TdTalkMessage>, };
+
+export type TdTalkMessage = { id: string, discussion_id: string, source: TdTalkSource, role: string, agent_type: string | null, author: string | null, content: string,
+/**
+ * The content is the lines around the mention, not the whole message.
+ */
+excerpt: boolean, timestamp: string, };
+
+/**
+ * `POST /api/projects/:id/audit/tds/:td_id/talk`: the sheet's own discussion,
+ * created with the first message when it does not exist yet.
+ */
+export type TdTalkRequest = { message: string, targets: Array<MessageTarget>, };
+
+export type TdTalkSource = "validation" | "td";
+
+export type TdTalkStart = { discussion_id: string,
+/**
+ * The message is already its first turn: run it instead of sending it.
+ */
+created: boolean, };
+
 export type TdTaskItem = { td_id: string, theme: string, state: TdTaskState, task_reference: string | null,
 /**
  * `rejected` or `accepted_decision` for a skipped sheet.
@@ -9184,6 +9263,12 @@ export type TdTaskState = "created" | "already_linked" | "skipped";
  * The parent task grouping the sheets of one theme.
  */
 export type TdTaskTheme = { theme: string, label: string, task_reference: string, created: boolean, };
+
+/**
+ * The rule that lets a project be validated without the discussion marker:
+ * every Critical and High sheet settled (a deferral does not count).
+ */
+export type TdValidationGate = { blocking_total: number, blocking_settled: number, met: boolean, };
 
 export type TechDebtItem = { id: string, problem: string, area: string, severity: string, };
 

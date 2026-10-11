@@ -19,6 +19,7 @@ import { SourcesBadge } from './SourcesBadge';
 import { RevalidateAudit } from './RevalidateAudit';
 import { DocReconfirm } from './DocReconfirm';
 import { TdTasksButton } from './TdTasksButton';
+import { TechDebtBlock } from './TechDebtBlock';
 import {
   saveAuditCheckpoint, loadAuditCheckpoint, clearAuditCheckpoint,
   type AuditCheckpointKind,
@@ -2053,6 +2054,16 @@ export function ProjectCard({
                   <span>{t('projects.master.overview.stale')}</span>
                 </button>
               </div>
+              <TechDebtBlock
+                project={proj}
+                auditActive={auditActive}
+                agents={agents}
+                modelTiers={modelTiers}
+                toast={toast}
+                onOpenDiscussion={onOpenDiscussion}
+                onNavigate={onNavigate}
+                onRefetch={onRefetch}
+              />
               <section
                 id={`project-linked-repos-${proj.id}`}
                 className="project-overview-linked-repos"

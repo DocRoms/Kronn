@@ -30,6 +30,7 @@ pub mod reconciliation;
 pub mod redact_artifacts;
 pub mod revalidate;
 pub mod run;
+pub mod td_review;
 pub mod td_tasks;
 pub mod validate;
 pub mod validation;
@@ -45,6 +46,7 @@ pub use info::*;
 pub use provenance::{confirm_doc_provenance, doc_provenance_report};
 pub use revalidate::{revalidate_audit, revalidation_plan};
 pub use run::*;
+pub use td_review::{create_td_task, decide_tds, list_tds, start_td_talk, td_talk};
 pub use td_tasks::convert_td_tasks;
 pub use validate::*;
 // Selective re-export of `pub(crate)` helpers actually consumed from

@@ -31,14 +31,50 @@ impl TdResolutionAction {
         }
     }
 
-    fn history_note(self) -> &'static str {
-        match self {
-            Self::Confirm => "Confirmed through an audit validation card.",
-            Self::Reject => "Rejected through an audit validation card.",
-            Self::AcceptDecision => {
+    fn history_note(self, origin: TdDecisionOrigin) -> &'static str {
+        match (self, origin) {
+            (Self::Confirm, TdDecisionOrigin::Card) => {
+                "Confirmed through an audit validation card."
+            }
+            (Self::Reject, TdDecisionOrigin::Card) => "Rejected through an audit validation card.",
+            (Self::Defer, TdDecisionOrigin::Card) => "Deferred through an audit validation card.",
+            (Self::Confirm, TdDecisionOrigin::Review) => {
+                "Confirmed from the tech-debt review screen."
+            }
+            (Self::Reject, TdDecisionOrigin::Review) => {
+                "Rejected from the tech-debt review screen."
+            }
+            (Self::Defer, TdDecisionOrigin::Review) => "Deferred from the tech-debt review screen.",
+            (Self::AcceptDecision, TdDecisionOrigin::Card) => {
                 "Accepted as an intentional decision and recorded in docs/decisions.md."
             }
-            Self::Defer => "Deferred through an audit validation card.",
+            (Self::AcceptDecision, TdDecisionOrigin::Review) => {
+                "Accepted as an intentional decision and recorded in the decision log."
+            }
+        }
+    }
+}
+
+/// Where a human took a TD decision. Both are human decisions: the ADR an
+/// acceptance appends is trusted the same way (KT-1174).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TdDecisionOrigin {
+    Card,
+    Review,
+}
+
+impl TdDecisionOrigin {
+    fn reviewer(self) -> &'static str {
+        match self {
+            Self::Card => "Kronn audit validation card",
+            Self::Review => "Kronn tech-debt review",
+        }
+    }
+
+    fn adr_source(self) -> &'static str {
+        match self {
+            Self::Card => "user (audit validation card)",
+            Self::Review => "user (tech-debt review)",
         }
     }
 }
@@ -281,12 +317,16 @@ pub(crate) fn replace_current_status(lines: &mut [String], status: &str) -> Resu
     Err(anyhow!("TD detail has no current Status field"))
 }
 
-fn append_audit_history(lines: &mut Vec<String>, action: TdResolutionAction) -> Result<()> {
+fn append_audit_history(
+    lines: &mut Vec<String>,
+    action: TdResolutionAction,
+    origin: TdDecisionOrigin,
+) -> Result<()> {
     append_history_entry(
         lines,
         action.status(),
-        "Kronn audit validation card",
-        action.history_note(),
+        origin.reviewer(),
+        action.history_note(origin),
     )
 }
 
@@ -365,11 +405,15 @@ pub(crate) fn append_history_entry(
     Ok(())
 }
 
-fn update_td(content: &str, action: TdResolutionAction) -> Result<String> {
+fn update_td(
+    content: &str,
+    action: TdResolutionAction,
+    origin: TdDecisionOrigin,
+) -> Result<String> {
     let trailing_newline = content.ends_with('\n');
     let mut lines = content.lines().map(str::to_string).collect::<Vec<_>>();
     replace_current_status(&mut lines, action.status())?;
-    append_audit_history(&mut lines, action)?;
+    append_audit_history(&mut lines, action, origin)?;
     let mut updated = lines.join("\n");
     if trailing_newline {
         updated.push('\n');
@@ -389,6 +433,7 @@ fn append_decision(
     title: &str,
     rationale: Option<&str>,
     date: &str,
+    origin: TdDecisionOrigin,
 ) -> String {
     let source = format!("tech-debt/{td_id}.md");
     if content.lines().any(|line| line.contains(&source)) {
@@ -405,12 +450,13 @@ fn append_decision(
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "Accepted during audit validation.".to_string());
     let title = one_line(title);
+    let source_label = origin.adr_source();
     let entry = format!(
         "## ADR-{next:04}: Accept `{td_id}` as an intentional trade-off\n\n\
 - **Status**: accepted\n\
 - **Date**: {date}\n\
 - **Covers**: {td_id}\n\
-- **Source**: user (audit validation card)\n\
+- **Source**: {source_label}\n\
 - **Links**: [`{td_id}`]({source})\n\n\
 ### Context\n\n\
 The audit reported `{td_id}`: {title}\n\n\
@@ -437,13 +483,32 @@ pub(crate) fn apply_td_resolutions(
         return Err(anyhow!("An audit TD card must resolve at least one TD"));
     }
     let project_path = linked_project_path(conn, discussion_id)?;
-    let docs_dir = canonical_child(&project_path, &project_path.join("docs"))?;
+    let items: Vec<(&TdResolution, Option<&str>)> =
+        resolutions.iter().map(|r| (r, rationale)).collect();
+    apply_td_resolutions_at(&project_path, &items, TdDecisionOrigin::Card)
+}
+
+/// Writes human TD decisions on the sheets of `project_path`. Every id is
+/// checked and every new content computed before the first write; a failed
+/// write restores the files already written.
+pub(crate) fn apply_td_resolutions_at(
+    project_path: &Path,
+    resolutions: &[(&TdResolution, Option<&str>)],
+    origin: TdDecisionOrigin,
+) -> Result<()> {
+    if resolutions.is_empty() {
+        return Err(anyhow!("At least one TD must be resolved"));
+    }
+    let docs_dir = canonical_child(
+        project_path,
+        &crate::core::scanner::detect_docs_dir(project_path),
+    )?;
     let td_dir = canonical_child(&docs_dir, &docs_dir.join("tech-debt"))?;
 
     let mut seen = std::collections::HashSet::new();
     let mut updates = Vec::with_capacity(resolutions.len());
     let mut titles = std::collections::HashMap::new();
-    for resolution in resolutions {
+    for (resolution, _) in resolutions {
         if !valid_td_id(&resolution.td_id) || !seen.insert(resolution.td_id.as_str()) {
             return Err(anyhow!("Invalid or duplicate audit TD id"));
         }
@@ -452,12 +517,13 @@ pub(crate) fn apply_td_resolutions(
             .with_context(|| format!("cannot read {}", path.display()))?;
         let title = crate::core::td_index::parse_sheet(&resolution.td_id, &content).title;
         titles.insert(resolution.td_id.as_str(), title);
-        updates.push((path, update_td(&content, resolution.action)?));
+        let updated = update_td(&content, resolution.action, origin)?;
+        updates.push((path, content, updated));
     }
 
     let accepted = resolutions
         .iter()
-        .filter(|resolution| resolution.action == TdResolutionAction::AcceptDecision)
+        .filter(|(resolution, _)| resolution.action == TdResolutionAction::AcceptDecision)
         .collect::<Vec<_>>();
     let mut card_adrs: Vec<String> = Vec::new();
     let decision_update = if accepted.is_empty() {
@@ -469,44 +535,81 @@ pub(crate) fn apply_td_resolutions(
         } else {
             target
         };
-        let mut content = if target.exists() {
-            std::fs::read_to_string(&target)
-                .with_context(|| format!("cannot read {}", target.display()))?
+        let original = if target.exists() {
+            Some(
+                std::fs::read_to_string(&target)
+                    .with_context(|| format!("cannot read {}", target.display()))?,
+            )
         } else {
-            "# Architecture decisions (why, not what)\n".to_string()
+            None
         };
+        let mut content = original
+            .clone()
+            .unwrap_or_else(|| "# Architecture decisions (why, not what)\n".to_string());
         let date = Utc::now().date_naive().format("%Y-%m-%d").to_string();
         let before: Vec<String> = crate::core::adr::parse(&content)
             .into_iter()
             .map(|adr| adr.id)
             .collect();
-        for resolution in accepted {
+        for (resolution, rationale) in accepted {
             let title = titles
                 .get(resolution.td_id.as_str())
                 .map_or(resolution.td_id.as_str(), String::as_str);
-            content = append_decision(&content, &resolution.td_id, title, rationale, &date);
+            content = append_decision(
+                &content,
+                &resolution.td_id,
+                title,
+                *rationale,
+                &date,
+                origin,
+            );
         }
         card_adrs = crate::core::adr::parse(&content)
             .into_iter()
             .map(|adr| adr.id)
             .filter(|id| !id.is_empty() && !before.contains(id))
             .collect();
-        Some((target, content))
+        Some((target, original, content))
     };
 
-    // A decided sheet now carries a person's decision: human-validated.
-    let root = project_path.canonicalize().unwrap_or(project_path.clone());
+    // A decided sheet now carries a person's decision: human-validated (KT-1079).
+    let root = project_path
+        .canonicalize()
+        .unwrap_or_else(|_| project_path.to_path_buf());
     let mut decided = Vec::new();
-    for ((path, content), resolution) in updates.into_iter().zip(resolutions) {
-        crate::core::mcp_scanner::atomic_write(&path, &content).map_err(|error| anyhow!(error))?;
+    let mut written: Vec<(&Path, Option<&str>)> = Vec::new();
+    let mut outcome: Result<()> = Ok(());
+    for ((path, original, content), (resolution, _)) in updates.iter().zip(resolutions.iter()) {
+        if let Err(error) = crate::core::mcp_scanner::atomic_write(path, content) {
+            outcome = Err(anyhow!(error));
+            break;
+        }
+        written.push((path.as_path(), Some(original.as_str())));
         if resolution.action != TdResolutionAction::Defer {
             if let Ok(rel) = path.strip_prefix(&root) {
                 decided.push(rel.to_string_lossy().replace('\\', "/"));
             }
         }
     }
-    if let Some((path, content)) = decision_update {
-        crate::core::mcp_scanner::atomic_write(&path, &content).map_err(|error| anyhow!(error))?;
+    if outcome.is_ok() {
+        if let Some((path, original, content)) = &decision_update {
+            match crate::core::mcp_scanner::atomic_write(path, content) {
+                Ok(()) => written.push((path.as_path(), original.as_deref())),
+                Err(error) => outcome = Err(anyhow!(error)),
+            }
+        }
+    }
+    if let Err(error) = outcome {
+        for (path, original) in written {
+            let restored = match original {
+                Some(original) => crate::core::mcp_scanner::atomic_write(path, original),
+                None => std::fs::remove_file(path).map_err(|e| e.to_string()),
+            };
+            if let Err(restore) = restored {
+                tracing::error!("Could not restore {}: {restore}", path.display());
+            }
+        }
+        return Err(error);
     }
     if let Err(error) = crate::core::doc_provenance::record_validation(
         &root,
@@ -516,10 +619,10 @@ pub(crate) fn apply_td_resolutions(
         tracing::warn!("Human-validation provenance of the TD cards not recorded: {error}");
     }
     // The decision is on the sheets; the index status column follows them.
-    // Only the ADRs this card appended settle here: the human accepted them.
+    // Only the ADRs this decision appended settle here: the human accepted them.
     let trust = crate::core::adr::Trust::CardAccepted(&card_adrs);
     if let Err(error) = crate::core::td_index::resync(&docs_dir, trust) {
-        tracing::warn!("Tech-debt index resync after a TD card failed: {error}");
+        tracing::warn!("Tech-debt index resync after a TD decision failed: {error}");
     }
     Ok(())
 }
@@ -536,12 +639,17 @@ mod tests {
 
     #[test]
     fn status_and_history_are_updated_idempotently() {
-        let once = update_td(&td("Verified in source"), TdResolutionAction::Defer).unwrap();
+        let once = update_td(
+            &td("Verified in source"),
+            TdResolutionAction::Defer,
+            TdDecisionOrigin::Card,
+        )
+        .unwrap();
         assert!(once.contains("- **Status**: Deferred"));
         assert!(once.contains("status: Deferred"));
         assert!(once.contains("reviewer: Kronn audit validation card"));
         assert_eq!(
-            update_td(&once, TdResolutionAction::Defer).unwrap(),
+            update_td(&once, TdResolutionAction::Defer, TdDecisionOrigin::Card).unwrap(),
             once,
             "a retry must not append a second audit-history entry"
         );
@@ -555,6 +663,7 @@ mod tests {
             "A deliberate | odd choice",
             Some("Known trade-off"),
             "2026-10-11",
+            TdDecisionOrigin::Card,
         );
         assert!(once.contains("tech-debt/TD-20260928-choice.md"));
         assert!(once.contains("Known trade-off"));
@@ -564,7 +673,8 @@ mod tests {
                 "TD-20260928-choice",
                 "t",
                 Some("duplicate"),
-                "2026-10-11"
+                "2026-10-11",
+                TdDecisionOrigin::Card,
             ),
             once
         );
@@ -575,7 +685,14 @@ mod tests {
         assert_eq!(adrs[0].covers, vec!["choice".to_string()]);
         assert!(crate::core::adr::problems(&once).is_empty(), "{once}");
         // The next accepted TD gets the next id.
-        let twice = append_decision(&once, "TD-20260929-other", "t", None, "2026-10-11");
+        let twice = append_decision(
+            &once,
+            "TD-20260929-other",
+            "t",
+            None,
+            "2026-10-11",
+            TdDecisionOrigin::Card,
+        );
         assert!(twice.contains("## ADR-0002: Accept `TD-20260929-other`"));
         assert!(crate::core::adr::problems(&twice).is_empty());
     }
@@ -592,7 +709,8 @@ mod tests {
             (TdResolutionAction::Defer, TdDecision::Deferred),
         ];
         for (action, decision) in cases {
-            let written = update_td(&td("Verified in source"), action).unwrap();
+            let written =
+                update_td(&td("Verified in source"), action, TdDecisionOrigin::Card).unwrap();
             assert_eq!(td_decision(&written), Some(decision), "{action:?}");
         }
         assert_eq!(td_decision(&td("Verified in source")), None);
@@ -617,7 +735,7 @@ mod tests {
     fn a_status_only_in_front_matter_is_read_and_written() {
         let sheet = "---\nname: td-x\nstatus: Open\nmetadata:\n  type: tech-debt\n---\n\n# TD-x — café ☕\n";
         assert_eq!(td_decision(sheet), None);
-        let written = update_td(sheet, TdResolutionAction::Reject).unwrap();
+        let written = update_td(sheet, TdResolutionAction::Reject, TdDecisionOrigin::Card).unwrap();
         assert!(written.contains("\nstatus: Rejected\n"));
         assert_eq!(td_decision(&written), Some(TdDecision::Rejected));
         // Only history: its last entry is the current status.

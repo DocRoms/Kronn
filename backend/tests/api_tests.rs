@@ -23254,6 +23254,71 @@ mod cold_api_handlers_tests {
         serde_json::json!({})
     );
 
+    // KT-982 — the review screen: list, settle in bulk, read back.
+    #[tokio::test]
+    async fn td_review_lists_settles_and_reads_back_over_http() {
+        let (_dir, repo) = seed_repo("td-review");
+        let td = repo.join("docs/tech-debt");
+        std::fs::create_dir_all(&td).unwrap();
+        for (id, severity) in [("TD-20261001-a", "Critical"), ("TD-20261001-b", "Low")] {
+            std::fs::write(
+                td.join(format!("{id}.md")),
+                format!("---\nname: {id}\nmetadata:\n  type: tech-debt\n---\n\n# {id}\n\n- **Area**: Backend\n- **Severity**: {severity}\n- **Status**: Verified in source\n"),
+            )
+            .unwrap();
+        }
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let list_url = format!("/api/projects/{pid}/audit/tds");
+
+        let (st, listed) = get_json(build_router_with_auth(state.clone(), false), &list_url).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(
+            listed["data"]["items"].as_array().unwrap().len(),
+            2,
+            "{listed}"
+        );
+        assert_eq!(listed["data"]["gate"]["met"], false);
+
+        let decide_url = format!("/api/projects/{pid}/audit/tds/decide");
+        let (_, refused) = post_json(
+            build_router_with_auth(state.clone(), false),
+            &decide_url,
+            serde_json::json!({ "items": [
+                { "td_id": "TD-20261001-a", "decision": "confirm" },
+                { "td_id": "TD-20261001-zz", "decision": "reject" }
+            ] }),
+        )
+        .await;
+        assert_eq!(refused["success"], false);
+        assert!(std::fs::read_to_string(td.join("TD-20261001-a.md"))
+            .unwrap()
+            .contains("Verified in source"));
+
+        let (_, decided) = post_json(
+            build_router_with_auth(state.clone(), false),
+            &decide_url,
+            serde_json::json!({ "items": [
+                { "td_id": "TD-20261001-a", "decision": "confirm" },
+                { "td_id": "TD-20261001-b", "decision": "defer", "reason": "plus tard" }
+            ] }),
+        )
+        .await;
+        assert_eq!(decided["success"], true, "{decided}");
+        assert_eq!(decided["data"]["gate"]["met"], true);
+
+        let (_, after) = get_json(build_router_with_auth(state, false), &list_url).await;
+        assert_eq!(after["data"]["counts"]["confirmed"], 1);
+        assert_eq!(after["data"]["counts"]["deferred"], 1);
+    }
+
+    envelope_get!(audit_tds_unknown_project, "/api/projects/nope/audit/tds");
+    envelope_post!(
+        audit_tds_decide_unknown_project,
+        "/api/projects/nope/audit/tds/decide",
+        serde_json::json!({ "items": [] })
+    );
+
     // ── audit briefing handlers ──────────────────────────────────────
     envelope_post!(
         audit_save_briefing_form_unknown,

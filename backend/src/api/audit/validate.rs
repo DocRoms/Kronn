@@ -85,6 +85,15 @@ pub async fn validate_audit(
     }
     let _lease = LeaseGuard(state.audit_tracker.clone(), project.id.clone());
 
+    // KT-982 — settling every Critical and High sheet stands in for the
+    // validation discussion's terminal marker.
+    let td_gate_path = scanner::resolve_host_path(&project.path);
+    let td_gate_met = tokio::task::spawn_blocking(move || {
+        crate::core::td_review::validation_gate(&td_gate_path).met
+    })
+    .await
+    .unwrap_or(false);
+
     let pid = project.id.clone();
     let gate = state
         .db
@@ -146,20 +155,22 @@ pub async fn validate_audit(
                     run.status
                 )));
             }
-            let Some(disc) = linked_disc else {
-                return Json(ApiResponse::err(
-                    "The latest completed run carries no linked validation discussion — only the discussion the audit itself created (and linked in the same transaction) can validate it.",
-                ));
-            };
-            if disc.project_id.as_deref() != Some(project.id.as_str()) {
-                return Json(ApiResponse::err(
-                    "The linked validation discussion belongs to another project — refusing.",
-                ));
-            }
-            if !validation_discussion_finished(&disc) {
-                return Json(ApiResponse::err(
-                    "The validation discussion has not finished — the agent must end on KRONN:VALIDATION_COMPLETE before the project can be marked validated.",
-                ));
+            if !td_gate_met {
+                let Some(disc) = linked_disc else {
+                    return Json(ApiResponse::err(
+                        "The latest completed run carries no linked validation discussion — only the discussion the audit itself created (and linked in the same transaction) can validate it, unless every Critical and High tech-debt sheet is settled.",
+                    ));
+                };
+                if disc.project_id.as_deref() != Some(project.id.as_str()) {
+                    return Json(ApiResponse::err(
+                        "The linked validation discussion belongs to another project — refusing.",
+                    ));
+                }
+                if !validation_discussion_finished(&disc) {
+                    return Json(ApiResponse::err(
+                        "The validation discussion has not finished — the agent must end on KRONN:VALIDATION_COMPLETE, or every Critical and High tech-debt sheet must be settled, before the project can be marked validated.",
+                    ));
+                }
             }
             run.kind == "Full"
         }
@@ -704,6 +715,67 @@ mod validate_gate_tests {
         )
         .await;
         assert!(timeline_validation(&state).await.is_none());
+    }
+
+    fn write_td(tmp: &std::path::Path, id: &str, severity: &str, status: &str) {
+        let dir = tmp.join("docs/tech-debt");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{id}.md")),
+            format!(
+                "---\nname: {id}\nmetadata:\n  type: tech-debt\n---\n\n# {id}\n\n- **Severity**: {severity}\n- **Status**: {status}\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn settled_critical_and_high_sheets_validate_without_the_discussion() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = test_state();
+        seed(
+            &state,
+            tmp.path(),
+            "Completed",
+            Some("d1"),
+            Some("Validation en cours"),
+        )
+        .await;
+        write_td(tmp.path(), "TD-20261001-a", "Critical", "Confirmed by user");
+        write_td(tmp.path(), "TD-20261001-b", "High", "Deferred");
+        write_td(tmp.path(), "TD-20261001-c", "Low", "Verified in source");
+
+        let refused = call(&state).await;
+        assert!(!refused.success, "a deferred High does not settle");
+        assert!(refused.error.unwrap().contains("has not finished"));
+
+        write_td(tmp.path(), "TD-20261001-b", "High", "Accepted decision");
+        let validated = call(&state).await;
+        assert!(validated.success, "{:?}", validated.error);
+        assert_eq!(validated.data, Some(AiAuditStatus::Validated));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_sheet_path_needs_a_completed_run_and_a_sheet() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = test_state();
+        seed(&state, tmp.path(), "Completed", None, None).await;
+        // No sheet at all: the discussion stays mandatory.
+        let refused = call(&state).await;
+        assert!(refused
+            .error
+            .unwrap()
+            .contains("no linked validation discussion"));
+        write_td(tmp.path(), "TD-20261001-a", "High", "Rejected");
+        let validated = call(&state).await;
+        assert!(validated.success, "{:?}", validated.error);
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = test_state();
+        seed(&state, tmp.path(), "Interrupted", None, None).await;
+        write_td(tmp.path(), "TD-20261001-a", "High", "Rejected");
+        let interrupted = call(&state).await;
+        assert!(interrupted.error.unwrap().contains("only a Completed run"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

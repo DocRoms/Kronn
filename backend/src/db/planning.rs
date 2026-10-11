@@ -309,6 +309,35 @@ pub fn task_by_idempotency_key(conn: &Connection, key: &str) -> Result<Option<(S
         .map(|(id, number)| (id, format!("KT-{number}"))))
 }
 
+/// `(idempotency_key, id, reference)` of every task whose key starts with
+/// `prefix`, read-only. A range scan, so `%` or `_` in the prefix match
+/// literally and the key index serves it.
+pub fn tasks_by_idempotency_prefix(
+    conn: &Connection,
+    prefix: &str,
+) -> Result<Vec<(String, String, String)>> {
+    let Some(last) = prefix.chars().last() else {
+        bail!("An idempotency key prefix cannot be empty");
+    };
+    let Some(next) = char::from_u32(last as u32 + 1) else {
+        bail!("Unsupported idempotency key prefix");
+    };
+    let upper = format!("{}{next}", &prefix[..prefix.len() - last.len_utf8()]);
+    let mut stmt = conn.prepare(
+        "SELECT idempotency_key, id, task_number FROM planning_tasks
+         WHERE idempotency_key >= ?1 AND idempotency_key < ?2
+         ORDER BY idempotency_key",
+    )?;
+    let rows = stmt.query_map(params![prefix, upper], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            format!("KT-{}", row.get::<_, i64>(2)?),
+        ))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 fn ensure_parent_is_valid(conn: &Connection, task_id: Option<&str>, parent_id: &str) -> Result<()> {
     ensure_task_exists(conn, parent_id)?;
     if task_id == Some(parent_id) {
@@ -1966,6 +1995,40 @@ mod tests {
             links: Vec::new(),
             actor: PlanningActor::default(),
         }
+    }
+
+    #[test]
+    fn idempotency_prefix_lookup_is_literal_and_read_only() {
+        let conn = connection();
+        for key in [
+            "audit:p_1:TD-1",
+            "audit:p_1:TD-2",
+            "audit:pX1:TD-3",
+            "audit:p_10:TD-4",
+        ] {
+            create_task(
+                &conn,
+                &CreatePlanningTaskRequest {
+                    idempotency_key: Some(key.into()),
+                    ..request(key)
+                },
+            )
+            .unwrap();
+        }
+        let count = |conn: &Connection| -> i64 {
+            conn.query_row("SELECT COUNT(*) FROM planning_tasks", [], |r| r.get(0))
+                .unwrap()
+        };
+        let before = count(&conn);
+        let found = tasks_by_idempotency_prefix(&conn, "audit:p_1:").unwrap();
+        let keys: Vec<&str> = found.iter().map(|(k, _, _)| k.as_str()).collect();
+        assert_eq!(keys, ["audit:p_1:TD-1", "audit:p_1:TD-2"]);
+        assert!(found.iter().all(|(_, _, r)| r.starts_with("KT-")));
+        assert_eq!(count(&conn), before);
+        assert!(tasks_by_idempotency_prefix(&conn, "audit:none:")
+            .unwrap()
+            .is_empty());
+        assert!(tasks_by_idempotency_prefix(&conn, "").is_err());
     }
 
     fn update_request() -> UpdatePlanningTaskRequest {

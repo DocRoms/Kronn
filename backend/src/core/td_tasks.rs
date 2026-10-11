@@ -101,7 +101,7 @@ pub fn source_from(id: &str, content: &str, source_path: String) -> TdTaskSource
 }
 
 /// Lines after the front matter, outside fenced code blocks.
-fn body_lines(content: &str) -> Vec<&str> {
+pub(crate) fn body_lines(content: &str) -> Vec<&str> {
     let lines: Vec<&str> = content.lines().collect();
     let start = if lines.first().is_some_and(|l| l.trim() == "---") {
         (1..lines.len())
@@ -126,7 +126,7 @@ fn body_lines(content: &str) -> Vec<&str> {
 
 /// Text of a `## Name…` section or of a `- **Name…**: text` item with its
 /// continuation lines, whitespace-collapsed.
-fn field_block(body: &[&str], names: &[&str]) -> Option<String> {
+pub(crate) fn field_block(body: &[&str], names: &[&str]) -> Option<String> {
     let starts_with_name = |text: &str| {
         let lower = text.to_lowercase();
         names.iter().any(|name| lower.starts_with(name))
@@ -178,7 +178,7 @@ fn collapse(value: &str) -> Option<String> {
     (!out.is_empty()).then_some(out)
 }
 
-fn truncate(value: &str, max: usize) -> String {
+pub(crate) fn truncate(value: &str, max: usize) -> String {
     if value.chars().count() <= max {
         return value.to_string();
     }

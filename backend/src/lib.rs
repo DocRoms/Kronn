@@ -2037,6 +2037,19 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/projects/{id}/audit/td-tasks",
             post(api::audit::convert_td_tasks),
         )
+        .route("/api/projects/{id}/audit/tds", get(api::audit::list_tds))
+        .route(
+            "/api/projects/{id}/audit/tds/decide",
+            post(api::audit::decide_tds),
+        )
+        .route(
+            "/api/projects/{id}/audit/tds/{td_id}/task",
+            post(api::audit::create_td_task),
+        )
+        .route(
+            "/api/projects/{id}/audit/tds/{td_id}/talk",
+            get(api::audit::td_talk).post(api::audit::start_td_talk),
+        )
         .route(
             "/api/projects/{id}/audit/cross-estimate",
             get(api::audit::cross_audit_estimate),

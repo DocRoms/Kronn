@@ -51,9 +51,11 @@ import { triggerDownload } from '../lib/downloadBlob';
 import { mergeDeclaredAndDetected } from '../lib/workflowVariables';
 import { detectAutomationImport, type AutomationImportKind } from '../lib/automationImport';
 import { describeRedacted, exportRedactionNotice, redactedFieldsIn } from '../lib/redactedFields';
-import { AGENT_LABELS, MODEL_TIER_ICONS, agentColor } from '../lib/constants';
+import { AGENT_LABELS } from '../lib/constants';
 import { AgentSwitchPicker } from '../components/AgentSwitchPicker';
 import type { AgentSwitchTarget } from '../components/AgentSwitchPicker';
+import { AgentCompareSelector } from '../components/AgentCompareSelector';
+import { defaultCompareTargets, type CompareTarget } from '../lib/compareTargets';
 import { CollectionRowActions } from '../components/CollectionRowActions';
 import { CollectionSidebarFooter } from '../components/CollectionSidebarFooter';
 import { ListControls } from '../components/ListControls';
@@ -111,16 +113,6 @@ import { LoadingState } from '../components/LoadingState';
 import { safeSetItem } from '../lib/safeStorage';
 
 type AutomationTab = 'workflows' | 'quickPrompts' | 'quickApis' | 'quickExecs' | 'skills';
-type CompareTarget = {
-  agent: AgentType;
-  tier: ModelTier;
-  connection_id?: string;
-};
-
-function compareTargetKey(target: Pick<CompareTarget, 'agent' | 'connection_id'>) {
-  return `${target.agent}:${target.connection_id ?? ''}`;
-}
-
 function externalConnectionSwitchTarget(
   connection: ExternalApiConnectionView,
 ): AgentSwitchTarget {
@@ -3488,155 +3480,18 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
                           {/* Compare targets use the shared agent+tier picker,
                               so this launch surface speaks the same model
                               language as discussions, QPs and workflow steps. */}
-                          {qpLaunchMode === 'compare' && compareAgentChoices.length > 0 && (() => {
-                            const targets = compareTargets ?? compareAgentChoices.map(choice => ({
-                              agent: choice.agent,
-                              tier: qp.tier ?? 'default' as ModelTier,
-                              ...(choice.connectionId ? { connection_id: choice.connectionId } : {}),
-                            }));
-                            const representedTargets = new Set(targets.map(compareTargetKey));
-                            const missingChoices = compareAgentChoices.filter(choice =>
-                              !representedTargets.has(compareTargetKey({
-                                agent: choice.agent,
-                                connection_id: choice.connectionId ?? undefined,
-                              }))
-                            );
-                            const hasOneOfEveryAgent = targets.length === compareAgentChoices.length
-                              && missingChoices.length === 0;
-                            return (
-                              <div className="qp-compare-selector">
-                                <span className="qp-compare-selector-label">
-                                  🤝 {t('qp.compareAgents.selectorLabel')}
-                                </span>
-                                {targets.map((target, targetIndex) => {
-                                  const selectedChoice = compareAgentChoices.find(choice =>
-                                    choice.agent === target.agent
-                                    && (choice.connectionId ?? undefined) === target.connection_id
-                                  );
-                                  const targetLabel = selectedChoice?.label
-                                    ?? AGENT_LABELS[target.agent]
-                                    ?? target.agent;
-                                  const duplicateIndex = targets
-                                    .slice(0, targetIndex)
-                                    .filter(row => compareTargetKey(row) === compareTargetKey(target)).length;
-                                  return (
-                                    <span
-                                      key={`${targetIndex}-${compareTargetKey(target)}-${target.tier}`}
-                                      className="qp-compare-target qp-compare-target--active"
-                                      style={{ borderColor: agentColor(target.agent) }}
-                                    >
-                                      <button
-                                        type="button"
-                                        data-testid={`qp-compare-chip-${target.connection_id ?? target.agent}${duplicateIndex > 0 ? `-${duplicateIndex + 1}` : ''}`}
-                                        className="qp-compare-target-toggle"
-                                        onClick={() => setCompareTargets(targets.filter((_, index) => index !== targetIndex))}
-                                        aria-pressed="true"
-                                        aria-label={`${t('qp.compareAgents.removeTarget')} ${targetLabel}`}
-                                      >
-                                        ✓
-                                      </button>
-                                      <AgentSwitchPicker
-                                        currentAgent={target.agent}
-                                        availableAgents={installedAgentTypes ?? []}
-                                        currentConnectionId={target.connection_id}
-                                        currentTargetLabel={targetLabel}
-                                        availableTargets={compareAgentChoices}
-                                        currentTier={target.tier}
-                                        onTargetSelectionChange={async (choice, tier) => {
-                                          setCompareTargets(current => {
-                                            const rows = current ?? compareAgentChoices.map(available => ({
-                                              agent: available.agent,
-                                              tier: qp.tier ?? 'default' as ModelTier,
-                                              ...(available.connectionId ? { connection_id: available.connectionId } : {}),
-                                            }));
-                                            return rows.map((row, index) => index === targetIndex
-                                              ? {
-                                                  agent: choice.agent,
-                                                  tier,
-                                                  ...(choice.connectionId ? { connection_id: choice.connectionId } : {}),
-                                                }
-                                              : row);
-                                          });
-                                        }}
-                                        tierLabels={{
-                                          economy: t('disc.tier.economy'),
-                                          default: t('disc.tier.default'),
-                                          reasoning: t('disc.tier.reasoning'),
-                                        }}
-                                        modelTiers={agentAccess?.model_tiers}
-                                        defaultModelLabel={t('config.defaultModel')}
-                                        title={t('disc.switchAgentAndTier')}
-                                        ariaLabel={t('qp.compareAgents.targetLabel', targetLabel)}
-                                        compact
-                                      />
-                                    </span>
-                                  );
-                                })}
-                                {unusableCompareChoices.map(choice => (
-                                  <span
-                                    key={`unusable-${choice.connectionId}`}
-                                    className="qp-compare-target qp-compare-target--unusable"
-                                    data-testid={`qp-compare-chip-unusable-${choice.connectionId}`}
-                                    title={t(`qp.compareAgents.unusable.${choice.reason}`)}
-                                  >
-                                    <span className="qp-compare-target-empty">
-                                      {choice.label}
-                                      <span className="qp-compare-target-reason">
-                                        {t(`qp.compareAgents.unusable.${choice.reason}`)}
-                                      </span>
-                                    </span>
-                                  </span>
-                                ))}
-                                {missingChoices.map(choice => {
-                                  const label = choice.label ?? AGENT_LABELS[choice.agent] ?? choice.agent;
-                                  const key = choice.connectionId ?? choice.agent;
-                                  return (
-                                  <span key={`missing-${key}`} className="qp-compare-target qp-compare-target--inactive">
-                                    <button
-                                      type="button"
-                                      data-testid={`qp-compare-chip-${key}`}
-                                      className="qp-compare-target-toggle"
-                                      onClick={() => setCompareTargets([...targets, {
-                                        agent: choice.agent,
-                                        tier: qp.tier ?? 'default',
-                                        ...(choice.connectionId ? { connection_id: choice.connectionId } : {}),
-                                      }])}
-                                      aria-pressed="false"
-                                      aria-label={`${t('qp.compareAgents.addTarget')} ${label}`}
-                                    >
-                                      +
-                                    </button>
-                                    <span className="qp-compare-target-empty">
-                                      {label}
-                                      <span aria-hidden="true">{MODEL_TIER_ICONS.default}</span>
-                                    </span>
-                                  </span>
-                                  );
-                                })}
-                                <button
-                                  type="button"
-                                  className="qp-compare-add-model"
-                                  onClick={() => setCompareTargets([
-                                    ...targets,
-                                    { agent: qp.agent, tier: qp.tier ?? 'default' },
-                                  ])}
-                                >
-                                  <Plus size={11} /> {t('qp.compareAgents.addModel')}
-                                </button>
-                                <button
-                                  type="button"
-                                  className="qp-compare-toggle-all"
-                                  onClick={() =>
-                                    setCompareTargets(hasOneOfEveryAgent ? [] : null)
-                                  }
-                                >
-                                  {hasOneOfEveryAgent
-                                    ? t('qp.compareAgents.selectNone')
-                                    : t('qp.compareAgents.selectAll')}
-                                </button>
-                              </div>
-                            );
-                          })()}
+                          {qpLaunchMode === 'compare' && compareAgentChoices.length > 0 && (
+                            <AgentCompareSelector
+                              targets={compareTargets ?? defaultCompareTargets(compareAgentChoices, qp.tier ?? 'default')}
+                              choices={compareAgentChoices}
+                              unusable={unusableCompareChoices}
+                              installedAgentTypes={installedAgentTypes ?? []}
+                              defaultTier={qp.tier ?? 'default'}
+                              addAgent={qp.agent}
+                              modelTiers={agentAccess?.model_tiers}
+                              onChange={setCompareTargets}
+                            />
+                          )}
                           {qpLaunchMode === 'single' && qp.variables.length > 0 && (
                             <div className="flex-row gap-3">
                               <button

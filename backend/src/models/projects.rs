@@ -1898,6 +1898,190 @@ pub struct TdTasksOutcome {
     pub items: Vec<TdTaskItem>,
 }
 
+/// KT-982 — where a tech-debt sheet stands in the human review.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum TdReviewState {
+    Pending,
+    Confirmed,
+    AcceptedDecision,
+    Deferred,
+    Rejected,
+}
+
+/// A decision taken from the review screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum TdReviewDecision {
+    Confirm,
+    AcceptDecision,
+    Defer,
+    Reject,
+}
+
+/// A `file[:line]` the sheet's "Where" section cites.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TdPointer {
+    pub path: String,
+    pub line: Option<u32>,
+}
+
+/// The Kronn task tracking a sheet (`audit:<project>:<TD-id>`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TdLinkedTask {
+    pub id: String,
+    pub reference: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TdReviewItem {
+    pub id: String,
+    pub title: String,
+    pub area: String,
+    /// `Critical`, `High`, `Medium`, `Low` or `Unknown`.
+    pub severity: String,
+    pub status: String,
+    pub effort: Option<String>,
+    pub blast_radius: Option<String>,
+    pub state: TdReviewState,
+    pub problem: Option<String>,
+    pub impact: Option<String>,
+    pub verification: Option<String>,
+    pub pointers: Vec<TdPointer>,
+    pub source_path: String,
+    pub task: Option<TdLinkedTask>,
+    /// Messages about this sheet: validation mentions plus its own discussion.
+    pub talk_count: u32,
+    pub talk_discussion_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TdStateCounts {
+    pub pending: u32,
+    pub confirmed: u32,
+    pub accepted_decision: u32,
+    pub deferred: u32,
+    pub rejected: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TdSeverityCount {
+    pub severity: String,
+    pub total: u32,
+    /// Pending or deferred.
+    pub remaining: u32,
+}
+
+/// The rule that lets a project be validated without the discussion marker:
+/// every Critical and High sheet settled (a deferral does not count).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TdValidationGate {
+    pub blocking_total: u32,
+    pub blocking_settled: u32,
+    pub met: bool,
+}
+
+/// `GET /api/projects/:id/audit/tds`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TdReviewList {
+    pub items: Vec<TdReviewItem>,
+    pub counts: TdStateCounts,
+    pub by_severity: Vec<TdSeverityCount>,
+    pub gate: TdValidationGate,
+    pub validated: bool,
+    pub audit_date: Option<DateTime<Utc>>,
+    pub validation_discussion_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TdDecisionItem {
+    pub td_id: String,
+    pub decision: TdReviewDecision,
+    #[serde(default)]
+    #[ts(optional)]
+    pub reason: Option<String>,
+}
+
+/// `POST /api/projects/:id/audit/tds/decide`: settled together or not at all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TdDecideRequest {
+    pub items: Vec<TdDecisionItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TdDecisionResult {
+    pub td_id: String,
+    pub state: TdReviewState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TdDecideOutcome {
+    pub results: Vec<TdDecisionResult>,
+    pub gate: TdValidationGate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum TdTalkSource {
+    Validation,
+    Td,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TdTalkMessage {
+    pub id: String,
+    pub discussion_id: String,
+    pub source: TdTalkSource,
+    pub role: String,
+    pub agent_type: Option<String>,
+    pub author: Option<String>,
+    pub content: String,
+    /// The content is the lines around the mention, not the whole message.
+    pub excerpt: bool,
+    pub timestamp: DateTime<Utc>,
+}
+
+/// `GET /api/projects/:id/audit/tds/:td_id/talk`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TdTalk {
+    pub validation_discussion_id: Option<String>,
+    pub discussion_id: Option<String>,
+    pub messages: Vec<TdTalkMessage>,
+}
+
+/// `POST /api/projects/:id/audit/tds/:td_id/talk`: the sheet's own discussion,
+/// created with the first message when it does not exist yet.
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+pub struct TdTalkRequest {
+    pub message: String,
+    pub targets: Vec<crate::models::MessageTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TdTalkStart {
+    pub discussion_id: String,
+    /// The message is already its first turn: run it instead of sending it.
+    pub created: bool,
+}
+
 #[derive(Debug, Deserialize, TS)]
 #[ts(export)]
 pub struct RevalidateAuditRequest {

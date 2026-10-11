@@ -175,6 +175,13 @@ import type {
   RevalidateAuditRequest,
   RevalidationPlan,
   TdTasksOutcome,
+  TdReviewList,
+  TdDecisionItem,
+  TdDecideOutcome,
+  TdDecideRequest,
+  TdTalk,
+  TdTalkRequest,
+  TdTalkStart,
   SectionCitations,
   AddContactResult,
   WorkflowSuggestion,
@@ -1306,6 +1313,16 @@ export const projects = {
     api<BriefingDetectedDoc>('POST', `/projects/${id}/briefing/docs/check`, { path }),
   /** KT-1167 — the project's TD sheets as Kronn tasks; a re-click creates nothing. */
   convertTdTasks: (id: string) => api<TdTasksOutcome>('POST', `/projects/${id}/audit/td-tasks`),
+  /** KT-982 — the review of the audit's tech-debt sheets. */
+  auditTds: (id: string) => api<TdReviewList>('GET', `/projects/${id}/audit/tds`),
+  decideTds: (id: string, items: TdDecisionItem[]) =>
+    api<TdDecideOutcome>('POST', `/projects/${id}/audit/tds/decide`, { items } satisfies TdDecideRequest),
+  createTdTask: (id: string, tdId: string) =>
+    api<TdTasksOutcome>('POST', `/projects/${id}/audit/tds/${encodeURIComponent(tdId)}/task`),
+  tdTalk: (id: string, tdId: string) =>
+    api<TdTalk>('GET', `/projects/${id}/audit/tds/${encodeURIComponent(tdId)}/talk`),
+  startTdTalk: (id: string, tdId: string, request: TdTalkRequest) =>
+    api<TdTalkStart>('POST', `/projects/${id}/audit/tds/${encodeURIComponent(tdId)}/talk`, request),
   setDefaultSkills: (id: string, skillIds: string[]) => api<boolean>('PUT', `/projects/${id}/default-skills`, skillIds),
   setDefaultProfile: (id: string, profileId: string | null) => api<boolean>('PUT', `/projects/${id}/default-profile`, { profile_id: profileId }),
   /** 0.8.3 — Replace the project's linked_repos list. The backend
