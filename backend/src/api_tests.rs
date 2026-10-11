@@ -7914,9 +7914,44 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
         }
 
-        #[tokio::test]
-        #[serial]
-        async fn an_isolated_instance_refuses_every_key_write_and_leaves_home_byte_identical() {
+        const OWN_PROCESS_ENV: &str = "KRONN_TEST_HOME_GATE_CHILD";
+
+        /// Runs `body` alone in a fresh copy of this binary: HOME is process-wide,
+        /// and parallel tests resolving it would write into the fake home meanwhile.
+        fn in_own_process<F: std::future::Future<Output = ()>>(
+            test: &str,
+            body: impl FnOnce() -> F,
+        ) {
+            if crate::core::child_env::var_os(OWN_PROCESS_ENV).is_some() {
+                return tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(body());
+            }
+            let name = format!("api_tests::tests::home_credential_gate::{test}");
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &name, "--nocapture", "--test-threads=1"])
+                .env(OWN_PROCESS_ENV, "1")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&child.stdout);
+            assert!(
+                child.status.success() && stdout.contains("1 passed"),
+                "{test} child failed:\nstdout:\n{stdout}\nstderr:\n{}",
+                String::from_utf8_lossy(&child.stderr),
+            );
+        }
+
+        #[test]
+        fn an_isolated_instance_refuses_every_key_write_and_leaves_home_byte_identical() {
+            in_own_process(
+                "an_isolated_instance_refuses_every_key_write_and_leaves_home_byte_identical",
+                isolated_instance_refuses_every_key_write,
+            );
+        }
+
+        async fn isolated_instance_refuses_every_key_write() {
             let _restore = EnvRestore::capture(&ENV);
             let root = tempfile::tempdir().unwrap();
             let home = user_home(root.path(), "home");
@@ -7952,9 +7987,15 @@ mod tests {
             );
         }
 
-        #[tokio::test]
-        #[serial]
-        async fn kronn_host_home_receives_the_keys_and_home_stays_untouched() {
+        #[test]
+        fn kronn_host_home_receives_the_keys_and_home_stays_untouched() {
+            in_own_process(
+                "kronn_host_home_receives_the_keys_and_home_stays_untouched",
+                host_home_receives_the_keys,
+            );
+        }
+
+        async fn host_home_receives_the_keys() {
             let _restore = EnvRestore::capture(&ENV);
             let root = tempfile::tempdir().unwrap();
             let home = user_home(root.path(), "home");

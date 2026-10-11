@@ -159,20 +159,11 @@ mod tests {
     use super::*;
     use serial_test::serial;
     use std::fs;
-    use std::sync::Mutex;
     use tempfile::TempDir;
 
-    /// Serialise tests that mutate process env. Rust's test runner uses a
-    /// thread pool by default, so without this mutex two tests both
-    /// hammering `HOME` race and one reads the other's value.
-    /// `PoisonError::into_inner` keeps the suite usable after a panic.
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
-
     /// Run a test with `HOME` overridden to a tempdir, then restored.
-    /// env vars are process-global, so we serialise via a mutex and
-    /// restore the previous value on exit.
+    /// Callers are `#[serial]`: every other HOME-setting test is, not this module alone.
     fn with_home<F: FnOnce(&Path)>(f: F) {
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let tmp = TempDir::new().expect("tempdir");
         let prev = crate::core::child_env::var("HOME").ok();
         crate::core::child_env::set_var("HOME", tmp.path());
@@ -184,6 +175,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn returns_false_when_config_file_absent() {
         with_home(|_| {
             assert!(!rtk_hook_configured_for(&AgentType::ClaudeCode));
@@ -197,7 +189,6 @@ mod tests {
     #[test]
     #[serial]
     fn rtk_binary_available_in_docker_checks_host_bins() {
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let tmp = TempDir::new().expect("tempdir");
         let prev_data = crate::core::child_env::var("KRONN_IN_DOCKER").ok();
         let prev_hb = crate::core::child_env::var("KRONN_HOST_BIN").ok();
@@ -239,6 +230,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn returns_true_when_claude_settings_mentions_rtk() {
         with_home(|home| {
             fs::create_dir_all(home.join(".claude")).unwrap();
@@ -252,6 +244,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn returns_false_when_claude_settings_has_no_rtk() {
         with_home(|home| {
             fs::create_dir_all(home.join(".claude")).unwrap();
@@ -265,6 +258,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn detection_is_case_insensitive() {
         with_home(|home| {
             fs::create_dir_all(home.join(".codex")).unwrap();
@@ -278,6 +272,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn codex_reads_agents_md_not_config_toml() {
         // Regression: first-pass implementation checked config.toml which
         // RTK doesn't actually touch. The right file is AGENTS.md.
@@ -293,6 +288,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn gemini_detection_finds_hook_script_file() {
         // RTK's primary install artifact for Gemini is the hook .sh script
         // at `~/.gemini/hooks/rtk-hook-gemini.sh`. Its presence alone is
@@ -310,6 +306,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn gemini_detection_falls_back_to_gemini_md() {
         // If the hook script is missing but GEMINI.md mentions rtk
         // (e.g. user deleted just the .sh), we still say "configured" —
@@ -323,6 +320,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn gemini_detection_falls_back_to_settings_json() {
         // Third fallback: settings.json's BeforeTool entry points at the
         // hook. Catches the user who blew away `.gemini/hooks/` but kept
@@ -338,6 +336,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn gemini_detection_ignores_shell_rc() {
         // Regression: pre-fix we scanned ~/.bashrc, ~/.zshrc and friends
         // — RTK 0.37 doesn't touch shell rc for Gemini. An unrelated `rtk`
@@ -351,6 +350,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn unsupported_agents_always_return_false() {
         // Kiro and Copilot CLI aren't in RTK's supported list. Even if an
         // unrelated config mentions "rtk", we must not lie about the state.
@@ -365,6 +365,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn vibe_and_ollama_always_return_false_even_with_matching_content() {
         // If an unrelated file under HOME happens to mention "rtk", the
         // API-only / hookless agents must still report false. We prove this
@@ -377,6 +378,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn unicode_path_does_not_panic() {
         with_home(|home| {
             // Regression: HOME with non-ASCII should not panic when appended.
