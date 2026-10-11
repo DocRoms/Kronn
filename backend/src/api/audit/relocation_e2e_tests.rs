@@ -237,6 +237,108 @@ async fn a_revalidation_of_a_dot_ai_project_finds_and_fixes_its_citations_there(
     assert!(!project.join("docs").exists());
 }
 
+/// A TD sheet the review and the step-8 dedup read.
+fn td_sheet(id: &str) -> String {
+    format!(
+        "---\nname: {id}\ndescription: Problem {id}\nmetadata:\n  type: tech-debt\n---\n\n# {id}\n\n\
+- **Area**: Backend\n- **Severity**: Low\n- **Status**: Verified in source\n- **Effort**: S\n- **Blast radius**: Module\n\n\
+## Problem (fact)\nIt breaks.\n\n## Where (pointers)\n- `src/mod0.rs:1`\n\n## Verification\nIt no longer breaks.\n"
+    )
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn provenance_citations_td_review_and_step_8_follow_a_dot_ai_root() {
+    let h = harness().await;
+    let project = h.project.path();
+    let _relocated = relocate(project, ".ai");
+    let ai = DocsRoot::from_rel(".ai").unwrap();
+    audited(&h, &ai).await;
+    assert!(project.join(".ai/citations.json").is_file());
+
+    // KT-1079: the validation records its provenance next to citations.json.
+    let validated = crate::api::audit::validate_audit(
+        axum::extract::State(h.state.clone()),
+        axum::extract::Path(PROJECT_ID.to_string()),
+    )
+    .await
+    .0;
+    assert!(validated.success, "{:?}", validated.error);
+    assert!(project.join(".ai/provenance.json").is_file());
+
+    // KT-982: the review lists and settles the sheets of the root.
+    let id = "TD-20261001-relocated";
+    let sheet = project.join(format!(".ai/tech-debt/{id}.md"));
+    std::fs::create_dir_all(sheet.parent().unwrap()).unwrap();
+    std::fs::write(&sheet, td_sheet(id)).unwrap();
+    let listed = crate::api::audit::td_review::list_tds(
+        axum::extract::State(h.state.clone()),
+        axum::extract::Path(PROJECT_ID.to_string()),
+    )
+    .await
+    .0
+    .data
+    .expect("listed");
+    let item = listed
+        .items
+        .iter()
+        .find(|i| i.id == id)
+        .expect("sheet listed");
+    assert_eq!(item.source_path, format!(".ai/tech-debt/{id}.md"));
+    let decided = crate::api::audit::td_review::decide_tds(
+        axum::extract::State(h.state.clone()),
+        axum::extract::Path(PROJECT_ID.to_string()),
+        axum::Json(crate::models::TdDecideRequest {
+            items: vec![crate::models::TdDecisionItem {
+                td_id: id.to_string(),
+                decision: crate::models::TdReviewDecision::Confirm,
+                reason: None,
+            }],
+        }),
+    )
+    .await
+    .0;
+    assert!(decided.success, "{:?}", decided.error);
+    assert!(std::fs::read_to_string(&sheet)
+        .unwrap()
+        .contains("- **Status**: Confirmed by user"));
+
+    // KT-152 / KT-1174: step 8 sees the detectors and the root's known debt.
+    // Untested sources make the zero-tests detector fire; only the prompt counts.
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    for i in 0..6 {
+        std::fs::write(project.join(format!("src/mod{i}.rs")), "fn x() {}\n").unwrap();
+    }
+    let index = ".ai/inconsistencies-tech-debt.md";
+    let step = targets_for(&ai).iter().position(|t| *t == index).unwrap() + 1;
+    arm(h.tools.path(), "fill", &[index]);
+    let response = crate::api::audit::drift::partial_audit(
+        axum::extract::State(h.state.clone()),
+        axum::extract::Path(PROJECT_ID.to_string()),
+        axum::Json(crate::models::PartialAuditRequest {
+            agent: AgentType::ClaudeCode,
+            connection_id: None,
+            tier: None,
+            steps: vec![step],
+        }),
+    )
+    .await
+    .into_response();
+    let body = sse_body(response).await;
+    let done = sse_events(&body, "done").pop().expect("terminal done");
+    validation_settled(&h.state, &done).await;
+    let prompt = std::fs::read_to_string(h.tools.path().join("prompt.1")).unwrap();
+    assert!(
+        prompt.contains("Deterministic detector signals"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("`.ai/tech-debt/`"), "{prompt}");
+    assert!(prompt.contains(id), "{prompt}");
+    assert!(!prompt.contains("`docs/"), "{prompt}");
+    assert!(!project.join("docs").exists(), "{body}");
+}
+
 #[test]
 fn the_default_root_leaves_every_step_and_prompt_untouched() {
     let docs = DocsRoot::default_root();

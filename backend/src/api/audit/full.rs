@@ -1413,7 +1413,7 @@ pub async fn full_audit(
             // KT-1183 — a finding step under the cross-agent option: Kronn
             // runs the agents, arbitrates and writes the step's documents.
             let cross_handled = match cross_agents.as_deref() {
-                Some(agents) if crate::core::cross_audit::is_cross_checked_target(analysis_step.target_file) => {
+                Some(agents) if crate::core::cross_audit::is_cross_checked_target(analysis_step.target_file, &docs_root) => {
                     yield Event::default().event("cross_audit_start").data(serde_json::json!({
                         "step": step, "file": file_label, "experimental": true,
                         "agents": agents.iter().map(crate::core::cross_audit::agent_label).collect::<Vec<_>>(),

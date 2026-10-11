@@ -25,13 +25,15 @@ fn find_readme(root: &Path) -> Option<String> {
     names.into_iter().next()
 }
 
-/// `docs/AGENTS.md`, else legacy `ai/index.md`, else a README.
+/// `<docs root>/AGENTS.md` (the repo's own folder when Kronn manages it,
+/// else `docs/`), else legacy `ai/index.md`, else a README.
 pub fn detect_ai_doc(root: &Path) -> (LinkedRepoAiDoc, Option<String>) {
     if !root.is_dir() {
         return (LinkedRepoAiDoc::Missing, None);
     }
-    if root.join("docs/AGENTS.md").is_file() {
-        return (LinkedRepoAiDoc::AgentsMd, Some("docs/AGENTS.md".into()));
+    let entry = crate::core::docs_location::DocsRoot::of(root).path("AGENTS.md");
+    if root.join(&entry).is_file() {
+        return (LinkedRepoAiDoc::AgentsMd, Some(entry));
     }
     if root.join("ai/index.md").is_file() {
         return (LinkedRepoAiDoc::LegacyAiIndex, Some("ai/index.md".into()));
