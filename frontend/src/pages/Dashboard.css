@@ -2119,6 +2119,19 @@ button.dash-badge-tech-debt {
   min-width: 0;
 }
 
+/* KT-1196 — the saved briefing arrived after a change. */
+.briefing-form-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  padding: var(--kr-sp-2);
+  border: 1px solid var(--kr-border-soft);
+  border-radius: 4px;
+  background: var(--kr-bg-elevated);
+  font-size: var(--kr-fs-sm);
+}
+
 /* KT-1196 — optional note under a project fact. */
 .briefing-card-note {
   font-size: var(--kr-fs-xs);

@@ -1682,6 +1682,8 @@ const es: TranslationDict = {
   'briefing.project.noteFor': 'Nota (opcional) — {0}',
   'briefing.project.notePlaceholder': 'Nota (opcional): el «cómo» que una opción no dice',
   'briefing.prefilled': 'Briefing guardado cargado: cambia solo lo que haya cambiado.',
+  'briefing.prefillLate': 'El briefing guardado llegó después de que empezaras a escribir: las secciones vacías se rellenaron con él y se conservan tus respuestas.',
+  'briefing.loadSaved': 'Cargar el briefing guardado',
   'briefing.saveBtn': 'Guardar briefing',
   'briefing.savedToast': 'Briefing guardado (docs/briefing.md).',
   'briefing.missingFields': 'Faltan campos obligatorios: {0}',

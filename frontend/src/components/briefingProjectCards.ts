@@ -188,3 +188,11 @@ export function cleanFactNotes(project: BriefingProjectAnswers): BriefingProject
   }
   return Object.keys(out).length > 0 ? out : undefined;
 }
+
+/** No card answered and no note written: the project section is still empty. */
+export function projectUnanswered(project: BriefingProjectAnswers): boolean {
+  const empty = emptyProjectAnswers();
+  return (Object.keys(empty) as (keyof BriefingProjectAnswers)[])
+    .every(key => JSON.stringify(project[key]) === JSON.stringify(empty[key]))
+    && cleanFactNotes(project) === undefined;
+}

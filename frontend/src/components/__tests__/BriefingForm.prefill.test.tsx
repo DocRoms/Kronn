@@ -12,7 +12,7 @@ vi.mock('../../lib/api', async () => {
 });
 
 import { BriefingForm } from '../BriefingForm';
-import { cleanFactNotes, emptyProjectAnswers } from '../briefingProjectCards';
+import { cleanFactNotes, emptyProjectAnswers, projectUnanswered } from '../briefingProjectCards';
 import { mergeSavedDocs } from '../briefingDocs';
 import { projects as projectsApi } from '../../lib/api';
 
@@ -163,16 +163,60 @@ describe('BriefingForm prefill (KT-1196)', () => {
     expect(within(docsRow).getAllByRole('checkbox')[0]).toBeChecked();
   });
 
-  it('never overwrites what the user typed before the saved briefing arrived', async () => {
+  it('a click that only focuses a field does not stop the prefill', async () => {
     let resolve: (v: SavedBriefing) => void = () => {};
     mocked(projectsApi.savedBriefing).mockReturnValueOnce(new Promise<SavedBriefing>(r => { resolve = r; }));
     wrap();
     const purpose = document.querySelector('textarea') as HTMLTextAreaElement;
+    fireEvent.click(purpose);
+    fireEvent.focus(purpose);
+    resolve(SAVED);
+    await screen.findByTestId('briefing-prefilled');
+    expect(purpose.value).toBe(SAVED.purpose);
+    expect(screen.queryByTestId('briefing-late-prefill')).toBeNull();
+  });
+
+  it('after a real change, keeps the typed text, fills only the empty sections and offers the rest', async () => {
+    let resolve: (v: SavedBriefing) => void = () => {};
+    mocked(projectsApi.savedBriefing).mockReturnValueOnce(new Promise<SavedBriefing>(r => { resolve = r; }));
+    mocked(projectsApi.saveBriefing).mockResolvedValue(true);
+    wrap();
+    const purpose = document.querySelector('textarea') as HTMLTextAreaElement;
     fireEvent.change(purpose, { target: { value: 'Typed first' } });
     resolve(SAVED);
-    await waitFor(() => expect(document.querySelector('[data-doc-path="docs"]')).not.toBeNull());
+    const notice = await screen.findByTestId('briefing-late-prefill');
     expect(purpose.value).toBe('Typed first');
     expect(screen.queryByTestId('briefing-prefilled')).toBeNull();
+    await waitFor(() => expect(document.querySelector('[data-doc-path="docs"]')).not.toBeNull());
+
+    // Saving now loses nothing the user did not change.
+    submit();
+    await waitFor(() => expect(projectsApi.saveBriefing).toHaveBeenCalledTimes(1));
+    const sent = payload();
+    expect(sent.purpose).toBe('Typed first');
+    expect(sent.team).toBe(SAVED.team);
+    expect(sent.traps).toBe(SAVED.traps);
+    expect(sent.project).toEqual(SAVED.project);
+    expect(sent.existing_docs.locations.map((l: { path: string }) => l.path)).toEqual(['README.md']);
+    expect(sent.td_to_tasks).toBe(true);
+    expect(sent.cross_audit_agents).toEqual(['ClaudeCode', 'Codex']);
+
+    // « Charger le briefing enregistré » replaces the typed text too.
+    fireEvent.click(within(notice).getByRole('button', { name: 'Charger le briefing enregistré' }));
+    expect(purpose.value).toBe(SAVED.purpose);
+    expect(screen.queryByTestId('briefing-late-prefill')).toBeNull();
+    expect(screen.getByTestId('briefing-prefilled')).toBeInTheDocument();
+  });
+
+  it('after a real change to the project cards, the saved facts do not replace them', async () => {
+    let resolve: (v: SavedBriefing) => void = () => {};
+    mocked(projectsApi.savedBriefing).mockReturnValueOnce(new Promise<SavedBriefing>(r => { resolve = r; }));
+    wrap();
+    fireEvent.click(within(card('tracker')).getByRole('radio', { name: 'Linear' }));
+    resolve(SAVED);
+    await screen.findByTestId('briefing-late-prefill');
+    expect(checked('tracker')).toBe('Linear');
+    expect(document.querySelectorAll('textarea')[1]).toHaveValue(SAVED.team);
   });
 
   it('every project fact takes an optional note, sent trimmed with the answers', async () => {
@@ -204,6 +248,13 @@ describe('briefing prefill helpers (KT-1196)', () => {
     };
     expect(cleanFactNotes(project)).toEqual({ review: 'ok' });
     expect(cleanFactNotes(emptyProjectAnswers())).toBeUndefined();
+  });
+
+  it('projectUnanswered is true only while no card and no note is filled', () => {
+    expect(projectUnanswered(emptyProjectAnswers())).toBe(true);
+    expect(projectUnanswered({ ...emptyProjectAnswers(), notes: { review: '  ' } })).toBe(true);
+    expect(projectUnanswered({ ...emptyProjectAnswers(), notes: { review: 'x' } })).toBe(false);
+    expect(projectUnanswered({ ...emptyProjectAnswers(), merge_strategy: 'squash' })).toBe(false);
   });
 
   it('mergeSavedDocs keeps the saved order and answers, and offers new locations unchecked', () => {

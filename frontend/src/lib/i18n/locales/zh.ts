@@ -1669,6 +1669,8 @@ const zh: TranslationDict = {
   "briefing.project.noteFor": "备注（可选）— {0}",
   "briefing.project.notePlaceholder": "备注（可选）：选项无法表达的“怎么做”",
   "briefing.prefilled": "已载入保存的简报：只修改有变化的内容。",
+  "briefing.prefillLate": "保存的简报在你开始输入后才载入：空白部分已用它填充，你的输入保持不变。",
+  "briefing.loadSaved": "载入保存的简报",
   "briefing.saveBtn": "保存简报",
   "briefing.savedToast": "简报已保存（docs/briefing.md）。",
   "briefing.missingFields": "必填字段缺失：{0}",

@@ -33,6 +33,7 @@ import {
   FACT_NOTE_MAX,
   cleanFactNotes,
   emptyProjectAnswers,
+  projectUnanswered,
   trackerTakesKey,
   type BriefingChoiceCard,
 } from './briefingProjectCards';
@@ -131,38 +132,22 @@ export function BriefingForm({
   const [project, setProject] = useState<BriefingProjectAnswers>(emptyProjectAnswers);
   const [docs, setDocs] = useState<BriefingDocLocation[]>([]);
   const [rules, setRules] = useState<ProjectRule[]>([]);
-  // KT-1196 — the saved briefing pre-fills the form, unless the user already started typing.
+  // KT-1196 — the saved briefing pre-fills the form. When it arrives after a
+  // real change, only the still-empty sections are filled and a notice offers the rest.
   const [savedDocs, setSavedDocs] = useState<SavedDocs>('loading');
   const [prefilled, setPrefilled] = useState(false);
+  const [lateSaved, setLateSaved] = useState<SavedBriefing | null>(null);
+  const [incoming, setIncoming] = useState<{ saved: SavedBriefing; late: boolean } | null>(null);
   const touched = useRef(false);
 
   useEffect(() => {
     let live = true;
-    const apply = (saved: SavedBriefing) => {
-      setForm({
-        purpose: saved.purpose,
-        team: saved.team,
-        maturity: saved.maturity,
-        dependencies: saved.dependencies,
-        traps: saved.traps,
-        additional: saved.additional,
-      });
-      setProject({ ...emptyProjectAnswers(), ...(saved.project ?? {}) });
-      setTdToTasks(saved.td_to_tasks);
-      setCrossAudit(saved.cross_audit_agents.length > 0);
-      setCrossAgents(saved.cross_audit_agents);
-      setPrefilled(true);
-    };
     projectsApi.savedBriefing(projectId)
       .then(saved => {
         if (!live) return;
-        if (saved && !touched.current) {
-          apply(saved);
-          // A saved briefing without the section kept no location.
-          setSavedDocs(saved.existing_docs?.locations ?? []);
-        } else {
-          setSavedDocs(null);
-        }
+        // A saved briefing without the section kept no location.
+        setSavedDocs(saved ? saved.existing_docs?.locations ?? [] : null);
+        if (saved) setIncoming({ saved, late: touched.current });
       })
       .catch(e => {
         console.warn('[BriefingForm] saved briefing unavailable:', e);
@@ -170,6 +155,44 @@ export function BriefingForm({
       });
     return () => { live = false; };
   }, [projectId]);
+
+  const applySaved = (saved: SavedBriefing) => {
+    setForm({
+      purpose: saved.purpose,
+      team: saved.team,
+      maturity: saved.maturity,
+      dependencies: saved.dependencies,
+      traps: saved.traps,
+      additional: saved.additional,
+    });
+    setProject({ ...emptyProjectAnswers(), ...(saved.project ?? {}) });
+    setTdToTasks(saved.td_to_tasks);
+    setCrossAudit(saved.cross_audit_agents.length > 0);
+    setCrossAgents(saved.cross_audit_agents);
+    setLateSaved(null);
+    setPrefilled(true);
+  };
+  const fillUnanswered = (saved: SavedBriefing) => {
+    setForm(f => ({
+      purpose: f.purpose.trim() ? f.purpose : saved.purpose,
+      team: f.team.trim() ? f.team : saved.team,
+      maturity: f.maturity.trim() ? f.maturity : saved.maturity,
+      dependencies: f.dependencies.trim() ? f.dependencies : saved.dependencies,
+      traps: f.traps.trim() ? f.traps : saved.traps,
+      additional: f.additional.trim() ? f.additional : saved.additional,
+    }));
+    setProject(p => (projectUnanswered(p) ? { ...emptyProjectAnswers(), ...(saved.project ?? {}) } : p));
+    setTdToTasks(v => v || saved.td_to_tasks);
+    setCrossAgents(list => (list.length > 0 ? list : saved.cross_audit_agents));
+    setCrossAudit(on => on || saved.cross_audit_agents.length > 0);
+    setLateSaved(saved);
+  };
+  if (incoming) {
+    setIncoming(null);
+    if (incoming.late) fillUnanswered(incoming.saved);
+    else applySaved(incoming.saved);
+  }
+  const markChanged = () => { touched.current = true; };
 
   const setNote = (fact: BriefingFact, value: string) =>
     setProject(p => ({ ...p, notes: { ...(p.notes ?? {}), [fact]: value } }));
@@ -279,8 +302,11 @@ export function BriefingForm({
     <form
       onSubmit={handleSubmit}
       className="briefing-form"
-      onChangeCapture={() => { touched.current = true; }}
-      onClickCapture={() => { touched.current = true; }}
+      onChangeCapture={markChanged}
+      onClickCapture={e => {
+        // Choice buttons change a value; a click that only focuses a field does not.
+        if ((e.target as HTMLElement).closest('[role="radio"], [role="checkbox"]')) markChanged();
+      }}
     >
       <div className="briefing-form-header">
         <h3>{t('briefing.formTitle')}</h3>
@@ -290,6 +316,14 @@ export function BriefingForm({
       </div>
       <p className="briefing-form-intro">{t('briefing.formIntro')}</p>
       {prefilled && <p className="briefing-form-intro" data-testid="briefing-prefilled">{t('briefing.prefilled')}</p>}
+      {lateSaved && (
+        <div className="briefing-form-notice" role="status" data-testid="briefing-late-prefill">
+          <span>{t('briefing.prefillLate')}</span>
+          <button type="button" className="briefing-card-option" onClick={() => applySaved(lateSaved)}>
+            {t('briefing.loadSaved')}
+          </button>
+        </div>
+      )}
 
       <label>
         <span className="briefing-form-q">{t('briefing.q1Purpose')}</span>

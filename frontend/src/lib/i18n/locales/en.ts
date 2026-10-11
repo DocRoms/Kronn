@@ -1682,6 +1682,8 @@ const en: TranslationDict = {
   'briefing.project.noteFor': 'Note (optional) — {0}',
   'briefing.project.notePlaceholder': 'Note (optional): the how a choice cannot say',
   'briefing.prefilled': 'Saved briefing loaded: change only what has changed.',
+  'briefing.prefillLate': 'The saved briefing arrived after you started typing: empty sections were filled from it and your entries are kept.',
+  'briefing.loadSaved': 'Load the saved briefing',
   'briefing.saveBtn': 'Save briefing',
   'briefing.savedToast': 'Briefing saved (docs/briefing.md).',
   'briefing.missingFields': 'Mandatory fields missing: {0}',

@@ -1692,6 +1692,8 @@ const fr: TranslationDict = {
   'briefing.project.noteFor': 'Note (facultatif) — {0}',
   'briefing.project.notePlaceholder': 'Note (facultatif) : le « comment » qu\'un choix ne dit pas',
   'briefing.prefilled': 'Briefing enregistré chargé : modifie seulement ce qui a changé.',
+  'briefing.prefillLate': 'Le briefing enregistré est arrivé après ta saisie : les sections vides en ont été remplies, tes saisies sont gardées.',
+  'briefing.loadSaved': 'Charger le briefing enregistré',
   'briefing.saveBtn': 'Enregistrer le briefing',
   'briefing.savedToast': 'Briefing enregistré (docs/briefing.md).',
   'briefing.missingFields': 'Champs obligatoires manquants : {0}',

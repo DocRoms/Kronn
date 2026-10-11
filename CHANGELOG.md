@@ -50,6 +50,10 @@ Release notes for 0.9.3 and earlier are available in the
   An answer line that would read as structure (a heading, a machine copy, a
   Kronn option line) is saved behind a `\` and given back as typed, and the
   questions are read in order, so an answer can never split the briefing.
+  A click that only focuses a field no longer skips the prefill; when the
+  saved briefing arrives after a real change, the typed text is kept, only
+  the empty sections are filled from it, and « Charger le briefing
+  enregistré » loads the rest, so a save never wipes what was not changed.
 - The briefing asks about existing documentation and linked projects
   (KT-999). « Existing documentation? » lists the locations Kronn finds in
   the repository (`README*`, `docs/`, `doc/`, `wiki/`, ADR folders,
