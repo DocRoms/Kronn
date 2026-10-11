@@ -3,7 +3,8 @@ import { projects as projectsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import { ClipboardList, X, ChevronRight, ChevronDown } from 'lucide-react';
 import { AGENT_LABELS } from '../lib/constants';
-import type { AuditTokenBreakdown } from '../types/generated';
+import type { AuditRunCost as AuditRunCostData, AuditTokenBreakdown } from '../types/generated';
+import AuditRunCost from './AuditRunCost';
 import { tokenBreakdownTitle } from '../lib/audit-cost';
 import { auditStepOutcome } from '../lib/audit-step-outcome';
 import './AuditRecapPanel.css';
@@ -156,6 +157,7 @@ export default function AuditRecapPanel({ projectId, refreshTrigger, selectedRun
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [historyResult, setHistoryResult] = useState<HistoryResult | null>(null);
   const [latestStepsResult, setLatestStepsResult] = useState<StepsResult | null>(null);
+  const [latestCost, setLatestCost] = useState<{ runId: string; cost: AuditRunCostData | null } | null>(null);
   const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
   const [stepsResult, setStepsResult] = useState<StepsResult | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>('step_index');
@@ -210,6 +212,23 @@ export default function AuditRecapPanel({ projectId, refreshTrigger, selectedRun
     })();
     return () => { cancelled = true; };
   }, [latestRun, reload]);
+
+  // The run's consumption per phase (KT-1084). Best effort: without it the
+  // panel keeps its steps and simply shows no phase table.
+  useEffect(() => {
+    if (!latestRun) return;
+    let cancelled = false;
+    const runId = latestRun.id;
+    (async () => {
+      try {
+        const cost = await projectsApi.auditRunCost(runId);
+        if (!cancelled) setLatestCost({ runId, cost: cost ?? null });
+      } catch {
+        if (!cancelled) setLatestCost({ runId, cost: null });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [latestRun, refreshTrigger]);
 
   // Load steps for an older run expanded in the history drawer. The latest
   // run reuses the direct-detail request above instead of fetching twice.
@@ -384,6 +403,10 @@ export default function AuditRecapPanel({ projectId, refreshTrigger, selectedRun
 
           {latestRun.project_profile_draft && (
             <ProfileDraft draft={latestRun.project_profile_draft} />
+          )}
+
+          {latestCost?.runId === latestRun.id && latestCost.cost && (
+            <AuditRunCost cost={latestCost.cost} />
           )}
 
           <div className="arp-latest-steps">

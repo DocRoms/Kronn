@@ -13,6 +13,16 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- The audit recap now shows what a run consumed per phase and in total
+  (KT-1084): the briefing, the audit steps and the validation discussion, each
+  with its tokens (uncached input, output, cache) and cost, plus a grand total.
+  `GET /api/audit-runs/:run_id/cost` adds them up from what each phase already
+  stored, nothing is re-measured. A step a resume carried over is counted once,
+  at the run that really ran it. A phase no agent reported shows « non mesuré »,
+  never 0; a sum over an unknown cost is marked `≥`, an estimated one `≈`. The
+  briefing is linked to the project, not to a run: it is the briefing discussion
+  opened since the previous Full audit.
+
 - After an audit with failed steps, a single step can be retried alone, or a
   human can accept it as it stands (KT-1131). On each failed line of the
   timeline, « Relancer cette étape » resumes the interrupted run with

@@ -184,6 +184,23 @@ pub async fn audit_run_steps(
     }
 }
 
+/// KT-1084 — an audit run's tokens and cost per phase (briefing, audit,
+/// validation) and in total. Aggregation of what each phase stored.
+pub async fn audit_run_cost(
+    State(state): State<AppState>,
+    Path(run_id): Path<String>,
+) -> Json<ApiResponse<crate::models::AuditRunCost>> {
+    let result = state
+        .db
+        .with_read_conn(move |conn| crate::db::audit_run_cost::for_run(conn, &run_id))
+        .await;
+    match result {
+        Ok(Some(cost)) => Json(ApiResponse::ok(cost)),
+        Ok(None) => Json(ApiResponse::err("Audit run not found")),
+        Err(e) => Json(ApiResponse::err(format!("db: {e}"))),
+    }
+}
+
 /// Runs whose steps the timeline merges (newest first): a resume or a partial
 /// run records only the steps it ran.
 const TIMELINE_STEP_RUNS: usize = 12;

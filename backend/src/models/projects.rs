@@ -1221,6 +1221,63 @@ pub struct AuditTokenBreakdown {
     pub total_with_cache: Option<u64>,
 }
 
+/// What one phase of an audit (briefing, audit steps, validation discussion)
+/// consumed (KT-1084). Every figure is absent when nothing reported it: a phase
+/// whose agents reported no usage is "not measured", never 0. A sum over items
+/// some of which reported nothing is a floor, and `cost_unknown_items` says so.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AuditPhaseCost {
+    /// Finished steps, or agent replies, the phase is made of.
+    pub items: u32,
+    /// Of those, the ones that reported token usage.
+    pub measured_items: u32,
+    /// Fresh traffic (uncached input plus output); input as reported when an
+    /// item's cache split is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub total_tokens: Option<u64>,
+    /// Uncached input, summed over the items whose cache split is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cache_read_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cache_write_tokens: Option<u64>,
+    /// Measured items whose cache split is unknown: the parts above leave them out.
+    pub split_unknown_items: u32,
+    /// Reported cost, else Kronn's estimate, summed over the items that have one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cost_usd_micros: Option<u64>,
+    /// At least one summed cost is an estimate, not an agent-reported figure.
+    pub cost_estimated: bool,
+    /// Items with no cost at all: the sum above is a floor.
+    pub cost_unknown_items: u32,
+    /// Steps a resume inherited from another run, counted once, at their origin's figures.
+    pub carried_items: u32,
+}
+
+/// An audit run's tokens and cost per phase and in total (KT-1084).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AuditRunCost {
+    pub run_id: String,
+    /// The project's briefing discussion(s) opened since the previous Full run.
+    pub briefing: AuditPhaseCost,
+    /// The run's steps, its own and the ones it carried, each counted once.
+    pub audit: AuditPhaseCost,
+    /// The agent replies of the run's validation discussion.
+    pub validation: AuditPhaseCost,
+    pub total: AuditPhaseCost,
+}
+
 /// Recommendation emitted by the completion-time cluster detector. Lives in
 /// `AuditRun.recommendations_json` as a JSON-encoded list.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

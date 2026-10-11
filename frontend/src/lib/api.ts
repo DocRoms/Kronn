@@ -1,4 +1,4 @@
-import type { AcceptAuditStepResponse, ArtifactBundle, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditStepInfo, AuditRecentActivity, AuditTokenBreakdown, EmbedOriginsChange } from '../types/generated';
+import type { AcceptAuditStepResponse, ArtifactBundle, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditRunCost, AuditStepInfo, AuditRecentActivity, AuditTokenBreakdown, EmbedOriginsChange } from '../types/generated';
 import type { WorkerConnectivity } from '../types/generated';
 import type { MergeBase, TemplateMergeAccepted, TemplateMergeAcceptRequest, TemplateMergeRequest, TemplateMergeView } from '../types/generated';
 import { readTextAttachmentPreview } from './textAttachmentPreview';
@@ -1182,6 +1182,8 @@ export const projects = {
    */
   /** KT-977 — the Full audit's steps in run order, known before any run. */
   auditSteps: () => api<AuditStepInfo[]>('GET', '/audit/steps'),
+  /** KT-1084 — an audit run's tokens and cost per phase (briefing, audit, validation) and in total. */
+  auditRunCost: (runId: string) => api<AuditRunCost>('GET', `/audit-runs/${runId}/cost`),
   auditRunSteps: (runId: string) =>
     api<Array<{
       audit_run_id: string;

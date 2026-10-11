@@ -352,6 +352,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
         resumable_after_step: null, state_in_history: null,
       }),
       auditRunSteps: resolve([]),
+      auditRunCost: resolve(null),
     auditSteps: resolve([]),
       // 0.8.4 (#294) — cross-agent memory bindings. Default "no
       // imported discs" so sidebar tests that don't care about the

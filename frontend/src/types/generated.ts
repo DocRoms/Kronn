@@ -892,6 +892,51 @@ export type AuditInfo = { files: Array<AuditFileInfo>, todos: Array<AuditTodo>, 
 export type AuditKind = "Full" | "Drift" | "Security" | "Docker" | "Performance" | "Accessibility" | "Rgaa" | "Database" | "ApiDesign" | "CodeQuality" | "Custom";
 
 /**
+ * What one phase of an audit (briefing, audit steps, validation discussion)
+ * consumed (KT-1084). Every figure is absent when nothing reported it: a phase
+ * whose agents reported no usage is "not measured", never 0. A sum over items
+ * some of which reported nothing is a floor, and `cost_unknown_items` says so.
+ */
+export type AuditPhaseCost = {
+/**
+ * Finished steps, or agent replies, the phase is made of.
+ */
+items: number,
+/**
+ * Of those, the ones that reported token usage.
+ */
+measured_items: number,
+/**
+ * Fresh traffic (uncached input plus output); input as reported when an
+ * item's cache split is unknown.
+ */
+total_tokens?: number,
+/**
+ * Uncached input, summed over the items whose cache split is known.
+ */
+input_tokens?: number, output_tokens?: number, cache_read_tokens?: number, cache_write_tokens?: number,
+/**
+ * Measured items whose cache split is unknown: the parts above leave them out.
+ */
+split_unknown_items: number,
+/**
+ * Reported cost, else Kronn's estimate, summed over the items that have one.
+ */
+cost_usd_micros?: number,
+/**
+ * At least one summed cost is an estimate, not an agent-reported figure.
+ */
+cost_estimated: boolean,
+/**
+ * Items with no cost at all: the sum above is a floor.
+ */
+cost_unknown_items: number,
+/**
+ * Steps a resume inherited from another run, counted once, at their origin's figures.
+ */
+carried_items: number, };
+
+/**
  * Live progress of a running audit, exposed via `GET /api/projects/:id/audit-status`.
  *
  * Produced by the SSE streams (`full_audit`, `partial_audit`)
@@ -1071,6 +1116,23 @@ model?: string | null,
  * (KT-920); never written into the checkout.
  */
 project_profile_draft?: string | null, };
+
+/**
+ * An audit run's tokens and cost per phase and in total (KT-1084).
+ */
+export type AuditRunCost = { run_id: string,
+/**
+ * The project's briefing discussion(s) opened since the previous Full run.
+ */
+briefing: AuditPhaseCost,
+/**
+ * The run's steps, its own and the ones it carried, each counted once.
+ */
+audit: AuditPhaseCost,
+/**
+ * The agent replies of the run's validation discussion.
+ */
+validation: AuditPhaseCost, total: AuditPhaseCost, };
 
 /**
  * 0.8.4 (#298) — Per-step metrics for the post-audit recap panel.

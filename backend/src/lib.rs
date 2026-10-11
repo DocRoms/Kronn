@@ -1900,6 +1900,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/audit-runs/{run_id}/steps",
             get(api::audit::audit_run_steps),
         )
+        .route(
+            "/api/audit-runs/{run_id}/cost",
+            get(api::audit::audit_run_cost),
+        )
         // KT-1131 — a human accepts a failed step as it stands. Kept off the
         // bridge route list: an agent's token is refused.
         .route(
