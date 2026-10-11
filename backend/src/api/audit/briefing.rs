@@ -44,6 +44,9 @@ pub async fn set_briefing(
     Path(id): Path<String>,
     Json(req): Json<SetBriefingRequest>,
 ) -> Json<ApiResponse<bool>> {
+    if audit_running(&state, &id) {
+        return Json(ApiResponse::err(BRIEFING_LOCKED));
+    }
     let notes = req.notes.filter(|n| !n.trim().is_empty());
     let pid = id.clone();
     let project = state
@@ -70,6 +73,19 @@ pub async fn set_briefing(
         Ok(false) => Json(ApiResponse::err("Project not found")),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
+}
+
+pub(crate) const BRIEFING_LOCKED: &str =
+    "The briefing is locked while an audit runs on this project: save it again once the audit ends.";
+
+/// An audit holds the project's lease: it read the briefing at launch and
+/// keeps syncing the coding-rules doc from it, so a save now would be undone.
+pub(crate) fn audit_running(state: &AppState, project_id: &str) -> bool {
+    state
+        .audit_tracker
+        .lock()
+        .map(|t| t.leased.contains(project_id))
+        .unwrap_or(true)
 }
 
 /// Mirror the notes into `<docs>/briefing.md`: written when set, removed when
@@ -359,6 +375,13 @@ async fn save_briefing_form_inner(
     id: String,
     form: BriefingFormRequest,
 ) -> Response {
+    if audit_running(&state, &id) {
+        return (
+            StatusCode::CONFLICT,
+            Json(ApiResponse::<bool>::err(BRIEFING_LOCKED)),
+        )
+            .into_response();
+    }
     // 1. Validate: Q1-Q5 are mandatory (matches the conversational flow).
     if form.purpose.trim().is_empty()
         || form.team.trim().is_empty()

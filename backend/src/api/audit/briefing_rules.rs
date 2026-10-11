@@ -19,7 +19,7 @@ const RULES_ANSWERS_SUFFIX: &str = " -->";
 pub(crate) const MAX_RULES: usize = 20;
 pub(crate) const TEXT_MAX_CHARS: usize = 200;
 pub(crate) const PATTERN_MAX_CHARS: usize = 100;
-/// Bounds the glob matcher's backtracking.
+/// Keeps a file glob readable; the matcher is linear whatever the pattern.
 const MAX_GLOB_STARS: usize = 3;
 
 /// Opening line of the Kronn-generated section of the coding-rules doc.
@@ -59,15 +59,18 @@ fn check_pattern(pattern: &ProjectRulePattern) -> Result<ProjectRulePattern, Str
                 "{field}: a file glob stays relative to the repository"
             ));
         }
-        let star_runs = value
-            .as_bytes()
-            .windows(2)
-            .filter(|w| w[0] != b'*' && w[1] == b'*')
-            .count()
-            + usize::from(value.starts_with('*'));
-        if star_runs > MAX_GLOB_STARS {
+        // Each `*` or `**` is one wildcard; three stars or more mean nothing.
+        let runs: Vec<usize> = value
+            .split(|c| c != '*')
+            .map(str::len)
+            .filter(|n| *n > 0)
+            .collect();
+        if runs.iter().any(|n| *n > 2) {
+            return Err(format!("{field}: `***` is not a wildcard; use `*` or `**`"));
+        }
+        if runs.len() > MAX_GLOB_STARS {
             return Err(format!(
-                "{field}: at most {MAX_GLOB_STARS} wildcard groups in a file glob"
+                "{field}: at most {MAX_GLOB_STARS} wildcards in a file glob"
             ));
         }
     }
@@ -230,20 +233,48 @@ fn doc_section(rules: &BriefingProjectRules) -> String {
     out
 }
 
-/// Byte range of the generated section, end marker line included.
+/// A line Kronn writes inside the section; nothing else can be removed when
+/// the end marker is missing.
+fn is_generated_line(line: &str) -> bool {
+    let t = line.trim();
+    t.is_empty()
+        || t == "## Project rules and bans"
+        || t.starts_with("> Written by Kronn from the project briefing")
+        || t.starts_with("- **Always:** ")
+        || t.starts_with("- **Never:** ")
+}
+
+/// Byte range of the generated section, end marker line included. Without
+/// an end marker (an agent dropped it), the range stops at the first line
+/// Kronn could not have written, so human text is never swallowed.
 fn find_doc_section(content: &str) -> Option<(usize, usize)> {
     let mut offset = 0;
     let mut start = None;
+    let mut generated_end = 0;
     for line in content.split_inclusive('\n') {
         let trimmed = line.trim();
         match start {
-            None if trimmed.starts_with(DOC_SECTION_OPEN) => start = Some(offset),
+            None if trimmed.starts_with(DOC_SECTION_OPEN) => {
+                start = Some(offset);
+                generated_end = offset + line.len();
+            }
             Some(s) if trimmed == DOC_SECTION_END => return Some((s, offset + line.len())),
+            Some(_) if generated_end == offset && is_generated_line(line) => {
+                generated_end = offset + line.len();
+            }
             _ => {}
         }
         offset += line.len();
     }
-    start.map(|s| (s, content.len()))
+    let start = start?;
+    tracing::warn!(
+        "coding-rules doc: the project-rules section lost its end marker; only Kronn's own lines are replaced"
+    );
+    // Keep the blank line before the next human text.
+    let tail = &content[start..generated_end];
+    let trimmed = tail.trim_end_matches(['\n', ' ']).len();
+    let end = (start + trimmed + 1).min(generated_end);
+    Some((start, end))
 }
 
 /// `content` with the generated section set to `rules`: replaced in place,

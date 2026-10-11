@@ -82,7 +82,7 @@ pub struct DetectedSignal {
 }
 
 /// Source-file extensions counted by the test-gap detector.
-pub(crate) static SOURCE_EXTS: &[&str] = &[
+static SOURCE_EXTS: &[&str] = &[
     "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs", "php", "py", "go", "java", "kt", "rb", "cs", "c",
     "h", "cpp", "hpp", "cc", "swift", "scala",
 ];

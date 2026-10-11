@@ -8,24 +8,10 @@
 use std::path::{Path, PathBuf};
 
 use crate::core::audit_baseline::{read_walked, rel_display, Capped, MAX_WALKED_FILES};
-use crate::core::audit_detectors::{walk, DetectedSignal, Severity, SOURCE_EXTS};
+use crate::core::audit_detectors::{walk, DetectedSignal, Severity};
 use crate::models::{ProjectRule, ProjectRuleKind, ProjectRulePattern, ProjectRulePatternKind};
 
 pub const DETECTOR_ID: &str = "project-ban";
-
-/// Lines that declare an import in the stacks Kronn audits; a module name
-/// elsewhere (prose, comments, identifiers) is not an import.
-const IMPORT_KEYWORDS: &[&str] = &[
-    "import",
-    "require",
-    "require_once",
-    "from",
-    "use",
-    "include",
-    "include_once",
-    "extern crate",
-    "@use",
-];
 
 #[derive(Default)]
 struct Files {
@@ -36,8 +22,10 @@ struct Files {
 }
 
 fn is_manifest(name: &str) -> bool {
-    matches!(name, "package.json" | "composer.json" | "Cargo.toml")
-        || (name.starts_with("requirements") && name.ends_with(".txt"))
+    matches!(
+        name,
+        "package.json" | "composer.json" | "Cargo.toml" | "pyproject.toml"
+    ) || (name.starts_with("requirements") && name.ends_with(".txt"))
 }
 
 fn collect(root: &Path) -> Files {
@@ -52,7 +40,7 @@ fn collect(root: &Path) -> Files {
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or_default();
-        if SOURCE_EXTS.contains(&ext) {
+        if syntax_for(ext).is_some() {
             files.sources.push(path.to_path_buf());
         }
         files.all.push(rel_display(root, path));
@@ -139,6 +127,7 @@ fn dependency_hits(root: &Path, manifests: &[PathBuf], name: &str) -> Vec<String
                 json_dependency_line(&content, &["require", "require-dev"], name, true)
             }
             "Cargo.toml" => cargo_dependency_line(&content, name),
+            "pyproject.toml" => pyproject_dependency_line(&content, name),
             _ => requirements_dependency_line(&content, name),
         };
         if let Some(line) = line {
@@ -191,8 +180,18 @@ fn cargo_name(name: &str) -> String {
         .to_ascii_lowercase()
 }
 
+/// `serde` for `serde`, `"serde"` and the dotted `serde.workspace`.
+fn cargo_key_root(key: &str) -> &str {
+    let key = key.trim();
+    match key.strip_prefix('"') {
+        Some(rest) => rest.split('"').next().unwrap_or(rest),
+        None => key.split('.').next().unwrap_or(key),
+    }
+}
+
 /// Line of a dependency in any `*dependencies` table, inline or as a
-/// `[dependencies.name]` table. A `package = "…"` rename is not followed.
+/// `[dependencies.name]` table, dotted keys included. A `package = "…"`
+/// rename is not followed.
 fn cargo_dependency_line(content: &str, name: &str) -> Option<usize> {
     let wanted = cargo_name(name);
     let mut in_deps = false;
@@ -210,7 +209,7 @@ fn cargo_dependency_line(content: &str, name: &str) -> Option<usize> {
         }
         if in_deps {
             if let Some((key, _)) = line.split_once('=') {
-                if cargo_name(key) == wanted {
+                if cargo_name(cargo_key_root(key)) == wanted {
                     return Some(i + 1);
                 }
             }
@@ -252,43 +251,269 @@ fn requirements_dependency_line(content: &str, name: &str) -> Option<usize> {
     })
 }
 
+/// The requirement name at the start of a PEP 508 string.
+fn requirement_name(spec: &str) -> &str {
+    let spec = spec.trim();
+    let end = spec
+        .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')))
+        .unwrap_or(spec.len());
+    &spec[..end]
+}
+
+/// PEP 621 `[project]` dependencies (optional ones included) and Poetry's
+/// `[tool.poetry.*dependencies]` tables, located on the first line naming them.
+fn pyproject_dependency_line(content: &str, name: &str) -> Option<usize> {
+    let wanted = pep503(name);
+    let doc: toml::Table = content.parse().ok()?;
+    let same = |n: &str| pep503(n) == wanted;
+    let in_list = |v: Option<&toml::Value>| {
+        v.and_then(|v| v.as_array()).is_some_and(|a| {
+            a.iter()
+                .any(|x| x.as_str().is_some_and(|s| same(requirement_name(s))))
+        })
+    };
+    let in_keys = |v: Option<&toml::Value>| {
+        v.and_then(|v| v.as_table())
+            .is_some_and(|t| t.keys().any(|k| same(k)))
+    };
+    let project = doc.get("project");
+    let mut declared = in_list(project.and_then(|p| p.get("dependencies")))
+        || project
+            .and_then(|p| p.get("optional-dependencies"))
+            .and_then(|o| o.as_table())
+            .is_some_and(|o| o.values().any(|v| in_list(Some(v))));
+    if let Some(poetry) = doc.get("tool").and_then(|t| t.get("poetry")) {
+        declared = declared
+            || in_keys(poetry.get("dependencies"))
+            || in_keys(poetry.get("dev-dependencies"))
+            || poetry
+                .get("group")
+                .and_then(|g| g.as_table())
+                .is_some_and(|g| g.values().any(|grp| in_keys(grp.get("dependencies"))));
+    }
+    if !declared {
+        return None;
+    }
+    let line = content
+        .lines()
+        .position(|l| {
+            let lead = requirement_name(l.trim_start());
+            same(lead) || quoted(l).iter().any(|q| same(requirement_name(q)))
+        })
+        .map(|i| i + 1)
+        .unwrap_or(1);
+    Some(line)
+}
+
 // ─── Imports ───────────────────────────────────────────────────────────
 
-fn is_name_char(c: char) -> bool {
-    c.is_alphanumeric() || matches!(c, '_' | '-' | '$')
+/// How a language spells an import, and what separates a module from its
+/// submodules (`lodash/fp` is lodash, `lodash.debounce` is another package).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Syntax {
+    Js,
+    Python,
+    Rust,
+    Php,
+    Go,
+    /// Java, Kotlin, Scala, C#.
+    Dotted,
+    C,
+    Ruby,
+    Swift,
 }
 
-/// `needle` in `line` with no name character glued on either side.
-pub(crate) fn word_match(line: &str, needle: &str) -> bool {
-    if needle.is_empty() {
-        return false;
+fn syntax_for(ext: &str) -> Option<Syntax> {
+    Some(match ext {
+        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "vue" | "svelte" => Syntax::Js,
+        "py" => Syntax::Python,
+        "rs" => Syntax::Rust,
+        "php" => Syntax::Php,
+        "go" => Syntax::Go,
+        "java" | "kt" | "scala" | "cs" => Syntax::Dotted,
+        "c" | "h" | "cpp" | "hpp" | "cc" => Syntax::C,
+        "rb" => Syntax::Ruby,
+        "swift" => Syntax::Swift,
+        _ => return None,
+    })
+}
+
+fn separators(syntax: Syntax) -> &'static [&'static str] {
+    match syntax {
+        Syntax::Js | Syntax::Go | Syntax::C | Syntax::Ruby => &["/"],
+        Syntax::Python | Syntax::Dotted | Syntax::Swift => &["."],
+        Syntax::Rust => &["::"],
+        Syntax::Php => &["\\", "/"],
     }
-    let mut from = 0;
-    while let Some(at) = line[from..].find(needle) {
-        let start = from + at;
-        let end = start + needle.len();
-        let before = line[..start].chars().next_back();
-        let after = line[end..].chars().next();
-        if !before.is_some_and(is_name_char) && !after.is_some_and(is_name_char) {
-            return true;
+}
+
+/// `spec` is `module` or one of its submodules.
+fn names_module(spec: &str, module: &str, syntax: Syntax) -> bool {
+    let spec = spec.trim_start_matches('\\').trim_start_matches("::");
+    match spec.strip_prefix(module) {
+        Some("") => true,
+        Some(rest) => separators(syntax).iter().any(|s| rest.starts_with(s)),
+        None => false,
+    }
+}
+
+fn is_comment(t: &str, syntax: Syntax) -> bool {
+    t.starts_with("//")
+        || t.starts_with("/*")
+        || t.starts_with('*')
+        || t.starts_with("--")
+        || (t.starts_with('#') && syntax != Syntax::C)
+}
+
+/// Every quoted literal of the line.
+fn quoted(t: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut rest = t;
+    while let Some(at) = rest.find(['\'', '"', '`']) {
+        let quote = rest[at..].chars().next().unwrap_or('"');
+        let after = &rest[at + 1..];
+        let Some(end) = after.find(quote) else {
+            break;
+        };
+        out.push(&after[..end]);
+        rest = &after[end + 1..];
+    }
+    out
+}
+
+/// The path after a keyword, up to `;`, `{`, `,` or a space.
+fn path_after<'a>(t: &'a str, keyword: &str) -> Option<&'a str> {
+    let rest = t.strip_prefix(keyword)?.trim_start();
+    let end = rest
+        .find(|c: char| c == ';' || c == '{' || c == ',' || c.is_whitespace())
+        .unwrap_or(rest.len());
+    Some(&rest[..end])
+}
+
+fn starts_with_word(t: &str, word: &str) -> bool {
+    t.strip_prefix(word).is_some_and(|rest| {
+        rest.is_empty() || !rest.starts_with(|c: char| c.is_alphanumeric() || c == '_')
+    })
+}
+
+/// The module names a source line imports, in that language's syntax.
+/// `go_block` tracks a Go `import ( … )` group across lines.
+fn import_specs<'a>(line: &'a str, syntax: Syntax, go_block: &mut bool) -> Vec<&'a str> {
+    let t = line.trim();
+    if t.is_empty() || is_comment(t, syntax) {
+        return Vec::new();
+    }
+    match syntax {
+        Syntax::Js => {
+            let is_import = starts_with_word(t, "import")
+                || t.contains("from '")
+                || t.contains("from \"")
+                || t.contains("require(")
+                || t.contains("import(");
+            if is_import {
+                quoted(t)
+            } else {
+                Vec::new()
+            }
         }
-        from = start + line[start..].chars().next().map_or(1, char::len_utf8);
+        Syntax::Python => {
+            if let Some(module) = path_after(t, "from ").filter(|_| t.contains(" import")) {
+                vec![module]
+            } else if let Some(rest) = t.strip_prefix("import ") {
+                rest.split(',')
+                    .filter_map(|m| m.split_whitespace().next())
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        }
+        Syntax::Rust => {
+            let t = t
+                .trim_start_matches("pub(crate) ")
+                .trim_start_matches("pub ");
+            path_after(t, "use ")
+                .or_else(|| path_after(t, "extern crate "))
+                .into_iter()
+                .collect()
+        }
+        Syntax::Php => {
+            if let Some(path) = path_after(t, "use ") {
+                vec![path]
+            } else if ["require", "include"].iter().any(|k| t.starts_with(k)) {
+                quoted(t)
+            } else {
+                Vec::new()
+            }
+        }
+        Syntax::Go => {
+            if *go_block {
+                if t.starts_with(')') {
+                    *go_block = false;
+                    return Vec::new();
+                }
+                return quoted(t);
+            }
+            if let Some(rest) = t.strip_prefix("import") {
+                if rest.trim_start().starts_with('(') {
+                    *go_block = !rest.contains(')');
+                }
+                return quoted(rest);
+            }
+            Vec::new()
+        }
+        Syntax::Dotted => {
+            let t = t.replacen("import static ", "import ", 1);
+            let path = path_after(&t, "import ").or_else(|| path_after(&t, "using "));
+            // `t` is owned here; re-borrow the same slice from `line`.
+            path.and_then(|p| line.find(p).map(|at| &line[at..at + p.len()]))
+                .into_iter()
+                .collect()
+        }
+        Syntax::C => {
+            let Some(rest) = t
+                .strip_prefix("#include")
+                .or_else(|| t.strip_prefix("#import"))
+            else {
+                return Vec::new();
+            };
+            let rest = rest.trim();
+            let inner = rest
+                .strip_prefix('<')
+                .and_then(|r| r.split('>').next())
+                .or_else(|| rest.strip_prefix('"').and_then(|r| r.split('"').next()));
+            inner.into_iter().collect()
+        }
+        Syntax::Ruby => {
+            if ["require", "require_relative", "load"]
+                .iter()
+                .any(|k| starts_with_word(t, k))
+            {
+                quoted(t)
+            } else {
+                Vec::new()
+            }
+        }
+        Syntax::Swift => path_after(t, "import ").into_iter().collect(),
     }
-    false
-}
-
-fn is_import_line(line: &str) -> bool {
-    IMPORT_KEYWORDS.iter().any(|k| word_match(line, k))
 }
 
 fn import_hits(root: &Path, sources: &[PathBuf], module: &str) -> Vec<String> {
     let mut out = Vec::new();
     for path in sources {
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default();
+        let Some(syntax) = syntax_for(ext) else {
+            continue;
+        };
         let Some(content) = read_walked(path) else {
             continue;
         };
+        let mut go_block = false;
         for (i, line) in content.lines().enumerate() {
-            if is_import_line(line) && word_match(line, module) {
+            let specs = import_specs(line, syntax, &mut go_block);
+            if specs.iter().any(|s| names_module(s, module, syntax)) {
                 out.push(format!("{}:{}", rel_display(root, path), i + 1));
             }
         }
@@ -298,9 +523,84 @@ fn import_hits(root: &Path, sources: &[PathBuf], module: &str) -> Vec<String> {
 
 // ─── File globs ────────────────────────────────────────────────────────
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GlobToken {
+    Byte(u8),
+    /// `?`: one character other than `/`.
+    One,
+    /// `*`: any run without `/`.
+    Star,
+    /// `**`: any run, `/` included.
+    Any,
+    /// `**/`: nothing, or any run ending with `/`.
+    AnyDir,
+}
+
+/// Consecutive stars collapse into one `**`, so no pattern adds work.
+fn glob_tokens(pattern: &str) -> Vec<GlobToken> {
+    let bytes = pattern.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'*' => {
+                let mut n = 0;
+                while i < bytes.len() && bytes[i] == b'*' {
+                    n += 1;
+                    i += 1;
+                }
+                if n == 1 {
+                    out.push(GlobToken::Star);
+                } else if i < bytes.len() && bytes[i] == b'/' {
+                    i += 1;
+                    out.push(GlobToken::AnyDir);
+                } else {
+                    out.push(GlobToken::Any);
+                }
+                continue;
+            }
+            b'?' => out.push(GlobToken::One),
+            b => out.push(GlobToken::Byte(b)),
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Glob match in O(pattern × path) time: a bottom-up table, no backtracking.
+pub(crate) fn glob_matches(pattern: &str, path: &str) -> bool {
+    let tokens = glob_tokens(pattern);
+    let text = path.as_bytes();
+    let m = text.len();
+    // `next[j]`: tokens after the current one match `text[j..]`.
+    let mut next = vec![false; m + 1];
+    next[m] = true;
+    for token in tokens.iter().rev() {
+        let mut cur = vec![false; m + 1];
+        // For AnyDir: some `k >= j` with `text[k] == '/'` and `next[k + 1]`.
+        let mut dir_ahead = false;
+        for j in (0..=m).rev() {
+            let here = text.get(j).copied();
+            cur[j] = match *token {
+                GlobToken::Byte(b) => here == Some(b) && next[j + 1],
+                GlobToken::One => here.is_some_and(|c| c != b'/') && next[j + 1],
+                GlobToken::Star => next[j] || (here.is_some_and(|c| c != b'/') && cur[j + 1]),
+                GlobToken::Any => next[j] || (here.is_some() && cur[j + 1]),
+                GlobToken::AnyDir => {
+                    if here == Some(b'/') && next[j + 1] {
+                        dir_ahead = true;
+                    }
+                    next[j] || dir_ahead
+                }
+            };
+        }
+        next = cur;
+    }
+    next[0]
+}
+
 /// A glob without `/` matches a file name at any depth, as in `.gitignore`.
 pub(crate) fn glob_hit(pattern: &str, rel: &str) -> bool {
-    use crate::api::agent_workspace_tools::glob_matches;
     if pattern.contains('/') {
         glob_matches(pattern, rel)
     } else {

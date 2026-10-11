@@ -83,6 +83,9 @@ fn normalize_refuses_unsafe_text_and_patterns() {
         (ProjectRulePatternKind::FileGlob, "src/../x"),
         (ProjectRulePatternKind::FileGlob, "[ab].js"),
         (ProjectRulePatternKind::FileGlob, "*a*b*c*d"),
+        (ProjectRulePatternKind::FileGlob, "**********Q"),
+        (ProjectRulePatternKind::FileGlob, "src/***/x"),
+        (ProjectRulePatternKind::FileGlob, "**/a/**/b/**/c/*"),
         (ProjectRulePatternKind::FileGlob, "  "),
     ];
     for (kind, value) in refused {
@@ -101,6 +104,7 @@ fn normalize_refuses_unsafe_text_and_patterns() {
         (ProjectRulePatternKind::Dependency, "@scope/pkg"),
         (ProjectRulePatternKind::Import, "App\\Legacy\\Mailer"),
         (ProjectRulePatternKind::FileGlob, "src/**/*.min.js"),
+        (ProjectRulePatternKind::FileGlob, "**/legacy/**/*.js"),
     ] {
         assert!(
             normalize(&rules(vec![ban("never", Some((kind, value)))])).is_ok(),
@@ -345,4 +349,46 @@ fn sync_is_a_no_op_without_the_doc() {
     std::fs::create_dir_all(dir.path().join("docs")).unwrap();
     assert!(!sync_coding_rules_doc(dir.path(), Some(&sample())).unwrap());
     assert!(!dir.path().join("docs/coding-rules.md").exists());
+}
+
+#[test]
+fn a_lost_end_marker_never_swallows_human_text() {
+    let with = upsert_doc_section(CODING_RULES, Some(&sample()));
+    // An agent rewrite dropped the end marker and appended its own text.
+    let broken = with.replace(DOC_SECTION_END, "") + "\n## Agent notes\n\nKeep me.\n";
+    let fixed = upsert_doc_section(&broken, Some(&sample()));
+    assert!(
+        fixed.contains("## Global\n\n- Prefer small diffs."),
+        "{fixed}"
+    );
+    assert!(fixed.contains("## Rust\n\nHuman text.\n"), "{fixed}");
+    assert!(fixed.contains("Keep me."), "{fixed}");
+    assert_eq!(fixed.matches(DOC_SECTION_OPEN).count(), 1, "{fixed}");
+    assert_eq!(
+        fixed.matches("ne jamais utiliser lodash").count(),
+        1,
+        "{fixed}"
+    );
+    assert_eq!(fixed.matches(DOC_SECTION_END).count(), 1, "{fixed}");
+    // Cleared rules remove Kronn's lines only.
+    let cleared = upsert_doc_section(&broken, None);
+    assert!(
+        !cleared.contains("lodash") && !cleared.contains(DOC_SECTION_OPEN),
+        "{cleared}"
+    );
+    assert!(
+        cleared.contains("## Global") && cleared.contains("Keep me."),
+        "{cleared}"
+    );
+}
+
+#[test]
+fn a_lost_end_marker_with_human_text_inside_keeps_it() {
+    let doc = format!(
+        "# Coding rules\n\n{DOC_SECTION_OPEN} owner=\"kronn\" generated=\"briefing\" -->\n## Project rules and bans\n\n- **Never:** old ban\nA human line written here.\n\n## Global\n"
+    );
+    let fixed = upsert_doc_section(&doc, Some(&sample()));
+    assert!(fixed.contains("A human line written here."), "{fixed}");
+    assert!(!fixed.contains("old ban"), "{fixed}");
+    assert!(fixed.contains("## Global"), "{fixed}");
 }

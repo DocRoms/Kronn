@@ -6143,7 +6143,7 @@ const zh: TranslationDict = {
   "briefing.rules.remove": "删除第 {0} 行",
   "briefing.rules.add": "添加一行",
   "briefing.rules.max": "最多 20 行。",
-  "briefing.rules.patternHint": "禁令可以附带一个模式，Kronn 在每次审计时只读检查：在 package.json、Cargo.toml、composer.json 或 requirements*.txt 中声明的依赖；import/require/use 行中的模块；或文件通配符（* 匹配目录内，** 跨目录）。",
+  "briefing.rules.patternHint": "禁令可以附带一个模式，Kronn 在每次审计时只读检查：在 package.json、Cargo.toml、composer.json、requirements*.txt 或 pyproject.toml 中声明的依赖；语言导入语句中的模块（忽略注释）；或文件通配符（* 匹配目录内，** 跨目录）。",
   "briefing.docs.kind.readme": "README",
   "briefing.docs.kind.docs": "文档目录",
   "briefing.docs.kind.wiki": "Wiki",

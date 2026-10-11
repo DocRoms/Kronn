@@ -23117,6 +23117,39 @@ mod cold_api_handlers_tests {
     }
 
     #[tokio::test]
+    async fn briefing_save_is_refused_while_an_audit_runs() {
+        let (_dir, repo) = seed_repo("brief-rules-lock");
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        assert!(state.audit_tracker.lock().unwrap().try_acquire_lease(&pid));
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, json) = post_json(
+            app,
+            &format!("/api/projects/{pid}/save-briefing"),
+            briefing_with_rules(serde_json::json!([{"kind": "rule", "text": "always X"}])),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT, "{json}");
+        assert!(
+            json["error"].as_str().unwrap_or("").contains("locked"),
+            "{json}"
+        );
+        assert!(!repo.join("docs/briefing.md").exists());
+
+        state.audit_tracker.lock().unwrap().release_lease(&pid);
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, _) = post_json(
+            app,
+            &format!("/api/projects/{pid}/save-briefing"),
+            briefing_with_rules(serde_json::json!([{"kind": "rule", "text": "always X"}])),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(repo.join("docs/briefing.md").exists());
+    }
+
+    #[tokio::test]
     async fn briefing_rules_out_of_bounds_are_refused_with_400() {
         let (_dir, repo) = seed_repo("brief-rules-bad");
         std::fs::create_dir_all(repo.join("docs")).unwrap();

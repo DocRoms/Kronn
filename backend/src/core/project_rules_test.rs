@@ -246,11 +246,166 @@ fn ban_signals_reach_step_8_and_need_a_disposition() {
 }
 
 #[test]
-fn word_match_needs_a_boundary() {
-    assert!(word_match("import 'lodash';", "lodash"));
-    assert!(word_match("from \"lodash/fp\"", "lodash"));
-    assert!(!word_match("import 'lodash-es'", "lodash"));
-    assert!(!word_match("const mylodash = 1", "lodash"));
-    assert!(word_match("é lodash", "lodash"));
-    assert!(!word_match("anything", ""));
+fn a_module_matches_itself_and_its_submodules_only() {
+    assert!(names_module("lodash", "lodash", Syntax::Js));
+    assert!(names_module("lodash/fp", "lodash", Syntax::Js));
+    assert!(!names_module("lodash.debounce", "lodash", Syntax::Js));
+    assert!(!names_module("lodash-es", "lodash", Syntax::Js));
+    assert!(names_module(
+        "requests.adapters",
+        "requests",
+        Syntax::Python
+    ));
+    assert!(!names_module(
+        "requests_toolbelt",
+        "requests",
+        Syntax::Python
+    ));
+    assert!(names_module("::serde::Serialize", "serde", Syntax::Rust));
+    assert!(!names_module("serde_json", "serde", Syntax::Rust));
+    assert!(names_module(
+        "\\App\\Legacy\\Mailer",
+        "App\\Legacy",
+        Syntax::Php
+    ));
+}
+
+#[test]
+fn comments_and_prose_are_not_imports() {
+    let t = tempfile::tempdir().unwrap();
+    write(
+        t.path(),
+        "src/a.ts",
+        "// we use moment here\n/* import moment from 'moment' */\n * require('moment')\nconst s = 'moment';\nlog(\"from moment\");\n",
+    );
+    write(
+        t.path(),
+        "src/b.py",
+        "# import moment\nprint('use moment')\n",
+    );
+    write(
+        t.path(),
+        "src/c.rs",
+        "// use moment;\nlet use_moment = 1;\n",
+    );
+    let rules = [ban("x", ProjectRulePatternKind::Import, "moment")];
+    assert!(detect_ban_violations(t.path(), &rules).is_empty());
+}
+
+#[test]
+fn import_syntax_is_read_per_language() {
+    let t = tempfile::tempdir().unwrap();
+    write(
+        t.path(),
+        "a.py",
+        "from requests.adapters import X\nimport os, requests as r\n",
+    );
+    write(
+        t.path(),
+        "b.rs",
+        "pub use serde::Serialize;\nextern crate serde;\n",
+    );
+    write(
+        t.path(),
+        "c.go",
+        "import (\n\t\"fmt\"\n\tlog \"github.com/x/logrus\"\n)\n",
+    );
+    write(t.path(), "d.java", "import static com.legacy.Util.run;\n");
+    write(t.path(), "e.c", "#include <legacy/api.h>\n");
+    write(
+        t.path(),
+        "f.vue",
+        "<script>\nimport { x } from \"legacy-ui/button\";\n</script>\n",
+    );
+    let rules = [
+        ban("a", ProjectRulePatternKind::Import, "requests"),
+        ban("b", ProjectRulePatternKind::Import, "serde"),
+        ban("c", ProjectRulePatternKind::Import, "github.com/x/logrus"),
+        ban("d", ProjectRulePatternKind::Import, "com.legacy"),
+        ban("e", ProjectRulePatternKind::Import, "legacy"),
+        ban("f", ProjectRulePatternKind::Import, "legacy-ui"),
+    ];
+    let mut ev = evidence(&detect_ban_violations(t.path(), &rules))
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    ev.sort();
+    assert_eq!(
+        ev,
+        vec!["a.py:1", "a.py:2", "b.rs:1", "b.rs:2", "c.go:3", "d.java:1", "e.c:1", "f.vue:2"]
+    );
+}
+
+#[test]
+fn cargo_dotted_keys_and_pyproject_are_read() {
+    let t = tempfile::tempdir().unwrap();
+    write(
+        t.path(),
+        "Cargo.toml",
+        "[package]\nname = \"x\"\n\n[dependencies]\nserde.workspace = true\nopenssl.version = \"0.10\"\n",
+    );
+    write(
+        t.path(),
+        "py/pyproject.toml",
+        "[project]\nname = \"x\"\ndependencies = [\n  \"requests>=2\",\n]\n[project.optional-dependencies]\ndev = [\"PyYAML\"]\n",
+    );
+    write(
+        t.path(),
+        "poetry/pyproject.toml",
+        "[tool.poetry]\nname = \"y\"\n\n[tool.poetry.dependencies]\npython = \"^3.11\"\nDjango = \"^5\"\n\n[tool.poetry.group.dev.dependencies]\npytest = \"*\"\n",
+    );
+    let rules = [
+        ban("a", ProjectRulePatternKind::Dependency, "serde"),
+        ban("b", ProjectRulePatternKind::Dependency, "openssl"),
+        ban("c", ProjectRulePatternKind::Dependency, "requests"),
+        ban("d", ProjectRulePatternKind::Dependency, "pyyaml"),
+        ban("e", ProjectRulePatternKind::Dependency, "django"),
+        ban("f", ProjectRulePatternKind::Dependency, "pytest"),
+        ban("g", ProjectRulePatternKind::Dependency, "flask"),
+    ];
+    let mut ev = evidence(&detect_ban_violations(t.path(), &rules))
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    ev.sort();
+    assert_eq!(
+        ev,
+        vec![
+            "Cargo.toml:5",
+            "Cargo.toml:6",
+            "poetry/pyproject.toml:6",
+            "poetry/pyproject.toml:9",
+            "py/pyproject.toml:4",
+            "py/pyproject.toml:7",
+        ]
+    );
+}
+
+#[test]
+fn glob_matching_semantics() {
+    assert!(glob_matches("src/**/*.min.js", "src/a/b/x.min.js"));
+    assert!(glob_matches("src/**/*.min.js", "src/x.min.js"));
+    assert!(!glob_matches("src/*.js", "src/a/x.js"));
+    assert!(glob_matches("src/**", "src/a/b"));
+    assert!(glob_matches("a?c", "abc"));
+    assert!(!glob_matches("a?c", "a/c"));
+    assert!(!glob_matches("*.min.js", "x.js"));
+    assert!(glob_hit("*.min.js", "deep/dir/app.min.js"));
+}
+
+#[test]
+fn a_pathological_glob_stays_linear() {
+    // The backtracking matcher took >20M calls for 12 stars on a 48-char path.
+    let path = format!("{}/{}", "a".repeat(30), "b".repeat(200));
+    let pattern = format!("{}Q", "*a".repeat(40));
+    let start = std::time::Instant::now();
+    for _ in 0..1_000 {
+        assert!(!glob_matches(&pattern, &path));
+        assert!(!glob_matches("**********************Q", &path));
+    }
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        start.elapsed()
+    );
 }

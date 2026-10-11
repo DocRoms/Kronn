@@ -16,14 +16,18 @@ Release notes for 0.9.3 and earlier are available in the
 - The briefing records the team's rules and bans (KT-1193). « Règles et
   interdits » holds up to 20 one-line entries of at most 200 characters,
   each a rule (always) or a ban (never). A ban may carry a pattern Kronn
-  checks: a dependency declared in `package.json`, `Cargo.toml`,
-  `composer.json` or `requirements*.txt`, a module on import/require/use
-  lines of source files, or a file glob. The entries go to a
+  checks: a dependency declared in `package.json`, `Cargo.toml` (dotted keys
+  included), `composer.json`, `requirements*.txt` or `pyproject.toml` (PEP 621
+  and Poetry), a module read from each language's import syntax (comments
+  skipped; `lodash` matches `lodash/fp`, not `lodash.debounce`), or a file
+  glob matched in linear time (at most three `*`/`**`). The entries go to a
   `## Project rules` section of `docs/briefing.md` with a machine copy, put
   back after the AI review, before `## Kronn options`; a briefing without
   rules keeps its earlier bytes. Kronn writes them into a generated section
   of the coding-rules doc (in the detected docs folder), restored after
-  every audit step, so every agent of the project reads them. The steps
+  every audit step, so every agent of the project reads them; a section that
+  lost its end marker is repaired without touching human lines. The briefing
+  cannot be saved while an audit runs on the project (409). The steps
   that judge the code (tech debt and every `inconsistencies-*` step) get a
   short rules block: a violated ban or unmet rule is a TD with its
   `file:line` proof, and no fix may break a ban. Each ban with a pattern is

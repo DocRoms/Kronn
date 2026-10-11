@@ -1903,7 +1903,7 @@ fn walk_bounded(root: &Path, start: &Path, max_depth: usize) -> (Vec<Value>, boo
 /// Match a path against a simple glob: `*` matches within a segment, `**` spans
 /// segments. Deliberately not a full glob crate — this covers `**/*.rs` and
 /// `src/**` , which is what a model asks for, with no new dependency.
-pub(crate) fn glob_matches(pattern: &str, path: &str) -> bool {
+fn glob_matches(pattern: &str, path: &str) -> bool {
     fn inner(pat: &[u8], txt: &[u8]) -> bool {
         if pat.is_empty() {
             return txt.is_empty();
