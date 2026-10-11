@@ -5,6 +5,14 @@ const TEMPLATE: &str = include_str!("../../../templates/docs/decisions.md");
 
 const CI_LABEL_ADR: &str = "# Architecture decisions\n\n## ADR-0001: CI is label-triggered\n\n- **Status**: accepted\n- **Date**: 2026-08-28\n- **Covers**: quality-gate-not-enforced\n- **Source**: `.github/workflows/ci.yml:3` + user\n\n### Context\n\nA CI run costs 40 minutes of paid runners.\n\n### Decision\n\nCI runs when a pull request carries the `ci` label.\n\n### Consequences\n\nDo NOT switch to `on: push`.\n";
 
+/// An audit run that found `decisions` and no `Decision record` line.
+fn run(decisions: &str) -> Trust<'_> {
+    Trust::RunBaseline {
+        decisions,
+        records: "",
+    }
+}
+
 /// The decisions in force in `content`, all trusted.
 fn force(content: &str) -> Vec<Adr> {
     in_force(&parse(content)).into_iter().cloned().collect()
@@ -142,7 +150,7 @@ fn a_finding_an_accepted_adr_covers_is_a_decision() {
         "CI does not run on every push",
         "",
     );
-    match coverage("TD-20261011-quality-gate-not-enforced", &td, &adrs) {
+    match coverage("TD-20261011-quality-gate-not-enforced", &td, &adrs, None) {
         Coverage::Covered(adr) => assert_eq!(adr.id, "ADR-0001"),
         other => panic!("{other:?}"),
     }
@@ -153,24 +161,24 @@ fn a_finding_an_accepted_adr_covers_is_a_decision() {
         "- **Decision record**: ADR-1\n",
     );
     assert!(matches!(
-        coverage("TD-20261011-ci-optional", &named, &adrs),
+        coverage("TD-20261011-ci-optional", &named, &adrs, None),
         Coverage::Covered(_)
     ));
     // A different finding stays debt.
     let other = sheet("TD-20261011-no-lint", "no lint", "");
     assert_eq!(
-        coverage("TD-20261011-no-lint", &other, &adrs),
+        coverage("TD-20261011-no-lint", &other, &adrs, None),
         Coverage::None
     );
     // A proposed ADR covers nothing.
     let proposed = CI_LABEL_ADR.replace("**Status**: accepted", "**Status**: proposed");
     let adrs = force(&proposed);
     assert_eq!(
-        coverage("TD-20261011-quality-gate-not-enforced", &td, &adrs),
+        coverage("TD-20261011-quality-gate-not-enforced", &td, &adrs, None),
         Coverage::None
     );
     assert_eq!(
-        coverage("TD-20261011-ci-optional", &named, &adrs),
+        coverage("TD-20261011-ci-optional", &named, &adrs, None),
         Coverage::NotInForce("ADR-0001".into())
     );
 }
@@ -204,7 +212,7 @@ fn legacy_table_rows_cover_the_sheets_they_link() {
     assert!(adrs[0].legacy);
     let td = sheet("TD-20260901-old", "old", "");
     assert!(matches!(
-        coverage("TD-20260901-old", &td, &adrs),
+        coverage("TD-20260901-old", &td, &adrs, None),
         Coverage::Covered(_)
     ));
     assert!(problems(legacy).is_empty());
@@ -236,7 +244,7 @@ fn settle_covered_sheets_writes_once_and_skips_rejected() {
     )
     .unwrap();
 
-    let first = settle_covered_sheets(&docs, Trust::RunBaseline(CI_LABEL_ADR)).unwrap();
+    let first = settle_covered_sheets(&docs, run(CI_LABEL_ADR)).unwrap();
     assert_eq!(
         first.settled,
         vec![
@@ -251,7 +259,7 @@ fn settle_covered_sheets_writes_once_and_skips_rejected() {
     assert_eq!(fs::read_to_string(&rejected_path).unwrap(), rejected);
 
     let after_first = fs::read_to_string(&covered).unwrap();
-    let second = settle_covered_sheets(&docs, Trust::RunBaseline(CI_LABEL_ADR)).unwrap();
+    let second = settle_covered_sheets(&docs, run(CI_LABEL_ADR)).unwrap();
     assert!(second.settled.is_empty(), "{second:?}");
     assert_eq!(fs::read_to_string(&covered).unwrap(), after_first);
 }
@@ -301,7 +309,7 @@ fn run_fixture(decisions: &str, sheet_extra: &str) -> (tempfile::TempDir, std::p
 fn an_adr_accepted_during_the_run_settles_nothing_and_goes_back_to_proposed() {
     let baseline = "# Architecture decisions\n";
     let (_dir, docs) = run_fixture(CI_LABEL_ADR, "- **Decision record**: ADR-0001\n");
-    let outcome = settle_covered_sheets(&docs, Trust::RunBaseline(baseline)).unwrap();
+    let outcome = settle_covered_sheets(&docs, run(baseline)).unwrap();
     assert!(outcome.settled.is_empty(), "{outcome:?}");
     assert_eq!(
         outcome.downgraded,
@@ -321,7 +329,7 @@ fn an_adr_accepted_during_the_run_settles_nothing_and_goes_back_to_proposed() {
     assert!(decisions.contains("only a human accepts an ADR"));
     assert!(in_force(&parse(&decisions)).is_empty());
     // The next run starts from the downgraded file: still nothing settles.
-    let again = settle_covered_sheets(&docs, Trust::RunBaseline(&decisions)).unwrap();
+    let again = settle_covered_sheets(&docs, run(&decisions)).unwrap();
     assert!(again.settled.is_empty() && again.downgraded.is_empty());
 }
 
@@ -330,7 +338,7 @@ fn a_covers_entry_added_during_the_run_does_not_count() {
     // ADR-0001 was accepted before the run, without the TD's slug.
     let baseline = CI_LABEL_ADR.replace("- **Covers**: quality-gate-not-enforced\n", "");
     let (_dir, docs) = run_fixture(CI_LABEL_ADR, "");
-    let outcome = settle_covered_sheets(&docs, Trust::RunBaseline(&baseline)).unwrap();
+    let outcome = settle_covered_sheets(&docs, run(&baseline)).unwrap();
     assert!(outcome.settled.is_empty(), "{outcome:?}");
     assert!(
         outcome.downgraded.is_empty(),
@@ -341,7 +349,7 @@ fn a_covers_entry_added_during_the_run_does_not_count() {
 #[test]
 fn an_adr_accepted_before_the_run_still_settles() {
     let (_dir, docs) = run_fixture(CI_LABEL_ADR, "");
-    let outcome = settle_covered_sheets(&docs, Trust::RunBaseline(CI_LABEL_ADR)).unwrap();
+    let outcome = settle_covered_sheets(&docs, run(CI_LABEL_ADR)).unwrap();
     assert_eq!(outcome.settled.len(), 1, "{outcome:?}");
     assert!(outcome.downgraded.is_empty());
     // Superseding it during the run only removes coverage (the safe side).
@@ -349,7 +357,7 @@ fn an_adr_accepted_before_the_run_still_settles() {
         &CI_LABEL_ADR.replace("**Status**: accepted", "**Status**: superseded by ADR-0002"),
         "",
     );
-    let outcome = settle_covered_sheets(&docs2, Trust::RunBaseline(CI_LABEL_ADR)).unwrap();
+    let outcome = settle_covered_sheets(&docs2, run(CI_LABEL_ADR)).unwrap();
     assert!(outcome.settled.is_empty());
 }
 
@@ -386,4 +394,139 @@ fn downgrade_touches_only_the_named_adrs_status() {
         "the fence is left alone"
     );
     assert_eq!(lowered.lines().count(), two.lines().count());
+}
+
+/// Two ADRs accepted before the run, neither covering a slug by `Covers`.
+const TWO_ADRS: &str = "## ADR-0001: CI is label-triggered\n\n- **Status**: accepted\n- **Date**: 2026-08-28\n\n### Context\n\nc\n\n### Decision\n\nd\n\n### Consequences\n\nq\n\n## ADR-0002: No ORM\n\n- **Status**: accepted\n- **Date**: 2026-08-28\n\n### Context\n\nc\n\n### Decision\n\nd\n\n### Consequences\n\nq\n";
+
+fn write_sheet(docs: &std::path::Path, id: &str, extra: &str) {
+    fs::write(
+        docs.join(format!("tech-debt/{id}.md")),
+        sheet(id, "real debt", extra),
+    )
+    .unwrap();
+}
+
+fn status_of(docs: &std::path::Path, id: &str) -> Option<TdDecision> {
+    td_decision(&fs::read_to_string(docs.join(format!("tech-debt/{id}.md"))).unwrap())
+}
+
+#[test]
+fn a_record_line_the_run_writes_on_a_new_sheet_settles_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let docs = dir.path().join("docs");
+    fs::create_dir_all(docs.join("tech-debt")).unwrap();
+    fs::write(docs.join(DECISIONS_FILE), TWO_ADRS).unwrap();
+    let start = StartOfRun::capture(&docs);
+    assert_eq!(start.records, "");
+    // The TD step writes a real finding and cites an unrelated accepted ADR.
+    write_sheet(
+        &docs,
+        "TD-20261011-sql-injection",
+        "- **Decision record**: ADR-0001\n",
+    );
+    let outcome = settle_covered_sheets(&docs, start.trust()).unwrap();
+    assert!(outcome.settled.is_empty(), "{outcome:?}");
+    assert_eq!(
+        outcome.not_in_force,
+        vec![
+            "TD-20261011-sql-injection → ADR-0001 (Decision record written during the run)"
+                .to_string()
+        ]
+    );
+    assert_eq!(status_of(&docs, "TD-20261011-sql-injection"), None);
+}
+
+#[test]
+fn a_record_line_the_run_adds_or_changes_on_an_existing_sheet_settles_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let docs = dir.path().join("docs");
+    fs::create_dir_all(docs.join("tech-debt")).unwrap();
+    fs::write(docs.join(DECISIONS_FILE), TWO_ADRS).unwrap();
+    write_sheet(&docs, "TD-20261001-no-record", "");
+    write_sheet(
+        &docs,
+        "TD-20261001-human",
+        "- **Decision record**: ADR-0002\n",
+    );
+    let start = StartOfRun::capture(&docs);
+    assert_eq!(start.records, "TD-20261001-human ADR-0002\n");
+    // The REVERIFY block rewrites both sheets during the run.
+    write_sheet(
+        &docs,
+        "TD-20261001-no-record",
+        "- **Decision record**: ADR-0001\n",
+    );
+    write_sheet(
+        &docs,
+        "TD-20261001-human",
+        "- **Decision record**: ADR-0001\n",
+    );
+    let outcome = settle_covered_sheets(&docs, start.trust()).unwrap();
+    assert!(outcome.settled.is_empty(), "{outcome:?}");
+    assert_eq!(outcome.not_in_force.len(), 2, "{outcome:?}");
+    assert_eq!(status_of(&docs, "TD-20261001-no-record"), None);
+    assert_eq!(status_of(&docs, "TD-20261001-human"), None);
+}
+
+#[test]
+fn a_record_line_present_before_the_run_still_settles() {
+    let dir = tempfile::tempdir().unwrap();
+    let docs = dir.path().join("docs");
+    fs::create_dir_all(docs.join("tech-debt")).unwrap();
+    fs::write(docs.join(DECISIONS_FILE), TWO_ADRS).unwrap();
+    write_sheet(&docs, "TD-20261001-human", "- **Decision record**: ADR-2\n");
+    let start = StartOfRun::capture(&docs);
+    let outcome = settle_covered_sheets(&docs, start.trust()).unwrap();
+    assert_eq!(
+        outcome.settled,
+        vec!["TD-20261001-human → ADR-0002 — No ORM".to_string()]
+    );
+    assert_eq!(
+        status_of(&docs, "TD-20261001-human"),
+        Some(TdDecision::AcceptedDecision)
+    );
+    // Settled lines are part of the next run's baseline.
+    assert_eq!(
+        parse_records(&capture_records(&docs)),
+        Records::from([("TD-20261001-human".to_string(), "ADR-0002".to_string())])
+    );
+}
+
+#[test]
+fn coverage_honours_only_record_pairs_from_the_start_of_the_run() {
+    let adrs = force(TWO_ADRS);
+    let td = sheet("TD-20261011-x", "x", "- **Decision record**: ADR-0001\n");
+    let pair = |td: &str, adr: &str| Records::from([(td.to_string(), adr.to_string())]);
+    assert!(matches!(
+        coverage(
+            "TD-20261011-x",
+            &td,
+            &adrs,
+            Some(&pair("TD-20261011-x", "ADR-0001"))
+        ),
+        Coverage::Covered(_)
+    ));
+    for other in [
+        pair("TD-20261011-x", "ADR-0002"),
+        pair("TD-20261011-y", "ADR-0001"),
+        Records::new(),
+    ] {
+        assert_eq!(
+            coverage("TD-20261011-x", &td, &adrs, Some(&other)),
+            Coverage::WrittenDuringRun("ADR-0001".into())
+        );
+    }
+    // A Covers entry from the start of the run still settles a new sheet.
+    let covered = force(CI_LABEL_ADR);
+    let new = sheet("TD-20261011-quality-gate-not-enforced", "x", "");
+    assert!(matches!(
+        coverage(
+            "TD-20261011-quality-gate-not-enforced",
+            &new,
+            &covered,
+            Some(&Records::new())
+        ),
+        Coverage::Covered(_)
+    ));
 }

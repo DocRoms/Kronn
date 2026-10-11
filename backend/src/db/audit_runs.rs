@@ -11,6 +11,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
 
+use crate::core::adr::StartOfRun;
 use crate::models::{AuditRun, AuditRunStep};
 
 /// Insert a new audit run with `status = Running` and zeroed counts.
@@ -407,32 +408,38 @@ pub fn set_run_provenance(
 
 /// Record the ADR baseline of run `id` and return it: its predecessor's when
 /// it resumes one that recorded a baseline, else `found` (`docs/decisions.md`
-/// as the run found it). A resume must not trust ADRs its predecessor wrote.
+/// and the TD sheets' `Decision record` lines as the run found them). A
+/// resume must not trust ADRs or record lines its predecessor wrote.
 pub fn record_adr_baseline(
     conn: &Connection,
     id: &str,
     resumed_from: Option<&str>,
-    found: String,
-) -> Result<String> {
+    found: StartOfRun,
+) -> Result<StartOfRun> {
     let inherited = match resumed_from {
         Some(previous) => adr_baseline(conn, previous)?,
         None => None,
     };
     let baseline = inherited.unwrap_or(found);
     conn.execute(
-        "UPDATE audit_runs SET adr_baseline = ?2 WHERE id = ?1",
-        params![id, baseline],
+        "UPDATE audit_runs SET adr_baseline = ?2, adr_record_baseline = ?3 WHERE id = ?1",
+        params![id, baseline.decisions, baseline.records],
     )?;
     Ok(baseline)
 }
 
-/// The `decisions.md` text a run started from, if it recorded one.
-pub fn adr_baseline(conn: &Connection, id: &str) -> Result<Option<String>> {
+/// What a run started from, if it recorded it. Record lines missing from a
+/// row that has a decisions baseline count as none (nothing honoured).
+pub fn adr_baseline(conn: &Connection, id: &str) -> Result<Option<StartOfRun>> {
     Ok(conn
         .query_row(
-            "SELECT adr_baseline FROM audit_runs WHERE id = ?1",
+            "SELECT adr_baseline, adr_record_baseline FROM audit_runs WHERE id = ?1",
             params![id],
-            |row| row.get::<_, Option<String>>(0),
+            |row| {
+                let decisions = row.get::<_, Option<String>>(0)?;
+                let records = row.get::<_, Option<String>>(1)?.unwrap_or_default();
+                Ok(decisions.map(|decisions| StartOfRun { decisions, records }))
+            },
         )
         .optional()?
         .flatten())
@@ -1308,13 +1315,27 @@ mod tests {
         for id in ["first", "second", "third"] {
             insert_running(&conn, id, "p", "Full", "ClaudeCode", Utc::now()).unwrap();
         }
-        let before = "## ADR-0001: before\n- **Status**: accepted\n".to_string();
+        let run_start = |decisions: &str, records: &str| StartOfRun {
+            decisions: decisions.to_string(),
+            records: records.to_string(),
+        };
+        let before = run_start(
+            "## ADR-0001: before\n- **Status**: accepted\n",
+            "TD-20261001-old ADR-0001\n",
+        );
         assert_eq!(
             record_adr_baseline(&conn, "first", None, before.clone()).unwrap(),
             before
         );
-        // The interrupted run's step 9 wrote an accepted ADR: the resume ignores it.
-        let after_step9 = format!("{before}## ADR-0002: late\n- **Status**: accepted\n");
+        // The interrupted run's step 9 wrote an accepted ADR and its TD step a
+        // record line: the resume ignores both.
+        let after_step9 = run_start(
+            &format!(
+                "{}## ADR-0002: late\n- **Status**: accepted\n",
+                before.decisions
+            ),
+            "TD-20261001-old ADR-0001\nTD-20261011-new ADR-0001\n",
+        );
         assert_eq!(
             record_adr_baseline(&conn, "second", Some("first"), after_step9.clone()).unwrap(),
             before
@@ -1325,6 +1346,7 @@ mod tests {
             record_adr_baseline(&conn, "third", Some("missing"), after_step9.clone()).unwrap(),
             after_step9
         );
+        assert_eq!(adr_baseline(&conn, "third").unwrap(), Some(after_step9));
     }
 
     fn fresh_conn() -> Connection {

@@ -401,32 +401,95 @@ pub fn decision_record(content: &str) -> Option<String> {
     field(&sheet_body(content), RECORD_FIELD).and_then(|v| find_adr_id(&v))
 }
 
+/// `(TD id, ADR id)` for each `Decision record` line on the TD sheets when a
+/// run started.
+pub type Records = BTreeSet<(String, String)>;
+
+/// Every `<docs>/tech-debt/TD-*.md` sheet, sorted by id.
+fn td_sheets(docs_dir: &Path) -> Vec<(String, std::path::PathBuf)> {
+    let Ok(entries) = std::fs::read_dir(docs_dir.join("tech-debt")) else {
+        return Vec::new();
+    };
+    let mut sheets: Vec<(String, std::path::PathBuf)> = entries
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .filter_map(|e| {
+            let name = e.file_name().to_str()?.to_string();
+            let id = name.strip_suffix(".md")?.to_string();
+            crate::core::td_index::is_td_id(&id).then(|| (id, e.path()))
+        })
+        .collect();
+    sheets.sort();
+    sheets
+}
+
+/// The `Decision record` lines of the TD sheets as they are now, one
+/// `TD-id ADR-id` per line: what a run stores at its start.
+pub fn capture_records(docs_dir: &Path) -> String {
+    let mut out = String::new();
+    for (id, path) in td_sheets(docs_dir) {
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if let Some(adr) = decision_record(&content) {
+            out.push_str(&format!("{id} {adr}\n"));
+        }
+    }
+    out
+}
+
+/// The pairs of a [`capture_records`] text.
+pub fn parse_records(text: &str) -> Records {
+    text.lines()
+        .filter_map(|line| {
+            let (td, adr) = line.trim().split_once(' ')?;
+            Some((td.to_string(), adr.trim().to_string()))
+        })
+        .collect()
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Coverage<'a> {
     /// An ADR in force covers the finding: it is a decision, not debt.
     Covered(&'a Adr),
     /// The sheet names an ADR that is not in force: it stays debt.
     NotInForce(String),
+    /// The sheet names a trusted ADR in a `Decision record` line the run
+    /// wrote or changed: it stays debt.
+    WrittenDuringRun(String),
     None,
 }
 
 /// Whether one of the `trusted` decisions covers the TD sheet `td_id`: the
 /// sheet names it in `Decision record`, or the ADR lists the TD's slug in
 /// `Covers`. Callers pass only the ADRs allowed to settle (see [`Trust`]).
-pub fn coverage<'a>(td_id: &str, content: &str, trusted: &'a [Adr]) -> Coverage<'a> {
+/// With `records`, a `Decision record` line counts only if that exact pair
+/// was on the sheet when the run started: the agent rewrites sheets.
+pub fn coverage<'a>(
+    td_id: &str,
+    content: &str,
+    trusted: &'a [Adr],
+    records: Option<&Records>,
+) -> Coverage<'a> {
     let force = trusted;
     let named = decision_record(content);
-    if let Some(adr) = named
+    let named_trusted = named
         .as_deref()
-        .and_then(|id| force.iter().find(|a| !a.legacy && a.id == id))
-    {
+        .and_then(|id| force.iter().find(|a| !a.legacy && a.id == id));
+    let predates =
+        |adr: &Adr| records.is_none_or(|r| r.contains(&(td_id.to_string(), adr.id.clone())));
+    if let Some(adr) = named_trusted.filter(|a| predates(a)) {
         return Coverage::Covered(adr);
     }
     let slug = td_slug(td_id);
     if let Some(adr) = force.iter().find(|a| a.covers.contains(&slug)) {
         return Coverage::Covered(adr);
     }
-    named.map_or(Coverage::None, Coverage::NotInForce)
+    match (named, named_trusted) {
+        (Some(id), Some(_)) => Coverage::WrittenDuringRun(id),
+        (Some(id), None) => Coverage::NotInForce(id),
+        (None, _) => Coverage::None,
+    }
 }
 
 fn record_line(adr: &Adr) -> String {
@@ -494,11 +557,42 @@ pub fn settle_sheet(content: &str, adr: &Adr) -> String {
 #[derive(Debug, Clone, Copy)]
 pub enum Trust<'a> {
     /// An audit run: only the decisions already in force in `decisions.md`
-    /// when the run started (this text), in that version. ADRs accepted since
-    /// are downgraded to `proposed` and left to a human.
-    RunBaseline(&'a str),
+    /// when the run started (`decisions`), in that version. ADRs accepted
+    /// since are downgraded to `proposed` and left to a human, even one a
+    /// human accepted mid-run or during a pause: it counts from the next fresh
+    /// run. A `Decision record` line counts only if it is in `records`
+    /// ([`capture_records`] at the start of the run).
+    RunBaseline {
+        decisions: &'a str,
+        records: &'a str,
+    },
     /// A validation card: only the ADRs the card itself just appended.
     CardAccepted(&'a [String]),
+}
+
+/// What an audit run found before its agent wrote anything: `decisions.md`
+/// and the `Decision record` lines of the TD sheets. A resume keeps its
+/// predecessor's.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StartOfRun {
+    pub decisions: String,
+    pub records: String,
+}
+
+impl StartOfRun {
+    pub fn capture(docs_dir: &Path) -> Self {
+        Self {
+            decisions: read_decisions(docs_dir),
+            records: capture_records(docs_dir),
+        }
+    }
+
+    pub fn trust(&self) -> Trust<'_> {
+        Trust::RunBaseline {
+            decisions: &self.decisions,
+            records: &self.records,
+        }
+    }
 }
 
 /// The ADRs allowed to settle under `trust`, and the ids of ADRs accepted
@@ -506,7 +600,10 @@ pub enum Trust<'a> {
 pub fn trusted(current: &[Adr], trust: Trust) -> (Vec<Adr>, Vec<String>) {
     let now = in_force(current);
     match trust {
-        Trust::RunBaseline(baseline) => {
+        Trust::RunBaseline {
+            decisions: baseline,
+            ..
+        } => {
             let base = parse(baseline);
             let before = in_force(&base);
             let kept = before
@@ -587,7 +684,8 @@ pub fn read_decisions(docs_dir: &Path) -> String {
 pub struct AdrSettleOutcome {
     /// `TD-x → ADR-y — title`, one per sheet settled by this pass.
     pub settled: Vec<String>,
-    /// `TD-x → ADR-y`: the sheet names an ADR that is not in force.
+    /// `TD-x → ADR-y`: the sheet names an ADR that is not in force, or in a
+    /// `Decision record` line written during the run.
     pub not_in_force: Vec<String>,
     /// Incomplete ADRs (see [`problems`]).
     pub problems: Vec<String>,
@@ -612,6 +710,10 @@ pub fn settle_covered_sheets(docs_dir: &Path, trust: Trust) -> Result<AdrSettleO
     };
     let current = parse(&decisions);
     let (adrs, late) = trusted(&current, trust);
+    let records = match trust {
+        Trust::RunBaseline { records, .. } => Some(parse_records(records)),
+        Trust::CardAccepted(_) => None,
+    };
     let mut outcome = AdrSettleOutcome {
         problems: problems(&decisions),
         ..AdrSettleOutcome::default()
@@ -626,24 +728,11 @@ pub fn settle_covered_sheets(docs_dir: &Path, trust: Trust) -> Result<AdrSettleO
             .map(Adr::reference)
             .collect();
     }
-    let Ok(entries) = std::fs::read_dir(docs_dir.join("tech-debt")) else {
-        return Ok(outcome);
-    };
-    let mut sheets: Vec<(String, std::path::PathBuf)> = entries
-        .flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
-        .filter_map(|e| {
-            let name = e.file_name().to_str()?.to_string();
-            let id = name.strip_suffix(".md")?.to_string();
-            crate::core::td_index::is_td_id(&id).then(|| (id, e.path()))
-        })
-        .collect();
-    sheets.sort();
-    for (id, path) in sheets {
+    for (id, path) in td_sheets(docs_dir) {
         let Ok(content) = std::fs::read_to_string(&path) else {
             continue;
         };
-        match coverage(&id, &content, &adrs) {
+        match coverage(&id, &content, &adrs, records.as_ref()) {
             Coverage::Covered(adr) => {
                 let decision = td_decision(&content);
                 if decision == Some(TdDecision::Rejected) {
@@ -660,6 +749,9 @@ pub fn settle_covered_sheets(docs_dir: &Path, trust: Trust) -> Result<AdrSettleO
                 outcome.settled.push(format!("{id} → {}", adr.reference()));
             }
             Coverage::NotInForce(adr_id) => outcome.not_in_force.push(format!("{id} → {adr_id}")),
+            Coverage::WrittenDuringRun(adr_id) => outcome.not_in_force.push(format!(
+                "{id} → {adr_id} (Decision record written during the run)"
+            )),
             Coverage::None => {}
         }
     }
@@ -670,17 +762,23 @@ pub fn settle_covered_sheets(docs_dir: &Path, trust: Trust) -> Result<AdrSettleO
 /// started), for the prompt of a step that writes TDs. Empty when there is none.
 pub fn in_force_prompt_block(docs_dir: &Path, baseline: &str) -> String {
     let current = parse(&read_decisions(docs_dir));
-    let (force, _) = trusted(&current, Trust::RunBaseline(baseline));
+    let (force, _) = trusted(
+        &current,
+        Trust::RunBaseline {
+            decisions: baseline,
+            records: "",
+        },
+    );
     if force.is_empty() {
         return String::new();
     }
     let mut out = String::from(
         "## Decisions in force (docs/decisions.md) — not debt\n\
 These ADRs were accepted before this run. A finding one of them explains is a recorded choice: do NOT write a TD for it. \
-An existing sheet it explains gets `- **Decision record**: <ADR id>` under its Status line instead. \
+Never add or change a `Decision record` line on a TD sheet: Kronn writes it when it settles a sheet, and one written during the run is ignored. \
 Evidence that a decision now causes harm goes in the index `## Coverage gaps` section, naming the ADR, so the validation asks whether to supersede it. \
 No other ADR covers anything in this run: one accepted during the run goes back to `proposed` for a human. \
-After the steps, Kronn settles every TD sheet these ADRs cover (by `Decision record`, or by a TD slug in `Covers`) as `Accepted decision`.\n",
+After the steps, Kronn settles every TD sheet these ADRs cover (by a TD slug in `Covers`, or a `Decision record` line already there before the run) as `Accepted decision`; the validation asks the human about any other.\n",
     );
     for adr in &force {
         let covers = if adr.covers.is_empty() {

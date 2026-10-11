@@ -562,8 +562,9 @@ pub(crate) async fn run_partial_pipeline(
             == crate::core::anti_halluc::AntiHallucMode::Enforce;
         let step8_selected = requested_steps.iter()
             .any(|&n| chain[n - 1].target_file.ends_with("inconsistencies-tech-debt.md"));
-        // KT-1174 — only the ADRs in force before this refresh settle a TD.
-        let adr_baseline = crate::core::adr::read_decisions(&project_path.join("docs"));
+        // KT-1174 — only the ADRs in force and the TD record lines present
+        // before this refresh settle a TD.
+        let adr_baseline = crate::core::adr::StartOfRun::capture(&project_path.join("docs"));
         let (detector_signals, prior_td_digests) = if step8_selected {
             let p = project_path.clone();
             let signals = tokio::task::spawn_blocking(move || {
@@ -662,7 +663,7 @@ pub(crate) async fn run_partial_pipeline(
             if let Some(block) = revalidation.as_ref().and_then(|r| r.blocks.get(&step)) {
                 full_prompt.push_str(block);
             }
-            full_prompt.push_str(&super::decisions_context_block(&project_path, analysis_step, &adr_baseline));
+            full_prompt.push_str(&super::decisions_context_block(&project_path, analysis_step, &adr_baseline.decisions));
 
             // Rewrite-proof snapshot BEFORE the agent runs — compared as the
             // LAST gate after CLI/validator (and step-8/enforce gates when
@@ -1377,7 +1378,7 @@ pub(crate) async fn run_partial_pipeline(
             let baseline = adr_baseline.clone();
             tokio::task::spawn_blocking(move || {
                 // A trusted ADR settles its sheets before the scope is read.
-                let trust = crate::core::adr::Trust::RunBaseline(&baseline);
+                let trust = baseline.trust();
                 if let Err(e) = crate::core::adr::settle_covered_sheets(&pp.join("docs"), trust) {
                     tracing::warn!("ADR check after the refresh failed: {e}");
                 }

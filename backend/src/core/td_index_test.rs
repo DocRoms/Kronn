@@ -2,7 +2,10 @@ use super::*;
 use std::fs;
 use std::path::PathBuf;
 
-const NO_ADR: crate::core::adr::Trust = crate::core::adr::Trust::RunBaseline("");
+const NO_ADR: crate::core::adr::Trust = crate::core::adr::Trust::RunBaseline {
+    decisions: "",
+    records: "",
+};
 
 fn sheet(id: &str, title: &str, area: &str, severity: &str, status: &str, extra: &str) -> String {
     format!(
@@ -371,7 +374,14 @@ fn a_finding_an_accepted_adr_covers_leaves_the_index_and_references_it() {
     w("TD-20261011-no-lint-in-ci", "No lint step in CI");
 
     let baseline = fs::read_to_string(docs.join("decisions.md")).unwrap();
-    let outcome = resync(&docs, crate::core::adr::Trust::RunBaseline(&baseline)).unwrap();
+    let outcome = resync(
+        &docs,
+        crate::core::adr::Trust::RunBaseline {
+            decisions: &baseline,
+            records: "",
+        },
+    )
+    .unwrap();
     assert_eq!(
         outcome.adr_settled,
         vec![format!("{covered} → ADR-0001 — CI is label-triggered")]
@@ -417,7 +427,14 @@ fn an_adr_accepted_during_the_run_leaves_its_finding_in_the_index_for_validation
     )
     .unwrap();
 
-    let outcome = resync(&docs, crate::core::adr::Trust::RunBaseline(baseline)).unwrap();
+    let outcome = resync(
+        &docs,
+        crate::core::adr::Trust::RunBaseline {
+            decisions: baseline,
+            records: "",
+        },
+    )
+    .unwrap();
     assert!(outcome.adr_settled.is_empty(), "{outcome:?}");
     assert_eq!(
         outcome.adr_downgraded,

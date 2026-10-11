@@ -181,8 +181,13 @@ Release notes for 0.9.3 and earlier are available in the
   in a validation card, may settle a TD. An ADR the run itself wrote or
   flipped to `accepted` goes back to `proposed`, and the finding stays in the
   validation, where accepting it as a decision records a covering ADR. A
-  resumed run keeps the baseline of the run it continues (migration 252,
-  `audit_runs.adr_baseline`). The steps that write TDs receive only the ADRs
+  sheet's `Decision record` line counts only if that line, naming that ADR,
+  was on the sheet when the run started: one the run writes on a new sheet,
+  adds to an existing one or changes leaves the finding in the validation.
+  An ADR a human accepts during a run, or while it is paused before a
+  resume, counts from the next fresh run. A resumed run keeps the baseline
+  of the run it continues (migration 252, `audit_runs.adr_baseline` and
+  `audit_runs.adr_record_baseline`). The steps that write TDs receive only the ADRs
   in force before the run. Existing tables keep working: a row that links a
   TD sheet still covers it.
 
