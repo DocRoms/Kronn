@@ -70,6 +70,24 @@ pub struct TemplateMergeView {
     /// Docs that only exist untracked in the checkout: a worktree cannot see them.
     pub untracked_in_checkout: Vec<String>,
     pub table_markdown: String,
+    pub merge: TemplateMergeState,
+}
+
+/// Where a merge stands, read from git without fetching or writing anything.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
+pub struct TemplateMergeState {
+    pub branch: String,
+    pub worktree_exists: bool,
+    pub worktree_path: Option<String>,
+    pub branch_exists: bool,
+    /// Commits on the merge branch that neither the checkout's current branch
+    /// nor the remote default branch contains yet.
+    pub branch_ahead_commits: u32,
+    /// Files proposed in the merge worktree and not accepted yet.
+    pub pending_files: u32,
+    /// `None` when the checkout is detached or not a git repository.
+    pub checkout_branch: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -174,6 +192,7 @@ fn view(
         existing_targets: plan.existing_targets.clone(),
         untracked_in_checkout,
         table_markdown: docs_merge::render_correspondence_markdown(plan),
+        merge: TemplateMergeState::default(),
     }
 }
 
@@ -185,6 +204,7 @@ pub fn preview_plan(repo: &Path, template_docs: &Path) -> Result<TemplateMergeVi
         (docs_merge::snapshot_tree(repo)?, Vec::new())
     };
     let plan = plan_on(repo, &existing, template_docs)?;
+    let merge = merge_state(repo);
     let files = plan
         .writes
         .iter()
@@ -195,33 +215,86 @@ pub fn preview_plan(repo: &Path, template_docs: &Path) -> Result<TemplateMergeVi
             diff: docs_merge::addition_diff(&w.path, &w.content),
         })
         .collect();
-    Ok(view(
-        &plan,
-        MergeBase::Local,
-        "HEAD".into(),
-        files,
-        untracked,
-    ))
+    let mut out = view(&plan, MergeBase::Local, "HEAD".into(), files, untracked);
+    out.merge = merge;
+    Ok(out)
+}
+
+/// The remote default branch as last fetched; never fetches.
+fn known_remote_default_ref(repo: &Path) -> Option<String> {
+    if let Ok(head) = git(
+        repo,
+        &[
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ],
+    ) {
+        let head = head.trim();
+        if !head.is_empty() {
+            return Some(head.to_string());
+        }
+    }
+    ["origin/main", "origin/master"]
+        .into_iter()
+        .find(|candidate| git(repo, &["rev-parse", "--verify", "--quiet", candidate]).is_ok())
+        .map(str::to_string)
 }
 
 fn remote_default_ref(repo: &Path) -> Result<String, String> {
     git(repo, &["fetch", "--prune", "origin"])
         .map_err(|e| format!("{e} — check the remote and its credentials, then resume"))?;
-    if let Ok(head) = git(
-        repo,
-        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-    ) {
-        let head = head.trim();
-        if !head.is_empty() {
-            return Ok(head.to_string());
-        }
+    known_remote_default_ref(repo)
+        .ok_or_else(|| "the remote has no default branch (origin/HEAD, main or master)".into())
+}
+
+/// Commits only the merge branch has. The remote default branch is excluded
+/// too: a remote-based merge must not count the upstream commits it started from.
+fn merge_branch_ahead(repo: &Path) -> u32 {
+    let branch = format!("refs/heads/{}", docs_merge::MERGE_BRANCH);
+    let remote = known_remote_default_ref(repo);
+    let mut args = vec!["rev-list", "--count", branch.as_str(), "--not", "HEAD"];
+    if let Some(remote) = remote.as_deref() {
+        args.push(remote);
     }
-    for candidate in ["origin/main", "origin/master"] {
-        if git(repo, &["rev-parse", "--verify", "--quiet", candidate]).is_ok() {
-            return Ok(candidate.to_string());
-        }
+    git(repo, &args)
+        .ok()
+        .and_then(|out| out.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+fn pending_files(worktree: &Path) -> u32 {
+    let Ok(existing) = tracked_files(worktree) else {
+        return 0;
+    };
+    let docs_dir = docs_merge::choose_docs_dir(&existing, None);
+    untracked_under(worktree, &docs_dir).map_or(0, |files| files.len() as u32)
+}
+
+/// Read-only: worktree list, refs and counts; no fetch, no index write.
+pub fn merge_state(repo: &Path) -> TemplateMergeState {
+    let mut state = TemplateMergeState {
+        branch: docs_merge::MERGE_BRANCH.to_string(),
+        ..TemplateMergeState::default()
+    };
+    if !is_git_repo(repo) {
+        return state;
     }
-    Err("the remote has no default branch (origin/HEAD, main or master)".into())
+    state.checkout_branch = git(repo, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .ok()
+        .map(|b| b.trim().to_string())
+        .filter(|b| !b.is_empty());
+    if let Some(worktree) = existing_merge_worktree(repo) {
+        state.worktree_exists = true;
+        state.pending_files = pending_files(&worktree);
+        state.worktree_path = Some(worktree.to_string_lossy().into_owned());
+    }
+    state.branch_exists = branch_exists(repo);
+    if state.branch_exists {
+        state.branch_ahead_commits = merge_branch_ahead(repo);
+    }
+    state
 }
 
 fn existing_merge_worktree(repo: &Path) -> Option<PathBuf> {
@@ -396,6 +469,7 @@ pub fn run_merge_in_worktree(
     out.worktree_path = Some(worktree.to_string_lossy().into_owned());
     out.branch = Some(docs_merge::MERGE_BRANCH.to_string());
     out.resumed = resumed;
+    out.merge = merge_state(repo);
     Ok(out)
 }
 
@@ -476,7 +550,7 @@ fn respond<T: Serialize>(result: Result<T, String>) -> Json<ApiResponse<T>> {
     }
 }
 
-/// GET /api/projects/:id/template-merge/plan — read-only correspondence table and diffs.
+/// GET /api/projects/:id/template-merge/plan — read-only correspondence table, diffs and merge state.
 pub async fn template_merge_plan(
     State(state): State<AppState>,
     AxPath(id): AxPath<String>,

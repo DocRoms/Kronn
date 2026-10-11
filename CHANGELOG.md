@@ -48,6 +48,14 @@ Release notes for 0.9.3 and earlier are available in the
   one diff per file that you accept one by one or all at once. You can also
   resume or abandon the merge. Every error says what to fix and offers
   "Reprendre".
+- The template merge plan now says where a merge stands (KT-1182). Its new
+  `merge` field reports whether the `kronn/template-v2-merge` worktree and
+  branch exist, how many files wait for review, and how many commits the
+  branch has that the checkout's branch (and the remote default branch)
+  does not. It reads git only: no fetch, no write. The panel opens on "Fusion
+  en cours" with Reprendre and Abandonner when a worktree exists, and on
+  "Fusion acceptée, à intégrer (N commits)" when accepted commits wait to be
+  merged. "Lancer l'audit" no longer offers the merge again in that case.
 - Audit drift is now measured per citation (KT-1175, KT-1078). Validation,
   and every audit baseline, records a fingerprint of each `[src: path:line]`
   the docs cite in `docs/citations.json`: path, line and a SHA-256 of the

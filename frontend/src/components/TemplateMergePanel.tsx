@@ -3,11 +3,11 @@ import { AlertTriangle, CheckCircle2, GitMerge, RotateCcw, Trash2, X } from 'luc
 import type { TemplateMergeOffer } from '../hooks/useTemplateMergeOffer';
 import { projects as projectsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
-import { countByAction, errorText, MAPPING_ACTIONS } from '../lib/templateMerge';
+import { countByAction, errorText, MAPPING_ACTIONS, templateMergeStatus } from '../lib/templateMerge';
 import { LoadingState } from './LoadingState';
 import { GitDiffViewer } from './GitDiffViewer';
 import type {
-  Correspondence, MappingAction, MergeBase, TemplateMergeAccepted, TemplateMergeView,
+  Correspondence, MappingAction, MergeBase, TemplateMergeAccepted, TemplateMergeState, TemplateMergeView,
 } from '../types/generated';
 import './GitPanel.css';
 import './TemplateMergePanel.css';
@@ -140,12 +140,84 @@ function UntrackedWarning({ paths, onRecheck }: { paths: string[]; onRecheck: ()
   );
 }
 
+/** Abandon behind a confirmation; `warning` names what else would be lost. */
+function DiscardControl({ onDiscard, warning }: { onDiscard: () => void; warning?: string }) {
+  const { t } = useLabels();
+  const [confirming, setConfirming] = useState(false);
+  if (!confirming) {
+    return (
+      <button type="button" className="tm-btn tm-btn-danger-ghost" onClick={() => setConfirming(true)} data-testid="template-merge-discard">
+        <Trash2 size={12} /> {t('templateMerge.discard')}
+      </button>
+    );
+  }
+  return (
+    <span className="tm-confirm">
+      <span>{t('templateMerge.discardConfirmText')}{warning && <> <strong>{warning}</strong></>}</span>
+      <button type="button" className="tm-btn tm-btn-danger" onClick={onDiscard} data-testid="template-merge-discard-confirm">
+        <Trash2 size={12} /> {t('templateMerge.discardConfirm')}
+      </button>
+      <button type="button" className="tm-btn" onClick={() => setConfirming(false)}>
+        {t('templateMerge.cancel')}
+      </button>
+    </span>
+  );
+}
+
+/** A merge already on disk, shown from the plan before any POST. */
+function MergeStateBox({ merge, onResume, onDiscard }: {
+  merge: TemplateMergeState;
+  onResume: () => void;
+  onDiscard: () => void;
+}) {
+  const { t } = useLabels();
+  const status = templateMergeStatus(merge);
+  if (status === 'none') return null;
+  const ahead = merge.branch_ahead_commits;
+  if (status === 'to_integrate') {
+    return (
+      <div className="tm-state" data-status={status} role="status" data-testid="template-merge-to-integrate">
+        <CheckCircle2 size={14} className="tm-state-icon" />
+        <div>
+          <strong>{t('templateMerge.integrate.title', ahead)}</strong>
+          <p>{t('templateMerge.integrate.desc', merge.branch, merge.checkout_branch ?? t('templateMerge.integrate.currentBranch'))}</p>
+          <div className="tm-actions">
+            <button type="button" className="tm-btn" onClick={onResume} data-testid="template-merge-state-resume">
+              <RotateCcw size={12} /> {t('templateMerge.resume')}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="tm-state" data-status={status} role="status" data-testid="template-merge-in-progress">
+      <GitMerge size={14} className="tm-state-icon" />
+      <div>
+        <strong>{t('templateMerge.progress.title')}</strong>
+        <p>{t('templateMerge.progress.desc', merge.pending_files, ahead)}</p>
+        {merge.worktree_path && (
+          <p className="tm-dim tm-small">{t('templateMerge.result.worktree')} <code>{merge.worktree_path}</code></p>
+        )}
+        <div className="tm-actions">
+          <button type="button" className="tm-btn tm-btn-primary" onClick={onResume} data-testid="template-merge-state-resume">
+            <RotateCcw size={12} /> {t('templateMerge.resume')}
+          </button>
+          <DiscardControl
+            onDiscard={onDiscard}
+            warning={ahead > 0 ? t('templateMerge.progress.discardLosesCommits', ahead) : undefined}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function TemplateMergePanel({ projectId, gate = false, onLaunchAuditAnyway, onClose }: TemplateMergePanelProps) {
   const { t, fix, loading } = useLabels();
   const [phase, setPhase] = useState<Phase>({ kind: 'loading', op: 'plan' });
   const [base, setBase] = useState<MergeBase>('local');
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [confirmDiscard, setConfirmDiscard] = useState(false);
   const busy = useRef(false);
 
   // One request at a time; every failure keeps a "Reprendre" that replays it.
@@ -166,7 +238,6 @@ export function TemplateMergePanel({ projectId, gate = false, onLaunchAuditAnywa
 
   const showResult = useCallback((view: TemplateMergeView, accepted: TemplateMergeAccepted | null) => {
     setSelected(new Set(view.files.map(f => f.path)));
-    setConfirmDiscard(false);
     setPhase({ kind: 'result', view, accepted });
   }, []);
 
@@ -200,6 +271,8 @@ export function TemplateMergePanel({ projectId, gate = false, onLaunchAuditAnywa
     [resultFiles, selected],
   );
 
+  const gateInProgress = phase.kind === 'plan' && templateMergeStatus(phase.plan.merge) === 'in_progress';
+
   return (
     <section className="tm-panel" data-testid="template-merge-panel" aria-label={t('templateMerge.title')}>
       <header className="tm-header">
@@ -217,7 +290,7 @@ export function TemplateMergePanel({ projectId, gate = false, onLaunchAuditAnywa
 
       {gate && (
         <div className="tm-gate" data-testid="template-merge-gate">
-          <p>{t('templateMerge.gate.desc')}</p>
+          <p>{t(gateInProgress ? 'templateMerge.gate.inProgress' : 'templateMerge.gate.desc')}</p>
           {onLaunchAuditAnyway && (
             <button type="button" className="tm-btn" onClick={onLaunchAuditAnyway}>
               {t('templateMerge.gate.auditAnyway')}
@@ -242,7 +315,18 @@ export function TemplateMergePanel({ projectId, gate = false, onLaunchAuditAnywa
         </div>
       )}
 
-      {phase.kind === 'plan' && (
+      {phase.kind === 'plan' && templateMergeStatus(phase.plan.merge) !== 'none' && (
+        <>
+          <MergeStateBox merge={phase.plan.merge} onResume={() => start(base)} onDiscard={discard} />
+          <UntrackedWarning paths={phase.plan.untracked_in_checkout} onRecheck={loadPlan} />
+          <details className="tm-details">
+            <summary>{t('templateMerge.result.table', phase.plan.correspondence.length)}</summary>
+            <CorrespondenceTable plan={phase.plan} />
+          </details>
+        </>
+      )}
+
+      {phase.kind === 'plan' && templateMergeStatus(phase.plan.merge) === 'none' && (
         <>
           <UntrackedWarning paths={phase.plan.untracked_in_checkout} onRecheck={loadPlan} />
           <p className="tm-summary">
@@ -359,21 +443,7 @@ export function TemplateMergePanel({ projectId, gate = false, onLaunchAuditAnywa
             <button type="button" className="tm-btn" onClick={() => start(base)} data-testid="template-merge-resume">
               <RotateCcw size={12} /> {t('templateMerge.resume')}
             </button>
-            {confirmDiscard ? (
-              <span className="tm-confirm">
-                <span>{t('templateMerge.discardConfirmText')}</span>
-                <button type="button" className="tm-btn tm-btn-danger" onClick={discard} data-testid="template-merge-discard-confirm">
-                  <Trash2 size={12} /> {t('templateMerge.discardConfirm')}
-                </button>
-                <button type="button" className="tm-btn" onClick={() => setConfirmDiscard(false)}>
-                  {t('templateMerge.cancel')}
-                </button>
-              </span>
-            ) : (
-              <button type="button" className="tm-btn tm-btn-danger-ghost" onClick={() => setConfirmDiscard(true)} data-testid="template-merge-discard">
-                <Trash2 size={12} /> {t('templateMerge.discard')}
-              </button>
-            )}
+            <DiscardControl onDiscard={discard} />
           </div>
         </>
       )}
@@ -404,7 +474,29 @@ export function TemplateMergeOfferSlot({ offer, projectId }: { offer: TemplateMe
       />
     );
   }
+  if (offer.status === 'to_integrate' && offer.merge) {
+    return (
+      <div className="tm-offer" data-testid="template-merge-offer" data-status={offer.status}>
+        <CheckCircle2 size={14} className="tm-state-icon" />
+        <span>{t('templateMerge.integrate.title', offer.merge.branch_ahead_commits)}</span>
+        <button type="button" className="tm-btn" onClick={offer.open}>
+          {t('templateMerge.offer.view')}
+        </button>
+      </div>
+    );
+  }
   if (!offer.eligible) return null;
+  if (offer.status === 'in_progress') {
+    return (
+      <div className="tm-offer" data-testid="template-merge-offer" data-status={offer.status}>
+        <GitMerge size={14} className="tm-header-icon" />
+        <span>{t('templateMerge.offer.inProgress')}</span>
+        <button type="button" className="tm-btn tm-btn-primary" onClick={offer.open}>
+          {t('templateMerge.resume')}
+        </button>
+      </div>
+    );
+  }
   return (
     <div className="tm-offer" data-testid="template-merge-offer">
       <GitMerge size={14} className="tm-header-icon" />

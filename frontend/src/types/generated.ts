@@ -8866,11 +8866,29 @@ paths: Array<string>, };
 
 export type TemplateMergeRequest = { base?: MergeBase, };
 
+/**
+ * Where a merge stands, read from git without fetching or writing anything.
+ */
+export type TemplateMergeState = { branch: string, worktree_exists: boolean, worktree_path: string | null, branch_exists: boolean,
+/**
+ * Commits on the merge branch that neither the checkout's current branch
+ * nor the remote default branch contains yet.
+ */
+branch_ahead_commits: number,
+/**
+ * Files proposed in the merge worktree and not accepted yet.
+ */
+pending_files: number,
+/**
+ * `None` when the checkout is detached or not a git repository.
+ */
+checkout_branch: string | null, };
+
 export type TemplateMergeView = { docs_dir: string, base: MergeBase, base_ref: string, worktree_path: string | null, branch: string | null, resumed: boolean, correspondence: Array<Correspondence>, files: Array<MergeFileDiff>, existing_targets: Array<string>,
 /**
  * Docs that only exist untracked in the checkout: a worktree cannot see them.
  */
-untracked_in_checkout: Array<string>, table_markdown: string, };
+untracked_in_checkout: Array<string>, table_markdown: string, merge: TemplateMergeState, };
 
 export type TestApiCallRequest = {
 /**

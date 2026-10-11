@@ -6064,6 +6064,15 @@ const zh: TranslationDict = {
   "templateMerge.discardConfirmText": "删除合并 worktree 及其未提交的文件？",
   "templateMerge.discardConfirm": "确认放弃",
   "templateMerge.cancel": "取消",
+  "templateMerge.gate.inProgress": "该仓库有一个进行中的模板 v2 合并：请在审计前完成或放弃它。",
+  "templateMerge.offer.inProgress": "该仓库的模板 v2 合并正在进行中。",
+  "templateMerge.offer.view": "查看",
+  "templateMerge.progress.title": "合并进行中",
+  "templateMerge.progress.desc": "合并 worktree 已存在：{0} 个文件待审核，{1} 个提交已接受。继续以审核文件，或放弃它。",
+  "templateMerge.progress.discardLosesCommits": "该分支及其 {0} 个已接受的提交将被删除。",
+  "templateMerge.integrate.title": "合并已接受，待集成（{0} 个提交）",
+  "templateMerge.integrate.desc": "请将分支 {0} 合并到 {1}（或发起 PR）。在此之前，审计不再重复提示合并。",
+  "templateMerge.integrate.currentBranch": "当前分支",
   "templateMerge.discarded": "已放弃合并：worktree 已删除，检出目录未受影响。",
 };
 

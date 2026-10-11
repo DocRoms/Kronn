@@ -14,11 +14,29 @@ vi.mock('../../lib/api', async () => {
 import { projects as projectsApi } from '../../lib/api';
 import { TemplateMergePanel, TemplateMergeOfferSlot } from '../TemplateMergePanel';
 import { useTemplateMergeOffer } from '../../hooks/useTemplateMergeOffer';
-import { offersTemplateMerge } from '../../lib/templateMerge';
-import type { TemplateMergeView } from '../../types/generated';
+import { offersTemplateMerge, templateMergeStatus } from '../../lib/templateMerge';
+import type { TemplateMergeState, TemplateMergeView } from '../../types/generated';
 
 const wrap = (ui: ReactElement) => render(<I18nProvider>{ui}</I18nProvider>);
 const api = vi.mocked(projectsApi);
+
+function mergeState(overrides: Partial<TemplateMergeState> = {}): TemplateMergeState {
+  return {
+    branch: 'kronn/template-v2-merge',
+    worktree_exists: false,
+    worktree_path: null,
+    branch_exists: false,
+    branch_ahead_commits: 0,
+    pending_files: 0,
+    checkout_branch: 'main',
+    ...overrides,
+  };
+}
+
+const IN_PROGRESS = mergeState({
+  worktree_exists: true, worktree_path: '/repo/.kronn/worktrees/template-v2-merge', branch_exists: true, pending_files: 3,
+});
+const TO_INTEGRATE = mergeState({ branch_exists: true, branch_ahead_commits: 2 });
 
 function plan(overrides: Partial<TemplateMergeView> = {}): TemplateMergeView {
   return {
@@ -40,6 +58,7 @@ function plan(overrides: Partial<TemplateMergeView> = {}): TemplateMergeView {
     existing_targets: ['docs/AGENTS.md'],
     untracked_in_checkout: [],
     table_markdown: '',
+    merge: mergeState(),
     ...overrides,
   };
 }
@@ -252,7 +271,7 @@ describe('audit entry point', () => {
     wrap(
       <TemplateMergeOfferSlot
         projectId="p1"
-        offer={{ eligible: true, mode: 'gate', open: vi.fn(), close: vi.fn(), gateLaunch: vi.fn(), launchAuditAnyway }}
+        offer={{ eligible: true, status: 'none', merge: null, mode: 'gate', open: vi.fn(), close: vi.fn(), gateLaunch: vi.fn(), launchAuditAnyway }}
       />,
     );
     const gate = await screen.findByTestId('template-merge-gate');
@@ -266,10 +285,140 @@ describe('audit entry point', () => {
     wrap(
       <TemplateMergeOfferSlot
         projectId="p1"
-        offer={{ eligible: true, mode: 'closed', open, close: vi.fn(), gateLaunch: vi.fn(), launchAuditAnyway: vi.fn() }}
+        offer={{ eligible: true, status: 'none', merge: null, mode: 'closed', open, close: vi.fn(), gateLaunch: vi.fn(), launchAuditAnyway: vi.fn() }}
       />,
     );
     fireEvent.click(screen.getByRole('button', { name: 'Voir le plan de fusion' }));
     expect(open).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('merge already on disk (KT-1182)', () => {
+  it('templateMergeStatus: worktree with work left = in progress; accepted commits alone = to integrate; merged = none', () => {
+    expect(templateMergeStatus(null)).toBe('none');
+    expect(templateMergeStatus(mergeState())).toBe('none');
+    expect(templateMergeStatus(IN_PROGRESS)).toBe('in_progress');
+    expect(templateMergeStatus(mergeState({ worktree_exists: true, branch_exists: true }))).toBe('in_progress');
+    expect(templateMergeStatus({ ...IN_PROGRESS, branch_ahead_commits: 1 })).toBe('in_progress');
+    expect(templateMergeStatus({ ...IN_PROGRESS, pending_files: 0, branch_ahead_commits: 2 })).toBe('to_integrate');
+    expect(templateMergeStatus(TO_INTEGRATE)).toBe('to_integrate');
+    expect(templateMergeStatus(mergeState({ branch_exists: true, branch_ahead_commits: 0 }))).toBe('none');
+  });
+
+  it('offersTemplateMerge: never while accepted commits wait, always while a merge is unfinished', () => {
+    expect(offersTemplateMerge(plan({ merge: TO_INTEGRATE }))).toBe(false);
+    expect(offersTemplateMerge(plan({ merge: TO_INTEGRATE, untracked_in_checkout: ['docs/a.md'] }))).toBe(false);
+    expect(offersTemplateMerge(plan({ merge: IN_PROGRESS, files: [], correspondence: [] }))).toBe(true);
+    expect(offersTemplateMerge(plan({ merge: mergeState({ branch_exists: true }) }))).toBe(true);
+    expect(offersTemplateMerge(plan({ merge: mergeState({ branch_exists: true }), files: [] }))).toBe(false);
+  });
+
+  it('shows "Fusion en cours" with resume and abandon before any POST', async () => {
+    api.templateMergePlan.mockResolvedValue(plan({ merge: { ...IN_PROGRESS, branch_ahead_commits: 1 } }));
+    wrap(<TemplateMergePanel projectId="p1" />);
+    const box = await screen.findByTestId('template-merge-in-progress');
+    expect(box).toHaveTextContent('Fusion en cours');
+    expect(box).toHaveTextContent('3 fichier(s) à valider, 1 commit(s) déjà accepté(s)');
+    expect(box).toHaveTextContent('/repo/.kronn/worktrees/template-v2-merge');
+    expect(screen.queryByTestId('template-merge-launch')).toBeNull();
+    expect(api.templateMergeStart).not.toHaveBeenCalled();
+    expect(api.templateMergeDiscard).not.toHaveBeenCalled();
+
+    fireEvent.click(within(box).getByTestId('template-merge-discard'));
+    expect(box).toHaveTextContent('La branche et ses 1 commit(s) acceptés seront supprimés.');
+    expect(api.templateMergeDiscard).not.toHaveBeenCalled();
+    fireEvent.click(within(box).getByRole('button', { name: 'Annuler' }));
+
+    fireEvent.click(within(box).getByTestId('template-merge-state-resume'));
+    await screen.findAllByTestId('template-merge-file');
+    expect(api.templateMergeStart).toHaveBeenCalledWith('p1', 'local');
+  });
+
+  it('abandons an in-progress merge after confirmation', async () => {
+    api.templateMergePlan.mockResolvedValue(plan({ merge: IN_PROGRESS }));
+    wrap(<TemplateMergePanel projectId="p1" />);
+    const box = await screen.findByTestId('template-merge-in-progress');
+    fireEvent.click(within(box).getByTestId('template-merge-discard'));
+    expect(box).not.toHaveTextContent('seront supprimés');
+    fireEvent.click(within(box).getByTestId('template-merge-discard-confirm'));
+    await screen.findByTestId('template-merge-discarded');
+    expect(api.templateMergeDiscard).toHaveBeenCalledWith('p1');
+  });
+
+  it('a failed resume of an in-progress merge keeps "Reprendre"', async () => {
+    api.templateMergePlan.mockResolvedValue(plan({ merge: IN_PROGRESS }));
+    api.templateMergeStart.mockRejectedValueOnce(new Error('worktree locked'));
+    wrap(<TemplateMergePanel projectId="p1" />);
+    fireEvent.click(await screen.findByTestId('template-merge-state-resume'));
+    const error = await screen.findByTestId('template-merge-error');
+    fireEvent.click(within(error).getByRole('button', { name: 'Reprendre' }));
+    await screen.findAllByTestId('template-merge-file');
+    expect(api.templateMergeStart).toHaveBeenCalledTimes(2);
+  });
+
+  it('shows "Fusion acceptée, à intégrer (N commits)" without launch or abandon', async () => {
+    api.templateMergePlan.mockResolvedValue(plan({ merge: TO_INTEGRATE }));
+    wrap(<TemplateMergePanel projectId="p1" />);
+    const box = await screen.findByTestId('template-merge-to-integrate');
+    expect(box).toHaveTextContent('Fusion acceptée, à intégrer (2 commits)');
+    expect(box).toHaveTextContent('Fusionnez la branche kronn/template-v2-merge dans main');
+    expect(screen.queryByTestId('template-merge-launch')).toBeNull();
+    expect(screen.queryByTestId('template-merge-discard')).toBeNull();
+    expect(screen.queryByTestId('template-merge-in-progress')).toBeNull();
+    fireEvent.click(within(box).getByTestId('template-merge-state-resume'));
+    await waitFor(() => expect(api.templateMergeStart).toHaveBeenCalledTimes(1));
+  });
+
+  it('the gate names an unfinished merge instead of a never-merged repo', async () => {
+    api.templateMergePlan.mockResolvedValue(plan({ merge: IN_PROGRESS }));
+    wrap(<TemplateMergePanel projectId="p1" gate onLaunchAuditAnyway={vi.fn()} />);
+    await screen.findByTestId('template-merge-in-progress');
+    expect(screen.getByTestId('template-merge-gate')).toHaveTextContent('Une fusion du template v2 est en cours');
+  });
+
+  it('"Lancer l\'audit" stops re-offering the merge once accepted commits wait to be integrated', async () => {
+    const audit = vi.fn();
+    api.templateMergePlan.mockResolvedValue(plan({ merge: TO_INTEGRATE }));
+    const { result: hook } = renderHook(() => useTemplateMergeOffer('p1', 'TemplateInstalled', true));
+    await waitFor(() => expect(hook.current.status).toBe('to_integrate'));
+    expect(hook.current.eligible).toBe(false);
+    await act(() => hook.current.gateLaunch(audit));
+    await act(() => hook.current.gateLaunch(audit));
+    expect(audit).toHaveBeenCalledTimes(2);
+    expect(hook.current.mode).toBe('closed');
+  });
+
+  it('"Lancer l\'audit" with an unfinished merge opens it first, and re-reads the state on close', async () => {
+    const audit = vi.fn();
+    api.templateMergePlan.mockResolvedValue(plan({ merge: IN_PROGRESS, files: [], correspondence: [] }));
+    const { result: hook } = renderHook(() => useTemplateMergeOffer('p1', 'NoTemplate', true));
+    await waitFor(() => expect(hook.current.status).toBe('in_progress'));
+    await act(() => hook.current.gateLaunch(audit));
+    expect(audit).not.toHaveBeenCalled();
+    expect(hook.current.mode).toBe('gate');
+
+    api.templateMergePlan.mockResolvedValue(plan({ merge: TO_INTEGRATE }));
+    act(() => hook.current.close());
+    await waitFor(() => expect(hook.current.status).toBe('to_integrate'));
+    expect(api.templateMergePlan).toHaveBeenCalledTimes(2);
+    await act(() => hook.current.gateLaunch(audit));
+    expect(audit).toHaveBeenCalledTimes(1);
+  });
+
+  it('the slot banner says "à intégrer" or offers to resume, by status', () => {
+    const open = vi.fn();
+    const base = { mode: 'closed' as const, open, close: vi.fn(), gateLaunch: vi.fn(), launchAuditAnyway: vi.fn() };
+    const { unmount } = wrap(
+      <TemplateMergeOfferSlot projectId="p1" offer={{ ...base, eligible: false, status: 'to_integrate', merge: TO_INTEGRATE }} />,
+    );
+    expect(screen.getByTestId('template-merge-offer')).toHaveTextContent('Fusion acceptée, à intégrer (2 commits)');
+    fireEvent.click(screen.getByRole('button', { name: 'Voir' }));
+    expect(open).toHaveBeenCalledTimes(1);
+    unmount();
+
+    wrap(<TemplateMergeOfferSlot projectId="p1" offer={{ ...base, eligible: true, status: 'in_progress', merge: IN_PROGRESS }} />);
+    expect(screen.getByTestId('template-merge-offer')).toHaveTextContent('Fusion du template v2 en cours');
+    fireEvent.click(screen.getByRole('button', { name: 'Reprendre' }));
+    expect(open).toHaveBeenCalledTimes(2);
   });
 });
