@@ -572,6 +572,12 @@ async fn a_0_8_style_kronn_folder_is_not_asked_about() {
         "<!-- kronn:section name=\"overview\" curated=\"ai\" -->\nBody\n<!-- kronn:section:end -->\n",
     )
     .unwrap();
+    // The audit Kronn recorded then: markers alone would be a human's docs.
+    std::fs::write(
+        project.join("docs/.kronn.json"),
+        r#"{"audits":[{"date":"2026-05-01","kronn_version":"0.8.4","type":"full"}]}"#,
+    )
+    .unwrap();
     crate::api::audit::briefing::save_briefing_answers(
         &h.state,
         PROJECT_ID,

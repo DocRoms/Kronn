@@ -1,20 +1,16 @@
 //! What the AI doc folder already holds (KT-1192): nothing, Kronn's own docs
 //! (updated in place, never asked about), or a human's docs (the briefing
-//! asks: another folder, or move them to `<folder>/legacy/`).
+//! asks: another folder, or move them to `<folder>/legacy/`). Kronn's docs
+//! need both proofs: a `.kronn.json` recording an audit or a bootstrap, and a
+//! structural marker. Anything less is a human's docs.
 
 use std::path::Path;
 
 use serde::Serialize;
 use ts_rs::TS;
 
-/// Markers only Kronn writes. `.kronn.json` and these decide; the AGENTS.md
-/// first-line signature is a weak extra signal.
-const KRONN_MARKERS: &[&str] = &[
-    "kronn:generated",
-    "<!-- kronn:section",
-    "kronn:doc-version",
-    "KRONN-MANAGED-BLOCK",
-];
+/// Line-leading metadata comments only Kronn writes.
+const KRONN_HEADERS: &[&str] = &["<!-- kronn:doc-version=", "<!-- kronn:generated="];
 
 /// Static-site generators whose config would break if the docs moved.
 const SITE_GENERATORS: &[&str] = &[
@@ -50,14 +46,40 @@ pub enum DocsFolderState {
     },
 }
 
+/// A Kronn structure, not a mention: outside fenced code, a line opening with
+/// a Kronn header, or `kronn:section` / managed-block markers that pair up.
+fn has_structural_marker(content: &str) -> bool {
+    let prose = crate::core::anti_halluc::strip_fenced_code(content);
+    let lines: Vec<&str> = prose.lines().map(str::trim_start).collect();
+    let count = |prefix: &str| lines.iter().filter(|l| l.starts_with(prefix)).count();
+    let paired = |open: &str, close: &str| {
+        let opens = count(open);
+        opens > 0 && opens == count(close)
+    };
+    lines
+        .iter()
+        .any(|l| KRONN_HEADERS.iter().any(|h| l.starts_with(h)))
+        || paired("<!-- kronn:section ", "<!-- kronn:section:end")
+        || paired(
+            "<!-- KRONN-MANAGED-BLOCK:START",
+            "<!-- KRONN-MANAGED-BLOCK:END",
+        )
+}
+
 fn is_marker_file(path: &Path) -> bool {
     let text_like = path
         .extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| matches!(e, "md" | "markdown" | "mdx"));
-    text_like
-        && std::fs::read_to_string(path)
-            .is_ok_and(|content| KRONN_MARKERS.iter().any(|m| content.contains(m)))
+    text_like && std::fs::read_to_string(path).is_ok_and(|c| has_structural_marker(&c))
+}
+
+/// `.kronn.json` in `dir` records an audit or a bootstrap.
+fn has_kronn_state(dir: &Path) -> bool {
+    std::fs::read_to_string(dir.join(crate::core::kronn_state::KRONN_STATE_FILENAME))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<crate::core::kronn_state::KronnState>(&raw).ok())
+        .is_some_and(|state| state.has_any_audit() || state.bootstrapped_at.is_some())
 }
 
 /// The state of `<root>/<rel>`. Never follows a symlink.
@@ -69,12 +91,7 @@ pub fn folder_state(root: &Path, rel: &str) -> DocsFolderState {
     if !meta.is_dir() {
         return DocsFolderState::Missing;
     }
-    if dir
-        .join(crate::core::kronn_state::KRONN_STATE_FILENAME)
-        .is_file()
-    {
-        return DocsFolderState::KronnManaged;
-    }
+    let recorded = has_kronn_state(&dir);
     let mut files = 0u32;
     let mut managed = false;
     let walker = walkdir::WalkDir::new(&dir)
@@ -90,16 +107,21 @@ pub fn folder_state(root: &Path, rel: &str) -> DocsFolderState {
         if !entry.file_type().is_file() {
             continue;
         }
-        // The briefing Kronn writes from the human's answers is not their docs.
-        if entry.depth() == 1 && entry.file_name() == "briefing.md" {
+        // The briefing Kronn writes from the human's answers and its state
+        // file are not their docs.
+        if entry.depth() == 1
+            && (entry.file_name() == "briefing.md"
+                || entry.file_name() == crate::core::kronn_state::KRONN_STATE_FILENAME)
+        {
             continue;
         }
         files += 1;
-        if !managed && (files as usize) <= MAX_SCANNED && is_marker_file(entry.path()) {
+        if recorded && !managed && (files as usize) <= MAX_SCANNED && is_marker_file(entry.path()) {
             managed = true;
         }
     }
-    if managed || (files > 0 && crate::core::legacy_docs::is_kronn_managed_docs(&dir)) {
+    let signed = || files > 0 && crate::core::legacy_docs::is_kronn_managed_docs(&dir);
+    if recorded && (managed || signed()) {
         return DocsFolderState::KronnManaged;
     }
     if files == 0 {
@@ -161,33 +183,85 @@ mod tests {
         assert_eq!(folder_state(t.path(), "docs"), DocsFolderState::Missing);
     }
 
+    const AUDITED: &str =
+        r#"{"audits":[{"date":"2026-05-01","kronn_version":"0.8.4","type":"full"}]}"#;
+    const SECTION: &str =
+        "<!-- kronn:section name=\"overview\" curated=\"ai\" -->\nBody\n<!-- kronn:section:end -->\n";
+
     #[test]
-    fn kronn_docs_of_any_version_are_recognised_without_the_signature() {
+    fn kronn_docs_need_a_recorded_audit_and_a_structural_marker() {
+        // A section marker deep in a hand-edited file, a first line a human
+        // rewrote, and the audit recorded.
         let t = tempfile::tempdir().unwrap();
-        // 0.8-style: a section marker deep in a hand-edited file, no state file,
-        // a first line a human rewrote.
         write(
             t.path(),
             "docs/AGENTS.md",
             "# Our project, edited by hand\n\nText.\n",
         );
-        write(
-            t.path(),
-            "docs/architecture/overview.md",
-            "<!-- kronn:section name=\"overview\" curated=\"ai\" -->\nBody\n<!-- kronn:section:end -->\n",
-        );
+        write(t.path(), "docs/architecture/overview.md", SECTION);
+        write(t.path(), "docs/.kronn.json", AUDITED);
         assert_eq!(
             folder_state(t.path(), "docs"),
             DocsFolderState::KronnManaged
         );
 
+        // A bootstrap counts as recorded.
         let t = tempfile::tempdir().unwrap();
-        write(t.path(), "docs/notes.md", "# Notes\n");
-        write(t.path(), "docs/.kronn.json", "{}");
+        write(
+            t.path(),
+            "docs/AGENTS.md",
+            "<!-- kronn:doc-version=\"1.0\" -->\n# P\n",
+        );
+        write(
+            t.path(),
+            "docs/.kronn.json",
+            r#"{"bootstrapped_at":"2026-05-01"}"#,
+        );
         assert_eq!(
             folder_state(t.path(), "docs"),
             DocsFolderState::KronnManaged
         );
+    }
+
+    #[test]
+    fn a_kronn_mention_or_an_empty_state_file_is_human_docs() {
+        let human = |files| DocsFolderState::HumanDocs {
+            files,
+            site_generator: None,
+            legacy_exists: false,
+        };
+        // Markers without a recorded audit: a project documenting Kronn, or
+        // an exported template.
+        let t = tempfile::tempdir().unwrap();
+        write(t.path(), "docs/architecture/overview.md", SECTION);
+        assert_eq!(folder_state(t.path(), "docs"), human(1));
+
+        // A state file recording nothing.
+        let t = tempfile::tempdir().unwrap();
+        write(t.path(), "docs/architecture/overview.md", SECTION);
+        write(t.path(), "docs/.kronn.json", "{}");
+        assert_eq!(folder_state(t.path(), "docs"), human(1));
+
+        // A recorded audit, but Kronn only mentioned in prose and in code.
+        let t = tempfile::tempdir().unwrap();
+        write(
+            t.path(),
+            "docs/kronn.md",
+            "Kronn writes `<!-- kronn:section ... -->` and kronn:generated headers.\n\n\
+             ```md\n<!-- kronn:doc-version=\"1.0\" -->\n<!-- kronn:section name=\"x\" -->\n```\n",
+        );
+        write(t.path(), "docs/.kronn.json", AUDITED);
+        assert_eq!(folder_state(t.path(), "docs"), human(1));
+
+        // An unpaired section opener is not a structure.
+        let t = tempfile::tempdir().unwrap();
+        write(
+            t.path(),
+            "docs/a.md",
+            "<!-- kronn:section name=\"x\" -->\nNo end.\n",
+        );
+        write(t.path(), "docs/.kronn.json", AUDITED);
+        assert_eq!(folder_state(t.path(), "docs"), human(1));
     }
 
     #[test]
