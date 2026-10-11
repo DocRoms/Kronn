@@ -1975,6 +1975,22 @@ html[data-density="large"] .dash-main {
   color: var(--kr-text-primary);
 }
 
+.briefing-form label.briefing-form-option {
+  flex-direction: row;
+  align-items: flex-start;
+  gap: var(--kr-sp-2);
+}
+
+.briefing-form-option > span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.briefing-form-option-hint {
+  color: var(--kr-text-secondary);
+}
+
 .briefing-form textarea {
   background: var(--kr-bg-elevated);
   border: 1px solid var(--kr-border-soft);

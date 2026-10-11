@@ -284,6 +284,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       getBriefing: resolve(null),
       startBriefing: resolve({ discussion_id: '' }),
       saveBriefing: resolve({}),
+      convertTdTasks: resolve({ created: 0, already_linked: 0, skipped: 0, themes: [], items: [] }),
       listAiFiles: resolve([]),
       readAiFile: resolve({ path: '', content: '' }),
       searchAiFiles: resolve([]),

@@ -27,6 +27,7 @@ pub mod reconciliation;
 pub mod redact_artifacts;
 pub mod revalidate;
 pub mod run;
+pub mod td_tasks;
 pub mod validate;
 pub mod validation;
 mod version_context;
@@ -38,6 +39,7 @@ pub use full::*;
 pub use info::*;
 pub use revalidate::{revalidate_audit, revalidation_plan};
 pub use run::*;
+pub use td_tasks::convert_td_tasks;
 pub use validate::*;
 // Selective re-export of `pub(crate)` helpers actually consumed from
 // outside this module — sibling `api::projects::*` calls these via

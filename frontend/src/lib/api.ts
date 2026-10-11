@@ -173,6 +173,7 @@ import type {
   CitationDriftResponse,
   RevalidateAuditRequest,
   RevalidationPlan,
+  TdTasksOutcome,
   SectionCitations,
   AddContactResult,
   WorkflowSuggestion,
@@ -1281,7 +1282,11 @@ export const projects = {
     dependencies: string; traps: string; additional: string;
     /** KT-1173 — closed project cards, written to `docs/project.md` by the audit. */
     project?: BriefingProjectAnswers;
+    /** KT-1167 — after a successful Full audit, turn the TDs into Kronn tasks. */
+    td_to_tasks?: boolean;
   }) => api<boolean>('POST', `/projects/${id}/save-briefing`, form),
+  /** KT-1167 — the project's TD sheets as Kronn tasks; a re-click creates nothing. */
+  convertTdTasks: (id: string) => api<TdTasksOutcome>('POST', `/projects/${id}/audit/td-tasks`),
   setDefaultSkills: (id: string, skillIds: string[]) => api<boolean>('PUT', `/projects/${id}/default-skills`, skillIds),
   setDefaultProfile: (id: string, profileId: string | null) => api<boolean>('PUT', `/projects/${id}/default-profile`, { profile_id: profileId }),
   /** 0.8.3 — Replace the project's linked_repos list. The backend

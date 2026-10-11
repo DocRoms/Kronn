@@ -300,6 +300,10 @@ pub async fn full_audit(
     let project_default_skill_ids = project.default_skill_ids.clone();
     let briefing_notes =
         crate::api::projects::resolve_briefing_notes(&project_path, &project.briefing_notes);
+    let td_tasks_option = super::td_tasks::briefing_option_set(
+        briefing_notes.as_deref(),
+        project.briefing_notes.as_deref(),
+    );
     // KT-926 — the only other repos this prompt names are the ones the user
     // explicitly linked to the project. Never the list of the machine's Kronn
     // projects: the prompt goes to the model provider, and a companion list
@@ -2971,6 +2975,26 @@ pub async fn full_audit(
             warned_steps: progress.failed_steps().to_vec(),
             discussion_id: disc_id.clone(),
         });
+
+        // KT-1167 — the briefing asked for the tech debt as Kronn tasks. A
+        // failure only warns: the audit itself is finished.
+        match super::td_tasks::convert_after_audit(
+            &db, kind, audit_fully_succeeded, td_tasks_option,
+            &project_id, &project_path, &audit_run_id,
+        ).await {
+            Some(Ok(outcome)) => {
+                yield Event::default().event("td_tasks").data(
+                    serde_json::to_string(&outcome).unwrap_or_default(),
+                );
+            }
+            Some(Err(e)) => {
+                tracing::warn!("Tech-debt tasks after audit {audit_run_id} failed: {e}");
+                yield Event::default().event("warning").data(serde_json::json!({
+                    "message": format!("The tech debt could not be turned into Kronn tasks: {e}"),
+                }).to_string());
+            }
+            None => {}
+        }
 
         // The done event mirrors what was DURABLY persisted. An interrupted
         // run may carry a `discussion_id` (KT-931: the validation of its

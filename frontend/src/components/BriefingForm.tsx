@@ -69,6 +69,8 @@ export function BriefingForm({ projectId, onClose, onSaved, agent, tier, review 
     traps: '',
     additional: '',
   });
+  // KT-1167 — persisted in the briefing; read at the end of a Full audit.
+  const [tdToTasks, setTdToTasks] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [project, setProject] = useState<BriefingProjectAnswers>(emptyProjectAnswers);
 
@@ -117,7 +119,7 @@ export function BriefingForm({ projectId, onClose, onSaved, agent, tier, review 
         forge_repo: project.forge === 'unknown' ? '' : project.forge_repo.trim(),
         people: project.people.filter(p => p.name.trim() || p.contact.trim()),
       };
-      await projectsApi.saveBriefing(projectId, { ...form, project: projectAnswers });
+      await projectsApi.saveBriefing(projectId, { ...form, project: projectAnswers, td_to_tasks: tdToTasks });
       if (!review) {
         toast(t('briefing.savedOnlyToast'), 'success');
         onSaved(null);
@@ -350,6 +352,19 @@ export function BriefingForm({ projectId, onClose, onSaved, agent, tier, review 
           <p className="briefing-form-intro">{t('briefing.project.peoplePrivacy')}</p>
         </fieldset>
       </section>
+
+      <label className="briefing-form-option">
+        <input
+          type="checkbox"
+          checked={tdToTasks}
+          onChange={e => setTdToTasks(e.target.checked)}
+          data-testid="briefing-td-to-tasks"
+        />
+        <span>
+          <span className="briefing-form-q">{t('briefing.tdToTasks')}</span>
+          <span className="briefing-form-option-hint">{t('briefing.tdToTasksHint')}</span>
+        </span>
+      </label>
 
       <div className="briefing-form-actions">
         <button type="button" onClick={onClose} disabled={submitting}>{t('common.cancel')}</button>

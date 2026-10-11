@@ -9027,6 +9027,27 @@ requested_model?: string,
  */
 warning?: CampaignTaskReason, };
 
+export type TdTaskItem = { td_id: string, theme: string, state: TdTaskState, task_reference: string | null,
+/**
+ * `rejected` or `accepted_decision` for a skipped sheet.
+ */
+reason: string | null, };
+
+/**
+ * `POST /api/projects/:id/audit/td-tasks`: tech-debt sheets turned into tasks.
+ */
+export type TdTasksOutcome = { created: number, already_linked: number, skipped: number, themes: Array<TdTaskTheme>, items: Array<TdTaskItem>, };
+
+/**
+ * What the conversion did with one tech-debt sheet (KT-1167).
+ */
+export type TdTaskState = "created" | "already_linked" | "skipped";
+
+/**
+ * The parent task grouping the sheets of one theme.
+ */
+export type TdTaskTheme = { theme: string, label: string, task_reference: string, created: boolean, };
+
 export type TechDebtItem = { id: string, problem: string, area: string, severity: string, };
 
 /**

@@ -322,6 +322,9 @@ pub struct BriefingFormRequest {
     /// KT-1173 — closed project cards; absent from older clients.
     #[serde(default)]
     pub project: Option<BriefingProjectAnswers>,
+    /// KT-1167 — after a successful Full audit, turn the TDs into Kronn tasks.
+    #[serde(default)]
+    pub td_to_tasks: bool,
 }
 
 pub async fn save_briefing_form(
@@ -400,6 +403,7 @@ pub async fn save_briefing_form(
         body.push('\n');
         body.push_str(&section);
     }
+    let body = with_kronn_options(body, form.td_to_tasks);
 
     // 4. Write `docs/briefing.md` on disk + persist briefing_notes in DB.
     // The on-disk file is what the audit reads at Phase 1; the DB
@@ -443,4 +447,17 @@ pub async fn save_briefing_form(
         Ok(false) => Json(ApiResponse::err("Project not found")),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
+}
+
+/// Appends the Kronn options section, only when an option is set, so a
+/// briefing without one keeps its historical shape.
+pub(crate) fn with_kronn_options(mut body: String, td_to_tasks: bool) -> String {
+    if td_to_tasks {
+        body.push_str(&format!(
+            "\n{}\n{}\n",
+            crate::core::td_tasks::BRIEFING_OPTIONS_HEADING,
+            crate::core::td_tasks::BRIEFING_OPTION_LINE
+        ));
+    }
+    body
 }

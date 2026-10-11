@@ -1803,6 +1803,49 @@ pub struct RevalidationPlan {
     pub human_count: usize,
 }
 
+/// What the conversion did with one tech-debt sheet (KT-1167).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum TdTaskState {
+    Created,
+    AlreadyLinked,
+    /// Rejected, or covered by an accepted decision.
+    Skipped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TdTaskItem {
+    pub td_id: String,
+    pub theme: String,
+    pub state: TdTaskState,
+    pub task_reference: Option<String>,
+    /// `rejected` or `accepted_decision` for a skipped sheet.
+    pub reason: Option<String>,
+}
+
+/// The parent task grouping the sheets of one theme.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TdTaskTheme {
+    pub theme: String,
+    pub label: String,
+    pub task_reference: String,
+    pub created: bool,
+}
+
+/// `POST /api/projects/:id/audit/td-tasks`: tech-debt sheets turned into tasks.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TdTasksOutcome {
+    pub created: u32,
+    pub already_linked: u32,
+    pub skipped: u32,
+    pub themes: Vec<TdTaskTheme>,
+    pub items: Vec<TdTaskItem>,
+}
+
 #[derive(Debug, Deserialize, TS)]
 #[ts(export)]
 pub struct RevalidateAuditRequest {

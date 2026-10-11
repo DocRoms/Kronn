@@ -92,6 +92,7 @@ pub mod sse_limits;
 pub mod static_context;
 pub mod tailscale;
 pub mod td_index;
+pub mod td_tasks;
 pub mod timezone;
 pub mod usage;
 pub mod user_context;

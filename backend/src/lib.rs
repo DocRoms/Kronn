@@ -2012,6 +2012,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             post(api::audit::save_briefing_form),
         )
         .route(
+            "/api/projects/{id}/audit/td-tasks",
+            post(api::audit::convert_td_tasks),
+        )
+        .route(
             "/api/projects/{id}/ai-files",
             get(api::ai_docs::list_ai_files),
         )

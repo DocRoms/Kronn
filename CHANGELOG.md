@@ -28,6 +28,23 @@ Release notes for 0.9.3 and earlier are available in the
   against the injected watch (absent row or other date = fabricated);
   elsewhere it stays unchecked. The `Dependencies` coverage row must state
   `source used: …` or `not verified: no source`, otherwise step 8 is re-run.
+- « En faire des tâches Kronn » on the card of a project with tech debt
+  (KT-1167). `POST /api/projects/:id/audit/td-tasks` turns every
+  `docs/tech-debt/TD-*.md` sheet into a planning task linked to the project:
+  one parent task per theme (the sheet's `Category`, else its `Area`) with one
+  subtask per sheet. A subtask carries the sheet's title, its severity as
+  priority (Critical/High/Low as is, Medium and unknown as normal), theme,
+  area, status, problem excerpt, sheet path and a verification criterion as
+  its Definition of Done. Every task is keyed (`audit:<project>:<TD-id>`, and
+  `audit:<project>:theme:<theme>` for a parent) on the existing planning
+  idempotency key, so a second click creates nothing and reports the tasks
+  already linked; rejected sheets and sheets covered by an accepted decision
+  are skipped. The answer counts created, already linked and skipped. The
+  sheets stay in the repository as the source of truth. The briefing form
+  gains « Faire des TD trouvées des tâches Kronn »: saved in `docs/briefing.md`
+  (and the DB notes) as a `## Kronn options` line, it runs the same
+  conversion at the end of a successful Full audit (`td_tasks` SSE event, a
+  warning on failure).
 - The audit recap now shows what a run consumed per phase and in total
   (KT-1084): the briefing, the audit steps and the validation discussion, each
   with its tokens (uncached input, output, cache) and cost, plus a grand total.

@@ -296,6 +296,19 @@ pub fn lookup_task_id(conn: &Connection, reference: &str) -> Result<Option<Strin
     }
 }
 
+/// The `(id, reference)` of the task created under an idempotency key, so a
+/// caller can tell "already created" apart from a content conflict.
+pub fn task_by_idempotency_key(conn: &Connection, key: &str) -> Result<Option<(String, String)>> {
+    Ok(conn
+        .query_row(
+            "SELECT id, task_number FROM planning_tasks WHERE idempotency_key = ?1",
+            [key.trim()],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()?
+        .map(|(id, number)| (id, format!("KT-{number}"))))
+}
+
 fn ensure_parent_is_valid(conn: &Connection, task_id: Option<&str>, parent_id: &str) -> Result<()> {
     ensure_task_exists(conn, parent_id)?;
     if task_id == Some(parent_id) {

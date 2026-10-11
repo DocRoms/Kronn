@@ -169,4 +169,28 @@ describe('BriefingForm (0.8.5)', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(projectsApi.saveBriefing).not.toHaveBeenCalled();
   });
+
+  // KT-1167 — the option travels with the answers, unchecked by default.
+  it('sends the TD-to-tasks option with the answers', async () => {
+    (projectsApi.saveBriefing as ReturnType<typeof vi.fn>).mockResolvedValue({});
+    const props = {
+      onClose: () => {}, onSaved: () => {}, agent: 'ClaudeCode' as const,
+      tier: 'reasoning' as const, review: false, toast: () => {},
+    };
+    const { unmount } = wrap(<BriefingForm projectId="p-off" {...props} />);
+    fillMandatory();
+    fireEvent.click(screen.getByRole('button', { name: /Save|Enregistrer|Guardar/i }));
+    await waitFor(() => expect(projectsApi.saveBriefing).toHaveBeenCalledWith(
+      'p-off', expect.objectContaining({ td_to_tasks: false }),
+    ));
+    unmount();
+
+    wrap(<BriefingForm projectId="p-on" {...props} />);
+    fillMandatory();
+    fireEvent.click(screen.getByTestId('briefing-td-to-tasks'));
+    fireEvent.click(screen.getByRole('button', { name: /Save|Enregistrer|Guardar/i }));
+    await waitFor(() => expect(projectsApi.saveBriefing).toHaveBeenCalledWith(
+      'p-on', expect.objectContaining({ td_to_tasks: true }),
+    ));
+  });
 });

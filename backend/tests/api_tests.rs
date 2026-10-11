@@ -23021,6 +23021,72 @@ mod cold_api_handlers_tests {
         );
     }
 
+    #[tokio::test]
+    async fn save_briefing_form_persists_the_td_tasks_option() {
+        let (_dir, repo) = seed_repo("brief-td-tasks");
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+        let (st, json) = post_json(
+            app,
+            &format!("/api/projects/{}/save-briefing", pid),
+            serde_json::json!({
+                "purpose": "P", "team": "T", "maturity": "M",
+                "dependencies": "D", "traps": "Tr", "additional": "",
+                "td_to_tasks": true
+            }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(true));
+        let body = std::fs::read_to_string(repo.join("docs/briefing.md")).unwrap();
+        assert!(
+            kronn::core::td_tasks::briefing_wants_td_tasks(&body),
+            "{body}"
+        );
+    }
+
+    // KT-1167 — the button: idempotent, a second click creates nothing.
+    #[tokio::test]
+    async fn td_tasks_endpoint_creates_once_then_reports_links() {
+        let (_dir, repo) = seed_repo("td-tasks");
+        let td = repo.join("docs/tech-debt");
+        std::fs::create_dir_all(&td).unwrap();
+        std::fs::write(
+            td.join("TD-20261001-a.md"),
+            "# TD-20261001-a\n\n- **Area**: Backend\n- **Severity**: High\n- **Status**: Verified in source\n",
+        )
+        .unwrap();
+        std::fs::write(
+            td.join("TD-20261001-b.md"),
+            "# TD-20261001-b\n\n- **Area**: Backend\n- **Severity**: Low\n- **Status**: Rejected\n",
+        )
+        .unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let url = format!("/api/projects/{pid}/audit/td-tasks");
+
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, first) = post_json(app, &url, serde_json::json!({})).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(first["success"], serde_json::Value::Bool(true), "{first}");
+        assert_eq!(first["data"]["created"], 1);
+        assert_eq!(first["data"]["skipped"], 1);
+
+        let app = build_router_with_auth(state, false);
+        let (_, second) = post_json(app, &url, serde_json::json!({})).await;
+        assert_eq!(second["data"]["created"], 0);
+        assert_eq!(second["data"]["already_linked"], 1);
+        assert_eq!(second["data"]["skipped"], 1);
+    }
+
+    envelope_post!(
+        audit_td_tasks_unknown_project,
+        "/api/projects/nope/audit/td-tasks",
+        serde_json::json!({})
+    );
+
     // ── audit briefing handlers ──────────────────────────────────────
     envelope_post!(
         audit_save_briefing_form_unknown,
