@@ -39,6 +39,8 @@ pub enum RecordReason {
     Validation,
     Audit,
     Acknowledged,
+    /// Re-verified by "Revalider l'audit" (KT-1168).
+    Revalidation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -246,7 +248,7 @@ struct DocCitation {
     lines: Option<(usize, usize)>,
 }
 
-fn cite_label(file: &str, lines: Option<(usize, usize)>) -> String {
+pub(crate) fn cite_label(file: &str, lines: Option<(usize, usize)>) -> String {
     match lines {
         None => file.to_string(),
         Some((s, e)) if s == e => format!("{file}:{s}"),
@@ -435,6 +437,201 @@ pub fn acknowledge(project_path: &Path, doc: &str) -> Result<SectionCitations, S
     file.docs.insert(doc.to_string(), entry.clone());
     write(project_path, &mut file)?;
     Ok(evaluate_section(project_path, doc, &entry))
+}
+
+/// The distinct citation labels a text carries, as the store names them.
+pub(crate) fn cite_labels(content: &str) -> BTreeSet<String> {
+    doc_citations(content).into_iter().map(|c| c.cite).collect()
+}
+
+/// A moved citation's new place: its label and line span there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reanchor {
+    pub from: String,
+    pub to: String,
+    pub line: usize,
+    pub end_line: usize,
+}
+
+impl Reanchor {
+    pub fn of(status: &CitationStatus) -> Option<Self> {
+        let (start, end, now) = (status.line?, status.end_line?, status.current_line?);
+        if status.state != CitationState::Moved {
+            return None;
+        }
+        let end_now = now + (end - start);
+        Some(Self {
+            from: status.cite.clone(),
+            to: cite_label(&status.file, Some((now, end_now))),
+            line: now,
+            end_line: end_now,
+        })
+    }
+}
+
+/// `content` with each marker named in `moves` rewritten to its new lines,
+/// on the lines `editable` allows, outside code. Returns the count rewritten.
+pub fn rewrite_citations(
+    content: &str,
+    moves: &[Reanchor],
+    editable: impl Fn(usize) -> bool,
+) -> (String, usize) {
+    let mut out = String::with_capacity(content.len());
+    let mut rewritten = 0;
+    let mut in_fence = false;
+    for (index, line) in content.split_inclusive('\n').enumerate() {
+        let fence = line.trim_start();
+        if fence.starts_with("```") || fence.starts_with("~~~") {
+            in_fence = !in_fence;
+            out.push_str(line);
+            continue;
+        }
+        if in_fence || !editable(index) {
+            out.push_str(line);
+            continue;
+        }
+        let (text, count) = rewrite_line(line, moves);
+        rewritten += count;
+        out.push_str(&text);
+    }
+    (out, rewritten)
+}
+
+fn rewrite_line(line: &str, moves: &[Reanchor]) -> (String, usize) {
+    let mut out = String::with_capacity(line.len());
+    let mut rewritten = 0;
+    let mut rest = line;
+    let mut ticks = 0usize;
+    loop {
+        let lower = rest.to_ascii_lowercase();
+        let Some(at) = lower.find("[src:") else {
+            out.push_str(rest);
+            return (out, rewritten);
+        };
+        ticks += rest[..at].matches('`').count();
+        out.push_str(&rest[..at]);
+        let body = &rest[at + 5..];
+        let mut depth = 1usize;
+        let mut close = None;
+        for (i, c) in body.char_indices() {
+            match c {
+                '[' => depth += 1,
+                ']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(close) = close else {
+            out.push_str(&rest[at..]);
+            return (out, rewritten);
+        };
+        let inner = &body[..close];
+        let replaced = ticks
+            .is_multiple_of(2)
+            .then(|| reanchored_inner(inner, moves))
+            .flatten();
+        out.push_str(&rest[at..at + 5]);
+        match replaced {
+            Some(inner) => {
+                out.push_str(&inner);
+                rewritten += 1;
+            }
+            None => out.push_str(inner),
+        }
+        out.push(']');
+        rest = &body[close + 1..];
+    }
+}
+
+fn reanchored_inner(inner: &str, moves: &[Reanchor]) -> Option<String> {
+    let (file, lines) = crate::core::anti_halluc::file_citation(inner.trim())?;
+    let label = cite_label(&file, Some(lines?));
+    let to = moves.iter().find(|m| m.from == label)?;
+    let trimmed = inner.trim_end();
+    let colon = trimmed.rfind(':')?;
+    let spec = if to.line == to.end_line {
+        to.line.to_string()
+    } else {
+        format!("{}-{}", to.line, to.end_line)
+    };
+    Some(format!(
+        "{}{spec}{}",
+        &trimmed[..=colon],
+        &inner[trimmed.len()..]
+    ))
+}
+
+/// After `rewrite_citations`: the moved fingerprints follow their citation,
+/// digest unchanged. A label the doc still carries (a human section) keeps
+/// its old entry too. Nothing else of the doc is acknowledged.
+pub fn record_reanchored(
+    project_path: &Path,
+    doc: &str,
+    before: &str,
+    after: &str,
+    moves: &[Reanchor],
+) -> Result<(), String> {
+    let mut file = read_strict(project_path)?
+        .ok_or_else(|| format!("No citation fingerprints recorded for `{doc}`"))?;
+    let entry = file
+        .docs
+        .get_mut(doc)
+        .ok_or_else(|| format!("No citation fingerprints recorded for `{doc}`"))?;
+    let still_cited = cite_labels(after);
+    let mut citations: Vec<CitationFingerprint> = Vec::new();
+    fn push(fp: CitationFingerprint, out: &mut Vec<CitationFingerprint>) {
+        if !out.iter().any(|c| c.cite == fp.cite) {
+            out.push(fp);
+        }
+    }
+    for fp in std::mem::take(&mut entry.citations) {
+        match moves.iter().find(|m| m.from == fp.cite) {
+            Some(m) => {
+                let moved = CitationFingerprint {
+                    cite: m.to.clone(),
+                    line: Some(m.line),
+                    end_line: Some(m.end_line),
+                    ..fp.clone()
+                };
+                if still_cited.contains(&fp.cite) {
+                    push(fp, &mut citations);
+                }
+                push(moved, &mut citations);
+            }
+            None => push(fp, &mut citations),
+        }
+    }
+    entry.citations = citations;
+    // An edit made by hand since the record stays visible as such.
+    if entry.doc_sha256 == sha256_hex(before.as_bytes()) {
+        entry.doc_sha256 = sha256_hex(after.as_bytes());
+    }
+    write(project_path, &mut file)
+}
+
+/// Fresh fingerprints for the docs a revalidation re-verified; every other
+/// doc keeps its record.
+pub fn record_docs(
+    project_path: &Path,
+    docs: &[String],
+    reason: RecordReason,
+) -> Result<(), String> {
+    if docs.is_empty() {
+        return Ok(());
+    }
+    let mut file = read_strict(project_path)?.unwrap_or_default();
+    for doc in docs {
+        if let Some(content) = read_doc(project_path, doc) {
+            file.docs
+                .insert(doc.clone(), fingerprint_doc(project_path, &content, reason));
+        }
+    }
+    write(project_path, &mut file)
 }
 
 // ─── Evaluation ───────────────────────────────────────────────────────────

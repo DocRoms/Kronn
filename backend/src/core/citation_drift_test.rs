@@ -526,3 +526,168 @@ fn scheduled_reverification_checks_recorded_projects() {
     assert_eq!(last_scheduled_check(&dir), Some(results[0].1.clone()));
     assert_eq!(last_scheduled_check(untracked.path()), None);
 }
+
+// ── KT-1168 — re-anchoring and per-doc recording ──────────────────────────
+
+fn moved_report(dir: &Path) -> CitationDriftReport {
+    record_all(dir).unwrap();
+    edit_source(dir, |lines| {
+        lines.insert(0, "// header one".into());
+        lines.insert(0, "// header two".into());
+    });
+    check(dir)
+}
+
+#[test]
+fn a_moved_citation_is_rewritten_to_its_new_line_outside_code_only() {
+    let tmp = fixture();
+    let report = moved_report(tmp.path());
+    let moves: Vec<Reanchor> = report
+        .section("docs/architecture.md")
+        .unwrap()
+        .citations
+        .iter()
+        .filter_map(Reanchor::of)
+        .collect();
+    assert_eq!(moves.len(), 3, "{moves:?}");
+    assert_eq!(moves[0].from, "src/lib.rs:2");
+    assert_eq!(moves[0].to, "src/lib.rs:4");
+    let content = "Retries [src: src/lib.rs:2].\n\
+                   Inline `[src: src/lib.rs:2]` stays.\n\
+                   ```\n[src: src/lib.rs:2]\n```\n\
+                   Flag [src: file: src/lib.rs:10 ] and range [SRC: src/lib.rs:6].\n\
+                   Locked [src: src/lib.rs:2].\n";
+    let (after, count) = rewrite_citations(content, &moves, |line| line != 6);
+    assert_eq!(count, 3, "{after}");
+    assert_eq!(
+        after,
+        "Retries [src: src/lib.rs:4].\n\
+         Inline `[src: src/lib.rs:2]` stays.\n\
+         ```\n[src: src/lib.rs:2]\n```\n\
+         Flag [src: file: src/lib.rs:12 ] and range [SRC: src/lib.rs:8].\n\
+         Locked [src: src/lib.rs:2].\n"
+    );
+    // A range moves as a whole; a non-moved citation is left alone.
+    let range = Reanchor {
+        from: "src/lib.rs:5-7".into(),
+        to: "src/lib.rs:7-9".into(),
+        line: 7,
+        end_line: 9,
+    };
+    let (after, count) = rewrite_citations(
+        "A [src: src/lib.rs:5-7] B [src: src/lib.rs:1]\n",
+        &[range],
+        |_| true,
+    );
+    assert_eq!(count, 1);
+    assert_eq!(after, "A [src: src/lib.rs:7-9] B [src: src/lib.rs:1]\n");
+}
+
+#[test]
+fn re_anchoring_moves_the_fingerprints_and_leaves_broken_ones_stale() {
+    let tmp = fixture();
+    let dir = tmp.path();
+    record_all(dir).unwrap();
+    edit_source(dir, |lines| {
+        lines.insert(0, "// header".into());
+        // Line 10 (now 11) changes: broken, never re-anchored.
+        lines[10] = "    let feature_flag = false;".into();
+    });
+    let report = check(dir);
+    let section = report.section("docs/architecture.md").unwrap();
+    let moves: Vec<Reanchor> = section.citations.iter().filter_map(Reanchor::of).collect();
+    assert_eq!(moves.len(), 2);
+    let doc = "docs/architecture.md";
+    let before = fs::read_to_string(dir.join(doc)).unwrap();
+    let (after, count) = rewrite_citations(&before, &moves, |_| true);
+    assert_eq!(count, 2);
+    fs::write(dir.join(doc), &after).unwrap();
+    record_reanchored(dir, doc, &before, &after, &moves).unwrap();
+
+    let section = check(dir).section(doc).unwrap().clone();
+    assert!(!section.doc_changed, "the record follows the rewrite");
+    assert_eq!(
+        section
+            .citations
+            .iter()
+            .map(|c| (c.cite.as_str(), c.state))
+            .collect::<Vec<_>>(),
+        vec![("src/lib.rs:10", CitationState::Changed)]
+    );
+    assert!(section.stale, "the changed line still needs a look");
+    assert_eq!(section.unchanged_count, 3);
+    // The glossary was not rewritten: its citation is still reported moved.
+    assert_eq!(
+        states(&check(dir), "docs/glossary.md"),
+        vec![("src/lib.rs:6".to_string(), CitationState::Moved)]
+    );
+}
+
+#[test]
+fn a_label_still_cited_elsewhere_keeps_its_old_fingerprint() {
+    let tmp = fixture();
+    let dir = tmp.path();
+    let report = moved_report(dir);
+    let moves: Vec<Reanchor> = report
+        .section("docs/glossary.md")
+        .unwrap()
+        .citations
+        .iter()
+        .filter_map(Reanchor::of)
+        .collect();
+    let doc = "docs/glossary.md";
+    let before = "# Glossary\nTimeout [src: src/lib.rs:6].\nHuman [src: src/lib.rs:6].\n";
+    fs::write(dir.join(doc), before).unwrap();
+    let (after, _) = rewrite_citations(before, &moves, |line| line != 2);
+    fs::write(dir.join(doc), &after).unwrap();
+    record_reanchored(dir, doc, before, &after, &moves).unwrap();
+    let file = read_strict(dir).unwrap().unwrap();
+    let cites: Vec<&str> = file.docs[doc]
+        .citations
+        .iter()
+        .map(|c| c.cite.as_str())
+        .collect();
+    assert_eq!(cites, vec!["src/lib.rs:6", "src/lib.rs:8"]);
+    // The doc was edited by hand before the record: it still reads as edited.
+    assert!(check(dir).section(doc).unwrap().doc_changed);
+}
+
+#[test]
+fn recording_named_docs_leaves_the_others_as_validated() {
+    let tmp = fixture();
+    let dir = tmp.path();
+    record_all(dir).unwrap();
+    edit_source(dir, |lines| lines[5] = "    let timeout_ms = 9000;".into());
+    assert!(check(dir).section("docs/glossary.md").unwrap().stale);
+    record_docs(
+        dir,
+        &["docs/glossary.md".to_string()],
+        RecordReason::Revalidation,
+    )
+    .unwrap();
+    let report = check(dir);
+    assert!(!report.section("docs/glossary.md").unwrap().stale);
+    assert!(report.section("docs/architecture.md").unwrap().stale);
+    let file = read_strict(dir).unwrap().unwrap();
+    assert_eq!(
+        file.docs["docs/glossary.md"].reason,
+        RecordReason::Revalidation
+    );
+    assert_eq!(
+        file.docs["docs/architecture.md"].reason,
+        RecordReason::Validation
+    );
+    // Nothing to record writes nothing.
+    let stamp = fs::metadata(citations_path(dir))
+        .unwrap()
+        .modified()
+        .unwrap();
+    record_docs(dir, &[], RecordReason::Revalidation).unwrap();
+    assert_eq!(
+        fs::metadata(citations_path(dir))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        stamp
+    );
+}

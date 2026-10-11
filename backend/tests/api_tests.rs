@@ -22675,6 +22675,86 @@ mod cold_api_handlers_tests {
         assert_eq!(json["data"]["sources_state"], "clean", "{json}");
     }
 
+    /// KT-1168 — « Revalider l'audit » through the router: the plan is
+    /// read-only, a moved line is re-anchored without an agent, and the
+    /// validation stays.
+    #[tokio::test]
+    async fn revalidation_reanchors_a_moved_citation_through_the_router() {
+        let (_dir, repo) = seed_repo("revalidate-moved");
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/config.rs"), "pub const RETRIES: u32 = 3;\n").unwrap();
+        std::fs::write(
+            repo.join("docs/AGENTS.md"),
+            "# AGENTS\nRetries are three [src: src/config.rs:1].\n",
+        )
+        .unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        seed_completed_validation(&state, &pid).await;
+        let (_, json) = post_json(
+            build_router_with_auth(state.clone(), false),
+            &format!("/api/projects/{pid}/validate-audit"),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(json["success"], serde_json::Value::Bool(true), "{json}");
+
+        std::fs::write(
+            repo.join("src/config.rs"),
+            "// Retry policy.\npub const RETRIES: u32 = 3;\n",
+        )
+        .unwrap();
+        let plan_url = format!("/api/projects/{pid}/revalidation");
+        let (_, json) = get_json(build_router_with_auth(state.clone(), false), &plan_url).await;
+        assert_eq!(json["success"], serde_json::Value::Bool(true), "{json}");
+        assert_eq!(json["data"]["reanchor_count"], 1, "{json}");
+        assert_eq!(json["data"]["agent_steps"], serde_json::json!([]), "{json}");
+        assert_eq!(json["data"]["sections"][0]["action"], "reanchor", "{json}");
+        assert_eq!(
+            json["data"]["sections"][0]["reanchor"][0]["current_line"], 2,
+            "{json}"
+        );
+        // Reading the plan writes nothing.
+        assert_eq!(
+            std::fs::read_to_string(repo.join("docs/AGENTS.md")).unwrap(),
+            "# AGENTS\nRetries are three [src: src/config.rs:1].\n"
+        );
+
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/api/projects/{pid}/revalidate-audit"))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"agent":"ClaudeCode"}"#))
+            .unwrap();
+        let mut req = req;
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                45678,
+            ))));
+        let resp = build_router_with_auth(state.clone(), false)
+            .oneshot(req)
+            .await
+            .unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8_lossy(&body);
+        assert!(body.contains("event: done"), "{body}");
+        assert!(body.contains(r#""status":"clean""#), "{body}");
+        assert_eq!(
+            std::fs::read_to_string(repo.join("docs/AGENTS.md")).unwrap(),
+            "# AGENTS\nRetries are three [src: src/config.rs:2].\n"
+        );
+        let (_, json) = get_json(build_router_with_auth(state.clone(), false), &plan_url).await;
+        assert_eq!(json["data"]["sections"], serde_json::json!([]), "{json}");
+        let (_, project) = get_json(
+            build_router_with_auth(state, false),
+            &format!("/api/projects/{pid}"),
+        )
+        .await;
+        assert_eq!(project["data"]["audit_status"], "Validated", "{project}");
+    }
+
     #[tokio::test]
     async fn validate_audit_is_idempotent_preserves_first_date() {
         // Second call must NOT overwrite the validated_at timestamp.

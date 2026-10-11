@@ -4055,6 +4055,11 @@ export type HostScope = { "kind": "ClaudeUser" } | { "kind": "ClaudeLocal", "val
 export type HostSyncMode = "None" | "GlobalOnly" | "MirrorAll";
 
 /**
+ * A citation inside a human-owned section: never edited, listed.
+ */
+export type HumanCitationTodo = { section: string, citation: CitationStatus, };
+
+/**
  * A credential as the UI may see it. No hash, no plaintext — a list of these
  * is safe to return.
  */
@@ -6835,7 +6840,7 @@ export type RecentMessagePreview = { sort_order: number, role: string, agent_typ
  */
 preview: string, };
 
-export type RecordReason = "validation" | "audit" | "acknowledged";
+export type RecordReason = "validation" | "audit" | "acknowledged" | "revalidation";
 
 export type RecoveryStatus = { configured: boolean,
 /**
@@ -7202,6 +7207,41 @@ idempotency_key: string, };
 export type RetryAgentDispatchResponse = { dispatch_id: string, trigger_message_id: string, agent_type: AgentType, duplicate: boolean, };
 
 export type RetryConfig = { max_retries: number, backoff: string, };
+
+export type RevalidateAuditRequest = { agent: AgentType, connection_id?: string, tier?: ModelTier | null, };
+
+/**
+ * What "Revalider l'audit" does with one section (KT-1168).
+ */
+export type RevalidationAction = "reanchor" | "agent" | "human" | "manual";
+
+/**
+ * `GET /api/projects/:id/revalidation`: the deterministic part of
+ * "Revalider l'audit", computed without writing anything.
+ */
+export type RevalidationPlan = { sources_state: SourcesState,
+/**
+ * Sections with something to do; clean ones are left out.
+ */
+sections: Array<RevalidationSection>,
+/**
+ * Full audit steps the bounded agent pass runs, in chain order.
+ */
+agent_steps: number[], reanchor_count: number, human_count: number, };
+
+export type RevalidationSection = { doc: string,
+/**
+ * The Full audit step that owns the doc, when one does.
+ */
+step: number | null, action: RevalidationAction, doc_missing: boolean,
+/**
+ * Moved citations outside human sections, re-anchored without an agent.
+ */
+reanchor: Array<CitationStatus>,
+/**
+ * Broken citations outside human sections.
+ */
+broken: Array<CitationStatus>, human: Array<HumanCitationTodo>, };
 
 /**
  * Principal → backend review (ADR §5, KT-319). `comment` is schema-optional but

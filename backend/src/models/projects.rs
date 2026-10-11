@@ -1747,6 +1747,73 @@ pub struct DriftSection {
     pub changed_sources: Vec<String>,
 }
 
+/// What "Revalider l'audit" does with one section (KT-1168).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum RevalidationAction {
+    /// Only moved citations: Kronn rewrites their line numbers, no agent.
+    Reanchor,
+    /// Broken citations in an audit-owned part: the audit step re-verifies it.
+    Agent,
+    /// Only citations inside `owner="human"` sections: a to-do for a person.
+    Human,
+    /// Broken, but no audit step owns the doc (or it was deleted): by hand.
+    Manual,
+}
+
+/// A citation inside a human-owned section: never edited, listed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct HumanCitationTodo {
+    pub section: String,
+    pub citation: crate::core::citation_drift::CitationStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RevalidationSection {
+    pub doc: String,
+    /// The Full audit step that owns the doc, when one does.
+    #[ts(type = "number | null")]
+    pub step: Option<usize>,
+    pub action: RevalidationAction,
+    pub doc_missing: bool,
+    /// Moved citations outside human sections, re-anchored without an agent.
+    pub reanchor: Vec<crate::core::citation_drift::CitationStatus>,
+    /// Broken citations outside human sections.
+    pub broken: Vec<crate::core::citation_drift::CitationStatus>,
+    pub human: Vec<HumanCitationTodo>,
+}
+
+/// `GET /api/projects/:id/revalidation`: the deterministic part of
+/// "Revalider l'audit", computed without writing anything.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, Default)]
+#[ts(export)]
+pub struct RevalidationPlan {
+    pub sources_state: crate::core::citation_drift::SourcesState,
+    /// Sections with something to do; clean ones are left out.
+    pub sections: Vec<RevalidationSection>,
+    /// Full audit steps the bounded agent pass runs, in chain order.
+    #[ts(type = "number[]")]
+    pub agent_steps: Vec<usize>,
+    #[ts(type = "number")]
+    pub reanchor_count: usize,
+    #[ts(type = "number")]
+    pub human_count: usize,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct RevalidateAuditRequest {
+    pub agent: AgentType,
+    #[serde(default)]
+    #[ts(optional)]
+    pub connection_id: Option<String>,
+    #[serde(default)]
+    pub tier: Option<crate::models::ModelTier>,
+}
+
 #[derive(Debug, Deserialize, TS)]
 #[ts(export)]
 pub struct PartialAuditRequest {

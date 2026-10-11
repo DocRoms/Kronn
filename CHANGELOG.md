@@ -22,6 +22,28 @@ Release notes for 0.9.3 and earlier are available in the
   never 0; a sum over an unknown cost is marked `≥`, an estimated one `≈`. The
   briefing is linked to the project, not to a run: it is the briefing discussion
   opened since the previous Full audit.
+- « Revalider l'audit » on the card of an audited or validated project
+  (KT-1168). Kronn first checks every citation against the fingerprints
+  recorded at validation, without a model:
+  `GET /api/projects/:id/revalidation` lists, per doc, the moved citations,
+  the broken ones (changed, removed, file missing), the ones inside
+  `owner="human"` sections, and the audit step that owns each doc.
+  `POST /api/projects/:id/revalidate-audit` then rewrites the line number of
+  each moved citation whose content is unchanged, also without a model. If
+  any doc still has broken citations, it runs the step that owns that doc,
+  and only that step, through the partial-audit pipeline (same lease, run
+  row, Stop and gates). That step gets the re-verification prompt, Kronn's
+  findings for its doc and the new builtin skill `audit-revalidation`. A
+  citation that no longer resolves is named before the agent runs, and the
+  step cannot end `unchanged` while it is still there. Human sections are
+  listed for their owner and never edited. Docs the agent rewrote get fresh
+  fingerprints, so the « Sources » badge is clean again once nothing is left.
+  A run that rewrote nothing, because the agent ended `unchanged` or was
+  stopped first, restores the validation it revoked. Relaunching the action
+  resumes: it recomputes what is left. Each section of the panel has
+  « Vérifié, inchangé », wired to the existing acknowledgement, and every
+  error, stop or interruption offers « Reprendre ». The routes are not on the
+  bridge list.
 
 - After an audit with failed steps, a single step can be retried alone, or a
   human can accept it as it stands (KT-1131). On each failed line of the

@@ -24,6 +24,7 @@ pub mod helpers;
 pub mod info;
 pub mod reconciliation;
 pub mod redact_artifacts;
+pub mod revalidate;
 pub mod run;
 pub mod validate;
 pub mod validation;
@@ -33,6 +34,7 @@ pub use briefing::*;
 pub use drift::*;
 pub use full::*;
 pub use info::*;
+pub use revalidate::{revalidate_audit, revalidation_plan};
 pub use run::*;
 pub use validate::*;
 // Selective re-export of `pub(crate)` helpers actually consumed from

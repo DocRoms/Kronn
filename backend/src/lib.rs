@@ -1853,6 +1853,14 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             post(api::audit::partial_audit),
         )
         .route(
+            "/api/projects/{id}/revalidation",
+            get(api::audit::revalidation_plan),
+        )
+        .route(
+            "/api/projects/{id}/revalidate-audit",
+            post(api::audit::revalidate_audit),
+        )
+        .route(
             "/api/projects/{id}/validate-audit",
             post(api::audit::validate_audit),
         )

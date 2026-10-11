@@ -42,6 +42,7 @@ case "$prompt" in
       *) kind=fill ;;
     esac
     echo "$n $target $kind" >> '{state}/steps.log'
+    printf '%s' "$prompt" > '{state}/prompt.'"$n"
     if grep -qx "$n" '{state}/fail' 2>/dev/null; then
       printf '%s\n' '{{"type":"result","subtype":"error_during_execution","is_error":true,"usage":{{"input_tokens":1,"output_tokens":1}}}}'
       exit 1
@@ -56,6 +57,18 @@ case "$prompt" in
       done < '{state}/drop'
       f='{project}'/"$target"
       if [ -f "$f" ] && grep -q 'Human-owned rule' "$f"; then
+        sed 's/Human-owned rule/Agent rewrote the human rule/' "$f" > "$f.next"
+        mv "$f.next" "$f"
+      fi
+    fi
+    if [ "$(cat '{state}/mode')" = revalidate ]; then
+      f='{project}'/"$target"
+      printf '%s\n' "$prompt" | sed -n 's/^- `\[src: file: \([^]]*\)\]` .*changed.*$/\1/p' > '{state}/fix'
+      while read -r cite; do
+        awk -v c="[src: file: $cite]" '{{ if (index($0, c)) print "- Revalidated against the current code " c; else print }}' "$f" > "$f.next"
+        mv "$f.next" "$f"
+      done < '{state}/fix'
+      if grep -q 'Human-owned rule' "$f"; then
         sed 's/Human-owned rule/Agent rewrote the human rule/' "$f" > "$f.next"
         mv "$f.next" "$f"
       fi
@@ -972,3 +985,6 @@ async fn a_launch_that_would_ignore_a_resumable_run_is_refused_unless_fresh() {
     let done = sse_events(&fresh, "done").pop().expect("terminal done");
     assert_ne!(done["audit_run_id"], json!(interrupted));
 }
+
+#[path = "revalidate_e2e_tests.rs"]
+mod revalidate_e2e_tests;

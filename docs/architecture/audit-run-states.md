@@ -122,6 +122,28 @@ by a human (KT-1131). An accepted step keeps its failure on record:
 - Refused acceptance. [src: file: frontend/src/components/AuditTimeline.tsx:408] [src: file: frontend/src/components/AuditTimeline.tsx:689]
 - Recap read error. [src: file: frontend/src/components/AuditRecapPanel.tsx:324]
 
+## Revalidating an audit (KT-1168)
+
+« Revalider l'audit » has no lifecycle of its own.
+
+- **Deterministic part.** It runs under the project's audit lease and leaves
+  no run row. Moved citations outside human sections get their new line
+  number, and their fingerprints move with them.
+- **Agent part.** Docs with broken citations go to a `Partial` run over their
+  owning steps, so the states above apply: Stop, `Interrupted`, the drop
+  guard, and a validation discussion when the run completes.
+- **Resuming.** Relaunching the action is the resume. The plan is recomputed
+  from `docs/citations.json`, and the docs rewritten by a step that succeeded
+  were re-fingerprinted even if the run was interrupted.
+- **Validation.** A run that rewrote no agent target, because every step
+  ended `unchanged` or was stopped first, restores the `validated_at` it
+  revoked.
+
+Sources:
+
+- The plan and the re-anchoring. [src: file: backend/src/api/audit/revalidate.rs:54] [src: file: backend/src/api/audit/revalidate.rs:131]
+- The partial pipeline the agent part reuses. [src: file: backend/src/api/audit/drift.rs:306]
+
 ## The action offered in each state
 
 | State (as the timeline sees it) | Primary action | Other actions |
