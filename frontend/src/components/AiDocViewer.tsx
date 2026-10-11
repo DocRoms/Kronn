@@ -11,6 +11,7 @@ import { MermaidDiagram } from './MermaidDiagram';
 import { DocHeading, DocLink } from './DocLink';
 import { buildDocIndex, DocLinkContext, findDocHeading, type DocLinkTarget } from '../lib/docLinks';
 import { onActivationKey } from '../lib/keyboardActivation';
+import { useDialogFocus } from '../hooks/useDialogFocus';
 import './AiDocViewer.css';
 import {
   ChevronRight, ChevronDown, ChevronUp,
@@ -201,13 +202,6 @@ function AiDocViewerProject({ projectId, onDiscussFile, initialExpandFolder, ban
     ? searchResult.matches
     : EMPTY_DOC_SEARCH_RESULTS;
   const searchLoading = Boolean(trimmedSearchQuery) && !searchIsCurrent;
-
-  useEffect(() => {
-    if (!codeTarget) return;
-    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') setCodeTarget(null); };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [codeTarget]);
 
   // Scroll once the target doc is rendered; a same-doc anchor applies immediately.
   useEffect(() => {
@@ -553,23 +547,35 @@ function AiDocViewerProject({ projectId, onDiscussFile, initialExpandFolder, ban
       </div>
       </div>
       {codeTarget && (
-        <div className="aidoc-code-overlay" role="dialog" aria-label={codeTarget.path}>
-          <div className="aidoc-code-panel">
-            <div className="aidoc-code-head">
-              <code>{codeTarget.path}{codeTarget.line ? `:${codeTarget.line}` : ''}</code>
-              <button type="button" className="aidoc-code-close" onClick={() => setCodeTarget(null)} aria-label={t('projects.docAi.closeCode')}>
-                <X size={14} />
-              </button>
-            </div>
-            <div className="aidoc-code-body">
-              <Suspense fallback={null}>
-                <SourceCodeViewer projectId={projectId} initialPath={codeTarget.path} initialLine={codeTarget.line} />
-              </Suspense>
-            </div>
-          </div>
-        </div>
+        <CodeOverlay projectId={projectId} target={codeTarget} onClose={() => setCodeTarget(null)} />
       )}
     </>
+  );
+}
+
+function CodeOverlay({ projectId, target, onClose }: {
+  projectId: string;
+  target: { path: string; line: number | null };
+  onClose: () => void;
+}) {
+  const { t } = useT();
+  const dialogRef = useDialogFocus<HTMLDivElement>({ onEscape: onClose });
+  return (
+    <div className="aidoc-code-overlay" role="dialog" aria-modal="true" aria-label={target.path} ref={dialogRef}>
+      <div className="aidoc-code-panel">
+        <div className="aidoc-code-head">
+          <code>{target.path}{target.line ? `:${target.line}` : ''}</code>
+          <button type="button" className="aidoc-code-close" onClick={onClose} aria-label={t('projects.docAi.closeCode')}>
+            <X size={14} />
+          </button>
+        </div>
+        <div className="aidoc-code-body">
+          <Suspense fallback={null}>
+            <SourceCodeViewer projectId={projectId} initialPath={target.path} initialLine={target.line} />
+          </Suspense>
+        </div>
+      </div>
+    </div>
   );
 }
 

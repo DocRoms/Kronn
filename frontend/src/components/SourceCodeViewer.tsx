@@ -10,6 +10,7 @@ import type {
   GitBlameLine, GitCommitDetail, SourceDirectoryListing, SourceFileNode,
 } from '../types/generated';
 import { useT } from '../lib/I18nContext';
+import { useDialogFocus } from '../hooks/useDialogFocus';
 import { highlightLine as highlightSourceLine, languageForPath } from '../lib/diff-syntax';
 import { buildHtmlPreviewDocument } from '../lib/html-preview';
 import './SourceCodeViewer.css';
@@ -308,15 +309,8 @@ function SourceCodeViewerProject({ projectId, initialPath, initialLine, onOpenCo
     return () => { alive = false; };
   }, [commitSha, projectId]);
 
-  // Escape closes the commit detail before anything else reacts to it.
-  useEffect(() => {
-    if (!commitSha) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setCommitSha(null);
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [commitSha]);
+  // An inline popover: one Escape inside it closes it alone, not the viewer hosting it.
+  const commitRef = useDialogFocus<HTMLDivElement>({ active: commitSha !== null, onEscape: () => setCommitSha(null), trap: false });
 
   useEffect(() => {
     if (searchTimer.current) clearTimeout(searchTimer.current);
@@ -691,7 +685,7 @@ function SourceCodeViewerProject({ projectId, initialPath, initialLine, onOpenCo
             </div>
           )}
           {commitSha && (
-            <div className="source-commit-detail" data-testid="source-commit-detail" role="dialog" aria-label={t('projects.source.commitTitle')}>
+            <div className="source-commit-detail" data-testid="source-commit-detail" role="dialog" aria-label={t('projects.source.commitTitle')} ref={commitRef}>
               <header>
                 <strong>{commitDetail?.short_sha ?? commitSha.slice(0, 8)}</strong>
                 <button

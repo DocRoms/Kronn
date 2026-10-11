@@ -149,6 +149,17 @@ describe('TechDebtReview', () => {
     expect(props.onClose).toHaveBeenCalled();
   });
 
+  it('leaves Escape to an IME composition or a control that consumed it (KT-1072)', () => {
+    const props = setup();
+    const search = screen.getByLabelText('techDebt.search');
+    fireEvent.keyDown(search, { key: 'Escape', isComposing: true });
+    search.addEventListener('keydown', event => event.preventDefault(), { once: true });
+    fireEvent.keyDown(search, { key: 'Escape' });
+    expect(props.onClose).not.toHaveBeenCalled();
+    fireEvent.keyDown(search, { key: 'Escape' });
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
   it('stays usable with 150 items', () => {
     const many = Array.from({ length: 150 }, (_, i) =>
       tdItem(`TD-20261001-n${i}`, ['Critical', 'High', 'Medium', 'Low'][i % 4]));
@@ -192,6 +203,7 @@ describe('TechDebtReview', () => {
       const pointer = within(screen.getByTestId('td-review')).getAllByRole('button', { name: /backend\/src\/lib\.rs/ })[0];
       await userEvent.click(pointer);
       const viewer = screen.getByRole('dialog', { name: 'backend/src/lib.rs' });
+      expect(viewer).toHaveAttribute('aria-modal', 'true');
       await expectFocusKeptIn(viewer, 3);
       await userEvent.keyboard('{Escape}');
       expect(screen.queryByRole('dialog', { name: 'backend/src/lib.rs' })).toBeNull();

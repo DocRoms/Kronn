@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { projects } from '../../lib/api';
 import { SourceCodeViewer } from '../SourceCodeViewer';
+import { useDialogFocus } from '../../hooks/useDialogFocus';
 import { buildHtmlPreviewDocument } from '../../lib/html-preview';
 import type { SourceDirectoryListing, SourceFileNode } from '../../types/generated';
 
@@ -659,7 +660,33 @@ describe('SourceCodeViewer', () => {
     const panel = await screen.findByTestId('source-commit-detail');
     await waitFor(() => expect(panel).toHaveTextContent('bad object'));
 
-    await act(async () => { fireEvent.keyDown(window, { key: 'Escape' }); });
+    expect(panel.contains(document.activeElement)).toBe(true);
+    await act(async () => { fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' }); });
     expect(screen.queryByTestId('source-commit-detail')).toBeNull();
+  });
+
+  it('inside a modal host, one Escape closes the commit detail alone, the next one the host (KT-1072)', async () => {
+    const closeHost = vi.fn();
+    function Host() {
+      const ref = useDialogFocus<HTMLDivElement>({ onEscape: closeHost });
+      return <div ref={ref} role="dialog" aria-modal="true" aria-label="host"><SourceCodeViewer projectId="project-1" /></div>;
+    }
+    render(<Host />);
+    await screen.findByText('main.rs');
+    fireEvent.click(screen.getByRole('button', { name: 'projects.source.annotate' }));
+    await screen.findByText(/Ada Lovelace/);
+    const blame = screen.getAllByTestId('source-blame-button')[0];
+    blame.focus();
+    fireEvent.click(blame);
+    const panel = await screen.findByTestId('source-commit-detail');
+    expect(panel.contains(document.activeElement)).toBe(true);
+
+    await act(async () => { fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' }); });
+    expect(screen.queryByTestId('source-commit-detail')).toBeNull();
+    expect(closeHost).not.toHaveBeenCalled();
+    expect(blame).toHaveFocus();
+
+    await act(async () => { fireEvent.keyDown(blame, { key: 'Escape' }); });
+    expect(closeHost).toHaveBeenCalledTimes(1);
   });
 });

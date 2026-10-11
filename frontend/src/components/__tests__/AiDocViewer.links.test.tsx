@@ -125,6 +125,27 @@ describe('AiDocViewer — in-app doc links', () => {
     expect(screen.queryByTestId('source-viewer')).toBeNull();
   });
 
+  it('the source overlay is a modal dialog: it takes focus and one Escape closes it alone (KT-1072)', async () => {
+    const page = vi.fn();
+    window.addEventListener('keydown', page);
+    try {
+      await openAgents();
+      const link = screen.getByRole('link', { name: 'Router' });
+      link.focus();
+      fireEvent.click(link);
+      await screen.findByTestId('source-viewer');
+      const dialog = screen.getByRole('dialog', { name: 'backend/src/lib.rs' });
+      expect(dialog).toHaveAttribute('aria-modal', 'true');
+      expect(screen.getByRole('button', { name: 'projects.docAi.closeCode' })).toHaveFocus();
+      fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
+      expect(screen.queryByTestId('source-viewer')).toBeNull();
+      expect(page).not.toHaveBeenCalled();
+      expect(link).toHaveFocus();
+    } finally {
+      window.removeEventListener('keydown', page);
+    }
+  });
+
   it('sends external links to a new tab with rel noopener noreferrer', async () => {
     await openAgents();
     const link = screen.getByRole('link', { name: 'Web' });

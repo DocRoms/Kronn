@@ -6,7 +6,6 @@ import { render, screen, fireEvent, waitFor, within } from '@testing-library/rea
 import type { ReactElement } from 'react';
 import userEvent from '@testing-library/user-event';
 import { I18nProvider } from '../../lib/I18nContext';
-import { expectFocusKeptIn } from '../../test/dialogFocus';
 
 vi.mock('../../lib/api', async () => {
   const { buildApiMock } = await import('../../test/apiMock');
@@ -174,14 +173,52 @@ describe('TemplateReinstall', () => {
     await waitFor(() => expect(api.templateReinstall).toHaveBeenCalledTimes(2));
   });
 
-  it('the confirmation dialog takes focus, keeps it, closes on Escape and returns focus to the open button (KT-1072)', async () => {
+  it('the inline confirmation takes focus, closes on Escape and returns focus to the open button (KT-1072)', async () => {
     wrap(<TemplateReinstall projectId="p1" />);
     await userEvent.click(screen.getByTestId('template-reinstall-open'));
     const dialog = await screen.findByTestId('template-reinstall-confirm');
-    await expectFocusKeptIn(dialog, 6);
+    expect(dialog.contains(document.activeElement)).toBe(true);
     await userEvent.keyboard('{Escape}');
     expect(screen.queryByTestId('template-reinstall-panel')).toBeNull();
     expect(screen.getByTestId('template-reinstall-open')).toHaveFocus();
+  });
+
+  it('the confirmation is non-modal: Tab leaves it, Escape outside it is ignored (KT-1072)', async () => {
+    wrap(<><TemplateReinstall projectId="p1" /><button type="button">after</button></>);
+    await userEvent.click(screen.getByTestId('template-reinstall-open'));
+    const dialog = await screen.findByTestId('template-reinstall-confirm');
+    expect(dialog).not.toHaveAttribute('aria-modal');
+    within(dialog).getByRole('button', { name: 'Annuler' }).focus();
+    await userEvent.tab();
+    expect(screen.getByText('after')).toHaveFocus();
+    fireEvent.keyDown(document.body, { key: 'Escape' });
+    expect(screen.getByTestId('template-reinstall-confirm')).toBeInTheDocument();
+  });
+
+  it('Confirm hands focus to the report\'s Close, and Close to the open button (KT-1072)', async () => {
+    await openConfirmation();
+    await userEvent.click(screen.getByTestId('template-reinstall-confirm-button'));
+    const done = await screen.findByTestId('template-reinstall-done');
+    const close = within(done).getByRole('button', { name: 'Fermer' });
+    await waitFor(() => expect(close).toHaveFocus());
+    await userEvent.click(close);
+    expect(screen.getByTestId('template-reinstall-open')).toHaveFocus();
+  });
+
+  it('a failure hands focus to its Close, and Close to the open button (KT-1072)', async () => {
+    api.templateReinstall.mockRejectedValueOnce(new Error('boom'));
+    await openConfirmation();
+    await userEvent.click(screen.getByTestId('template-reinstall-confirm-button'));
+    const error = await screen.findByTestId('template-reinstall-error');
+    const close = within(error).getByRole('button', { name: 'Fermer' });
+    await waitFor(() => expect(close).toHaveFocus());
+    await userEvent.click(close);
+    expect(screen.getByTestId('template-reinstall-open')).toHaveFocus();
+  });
+
+  it('does not take focus when it first renders (KT-1072)', () => {
+    wrap(<TemplateReinstall projectId="p1" />);
+    expect(document.body).toHaveFocus();
   });
 
   it('the inline panel outside the confirmation never traps the keyboard (KT-1072)', async () => {

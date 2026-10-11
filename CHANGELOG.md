@@ -376,6 +376,14 @@ Release notes for 0.9.3 and earlier are available in the
   a control inside it. The audit history's sortable columns expose
   `aria-sort` and sort from a button, and the audit timeline announces each
   new step, not every tick, through a polite live region.
+  The template reinstall confirmation is non-modal (Tab may leave it, only
+  an Escape pressed inside closes it) and focus follows each step: the
+  report's or the error's « Fermer » after confirming, then the open button.
+  Escape in one of two side-by-side inline panels closes that panel. The doc
+  viewer's source overlay is a modal dialog, the tech-debt review and its
+  source viewer leave Escape to an IME composition or a control that
+  consumed it, and one Escape in the commit detail closes it alone, not the
+  viewer around it.
 
 - One click on « Voir » in the pending-decisions banner now brings the
   decision card into view. It fired a single smooth `scrollIntoView`, aimed

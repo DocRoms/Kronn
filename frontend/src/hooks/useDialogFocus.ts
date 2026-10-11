@@ -24,12 +24,22 @@ export function focusableIn(root: HTMLElement): HTMLElement[] {
     .filter(el => !el.closest('[hidden], [inert], [aria-hidden="true"]'));
 }
 
-// Open dialogs, innermost last: only the top one handles Escape and Tab.
+// Open dialogs, innermost last: the top one handles Tab and a modal's Escape.
 const openDialogs: HTMLElement[] = [];
+
+const isModal = (node: HTMLElement) => node.getAttribute('aria-modal') === 'true';
+
+// Side-by-side inline panels: the innermost dialog around the target owns Escape, unless a modal opened later.
+function ownsEscape(node: HTMLElement, target: Node): boolean {
+  const index = openDialogs.lastIndexOf(node);
+  return !openDialogs.some((other, i) => other !== node
+    && ((node.contains(other) && other.contains(target)) || (i > index && isModal(other))));
+}
 
 /**
  * Initial focus, Tab trap, Escape and focus return for a dialog or drawer.
  * Attach the returned ref to the element carrying role="dialog".
+ * With onEscape, Escape stops at body: a popover inside listening on document or window never sees it.
  */
 export function useDialogFocus<T extends HTMLElement = HTMLDivElement>(options: DialogFocusOptions = {}): RefObject<T | null> {
   const { active = true, trap = true } = options;
@@ -54,17 +64,18 @@ export function useDialogFocus<T extends HTMLElement = HTMLDivElement>(options: 
     }
 
     const isTop = () => openDialogs[openDialogs.length - 1] === node;
-    const modal = node.getAttribute('aria-modal') === 'true';
+    const modal = isModal(node);
 
     const closeOnEscape = (event: KeyboardEvent) => {
       const onEscape = latest.current.onEscape;
       // An IME composition uses Escape to cancel itself.
       if (event.key !== 'Escape' || event.isComposing || event.keyCode === 229) return;
-      if (!onEscape || event.defaultPrevented || !isTop()) return;
-      const target = event.target;
-      const lost = !(target instanceof Node) || target === document || target === document.body;
-      // A non-modal dialog only owns Escape pressed inside it.
-      if (!(target instanceof Node && node.contains(target)) && !(modal && lost)) return;
+      if (!onEscape || event.defaultPrevented) return;
+      const target = event.target instanceof Node ? event.target : null;
+      const inside = target !== null && node.contains(target);
+      const lost = target === null || target === document || target === document.body;
+      // A modal answers from the top of the stack; a non-modal only owns Escape pressed inside it.
+      if (modal ? !isTop() || !(inside || lost) : !inside || !ownsEscape(node, target)) return;
       event.preventDefault();
       // One layer per Escape: document and window listeners never see it.
       event.stopPropagation();

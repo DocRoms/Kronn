@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState, type RefObject } from 'react';
+import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
 import { AlertTriangle, CheckCircle2, RotateCcw, Wrench } from 'lucide-react';
 import { projects as projectsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
@@ -48,6 +48,18 @@ export function TemplateReinstall({ projectId }: { projectId: string }) {
 
   const close = () => setPhase({ kind: 'idle' });
   const openRef = useRef<HTMLButtonElement>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
+  const shown = useRef(phase.kind);
+
+  // The control that held focus (Confirm, Close) was unmounted: hand focus to the next step's control.
+  useEffect(() => {
+    const previous = shown.current;
+    shown.current = phase.kind;
+    const lost = document.activeElement === null || document.activeElement === document.body;
+    if (previous === phase.kind || !lost) return;
+    if (phase.kind === 'idle') openRef.current?.focus();
+    else if (phase.kind === 'done' || phase.kind === 'error') closeRef.current?.focus();
+  }, [phase.kind]);
 
   if (phase.kind === 'idle') {
     return (
@@ -78,7 +90,7 @@ export function TemplateReinstall({ projectId }: { projectId: string }) {
               <button type="button" className="tm-btn tm-btn-primary" onClick={phase.retry}>
                 <RotateCcw size={12} /> {t('templateMerge.resume')}
               </button>
-              <button type="button" className="tm-btn" onClick={close}>{t('templateMerge.close')}</button>
+              <button type="button" className="tm-btn" onClick={close} ref={closeRef}>{t('templateMerge.close')}</button>
             </div>
           </div>
         </div>
@@ -107,7 +119,7 @@ export function TemplateReinstall({ projectId }: { projectId: string }) {
             {phase.report.to_reconfirm.length > 0 && (
               <p className="tm-small" data-testid="template-reinstall-reconfirm">{t('templateReinstall.done.reconfirm', phase.report.to_reconfirm.join(', '))}</p>
             )}
-            <button type="button" className="tm-btn" onClick={close}>{t('templateMerge.close')}</button>
+            <button type="button" className="tm-btn" onClick={close} ref={closeRef}>{t('templateMerge.close')}</button>
           </div>
         </div>
       )}
@@ -122,8 +134,9 @@ function ConfirmBody({ plan, onConfirm, onCancel, returnFocus }: {
   returnFocus: RefObject<HTMLButtonElement | null>;
 }) {
   const { t } = useT();
-  // Only the confirmation is a dialog; the open button is re-rendered on cancel, hence returnFocus.
-  const dialogRef = useDialogFocus<HTMLDivElement>({ onEscape: onCancel, returnFocus });
+  // Inline in the project card, so non-modal: Tab may leave it and only Escape pressed inside closes it.
+  // The open button is re-rendered on cancel, hence returnFocus.
+  const dialogRef = useDialogFocus<HTMLDivElement>({ onEscape: onCancel, returnFocus, trap: false });
   const damaged = plan.files.filter(f => f.action === 'replace' && f.kind !== 'filled');
   const filled = plan.files.filter(f => f.action === 'replace' && f.kind === 'filled');
   const created = plan.files.filter(f => f.action === 'create');

@@ -192,6 +192,34 @@ describe('useDialogFocus (KT-1072)', () => {
     });
   });
 
+  describe('side-by-side non-modal dialogs (KT-1072 review)', () => {
+    function Panel({ name, onEscape, modal }: { name: string; onEscape: () => void; modal?: boolean }) {
+      const ref = useDialogFocus<HTMLDivElement>({ onEscape, trap: false });
+      return <div ref={ref} role="dialog" aria-label={name} aria-modal={modal ? 'true' : undefined}><button type="button">{`in ${name}`}</button></div>;
+    }
+
+    it('Escape closes the panel holding the target, even below the top of the stack', () => {
+      const first = vi.fn();
+      const second = vi.fn();
+      render(<><Panel name="A" onEscape={first} /><Panel name="B" onEscape={second} /></>);
+      fireEvent.keyDown(screen.getByText('in A'), { key: 'Escape' });
+      expect(first).toHaveBeenCalledTimes(1);
+      expect(second).not.toHaveBeenCalled();
+      fireEvent.keyDown(screen.getByText('in B'), { key: 'Escape' });
+      expect(second).toHaveBeenCalledTimes(1);
+    });
+
+    it('a modal opened later still owns Escape', () => {
+      const below = vi.fn();
+      const modal = vi.fn();
+      render(<><Panel name="A" onEscape={below} /><Panel name="M" onEscape={modal} modal /></>);
+      fireEvent.keyDown(screen.getByText('in A'), { key: 'Escape' });
+      expect(below).not.toHaveBeenCalled();
+      fireEvent.keyDown(screen.getByText('in M'), { key: 'Escape' });
+      expect(modal).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it('closing a dialog out of order leaves focus in the dialog still open', async () => {
     function A({ open }: { open: boolean }) {
       const ref = useDialogFocus<HTMLDivElement>({ active: open });

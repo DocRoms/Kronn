@@ -93,9 +93,9 @@ export function TechDebtReview({
   const [reasonFor, setReasonFor] = useState<{ id: string | null; text: string }>({ id: null, text: '' });
   const [viewer, setViewer] = useState<TdPointer | null>(null);
   const [busy, setBusy] = useState(false);
-  // Escape stays in the effect below: it closes the source viewer first.
-  const dialogRef = useDialogFocus<HTMLDivElement>();
-  const viewerRef = useDialogFocus<HTMLDivElement>({ active: viewer !== null });
+  // The viewer covers the review, so it is modal too and takes Escape first.
+  const dialogRef = useDialogFocus<HTMLDivElement>({ onEscape: onClose });
+  const viewerRef = useDialogFocus<HTMLDivElement>({ active: viewer !== null, onEscape: () => setViewer(null) });
   const { data: connections } = useApi(() => externalApi.list(), []);
   const installedAgentTypes = useMemo(() => agents.filter(isUsable).map(a => a.agent_type), [agents]);
   const talkChoices = useMemo<AgentSwitchTarget[]>(() => [
@@ -122,16 +122,6 @@ export function TechDebtReview({
   const reason = reasonFor.id === currentId ? reasonFor.text : '';
   const total = list.items.length;
   const todoCount = list.counts.pending + list.counts.deferred;
-
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
-      if (viewer) setViewer(null);
-      else onClose();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [viewer, onClose]);
 
   useEffect(() => { dialogRef.current?.focus(); }, [dialogRef]);
 
@@ -525,7 +515,7 @@ export function TechDebtReview({
         </div>
 
         {viewer && (
-          <div className="td-viewer" role="dialog" aria-label={viewer.path} ref={viewerRef}>
+          <div className="td-viewer" role="dialog" aria-modal="true" aria-label={viewer.path} ref={viewerRef}>
             <div className="td-viewer-head">
               <code>{viewer.path}{viewer.line ? `:${viewer.line}` : ''}</code>
               <button type="button" className="td-icon-btn" onClick={() => setViewer(null)} aria-label={t('techDebt.viewer.close')}>
