@@ -10,9 +10,11 @@ import { refreshDiscussionQuestions, useDiscussionQuestions } from '../lib/discu
 import { useT } from '../lib/I18nContext';
 import './DiscussionQuestionBanner.css';
 
-export function DiscussionQuestionBanner({ discussionId, messageRevision }: {
+export function DiscussionQuestionBanner({ discussionId, messageRevision, onNavigate }: {
   discussionId: string;
   messageRevision?: string;
+  /** Brings a message into view and keeps it there while the thread lays out. */
+  onNavigate: (messageId: string, anchorSelector?: string) => void;
 }) {
   const { t } = useT();
   const { questions, pendingCount } = useDiscussionQuestions(discussionId);
@@ -22,11 +24,11 @@ export function DiscussionQuestionBanner({ discussionId, messageRevision }: {
   if (pendingCount === 0) return null;
 
   const first = questions.find(question => question.state === 'pending');
+  // A one-shot scrollIntoView lands short on a long thread; the page's pinned
+  // navigation keeps the card centred until the rows above settle.
   const reveal = () => {
     if (!first) return;
-    document
-      .querySelector(`[data-testid="disc-question-${first.id}"]`)
-      ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    onNavigate(first.source_message_id, `[data-testid="disc-question-${first.id}"]`);
   };
 
   return (

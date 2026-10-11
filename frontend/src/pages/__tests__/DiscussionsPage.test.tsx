@@ -218,6 +218,7 @@ import {
 } from '../../lib/api';
 import { DiscussionsPage } from '../DiscussionsPage';
 import { clearImportantMessages } from '../../lib/importantMessages';
+import { resetDiscussionQuestions } from '../../lib/discussionQuestions';
 import { discardImportantDraft } from '../../lib/importantMessageDraft';
 import { findRenderedTextRanges } from '../../lib/discussionMessageSearch';
 import type { ActiveAgentDispatch, AgentDetection, AgentType, AgentsConfig, AiAuditStatus, ContextFile, Discussion, Project, SharedRun, WsMessage } from '../../types/generated';
@@ -294,6 +295,65 @@ const liftedProps = () => ({
 });
 
 /** List-view discussion: has message_count but messages is empty (like the real backend) */
+/**
+ * jsdom performs no layout. Model a long thread whose rows use
+ * `content-visibility: auto`: `targetSelector` sits at `offset` in the scrolled
+ * content, the container shows 800 px, and rows above take their real height
+ * only after the click. A native scrollIntoView aims once, at the layout
+ * measured when it fires.
+ */
+function installGrowingLayout(targetSelector: string) {
+  const rectDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'getBoundingClientRect');
+  const scrollDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollIntoView');
+  let offset = 2000;
+  const container = () => document.querySelector<HTMLElement>('.disc-messages');
+  const rect = (top: number, height: number) => ({
+    top, bottom: top + height, left: 0, right: 600, width: 600, height, x: 0, y: top, toJSON: () => ({}),
+  }) as DOMRect;
+  Object.defineProperty(HTMLElement.prototype, 'getBoundingClientRect', {
+    configurable: true,
+    value(this: HTMLElement) {
+      const box = container();
+      if (this === box) return rect(0, 800);
+      if (box && this.matches(targetSelector)) return rect(offset - box.scrollTop, 100);
+      return rect(0, 0);
+    },
+  });
+  Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+    configurable: true,
+    value(this: HTMLElement) {
+      const box = container();
+      if (!box) return;
+      const target = this.getBoundingClientRect();
+      box.scrollTop += (target.top + target.bottom) / 2 - 400;
+    },
+  });
+  const wait = (ms: number) => act(async () => { await new Promise(resolve => setTimeout(resolve, ms)); });
+  return {
+    async clickWhileGrowing(button: HTMLElement) {
+      // Let earlier pins (cold-load bottom, first search match) finish first.
+      await wait(800);
+      container()!.scrollTop = 0;
+      const grow = setInterval(() => { if (offset < 6000) offset += 1000; }, 16);
+      await act(async () => { fireEvent.click(button); });
+      await wait(300);
+      clearInterval(grow);
+      await wait(600);
+    },
+    expectTargetCentred() {
+      // Centred where the target finally sits, not where it was at the click.
+      expect(offset).toBe(6000);
+      expect(Math.abs(offset + 50 - container()!.scrollTop - 400)).toBeLessThan(1);
+    },
+    restore() {
+      if (rectDescriptor) Object.defineProperty(HTMLElement.prototype, 'getBoundingClientRect', rectDescriptor);
+      else delete (HTMLElement.prototype as { getBoundingClientRect?: unknown }).getBoundingClientRect;
+      if (scrollDescriptor) Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', scrollDescriptor);
+      else delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+    },
+  };
+}
+
 const makeListDiscussion = (id: string, msgCount: number): Discussion => ({
   id,
   project_id: null,
@@ -1923,12 +1983,6 @@ describe('DiscussionsPage', () => {
       ai_generation: null,
       created_at: '2026-01-01T00:01:00Z',
     }]);
-    const scrollIntoView = vi.fn();
-    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
-      configurable: true,
-      value: scrollIntoView,
-    });
-
     await wrap(
       <DiscussionsPage
         projects={[]}
@@ -1951,7 +2005,9 @@ describe('DiscussionsPage', () => {
     expect(screen.getByRole('complementary', { name: 'Assets' })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /Aller au message contenant source\.csv/ }));
 
-    await waitFor(() => expect(scrollIntoView).toHaveBeenCalled());
+    await waitFor(() => expect(
+      document.querySelector('[data-message-id="m-asset"]')?.getAttribute('data-search-current'),
+    ).toBe('true'));
     expect(screen.queryByRole('complementary', { name: 'Assets' })).toBeNull();
   });
 
@@ -2798,6 +2854,102 @@ describe('DiscussionsPage', () => {
     // measured when the click happened.
     expect(scrollHeight).toBe(9000);
     expect(container.scrollTop).toBe(9000);
+  });
+
+  const longThread = (id: string, contentFor: (i: number) => string | null = () => null) => {
+    const messages = Array.from({ length: 30 }, (_, i) => ({
+      id: `m${i}`,
+      role: (i % 2 === 0 ? 'User' : 'Agent') as 'User' | 'Agent',
+      channel: 'main' as const,
+      content: contentFor(i) ?? `message ${i}`,
+      agent_type: i % 2 === 0 ? null : ('ClaudeCode' as const),
+      timestamp: '2026-01-01T00:00:00Z',
+      tokens_used: 0,
+      auth_mode: null,
+    }));
+    return { ...makeListDiscussion(id, messages.length), messages };
+  };
+  const renderThread = (disc: Discussion) => wrap(
+    <DiscussionsPage
+      projects={[]}
+      agents={[]}
+      allDiscussions={[disc]}
+      configLanguage="fr"
+      agentAccess={null}
+      refetchDiscussions={noop}
+      refetchProjects={noop}
+      onNavigate={noop}
+      toast={toastFn}
+      initialActiveDiscussionId={disc.id}
+      {...liftedProps()}
+    />
+  );
+
+  it('opens the pending decision card in one click while rows above are still laying out', async () => {
+    // Reported bug: "je suis obligé de cliquer au moins 10 fois" on the
+    // arbitration banner.
+    resetDiscussionQuestions();
+    const disc = longThread('d-arb', i => (i === 3 ? '```kronn-question\n{"version":1,"key":"k"}\n```' : null));
+    vi.mocked(discussionsApi.get).mockResolvedValue(disc);
+    vi.mocked(discussionsApi.questions).mockResolvedValue({
+      questions: [{
+        id: 'q-arb', discussion_id: 'd-arb', source_message_id: 'm3', fence_index: 0, key: 'k',
+        question: 'Which policy?', context: null,
+        options: [{ id: 'a', label: 'A', description: null }], items: [], multiple: false,
+        recommended_option_ids: [], task_ref: null, requester_workflow_step: null, resume: null,
+        state: 'pending', answer: null,
+        created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+      }],
+      pending_count: 1,
+    } as never);
+    const layout = installGrowingLayout('[data-message-id="m3"], [data-testid="disc-question-q-arb"]');
+    try {
+      await renderThread(disc);
+      await screen.findByTestId('disc-question-q-arb');
+      await layout.clickWhileGrowing(await screen.findByTestId('disc-question-banner-go'));
+      layout.expectTargetCentred();
+    } finally {
+      layout.restore();
+      resetDiscussionQuestions();
+    }
+  });
+
+  it('jumps from the asset inventory to its message in one click while rows above are still laying out', async () => {
+    const disc = longThread('d-asset-jump');
+    vi.mocked(discussionsApi.get).mockResolvedValue(disc);
+    vi.mocked(discussionsApi.listContextFiles).mockResolvedValue([{
+      id: 'cf-jump', discussion_id: 'd-asset-jump', filename: 'source.csv', mime_type: 'text/csv',
+      original_size: 128, extracted_size: 128, disk_path: null, message_id: 'm3', ai_generation: null,
+      created_at: '2026-01-01T00:01:00Z',
+    }]);
+    const layout = installGrowingLayout('[data-message-id="m3"]');
+    try {
+      await renderThread(disc);
+      fireEvent.click(await screen.findByTestId('panel-open-toggle'));
+      fireEvent.click(await screen.findByRole('button', { name: /Parcourir tous les assets.*1/ }));
+      await layout.clickWhileGrowing(screen.getByRole('button', { name: /Aller au message contenant source\.csv/ }));
+      layout.expectTargetCentred();
+    } finally {
+      layout.restore();
+    }
+  });
+
+  it('reaches the next search match in one click while rows above are still laying out', async () => {
+    const disc = longThread('d-search-jump', i => (i === 3 || i === 5 ? `zebra ${i}` : null));
+    vi.mocked(discussionsApi.get).mockResolvedValue(disc);
+    const layout = installGrowingLayout('[data-message-id="m5"]');
+    try {
+      await renderThread(disc);
+      fireEvent.click(await screen.findByRole('button', { name: 'Rechercher dans les messages' }));
+      const input = await screen.findByRole('searchbox', { name: 'Rechercher dans cette discussion…' });
+      fireEvent.change(input, { target: { value: 'zebra' } });
+      await waitFor(() => expect(screen.getByText('1 / 2')).toBeTruthy());
+      await layout.clickWhileGrowing(screen.getByRole('button', { name: 'Occurrence suivante' }));
+      expect(screen.getByText('2 / 2')).toBeTruthy();
+      layout.expectTargetCentred();
+    } finally {
+      layout.restore();
+    }
   });
 
   it('optimistically promotes the streaming buffer to a real Agent message on stream end (no scroll jump)', async () => {

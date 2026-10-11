@@ -82,18 +82,26 @@ describe('DiscussionQuestionCard', () => {
 
   it('refreshes an initially empty room when its first question message arrives', async () => {
     questionsMock.mockResolvedValueOnce({ questions: [], pending_count: 0 });
-    const view = render(<DiscussionQuestionBanner discussionId="d-1" messageRevision="m-0" />);
+    const view = render(<DiscussionQuestionBanner discussionId="d-1" messageRevision="m-0" onNavigate={() => {}} />);
     await act(async () => {});
     expect(questionsMock).toHaveBeenCalledTimes(1);
 
     view.rerender(<>
-      <DiscussionQuestionBanner discussionId="d-1" messageRevision="m-1" />
+      <DiscussionQuestionBanner discussionId="d-1" messageRevision="m-1" onNavigate={() => {}} />
       <DiscussionQuestionCard discussionId="d-1" sourceMessageId="m-1" fenceIndex={0} />
     </>);
 
     expect(await screen.findByTestId('disc-question-q-1')).toHaveAttribute('data-state', 'pending');
     expect(screen.getByTestId('disc-question-banner')).toHaveTextContent('disc.question.bannerPending 1');
     expect(questionsMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('hands the pending question to the page navigation on one click', async () => {
+    const onNavigate = vi.fn();
+    render(<DiscussionQuestionBanner discussionId="d-1" messageRevision="m-1" onNavigate={onNavigate} />);
+    fireEvent.click(await screen.findByTestId('disc-question-banner-go'));
+    expect(onNavigate).toHaveBeenCalledTimes(1);
+    expect(onNavigate).toHaveBeenCalledWith('m-1', '[data-testid="disc-question-q-1"]');
   });
 
   it('revalidates the cached room after its last subscriber leaves and returns', async () => {

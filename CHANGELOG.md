@@ -205,6 +205,15 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- One click on « Voir » in the pending-decisions banner now brings the
+  decision card into view. It fired a single smooth `scrollIntoView`, aimed
+  at the layout measured at the click; message rows use
+  `content-visibility: auto` and take their real height only as the scroll
+  reveals them, so on a long room it landed short and took up to ten clicks.
+  The banner now uses the room's pinned navigation, which keeps the card
+  centred until the rows above settle and stops on a wheel or touch. The
+  asset inventory's « go to message » and the in-room search's
+  previous/next had the same one-shot scroll and use the same pin.
 - Security: the citation verifier no longer marks a source outside the project
   `verified` (KT-1077). An absolute citation such as `[src: file: /etc/passwd:1]`
   used to pass on mere existence; it is now accepted only under a project root
