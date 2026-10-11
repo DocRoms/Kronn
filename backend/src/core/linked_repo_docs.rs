@@ -89,6 +89,21 @@ mod tests {
     }
 
     #[test]
+    fn a_linked_kronn_project_is_read_under_its_own_docs_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_string_lossy().into_owned();
+        std::fs::create_dir_all(dir.path().join(".ai")).unwrap();
+        std::fs::write(dir.path().join(".ai/AGENTS.md"), "a").unwrap();
+        crate::core::docs_location::set_project_override(&path, Some(".ai"));
+        let found = detect_ai_doc(dir.path());
+        crate::core::docs_location::set_project_override(&path, None);
+        assert_eq!(
+            found,
+            (LinkedRepoAiDoc::AgentsMd, Some(".ai/AGENTS.md".into()))
+        );
+    }
+
+    #[test]
     fn a_readme_alone_is_reported_as_readme_only_and_nothing_as_no_ai_doc() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(detect_ai_doc(dir.path()), (LinkedRepoAiDoc::NoAiDoc, None));
