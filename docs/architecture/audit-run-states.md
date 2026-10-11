@@ -99,7 +99,7 @@ by a human (KT-1131). An accepted step keeps its failure on record:
   run is resumable, it says so and offers "Retry". Every launch button stays
   disabled until it knows. A step retried alone never falls back to a whole
   audit when its run is no longer resumable.
-  [src: file: frontend/src/components/ProjectCard.tsx:503-506#resumableUnknown] [src: file: frontend/src/components/ProjectCard.tsx:771-776#retrySteps] [src: file: frontend/src/components/AuditTimeline.tsx:394#launchBlocked]
+  [src: file: frontend/src/components/ProjectCard.tsx:503-506#resumableUnknown] [src: file: frontend/src/components/ProjectCard.tsx:771-776#retrySteps] [src: file: frontend/src/components/AuditTimeline.tsx:397#launchBlocked]
 
 ## Every error carries its action (KT-1169)
 
@@ -117,9 +117,9 @@ by a human (KT-1131). An accepted step keeps its failure on record:
 | Card header | A stale-sections refresh failed or changed nothing. | The refresh button stays while the sections are stale. It is hidden while a run waits to be resumed, because the server refuses it then. |
 | Toasts during a run | A step failed or warned. | Informational: the run ends with that step's "Retry this step" and "Accept as it stands". |
 
-- Launch error banner. [src: file: frontend/src/components/AuditTimeline.tsx:560-561#launchError] [src: file: frontend/src/components/ProjectCard.tsx:951#setAuditLaunchError] [src: file: frontend/src/components/ProjectCard.tsx:448-449#auditLaunchError]
-- Unknown resumable state, unreadable timeline. [src: file: frontend/src/components/AuditTimeline.tsx:579-580#resumableUnknown] [src: file: frontend/src/components/AuditTimeline.tsx:592-593#loadFailed]
-- Refused acceptance. [src: file: frontend/src/components/AuditTimeline.tsx:408#setAcceptError] [src: file: frontend/src/components/AuditTimeline.tsx:688-689#acceptError]
+- Launch error banner. [src: file: frontend/src/components/AuditTimeline.tsx:565-566#launchError] [src: file: frontend/src/components/ProjectCard.tsx:951#setAuditLaunchError] [src: file: frontend/src/components/ProjectCard.tsx:448-449#auditLaunchError]
+- Unknown resumable state, unreadable timeline. [src: file: frontend/src/components/AuditTimeline.tsx:584-585#resumableUnknown] [src: file: frontend/src/components/AuditTimeline.tsx:597-598#loadFailed]
+- Refused acceptance. [src: file: frontend/src/components/AuditTimeline.tsx:405#setAcceptError] [src: file: frontend/src/components/AuditTimeline.tsx:693-694#acceptError]
 - Recap read error. [src: file: frontend/src/components/AuditRecapPanel.tsx:342-347#errorBlock]
 
 ## Revalidating an audit (KT-1168)
@@ -163,11 +163,11 @@ Sources:
 
 The validation phase never reads "running" while an audit runs.
 
-- Step status, accepted included. [src: file: frontend/src/components/AuditTimeline.tsx:151#stepStatus]
-- Launch label: resume, finalize, run again. [src: file: frontend/src/components/AuditTimeline.tsx:384#launchLabel]
-- Per-step actions only on the resumable run. [src: file: frontend/src/components/AuditTimeline.tsx:392#stepActions]
-- Validation phase is not running during an audit. [src: file: frontend/src/components/AuditTimeline.tsx:397#validationRunning] [src: file: frontend/src/components/ProjectCard.tsx:564-566#validationInProgress]
-- Validation phase hands over to the run. [src: file: frontend/src/components/AuditTimeline.tsx:814-816#runPending]
-- Confirmation before a fresh full audit. [src: file: frontend/src/components/AuditTimeline.tsx:977-978#confirmRelaunch]
-- Orphaned lease banner. [src: file: frontend/src/components/AuditTimeline.tsx:547-548#leaseOrphaned]
+- Step status, accepted included. [src: file: frontend/src/components/AuditTimeline.tsx:154#stepStatus]
+- Launch label: resume, finalize, run again. [src: file: frontend/src/components/AuditTimeline.tsx:387#launchLabel]
+- Per-step actions only on the resumable run. [src: file: frontend/src/components/AuditTimeline.tsx:395#stepActions]
+- Validation phase is not running during an audit. [src: file: frontend/src/components/AuditTimeline.tsx:400#validationRunning] [src: file: frontend/src/components/ProjectCard.tsx:564-566#validationInProgress]
+- Validation phase hands over to the run. [src: file: frontend/src/components/AuditTimeline.tsx:813-815#runPending]
+- Confirmation before a fresh full audit. [src: file: frontend/src/components/AuditTimeline.tsx:982-983#confirmRelaunch]
+- Orphaned lease banner. [src: file: frontend/src/components/AuditTimeline.tsx:552-553#leaseOrphaned]
 - Cancel pending. [src: file: frontend/src/components/AuditTimeline.tsx:544-545#cancelPending] [src: file: frontend/src/components/ProjectCard.tsx:731-735#setCancelPending]
