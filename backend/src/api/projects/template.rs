@@ -51,7 +51,8 @@ pub async fn install_template(
         // Permission check on whichever doc-folder the project already
         // has (`docs/`, legacy `ai/`, or alt `doc/`). Fresh projects
         // skip this — there's nothing to check yet.
-        let existing_docs = crate::core::scanner::detect_docs_dir(&project_path);
+        // A configured folder that fails containment stops the install (KT-263).
+        let existing_docs = crate::core::docs_location::guard_write(&project_path)?;
         if existing_docs.exists() {
             if let Err(e) = crate::api::audit::check_ai_dir_permissions(&existing_docs) {
                 let folder_name = existing_docs
@@ -81,11 +82,8 @@ pub async fn install_template(
         // projects always get docs/; legacy `ai/` projects keep their
         // layout until the operator clicks Migrate.
         let docs_template = template_dir.join("docs");
-        let docs_target = if existing_docs.exists() {
-            existing_docs
-        } else {
-            project_path.join("docs")
-        };
+        // Unconfigured, a missing folder resolves to `docs/` (fresh project).
+        let docs_target = existing_docs;
         let mut created_files = Vec::new();
         if docs_template.is_dir() {
             created_files.extend(copy_dir_nondestructive(&docs_template, &docs_target)?);
@@ -157,15 +155,12 @@ pub async fn install_template(
 
     // Ensure the docs/var/ scratch dir is gitignored (legacy ai/var/ path
     // stays gitignored too on projects that haven't migrated yet).
-    let docs_dir = crate::core::scanner::detect_docs_dir(&std::path::PathBuf::from(&project.path));
-    let docs_dir_name = docs_dir
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("docs");
-    crate::core::mcp_scanner::ensure_local_exclude(
-        &project.path,
-        &format!("{}/var/", docs_dir_name),
-    );
+    let project_root = scanner::resolve_host_path(&project.path);
+    if let Some(docs_rel) =
+        crate::core::docs_location::resolution(&project_root).relative(&project_root)
+    {
+        crate::core::mcp_scanner::ensure_local_exclude(&project.path, &format!("{docs_rel}/var/"));
+    }
 
     let status = scanner::detect_audit_status(&project.path);
     Json(ApiResponse::ok(status))

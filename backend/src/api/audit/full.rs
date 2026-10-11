@@ -297,6 +297,10 @@ pub async fn full_audit(
     let project_id = project.id.clone();
     let project_path_str = project.path.clone();
     let project_path = scanner::resolve_host_path(&project.path);
+    // The steps write `docs/` by name: a relocated AI doc is refused (KT-263).
+    if let Err(reason) = crate::core::docs_location::guard_docs_pipeline(&project_path) {
+        return sse_error(reason);
+    }
     let project_default_skill_ids = project.default_skill_ids.clone();
     let briefing_notes =
         crate::api::projects::resolve_briefing_notes(&project_path, &project.briefing_notes);

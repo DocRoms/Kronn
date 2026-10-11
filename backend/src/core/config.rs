@@ -737,6 +737,7 @@ pub fn default_config() -> AppConfig {
                 ".rustup".into(),
             ],
             scan_depth: 4,
+            default_docs_dir: None,
         },
         agents: AgentsConfig {
             claude_code: AgentConfig {

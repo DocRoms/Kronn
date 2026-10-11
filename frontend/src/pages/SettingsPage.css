@@ -7117,3 +7117,10 @@
   gap: var(--kr-sp-3);
   margin: var(--kr-sp-4) var(--kr-sp-6) 0;
 }
+
+/* KT-263 — default AI doc folder */
+.default-docs-dir-error {
+  margin: var(--kr-sp-2) 0 0;
+  font-size: var(--kr-fs-xs);
+  color: rgb(var(--kr-error-rgb));
+}

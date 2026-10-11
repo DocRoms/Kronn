@@ -39,11 +39,23 @@ pub use crate::workflows::WorkflowEngine;
 /// desktop) loads its config through this, so no scheduler tick or preview runs
 /// in the wrong zone and the first agent run already honours the saved mode.
 pub async fn load_startup_config() -> anyhow::Result<AppConfig> {
-    load_startup_config_with(
+    let config = load_startup_config_with(
         crate::core::timezone::detect_machine_timezone,
         crate::core::anti_halluc::set_mode,
     )
-    .await
+    .await?;
+    crate::core::docs_location::set_global_default(config.scan.default_docs_dir.as_deref());
+    Ok(config)
+}
+
+/// Arm every project's AI doc folder override from the database (KT-263).
+/// Both entry points call it once the database is open.
+pub async fn arm_docs_locations(database: &Arc<Database>) -> anyhow::Result<()> {
+    let rows = database
+        .with_read_conn(crate::db::projects::list_docs_dir_overrides)
+        .await?;
+    crate::core::docs_location::load_project_overrides(rows);
+    Ok(())
 }
 
 // `arm_mode` is injected so tests observe the arming without touching the
@@ -1620,6 +1632,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             get(api::setup::get_scan_ignore).post(api::setup::set_scan_ignore),
         )
         .route(
+            "/api/config/default-docs-dir",
+            get(api::setup::get_default_docs_dir).post(api::setup::save_default_docs_dir),
+        )
+        .route(
             "/api/config/scan-depth",
             get(api::setup::get_scan_depth).post(api::setup::set_scan_depth),
         )
@@ -1739,6 +1755,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // tell (referenced native skills, skills Kronn published).
         .route("/api/projects/used-skills", get(api::projects::used_skills))
         .route("/api/projects/{id}", get(api::projects::get))
+        .route(
+            "/api/projects/{id}/docs-location",
+            get(api::projects::docs_location::get).put(api::projects::docs_location::set),
+        )
         .route(
             "/api/projects/{id}/agent-files",
             get(api::projects::agent_files::get).put(api::projects::agent_files::set),
@@ -3897,5 +3917,45 @@ mod startup_config_tests {
                 "{entry} loads its config directly and skips the timezone"
             );
         }
+    }
+
+    #[test]
+    fn every_entry_point_arms_the_project_docs_locations() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        for entry in ["backend/src/main.rs", "desktop/src-tauri/src/main.rs"] {
+            let source = std::fs::read_to_string(root.join(entry)).unwrap();
+            assert!(
+                source.contains("kronn::arm_docs_locations(&database).await?"),
+                "{entry} must arm the AI doc folder overrides at startup"
+            );
+        }
+        let lib = std::fs::read_to_string(root.join("backend/src/lib.rs")).unwrap();
+        assert!(lib.contains(
+            "crate::core::docs_location::set_global_default(config.scan.default_docs_dir.as_deref());"
+        ));
+    }
+
+    #[tokio::test]
+    async fn arming_reads_the_saved_overrides_from_the_database() {
+        let repo = tempfile::tempdir().unwrap();
+        let path = repo.path().join("p").to_string_lossy().into_owned();
+        std::fs::create_dir_all(&path).unwrap();
+        let database = Arc::new(Database::open_in_memory().unwrap());
+        let insert = path.clone();
+        database
+            .with_conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at, docs_dir) \
+                     VALUES ('p-arm', 'p', ?1, '2026-01-01', '2026-01-01', '.ai')",
+                    [&insert],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        arm_docs_locations(&database).await.unwrap();
+        let resolved = crate::core::docs_location::docs_dir(std::path::Path::new(&path));
+        crate::core::docs_location::set_project_override(&path, None);
+        assert_eq!(resolved, std::path::Path::new(&path).join(".ai"));
     }
 }

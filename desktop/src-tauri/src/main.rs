@@ -649,6 +649,8 @@ async fn start_backend(
 
     // Resolve the encryption key and the stored credentials now the DB is open.
     kronn::resolve_key_and_credentials(&mut app_config, &database, env_token).await?;
+    // Before any request resolves a project's AI doc folder (KT-263).
+    kronn::arm_docs_locations(&database).await?;
 
     // Same LAN guard as the standalone backend: never serve the network with
     // an unauthenticated API.

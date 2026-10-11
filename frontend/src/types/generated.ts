@@ -3714,6 +3714,11 @@ changes: Array<ProvenanceChange>, };
 export type DocWriter = "full_audit" | "partial_audit" | "revalidation" | "template_reinstall" | "document_repair" | "td_index";
 
 /**
+ * Which rule picked the folder.
+ */
+export type DocsDirSource = "project_override" | "global_default" | "detected";
+
+/**
  * What changed since a previous audit — KT-194 drift.
  */
 export type Drift = {
@@ -6438,6 +6443,24 @@ export type ProjectDockerService = { service: string, container_name: string | n
  */
 export type ProjectDockerStatus = { compose_present: boolean, compose_file: string | null, docker_available: boolean, daemon_available: boolean, services: Array<ProjectDockerService>, checked_at: string, error: string | null, };
 
+export type ProjectDocsLocation = {
+/**
+ * The project's own override, as saved.
+ */
+override_dir: string | null,
+/**
+ * The global default from the settings.
+ */
+default_dir: string | null,
+/**
+ * The folder in use, relative to the project root; `None` when refused.
+ */
+effective_dir: string | null, source: DocsDirSource,
+/**
+ * Why a configured folder is not used.
+ */
+refused: string | null, };
+
 export type ProjectGithubConnection = { project_id: string, mode: GithubConnectionMode, state: GithubConnectionState, machine_token_available: boolean, machine_token_source: GithubMachineTokenSource | null,
 /**
  * The project's remote is on github.com.
@@ -7844,7 +7867,12 @@ export type ScanConfig = { paths: Array<string>, ignore: Array<string>,
 /**
  * Max depth when scanning for git repos (2–10, default 4)
  */
-scan_depth: number, };
+scan_depth: number,
+/**
+ * Default AI doc folder, relative to each project root (KT-263). `None`
+ * keeps the historical detection (`docs/` → `doc/` → `ai/`).
+ */
+default_docs_dir?: string, };
 
 export type ScheduleAgentWakeRequest = { delay_seconds: number, reason: string, dedupe_key: string, task_execution_id?: string | null, };
 
@@ -8285,6 +8313,12 @@ num_ctx: number | null,
 warnings: Array<string>, };
 
 export type SetProjectAgentFiles = { policy: AgentFilesPolicy, };
+
+export type SetProjectDocsLocation = {
+/**
+ * `None` or blank clears the override.
+ */
+dir?: string | null, };
 
 /**
  * `PUT /api/projects/{id}/github`. `token` is read only for `stored_token`.

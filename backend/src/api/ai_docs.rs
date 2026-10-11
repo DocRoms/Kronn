@@ -111,11 +111,11 @@ fn assemble_doc_nodes(project_path: &std::path::Path) -> Vec<AiFileNode> {
     if docs_dir.is_dir() {
         // Use the actual folder name (`docs`, `doc` or `ai`) so the display
         // matches the on-disk reality.
-        let prefix = docs_dir
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("docs")
-            .to_string();
+        // The path relative to the root, so a configured `.ai` or
+        // `packages/x/docs` reads back through `read_ai_file` (KT-263).
+        let prefix = crate::core::docs_location::resolution(project_path)
+            .relative(project_path)
+            .unwrap_or_else(|| "docs".to_string());
         let children = build_ai_file_tree(&docs_dir, &prefix);
         // Only surface the folder node when it actually has docs — an empty
         // `docs/` node would suppress the "run the audit" empty state that
@@ -165,12 +165,16 @@ fn find_root_readme(project_path: &std::path::Path) -> Option<String> {
 /// never containing `..`. The root-README exception is deliberately narrow
 /// (no slash + `readme*.md` only) so it can't be used to read arbitrary
 /// root files like `.env` or `Cargo.toml`.
-fn is_readable_doc_path(path: &str) -> bool {
+/// `configured` is the project's resolved AI doc folder (KT-263), accepted as
+/// a root in addition to the historical ones.
+fn is_readable_doc_path(path: &str, configured: Option<&str>) -> bool {
     if path.contains("..") {
         return false;
     }
-    let in_docs_root =
-        path.starts_with("docs/") || path.starts_with("doc/") || path.starts_with("ai/");
+    let in_docs_root = path.starts_with("docs/")
+        || path.starts_with("doc/")
+        || path.starts_with("ai/")
+        || configured.is_some_and(|dir| path.starts_with(&format!("{dir}/")));
     let is_root_readme = !path.contains('/') && {
         let l = path.to_ascii_lowercase();
         l.starts_with("readme") && (l.ends_with(".md") || l.ends_with(".markdown"))
@@ -281,12 +285,11 @@ pub async fn search_ai_files(
         if !docs_dir.is_dir() {
             return vec![];
         }
-        let prefix = docs_dir
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("docs");
+        let prefix = crate::core::docs_location::resolution(&project_path)
+            .relative(&project_path)
+            .unwrap_or_else(|| "docs".to_string());
         let mut results = Vec::new();
-        search_ai_dir_recursive(&docs_dir, prefix, &q.to_lowercase(), &mut results);
+        search_ai_dir_recursive(&docs_dir, &prefix, &q.to_lowercase(), &mut results);
         // Sort by match_count descending
         results.sort_by_key(|r| std::cmp::Reverse(r.match_count));
         results
@@ -344,14 +347,6 @@ pub async fn read_ai_file(
     Path(id): Path<String>,
     Query(query): Query<AiFileQuery>,
 ) -> Json<ApiResponse<AiFileContent>> {
-    // Path traversal protection — confined to a recognised docs root or the
-    // project's root README, and never containing `..`.
-    if !is_readable_doc_path(&query.path) {
-        return Json(ApiResponse::err(
-            "Invalid path: must be under docs/, doc/, ai/ or the root README, and not contain ..",
-        ));
-    }
-
     let project = match state
         .db
         .with_conn(move |conn| crate::db::projects::get_project(conn, &id))
@@ -367,6 +362,16 @@ pub async fn read_ai_file(
 
     let result = tokio::task::spawn_blocking(move || {
         let project_path = scanner::resolve_host_path(&project_path_str);
+        // Path traversal protection — confined to a recognised docs root or
+        // the project's root README, and never containing `..`.
+        let configured = crate::core::docs_location::resolution(&project_path)
+            .relative(&project_path);
+        if !is_readable_doc_path(&file_path, configured.as_deref()) {
+            return Err(
+                "Invalid path: must be under the AI doc folder or the root README, and not contain .."
+                    .to_string(),
+            );
+        }
         let full_path = project_path.join(&file_path);
         match std::fs::read_to_string(&full_path) {
             Ok(content) => Ok(AiFileContent {
@@ -1715,17 +1720,42 @@ mod tests {
     #[test]
     fn read_guard_allows_docs_roots_and_root_readme_only() {
         // Allowed.
-        assert!(is_readable_doc_path("docs/AGENTS.md"));
-        assert!(is_readable_doc_path("doc/index.md"));
-        assert!(is_readable_doc_path("ai/index.md"));
-        assert!(is_readable_doc_path("README.md"));
-        assert!(is_readable_doc_path("readme.markdown"));
+        assert!(is_readable_doc_path("docs/AGENTS.md", None));
+        assert!(is_readable_doc_path("doc/index.md", None));
+        assert!(is_readable_doc_path("ai/index.md", None));
+        assert!(is_readable_doc_path("README.md", None));
+        assert!(is_readable_doc_path("readme.markdown", None));
         // Rejected — traversal + arbitrary root/nested files.
-        assert!(!is_readable_doc_path("../secret"));
-        assert!(!is_readable_doc_path("docs/../Cargo.toml"));
-        assert!(!is_readable_doc_path("Cargo.toml"));
-        assert!(!is_readable_doc_path(".env"));
-        assert!(!is_readable_doc_path("src/README.md"));
+        assert!(!is_readable_doc_path("../secret", None));
+        assert!(!is_readable_doc_path("docs/../Cargo.toml", None));
+        assert!(!is_readable_doc_path("Cargo.toml", None));
+        assert!(!is_readable_doc_path(".env", None));
+        assert!(!is_readable_doc_path("src/README.md", None));
+    }
+
+    #[test]
+    fn read_guard_accepts_the_configured_folder_only_when_configured() {
+        assert!(!is_readable_doc_path(".ai/AGENTS.md", None));
+        assert!(is_readable_doc_path(".ai/AGENTS.md", Some(".ai")));
+        assert!(is_readable_doc_path(
+            "packages/x/docs/a.md",
+            Some("packages/x/docs")
+        ));
+        assert!(!is_readable_doc_path(".ai/../.env", Some(".ai")));
+        assert!(!is_readable_doc_path(".aix/a.md", Some(".ai")));
+    }
+
+    #[test]
+    fn doc_tree_of_an_overridden_project_uses_its_relative_folder() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("repo");
+        touch(&root.join("packages/x/docs/AGENTS.md"));
+        let path = root.to_string_lossy().into_owned();
+        crate::core::docs_location::set_project_override(&path, Some("packages/x/docs"));
+        let nodes = assemble_doc_nodes(&root);
+        crate::core::docs_location::set_project_override(&path, None);
+        assert_eq!(nodes[0].path, "packages/x/docs");
+        assert_eq!(nodes[0].children[0].path, "packages/x/docs/AGENTS.md");
     }
 
     // ── Source browser ───────────────────────────────────────────────────

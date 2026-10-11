@@ -14,6 +14,7 @@ pub mod clone;
 pub mod crud;
 pub mod dependencies;
 pub mod docker;
+pub mod docs_location;
 pub mod git;
 pub mod migrate;
 pub mod resource_links;

@@ -21,7 +21,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use ts_rs::TS;
 
 /// Cap on the rendered report.
@@ -50,7 +50,8 @@ pub struct Convention {
     pub paths: &'static [&'static str],
 }
 
-/// The conventions Kronn knows about.
+/// The conventions Kronn knows about. The project's own AI doc entry is not
+/// listed here: `scan_repo` adds it from `core::docs_location` (KT-263).
 ///
 /// Precedence within an agent is the order below, taken from each vendor's own
 /// documented loading order. An agent absent from a repository contributes
@@ -896,11 +897,22 @@ fn collect_existing(root: &Path, dir: &Path, out: &mut HashSet<String>, depth: u
 }
 
 fn nested_agents_files(root: &Path) -> Vec<String> {
+    let mut candidates: Vec<String> = Vec::new();
+    // The AI doc folder as the badge sees it (KT-263), or a redirect to a
+    // relocated `AGENTS.md` would point at a file the audit never read.
+    if let Some(docs) = crate::core::docs_location::resolution(root).relative(root) {
+        candidates.push(docs);
+    }
+    for fixed in ["docs", "backend", "frontend", "src", "apps", "packages"] {
+        if !candidates.iter().any(|c| c == fixed) {
+            candidates.push(fixed.to_string());
+        }
+    }
     let mut found = Vec::new();
-    for candidate in ["docs", "backend", "frontend", "src", "apps", "packages"] {
-        let path = PathBuf::from(candidate).join("AGENTS.md");
+    for candidate in candidates {
+        let path = format!("{candidate}/AGENTS.md");
         if root.join(&path).is_file() {
-            found.push(path.to_string_lossy().to_string());
+            found.push(path);
         }
     }
     found

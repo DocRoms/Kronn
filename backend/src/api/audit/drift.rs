@@ -184,6 +184,14 @@ pub async fn partial_audit(
     // Safety: early return above guarantees project is Some
     let project = project.expect("project is Some after early return");
     let project_path = scanner::resolve_host_path(&project.path);
+    // The steps write `docs/` by name: a relocated AI doc is refused (KT-263).
+    if let Err(reason) = crate::core::docs_location::guard_docs_pipeline(&project_path) {
+        let msg = serde_json::json!({ "error": reason });
+        let stream: SseStream = Box::pin(futures::stream::once(async move {
+            Ok::<_, Infallible>(Event::default().event("error").data(msg.to_string()))
+        }));
+        return Sse::new(stream);
+    }
 
     // Validate requested step numbers against the FULL chained pipeline
     // (foundation 1..9 + chained sub-audits 10..16), not just the 9

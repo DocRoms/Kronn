@@ -1044,6 +1044,50 @@ button.dash-badge-tech-debt {
   color: rgb(var(--kr-error-rgb));
 }
 
+/* KT-263 — project AI doc folder */
+.project-docs-location {
+  margin-top: var(--kr-sp-6);
+  padding-top: var(--kr-sp-6);
+  border-top: 1px solid var(--kr-border-ghost);
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+}
+
+.project-docs-location h4 {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  margin: 0;
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-primary);
+}
+
+.project-docs-location-help,
+.project-docs-location-effective {
+  margin: 0;
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-faint);
+}
+
+.project-docs-location-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-2);
+}
+
+.project-docs-location-row input {
+  flex: 1 1 160px;
+  min-width: 0;
+}
+
+.project-docs-location-error {
+  margin: 0;
+  font-size: var(--kr-fs-xs);
+  color: rgb(var(--kr-error-rgb));
+}
+
 .dash-delete-zone {
   margin-top: var(--kr-sp-6);
   padding-top: var(--kr-sp-6);

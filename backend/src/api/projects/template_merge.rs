@@ -578,6 +578,7 @@ pub async fn template_merge_start(
     let result = match project_root(&state, id).await {
         Ok((root, name)) => {
             blocking(move || {
+                crate::core::docs_location::guard_docs_pipeline(&root)?;
                 let template = templates_docs_dir()?;
                 run_merge_in_worktree(&root, &name, base, &template)
             })

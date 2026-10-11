@@ -7665,6 +7665,184 @@ async fn a_project_can_switch_its_agent_files_outside_its_repository_and_back() 
     assert_eq!(unknown["error_code"], "not_found", "{unknown}");
 }
 
+fn docs_location_project(id: &str, path: &std::path::Path) -> kronn::models::Project {
+    let now = chrono::Utc::now();
+    kronn::models::Project {
+        id: id.into(),
+        name: id.into(),
+        path: path.to_string_lossy().into_owned(),
+        repo_url: None,
+        token_override: None,
+        ai_config: kronn::models::AiConfigStatus {
+            detected: false,
+            configs: vec![],
+        },
+        audit_status: kronn::models::AiAuditStatus::NoTemplate,
+        ai_todo_count: 0,
+        tech_debt_count: 0,
+        needs_docs_migration: false,
+        path_exists: true,
+        write_access: None,
+        mcp_sync_report: None,
+        default_skill_ids: vec![],
+        default_profile_id: None,
+        briefing_notes: None,
+        linked_repos: vec![],
+        workspace: None,
+        created_at: now,
+        updated_at: now,
+    }
+}
+
+#[tokio::test]
+async fn a_project_keeping_its_ai_doc_in_dot_ai_is_detected_audited_and_badged() {
+    // KT-263 — detection, audit status, badge, evidence file and the context
+    // audit all follow the override; clearing it restores the old view.
+    let state = test_state();
+    let repo = tempfile::tempdir().unwrap();
+    let root = repo.path().join("repo");
+    std::fs::create_dir_all(root.join(".ai")).unwrap();
+    std::fs::write(root.join(".ai/AGENTS.md"), "# Project\n\nReal content.\n").unwrap();
+    std::fs::write(root.join("CLAUDE.md"), "Read `.ai/AGENTS.md` first.\n").unwrap();
+    let project = docs_location_project("p-docs-dot-ai", &root);
+    state
+        .db
+        .with_conn(move |conn| kronn::db::projects::insert_project(conn, &project))
+        .await
+        .unwrap();
+    let app = || build_router_with_auth(state.clone(), false);
+    let uri = "/api/projects/p-docs-dot-ai/docs-location";
+
+    let (_, badge) = get_json(app(), "/api/projects/p-docs-dot-ai").await;
+    assert_eq!(badge["data"]["audit_status"], "NoTemplate", "{badge}");
+    let (_, read) = get_json(app(), uri).await;
+    assert_eq!(read["data"]["effective_dir"], "docs", "{read}");
+    assert_eq!(read["data"]["source"], "detected");
+
+    let (status, saved) = put_json_root(app(), uri, serde_json::json!({"dir": "./.ai/"})).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["data"]["override_dir"], ".ai");
+    assert_eq!(saved["data"]["effective_dir"], ".ai");
+    assert_eq!(saved["data"]["source"], "project_override");
+
+    // Detection: a filled entry with no evidence yet is a template.
+    let (_, badge) = get_json(app(), "/api/projects/p-docs-dot-ai").await;
+    assert_eq!(
+        badge["data"]["audit_status"], "TemplateInstalled",
+        "{badge}"
+    );
+    // The evidence write lands in `.ai/`, and the badge follows it.
+    kronn::core::kronn_state::record_audit(&root, "full").unwrap();
+    assert!(root.join(".ai/.kronn.json").is_file());
+    assert!(!root.join("docs").exists());
+    let (_, badge) = get_json(app(), "/api/projects/p-docs-dot-ai").await;
+    assert_eq!(badge["data"]["audit_status"], "Audited", "{badge}");
+    let (_, evidence) = get_json(app(), "/api/projects/p-docs-dot-ai/audit-evidence").await;
+    assert_eq!(
+        evidence["data"]["state_file"], ".ai/.kronn.json",
+        "{evidence}"
+    );
+    assert_eq!(evidence["data"]["kind"], "kronn_audit");
+    let (_, context) = get_json(app(), "/api/projects/p-docs-dot-ai/context-audit").await;
+    let claude = context["data"]["audit"]["per_agent"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["agent"] == "ClaudeCode")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        claude["files"],
+        serde_json::json!(["CLAUDE.md", ".ai/AGENTS.md"]),
+        "{context}"
+    );
+    // The docs/ pipeline refuses instead of writing a second tree.
+    let (_, migrate) = post_json(
+        app(),
+        "/api/projects/p-docs-dot-ai/migrate-docs",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(migrate["success"], false, "{migrate}");
+    assert!(
+        migrate["error"].as_str().unwrap().contains("`.ai/`"),
+        "{migrate}"
+    );
+
+    let (status, cleared) = put_json_root(app(), uri, serde_json::json!({"dir": null})).await;
+    assert_eq!(status, StatusCode::OK, "{cleared}");
+    assert!(cleared["data"]["override_dir"].is_null());
+    let (_, badge) = get_json(app(), "/api/projects/p-docs-dot-ai").await;
+    assert_eq!(badge["data"]["audit_status"], "NoTemplate", "{badge}");
+}
+
+#[tokio::test]
+async fn a_project_ai_doc_folder_leaving_the_root_is_refused_with_a_400() {
+    // KT-263 — save-time containment: absolute, `..`, `.git` and a symlink out
+    // are 400s with a message; nothing is stored.
+    let state = test_state();
+    let repo = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let root = repo.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(outside.path(), root.join("linked")).unwrap();
+    let project = docs_location_project("p-docs-escape", &root);
+    state
+        .db
+        .with_conn(move |conn| kronn::db::projects::insert_project(conn, &project))
+        .await
+        .unwrap();
+    let uri = "/api/projects/p-docs-escape/docs-location";
+    let mut refused = vec!["../outside", "/etc", ".git/hooks", "a/../../b"];
+    if cfg!(unix) {
+        refused.push("linked");
+        refused.push("linked/docs");
+    }
+    for dir in refused {
+        let (status, body) = put_json_root(
+            build_router_with_auth(state.clone(), false),
+            uri,
+            serde_json::json!({ "dir": dir }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{dir}: {body}");
+        assert_eq!(body["error_code"], "validation", "{dir}: {body}");
+        assert!(!body["error"].as_str().unwrap().is_empty());
+    }
+    let (_, read) = get_json(build_router_with_auth(state.clone(), false), uri).await;
+    assert!(read["data"]["override_dir"].is_null(), "{read}");
+    assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
+
+    let (status, unknown) = put_json_root(
+        build_router_with_auth(state, false),
+        "/api/projects/nope/docs-location",
+        serde_json::json!({ "dir": ".ai" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(unknown["error_code"], "not_found");
+}
+
+#[tokio::test]
+async fn the_default_ai_doc_folder_setting_refuses_unsafe_values_with_a_400() {
+    // KT-263 — only refusals here: a saved default is process-wide and would
+    // move other tests' fresh-project fallback (the save path is a lib test).
+    let app = test_app();
+    let (_, read) = get_json(app.clone(), "/api/config/default-docs-dir").await;
+    assert_eq!(read["success"], true, "{read}");
+    for bad in ["../x", "/abs", ".git"] {
+        let (status, body) = post_json(
+            app.clone(),
+            "/api/config/default-docs-dir",
+            serde_json::json!(bad),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {body}");
+        assert_eq!(body["error_code"], "validation");
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Health endpoint tests
 // ═══════════════════════════════════════════════════════════════════════════════

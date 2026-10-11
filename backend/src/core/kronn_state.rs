@@ -119,6 +119,7 @@ fn read_for_mutation(project_path: &Path) -> Result<Option<KronnState>, String> 
 /// instead of clobbering. Seeding from legacy evidence keeps a marker-only
 /// project's Validated/Bootstrapped state when its first state file is written.
 fn load_for_mutation(project_path: &Path) -> Result<KronnState, String> {
+    crate::core::docs_location::guard_write(project_path)?;
     read_for_mutation(project_path)
         .map(|state| {
             state
@@ -134,7 +135,8 @@ fn load_for_mutation(project_path: &Path) -> Result<KronnState, String> {
 /// reader never sees a torn file. Always rewrites the `_readme` field on the
 /// in-memory state before serializing.
 pub fn write(project_path: &Path, state: &mut KronnState) -> Result<(), String> {
-    let docs_dir = crate::core::scanner::detect_docs_dir(project_path);
+    // A configured folder that fails containment refuses the write (KT-263).
+    let docs_dir = crate::core::docs_location::guard_write(project_path)?;
     std::fs::create_dir_all(&docs_dir)
         .map_err(|e| format!("Failed to create {} dir: {e}", docs_dir.display()))?;
 

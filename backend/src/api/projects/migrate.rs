@@ -84,6 +84,10 @@ pub async fn migrate_docs(
     };
 
     let project_path = scanner::resolve_host_path(&project.path);
+    // ai/ → docs/ only makes sense under the detected layout (KT-263).
+    if let Err(reason) = crate::core::docs_location::guard_docs_pipeline(&project_path) {
+        return Json(ApiResponse::err(reason));
+    }
     let outcome =
         crate::core::docs_migration::migrate_project(&project_path, req.create_symlink).await;
 

@@ -175,6 +175,10 @@ pub fn render_agent_template(project_root: &Path, template: &str) -> Result<Stri
     rendered = rendered
         .replace(" [ex: \"cargo test && npm test\"]", "")
         .replace(" [ex: \"cargo clippy && npx tsc --noEmit\"]", "");
+    // Point at the configured AI doc entry, not the template's `docs/` (KT-263).
+    if let Some(entry) = crate::core::docs_location::configured_entry(project_root) {
+        rendered = rendered.replace("docs/AGENTS.md", &entry);
+    }
     if rendered.contains("{{") || rendered.contains("}}") {
         return Err("instruction template contains an unresolved placeholder".into());
     }
@@ -205,7 +209,11 @@ fn repair_generated_agent_file(project_root: &Path, path: &Path) -> Result<bool,
         return Ok(false);
     };
     let more_start = critical_start + more_rel;
-    if !original[more_start..].contains("docs/AGENTS.md") {
+    let entry = crate::core::docs_location::configured_entry(project_root)
+        .unwrap_or_else(|| "docs/AGENTS.md".to_string());
+    if !original[more_start..].contains("docs/AGENTS.md")
+        && !original[more_start..].contains(&entry)
+    {
         return Ok(false);
     }
     let header_start = original[..facts_start]

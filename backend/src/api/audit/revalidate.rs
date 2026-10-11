@@ -297,6 +297,10 @@ pub async fn revalidate_audit(
         Err(e) => return single_error(e),
     };
     let project_path = scanner::resolve_host_path(&project.path);
+    // The steps write `docs/` by name: a relocated AI doc is refused (KT-263).
+    if let Err(reason) = crate::core::docs_location::guard_docs_pipeline(&project_path) {
+        return single_error(reason);
+    }
     let planned = {
         let path = project_path.clone();
         match tokio::task::spawn_blocking(move || plan(&path)).await {

@@ -61,6 +61,22 @@
   the feature is scheduled. No implementation is planned in the current UI
   iteration beyond improving the existing viewer's layout.
 
+## Status after KT-263 (0.15.1)
+
+- Shipped: `core::docs_location` resolves the folder (project override in
+  `projects.docs_dir`, migration 258 → `scan.default_docs_dir` in the config →
+  historical detection). Every `scanner::detect_docs_dir` caller reads it;
+  containment (relative, no `..`, no symlink out) is checked on save (HTTP 400)
+  and on each resolution (a refused override yields an unusable path).
+- Residual: the audit pipeline (`api/audit/full.rs`, `helpers.rs`,
+  `validation.rs`, `validate.rs`, `drift.rs`, `document_optimization.rs`,
+  step targets such as `FOUNDING_STEP_TARGET`), bootstrap and template
+  reinstall/merge still write `docs/` by name. Until they read the resolver,
+  `docs_location::guard_docs_pipeline` refuses full/partial audits,
+  revalidation, migration and template reinstall/merge when the resolved
+  folder is configured and is not `docs/`. Reading, badge and human
+  attestation work.
+
 ## Notes
 
 - Surfaced 2026-06-27 alongside a related fix: `AiDocViewer` used to render the

@@ -297,7 +297,7 @@ import { ApiRequestError } from './apiRequestError';
 import { looksLikeBackendDown, reportBackendSuspect } from './backendReachability';
 
 import type { SafetyCheckRequest, SafetyWarning, CronPreview, CronPreviewRequest } from '../types/generated';
-import type { AgentFilesPolicy, MigrateDocsResponse, ProjectAgentFiles, ReencryptResponse, RecoveryStatus, StartNewKeyResponse } from '../types/generated';
+import type { AgentFilesPolicy, MigrateDocsResponse, ProjectAgentFiles, ProjectDocsLocation, ReencryptResponse, RecoveryStatus, StartNewKeyResponse } from '../types/generated';
 import type {
   CatalogModelEntry,
   DeleteManualModelRequest,
@@ -898,6 +898,9 @@ export const config = {
   changeEmbedOrigins: (change: EmbedOriginsChange) => api<string[]>('POST', '/config/embed-origins', change),
   getScanIgnore: () => api<string[]>('GET', '/config/scan-ignore'),
   setScanIgnore: (patterns: string[]) => api<void>('POST', '/config/scan-ignore', patterns),
+  /** Default AI doc folder, relative to every project root (KT-263); null = historical detection. */
+  getDefaultDocsDir: () => api<string | null>('GET', '/config/default-docs-dir'),
+  saveDefaultDocsDir: (dir: string | null) => api<string | null>('POST', '/config/default-docs-dir', dir),
   getScanDepth: () => api<number>('GET', '/config/scan-depth'),
   setScanDepth: (depth: number) => api<number>('POST', '/config/scan-depth', depth),
   getAgentAccess: () => api<AgentsConfig>('GET', '/config/agent-access'),
@@ -1007,6 +1010,11 @@ export const projects = {
     api<ProjectAgentFiles>('GET', `/projects/${encodeURIComponent(id)}/agent-files`),
   setAgentFiles: (id: string, policy: AgentFilesPolicy) =>
     api<ProjectAgentFiles>('PUT', `/projects/${encodeURIComponent(id)}/agent-files`, { policy }),
+  /** Where the project keeps its AI doc, and its own override (KT-263). */
+  docsLocation: (id: string) =>
+    api<ProjectDocsLocation>('GET', `/projects/${encodeURIComponent(id)}/docs-location`),
+  setDocsLocation: (id: string, dir: string | null) =>
+    api<ProjectDocsLocation>('PUT', `/projects/${encodeURIComponent(id)}/docs-location`, { dir }),
   repositoryResources: (id: string) =>
     api<ProjectRepositoryResources>('GET', `/projects/${encodeURIComponent(id)}/repository-resources`),
   /** The diffs behind one listed resource, built when its Compare sheet opens:

@@ -137,12 +137,9 @@ fn prepare(project: &Path, template_docs: &Path) -> Result<(PathBuf, Vec<Prepare
             template_docs.display()
         ));
     }
+    crate::core::docs_location::guard_docs_pipeline(project)?;
+    // Unconfigured, a missing folder resolves to `docs/` (fresh project).
     let docs_dir = scanner::detect_docs_dir(project);
-    let docs_dir = if docs_dir.exists() {
-        docs_dir
-    } else {
-        project.join("docs")
-    };
     let validated: Vec<String> = crate::core::doc_provenance::report(project, false)
         .map(|r| {
             r.docs

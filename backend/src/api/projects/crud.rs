@@ -573,13 +573,29 @@ pub async fn delete(
         }
     }
 
+    // The path keys the AI doc folder override that must go with the row.
+    let lookup = id.clone();
+    let stored_path = state
+        .db
+        .with_read_conn(move |conn| crate::db::projects::get_project(conn, &lookup))
+        .await
+        .ok()
+        .flatten()
+        .map(|p| p.path);
+
     // Delete project from DB
+    let deleted_id = id.clone();
     match state
         .db
         .with_conn(move |conn| crate::db::projects::delete_project(conn, &id))
         .await
     {
-        Ok(true) => Json(ApiResponse::ok(())),
+        Ok(true) => {
+            if let Some(path) = stored_path {
+                super::docs_location::rekey(&state, &deleted_id, &path, None).await;
+            }
+            Json(ApiResponse::ok(()))
+        }
         Ok(false) => Json(ApiResponse::err("Project not found")),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
@@ -1152,6 +1168,15 @@ pub async fn remap_path(
         return Json(ApiResponse::err("Path does not exist".to_string()));
     }
 
+    let lookup = id.clone();
+    let old_path = state
+        .db
+        .with_read_conn(move |conn| crate::db::projects::get_project(conn, &lookup))
+        .await
+        .ok()
+        .flatten()
+        .map(|p| p.path);
+
     let pid = id.clone();
     let np = new_path.clone();
     match state
@@ -1165,6 +1190,9 @@ pub async fn remap_path(
             // pointer — the freshly mapped folder never received the `.mcp.json`
             // / SKILL.md files the project is configured for, so an agent running
             // there saw none of its plugins. Best-effort (logs on failure).
+            if let Some(old_path) = old_path {
+                super::docs_location::rekey(&state, &id, &old_path, Some(&new_path)).await;
+            }
             super::resync_project_assets(&state, &id).await;
             Json(ApiResponse::ok(()))
         }

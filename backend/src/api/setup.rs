@@ -705,6 +705,50 @@ pub async fn set_scan_depth(
     }
 }
 
+/// GET /api/config/default-docs-dir — the default AI doc folder (KT-263).
+pub async fn get_default_docs_dir(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<Option<String>>> {
+    let config = state.config.read().await;
+    Json(ApiResponse::ok(config.scan.default_docs_dir.clone()))
+}
+
+/// POST /api/config/default-docs-dir — `null` or blank clears it. Anything
+/// absolute or with `..` is a 400: the folder is resolved under every project.
+pub async fn save_default_docs_dir(
+    State(state): State<AppState>,
+    Json(value): Json<Option<String>>,
+) -> Response {
+    let normalized = match value.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        None => None,
+        Some(raw) => match crate::core::docs_location::normalize_relative(raw) {
+            Ok(rel) => Some(rel),
+            Err(reason) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ApiResponse::<Option<String>>::err_coded(
+                        ApiErrorCode::Validation,
+                        reason,
+                    )),
+                )
+                    .into_response()
+            }
+        },
+    };
+    let mut config = state.config.write().await;
+    let previous = config.scan.default_docs_dir.clone();
+    config.scan.default_docs_dir = normalized.clone();
+    if let Err(e) = config::save(&config).await {
+        config.scan.default_docs_dir = previous;
+        return Json(ApiResponse::<Option<String>>::err(format!(
+            "Failed to save: {e}"
+        )))
+        .into_response();
+    }
+    crate::core::docs_location::set_global_default(normalized.as_deref());
+    Json(ApiResponse::ok(normalized)).into_response()
+}
+
 /// GET /api/config/agent-access
 pub async fn get_agent_access(State(state): State<AppState>) -> Json<ApiResponse<AgentsConfig>> {
     let config = state.config.read().await;
@@ -5659,5 +5703,66 @@ mod frontend_origin_tests {
         for bad in ["http://h:3140/path", "*", "http://evil#", "null"] {
             assert!(normalize_origin_list(&[bad.into()]).is_err(), "{bad}");
         }
+    }
+}
+
+#[cfg(test)]
+mod default_docs_dir_tests {
+    use super::*;
+
+    async fn docs_dir_reply(response: Response) -> (StatusCode, serde_json::Value) {
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    /// KT-263: the default AI doc folder is normalized, persisted, armed for
+    /// the resolver, and refused with a 400 when it could leave a project.
+    #[tokio::test]
+    async fn default_docs_dir_is_normalized_saved_armed_and_refused_when_unsafe() {
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let config = std::sync::Arc::new(tokio::sync::RwLock::new(config::default_config()));
+        let state = crate::AppState::new_defaults(config, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS);
+
+        let (status, body) = docs_dir_reply(
+            save_default_docs_dir(State(state.clone()), Json(Some(" ./handbook/ ".into()))).await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"], "handbook");
+        assert_eq!(
+            state.config.read().await.scan.default_docs_dir.as_deref(),
+            Some("handbook")
+        );
+        assert_eq!(
+            crate::core::docs_location::global_default().as_deref(),
+            Some("handbook")
+        );
+
+        for bad in ["../outside", "/etc", "C:\\docs", ".git/x"] {
+            let (status, body) = docs_dir_reply(
+                save_default_docs_dir(State(state.clone()), Json(Some(bad.into()))).await,
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {body}");
+            assert_eq!(body["error_code"], "validation");
+            assert!(!body["error"].as_str().unwrap().is_empty());
+            assert_eq!(
+                state.config.read().await.scan.default_docs_dir.as_deref(),
+                Some("handbook"),
+                "a refused value leaves the saved one"
+            );
+        }
+
+        let (status, body) = docs_dir_reply(
+            save_default_docs_dir(State(state.clone()), Json(Some("  ".into()))).await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body["data"].is_null());
+        assert_eq!(state.config.read().await.scan.default_docs_dir, None);
+        assert_eq!(crate::core::docs_location::global_default(), None);
     }
 }
