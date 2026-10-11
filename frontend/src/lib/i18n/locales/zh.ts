@@ -6088,7 +6088,7 @@ const zh: TranslationDict = {
   "briefing.savedOnlyToast": "简介已保存。",
   "briefing.saveOnlyBtn": "保存",
   "briefing.tdToTasks": "将发现的技术债务转为 Kronn 任务",
-  "briefing.tdToTasksHint": "完整审计成功结束后，每份 TD 表都会成为按主题分组的任务。这些表仍保留在仓库中。",
+  "briefing.tdToTasksHint": "完整审计结束后，发现的所有技术债务（“TD”表）都会按主题归组为 Kronn 任务，以便更容易修复。这些表也会保留在仓库的审计文档中，直到问题解决。",
   "briefing.crossAudit.label": "交叉审计",
   "briefing.crossAudit.experimental": "实验性",
   "briefing.crossAudit.hint": "多个代理独立审计安全步骤，然后相互质疑对方的发现。发现依据证据判断，绝不按多数票决定。默认关闭。",
