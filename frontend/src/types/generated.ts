@@ -4191,7 +4191,8 @@ export type HostScope = { "kind": "ClaudeUser" } | { "kind": "ClaudeLocal", "val
 export type HostSyncMode = "None" | "GlobalOnly" | "MirrorAll";
 
 /**
- * A citation inside a human-owned section: never edited, listed.
+ * A citation inside a human-owned section, listed for its owner: Kronn may
+ * correct it, and its owner then reconfirms the doc.
  */
 export type HumanCitationTodo = { section: string, citation: CitationStatus, };
 

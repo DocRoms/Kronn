@@ -1397,11 +1397,16 @@ pub async fn full_audit(
                     let (mut success, mut warning, report) = match outcome {
                         Ok(mut report) => match super::cross_audit::write_outputs(&project_path, analysis_step.target_file, agents, &audit_run_id, &mut report) {
                             Ok(()) => {
-                                let protected = super::helpers::protect_human_owned_sections(&project_path, &human_owned_snapshot, &today)
-                                    .err()
-                                    .map(|e| format!("human-owned section protection failed for {file_label}: {e}"));
+                                // KT-1079: the writes stay; validated docs are marked, a failed record only warns.
+                                let unmarked = super::helpers::mark_validated_doc_writes(
+                                    &project_path,
+                                    &validated_docs_snapshot,
+                                    crate::core::doc_provenance::DocWriter::FullAudit,
+                                )
+                                .err()
+                                .map(|e| format!("human-validation provenance not recorded for {file_label}: {e}"));
                                 let (ok, w) = super::validation::validate_step_output(true, &project_path, analysis_step.target_file);
-                                (ok && protected.is_none(), protected.or(w.map(|w| w.reason)), Some(report))
+                                (ok, unmarked.or(w.map(|w| w.reason)), Some(report))
                             }
                             Err(e) => (false, Some(format!("cross-agent audit could not write its documents: {e}")), Some(report)),
                         },

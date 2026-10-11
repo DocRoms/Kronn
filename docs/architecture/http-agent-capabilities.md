@@ -347,7 +347,7 @@ briefing are discussions). The only
 other repos a step names are those the user linked to the project
 (`Project.linked_repos`), a voluntary declaration that stays in every step
 [src: file: backend/src/api/audit/full.rs:317-318#format_linked_repos_for_prompt]
-[src: file: backend/src/api/audit/drift.rs:324-325#format_linked_repos_for_prompt]. What remains: the block for a
+[src: file: backend/src/api/audit/drift.rs:333-334#format_linked_repos_for_prompt]. What remains: the block for a
 linked repo still says to start with `<repo-path>/docs/AGENTS.md`, a path an HTTP
 agent's tools refuse because it is outside the project, so for that agent the
 block is information, not something it can follow. Making that block
@@ -367,7 +367,7 @@ one.
 killing the lifeline PID does not stop it. A Full audit therefore registers a
 cancellation token per step, and `cancel_audit` trips it
 [src: file: backend/src/api/audit/full.rs:1544-1549#agent_cancels]
-[src: file: backend/src/api/audit/full.rs:3918-3922#agent_cancels]. Since KT-927 the partial audit does
+[src: file: backend/src/api/audit/full.rs:3909-3913#agent_cancels]. Since KT-927 the partial audit does
 the same, and so does an ACP agent, whose PID is a lifeline too: see
 [auditing with an ACP agent](audit-acp-agents.md).
 
