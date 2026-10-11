@@ -239,20 +239,26 @@ Release notes for 0.9.3 and earlier are available in the
   the briefing step is required and its form gets a one-click « Utiliser
   les valeurs par défaut ». An MCP launch (`audit_launch`, `audit_prepare`)
   receives the briefing as ready-to-post `kronn-question` cards in the
-  discussion's language; once every card is answered in that discussion,
-  Kronn saves the briefing through the form's validation. A launch with no
+  discussion's language, as a set of its own (`briefing-<field>.<set>`
+  keys); once every card of the latest set is answered in that discussion,
+  Kronn saves the briefing through the form's validation, and answers to a
+  superseded set are saved nowhere. A launch with no
   discussion (a workflow run) gets default answers, flagged « valeurs par
   défaut — à compléter » on the project card.
-- An existing AI doc folder is handled explicitly (KT-1192). Kronn's own docs,
-  recognised by `.kronn.json` or `kronn:` markers (any version, the AGENTS.md
-  signature only as a weak hint), are updated in place without a question.
+- An existing AI doc folder is handled explicitly (KT-1192). Kronn's own docs
+  are updated in place without a question; they need both a `.kronn.json`
+  recording an audit or a bootstrap and a structural marker (a line-leading
+  `kronn:doc-version` / `kronn:generated` header, paired `kronn:section` or
+  managed-block markers outside code, or the AGENTS.md signature). A mention
+  of Kronn, or markers without that record, is a human's docs.
   A folder of human docs shows « Le dossier … utilisé par Kronn existe déjà »
   and asks: put Kronn's docs in another folder, or move them to
   `<folder>/legacy/` (file count, broken links and a detected mkdocs,
   Docusaurus or VitePress config are stated first); the audit then reads
   them as its primary source. The silent pre-audit move is gone: nothing
-  moves without that choice, never into an existing `legacy/`, and an audit
-  or unattended launch on such a folder without a choice stops with
+  moves without that choice, never into an existing `legacy/`, and only once
+  the briefing is committed (a failed save leaves the folder as it was). An
+  audit or unattended launch on such a folder without a choice stops with
   `docs_folder_choice_required`.
 - Audit versions and standards are judged from dated sources (KT-1000). The
   tech-debt step and the security pass get a « Technologies and standards »
