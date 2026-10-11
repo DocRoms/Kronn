@@ -530,3 +530,41 @@ fn coverage_honours_only_record_pairs_from_the_start_of_the_run() {
         Coverage::Covered(_)
     ));
 }
+
+#[test]
+fn a_card_ignores_a_record_line_naming_the_adr_it_creates() {
+    let dir = tempfile::tempdir().unwrap();
+    let docs = dir.path().join("docs");
+    fs::create_dir_all(docs.join("tech-debt")).unwrap();
+    // An agent guessed the id the next card would create.
+    write_sheet(
+        &docs,
+        "TD-20261011-hidden-debt",
+        "- **Decision record**: ADR-0005\n",
+    );
+    write_sheet(&docs, "TD-20261011-accepted", "");
+    // The card for the other TD appends ADR-0005, covering only that TD.
+    let card = "## ADR-0005: Accept `TD-20261011-accepted` as an intentional trade-off\n\n- **Status**: accepted\n- **Date**: 2026-10-11\n- **Covers**: TD-20261011-accepted\n";
+    fs::write(docs.join(DECISIONS_FILE), card).unwrap();
+    let ids = vec!["ADR-0005".to_string()];
+    let outcome = settle_covered_sheets(&docs, Trust::CardAccepted(&ids)).unwrap();
+    assert_eq!(
+        outcome.settled,
+        vec![
+            "TD-20261011-accepted → ADR-0005 — Accept `TD-20261011-accepted` as an intentional trade-off"
+                .to_string()
+        ]
+    );
+    assert_eq!(
+        outcome.not_in_force,
+        vec![
+            "TD-20261011-hidden-debt → ADR-0005 (Decision record ignored by a validation card)"
+                .to_string()
+        ]
+    );
+    assert_eq!(status_of(&docs, "TD-20261011-hidden-debt"), None);
+    assert_eq!(
+        status_of(&docs, "TD-20261011-accepted"),
+        Some(TdDecision::AcceptedDecision)
+    );
+}

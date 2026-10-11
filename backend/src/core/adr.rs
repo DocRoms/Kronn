@@ -566,7 +566,9 @@ pub enum Trust<'a> {
         decisions: &'a str,
         records: &'a str,
     },
-    /// A validation card: only the ADRs the card itself just appended.
+    /// A validation card: only the ADRs the card itself just appended, and
+    /// only through their `Covers`; no `Decision record` line counts, since
+    /// an agent could have written the id the card was going to create.
     CardAccepted(&'a [String]),
 }
 
@@ -710,9 +712,9 @@ pub fn settle_covered_sheets(docs_dir: &Path, trust: Trust) -> Result<AdrSettleO
     };
     let current = parse(&decisions);
     let (adrs, late) = trusted(&current, trust);
-    let records = match trust {
-        Trust::RunBaseline { records, .. } => Some(parse_records(records)),
-        Trust::CardAccepted(_) => None,
+    let (records, ignored) = match trust {
+        Trust::RunBaseline { records, .. } => (parse_records(records), "written during the run"),
+        Trust::CardAccepted(_) => (Records::new(), "ignored by a validation card"),
     };
     let mut outcome = AdrSettleOutcome {
         problems: problems(&decisions),
@@ -732,7 +734,7 @@ pub fn settle_covered_sheets(docs_dir: &Path, trust: Trust) -> Result<AdrSettleO
         let Ok(content) = std::fs::read_to_string(&path) else {
             continue;
         };
-        match coverage(&id, &content, &adrs, records.as_ref()) {
+        match coverage(&id, &content, &adrs, Some(&records)) {
             Coverage::Covered(adr) => {
                 let decision = td_decision(&content);
                 if decision == Some(TdDecision::Rejected) {
@@ -749,9 +751,9 @@ pub fn settle_covered_sheets(docs_dir: &Path, trust: Trust) -> Result<AdrSettleO
                 outcome.settled.push(format!("{id} → {}", adr.reference()));
             }
             Coverage::NotInForce(adr_id) => outcome.not_in_force.push(format!("{id} → {adr_id}")),
-            Coverage::WrittenDuringRun(adr_id) => outcome.not_in_force.push(format!(
-                "{id} → {adr_id} (Decision record written during the run)"
-            )),
+            Coverage::WrittenDuringRun(adr_id) => outcome
+                .not_in_force
+                .push(format!("{id} → {adr_id} (Decision record {ignored})")),
             Coverage::None => {}
         }
     }
