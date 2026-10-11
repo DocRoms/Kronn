@@ -71,7 +71,14 @@ Release notes for 0.9.3 and earlier are available in the
   missed anchor reads as `out_of_bounds` with a detail saying where the
   symbol appears, so the existing red/amber badges are unchanged. Re-anchoring
   a moved citation keeps its anchor. Documented in the citation spec and in
-  `docs/AGENTS.md`.
+  `docs/AGENTS.md`. Every one of the 1,345 file citations of
+  `docs/architecture/` and `docs/operations/` was re-read against the code
+  and now carries an anchor: about 60 % pointed beside what they described
+  (a random sample of 24 measured 10 beside before, 0 after); they were
+  re-pointed, and some 50 sentences describing code that has since changed
+  were rewritten (ADR-002 no longer claims an advisory integration lease,
+  the HTTP workspace catalogue lists its 13 tools including `git_commit`,
+  audits accept every agent but Vibe, among others).
 - Audit versions and standards are judged from dated sources (KT-1000). The
   tech-debt step and the security pass get a « Technologies and standards »
   block: the project's stored dependency watch (version in place, latest,

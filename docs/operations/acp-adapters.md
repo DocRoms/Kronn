@@ -20,7 +20,7 @@ own documented, stable, non-interactive flags underneath — `claude --print
 **ACP adapters are the production default for both agents (KT-652).** Direct
 CLI remains an explicit, per-agent compatibility route. This changes transport
 selection, not the number of CLI processes: both still spawn once per turn.
-[src: file: backend/src/acp.rs:103]
+[src: file: backend/src/acp.rs:213-232#acp_adapter_enabled]
 
 ## Explicit compatibility override
 
@@ -47,8 +47,8 @@ with a resume hint, and `full_access` cannot override their worker policy.
 The common process launcher supplies delivery context and worktree-local
 temporary files. It removes inherited worker context from ordinary turns and
 the permissive container marker from workers.
-[src: file: backend/src/agents/runner.rs:3333]
-[src: file: backend/tests/adapter_worker_policy.rs:1]
+[src: file: backend/src/agents/runner.rs:4787-4813#adapter_task_worker_args]
+[src: file: backend/tests/adapter_worker_policy.rs:40-41#default_adapters_and_explicit_fallback_keep_worker_spawn_boundaries]
 
 Each adapter permits one active prompt at a time; sequential turns still resume
 the session. The prompt owns a guard across its stdin writes, streaming and
@@ -56,8 +56,8 @@ process wait. Cancellation during startup remains effective when the child is
 registered; abandoning the prompt releases its owned process group. Explicit
 cancellation reaps the child. Cleanup failures are reported through the same
 redacted runner diagnostic as prompt failures, never as a clean success.
-[src: file: backend/src/acp/adapter_process.rs:1]
-[src: file: backend/src/agents/runner.rs:4056]
+[src: file: backend/src/acp/adapter_process.rs:170-232#AdapterTurn]
+[src: file: backend/src/agents/runner.rs:5721-5731#acp_failure_diagnostic]
 
 ## Packaged desktop bridge
 
@@ -69,28 +69,28 @@ The desktop resolves it through Tauri's resource directory and sets
 `KRONN_INTERNAL_MCP_EXECUTABLE` before starting the backend. An explicitly
 configured but missing executable fails closed instead of using a developer's
 source checkout. Docker and source development keep the existing script route.
-[src: file: desktop/src-tauri/src/main.rs:898]
-[src: file: backend/src/agents/runner.rs:4498]
+[src: file: desktop/src-tauri/src/main.rs:1133-1147#KRONN_INTERNAL_MCP_EXECUTABLE]
+[src: file: backend/src/agents/runner.rs:6028-6046#resolve_internal_mcp_command]
 
 The embedded backend exports its actual loopback port as `KRONN_BACKEND_URL`
 before starting agent dispatch and MCP configuration sync. Generated desktop
 MCP configurations also carry this URL for host CLIs launched outside Kronn.
 This overrides an inherited URL belonging to another installation. Turning off
 the ACP adapter does not repair a missing bridge or an incorrect backend URL.
-[src: file: desktop/src-tauri/src/main.rs:559]
+[src: file: desktop/src-tauri/src/main.rs:617-623#KRONN_BACKEND_URL]
 
 Claude task workers require a sandbox. Native Windows launches are rejected
 with a specific diagnostic; this does not disable ordinary Claude discussions
 or relax worker isolation. Workers run through WSL instead; the boundary
 (`WSLENV`, translated paths, backend URL in NAT mode, native ACP refusal) is in
 [`windows-wsl-agents.md`](windows-wsl-agents.md).
-[src: file: backend/src/agents/runner.rs:9382]
+[src: file: backend/src/agents/runner.rs:12293-12302#claude_task_worker_platform_check]
 [Claude sandbox platform support](https://code.claude.com/docs/en/sandboxing)
 
 After replacing a frozen bridge, reconnect the MCP session. Frozen and Windows
 runtimes report that a restart is required instead of attempting the Unix
 file-descriptor script reload used during source development.
-[src: file: backend/scripts/disc-introspection-mcp.py:10384]
+[src: file: backend/scripts/disc-introspection-mcp.py:11016-11026#_schedule_bridge_reload]
 
 The desktop sidecar build runs an MCP smoke test from a relocated directory
 with spaces and non-ASCII characters, an empty PATH and an ephemeral HTTP
@@ -98,7 +98,7 @@ backend. It verifies initialization, a fresh source fingerprint and a real tool
 call to that backend. This test does not authenticate Claude, open the app UI,
 or prove that an installer passes Gatekeeper; those require installed-app
 qualification on each target OS.
-[src: file: backend/sidecars/mcp/smoke_bundle.py:15]
+[src: file: backend/sidecars/mcp/smoke_bundle.py:15-50#smoke_bundle]
 
 ## Observability
 
@@ -108,7 +108,7 @@ to the displayed reply. Thought, tool-content and unknown labelled updates do
 not become answer text; tool and usage events still follow their own paths.
 Older runtimes with unlabelled content retain their compatibility path.
 An echo without an agent message therefore supplies no answer text.
-[src: file: backend/src/acp.rs:940]
+[src: file: backend/src/acp.rs:1450-1457#is_answer]
 [ACP session updates](https://agentclientprotocol.com/protocol/v1/prompt-turn#session-updates)
 
 Native tool banners retain the reported tool name, a bounded redacted input
@@ -120,8 +120,8 @@ when the runtime reports it; missing metadata remains `unknown` or
 are not copied into these records. Input masking covers sensitive JSON keys
 and the shared credential patterns before truncation; it is heuristic, not a
 guarantee that arbitrary user content is secret-free.
-[src: file: backend/src/agents/tool_trace.rs:1]
-[src: file: backend/src/api/discussions/streaming.rs:750]
+[src: file: backend/src/agents/tool_trace.rs:1-15#ToolTraceUpdate]
+[src: file: backend/src/api/discussions/streaming.rs:805-852#lift_acp_tool_calls]
 
 Native ACP sessions receive Kronn's bridge even when no project is attached.
 The runtime reconstructs the reserved `kronn-internal` entry from its own
@@ -131,14 +131,14 @@ subject to that filter. A permission request for a runtime-registered Kronn
 tool may read or write with `full_access=false`, but must still identify the
 bound protocol session and an authorized server/tool. Missing or ambiguous
 identity remains refused; registration does not grant filesystem access.
-[src: file: backend/src/acp.rs:1227]
-[src: file: backend/src/acp/permission_broker.rs:350]
+[src: file: backend/src/acp.rs:1530-1569#native_session_mcp_servers]
+[src: file: backend/src/acp/permission_broker.rs:576-584#trusted_internal_call]
 
 A native agent's `disc_append` can carry its runtime session id without having
 joined the room as a CLI peer. Such a post does not implicitly queue another
 answer from the discussion's principal. An actual joined CLI may still hand
 the turn back, and explicit recipients keep their existing routing.
-[src: file: backend/src/api/disc_source.rs:622]
+[src: file: backend/src/api/disc_source.rs:714-726#route_joined_peer_turn]
 
 Claude's SDK model catalogue is discovered independently of these execution
 toggles. It uses an initialization-only, no-prompt CLI process, not the ACP
@@ -174,12 +174,13 @@ project path never reuses that identifier.
   `think`, `fetch`); everything else is refused. Kronn's current Claude/Codex
   adapters do not implement live permission callbacks. They apply the broker's
   static session policy through CLI flags: Claude's permission bypass when
-  `full_access` is set; Codex's sandbox override on a fresh non-worker thread.
+  `full_access` is set; Codex's sandbox override on a non-worker turn.
   Resumes and workers retain their separately scoped launch rules. This is an
   implementation limit, not a claim that no vendor interface supports callbacks.
-  [src: file: backend/src/acp/permission_broker.rs:449-469]
-  [src: file: backend/src/acp/claude_adapter.rs:282-284]
-  [src: file: backend/src/acp/codex_adapter.rs:389-396]
+  [src: file: backend/src/acp/permission_broker.rs:491-505#decide_tool_call_permission]
+  [src: file: backend/src/acp/permission_broker.rs:729-756#session_policy]
+  [src: file: backend/src/acp/claude_adapter.rs:335-337#claude_skip_permissions]
+  [src: file: backend/src/acp/codex_adapter.rs:502-513#codex_sandbox]
   A scoped live request must also match the bound ACP protocol session and
   identify either an authorized MCP server/tool or at least one path wholly
   contained by the canonical project root. Missing/malformed locations and
@@ -192,7 +193,7 @@ project path never reuses that identifier.
   (`OPENCODE_CONFIG_CONTENT`) that denies the real environment files, allows the
   templates and keeps a refusal from ending the turn. See
   [auditing with an ACP agent](../architecture/audit-acp-agents.md).
-  [src: file: backend/src/acp/secret_files.rs:51-79] [src: file: backend/src/acp/secret_files.rs:108-131]
+  [src: file: backend/src/acp/secret_files.rs:51-79#is_secret_file] [src: file: backend/src/acp/secret_files.rs:108-130#opencode_config_content]
 - **Filesystem / terminal:** Kronn has not bound a scoped executor for
   `fs/*`/`terminal/*` yet. Every such request — from any agent — gets a
   spec-correct JSON-RPC error (`-32001` "capability not granted"), never a
@@ -226,7 +227,7 @@ project path never reuses that identifier.
   just those two variables, and only from an owner-only regular file. The file
   stays as long as the session's transport, because Vibe restarts the bridge
   for each tool call, and is deleted when the transport is dropped.
-  [src: file: backend/src/acp/bridge_env.rs:19-31] [src: file: backend/src/acp/bridge_env.rs:50-83] [src: file: backend/src/acp/bridge_env.rs:94-130]
+  [src: file: backend/src/acp/bridge_env.rs:19-31#PLAIN] [src: file: backend/src/acp/bridge_env.rs:50-83#SecretEnvFile] [src: file: backend/src/acp/bridge_env.rs:94-130#for_launch]
 - **Vibe's tool identity (KT-1158):** Vibe's `session/request_permission`
   carries only `toolCallId`: no kind, server or arguments. The `tool_call`
   update it sends first names the tool it resolved in `_meta.tool_name`
@@ -238,7 +239,7 @@ project path never reuses that identifier.
   name stays unidentified and is governed as before. Every refusal carries
   `_meta.kronn.refusal` (what, why, what the user can change). Vibe 2.26 does
   not read it: its model sees "User rejected the tool call".
-  [src: file: backend/src/acp/permission_broker.rs:392-436] [src: file: backend/src/acp/permission_broker.rs:449-466] [src: file: backend/src/acp/permission_broker.rs:509-518]
+  [src: file: backend/src/acp/permission_broker.rs:392-436#observe_session_update] [src: file: backend/src/acp/permission_broker.rs:449-466#bridge_tool_from_runtime_name] [src: file: backend/src/acp/permission_broker.rs:509-518#permission_response]
 
 ## Known limitations
 
@@ -250,7 +251,7 @@ project path never reuses that identifier.
 - **No live permission negotiation in the current adapters.** Kronn applies
   a static launch policy instead of consulting its broker for each tool call.
   The native ACP permission-request path remains separate.
-  [src: file: backend/src/acp/permission_broker.rs:449-469]
+  [src: file: backend/src/acp/permission_broker.rs:729-756#session_policy]
 - **No automatic prompt replay.** Adapter failures do not retry the submitted
   prompt through the direct runner. Switching the compatibility override is
   an operator action, not an error-recovery guess.
@@ -267,31 +268,33 @@ project path never reuses that identifier.
   [compatibility matrix](agents-v2-matrix.md#known-asymmetries) for the
   distinction between ACP normalization, token statistics and log collection.
 
-- **`codex exec resume` cannot change the sandbox mode** — verified absent
-  from `codex exec resume --help` though present on `codex exec` — so a
-  resumed Codex adapter session keeps whatever sandbox policy its first turn
-  set.
+- **`codex exec resume` rejects `--sandbox`** — verified absent from
+  `codex exec resume --help` though present on `codex exec` — and does not keep
+  the first turn's mode, so a resumed Codex adapter turn passes the sandbox as
+  a `sandbox_mode` config override instead.
+  [src: file: backend/src/acp/codex_adapter.rs:502-513#sandbox_mode]
 
 ## Declared tools of a workflow Agent step (KT-908)
 
 `agent_settings.tools` (`{cli: [...], kronn_internal: [...]}`) replaces what a
 workflow Agent step is launched with. Undeclared, the argv is unchanged.
-[src: file: backend/src/models/workflows.rs:1167]
+[src: file: backend/src/models/workflows.rs:1517-1536#StepTools]
 
 - Claude adapter: `--tools <cli list>` (empty string = no built-in tool),
   `--disable-slash-commands` (no skill listing), and an MCP config holding
   only `kronn-internal` started with `--step-tools=<list>`, with one
   `--allowedTools mcp__kronn-internal__<tool>` per tool and
   `ENABLE_TOOL_SEARCH=false` in the CLI's environment; no Kronn tool means
-  `{"mcpServers":{}}`. [src: file: backend/src/acp/claude_adapter.rs:168]
+  `{"mcpServers":{}}`. [src: file: backend/src/acp/claude_adapter.rs:174-206#bridge_declared] [src: file: backend/src/acp/claude_adapter.rs:343-352#ENABLE_TOOL_SEARCH]
 - Codex adapter: the MCP override holds only `kronn-internal` with
   `enabled_tools`, or `mcp_servers={}`; `cli` is refused at save.
-  [src: file: backend/src/acp/codex_adapter.rs:132]
+  [src: file: backend/src/acp/codex_adapter.rs:139-168#codex_project_mcp_override]
+  [src: file: backend/src/models/workflows.rs:1539-1560#validate]
 - Native ACP agents: `session/new` offers only the narrowed bridge, or no
-  server. [src: file: backend/src/agents/runner.rs:5110]
+  server. [src: file: backend/src/agents/runner.rs:5779-5800#declared_mcp_servers]
 - The bridge, given `--step-tools=`, lists and dispatches only those tools
   and sends no catalogue instructions on `initialize`.
-  [src: file: backend/scripts/disc-introspection-mcp.py:5695]
+  [src: file: backend/scripts/disc-introspection-mcp.py:5779-5795#_declared_step_tools]
 - The direct CLI fallback (`KRONN_ACP_ADAPTER_*=0`) refuses a declared step
   rather than launch it with every tool.
 
@@ -310,7 +313,7 @@ of a declared step shows no `ToolSearch` before relying on it.
   once, or Codex refuses the invalid TOML during bootstrap (exit 1). Other
   authorized project servers remain in the override; no global configuration
   change or MCP permission bypass is needed.
-  [src: file: backend/src/acp/codex_adapter.rs:140]
+  [src: file: backend/src/acp/codex_adapter.rs:139-181#codex_project_mcp_override]
 
 - **"no verified production ACP command" / adapter never engages:** check the
   exact toggle name (`KRONN_ACP_ADAPTER_CODEX` / `KRONN_ACP_ADAPTER_CLAUDE`,

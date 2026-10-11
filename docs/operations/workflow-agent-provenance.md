@@ -67,7 +67,7 @@ the tooltip and clipboard expose the full ID. Connection names are not
 snapshotted, so the detail never resolves them from the current configuration.
 Attempts without a saved connection ID do not invent one.
 
-[src: file: frontend/src/components/workflows/AgentProvenance.tsx:36-75]
+[src: file: frontend/src/components/workflows/AgentProvenance.tsx:36-75#AgentProvenanceDetails]
 
 ## In templates and Page publication
 
@@ -92,9 +92,9 @@ step with no recorded provenance (older runs, non-Agent steps) exposes nothing:
 `render_strict` fails on these paths rather than inventing an author from the
 current configuration.
 
-[src: file: backend/src/models/workflows.rs:1933-2027]
-[src: file: backend/src/workflows/steps.rs:1389-1435]
-[src: file: backend/src/workflows/runner.rs:4716-4730]
-[src: file: backend/src/agents/provenance.rs:36-101]
-[src: file: backend/src/agents/runner.rs:4608-4614]
-[src: file: backend/src/workflows/template.rs:153-194]
+[src: file: backend/src/models/workflows.rs:1933-2027#WorkflowAgentProvenance]
+[src: file: backend/src/workflows/steps.rs:1389-1435#WorkflowAgentAttempt]
+[src: file: backend/src/workflows/runner.rs:4714-4730#record_step_completion]
+[src: file: backend/src/agents/provenance.rs:36-101#observe_model]
+[src: file: backend/src/agents/runner.rs:4608-4614#claude_observed_model]
+[src: file: backend/src/workflows/template.rs:153-194#set_step_provenance]

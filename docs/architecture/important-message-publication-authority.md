@@ -180,10 +180,10 @@ or a retryable error: cancellation cannot undo a server commit.
 Reload restores text and the same UUID, not publication authority. Without a
 newly entered grant the restored message is ordinary text. The refusal notice
 does not claim the message was delivered before an acceptance receipt arrives.
-[src: file: frontend/src/hooks/useMessageQueue.ts:1]
-[src: file: frontend/src/lib/importantPublication.ts:1]
-[src: file: frontend/src/pages/DiscussionsPage.tsx:1]
-[src: file: backend/src/api/discussions/messaging.rs:3345]
+[src: file: frontend/src/hooks/useMessageQueue.ts:54-83#loadQueue]
+[src: file: frontend/src/lib/importantPublication.ts:55-74#preparePublication]
+[src: file: frontend/src/pages/DiscussionsPage.tsx:538-541#publicationGrant]
+[src: file: backend/src/api/discussions/messaging.rs:3571-3600#fresh_proof]
 
 ## Reading the code
 
@@ -192,7 +192,7 @@ Its key is requested contextually, not above every ordinary reply. Publication
 success requires the persisted card, not merely issuance of a proof or receipt
 of an ordinary message. See [the form lifecycle](important-messages.md#human-form-0130-kt-643)
 for draft isolation, cancellation and uncertain-write reconciliation.
-[src: file: frontend/src/lib/submitImportantMessage.ts:1]
+[src: file: frontend/src/lib/submitImportantMessage.ts:23-77#submitImportantMessage]
 
 | | |
 |---|---|

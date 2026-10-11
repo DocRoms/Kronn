@@ -184,10 +184,10 @@ Writes are separate tools with narrow schemas. Lists are compact by default and
 full content is returned only for an explicitly requested task.
 `task_update_dod(task_id, dod_id, completed)` is the preferred narrow write for
 checkbox progress. Delta timestamps are compared numerically as RFC3339
-instants, independent of `Z`/offset spelling and fractional precision. Agents must be
-taught this contract in the same prompt/instruction layer that currently
-advertises discussion-history tools. Today that layer explicitly describes
-`disc_meta`, `disc_get_message`, and `disc_summarize`. `[src: file: backend/src/api/disc_prompts.rs:346-361]`
+instants, independent of `Z`/offset spelling and fractional precision. Agents are
+taught this contract in the same prompt/instruction layer that advertises the
+discussion-history tools `disc_meta`, `disc_get_message` and `disc_summarize`:
+the delayed history notice also lists the Planning reads and writes. `[src: file: backend/src/api/disc_prompts.rs:549-573#introspection_notice]`
 
 Runtime parity is capability-based:
 

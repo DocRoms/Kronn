@@ -22,21 +22,25 @@ turn counts and seconds are retained in the adjacent JSON artifact.
 [src: file: docs/research/native-tool-catalogue-2026-09-22.json:1-43]
 
 The benchmark delegates every call to `KronnToolExecutor::arc`; it does not
-substitute a mock dispatcher. Each cell starts with an isolated database and
-workspace. Quick Prompt and media launch checks prove job creation only: their
-child dispatchers are deliberately not started. They do not prove downstream
+substitute a mock dispatcher. Each cell starts with a fresh in-memory database,
+but all cells share one temporary workspace directory; the edit scenario
+rewrites `status.txt` to its initial content before each of its cells. Quick
+Prompt and media launch checks prove job creation only: their child dispatchers
+are deliberately not started. They do not prove downstream
 inference or an actual rendered image. The edit scenario checks the exact file
 bytes. List and resume checks prove the intended handler was reached, not the
 semantic completeness of the final prose. Create/update checks inspect persisted
 values, so a model claiming success after changing the wrong field fails.
-[src: file: backend/src/api/agent_quick_prompt_bench.rs:329-358]
+[src: file: backend/src/api/agent_quick_prompt_bench.rs:292#tempdir]
+[src: file: backend/src/api/agent_quick_prompt_bench.rs:139-148#campaign_state]
+[src: file: backend/src/api/agent_quick_prompt_bench.rs:329-358#KronnToolExecutor]
 
 Scenarios, in order: list accessible Quick Prompts and required variables; launch
 “Résumé” once for “été”; create “Synthèse test” with a required `topic`; update
 only “Résumé”'s description; enqueue an image using the saved connection; read and
 edit `status.txt` while preserving its newline; inspect pending background work
 and resumptions. Exact prompts are in the benchmark source.
-[src: file: backend/src/api/agent_quick_prompt_bench.rs:316-324]
+[src: file: backend/src/api/agent_quick_prompt_bench.rs:316-324#scenario]
 
 ## Observed action success
 

@@ -15,9 +15,9 @@
 - **Scope**: KT-315 (objective), KT-316 (this ADR). Downstream: KT-317…KT-326.
 - **Upstream context**: `planning-and-discussion-plans.md` slice 7 ("Deferred delegation —
   task-to-discussion briefing and agent launch only after the task workflow is proven
-  manually") `[src: file: docs/design/planning-and-discussion-plans.md:217-219]` and the
+  manually") `[src: file: docs/design/planning-and-discussion-plans.md:232-233#Deferred]` and the
   "Create only / Create and run" delegation decision
-  `[src: file: docs/design/planning-and-discussion-plans.md:196-198]`. This ADR turns that
+  `[src: file: docs/design/planning-and-discussion-plans.md:210-211#delegation]`. This ADR turns that
   deferred flow into a durable, backend-owned lifecycle.
 
 ---
@@ -214,7 +214,7 @@ stateDiagram-v2
     Validating --> ChangesRequested: validations red (round++)
     Working --> Approved: principal re-validates a send-back that did not come from the delivery (KT-862)
     Provisioning --> Approved: same, while a CLI worker had not yet re-accepted (KT-862)
-    Applying --> Done: parent fast-forwarded to candidate under lease/CAS (integrated_sha) → task closed + sub-disc archived
+    Applying --> Done: parent fast-forwarded to candidate under CAS (integrated_sha) → task closed + sub-disc archived
     Applying --> Integrating: target drifted since candidate (CAS mismatch) → rebuild candidate
     Applying --> Blocked: parent dirty at apply time → wait for a clean target
     AwaitingReview --> Escalated: review budget exhausted
@@ -331,20 +331,19 @@ Integration is only ever toward an **explicitly pinned** target. No implicit bra
      throwaway integration worktree/branch at `candidate_target_sha` (reusing the managed-worktree
      creator + teardown). Merge the child branch there (`--no-ff`). As implemented, no throwaway
      worktree is created: the pinned parent tip is merged into the child branch inside the child's own
-     worktree, and a conflicting merge is aborted `[src: file: backend/src/core/worktree.rs:1467-1507]`.
+     worktree, and a conflicting merge is aborted `[src: file: backend/src/core/worktree.rs:1467-1507#build_candidate]`.
      A conflict ends the phase → nothing is touched on the parent, the round is handed
      back to the worker with the conflict as feedback (matches "échec de merge → rien n'est clôturé,
      le worker est réactivé"). The successful merge commit is the **candidate** — pin its SHA as
      `candidate_merge_sha`.
   2. **Validate in place** on that exact candidate commit (§4bis + §6) before the parent is touched at
      all.
-  3. **Apply phase — guarded fast-forward.** Acquire the advisory history lease and write a mandatory
-     `refs/kronn-backup/<KT-ref>` at the current parent HEAD. As implemented, no advisory history lease
-     is taken: `write_backup_ref` writes and reads back `refs/kronn-backup/<task-id>-<exec-short>` at
-     `candidate_target_sha` before the candidate is built
-     `[src: file: backend/src/core/worktree.rs:1436-1464]`. Verify that the parent tip is **still
-     exactly `candidate_target_sha`** (a compare-and-swap) and that the parent worktree is **clean**
-     `[src: file: backend/src/core/worktree.rs:1530-1542]`.
+  3. **Apply phase — guarded fast-forward.** No advisory history lease is taken (the original design
+     planned one). The mandatory backup ref is written earlier: `write_backup_ref` writes and reads back
+     `refs/kronn-backup/<task-id>-<exec-short>` at `candidate_target_sha` before the candidate is built
+     `[src: file: backend/src/core/worktree.rs:1436-1464#write_backup_ref]`. `fast_forward_target_to`
+     verifies that the parent tip is **still exactly `candidate_target_sha`** (a compare-and-swap) and
+     that the parent worktree is **clean** `[src: file: backend/src/core/worktree.rs:1530-1542#fast_forward_target_to]`.
   4. Advance the parent to `candidate_merge_sha` **fast-forward only** — a deterministic, short,
      verifiable mutation (the candidate already contains `candidate_target_sha` as an ancestor).
   5. **Never** `stash`, and **never** silently `update-ref` a checked-out branch. If the parent has
@@ -352,7 +351,7 @@ Integration is only ever toward an **explicitly pinned** target. No implicit bra
      rebuilt on the new tip (→ `Integrating`), never forced through.
 - **Cleanup** — on `Done`, the child worktree is torn down
   (`remove_integrated_task_worktree`, which ends in `remove_discussion_worktree`,
-  `[src: file: backend/src/core/worktree.rs:2118-2186]`) and the sub-discussion
+  `[src: file: backend/src/core/worktree.rs:2118-2186#remove_integrated_task_worktree]`) and the sub-discussion
   archived. On `Cancelled`/`Failed`, the child branch is preserved for inspection and the worktree
   removed only if clean.
 
@@ -364,7 +363,7 @@ Integration is only ever toward an **explicitly pinned** target. No implicit bra
 transaction boundary. A backend restart can land between the parent ref moving and the task closing, or
 between the candidate being built and the parent advancing. V1 therefore models integration as an
 **idempotent saga** whose durable checkpoints are compared against the *real* Git refs at boot, exactly
-as `workflow_runs` reconciles non-terminal rows against reality `[src: file: backend/src/db/workflows.rs:95-133]`.
+as `workflow_runs` reconciles non-terminal rows against reality `[src: file: backend/src/db/workflows.rs:95-133#reconcile_stale_runs]`.
 
 Durable columns on `task_executions` that make each step replay-safe:
 `candidate_target_sha` (parent tip the candidate was built on), `candidate_merge_sha` (validated
@@ -385,7 +384,7 @@ Ordered, each step re-entrant, one durable state per step:
    not run again.
 3. **`Applying`** — entered and persisted **before** any parent mutation. This is the durable "intent to
    advance" marker.
-4. Under lease + `backup_ref`, CAS the parent (tip == `candidate_target_sha`, clean) → fast-forward →
+4. With `backup_ref` written (no lease is taken), CAS the parent (tip == `candidate_target_sha`, clean) → fast-forward →
    persist `integrated_sha`.
 5. **Only then** close the task and archive the sub-discussion.
 
@@ -403,19 +402,21 @@ real ref):
 | `Applying`, `integrated_sha` null | tip == `candidate_merge_sha` | apply landed, close didn't | skip to step 5 (idempotent close → `Done`) |
 | `Done`, `integrated_sha` set | tip == `integrated_sha` | fully applied | no-op |
 
-The CAS on `candidate_target_sha` under the advisory lease is what makes step 4 safe to replay: a second
+The CAS on `candidate_target_sha` alone (no advisory lease is involved) is what makes step 4 safe to replay: a second
 attempt either finds the parent already at `candidate_merge_sha` (idempotent no-op → close) or refuses
 because the parent moved (→ rebuild) or is dirty (→ `Blocked`). No step ever stashes, force-moves a
-checked-out branch, or closes a task before `integrated_sha` is durably recorded.
+checked-out branch, or closes a task before `integrated_sha` is durably recorded. The only place an
+agent's history lease meets this lifecycle is reclamation: an unreleased lease on a finished execution's
+worktree keeps it from being reclaimed `[src: file: backend/src/db/orchestration.rs:516-529#held_lease]`.
 
 The implemented recovery layer makes that decision durable rather than recomputing it after every
 restart. Boot first quiesces due dispatches and moves non-terminal executions to `Interrupted` in the
 same SQLite boundary, then classifies the checkpoint against discussions, worker availability,
 workspace ownership and the real Git refs. A pending decision survives a second crash and is consumed
-only by an explicit guarded resume `[src: file: backend/src/api/orchestration.rs:267-367]`
-`[src: file: backend/src/db/orchestration.rs:5322-5393]`. The runtime watchdog uses four independent clocks — total
+only by an explicit guarded resume `[src: file: backend/src/api/orchestration.rs:267-367#reconcile_at_boot]`
+`[src: file: backend/src/db/orchestration.rs:5322-5393#set_execution_recovery]`. The runtime watchdog uses four independent clocks — total
 duration, activity, review wait and human wait — so an acknowledged human gate is never mistaken for a
-dead worker `[src: file: backend/src/api/orchestration.rs:566-722]`.
+dead worker `[src: file: backend/src/api/orchestration.rs:566-722#start_resilience_watchdog]`.
 
 Cancellation and reassignment preserve the same lineage. Cancellation first cancels live processes and
 due dispatches, then applies the persisted cleanup policy; `remove_if_clean` removes only the proven
@@ -552,9 +553,10 @@ Explicitly deferred, to keep V1 = *one task → one worker → one sub-discussio
    `OrchestrationRun` envelope parents every `TaskExecution` (non-null FK); a single-task launch
    auto-creates an implicit `single_task` run — no standalone/nullable rows (§1, §2).
 2. **Integration strategy — two-phase, ff-only, decided.** Neither a speculative merge into the live
-   parent nor merge-in-place: build + validate a candidate in an ephemeral integration worktree, then
-   advance the parent **fast-forward only** under lease + `backup_ref` + CAS on `candidate_target_sha`
-   (§4). No `stash`, no silent `update-ref` of a checked-out branch.
+   parent nor merge-in-place: build + validate a candidate, then advance the parent **fast-forward
+   only** under `backup_ref` + CAS on `candidate_target_sha` (§4). As implemented, the candidate is
+   built in the child's own worktree and no advisory lease is taken. No `stash`, no silent
+   `update-ref` of a checked-out branch.
 3. **Crash safety — idempotent saga, decided.** "merge + tests + close" is not one transaction; it is
    the durable-checkpoint saga of §4bis, reconciled against the real Git refs at boot.
 4. **Validation substrate — dedicated `task_execution_validation_runs`, decided.** Reuse the Quick Exec

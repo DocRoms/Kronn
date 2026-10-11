@@ -5,7 +5,7 @@ the latter stay with a human. A joined CLI checks durable answers before asking,
 publishes a numeric-version `kronn-question` card when needed, verifies its
 recording, and pauses only the affected scope. Narrower native and HTTP worker
 surfaces request that the principal relay the card; neither actor may decide for
-the human. [src: file: backend/src/api/orchestration.rs:5246-5270]
+the human. [src: file: backend/src/api/orchestration.rs:6753-6778#human_arbitration]
 
 The parent-milestones section is transport-aware, not a single shared string, and
 the two joined-CLI tools do not share one restriction. `disc_append` defaults to
@@ -26,16 +26,16 @@ them to report any other verified notable fact (progress, a blocker, a result)
 through their actually available output and to explicitly ask the principal to
 relay it toward the parent room — without promising automatic visibility,
 guaranteed delivery, or a publication tool the surface does not declare.
-[src: file: backend/src/api/orchestration.rs:5271-5300]
-[src: file: backend/src/api/orchestration.rs:5136-5157]
-[src: file: backend/src/api/orchestration.rs:5163-5189]
-[src: file: backend/src/models/orchestration.rs:1196-1203]
+[src: file: backend/src/api/orchestration.rs:6779-6808#parent_milestones]
+[src: file: backend/src/db/orchestration.rs:5140-5176#get_execution_lineage]
+[src: file: backend/src/api/orchestration.rs:14422-14426#worker_briefs_make_human_arbitration_and_parent_milestones_transport_aware]
+[src: file: backend/src/models/orchestration.rs:1324-1337#TaskExecutionLineage]
 
 The bridge documents that `disc_question_list` reads durable question state and
 that `disc_append` is the live discussion publication tool; its implementation
 shows `disc_append` accepting an explicit `disc_id` (defaulting to the
 runtime-bound one) while `disc_question_list` always resolves `_disc_id()` and
 ignores any id argument.
-[src: file: backend/scripts/disc-introspection-mcp.py:176-177]
-[src: file: backend/scripts/disc-introspection-mcp.py:5063]
-[src: file: backend/scripts/disc-introspection-mcp.py:4278-4289]
+[src: file: backend/scripts/disc-introspection-mcp.py:221-222#disc_question_list]
+[src: file: backend/scripts/disc-introspection-mcp.py:5320-5338#call_disc_append]
+[src: file: backend/scripts/disc-introspection-mcp.py:4546-4550#call_disc_question_list]

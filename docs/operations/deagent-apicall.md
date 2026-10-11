@@ -21,17 +21,17 @@ on the transport result without fabricating fields in the API's data. The normal
 extraction rules still apply if the author explicitly configured `api_extract`.
 A JSON body containing `null` remains an ordinary JSON response; whitespace or
 other nonempty invalid JSON still produces a parsing failure.
-[src: file: backend/src/workflows/api_call_executor.rs:304-397]
-[src: file: backend/src/workflows/api_call_executor.rs:1756-1799]
+[src: file: backend/src/workflows/api_call_executor.rs:497-501#empty_http_signal]
+[src: file: backend/src/workflows/api_call_executor.rs:4698#empty_success_is_null_with_visible_http_status_and_one_request]
 
 An empty response ends pagination. If it is the first page, the result is null;
 if earlier pages returned data, those values are retained. Links on the empty
 response are not followed. The existing retry policy is unchanged: write verbs
 are not automatically resent. Tests assert the request count for writes,
 nonempty parse failures and pagination ending with an empty response.
-[src: file: backend/src/workflows/api_call_executor.rs:1474-1483]
-[src: file: backend/src/workflows/api_call_executor.rs:1725-1736]
-[src: file: backend/src/workflows/api_call_executor.rs:3765]
+[src: file: backend/src/workflows/api_call_executor.rs:1974-1982#empty_status]
+[src: file: backend/src/workflows/api_call_executor.rs:2221-2225#max_retries]
+[src: file: backend/src/workflows/api_call_executor.rs:4755-4819#empty_page_ends_pagination_without_discarding_prior_data]
 
 ## Default headers declared on a plugin
 
@@ -48,9 +48,9 @@ references to the config's fields, resolved server-side; a missing field fails
 the call before anything is sent. A header of the same name given on the call
 itself (`api_headers`) wins, and a header the auth already sends is never
 replaced. Values are attached as sensitive headers.
-[src: file: backend/src/models/mcp.rs:86-98]
-[src: file: backend/src/workflows/api_call_executor.rs:189]
-[src: file: backend/src/workflows/api_call_executor.rs:976-995]
+[src: file: backend/src/models/mcp.rs:82-86#default_headers]
+[src: file: backend/src/workflows/api_call_executor.rs:304-306#apply_default_headers]
+[src: file: backend/src/workflows/api_call_executor.rs:1203-1224#apply_default_headers]
 
 Custom API plugins edit them in **Headers sent on every call**, and the 🪄
 helper proposes them from the docs or a curl example. Create, update, file
@@ -60,8 +60,8 @@ unique name, never a header Kronn owns (`Authorization`, `Host`,
 `${ENV.KEY}` declared as a field, and no literal value for a name that looks
 like a credential, so a plugin export never carries a secret. Agents only see
 the header names in their API context, never the values.
-[src: file: backend/src/api/mcps.rs:941-1063]
-[src: file: backend/src/core/mcp_scanner.rs:3988]
+[src: file: backend/src/api/mcps.rs:1192-1250#validate_default_headers]
+[src: file: backend/src/core/mcp_scanner.rs:4123-4133#default_headers]
 
 ## Test endpoint of a plugin
 
@@ -94,8 +94,8 @@ declare `api_response: {"type": "Binary"}`; the body then comes back as
 `{content_type, size, base64, data_uri}`. Credentials are still injected by the
 server and never appear in the step output, the summary or the audit log.
 Omitting the field (or `{"type": "Json"}`) keeps the JSON behaviour unchanged.
-[src: file: backend/src/models/workflows.rs:739]
-[src: file: backend/src/workflows/api_call_executor.rs:1773]
+[src: file: backend/src/models/workflows.rs:745-748#api_response]
+[src: file: backend/src/workflows/api_call_executor.rs:2280-2285#read_binary_body]
 
 ```json
 "api_response": {"type": "Binary", "accept": ["image/png", "image/jpeg"], "max_bytes": 131072}
@@ -113,10 +113,10 @@ Omitting the field (or `{"type": "Json"}`) keeps the JSON behaviour unchanged.
 - Multi-page pagination is refused with a binary response (one call, one file).
   An empty 2xx body still yields `data: null` with its `http_<code>` signal.
 - The summary names the type and size only; it never embeds the payload.
-[src: file: backend/src/workflows/api_call_binary.rs:16-18]
-[src: file: backend/src/workflows/api_call_binary.rs:51-97]
-[src: file: backend/src/workflows/api_call_binary.rs:101-150]
-[src: file: backend/src/api/workflows.rs:824]
+[src: file: backend/src/workflows/api_call_binary.rs:16-18#DEFAULT_BINARY_MAX_BYTES]
+[src: file: backend/src/workflows/api_call_binary.rs:51-97#resolve_binary_policy]
+[src: file: backend/src/workflows/api_call_binary.rs:101-150#read_binary_body]
+[src: file: backend/src/api/workflows.rs:1208-1209#resolve_binary_policy]
 
 `base64` and `data_uri` carry the same bytes. Use `api_extract` to keep the one
 you need, for example `{"path": "$.data_uri"}` for a Page image, so the payload
@@ -135,8 +135,8 @@ used directly. Fetch the thumbnails through the broker and publish data URIs:
 
 The whole path, with a mock server that requires the credential, is covered by
 `batch_thumbnails_reach_a_page_dataset_as_data_uris_indexed_by_attachment`.
-[src: file: backend/src/workflows/api_call_binary.rs:663]
-[src: file: frontend/src/lib/live-page-sandbox.ts:5]
+[src: file: backend/src/workflows/api_call_binary.rs:663-666#batch_thumbnails_reach_a_page_dataset_as_data_uris_indexed_by_attachment]
+[src: file: frontend/src/lib/live-page-sandbox.ts:5-7#LIVE_PAGE_CSP]
 
 ## Status (2026-04-26)
 
@@ -275,15 +275,15 @@ in one database transaction. A referenced API is retained, with a `conflict`
 error naming each workflow and step to edit. This covers direct `quick_api_id`
 fields, `CollectApiData` sources and `on_failure` steps; several source aliases
 in one step count once in the deletion impact preview. No workflow is rewritten
-automatically. [src: file: backend/src/db/quick_apis.rs:223-281]
-[src: file: backend/src/api/quick_apis.rs:195-216]
+automatically. [src: file: backend/src/db/quick_apis.rs:236-281#workflow_step_references]
+[src: file: backend/src/api/quick_apis.rs:258-273#QuickApiInUse]
 
 The workflow wizard flags references already missing from the saved catalogue,
 including old deletions or imported workflows. It waits for a successful
 catalogue read and clears the warning when the reference is replaced or removed.
 The warning identifies the step and missing id and remains visible across wizard
-stages. [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:1255-1269]
-[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:1318-1330]
+stages. [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:1353-1365#missingQuickApis]
+[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:1424-1431#missingQuickApiReference]
 
 ## Run-anchored time templates
 

@@ -17,7 +17,7 @@ loss = **lost forever** without a copy.
 
 ## Built-in backups
 
-Kronn writes three kinds of copies. `[src: file: backend/src/core/backup.rs:1]`
+Kronn writes three kinds of copies. `[src: file: backend/src/core/backup.rs:316-330#BackupScheduler]`
 
 | Copy | When | Where |
 |------|------|-------|
@@ -41,13 +41,14 @@ The pre-migration copy is a file copy of the checkpointed database to
 `kronn.db.backup.tmp`, synced, then renamed over `kronn.db.backup`. If the
 disk lacks room or the copy fails, boot stops before any migration with a
 message saying so. `KRONN_MIGRATION_BACKUP=0` upgrades without a backup; use
-it only after taking a copy by hand. `[src: file: backend/src/db/migrations.rs:1]`
+it only after taking a copy by hand. `[src: file: backend/src/db/migrations.rs:1169-1178#backup_before_migration]`
 
 ## Run retention and compaction
 
 Step outputs are almost all of a workflow run's weight, and `workflow_runs`
 was 9.2 GB of a 10 GB base. Two mechanisms keep it bounded.
-`[src: file: backend/src/db/run_retention.rs:1]`
+`[src: file: backend/src/db/run_retention.rs:139-165#compact_run_payloads_chunk]`
+`[src: file: backend/src/db/run_retention.rs:218-236#delete_runs_chunk]`
 
 - **Payload retention, opt-in on every install.** Once enabled, every 6 h (first pass 10 min after
   boot, never during boot), Kronn replaces the step outputs of finished runs
@@ -68,7 +69,8 @@ was 9.2 GB of a 10 GB base. Two mechanisms keep it bounded.
   publication stays with its run link cleared. Its step outputs are cut to
   2 000 characters as soon as it is classified (every step succeeded, so no
   error is cut). See [Runs without changes](#runs-without-changes-kt-1100).
-  `[src: file: backend/src/workflows/run_effect.rs:1]`
+  `[src: file: backend/src/workflows/run_effect.rs:26-27#NO_OP_OUTPUT_CHARS]`
+  `[src: file: backend/src/core/run_retention.rs:25#DEFAULT_NO_OP_RETENTION_HOURS]`
 - **Per-workflow retention (KT-1100).** `Workflow.retention`
   (`{no_op_hours, success_days, failure_days}`, editor card "Run retention",
   `workflow_update`) overrides each global window for its class: no-op runs,
@@ -82,7 +84,7 @@ was 9.2 GB of a 10 GB base. Two mechanisms keep it bounded.
   stored value in the UPDATE itself (no stale read), a `kronn/` re-import keeps
   the stored value, and an agent may set it only on a new draft, which runs
   nothing until a human enables it.
-  `[src: file: backend/src/core/run_retention.rs:1]`
+  `[src: file: backend/src/core/run_retention.rs:50-68#window_hours]`
 
 Never touched, whatever their age: runs that are not `Success`, `Partial`,
 `Failed`, `Cancelled` or `StoppedByGuard` (so not `Running`, `Pending`,
