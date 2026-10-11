@@ -192,7 +192,7 @@ project path never reuses that identifier.
   (`OPENCODE_CONFIG_CONTENT`) that denies the real environment files, allows the
   templates and keeps a refusal from ending the turn. See
   [auditing with an ACP agent](../architecture/audit-acp-agents.md).
-  [src: file: backend/src/acp/secret_files.rs]
+  [src: file: backend/src/acp/secret_files.rs:51-79] [src: file: backend/src/acp/secret_files.rs:108-131]
 - **Filesystem / terminal:** Kronn has not bound a scoped executor for
   `fs/*`/`terminal/*` yet. Every such request — from any agent — gets a
   spec-correct JSON-RPC error (`-32001` "capability not granted"), never a
@@ -226,7 +226,7 @@ project path never reuses that identifier.
   just those two variables, and only from an owner-only regular file. The file
   stays as long as the session's transport, because Vibe restarts the bridge
   for each tool call, and is deleted when the transport is dropped.
-  [src: file: backend/src/acp/bridge_env.rs]
+  [src: file: backend/src/acp/bridge_env.rs:19-31] [src: file: backend/src/acp/bridge_env.rs:50-83] [src: file: backend/src/acp/bridge_env.rs:94-130]
 - **Vibe's tool identity (KT-1158):** Vibe's `session/request_permission`
   carries only `toolCallId`: no kind, server or arguments. The `tool_call`
   update it sends first names the tool it resolved in `_meta.tool_name`
@@ -238,7 +238,7 @@ project path never reuses that identifier.
   name stays unidentified and is governed as before. Every refusal carries
   `_meta.kronn.refusal` (what, why, what the user can change). Vibe 2.26 does
   not read it: its model sees "User rejected the tool call".
-  [src: file: backend/src/acp/permission_broker.rs]
+  [src: file: backend/src/acp/permission_broker.rs:392-436] [src: file: backend/src/acp/permission_broker.rs:449-466] [src: file: backend/src/acp/permission_broker.rs:509-518]
 
 ## Known limitations
 

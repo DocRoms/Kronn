@@ -73,7 +73,7 @@ The workspace catalogue, eight tools [src: file: backend/src/api/agent_workspace
 | `git_status`, `git_diff`, `git_log` | Read the workspace repository |
 
 Plus Kronn's internal catalogue — plan and task tools, `qa_list`/`qa_run`, and `api_call`
-against configured REST plugins [src: file: backend/src/api/agent_tools.rs].
+against configured REST plugins [src: file: backend/src/api/agent_tools.rs:501-836].
 
 And, since 0.13.0, media generation: `media_generate` and `media_job_status`
 [src: file: backend/src/api/agent_tools.rs:420-445]. These sit in the orchestration
@@ -213,7 +213,8 @@ rest of the discussion, or keep the partial answer.
 * **In a discussion, the round ceiling is no longer a failure.** The round's calls are
   refused, the model answers with what it has, and the question follows. A workflow step or
   a worker still fails with its reason: there is no one there to answer.
-  [src: file: backend/src/api/discussions/ceilings.rs]
+  [src: file: backend/src/agents/runner.rs:10537-10577]
+  [src: file: backend/src/api/discussions/ceilings.rs:117-161]
 
 ## Saved Quick Prompt generation settings (KT-670)
 
@@ -224,10 +225,10 @@ launches use the same capture helper. HTTP snapshots bind the discussion,
 agent, connection, tier and resolved model; changing the target does not apply
 the old target's controls. Existing discussions are not backfilled from a
 mutable Quick Prompt. CLI effort keeps its existing snapshot format.
-[src: file: backend/src/api/mcp_remote.rs]
-[src: file: backend/src/db/discussion_launch_settings.rs]
-[src: file: backend/src/db/sql/186_discussion_http_settings.sql]
-[src: file: backend/src/api/discussions/crud.rs]
+[src: file: backend/src/api/mcp_remote.rs:584-612]
+[src: file: backend/src/db/discussion_launch_settings.rs:18-117]
+[src: file: backend/src/db/sql/186_discussion_http_settings.sql:1-10]
+[src: file: backend/src/api/discussions/crud.rs:608-619]
 
 HTTP launches transmit explicit `reasoning_effort` and `max_tokens` on the
 OpenAI-compatible wire. Ollama receives `think` and `options.num_predict` after
@@ -235,8 +236,8 @@ context fitting; an explicit thinking request removes Kronn's older Qwen
 `/no_think` control message. Limits apply per provider request, including tool
 round trips, rather than defining a total run budget. The provider may refuse
 a setting its selected model does not support. Kronn does not retry by dropping
-the saved control. [src: file: backend/src/agents/generation_settings.rs]
-[src: file: backend/src/agents/runner.rs]
+the saved control. [src: file: backend/src/agents/generation_settings.rs:39-70]
+[src: file: backend/src/agents/runner.rs:9215]
 [src: url: https://docs.ollama.com/api/chat]
 [src: url: https://docs.ollama.com/capabilities/thinking]
 [src: url: https://docs.litellm.ai/docs/completion/input]
@@ -247,25 +248,27 @@ with an instruction to clear the setting or choose an HTTP provider. An explicit
 effort on an unsupported transport is also refused. The runner applies the same
 validation to explicit workflow Agent-step controls. Legacy batch/compare target
 overrides are outside this single-launch snapshot change.
-[src: file: backend/src/api/agent_quick_prompt_tests.rs]
-[src: file: backend/src/agents/generation_settings.rs]
-[src: file: backend/src/workflows/steps.rs]
+[src: file: backend/src/api/agent_quick_prompt_tests.rs:550-603]
+[src: file: backend/src/agents/generation_settings.rs:5-28]
+[src: file: backend/src/workflows/steps.rs:1356-1360]
+[src: file: backend/src/agents/runner.rs:3755-3759]
 
 The HTTP regression launches through the native QP tool and the discussion
 stream, edits the template while the job is queued, then inspects both requests
 received by a loopback provider. A separate Ollama fixture checks the actual
 request after context fitting. These fixtures prove transport and persistence,
 not live hosted-provider availability or model quality.
-[src: file: backend/src/api/agent_quick_prompt_tests.rs]
-[src: file: backend/src/agents/generation_settings.rs]
+[src: file: backend/src/api/agent_quick_prompt_tests.rs:470-548]
+[src: file: backend/src/agents/generation_settings.rs:119-188]
 
 ## Full catalogue by default; progressive loading is experimental (KT-685)
 
 HTTP discussion agents receive the full native catalogue by default. Explicitly
 setting `KRONN_TIERED_TOOLS=1` starts with the core tools and an index of the
-`media`, `delegation`, `edit` and `automations` families. `tools_load` adds a family
+`pages`, `media`, `delegation`, `edit` and `automations` families. `tools_load` adds a family
 for the remainder of the run. Bounded workers cannot expand their catalogue.
-[src: file: backend/src/api/agent_tools.rs]
+[src: file: backend/src/api/agent_tools.rs:329-405]
+[src: file: backend/src/api/agent_tools.rs:2304-2310]
 
 The native dispatcher now routes `tools_load` correctly. Earlier benchmarks used
 a substitute dispatcher and their claimed savings did not validate this path.
@@ -274,14 +277,14 @@ local models: full declarations succeeded in 35/42 cells, progressive loading in
 17/42, with regressions for every model. This does not establish a saving at
 comparable quality. The full protocol, individual costs, failures and limitations
 are in [the campaign report](../research/native-tool-catalogue-2026-09-22.md).
-[src: file: docs/research/native-tool-catalogue-2026-09-22.json]
+[src: file: docs/research/native-tool-catalogue-2026-09-22.json:44-2757]
 
 Tiering reduces the initial declaration text, not the context capacity required
 to reach every family. Window reservation counts the whole reachable catalogue,
 including JSON separators, before loading a family. A regression test checks
-exact byte counts and an unchanged window through all four family loads.
-[src: file: backend/src/agents/runner.rs]
-[src: file: backend/src/agents/runner_test.rs]
+exact byte counts and an unchanged window through every family load.
+[src: file: backend/src/agents/runner.rs:6739-6769]
+[src: file: backend/src/agents/runner_test.rs:1584-1621]
 
 ## Audits (KT-924)
 
@@ -305,7 +308,7 @@ test [src: file: backend/src/api/audit/mod.rs:1271]. Admitting NVIDIA or Custom
 later is a product decision about what leaves the machine, not a wiring one.
 
 **How an audit step reaches the project.** Both pipelines start the step's agent
-through one launcher [src: file: backend/src/api/audit/agent_launch.rs]. A CLI
+through one launcher [src: file: backend/src/api/audit/agent_launch.rs:253-308]. A CLI
 agent is spawned exactly as before. An HTTP agent gets a
 `KronnToolExecutor::audit_arc`, scoped to the project directory the pipeline
 already resolved (`resolve_host_path`, so it is right inside a container) rather
@@ -346,14 +349,16 @@ why the gates exist. An HTTP run that answers in prose instead of calling a tool
 ends cleanly, so its exit code says "success"; the output validator and the
 rewrite proof are what record the step as failed when its target is missing,
 still the template, or byte-identical to before the agent ran
-[src: file: backend/src/api/audit/validation.rs]. The final review step has no
+[src: file: backend/src/api/audit/validation.rs:160-300]
+[src: file: backend/src/api/audit/validation.rs:60-70]. The final review step has no
 target file and is judged on the exit code alone, for an HTTP agent as for a CLI
 one.
 
 **Stopping.** An HTTP agent's request and tool loop are a task, not a process:
 killing the lifeline PID does not stop it. A Full audit therefore registers a
 cancellation token per step, and `cancel_audit` trips it
-[src: file: backend/src/api/audit/full.rs]. Since KT-927 the partial audit does
+[src: file: backend/src/api/audit/full.rs:1409-1414]
+[src: file: backend/src/api/audit/full.rs:3760-3764]. Since KT-927 the partial audit does
 the same, and so does an ACP agent, whose PID is a lifeline too: see
 [auditing with an ACP agent](audit-acp-agents.md).
 
@@ -432,24 +437,25 @@ writes are scoped to general workflows plus the current discussion's project.
 Create inherits that project unless an explicit null requests a general draft.
 Update preserves the existing project and all omitted fields; supplied arrays
 replace their stored array. Workers and workflow Agent steps cannot use this
-authoring surface. [src: file: backend/src/api/agent_workflow_tools.rs]
+authoring surface. [src: file: backend/src/api/agent_workflow_tools.rs:48-231]
 
 Authoring always leaves the workflow disabled. Updating an enabled workflow
 returns an explicit alternative: disable it in the Workflows UI or create a new
 disabled draft. Neither enabling, triggering nor deletion is exposed here.
 Cron and Tracker drafts default to concurrency 1. The existing workflow HTTP
 handlers validate steps, references, allowlists and stored command bindings.
-[src: file: backend/src/api/agent_workflow_tools.rs]
-[src: file: backend/src/api/workflows.rs]
+[src: file: backend/src/api/agent_workflow_tools.rs:77-119]
+[src: file: backend/src/api/agent_workflow_tools.rs:206-208]
+[src: file: backend/src/api/workflows.rs:2580-2640]
 
 The canonical schema lives in `workflow_step_schema.json`. MCP reads the complete
 contract from `GET /api/workflows/step-schema`; native agents receive the same
 contract and can request one step type or shared section. This avoids paying
 the full schema on every turn while keeping both interfaces on the same source.
 The examples are deserialized as real `WorkflowStep` values in regression tests.
-[src: file: backend/src/api/workflow_step_schema.json]
-[src: file: backend/scripts/disc-introspection-mcp.py]
-[src: file: backend/src/api/agent_workflow_tests.rs]
+[src: file: backend/src/api/workflow_step_schema.json:1-467]
+[src: file: backend/scripts/disc-introspection-mcp.py:9373-9375]
+[src: file: backend/src/api/agent_workflow_tests.rs:146-170]
 
 Ollama tool-result clamping preserves this authoring contract as complete JSON
 before the next request is resized. The regression reproduces that production

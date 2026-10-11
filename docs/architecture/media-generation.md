@@ -355,20 +355,20 @@ make the film, in what order, and plays them through.
   it names a file of another discussion, or the same clip twice, in either
   list. A deleted clip drops out when the order is read, not when it is
   deleted, so a deletion never needs to know about the sequence.
-  [src: file: backend/src/db/discussion_video_sequences.rs]
+  [src: file: backend/src/db/discussion_video_sequences.rs:26-47] [src: file: backend/src/db/discussion_video_sequences.rs:49-70]
 * **A new clip joins the film, at the end.** Clips nobody has placed yet
   follow the arranged ones, oldest first: clips are generated one after the
   other, so the order they were made in is the film's default. A clip that
   has nothing to do with the film is dragged to "Hors version finale", or
   taken out with its button: it stays in the discussion and is not played,
   until it is put back.
-  [src: file: frontend/src/lib/videoSequence.ts]
+  [src: file: frontend/src/lib/videoSequence.ts:14-37]
 * **Every move is saved at once.** Drag-and-drop or the buttons send both
   lists; a refusal is shown in place, and the list keeps the order on screen.
   While a clip is dragged, a line between two rows shows where it will land
   (the upper half of a row points above it, the lower half below), and none
   is drawn where the clip would not move.
-  [src: file: frontend/src/lib/videoSequence.ts]
+  [src: file: frontend/src/components/VideoSequenceEditor.tsx:170-181] [src: file: frontend/src/lib/videoSequence.ts:80-94]
 * **Each clip shows its first frame.** The thumbnail is the clip itself,
   paused near its start, fetched once its row is on screen. The bytes are
   fetched once per clip and shared with the player.
@@ -380,11 +380,11 @@ make the film, in what order, and plays them through.
   only the clips of the film. A clip with no declared price, an upload, or one
   billed on the user's own key is not added: the total says how many were left
   out rather than counting them as free.
-  [src: file: frontend/src/lib/videoSequence.ts]
+  [src: file: frontend/src/lib/videoSequence.ts:96-131]
 * **"Lire la version finale" plays, it does not render.** A full-screen player
   shows each clip of the film in order and starts the next one when the
   current one ends,
   fetching the following clip while the current one plays. A clip that cannot
   be loaded is announced with a button to skip it. No file is produced:
   cutting and exporting a single video are separate work.
-  [src: file: frontend/src/components/VideoSequenceEditor.tsx]
+  [src: file: frontend/src/components/VideoSequenceEditor.tsx:458-478] [src: file: frontend/src/components/VideoSequenceEditor.tsx:517-531]

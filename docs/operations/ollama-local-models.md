@@ -28,10 +28,14 @@ execution id or caller identity in the model-authored schema. Kronn resolves the
 target from the executor's durable child room, typed provider, source message
 and exact dispatch job. A supplied `task_execution_id` is ignored even when it
 names another valid concurrent execution. Principals keep explicit execution
-references for the lifecycle actions they steer; workers are not offered
-`task_exec_status`, because asking a local model to reconstruct an opaque UUID
-from a branch or worktree name is both unreliable and an authorization smell.
-`[src: file: backend/src/api/agent_tools.rs]`
+references for the lifecycle actions they steer. A worker is still offered
+`task_exec_status`, but it accepts a task reference as well as an execution id,
+so a local model never has to reconstruct an opaque UUID, and it answers only
+the execution's principal or its own native worker.
+`[src: file: backend/src/api/agent_tools.rs:1455-1462]`
+`[src: file: backend/src/api/agent_tools.rs:2685-2713]`
+`[src: file: backend/src/api/agent_tools.rs:2655-2663]`
+`[src: file: backend/src/api/agent_tools.rs:3787-3814]`
 
 The discussion SSE path resolves this scope from the durable
 `task_executions.sub_discussion_id` lineage before it constructs the HTTP tool
@@ -156,7 +160,10 @@ inner lines may move. The diagnostic starts with `Structure validation refused`
 and, like a Rust parser error, puts the worker into its one strict correction
 of the same frozen range. The prelocalized brief carries no human-arbitration
 or parent-milestone section: a bounded edit has neither.
-`[src: file: backend/src/api/agent_workspace_structure.rs]`
+`[src: file: backend/src/api/agent_workspace_structure.rs:1-10]`
+`[src: file: backend/src/api/agent_workspace_structure.rs:234-252]`
+`[src: file: backend/src/api/agent_workspace_structure.rs:270-312]`
+`[src: file: backend/src/api/agent_workspace_tools.rs:95-113]`
 
 For a pure insertion, do not make the worker reproduce a paragraph inside a
 replacement range. Use one verified anchor line:
@@ -199,7 +206,8 @@ range. When anything outside the range changed, the range was deleted
 entirely, or it grew past 200 lines, the rework is refused with
 `stale range: …; relaunch with a new worker_scope`, naming the launch range
 and the observed change.
-`[src: file: backend/src/api/orchestration.rs]`
+`[src: file: backend/src/api/orchestration.rs:1943-2011]`
+`[src: file: backend/src/api/orchestration.rs:2041-2097]`
 `task_exec_status` now exposes `usage.http` — cumulative HTTP traffic, context peak, and per-phase detail — without prompts or arguments.
 
 Native HTTP delivery — and delivery from a spawned host CLI worker that uses
@@ -220,8 +228,8 @@ range and that the automatically padded window contains enough evidence. If the
 worker needs to discover a symbol, compare several files or broaden the range,
 split/pre-analyse the task first or use the normal bounded worker path instead
 of weakening this contract.
-`[src: file: backend/src/models/orchestration.rs]`
-`[src: file: backend/src/agents/runner.rs]`
+`[src: file: backend/src/models/orchestration.rs:834-853]`
+`[src: file: backend/src/agents/runner.rs:1154-1182]`
 
 When changing this lifecycle itself, first run the same commit → manifest →
 review → integration gate with capable Claude/Codex workers. That separates a
@@ -321,7 +329,7 @@ launch (`crud.rs` stamps `discussions.model` from the QP).
 
 ## "Stable output", NOT bit-exact determinism
 
-`build_ollama_chat_body` [src: file: backend/src/agents/runner.rs] sends
+`build_ollama_chat_body` [src: file: backend/src/agents/runner.rs:7703-7732] sends
 `temperature:0, top_k:1, seed:42` as INTERNAL constants (no per-step knob).
 On Apple Metal the float reduction order isn't guaranteed, so two logits within
 epsilon can flip the argmax (more so under Q4 quant) → output is *greedy-stable*,
@@ -544,7 +552,7 @@ can select: a 198 KB answer, the full catalogue and a 32,768-token window ended 
    the initial brief plus tool catalogue and reply headroom do not honestly fit,
    Kronn refuses the run with an actionable error instead of silently trimming
    the task. GGUF and OpenAI-wire providers keep their existing context policy.
-   [src: file: backend/src/agents/runner.rs]
+   [src: file: backend/src/agents/runner.rs:97-104] [src: file: backend/src/agents/runner.rs:227-250]
    Finalization instead uses a deterministic checkpoint after the already
    authorized boundary call has executed and its result has been recorded:
    immutable system/user policy plus the three most recent complete
@@ -563,7 +571,7 @@ can select: a 198 KB answer, the full catalogue and a 32,768-token window ended 
    another full model turn. Prefer a GGUF/non-MLX model for an unusually long
    repository investigation until the upstream prefix-cache and retained-memory
    defects are fixed.
-   [src: file: backend/src/agents/runner.rs]
+   [src: file: backend/src/agents/runner.rs:65-70] [src: file: backend/src/agents/runner.rs:587-661]
    [src: url: https://github.com/ollama/ollama/issues/17829]
    [src: url: https://github.com/ollama/ollama/issues/17875]
 4. **Quoted scalar arguments** — local models sometimes serialize a numeric or
@@ -574,7 +582,7 @@ can select: a 198 KB answer, the full catalogue and a 32,768-token window ended 
    validation are unchanged.
    Missing required line fields are reported separately from present-but-invalid
    values so the model can correct the shape instead of guessing a new number.
-   [src: file: backend/src/api/agent_tools.rs]
+   [src: file: backend/src/api/agent_tools.rs:3849-3877] [src: file: backend/src/api/agent_tools.rs:3584-3598]
 5. **Rust edits are structurally atomic** — `write_file`, `edit_file` and
    `edit_lines` parse a proposed `.rs` file in memory before the first durable
    byte. A refusal reports the exact parser position and leaves the prior bytes
@@ -583,14 +591,14 @@ can select: a 198 KB answer, the full catalogue and a 32,768-token window ended 
    correction, then proceeds to bounded commit/delivery or returns control for
    strong fallback. Non-Rust files and syntactically valid Rust edits keep the
    existing CAS behavior.
-   [src: file: backend/src/api/agent_workspace_tools.rs]
-   [src: file: backend/src/agents/runner.rs]
+   [src: file: backend/src/api/agent_workspace_tools.rs:95-113]
+   [src: file: backend/src/agents/runner.rs:1391-1424]
 6. **Failed workspace edits remain diagnosable** — persisted tool traces include
    bounded arguments and a bounded, single-line executor error for workspace
    tools such as `edit_lines`. This keeps an interrupted local-worker attempt
    auditable after its stream has ended. API calls remain route-only (never
    query/body/error data), and commit arguments remain hidden.
-   [src: file: backend/src/agents/tools.rs]
+   [src: file: backend/src/agents/tools.rs:312-402]
 
 ## TypedSchema → constrained JSON + quality escalation
 
@@ -616,8 +624,9 @@ policy is unchanged: `Fail` rejects output that remains invalid, while
 `Continue` may keep invalid raw output. Prompt-based output is not a guarantee
 of schema compliance. Repeated launches, including a repair launch, negotiate
 the capability independently; no persistent capability cache is written.
-`[src: file: backend/src/agents/runner.rs]`
-`[src: file: backend/src/workflows/steps.rs]`
+`[src: file: backend/src/agents/runner.rs:8536-8570]`
+`[src: file: backend/src/agents/runner.rs:9292-9318]`
+`[src: file: backend/src/workflows/steps.rs:1070-1093]`
 
 **Quality escalation** (`steps.rs::escalation_step`): if a LOCAL (Ollama)
 TypedSchema step still fails validation after the repair attempt, it retries

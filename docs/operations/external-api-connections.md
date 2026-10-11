@@ -178,7 +178,7 @@ agent kind is absent from it by default, and absence reads as *disabled*.
 
 Identity colour is derived from the alias rather than assigned, so a new
 connection has a distinct, stable colour on first use with nothing to configure.
-[src: file: frontend/src/lib/externalAgentIdentity.ts]
+[src: file: frontend/src/lib/externalAgentIdentity.ts:126-141]
 
 ## Upgrade from legacy settings
 
@@ -228,7 +228,8 @@ the runtime-resolution guide.
   failed a test it should have passed. The probe now chats with a configured
   model, and an HTTP failure is reported with a hint keyed to the status and the
   model actually tried — not a bare code.
-  [src: file: backend/src/api/external_api_connections.rs]
+  [src: file: backend/src/api/external_api_connections.rs:704-738]
+  [src: file: backend/src/api/external_api_connections.rs:457-469]
 - **An agent cannot find the connection to generate an image or a video:**
   fixed in 0.13.2. In a plain discussion, `agent_list`, the only place the
   connection id appears, refused any agent that was not a member of a room, and
@@ -236,7 +237,8 @@ the runtime-resolution guide.
   tried instead. The catalogue now answers in every discussion, and a
   generation accepts the connection's id, alias or display name; a refusal
   lists the connections that can generate the requested modality.
-  [src: file: backend/src/api/media.rs]
+  [src: file: backend/src/api/media.rs:150-189]
+  [src: file: backend/src/api/media.rs:385-414]
 - **Wrong model after an endpoint edit:** test again before selecting tiers;
   model choices are tied to the exact tested endpoint and credential state.
   [src: file: frontend/src/components/settings/ExternalApiSection.tsx:362-400]

@@ -53,5 +53,5 @@ have left a Git object; unstaged or untracked contents may have no Git copy.
 An unsuccessful object search does not prove that recovery is impossible.
 The new audit cannot reconstruct contents removed by an older release.
 
-[src: file: backend/src/core/docs_write_filter.rs]
-[src: file: backend/src/workflows/runner.rs]
+[src: file: backend/src/core/docs_write_filter.rs:506-571]
+[src: file: backend/src/workflows/runner.rs:2569-2597]

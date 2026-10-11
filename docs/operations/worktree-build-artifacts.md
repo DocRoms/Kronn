@@ -149,7 +149,7 @@ deployment has changed either server disk threshold, the operator must supply
 the same approved values through `KRONN_DEV_BACKEND_DISK_WARNING_GIB` and
 `KRONN_DEV_BACKEND_DISK_CRITICAL_GIB` rather than reading a host configuration
 file from the shell. [src: file: scripts/dev-backend-supervisor.sh:16-23]
-[src: file: scripts/dev-backend-build-guard.sh:8-49]
+[src: file: scripts/dev-backend-build-guard.sh:8-48]
 
 Kronn's versioned backend and desktop development profiles use line-table-only
 debug information, disable incremental compilation, and explicitly retain

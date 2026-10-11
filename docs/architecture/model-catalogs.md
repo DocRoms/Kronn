@@ -148,8 +148,8 @@ classic batch, which runs the Quick Prompt's own agent, still inherits it.
 A connection Kronn cannot route to yet — no endpoint, or no model on any tier —
 is shown in the target list with that reason instead of being dropped from it
 in silence.
-[src: file: backend/src/db/workflows.rs]
-[src: file: frontend/src/lib/externalAgentIdentity.ts]
+[src: file: backend/src/db/workflows.rs:504-519]
+[src: file: frontend/src/lib/externalAgentIdentity.ts:44-58]
 
 `AgentSwitchPicker` remains the common selector on discussion, QP/compare and
 workflow surfaces. It reads the shared snapshot, shows provenance, and leaves
@@ -193,7 +193,7 @@ candidate differs from an advertised mode only by case or whitespace, the
 refusal names that mode instead of the generic "catalogue does not list
 that combination" message, which otherwise reads as if the mode is entirely
 absent (KT-656).
-[src: file: backend/src/agents/runner.rs]
+[src: file: backend/src/agents/runner.rs:3532-3586]
 The direct Codex runner still starts a fresh execution on each turn; its ACP
 adapter supports thread resume. Claude supports resume on both routes. Effort
 is transmitted on every supported fresh/resumed invocation; this feature does
@@ -284,7 +284,7 @@ of clearing it, so an unrelated edit (e.g. a rename) cannot silently wipe an
 auto-detected or previously-confirmed assessment.
 [src: file: backend/src/db/model_catalog.rs:501]
 [src: file: backend/src/db/model_catalog.rs:537]
-[src: file: backend/src/db/sql/164_model_catalog_cost_privacy.sql]
+[src: file: backend/src/db/sql/164_model_catalog_cost_privacy.sql:1-7]
 [src: file: backend/src/models/model_catalog.rs:76]
 [src: url: https://opencode.ai/docs/zen/]
 [src: url: https://opencode.ai/zen/v1/models]

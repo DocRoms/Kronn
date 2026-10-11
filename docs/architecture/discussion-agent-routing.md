@@ -15,7 +15,7 @@ responders may all be Codex without being interchangeable:
 `messages.target_agent` and `target_agents` remain compatibility projections
 for older clients and peers.
 [src: file: backend/src/models/discussions.rs:340-430]
-[src: file: backend/src/db/sql/099_typed_message_targets.sql:1-38]
+[src: file: backend/src/db/sql/099_typed_message_targets.sql:1-37]
 
 The composer parses prose once and submits the typed target list. The backend
 validates that every CLI session belongs to the discussion before accepting
@@ -41,8 +41,8 @@ Mentions inside inline code or fenced code are examples, not dispatch requests.
 This is the supported escape hatch when a human or agent needs to discuss the
 syntax itself (write `` `@codex` `` rather than a live mention). The UI composer
 and MCP bridge apply the same exemption before resolving targets.
-[src: file: frontend/src/lib/messageTargets.ts]
-[src: file: backend/scripts/disc-introspection-mcp.py]
+[src: file: frontend/src/lib/messageTargets.ts:131-147]
+[src: file: backend/scripts/disc-introspection-mcp.py:5023-5024]
 
 | Room mode | Target state | Result |
 |---|---|---|
@@ -81,8 +81,8 @@ a second wait while the first is active. The bridge serves one request at a
 time, so any other Kronn call ends that wait; the call's result carries
 `wait_preempted` and the agent must re-arm. True zero-turn silence on such a
 host needs an out-of-band push capability.
-[src: file: backend/src/api/disc_invite.rs]
-[src: file: backend/scripts/disc-introspection-mcp.py]
+[src: file: backend/src/api/disc_invite.rs:1674-1742]
+[src: file: backend/scripts/disc-introspection-mcp.py:7206-7237]
 
 Awareness delivery follows a scan / offer / ack contract with two durable
 per-session cursors. When a wake response attaches a batch, the server
@@ -93,10 +93,10 @@ cursor (`user_catchup_cursor`) advance, clamped to the offer — so a cancelled
 call, a bridge crash, an oversized or racing ack can only cause a bounded
 replay, never a skipped turn. Message revision events ride the same backlog.
 New and migrated sessions start both cursors at the room's current tip.
-[src: file: backend/src/db/sql/105_user_turn_catchup.sql]
-[src: file: backend/src/db/sql/106_awareness_offered_cursor.sql]
-[src: file: backend/src/api/disc_invite.rs]
-[src: file: backend/scripts/disc-introspection-mcp.py]
+[src: file: backend/src/db/sql/105_user_turn_catchup.sql:1-23]
+[src: file: backend/src/db/sql/106_awareness_offered_cursor.sql:1-11]
+[src: file: backend/src/api/disc_invite.rs:1362-1390]
+[src: file: backend/scripts/disc-introspection-mcp.py:3467-3474]
 
 ## Queue, restart, and edit/resend
 
@@ -143,8 +143,8 @@ dispatch) and then addresses the first agent alone, so its handoff markers can
 reach the others; "parallel" keeps the fan-out above. A native reply's prose
 mention that launched nobody is annotated with its reason (already scheduled
 on the root turn, or no marker), computed from `message_targets`.
-[src: file: frontend/src/lib/agentDelegation.ts]
-[src: file: backend/src/db/discussions.rs]
+[src: file: frontend/src/lib/agentDelegation.ts:62-149]
+[src: file: backend/src/db/discussions.rs:1746-1789]
 [src: file: backend/src/api/discussions/crud.rs:242-315]
 [src: file: backend/src/api/discussions/messaging.rs:54-117]
 [src: file: backend/src/api/discussions/messaging.rs:829-905]
@@ -159,16 +159,16 @@ from exact joined aliases (`@codex-cli`, `@codex-cli-2`, …) using the
 discussion's participant order. Several mentions fan out once per durable
 identity. The legacy single `target_agent` field remains accepted during
 rolling upgrades, with its historical provider-level semantics.
-[src: file: backend/scripts/disc-introspection-mcp.py]
-[src: file: backend/src/api/disc_source.rs]
+[src: file: backend/scripts/disc-introspection-mcp.py:5013-5099]
+[src: file: backend/src/api/disc_source.rs:434-454]
 
 For each native identity, the message and its dispatch obligation commit in one
 transaction. Exact CLI identities create no local runner: the addressed session
 receives the Agent turn through its next poll, while every unrelated CLI skips
 it and advances its cursor. Bulk imports, historical appends, duplicates and
 appends without a live JOIN session never start a runner.
-[src: file: backend/src/db/discussions.rs]
-[src: file: backend/src/api/disc_invite.rs]
+[src: file: backend/src/db/discussions.rs:1529-1547]
+[src: file: backend/src/api/disc_invite.rs:1674-1693]
 
 Every verified live MCP append also records its exact author session in
 `message_cli_authors`. This is local routing provenance, not portable transcript
@@ -184,10 +184,10 @@ once when an old cursor is restored because Kronn cannot safely guess which
 historical CLI wrote them. `disc_wait_for_peer` and `disc_get_message` expose
 the identity as `reply_target` so agents can inspect the decision without
 loading session tables.
-[src: file: backend/src/db/sql/100_message_cli_authors.sql]
-[src: file: backend/src/api/disc_source.rs]
-[src: file: backend/src/api/disc_invite.rs]
-[src: file: backend/src/api/disc_introspection.rs]
+[src: file: backend/src/db/sql/100_message_cli_authors.sql:1-14]
+[src: file: backend/src/api/disc_source.rs:455-488] [src: file: backend/src/api/disc_source.rs:542-569]
+[src: file: backend/src/api/disc_invite.rs:1606-1673]
+[src: file: backend/src/api/disc_introspection.rs:83-86] [src: file: backend/src/api/disc_introspection.rs:515-528]
 
 An untargeted live peer append in a native discussion deliberately addresses
 the native principal: this is how an invited CLI hands work back to the
@@ -217,7 +217,7 @@ Two distinctions the reason must not blur, and does not:
   the untracked path alone changes nothing a room user sees — which is exactly how the
   second producer of the generic string survived the first fix. `strings` on the built
   binary, not a source grep, is what proved a second one existed.
-[src: file: backend/src/api/discussions/streaming.rs]
+[src: file: backend/src/api/discussions/streaming.rs:964-1009] [src: file: backend/src/api/discussions/streaming.rs:1175-1189]
 
 ## Persistence and interruption
 

@@ -111,8 +111,8 @@ names, versions, behaviour). The grammar:
 
 - `[src: file: backend/src/api/mod.rs:14]` — file + single line.
 - `[src: file: backend/src/api/mod.rs:14-22]` — file + line range.
-- `[src: backend/src/api/mod.rs]` — file only (type defaulted).
-- `[src: file: docs/specs/brief.docx]` — file only. Required for a binary file (.docx,
+- `[src: <path>:<line>]` — the `file:` type is the default.
+- `[src: file: <path>.docx]` — file only. Required for a binary file (.docx,
   .pdf, images), which has no lines; detected by content, not extension. In audited `docs/`
   a text file always takes a line, and a binary file never does.
 - Percent-encoded paths (`My%20File.docx`) are decoded before resolving.

@@ -82,7 +82,7 @@ persisted System error/job linkage, terminal Failed state, one attempt, cleared
 awaiting state and refusal to defer a settled job. It does not spawn a real
 provider or claim a browser/full-runtime end-to-end demonstration. Truly absent
 runtimes still use the existing deferral policy; this patch does not cap it.
-[src: file: backend/tests/context_file_safety.rs]
+[src: file: backend/tests/context_file_safety.rs:82-233]
 [src: file: backend/src/api/discussions/streaming.rs:775]
 [src: file: backend/src/api/discussions/streaming.rs:4961]
 

@@ -57,9 +57,9 @@ renderer remains strict. Existing encrypted snapshots are immutable and are
 not rewritten; a new launch obtains the corrected snapshot. Resuming an
 already affected run retains its original snapshot.
 
-[src: file: backend/src/core/execution_variables.rs]
-[src: file: backend/src/api/execution_variables.rs]
-[src: file: frontend/src/components/workflows/ProvidedVariablesPreview.tsx]
+[src: file: backend/src/core/execution_variables.rs:54-188]
+[src: file: backend/src/api/execution_variables.rs:23-101]
+[src: file: frontend/src/components/workflows/ProvidedVariablesPreview.tsx:80-136]
 
 ## Snapshot and discussion trace
 
@@ -74,8 +74,8 @@ Metadata access first verifies that the opaque run id still belongs to its
 durable discussion/run and project scope. Reveals are audited without storing
 the returned value.
 
-[src: file: backend/src/db/execution_variable_snapshots.rs]
-[src: file: frontend/src/components/MessageBubble.tsx]
+[src: file: backend/src/db/execution_variable_snapshots.rs:151-222] [src: file: backend/src/db/execution_variable_snapshots.rs:32-41]
+[src: file: frontend/src/components/MessageBubble.tsx:1023-1050]
 
 ## Retention
 
@@ -98,7 +98,7 @@ purge. API tests prove that metadata and preview payloads stay masked. Frontend
 tests cover masked rendering, explicit reveal/remask, manual override and
 value-free errors.
 
-[src: file: backend/src/core/execution_variables.rs]
-[src: file: backend/src/db/execution_variable_snapshots.rs]
-[src: file: backend/tests/api_tests.rs]
-[src: file: frontend/src/components/workflows/__tests__/ProvidedVariablesPreview.test.tsx]
+[src: file: backend/src/core/execution_variables.rs:326-1013]
+[src: file: backend/src/db/execution_variable_snapshots.rs:319-597]
+[src: file: backend/tests/api_tests.rs:10897-11107]
+[src: file: frontend/src/components/workflows/__tests__/ProvidedVariablesPreview.test.tsx:71-120]

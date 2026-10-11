@@ -6,7 +6,7 @@ in storage — not a formatting convention, a colour or an emoji. Publication
 mints a NEW message and its card row together, in one transaction; no service
 path attaches a card to a message that already exists, so a `delivery_summary`
 never becomes an important card retroactively.
-[src: file: backend/src/db/sql/172_discussion_important_messages.sql:1-53]
+[src: file: backend/src/db/sql/172_discussion_important_messages.sql:1-52]
 [src: file: backend/src/db/discussion_important.rs:263-328]
 
 ## The template

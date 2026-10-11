@@ -4,7 +4,7 @@ An audit step can run on OpenCode, Gemini CLI, GitHub Copilot CLI, Kiro — the
 native ACP agents — and on Claude Code and Codex through their adapters. All of
 them run inside Kronn's ACP host, and the audit pipelines (Full and partial)
 start them through one launcher
-[src: file: backend/src/api/audit/agent_launch.rs]. Three things went wrong there
+[src: file: backend/src/api/audit/agent_launch.rs:1-2] [src: file: backend/src/api/audit/agent_launch.rs:84-90]. Three things went wrong there
 on the first real bench (OpenCode on Ollama, `front_apollo`), and were one
 assumption each: that the process `start` returns is the agent, that a refused
 read is a failed tool, and that usage is something only Claude's stream-json
@@ -21,7 +21,7 @@ An environment file named like a template — `.env.dist`, `.env.example`,
 purpose. A real one (`.env`, `.env.local`, `.envrc`, `prod.env`) or a key file
 (`*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`, anything under `.ssh/` or `.aws/`)
 does not. The rule is one function, `is_secret_file`
-[src: file: backend/src/acp/secret_files.rs].
+[src: file: backend/src/acp/secret_files.rs:51-79].
 
 It is applied twice, because the two kinds of runtime are not alike.
 
@@ -39,12 +39,12 @@ One refused read therefore ended the whole audit step.
 The decision has to be made inside OpenCode, by pattern, before any question is
 asked. Kronn starts `opencode acp` with an inline configuration
 (`OPENCODE_CONFIG_CONTENT`, merged after the user's and the project's own files)
-[src: file: backend/src/acp.rs]:
+[src: file: backend/src/acp.rs:881-894]:
 
 - `permission.read` denies `*.env` and `*.env.*`, then allows the four template
   suffixes (`*.env.<suffix>` and `*.env.*.<suffix>`). OpenCode honours the last
   matching rule, in the order written, so the allows follow the deny — a test
-  pins that order [src: file: backend/src/acp/secret_files.rs]. A denial is not a
+  pins that order [src: file: backend/src/acp/secret_files.rs:232-266]. A denial is not a
   question put to Kronn: OpenCode hands its model an error as the tool's answer
   and the turn goes on.
 - `experimental.continue_loop_on_deny` is `true`, so a refusal the broker does
@@ -59,7 +59,7 @@ file is refused — under `full_access` too, because `full_access` widens what a
 agent may do, never what it may read of a secret. A path that resolves to a
 secret file through a link (`notes.txt` → `.env`) is refused under its innocent
 name. Writes are the `full_access` gate's business and are unchanged
-[src: file: backend/src/acp/permission_broker.rs].
+[src: file: backend/src/acp/permission_broker.rs:570-585] [src: file: backend/src/acp/permission_broker.rs:768-776].
 
 A refusal is always an answer: the broker replies with the agent's own reject
 option (`selected`, not `cancelled`), which an agent reads as the tool's result.
@@ -80,21 +80,21 @@ Now an ACP agent is stopped like an HTTP agent (KT-924), through a token:
 1. Both pipelines register a cancellation token per step **before** the agent
    starts (the handshake and a cold model's first answer can take long), and
    register a PID only for a direct CLI agent. `stops_with_token()` says which
-   [src: file: backend/src/api/audit/agent_launch.rs].
+   [src: file: backend/src/api/audit/agent_launch.rs:209-217].
 2. `cancel_audit` trips the token. The ACP session writes `session/cancel`
    (bounded to five seconds, so a wedged agent cannot hold the stop hostage),
    drops the turn, and shuts the agent's process down
-   [src: file: backend/src/agents/runner.rs].
+   [src: file: backend/src/agents/runner.rs:5624-5634] [src: file: backend/src/agents/runner.rs:5690-5697].
 3. The process is started as its own process group, and shutdown kills the
    group, so what the agent started — a shell command, an MCP server — stops
-   with it [src: file: backend/src/acp.rs].
+   with it [src: file: backend/src/acp.rs:991-995] [src: file: backend/src/acp.rs:1795-1803].
 4. The pipeline waits on the lifeline, which exits only after that shutdown, so
    the audit is finalised as `Cancelled` once the agent is really gone. This is
    also why the lifeline's PID is **not** killed: doing it ended the wait early.
 
 The partial audit now checks the stop between two steps and after each step's
 agent, finalises the run as `Cancelled` and releases the project lease, like the
-Full audit [src: file: backend/src/api/audit/drift.rs]. A partial refresh that
+Full audit [src: file: backend/src/api/audit/drift.rs:593-620] [src: file: backend/src/api/audit/drift.rs:966-993]. A partial refresh that
 was cancelled does not refresh the baseline, so its sections stay reported as
 stale.
 
@@ -113,7 +113,7 @@ Every ACP step was recorded at 0 tokens, per step and per run. Now:
   runtime puts them on the `session/prompt` response — OpenCode sends
   `inputTokens`, `outputTokens`, `cachedReadTokens`, `cachedWriteTokens`, which
   the ACP host now keeps apart instead of dropping the cache
-  [src: file: backend/src/acp.rs]. The counters are read as the stream goes and
+  [src: file: backend/src/acp.rs:1394-1417]. The counters are read as the stream goes and
   once more when it ends, because ACP reports them with the end of the turn.
 - **What is recorded.** `audit_run_steps` keeps `input_tokens`, `output_tokens`,
   `cache_read_tokens` and `cache_write_tokens` (migration 205), and
@@ -142,14 +142,17 @@ not before.
 - **Where the cost comes from.** Only what a runtime reports itself: Claude
   Code's `total_cost_usd` (its stream-json `result` line, or the adapter's
   `Cost` event) and OpenRouter's `usage.cost`, summed per response
-  [src: file: backend/src/agents/runner.rs]. Nothing is recomputed from a rate
-  table.
+  [src: file: backend/src/agents/runner.rs:13918-13926] [src: file: backend/src/agents/runner.rs:5591-5593] [src: file: backend/src/agents/runner.rs:9721-9727].
+  The recorded cost is never recomputed from a rate table; a finished step
+  whose agent reported none is priced on read by `core::pricing` for the served
+  model and shown as an estimate, never as a reported cost
+  [src: file: backend/src/db/audit_runs.rs:1245-1256].
 - **Per step.** `audit_run_steps.cost_usd_micros` (integer micro-USD) sums the
   step's attempts. It stays `NULL` when any attempt that ran reported no cost:
   a sum over a silent attempt would be a floor shown as the whole. A reported
   zero is recorded as 0. `step_done` carries the same figure as
   `cost_usd_micros` (`null` when unknown)
-  [src: file: backend/src/api/audit/agent_launch.rs].
+  [src: file: backend/src/api/audit/agent_launch.rs:492-519].
 - **The run's model.** `audit_runs.model` is the model(s) the runtime reported
   serving, from the launch's provenance capture shared by every step (`a / b`
   when several). With none observed it is the model Settings or the named
@@ -158,9 +161,10 @@ not before.
   writes to a worker dispatch row.
 - **The timeline's total.** Summed over the finished steps the timeline shows
   (the newest result of each step, carried ones included): `~x $` when every
-  one reported, `≥ x $ (n steps unknown)` when some did not, `cost ?` when none
-  did. A step still running counts for nothing yet
-  [src: file: frontend/src/lib/audit-cost.ts].
+  one has a cost, `≥ x $ (n steps unknown)` when some have none, `cost ?` when
+  none has; a step counted with its estimate marks the total estimated (`≈`). A
+  step still running counts for nothing yet
+  [src: file: frontend/src/lib/audit-cost.ts:26-49].
 
 ## Activity without text (KT-950)
 
@@ -168,14 +172,14 @@ not before.
   count on its run's usage; an ACP agent on the activity sink, which now counts
   the calls where they pass (`AgentActivity.calls`) so a reader polling it misses
   none. `AuditActivityProbe` reads either
-  [src: file: backend/src/api/audit/agent_launch.rs].
+  [src: file: backend/src/api/audit/agent_launch.rs:357-386].
 - **Ticks, not lines.** For an agent without stream-json, both pipelines look at
   the probe on every line and every `ACTIVITY_TICK` (1 s): a moved tool sends
   `tool_call` with `calls`, moved tokens send `step_progress`, and both update the
   tracker the progress poll reads. A provider that is only thinking moves
   nothing. The tick does not push back the Full audit's 60 s zombie deadline.
 - **Keep-alive.** A detached audit stream silent for 15 s sends an SSE comment
-  (`: keep-alive`) [src: file: backend/src/api/audit/mod.rs]. A comment is not an
+  (`: keep-alive`) [src: file: backend/src/api/audit/mod.rs:55-73]. A comment is not an
   event: no client handler sees it, so it holds the connection without passing
   for model activity.
 

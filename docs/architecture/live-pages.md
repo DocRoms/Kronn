@@ -340,8 +340,8 @@ tokens pass: keys `^[a-z][a-z0-9_]{0,31}$`, values `^[A-Za-z0-9_.-]{0,64}$`,
 at most 8, first occurrence wins; anything else is dropped. The embedded viewer
 and mosaic tiles have no URL of their own and send no `params` key. Parameters
 are hints for the Page's own rendering, never an authorization input.
-`[src: file: frontend/src/lib/live-page-navigation.ts]`
-`[src: file: frontend/src/lib/live-page-sandbox.ts]`
+`[src: file: frontend/src/lib/live-page-navigation.ts:43-73]`
+`[src: file: frontend/src/lib/live-page-sandbox.ts:314-325]`
 
 The embedded viewer, standalone Page and mosaic skip automatic data
 publication when the Page id, slug, title, data revision and dataset count
@@ -476,7 +476,7 @@ values it ran against, so it stays true history and becomes explicitly stale
 when the Page moves on. The API keeps speaking one `LivePageAction`: the
 declaration before a click, the declaration joined to its launch afterwards,
 with `id` naming the launch so a card follows its own run.
-`[src: file: backend/src/db/live_page_actions.rs]`
+`[src: file: backend/src/db/live_page_actions.rs:23-31]`
 
 Action launch history retains at most 1,000 terminal rows per
 `(page_id, action_ref)`, shared across bindings and revisions. The launch involved
@@ -513,7 +513,8 @@ the card also closes with its × or Escape. A row whose last launch is finished
 opens a fresh offer, which launches a new attempt of that row, with the
 previous launch one click away; a Discussion card never relaunches, since a
 fence carries one intention.
-[src: file: frontend/src/hooks/useLivePageActions.ts]
+[src: file: frontend/src/hooks/useLivePageActions.ts:174-218]
+[src: file: frontend/src/hooks/useLivePageActions.ts:276-288]
 
 A `user_input` value may also carry a `<page.…>` `source_ref`: when the card
 opens, `POST /api/live-page-actions/{id}/prefill` resolves it server-side for
@@ -524,7 +525,8 @@ overwritten. The launch runs what the reader sends. `GET /api/pages/{id}/actions
 lists only the blocks of the current revision: a block removed from the
 published HTML keeps its row for the launches that reference it, but is no
 longer offered, and its old id refuses a launch.
-[src: file: backend/src/db/live_page_actions.rs]
+[src: file: backend/src/db/live_page_actions.rs:929-972]
+[src: file: backend/src/db/live_page_actions.rs:603-617]
 
 The periodic refresh of a Page (every 30 s, in the Pages view and in its own
 tab) keeps an open card, and what was typed in it, while the Page still offers
@@ -533,7 +535,8 @@ rows, the bridge reopens the collapse under the row that now carries the same
 binding and the card follows it. A placeholder is shown as an example
 (`e.g. …`), since an empty field sends nothing, unless its author already
 phrased it as an example or an instruction.
-[src: file: frontend/src/lib/live-page-sandbox.ts]
+[src: file: frontend/src/lib/live-page-sandbox.ts:510-517]
+[src: file: frontend/src/components/DiscussionActionCard.tsx:69-83]
 
 Once launched, a card tells what the run produced, the same way on a Page and
 in a Discussion. A workflow's steps are listed (name, type, status, duration)
@@ -542,16 +545,17 @@ discussions of the run's whole tree, because a `BatchQuickPrompt` step opens
 its discussions under a child batch run. Each one carries its agent's state
 and the head of its latest answer, where agents put their verdict. A launch
 whose result is a discussion reads `GET /api/discussions/{id}/outcome`.
-`[src: file: backend/src/db/run_outcome.rs]`
-`[src: file: frontend/src/components/RunOutcomePanel.tsx]`
+`[src: file: backend/src/db/run_outcome.rs:1-7]`
+`[src: file: frontend/src/components/RunOutcomePanel.tsx:22-27]`
 
 Agents learn this contract where they write Page HTML: the MCP manuals of
 `page_create` and `page_update_html` share one text (one block per row,
 `data-kronn-action-state`, what the card shows), `page_update_html` adds that a
 block's reference must stay stable across revisions since it ties a button to
 its past launches, and the `workflow-architect` skill carries the same rules.
-`[src: file: backend/scripts/disc-introspection-mcp.py]`
-`[src: file: frontend/src/lib/live-page-sandbox.ts]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:9800-9835]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10106-10115]`
+`[src: file: backend/src/skills/workflow-architect.md:384-391]`
 Active and terminal execution rendering delegates to the common
 `RunStatusCard` contract used by Discussions. A Quick Prompt result records
 both the action's result-discussion anchor and the existing Page-to-discussion
@@ -567,13 +571,15 @@ the shared offer, and never on a later click's card if the answer arrives
 late), and (for mosaic) keeps one tile's action state fully isolated from
 its siblings — a valid or fail-closed click in one tile never affects another,
 even when two tiles share the same `action_ref` string for different Pages.
-`[src: file: frontend/src/hooks/useLivePageActions.ts]`
-`[src: file: frontend/src/components/LivePageActionOverlay.tsx]`
+`[src: file: frontend/src/hooks/useLivePageActions.ts:83-96]`
+`[src: file: frontend/src/hooks/useLivePageActions.ts:174-179]`
+`[src: file: frontend/src/hooks/useLivePageActions.ts:220-227]`
+`[src: file: frontend/src/components/LivePageActionOverlay.tsx:105-116]`
 The standalone tab and mosaic tiles have no Dashboard shell to navigate
-within, so a terminal action's "open discussion" jump seeds the same
-session-storage reload checkpoint Dashboard already reads on mount
-(`dashboard-navigation.ts`) and opens it in a fresh same-origin tab instead of
-switching in place. `[src: file: frontend/src/lib/live-page-navigation.ts]`
+within, so a terminal action's "open discussion" jump opens it in a fresh
+same-origin tab addressed by `#discussion-<id>` instead of switching in place.
+It still seeds the session-storage checkpoint Dashboard reads on mount
+(`dashboard-navigation.ts`), so a reload of the original tab keeps its place. `[src: file: frontend/src/lib/live-page-navigation.ts:144-164]`
 
 Workflow export bundle v2 includes each statically referenced Page's current
 HTML template and dataset contract, then remaps every `PublishPageData.page_id`

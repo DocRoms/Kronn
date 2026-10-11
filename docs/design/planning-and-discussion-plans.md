@@ -116,7 +116,7 @@ on in-progress rows reflects Planning status only, not a worker heartbeat; it
 stops animating when reduced motion is requested. Background plan refreshes
 update membership and indicators without resetting the selected view.
 `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:383-423]`
-`[src: file: frontend/src/lib/orch-panel-state.ts:50-70]`
+`[src: file: frontend/src/lib/orch-panel-state.ts:47-69]`
 `[src: file: frontend/src/components/DiscussionPlanPanel.css:163-182]`
 
 Agents may instead emit structured proposals that the UI renders as existing
@@ -170,7 +170,8 @@ the exact discussion id for MCP clients, so an explicit `plan_get` or
 Planning state changes, agents also receive a compact change notification and
 then pull only the required details. This prevents unrelated agents from paying
 for unused task content while ensuring “create the discussion plan” works on a
-new room. `[src: file: backend/src/api/disc_prompts.rs]`
+new room. `[src: file: backend/src/api/disc_prompts.rs:471-492]`
+`[src: file: backend/src/api/discussions/streaming.rs:3268-3298]`
 
 The intended read surface is:
 
@@ -190,18 +191,19 @@ advertises discussion-history tools. Today that layer explicitly describes
 
 Runtime parity is capability-based:
 
-- Claude Code, Codex, Gemini CLI, Kiro and Copilot CLI call the
+- Claude Code, Codex, OpenCode, Gemini CLI, Kiro and Copilot CLI call the
   `kronn-internal` MCP tools. The injected explicit discussion id remains valid
   even when the bridge reports `no disc bound` or `rejoin_required`.
-- Ollama and LiteLLM call a compact native catalogue through the same Rust
+- Ollama, LiteLLM and NVIDIA call a compact native catalogue through the same Rust
   Planning handlers. Kronn enforces the current discussion scope server-side,
   records the concrete agent and source user message, hashes retry keys into a
   bounded discussion-scoped identity, and returns compact mutation receipts.
 - Vibe runs without MCP to avoid its stdio hang. It therefore emits a durable
   `kronn-plan-action` proposal for human validation instead of pretending that
   a direct task write succeeded.
-  `[src: file: backend/src/api/agent_tools.rs]`
-  `[src: file: backend/src/agents/runner.rs]`
+  `[src: file: backend/src/api/agent_tools.rs:2041-2121]`
+  `[src: file: backend/src/api/disc_prompts.rs:431-443]`
+  `[src: file: backend/src/api/disc_prompts.rs:282-287]`
 
 The first release is local-only. Actor/audit metadata must still distinguish
 the human from an agent and record which agent changed a task. Assignment fields

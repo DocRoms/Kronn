@@ -23,8 +23,8 @@ The same word therefore names TWO different identities depending on the
 room: `@claude` is the discussion agent in a ClaudeCode-configured room
 and a punctual spawn everywhere else. This is intentional and the
 autocomplete must always show which one is being picked (KT-211).
-[src: file: frontend/src/lib/messageTargets.ts]
-[src: file: backend/scripts/disc-introspection-mcp.py]
+[src: file: frontend/src/lib/messageTargets.ts:54-68]
+[src: file: backend/scripts/disc-introspection-mcp.py:5088-5096]
 
 ## 2. Alias resolution, exactly
 
@@ -34,14 +34,14 @@ autocomplete must always show which one is being picked (KT-211).
   `-cli[-N]` ordinals. `targetsFromComposerText` matches triggers in
   prose only (fenced/inline code is documentation), keeps textual order,
   deduplicates identical targets.
-  [src: file: frontend/src/lib/messageTargets.ts]
+  [src: file: frontend/src/lib/messageTargets.ts:26-123] [src: file: frontend/src/lib/messageTargets.ts:177-208]
 - **MCP append (agent)**: `_structured_message_targets` parses the same
   grammar from prose (code stripped first). `@x-cli-N` resolves against
   the live participants list and RAISES when the ordinal does not
   identify a joined CLI — an agent cannot invent a session. A short
   alias resolves to `discussion_agent` when principal, else `agent`.
   Multiple mentions fan out once per identity, in textual order.
-  [src: file: backend/scripts/disc-introspection-mcp.py]
+  [src: file: backend/scripts/disc-introspection-mcp.py:5013-5099]
 - **No presence-based substitution.** A short alias never silently
   reroutes to a joined CLI (and never refuses to spawn) just because a
   same-provider CLI is present: the punctual agent and the CLI are
@@ -63,8 +63,8 @@ Awareness batches are bounded (20/wake), explicitly flagged
 `awareness: true`, delivered with a durable scan/offer/ack contract and
 never end a quiet wait. The bridge itself does not return merely because one
 server poll was quiet.
-[src: file: backend/src/api/disc_invite.rs]
-[src: file: docs/architecture/discussion-agent-routing.md]
+[src: file: backend/src/api/disc_invite.rs:1064-1068] [src: file: backend/src/api/disc_invite.rs:1128-1135]
+[src: file: docs/architecture/discussion-agent-routing.md:87-99]
 
 ## 3 bis — Bridge guarantee vs host capability
 
@@ -86,8 +86,8 @@ AUTHOR of the replied message: a CLI-authored message exposes
 precise CLI even among same-provider siblings; replying to a
 native-authored message keeps untargeted routing. An explicit typed
 target or fan-out always wins over the inferred author.
-[src: file: backend/src/api/disc_source.rs]
-[src: file: backend/src/api/disc_invite.rs]
+[src: file: backend/src/api/disc_source.rs:542-569]
+[src: file: backend/src/api/disc_invite.rs:1606-1614]
 
 ## 5. Reply-coherence guard (KT-211)
 
@@ -104,7 +104,7 @@ the author or alias cannot be verified, with a refusal that never
 fabricates an ordinal. A deliberate fan-out that lists the exact replied
 CLI alongside its native identity passes untouched, and outside a reply
 context the short alias stays free (both identities may be wanted).
-[src: file: backend/scripts/disc-introspection-mcp.py]
+[src: file: backend/scripts/disc-introspection-mcp.py:5189-5272]
 
 ## 6. Presence, fallback, reload
 
@@ -113,24 +113,26 @@ context the short alias stays free (both identities may be wanted).
   `next_poll_at`. Eligibility = unexpired lease or next_poll grace. A
   session identified only by its session id (provider unknown) keeps
   full presence via the agent type stored on its row.
-  [src: file: backend/src/api/disc_invite.rs]
-- **Fallback**: when no joined CLI is an eligible responder, an
-  untargeted human turn falls back to the native discussion agent so the
-  room never goes silent; the turn reaches the CLIs as awareness.
-  [src: file: backend/src/db/discussions.rs]
+  [src: file: backend/src/api/disc_invite.rs:1262-1275] [src: file: backend/src/api/disc_invite.rs:1348-1350] [src: file: backend/src/db/discussion_sessions.rs:1245-1270]
+- **Untargeted human turn**: in a room with a native agent it always
+  belongs to the configured discussion agent, whatever the CLI presence
+  (target identity, not presence, decides ownership); the turn reaches the
+  joined CLIs as awareness and is marked for their one-shot catch-up.
+  [src: file: backend/src/api/discussions/routing.rs:20-40] [src: file: backend/src/db/discussions.rs:2101-2112]
 - **Reload**: a bridge reload re-attaches the durable session through
   the 0600 resume credential (`/peer-resume`, no token). A CLI whose
   native identity rotated (fresh session id) needs one `disc_join` with
   a token, which mints its credential — one-shot, by design. Unacked
   awareness survives reloads (server cursors, migrations 105/106).
-  [src: file: backend/scripts/disc-introspection-mcp.py]
-  [src: file: backend/src/db/sql/106_awareness_offered_cursor.sql]
+  [src: file: backend/scripts/disc-introspection-mcp.py:3528-3536]
+  [src: file: backend/src/db/sql/106_awareness_offered_cursor.sql:1-11]
 
 ## 7. Autocomplete presentation (KT-211 contract)
 
 The composer menu must make the three identity kinds visually distinct
-(discussion agent / punctual agent / joined CLI), show joined CLIs first
-when present, and never present two identities under one undifferentiated
-label. The menu is a disambiguation device, not a shortcut: picking an
-entry always yields exactly the identity it names.
-[src: file: frontend/src/components/ChatInput.tsx]
+(discussion agent / punctual agent / joined CLI), list the active
+identities first (discussion agent, then joined CLIs, then punctual agents
+already in the room), and never present two identities under one
+undifferentiated label. The menu is a disambiguation device, not a shortcut:
+picking an entry always yields exactly the identity it names.
+[src: file: frontend/src/components/ChatInput.tsx:696-727] [src: file: frontend/src/lib/messageTargets.ts:102-120]
