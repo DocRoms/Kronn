@@ -180,6 +180,19 @@ mod tests {
     }
 
     #[test]
+    fn absolute_evidence_outside_the_roots_is_fabricated() {
+        let root = temp_project();
+        let inside = root.join("src/foo.rs").display().to_string();
+        let report = verify_evidence(
+            &[ev("file", &inside), ev("file", "/etc/passwd")],
+            &[root.as_path()],
+        );
+        assert_eq!(report.verified_count, 1, "{:?}", report.checks);
+        assert!(report.any_fabricated, "{:?}", report.checks);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn url_and_user_evidence_are_unchecked_not_fabricated() {
         let report = verify_evidence(
             &[ev("url", "https://x.test"), ev("user", "user:2026-05-31")],

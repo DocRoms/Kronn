@@ -439,6 +439,25 @@ mod tests {
     }
 
     #[test]
+    fn absolute_citation_outside_the_project_is_fabricated() {
+        let dir = tempdir().unwrap();
+        let verdict = lint_step_file("Secrets in [src: file: /etc/passwd:1].", &[dir.path()]);
+        assert_eq!(verdict.count(), 1);
+        assert_eq!(
+            verdict.fabricated[0].status,
+            anti_halluc::SourceStatus::OutsideProject
+        );
+    }
+
+    #[test]
+    fn quoted_grammar_example_does_not_block_the_gate() {
+        // The AGENTS.md template quotes the grammar with placeholders.
+        let dir = tempdir().unwrap();
+        let content = "Cite `[src: file: <path>:<line>]` or `[src: file: ghost.rs:1]`.";
+        assert!(lint_step_file(content, &[dir.path()]).is_clean());
+    }
+
+    #[test]
     fn decide_passes_on_clean_verdict() {
         let clean = CitationVerdict::default();
         assert_eq!(decide(&clean, 1, MAX_ATTEMPTS), GateDecision::Pass);

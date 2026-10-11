@@ -62,7 +62,7 @@ Attach a structured citation to every non-trivial assertion:
 - `[src: user: <YYYY-MM-DD>: <ref>]` — human confirmation
 - `[src: commit: <sha>]` — git commit
 
-A citation pointing to a file/line that does not exist, or escaping the project root, is **rejected as fabricated**. A code comment is NOT authoritative — treat it as a hint to verify, never as the fact itself.
+A citation to a missing file/line or outside the project root (even absolute) is **rejected as fabricated**; in backticks a failure is only unverified. A code comment is a hint to verify, never the fact itself.
 
 Full spec: [`docs/conventions/agents-md-format-v1.md`](conventions/agents-md-format-v1.md). **Honest by design**: `verified` means the citation *exists*, not that the claim is *true*.
 <!-- kronn:section:end -->

@@ -169,6 +169,19 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- Security: the citation verifier no longer marks a source outside the project
+  `verified` (KT-1077). An absolute citation such as `[src: file: /etc/passwd:1]`
+  used to pass on mere existence; it is now accepted only under a project root
+  (the discussion's worktree, the checkout, a declared linked repo) and then
+  jailed like a relative path, otherwise it is `outside_project`. Symlinks are
+  resolved one component at a time without following one out of the root, so
+  an existing and a missing file behind an escaping link get the same verdict:
+  nothing outside the root is stat'ed or opened. A `[src: …]` marker quoted in
+  inline backticks was skipped entirely; it is now verified too, green when it
+  resolves, and counted as unverified (amber, never fabricated) when it does
+  not, because docs quote the grammar itself that way (`[src: file: <path>:<line>]`).
+  `docs/AGENTS.md` and the citation spec say exactly this.
+
 - An audit error never stays on screen without a way out, and « Lancer
   l'audit » always starts from what exists (KT-1169). A launch that stops on
   an error, whether refused, cut off or offline, leaves a « Reprendre »

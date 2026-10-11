@@ -957,7 +957,14 @@ const MAX_BACKTICK_RUNS_PER_LINE: usize = 64;
 /// Runs are pre-scanned once per line and their count is capped, so a long
 /// hostile line can't turn the pairing into a CPU hotspot (Copilot review).
 pub(crate) fn strip_inline_code(text: &str) -> String {
+    partition_inline_code(text).0
+}
+
+/// [`strip_inline_code`]'s prose, plus the inner text of every dropped span,
+/// one span per line.
+fn partition_inline_code(text: &str) -> (String, String) {
     let mut out = String::with_capacity(text.len());
+    let mut spans = String::new();
     for line in text.lines() {
         // Fast path — the overwhelmingly common case.
         if !line.contains('`') {
@@ -1008,7 +1015,11 @@ pub(crate) fn strip_inline_code(text: &str) -> String {
                 // must never weld into a NEW `[src:` across the boundary
                 // (Copilot: "[s" + span + "rc: …]" would mint a citation).
                 out.push(' ');
-                i = drop_ranges[di].1;
+                let (start, end) = drop_ranges[di];
+                let inner: String = chars[start..end].iter().collect();
+                spans.push_str(inner.trim_matches('`'));
+                spans.push('\n');
+                i = end;
                 di += 1;
                 continue;
             }
@@ -1017,7 +1028,7 @@ pub(crate) fn strip_inline_code(text: &str) -> String {
         }
         out.push('\n');
     }
-    out
+    (out, spans)
 }
 
 /// Split into candidate sentences on `.`, `!`, `?` and newlines. Char-based so
@@ -1147,13 +1158,22 @@ const MAX_SOURCES_VERIFIED: usize = 50;
 /// Skip line-count verification above this file size (existence still checked).
 const LINE_COUNT_SIZE_CAP_BYTES: u64 = 2 * 1024 * 1024;
 
-/// Extract every `[src: …]` marker from the text, skipping fenced code blocks
-/// AND inline-backtick spans (example/quoted syntax shouldn't be verified),
+/// Extract every `[src: …]` marker from the prose, skipping fenced code blocks
+/// AND inline-backtick spans (those are [`extract_quoted_source_markers`]),
 /// and dropping EMPTY markers — a bare `[src:]` in prose is a mention of the
 /// grammar, not a citation. Returns the inner content (after `src:`),
 /// trimmed. Bracket-balanced so `[src: a[0]]` reads `a[0]`.
 pub fn extract_source_markers(text: &str) -> Vec<String> {
-    let prose = strip_inline_code(&strip_fenced_code(text));
+    markers_in(&strip_inline_code(&strip_fenced_code(text)))
+}
+
+/// The `[src: …]` markers quoted in inline-backtick spans. Docs quote real
+/// citations this way, but also the grammar itself as an example.
+pub fn extract_quoted_source_markers(text: &str) -> Vec<String> {
+    markers_in(&partition_inline_code(&strip_fenced_code(text)).1)
+}
+
+fn markers_in(prose: &str) -> Vec<String> {
     let chars: Vec<char> = prose.chars().collect();
     let lower: Vec<char> = prose.to_ascii_lowercase().chars().collect();
     let needle: Vec<char> = "[src:".chars().collect();
@@ -1686,16 +1706,127 @@ fn resolve_unique_path_suffix(needle: &str, roots: &[&Path]) -> BasenameResoluti
     BasenameResolution::NotFound
 }
 
+/// Outcome of resolving a relative path inside one root.
+enum Jailed {
+    /// The real, symlink-free path of an existing entry inside the root.
+    Inside(PathBuf),
+    Missing,
+    /// A `..` or a symlink leads out of the root.
+    Escapes,
+}
+
+/// Cap on symlinks followed while resolving one citation (loops included).
+const MAX_SYMLINK_HOPS: usize = 40;
+
+/// Resolve `rel` under `root` one component at a time with lstat/readlink
+/// only, so an escaping symlink is refused before its target is ever stat'ed:
+/// the verdict reveals nothing about files outside the root.
+fn resolve_in_root(root: &Path, rel: &Path) -> Jailed {
+    use std::collections::VecDeque;
+    use std::ffi::OsString;
+    use std::path::Component;
+    /// Queue `path`'s components in front of `queue`; `false` on a rooted one.
+    fn push_front(queue: &mut VecDeque<OsString>, path: &Path) -> bool {
+        for comp in path.components().rev() {
+            match comp {
+                Component::CurDir => {}
+                Component::Prefix(_) | Component::RootDir => return false,
+                c => queue.push_front(c.as_os_str().to_os_string()),
+            }
+        }
+        true
+    }
+    let Ok(canon_root) = root.canonicalize() else {
+        return Jailed::Missing;
+    };
+    let bases = [canon_root.clone(), normalize_lexical(root)];
+    let mut queue = VecDeque::new();
+    if !push_front(&mut queue, rel) {
+        return Jailed::Escapes;
+    }
+    let mut current = canon_root.clone();
+    let mut hops = 0usize;
+    while let Some(comp) = queue.pop_front() {
+        if comp == ".." {
+            if current == canon_root {
+                return Jailed::Escapes;
+            }
+            current.pop();
+            continue;
+        }
+        let next = current.join(&comp);
+        let Ok(meta) = std::fs::symlink_metadata(&next) else {
+            return Jailed::Missing;
+        };
+        if !meta.file_type().is_symlink() {
+            current = next;
+            continue;
+        }
+        hops += 1;
+        if hops > MAX_SYMLINK_HOPS {
+            return Jailed::Missing;
+        }
+        let Ok(target) = std::fs::read_link(&next) else {
+            return Jailed::Missing;
+        };
+        let relative = if target.has_root() {
+            // `..` stays in the remainder: the walk resolves it physically.
+            let Some(inside) = bases.iter().find_map(|b| target.strip_prefix(b).ok()) else {
+                return Jailed::Escapes;
+            };
+            current = canon_root.clone();
+            inside.to_path_buf()
+        } else {
+            target
+        };
+        if !push_front(&mut queue, &relative) {
+            return Jailed::Escapes;
+        }
+    }
+    Jailed::Inside(current)
+}
+
+/// Lexical forms of an absolute citation: as written, and mapped onto the
+/// Docker host-home mount. Never touches the filesystem.
+fn absolute_forms(path_str: &str) -> Vec<PathBuf> {
+    let mut forms = vec![normalize_lexical(Path::new(path_str))];
+    for alias in crate::core::scanner::host_home_aliases() {
+        if let Some(rest) = path_str.strip_prefix(alias.as_str()) {
+            if rest.is_empty() || rest.starts_with('/') {
+                forms.push(normalize_lexical(Path::new(&format!("/host-home{rest}"))));
+            }
+        }
+    }
+    forms
+}
+
+/// The root holding an absolute citation, and the path relative to it.
+fn absolute_under_root<'a>(path_str: &str, roots: &[&'a Path]) -> Option<(&'a Path, PathBuf)> {
+    let forms = absolute_forms(path_str);
+    roots.iter().find_map(|root| {
+        let mut bases = vec![normalize_lexical(root)];
+        if let Ok(canon) = root.canonicalize() {
+            bases.push(canon);
+        }
+        forms.iter().find_map(|form| {
+            bases
+                .iter()
+                .find_map(|base| form.strip_prefix(base).ok())
+                .map(|rest| (*root, rest.to_path_buf()))
+        })
+    })
+}
+
 /// Verify a file reference against one or more candidate roots. The FIRST root
 /// where the (jailed) relative path exists wins — this is how an Isolated
 /// discussion's git worktree is tried before the main checkout, fixing the
 /// false-NotFound on files the agent saw/created in the worktree.
 ///
-/// - Absolute path → existence-only (2026-05-28 decision: no jail, no symlink
-///   check; the agent emits a fully-qualified path and it either exists or not).
-/// - Relative path → lexical jail + symlink-escape re-check under EACH root.
+/// - Absolute path → accepted only when it lies under a root (lexical match),
+///   then jailed like a relative path; anywhere else → OutsideProject.
+/// - Relative path → lexical jail + symlink-aware walk under EACH root.
 ///   `../` escape in every root → OutsideProject; jailed-but-absent everywhere
-///   → NotFound. The SSRF/jail guarantee is unchanged (applied per-root).
+///   → NotFound. Nothing outside a root is stat'ed (no existence oracle).
 /// - Bare basename (no separator) unresolved at root level → unique-match walk
 ///   (`resolve_unique_basename`) before NotFound.
 fn verify_file_ref(reference: &str, roots: &[&Path]) -> (SourceStatus, String) {
@@ -1748,19 +1879,29 @@ fn verify_file_ref_as_written(
     }
     let path = Path::new(path_str);
 
-    // Absolute → existence-only, host-path-translated for Docker. No jail.
-    if path.is_absolute() {
-        let candidate = crate::core::scanner::resolve_host_path(path_str);
-        if !candidate.exists() {
+    // Absolute → accepted only under a root, then jailed like a relative path.
+    // Matched lexically: nothing outside the roots is ever stat'ed.
+    if path.has_root() || path.is_absolute() {
+        let Some((root, rel)) = absolute_under_root(path_str, roots) else {
             return (
+                SourceStatus::OutsideProject,
+                "absolute path outside the project root".into(),
+            );
+        };
+        return match resolve_in_root(root, &rel) {
+            Jailed::Inside(found) => line_bounds_status(&found, line_spec),
+            Jailed::Missing => (
                 SourceStatus::NotFound,
                 format!("file not found: {}", path_str),
-            );
-        }
-        return line_bounds_status(&candidate, line_spec);
+            ),
+            Jailed::Escapes => (
+                SourceStatus::OutsideProject,
+                "resolves (via symlink) outside the project root".into(),
+            ),
+        };
     }
 
-    // Relative → try each root. Lexical jail + symlink re-check per root.
+    // Relative → try each root. Lexical jail, then a symlink-aware walk.
     let mut all_escaped = true;
     for root in roots {
         let joined = root.join(path);
@@ -1771,20 +1912,16 @@ fn verify_file_ref_as_written(
             continue;
         }
         all_escaped = false;
-        if !joined.exists() {
-            continue;
-        }
-        // Symlink escape guard: a `subdir/` symlink to `/etc/` passes the
-        // lexical jail but canonicalises outside — re-check on disk.
-        if let (Ok(canon), Ok(canon_root)) = (joined.canonicalize(), root.canonicalize()) {
-            if !canon.starts_with(&canon_root) {
+        match resolve_in_root(root, path) {
+            Jailed::Inside(found) => return line_bounds_status(&found, line_spec),
+            Jailed::Missing => continue,
+            Jailed::Escapes => {
                 return (
                     SourceStatus::OutsideProject,
                     "resolves (via symlink) outside the project root".into(),
-                );
+                )
             }
         }
-        return line_bounds_status(&joined, line_spec);
     }
 
     if all_escaped {
@@ -1968,9 +2105,10 @@ fn explicit_lane_ref<'a>(cleaned: &str, lanes: &'a [LaneRoot]) -> Option<(&'a La
     if !Path::new(path_part).is_absolute() {
         return None;
     }
-    let absolute = normalize_lexical(&crate::core::scanner::resolve_host_path(path_part));
+    let forms = absolute_forms(path_part);
     lanes.iter().find_map(|lane| {
-        let rest = absolute.strip_prefix(normalize_lexical(&lane.path)).ok()?;
+        let base = normalize_lexical(&lane.path);
+        let rest = forms.iter().find_map(|f| f.strip_prefix(&base).ok())?;
         let rest = rest.to_str().filter(|r| !r.is_empty())?;
         let lines = match line_spec {
             Some((start, end)) if start == end => format!(":{start}"),
@@ -1989,14 +2127,14 @@ fn foreign_worktree_path(cleaned: &str, roots: &[&Path]) -> Option<String> {
     if !Path::new(path_part).is_absolute() {
         return None;
     }
-    let absolute = normalize_lexical(&crate::core::scanner::resolve_host_path(path_part));
-    let names: Vec<&std::ffi::OsStr> = absolute.iter().collect();
-    let in_worktrees = names
-        .windows(2)
-        .any(|pair| pair[0] == ".kronn" && pair[1] == "worktrees");
-    let under_root = roots
-        .iter()
-        .any(|root| absolute.starts_with(normalize_lexical(root)));
+    let forms = absolute_forms(path_part);
+    let in_worktrees = forms.iter().any(|form| {
+        let names: Vec<&std::ffi::OsStr> = form.iter().collect();
+        names
+            .windows(2)
+            .any(|pair| pair[0] == ".kronn" && pair[1] == "worktrees")
+    });
+    let under_root = absolute_under_root(path_part, roots).is_some();
     (in_worktrees && !under_root)
         .then(|| format!("{path_part} is in a worktree of another project — refused"))
 }
@@ -2149,6 +2287,28 @@ pub fn analyze_roots_lanes(text: &str, roots: &[&Path], lanes: &[LaneRoot]) -> L
         // green chip / inflate the telemetry.
         if matches!(check.kind, SourceKind::File | SourceKind::CodeComment) {
             seen.insert(file_path_key(&raw));
+        }
+        sources.push(check);
+    }
+    // Quoted markers are verified like the others, but a failure counts as
+    // unverified, not fabricated: backticks also quote the grammar as an example.
+    for raw in extract_quoted_source_markers(text)
+        .into_iter()
+        .take(MAX_SOURCES_VERIFIED)
+    {
+        let is_file = matches!(
+            classify_source(&raw).0,
+            SourceKind::File | SourceKind::CodeComment
+        );
+        if is_file && !seen.insert(file_path_key(&raw)) {
+            continue;
+        }
+        let mut check = verify_source_marker_lanes(&raw, roots, lanes);
+        if check.status.is_fabricated() {
+            unverified += 1;
+            check.status = SourceStatus::Unchecked;
+            check.detail = format!("quoted in backticks (couldn't verify): {}", check.detail);
+            check.origin = None;
         }
         sources.push(check);
     }
@@ -3013,6 +3173,57 @@ mod tests {
         assert_eq!(extract_source_markers(&txt), vec!["real.rs:3"]);
     }
 
+    #[test]
+    fn extract_quoted_returns_only_the_markers_in_inline_code() {
+        let txt = "prose [src: a.rs:1], quoted `[src: file: b.rs:2]` and ``[src: c.rs]``.\n\
+                   ```\n[src: fenced.rs:1]\n```\n";
+        assert_eq!(
+            extract_quoted_source_markers(txt),
+            vec!["file: b.rs:2", "c.rs"]
+        );
+        assert_eq!(extract_source_markers(txt), vec!["a.rs:1"]);
+    }
+
+    #[test]
+    fn quoted_marker_that_resolves_is_verified_like_the_others() {
+        let root = temp_project();
+        let r = analyze("Defined in `[src: file: src/foo.rs:3]`.", Some(&root));
+        assert_eq!(r.verified_count(), 1, "{r:?}");
+        assert_eq!((r.fabricated_count, r.unverified_count), (0, 0));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn quoted_marker_that_fails_counts_as_unverified_never_green() {
+        let root = temp_project();
+        let text = "Bad `[src: file: src/ghost.rs:1]`, escape `[src: file: /etc/passwd:1]`, \
+                    grammar `[src: file: <path>:<line>]`, refused `[src: training-data]`.";
+        let r = analyze(text, Some(&root));
+        assert_eq!(r.verified_count(), 0, "{r:?}");
+        assert_eq!(
+            r.fabricated_count, 0,
+            "an example must not read as fabricated"
+        );
+        assert_eq!(r.unverified_count, 4, "{r:?}");
+        assert!(r
+            .sources
+            .iter()
+            .all(|s| s.status == SourceStatus::Unchecked
+                && s.detail.starts_with("quoted in backticks")));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn quoted_marker_is_deduped_against_the_same_file_in_prose() {
+        let root = temp_project();
+        let r = analyze(
+            "See [src: file: src/foo.rs:2] and `[src: file: src/foo.rs:4]`.",
+            Some(&root),
+        );
+        assert_eq!(r.sources.len(), 1, "{r:?}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     // ── Niveau 1 — line-spec parsing ──────────────────────────────────
 
     #[test]
@@ -3295,67 +3506,137 @@ mod tests {
     }
 
     #[test]
-    fn verify_absolute_path_is_existence_only_no_jail() {
-        // 0.8.7 policy (decided 2026-05-28) : an absolute citation is
-        // checked for existence on the host filesystem, period. No
-        // project-root jail. This is what unblocks the linked_repos /
-        // monorepo / sister-site references the agent legitimately
-        // emits (e.g. a `front_africanews` file cited from a
-        // `front_euronews` discussion). `/etc/passwd` exists on every
-        // Linux, so it must verify under the new rule — this codifies
-        // the policy change explicitly.
+    fn verify_absolute_path_outside_root_is_rejected() {
+        // `/etc/passwd` exists on every Unix host: it must still be refused.
         let root = temp_project();
-        let c = verify_source_marker("/etc/passwd", Some(&root));
-        assert_eq!(c.status, SourceStatus::Verified, "{:?}", c);
+        let c = verify_source_marker("file: /etc/passwd:1", Some(&root));
+        assert_eq!(c.status, SourceStatus::OutsideProject, "{c:?}");
+        assert!(c.status.is_fabricated());
         std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
-    fn verify_absolute_path_to_sibling_dir_is_verified() {
-        // The actual bug-fix case : project root in /tmp/foo, citation
-        // points at /tmp/foo-sibling/file — outside `root` lexically,
-        // but exists on disk. Pre-fix this returned NotFound /
-        // OutsideProject (false positive) ; under the new rule it
-        // verifies.
+    fn verify_absolute_outside_root_gives_no_existence_oracle() {
+        // An existing and a missing file outside the root read the same.
         let root = temp_project();
-        let sibling = std::env::temp_dir().join(format!(
-            "kronn-lint-test-sibling-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let sibling =
+            std::env::temp_dir().join(format!("kronn_lint_sibling_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(sibling.join("src")).unwrap();
         std::fs::write(sibling.join("src/data.yml"), "hello: world\n").unwrap();
-        let abs_ref = format!("{}", sibling.join("src/data.yml").display());
-
-        let c = verify_source_marker(&abs_ref, Some(&root));
-        assert_eq!(c.status, SourceStatus::Verified, "{:?}", c);
-
+        let present = verify_source_marker(
+            &sibling.join("src/data.yml").display().to_string(),
+            Some(&root),
+        );
+        let absent = verify_source_marker(
+            &sibling.join("src/nope.yml").display().to_string(),
+            Some(&root),
+        );
+        let ghost = verify_source_marker(
+            "/this/path/should/not/exist/anywhere-7a3f.txt:1",
+            Some(&root),
+        );
+        for c in [&present, &absent, &ghost] {
+            assert_eq!(c.status, SourceStatus::OutsideProject, "{c:?}");
+        }
+        assert_eq!(present.detail, absent.detail);
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&sibling).ok();
     }
 
     #[test]
-    fn verify_absolute_path_that_does_not_exist_is_not_found() {
-        // The honest failure mode under the new rule : an absolute path
-        // that doesn't exist anywhere on the host returns NotFound (not
-        // OutsideProject), and the detail surfaces the path as-emitted.
+    fn verify_absolute_path_under_root_is_jailed_like_a_relative_one() {
         let root = temp_project();
-        let missing = "/this/path/should/not/exist/anywhere-7a3f.txt:1";
-        let c = verify_source_marker(missing, Some(&root));
-        assert_eq!(c.status, SourceStatus::NotFound, "{:?}", c);
+        let inside = format!("{}:3", root.join("src/foo.rs").display());
+        assert_eq!(
+            verify_source_marker(&inside, Some(&root)).status,
+            SourceStatus::Verified
+        );
+        let missing = root.join("src/ghost.rs").display().to_string();
+        assert_eq!(
+            verify_source_marker(&missing, Some(&root)).status,
+            SourceStatus::NotFound
+        );
+        // A `..` that climbs out of the root is outside, even if written under it.
+        let climb = format!("{}/src/../../etc/passwd", root.display());
+        assert_eq!(
+            verify_source_marker(&climb, Some(&root)).status,
+            SourceStatus::OutsideProject
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn verify_absolute_path_without_root_is_unchecked() {
+        let c = verify_source_marker("/etc/passwd", None);
+        assert_eq!(c.status, SourceStatus::Unchecked, "{c:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_symlink_escape_gives_no_existence_oracle() {
+        // Both targets lie behind the same escaping link: an existing and a
+        // missing file outside must get the same verdict, through a relative
+        // or an absolute citation.
+        use std::os::unix::fs::symlink;
+        let root = temp_project();
+        let outside =
+            std::env::temp_dir().join(format!("kronn_antihalluc_out_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "leaked\n").unwrap();
+        symlink(&outside, root.join("link")).unwrap();
+        let abs = |name: &str| root.join("link").join(name).display().to_string();
+        for raw in [
+            "link/secret.txt".to_string(),
+            "link/missing.txt".to_string(),
+            abs("secret.txt"),
+            abs("missing.txt"),
+        ] {
+            let c = verify_source_marker(&raw, Some(&root));
+            assert_eq!(c.status, SourceStatus::OutsideProject, "{raw}: {c:?}");
+        }
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&outside).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_symlink_with_dotdot_target_escaping_is_outside() {
+        // A relative link target that climbs out (`../..`) is refused.
+        use std::os::unix::fs::symlink;
+        let root = temp_project();
+        symlink("../../../../../../../../etc", root.join("src/etc")).unwrap();
+        let c = verify_source_marker("src/etc/passwd", Some(&root));
+        assert_eq!(c.status, SourceStatus::OutsideProject, "{c:?}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_symlink_with_absolute_target_inside_root_is_verified() {
+        use std::os::unix::fs::symlink;
+        let root = temp_project();
+        symlink(root.join("src"), root.join("alias")).unwrap();
+        let c = verify_source_marker("alias/foo.rs:5", Some(&root));
+        assert_eq!(c.status, SourceStatus::Verified, "{c:?}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_symlink_loop_terminates_as_not_found() {
+        use std::os::unix::fs::symlink;
+        let root = temp_project();
+        symlink("b", root.join("a")).unwrap();
+        symlink("a", root.join("b")).unwrap();
+        let c = verify_source_marker("a/x.rs", Some(&root));
+        assert_eq!(c.status, SourceStatus::NotFound, "{c:?}");
         std::fs::remove_dir_all(&root).ok();
     }
 
     // P0-5 of the QA roadmap — symlink escape via a RELATIVE path. The
     // lexical jail catches `../` traversal in `verify_relative_path_…`
     // above ; it does NOT catch a symlink whose components look innocent
-    // but whose canonical resolution points outside the project. After
-    // the 2026-05-28 absolute-path-existence-only policy was applied,
-    // the canonicalize re-check was preserved only for the relative
-    // branch (absolute citations are trusted by design). This test pins
-    // that the relative-symlink-escape attack stays blocked.
+    // but whose canonical resolution points outside the project.
     #[cfg(unix)]
     #[test]
     fn verify_relative_symlink_escape_is_outside_project() {
@@ -3376,7 +3657,7 @@ mod tests {
         assert_eq!(
             c.status,
             SourceStatus::OutsideProject,
-            "symlink escape must be caught by the canonicalize re-check; got {c:?}"
+            "symlink escape must be caught by the jailed walk; got {c:?}"
         );
         assert!(
             c.detail.to_lowercase().contains("symlink"),
@@ -4376,9 +4657,8 @@ mod tests {
         }
 
         #[test]
-        fn absolute_path_existence_only_no_jail() {
+        fn absolute_path_under_root_is_verified() {
             let root = temp_project();
-            // Absolute path is checked for existence only — no project jail.
             // foo.rs lives under root; cite it by absolute path.
             let abs = root.join("src/foo.rs");
             let c = verify_source_marker(&format!("{}", abs.display()), Some(&root));

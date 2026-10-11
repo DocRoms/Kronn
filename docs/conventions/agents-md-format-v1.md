@@ -118,9 +118,14 @@ names, versions, behaviour). The grammar:
 - Percent-encoded paths (`My%20File.docx`) are decoded before resolving.
 
 Mechanical verification is **path-jailed to the project root**: a citation that escapes the
-root (`../../etc/passwd`) is rejected as `outside_project` without ever touching the
-filesystem. This is the ungameable core — an agent cannot fabricate a file or line that
-actually exists.
+root (`../../etc/passwd`, an absolute path such as `/etc/passwd`, or a symlink leading out) is
+rejected as `outside_project` without ever touching a file outside the root. An absolute path
+under the root is verified like a relative one. This is the ungameable core — an agent cannot
+fabricate a file or line that actually exists.
+
+A marker quoted in inline backticks is verified too: it is `verified` when it resolves, but a
+failure there counts as *unverified*, not fabricated, because backticks also quote the grammar
+as an example. Markers inside fenced code blocks are not read.
 
 > **What verification proves — and what it does not.** A `verified` status means the cited
 > source *exists and is in bounds*. It does **not** prove the source *supports the claim*.
