@@ -550,6 +550,19 @@ fn line_range(text: &str, line: usize) -> Option<std::ops::Range<usize>> {
     None
 }
 
+/// Byte offset in `line` of the first `[src: …]` marker whose whole inner
+/// text is `citation`: plain text or a longer marker holding it never matches.
+/// Identical markers fail identically, so the first one left is the right one.
+fn marker_inner_at(line: &str, citation: &str) -> Option<usize> {
+    markers_at(line).into_iter().find_map(|(chars, inner)| {
+        if inner != citation {
+            return None;
+        }
+        let open = line.char_indices().nth(chars)?.0 + "[src:".len();
+        Some(open + line[open..].find(citation)?)
+    })
+}
+
 /// `text` with every moved anchor whose symbol occurs once re-pointed at it.
 fn reanchor_doc(doc: &Path, text: &str, root: &Path, outcome: &mut ReanchorOutcome) -> String {
     let mut out = text.to_string();
@@ -571,7 +584,7 @@ fn reanchor_doc(doc: &Path, text: &str, root: &Path, outcome: &mut ReanchorOutco
             .and_then(|span| respan(&failure.citation, span))
             .and_then(|new| {
                 let range = line_range(&out, failure.line)?;
-                let at = out[range.clone()].find(&failure.citation)? + range.start;
+                let at = marker_inner_at(&out[range.clone()], &failure.citation)? + range.start;
                 out.replace_range(at..at + failure.citation.len(), &new);
                 Some(new)
             });
@@ -902,6 +915,10 @@ mod tests {
                 .collect()
             )
         );
+        assert_eq!(
+            Scope::for_changes("docs/été.md\n"),
+            Scope::Files([PathBuf::from("docs/été.md")].into_iter().collect())
+        );
         // A release bumps VERSION: every doc is checked.
         assert_eq!(Scope::for_changes("VERSION\ndocs/a.md\n"), Scope::Strict);
         assert!(!is_checked_doc("backend/docsx/a.md"));
@@ -1053,6 +1070,21 @@ mod tests {
         // Clamped to the last line; spacing around the spec is kept.
         let (new, _) = reanchor(root, "docs/b.md", "[src: file: src/m.rs: 1-5 #once]\n");
         assert_eq!(new, "[src: file: src/m.rs: 6-9 #once]\n");
+    }
+
+    #[test]
+    fn reanchoring_edits_the_failing_marker_not_an_earlier_copy_of_its_text() {
+        let tmp = moved_repo();
+        let root = tmp.path();
+        let text = "é `file: src/m.rs:1#once` [src: file: src/m.rs:1#onceX] [src: file: src/m.rs:1#once]\n";
+        let (new, outcome) = reanchor(root, "docs/a.md", text);
+        assert_eq!(
+            new,
+            "é `file: src/m.rs:1#once` [src: file: src/m.rs:1#onceX] [src: file: src/m.rs:6#once]\n"
+        );
+        assert_eq!(outcome.rewritten.len(), 1);
+        assert_eq!(marker_inner_at("[SRC: a] [src:  a ]", "a"), Some(6));
+        assert_eq!(marker_inner_at("a [src: ab]", "a"), None);
     }
 
     #[test]

@@ -107,6 +107,24 @@ class ChangedPathsScript(unittest.TestCase):
         self.assertEqual(sorted(out.read_text().split()), ["backend/docs/b.md", "docs/a.md"])
         self.assertIn("2 changed path(s), 2 under docs/", result.stdout)
 
+    def test_a_non_ascii_doc_name_is_listed_unquoted(self):
+        # Quoted ("docs/\303\251t\303\251.md") it would not read as a doc.
+        self.merge_pull_request({"docs/été.md": "new\n"})
+        result, out, _ = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(out.read_text(encoding="utf-8"), "docs/été.md\n")
+
+    def test_a_deleted_doc_is_not_listed(self):
+        self.git("checkout", "-q", "-b", "pr")
+        self.git("rm", "-q", "docs/a.md")
+        self.commit("pr")
+        self.git("checkout", "-q", "base")
+        self.git("merge", "-q", "--no-ff", "-m", "merge", "pr")
+        result, out, _ = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(out.read_text(), "")
+        self.assertIn("0 changed path(s), 0 under docs/", result.stdout)
+
     def test_a_commit_that_is_not_a_merge_fails_and_exports_nothing(self):
         self.write("docs/a.md", "edited\n")
         self.commit("plain")

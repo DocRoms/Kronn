@@ -16,7 +16,9 @@ if ! git rev-parse --verify --quiet 'HEAD^2' >/dev/null; then
   echo "::error::HEAD is not a pull request merge commit with both parents fetched (checkout fetch-depth: 2)."
   exit 1
 fi
-git diff --name-only 'HEAD^1' HEAD > "$out"
+# Unquoted non-ASCII names, which the gate compares as paths; a deleted doc
+# has nothing left to check.
+git -c core.quotePath=false diff --name-only --diff-filter=d 'HEAD^1' HEAD > "$out"
 echo "KRONN_DOCS_CITATIONS_CHANGED=$out" >> "$GITHUB_ENV"
 docs=$(grep -cE '^(backend/)?docs/' "$out" || true)
 echo "$(wc -l < "$out" | tr -d ' ') changed path(s), ${docs} under docs/ or backend/docs/."
