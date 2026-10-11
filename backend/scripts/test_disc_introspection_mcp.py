@@ -4968,6 +4968,45 @@ class DiscWaitForPeerTests(unittest.TestCase):
         self.assertIn("exact Codex CLI session", result["routing_hint"])
         self.assertIn("answer this turn once", result["routing_hint"])
 
+    def _untargeted_native_reply(self, addressed):
+        """KT-1201 — the native agent answers a CLI turn without naming anyone;
+        the server decides `addressed_to_caller` from the replied author."""
+        return {
+            "success": True,
+            "data": {
+                "timed_out": False,
+                "messages": [{
+                    "message_id": "m-litellm-verdict",
+                    "sort_order": 12,
+                    "role": "Agent",
+                    "agent_type": "LiteLlm",
+                    "content": "Verdict : approuvé avec deux réserves.",
+                    "timestamp": "2026-10-11T10:00:00Z",
+                    "targets": [],
+                    "target_agents": [],
+                    "addressed_to_caller": addressed,
+                }],
+                "latest_sort_order": 12,
+            },
+        }
+
+    def test_untargeted_reply_to_my_own_turn_is_addressed_to_me(self):
+        with mock.patch.object(self.mod, "_http") as mock_http:
+            mock_http.return_value = self._untargeted_native_reply(True)
+            result = self.mod.call_disc_wait_for_peer({"since_sort_order": 11})
+
+        self.assertEqual(len(result["messages"]), 1)
+        self.assertNotIn("withheld_by_routing", result)
+        self.assertIn("answer this turn once", result["routing_hint"])
+        self.assertNotIn("do NOT answer", result["routing_hint"])
+
+    def test_untargeted_reply_to_someone_else_is_not_addressed_to_me(self):
+        with mock.patch.object(self.mod, "_http") as mock_http:
+            mock_http.return_value = self._untargeted_native_reply(False)
+            result = self.mod.call_disc_wait_for_peer({"since_sort_order": 11})
+
+        self.assertNotIn("answer this turn once", result.get("routing_hint", ""))
+
     def test_unbound_disc_raises_before_http(self):
         with mock.patch.dict(os.environ, {
             k: v for k, v in os.environ.items() if k != "KRONN_DISCUSSION_ID"

@@ -334,6 +334,26 @@ fn isolated_worktree_notice(disc: &Discussion) -> String {
     }
 }
 
+/// Speaker label of an agent turn. A joined CLI session is named by its room
+/// alias so a native agent of the same provider never reads that session's
+/// turns as its own (KT-1201).
+fn transcript_agent_label(message: &DiscussionMessage) -> String {
+    let Some(agent) = message.agent_type.as_ref() else {
+        return "Agent".into();
+    };
+    let name = agent_display_name(agent);
+    match message.author_cli_ordinal {
+        Some(ordinal) => match crate::db::discussion_sessions::cli_session_alias(
+            &format!("{agent:?}"),
+            Some(ordinal),
+        ) {
+            Some(alias) => format!("{name} (joined CLI session {alias})"),
+            None => format!("{name} (joined CLI session)"),
+        },
+        None => name,
+    }
+}
+
 fn reply_context(message: &DiscussionMessage, messages: &[DiscussionMessage]) -> String {
     let Some(reply_id) = message.reply_to_message_id.as_deref() else {
         return String::new();
@@ -345,7 +365,7 @@ fn reply_context(message: &DiscussionMessage, messages: &[DiscussionMessage]) ->
     let author = target
         .agent_type
         .as_ref()
-        .map(agent_display_name)
+        .map(|_| transcript_agent_label(target))
         .or_else(|| target.author_pseudo.clone())
         .unwrap_or_else(|| match target.role {
             MessageRole::User => "User".into(),
@@ -784,11 +804,7 @@ fn build_agent_prompt_inner(
                 msg.content
             ),
             MessageRole::Agent => {
-                let agent_label = msg
-                    .agent_type
-                    .as_ref()
-                    .map(agent_display_name)
-                    .unwrap_or_else(|| "Agent".into());
+                let agent_label = transcript_agent_label(msg);
                 format!(
                     "{}: {}{}\n\n",
                     agent_label,
@@ -983,6 +999,28 @@ mod tests {
             target_agent: None,
             reply_to_message_id: None,
         }
+    }
+
+    #[test]
+    fn a_joined_cli_turn_is_labelled_with_its_alias_not_as_the_native_agent() {
+        // KT-1201 — a punctual Claude read @claude-cli-2's turns, labelled
+        // "Claude Code", as its own and spoke as the lane lead.
+        let mut cli_turn = agent_msg("Je pilote le lot 2.", AgentType::ClaudeCode);
+        cli_turn.author_cli_ordinal = Some(2);
+        let mut reply = agent_msg("Relu.", AgentType::LiteLlm);
+        reply.reply_to_message_id = Some(cli_turn.id.clone());
+        let native = agent_msg("Réponse native.", AgentType::ClaudeCode);
+        let disc = disc_with_messages(
+            vec![user_msg("Go"), cli_turn, reply, native, user_msg("Suite")],
+            "fr",
+        );
+        let prompt = build_agent_prompt(&disc, &AgentType::ClaudeCode, 0);
+        assert!(
+            prompt.contains("Claude Code (joined CLI session @claude-cli-2): Je pilote le lot 2."),
+            "{prompt}"
+        );
+        assert!(prompt.contains("by Claude Code (joined CLI session @claude-cli-2):"));
+        assert!(prompt.contains("Claude Code: Réponse native."));
     }
 
     #[test]

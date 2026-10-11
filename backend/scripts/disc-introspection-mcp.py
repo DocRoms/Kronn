@@ -7074,6 +7074,11 @@ def _wait_once(args):
                     if not (message_addressed_here and kind == "cli"):
                         other_targets.add(label)
                 continue
+            # KT-1201 — an untargeted reply to this session's own message is
+            # addressed here by the server; never fold it into room context.
+            if message.get("addressed_to_caller"):
+                addressed_here = True
+                continue
             targets = message.get("target_agents") or []
             if not targets and message.get("target_agent"):
                 targets = [message["target_agent"]]

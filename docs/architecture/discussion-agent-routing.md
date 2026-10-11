@@ -114,7 +114,7 @@ New and migrated sessions start both cursors at the room's current tip.
 [src: file: frontend/src/hooks/useMessageQueue.ts:260-280#enqueue]
 [src: file: backend/src/db/discussions.rs:1290-1310#insert_user_message_with_dispatches]
 [src: file: backend/src/db/agent_dispatch.rs:677-770#recover_after_restart]
-[src: file: backend/src/db/discussions.rs:3264-3270#DispatchInProgress]
+[src: file: backend/src/db/discussions.rs:3320-3326#DispatchInProgress]
 [src: file: backend/src/api/federation.rs:26-70#federate_message]
 
 New-discussion aliases follow the same independent fan-out contract. Creation
@@ -134,7 +134,10 @@ told not to wait for or relaunch it, and the persistence boundary rejects any
 redundant handoff. Natural `@alias` references in generated prose are inert. A
 new native dispatch requires the explicit hidden
 `<!-- kronn:handoff @alias -->` marker described in the collaboration prompt;
-Kronn removes that marker before persistence. An agent not scheduled yet can
+Kronn removes that marker before persistence. When a joined CLI of that
+provider wrote the answered turn, or is the only one joined and the provider is
+not the room's agent, the alias (marker or prose) wakes that CLI instead and
+spawns nothing (KT-1201, `agent-identities.md` §2). An agent not scheduled yet can
 still be delegated a concrete follow-up under the normal collaboration limits.
 
 The UI makes this contract visible (KT-1109). A turn naming several agents is
@@ -150,8 +153,8 @@ on the root turn, or no marker), computed from `message_targets`.
 [src: file: backend/src/api/discussions/crud.rs:531-541#initial_participants]
 [src: file: backend/src/api/discussions/messaging.rs:115-158#enqueue_dispatches_for_trigger]
 [src: file: backend/src/api/discussions/crud.rs:883-887#attach_discussion_participants]
-[src: file: backend/src/api/discussions/streaming.rs:1915-1925#independent_sibling_notice]
-[src: file: backend/src/db/discussions.rs:1926-1940#already_scheduled]
+[src: file: backend/src/api/discussions/streaming.rs:1930-1940#independent_sibling_notice]
+[src: file: backend/src/db/discussions.rs:1972-1986#already_scheduled]
 
 ## Joined agent turn (MCP)
 
@@ -170,14 +173,16 @@ receives the Agent turn through its next poll, while every unrelated CLI skips
 it and advances its cursor. Bulk imports, historical appends, duplicates and
 appends without a live JOIN session never start a runner.
 [src: file: backend/src/db/discussions.rs:1529-1547#insert_message_with_targets_and_dispatches]
-[src: file: backend/src/api/disc_invite.rs:1674-1693#addressed_to_caller]
+[src: file: backend/src/api/disc_invite.rs:1691-1710#addressed_to_caller]
 
 Every verified live MCP append also records its exact author session in
 `message_cli_authors`. This is local routing provenance, not portable transcript
 data: imports and federated messages never acquire a local CLI identity. When a
 later live peer uses `reply_to_message_id` without an explicit target, Kronn
 routes the reply to that exact author session. Explicit typed or legacy targets
-still win. This lets two Codex CLIs answer one another without waking the native
+still win. A native agent's reply to such a message defaults to the same exact
+session unless it names someone else, and delivery treats an untargeted agent
+reply to a session's own message as addressed to it (KT-1201). This lets two Codex CLIs answer one another without waking the native
 Codex agent or filtering the sibling as “self”; only the author session excludes
 its own append. An untargeted message from the native Codex agent remains a real
 peer turn for a Codex CLI — provider equality alone is never treated as

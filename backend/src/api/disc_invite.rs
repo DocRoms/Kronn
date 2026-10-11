@@ -1482,7 +1482,7 @@ pub async fn wait_for_peer(
                     "SELECT message_id, sort_order, role, agent_type, content, timestamp,
                             author_pseudo, event_type, target_message_id, target_agent,
                             targets, author_agent_type, author_cli_session_id,
-                            native_fallback, recovered_partial
+                            native_fallback, recovered_partial, reply_parent_cli_session_id
                      FROM (
                          SELECT id AS message_id, sort_order, role, agent_type, content, timestamp,
                                 author_pseudo, NULL AS event_type,
@@ -1517,6 +1517,14 @@ pub async fn wait_for_peer(
                                     FROM message_cli_authors mca
                                     WHERE mca.message_id = messages.id
                                 ) AS author_cli_session_id,
+                                (
+                                    SELECT parent_author.cli_session_id
+                                    FROM messages parent
+                                    JOIN message_cli_authors parent_author
+                                      ON parent_author.message_id = parent.id
+                                    WHERE parent.id = messages.reply_to_message_id
+                                      AND parent.discussion_id = messages.discussion_id
+                                ) AS reply_parent_cli_session_id,
                                 native_fallback, recovered_partial
                          FROM messages
                          WHERE discussion_id = ?1
@@ -1547,6 +1555,7 @@ pub async fn wait_for_peer(
                                 ) AS targets,
                                 NULL AS author_agent_type,
                                 NULL AS author_cli_session_id,
+                                NULL AS reply_parent_cli_session_id,
                                 0 AS native_fallback, 0 AS recovered_partial
                          FROM message_revision_events
                          WHERE discussion_id = ?1
@@ -1612,27 +1621,35 @@ pub async fn wait_for_peer(
                                     .map(|agent_type| MessageTarget::cli(agent_type, cli_session_id))
                             })
                             .transpose()?;
+                        let role: String = r.get(2)?;
+                        let event_type: Option<String> = r.get(7)?;
+                        let reply_parent_cli_session_id = r.get::<_, Option<i64>>(15)?;
+                        let target_agent: Option<String> = r.get(9)?;
                         Ok(WaitForPeerMessage {
                             message_id: r.get(0)?,
                             sort_order: r.get(1)?,
-                            role: r.get(2)?,
                             agent_type: r.get(3)?,
                             content: r.get(4)?,
                             timestamp: r.get(5)?,
                             author_pseudo: r.get(6)?,
-                            event_type: r.get(7)?,
                             target_message_id: r.get(8)?,
-                            target_agent: r.get(9)?,
                             target_agents: targets
                                 .iter()
                                 .map(|target| format!("{:?}", target.agent_type))
                                 .collect(),
                             addressed_to_caller: caller_session_pk.is_some_and(|session_pk| {
-                                targets.iter().any(|target| {
-                                    target.kind == MessageTargetKind::Cli
-                                        && target.cli_session_id == Some(session_pk)
-                                })
+                                addressed_to_session(
+                                    &targets,
+                                    target_agent.as_deref(),
+                                    &role,
+                                    event_type.as_deref(),
+                                    reply_parent_cli_session_id,
+                                    session_pk,
+                                )
                             }),
+                            role,
+                            event_type,
+                            target_agent,
                             targets,
                             reply_target,
                             awareness: false,
@@ -1952,6 +1969,28 @@ pub async fn wait_for_peer(
     }
 }
 
+/// Whether one room turn is addressed to this exact CLI session: its typed CLI
+/// target, or (KT-1201) an untargeted agent turn replying to a message this
+/// session wrote. An explicit target to someone else always wins.
+fn addressed_to_session(
+    targets: &[MessageTarget],
+    legacy_target: Option<&str>,
+    role: &str,
+    event_type: Option<&str>,
+    reply_parent_cli_session_id: Option<i64>,
+    session_pk: i64,
+) -> bool {
+    if !targets.is_empty() {
+        return targets.iter().any(|target| {
+            target.kind == MessageTargetKind::Cli && target.cli_session_id == Some(session_pk)
+        });
+    }
+    legacy_target.is_none()
+        && event_type.is_none()
+        && role == "Agent"
+        && reply_parent_cli_session_id == Some(session_pk)
+}
+
 /// KT-189 — load the AWARENESS backlog of one session: main-channel turns in
 /// `(cursor, upto]` that did not and will not wake this CLI — untargeted room
 /// traffic and turns addressed to another responder — excluding the session's
@@ -1971,7 +2010,7 @@ fn load_awareness_batch(
         "SELECT message_id, sort_order, role, agent_type, content, timestamp,
                 author_pseudo, event_type, target_message_id, target_agent,
                 targets, author_cli_session_id, recovered_partial,
-                superseded_fragment
+                superseded_fragment, reply_parent_cli_session_id
          FROM (
              SELECT id AS message_id, sort_order, role, agent_type, content,
                     timestamp, author_pseudo, NULL AS event_type,
@@ -2009,7 +2048,15 @@ fn load_awareness_batch(
                               AND complete.recovered_partial = 0
                               AND complete.sort_order > messages.sort_order
                         )
-                    ) AS superseded_fragment
+                    ) AS superseded_fragment,
+                    (
+                        SELECT parent_author.cli_session_id
+                        FROM messages parent
+                        JOIN message_cli_authors parent_author
+                          ON parent_author.message_id = parent.id
+                        WHERE parent.id = messages.reply_to_message_id
+                          AND parent.discussion_id = messages.discussion_id
+                    ) AS reply_parent_cli_session_id
              FROM messages
              WHERE discussion_id = ?1
                AND sort_order > ?2
@@ -2041,7 +2088,8 @@ fn load_awareness_batch(
                     ) AS targets,
                     NULL AS author_cli_session_id,
                     0 AS recovered_partial,
-                    0 AS superseded_fragment
+                    0 AS superseded_fragment,
+                    NULL AS reply_parent_cli_session_id
              FROM message_revision_events
              WHERE discussion_id = ?1
                AND sort_order > ?2
@@ -2097,20 +2145,28 @@ fn load_awareness_batch(
                 .transpose()?
                 .unwrap_or_default();
             let author_cli_session_id = r.get::<_, Option<i64>>(11)?;
-            let addressed_to_caller = targets.iter().any(|target| {
-                target.kind == MessageTargetKind::Cli && target.cli_session_id == Some(session_pk)
-            });
+            let role: String = r.get(2)?;
+            let event_type: Option<String> = r.get(7)?;
+            let target_agent: Option<String> = r.get(9)?;
+            let addressed_to_caller = addressed_to_session(
+                &targets,
+                target_agent.as_deref(),
+                &role,
+                event_type.as_deref(),
+                r.get::<_, Option<i64>>(14)?,
+                session_pk,
+            );
             let message = WaitForPeerMessage {
                 message_id: r.get(0)?,
                 sort_order: r.get(1)?,
-                role: r.get(2)?,
+                role,
                 agent_type: r.get(3)?,
                 content: r.get(4)?,
                 timestamp: r.get(5)?,
                 author_pseudo: r.get(6)?,
-                event_type: r.get(7)?,
+                event_type,
                 target_message_id: r.get(8)?,
-                target_agent: r.get(9)?,
+                target_agent,
                 target_agents: targets
                     .iter()
                     .map(|target| format!("{:?}", target.agent_type))
@@ -6164,6 +6220,110 @@ mod tests {
             assert!(delivered.messages[0].addressed_to_caller);
             assert_eq!(delivered.withheld_by_routing, 0);
         }
+    }
+
+    /// KT-1201 — an untargeted native reply to a CLI's own turn reaches that
+    /// CLI as addressed; a sibling CLI still never receives it as a wake.
+    #[tokio::test]
+    async fn untargeted_native_reply_wakes_only_the_cli_it_answers() {
+        let state = make_state_with_disc("d-wait-reply-author").await;
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-wait-reply-author",
+                    "ClaudeCode",
+                    Some("claude-one"),
+                    "peer",
+                )?;
+                let author = crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-wait-reply-author",
+                    "ClaudeCode",
+                    Some("claude-two"),
+                    "peer",
+                )?;
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO messages (
+                         id, discussion_id, role, content, agent_type, timestamp, sort_order
+                     ) VALUES
+                         ('c-cli-turn', 'd-wait-reply-author', 'Agent',
+                          '@litellm relis le lot', 'ClaudeCode', ?1, 5)",
+                    rusqlite::params![now],
+                )?;
+                crate::db::discussions::set_message_cli_author(conn, "c-cli-turn", author)?;
+                conn.execute(
+                    "INSERT INTO messages (
+                         id, discussion_id, role, content, agent_type, timestamp, sort_order,
+                         reply_to_message_id
+                     ) VALUES
+                         ('a-verdict', 'd-wait-reply-author', 'Agent',
+                          'Verdict : approuvé', 'LiteLlm', ?1, 6, 'c-cli-turn')",
+                    rusqlite::params![now],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let wait = |session_id: &str| {
+            wait_for_peer(
+                State(state.clone()),
+                Path("d-wait-reply-author".to_string()),
+                Query(WaitForPeerQuery {
+                    since_sort_order: Some(5),
+                    timeout_secs: Some(1),
+                    exclude_agent_type: Some("ClaudeCode".to_string()),
+                    session_id: Some(session_id.to_string()),
+                    conversation_id: None,
+                    ack_awareness_upto: None,
+                }),
+            )
+        };
+
+        let author = wait("claude-two").await.0.data.unwrap();
+        assert_eq!(author.messages.len(), 1);
+        assert_eq!(author.messages[0].message_id, "a-verdict");
+        assert!(author.messages[0].addressed_to_caller);
+        assert!(!author.messages[0].awareness);
+        assert_eq!(author.withheld_by_routing, 0);
+
+        let sibling = wait("claude-one").await.0.data.unwrap();
+        assert!(sibling.messages.is_empty());
+        assert_eq!(sibling.withheld_by_routing, 1);
+    }
+
+    #[test]
+    fn an_explicit_target_elsewhere_wins_over_the_replied_author() {
+        let elsewhere = [MessageTarget::cli(crate::models::AgentType::ClaudeCode, 1)];
+        assert!(!addressed_to_session(
+            &elsewhere,
+            None,
+            "Agent",
+            None,
+            Some(2),
+            2
+        ));
+        assert!(addressed_to_session(&[], None, "Agent", None, Some(2), 2));
+        assert!(!addressed_to_session(
+            &[],
+            Some("Codex"),
+            "Agent",
+            None,
+            Some(2),
+            2
+        ));
+        assert!(!addressed_to_session(&[], None, "User", None, Some(2), 2));
+        assert!(!addressed_to_session(
+            &[],
+            None,
+            "System",
+            Some("message_revised"),
+            Some(2),
+            2
+        ));
+        assert!(!addressed_to_session(&[], None, "Agent", None, Some(1), 2));
     }
 
     #[tokio::test]

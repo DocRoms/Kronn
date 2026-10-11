@@ -1869,7 +1869,7 @@ pub fn insert_native_agent_message_with_checkpoint(
         serde_json::from_str::<Vec<AgentType>>(&participants_json).unwrap_or_default();
     let primary_agent = parse_agent_type(&primary_agent)?;
     if !attached_agents.contains(&primary_agent) {
-        attached_agents.push(primary_agent);
+        attached_agents.push(primary_agent.clone());
     }
 
     // KT-330 — a native reply that names a joined CLI peer by its room alias
@@ -1877,7 +1877,7 @@ pub fn insert_native_agent_message_with_checkpoint(
     // aliases to Cli targets and persist them regardless of the handoff branch
     // below: a bare provider mention stays inert (marker-gated), but naming a
     // joined session is an explicit wake even when native handoffs are off.
-    let cli_mention_targets: Vec<MessageTarget> =
+    let (cli_mention_targets, joined_cli): (Vec<MessageTarget>, Vec<MessageTarget>) =
         if crate::db::discussion_sessions::count_cli_sessions(&transaction, discussion_id)? > 0 {
             let views = crate::db::discussion_sessions::list_participant_views(
                 &transaction,
@@ -1892,26 +1892,76 @@ pub fn insert_native_agent_message_with_checkpoint(
                     session_pk: v.id,
                 })
                 .collect();
-            crate::db::discussion_sessions::resolve_cli_session_mentions(&msg.content, &joined)
-                .into_iter()
-                .map(|pk| {
-                    let view = views
-                        .iter()
-                        .find(|view| view.id == pk)
-                        .ok_or(rusqlite::Error::InvalidQuery)?;
-                    Ok(session_cli_target(&view.agent_type, pk))
-                })
-                .collect::<rusqlite::Result<Vec<_>>>()?
-                .into_iter()
-                .flatten()
-                .collect()
+            let joined_cli = joined
+                .iter()
+                .filter_map(|session| session_cli_target(&session.agent_type, session.session_pk))
+                .collect();
+            let mentioned =
+                crate::db::discussion_sessions::resolve_cli_session_mentions(&msg.content, &joined)
+                    .into_iter()
+                    .map(|pk| {
+                        let view = views
+                            .iter()
+                            .find(|view| view.id == pk)
+                            .ok_or(rusqlite::Error::InvalidQuery)?;
+                        Ok(session_cli_target(&view.agent_type, pk))
+                    })
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+                    .into_iter()
+                    .flatten()
+                    .collect();
+            (mentioned, joined_cli)
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
     let connection_mention_targets = {
         let connections = crate::db::external_api_connections::list(&transaction)?;
         crate::db::external_api_connections::resolve_connection_mentions(&msg.content, &connections)
     };
+    // KT-1201 — the CLI that wrote the turn this reply answers, and the joined
+    // CLIs an agent-written short alias (`@claude`, marker or prose) names.
+    // A provider resolved to a CLI never spawns a punctual agent.
+    let reply_author = match msg.reply_to_message_id.as_deref() {
+        Some(parent) => message_cli_author_target(&transaction, discussion_id, parent)?,
+        None => None,
+    };
+    let mut alias_cli_targets: Vec<MessageTarget> = Vec::new();
+    let mut providers_resolved_to_cli: Vec<AgentType> = Vec::new();
+    for provider in
+        candidate_agents
+            .iter()
+            .cloned()
+            .chain(crate::api::disc_helpers::agent_mentions_in_prose(
+                &msg.content,
+            ))
+    {
+        if &provider == source_agent || providers_resolved_to_cli.contains(&provider) {
+            continue;
+        }
+        if let Some(target) = agent_alias_cli_target(
+            &provider,
+            reply_author.as_ref(),
+            &joined_cli,
+            &primary_agent,
+        ) {
+            providers_resolved_to_cli.push(provider);
+            alias_cli_targets.push(target);
+        }
+    }
+    let candidate_agents: Vec<AgentType> = candidate_agents
+        .iter()
+        .filter(|agent| !providers_resolved_to_cli.contains(agent))
+        .cloned()
+        .collect();
+    let mut cli_targets = cli_mention_targets;
+    for target in alias_cli_targets {
+        if !cli_targets
+            .iter()
+            .any(|existing| existing.cli_session_id == target.cli_session_id)
+        {
+            cli_targets.push(target);
+        }
+    }
 
     let mut allowed = Vec::new();
     let root =
@@ -1932,7 +1982,7 @@ pub fn insert_native_agent_message_with_checkpoint(
             discussion_id,
             msg.reply_to_message_id.as_deref(),
         )?;
-        for agent in candidate_agents {
+        for agent in &candidate_agents {
             if agent == source_agent
                 || already_scheduled.contains(agent)
                 || !attached_agents.contains(agent)
@@ -1972,7 +2022,10 @@ pub fn insert_native_agent_message_with_checkpoint(
             .collect::<Vec<_>>();
         // CLI wake targets ride the same message but never trigger a native
         // dispatch or `awaiting_agent`: the joined peer wakes via wait_for_peer.
-        targets.extend(cli_mention_targets.iter().cloned());
+        targets.extend(cli_targets.iter().cloned());
+        if targets.is_empty() && connection_mention_targets.is_empty() {
+            targets.extend(reply_author.clone());
+        }
         crate::db::external_api_connections::merge_connection_mention_targets(
             &mut targets,
             connection_mention_targets.clone(),
@@ -2024,7 +2077,10 @@ pub fn insert_native_agent_message_with_checkpoint(
          WHERE id = ?1",
         params![msg.id, child_run_was_success as i64, dispatch_job_id],
     )?;
-    let mut mention_targets = cli_mention_targets;
+    let mut mention_targets = cli_targets;
+    if mention_targets.is_empty() && connection_mention_targets.is_empty() {
+        mention_targets.extend(reply_author);
+    }
     crate::db::external_api_connections::merge_connection_mention_targets(
         &mut mention_targets,
         connection_mention_targets,
@@ -3918,6 +3974,48 @@ pub fn update_message_tokens(
         params![tokens_used as i64, auth_mode, message_id],
     )?;
     Ok(())
+}
+
+/// KT-1201 — the joined CLI an AGENT-written short alias (`@claude`) names: the
+/// CLI of that provider that wrote the turn being answered, else the only
+/// joined CLI of that provider unless the provider is the room's own agent.
+/// `None` keeps the native meaning (punctual spawn or discussion agent).
+/// Human-composed mentions never go through this: KT-211 keeps them literal.
+pub(crate) fn agent_alias_cli_target(
+    provider: &AgentType,
+    reply_author: Option<&MessageTarget>,
+    joined_cli: &[MessageTarget],
+    room_agent: &AgentType,
+) -> Option<MessageTarget> {
+    if let Some(author) = reply_author
+        .filter(|author| author.kind == MessageTargetKind::Cli && &author.agent_type == provider)
+    {
+        return Some(author.clone());
+    }
+    if provider == room_agent {
+        return None;
+    }
+    let mut same_provider = joined_cli
+        .iter()
+        .filter(|target| &target.agent_type == provider);
+    match (same_provider.next(), same_provider.next()) {
+        (Some(only), None) => Some(only.clone()),
+        _ => None,
+    }
+}
+
+/// Every joined, non-workflow CLI session of a discussion as a typed target.
+pub(crate) fn joined_cli_targets(
+    conn: &Connection,
+    discussion_id: &str,
+) -> Result<Vec<MessageTarget>> {
+    Ok(
+        crate::db::discussion_sessions::list_participant_views(conn, discussion_id)?
+            .into_iter()
+            .filter(|view| view.workflow_step.is_none())
+            .filter_map(|view| session_cli_target(&view.agent_type, view.id))
+            .collect(),
+    )
 }
 
 /// A joined session as a typed CLI target, or `None` when the bridge could not

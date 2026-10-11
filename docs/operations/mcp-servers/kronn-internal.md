@@ -594,8 +594,8 @@ reports one precise manual reconnect/recovery action instead.
 `[src: file: backend/scripts/disc-introspection-mcp.py:11084-11145#_perform_scheduled_bridge_reload]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:2841-2870#_restore_reload_handoff]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:11206-11214#_close_inherited_reload_artifact]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:11845-11858#list_changed]`
-`[src: file: backend/scripts/test_disc_introspection_mcp.py:8195-8211#test_reload_is_not_deferred_by_a_detached_full_audit]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:11850-11863#list_changed]`
+`[src: file: backend/scripts/test_disc_introspection_mcp.py:8234-8250#test_reload_is_not_deferred_by_a_detached_full_audit]`
 
 The replacement process restores the room and durable read cursor through the
 existing binding files; no invitation token is needed. A changed mtime with
@@ -798,7 +798,7 @@ diagram examples remain on demand in the Kronn Docs skill so the permanent MCP
 catalogue does not pay for a long manual.
 `[src: file: frontend/src/components/MessageBubble.tsx:2025-2036#DocPreview]`
 `[src: file: frontend/src/components/MermaidDiagram.tsx:111-119#validRoots]`
-`[src: file: backend/src/api/disc_prompts.rs:443-453#rich_output_notice]`
+`[src: file: backend/src/api/disc_prompts.rs:463-473#rich_output_notice]`
 `[src: file: backend/src/api/disc_invite.rs:583-632#join_next_steps]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:11586-11679#initialize]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:4377-4393#MAX_DISC_APPEND_ATTACHMENTS]`
@@ -847,7 +847,7 @@ alongside compact step metadata while still truncating long step outputs.
 Missing/null provenance stays absent for historical runs; an explicit empty
 attempt list is preserved. The bridge does not look up today's model settings
 or infer attempts from output text.
-[src: file: backend/scripts/disc-introspection-mcp.py:8347-8350#agent_provenance]
+[src: file: backend/scripts/disc-introspection-mcp.py:8352-8355#agent_provenance]
 
 ## Workflow readiness
 
@@ -883,7 +883,7 @@ backend refuses, before creating the run, an unknown or non-Agent step, an
 agent that is not installed and enabled, and tools or a budget the agent cannot
 apply. A bridge token passes the field through; the workflow it names is still
 scope-checked. Details: `tool_manual({tool: "workflow_trigger"})`.
-[src: file: backend/scripts/disc-introspection-mcp.py:8939-8942#step_agents]
+[src: file: backend/scripts/disc-introspection-mcp.py:8944-8947#step_agents]
 [src: file: backend/src/workflows/step_agents.rs:58-181#validate]
 
 ## Transport size contract
@@ -1030,7 +1030,7 @@ other visible timeline message.
 
 [src: file: backend/src/api/disc_introspection.rs:585-626#disc_note_list]
 [src: file: backend/src/api/disc_invite.rs:249-416#note_count]
-[src: file: backend/src/api/disc_source.rs:1692-1714#disc_load_other]
+[src: file: backend/src/api/disc_source.rs:1750-1772#disc_load_other]
 [src: file: backend/src/api/discussions/messaging.rs:441-457#MessageChannel]
 [src: file: backend/src/db/discussions.rs:1411-1418#insert_note_message]
 
@@ -1077,7 +1077,7 @@ The Python catalogue distinguishes bounded work from idle listening, and one
 shared orientation supplies the join manual, wait manual and initialize text.
 This is a source instruction contract, not a guarantee that a running host has
 loaded or follows it. See [the diagnosis and qualification](../../gotchas/joined-cli-work-loop.md).
-[src: file: backend/scripts/disc-introspection-mcp.py:9782-9786#ROOM_WORK_PROTOCOL]
+[src: file: backend/scripts/disc-introspection-mcp.py:9787-9791#ROOM_WORK_PROTOCOL]
 [src: file: backend/scripts/disc-introspection-mcp.py:10351-10355#TOOL_MANUALS]
 
 The bridge auto-derives your `agent_type` from the MCP `clientInfo.name` handshake (Claude Code → ClaudeCode, Codex → Codex, OpenCode → OpenCode, …), then from the parent command line, so no env-var prep is needed. An unidentified CLI joins as `Unknown`: it can read and post, but no implicit turn is routed to it. Set `KRONN_AGENT_TYPE` to name it explicitly.

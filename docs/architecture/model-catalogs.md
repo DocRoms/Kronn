@@ -135,7 +135,7 @@ this is permission to attempt execution, not proof of account access. Missing CL
 authentication failures and unavailable/unknown identities are not covered by
 that exception, and other runtimes keep their existing failure policy.
 [src: file: backend/src/core/model_catalog/mod.rs:1083-1098#retained_claude_model]
-[src: file: backend/src/api/discussions/streaming.rs:3674-3681#preflight_resolve]
+[src: file: backend/src/api/discussions/streaming.rs:3771-3778#preflight_resolve]
 [src: file: backend/src/workflows/runner.rs:1840-1878#preflight_resolve]
 [src: file: backend/src/workflows/steps.rs:1174-1213#preflight_workflow_launch]
 
@@ -240,7 +240,7 @@ was formerly inert; ignoring it silently would claim a setting was applied
 when it was not. QPs with no effort or only whitespace keep the old behavior.
 [src: file: backend/src/db/discussion_effort.rs:9-55#capture]
 [src: file: backend/src/api/discussions/crud.rs:721-728#UnresolvedQuickPromptEffort]
-[src: file: backend/src/api/discussions/streaming.rs:3587-3594#for_run]
+[src: file: backend/src/api/discussions/streaming.rs:3684-3691#for_run]
 
 These snapshots are local execution state, not a portable QP setting. Exporting
 or importing a QP preserves its editable `agent_settings`, while it does not

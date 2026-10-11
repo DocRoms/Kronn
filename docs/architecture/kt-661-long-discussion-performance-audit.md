@@ -24,7 +24,7 @@ alone does not establish a user-visible duration.
    [src: file: backend/src/db/discussions.rs:779-788#list_messages]
 3. `list_messages` selects the message content and other message fields for one
    discussion, ordered by `sort_order, timestamp`; it has no `LIMIT` or
-   pagination clause. [src: file: backend/src/db/discussions.rs:2460-2477#list_messages]
+   pagination clause. [src: file: backend/src/db/discussions.rs:2512-2529#list_messages]
    The `(discussion_id, sort_order)` unique index supports the first ordering
    key. [src: file: backend/src/db/sql/082_message_sequence.sql:14-15#idx_messages_discussion_sort_order_unique]
 4. The frontend polls `GET /api/discussions/{id}/poll` on active-discussion
@@ -37,7 +37,7 @@ alone does not establish a user-visible duration.
    [src: file: backend/src/api/discussions/crud.rs:185-215#poll]
 5. The detail response also queries all message targets belonging to the
    discussion and groups them in a map.
-   [src: file: backend/src/db/discussions.rs:2902-2943#list_discussion_message_targets]
+   [src: file: backend/src/db/discussions.rs:2954-2995#list_discussion_message_targets]
    This means the refresh payload and
    server-side deserialization can grow with both messages and addressed
    targets, independently of visible transcript rows.

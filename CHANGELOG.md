@@ -347,6 +347,18 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A native agent's reply to a joined CLI now reaches that CLI (KT-1201). When
+  the room's agent answered a CLI turn without naming it, the reply had no
+  target, and the bridge reported it as `withheld_by_routing` ("target another
+  identity"): the CLI thought the agent silent for hours. The reply is now
+  stored with that CLI as its target unless it names someone else, and the
+  delivery treats an untargeted agent reply to a session's own message as
+  addressed to it (`attention_required`). A native agent that writes
+  `@claude` while a Claude CLI is joined (the author of the turn it answers,
+  or the only one) now reaches that CLI instead of spawning a one-off Claude,
+  which used to answer as if it were the CLI. A one-off agent is told it is
+  not the joined CLI of its provider, whose turns it now sees labelled with
+  the CLI alias. Joined CLIs need an MCP reload to load the new bridge.
 - A favourite stays in Favoris while an agent runs or waits in it. From 20
   discussions on, a live pinned discussion moved to « À suivre » and left
   Favoris until the run ended. Favoris now lists every pinned discussion,

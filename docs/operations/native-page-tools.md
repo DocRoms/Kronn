@@ -9,7 +9,7 @@ exists on the MCP bridge only; native discussion agents do not get it. See
 objects, not an HTML preview.
 [src: file: backend/src/api/agent_tools.rs:1698-1700#execute_page_tool]
 [src: file: backend/src/api/agent_page_tools.rs:173-237#execute_page_tool]
-[src: file: backend/scripts/disc-introspection-mcp.py:7834-7836#call_page_delete_dataset]
+[src: file: backend/scripts/disc-introspection-mcp.py:7839-7841#call_page_delete_dataset]
 
 Native and bridge access are two policies, not one:
 

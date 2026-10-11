@@ -47,6 +47,16 @@ autocomplete must always show which one is being picked (KT-211).
   same-provider CLI is present: the punctual agent and the CLI are
   distinct identities that may both be needed (sealed 2026-08-02).
   The one exception is the reply-coherence guard in §5.
+- **Agent-written short alias (KT-1201).** That rule binds the human
+  composer and joined CLIs. A NATIVE agent (its streamed reply, handoff
+  marker included, or its own MCP post) writing `@claude` names the
+  joined Claude CLI that wrote the turn it answers, else the only joined
+  Claude CLI unless Claude is the room's own agent. That CLI gets the
+  wake and no punctual agent is spawned; with two candidate CLIs and no
+  reply context nothing is guessed.
+  [src: file: backend/src/db/discussions.rs:3979-4005#agent_alias_cli_target]
+  [src: file: backend/src/db/discussions.rs:1921-1951#providers_resolved_to_cli]
+  [src: file: backend/src/api/disc_source.rs:678-730#agent_alias_cli_target]
 
 ## 3. Wake vs awareness (per identity, post-KT-189)
 
@@ -87,7 +97,22 @@ precise CLI even among same-provider siblings; replying to a
 native-authored message keeps untargeted routing. An explicit typed
 target or fan-out always wins over the inferred author.
 [src: file: backend/src/api/disc_source.rs:542-569#message_cli_author_target]
-[src: file: backend/src/api/disc_invite.rs:1606-1614#reply_target]
+
+The native agent follows the same rule (KT-1201): its reply to a
+CLI-authored turn is stored with that CLI as target unless it names
+another identity, and a native runner's MCP post without `reply_to`
+answers its job trigger's author. Delivery applies the rule to stored
+rows too: an untargeted agent turn replying to this session's message is
+`addressed_to_caller` (a wake, `attention_required`), never
+`withheld_by_routing`. Human and native authors need no target: they
+do not poll. A punctual agent is also told it is a one-off, not the
+joined CLI of its provider, whose turns its transcript labels with
+the CLI alias.
+[src: file: backend/src/db/discussions.rs:2025-2028#reply_author]
+[src: file: backend/src/api/disc_invite.rs:1972-1992#addressed_to_session]
+[src: file: backend/src/api/discussions/streaming.rs:2077-2125#punctual_identity_notice]
+[src: file: backend/src/api/disc_prompts.rs:337-355#transcript_agent_label]
+[src: file: backend/src/api/disc_invite.rs:1615-1623#reply_target]
 
 ## 5. Reply-coherence guard (KT-211)
 
@@ -118,7 +143,7 @@ context the short alias stays free (both identities may be wanted).
   belongs to the configured discussion agent, whatever the CLI presence
   (target identity, not presence, decides ownership); the turn reaches the
   joined CLIs as awareness and is marked for their one-shot catch-up.
-  [src: file: backend/src/api/discussions/routing.rs:20-40#route_human_turn] [src: file: backend/src/db/discussions.rs:2102-2113#native_fallback]
+  [src: file: backend/src/api/discussions/routing.rs:20-40#route_human_turn] [src: file: backend/src/db/discussions.rs:2166-2177#native_fallback]
 - **Reload**: a bridge reload re-attaches the durable session through
   the 0600 resume credential (`/peer-resume`, no token). A CLI whose
   native identity rotated (fresh session id) needs one `disc_join` with

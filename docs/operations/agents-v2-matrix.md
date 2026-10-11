@@ -90,7 +90,7 @@ human-gated Automation proposals and the task-delegation lifecycle from the
 first turn; history-tool discovery remains deferred until the third user
 message. This instruction contract does not imply a live provider validation
 or change session-resume and pricing limitations.
-[src: file: backend/src/api/disc_prompts.rs:1084-1110#opencode_prompt_matches_its_injected_mcp_bridge_on_first_and_later_turns]
+[src: file: backend/src/api/disc_prompts.rs:1122-1148#opencode_prompt_matches_its_injected_mcp_bridge_on_first_and_later_turns]
 [src: file: backend/src/acp.rs:1538-1560#native_session_mcp_servers]
 
 The orchestration database must also read back every native provider name it
@@ -118,7 +118,7 @@ the same job.
   negotiated `session/resume` contract and exact proof boundaries.
   [src: file: backend/src/agents/runner.rs:2755-2789#completion_checkpoint]
   [src: file: backend/src/api/discussions/streaming.rs:2223-2290#resume_with_delta_if_possible]
-  [src: file: backend/src/api/discussions/streaming.rs:8004-8012#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
+  [src: file: backend/src/api/discussions/streaming.rs:8102-8110#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
 - **Kronn does not yet normalize ACP's optional session cost.** The current
   upstream v1 schema supports `usage_update.cost` as a cumulative amount with
   an explicit currency; this is not a per-turn USD price. Kronn's native ACP

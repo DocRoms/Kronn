@@ -542,8 +542,16 @@ pub async fn disc_append(
     // An explicit typed target or legacy one-shot target always wins. With no
     // explicit responder, replying to a CLI-authored message targets that
     // exact session — never the provider's native agent or a sibling CLI.
+    // A native runner's post with no explicit reply_to answers its job trigger
+    // (KT-1171), so that trigger's CLI author is the default target (KT-1201).
     if routing_candidate && requested_targets.is_empty() && legacy_requested_target.is_none() {
-        if let Some(reply_to_message_id) = req.messages[0].reply_to_message_id.clone() {
+        if let Some(reply_to_message_id) =
+            req.messages[0].reply_to_message_id.clone().or_else(|| {
+                native_turn
+                    .as_ref()
+                    .map(|turn| turn.trigger_message_id.clone())
+            })
+        {
             let did = req.disc_id.clone();
             requested_targets = match state
                 .db
@@ -666,6 +674,59 @@ pub async fn disc_append(
                 MessageTargetKind::Agent | MessageTargetKind::DiscussionAgent
             ) || !turn.root_turn_agents.contains(&target.agent_type)
         });
+    }
+    // KT-1201 — a native runner's short alias (`@claude`) names the joined CLI
+    // of that provider it is answering, or the only one: never a punctual spawn
+    // impersonating that session. Joined CLIs and humans keep KT-211 literal.
+    if let Some(turn) = native_turn.as_ref() {
+        if requested_targets
+            .iter()
+            .any(|target| target.kind == MessageTargetKind::Agent && target.connection_id.is_none())
+        {
+            let did = req.disc_id.clone();
+            let parent = req.messages[0]
+                .reply_to_message_id
+                .clone()
+                .unwrap_or_else(|| turn.trigger_message_id.clone());
+            let room_agent = disc.agent.clone();
+            let targets = std::mem::take(&mut requested_targets);
+            requested_targets = match state
+                .db
+                .with_read_conn(move |conn| {
+                    let author =
+                        crate::db::discussions::message_cli_author_target(conn, &did, &parent)?;
+                    let joined = crate::db::discussions::joined_cli_targets(conn, &did)?;
+                    let mut resolved: Vec<MessageTarget> = Vec::with_capacity(targets.len());
+                    for target in targets {
+                        let target = if target.kind == MessageTargetKind::Agent
+                            && target.connection_id.is_none()
+                        {
+                            crate::db::discussions::agent_alias_cli_target(
+                                &target.agent_type,
+                                author.as_ref(),
+                                &joined,
+                                &room_agent,
+                            )
+                            .unwrap_or(target)
+                        } else {
+                            target
+                        };
+                        if !resolved.contains(&target) {
+                            resolved.push(target);
+                        }
+                    }
+                    Ok(resolved)
+                })
+                .await
+            {
+                Ok(targets) => targets,
+                Err(error) => {
+                    return Json(ApiResponse::err(format!(
+                        "DB error resolving agent aliases: {error}"
+                    )))
+                }
+            };
+        }
     }
     let legacy_requested_target = match native_turn.as_ref() {
         Some(turn) => {
@@ -2848,6 +2909,92 @@ mod tests {
             })
             .await
             .unwrap()
+    }
+
+    /// KT-1201 — the native runner writes `@claude` (the bridge sends a
+    /// punctual target). Returns (job count, the post's targets).
+    async fn native_runner_claude_post(
+        state: &crate::AppState,
+        job_id: &str,
+    ) -> (i64, Vec<MessageTarget>) {
+        let mut message = agent_msg("judge-claude-post", "@claude relis ce verdict");
+        message.agent_type = Some(AgentType::OpenCode);
+        message.targets = vec![MessageTarget::agent(AgentType::ClaudeCode)];
+        let response = disc_append(
+            axum::extract::State(state.clone()),
+            Json(DiscAppendRequest {
+                disc_id: "d-lint".into(),
+                messages: vec![message],
+                session_id: Some("opencode-runtime-session".into()),
+                since_sort_order: None,
+                session_credential: None,
+                publication_grant: None,
+                publication_proof: None,
+                room_agent: Some(judge_context("d-lint", job_id, "root")),
+            }),
+        )
+        .await;
+        assert_eq!(response.0.data.expect("append succeeds").appended, 1);
+        state
+            .db
+            .with_read_conn(|conn| {
+                let jobs = conn.query_row(
+                    "SELECT COUNT(*) FROM agent_dispatch_jobs WHERE discussion_id = 'd-lint'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?;
+                let id: String = conn.query_row(
+                    "SELECT id FROM messages WHERE source_msg_id = 'judge-claude-post'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                Ok((
+                    jobs,
+                    crate::db::discussions::list_message_targets(conn, &id)?,
+                ))
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_native_runner_short_alias_reaches_the_only_joined_cli_of_that_provider() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        let job_id = judge_room(&state).await;
+        let cli = state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-lint",
+                    "ClaudeCode",
+                    Some("claude-joined"),
+                    "peer",
+                )
+            })
+            .await
+            .unwrap();
+
+        let (jobs, targets) = native_runner_claude_post(&state, &job_id).await;
+        assert_eq!(jobs, 3, "no punctual Claude is spawned in place of the CLI");
+        assert_eq!(
+            targets,
+            vec![MessageTarget::cli(AgentType::ClaudeCode, cli)]
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_native_runner_short_alias_spawns_when_no_cli_of_that_provider_is_joined() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        let job_id = judge_room(&state).await;
+
+        let (jobs, targets) = native_runner_claude_post(&state, &job_id).await;
+        assert_eq!(jobs, 4);
+        assert_eq!(targets, vec![MessageTarget::agent(AgentType::ClaudeCode)]);
     }
 
     #[tokio::test]

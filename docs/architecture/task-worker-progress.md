@@ -6,6 +6,6 @@ Queue state comes from the durable dispatch row. A claimed dispatch without `age
 
 Process liveness is attached by both execution-status surfaces only when the runtime registry has observed a successfully created provider runtime. Cancellation-token presence or absence is not treated as process evidence. [src: file: backend/src/api/orchestration.rs:8107-8128#attach_runtime_liveness] [src: file: backend/src/api/orchestration.rs:11405-11416#attach_runtime_liveness] [src: file: backend/src/lib.rs:471-474#agent_runtime_registry]
 
-Native Claude stream tool boundaries update durable progress: tool start records `tool_activity`, and tool completion returns the phase to `upstream_wait`. [src: file: backend/src/api/discussions/streaming.rs:4336-4415#mark_progress]
+Native Claude stream tool boundaries update durable progress: tool start records `tool_activity`, and tool completion returns the phase to `upstream_wait`. [src: file: backend/src/api/discussions/streaming.rs:4434-4513#mark_progress]
 
 The dispatcher persists provider launch and later progress boundaries in `agent_dispatch_jobs.last_progress_at`. [src: file: backend/src/db/agent_dispatch.rs:838-885#mark_progress]
