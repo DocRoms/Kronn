@@ -1278,6 +1278,56 @@ pub struct AuditRunCost {
     pub total: AuditPhaseCost,
 }
 
+/// The cost of a cross-agent audit, before launch (KT-1183, experimental).
+/// Detection runs each cross-checked step once per agent; the cross-check and
+/// the reply add at most one call per agent each: the range goes from N to 2N
+/// times the step's single-agent cost.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CrossAuditEstimate {
+    pub agents: u32,
+    /// The steps run cross-agent (finding steps only).
+    pub cross_checked_steps: Vec<String>,
+    pub low_factor: u32,
+    pub high_factor: u32,
+    /// Findings challenged per step; the rest are listed as not cross-checked.
+    pub max_cross_checked: u32,
+    /// The single-agent run the range scales (its cost: `GET /api/audit-runs/{id}/cost`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub base_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub base_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub base_cost_usd_micros: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub low_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub high_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub low_cost_usd_micros: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub high_cost_usd_micros: Option<u64>,
+    /// A past cross-agent run of the step with as many agents, as measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub measured_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub measured_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub measured_cost_usd_micros: Option<u64>,
+    /// No comparable cross-agent run was measured: the range is an estimate.
+    pub estimated: bool,
+}
+
 /// Recommendation emitted by the completion-time cluster detector. Lives in
 /// `AuditRun.recommendations_json` as a JSON-encoded list.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

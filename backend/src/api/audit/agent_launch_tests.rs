@@ -18,6 +18,10 @@ mod coverage_repair_tests;
 #[path = "reaudit_unchanged_tests.rs"]
 mod reaudit_unchanged_tests;
 
+#[cfg(unix)]
+#[path = "cross_audit_e2e_tests.rs"]
+mod cross_audit_e2e_tests;
+
 fn sse(frames: &[String]) -> String {
     frames
         .iter()

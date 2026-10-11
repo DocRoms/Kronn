@@ -1,5 +1,5 @@
 import type { AcceptAuditStepResponse, ArtifactBundle, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditRunCost, AuditStepInfo, AuditRecentActivity, AuditTokenBreakdown, EmbedOriginsChange } from '../types/generated';
-import type { BriefingProjectAnswers } from '../types/generated';
+import type { BriefingProjectAnswers, CrossAuditEstimate } from '../types/generated';
 import type { WorkerConnectivity } from '../types/generated';
 import type { TemplateReinstallRequest, TemplateReinstallPlan, TemplateReinstallReport, MergeBase, TemplateMergeAccepted, TemplateMergeAcceptRequest, TemplateMergeRequest, TemplateMergeView } from '../types/generated';
 import { readTextAttachmentPreview } from './textAttachmentPreview';
@@ -1284,7 +1284,12 @@ export const projects = {
     project?: BriefingProjectAnswers;
     /** KT-1167 — after a successful Full audit, turn the TDs into Kronn tasks. */
     td_to_tasks?: boolean;
+    /** KT-1183 — experimental cross-agent audit: 2 or 3 agents, empty = off. */
+    cross_audit_agents?: AgentType[];
   }) => api<boolean>('POST', `/projects/${id}/save-briefing`, form),
+  /** KT-1183 — the cross-agent audit's cost range, scaled from the last measured run. */
+  crossAuditEstimate: (id: string, agents: number) =>
+    api<CrossAuditEstimate>('GET', `/projects/${id}/audit/cross-estimate?agents=${agents}`),
   /** KT-1167 — the project's TD sheets as Kronn tasks; a re-click creates nothing. */
   convertTdTasks: (id: string) => api<TdTasksOutcome>('POST', `/projects/${id}/audit/td-tasks`),
   setDefaultSkills: (id: string, skillIds: string[]) => api<boolean>('PUT', `/projects/${id}/default-skills`, skillIds),

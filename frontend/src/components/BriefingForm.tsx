@@ -12,11 +12,13 @@
  * still pick the conversational variant if they prefer guidance —
  * both are surfaced side-by-side in ProjectCard.
  */
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useT } from '../lib/I18nContext';
 import { projects as projectsApi } from '../lib/api';
 import { Save, X, Loader2 } from 'lucide-react';
-import type { AgentType, BriefingProjectAnswers, ModelTier } from '../types/generated';
+import type { AgentType, BriefingProjectAnswers, CrossAuditEstimate, ModelTier } from '../types/generated';
+import { AGENT_LABELS } from '../lib/constants';
+import { formatUsd } from '../lib/audit-cost';
 import {
   BRIEFING_ENVIRONMENTS,
   BRIEFING_PROJECT_CARDS,
@@ -25,6 +27,11 @@ import {
   trackerTakesKey,
   type BriefingChoiceCard,
 } from './briefingProjectCards';
+
+/** KT-1183 — agents a cross-agent audit may use: audit-capable, no named connection. */
+const CROSS_AUDIT_AGENTS: AgentType[] = [
+  'ClaudeCode', 'Codex', 'OpenCode', 'GeminiCli', 'Kiro', 'CopilotCli', 'Ollama', 'LiteLlm', 'Nvidia',
+];
 
 interface BriefingFormProps {
   projectId: string;
@@ -60,7 +67,7 @@ interface BriefingFormProps {
 }
 
 export function BriefingForm({ projectId, onClose, onSaved, agent, tier, review = true, toast }: BriefingFormProps) {
-  const { t } = useT();
+  const { t, locale } = useT();
   const [form, setForm] = useState({
     purpose: '',
     team: '',
@@ -71,6 +78,40 @@ export function BriefingForm({ projectId, onClose, onSaved, agent, tier, review 
   });
   // KT-1167 — persisted in the briefing; read at the end of a Full audit.
   const [tdToTasks, setTdToTasks] = useState(false);
+  // KT-1183 — experimental, never on by default.
+  const [crossAudit, setCrossAudit] = useState(false);
+  const [crossAgents, setCrossAgents] = useState<AgentType[]>([]);
+  const [estimate, setEstimate] = useState<CrossAuditEstimate | null>(null);
+  const crossCountOk = crossAgents.length >= 2 && crossAgents.length <= 3;
+
+  useEffect(() => {
+    if (!crossAudit || !crossCountOk) return;
+    let live = true;
+    projectsApi.crossAuditEstimate(projectId, crossAgents.length)
+      .then(e => { if (live) setEstimate(e); })
+      .catch(() => { if (live) setEstimate(null); });
+    return () => { live = false; };
+  }, [crossAudit, crossCountOk, crossAgents.length, projectId]);
+
+  const toggleCrossAgent = (agent: AgentType) =>
+    setCrossAgents(list => (list.includes(agent)
+      ? list.filter(a => a !== agent)
+      : list.length >= 3 ? list : [...list, agent]));
+
+  const estimateText = (e: CrossAuditEstimate): string => {
+    if (!e.estimated && e.measured_cost_usd_micros != null) {
+      return t('briefing.crossAudit.measured', formatUsd(e.measured_cost_usd_micros, locale));
+    }
+    if (e.low_cost_usd_micros != null && e.high_cost_usd_micros != null) {
+      return t('briefing.crossAudit.estimateCost', formatUsd(e.low_cost_usd_micros, locale),
+        formatUsd(e.high_cost_usd_micros, locale), e.low_factor, e.high_factor);
+    }
+    if (e.low_tokens != null && e.high_tokens != null) {
+      return t('briefing.crossAudit.estimateTokens', e.low_tokens.toLocaleString(locale),
+        e.high_tokens.toLocaleString(locale), e.low_factor, e.high_factor);
+    }
+    return t('briefing.crossAudit.estimateFactor', e.low_factor, e.high_factor);
+  };
   const [submitting, setSubmitting] = useState(false);
   const [project, setProject] = useState<BriefingProjectAnswers>(emptyProjectAnswers);
 
@@ -110,6 +151,10 @@ export function BriefingForm({ projectId, onClose, onSaved, agent, tier, review 
       toast(t('briefing.missingFields', missing.join(', ')), 'error');
       return;
     }
+    if (crossAudit && !crossCountOk) {
+      toast(t('briefing.crossAudit.pickAgents'), 'error');
+      return;
+    }
     setSubmitting(true);
     try {
       // 1. Save the answers — writes `docs/briefing.md` + DB notes.
@@ -119,7 +164,7 @@ export function BriefingForm({ projectId, onClose, onSaved, agent, tier, review 
         forge_repo: project.forge === 'unknown' ? '' : project.forge_repo.trim(),
         people: project.people.filter(p => p.name.trim() || p.contact.trim()),
       };
-      await projectsApi.saveBriefing(projectId, { ...form, project: projectAnswers, td_to_tasks: tdToTasks });
+      await projectsApi.saveBriefing(projectId, { ...form, project: projectAnswers, td_to_tasks: tdToTasks, cross_audit_agents: crossAudit ? crossAgents : [] });
       if (!review) {
         toast(t('briefing.savedOnlyToast'), 'success');
         onSaved(null);
@@ -365,6 +410,53 @@ export function BriefingForm({ projectId, onClose, onSaved, agent, tier, review 
           <span className="briefing-form-option-hint">{t('briefing.tdToTasksHint')}</span>
         </span>
       </label>
+
+      <label className="briefing-form-option">
+        <input
+          type="checkbox"
+          checked={crossAudit}
+          onChange={e => setCrossAudit(e.target.checked)}
+          data-testid="briefing-cross-audit"
+        />
+        <span>
+          <span className="briefing-form-q">
+            {t('briefing.crossAudit.label')}{' '}
+            <span className="briefing-experimental">{t('briefing.crossAudit.experimental')}</span>
+          </span>
+          <span className="briefing-form-option-hint">{t('briefing.crossAudit.hint')}</span>
+        </span>
+      </label>
+      {crossAudit && (
+        <fieldset className="briefing-card" data-card="cross-audit">
+          <legend className="briefing-form-q">{t('briefing.crossAudit.agentsQ')}</legend>
+          <div className="briefing-card-options" role="group" aria-label={t('briefing.crossAudit.agentsQ')}>
+            {CROSS_AUDIT_AGENTS.map(agent => {
+              const selected = crossAgents.includes(agent);
+              return (
+                <button
+                  key={agent}
+                  type="button"
+                  role="checkbox"
+                  aria-checked={selected}
+                  className={`briefing-card-option${selected ? ' is-selected' : ''}`}
+                  onClick={() => toggleCrossAgent(agent)}
+                  data-testid={`briefing-cross-agent-${agent}`}
+                >
+                  {AGENT_LABELS[agent] ?? agent}
+                </button>
+              );
+            })}
+          </div>
+          <p className="briefing-form-intro" data-testid="briefing-cross-estimate">
+            {!crossCountOk
+              ? t('briefing.crossAudit.pickAgents')
+              : estimate && estimate.agents === crossAgents.length
+                ? estimateText(estimate)
+                : t('briefing.crossAudit.estimateLoading')}
+          </p>
+          <p className="briefing-form-option-hint">{t('briefing.crossAudit.scope')}</p>
+        </fieldset>
+      )}
 
       <div className="briefing-form-actions">
         <button type="button" onClick={onClose} disabled={submitting}>{t('common.cancel')}</button>

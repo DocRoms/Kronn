@@ -325,6 +325,9 @@ pub struct BriefingFormRequest {
     /// KT-1167 — after a successful Full audit, turn the TDs into Kronn tasks.
     #[serde(default)]
     pub td_to_tasks: bool,
+    /// KT-1183 — experimental cross-agent audit: 2 or 3 agents, empty = off.
+    #[serde(default)]
+    pub cross_audit_agents: Vec<AgentType>,
 }
 
 pub async fn save_briefing_form(
@@ -344,6 +347,19 @@ pub async fn save_briefing_form(
              Q6 (additional) is optional. Use \"Not provided\" or \"None\" if you \
              want to skip a mandatory question explicitly.",
         ));
+    }
+
+    if !form.cross_audit_agents.is_empty() {
+        let names: Vec<String> = form
+            .cross_audit_agents
+            .iter()
+            .map(crate::core::cross_audit::agent_label)
+            .collect();
+        if crate::core::cross_audit::parse_agent_list(&names.join(",")).is_none() {
+            return Json(ApiResponse::err(
+                "The cross-agent audit needs 2 or 3 distinct audit-capable agents (a Custom connection cannot be one).",
+            ));
+        }
     }
 
     let project_facts = match form
@@ -403,7 +419,7 @@ pub async fn save_briefing_form(
         body.push('\n');
         body.push_str(&section);
     }
-    let body = with_kronn_options(body, form.td_to_tasks);
+    let body = with_all_kronn_options(body, form.td_to_tasks, &form.cross_audit_agents);
 
     // 4. Write `docs/briefing.md` on disk + persist briefing_notes in DB.
     // The on-disk file is what the audit reads at Phase 1; the DB
@@ -451,12 +467,31 @@ pub async fn save_briefing_form(
 
 /// Appends the Kronn options section, only when an option is set, so a
 /// briefing without one keeps its historical shape.
-pub(crate) fn with_kronn_options(mut body: String, td_to_tasks: bool) -> String {
+#[cfg(test)]
+pub(crate) fn with_kronn_options(body: String, td_to_tasks: bool) -> String {
+    with_all_kronn_options(body, td_to_tasks, &[])
+}
+
+/// Every Kronn option under one heading; no heading when none is set.
+pub(crate) fn with_all_kronn_options(
+    mut body: String,
+    td_to_tasks: bool,
+    cross_audit_agents: &[AgentType],
+) -> String {
+    let mut lines: Vec<String> = Vec::new();
     if td_to_tasks {
+        lines.push(crate::core::td_tasks::BRIEFING_OPTION_LINE.to_string());
+    }
+    if !cross_audit_agents.is_empty() {
+        lines.push(crate::core::cross_audit::briefing_option_line(
+            cross_audit_agents,
+        ));
+    }
+    if !lines.is_empty() {
         body.push_str(&format!(
             "\n{}\n{}\n",
             crate::core::td_tasks::BRIEFING_OPTIONS_HEADING,
-            crate::core::td_tasks::BRIEFING_OPTION_LINE
+            lines.join("\n")
         ));
     }
     body

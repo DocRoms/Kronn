@@ -2241,6 +2241,34 @@ export type CronPreviewRequest = { schedule: string,
  */
 timezone?: string, };
 
+/**
+ * The cost of a cross-agent audit, before launch (KT-1183, experimental).
+ * Detection runs each cross-checked step once per agent; the cross-check and
+ * the reply add at most one call per agent each: the range goes from N to 2N
+ * times the step's single-agent cost.
+ */
+export type CrossAuditEstimate = { agents: number,
+/**
+ * The steps run cross-agent (finding steps only).
+ */
+cross_checked_steps: Array<string>, low_factor: number, high_factor: number,
+/**
+ * Findings challenged per step; the rest are listed as not cross-checked.
+ */
+max_cross_checked: number,
+/**
+ * The single-agent run the range scales (its cost: `GET /api/audit-runs/{id}/cost`).
+ */
+base_run_id?: string, base_tokens?: number, base_cost_usd_micros?: number, low_tokens?: number, high_tokens?: number, low_cost_usd_micros?: number, high_cost_usd_micros?: number,
+/**
+ * A past cross-agent run of the step with as many agents, as measured.
+ */
+measured_run_id?: string, measured_tokens?: number, measured_cost_usd_micros?: number,
+/**
+ * No comparable cross-agent run was measured: the range is an estimate.
+ */
+estimated: boolean, };
+
 export type CustomApiField = { label: string, value: string, };
 
 /**

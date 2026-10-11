@@ -933,6 +933,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "252_audit_adr_baseline",
         include_str!("sql/252_audit_adr_baseline.sql"),
     ),
+    (
+        "257_audit_cross_findings",
+        include_str!("sql/257_audit_cross_findings.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup` (owner-only) without the auth

@@ -17,6 +17,7 @@ mod agent_launch;
 pub mod anti_hallu_enforce;
 pub mod anti_hallu_step;
 pub mod briefing;
+pub mod cross_audit;
 mod document_repair;
 pub mod drift;
 pub mod full;
@@ -34,6 +35,7 @@ mod version_context;
 
 pub use accept::*;
 pub use briefing::*;
+pub use cross_audit::cross_audit_estimate;
 pub use drift::*;
 pub use full::*;
 pub use info::*;

@@ -22,6 +22,7 @@ pub mod content_memo;
 pub mod context_audit;
 pub mod context_files;
 pub mod credential_store;
+pub mod cross_audit;
 pub mod crypto;
 pub mod default_todo;
 pub mod dependency_updates;

@@ -284,6 +284,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       getBriefing: resolve(null),
       startBriefing: resolve({ discussion_id: '' }),
       saveBriefing: resolve({}),
+      crossAuditEstimate: resolve({ agents: 2, cross_checked_steps: ['docs/inconsistencies-security.md'], low_factor: 2, high_factor: 4, max_cross_checked: 30, estimated: true }),
       convertTdTasks: resolve({ created: 0, already_linked: 0, skipped: 0, themes: [], items: [] }),
       listAiFiles: resolve([]),
       readAiFile: resolve({ path: '', content: '' }),

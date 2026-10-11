@@ -42,6 +42,26 @@ Release notes for 0.9.3 and earlier are available in the
   item is mapped to a detector, a stack item or a remaining prompt line by a
   test.
 
+- Cross-agent audit, experimental and off by default (KT-1183). A briefing
+  option (« Audit croisé ») picks 2 or 3 agents and shows the estimated cost
+  first: ×N to ×2N the security step's last measured single-agent cost (from
+  the same step figures as `GET /api/audit-runs/{id}/cost`), or the measured
+  cost of an earlier cross-agent run with as many agents. On the security
+  step only, the agents detect in parallel without seeing each other's work
+  and return their findings as a machine-readable block; Kronn checks every
+  citation (file, lines, quoted text) and drops a false one with no model
+  call, groups findings about the same place (information only), then has
+  each finding challenged by another agent, who is not told who found it.
+  Never a vote: a refutation dismisses a finding only with a proof that passes
+  the same citation check, otherwise the finding stays, marked contested; the
+  author may answer a proven refutation once, and two proven positions become
+  a human `kronn-question` card with both arguments side by side. At most 30
+  findings are challenged per step, the rest listed as not cross-checked.
+  Kronn writes the index and the TD sheets (an existing sheet keeps its body,
+  only a Kronn provenance block changes); every finding's provenance —
+  found by, detection count, checked by, proof, reply, verdict — and the
+  dropped and dismissed findings are stored (migration 257). Without the
+  option the step is unchanged, byte for byte.
 - Audit versions and standards are judged from dated sources (KT-1000). The
   tech-debt step and the security pass get a « Technologies and standards »
   block: the project's stored dependency watch (version in place, latest,

@@ -1991,6 +1991,15 @@ html[data-density="large"] .dash-main {
   color: var(--kr-text-secondary);
 }
 
+.briefing-experimental {
+  padding: 0 6px;
+  border: 1px solid var(--kr-warning);
+  border-radius: 999px;
+  color: var(--kr-warning);
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+}
+
 .briefing-form textarea {
   background: var(--kr-bg-elevated);
   border: 1px solid var(--kr-border-soft);

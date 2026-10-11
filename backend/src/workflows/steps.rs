@@ -23,18 +23,18 @@ pub struct StepOutcome {
 
 /// Output from a single agent run, including token usage.
 #[derive(Debug)]
-struct AgentOutput {
+pub(crate) struct AgentOutput {
     attempt_id: u32,
-    text: String,
+    pub(crate) text: String,
     /// `None`: the runtime reported no usage for this run.
-    tokens_used: Option<u64>,
+    pub(crate) tokens_used: Option<u64>,
     prompt_cache: runner::PromptCacheUsage,
     /// The usage `tokens_used` came from, parts kept apart: an attempt's cost is
     /// computed from these, never from the total (KT-894). `None` when the
     /// runtime reported only a total, or nothing.
-    reported_usage: Option<runner::ReportedUsage>,
+    pub(crate) reported_usage: Option<runner::ReportedUsage>,
     /// The cost the agent itself reported, when it gives one.
-    reported_cost_usd: Option<f64>,
+    pub(crate) reported_cost_usd: Option<f64>,
     native_tool_calls: Vec<NativeToolCallLog>,
     runtime_notices: Vec<String>,
 }
@@ -1541,7 +1541,7 @@ fn format_silent_exit_error(exit_desc: &str, killed_by_signal: bool, stdout: &st
 /// timeout, then collect text + tokens. Generic over [`runner::AgentIo`]
 /// (0.8.8 test-seam) so the loop is exercised by a `ScriptedProcess` in
 /// tests without spawning a CLI.
-async fn drive_agent_to_output(
+pub(crate) async fn drive_agent_to_output(
     mut process: impl runner::AgentIo,
     progress_tx: Option<&ProgressSender>,
     activity: Option<&AgentActivitySink>,

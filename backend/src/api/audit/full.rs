@@ -304,6 +304,11 @@ pub async fn full_audit(
         briefing_notes.as_deref(),
         project.briefing_notes.as_deref(),
     );
+    // KT-1183 — experimental cross-agent audit; `None` keeps every step single-agent.
+    let cross_agents = super::cross_audit::briefing_cross_agents(
+        briefing_notes.as_deref(),
+        project.briefing_notes.as_deref(),
+    );
     // KT-926 — the only other repos this prompt names are the ones the user
     // explicitly linked to the project. Never the list of the machine's Kronn
     // projects: the prompt goes to the model provider, and a companion list
@@ -1372,6 +1377,108 @@ pub async fn full_audit(
                     }
                 };
 
+            // KT-1183 — a finding step under the cross-agent option: Kronn
+            // runs the agents, arbitrates and writes the step's documents.
+            let cross_handled = match cross_agents.as_deref() {
+                Some(agents) if crate::core::cross_audit::is_cross_checked_target(analysis_step.target_file) => {
+                    yield Event::default().event("cross_audit_start").data(serde_json::json!({
+                        "step": step, "file": file_label, "experimental": true,
+                        "agents": agents.iter().map(crate::core::cross_audit::agent_label).collect::<Vec<_>>(),
+                    }).to_string());
+                    let runner = super::cross_audit::LauncherRunner {
+                        state: state_for_validation.clone(),
+                        tier: audit_tier,
+                        project_path: project_path.clone(),
+                        project_path_str: project_path_str.clone(),
+                        tokens: tokens.clone(),
+                        step_target: analysis_step.target_file.to_string(),
+                    };
+                    let outcome = super::cross_audit::run_cross_step(&runner, &project_path, agents, &full_prompt).await;
+                    let (mut success, mut warning, report) = match outcome {
+                        Ok(mut report) => match super::cross_audit::write_outputs(&project_path, analysis_step.target_file, agents, &audit_run_id, &mut report) {
+                            Ok(()) => {
+                                let protected = super::helpers::protect_human_owned_sections(&project_path, &human_owned_snapshot, &today)
+                                    .err()
+                                    .map(|e| format!("human-owned section protection failed for {file_label}: {e}"));
+                                let (ok, w) = super::validation::validate_step_output(true, &project_path, analysis_step.target_file);
+                                (ok && protected.is_none(), protected.or(w.map(|w| w.reason)), Some(report))
+                            }
+                            Err(e) => (false, Some(format!("cross-agent audit could not write its documents: {e}")), Some(report)),
+                        },
+                        Err(e) => (false, Some(format!("cross-agent audit: {e}")), None),
+                    };
+                    if let Some(report) = report.as_ref() {
+                        let disputes = super::cross_audit::dispute_discussion(&project_id, &agent_type, &language, audit_tier, report);
+                        let mut dispute_id = disputes.as_ref().map(|(d, _)| d.id.clone());
+                        let (run_id, label, agents_owned) = (audit_run_id.clone(), file_label.to_string(), agents.to_vec());
+                        let snapshot = report.clone();
+                        let persisted = db.with_conn(move |conn| {
+                            super::cross_audit::persist(conn, &run_id, step as u32, &label, &agents_owned, &snapshot, disputes.as_ref())
+                        }).await;
+                        if let Err(e) = persisted {
+                            success = false;
+                            warning = Some(format!("cross-agent audit provenance could not be recorded (db): {e}"));
+                            dispute_id = None;
+                        }
+                        yield Event::default().event("cross_audit").data(
+                            super::cross_audit::summary_json(report, step, dispute_id.as_deref()).to_string(),
+                        );
+                    }
+                    if let Some(reason) = warning.as_ref() {
+                        yield Event::default().event("step_warning").data(serde_json::json!({
+                            "step": step, "file": file_label,
+                            "reason": reason, "repaired_from_template": false,
+                        }).to_string());
+                    }
+                    let usage = report.as_ref().map(|r| r.usage()).unwrap_or(crate::db::audit_runs::StepTokens::UNKNOWN);
+                    let cost = report.as_ref().and_then(|r| r.cost_usd_micros());
+                    let duration_ms = step_started_at.elapsed().as_millis() as u64;
+                    run_tokens.add(usage.total());
+                    yield Event::default().event("step_done").data(serde_json::json!({
+                        "step": step,
+                        "success": success,
+                        "outcome": step_outcome_label(success, false),
+                        "file": file_label,
+                        "tokens": usage.total(),
+                        "duration_ms": duration_ms,
+                        "total_tokens": run_tokens.total(),
+                        "cost_usd_micros": cost,
+                        "cross_audit": true,
+                    }).to_string());
+                    {
+                        let (run_id, warn_reason, recorded_total) = (audit_run_id.clone(), warning.clone(), run_tokens.total());
+                        if let Err(e) = db.with_conn(move |conn| {
+                            crate::db::audit_runs::finalize_audit_step_with_outcome(
+                                conn, &run_id, step as u32, Utc::now(), duration_ms, &usage,
+                                recorded_total, success, warn_reason.as_deref(), false, false,
+                            )?;
+                            if let Some(cost) = cost {
+                                crate::db::audit_runs::set_step_cost(conn, &run_id, step as u32, cost)?;
+                            }
+                            Ok(())
+                        }).await {
+                            tracing::error!("Failed to finalize cross-agent audit step {step}: {e}");
+                        }
+                    }
+                    if success {
+                        if analysis_step.target_file.contains("inconsistencies-") {
+                            freshly_written_indices.push(analysis_step.target_file.to_string());
+                        }
+                        let succeeded = progress.record_success(step as u32);
+                        let run_id = audit_run_id.clone();
+                        if let Err(e) = db.with_conn(move |conn| {
+                            crate::db::audit_runs::update_last_completed_step(conn, &run_id, succeeded)
+                        }).await {
+                            tracing::error!("Failed to persist last_completed_step after cross-agent step {step}: {e}");
+                        }
+                    } else {
+                        progress.record_failure(step as u32);
+                    }
+                    true
+                }
+                _ => false,
+            };
+
             // Correct blockers before final validation, at most twice per
             // step. Full's documentary gate also applies in off/warn mode;
             // the global provenance setting still controls the enforce gate.
@@ -1414,6 +1521,9 @@ pub async fn full_audit(
             let mut previous_attempt_usage: Option<crate::db::audit_runs::StepTokens> = None;
             let mut step_cost = super::agent_launch::StepCost::default();
             'attempts: loop {
+            if cross_handled {
+                break 'attempts;
+            }
             attempt += 1;
             let mut step_usage = crate::db::audit_runs::StepTokens::UNKNOWN;
             let attempt_prompt = match &citation_feedback {
