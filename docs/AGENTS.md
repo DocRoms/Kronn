@@ -64,7 +64,7 @@ Attach a structured citation to every non-trivial assertion:
 
 A citation to a missing file/line or outside the project root (even absolute) is **rejected as fabricated**; in backticks a failure is only unverified. A code comment is a hint, never the fact.
 
-CI (`cargo test docs_citations`) fails on a `file:` citation in `docs/` (not `releases/`) or `backend/docs/` lacking a line, whose root-relative path or line is missing, or whose anchor left the range; fenced code and `<placeholder>`s are skipped.
+`cargo test docs_citations` fails on a `file:` citation in `docs/` (not `releases/`) or `backend/docs/` lacking a line, whose root-relative path or line is missing, or whose anchor left the range; fenced code and `<placeholder>`s are skipped.
 
 Spec: [`agents-md-format-v1.md`](conventions/agents-md-format-v1.md). **Honest by design**: `verified` means the citation *exists*, not that the claim is *true*.
 <!-- kronn:section:end -->

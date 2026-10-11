@@ -145,6 +145,28 @@ Release notes for 0.9.3 and earlier are available in the
   were rewritten (ADR-002 no longer claims an advisory integration lease,
   the HTTP workspace catalogue lists its 13 tools including `git_commit`,
   audits accept every agent but Vibe, among others).
+- The docs citation check is scoped per pull request (KT-1195). A pull
+  request that changes no file under `docs/` or `backend/docs/` gets the
+  check as a counted warning (job summary and one annotation per failure),
+  never a failure; one that changes docs fails only on citations of the docs
+  it changes, with the repair command in the message
+  (`make docs-reanchor DOCS="…"`). A pull request that changes `VERSION` (a
+  release), a release run without a pull-request proof, a manual run and a
+  local `cargo test` stay strict on every doc. CI lists the changed paths
+  from the pull request's merge commit (`scripts/ci/docs_citations_changed.sh`,
+  failing rather than guessing when it cannot) and passes them to the test.
+  `make docs-reanchor` re-points a citation whose `#symbol` left its range
+  only when the symbol occurs once in the cited file, keeping the span length
+  (clamped) and the anchor; with several occurrences it rewrites nothing and
+  lists the candidate lines, and the CI message no longer suggests a « try »
+  range for such an anchor (the nearest occurrence was often the wrong one). Missing files, missing lines and lines past the
+  end are never rewritten, and only the checked docs are written. It is the
+  first step of the release checklist (`docs/operations/releasing.md`). The
+  CI check, the `verified` badge and the runtime verifier keep one anchor
+  rule with no tolerance window, now stated in the citation spec. The 16
+  citations the integration had shifted were repaired: 1 by the command, 15
+  by hand, because their symbol occurs several times (for one of them the
+  nearest occurrence was the wrong one).
 - Audit versions and standards are judged from dated sources (KT-1000). The
   tech-debt step and the security pass get a « Technologies and standards »
   block: the project's stored dependency watch (version in place, latest,

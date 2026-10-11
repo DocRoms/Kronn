@@ -103,6 +103,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
+          # Both parents of the pull request's merge commit, for the doc-citation scope.
+          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 1 }}
 
       # Cache the reusable instrumented directories in place. Never archive
       # profraw files, debug/incremental, tmp, or any other transient target
@@ -190,6 +192,12 @@ jobs:
       - name: cargo fmt
         run: cargo fmt --all -- --check
 
+      # The doc-citation gate blocks a pull request only on the docs it
+      # changes; other triggers leave the variable unset and stay strict.
+      - name: Doc citations — paths this pull request changes
+        if: github.event_name == 'pull_request'
+        run: ../scripts/ci/docs_citations_changed.sh "$RUNNER_TEMP/docs-citations-changed.txt"
+
       # Same runner and configuration as `make test-backend-cov`
       # (backend/.config/nextest.toml, profile `ci`).
       - name: cargo llvm-cov nextest — measured backend critical path and coverage floor
@@ -198,11 +206,20 @@ jobs:
           # One profile per test process would be ~9,600 files and ~50 GB;
           # LLVM merges them online into a pool of eight per binary instead.
           LLVM_PROFILE_FILE_NAME: kronn-%8m.profraw
+          KRONN_DOCS_CITATIONS_REPORT_DIR: ${{ runner.temp }}/docs-citations
         run: |
           cargo llvm-cov nextest --workspace --summary-only \
             --fail-under-lines 83 \
             --fail-under-functions 83 \
             --fail-under-regions 83
+
+      # nextest hides a passing test's output: the gate leaves its warnings here.
+      - name: Doc citations — annotations and summary
+        if: always()
+        run: |
+          dir="$RUNNER_TEMP/docs-citations"
+          if [ -f "$dir/summary.md" ]; then cat "$dir/summary.md" >> "$GITHUB_STEP_SUMMARY"; fi
+          if [ -f "$dir/annotations.txt" ]; then cat "$dir/annotations.txt"; fi
 
       - name: cargo llvm-cov — key-management scoped floor
         run: ../scripts/check-keymgmt-coverage.sh

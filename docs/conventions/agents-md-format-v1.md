@@ -138,6 +138,13 @@ An anchor absent from the cited lines makes the citation `out_of_bounds` (the ra
 for what it names); the detail says where the symbol does appear, if anywhere. The check is
 textual and deterministic: no code is parsed.
 
+**One anchor rule, no tolerance window.** The runtime verifier, the `verified` badge it feeds
+and Kronn's docs check apply this same rule: the symbol is inside the cited lines, or the
+citation fails; one line past the range fails everywhere. A tool that re-anchors a moved
+citation rewrites the range only when the symbol occurs once in the cited file, keeping the
+span length and the anchor; with several occurrences a human picks the line. A missing file
+or line is never re-anchored.
+
 A marker quoted in inline backticks is verified too: it is `verified` when it resolves, but a
 failure there counts as *unverified*, not fabricated, because backticks also quote the grammar
 as an example. Markers inside fenced code blocks are not read.

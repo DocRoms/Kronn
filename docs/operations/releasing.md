@@ -6,19 +6,23 @@ and the update banner led users to empty release pages (KT-970).
 
 ## Steps
 
-1. `make bump V=x.y.z`, update "What's new" in `README.md` and the site note
+1. `make docs-reanchor`: it re-points every doc citation whose `#symbol`
+   moved, when the symbol occurs once in the cited file, then runs the strict
+   citation check over every doc. Fix what it lists by hand and commit. A pull
+   request that changes `VERSION` gets that strict check in CI too.
+2. `make bump V=x.y.z`, update "What's new" in `README.md` and the site note
    (`make bump` leaves them), then run `scripts/check-version-sync.sh`
    directly.
-2. Merge, then tag the merge commit `x.y.z` (no `v`) and push the tag.
-3. Desktop Build first runs `scripts/check-version-sync.sh <tag>`: the tag must
+3. Merge, then tag the merge commit `x.y.z` (no `v`) and push the tag.
+4. Desktop Build first runs `scripts/check-version-sync.sh <tag>`: the tag must
    equal `VERSION` (a `-rc1` tag fails) and every version marker must agree.
    It then builds the four installers (Windows `.exe`, macOS Apple Silicon and
    Intel `.dmg`, Linux `.deb`: exactly the Tauri targets `deb`, `nsis`, `dmg`;
    no `.msi` or `.AppImage`), checks that each is a real, non-empty file, and
    creates a **draft** release carrying them.
-4. Its last step reads the release's assets back from GitHub and fails if a
+5. Its last step reads the release's assets back from GitHub and fails if a
    platform has no installer (`verify_artifacts.py --release-assets`).
-5. Review the notes and publish the draft.
+6. Review the notes and publish the draft.
 
 Desktop Build resolves the release commit once (`release-checks`, output
 `sha`) and every checkout, the dependency review and the CI gate use that SHA,

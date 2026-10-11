@@ -88,7 +88,7 @@ standalone Rust test files; a `#[cfg(test)]` on their parent module does not
 exclude their contents. Propagate fallible fixture setup inside the closure
 and assert its result after awaiting it.
 `[src: file: backend/scripts/ci/lint_with_conn_unwrap.py:79-115]`
-`[src: file: .github/workflows/ci-test.yml:449-454]`
+`[src: file: .github/workflows/ci-test.yml:466-471]`
 
 Supervisor cleanup must also reap live shell jobs whose PID was not yet recorded:
 a termination signal can arrive between the fork and that assignment, leaving
@@ -124,7 +124,7 @@ tree (`target/llvm-cov-target/debug/{.fingerprint,build,deps}`); a warmup only
 validates them and writes a versioned marker (`.kronn-backend-cache-v3`)
 before the cache action's post-job save. Profraw files, the nextest store and
 other transient trees are never archived.
-[src: file: .github/workflows/ci-test.yml:71-228]
+[src: file: .github/workflows/ci-test.yml:71-245]
 
 The backend performance observer publishes the duration for every eligible run
 and reports a warning rather than failing a green functional run when a hot
@@ -140,7 +140,7 @@ a verified restored compiled cache. The v3 key cannot restore the former
 debug layout, so the first run is an explicit warmup.
 [src: file: .cargo/config.toml:1-6] [src: file: scripts/ci/backend_ci_slo.mjs:1-153]
 The observer's Node unit test runs in the blocking `test-python` gate.
-[src: file: .github/workflows/ci-test.yml:299-324]
+[src: file: .github/workflows/ci-test.yml:316-341]
 
 Run `CI Tests` manually with `cache_mode=hot` for a warmed compiled-artifact
 measurement or `cache_mode=cold` for a current-run-only cold measurement.
@@ -198,9 +198,9 @@ gate is skipped or fails. A timeout is a functional failure; the SLO observer
 does not retry, sleep, or mask it. An SLO breach is a warning, while missing,
 duplicate, incomplete, or contradictory measurement evidence fails the
 observer instead of publishing a misleading timing.
-[src: file: .github/workflows/ci-test.yml:37-59] [src: file: .github/workflows/ci-test.yml:750-778]
+[src: file: .github/workflows/ci-test.yml:37-59] [src: file: .github/workflows/ci-test.yml:767-795]
 
-[src: file: .github/workflows/ci-test.yml:719]
+[src: file: .github/workflows/ci-test.yml:736]
 
 ## Test placement
 
