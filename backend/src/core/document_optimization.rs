@@ -443,8 +443,8 @@ fn unindexed_tds(project: &Path, docs: &[PathBuf], out: &mut Vec<Diagnostic>) {
 }
 
 /// Links and citations of one document. A dead one inside an `owner="human"`
-/// section is reported for its owner and never blocks: no audit step may
-/// rewrite that section, so blocking on it would leave no way forward.
+/// section is reported for its owner and never blocks: human prose never
+/// holds a run back (KT-1079).
 fn inspect_references(
     project: &Path,
     source: &Path,
@@ -470,7 +470,7 @@ fn demote_human_section(rel: &str, name: &str, found: Vec<Diagnostic>, out: &mut
             HUMAN_SECTION_REFERENCE,
             rel,
             format!(
-                "human-owned section `{name}`: {}; only its owner can fix it",
+                "human-owned section `{name}`: {}; reported for its owner, never blocking",
                 d.message
             ),
         );

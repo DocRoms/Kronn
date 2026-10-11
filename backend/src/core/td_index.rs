@@ -618,8 +618,9 @@ pub fn resync(docs_dir: &Path, trust: crate::core::adr::Trust) -> Result<ResyncO
 }
 
 /// Resync `<docs>/inconsistencies-tech-debt.md` from `<docs>/tech-debt/`.
-/// Leaves the file alone when it is absent, a symlink, or carries a
-/// human-owned section; the `unindexed_td` diagnostic then reports the gap.
+/// Leaves the file alone when it is absent or a symlink; the `unindexed_td`
+/// diagnostic then reports the gap. A human-validated index is rewritten and
+/// marked to reconfirm (KT-1079).
 fn resync_index(docs_dir: &Path) -> Result<ResyncOutcome, String> {
     let index = docs_dir.join(CENTRAL_INDEX);
     let skip = |why: &str| {
@@ -637,9 +638,6 @@ fn resync_index(docs_dir: &Path) -> Result<ResyncOutcome, String> {
     }
     let content =
         std::fs::read_to_string(&index).map_err(|e| format!("read {}: {e}", index.display()))?;
-    if crate::api::audit::anti_hallu_enforce::contains_human_owned_section(&content) {
-        return skip("central index has a human-owned section");
-    }
     let sheets = read_sheets(docs_dir);
     let has_block = content
         .lines()
@@ -651,6 +649,21 @@ fn resync_index(docs_dir: &Path) -> Result<ResyncOutcome, String> {
     let (text, outcome) = resync_content(&content, &sheets, &indexes);
     if outcome.changed {
         crate::core::mcp_scanner::atomic_write(&index, &text)?;
+        if let Some(project) = docs_dir.parent() {
+            let rel = index
+                .strip_prefix(project)
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();
+            if let Err(e) = crate::core::doc_provenance::note_write(
+                project,
+                &rel,
+                &content,
+                &text,
+                crate::core::doc_provenance::DocWriter::TdIndex,
+            ) {
+                tracing::warn!("Human-validation provenance of {rel} not recorded: {e}");
+            }
+        }
     }
     Ok(outcome)
 }

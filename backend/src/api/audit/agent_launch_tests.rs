@@ -467,10 +467,23 @@ async fn http_resume_repairs_an_auxiliary_document_from_a_previously_successful_
         );
         let repaired =
             std::fs::read_to_string(project.path().join("docs/tech-debt/TD-repair.md")).unwrap();
+        // The rewrite that dropped the human section stays (KT-1079): the
+        // doc waits for its owner to reconfirm, with the human text as before.
         assert!(
-            repaired.contains(human.trim_end()),
-            "human section restored before validation: {repaired:?}"
+            !repaired.contains(human.trim_end()),
+            "never reverted: {repaired:?}"
         );
+        let provenance = crate::core::doc_provenance::report(project.path(), true).unwrap();
+        let marked = provenance
+            .docs
+            .iter()
+            .find(|d| d.doc == "docs/tech-debt/TD-repair.md")
+            .unwrap_or_else(|| panic!("{provenance:?}"));
+        assert!(marked.changes[0]
+            .before
+            .as_deref()
+            .unwrap()
+            .contains("Human decision remains."));
         assert_eq!(repaired.contains("invented.rs"), !correct);
         assert!(
             std::fs::read_dir(

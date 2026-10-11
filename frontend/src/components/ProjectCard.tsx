@@ -17,6 +17,7 @@ import type { AuditKind } from '../types/AuditKind';
 import { ProjectLinkedRepos } from './ProjectLinkedRepos';
 import { SourcesBadge } from './SourcesBadge';
 import { RevalidateAudit } from './RevalidateAudit';
+import { DocReconfirm } from './DocReconfirm';
 import { TdTasksButton } from './TdTasksButton';
 import {
   saveAuditCheckpoint, loadAuditCheckpoint, clearAuditCheckpoint,
@@ -1364,6 +1365,7 @@ export function ProjectCard({
               )}
               {!auditActive && <SourcesBadge drift={driftStatus} />}
               <RevalidateAudit project={proj} auditActive={auditActive} agent={selectedAuditAgent} tier={auditTierChoice} connectionId={auditConnectionId} toast={toast} onRefetch={onRefetch} onRefetchDrift={onRefetchDrift} onOpenDiscussion={onOpenDiscussion} onNavigate={onNavigate} />
+              <DocReconfirm project={proj} auditActive={auditActive} toast={toast} />
               <TdTasksButton project={proj} auditActive={auditActive} toast={toast} />
               {!auditActive && !resumableAudit && driftStatus && driftStatus.stale_sections.length > 0 && (
                 <>
@@ -1509,6 +1511,7 @@ export function ProjectCard({
             ) : null}
             {!auditActive && <SourcesBadge drift={driftStatus} />}
             <RevalidateAudit project={proj} auditActive={auditActive} agent={selectedAuditAgent} tier={auditTierChoice} connectionId={auditConnectionId} toast={toast} onRefetch={onRefetch} onRefetchDrift={onRefetchDrift} onOpenDiscussion={onOpenDiscussion} onNavigate={onNavigate} />
+            <DocReconfirm project={proj} auditActive={auditActive} toast={toast} />
             <TdTasksButton project={proj} auditActive={auditActive} toast={toast} />
             {!auditActive && latestAuditOutcome && (
               <button

@@ -44,7 +44,7 @@ Free-form prose owned by humans. Kronn never validates this section.
 |---|---|---|
 | `name` | yes | Stable, unique-within-file section id. Survives reordering/renames. |
 | `curated` | yes | `"ai"` (provenance required) or `"human"` (free-form, never validated). |
-| `owner` | template v2 | `"audit"` (the audit may refresh it) or `"human"` (the audit must preserve it byte-for-byte and propose changes separately). If absent on a legacy marker, `curated="human"` implies human ownership; otherwise audit ownership is assumed. |
+| `owner` | template v2 | `"audit"` (the audit may refresh it) or `"human"` (a person wrote or validated it: Kronn may still correct it, and then asks for a reconfirmation). If absent on a legacy marker, `curated="human"` implies human ownership; otherwise audit ownership is assumed. |
 | `audit` | for `curated="ai"` | ISO-8601 date the section was last **verified against reality**. Distinct from git's "last edited". |
 
 The file SHOULD open with `<!-- kronn:doc-version="1.0" -->`. A file with **no**
@@ -56,12 +56,18 @@ is strictly opt-in by presence.
 - **`curated="ai"`** — provenance is required: every non-trivial assertion needs a
   `[src: …]` citation.
 - **`curated="human"`** — owned by a person, free-form, never validated.
-- **`owner="human"`** — never rewritten by a full or partial audit. A re-audit
-  restores the original block and records its proposal as a dated diff. The
-  legacy `curated="human"` spelling receives the same protection. This holds for
-  the audit's own STEP 0 too (the `anti-hallu` section included), and a
-  `kronn:section` marker inside a fenced code block (``` or `~~~`) is an example,
-  never a boundary: it neither opens nor closes a protected section.
+- **`owner="human"`** — written or validated by a person. No Kronn write is
+  refused or reverted because of it: an audit, a revalidation, a template
+  reinstall or a documentary repair applies its change, and the section is
+  then marked "to reconfirm" with the diff until its owner confirms it. The
+  legacy `curated="human"` spelling is read the same way. STEP 0 never restamps
+  a human opener, and a `kronn:section` marker inside a fenced code block
+  (``` or `~~~`) is an example, never a boundary.
+- **Human-validation provenance** — a validation (`validate-audit`, a TD
+  validation card, « Vérifié, inchangé », « Confirmer ») records the digest of
+  what the person approved in `docs/provenance.json`, next to `citations.json`.
+  No marker is added to the prose. A doc whose validated text changed reads as
+  AI-generated, for the learning gate too, until it is reconfirmed.
 - **Asymmetric conversion** — a human may convert a `curated="ai"` section to
   `curated="human"`. The reverse never happens automatically: human authority outranks AI,
   never the other way around.

@@ -409,8 +409,9 @@ fn prompt_kinds(tools: &Path) -> Vec<(String, bool)> {
 
 /// KT-1132 — a re-audit re-checks a filled document against the current code:
 /// a claim whose citation no longer resolves is corrected in the same run,
-/// a true document stays byte-identical, a human-owned section stays intact,
-/// a dead citation inside a human section becomes a to-do for its owner
+/// a true document stays byte-identical, a rewrite of a human-owned section
+/// is kept and marked to reconfirm (KT-1079), a dead citation inside a human
+/// section becomes a to-do for its owner
 /// instead of a blocker, and the operator's `.gitignore` is never written.
 #[tokio::test]
 #[serial_test::serial]
@@ -498,13 +499,31 @@ async fn a_reaudit_corrects_a_stale_citation_and_leaves_true_docs_unchanged() {
         );
     }
 
-    // The stale claims are gone, the true one and the human rule stay.
+    // The stale claims are gone, the true one stays; the agent's rewrite of
+    // the human rule is kept, and the doc waits for its owner to reconfirm.
     let corrected = std::fs::read_to_string(&rules).unwrap();
     assert!(!corrected.contains("src/gone.rs"), "{corrected}");
     assert!(!corrected.contains("src/kept.rs:40"), "{corrected}");
     assert!(corrected.contains("- The entry point is `main` [src: file: src/kept.rs:1]\n"));
-    assert!(corrected.contains(human), "{corrected}");
-    assert!(!corrected.contains("Agent rewrote"), "{corrected}");
+    assert!(
+        corrected.contains("Agent rewrote the human rule"),
+        "{corrected}"
+    );
+    let provenance = crate::core::doc_provenance::report(project, true).unwrap();
+    let marked = provenance
+        .docs
+        .iter()
+        .find(|d| d.doc == "docs/coding-rules.md")
+        .unwrap_or_else(|| panic!("{provenance:?}"));
+    assert_eq!(
+        marked.state,
+        crate::core::doc_provenance::ProvenanceState::ToReconfirm
+    );
+    assert!(marked.changes[0]
+        .before
+        .as_deref()
+        .unwrap()
+        .contains("Human-owned rule"));
     let rules_done = sse_events(&second, "step_done")
         .into_iter()
         .find(|e| e["step"] == rules_step)
@@ -534,7 +553,7 @@ async fn a_reaudit_corrects_a_stale_citation_and_leaves_true_docs_unchanged() {
         .unwrap();
     assert_eq!(glossary_done["outcome"], "unchanged", "{glossary_done}");
     let message = "human-owned section `vocabulary-owner`: citation path does not exist \
-                   `src/retired.rs`; only its owner can fix it";
+                   `src/retired.rs`; reported for its owner, never blocking";
     let reported = optimization["diagnostics"]
         .as_array()
         .unwrap()

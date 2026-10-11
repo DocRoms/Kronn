@@ -5,7 +5,7 @@
 // pass of the partial-audit pipeline (same lease, run row, cancel, resume),
 // on the owning steps only, with the findings and the revalidation skill.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::convert::Infallible;
 use std::path::Path as FsPath;
 
@@ -25,22 +25,13 @@ use super::SseStream;
 /// The builtin skill the agent pass receives.
 pub(crate) const SKILL_ID: &str = "audit-revalidation";
 
-/// Lines of `content` inside `owner="human"` sections, and each section's
-/// citation labels.
-fn human_parts(content: &str) -> (HashSet<usize>, Vec<(String, BTreeSet<String>)>) {
-    let (blanked, sections) = super::anti_hallu_enforce::split_human_owned_sections(content);
-    let lines: HashSet<usize> = content
-        .split('\n')
-        .zip(blanked.split('\n'))
-        .enumerate()
-        .filter(|(_, (original, kept))| original != kept)
-        .map(|(index, _)| index)
-        .collect();
-    let labels = sections
+/// Each `owner="human"` section's citation labels, listed for its owner.
+fn human_parts(content: &str) -> Vec<(String, BTreeSet<String>)> {
+    let (_, sections) = super::anti_hallu_enforce::split_human_owned_sections(content);
+    sections
         .into_iter()
         .map(|(name, text)| (name, citation_drift::cite_labels(&text)))
-        .collect();
-    (lines, labels)
+        .collect()
 }
 
 fn owning_step(chain: &[super::AnalysisStep], doc: &str) -> Option<usize> {
@@ -63,9 +54,7 @@ pub fn plan(project_path: &FsPath) -> RevalidationPlan {
             continue;
         }
         let content = std::fs::read_to_string(project_path.join(&section.doc)).unwrap_or_default();
-        let (blanked, _) = super::anti_hallu_enforce::split_human_owned_sections(&content);
-        let ai_labels = citation_drift::cite_labels(&blanked);
-        let (_, human_sections) = human_parts(&content);
+        let human_sections = human_parts(&content);
         let mut entry = RevalidationSection {
             doc: section.doc.clone(),
             step: owning_step(&chain, &section.doc),
@@ -84,15 +73,12 @@ pub fn plan(project_path: &FsPath) -> RevalidationPlan {
                     });
                 }
             }
-            let in_human = entry.human.iter().any(|h| h.citation.cite == citation.cite);
-            // Not found in either part (a citation the doc lost): the agent
-            // re-verifies it like any audit-owned one.
-            if ai_labels.contains(&citation.cite) || !in_human {
-                if citation.state == CitationState::Moved {
-                    entry.reanchor.push(citation.clone());
-                } else {
-                    entry.broken.push(citation.clone());
-                }
+            // A citation in a human section is corrected like any other; its
+            // owner then reconfirms the doc (KT-1079).
+            if citation.state == CitationState::Moved {
+                entry.reanchor.push(citation.clone());
+            } else {
+                entry.broken.push(citation.clone());
             }
         }
         entry.action = if section.doc_missing || (!entry.broken.is_empty() && entry.step.is_none())
@@ -126,8 +112,9 @@ pub(crate) struct Reanchored {
     pub count: usize,
 }
 
-/// Rewrite every moved citation outside human sections to its new line and
-/// move its fingerprint with it. Callers hold the project's audit lease.
+/// Rewrite every moved citation to its new line and move its fingerprint with
+/// it. A human-validated doc it rewrites is marked to reconfirm. Callers hold
+/// the project's audit lease.
 pub(crate) fn apply_reanchors(project_path: &FsPath) -> Result<Vec<Reanchored>, String> {
     let mut done = Vec::new();
     for section in plan(project_path).sections {
@@ -138,14 +125,24 @@ pub(crate) fn apply_reanchors(project_path: &FsPath) -> Result<Vec<Reanchored>, 
         let path = project_path.join(&section.doc);
         let before = std::fs::read_to_string(&path)
             .map_err(|e| format!("Cannot read {}: {e}", section.doc))?;
-        let (human_lines, _) = human_parts(&before);
-        let (after, count) =
-            citation_drift::rewrite_citations(&before, &moves, |i| !human_lines.contains(&i));
+        let (after, count) = citation_drift::rewrite_citations(&before, &moves, |_| true);
         if count == 0 {
             continue;
         }
         crate::core::mcp_scanner::atomic_write(&path, &after)?;
         citation_drift::record_reanchored(project_path, &section.doc, &before, &after, &moves)?;
+        if let Err(e) = crate::core::doc_provenance::note_write(
+            project_path,
+            &section.doc,
+            &before,
+            &after,
+            crate::core::doc_provenance::DocWriter::Revalidation,
+        ) {
+            tracing::warn!(
+                "Human-validation provenance of {} not recorded: {e}",
+                section.doc
+            );
+        }
         done.push(Reanchored {
             doc: section.doc,
             count,
@@ -201,7 +198,7 @@ pub(crate) fn prompt_blocks(plan: &RevalidationPlan) -> HashMap<usize, String> {
         }
         if !section.human.is_empty() {
             block.push_str(
-                "These citations sit in `owner=\"human\"` sections: never edit them, they are listed for their owner.\n",
+                "These citations sit in `owner=\"human\"` sections: correct them like the others, keep the rest of the human wording; Kronn asks their owner to reconfirm.\n",
             );
             for h in &section.human {
                 block.push_str(&format!(
@@ -235,7 +232,18 @@ pub(crate) fn restore_validation_if_untouched(
     let untouched = snapshots.iter().all(|(target, before)| {
         super::validation::target_snapshot(project_path, target).is_ok_and(|now| &now == before)
     });
-    untouched && crate::core::kronn_state::restore_validated(project_path, date).is_ok()
+    if !(untouched && crate::core::kronn_state::restore_validated(project_path, date).is_ok()) {
+        return false;
+    }
+    let docs: Vec<String> = snapshots.iter().map(|(target, _)| target.clone()).collect();
+    if let Err(e) = crate::core::doc_provenance::refresh_validation(
+        project_path,
+        &docs,
+        crate::core::doc_provenance::ValidationReason::Revalidation,
+    ) {
+        tracing::warn!("Human-validation provenance not recorded: {e}");
+    }
+    true
 }
 
 async fn project_of(state: &AppState, id: &str) -> Result<Project, String> {

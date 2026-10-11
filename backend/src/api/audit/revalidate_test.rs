@@ -58,16 +58,19 @@ fn the_plan_sorts_each_citation_into_reanchor_agent_human_or_manual() {
     let plan = plan(tmp.path());
     assert_eq!(plan.sources_state, SourcesState::NeedsReverification);
     assert_eq!(plan.agent_steps, vec![rules_step()]);
-    assert_eq!(plan.reanchor_count, 1);
+    assert_eq!(plan.reanchor_count, 2, "the human citation moves too");
     assert_eq!(plan.human_count, 1);
 
     let rules = plan.sections.iter().find(|s| s.doc == RULES).unwrap();
     assert_eq!(rules.action, RevalidationAction::Agent);
     assert_eq!(rules.step, Some(rules_step()));
-    assert_eq!(
-        cites(&rules.reanchor),
-        vec![("src/lib.rs:2", CitationState::Moved)]
-    );
+    let mut moved: Vec<&str> = rules.reanchor.iter().map(|c| c.cite.as_str()).collect();
+    moved.sort_unstable();
+    assert_eq!(moved, vec!["src/lib.rs:1", "src/lib.rs:2"]);
+    assert!(rules
+        .reanchor
+        .iter()
+        .all(|c| c.state == CitationState::Moved));
     assert_eq!(
         cites(&rules.broken),
         vec![("src/lib.rs:6", CitationState::Changed)]
@@ -87,22 +90,28 @@ fn the_plan_sorts_each_citation_into_reanchor_agent_human_or_manual() {
 }
 
 #[test]
-fn re_anchoring_rewrites_the_audit_part_and_never_a_human_section() {
+fn re_anchoring_rewrites_a_human_section_too_and_marks_it_to_reconfirm() {
     let tmp = drifted();
     let dir = tmp.path();
     let notes_before = fs::read(dir.join("docs/notes.md")).unwrap();
     let done = apply_reanchors(dir).unwrap();
     assert_eq!(done.len(), 1);
     assert_eq!(done[0].doc, RULES);
-    assert_eq!(done[0].count, 1);
+    assert_eq!(done[0].count, 2);
     let rules = fs::read_to_string(dir.join(RULES)).unwrap();
     assert!(
         rules.contains("Retries [src: file: src/lib.rs:3].\n"),
         "{rules}"
     );
     assert!(
-        rules.contains("Owner note [src: file: src/lib.rs:1].\n"),
-        "{rules}"
+        rules.contains("Owner note [src: file: src/lib.rs:2].\n"),
+        "never refused: {rules}"
+    );
+    let provenance = crate::core::doc_provenance::report(dir, true).unwrap();
+    assert_eq!(provenance.to_reconfirm, 1);
+    assert_eq!(
+        provenance.docs[0].kronn_writes[0].writer,
+        crate::core::doc_provenance::DocWriter::Revalidation
     );
     assert!(
         rules.contains("Timeout [src: file: src/lib.rs:6].\n"),
@@ -110,7 +119,7 @@ fn re_anchoring_rewrites_the_audit_part_and_never_a_human_section() {
     );
     assert_eq!(fs::read(dir.join("docs/notes.md")).unwrap(), notes_before);
 
-    // The moved one is settled; the broken and the human ones stay.
+    // Both moves are settled, the fingerprints follow; the broken one stays.
     let after = plan(dir);
     let section = after.sections.iter().find(|s| s.doc == RULES).unwrap();
     assert!(section.reanchor.is_empty());
@@ -118,7 +127,6 @@ fn re_anchoring_rewrites_the_audit_part_and_never_a_human_section() {
         cites(&section.broken),
         vec![("src/lib.rs:6", CitationState::Changed)]
     );
-    assert_eq!(section.human.len(), 1);
     // Idempotent: a second pass has nothing left to move.
     assert!(apply_reanchors(dir).unwrap().is_empty());
 }
@@ -179,7 +187,7 @@ fn the_agent_block_carries_the_skill_and_the_findings_of_its_doc_only() {
         "{block}"
     );
     assert!(
-        block.contains("Kronn already re-anchored 1 moved citation(s)"),
+        block.contains("Kronn already re-anchored 2 moved citation(s)"),
         "{block}"
     );
     assert!(
@@ -231,7 +239,7 @@ fn the_validation_comes_back_only_when_no_target_changed() {
 }
 
 #[test]
-fn a_label_cited_in_both_parts_is_re_anchored_in_the_audit_part_only() {
+fn a_label_cited_in_both_parts_is_re_anchored_in_both() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     fs::create_dir_all(dir.join("src")).unwrap();
@@ -263,16 +271,9 @@ fn a_label_cited_in_both_parts_is_re_anchored_in_the_audit_part_only() {
     apply_reanchors(dir).unwrap();
     assert_eq!(
         fs::read_to_string(dir.join(RULES)).unwrap(),
-        doc.replacen(
-            "Retries [src: file: src/lib.rs:2]",
-            "Retries [src: file: src/lib.rs:3]",
-            1
-        )
+        doc.replace("src/lib.rs:2", "src/lib.rs:3")
     );
-    // The human copy is still listed for its owner, never rewritten.
-    let after = plan(dir);
-    let section = after.sections.iter().find(|s| s.doc == RULES).unwrap();
-    assert!(section.reanchor.is_empty());
-    assert_eq!(section.action, RevalidationAction::Human);
-    assert_eq!(section.human[0].citation.cite, "src/lib.rs:2");
+    assert!(plan(dir).sections.iter().all(|s| s.doc != RULES));
+    let provenance = crate::core::doc_provenance::report(dir, false).unwrap();
+    assert_eq!(provenance.to_reconfirm, 1, "the human copy asks its owner");
 }

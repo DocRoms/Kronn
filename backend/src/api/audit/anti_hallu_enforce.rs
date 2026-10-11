@@ -273,6 +273,32 @@ pub fn split_human_owned_sections(content: &str) -> (String, Vec<(String, String
     (lines.join("\n"), human)
 }
 
+/// One live named section: its text (markers included) and 0-based line span.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedSection {
+    pub name: String,
+    pub block: String,
+    pub human: bool,
+    pub start: usize,
+    pub end: usize,
+}
+
+/// Every live named section of `content`; fenced examples are not sections.
+pub fn named_sections(content: &str) -> Vec<NamedSection> {
+    let lines: Vec<&str> = content.split('\n').collect();
+    let scan = code_line_mask(content, false);
+    parse_named_sections(&lines, &scan.in_fence)
+        .into_iter()
+        .map(|span| NamedSection {
+            block: lines[span.start..=span.end].join("\n"),
+            name: span.name,
+            human: span.is_human,
+            start: span.start,
+            end: span.end,
+        })
+        .collect()
+}
+
 pub fn contains_human_owned_section(content: &str) -> bool {
     let lines: Vec<&str> = content.split('\n').collect();
     let scan = code_line_mask(content, false);
@@ -375,31 +401,6 @@ pub fn enforce_human_owned_sections(
     }
 
     Some((out_lines.join("\n"), diffs))
-}
-
-/// Render the audit-proposed changes for a human to review by hand.
-pub fn format_human_section_diff_report(
-    file_label: &str,
-    diffs: &[HumanSectionDiff],
-    today: &str,
-) -> String {
-    let mut out = format!(
-        "# Proposed changes to human-owned sections — {today}\n\n\
-The audit tried to update the following `owner=\"human\"` section(s) in \
-`{file_label}` but left them untouched, as the convention requires. Review \
-each diff below and apply it by hand if you agree with it.\n"
-    );
-    for d in diffs {
-        out.push_str(&format!(
-            "\n## Section `{}`\n\n### Kept (current)\n\n```\n{}\n```\n\n### Audit-proposed\n\n```\n{}\n```\n",
-            d.name,
-            d.pre_block,
-            d.post_block
-                .as_deref()
-                .unwrap_or("(the audit removed this section — it was restored)"),
-        ));
-    }
-    out
 }
 
 #[cfg(test)]
@@ -792,35 +793,6 @@ mod tests {
         assert_eq!(
             occupied,
             vec![false, true, true, true, true, true, true, false, false]
-        );
-    }
-
-    #[test]
-    fn diff_report_names_the_file_and_every_section() {
-        let diffs = vec![
-            HumanSectionDiff {
-                name: "team".to_string(),
-                pre_block: "kept text".to_string(),
-                post_block: Some("agent text".to_string()),
-            },
-            HumanSectionDiff {
-                name: "roadmap".to_string(),
-                pre_block: "kept roadmap".to_string(),
-                post_block: None,
-            },
-        ];
-        let report = format_human_section_diff_report("docs/AGENTS.md", &diffs, "2026-09-27");
-        assert!(report.contains("docs/AGENTS.md"));
-        assert!(report.contains("2026-09-27"));
-        assert!(
-            report.contains("team")
-                && report.contains("kept text")
-                && report.contains("agent text")
-        );
-        assert!(report.contains("roadmap") && report.contains("kept roadmap"));
-        assert!(
-            report.contains("restored"),
-            "the removed section notes it was restored"
         );
     }
 

@@ -23,7 +23,8 @@ the smallest possible edit.
   (`file missing`). They are facts, not guesses: start there.
 - **Moved citations** were already re-anchored by Kronn (same content, new
   line). Do not touch them.
-- **Human-owned citations** are listed for their owner only.
+- **Human-owned citations** sit in `owner="human"` sections: correct them
+  like the others. Kronn asks their owner to reconfirm the change.
 
 ## Procedure
 
@@ -45,8 +46,8 @@ the smallest possible edit.
 
 - Keep every statement that is still true exactly as written: no rephrasing,
   reordering or restyling. A file that is still accurate stays byte-identical.
-- Never edit a section marked `owner="human"`, even to fix its citations.
-  Kronn lists those for their owner.
+- In a section marked `owner="human"`, correct only what the code
+  contradicts and keep the rest of the human wording.
 - Never invent a fact to fill a gap. If you cannot prove a replacement, remove
   the claim.
 - Edit only the target file named by the step.

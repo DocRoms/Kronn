@@ -1355,8 +1355,8 @@ pub async fn full_audit(
             // Snapshot the full human-owned surface, not just target_file:
             // Step 9 and future review prompts may legitimately edit several
             // docs during one attempt.
-            let human_owned_snapshot =
-                match super::helpers::capture_human_owned_sections(&project_path) {
+            let validated_docs_snapshot =
+                match super::helpers::capture_validated_docs(&project_path) {
                     Ok(snapshot) => snapshot,
                     Err(reason) => {
                         yield Event::default().event("step_warning").data(
@@ -1865,36 +1865,27 @@ pub async fn full_audit(
                         }
                     }
 
-                    // Ownership is enforced at the attempt boundary, before
-                    // cancellation, retry, or failure can leave an agent's
-                    // rewrite on disk. A report failure also fails the step:
-                    // the human text is restored, but the promised proposal
-                    // was not durably recorded.
-                    let ownership_warning = match super::helpers::protect_human_owned_sections(
+                    // Every write of the attempt stays; the docs a human
+                    // validated are marked to reconfirm (KT-1079). A failed
+                    // record is a warning, never a failed step.
+                    if let Err(reason) = super::helpers::mark_validated_doc_writes(
                         &project_path,
-                        &human_owned_snapshot,
-                        &today,
+                        &validated_docs_snapshot,
+                        crate::core::doc_provenance::DocWriter::FullAudit,
                     ) {
-                        Ok(_) => None,
-                        Err(reason) => {
-                            let reason = format!(
-                                "human-owned section protection failed for {file_label}: {reason}"
-                            );
-                            tracing::warn!("Audit step {} ({}): {}", step, file_label, reason);
-                            yield Event::default().event("step_warning").data(
-                                serde_json::json!({
-                                    "step": step,
-                                    "file": file_label,
-                                    "reason": reason.clone(),
-                                    "repaired_from_template": false,
-                                }).to_string()
-                            );
-                            Some(crate::api::audit::validation::StepValidationWarning {
-                                reason,
-                                repaired: false,
-                            })
-                        }
-                    };
+                        let reason = format!(
+                            "human-validation provenance not recorded for {file_label}: {reason}"
+                        );
+                        tracing::warn!("Audit step {} ({}): {}", step, file_label, reason);
+                        yield Event::default().event("step_warning").data(
+                            serde_json::json!({
+                                "step": step,
+                                "file": file_label,
+                                "reason": reason,
+                                "repaired_from_template": false,
+                            }).to_string()
+                        );
+                    }
 
                     // Check if cancelled during this step. Must finalize
                     // exactly like the pre-step branch: persist `Cancelled`
@@ -1964,8 +1955,8 @@ pub async fn full_audit(
                     // A model can finish normally with an incomplete coverage
                     // table. Give that exact failure back within the existing
                     // Full-audit attempt budget, never after a provider failure
-                    // or an ownership violation and never by accepting bad data.
-                    if cli_success && !success && ownership_warning.is_none()
+                    // and never by accepting bad data.
+                    if cli_success && !success
                         && documentary_snapshot.is_some() && attempt < max_attempts
                     {
                         if let Some(feedback) = super::validation::coverage_repair_feedback(&project_path, analysis_step.target_file) {
@@ -1976,11 +1967,6 @@ pub async fn full_audit(
                             citation_feedback = Some(feedback);
                             continue 'attempts;
                         }
-                    }
-
-                    if let Some(ownership_warning) = ownership_warning {
-                        success = false;
-                        warning = Some(ownership_warning);
                     }
 
                     warning = super::validation::with_http_diagnostics(

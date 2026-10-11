@@ -33,6 +33,30 @@ Release notes for 0.9.3 and earlier are available in the
   (`docs/AGENTS.md` or the legacy `ai/index.md`), « README seulement » or
   « pas de doc IA ».
 
+- Docs record what a human validated and ask for a reconfirmation when Kronn
+  changes it, never blocking (KT-1079). A validation (`validate-audit`, a TD
+  decision on a validation card, « Vérifié, inchangé », a revalidation that
+  leaves the docs as validated) records the digest of each validated doc in
+  `docs/provenance.json`, next to `citations.json`; the validated text stays
+  local under `.kronn/audit/validated-originals/` for the diff. No marker is
+  added to the prose. Every automatic writer now applies its change to a
+  human-validated doc or an `owner="human"` section instead of refusing,
+  reverting or skipping it: full and partial audits (no more restore + dated
+  `human-section-diff` report), revalidation (re-anchoring and the agent pass
+  now cover human sections), template reinstall (human sections are no longer
+  put back), documentary repair (citation bundles in human sections are
+  normalized) and the tech-debt index resync. The doc is then marked « to
+  reconfirm » with the writer and a before/after diff. A « À reconfirmer (N) »
+  button next to the audit status on the project card opens the docs to
+  reconfirm with their diff; « Confirmer » (one doc or all,
+  `POST /api/projects/:id/doc-provenance/confirm`, human only) restores the
+  provenance. The template reinstall plan names the human-validated content
+  it will rewrite before writing. The learning gate weights its sources by
+  this provenance: a source in a doc a human validated and nothing changed
+  counts as proof; one only an AI wrote, or changed since its validation,
+  does not count as verified evidence for a `fact` until reconfirmed. The
+  audit prompts let an audit correct a human section where the code
+  contradicts it. No database change.
 - CI checks the `[src: file:]` citations of Kronn's own docs (KT-1059). A
   test (`cargo test docs_citations`, run by the backend suite) walks
   `docs/**/*.md` (except the historical `docs/releases/`) and `backend/docs/`

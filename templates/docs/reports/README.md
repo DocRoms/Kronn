@@ -11,9 +11,8 @@ benchmark into every task's context would be silently stale advice.
 - Name files `YYYY-MM-DD-slug.md` — the date is load-bearing, not decoration.
 - A report is never edited **by hand** after the fact — if the finding
   changed, add a new dated report and let the old one stand as history. A
-  same-day automated rerun of the same slug (e.g. the audit's own
-  `human-section-diff` reports) overwrites its own file, since only the
-  latest proposal for that day matters — a new day always gets a new file.
+  same-day automated rerun of the same slug overwrites its own file, since
+  only the latest one for that day matters — a new day always gets a new file.
 - Nothing under `docs/reports/` is loaded by any tier. An agent reads one only
   when a task explicitly names it (e.g. "compare against
   `reports/2026-05-01-startup-latency.md`").

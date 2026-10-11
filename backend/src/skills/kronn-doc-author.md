@@ -38,9 +38,10 @@ message.
   assertion (= every `[src: …]` must resolve). Lint runs here.
 - `curated="human"` — owned by a person, never validated. Free-form.
   You may convert ai → human, never the reverse automatically.
-- `owner="audit"` / `owner="human"` — write ownership in Template v2. Never
-  rewrite a human-owned section; a re-audit proposes a dated diff instead.
-  Legacy `curated="human"` sections remain protected.
+- `owner="audit"` / `owner="human"` — write ownership in Template v2. A
+  human-owned section is corrected only where the code contradicts it; Kronn
+  keeps the change and asks its owner to reconfirm it. Same for legacy
+  `curated="human"`.
 - `audit="YYYY-MM-DD"` — required on `curated="ai"`. The date you (or
   the audit) last *verified the section against reality*. NOT git's
   last-edit date.

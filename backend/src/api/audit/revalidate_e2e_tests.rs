@@ -70,6 +70,13 @@ impl Validated {
             crate::core::citation_drift::check(project).sources_state,
             crate::core::citation_drift::SourcesState::Clean
         );
+        // KT-1079 — the validation marks every doc human-validated.
+        let provenance = crate::core::doc_provenance::report(project, false).unwrap();
+        assert!(
+            provenance.docs.iter().any(|d| d.doc == RULES),
+            "{provenance:?}"
+        );
+        assert_eq!(provenance.to_reconfirm, 0, "{provenance:?}");
         std::fs::write(fx.h.tools.path().join("steps.log"), "").unwrap();
         fx
     }
@@ -279,14 +286,29 @@ async fn a_changed_cited_line_is_corrected_by_the_agent_and_the_badge_goes_back_
         "{prompt}"
     );
 
-    // The stale claim is corrected; the true one and the human rule stay
-    // byte-identical, though the agent tried to rewrite the rule.
+    // The stale claim is corrected and the true one stays. The agent's rewrite
+    // of the human rule is kept: the doc waits for its owner to reconfirm.
     let after = std::fs::read_to_string(fx.project().join(RULES)).unwrap();
     assert!(after.contains("- Revalidated against the current code [src: file: src/kept.rs:3]\n"));
     assert!(!after.contains("Errors are mapped in one place"), "{after}");
     assert!(after.contains("- Configuration loads in one function [src: file: src/kept.rs:2]\n"));
-    assert!(after.contains(HUMAN_RULE), "{after}");
+    assert!(after.contains("Agent rewrote the human rule"), "{after}");
     assert_ne!(after, before);
+    let provenance = crate::core::doc_provenance::report(fx.project(), true).unwrap();
+    let rules = provenance.docs.iter().find(|d| d.doc == RULES).unwrap();
+    assert_eq!(
+        rules.state,
+        crate::core::doc_provenance::ProvenanceState::ToReconfirm
+    );
+    assert_eq!(
+        rules.kronn_writes.last().map(|w| w.writer),
+        Some(crate::core::doc_provenance::DocWriter::Revalidation)
+    );
+    assert!(rules.changes[0]
+        .before
+        .as_deref()
+        .unwrap()
+        .contains("Human-owned rule"));
 
     // Fresh fingerprints for the rewritten doc: the badge is clean again.
     assert_eq!(
@@ -300,6 +322,13 @@ async fn a_changed_cited_line_is_corrected_by_the_agent_and_the_badge_goes_back_
     let validated = fx.validate().await;
     assert!(validated.success, "{:?}", validated.error);
     assert_eq!(fx.audit_status(), crate::models::AiAuditStatus::Validated);
+    assert_eq!(
+        crate::core::doc_provenance::report(fx.project(), false)
+            .unwrap()
+            .to_reconfirm,
+        0,
+        "validating again confirms the rewrite"
+    );
 }
 
 #[tokio::test]
@@ -346,7 +375,7 @@ async fn a_moved_cited_line_is_re_anchored_without_an_agent() {
 #[tokio::test]
 #[serial_test::serial]
 #[serial_test::serial(kronn_templates_env)]
-async fn a_human_section_is_listed_not_edited_and_a_true_doc_gives_the_validation_back() {
+async fn a_human_section_citation_is_corrected_then_confirmed_by_its_owner() {
     let fx = Validated::new(|project| {
         append(
             project,
@@ -357,43 +386,75 @@ async fn a_human_section_is_listed_not_edited_and_a_true_doc_gives_the_validatio
         );
     })
     .await;
+    let glossary_step = fx.step_of(GLOSSARY);
     fx.edit_source(|lines| lines[5] = "fn helper_renamed_by_a_commit() {}".into());
 
+    // Never held back: the agent corrects it; the owner stays informed.
     let plan = fx.plan().await;
-    assert!(plan.agent_steps.is_empty(), "{plan:?}");
+    assert_eq!(plan.agent_steps, vec![glossary_step as usize], "{plan:?}");
     let glossary = section(&plan, GLOSSARY);
-    assert_eq!(glossary.action, crate::models::RevalidationAction::Human);
+    assert_eq!(glossary.action, crate::models::RevalidationAction::Agent);
     assert_eq!(glossary.human.len(), 1);
     assert_eq!(glossary.human[0].section, "owner-notes");
-    assert_eq!(glossary.human[0].citation.cite, "src/kept.rs:6");
-    assert!(glossary.broken.is_empty());
+    assert_eq!(glossary.broken[0].cite, "src/kept.rs:6");
 
-    let before = std::fs::read(fx.project().join(GLOSSARY)).unwrap();
     arm(fx.h.tools.path(), "revalidate", &[GLOSSARY]);
     let body = fx.revalidate().await;
     let done = sse_events(&body, "done").pop().expect("terminal done");
-    assert_eq!(done["status"], "todo", "{body}");
-    assert!(fx.prompts().is_empty(), "{:?}", fx.prompts());
-    assert_eq!(std::fs::read(fx.project().join(GLOSSARY)).unwrap(), before);
-    assert_eq!(fx.audit_status(), crate::models::AiAuditStatus::Validated);
+    assert_eq!(done["status"], "complete", "{body}");
+    let after = std::fs::read_to_string(fx.project().join(GLOSSARY)).unwrap();
+    assert!(
+        after.contains("- Revalidated against the current code [src: file: src/kept.rs:6]"),
+        "{after}"
+    );
+    let provenance = crate::core::doc_provenance::report(fx.project(), true).unwrap();
+    let doc = provenance.docs.iter().find(|d| d.doc == GLOSSARY).unwrap();
+    assert_eq!(
+        doc.state,
+        crate::core::doc_provenance::ProvenanceState::ToReconfirm
+    );
+    assert!(doc.changes[0]
+        .before
+        .as_deref()
+        .unwrap()
+        .contains("The sixth helper names the term"));
 
-    // The owner checks it: "Vérifié, inchangé" settles the section.
-    let acknowledged = crate::api::audit::acknowledge_citations(
+    // « Confirmer » gives the provenance back.
+    let confirmed = crate::api::audit::confirm_doc_provenance(
         axum::extract::State(fx.h.state.clone()),
         axum::extract::Path(PROJECT_ID.to_string()),
-        axum::Json(crate::models::AcknowledgeCitationsRequest {
-            doc: GLOSSARY.into(),
+        None,
+        axum::Json(crate::core::doc_provenance::ConfirmDocsRequest {
+            docs: vec![GLOSSARY.into()],
         }),
     )
     .await
     .0;
-    assert!(acknowledged.success, "{:?}", acknowledged.error);
-    assert_eq!(std::fs::read(fx.project().join(GLOSSARY)).unwrap(), before);
-    assert!(fx.plan().await.sections.is_empty());
+    assert!(confirmed.success, "{:?}", confirmed.error);
+    let doc = confirmed
+        .data
+        .unwrap()
+        .docs
+        .into_iter()
+        .find(|d| d.doc == GLOSSARY)
+        .unwrap();
+    assert_eq!(
+        doc.state,
+        crate::core::doc_provenance::ProvenanceState::HumanValidated
+    );
+    assert_eq!(
+        doc.reason,
+        crate::core::doc_provenance::ValidationReason::Confirmed
+    );
+}
 
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_true_doc_gives_the_validation_back_and_the_owner_acknowledges_it() {
+    let fx = Validated::new(|_| {}).await;
     // An agent that finds the doc still true rewrites nothing: the run ends
-    // no_change, the validation it revoked comes back, and the section is
-    // left for the human to acknowledge.
+    // no_change, the validation it revoked comes back with its provenance.
     fx.edit_source(|lines| lines[1] = "fn config_loader_renamed() {}".into());
     arm(fx.h.tools.path(), "noop", &[RULES]);
     let body = fx.revalidate().await;
@@ -401,9 +462,44 @@ async fn a_human_section_is_listed_not_edited_and_a_true_doc_gives_the_validatio
     assert_eq!(done["status"], "no_change", "{body}");
     assert_eq!(fx.prompts().len(), 1);
     assert_eq!(fx.audit_status(), crate::models::AiAuditStatus::Validated);
+    let reason_of = |doc: &str| {
+        crate::core::doc_provenance::report(fx.project(), false)
+            .unwrap()
+            .docs
+            .into_iter()
+            .find(|d| d.doc == doc)
+            .map(|d| (d.state, d.reason))
+    };
+    assert_eq!(
+        reason_of(RULES),
+        Some((
+            crate::core::doc_provenance::ProvenanceState::HumanValidated,
+            crate::core::doc_provenance::ValidationReason::Revalidation
+        ))
+    );
     assert_eq!(
         section(&fx.plan().await, RULES).action,
         crate::models::RevalidationAction::Agent
+    );
+
+    // The owner checks it: "Vérifié, inchangé" settles the section.
+    let before = std::fs::read(fx.project().join(RULES)).unwrap();
+    let acknowledged = crate::api::audit::acknowledge_citations(
+        axum::extract::State(fx.h.state.clone()),
+        axum::extract::Path(PROJECT_ID.to_string()),
+        axum::Json(crate::models::AcknowledgeCitationsRequest { doc: RULES.into() }),
+    )
+    .await
+    .0;
+    assert!(acknowledged.success, "{:?}", acknowledged.error);
+    assert_eq!(std::fs::read(fx.project().join(RULES)).unwrap(), before);
+    assert!(fx.plan().await.sections.is_empty());
+    assert_eq!(
+        reason_of(RULES),
+        Some((
+            crate::core::doc_provenance::ProvenanceState::HumanValidated,
+            crate::core::doc_provenance::ValidationReason::Acknowledged
+        ))
     );
 }
 
@@ -553,7 +649,10 @@ async fn a_dead_citation_is_named_before_the_agent_and_never_ends_unchanged() {
     assert_eq!(fx.prompts().len(), 1, "{:?}", fx.prompts());
     let after = std::fs::read_to_string(fx.project().join(RULES)).unwrap();
     assert!(!after.contains("src/legacy.rs"), "{after}");
-    assert!(after.contains(HUMAN_RULE), "{after}");
+    assert!(
+        after.contains("Agent rewrote the human rule"),
+        "kept: {after}"
+    );
     assert_eq!(
         fx.sources_state(),
         crate::core::citation_drift::SourcesState::Clean

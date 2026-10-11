@@ -338,7 +338,7 @@ fn write(project_path: &Path, file: &mut CitationsFile) -> Result<(), String> {
 }
 
 /// Markdown docs under the docs dir, as paths relative to the project root.
-fn doc_files(project_path: &Path) -> Vec<String> {
+pub(crate) fn doc_files(project_path: &Path) -> Vec<String> {
     let docs_dir = crate::core::scanner::detect_docs_dir(project_path);
     let mut out = Vec::new();
     let mut stack = vec![docs_dir.clone()];
@@ -583,6 +583,8 @@ pub fn record_reanchored(
         .get_mut(doc)
         .ok_or_else(|| format!("No citation fingerprints recorded for `{doc}`"))?;
     let still_cited = cite_labels(after);
+    // A label a move lands on now names the moved line, not its old one.
+    let landed: BTreeSet<&str> = moves.iter().map(|m| m.to.as_str()).collect();
     let mut citations: Vec<CitationFingerprint> = Vec::new();
     fn push(fp: CitationFingerprint, out: &mut Vec<CitationFingerprint>) {
         if !out.iter().any(|c| c.cite == fp.cite) {
@@ -598,11 +600,13 @@ pub fn record_reanchored(
                     end_line: Some(m.end_line),
                     ..fp.clone()
                 };
-                if still_cited.contains(&fp.cite) {
+                if still_cited.contains(&fp.cite) && !landed.contains(fp.cite.as_str()) {
                     push(fp, &mut citations);
                 }
-                push(moved, &mut citations);
+                citations.retain(|c| c.cite != moved.cite);
+                citations.push(moved);
             }
+            None if landed.contains(fp.cite.as_str()) => {}
             None => push(fp, &mut citations),
         }
     }

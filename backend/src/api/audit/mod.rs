@@ -25,6 +25,7 @@ pub mod full;
 pub mod helpers;
 pub mod info;
 pub(crate) mod project_doc;
+pub mod provenance;
 pub mod reconciliation;
 pub mod redact_artifacts;
 pub mod revalidate;
@@ -41,6 +42,7 @@ pub use cross_audit::cross_audit_estimate;
 pub use drift::*;
 pub use full::*;
 pub use info::*;
+pub use provenance::{confirm_doc_provenance, doc_provenance_report};
 pub use revalidate::{revalidate_audit, revalidation_plan};
 pub use run::*;
 pub use td_tasks::convert_td_tasks;
@@ -178,7 +180,7 @@ Rules: Write new content in the documentation language declared by `docs/AGENTS.
 - Replace ALL `{{PLACEHOLDERS}}` and `<!-- ... -->` comment placeholders with real content. {{PLACEHOLDERS}} are literal text markers — replace by editing file content directly.\n\
 - Keep the existing file structure and section headings — fill in the blanks, do NOT rewrite the file from scratch.\n\
 - If a section does not apply to this project, replace placeholders with 'N/A — not used in this project.' Do not delete the section.\n\
-- Any section marked `owner=\"human\"` is owned by a person (legacy `curated=\"human\"` has the same protection): a full OR partial audit must NEVER rewrite, reorder, or delete its body. The pipeline restores attempted changes and records the proposal under `docs/reports/`; do not work around that guard.\n\
+- A section marked `owner=\"human\"` (legacy `curated=\"human\"`) was written or validated by a person. In a full OR partial audit, change it only to correct what the code contradicts and keep its wording otherwise; never reorder or delete it. Kronn keeps your change and asks its owner to reconfirm it, with the diff.\n\
 - Never force-translate an existing `docs/` file into another language — a doc already written in a different language stays as-is; the docs/tickets language parameter only governs NEW content.\n\
 - Plain facts in docs/ files — no opinions, debate or trade-off analysis. One exception: `Suggested direction` in TD detail files (and index remediation lines) may carry a one-line, non-binding fix hint.\n\
 - Each section should be self-contained: another AI agent reading just that section should get the full picture.\n\
@@ -1147,7 +1149,7 @@ pub(crate) const REVERIFY_BLOCK: &str = "\
 1. Check every fact and every `[src: …]` citation against the current code: open the cited file at the cited line.\n\
 2. Correct what is false or stale (moved line, renamed or deleted file, changed command or version), add what the checklist requires and the file lacks, remove what no longer exists.\n\
 3. Keep every statement that is still true exactly as written: no rephrasing, reordering or restyling.\n\
-4. Never touch a section marked `owner=\"human\"`.\n\
+4. In a section marked `owner=\"human\"`, correct only what the code contradicts: its owner reconfirms the change.\n\
 5. If everything is still accurate, leave the file byte-identical: the step then ends unchanged, a valid result.\n";
 
 /// Whether this step re-verifies its target rather than filling it: a
@@ -2399,21 +2401,22 @@ mod prompt_tests {
     }
 
     #[test]
-    fn preamble_forbids_rewriting_human_owned_sections_on_any_audit() {
-        // KT-843 (Template v2) — the "Never edit docs/AGENTS.md" blanket
-        // ban is gone; ownership is now per-section (`owner="audit"` vs
-        // `owner="human"`). PROMPT_PREAMBLE is injected before EVERY
-        // step of a Full run (full.rs) AND a Drift/partial run
-        // (drift.rs), so this is the one place that guards BOTH: a
-        // human-owned section must never be silently rewritten, and a
-        // re-audit proposes the change as a diff instead.
+    fn preamble_lets_an_audit_correct_a_human_section_for_reconfirmation() {
+        // KT-1079 — PROMPT_PREAMBLE is injected before EVERY step of a Full
+        // run AND a partial run. A human section may be corrected where the
+        // code contradicts it; Kronn keeps the write and asks for a
+        // reconfirmation with the diff instead of blocking it.
         assert!(
             PROMPT_PREAMBLE.contains("owner=\"human\""),
             "PROMPT_PREAMBLE must name the owner=\"human\" ownership marker"
         );
         assert!(
-            PROMPT_PREAMBLE.to_lowercase().contains("never rewrite"),
-            "PROMPT_PREAMBLE must forbid rewriting a human-owned section"
+            PROMPT_PREAMBLE.contains("reconfirm"),
+            "the owner reconfirms a correction"
+        );
+        assert!(
+            !PROMPT_PREAMBLE.to_lowercase().contains("never rewrite"),
+            "no write into a human section is forbidden any more"
         );
         assert!(
             PROMPT_PREAMBLE
@@ -2424,7 +2427,7 @@ mod prompt_tests {
         );
         assert!(
             PROMPT_PREAMBLE.contains("diff"),
-            "a re-audit must propose the change as a diff, not silently overwrite"
+            "the owner sees the change as a diff"
         );
         // The old blanket ban must actually be gone (KT-843 objective).
         assert!(
@@ -2434,20 +2437,20 @@ mod prompt_tests {
     }
 
     #[test]
-    fn full_and_partial_audits_restore_human_sections_before_retry_decisions() {
+    fn full_and_partial_audits_mark_validated_docs_before_retry_decisions() {
         for (pipeline, source) in [
             ("full", include_str!("full.rs")),
             ("partial", include_str!("drift.rs")),
         ] {
             let protection = source
-                .find("protect_human_owned_sections")
-                .unwrap_or_else(|| panic!("{pipeline} audit must enforce section ownership"));
+                .find("mark_validated_doc_writes")
+                .unwrap_or_else(|| panic!("{pipeline} audit must mark validated docs"));
             let retry_gate = source
                 .find("evaluate_enforce_gate")
                 .unwrap_or_else(|| panic!("{pipeline} audit must contain its retry gate"));
             assert!(
                 protection < retry_gate,
-                "{pipeline} audit must restore owner=\"human\" content before a retry can start"
+                "{pipeline} audit must mark its writes before a retry can start"
             );
         }
     }

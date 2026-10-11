@@ -494,11 +494,26 @@ pub(crate) fn apply_td_resolutions(
         Some((target, content))
     };
 
-    for (path, content) in updates {
+    // A decided sheet now carries a person's decision: human-validated.
+    let root = project_path.canonicalize().unwrap_or(project_path.clone());
+    let mut decided = Vec::new();
+    for ((path, content), resolution) in updates.into_iter().zip(resolutions) {
         crate::core::mcp_scanner::atomic_write(&path, &content).map_err(|error| anyhow!(error))?;
+        if resolution.action != TdResolutionAction::Defer {
+            if let Ok(rel) = path.strip_prefix(&root) {
+                decided.push(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
     }
     if let Some((path, content)) = decision_update {
         crate::core::mcp_scanner::atomic_write(&path, &content).map_err(|error| anyhow!(error))?;
+    }
+    if let Err(error) = crate::core::doc_provenance::record_validation(
+        &root,
+        &decided,
+        crate::core::doc_provenance::ValidationReason::ValidationCard,
+    ) {
+        tracing::warn!("Human-validation provenance of the TD cards not recorded: {error}");
     }
     // The decision is on the sheets; the index status column follows them.
     // Only the ADRs this card appended settle here: the human accepted them.

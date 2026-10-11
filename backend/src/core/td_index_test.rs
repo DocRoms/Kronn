@@ -308,13 +308,23 @@ fn a_table_quoted_in_a_code_fence_is_not_the_current_list() {
 }
 
 #[test]
-fn human_owned_or_missing_indexes_are_left_alone() {
+fn a_human_owned_index_is_resynced_and_marked_and_a_missing_one_left_alone() {
     let f = fixture();
     let human = format!("<!-- kronn:section name=\"debt\" owner=\"human\" -->\n{CENTRAL}<!-- kronn:section:end -->\n");
     fs::write(f.docs.join(CENTRAL_INDEX), &human).unwrap();
     let outcome = resync(&f.docs, NO_ADR).unwrap();
-    assert!(outcome.skipped.is_some() && !outcome.changed);
-    assert_eq!(index(&f), human);
+    assert!(
+        outcome.skipped.is_none() && outcome.changed,
+        "never skipped"
+    );
+    assert_ne!(index(&f), human);
+    let project = f.docs.parent().unwrap();
+    let provenance = crate::core::doc_provenance::report(project, false).unwrap();
+    assert_eq!(provenance.to_reconfirm, 1, "{provenance:?}");
+    assert_eq!(
+        provenance.docs[0].kronn_writes[0].writer,
+        crate::core::doc_provenance::DocWriter::TdIndex
+    );
 
     fs::remove_file(f.docs.join(CENTRAL_INDEX)).unwrap();
     assert_eq!(

@@ -23,11 +23,11 @@ function plan(overrides: Partial<TemplateReinstallPlan> = {}): TemplateReinstall
     docs_dir: 'docs',
     audit_running: false,
     files: [
-      { path: 'docs/AGENTS.md', action: 'replace', kind: 'damaged_or_template', kept_human_sections: ['team'] },
-      { path: 'docs/glossary.md', action: 'replace', kind: 'damaged_or_template', kept_human_sections: [] },
-      { path: 'docs/testing-quality.md', action: 'replace', kind: 'filled', kept_human_sections: [] },
-      { path: 'docs/repo-map.md', action: 'create', kind: null, kept_human_sections: [] },
-      { path: 'docs/decisions.md', action: 'unchanged', kind: null, kept_human_sections: [] },
+      { path: 'docs/AGENTS.md', action: 'replace', kind: 'damaged_or_template', human_sections: ['team'], human_validated: false },
+      { path: 'docs/glossary.md', action: 'replace', kind: 'damaged_or_template', human_sections: [], human_validated: false },
+      { path: 'docs/testing-quality.md', action: 'replace', kind: 'filled', human_sections: [], human_validated: true },
+      { path: 'docs/repo-map.md', action: 'create', kind: null, human_sections: [], human_validated: false },
+      { path: 'docs/decisions.md', action: 'unchanged', kind: null, human_sections: [], human_validated: false },
     ],
     ...overrides,
   };
@@ -41,7 +41,7 @@ const REPORT: TemplateReinstallReport = {
   ],
   created: ['docs/repo-map.md'],
   unchanged: ['docs/decisions.md'],
-  kept_human_sections: ['docs/AGENTS.md#team'],
+  to_reconfirm: ['docs/AGENTS.md'],
   skipped: ['docs/testing-quality.md'],
 };
 
@@ -100,6 +100,18 @@ describe('TemplateReinstall', () => {
     expect(api.templateReinstall).toHaveBeenCalledWith('p1', ['docs/AGENTS.md', 'docs/testing-quality.md']);
   });
 
+  it('announces, without blocking, the human-validated content a reinstall rewrites (KT-1079)', async () => {
+    const dialog = await openConfirmation();
+    const notices = within(dialog).getAllByTestId('template-reinstall-notice').map(n => n.textContent);
+    expect(notices.some(n => n?.includes('team') && n.includes('reconfirmer'))).toBe(true);
+    expect(notices.some(n => n?.includes('validée par un humain'))).toBe(true);
+    const confirm = within(dialog).getByTestId('template-reinstall-confirm-button') as HTMLButtonElement;
+    expect(confirm.disabled).toBe(false);
+    fireEvent.click(confirm);
+    const done = await screen.findByTestId('template-reinstall-done');
+    expect(within(done).getByTestId('template-reinstall-reconfirm').textContent).toContain('docs/AGENTS.md');
+  });
+
   it('cancelling runs nothing and gives the button back', async () => {
     await openConfirmation();
     fireEvent.click(screen.getByRole('button', { name: 'Annuler' }));
@@ -131,7 +143,7 @@ describe('TemplateReinstall', () => {
 
   it('offers no confirmation when every file already matches the template', async () => {
     api.templateReinstallPlan.mockResolvedValue(plan({
-      files: [{ path: 'docs/AGENTS.md', action: 'unchanged', kind: null, kept_human_sections: [] }],
+      files: [{ path: 'docs/AGENTS.md', action: 'unchanged', kind: null, human_sections: [], human_validated: false }],
     }));
     const dialog = await openConfirmation();
     expect(within(dialog).getByTestId('template-reinstall-uptodate')).toBeTruthy();

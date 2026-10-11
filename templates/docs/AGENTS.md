@@ -134,7 +134,7 @@ New code placement: see [repo-map](repo-map.md).
 - Large refactor needed → add entry to [inconsistencies-tech-debt](inconsistencies-tech-debt.md).
 - **Follow the test policy** — see § 4.
 - After task: update `docs/` if you learned something non-obvious. Prefer the agent-writable subfolders: `docs/conventions/`, `docs/gotchas/`, `docs/architecture/`, `docs/operations/`.
-- `docs/AGENTS.md` sections use `owner="audit"` or `owner="human"` (legacy `curated="human"` remains protected). Never rewrite a human-owned section in a full or partial audit; re-audits put the proposed change in a dated diff under `docs/reports/`.
+- `docs/AGENTS.md` sections use `owner="audit"` or `owner="human"` (legacy `curated="human"` too). In a human-owned section, correct only what the code contradicts: Kronn keeps the change and asks its owner to reconfirm it.
 
 ---
 

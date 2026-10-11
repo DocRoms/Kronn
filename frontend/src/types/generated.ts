@@ -1978,6 +1978,12 @@ export type ComparePromptCompatibility = "identical" | "different" | "missing";
 
 export type ConditionAction = { "type": "Stop" } | { "type": "Skip" } | { "type": "Goto", step_name: string, max_iterations?: number | null, };
 
+export type ConfirmDocsRequest = {
+/**
+ * Docs to confirm; empty confirms every doc to reconfirm.
+ */
+docs?: Array<string>, };
+
 export type Contact = { id: string, pseudo: string, avatar_email: string | null, kronn_url: string, invite_code: string, status: string, created_at: string, updated_at: string, };
 
 export type ContextAudit = { files: Array<InstructionFile>, per_agent: Array<AgentContext>, proposal: Array<TierMove>, findings: Array<AuditFinding>,
@@ -3654,6 +3660,24 @@ export type DiscWorkspaceSetResponse = { workspace: DiscussionWorkspace, blocker
 
 export type DiscWorkspaceState = { disc_id: string, session_pk: number, current: DiscussionWorkspace | null, workspaces: Array<DiscussionWorkspace>, };
 
+export type DocProvenanceReport = { docs: Array<DocProvenanceStatus>, to_reconfirm: number, };
+
+export type DocProvenanceStatus = { doc: string, state: ProvenanceState, reason: ValidationReason, scope: ProvenanceScope, validated_at: string,
+/**
+ * The sections in scope (`sections` scope only).
+ */
+sections: Array<string>,
+/**
+ * Kronn writes since the validation; empty when edited outside Kronn.
+ */
+kronn_writes: Array<KronnWrite>,
+/**
+ * Filled on request, for docs to reconfirm only.
+ */
+changes: Array<ProvenanceChange>, };
+
+export type DocWriter = "full_audit" | "partial_audit" | "revalidation" | "template_reinstall" | "document_repair" | "td_index";
+
 /**
  * What changed since a previous audit — KT-194 drift.
  */
@@ -3741,7 +3765,11 @@ export type Evidence = { kind: string, ref: string, quote?: string | null, };
 /**
  * Gate-1 verdict for one evidence row (rendered per-row in the validation modal).
  */
-export type EvidenceCheck = { reference: string, status: string, fabricated: boolean, };
+export type EvidenceCheck = { reference: string, status: string, fabricated: boolean,
+/**
+ * A source inside the project docs: human-validated or AI-generated (KT-1079).
+ */
+doc_provenance?: SourceProvenance, };
 
 /**
  * What a run may be evidence for.
@@ -4445,6 +4473,8 @@ resume_token: string, };
 export type JsonValue = number | string | boolean | Array<JsonValue> | { [key in string]: JsonValue } | null;
 
 export type KronnOwnership = { "type": "NotManaged" } | { "type": "ManagedByMarker", "config_id": string } | { "type": "ManagedByHash", "config_id": string };
+
+export type KronnWrite = { writer: DocWriter, at: string, };
 
 export type LaunchAuditRequest = { agent: AgentType,
 /**
@@ -6676,6 +6706,24 @@ pending_item_count: number, };
 
 export type ProposeResult = { accepted: boolean, reason: string | null, warnings: Array<string>, evidence_checks: Array<EvidenceCheck>, learning: Learning | null, };
 
+export type ProvenanceChange = {
+/**
+ * `None`: the whole doc.
+ */
+section: string | null,
+/**
+ * `None`: the validated text is not kept on this machine.
+ */
+before: string | null,
+/**
+ * `None`: the doc or section was removed.
+ */
+after: string | null, truncated: boolean, };
+
+export type ProvenanceScope = "doc" | "sections";
+
+export type ProvenanceState = "human_validated" | "to_reconfirm";
+
 /**
  * Read-only quota state shown to a human in Agent settings.  Re-arming is a
  * separate human-only HTTP action; it is intentionally absent from agent tools.
@@ -7088,9 +7136,13 @@ path: string, action: ReinstallAction,
  */
 kind: ReinstallKind | null,
 /**
- * Human-owned sections of the current file that the reinstall keeps.
+ * `owner="human"` sections of the current file this reinstall rewrites.
  */
-kept_human_sections: Array<string>, };
+human_sections: Array<string>,
+/**
+ * The current file is human-validated: replacing it asks to reconfirm.
+ */
+human_validated: boolean, };
 
 /**
  * Why an existing file differs from the template.
@@ -8440,6 +8492,11 @@ name?: string, };
 export type SourceOriginKind = "checkout" | "worktree";
 
 /**
+ * How a learning source counts (KT-1079 §4).
+ */
+export type SourceProvenance = "human_validated" | "ai_generated";
+
+/**
  * "Sources clean" badge, recomputed on every read. Distinct from the dated
  * "audit complete" milestone (`validated_at` in `.kronn.json`).
  */
@@ -9195,7 +9252,11 @@ backup_dir: string | null, replaced: Array<ReplacedFile>, created: Array<string>
 /**
  * Differing files that were not selected, left as they are.
  */
-skipped: Array<string>, kept_human_sections: Array<string>, };
+skipped: Array<string>,
+/**
+ * Human-validated docs this reinstall rewrote, now to reconfirm.
+ */
+to_reconfirm: Array<string>, };
 
 export type TemplateReinstallRequest = {
 /**
@@ -9707,6 +9768,8 @@ model_breakdowns: Array<UsageModelBreakdown>, input_tokens: number, output_token
  * Aggregate totals across all rows.
  */
 export type UsageTotals = { input_tokens: number, output_tokens: number, cache_creation_tokens: number, cache_read_tokens: number, total_tokens: number, total_cost: number, };
+
+export type ValidationReason = "audit_validation" | "validation_card" | "acknowledged" | "revalidation" | "confirmed" | "human_owned";
 
 /**
  * One validation to run on the candidate before the parent is advanced (§6).

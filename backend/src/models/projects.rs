@@ -1804,15 +1804,17 @@ pub struct DriftSection {
 pub enum RevalidationAction {
     /// Only moved citations: Kronn rewrites their line numbers, no agent.
     Reanchor,
-    /// Broken citations in an audit-owned part: the audit step re-verifies it.
+    /// Broken citations, human sections included: the audit step re-verifies
+    /// them and a human-validated doc is then marked to reconfirm (KT-1079).
     Agent,
-    /// Only citations inside `owner="human"` sections: a to-do for a person.
+    /// Nothing left for Kronn to rewrite: a person acknowledges it.
     Human,
     /// Broken, but no audit step owns the doc (or it was deleted): by hand.
     Manual,
 }
 
-/// A citation inside a human-owned section: never edited, listed.
+/// A citation inside a human-owned section, listed for its owner: Kronn may
+/// correct it, and its owner then reconfirms the doc.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct HumanCitationTodo {

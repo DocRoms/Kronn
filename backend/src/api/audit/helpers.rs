@@ -932,124 +932,28 @@ pub(crate) fn check_ai_dir_permissions(ai_dir: &std::path::Path) -> Result<(), S
 }
 
 #[derive(Debug)]
-pub(crate) struct HumanOwnedDocsSnapshot {
+pub(crate) struct ValidatedDocsSnapshot {
     files: Vec<(String, String)>,
 }
 
-/// Capture every documentation file that contains a human-owned section.
-/// Audit prompts may edit files beyond their declared validation target (the
-/// final review explicitly does), so ownership protection cannot be scoped to
-/// `AnalysisStep::target_file`.
-pub(crate) fn capture_human_owned_sections(
+/// Every doc whose provenance a write affects: human-validated, or carrying an
+/// `owner="human"` section. Audit prompts may edit beyond their declared
+/// target (the final review does), so this is not scoped to `target_file`.
+pub(crate) fn capture_validated_docs(
     project_path: &std::path::Path,
-) -> Result<HumanOwnedDocsSnapshot, String> {
-    let docs_dir = crate::core::scanner::detect_docs_dir(project_path);
-    if !docs_dir.is_dir() {
-        return Ok(HumanOwnedDocsSnapshot { files: Vec::new() });
-    }
-
-    let mut files = Vec::new();
-    for entry in walkdir::WalkDir::new(&docs_dir).max_depth(5) {
-        let entry = entry.map_err(|e| format!("scan human-owned sections: {e}"))?;
-        if !entry.file_type().is_file()
-            || entry
-                .path()
-                .extension()
-                .is_none_or(|extension| extension != "md")
-        {
-            continue;
-        }
-        let content = std::fs::read_to_string(entry.path())
-            .map_err(|e| format!("read {}: {e}", entry.path().display()))?;
-        if !super::anti_hallu_enforce::contains_human_owned_section(&content) {
-            continue;
-        }
-        let relative = entry
-            .path()
-            .strip_prefix(project_path)
-            .map_err(|_| format!("{} escapes project root", entry.path().display()))?
-            .to_string_lossy()
-            .replace('\\', "/");
-        files.push((relative, content));
-    }
-    Ok(HumanOwnedDocsSnapshot { files })
+) -> Result<ValidatedDocsSnapshot, String> {
+    crate::core::doc_provenance::snapshot_tracked(project_path)
+        .map(|files| ValidatedDocsSnapshot { files })
 }
 
-/// Restore human-owned sections changed anywhere in the docs tree by one
-/// agent attempt and persist each rejected proposal as a dated report. This
-/// runs before retry/cancellation/failure branches can leave changes behind.
-pub(crate) fn protect_human_owned_sections(
+/// Mark every tracked doc one agent attempt changed "to reconfirm". The
+/// write itself stays on disk: human ownership never reverts it (KT-1079).
+pub(crate) fn mark_validated_doc_writes(
     project_path: &std::path::Path,
-    snapshot: &HumanOwnedDocsSnapshot,
-    today: &str,
+    snapshot: &ValidatedDocsSnapshot,
+    writer: crate::core::doc_provenance::DocWriter,
 ) -> Result<usize, String> {
-    let mut proposals = Vec::new();
-    let mut errors = Vec::new();
-    let mut restored_count = 0;
-
-    for (target_file, pre_content) in &snapshot.files {
-        let target_path = project_path.join(target_file);
-        let written = match std::fs::read_to_string(&target_path) {
-            Ok(content) => content,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(e) => {
-                errors.push(format!("read {}: {e}", target_path.display()));
-                continue;
-            }
-        };
-        let Some((restored, diffs)) =
-            super::anti_hallu_enforce::enforce_human_owned_sections(pre_content, &written)
-        else {
-            continue;
-        };
-
-        let restore_result =
-            crate::core::fs_guard::assert_contained_no_symlink(project_path, &target_path)
-                .and_then(|_| {
-                    crate::core::mcp_scanner::atomic_write(&target_path, &restored)
-                        .map_err(|e| format!("restore {}: {e}", target_path.display()))
-                });
-        match restore_result {
-            Ok(()) => {
-                restored_count += diffs.len();
-                proposals.push((target_file.as_str(), diffs));
-            }
-            Err(e) => errors.push(e),
-        }
-    }
-
-    for (target_file, diffs) in proposals {
-        if let Err(e) = write_human_section_diff_report(project_path, target_file, &diffs, today) {
-            errors.push(e);
-        }
-    }
-
-    if errors.is_empty() {
-        Ok(restored_count)
-    } else {
-        Err(errors.join("; "))
-    }
-}
-
-/// Write an audit proposal under `docs/reports/`. A same-day rerun for the
-/// same target replaces that day's report; a new day creates a new snapshot.
-fn write_human_section_diff_report(
-    project_path: &std::path::Path,
-    target_file: &str,
-    diffs: &[super::anti_hallu_enforce::HumanSectionDiff],
-    today: &str,
-) -> Result<(), String> {
-    let slug = target_file
-        .trim_end_matches(".md")
-        .replace(['/', '\\'], "-");
-    let reports_dir = project_path.join("docs/reports");
-    crate::core::fs_guard::guarded_create_dir_all(project_path, &reports_dir)?;
-    let report_path = reports_dir.join(format!("{today}-human-section-diff-{slug}.md"));
-    crate::core::fs_guard::assert_contained_no_symlink(project_path, &report_path)?;
-    let body =
-        super::anti_hallu_enforce::format_human_section_diff_report(target_file, diffs, today);
-    crate::core::mcp_scanner::atomic_write(&report_path, &body)
-        .map_err(|e| format!("write {}: {e}", report_path.display()))
+    crate::core::doc_provenance::note_snapshot_writes(project_path, &snapshot.files, writer)
 }
 
 /// Remove the KRONN:BOOTSTRAP block from docs/AGENTS.md
@@ -1679,7 +1583,7 @@ mod compute_audit_info_tests {
     }
 
     #[test]
-    fn protects_human_section_and_writes_report_from_shipped_template_fixture() {
+    fn a_human_section_rewrite_from_the_shipped_template_is_kept_and_marked() {
         let dir = tempdir().unwrap();
         let docs = dir.path().join("docs");
         fs::create_dir_all(&docs).unwrap();
@@ -1692,85 +1596,66 @@ mod compute_audit_info_tests {
             "{template}\n<!-- kronn:section name=\"team-notes\" curated=\"human\" owner=\"human\" -->\nOriginal human note.\n<!-- kronn:section:end -->\n"
         );
         fs::write(docs.join("AGENTS.md"), &pre).unwrap();
+        fs::write(docs.join("coding-rules.md"), "# Rules\nAI text.\n").unwrap();
+        let snapshot = capture_validated_docs(dir.path()).unwrap();
 
-        let coding_template = fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .unwrap()
-                .join("templates/docs/coding-rules.md"),
-        )
-        .unwrap();
-        let coding_pre = format!(
-            "{coding_template}\n<!-- kronn:section name=\"review-note\" owner=\"human\" -->\nKeep this review rule.\n<!-- kronn:section:end -->\n"
-        );
-        fs::write(docs.join("coding-rules.md"), &coding_pre).unwrap();
-        let snapshot = capture_human_owned_sections(dir.path()).unwrap();
-
-        fs::write(
-            docs.join("AGENTS.md"),
-            pre.replace("Original human note.", "Audit replacement."),
-        )
-        .unwrap();
+        let post = pre.replace("Original human note.", "Audit replacement.");
+        fs::write(docs.join("AGENTS.md"), &post).unwrap();
         fs::write(
             docs.join("coding-rules.md"),
-            coding_pre.replace("Keep this review rule.", "Rewrite this review rule."),
+            "# Rules\nAI text, refreshed.\n",
         )
         .unwrap();
-        let restored = protect_human_owned_sections(dir.path(), &snapshot, "2026-09-27").unwrap();
+        let marked = mark_validated_doc_writes(
+            dir.path(),
+            &snapshot,
+            crate::core::doc_provenance::DocWriter::FullAudit,
+        )
+        .unwrap();
 
-        assert_eq!(restored, 2);
-        let target = fs::read_to_string(docs.join("AGENTS.md")).unwrap();
-        assert!(target.contains("Original human note."));
-        assert!(!target.contains("Audit replacement."));
-        let coding = fs::read_to_string(docs.join("coding-rules.md")).unwrap();
-        assert!(coding.contains("Keep this review rule."));
-        assert!(!coding.contains("Rewrite this review rule."));
-        let report =
-            fs::read_to_string(docs.join("reports/2026-09-27-human-section-diff-docs-AGENTS.md"))
-                .unwrap();
-        assert!(report.contains("Original human note."));
-        assert!(report.contains("Audit replacement."));
-        assert!(docs
-            .join("reports/2026-09-27-human-section-diff-docs-coding-rules.md")
-            .is_file());
+        assert_eq!(marked, 1, "only the doc with a human section is tracked");
+        assert_eq!(fs::read_to_string(docs.join("AGENTS.md")).unwrap(), post);
+        assert!(!docs.join("reports").exists(), "no dated report any more");
+        let report = crate::core::doc_provenance::report(dir.path(), true).unwrap();
+        assert_eq!(report.to_reconfirm, 1);
+        let change = &report.docs[0].changes[0];
+        assert!(change
+            .before
+            .as_deref()
+            .unwrap()
+            .contains("Original human note."));
+        assert!(change
+            .after
+            .as_deref()
+            .unwrap()
+            .contains("Audit replacement."));
     }
 
-    /// KT-933: the on-disk restore catches the two ways an audit used to turn
-    /// a human section into an "example" without changing a byte of it —
-    /// fencing it, and documenting `section:end` inside it.
+    /// Fencing a human section turns it into an example: still a change to
+    /// reconfirm, not a silent loss.
     #[test]
-    fn protect_restores_a_fence_wrapped_human_section_and_one_with_a_quoted_closer() {
+    fn a_fence_wrapped_human_section_is_marked_to_reconfirm() {
         let dir = tempdir().unwrap();
         let docs = dir.path().join("docs");
         fs::create_dir_all(&docs).unwrap();
         let team = "<!-- kronn:section name=\"team\" owner=\"human\" -->\nKeep me live.\n<!-- kronn:section:end -->";
-        let howto = "<!-- kronn:section name=\"howto\" owner=\"human\" -->\nClose a section with:\n```\n<!-- kronn:section:end -->\n```\nRule after the example.\n<!-- kronn:section:end -->";
-        let pre = format!("# Doc\n{team}\n\n{howto}\n");
+        let pre = format!("# Doc\n{team}\n");
         fs::write(docs.join("AGENTS.md"), &pre).unwrap();
-        let snapshot = capture_human_owned_sections(dir.path()).unwrap();
-
-        // Audit: fences the first section, rewrites the rule after the example.
-        let post = pre
-            .replace(team, &format!("```\n{team}\n```"))
-            .replace("Rule after the example.", "Agent-made rule.");
+        let snapshot = capture_validated_docs(dir.path()).unwrap();
+        let post = pre.replace(team, &format!("```\n{team}\n```"));
         fs::write(docs.join("AGENTS.md"), &post).unwrap();
-        let restored = protect_human_owned_sections(dir.path(), &snapshot, "2026-10-01").unwrap();
-
-        assert_eq!(restored, 2, "both sections are flagged");
-        let target = fs::read_to_string(docs.join("AGENTS.md")).unwrap();
-        assert!(
-            target.contains(howto),
-            "quoted-closer section restored whole"
-        );
-        assert!(!target.contains("Agent-made rule."));
-        assert!(
-            crate::api::audit::anti_hallu_enforce::enforce_human_owned_sections(&pre, &target)
-                .is_none(),
-            "every human section is live and intact again:\n{target}"
-        );
-        assert!(docs
-            .join("reports/2026-10-01-human-section-diff-docs-AGENTS.md")
-            .is_file());
+        let marked = mark_validated_doc_writes(
+            dir.path(),
+            &snapshot,
+            crate::core::doc_provenance::DocWriter::PartialAudit,
+        )
+        .unwrap();
+        assert_eq!(marked, 1);
+        assert_eq!(fs::read_to_string(docs.join("AGENTS.md")).unwrap(), post);
+        let doc = &crate::core::doc_provenance::report(dir.path(), true)
+            .unwrap()
+            .docs[0];
+        assert_eq!(doc.changes[0].after, None, "the live section is gone");
     }
 
     // ── check_ai_dir_permissions — defensive guard tests ────────────

@@ -1,9 +1,10 @@
 // Explicit reinstall of the AI-doc template v2 files (KT-1166). Unlike the
 // install (`copy_dir_nondestructive`, which never overwrites), this replaces
 // the template's own files, after copying every original to
-// `.kronn/audit/template-backups/<stamp>/`. Human-owned sections survive; no
-// file outside the template's list is read or written. A human action: it is
-// off the bridge-token route list and refused again in the handler.
+// `.kronn/audit/template-backups/<stamp>/`. A human-validated doc or section
+// it rewrites is marked to reconfirm, never kept back (KT-1079). No file
+// outside the template's list is read or written. A human action: it is off
+// the bridge-token route list and refused again in the handler.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -60,8 +61,10 @@ pub struct ReinstallFile {
     pub action: ReinstallAction,
     /// Set for `replace` only.
     pub kind: Option<ReinstallKind>,
-    /// Human-owned sections of the current file that the reinstall keeps.
-    pub kept_human_sections: Vec<String>,
+    /// `owner="human"` sections of the current file this reinstall rewrites.
+    pub human_sections: Vec<String>,
+    /// The current file is human-validated: replacing it asks to reconfirm.
+    pub human_validated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -91,7 +94,8 @@ pub struct TemplateReinstallReport {
     pub unchanged: Vec<String>,
     /// Differing files that were not selected, left as they are.
     pub skipped: Vec<String>,
-    pub kept_human_sections: Vec<String>,
+    /// Human-validated docs this reinstall rewrote, now to reconfirm.
+    pub to_reconfirm: Vec<String>,
 }
 
 struct Prepared {
@@ -101,7 +105,8 @@ struct Prepared {
     kind: Option<ReinstallKind>,
     old: Option<Vec<u8>>,
     new: Vec<u8>,
-    kept: Vec<String>,
+    human: Vec<String>,
+    validated: bool,
 }
 
 fn template_files(root: &Path) -> Result<Vec<PathBuf>, String> {
@@ -138,6 +143,15 @@ fn prepare(project: &Path, template_docs: &Path) -> Result<(PathBuf, Vec<Prepare
     } else {
         project.join("docs")
     };
+    let validated: Vec<String> = crate::core::doc_provenance::report(project, false)
+        .map(|r| {
+            r.docs
+                .into_iter()
+                .filter(|d| d.state == crate::core::doc_provenance::ProvenanceState::HumanValidated)
+                .map(|d| d.doc)
+                .collect()
+        })
+        .unwrap_or_default();
     let mut prepared = Vec::new();
     for source in template_files(template_docs)? {
         let within = source
@@ -151,7 +165,7 @@ fn prepare(project: &Path, template_docs: &Path) -> Result<(PathBuf, Vec<Prepare
             .to_string_lossy()
             .replace('\\', "/");
         let new = std::fs::read(&source).map_err(|e| format!("read {}: {e}", source.display()))?;
-        let (old, action, kind, new, kept) = match std::fs::symlink_metadata(&dst) {
+        let (old, action, kind, new, human) = match std::fs::symlink_metadata(&dst) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 (None, ReinstallAction::Create, None, new, Vec::new())
             }
@@ -161,23 +175,24 @@ fn prepare(project: &Path, template_docs: &Path) -> Result<(PathBuf, Vec<Prepare
             }
             Ok(_) => {
                 let old = std::fs::read(&dst).map_err(|e| format!("read {rel}: {e}"))?;
-                let (new, kept) = keep_human_sections(&old, new);
+                let human = rewritten_human_sections(&old, &new);
                 let (action, kind) = if old == new {
                     (ReinstallAction::Unchanged, None)
                 } else {
                     (ReinstallAction::Replace, Some(classify(&old)))
                 };
-                (Some(old), action, kind, new, kept)
+                (Some(old), action, kind, new, human)
             }
         };
         prepared.push(Prepared {
+            validated: validated.contains(&rel),
             rel,
             dst,
             action,
             kind,
             old,
             new,
-            kept,
+            human,
         });
     }
     Ok((docs_dir, prepared))
@@ -221,18 +236,14 @@ fn without_inline_code(text: &str) -> String {
     out
 }
 
-/// The template's bytes with every human-owned section of `old` put back.
-fn keep_human_sections(old: &[u8], new: Vec<u8>) -> (Vec<u8>, Vec<String>) {
-    let (Ok(old_text), Ok(new_text)) = (std::str::from_utf8(old), std::str::from_utf8(&new)) else {
-        return (new, Vec::new());
+/// The `owner="human"` sections of `old` the template's bytes would change.
+fn rewritten_human_sections(old: &[u8], new: &[u8]) -> Vec<String> {
+    let (Ok(old_text), Ok(new_text)) = (std::str::from_utf8(old), std::str::from_utf8(new)) else {
+        return Vec::new();
     };
-    match crate::api::audit::anti_hallu_enforce::enforce_human_owned_sections(old_text, new_text) {
-        Some((merged, diffs)) => (
-            merged.into_bytes(),
-            diffs.into_iter().map(|d| d.name).collect(),
-        ),
-        None => (new, Vec::new()),
-    }
+    crate::api::audit::anti_hallu_enforce::enforce_human_owned_sections(old_text, new_text)
+        .map(|(_, diffs)| diffs.into_iter().map(|d| d.name).collect())
+        .unwrap_or_default()
 }
 
 pub fn plan_reinstall(
@@ -252,7 +263,8 @@ pub fn plan_reinstall(
                 path: p.rel,
                 action: p.action,
                 kind: p.kind,
-                kept_human_sections: p.kept,
+                human_sections: p.human,
+                human_validated: p.validated,
             })
             .collect(),
         audit_running,
@@ -392,6 +404,31 @@ pub fn reinstall(
     // Placeholders of the files this call wrote, scoped to those files only.
     let touched: Vec<PathBuf> = written.iter().map(|p| p.dst.clone()).collect();
     let _ = crate::core::docs_migration::prefill_files(project, &touched);
+    let mut to_reconfirm = Vec::new();
+    for file in &written {
+        let (Some(old), Ok(after)) = (
+            file.old
+                .as_deref()
+                .and_then(|b| std::str::from_utf8(b).ok()),
+            std::fs::read_to_string(&file.dst),
+        ) else {
+            continue;
+        };
+        match crate::core::doc_provenance::note_write(
+            project,
+            &file.rel,
+            old,
+            &after,
+            crate::core::doc_provenance::DocWriter::TemplateReinstall,
+        ) {
+            Ok(true) => to_reconfirm.push(file.rel.clone()),
+            Ok(false) => {}
+            Err(e) => tracing::warn!(
+                "Human-validation provenance of {} not recorded: {e}",
+                file.rel
+            ),
+        }
+    }
 
     let mut by_action: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     for file in &prepared {
@@ -412,10 +449,7 @@ pub fn reinstall(
             .filter(|p| p.action == ReinstallAction::Replace && !chosen(p))
             .map(|p| p.rel.clone())
             .collect(),
-        kept_human_sections: prepared
-            .iter()
-            .flat_map(|p| p.kept.iter().map(|name| format!("{}#{name}", p.rel)))
-            .collect(),
+        to_reconfirm,
     })
 }
 

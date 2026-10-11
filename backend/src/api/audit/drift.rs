@@ -131,7 +131,15 @@ pub async fn acknowledge_citations(
     }
     let tracker = state.audit_tracker.clone();
     let result = tokio::task::spawn_blocking(move || {
-        crate::core::citation_drift::acknowledge(&project_path, &req.doc)
+        let section = crate::core::citation_drift::acknowledge(&project_path, &req.doc)?;
+        if let Err(e) = crate::core::doc_provenance::record_validation(
+            &project_path,
+            std::slice::from_ref(&req.doc),
+            crate::core::doc_provenance::ValidationReason::Acknowledged,
+        ) {
+            tracing::warn!("Human-validation provenance not recorded: {e}");
+        }
+        Ok(section)
     })
     .await
     .unwrap_or_else(|e| Err(format!("Task failed: {e}")));
@@ -444,6 +452,11 @@ pub(crate) async fn run_partial_pipeline(
         }
         drop_guard.set_run_id(audit_run_id.clone());
         super::full::stop_validation_agents(&state, &project_id_for_progress).await;
+        let provenance_writer = if revalidation.is_some() {
+            crate::core::doc_provenance::DocWriter::Revalidation
+        } else {
+            crate::core::doc_provenance::DocWriter::PartialAudit
+        };
         // KT-1168 — a revalidation that ends up rewriting nothing gives it back.
         let validated_before: Option<String> = if revalidation.is_some() {
             crate::core::kronn_state::read(&project_path).and_then(|s| s.validated_at)
@@ -646,7 +659,6 @@ pub(crate) async fn run_partial_pipeline(
             });
             yield Event::default().event("step_start").data(step_start.to_string());
 
-            let today = Utc::now().format("%Y-%m-%d").to_string();
             // Chained sub-audit steps (10..16) carry the relevance gate, same
             // as a full chained run — a partial re-run of a sub-audit that no
             // longer applies must still write its one-line "Not applicable".
@@ -694,8 +706,8 @@ pub(crate) async fn run_partial_pipeline(
                     continue;
                 }
             };
-            let human_owned_snapshot =
-                match super::helpers::capture_human_owned_sections(&project_path) {
+            let validated_docs_snapshot =
+                match super::helpers::capture_validated_docs(&project_path) {
                     Ok(snapshot) => snapshot,
                     Err(reason) => {
                         yield Event::default().event("step_warning").data(
@@ -951,32 +963,28 @@ pub(crate) async fn run_partial_pipeline(
                         }
                     }
 
-                    // Restore protected sections before any retry/failure
-                    // branch can leave this attempt's rewrite on disk.
-                    let ownership_error = match super::helpers::protect_human_owned_sections(
+                    // Every write of the attempt stays; the docs a human
+                    // validated are marked to reconfirm (KT-1079).
+                    if let Err(reason) = super::helpers::mark_validated_doc_writes(
                         &project_path,
-                        &human_owned_snapshot,
-                        &today,
+                        &validated_docs_snapshot,
+                        provenance_writer,
                     ) {
-                        Ok(_) => None,
-                        Err(reason) => {
-                            let reason = format!(
-                                "human-owned section protection failed for {file_label}: {reason}"
-                            );
-                            yield Event::default().event("step_warning").data(
-                                serde_json::json!({
-                                    "step": step, "file": file_label,
-                                    "reason": reason.clone(), "repaired_from_template": false,
-                                }).to_string()
-                            );
-                            Some(reason)
-                        }
-                    };
+                        let reason = format!(
+                            "human-validation provenance not recorded for {file_label}: {reason}"
+                        );
+                        yield Event::default().event("step_warning").data(
+                            serde_json::json!({
+                                "step": step, "file": file_label,
+                                "reason": reason, "repaired_from_template": false,
+                            }).to_string()
+                        );
+                    }
 
                     // KT-927 — a Stop during the step. Checked AFTER the
                     // sweeps above, like the Full pipeline, so the attempt's
-                    // rewrite is already redacted and the human-owned sections
-                    // restored; BEFORE any gate or retry, so a stopped step
+                    // rewrite is already redacted and the validated docs
+                    // marked; BEFORE any gate or retry, so a stopped step
                     // neither counts as a failure nor spawns another agent.
                     if audit_tracker.lock().map(|t| t.cancelled.contains(&project_id_for_progress)).unwrap_or(false) {
                         let run_id = audit_run_id.clone();
@@ -1017,9 +1025,6 @@ pub(crate) async fn run_partial_pipeline(
                         super::validation::validate_step_output(
                             cli_success, &project_path, analysis_step.target_file,
                         );
-                    if ownership_error.is_some() {
-                        success = false;
-                    }
                     let validation_warning = super::validation::with_http_diagnostics(
                         success, validation_warning, &process.captured_stderr(),
                     );

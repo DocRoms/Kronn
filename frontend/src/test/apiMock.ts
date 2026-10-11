@@ -375,6 +375,9 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       revalidationPlan: resolve({ sources_state: 'unknown', sections: [], agent_steps: [], reanchor_count: 0, human_count: 0 }),
       revalidateAuditStream: vi.fn(),
       acknowledgeCitations: resolve({}),
+      // KT-1079 — nothing to reconfirm by default.
+      docProvenance: resolve({ docs: [], to_reconfirm: 0 }),
+      confirmDocProvenance: resolve({ docs: [], to_reconfirm: 0 }),
     },
 
     agents: {

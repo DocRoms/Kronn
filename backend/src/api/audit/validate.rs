@@ -196,6 +196,14 @@ pub async fn validate_audit(
         }
 
         crate::core::citation_drift::record_all(&project_path)?;
+        // A failed record never refuses the validation: the docs simply read
+        // as not yet human-validated.
+        if let Err(e) = crate::core::doc_provenance::record_all(
+            &project_path,
+            crate::core::doc_provenance::ValidationReason::AuditValidation,
+        ) {
+            tracing::warn!("Human-validation provenance not recorded: {e}");
+        }
         kronn_state::mark_validated(&project_path)
     })
     .await

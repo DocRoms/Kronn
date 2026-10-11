@@ -1857,6 +1857,14 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             post(api::audit::acknowledge_citations),
         )
         .route(
+            "/api/projects/{id}/doc-provenance",
+            get(api::audit::doc_provenance_report),
+        )
+        .route(
+            "/api/projects/{id}/doc-provenance/confirm",
+            post(api::audit::confirm_doc_provenance),
+        )
+        .route(
             "/api/projects/{id}/partial-audit",
             post(api::audit::partial_audit),
         )

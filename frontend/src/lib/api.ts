@@ -1,6 +1,7 @@
 import type { AcceptAuditStepResponse, ArtifactBundle, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditRunCost, AuditStepInfo, AuditRecentActivity, AuditTokenBreakdown, EmbedOriginsChange } from '../types/generated';
 import type { BriefingDetectedDoc, BriefingDocsAnswers, BriefingProjectAnswers, CrossAuditEstimate, LinkedRepoDocStatus } from '../types/generated';
 import type { WorkerConnectivity } from '../types/generated';
+import type { DocProvenanceReport } from '../types/generated';
 import type { TemplateReinstallRequest, TemplateReinstallPlan, TemplateReinstallReport, MergeBase, TemplateMergeAccepted, TemplateMergeAcceptRequest, TemplateMergeRequest, TemplateMergeView } from '../types/generated';
 import { readTextAttachmentPreview } from './textAttachmentPreview';
 import type {
@@ -1266,6 +1267,12 @@ export const projects = {
   citationDrift: (id: string) => api<CitationDriftResponse>('GET', `/projects/${id}/citation-drift`),
   acknowledgeCitations: (id: string, doc: string) =>
     api<SectionCitations>('POST', `/projects/${id}/citation-drift/acknowledge`, { doc }),
+  /** KT-1079 — docs a human validated, and those Kronn changed since. */
+  docProvenance: (id: string, detail = false) =>
+    api<DocProvenanceReport>('GET', `/projects/${id}/doc-provenance${detail ? '?detail=true' : ''}`),
+  /** KT-1079 — « Confirmer »: an empty list confirms every doc to reconfirm. */
+  confirmDocProvenance: (id: string, docs: string[]) =>
+    api<DocProvenanceReport>('POST', `/projects/${id}/doc-provenance/confirm`, { docs }),
   /** KT-1168 — what « Revalider l'audit » would do, computed without writing. */
   revalidationPlan: (id: string) => api<RevalidationPlan>('GET', `/projects/${id}/revalidation`),
   getBriefing: (id: string) => api<string | null>('GET', `/projects/${id}/briefing`),

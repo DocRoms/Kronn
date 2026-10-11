@@ -102,8 +102,8 @@ export function TemplateReinstall({ projectId }: { projectId: string }) {
             {phase.report.skipped.length > 0 && (
               <p className="tm-small" data-testid="template-reinstall-skipped">{t('templateReinstall.done.skipped', phase.report.skipped.length)}</p>
             )}
-            {phase.report.kept_human_sections.length > 0 && (
-              <p className="tm-small">{t('templateReinstall.done.kept', phase.report.kept_human_sections.join(', '))}</p>
+            {phase.report.to_reconfirm.length > 0 && (
+              <p className="tm-small" data-testid="template-reinstall-reconfirm">{t('templateReinstall.done.reconfirm', phase.report.to_reconfirm.join(', '))}</p>
             )}
             <button type="button" className="tm-btn" onClick={close}>{t('templateMerge.close')}</button>
           </div>
@@ -142,8 +142,10 @@ function ConfirmBody({ plan, onConfirm, onCancel }: {
         />{' '}
         <code>{f.path}</code>
       </label>
-      {f.kept_human_sections.length > 0 && (
-        <span className="tm-dim"> · {t('templateReinstall.keepsHuman', f.kept_human_sections.join(', '))}</span>
+      {f.human_sections.length > 0 ? (
+        <span className="tm-dim" data-testid="template-reinstall-notice"> · {t('templateReinstall.reconfirmHuman', f.human_sections.join(', '))}</span>
+      ) : f.human_validated && (
+        <span className="tm-dim" data-testid="template-reinstall-notice"> · {t('templateReinstall.reconfirmValidated')}</span>
       )}
     </li>
   );

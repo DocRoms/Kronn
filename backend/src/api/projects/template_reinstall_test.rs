@@ -115,7 +115,7 @@ fn walk(dir: &Path) -> Vec<String> {
 }
 
 #[test]
-fn a_human_owned_section_survives_byte_for_byte() {
+fn a_human_owned_section_is_rewritten_never_kept_back_and_marked_to_reconfirm() {
     let (_tmp, project, template) = fixture();
     let human = format!("{HUMAN_OPEN}\nOur team rules, hand written.\n{SECTION_END}");
     write(
@@ -123,24 +123,70 @@ fn a_human_owned_section_survives_byte_for_byte() {
         "docs/AGENTS.md",
         &format!("# Old entry {{{{X}}}}\n{human}\nstale tail\n"),
     );
+    let plan = plan_reinstall(&project, &template, false).unwrap();
+    let entry = plan
+        .files
+        .iter()
+        .find(|f| f.path == "docs/AGENTS.md")
+        .unwrap();
+    assert_eq!(entry.human_sections, vec!["team"], "notice before writing");
 
     let report = reinstall(&project, &template, "s1", None).unwrap();
 
     let after = read(&project, "docs/AGENTS.md");
-    assert!(
-        after.contains(&human),
-        "human section kept verbatim: {after}"
+    assert_eq!(
+        after, "# Template entry\n",
+        "the reinstall is applied in full"
     );
-    assert!(
-        after.contains("# Template entry"),
-        "template content landed"
+    assert_eq!(report.to_reconfirm, vec!["docs/AGENTS.md"]);
+    let provenance = crate::core::doc_provenance::report(&project, true).unwrap();
+    assert_eq!(provenance.to_reconfirm, 1);
+    let doc = &provenance.docs[0];
+    assert_eq!(
+        doc.kronn_writes[0].writer,
+        crate::core::doc_provenance::DocWriter::TemplateReinstall
     );
-    assert!(!after.contains("stale tail"));
-    assert_eq!(report.kept_human_sections, vec!["docs/AGENTS.md#team"]);
+    assert!(doc.changes[0]
+        .before
+        .as_deref()
+        .unwrap()
+        .contains("Our team rules"));
     assert!(
         read(&project, ".kronn/audit/template-backups/s1/docs/AGENTS.md").contains("stale tail"),
         "the backup is the whole original"
     );
+}
+
+#[test]
+fn replacing_a_human_validated_doc_is_announced_then_marked() {
+    let (_tmp, project, template) = fixture();
+    write(
+        &project,
+        "docs/AGENTS.md",
+        "# Validated entry\nReal content.\n",
+    );
+    crate::core::doc_provenance::record_all(
+        &project,
+        crate::core::doc_provenance::ValidationReason::AuditValidation,
+    )
+    .unwrap();
+    let plan = plan_reinstall(&project, &template, false).unwrap();
+    let entry = plan
+        .files
+        .iter()
+        .find(|f| f.path == "docs/AGENTS.md")
+        .unwrap();
+    assert!(entry.human_validated);
+
+    let report = reinstall(
+        &project,
+        &template,
+        "s2",
+        Some(&["docs/AGENTS.md".to_string()]),
+    )
+    .unwrap();
+    assert_eq!(read(&project, "docs/AGENTS.md"), "# Template entry\n");
+    assert_eq!(report.to_reconfirm, vec!["docs/AGENTS.md"]);
 }
 
 #[test]
