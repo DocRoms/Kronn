@@ -53,14 +53,32 @@ export function useDialogFocus<T extends HTMLElement = HTMLDivElement>(options: 
       target.focus();
     }
 
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (openDialogs[openDialogs.length - 1] !== node) return;
+    const isTop = () => openDialogs[openDialogs.length - 1] === node;
+    const modal = node.getAttribute('aria-modal') === 'true';
+
+    const closeOnEscape = (event: KeyboardEvent) => {
+      const onEscape = latest.current.onEscape;
+      // An IME composition uses Escape to cancel itself.
+      if (event.key !== 'Escape' || event.isComposing || event.keyCode === 229) return;
+      if (!onEscape || event.defaultPrevented || !isTop()) return;
+      const target = event.target;
+      const lost = !(target instanceof Node) || target === document || target === document.body;
+      // A non-modal dialog only owns Escape pressed inside it.
+      if (!(target instanceof Node && node.contains(target)) && !(modal && lost)) return;
+      event.preventDefault();
+      // One layer per Escape: document and window listeners never see it.
+      event.stopPropagation();
+      onEscape();
+    };
+
+    // On body: after React's root and portal handlers (an inner control can prevent it), before page listeners.
+    const onBodyKeyDown = (event: KeyboardEvent) => closeOnEscape(event);
+
+    const onWindowKeyDown = (event: KeyboardEvent) => {
+      if (!isTop()) return;
       if (event.key === 'Escape') {
-        const onEscape = latest.current.onEscape;
-        if (onEscape && !event.defaultPrevented) {
-          event.preventDefault();
-          onEscape();
-        }
+        // Dispatched above body (window, document): body never saw it.
+        if (!(event.target instanceof Node) || event.target === document) closeOnEscape(event);
         return;
       }
       if (event.key !== 'Tab' || !trap) return;
@@ -87,12 +105,17 @@ export function useDialogFocus<T extends HTMLElement = HTMLDivElement>(options: 
         first.focus();
       }
     };
-    window.addEventListener('keydown', onKeyDown);
+    document.body.addEventListener('keydown', onBodyKeyDown);
+    window.addEventListener('keydown', onWindowKeyDown);
 
     return () => {
-      window.removeEventListener('keydown', onKeyDown);
+      document.body.removeEventListener('keydown', onBodyKeyDown);
+      window.removeEventListener('keydown', onWindowKeyDown);
       const index = openDialogs.lastIndexOf(node);
       if (index >= 0) openDialogs.splice(index, 1);
+      // Another layer that now holds focus keeps it.
+      const current = document.activeElement;
+      if (current !== null && current !== document.body && !node.contains(current)) return;
       const back = trigger?.isConnected ? trigger : fallback?.current;
       back?.focus();
     };

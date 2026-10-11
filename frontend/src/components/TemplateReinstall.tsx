@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useRef, useState, type RefObject } from 'react';
 import { AlertTriangle, CheckCircle2, RotateCcw, Wrench } from 'lucide-react';
 import { projects as projectsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
@@ -48,12 +48,6 @@ export function TemplateReinstall({ projectId }: { projectId: string }) {
 
   const close = () => setPhase({ kind: 'idle' });
   const openRef = useRef<HTMLButtonElement>(null);
-  // The open button is re-rendered on close, hence returnFocus; Escape waits for a running request.
-  const panelRef = useDialogFocus<HTMLElement>({
-    active: phase.kind !== 'idle',
-    onEscape: () => { if (!busy.current) close(); },
-    returnFocus: openRef,
-  });
 
   if (phase.kind === 'idle') {
     return (
@@ -68,7 +62,7 @@ export function TemplateReinstall({ projectId }: { projectId: string }) {
   }
 
   return (
-    <section ref={panelRef} className="tm-panel" data-testid="template-reinstall-panel" aria-label={t('templateReinstall.title')}>
+    <section className="tm-panel" data-testid="template-reinstall-panel" aria-label={t('templateReinstall.title')}>
       {phase.kind === 'loading' && (
         <LoadingState message={t(phase.op === 'plan' ? 'templateReinstall.loading.plan' : 'templateReinstall.loading.run')} />
       )}
@@ -90,7 +84,7 @@ export function TemplateReinstall({ projectId }: { projectId: string }) {
         </div>
       )}
 
-      {phase.kind === 'confirm' && <ConfirmBody plan={phase.plan} onConfirm={reinstall} onCancel={close} />}
+      {phase.kind === 'confirm' && <ConfirmBody plan={phase.plan} onConfirm={reinstall} onCancel={close} returnFocus={openRef} />}
 
       {phase.kind === 'done' && (
         <div className="tm-success" role="status" data-testid="template-reinstall-done">
@@ -121,12 +115,15 @@ export function TemplateReinstall({ projectId }: { projectId: string }) {
   );
 }
 
-function ConfirmBody({ plan, onConfirm, onCancel }: {
+function ConfirmBody({ plan, onConfirm, onCancel, returnFocus }: {
   plan: TemplateReinstallPlan;
   onConfirm: (paths: string[]) => void;
   onCancel: () => void;
+  returnFocus: RefObject<HTMLButtonElement | null>;
 }) {
   const { t } = useT();
+  // Only the confirmation is a dialog; the open button is re-rendered on cancel, hence returnFocus.
+  const dialogRef = useDialogFocus<HTMLDivElement>({ onEscape: onCancel, returnFocus });
   const damaged = plan.files.filter(f => f.action === 'replace' && f.kind !== 'filled');
   const filled = plan.files.filter(f => f.action === 'replace' && f.kind === 'filled');
   const created = plan.files.filter(f => f.action === 'create');
@@ -158,7 +155,7 @@ function ConfirmBody({ plan, onConfirm, onCancel }: {
     </li>
   );
   return (
-    <div data-testid="template-reinstall-confirm" role="dialog" aria-label={t('templateReinstall.title')}>
+    <div ref={dialogRef} data-testid="template-reinstall-confirm" role="dialog" aria-label={t('templateReinstall.title')}>
       <header className="tm-header">
         <Wrench size={16} className="tm-header-icon" />
         <div className="tm-header-text">

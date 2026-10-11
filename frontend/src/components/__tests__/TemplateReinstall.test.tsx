@@ -174,14 +174,23 @@ describe('TemplateReinstall', () => {
     await waitFor(() => expect(api.templateReinstall).toHaveBeenCalledTimes(2));
   });
 
-  it('the confirmation takes focus, keeps it, closes on Escape and returns focus to the open button (KT-1072)', async () => {
+  it('the confirmation dialog takes focus, keeps it, closes on Escape and returns focus to the open button (KT-1072)', async () => {
     wrap(<TemplateReinstall projectId="p1" />);
     await userEvent.click(screen.getByTestId('template-reinstall-open'));
-    await screen.findByTestId('template-reinstall-confirm');
-    const panel = screen.getByTestId('template-reinstall-panel');
-    await expectFocusKeptIn(panel, 6);
+    const dialog = await screen.findByTestId('template-reinstall-confirm');
+    await expectFocusKeptIn(dialog, 6);
     await userEvent.keyboard('{Escape}');
     expect(screen.queryByTestId('template-reinstall-panel')).toBeNull();
     expect(screen.getByTestId('template-reinstall-open')).toHaveFocus();
+  });
+
+  it('the inline panel outside the confirmation never traps the keyboard (KT-1072)', async () => {
+    wrap(<><TemplateReinstall projectId="p1" /><button type="button">after</button></>);
+    await userEvent.click(screen.getByTestId('template-reinstall-open'));
+    await userEvent.click(await screen.findByTestId('template-reinstall-confirm-button'));
+    await screen.findByTestId('template-reinstall-done');
+    within(screen.getByTestId('template-reinstall-panel')).getByRole('button').focus();
+    await userEvent.tab();
+    expect(screen.getByText('after')).toHaveFocus();
   });
 });
