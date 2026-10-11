@@ -364,6 +364,10 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       auditStatusAll: resolve([]),
       fullAuditStream: vi.fn(),
       partialAuditStream: vi.fn(),
+      // KT-1168 — « Revalider l'audit »: nothing to do by default.
+      revalidationPlan: resolve({ sources_state: 'unknown', sections: [], agent_steps: [], reanchor_count: 0, human_count: 0 }),
+      revalidateAuditStream: vi.fn(),
+      acknowledgeCitations: resolve({}),
     },
 
     agents: {

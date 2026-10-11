@@ -15,6 +15,7 @@ import { useTemplateMergeOffer } from '../hooks/useTemplateMergeOffer';
 import type { AuditKind } from '../types/AuditKind';
 import { ProjectLinkedRepos } from './ProjectLinkedRepos';
 import { SourcesBadge } from './SourcesBadge';
+import { RevalidateAudit } from './RevalidateAudit';
 import {
   saveAuditCheckpoint, loadAuditCheckpoint, clearAuditCheckpoint,
   type AuditCheckpointKind,
@@ -1360,6 +1361,7 @@ export function ProjectCard({
                 </button>
               )}
               {!auditActive && <SourcesBadge drift={driftStatus} />}
+              <RevalidateAudit project={proj} auditActive={auditActive} agent={selectedAuditAgent} tier={auditTierChoice} connectionId={auditConnectionId} toast={toast} onRefetch={onRefetch} onRefetchDrift={onRefetchDrift} onOpenDiscussion={onOpenDiscussion} onNavigate={onNavigate} />
               {!auditActive && !resumableAudit && driftStatus && driftStatus.stale_sections.length > 0 && (
                 <>
                   <span
@@ -1503,6 +1505,7 @@ export function ProjectCard({
               <span className="dash-badge-gray"><ShieldCheck size={9} /> Validated</span>
             ) : null}
             {!auditActive && <SourcesBadge drift={driftStatus} />}
+            <RevalidateAudit project={proj} auditActive={auditActive} agent={selectedAuditAgent} tier={auditTierChoice} connectionId={auditConnectionId} toast={toast} onRefetch={onRefetch} onRefetchDrift={onRefetchDrift} onOpenDiscussion={onOpenDiscussion} onNavigate={onNavigate} />
             {!auditActive && latestAuditOutcome && (
               <button
                 type="button"

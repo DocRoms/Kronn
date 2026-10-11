@@ -170,6 +170,8 @@ import type {
   ModelTiersConfig,
   DriftCheckResponse,
   CitationDriftResponse,
+  RevalidateAuditRequest,
+  RevalidationPlan,
   SectionCitations,
   AddContactResult,
   WorkflowSuggestion,
@@ -500,6 +502,12 @@ async function parseSSEStream(
  *  validate shape, the cast trusts the backend (which we own).
  */
 /** Terminal payload of a partial refresh (matrix v2). */
+/** KT-1168 — terminal of « Revalider l'audit »: re-anchoring alone, or the
+ *  bounded agent pass (same contract as a partial audit). */
+export type RevalidationDoneInfo =
+  | { kind: 'deterministic'; status: 'clean' | 'todo'; reanchored: number }
+  | { kind: 'agent'; info: PartialDoneInfo };
+
 export interface PartialDoneInfo {
   status: 'complete' | 'interrupted' | 'no_change';
   discussionId: string | null;
@@ -1250,6 +1258,8 @@ export const projects = {
   citationDrift: (id: string) => api<CitationDriftResponse>('GET', `/projects/${id}/citation-drift`),
   acknowledgeCitations: (id: string, doc: string) =>
     api<SectionCitations>('POST', `/projects/${id}/citation-drift/acknowledge`, { doc }),
+  /** KT-1168 — what « Revalider l'audit » would do, computed without writing. */
+  revalidationPlan: (id: string) => api<RevalidationPlan>('GET', `/projects/${id}/revalidation`),
   getBriefing: (id: string) => api<string | null>('GET', `/projects/${id}/briefing`),
   setBriefing: (id: string, notes: string | null) => api<void>('PUT', `/projects/${id}/briefing`, { notes }),
   startBriefing: (id: string, agent: AgentType, tier?: ModelTier) =>
@@ -1451,6 +1461,71 @@ export const projects = {
           fail('Audit stream closed before a terminal event');
         },
         onError: fail,
+      },
+    );
+  },
+  /** KT-1168 — « Revalider l'audit »: re-anchors moved citations, then runs
+   * the owning audit steps of the broken sections (partial pipeline). A
+   * relaunch resumes: the backend recomputes the plan every time. */
+  revalidateAuditStream: async (
+    id: string,
+    req: RevalidateAuditRequest,
+    handlers: {
+      onReanchored?: (doc: string, count: number) => void;
+      onStepStart?: (step: number, total: number, file: string) => void;
+      onStepDone?: (step: number, success: boolean) => void;
+      onWarning?: (message: string) => void;
+      /** TERMINAL: the run was stopped; nothing else follows. */
+      onCancelled: () => void;
+      /** TERMINAL. Undefined on a user abort. */
+      onDone: (info?: RevalidationDoneInfo) => void;
+      /** TERMINAL. */
+      onError: (error: string) => void;
+    },
+    signal?: AbortSignal,
+  ) => {
+    let finished = false;
+    let canonicalSteps: number[] | null = null;
+    const seal = (f: () => void) => { if (!finished) { finished = true; f(); } };
+    await fetchAndParseSSE(
+      `${_apiBase}/api/projects/${id}/revalidate-audit`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify(req), signal },
+      {
+        onEvent: (type, payload) => {
+          const p = payload as Record<string, unknown>;
+          switch (type) {
+            case 'start':
+              if (isStepList(p.requested_steps)) canonicalSteps = p.requested_steps;
+              break;
+            case 'reanchored':
+              handlers.onReanchored?.(String(p.doc ?? ''), Number(p.count ?? 0));
+              break;
+            case 'step_start':
+              handlers.onStepStart?.(Number(p.progress ?? p.step), Number(p.total), String(p.file ?? ''));
+              break;
+            case 'step_done': handlers.onStepDone?.(Number(p.step), p.success === true); break;
+            case 'warning': handlers.onWarning?.(String(p.message ?? 'Revalidation warning')); break;
+            case 'cancelled': seal(handlers.onCancelled); break;
+            case 'done': {
+              if (p.status === 'clean' || p.status === 'todo') {
+                const status = p.status;
+                seal(() => handlers.onDone({ kind: 'deterministic', status, reanchored: Number(p.reanchored ?? 0) }));
+                break;
+              }
+              if (canonicalSteps === null) { seal(() => handlers.onError('Malformed revalidation stream: done before start')); break; }
+              const info = parsePartialDone(p, canonicalSteps);
+              if (typeof info === 'string') seal(() => handlers.onError(info));
+              else seal(() => handlers.onDone({ kind: 'agent', info }));
+              break;
+            }
+            case 'error': seal(() => handlers.onError(String(p.error ?? 'Unknown error'))); break;
+          }
+        },
+        onDone: () => {
+          if (signal?.aborted) { seal(() => handlers.onDone()); return; }
+          seal(() => handlers.onError('Revalidation stream closed before a terminal event'));
+        },
+        onError: (error) => seal(() => handlers.onError(error)),
       },
     );
   },
