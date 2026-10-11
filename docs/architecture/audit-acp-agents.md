@@ -84,7 +84,7 @@ Now an ACP agent is stopped like an HTTP agent (KT-924), through a token:
 2. `cancel_audit` trips the token. The ACP session writes `session/cancel`
    (bounded to five seconds, so a wedged agent cannot hold the stop hostage),
    drops the turn, and shuts the agent's process down
-   [src: file: backend/src/agents/runner.rs:5624-5634#ACP_CANCEL_GRACE] [src: file: backend/src/agents/runner.rs:5690-5697#shutdown].
+   [src: file: backend/src/agents/runner.rs:5662-5672#ACP_CANCEL_GRACE] [src: file: backend/src/agents/runner.rs:5660-5667#shutdown].
 3. The process is started as its own process group, and shutdown kills the
    group, so what the agent started — a shell command, an MCP server — stops
    with it [src: file: backend/src/acp.rs:991-995#process_group] [src: file: backend/src/acp.rs:1795-1803#kill_process_group].
@@ -142,7 +142,7 @@ not before.
 - **Where the cost comes from.** Only what a runtime reports itself: Claude
   Code's `total_cost_usd` (its stream-json `result` line, or the adapter's
   `Cost` event) and OpenRouter's `usage.cost`, summed per response
-  [src: file: backend/src/agents/runner.rs:13918-13926#total_cost_usd] [src: file: backend/src/agents/runner.rs:5591-5593#usd_micros] [src: file: backend/src/agents/runner.rs:9721-9727#cost_usd_micros].
+  [src: file: backend/src/agents/runner.rs:13953-13961#total_cost_usd] [src: file: backend/src/agents/runner.rs:5624-5626#usd_micros] [src: file: backend/src/agents/runner.rs:9754-9760#cost_usd_micros].
   The recorded cost is never recomputed from a rate table; a finished step
   whose agent reported none is priced on read by `core::pricing` for the served
   model and shown as an estimate, never as a reported cost

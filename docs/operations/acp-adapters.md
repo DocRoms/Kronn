@@ -70,7 +70,7 @@ The desktop resolves it through Tauri's resource directory and sets
 configured but missing executable fails closed instead of using a developer's
 source checkout. Docker and source development keep the existing script route.
 [src: file: desktop/src-tauri/src/main.rs:1133-1147#KRONN_INTERNAL_MCP_EXECUTABLE]
-[src: file: backend/src/agents/runner.rs:6028-6046#resolve_internal_mcp_command]
+[src: file: backend/src/agents/runner.rs:6062-6080#resolve_internal_mcp_command]
 
 The embedded backend exports its actual loopback port as `KRONN_BACKEND_URL`
 before starting agent dispatch and MCP configuration sync. Generated desktop
@@ -84,7 +84,7 @@ with a specific diagnostic; this does not disable ordinary Claude discussions
 or relax worker isolation. Workers run through WSL instead; the boundary
 (`WSLENV`, translated paths, backend URL in NAT mode, native ACP refusal) is in
 [`windows-wsl-agents.md`](windows-wsl-agents.md).
-[src: file: backend/src/agents/runner.rs:12293-12302#claude_task_worker_platform_check]
+[src: file: backend/src/agents/runner.rs:12310-12319#claude_task_worker_platform_check]
 [Claude sandbox platform support](https://code.claude.com/docs/en/sandboxing)
 
 After replacing a frozen bridge, reconnect the MCP session. Frozen and Windows
@@ -291,7 +291,7 @@ workflow Agent step is launched with. Undeclared, the argv is unchanged.
   [src: file: backend/src/acp/codex_adapter.rs:139-168#codex_project_mcp_override]
   [src: file: backend/src/models/workflows.rs:1539-1560#validate]
 - Native ACP agents: `session/new` offers only the narrowed bridge, or no
-  server. [src: file: backend/src/agents/runner.rs:5779-5800#declared_mcp_servers]
+  server. [src: file: backend/src/agents/runner.rs:5814-5835#declared_mcp_servers]
 - The bridge, given `--step-tools=`, lists and dispatches only those tools
   and sends no catalogue instructions on `initialize`.
   [src: file: backend/scripts/disc-introspection-mcp.py:5779-5795#_declared_step_tools]

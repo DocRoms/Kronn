@@ -116,7 +116,7 @@ that lists no models keeps its own default: there is nothing to match. A
 session that lists models without the chosen one used to be left on OpenCode's
 own default while every screen showed the chosen model; the launch is now
 refused, naming the model, before any prompt is sent.
-[src: file: backend/src/agents/runner.rs:5363-5397#offers_model_catalogue]
+[src: file: backend/src/agents/runner.rs:5421-5455#offers_model_catalogue]
 [src: file: backend/src/acp.rs:1886-1916#select_model]
 
 ## Launch safety and UI
@@ -201,7 +201,7 @@ adapter supports thread resume. Claude supports resume on both routes. Effort
 is transmitted on every supported fresh/resumed invocation; this feature does
 not add resume to the direct Codex runner. Delegated task workers take the
 same route as ordinary turns, with their isolated worker arguments.
-[src: file: backend/src/agents/runner.rs:12796-12830#model_reasoning_effort]
+[src: file: backend/src/agents/runner.rs:12858-12892#model_reasoning_effort]
 [src: file: backend/src/acp/claude_adapter.rs:311-324#reasoning_effort]
 [src: file: backend/src/acp/codex_adapter.rs:462-501#model_reasoning_effort]
 [src: file: backend/src/agents/runner.rs:4787-4813#adapter_task_worker_args]

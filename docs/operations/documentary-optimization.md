@@ -5,7 +5,7 @@ reconciliation and before validation. It writes
 `.kronn/audit/document-optimization.json`, Kronn's local working state (listed
 in `.git/info/exclude`, never in your `.gitignore`); any blocking diagnostic prevents the
 audit from completing and the validation endpoint re-runs the same gate before
-recording validated state. [src: file: backend/src/api/audit/full.rs:2505-2548#analyze_and_write]
+recording validated state. [src: file: backend/src/api/audit/full.rs:2618-2661#analyze_and_write]
 [src: file: backend/src/api/audit/validate.rs:177-187#blocking_diagnostics]
 
 Defaults are 220 words per root adapter, 800 words for `docs/AGENTS.md`, 1,200
