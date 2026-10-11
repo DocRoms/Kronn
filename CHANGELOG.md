@@ -47,6 +47,9 @@ Release notes for 0.9.3 and earlier are available in the
   when empty, so older briefings stay byte-identical), rendered next to its
   fact in `## Project facts` and `docs/project.md`, given to the audit with
   the fact and put back after an AI review.
+  An answer line that would read as structure (a heading, a machine copy, a
+  Kronn option line) is saved behind a `\` and given back as typed, and the
+  questions are read in order, so an answer can never split the briefing.
 - The briefing asks about existing documentation and linked projects
   (KT-999). « Existing documentation? » lists the locations Kronn finds in
   the repository (`README*`, `docs/`, `doc/`, `wiki/`, ADR folders,

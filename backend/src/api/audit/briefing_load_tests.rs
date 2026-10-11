@@ -204,7 +204,54 @@ fn a_section_the_form_does_not_know_survives_a_resave() {
         "Ask Sam first.\n\n## Clarifications\nFrom the review."
     );
     assert_eq!(saved.purpose, form.purpose);
+    // Kept inside the answer, escaped once, then stable.
+    let first = save(&reload(&notes));
+    assert!(
+        first.contains("\\## Clarifications\nFrom the review."),
+        "{first}"
+    );
+    assert_eq!(parse_saved_briefing(&first).additional, saved.additional);
+    assert_eq!(save(&reload(&first)), first);
+}
+
+#[test]
+fn an_answer_with_structure_lines_round_trips_and_splits_nothing() {
+    let mut form = full_form();
+    form.purpose = "Intro\n## Team\nfoo\n# Project Briefing\n\\already escaped".into();
+    form.additional = format!(
+        "Pasted:\n## Project facts\n  <!-- kronn:project-answers v1 {{}} -->\n{}\n{} Codex, Kiro\n## Kronn options",
+        crate::core::td_tasks::BRIEFING_OPTION_LINE,
+        crate::core::cross_audit::BRIEFING_OPTION_PREFIX,
+    );
+    form.project = None;
+    form.td_to_tasks = false;
+    form.cross_audit_agents.clear();
+    let notes = save(&form);
+    let saved = parse_saved_briefing(&notes);
+    assert_eq!(saved.purpose, form.purpose);
+    assert_eq!(saved.team, "Four devs");
+    assert_eq!(saved.additional, form.additional);
+    // Nothing typed in an answer becomes structure or an option.
+    assert_eq!(saved.project, None);
+    assert!(!saved.td_to_tasks);
+    assert!(saved.cross_audit_agents.is_empty());
+    assert_eq!(project_doc::parse_answers(&notes), None);
+    assert!(!crate::core::td_tasks::briefing_wants_td_tasks(&notes));
     assert_eq!(save(&reload(&notes)), notes);
+}
+
+#[test]
+fn a_heading_line_inside_an_older_answer_never_drops_a_later_answer() {
+    // Written before answers were escaped: Purpose holds a `## Team` line.
+    let notes = "# Project Briefing\n\n## Purpose\nIntro\n## Team\nfoo\n\n## Team\nReal team\n\n\
+        ## Maturity\nM\n\n## External Dependencies\nD\n\n## Traps & Fragile Areas\nX\n\n\
+        ## Additional Context\nNone.\n";
+    let saved = parse_saved_briefing(notes);
+    assert_eq!(saved.purpose, "Intro");
+    assert!(saved.team.contains("Real team"), "{}", saved.team);
+    assert!(saved.team.starts_with("foo"), "{}", saved.team);
+    assert_eq!(saved.maturity, "M");
+    assert_eq!(saved.traps, "X");
 }
 
 #[test]

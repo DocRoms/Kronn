@@ -44,51 +44,97 @@ pub(crate) fn render_questions(answers: [&str; 6]) -> String {
         out.push('\n');
         out.push_str(heading);
         out.push('\n');
-        out.push_str(answer);
+        out.push_str(&escape_answer(answer));
         out.push('\n');
     }
     out
 }
 
-/// Body of the section under `heading`, up to the next boundary heading;
-/// `None` when the heading is absent.
-fn section_body(notes: &str, heading: &str, boundaries: &[&str]) -> Option<String> {
-    let mut body: Option<String> = None;
+/// A line of an answer that Kronn would read as structure: a heading, a
+/// machine copy or a Kronn option line.
+fn reads_as_structure(line: &str) -> bool {
+    let t = line.trim();
+    line.starts_with('\\')
+        || t.starts_with('#')
+        || t.starts_with("<!--")
+        || t.eq_ignore_ascii_case(crate::core::td_tasks::BRIEFING_OPTION_LINE)
+        || t.starts_with(crate::core::cross_audit::BRIEFING_OPTION_PREFIX)
+}
+
+/// Prefix such lines with `\` so an answer can never split the briefing or
+/// switch an option on; [`unescape_answer`] gives the typed text back.
+pub(crate) fn escape_answer(answer: &str) -> String {
+    answer
+        .split('\n')
+        .map(|line| {
+            if reads_as_structure(line) {
+                format!("\\{line}")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn unescape_answer(answer: &str) -> String {
+    answer
+        .split('\n')
+        .map(|line| line.strip_prefix('\\').unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The body under each question heading, `None` when absent. Each heading is
+/// searched after the previous one, so a heading-like line inside an earlier
+/// answer cannot take a later question's place.
+fn question_bodies(notes: &str) -> [Option<String>; 6] {
+    let mut bodies: [Option<String>; 6] = Default::default();
+    let mut current: Option<usize> = None;
+    let mut next = 0;
+    let form_sections = form_section_headings();
     for line in notes.split_inclusive('\n') {
         let trimmed = line.trim_end();
-        match body.as_mut() {
-            None if trimmed == heading => body = Some(String::new()),
-            None => {}
-            Some(_) if boundaries.contains(&trimmed) => break,
-            Some(b) => b.push_str(line),
+        if let Some(k) = (next..QUESTION_HEADINGS.len()).find(|&k| QUESTION_HEADINGS[k] == trimmed)
+        {
+            bodies[k] = Some(String::new());
+            current = Some(k);
+            next = k + 1;
+            continue;
+        }
+        if form_sections.contains(&trimmed) {
+            current = None;
+            continue;
+        }
+        if let Some(k) = current {
+            if let Some(body) = bodies[k].as_mut() {
+                body.push_str(line);
+            }
         }
     }
-    body
+    bodies
 }
 
 /// Parse a briefing into the form's answers. Missing or malformed parts are
 /// left empty; nothing here fails.
 pub(crate) fn parse_saved_briefing(notes: &str) -> SavedBriefing {
-    let boundaries: Vec<&str> = QUESTION_HEADINGS
-        .iter()
-        .copied()
-        .chain(form_section_headings())
-        .collect();
-    let answer = |heading: &str| {
-        section_body(notes, heading, &boundaries)
-            .map(|b| b.trim().to_string())
+    let bodies = question_bodies(notes);
+    let answer = |k: usize| {
+        bodies[k]
+            .as_deref()
+            .map(|b| unescape_answer(b.trim()))
             .unwrap_or_default()
     };
-    let mut additional = answer(QUESTION_HEADINGS[5]);
+    let mut additional = answer(5);
     if additional == ADDITIONAL_NONE {
         additional.clear();
     }
     SavedBriefing {
-        purpose: answer(QUESTION_HEADINGS[0]),
-        team: answer(QUESTION_HEADINGS[1]),
-        maturity: answer(QUESTION_HEADINGS[2]),
-        dependencies: answer(QUESTION_HEADINGS[3]),
-        traps: answer(QUESTION_HEADINGS[4]),
+        purpose: answer(0),
+        team: answer(1),
+        maturity: answer(2),
+        dependencies: answer(3),
+        traps: answer(4),
         additional,
         project: super::project_doc::parse_answers(notes),
         existing_docs: super::briefing_docs::parse(notes),
