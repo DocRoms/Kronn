@@ -1457,6 +1457,8 @@ tracker_key: string, forge: BriefingForge,
  */
 forge_repo: string, default_branch: BriefingDefaultBranch, commit_convention: BriefingCommitConvention, signoff_required: BriefingYesNo, merge_strategy: BriefingMergeStrategy, review_policy: BriefingReviewPolicy, release_cadence: BriefingReleaseCadence, environments: Array<BriefingEnvironment>, people: Array<BriefingPerson>, };
 
+export type BriefingProjectRules = { rules: Array<ProjectRule>, };
+
 export type BriefingReleaseCadence = "unknown" | "continuous" | "scheduled" | "on_demand";
 
 export type BriefingReviewPolicy = "unknown" | "no_review" | "one_approval" | "two_approvals";
@@ -6531,6 +6533,27 @@ referenced: boolean, required_secrets: Array<RequiredSecretStatus>, adr_level: R
 repository_fingerprint?: string, kronn_fingerprint?: string, };
 
 export type ProjectRepositorySkillProvenance = "repository" | "kronn" | "both";
+
+export type ProjectRule = { kind: ProjectRuleKind, text: string,
+/**
+ * Only on a ban.
+ */
+pattern: ProjectRulePattern | null, };
+
+/**
+ * A line the team states about the code: something always done, or never.
+ */
+export type ProjectRuleKind = "rule" | "ban";
+
+/**
+ * A deterministic pattern Kronn checks for a ban, read-only.
+ */
+export type ProjectRulePattern = { kind: ProjectRulePatternKind, value: string, };
+
+/**
+ * What a ban's verifiable pattern names.
+ */
+export type ProjectRulePatternKind = "dependency" | "import" | "file_glob";
 
 /**
  * The `SKILL.md` of a used skill, as the repository holds it now: masked the

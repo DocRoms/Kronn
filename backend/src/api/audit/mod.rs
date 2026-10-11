@@ -18,6 +18,7 @@ pub mod anti_hallu_enforce;
 pub mod anti_hallu_step;
 pub mod briefing;
 pub(crate) mod briefing_docs;
+pub(crate) mod briefing_rules;
 pub mod cross_audit;
 mod document_repair;
 pub mod drift;

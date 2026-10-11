@@ -2176,6 +2176,47 @@ button.dash-badge-tech-debt {
   color: var(--kr-error);
 }
 
+/* KT-1193 — rules and bans editor */
+.briefing-rule {
+  padding: var(--kr-sp-2) 0;
+  border-top: 1px dashed var(--kr-border-soft);
+}
+
+.briefing-rule-head,
+.briefing-rule-pattern {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-2);
+}
+
+.briefing-rule-pattern {
+  margin-top: var(--kr-sp-2);
+}
+
+.briefing-rule-head .briefing-rule-text,
+.briefing-rule-pattern .briefing-card-input {
+  flex: 1 1 200px;
+}
+
+.briefing-rule-pattern select.briefing-card-input {
+  flex: 0 0 auto;
+}
+
+.briefing-rule-remove {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border: none;
+  background: transparent;
+  color: var(--kr-text-muted);
+  cursor: pointer;
+}
+
+.briefing-rule-remove:hover {
+  color: var(--kr-error);
+}
+
 /* KT-999 — which AI doc a linked repo really has. */
 .linked-repo-ai-doc {
   padding: 0 6px;

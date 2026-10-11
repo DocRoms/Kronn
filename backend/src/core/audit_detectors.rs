@@ -82,7 +82,7 @@ pub struct DetectedSignal {
 }
 
 /// Source-file extensions counted by the test-gap detector.
-static SOURCE_EXTS: &[&str] = &[
+pub(crate) static SOURCE_EXTS: &[&str] = &[
     "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs", "php", "py", "go", "java", "kt", "rb", "cs", "c",
     "h", "cpp", "hpp", "cc", "swift", "scala",
 ];
@@ -111,6 +111,14 @@ pub struct ProjectScan {
 }
 
 pub fn scan_project(project_path: &Path) -> ProjectScan {
+    scan_project_with_rules(project_path, &[])
+}
+
+/// [`scan_project`] plus the briefing's bans that carry a pattern (KT-1193).
+pub fn scan_project_with_rules(
+    project_path: &Path,
+    rules: &[crate::models::ProjectRule],
+) -> ProjectScan {
     let inventory = crate::core::audit_baseline::Inventory::collect(project_path);
     let listing = tracked_listing(project_path);
     let mut out = Vec::new();
@@ -130,6 +138,10 @@ pub fn scan_project(project_path: &Path) -> ProjectScan {
     out.extend(crate::core::audit_baseline::run_baseline(
         project_path,
         &inventory,
+    ));
+    out.extend(crate::core::project_rules::detect_ban_violations(
+        project_path,
+        rules,
     ));
     // Stable order: severity first, then detector id, then evidence.
     out.sort_by(|a, b| {
@@ -654,7 +666,9 @@ fn disposition_anchor(sig: &DetectedSignal) -> Option<String> {
     {
         return Some(sig.evidence.to_lowercase());
     }
-    if sig.detector_id == "tracked-dotenv" {
+    if sig.detector_id == "tracked-dotenv"
+        || sig.detector_id == crate::core::project_rules::DETECTOR_ID
+    {
         return Some(sig.evidence.to_lowercase());
     }
     // Count / structural signals: fall back to a stable keyword.

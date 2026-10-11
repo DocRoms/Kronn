@@ -2389,3 +2389,55 @@ pub struct LinkedRepoDocStatus {
     /// Path of the entry point relative to the repository, when there is one.
     pub doc_path: Option<String>,
 }
+
+// ─── Project rules and bans (KT-1193) ──────────────────────────────────────
+
+/// A line the team states about the code: something always done, or never.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectRuleKind {
+    /// « Toujours… »: the code must do it.
+    #[default]
+    Rule,
+    /// « Jamais… »: the code must never do it.
+    Ban,
+}
+
+/// What a ban's verifiable pattern names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectRulePatternKind {
+    /// A package declared in package.json, Cargo.toml, composer.json or requirements*.txt.
+    Dependency,
+    /// An import or module name, word-matched in source files.
+    Import,
+    /// A file glob (`*` within a segment, `**` across segments).
+    FileGlob,
+}
+
+/// A deterministic pattern Kronn checks for a ban, read-only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ProjectRulePattern {
+    pub kind: ProjectRulePatternKind,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(default)]
+pub struct ProjectRule {
+    pub kind: ProjectRuleKind,
+    pub text: String,
+    /// Only on a ban.
+    pub pattern: Option<ProjectRulePattern>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(default)]
+pub struct BriefingProjectRules {
+    pub rules: Vec<ProjectRule>,
+}

@@ -16,7 +16,7 @@ use crate::core::audit_detectors::{
 /// Files above this size are skipped: a baseline config is never that large.
 const MAX_READ_BYTES: u64 = 512 * 1024;
 /// Upper bound on walked files, so a huge monorepo cannot stall the audit.
-const MAX_WALKED_FILES: usize = 50_000;
+pub(crate) const MAX_WALKED_FILES: usize = 50_000;
 /// Inline `<script>`/`<style>` bodies longer than this are flagged.
 const MAX_INLINE_LINES: usize = 50;
 
@@ -102,7 +102,7 @@ fn is_github_workflow(root: &Path, path: &Path) -> bool {
 }
 
 /// Bounded read of a walked file. Walk entries are never symlinks.
-fn read_walked(path: &Path) -> Option<String> {
+pub(crate) fn read_walked(path: &Path) -> Option<String> {
     let meta = std::fs::symlink_metadata(path).ok()?;
     if !meta.is_file() || meta.len() > MAX_READ_BYTES {
         return None;
@@ -116,7 +116,7 @@ fn read_root_file(root: &Path, rel: &str) -> Option<String> {
     read_walked(&resolved)
 }
 
-fn rel_display(root: &Path, path: &Path) -> String {
+pub(crate) fn rel_display(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
         .unwrap_or(path)
         .to_string_lossy()
@@ -124,7 +124,7 @@ fn rel_display(root: &Path, path: &Path) -> String {
 }
 
 /// Pushes signals with the shared per-detector cap and a remainder summary.
-struct Capped {
+pub(crate) struct Capped {
     id: &'static str,
     dimension: &'static str,
     severity: Severity,
@@ -133,7 +133,7 @@ struct Capped {
 }
 
 impl Capped {
-    fn new(id: &'static str, dimension: &'static str, severity: Severity) -> Self {
+    pub(crate) fn new(id: &'static str, dimension: &'static str, severity: Severity) -> Self {
         Self {
             id,
             dimension,
@@ -143,7 +143,7 @@ impl Capped {
         }
     }
 
-    fn push(&mut self, title: String, evidence: String) {
+    pub(crate) fn push(&mut self, title: String, evidence: String) {
         self.push_with(self.severity, title, evidence);
     }
 
@@ -161,7 +161,7 @@ impl Capped {
         });
     }
 
-    fn finish(mut self) -> Vec<DetectedSignal> {
+    pub(crate) fn finish(mut self) -> Vec<DetectedSignal> {
         if self.truncated > 0 {
             self.out.push(DetectedSignal {
                 detector_id: self.id,

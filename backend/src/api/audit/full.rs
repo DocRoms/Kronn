@@ -304,6 +304,10 @@ pub async fn full_audit(
         briefing_notes.as_deref(),
         project.briefing_notes.as_deref(),
     );
+    // KT-1193 — the team's rules and bans: prompt block, detector, coding-rules doc.
+    let project_rules = briefing_notes
+        .as_deref()
+        .and_then(super::briefing_rules::parse);
     // KT-1183 — experimental cross-agent audit; `None` keeps every step single-agent.
     let cross_agents = super::cross_audit::briefing_cross_agents(
         briefing_notes.as_deref(),
@@ -914,6 +918,7 @@ pub async fn full_audit(
                 serde_json::to_string(&report).unwrap_or_else(|_| "{}".into())
             );
         }
+        super::briefing_rules::sync_from_notes(&project_path, briefing_notes.as_deref());
 
         // 0.8.3 (#280) — MCP allowlist for the audit. On projects
         // with 10+ MCP servers wired (Fastly, Docker, GitLab, M365,
@@ -1138,8 +1143,9 @@ pub async fn full_audit(
         // executor (filesystem walk) via spawn_blocking.
         let (detector_signals, ecosystems) = {
             let p = project_path.clone();
+            let rules = project_rules.clone().unwrap_or_default().rules;
             match tokio::task::spawn_blocking(move || {
-                crate::core::audit_detectors::scan_project(&p)
+                crate::core::audit_detectors::scan_project_with_rules(&p, &rules)
             })
             .await
             {
@@ -1288,6 +1294,7 @@ pub async fn full_audit(
                 full_prompt.push_str(&block);
             }
             full_prompt.push_str(&super::decisions_context_block(&project_path, analysis_step, &adr_baseline.decisions));
+            full_prompt.push_str(&super::briefing_rules::prompt_block(analysis_step.target_file, project_rules.as_ref()));
             // 0.8.3 (#272) — pre-existing user docs are migrated to
             // docs/legacy/ before the audit runs. Tell the agent to
             // READ them FIRST as the primary source of truth when
@@ -1870,6 +1877,8 @@ pub async fn full_audit(
                         }
                     }
 
+                    // The rules section belongs to Kronn: an agent rewrite never keeps it.
+                    super::briefing_rules::sync_from_notes(&project_path, briefing_notes.as_deref());
                     // Every write of the attempt stays; the docs a human
                     // validated are marked to reconfirm (KT-1079). A failed
                     // record is a warning, never a failed step.

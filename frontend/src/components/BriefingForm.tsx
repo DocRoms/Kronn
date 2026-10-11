@@ -16,10 +16,11 @@ import { useEffect, useState } from 'react';
 import { useT } from '../lib/I18nContext';
 import { projects as projectsApi } from '../lib/api';
 import { Save, X, Loader2 } from 'lucide-react';
-import type { AgentType, BriefingDocLocation, BriefingProjectAnswers, CrossAuditEstimate, LinkedRepo, ModelTier } from '../types/generated';
+import type { AgentType, BriefingDocLocation, BriefingProjectAnswers, CrossAuditEstimate, LinkedRepo, ModelTier, ProjectRule } from '../types/generated';
 import { AGENT_LABELS } from '../lib/constants';
 import { formatUsd } from '../lib/audit-cost';
 import { BriefingExistingDocs } from './BriefingExistingDocs';
+import { BriefingProjectRules } from './BriefingProjectRules';
 import { ProjectLinkedRepos } from './ProjectLinkedRepos';
 import {
   BRIEFING_ENVIRONMENTS,
@@ -123,6 +124,7 @@ export function BriefingForm({
   const [submitting, setSubmitting] = useState(false);
   const [project, setProject] = useState<BriefingProjectAnswers>(emptyProjectAnswers);
   const [docs, setDocs] = useState<BriefingDocLocation[]>([]);
+  const [rules, setRules] = useState<ProjectRule[]>([]);
 
   const update = (key: keyof typeof form, value: string) => setForm(f => ({ ...f, [key]: value }));
   const choose = (key: BriefingChoiceCard['key'], id: string) =>
@@ -178,6 +180,7 @@ export function BriefingForm({
         project: projectAnswers,
         td_to_tasks: tdToTasks,
         existing_docs: { locations: docs },
+        project_rules: { rules },
         cross_audit_agents: crossAudit ? crossAgents : [],
       });
       if (!review) {
@@ -414,6 +417,8 @@ export function BriefingForm({
       </section>
 
       <BriefingExistingDocs projectId={projectId} onChange={setDocs} />
+
+      <BriefingProjectRules onChange={setRules} />
 
       {linkedRepos && (
         <section className="briefing-project" aria-labelledby="briefing-linked-title" data-testid="briefing-linked-repos">

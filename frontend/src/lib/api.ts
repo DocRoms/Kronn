@@ -1,5 +1,5 @@
 import type { AcceptAuditStepResponse, ArtifactBundle, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditRunCost, AuditStepInfo, AuditRecentActivity, AuditTokenBreakdown, EmbedOriginsChange } from '../types/generated';
-import type { BriefingDetectedDoc, BriefingDocsAnswers, BriefingProjectAnswers, CrossAuditEstimate, LinkedRepoDocStatus } from '../types/generated';
+import type { BriefingDetectedDoc, BriefingDocsAnswers, BriefingProjectAnswers, BriefingProjectRules, CrossAuditEstimate, LinkedRepoDocStatus } from '../types/generated';
 import type { WorkerConnectivity } from '../types/generated';
 import type { DocProvenanceReport } from '../types/generated';
 import type { TemplateReinstallRequest, TemplateReinstallPlan, TemplateReinstallReport, MergeBase, TemplateMergeAccepted, TemplateMergeAcceptRequest, TemplateMergeRequest, TemplateMergeView } from '../types/generated';
@@ -1302,6 +1302,8 @@ export const projects = {
     cross_audit_agents?: AgentType[];
     /** KT-999 — documentation locations, their state and sources of truth. */
     existing_docs?: BriefingDocsAnswers;
+    /** KT-1193 — rules and bans, written to the coding-rules doc and checked by the audit. */
+    project_rules?: BriefingProjectRules;
   }) => api<boolean>('POST', `/projects/${id}/save-briefing`, form),
   /** KT-1183 — the cross-agent audit's cost range, scaled from the last measured run. */
   crossAuditEstimate: (id: string, agents: number) =>

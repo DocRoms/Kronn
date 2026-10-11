@@ -389,12 +389,21 @@ pub(crate) fn strip_sections(notes: &str, headings: &[&str], machine_prefixes: &
 }
 
 /// `notes` without the form-owned sections (`## Project facts`,
-/// `## Existing documentation`) and without any stray machine copy.
+/// `## Existing documentation`, `## Project rules`) and without any stray
+/// machine copy.
 pub(crate) fn strip_facts_section(notes: &str) -> String {
     strip_sections(
         notes,
-        &[FACTS_HEADING, super::briefing_docs::DOCS_HEADING],
-        &[ANSWERS_PREFIX, super::briefing_docs::DOCS_ANSWERS_PREFIX],
+        &[
+            FACTS_HEADING,
+            super::briefing_docs::DOCS_HEADING,
+            super::briefing_rules::RULES_HEADING,
+        ],
+        &[
+            ANSWERS_PREFIX,
+            super::briefing_docs::DOCS_ANSWERS_PREFIX,
+            super::briefing_rules::RULES_ANSWERS_PREFIX,
+        ],
     )
 }
 
@@ -404,7 +413,11 @@ pub(crate) fn strip_answers_line(notes: &str) -> String {
     strip_sections(
         notes,
         &[],
-        &[ANSWERS_PREFIX, super::briefing_docs::DOCS_ANSWERS_PREFIX],
+        &[
+            ANSWERS_PREFIX,
+            super::briefing_docs::DOCS_ANSWERS_PREFIX,
+            super::briefing_rules::RULES_ANSWERS_PREFIX,
+        ],
     )
 }
 
@@ -419,7 +432,10 @@ pub(crate) fn reattach_facts(previous: Option<&str>, reviewed: &str) -> String {
     let docs = previous
         .and_then(super::briefing_docs::parse)
         .and_then(|d| super::briefing_docs::render_section(&d));
-    if facts.is_none() && docs.is_none() {
+    let rules = previous
+        .and_then(super::briefing_rules::parse)
+        .and_then(|r| super::briefing_rules::render_section(&r));
+    if facts.is_none() && docs.is_none() && rules.is_none() {
         return reviewed.to_string();
     }
     let stripped = strip_facts_section(reviewed);
@@ -438,7 +454,7 @@ pub(crate) fn reattach_facts(previous: Option<&str>, reviewed: &str) -> String {
     };
     let mut body = head.trim_end().to_string();
     body.push('\n');
-    for section in [facts, docs].into_iter().flatten() {
+    for section in [facts, docs, rules].into_iter().flatten() {
         body.push('\n');
         body.push_str(&section);
     }

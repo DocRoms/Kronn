@@ -325,6 +325,10 @@ pub(crate) async fn run_partial_pipeline(
     let project_path = scanner::resolve_host_path(&project.path);
     let briefing_notes =
         crate::api::projects::resolve_briefing_notes(&project_path, &project.briefing_notes);
+    // KT-1193 — same rules inputs as the Full pipeline.
+    let project_rules = briefing_notes
+        .as_deref()
+        .and_then(super::briefing_rules::parse);
     // KT-926 — the only other repos this prompt names are the ones the user
     // explicitly linked to the project. Never the list of the machine's Kronn
     // projects: the prompt goes to the model provider, and a companion list
@@ -585,8 +589,9 @@ pub(crate) async fn run_partial_pipeline(
         let adr_baseline = crate::core::adr::StartOfRun::capture(&project_path.join("docs"));
         let (detector_signals, ecosystems, prior_td_digests) = if step8_selected {
             let p = project_path.clone();
+            let rules = project_rules.clone().unwrap_or_default().rules;
             let (signals, ecosystems) = tokio::task::spawn_blocking(move || {
-                let scan = crate::core::audit_detectors::scan_project(&p);
+                let scan = crate::core::audit_detectors::scan_project_with_rules(&p, &rules);
                 (scan.signals, scan.ecosystems)
             }).await.unwrap_or_default();
             let digests = super::reconciliation::digest_prior_tech_debt(&project_path.join("docs"));
@@ -682,6 +687,7 @@ pub(crate) async fn run_partial_pipeline(
                 full_prompt.push_str(block);
             }
             full_prompt.push_str(&super::decisions_context_block(&project_path, analysis_step, &adr_baseline.decisions));
+            full_prompt.push_str(&super::briefing_rules::prompt_block(analysis_step.target_file, project_rules.as_ref()));
 
             // Rewrite-proof snapshot BEFORE the agent runs — compared as the
             // LAST gate after CLI/validator (and step-8/enforce gates when
@@ -963,6 +969,8 @@ pub(crate) async fn run_partial_pipeline(
                         }
                     }
 
+                    // The rules section belongs to Kronn: an agent rewrite never keeps it.
+                    super::briefing_rules::sync_from_notes(&project_path, briefing_notes.as_deref());
                     // Every write of the attempt stays; the docs a human
                     // validated are marked to reconfirm (KT-1079).
                     if let Err(reason) = super::helpers::mark_validated_doc_writes(

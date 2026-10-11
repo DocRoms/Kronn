@@ -105,6 +105,7 @@ pub(crate) const BRIEFING_PROMPT_MAX_CHARS: usize = 6_000;
 /// it say the same thing. The documentation section stays out (KT-999).
 pub(crate) fn briefing_prompt_section(notes: &str) -> String {
     let notes = super::briefing_docs::strip_section(notes);
+    let notes = super::briefing_rules::strip_section(&notes);
     let notes = super::project_doc::strip_answers_line(&notes);
     let notes = notes.trim_end();
     let total = notes.chars().count();
@@ -336,6 +337,9 @@ pub struct BriefingFormRequest {
     /// KT-999 — documentation locations and their state; absent from older clients.
     #[serde(default)]
     pub existing_docs: Option<BriefingDocsAnswers>,
+    /// KT-1193 — rules and bans the team states about the code; optional.
+    #[serde(default)]
+    pub project_rules: Option<BriefingProjectRules>,
 }
 
 pub async fn save_briefing_form(
@@ -391,6 +395,20 @@ async fn save_briefing_form_inner(
         Some(Ok(answers)) => super::project_doc::render_facts_section(&answers),
         Some(Err(e)) => return json_bool(ApiResponse::err(e)),
     };
+    let project_rules = match form
+        .project_rules
+        .as_ref()
+        .map(super::briefing_rules::normalize)
+    {
+        None => None,
+        Some(Ok(rules)) => Some(rules),
+        Some(Err(e)) => {
+            return (StatusCode::BAD_REQUEST, Json(ApiResponse::<bool>::err(e))).into_response()
+        }
+    };
+    let rules_section = project_rules
+        .as_ref()
+        .and_then(super::briefing_rules::render_section);
 
     // 2. Look up project for the on-disk path.
     let pid = id.clone();
@@ -448,7 +466,10 @@ async fn save_briefing_form_inner(
         traps_rendered,
         additional_rendered,
     );
-    for section in [project_facts, docs_section].into_iter().flatten() {
+    for section in [project_facts, docs_section, rules_section]
+        .into_iter()
+        .flatten()
+    {
         body.push('\n');
         body.push_str(&section);
     }
@@ -482,6 +503,12 @@ async fn save_briefing_form_inner(
             target.display(),
             e
         )));
+    }
+    // KT-1193 — every agent of the project reads the coding-rules doc.
+    if let Err(e) =
+        super::briefing_rules::sync_coding_rules_doc(&project_path, project_rules.as_ref())
+    {
+        tracing::warn!("project rules not written to the coding-rules doc: {e}");
     }
     let notes = body.clone();
     match state

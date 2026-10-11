@@ -23047,6 +23047,105 @@ mod cold_api_handlers_tests {
         );
     }
 
+    // KT-1193 — project rules and bans in the briefing.
+    fn briefing_with_rules(rules: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "purpose": "P", "team": "T", "maturity": "M",
+            "dependencies": "D", "traps": "Tr", "additional": "",
+            "project_rules": { "rules": rules }
+        })
+    }
+
+    #[tokio::test]
+    async fn briefing_rules_are_recorded_and_written_to_the_coding_rules_doc() {
+        let (_dir, repo) = seed_repo("brief-rules");
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        std::fs::write(repo.join("docs/AGENTS.md"), "# A\n").unwrap();
+        let human = "# Coding rules\n\n## Global\n\nHuman text.\n";
+        std::fs::write(repo.join("docs/coding-rules.md"), human).unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, json) = post_json(
+            app,
+            &format!("/api/projects/{pid}/save-briefing"),
+            briefing_with_rules(serde_json::json!([
+                {"kind": "rule", "text": "toujours passer par le service X"},
+                {"kind": "ban", "text": "ne jamais utiliser lodash",
+                 "pattern": {"kind": "dependency", "value": "lodash"}}
+            ])),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{json}");
+        assert_eq!(json["success"], serde_json::Value::Bool(true), "{json}");
+        let body = std::fs::read_to_string(repo.join("docs/briefing.md")).unwrap();
+        assert!(body.contains("## Project rules\n"), "{body}");
+        assert!(
+            body.contains(
+                "- Never: ne jamais utiliser lodash — checked by Kronn: dependency `lodash`"
+            ),
+            "{body}"
+        );
+        assert!(body.contains("<!-- kronn:project-rules v1 "), "{body}");
+        let doc = std::fs::read_to_string(repo.join("docs/coding-rules.md")).unwrap();
+        assert!(
+            doc.contains("<!-- kronn:section name=\"project-rules\""),
+            "{doc}"
+        );
+        assert!(
+            doc.contains("**Always:** toujours passer par le service X"),
+            "{doc}"
+        );
+        assert!(doc.ends_with("## Global\n\nHuman text.\n"), "{doc}");
+
+        // Saving without rules removes the section and leaves the human doc.
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, _) = post_json(
+            app,
+            &format!("/api/projects/{pid}/save-briefing"),
+            briefing_with_rules(serde_json::json!([])),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let body = std::fs::read_to_string(repo.join("docs/briefing.md")).unwrap();
+        assert!(!body.contains("## Project rules"), "{body}");
+        assert_eq!(
+            std::fs::read_to_string(repo.join("docs/coding-rules.md")).unwrap(),
+            human
+        );
+    }
+
+    #[tokio::test]
+    async fn briefing_rules_out_of_bounds_are_refused_with_400() {
+        let (_dir, repo) = seed_repo("brief-rules-bad");
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let too_many: Vec<_> = (0..21)
+            .map(|i| serde_json::json!({"kind": "rule", "text": format!("rule {i}")}))
+            .collect();
+        for bad in [
+            serde_json::Value::Array(too_many),
+            serde_json::json!([{"kind": "rule", "text": "x".repeat(201)}]),
+            serde_json::json!([{"kind": "rule", "text": "always",
+                "pattern": {"kind": "import", "value": "lodash"}}]),
+            serde_json::json!([{"kind": "ban", "text": "never",
+                "pattern": {"kind": "file_glob", "value": "../secret/*"}}]),
+        ] {
+            let app = build_router_with_auth(state.clone(), false);
+            let (st, json) = post_json(
+                app,
+                &format!("/api/projects/{pid}/save-briefing"),
+                briefing_with_rules(bad),
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "{json}");
+            assert_eq!(json["success"], serde_json::Value::Bool(false));
+        }
+        assert!(!repo.join("docs/briefing.md").exists());
+    }
+
     // KT-999 — existing documentation in the briefing.
     fn briefing_with_docs(locations: serde_json::Value) -> serde_json::Value {
         serde_json::json!({
