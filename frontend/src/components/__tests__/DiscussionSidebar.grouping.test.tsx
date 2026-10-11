@@ -666,16 +666,58 @@ describe('DiscussionSidebar — high-volume smart sections', () => {
     expect(favorites).not.toBeNull();
     expect(recent).not.toBeNull();
 
-    // Running wins over pinned, unread joins Follow up, and neither leaks into
-    // another smart section. The canonical project/general tree still contains
-    // every discussion below those shortcuts.
-    expect(within(followUp).getByText('Smart discussion 1')).toBeInTheDocument();
+    // A running favorite stays in Favoris, unread joins Follow up, and neither
+    // leaks into another smart section. The canonical project/general tree
+    // still contains every discussion below those shortcuts.
+    expect(within(followUp).queryByText('Smart discussion 1')).toBeNull();
     expect(within(followUp).getByText('Smart discussion 2')).toBeInTheDocument();
-    expect(within(favorites).queryByText('Smart discussion 1')).toBeNull();
+    expect(within(favorites).getByText('Smart discussion 1')).toBeInTheDocument();
     expect(within(favorites).getByText('Smart discussion 0')).toBeInTheDocument();
     expect(within(recent).queryByText('Smart discussion 0')).toBeNull();
     expect(within(recent).queryByText('Smart discussion 1')).toBeNull();
     expect(within(recent).queryByText('Smart discussion 2')).toBeNull();
+  });
+
+  // Smart sections only exist from 20 discussions on, which is where a live
+  // favorite used to drop out of Favoris into Follow up.
+  const favoriteStateFixture = () => [
+    ...Array.from({ length: 20 }, (_, index) => mkDisc({ id: `filler-${index}`, title: `Filler ${index}` })),
+    mkDisc({ id: 'fav-running', title: 'Fav running', pinned: true, agent_running: true }),
+    mkDisc({ id: 'fav-queued', title: 'Fav queued', pinned: true, awaiting_agent: true }),
+    mkDisc({ id: 'fav-sending', title: 'Fav sending', pinned: true }),
+    mkDisc({ id: 'fav-idle', title: 'Fav idle', pinned: true, updated_at: '2026-05-20T00:00:00Z' }),
+    mkDisc({ id: 'plain-running', title: 'Plain running', agent_running: true }),
+  ];
+
+  it('keeps every favorite in Favoris while an agent runs or waits in it, live first', async () => {
+    render(
+      <DiscussionSidebar
+        {...baseProps}
+        discussions={favoriteStateFixture()}
+        sendingMap={{ 'fav-sending': true }}
+      />,
+    );
+    await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
+
+    const favorites = document.querySelector('.disc-sidebar-favorites') as HTMLElement;
+    expect(favorites).not.toBeNull();
+    const titles = ['Fav running', 'Fav queued', 'Fav sending', 'Fav idle'];
+    for (const title of titles) {
+      expect(within(favorites).getByText(title)).toBeInTheDocument();
+    }
+    expect(within(favorites).queryByText('Plain running')).toBeNull();
+    // Live favorites sort ahead of the idle one even though it is more recent.
+    const idle = within(favorites).getByText('Fav idle');
+    for (const title of ['Fav running', 'Fav queued', 'Fav sending']) {
+      expect(within(favorites).getByText(title).compareDocumentPosition(idle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    }
+
+    // Follow up keeps unpinned live work only: one shortcut row per discussion.
+    const followUp = document.querySelector('.disc-sidebar-follow-up') as HTMLElement;
+    expect(within(followUp).getByText('Plain running')).toBeInTheDocument();
+    for (const title of titles) {
+      expect(within(followUp).queryByText(title)).toBeNull();
+    }
   });
 
   it('caps shortcut rows until the user explicitly asks for the rest', async () => {

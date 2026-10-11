@@ -325,6 +325,11 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A favourite stays in Favoris while an agent runs or waits in it. From 20
+  discussions on, a live pinned discussion moved to « À suivre » and left
+  Favoris until the run ended. Favoris now lists every pinned discussion,
+  live ones first with their indicator, and « À suivre » keeps the unpinned
+  live and unread work, so each discussion has one shortcut row.
 - One click on « Voir » in the pending-decisions banner now brings the
   decision card into view. It fired a single smooth `scrollIntoView`, aimed
   at the layout measured at the click; message rows use
