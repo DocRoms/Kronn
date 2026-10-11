@@ -684,7 +684,10 @@ pub(crate) fn save_briefing_in(
             1,
         );
     }
-    for section in [project_facts.as_deref(), docs_section].into_iter().flatten() {
+    for section in [project_facts.as_deref(), docs_section]
+        .into_iter()
+        .flatten()
+    {
         body.push('\n');
         body.push_str(section);
     }
@@ -753,7 +756,13 @@ pub(crate) async fn save_briefing_with(
             let Some(project) = crate::db::projects::get_project(conn, &id)? else {
                 return Ok(Err(BriefingSaveError::NotFound));
             };
-            Ok(save_briefing_in(conn, &project, &form, defaults, docs_section.as_deref()))
+            Ok(save_briefing_in(
+                conn,
+                &project,
+                &form,
+                defaults,
+                docs_section.as_deref(),
+            ))
         })
         .await
         .unwrap_or_else(|e| Err(BriefingSaveError::Internal(format!("DB error: {e}"))))
@@ -774,9 +783,11 @@ pub async fn save_briefing_form(
             )),
         )
             .into_response(),
-        Err(BriefingSaveError::ExistingDocs(reason)) => {
-            (StatusCode::BAD_REQUEST, Json(ApiResponse::<bool>::err(reason))).into_response()
-        }
+        Err(BriefingSaveError::ExistingDocs(reason)) => (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::<bool>::err(reason)),
+        )
+            .into_response(),
         Err(error) => Json(ApiResponse::<bool>::err(error.message())).into_response(),
     }
 }

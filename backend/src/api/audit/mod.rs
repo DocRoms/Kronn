@@ -3213,7 +3213,12 @@ mod prompt_tests {
     #[test]
     fn step8_context_carries_signals_then_the_stack_checklist() {
         use crate::core::audit_ecosystems::Ecosystem;
-        let block = step8_context_block(&[], &[Ecosystem::Rust], &[], &crate::core::docs_location::DocsRoot::default_root());
+        let block = step8_context_block(
+            &[],
+            &[Ecosystem::Rust],
+            &[],
+            &crate::core::docs_location::DocsRoot::default_root(),
+        );
         let signals = block.find("Deterministic detector signals").unwrap();
         let stack = block.find("Stack-specific checklist").unwrap();
         assert!(signals < stack, "{block}");
