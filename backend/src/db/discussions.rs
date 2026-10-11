@@ -264,6 +264,7 @@ pub fn reconcile_awaiting_agents(conn: &Connection) -> Result<Vec<String>> {
                 target_agent: None,
                 reply_to_message_id: None,
                 author_cli_ordinal: None,
+                session_continuity: None,
             };
             // If the notice can't be persisted, KEEP awaiting_agent=1 so the
             // next boot retries: no notice landed, so retrying can't duplicate
@@ -387,6 +388,7 @@ pub fn recover_partial_responses(conn: &Connection) -> Result<Vec<String>> {
             target_agent: None,
             reply_to_message_id: trigger_message_id,
             author_cli_ordinal: None,
+            session_continuity: None,
         };
         let recovery_result = (|| -> Result<()> {
             let transaction = conn.unchecked_transaction()?;
@@ -2427,6 +2429,11 @@ pub fn update_discussion_participants(
 
 // ─── Messages ───────────────────────────────────────────────────────────────
 
+/// An unreadable value is unknown, never a reason to drop the message.
+fn parse_session_continuity(raw: Option<String>) -> Option<crate::models::SessionContinuity> {
+    raw.and_then(|value| serde_json::from_str(&value).ok())
+}
+
 /// Load all messages grouped by discussion_id in a single query (avoids N+1).
 fn list_all_messages(
     conn: &Connection,
@@ -2442,7 +2449,8 @@ fn list_all_messages(
                     AND NOT EXISTS (
                         SELECT 1 FROM workflow_step_room_sessions step_session
                          WHERE step_session.session_pk = mca.cli_session_id
-                    )) AS author_cli_ordinal
+                    )) AS author_cli_ordinal,
+                session_continuity
          FROM messages ORDER BY sort_order, timestamp"
     )?;
 
@@ -2487,6 +2495,7 @@ fn list_all_messages(
                     .unwrap_or(Some(false))
                     .unwrap_or(false),
                 author_cli_ordinal: row.get::<_, Option<i64>>(17).unwrap_or(None),
+                session_continuity: parse_session_continuity(row.get(18)?),
             },
         ))
     })?;
@@ -2527,7 +2536,8 @@ pub fn list_messages(conn: &Connection, discussion_id: &str) -> Result<Vec<Discu
                     AND NOT EXISTS (
                         SELECT 1 FROM workflow_step_room_sessions step_session
                          WHERE step_session.session_pk = mca.cli_session_id
-                    )) AS author_cli_ordinal
+                    )) AS author_cli_ordinal,
+                session_continuity
          FROM messages WHERE discussion_id = ?1
          ORDER BY sort_order, timestamp"
     )?;
@@ -2573,6 +2583,7 @@ pub fn list_messages(conn: &Connection, discussion_id: &str) -> Result<Vec<Discu
                     .unwrap_or(Some(false))
                     .unwrap_or(false),
                 author_cli_ordinal: row.get::<_, Option<i64>>(20).unwrap_or(None),
+                session_continuity: parse_session_continuity(row.get(21)?),
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -2614,6 +2625,7 @@ pub fn list_notes(
                     recovered_partial: false,
                     session_tokens_at_message: None,
                     author_cli_ordinal: None,
+                    session_continuity: None,
                     id: row.get(1)?,
                     role: parse_role(&role),
                     channel: parse_message_channel(&channel),
@@ -2801,8 +2813,8 @@ fn insert_message_inner(
         crate::db::assistant_conversations::mask_for_discussion(conn, discussion_id, &msg.content)?;
 
     conn.execute(
-        "INSERT INTO messages (id, discussion_id, role, channel, content, agent_type, timestamp, sort_order, tokens_used, auth_mode, model_tier, cost_usd, author_pseudo, author_avatar_email, source_msg_id, duration_ms, lint_report, model, target_agent, received_at, reply_to_message_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+        "INSERT INTO messages (id, discussion_id, role, channel, content, agent_type, timestamp, sort_order, tokens_used, auth_mode, model_tier, cost_usd, author_pseudo, author_avatar_email, source_msg_id, duration_ms, lint_report, model, target_agent, received_at, reply_to_message_id, session_continuity)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
         params![
             msg.id,
             discussion_id,
@@ -2827,6 +2839,8 @@ fn insert_message_inner(
             // timestamp — the pacing anchors depend on it.
             chrono::Utc::now().to_rfc3339(),
             msg.reply_to_message_id,
+            msg.session_continuity
+                .and_then(|continuity| serde_json::to_string(&continuity).ok()),
         ],
     )?;
     if let Some(target) = msg.target_agent.as_ref() {

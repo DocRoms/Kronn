@@ -882,6 +882,7 @@ pub async fn disc_append(
             recovered_partial: false,
             session_tokens_at_message: None,
             author_cli_ordinal: None,
+            session_continuity: None,
             model: None,
             // Only a live single Agent append carries a report (loop runs once).
             lint_report: live_lint_report.take(),
@@ -2194,6 +2195,7 @@ mod tests {
                     recovered_partial: false,
                     session_tokens_at_message: None,
                     author_cli_ordinal: None,
+                    session_continuity: None,
                 };
                 crate::db::discussions::insert_message(conn, "d-lint", &user)?;
                 Ok(())
@@ -2385,6 +2387,7 @@ mod tests {
                     recovered_partial: false,
                     session_tokens_at_message: None,
                     author_cli_ordinal: None,
+                    session_continuity: None,
                 };
                 let cursor = crate::db::discussions::insert_message(conn, "d-lint", &old)?;
                 let mut note = old.clone();

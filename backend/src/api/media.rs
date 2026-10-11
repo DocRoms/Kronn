@@ -486,6 +486,7 @@ fn build_prompt_message(
         recovered_partial: false,
         session_tokens_at_message: None,
         author_cli_ordinal: None,
+        session_continuity: None,
         model: None,
         lint_report: None,
         id: message_id.clone(),

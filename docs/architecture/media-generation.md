@@ -115,6 +115,16 @@ a causal source (`reply_to_message_id`), not an anchor to reuse: concurrent
 generations started from one prompt therefore keep distinct transcript
 positions and run identities.
 
+The file is stored like an upload. The copy the UI serves (`disk_path`) stays
+in the project's main checkout under `.kronn/context-files/`, or in Kronn's data
+dir without a project, so removing a worktree never deletes it. When the agent
+runs elsewhere (a worktree, a project-less discussion's folder) it receives a
+git-excluded copy under its own `.kronn/context-files/`, made at save time and
+again when its prompt is built; a failed copy is logged and the original path
+given instead. Assets stored before keep working.
+[src: file: backend/src/core/context_files.rs:181-205#attachment_dirs_for]
+[src: file: backend/src/core/context_files.rs:267-293#agent_readable_path]
+
 The anchor is rendered as one media bubble whose state changes in place from
 pending/running to success or failure. On success it shows the media itself,
 fetched through the authenticated context-file endpoint as an object URL, and

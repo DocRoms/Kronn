@@ -676,7 +676,7 @@ agent-type/alias matching or any other permissive resolution if either is missin
 `AwaitingReview` while the CLI is already in its principal room. The legacy
 terminal return remains only as compatibility for executions accepted by older
 bridges that physically moved a session into a child room.
-[src: file: backend/src/api/orchestration.rs:23676-23680#every_terminal_state_keeps_execution_scoped_cli_in_its_origin]
+[src: file: backend/src/api/orchestration.rs:23678-23682#every_terminal_state_keeps_execution_scoped_cli_in_its_origin]
 [src: file: backend/src/db/cli_worker_bindings.rs:78-165#return_to_origin]
 
 Collapsing the live and reload-stable identities, as an earlier revision did,
@@ -743,7 +743,7 @@ the MCP entry's `env_vars`. Kronn writes a narrow `KRONN_*` allowlist into the
 global Codex config and repeats it as a per-run `-c` override, so the dynamic
 discussion/task capability reaches that run immediately without rewriting
 shared config or leaking unrelated host variables.
-`[src: file: backend/src/agents/runner.rs:12592-12641#claude_task_worker_mcp_config]` `[src: file: backend/src/agents/runner.rs:2631-2659#KRONN_INTERNAL_CODEX_ENV_VARS]`
+`[src: file: backend/src/agents/runner.rs:12636-12685#claude_task_worker_mcp_config]` `[src: file: backend/src/agents/runner.rs:2631-2659#KRONN_INTERNAL_CODEX_ENV_VARS]`
 `[src: file: backend/src/api/discussions/streaming.rs:148-233#cli_task_worker_context]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:5740-5774#_spawned_task_worker_context]` `[src: file: backend/scripts/disc-introspection-mcp.py:11763-11776#_spawned_task_worker_mode]`
 
@@ -796,7 +796,7 @@ The MCP `initialize` instructions expose this contract before any room tool is
 called, and `disc_join` repeats it in the room protocol. The full document and
 diagram examples remain on demand in the Kronn Docs skill so the permanent MCP
 catalogue does not pay for a long manual.
-`[src: file: frontend/src/components/MessageBubble.tsx:2025-2036#DocPreview]`
+`[src: file: frontend/src/components/MessageBubble.tsx:2049-2060#DocPreview]`
 `[src: file: frontend/src/components/MermaidDiagram.tsx:111-119#validRoots]`
 `[src: file: backend/src/api/disc_prompts.rs:463-473#rich_output_notice]`
 `[src: file: backend/src/api/disc_invite.rs:583-632#join_next_steps]`
@@ -979,7 +979,7 @@ summaries, and `workflow_run_get` truncates step outputs. `task_list`,
 
 Every discussion message exposes the same `#xxxxxxxx` header pill as discussions
 and workflows; clicking it copies the full stable message UUID.
-[src: file: frontend/src/components/MessageBubble.tsx:645-653#copyMessageId]
+[src: file: frontend/src/components/MessageBubble.tsx:657-665#copyMessageId]
 `disc_get_message` accepts that UUID, the compact `MSG-xxxxxxxx` reference
 returned by the API, or the existing positive/negative `idx`. Pass `before`
 and/or `after` (0–10) to retrieve only the nearby messages needed for context:

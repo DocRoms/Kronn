@@ -116,9 +116,9 @@ the same job.
   not qualify live model behavior or KT-577's long-lived Claude process.
   See [native ACP continuity](../gotchas/native-acp-resume-continuity.md) for the
   negotiated `session/resume` contract and exact proof boundaries.
-  [src: file: backend/src/agents/runner.rs:2755-2789#completion_checkpoint]
+  [src: file: backend/src/agents/runner.rs:2764-2824#completion_checkpoint]
   [src: file: backend/src/api/discussions/streaming.rs:2223-2290#resume_with_delta_if_possible]
-  [src: file: backend/src/api/discussions/streaming.rs:8102-8110#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
+  [src: file: backend/src/api/discussions/streaming.rs:8266-8274#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
 - **Kronn does not yet normalize ACP's optional session cost.** The current
   upstream v1 schema supports `usage_update.cost` as a cumulative amount with
   an explicit currency; this is not a per-turn USD price. Kronn's native ACP
@@ -150,7 +150,7 @@ the same job.
   nor the worker permission scope. `task_worker_route_policy` decides this for
   worker preparation and for every launch route; an exact joined CLI session
   of the same agent stays eligible.
-  [src: file: backend/src/agents/runner.rs:3705-3723#task_worker_route_policy]
+  [src: file: backend/src/agents/runner.rs:3740-3758#task_worker_route_policy]
   The direct Copilot worker preflight keeps a four-second deadline and awaits
   process collection on timeout. Its [timeout regression](../gotchas/copilot-preflight-timeout.md)
   uses controlled time and an owned child, not a startup PID-file race.
@@ -170,8 +170,8 @@ successful run. The runner tests exercise this path with a fake ACP transport
 for creation, resume and its existing fallback, streaming, usage, cancellation,
 and prompt/persistence failures. They do not invoke an agent CLI, and ACP token
 usage still has no implied price.
-[src: file: backend/src/agents/runner.rs:5669-5730#acp_failure_diagnostic]
-[src: file: backend/src/agents/runner.rs:14865-14944#run_acp_session_reports_redacted_prompt_and_persistence_failures]
+[src: file: backend/src/agents/runner.rs:5711-5772#acp_failure_diagnostic]
+[src: file: backend/src/agents/runner.rs:14919-14998#run_acp_session_reports_redacted_prompt_and_persistence_failures]
 [src: file: backend/src/core/redact.rs:522-528#redact_for_audit_artifact]
 
 ## Settings catalogue correction (KT-531 / KT-597)

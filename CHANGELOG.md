@@ -437,6 +437,16 @@ Release notes for 0.9.3 and earlier are available in the
   `audit_runs.adr_record_baseline`). The steps that write TDs receive only the ADRs
   in force before the run. Existing tables keep working: a row that links a
   TD sheet still covers it.
+- Each agent reply says whether it continued the agent's conversation
+  (KT-1202). Every turn relaunches the CLI or ACP process; memory survives
+  through `--resume` (Claude Code) or ACP `session/resume`, with the full
+  history sent when that is not possible. The reply now records which
+  happened: « reprise », « nouvelle session » or « historique complet »
+  (resume refused by the runtime), shown discreetly after the model, with the
+  reason in the tooltip (no stored conversation, working directory changed,
+  previous turn unfinished, conversation expired, history changed, nothing
+  new, resume not supported…). Agents that never resume record nothing.
+  Migration 259 adds `messages.session_continuity`.
 
 ### Fixed
 
@@ -462,6 +472,16 @@ Release notes for 0.9.3 and earlier are available in the
   `audit_launch` takes `fresh` and `retry_steps`, the parameters the backend
   refusal already asked for, and refuses contradictory combinations before
   any call. The bridge is a long-running process: reload it to get the fix.
+- An agent can open the images and videos it generated (KT-1202). They were
+  stored in Kronn's data dir, outside the project the CLI agent is allowed to
+  read, so its `Read` of its own picture failed. Generated media are now
+  stored like uploads: the copy the UI serves stays in the project's main
+  checkout under `.kronn/context-files/` (Kronn's data dir without a
+  project), so removing a worktree never deletes it. When the agent runs
+  elsewhere (a worktree, a project-less discussion's folder), it gets a
+  git-excluded copy under its own `.kronn/context-files/` and that path in its
+  prompt; a failed copy is logged and the original path given instead. Media
+  already stored keep working: files are served from their recorded path.
 - A favourite stays in Favoris while an agent runs or waits in it. From 20
   discussions on, a live pinned discussion moved to « À suivre » and left
   Favoris until the run ended. Favoris now lists every pinned discussion,

@@ -401,6 +401,79 @@ pub struct DiscussionMessage {
     /// recorded CLI author.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author_cli_ordinal: Option<i64>,
+    /// KT-1202 — whether this agent turn continued its CLI/ACP conversation or
+    /// started a new one, and why. `None` for runtimes that never resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_continuity: Option<SessionContinuity>,
+}
+
+/// How an agent turn related to the CLI/ACP conversation of the previous one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum SessionContinuityStatus {
+    /// The stored conversation was continued with only the unseen messages.
+    Resumed,
+    /// A new conversation received the full history.
+    New,
+    /// A resume was attempted, refused, and the full history sent instead.
+    FallbackFullHistory,
+}
+
+/// Why a turn did not resume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum SessionContinuityReason {
+    /// No conversation was ever recorded for this agent here.
+    NoStoredId,
+    /// The recorded conversation ran in another directory.
+    ScopeChanged,
+    /// The previous turn never completed, so nothing proves what it saw.
+    PreviousTurnUnfinished,
+    /// The runtime no longer knows the recorded conversation.
+    SessionExpired,
+    /// The history changed since the agent's last turn.
+    HistoryChanged,
+    /// Nothing new was written since the agent's last turn.
+    NothingNew,
+    /// The unseen messages were not shorter than the full history.
+    DeltaNotSmaller,
+    /// The runtime cannot resume a conversation.
+    ResumeUnsupported,
+    /// The recorded conversation could not be read.
+    StoreUnavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SessionContinuity {
+    pub status: SessionContinuityStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<SessionContinuityReason>,
+}
+
+impl SessionContinuity {
+    pub fn resumed() -> Self {
+        Self {
+            status: SessionContinuityStatus::Resumed,
+            reason: None,
+        }
+    }
+
+    pub fn new_because(reason: SessionContinuityReason) -> Self {
+        Self {
+            status: SessionContinuityStatus::New,
+            reason: Some(reason),
+        }
+    }
+
+    pub fn fallback_because(reason: SessionContinuityReason) -> Self {
+        Self {
+            status: SessionContinuityStatus::FallbackFullHistory,
+            reason: Some(reason),
+        }
+    }
 }
 
 /// Per-discussion summary strategy.

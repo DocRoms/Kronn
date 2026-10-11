@@ -3427,7 +3427,12 @@ reply_to_message_id?: string | null,
  * `None` for User/System/native-agent messages and legacy rows with no
  * recorded CLI author.
  */
-author_cli_ordinal?: number | null, };
+author_cli_ordinal?: number | null,
+/**
+ * KT-1202 — whether this agent turn continued its CLI/ACP conversation or
+ * started a new one, and why. `None` for runtimes that never resume.
+ */
+session_continuity?: SessionContinuity | null, };
 
 /**
  * Lean surrounding-message shape for a `disc_get_message` window.
@@ -8292,6 +8297,18 @@ max_turns: number,
  * prepare a handover instead of being cut off mid-task.
  */
 soft_ratio: number, };
+
+export type SessionContinuity = { status: SessionContinuityStatus, reason?: SessionContinuityReason | null, };
+
+/**
+ * Why a turn did not resume.
+ */
+export type SessionContinuityReason = "no_stored_id" | "scope_changed" | "previous_turn_unfinished" | "session_expired" | "history_changed" | "nothing_new" | "delta_not_smaller" | "resume_unsupported" | "store_unavailable";
+
+/**
+ * How an agent turn related to the CLI/ACP conversation of the previous one.
+ */
+export type SessionContinuityStatus = "resumed" | "new" | "fallback_full_history";
 
 /**
  * A bridge-held secret, carried without ever being printed.

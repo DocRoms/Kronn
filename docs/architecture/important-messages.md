@@ -108,7 +108,7 @@ Only a matching row with `source_kind: orchestration` enables that path; an
 orchestrator display label or ordinary notification alone renders no card and
 no false refusal notice.
 [src: file: frontend/src/components/ImportantMessageCard.tsx:36-60#ImportantMessageCard]
-[src: file: frontend/src/components/MessageBubble.tsx:1083-1090#serverEventOnly]
+[src: file: frontend/src/components/MessageBubble.tsx:1107-1114#serverEventOnly]
 
 The bar re-fetches when the transcript's newest durable message id changes
 (`messageRevision`, the same idiom `DiscussionQuestionBanner` uses) — one

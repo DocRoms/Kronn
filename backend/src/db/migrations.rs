@@ -941,6 +941,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "258_project_docs_dir",
         include_str!("sql/258_project_docs_dir.sql"),
     ),
+    (
+        "259_message_session_continuity",
+        include_str!("sql/259_message_session_continuity.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup` (owner-only) without the auth

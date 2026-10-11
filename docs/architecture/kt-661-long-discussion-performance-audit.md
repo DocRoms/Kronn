@@ -67,14 +67,14 @@ alone does not establish a user-visible duration.
    injected context and sends the content to `ReactMarkdown` with
    `remark-gfm` and `remark-emoji`.
    [src: file: frontend/src/components/MessageBubble.tsx:2230-2275#MessageBody]
-   [src: file: frontend/src/components/MessageBubble.tsx:2179-2192#ReactMarkdown]
+   [src: file: frontend/src/components/MessageBubble.tsx:2203-2216#ReactMarkdown]
    Each message first renders as plain text and upgrades to Markdown once it is
    near the viewport or the browser is idle, so every message is still parsed.
    [src: file: frontend/src/components/MessageBubble.tsx:2128-2160#canDefer]
    There is a per-message
    200,000-character fallback that avoids this Markdown path for very large
    individual messages; it does not cap the count of ordinary messages.
-   [src: file: frontend/src/components/MessageBubble.tsx:1943-1951#MAX_MARKDOWN_CHARS]
+   [src: file: frontend/src/components/MessageBubble.tsx:1967-1975#MAX_MARKDOWN_CHARS]
 5. In-transcript search walks each rendered message row, then scans each row's
    rendered text nodes. For every match, the range helper locates start and end
    nodes by linear `find` calls.

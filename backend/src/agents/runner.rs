@@ -1769,6 +1769,9 @@ pub struct AgentProcess {
     activity_watched: bool,
     /// The launch's scoped bridge token; dropping the process revokes it.
     bridge_token: Option<crate::core::bridge_token::BridgeTokenGuard>,
+    /// Set when the runtime refused the requested resume and the turn went out
+    /// with the full history in a new session instead.
+    resume_fallback: Option<crate::models::SessionContinuityReason>,
 }
 
 /// Reads an HTTP agent's tool activity from outside its run.
@@ -1903,6 +1906,12 @@ impl AgentProcess {
     ) -> Self {
         self.bridge_token = guard;
         self
+    }
+
+    /// Why the requested resume was refused, when the turn fell back to the
+    /// full history in a new session.
+    pub fn resume_fallback(&self) -> Option<crate::models::SessionContinuityReason> {
+        self.resume_fallback
     }
 
     /// True when `next_line()` yields RAW token fragments to concatenate as-is,
@@ -2767,6 +2776,32 @@ impl AcpSessionStore {
             })
             .await
             .map_err(|error| format!("load completed conversation checkpoint: {error}"))
+    }
+
+    /// Why `load_completed_checkpoint` returned nothing for this scope.
+    pub async fn explain_missing_checkpoint(
+        &self,
+        agent_type: &AgentType,
+        project_scope: &Path,
+        cli_print: bool,
+    ) -> crate::models::SessionContinuityReason {
+        use crate::db::acp_runtime_sessions::CheckpointAbsence;
+        use crate::models::SessionContinuityReason as Reason;
+        let Some(key) = self.session_key(agent_type, project_scope, cli_print) else {
+            return Reason::ResumeUnsupported;
+        };
+        match self
+            .db
+            .with_read_conn(move |conn| {
+                crate::db::acp_runtime_sessions::checkpoint_absence(conn, &key)
+            })
+            .await
+        {
+            Ok(CheckpointAbsence::NoSession) => Reason::NoStoredId,
+            Ok(CheckpointAbsence::ScopeChanged) => Reason::ScopeChanged,
+            Ok(CheckpointAbsence::TurnUnfinished) => Reason::PreviousTurnUnfinished,
+            Err(_) => Reason::StoreUnavailable,
+        }
     }
 
     /// The response writer commits this proof in its existing transaction.
@@ -4712,6 +4747,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         token_fragments: false,
         activity_watched: false,
         bridge_token: bridge,
+        resume_fallback: None,
     })
 }
 
@@ -5319,7 +5355,7 @@ async fn run_acp_session(
         AgentRunPhase::OpeningSession,
         Some(startup_bounds.session_setup),
     );
-    let (resumed, resume_failed) = match resume_id {
+    let (resumed, resume_refused) = match resume_id {
         Some(conversation_id) => {
             let agent = match acp_agent(agent_type) {
                 Some(agent) => agent,
@@ -5347,15 +5383,21 @@ async fn run_acp_session(
                 return Err(acp_start_failure(&host, cancelled()).await);
             };
             match resumed {
-                Ok(()) => (Some(target), false),
+                Ok(()) => (Some(target), None),
                 // Capability absence and a positively identified missing
                 // session are safe before a prompt has any external effect.
                 // Authentication, timeout and transport errors are ambiguous:
                 // returning them avoids a potentially duplicate prompt.
                 Err(crate::acp::AcpError::CapabilityUnavailable {
                     capability: AcpCapability::Resume,
-                }) => (None, true),
-                Err(crate::acp::AcpError::SessionNotFound) => (None, true),
+                }) => (
+                    None,
+                    Some(crate::models::SessionContinuityReason::ResumeUnsupported),
+                ),
+                Err(crate::acp::AcpError::SessionNotFound) => (
+                    None,
+                    Some(crate::models::SessionContinuityReason::SessionExpired),
+                ),
                 Err(error) => {
                     let failure = timed_out(&error, AcpStartPhase::Session, started)
                         .unwrap_or_else(|| {
@@ -5368,7 +5410,7 @@ async fn run_acp_session(
                 }
             }
         }
-        None => (None, false),
+        None => (None, None),
     };
     let session = match resumed {
         Some(target) => target,
@@ -5456,7 +5498,7 @@ async fn run_acp_session(
         }
     }
 
-    let prompt_for_session = if resume_failed {
+    let prompt_for_session = if resume_refused.is_some() {
         fallback_prompt.unwrap_or(prompt)
     } else {
         prompt
@@ -5755,6 +5797,7 @@ async fn run_acp_session(
         token_fragments: true,
         activity_watched: true,
         bridge_token: None,
+        resume_fallback: resume_refused,
     })
 }
 
@@ -12018,6 +12061,7 @@ async fn start_ollama_http_with_idle(
         token_fragments: false,
         activity_watched: streamed,
         bridge_token: None,
+        resume_fallback: None,
     })
 }
 
@@ -14805,6 +14849,7 @@ mod acp_resume_tests {
             .success());
         assert_eq!(resumed.resumed.load(Ordering::SeqCst), 1);
         assert_eq!(resumed.created.load(Ordering::SeqCst), 0);
+        assert_eq!(resumed_process.resume_fallback(), None);
 
         let fallback = transport(ResumeOutcome::Missing, PromptOutcome::Complete);
         let mut fallback_process = run_fixture(
@@ -14830,6 +14875,11 @@ mod acp_resume_tests {
             ["complete history"],
             "a disappeared native session must receive the full prompt, never the delta"
         );
+        // KT-1202 — the message records that this turn fell back, and why.
+        assert_eq!(
+            fallback_process.resume_fallback(),
+            Some(crate::models::SessionContinuityReason::SessionExpired)
+        );
 
         let absent = transport(
             ResumeOutcome::CapabilityUnavailable,
@@ -14849,6 +14899,10 @@ mod acp_resume_tests {
         assert_eq!(
             absent.prompts.lock().unwrap().as_slice(),
             ["complete history"]
+        );
+        assert_eq!(
+            absent_process.resume_fallback(),
+            Some(crate::models::SessionContinuityReason::ResumeUnsupported)
         );
     }
 

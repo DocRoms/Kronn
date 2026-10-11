@@ -14,7 +14,7 @@ responders may all be Codex without being interchangeable:
 `message_targets` preserves those identities in textual order.
 `messages.target_agent` and `target_agents` remain compatibility projections
 for older clients and peers.
-[src: file: backend/src/models/discussions.rs:592-618#MessageTarget]
+[src: file: backend/src/models/discussions.rs:665-691#MessageTarget]
 [src: file: backend/src/db/sql/099_typed_message_targets.sql:1-37#message_targets]
 
 The composer parses prose once and submits the typed target list. The backend
@@ -114,7 +114,7 @@ New and migrated sessions start both cursors at the room's current tip.
 [src: file: frontend/src/hooks/useMessageQueue.ts:260-280#enqueue]
 [src: file: backend/src/db/discussions.rs:1290-1310#insert_user_message_with_dispatches]
 [src: file: backend/src/db/agent_dispatch.rs:677-770#recover_after_restart]
-[src: file: backend/src/db/discussions.rs:3320-3326#DispatchInProgress]
+[src: file: backend/src/db/discussions.rs:3334-3340#DispatchInProgress]
 [src: file: backend/src/api/federation.rs:26-70#federate_message]
 
 New-discussion aliases follow the same independent fan-out contract. Creation
