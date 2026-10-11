@@ -586,6 +586,14 @@ html[data-density="large"] .dash-main {
   background: rgba(var(--kr-warning-rgb), 0.2);
 }
 
+/* Clickable badges are buttons for keyboard users; keep the span look. */
+button.dash-badge-orange,
+button.dash-badge-tech-debt {
+  font-family: inherit;
+  line-height: inherit;
+  cursor: pointer;
+}
+
 /* Docs section state banners (0.8.1): shown inside the AiDocViewer
    when audit_status isn't yet Validated. Tone matches the message
    urgency — info for "you can audit", warn for "validate to finalize". */

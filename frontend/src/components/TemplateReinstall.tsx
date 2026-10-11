@@ -4,6 +4,7 @@ import { projects as projectsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import { errorText } from '../lib/templateMerge';
 import { LoadingState } from './LoadingState';
+import { useDialogFocus } from '../hooks/useDialogFocus';
 import type { TemplateReinstallPlan, TemplateReinstallReport } from '../types/generated';
 import './TemplateMergePanel.css';
 
@@ -46,13 +47,20 @@ export function TemplateReinstall({ projectId }: { projectId: string }) {
   }, [run, projectId]);
 
   const close = () => setPhase({ kind: 'idle' });
+  const openRef = useRef<HTMLButtonElement>(null);
+  // The open button is re-rendered on close, hence returnFocus; Escape waits for a running request.
+  const panelRef = useDialogFocus<HTMLElement>({
+    active: phase.kind !== 'idle',
+    onEscape: () => { if (!busy.current) close(); },
+    returnFocus: openRef,
+  });
 
   if (phase.kind === 'idle') {
     return (
       <div className="tm-offer" data-testid="template-reinstall-offer">
         <Wrench size={14} className="tm-header-icon" />
         <span>{t('templateReinstall.hint')}</span>
-        <button type="button" className="tm-btn" onClick={loadPlan} data-testid="template-reinstall-open">
+        <button type="button" className="tm-btn" onClick={loadPlan} data-testid="template-reinstall-open" ref={openRef}>
           {t('templateReinstall.open')}
         </button>
       </div>
@@ -60,7 +68,7 @@ export function TemplateReinstall({ projectId }: { projectId: string }) {
   }
 
   return (
-    <section className="tm-panel" data-testid="template-reinstall-panel" aria-label={t('templateReinstall.title')}>
+    <section ref={panelRef} className="tm-panel" data-testid="template-reinstall-panel" aria-label={t('templateReinstall.title')}>
       {phase.kind === 'loading' && (
         <LoadingState message={t(phase.op === 'plan' ? 'templateReinstall.loading.plan' : 'templateReinstall.loading.run')} />
       )}

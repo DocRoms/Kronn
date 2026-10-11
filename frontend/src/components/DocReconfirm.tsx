@@ -6,6 +6,7 @@ import { projects as projectsApi } from '../lib/api';
 import { useAsyncGuard } from '../hooks/useAsyncGuard';
 import { lineDiff } from '../lib/lineDiff';
 import type { DocProvenanceReport, DocProvenanceStatus, Project, ProvenanceChange } from '../types/generated';
+import { useDialogFocus } from '../hooks/useDialogFocus';
 import './DocReconfirm.css';
 
 export interface DocReconfirmProps {
@@ -64,12 +65,7 @@ export function DocReconfirm({ project, auditActive, toast }: DocReconfirmProps)
     return () => { live = false; };
   }, [auditActive, project.id]);
 
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [open]);
+  const panelRef = useDialogFocus<HTMLDivElement>({ active: open, onEscape: () => setOpen(false) });
 
   const openPanel = async () => {
     setOpen(true);
@@ -143,6 +139,7 @@ export function DocReconfirm({ project, auditActive, toast }: DocReconfirmProps)
       {open && createPortal(
         <div className="dr-overlay" role="presentation" onClick={(e) => { e.stopPropagation(); setOpen(false); }}>
           <div
+            ref={panelRef}
             className="dr-panel"
             role="dialog"
             aria-modal="true"

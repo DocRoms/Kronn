@@ -527,6 +527,10 @@ export function AuditTimeline(props: AuditTimelineProps) {
                 </div>
               </>
             )}
+            {/* Mounted before the run starts so screen readers pick up the first step; only the step text changes. */}
+            <p className="audit-tl-sr-only" role="status" aria-live="polite" aria-atomic="true" data-testid="audit-timeline-step-announce">
+              {auditActive ? t('audit.step', liveIndex, partialRun ? total : props.liveTotal, props.liveFile) : ''}
+            </p>
             {auditActive && (
               <div className="audit-tl-live" data-testid="audit-timeline-live">
                 <Loader2 size={13} className="spin" aria-hidden="true" />

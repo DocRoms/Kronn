@@ -364,6 +364,19 @@ Release notes for 0.9.3 and earlier are available in the
   `rel="noopener noreferrer"`. A link to a missing doc, or to a path outside
   the project, shows an inline message instead. A back button returns to the
   previous doc.
+- Dialogs, drawers and click targets work from the keyboard (KT-1072). A
+  shared `useDialogFocus` hook gives focus on open, keeps Tab inside, closes
+  on Escape and returns focus to the trigger; it now covers the folder
+  picker, the audit history drawer (now `aria-modal`), the API call log
+  drawer, the tech-debt review and its source viewer, « À reconfirmer »,
+  « Revalider l'audit » and the template reinstall confirmation. API call
+  log rows and the doc viewer tree take focus and open with Enter or Space;
+  the project card's validation, anti-hallucination and tech-debt badges are
+  buttons, and the card header no longer swallows Enter or Space pressed on
+  a control inside it. The audit history's sortable columns expose
+  `aria-sort` and sort from a button, and the audit timeline announces each
+  new step, not every tick, through a polite live region.
+
 - One click on « Voir » in the pending-decisions banner now brings the
   decision card into view. It fired a single smooth `scrollIntoView`, aimed
   at the layout measured at the click; message rows use

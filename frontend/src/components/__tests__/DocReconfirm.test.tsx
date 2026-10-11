@@ -4,7 +4,9 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, fireEvent, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { buildApiMock } from '../../test/apiMock';
+import { expectFocusKeptIn } from '../../test/dialogFocus';
 
 vi.mock('../../lib/api', () => buildApiMock());
 vi.mock('../../lib/I18nContext', () => ({
@@ -148,5 +150,18 @@ describe('lineDiff', () => {
     const before = Array.from({ length: 1000 }, (_, i) => `old ${i}`).join('\n');
     const after = Array.from({ length: 1000 }, (_, i) => `new ${i}`).join('\n');
     expect(lineDiff(before, after)).toBeNull();
+  });
+
+  it('the panel takes focus, keeps it, closes on Escape and returns focus to its trigger (KT-1072)', async () => {
+    provenance().mockResolvedValue(report([doc('docs/a.md'), doc('docs/b.md')]));
+    render(<DocReconfirm project={PROJECT} auditActive={false} toast={vi.fn()} />);
+    const trigger = await screen.findByTestId('project-doc-reconfirm');
+    await userEvent.click(trigger);
+    const panel = await screen.findByTestId('doc-reconfirm-panel');
+    await within(panel).findAllByTestId('doc-reconfirm-doc');
+    await expectFocusKeptIn(panel);
+    await userEvent.keyboard('{Escape}');
+    expect(screen.queryByTestId('doc-reconfirm-panel')).toBeNull();
+    expect(trigger).toHaveFocus();
   });
 });

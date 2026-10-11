@@ -4,7 +4,9 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, act, fireEvent, screen, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { buildApiMock } from '../../test/apiMock';
+import { expectFocusKeptIn } from '../../test/dialogFocus';
 
 vi.mock('../../lib/api', () => buildApiMock());
 vi.mock('../../lib/I18nContext', () => ({
@@ -340,5 +342,17 @@ describe('ProjectCard — Revalider l’audit', () => {
       onRefetchDrift: vi.fn(),
     } as unknown as React.ComponentProps<typeof ProjectCard>)} />);
     expect(await screen.findByTestId('project-revalidate')).toBeInTheDocument();
+  });
+
+  it('the panel takes focus, keeps it, closes on Escape and returns focus to its trigger (KT-1072)', async () => {
+    setup();
+    const trigger = screen.getByTestId('project-revalidate');
+    await userEvent.click(trigger);
+    const panel = await screen.findByTestId('revalidate-panel');
+    await within(panel).findByTestId('revalidate-launch');
+    await expectFocusKeptIn(panel);
+    await userEvent.keyboard('{Escape}');
+    expect(screen.queryByTestId('revalidate-panel')).toBeNull();
+    expect(trigger).toHaveFocus();
   });
 });

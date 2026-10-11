@@ -139,3 +139,16 @@
 
 .audit-tl-recorded ul { list-style: none; margin: var(--kr-sp-3) 0 0; padding: 0; display: grid; gap: var(--kr-sp-2); }
 .audit-tl-recorded li { display: flex; flex-wrap: wrap; gap: var(--kr-sp-4); align-items: baseline; font-size: var(--kr-fs-md); }
+
+/* Screen-reader only: the polite live region announcing audit step changes. */
+.audit-tl-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}

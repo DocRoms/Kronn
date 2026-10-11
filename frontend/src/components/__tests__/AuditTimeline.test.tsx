@@ -525,4 +525,26 @@ describe('AuditTimeline', () => {
     expect(screen.queryByTestId('audit-timeline-validation-finished')).toBeNull();
     expect(screen.queryByRole('button', { name: /Voir la discussion de validation/ })).toBeNull();
   });
+
+  it('announces step changes, not ticks, through a polite live region (KT-1072)', async () => {
+    mockTimeline([{ id: 'run-1', started_at: '2026-10-02T10:00:00Z' }], [step(1)]);
+    const { rerender } = wrap(<AuditTimeline {...props()} />);
+    const region = await screen.findByTestId('audit-timeline-step-announce');
+    expect(region).toHaveAttribute('aria-live', 'polite');
+    expect(region).toHaveTextContent('');
+
+    const running = (over: Partial<AuditTimelineProps>) => (
+      <I18nProvider>
+        <AuditTimeline {...props({ auditActive: true, liveTotal: 16, liveStep: 2, liveFile: 'docs/step-2.md', ...over })} />
+      </I18nProvider>
+    );
+    rerender(running({ liveElapsed: '0:05', liveTotalTokens: 100 }));
+    await waitFor(() => expect(region.textContent).toMatch(/2.*16.*docs\/step-2\.md/));
+    const announced = region.textContent;
+    rerender(running({ liveElapsed: '0:06', liveTotalTokens: 250, liveTool: 'Read', liveToolCalls: 3 }));
+    expect(region.textContent).toBe(announced);
+    rerender(running({ liveStep: 3, liveFile: 'docs/step-3.md', liveElapsed: '0:07' }));
+    await waitFor(() => expect(region.textContent).toMatch(/3.*16.*docs\/step-3\.md/));
+    expect(screen.getByTestId('audit-timeline-step-announce')).toBe(region);
+  });
 });

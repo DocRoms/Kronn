@@ -3,7 +3,10 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { useState } from 'react';
+import userEvent from '@testing-library/user-event';
 import { buildApiMock } from '../../test/apiMock';
+import { expectFocusKeptIn } from '../../test/dialogFocus';
 
 vi.mock('../../lib/api', () => buildApiMock());
 vi.mock('../../lib/I18nContext', () => ({
@@ -153,5 +156,47 @@ describe('TechDebtReview', () => {
     expect(screen.getAllByRole('checkbox')).toHaveLength(150);
     fireEvent.click(screen.getByTestId('td-group-toggle-Low'));
     expect(screen.getByTestId('td-bulk')).toHaveTextContent('techDebt.bulk.selected 37');
+  });
+
+  describe('dialog focus (KT-1072)', () => {
+    function Opener() {
+      const [open, setOpen] = useState(false);
+      return (
+        <>
+          <button type="button" onClick={() => setOpen(true)}>open-review</button>
+          {open && (
+            <TechDebtReview
+              project={PROJECT} list={list()} agents={[]} toast={vi.fn()}
+              onReload={vi.fn().mockResolvedValue(undefined)} onValidate={vi.fn()}
+              onClose={() => setOpen(false)} onOpenDiscussion={vi.fn()} onNavigate={vi.fn()}
+            />
+          )}
+        </>
+      );
+    }
+
+    it('takes focus, keeps it, closes on Escape and returns focus to its trigger', async () => {
+      render(<Opener />);
+      const trigger = screen.getByText('open-review');
+      await userEvent.click(trigger);
+      const dialog = screen.getByTestId('td-review');
+      await expectFocusKeptIn(dialog, 6);
+      await userEvent.keyboard('{Escape}');
+      expect(screen.queryByTestId('td-review')).toBeNull();
+      expect(trigger).toHaveFocus();
+    });
+
+    it('the source viewer takes focus, keeps it, and Escape returns to the pointer that opened it', async () => {
+      render(<Opener />);
+      await userEvent.click(screen.getByText('open-review'));
+      const pointer = within(screen.getByTestId('td-review')).getAllByRole('button', { name: /backend\/src\/lib\.rs/ })[0];
+      await userEvent.click(pointer);
+      const viewer = screen.getByRole('dialog', { name: 'backend/src/lib.rs' });
+      await expectFocusKeptIn(viewer, 3);
+      await userEvent.keyboard('{Escape}');
+      expect(screen.queryByRole('dialog', { name: 'backend/src/lib.rs' })).toBeNull();
+      expect(screen.getByTestId('td-review')).toBeInTheDocument();
+      expect(pointer).toHaveFocus();
+    });
   });
 });

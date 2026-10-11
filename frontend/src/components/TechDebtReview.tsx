@@ -1,4 +1,4 @@
-import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import { ExternalLink, FileCode2, ListChecks, MessageSquare, Search, ShieldCheck, X } from 'lucide-react';
 import { useT } from '../lib/I18nContext';
 import { externalApi, projects as projectsApi } from '../lib/api';
@@ -8,6 +8,7 @@ import { externalAgentTargets, unusableExternalAgentTargets } from '../lib/exter
 import { defaultCompareTargets, type CompareTarget } from '../lib/compareTargets';
 import type { AgentSwitchTarget } from './AgentSwitchPicker';
 import { useAsyncGuard } from '../hooks/useAsyncGuard';
+import { useDialogFocus } from '../hooks/useDialogFocus';
 import {
   groupTds, isTdSettled, nextUnsettled, shortTdId, TD_DECISIONS, TD_STATE_OF_DECISION, visibleTds,
   type TdFilter,
@@ -92,7 +93,9 @@ export function TechDebtReview({
   const [reasonFor, setReasonFor] = useState<{ id: string | null; text: string }>({ id: null, text: '' });
   const [viewer, setViewer] = useState<TdPointer | null>(null);
   const [busy, setBusy] = useState(false);
-  const dialogRef = useRef<HTMLDivElement>(null);
+  // Escape stays in the effect below: it closes the source viewer first.
+  const dialogRef = useDialogFocus<HTMLDivElement>();
+  const viewerRef = useDialogFocus<HTMLDivElement>({ active: viewer !== null });
   const { data: connections } = useApi(() => externalApi.list(), []);
   const installedAgentTypes = useMemo(() => agents.filter(isUsable).map(a => a.agent_type), [agents]);
   const talkChoices = useMemo<AgentSwitchTarget[]>(() => [
@@ -130,7 +133,7 @@ export function TechDebtReview({
     return () => window.removeEventListener('keydown', onKey);
   }, [viewer, onClose]);
 
-  useEffect(() => { dialogRef.current?.focus(); }, []);
+  useEffect(() => { dialogRef.current?.focus(); }, [dialogRef]);
 
   const onSelect = useCallback((id: string) => setCurrentId(id), []);
   const onToggle = useCallback((id: string) => {
@@ -522,7 +525,7 @@ export function TechDebtReview({
         </div>
 
         {viewer && (
-          <div className="td-viewer" role="dialog" aria-label={viewer.path}>
+          <div className="td-viewer" role="dialog" aria-label={viewer.path} ref={viewerRef}>
             <div className="td-viewer-head">
               <code>{viewer.path}{viewer.line ? `:${viewer.line}` : ''}</code>
               <button type="button" className="td-icon-btn" onClick={() => setViewer(null)} aria-label={t('techDebt.viewer.close')}>

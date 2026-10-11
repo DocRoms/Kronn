@@ -8,6 +8,7 @@ import { isValidationDisc, isBriefingDisc, isBootstrapDisc, isTrackerMcp } from 
 import { canRunAudit } from '../lib/agentCapabilities';
 import { AiDocViewer } from './AiDocViewer';
 import { unseenBasis } from '../lib/discussionUiUtils';
+import { onActivationKey } from '../lib/keyboardActivation';
 import AuditRecapPanel from './AuditRecapPanel';
 import { AuditTimeline } from './AuditTimeline';
 import { TemplateMergeOfferSlot } from './TemplateMergePanel';
@@ -1439,12 +1440,7 @@ export function ProjectCard({
         role="button"
         tabIndex={0}
         onClick={onToggleOpen}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            onToggleOpen();
-          }
-        }}
+        onKeyDown={onActivationKey(onToggleOpen)}
         aria-expanded={isOpen}
       >
         <ChevronRight size={14} style={{ color: 'var(--kr-accent-ink)', transform: isOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.2s' }} />
@@ -1504,9 +1500,9 @@ export function ProjectCard({
             {!auditActive && proj.audit_status === 'Validated' ? (
               <span className="dash-badge-green"><ShieldCheck size={9} /> Validated</span>
             ) : !auditActive && validationInProgress ? (
-              <span className="dash-badge-orange cursor-pointer" onClick={(e) => { e.stopPropagation(); if (validationDisc) onOpenDiscussion(validationDisc.id); onNavigate('discussions'); }}>
+              <button type="button" className="dash-badge-orange cursor-pointer" data-testid="project-validation-badge" onClick={(e) => { e.stopPropagation(); if (validationDisc) onOpenDiscussion(validationDisc.id); onNavigate('discussions'); }}>
                 <Loader2 size={9} style={{ animation: 'spin 1s linear infinite' }} /> Validation
-              </span>
+              </button>
             ) : !auditActive && (proj.audit_status === 'Audited' || proj.audit_status === 'TemplateInstalled') ? (
               <span className="dash-badge-gray"><ShieldCheck size={9} /> Validated</span>
             ) : null}
@@ -1545,8 +1541,10 @@ export function ProjectCard({
                   <ShieldCheck size={9} /> {t('projects.antiHallu.present')}
                 </span>
               ) : antiHalluStatus.file_exists ? (
-                <span
+                <button
+                  type="button"
                   className="dash-badge-orange cursor-pointer"
+                  data-testid="project-anti-hallu-inject"
                   onClick={(e) => { e.stopPropagation(); handleInjectAntiHallu(); }}
                   title={t('projects.antiHallu.injectTooltip')}
                 >
@@ -1554,12 +1552,14 @@ export function ProjectCard({
                     ? <><Loader2 size={9} style={{ animation: 'spin 1s linear infinite' }} /> {t('projects.antiHallu.injecting')}</>
                     : <><AlertTriangle size={9} /> {t('projects.antiHallu.missing')}</>
                   }
-                </span>
+                </button>
               ) : null
             )}
             {!auditActive && (proj.tech_debt_count ?? 0) > 0 && (
-              <span
+              <button
+                type="button"
                 className="dash-badge-tech-debt"
+                data-testid="project-tech-debt-badge"
                 title={t('projects.techDebtBadge', proj.tech_debt_count ?? 0)}
                 onClick={(e) => {
                   e.stopPropagation();
@@ -1578,7 +1578,7 @@ export function ProjectCard({
                 }}
               >
                 <AlertTriangle size={9} /> {proj.tech_debt_count} TD
-              </span>
+              </button>
             )}
             {/* Drift badge — hidden during active audit (#326 / F6) */}
             {!auditActive && !resumableAudit && driftStatus && driftStatus.stale_sections.length > 0 && (

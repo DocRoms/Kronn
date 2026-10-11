@@ -4,7 +4,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import type { ReactElement } from 'react';
+import userEvent from '@testing-library/user-event';
 import { I18nProvider } from '../../lib/I18nContext';
+import { expectFocusKeptIn } from '../../test/dialogFocus';
 
 vi.mock('../../lib/api', async () => {
   const { buildApiMock } = await import('../../test/apiMock');
@@ -170,5 +172,16 @@ describe('TemplateReinstall', () => {
     fireEvent.click(within(error).getByRole('button', { name: 'Reprendre' }));
     await screen.findByTestId('template-reinstall-done');
     await waitFor(() => expect(api.templateReinstall).toHaveBeenCalledTimes(2));
+  });
+
+  it('the confirmation takes focus, keeps it, closes on Escape and returns focus to the open button (KT-1072)', async () => {
+    wrap(<TemplateReinstall projectId="p1" />);
+    await userEvent.click(screen.getByTestId('template-reinstall-open'));
+    await screen.findByTestId('template-reinstall-confirm');
+    const panel = screen.getByTestId('template-reinstall-panel');
+    await expectFocusKeptIn(panel, 6);
+    await userEvent.keyboard('{Escape}');
+    expect(screen.queryByTestId('template-reinstall-panel')).toBeNull();
+    expect(screen.getByTestId('template-reinstall-open')).toHaveFocus();
   });
 });

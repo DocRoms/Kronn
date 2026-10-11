@@ -7,6 +7,7 @@ import type { RevalidationDoneInfo } from '../lib/api';
 import type {
   AgentType, CitationStatus, ModelTier, Project, RevalidationPlan, RevalidationSection,
 } from '../types/generated';
+import { useDialogFocus } from '../hooks/useDialogFocus';
 import './RevalidateAudit.css';
 
 type Phase =
@@ -67,12 +68,7 @@ export function RevalidateAudit({
     }
   }, [loadPlan]);
 
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [open]);
+  const panelRef = useDialogFocus<HTMLDivElement>({ active: open, onEscape: () => setOpen(false) });
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
@@ -226,6 +222,7 @@ export function RevalidateAudit({
       {open && createPortal(
         <div className="rv-overlay" role="presentation" onClick={(e) => { e.stopPropagation(); setOpen(false); }}>
           <div
+            ref={panelRef}
             className="rv-panel"
             role="dialog"
             aria-modal="true"

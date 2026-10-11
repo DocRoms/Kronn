@@ -5,6 +5,7 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { buildApiMock } from '../../test/apiMock';
 import { projects } from '../../lib/api';
 
@@ -113,5 +114,21 @@ describe('AiDocViewer — docs/ root folder + project README', () => {
     });
     expect(screen.getByText('1 / 2')).toBeInTheDocument();
     expect(container.querySelector('.aidoc-search-results .text-dim')).toBeNull();
+  });
+
+  it('tree folders and files are reachable and activatable from the keyboard (KT-1072)', async () => {
+    render(<AiDocViewer projectId="p1" />);
+    const folder = (await screen.findByText('architecture')).closest('[role="button"]') as HTMLElement;
+    expect(folder).toHaveAttribute('tabindex', '0');
+    expect(folder).toHaveAttribute('aria-expanded', 'false');
+    folder.focus();
+    await userEvent.keyboard('{Enter}');
+    expect(folder).toHaveAttribute('aria-expanded', 'true');
+    const file = screen.getByText('overview.md').closest('[role="button"]') as HTMLElement;
+    expect(file).toHaveAttribute('tabindex', '0');
+    file.focus();
+    await userEvent.keyboard(' ');
+    await waitFor(() => expect(projects.readAiFile).toHaveBeenCalledWith('p1', 'docs/architecture/overview.md'));
+    expect(file).toHaveAttribute('aria-current', 'true');
   });
 });

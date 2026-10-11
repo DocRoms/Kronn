@@ -10,6 +10,7 @@ import { rehypeRewriteDocImages } from '../lib/docImageRewrite';
 import { MermaidDiagram } from './MermaidDiagram';
 import { DocHeading, DocLink } from './DocLink';
 import { buildDocIndex, DocLinkContext, findDocHeading, type DocLinkTarget } from '../lib/docLinks';
+import { onActivationKey } from '../lib/keyboardActivation';
 import './AiDocViewer.css';
 import {
   ChevronRight, ChevronDown, ChevronUp,
@@ -675,6 +676,10 @@ function TreeNode({ node, selectedPath, expandedDirs, onSelect, onToggleDir, dep
           className="aidoc-tree-dir"
           style={{ paddingLeft: pl, padding: `3px 8px 3px ${pl}px` }}
           onClick={() => onToggleDir(node.path)}
+          onKeyDown={onActivationKey(() => onToggleDir(node.path))}
+          role="button"
+          tabIndex={0}
+          aria-expanded={isExpanded}
         >
           {isExpanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
           <Folder size={11} className="aidoc-tree-dir-icon" />
@@ -697,6 +702,10 @@ function TreeNode({ node, selectedPath, expandedDirs, onSelect, onToggleDir, dep
       data-dimmed={dimmed}
       style={{ paddingLeft: pl, padding: `3px 8px 3px ${pl}px` }}
       onClick={() => onSelect(node.path)}
+      onKeyDown={onActivationKey(() => onSelect(node.path))}
+      role="button"
+      tabIndex={0}
+      aria-current={isSelected ? 'true' : undefined}
     >
       <FileText size={11} className="flex-shrink-0" />
       <span className="aidoc-tree-file-name">

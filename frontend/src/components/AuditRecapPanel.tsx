@@ -7,6 +7,7 @@ import type { AuditRunCost as AuditRunCostData, AuditTokenBreakdown } from '../t
 import AuditRunCost from './AuditRunCost';
 import { tokenBreakdownTitle } from '../lib/audit-cost';
 import { auditStepOutcome } from '../lib/audit-step-outcome';
+import { useDialogFocus } from '../hooks/useDialogFocus';
 import './AuditRecapPanel.css';
 
 type Step = {
@@ -263,13 +264,7 @@ export default function AuditRecapPanel({ projectId, refreshTrigger, selectedRun
     ?? (latestStepsAreCurrent ? latestStepsResult.error : null)
     ?? (drawerStepsAreCurrent ? stepsResult?.error ?? null : null);
 
-  // Close drawer on Escape.
-  useEffect(() => {
-    if (!drawerOpen) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setDrawerOpen(false); };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [drawerOpen]);
+  const drawerRef = useDialogFocus<HTMLElement>({ active: drawerOpen, onEscape: () => setDrawerOpen(false) });
 
   const kindsInStrip = useMemo(() => {
     const seen = new Set<string>();
@@ -327,6 +322,32 @@ export default function AuditRecapPanel({ projectId, refreshTrigger, selectedRun
     else { setSortKey(key); setSortDir(key === 'step_index' ? 'asc' : 'desc'); }
   };
   const sortMark = (key: SortKey) => sortKey === key ? (sortDir === 'asc' ? ' ▲' : ' ▼') : '';
+  const sortableTh = (key: SortKey, label: string, tooltip: string) => (
+    <th
+      className="arp-num"
+      data-sortable="true"
+      aria-sort={sortKey === key ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}
+      title={tooltip}
+      onClick={() => toggleSort(key)}
+    >
+      {/* No handler of its own: its click, keyboard included, bubbles to the whole-cell target. */}
+      <button type="button" className="arp-sort-btn">
+        {label}{sortMark(key)}
+      </button>
+    </th>
+  );
+  const stepsHead = (
+    <thead>
+      <tr>
+        {sortableTh('step_index', '#', t('projects.docAi.auditRecap.colStepTooltip'))}
+        <th title={t('projects.docAi.auditRecap.colFileTooltip')}>
+          {t('projects.docAi.auditRecap.colFile')}
+        </th>
+        {sortableTh('duration_ms', t('projects.docAi.auditRecap.colDuration'), t('projects.docAi.auditRecap.colDurationTooltip'))}
+        {sortableTh('step_tokens', t('projects.docAi.auditRecap.colTokens'), t('projects.docAi.auditRecap.colTokensTooltip'))}
+      </tr>
+    </thead>
+  );
   const kindLabel = (kind: string) => kind === 'Partial'
     ? t('projects.docAi.auditRecap.partialKind')
     : kind === 'Full' ? t('audit.kind.Full') : kind;
@@ -418,37 +439,7 @@ export default function AuditRecapPanel({ projectId, refreshTrigger, selectedRun
             )}
             {!loadingLatestSteps && latestSteps.length > 0 && (
               <table className="arp-steps-table" data-testid="audit-recap-latest-table">
-                <thead>
-                  <tr>
-                    <th
-                      className="arp-num"
-                      data-sortable="true"
-                      onClick={() => toggleSort('step_index')}
-                      title={t('projects.docAi.auditRecap.colStepTooltip')}
-                    >
-                      #{sortMark('step_index')}
-                    </th>
-                    <th title={t('projects.docAi.auditRecap.colFileTooltip')}>
-                      {t('projects.docAi.auditRecap.colFile')}
-                    </th>
-                    <th
-                      className="arp-num"
-                      data-sortable="true"
-                      onClick={() => toggleSort('duration_ms')}
-                      title={t('projects.docAi.auditRecap.colDurationTooltip')}
-                    >
-                      {t('projects.docAi.auditRecap.colDuration')}{sortMark('duration_ms')}
-                    </th>
-                    <th
-                      className="arp-num"
-                      data-sortable="true"
-                      onClick={() => toggleSort('step_tokens')}
-                      title={t('projects.docAi.auditRecap.colTokensTooltip')}
-                    >
-                      {t('projects.docAi.auditRecap.colTokens')}{sortMark('step_tokens')}
-                    </th>
-                  </tr>
-                </thead>
+                {stepsHead}
                 <tbody>
                   {sortedLatestSteps.map(step => {
                     const outcome = auditStepOutcome(step);
@@ -504,9 +495,11 @@ export default function AuditRecapPanel({ projectId, refreshTrigger, selectedRun
             onClick={() => setDrawerOpen(false)}
           />
           <aside
+            ref={drawerRef}
             className="arp-drawer"
             data-testid="audit-recap-drawer"
             role="dialog"
+            aria-modal="true"
             aria-label={t('projects.docAi.auditRecap.drawerTitle')}
           >
             <header className="arp-drawer-header">
@@ -622,37 +615,7 @@ export default function AuditRecapPanel({ projectId, refreshTrigger, selectedRun
                               className="arp-steps-table"
                               data-testid="audit-recap-table"
                             >
-                              <thead>
-                                <tr>
-                                  <th
-                                    className="arp-num"
-                                    data-sortable="true"
-                                    onClick={() => toggleSort('step_index')}
-                                    title={t('projects.docAi.auditRecap.colStepTooltip')}
-                                  >
-                                    #{sortMark('step_index')}
-                                  </th>
-                                  <th title={t('projects.docAi.auditRecap.colFileTooltip')}>
-                                    {t('projects.docAi.auditRecap.colFile')}
-                                  </th>
-                                  <th
-                                    className="arp-num"
-                                    data-sortable="true"
-                                    onClick={() => toggleSort('duration_ms')}
-                                    title={t('projects.docAi.auditRecap.colDurationTooltip')}
-                                  >
-                                    {t('projects.docAi.auditRecap.colDuration')}{sortMark('duration_ms')}
-                                  </th>
-                                  <th
-                                    className="arp-num"
-                                    data-sortable="true"
-                                    onClick={() => toggleSort('step_tokens')}
-                                    title={t('projects.docAi.auditRecap.colTokensTooltip')}
-                                  >
-                                    {t('projects.docAi.auditRecap.colTokens')}{sortMark('step_tokens')}
-                                  </th>
-                                </tr>
-                              </thead>
+                              {stepsHead}
                               <tbody>
                                 {sortedSteps.map(s => {
                                   const outcome = auditStepOutcome(s);

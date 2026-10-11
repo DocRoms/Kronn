@@ -472,6 +472,17 @@
   color: var(--kr-text-primary);
 }
 
+/* Sort control is a real button for keyboard users; it keeps the header look. */
+.arp-sort-btn {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  text-align: inherit;
+  cursor: pointer;
+}
+
 .arp-steps-table th.arp-num,
 .arp-steps-table td.arp-num {
   text-align: right;

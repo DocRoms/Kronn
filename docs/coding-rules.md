@@ -37,6 +37,7 @@
 - **Styling**: CSS tokens (`--kr-*`), utility classes (`.flex-row`, `.gap-*`, `.text-*`), and component classes (`.btn`, `.card`, `.input`, `.badge`) in `src/styles/`. Per-page CSS in `src/pages/*.css`. Inline `style={{}}` only for dynamic values. Import page CSS at the top: `import './PageName.css'`.
 - **State**: local `useState` / `useEffect` / `useMemo` / `useCallback`. No global state library.
 - **i18n**: use `useT()` from `I18nContext.tsx`. All user-visible strings must use `t('key.name')`. Locale files are separated under `lib/i18n/locales/`; `fr`, `en`, `es` and `zh` must keep exact key parity. The agent output language is an independent setting.
+- **Accessibility**: a `role="dialog"` or drawer attaches the ref from `hooks/useDialogFocus.ts` (initial focus, Tab trap, Escape, focus return). Prefer a real `<button>` for a click target; otherwise add `role`, `tabIndex={0}` and `onKeyDown={onActivationKey(...)}` from `lib/keyboardActivation.ts`. Sortable headers carry `aria-sort`.
 - **Error boundaries**: wrap lazy-loaded routes with `ErrorBoundary` (see App.tsx).
 - **SSE handling**: use `_streamSSE` from `api.ts` with `AbortController` cancellation. Keep controller cleanup with the lifecycle owner; discussion streams intentionally survive page-tab switches and are cleaned on completion or explicit Stop.
 - **Linter**: ESLint 10 (`pnpm lint`) is authoritative; Oxlint (`pnpm lint:fast`) is the zero-warning fast gate. ESLint requires zero errors and CI pins its warning count as a ratchet: cleanup lowers the budget, new warnings fail.

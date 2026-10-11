@@ -13,6 +13,8 @@ import { useState, useEffect, useCallback } from 'react';
 import { useT } from '../lib/I18nContext';
 import { apiCallLogs, type ApiCallLogRow, type ApiCallLogsFilter } from '../lib/api';
 import { RefreshCw, X, Filter, Activity } from 'lucide-react';
+import { useDialogFocus } from '../hooks/useDialogFocus';
+import { onActivationKey } from '../lib/keyboardActivation';
 import './ApiCallLogsPage.css';
 
 type SourceFilter = ApiCallLogsFilter['source'] | 'all';
@@ -30,6 +32,7 @@ export function ApiCallLogsPage() {
   const [pluginFilter, setPluginFilter] = useState<string>('');
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [drawerRow, setDrawerRow] = useState<ApiCallLogRow | null>(null);
+  const drawerRef = useDialogFocus<HTMLDivElement>({ active: drawerRow !== null, onEscape: () => setDrawerRow(null) });
   const refresh = useCallback(async () => {
     const filter: ApiCallLogsFilter = {
       ...(sourceFilter !== 'all' ? { source: sourceFilter } : {}),
@@ -196,6 +199,9 @@ export function ApiCallLogsPage() {
                   key={row.id}
                   className={`api-call-logs-row api-call-logs-row-${row.status.toLowerCase()}`}
                   onClick={() => setDrawerRow(row)}
+                  onKeyDown={onActivationKey(() => setDrawerRow(row))}
+                  tabIndex={0}
+                  aria-haspopup="dialog"
                   data-testid={`api-call-logs-row-${row.id}`}
                 >
                   <td className="api-call-logs-mono">{row.called_at}</td>
@@ -227,7 +233,14 @@ export function ApiCallLogsPage() {
           onClick={() => setDrawerRow(null)}
           data-testid="api-call-logs-drawer"
         >
-          <div className="api-call-logs-drawer" onClick={e => e.stopPropagation()}>
+          <div
+            ref={drawerRef}
+            className="api-call-logs-drawer"
+            role="dialog"
+            aria-modal="true"
+            aria-label={`${drawerRow.method} ${drawerRow.endpoint_path}`}
+            onClick={e => e.stopPropagation()}
+          >
             <div className="api-call-logs-drawer-header">
               <h2>{drawerRow.method} {drawerRow.endpoint_path}</h2>
               <button
