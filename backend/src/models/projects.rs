@@ -1850,3 +1850,164 @@ pub struct StartBriefingResponse {
 pub struct SetBriefingRequest {
     pub notes: Option<String>,
 }
+
+// ─── Briefing: closed project answers (KT-1173) ─────────────────────────────
+//
+// Every choice is a closed set of option ids, like a `kronn-question` card.
+// `Unknown` is the default: an unanswered card, never a guess.
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum BriefingTracker {
+    #[default]
+    Unknown,
+    Jira,
+    GithubIssues,
+    GitlabIssues,
+    Linear,
+    Other,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum BriefingForge {
+    #[default]
+    Unknown,
+    Github,
+    Gitlab,
+    Bitbucket,
+    AzureDevops,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum BriefingDefaultBranch {
+    #[default]
+    Unknown,
+    Main,
+    Master,
+    Develop,
+    Trunk,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum BriefingCommitConvention {
+    #[default]
+    Unknown,
+    Conventional,
+    TicketPrefixed,
+    Free,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum BriefingYesNo {
+    #[default]
+    Unknown,
+    Yes,
+    No,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum BriefingMergeStrategy {
+    #[default]
+    Unknown,
+    Squash,
+    Rebase,
+    MergeCommit,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum BriefingReviewPolicy {
+    #[default]
+    Unknown,
+    NoReview,
+    OneApproval,
+    TwoApprovals,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum BriefingReleaseCadence {
+    #[default]
+    Unknown,
+    Continuous,
+    Scheduled,
+    OnDemand,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum BriefingEnvironmentKind {
+    Local,
+    Dev,
+    Staging,
+    Preprod,
+    Production,
+    Preview,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct BriefingEnvironment {
+    pub kind: BriefingEnvironmentKind,
+    #[serde(default)]
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum BriefingPersonRole {
+    Arbiter,
+    TechLead,
+    Devops,
+    ProductOwner,
+    Qa,
+}
+
+/// A role and the name/contact the user typed; nothing else is recorded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct BriefingPerson {
+    pub role: BriefingPersonRole,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub contact: String,
+}
+
+/// The answers `docs/project.md` is rendered from.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(default)]
+pub struct BriefingProjectAnswers {
+    pub tracker: BriefingTracker,
+    /// Jira project key, Linear team key, …: checked when a connection exists.
+    pub tracker_key: String,
+    pub forge: BriefingForge,
+    /// `owner/name`; inferred from the project's git remote when empty.
+    pub forge_repo: String,
+    pub default_branch: BriefingDefaultBranch,
+    pub commit_convention: BriefingCommitConvention,
+    pub signoff_required: BriefingYesNo,
+    pub merge_strategy: BriefingMergeStrategy,
+    pub review_policy: BriefingReviewPolicy,
+    pub release_cadence: BriefingReleaseCadence,
+    pub environments: Vec<BriefingEnvironment>,
+    pub people: Vec<BriefingPerson>,
+}

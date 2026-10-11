@@ -2018,6 +2018,80 @@ html[data-density="large"] .dash-main {
   font-weight: 600;
 }
 
+/* KT-1173 — closed project cards (one choice per card, like a kronn-question). */
+.briefing-project {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-3);
+  padding-top: var(--kr-sp-3);
+  border-top: 1px solid var(--kr-border-soft);
+}
+
+.briefing-project h4 {
+  margin: 0;
+}
+
+.briefing-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+  margin: 0;
+  padding: 0;
+  border: none;
+  min-width: 0;
+}
+
+.briefing-card legend {
+  padding: 0;
+  margin-bottom: var(--kr-sp-2);
+  font-size: var(--kr-fs-xs);
+}
+
+.briefing-card-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--kr-sp-2);
+}
+
+.briefing-card-option {
+  padding: 4px 10px;
+  font-size: var(--kr-fs-xs);
+  background: var(--kr-bg-elevated);
+  border: 1px solid var(--kr-border-soft);
+  border-radius: 999px;
+  color: var(--kr-text-secondary);
+  cursor: pointer;
+}
+
+.briefing-card-option.is-selected {
+  background: var(--kr-accent-bg);
+  border-color: var(--kr-accent-ink);
+  color: var(--kr-accent-ink);
+  font-weight: 600;
+}
+
+.briefing-card-option:focus-visible,
+.briefing-card-input:focus {
+  outline: 1px solid var(--kr-accent-ink);
+}
+
+.briefing-card-input {
+  background: var(--kr-bg-elevated);
+  border: 1px solid var(--kr-border-soft);
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-family: inherit;
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-primary);
+  min-width: 0;
+}
+
+.briefing-card-person {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--kr-sp-2);
+}
+
 /* ── Running-agents badge (2026-06-24) ───────────────────────────────────
    Persistent nav indicator: agents still running server-side (incl.
    background/batch) so the user doesn't think nothing's happening and

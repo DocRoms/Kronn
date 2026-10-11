@@ -4349,6 +4349,205 @@ mod tests {
         );
     }
 
+    /// A project rooted in `root` (KT-1173 briefing tests).
+    async fn insert_briefing_project(state: &AppState, id: &str, root: &std::path::Path) {
+        let id = id.to_string();
+        let path = root.to_string_lossy().to_string();
+        state
+            .db
+            .with_conn(move |conn| {
+                let now = chrono::Utc::now();
+                let project = crate::models::Project {
+                    id,
+                    name: "Briefing Test".into(),
+                    path,
+                    repo_url: None,
+                    token_override: None,
+                    ai_config: crate::models::AiConfigStatus {
+                        detected: false,
+                        configs: vec![],
+                    },
+                    audit_status: crate::models::AiAuditStatus::NoTemplate,
+                    ai_todo_count: 0,
+                    tech_debt_count: 0,
+                    needs_docs_migration: false,
+                    path_exists: true,
+                    write_access: None,
+                    mcp_sync_report: None,
+                    default_skill_ids: vec![],
+                    default_profile_id: None,
+                    briefing_notes: None,
+                    linked_repos: vec![],
+                    workspace: None,
+                    created_at: now,
+                    updated_at: now,
+                };
+                crate::db::projects::insert_project(conn, &project)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    fn json_request(method: &str, uri: &str, body: serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn briefing_put_updates_an_existing_briefing_md() {
+        // AUD-14: the audit reads docs/briefing.md first, so a PUT that only
+        // wrote the DB was silently ignored once the file existed.
+        let state = test_state();
+        let tmp = tempfile::tempdir().unwrap();
+        let docs = tmp.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(
+            docs.join("briefing.md"),
+            "# Project Briefing\nOld answers\n",
+        )
+        .unwrap();
+        insert_briefing_project(&state, "brief-put", tmp.path()).await;
+
+        let req = json_request(
+            "PUT",
+            "/api/projects/brief-put/briefing",
+            serde_json::json!({"notes": "# Project Briefing\nNew answers\n"}),
+        );
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["success"].as_bool().unwrap_or(false), "{body}");
+        assert_eq!(
+            std::fs::read_to_string(docs.join("briefing.md")).unwrap(),
+            "# Project Briefing\nNew answers\n"
+        );
+        let resolved = crate::api::projects::resolve_briefing_notes(tmp.path(), &None);
+        assert_eq!(
+            resolved.as_deref(),
+            Some("# Project Briefing\nNew answers\n")
+        );
+
+        // Clearing removes the file too, so the audit stops reading the old one.
+        let req = json_request(
+            "PUT",
+            "/api/projects/brief-put/briefing",
+            serde_json::json!({"notes": null}),
+        );
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["success"].as_bool().unwrap_or(false), "{body}");
+        assert!(!docs.join("briefing.md").exists());
+        assert_eq!(
+            crate::api::projects::resolve_briefing_notes(tmp.path(), &None),
+            None
+        );
+    }
+
+    fn briefing_form(project: Option<serde_json::Value>) -> serde_json::Value {
+        let mut form = serde_json::json!({
+            "purpose": "News site",
+            "team": "Four devs",
+            "maturity": "Production",
+            "dependencies": "Jira, Fastly",
+            "traps": "Cache purge",
+            "additional": "",
+        });
+        if let Some(project) = project {
+            form["project"] = project;
+        }
+        form
+    }
+
+    #[tokio::test]
+    async fn save_briefing_form_without_project_cards_keeps_the_six_question_format() {
+        let state = test_state();
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("docs")).unwrap();
+        insert_briefing_project(&state, "brief-legacy", tmp.path()).await;
+        let req = json_request(
+            "POST",
+            "/api/projects/brief-legacy/save-briefing",
+            briefing_form(None),
+        );
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["success"].as_bool().unwrap_or(false), "{body}");
+        let written = std::fs::read_to_string(tmp.path().join("docs/briefing.md")).unwrap();
+        assert!(
+            written.ends_with("## Additional Context\nNone.\n"),
+            "{written}"
+        );
+        assert!(!written.contains("## Project facts"));
+    }
+
+    #[tokio::test]
+    async fn save_briefing_form_records_the_closed_project_cards() {
+        let state = test_state();
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("docs")).unwrap();
+        insert_briefing_project(&state, "brief-cards", tmp.path()).await;
+        let project = serde_json::json!({
+            "tracker": "jira",
+            "tracker_key": "ew",
+            "forge": "github",
+            "forge_repo": "euronews/front",
+            "default_branch": "develop",
+            "commit_convention": "ticket_prefixed",
+            "signoff_required": "no",
+            "merge_strategy": "squash",
+            "review_policy": "two_approvals",
+            "release_cadence": "scheduled",
+            "environments": [{"kind": "production", "url": "https://www.example.com"}],
+            "people": [{"role": "devops", "name": "Sam", "contact": "#devops"}],
+        });
+        let req = json_request(
+            "POST",
+            "/api/projects/brief-cards/save-briefing",
+            briefing_form(Some(project.clone())),
+        );
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["success"].as_bool().unwrap_or(false), "{body}");
+        let written = std::fs::read_to_string(tmp.path().join("docs/briefing.md")).unwrap();
+        assert!(written.contains("## Project facts"), "{written}");
+        let answers = crate::api::audit::project_doc::parse_answers(&written)
+            .expect("the answers are recorded");
+        assert_eq!(answers.tracker_key, "EW");
+        assert_eq!(answers.forge_repo, "euronews/front");
+        assert_eq!(answers.people[0].contact, "#devops");
+
+        // A choice outside the card's options is refused, not stored as prose.
+        let mut bad = project.clone();
+        bad["tracker"] = serde_json::json!("my favourite tracker");
+        let req = json_request(
+            "POST",
+            "/api/projects/brief-cards/save-briefing",
+            briefing_form(Some(bad)),
+        );
+        let (status, _) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+        let mut bad_key = project;
+        bad_key["tracker_key"] = serde_json::json!("not a key");
+        let req = json_request(
+            "POST",
+            "/api/projects/brief-cards/save-briefing",
+            briefing_form(Some(bad_key)),
+        );
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!body["success"].as_bool().unwrap_or(true), "{body}");
+        // The refused save left the recorded briefing untouched.
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("docs/briefing.md")).unwrap(),
+            written
+        );
+    }
+
     #[tokio::test]
     async fn briefing_nonexistent_project() {
         let state = test_state();

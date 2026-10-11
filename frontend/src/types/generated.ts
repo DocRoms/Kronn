@@ -1387,6 +1387,46 @@ export type BootstrapProjectRequest = { name: string, description: string, agent
 
 export type BootstrapProjectResponse = { project_id: string, discussion_id: string, };
 
+export type BriefingCommitConvention = "unknown" | "conventional" | "ticket_prefixed" | "free";
+
+export type BriefingDefaultBranch = "unknown" | "main" | "master" | "develop" | "trunk";
+
+export type BriefingEnvironment = { kind: BriefingEnvironmentKind, url: string, };
+
+export type BriefingEnvironmentKind = "local" | "dev" | "staging" | "preprod" | "production" | "preview";
+
+export type BriefingForge = "unknown" | "github" | "gitlab" | "bitbucket" | "azure_devops" | "other";
+
+export type BriefingMergeStrategy = "unknown" | "squash" | "rebase" | "merge_commit";
+
+/**
+ * A role and the name/contact the user typed; nothing else is recorded.
+ */
+export type BriefingPerson = { role: BriefingPersonRole, name: string, contact: string, };
+
+export type BriefingPersonRole = "arbiter" | "tech_lead" | "devops" | "product_owner" | "qa";
+
+/**
+ * The answers `docs/project.md` is rendered from.
+ */
+export type BriefingProjectAnswers = { tracker: BriefingTracker,
+/**
+ * Jira project key, Linear team key, …: checked when a connection exists.
+ */
+tracker_key: string, forge: BriefingForge,
+/**
+ * `owner/name`; inferred from the project's git remote when empty.
+ */
+forge_repo: string, default_branch: BriefingDefaultBranch, commit_convention: BriefingCommitConvention, signoff_required: BriefingYesNo, merge_strategy: BriefingMergeStrategy, review_policy: BriefingReviewPolicy, release_cadence: BriefingReleaseCadence, environments: Array<BriefingEnvironment>, people: Array<BriefingPerson>, };
+
+export type BriefingReleaseCadence = "unknown" | "continuous" | "scheduled" | "on_demand";
+
+export type BriefingReviewPolicy = "unknown" | "no_review" | "one_approval" | "two_approvals";
+
+export type BriefingTracker = "unknown" | "jira" | "github_issues" | "gitlab_issues" | "linear" | "other" | "none";
+
+export type BriefingYesNo = "unknown" | "yes" | "no";
+
 export type BrowseEntry = { name: string, path: string,
 /**
  * This directory is itself a working copy — worth selecting as is.

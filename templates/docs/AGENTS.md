@@ -62,6 +62,7 @@ Full grammar and cascade: [`docs/conventions/agents-md-format-v1.md`](convention
 | Ticket/tracker conventions | [workflow/tickets](workflow/tickets.md) |
 | CI/CD pipeline | [workflow/ci-cd](workflow/ci-cd.md) |
 | Environments (staging, prod, …) | [environments](environments.md) |
+| Tracker, forge, people, process | [project](project.md) |
 | Worked examples | [examples/](examples/README.md) |
 
 If T0–T2 are insufficient, state which additional file you need and why. Never load every file.

@@ -1,5 +1,5 @@
-// Pre-audit briefing: a conversational discussion that asks the user
-// 6 product/team questions and writes the answers to `docs/briefing.md`.
+// Pre-audit briefing: six product/team questions plus closed project cards
+// (KT-1173), written to `docs/briefing.md`.
 // The audit later reads `docs/briefing.md` (via
 // `projects::resolve_briefing_notes`) and injects the user's answers
 // into every step prompt.
@@ -33,13 +33,30 @@ pub async fn get_briefing(
 }
 
 /// PUT /api/projects/:id/briefing
-/// Sets or clears the briefing notes for a project.
+/// Sets or clears the briefing notes for a project. The audit reads
+/// `docs/briefing.md` before the DB column, so the file is written (or
+/// removed) first: a PUT that only touched the DB was silently ignored once
+/// the file existed (AUD-14).
 pub async fn set_briefing(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(req): Json<SetBriefingRequest>,
 ) -> Json<ApiResponse<bool>> {
-    let notes = req.notes;
+    let notes = req.notes.filter(|n| !n.trim().is_empty());
+    let pid = id.clone();
+    let project = state
+        .db
+        .with_conn(move |conn| crate::db::projects::get_project(conn, &pid))
+        .await
+        .ok()
+        .flatten();
+    let Some(project) = project else {
+        return Json(ApiResponse::err("Project not found"));
+    };
+    let project_path = crate::core::scanner::resolve_host_path(&project.path);
+    if let Err(e) = sync_briefing_file(&project_path, notes.as_deref()) {
+        return Json(ApiResponse::err(e));
+    }
     match state
         .db
         .with_conn(move |conn| {
@@ -50,6 +67,108 @@ pub async fn set_briefing(
         Ok(true) => Json(ApiResponse::ok(true)),
         Ok(false) => Json(ApiResponse::err("Project not found")),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
+}
+
+/// Mirror the notes into `<docs>/briefing.md`: written when set, removed when
+/// cleared. No-op before the project has a docs directory (the DB column is
+/// then the only source, which `resolve_briefing_notes` falls back to).
+pub(crate) fn sync_briefing_file(
+    project_path: &std::path::Path,
+    notes: Option<&str>,
+) -> Result<(), String> {
+    let docs_dir = crate::core::scanner::detect_docs_dir(project_path);
+    if !docs_dir.is_dir() {
+        return Ok(());
+    }
+    let target = docs_dir.join("briefing.md");
+    crate::core::fs_guard::assert_contained_no_symlink(project_path, &target)?;
+    match notes {
+        Some(body) => std::fs::write(&target, body)
+            .map_err(|e| format!("Failed to write {}: {}", target.display(), e)),
+        None => match std::fs::remove_file(&target) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(format!("Failed to remove {}: {}", target.display(), e)),
+        },
+    }
+}
+
+/// Longest briefing, in characters, injected into each audit step prompt.
+pub(crate) const BRIEFING_PROMPT_MAX_CHARS: usize = 6_000;
+
+/// The `## Project briefing` block appended to an audit step prompt, capped
+/// at [`BRIEFING_PROMPT_MAX_CHARS`] with an explicit truncation marker. The
+/// machine copy of the project answers is dropped: the readable facts above
+/// it say the same thing.
+pub(crate) fn briefing_prompt_section(notes: &str) -> String {
+    let notes = super::project_doc::strip_answers_line(notes);
+    let notes = notes.trim_end();
+    let total = notes.chars().count();
+    let body = if total <= BRIEFING_PROMPT_MAX_CHARS {
+        notes.to_string()
+    } else {
+        let mut cut: String = notes.chars().take(BRIEFING_PROMPT_MAX_CHARS).collect();
+        // End on a line break when one is close, so no line is cut mid-way.
+        if let Some(i) = cut.rfind('\n') {
+            if i >= cut.len() * 4 / 5 {
+                cut.truncate(i);
+            }
+        }
+        let shown = cut.chars().count();
+        format!(
+            "{cut}\n\n[Briefing truncated by Kronn: {shown} of {total} characters shown. Read docs/briefing.md for the rest.]"
+        )
+    };
+    format!("\n\n## Project briefing (from the user)\n{body}\n")
+}
+
+/// After `KRONN:BRIEFING_COMPLETE`: store the reviewed `docs/briefing.md`,
+/// with the form's project facts put back as answered.
+pub(crate) async fn complete_reviewed_briefing(
+    state: &AppState,
+    project_id: String,
+    briefing_file: std::path::PathBuf,
+) {
+    let file = briefing_file.clone();
+    let reviewed = tokio::task::spawn_blocking(move || std::fs::read_to_string(&file).ok())
+        .await
+        .unwrap_or(None);
+    let Some(reviewed) = reviewed else {
+        tracing::warn!(
+            "BRIEFING_COMPLETE detected but docs/briefing.md not found for project {}",
+            project_id
+        );
+        return;
+    };
+    let pid = project_id.clone();
+    let previous = state
+        .db
+        .with_conn(move |conn| crate::db::projects::get_project_briefing_notes(conn, &pid))
+        .await
+        .ok()
+        .flatten();
+    let content = super::project_doc::reattach_facts(previous.as_deref(), &reviewed);
+    if content != reviewed {
+        let file = briefing_file.clone();
+        let body = content.clone();
+        if let Ok(Err(e)) = tokio::task::spawn_blocking(move || std::fs::write(&file, body)).await {
+            tracing::warn!("Failed to restore the project facts in docs/briefing.md: {e}");
+        }
+    }
+    let pid = project_id.clone();
+    match state
+        .db
+        .with_conn(move |conn| {
+            crate::db::projects::update_project_briefing_notes(conn, &pid, Some(&content))
+        })
+        .await
+    {
+        Ok(_) => tracing::info!("Briefing notes saved for project {}", project_id),
+        Err(e) => tracing::error!(
+            "Failed to save briefing notes for project {}: {e}",
+            project_id
+        ),
     }
 }
 
@@ -200,6 +319,9 @@ pub struct BriefingFormRequest {
     pub dependencies: String,
     pub traps: String,
     pub additional: String,
+    /// KT-1173 — closed project cards; absent from older clients.
+    #[serde(default)]
+    pub project: Option<BriefingProjectAnswers>,
 }
 
 pub async fn save_briefing_form(
@@ -220,6 +342,16 @@ pub async fn save_briefing_form(
              want to skip a mandatory question explicitly.",
         ));
     }
+
+    let project_facts = match form
+        .project
+        .as_ref()
+        .map(super::project_doc::normalize_answers)
+    {
+        None => None,
+        Some(Ok(answers)) => super::project_doc::render_facts_section(&answers),
+        Some(Err(e)) => return Json(ApiResponse::err(e)),
+    };
 
     // 2. Look up project for the on-disk path.
     let pid = id.clone();
@@ -248,7 +380,7 @@ pub async fn save_briefing_form(
         form.additional.trim().to_string()
     };
 
-    let body = format!(
+    let mut body = format!(
         "# Project Briefing\n\
          > Auto-generated by Kronn briefing form (no AI call). Source: user answers.\n\n\
          ## Purpose\n{}\n\n\
@@ -264,6 +396,10 @@ pub async fn save_briefing_form(
         traps_rendered,
         additional_rendered,
     );
+    if let Some(section) = project_facts {
+        body.push('\n');
+        body.push_str(&section);
+    }
 
     // 4. Write `docs/briefing.md` on disk + persist briefing_notes in DB.
     // The on-disk file is what the audit reads at Phase 1; the DB

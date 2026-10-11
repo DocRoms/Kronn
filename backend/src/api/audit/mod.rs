@@ -22,6 +22,7 @@ pub mod drift;
 pub mod full;
 pub mod helpers;
 pub mod info;
+pub(crate) mod project_doc;
 pub mod reconciliation;
 pub mod redact_artifacts;
 pub mod revalidate;

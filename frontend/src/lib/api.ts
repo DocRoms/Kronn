@@ -1,4 +1,5 @@
 import type { AcceptAuditStepResponse, ArtifactBundle, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditRunCost, AuditStepInfo, AuditRecentActivity, AuditTokenBreakdown, EmbedOriginsChange } from '../types/generated';
+import type { BriefingProjectAnswers } from '../types/generated';
 import type { WorkerConnectivity } from '../types/generated';
 import type { MergeBase, TemplateMergeAccepted, TemplateMergeAcceptRequest, TemplateMergeRequest, TemplateMergeView } from '../types/generated';
 import { readTextAttachmentPreview } from './textAttachmentPreview';
@@ -1272,6 +1273,8 @@ export const projects = {
   saveBriefing: (id: string, form: {
     purpose: string; team: string; maturity: string;
     dependencies: string; traps: string; additional: string;
+    /** KT-1173 — closed project cards, written to `docs/project.md` by the audit. */
+    project?: BriefingProjectAnswers;
   }) => api<boolean>('POST', `/projects/${id}/save-briefing`, form),
   setDefaultSkills: (id: string, skillIds: string[]) => api<boolean>('PUT', `/projects/${id}/default-skills`, skillIds),
   setDefaultProfile: (id: string, profileId: string | null) => api<boolean>('PUT', `/projects/${id}/default-profile`, { profile_id: profileId }),

@@ -5512,44 +5512,17 @@ pub(super) async fn make_agent_stream_inner(
                         let briefing_project_path = project_path.clone();
                         let briefing_state = state.clone();
                         tokio::spawn(async move {
-                            // Read briefing.md from the project's docs folder.
                             // Path-agnostic — works on docs/ post-pivot AND legacy ai/.
                             let resolved =
                                 crate::core::scanner::resolve_host_path(&briefing_project_path);
                             let briefing_file = crate::core::scanner::detect_docs_dir(&resolved)
                                 .join("briefing.md");
-                            let notes = tokio::task::spawn_blocking(move || {
-                                std::fs::read_to_string(&briefing_file).ok()
-                            })
-                            .await
-                            .unwrap_or(None);
-
-                            if let Some(content) = notes {
-                                let pid = briefing_project_id.clone();
-                                if let Err(e) = briefing_state
-                                    .db
-                                    .with_conn(move |conn| {
-                                        crate::db::projects::update_project_briefing_notes(
-                                            conn,
-                                            &pid,
-                                            Some(&content),
-                                        )
-                                    })
-                                    .await
-                                {
-                                    tracing::error!(
-                                        "Failed to save briefing notes for project {}: {e}",
-                                        briefing_project_id
-                                    );
-                                } else {
-                                    tracing::info!(
-                                        "Briefing notes saved for project {}",
-                                        briefing_project_id
-                                    );
-                                }
-                            } else {
-                                tracing::warn!("BRIEFING_COMPLETE detected but ai/briefing.md not found for project {}", briefing_project_id);
-                            }
+                            crate::api::audit::briefing::complete_reviewed_briefing(
+                                &briefing_state,
+                                briefing_project_id,
+                                briefing_file,
+                            )
+                            .await;
                         });
                     }
                 }

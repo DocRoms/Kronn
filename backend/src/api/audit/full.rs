@@ -874,6 +874,20 @@ pub async fn full_audit(
         let tmpl_event = serde_json::json!({ "installed": template_installed });
         yield Event::default().event("template_installed").data(tmpl_event.to_string());
 
+        // KT-1173 — `docs/project.md` from the briefing's closed answers,
+        // checked read-only against the project's tracking connections.
+        if is_full {
+            let report = super::project_doc::fill_project_doc_for_audit(
+                &state, &project_id, &project_path, project.repo_url.as_deref(), briefing_notes.as_deref(),
+            ).await;
+            if !report.mismatches.is_empty() || report.error.is_some() {
+                tracing::warn!("docs/project.md for project {project_id}: {report:?}");
+            }
+            yield Event::default().event("project_doc").data(
+                serde_json::to_string(&report).unwrap_or_else(|_| "{}".into())
+            );
+        }
+
         // 0.8.3 (#280) — MCP allowlist for the audit. On projects
         // with 10+ MCP servers wired (Fastly, Docker, GitLab, M365,
         // Playwright, …), the agent's system prompt balloons to 12-
@@ -1222,7 +1236,7 @@ pub async fn full_audit(
             let mut full_prompt = super::dated_step_prompt(gate, &super::step_prompt_body(analysis_step, reverify), Utc::now());
 
             if let Some(ref notes) = briefing_notes {
-                full_prompt.push_str(&format!("\n\n## Project briefing (from the user)\n{}\n", notes));
+                full_prompt.push_str(&super::briefing::briefing_prompt_section(notes));
             }
             // chantier 1 (2026-06-03) — inject deterministic detector signals
             // ONLY into the tech-debt step (Step 8). They anchor the dimension

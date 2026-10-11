@@ -643,7 +643,7 @@ pub(crate) async fn run_partial_pipeline(
             let mut full_prompt = super::dated_step_prompt(gate, &super::step_prompt_body(analysis_step, reverify), Utc::now());
 
             if let Some(ref notes) = briefing_notes {
-                full_prompt.push_str(&format!("\n\n## Project briefing (from the user)\n{}\n", notes));
+                full_prompt.push_str(&super::briefing::briefing_prompt_section(notes));
             }
             if let Some(ref block) = linked_repos_block {
                 full_prompt.push_str(&format!("\n\n{}\n", block));

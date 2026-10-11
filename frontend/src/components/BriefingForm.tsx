@@ -16,7 +16,15 @@ import { useState } from 'react';
 import { useT } from '../lib/I18nContext';
 import { projects as projectsApi } from '../lib/api';
 import { Save, X, Loader2 } from 'lucide-react';
-import type { AgentType, ModelTier } from '../types/generated';
+import type { AgentType, BriefingProjectAnswers, ModelTier } from '../types/generated';
+import {
+  BRIEFING_ENVIRONMENTS,
+  BRIEFING_PROJECT_CARDS,
+  BRIEFING_ROLES,
+  emptyProjectAnswers,
+  trackerTakesKey,
+  type BriefingChoiceCard,
+} from './briefingProjectCards';
 
 interface BriefingFormProps {
   projectId: string;
@@ -62,8 +70,29 @@ export function BriefingForm({ projectId, onClose, onSaved, agent, tier, review 
     additional: '',
   });
   const [submitting, setSubmitting] = useState(false);
+  const [project, setProject] = useState<BriefingProjectAnswers>(emptyProjectAnswers);
 
   const update = (key: keyof typeof form, value: string) => setForm(f => ({ ...f, [key]: value }));
+  const choose = (key: BriefingChoiceCard['key'], id: string) =>
+    setProject(p => ({ ...p, [key]: id }));
+  const toggleEnv = (kind: BriefingProjectAnswers['environments'][number]['kind']) =>
+    setProject(p => ({
+      ...p,
+      environments: p.environments.some(e => e.kind === kind)
+        ? p.environments.filter(e => e.kind !== kind)
+        : [...p.environments, { kind, url: '' }],
+    }));
+  const setEnvUrl = (kind: string, url: string) =>
+    setProject(p => ({ ...p, environments: p.environments.map(e => (e.kind === kind ? { ...e, url } : e)) }));
+  const toggleRole = (role: BriefingProjectAnswers['people'][number]['role']) =>
+    setProject(p => ({
+      ...p,
+      people: p.people.some(x => x.role === role)
+        ? p.people.filter(x => x.role !== role)
+        : [...p.people, { role, name: '', contact: '' }],
+    }));
+  const setPerson = (role: string, field: 'name' | 'contact', value: string) =>
+    setProject(p => ({ ...p, people: p.people.map(x => (x.role === role ? { ...x, [field]: value } : x)) }));
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -82,7 +111,13 @@ export function BriefingForm({ projectId, onClose, onSaved, agent, tier, review 
     setSubmitting(true);
     try {
       // 1. Save the answers — writes `docs/briefing.md` + DB notes.
-      await projectsApi.saveBriefing(projectId, form);
+      const projectAnswers: BriefingProjectAnswers = {
+        ...project,
+        tracker_key: trackerTakesKey(project.tracker) ? project.tracker_key.trim() : '',
+        forge_repo: project.forge === 'unknown' ? '' : project.forge_repo.trim(),
+        people: project.people.filter(p => p.name.trim() || p.contact.trim()),
+      };
+      await projectsApi.saveBriefing(projectId, { ...form, project: projectAnswers });
       if (!review) {
         toast(t('briefing.savedOnlyToast'), 'success');
         onSaved(null);
@@ -189,6 +224,132 @@ export function BriefingForm({ projectId, onClose, onSaved, agent, tier, review 
           placeholder={t('briefing.q6Placeholder')}
         />
       </label>
+
+      <section className="briefing-project" aria-labelledby="briefing-project-title">
+        <h4 id="briefing-project-title" className="briefing-form-q">{t('briefing.project.title')}</h4>
+        <p className="briefing-form-intro">{t('briefing.project.intro')}</p>
+
+        {BRIEFING_PROJECT_CARDS.map(card => (
+          <fieldset key={card.key} className="briefing-card" data-card={card.key}>
+            <legend className="briefing-form-q">{t(card.questionKey)}</legend>
+            <div className="briefing-card-options" role="radiogroup" aria-label={t(card.questionKey)}>
+              {card.options.map(option => {
+                const selected = project[card.key] === option.id;
+                return (
+                  <button
+                    key={option.id}
+                    type="button"
+                    role="radio"
+                    aria-checked={selected}
+                    className={`briefing-card-option${selected ? ' is-selected' : ''}`}
+                    onClick={() => choose(card.key, option.id)}
+                  >
+                    {option.literal ?? t(option.labelKey ?? '')}
+                  </button>
+                );
+              })}
+            </div>
+            {card.key === 'tracker' && trackerTakesKey(project.tracker) && (
+              <input
+                className="briefing-card-input"
+                aria-label={t('briefing.project.trackerKey')}
+                placeholder={t('briefing.project.trackerKeyPlaceholder')}
+                value={project.tracker_key}
+                maxLength={64}
+                onChange={e => setProject(p => ({ ...p, tracker_key: e.target.value }))}
+              />
+            )}
+            {card.key === 'forge' && project.forge !== 'unknown' && (
+              <input
+                className="briefing-card-input"
+                aria-label={t('briefing.project.forgeRepo')}
+                placeholder={t('briefing.project.forgeRepoPlaceholder')}
+                value={project.forge_repo}
+                maxLength={140}
+                onChange={e => setProject(p => ({ ...p, forge_repo: e.target.value }))}
+              />
+            )}
+          </fieldset>
+        ))}
+
+        <fieldset className="briefing-card" data-card="environments">
+          <legend className="briefing-form-q">{t('briefing.project.envQ')}</legend>
+          <div className="briefing-card-options" role="group" aria-label={t('briefing.project.envQ')}>
+            {BRIEFING_ENVIRONMENTS.map(env => {
+              const selected = project.environments.some(e => e.kind === env.id);
+              return (
+                <button
+                  key={env.id}
+                  type="button"
+                  role="checkbox"
+                  aria-checked={selected}
+                  className={`briefing-card-option${selected ? ' is-selected' : ''}`}
+                  onClick={() => toggleEnv(env.id)}
+                >
+                  {t(env.labelKey)}
+                </button>
+              );
+            })}
+          </div>
+          {project.environments.map(env => (
+            <input
+              key={env.kind}
+              className="briefing-card-input"
+              type="url"
+              aria-label={`${t(BRIEFING_ENVIRONMENTS.find(e => e.id === env.kind)?.labelKey ?? '')} — URL`}
+              placeholder={t('briefing.project.envUrlPlaceholder')}
+              value={env.url}
+              maxLength={200}
+              onChange={e => setEnvUrl(env.kind, e.target.value)}
+            />
+          ))}
+        </fieldset>
+
+        <fieldset className="briefing-card" data-card="people">
+          <legend className="briefing-form-q">{t('briefing.project.peopleQ')}</legend>
+          <div className="briefing-card-options" role="group" aria-label={t('briefing.project.peopleQ')}>
+            {BRIEFING_ROLES.map(role => {
+              const selected = project.people.some(p => p.role === role.id);
+              return (
+                <button
+                  key={role.id}
+                  type="button"
+                  role="checkbox"
+                  aria-checked={selected}
+                  className={`briefing-card-option${selected ? ' is-selected' : ''}`}
+                  onClick={() => toggleRole(role.id)}
+                >
+                  {t(role.labelKey)}
+                </button>
+              );
+            })}
+          </div>
+          {project.people.map(person => {
+            const roleLabel = t(BRIEFING_ROLES.find(r => r.id === person.role)?.labelKey ?? '');
+            return (
+              <div key={person.role} className="briefing-card-person">
+                <input
+                  className="briefing-card-input"
+                  aria-label={`${roleLabel} — ${t('briefing.project.personName')}`}
+                  placeholder={t('briefing.project.personName')}
+                  value={person.name}
+                  maxLength={80}
+                  onChange={e => setPerson(person.role, 'name', e.target.value)}
+                />
+                <input
+                  className="briefing-card-input"
+                  aria-label={`${roleLabel} — ${t('briefing.project.personContact')}`}
+                  placeholder={t('briefing.project.personContact')}
+                  value={person.contact}
+                  maxLength={120}
+                  onChange={e => setPerson(person.role, 'contact', e.target.value)}
+                />
+              </div>
+            );
+          })}
+          <p className="briefing-form-intro">{t('briefing.project.peoplePrivacy')}</p>
+        </fieldset>
+      </section>
 
       <div className="briefing-form-actions">
         <button type="button" onClick={onClose} disabled={submitting}>{t('common.cancel')}</button>

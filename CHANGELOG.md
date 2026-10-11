@@ -44,6 +44,23 @@ Release notes for 0.9.3 and earlier are available in the
   « Vérifié, inchangé », wired to the existing acknowledgement, and every
   error, stop or interruption offers « Reprendre ». The routes are not on the
   bridge list.
+- The briefing now asks about the project itself, on closed cards, and the
+  audit writes `docs/project.md` from the answers (KT-1173). Next to the six
+  questions, the form shows one choice card per fact: tracker, project key,
+  forge, repository, default branch, commit convention, sign-off, merge
+  strategy, review, release cadence, environments (with optional URLs) and
+  roles (arbiter, tech lead, DevOps, PO, QA, with only the name and contact
+  the user types). The backend refuses any option outside a card. Answers go
+  to a `## Project facts` section of `docs/briefing.md`, kept as answered
+  even when the AI review rewrites the file. Each Full audit renders
+  `docs/project.md` deterministically (template v2 ships its skeleton and
+  routes it from `docs/AGENTS.md`). An open repository is taken from the git
+  remote. When the project has a Jira (`mcp-atlassian`) or GitHub
+  (`mcp-github`) API connection, the Jira project key, the repository and
+  its default branch are checked read-only with one GET each, and a
+  mismatch is flagged on the page. With no connection, the value is marked
+  "not verified". A `docs/project.md` without its generated marker is never
+  rewritten.
 
 - After an audit with failed steps, a single step can be retried alone, or a
   human can accept it as it stands (KT-1131). On each failed line of the
@@ -120,6 +137,12 @@ Release notes for 0.9.3 and earlier are available in the
   never turns into a whole audit. On a documented repository no launch
   installs the template again. The states and their actions are listed in
   `docs/architecture/audit-run-states.md`.
+- `PUT /api/projects/:id/briefing` is no longer ignored once
+  `docs/briefing.md` exists (AUD-14): it writes the file, or removes it when
+  the notes are cleared, before the database column the audit falls back to.
+  The briefing injected into each audit step, full or partial, is capped at
+  6,000 characters and ends with an explicit truncation marker that points
+  to `docs/briefing.md`.
 
 - A task execution's progress no longer exposes the raw name of the running
   tool (KT-1124). `task_exec_status` returned it in
