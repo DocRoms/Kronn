@@ -89,6 +89,12 @@ export interface AuditTimelineProps {
   /** The backend has not acknowledged the cancel yet: the audit may still run. */
   cancelPending?: boolean;
   resumable: { id: string; steps_to_redo?: number[]; last_completed_step: number } | null;
+  /** Whether a run can be resumed is not known: launching waits for it (KT-1169). */
+  resumableUnknown?: boolean;
+  onReloadResumable?: () => void;
+  /** The last launch stopped on this error; `retry` replays it (KT-1169). */
+  launchError?: { message: string; retry: () => void } | null;
+  onDismissLaunchError?: () => void;
   onLaunch: () => void;
   /** Retry one failed step of the resumable run, alone (KT-1131). */
   onRetryStep?: (step: number) => void;
@@ -211,6 +217,9 @@ export function AuditTimeline(props: AuditTimelineProps) {
   const [acceptReason, setAcceptReason] = useState('');
   const [acceptBusy, setAcceptBusy] = useState(false);
   const [confirmRelaunch, setConfirmRelaunch] = useState(false);
+  const [acceptError, setAcceptError] = useState<string | null>(null);
+  // The recorded steps could not be read: never shown as "not started".
+  const [loadFailed, setLoadFailed] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -258,9 +267,10 @@ export function AuditTimeline(props: AuditTimelineProps) {
         if (alive) {
           setRunId(id); setSteps(rows); setTdTotal(td); setRecorded(entries);
           setLinkedValidation(validation); setLeaseOrphaned(orphaned); setStepsLoaded(true);
+          setLoadFailed(false);
         }
       })
-      .catch(() => { if (alive) { setSteps([]); setRecorded([]); setLinkedValidation(null); setStepsLoaded(true); } });
+      .catch(() => { if (alive) { setSteps([]); setRecorded([]); setLinkedValidation(null); setStepsLoaded(true); setLoadFailed(true); } });
     return () => { alive = false; };
   }, [projectId, resumable, refreshTrigger, auditActive, liveStep, reloadTick]);
 
@@ -380,6 +390,8 @@ export function AuditTimeline(props: AuditTimelineProps) {
     : audited ? t('auditTimeline.relaunch') : t('audit.startFullAudit');
   // Per-step actions exist only on the run a resume continues.
   const stepActions = !auditActive && !!resumable && !leaseOrphaned;
+  // No launch while the state it must start from is unknown or locked.
+  const launchBlocked = leaseOrphaned || !!props.resumableUnknown;
   // The latest run is interrupted: validating waits for its failed steps.
   const runPending = !!resumable && !auditActive;
   const validationRunning = props.validationInProgress && !auditActive;
@@ -387,10 +399,13 @@ export function AuditTimeline(props: AuditTimelineProps) {
   const submitAccept = async (step: number) => {
     if (!props.onAcceptStep || acceptBusy) return;
     setAcceptBusy(true);
+    setAcceptError(null);
     try {
       await props.onAcceptStep(step, acceptReason.trim() || null);
       setAccepting(null);
       setAcceptReason('');
+    } catch (error) {
+      setAcceptError(error instanceof Error ? error.message : String(error));
     } finally {
       setAcceptBusy(false);
     }
@@ -542,6 +557,49 @@ export function AuditTimeline(props: AuditTimelineProps) {
                 </div>
               </div>
             )}
+            {props.launchError && !auditActive && (
+              <div className="audit-tl-warn" role="alert" data-testid="audit-timeline-launch-error">
+                <AlertTriangle size={13} aria-hidden="true" />
+                <div>
+                  <p><strong>{t('auditTimeline.error.title')}</strong></p>
+                  <p className="audit-tl-error-message">{props.launchError.message}</p>
+                  <div className="audit-tl-validation-actions">
+                    <button type="button" className="audit-tl-btn audit-tl-btn-small audit-tl-btn-warn" onClick={props.launchError.retry} data-testid="audit-timeline-launch-error-retry">
+                      <RotateCcw size={12} /> {t('auditTimeline.error.resume')}
+                    </button>
+                    {props.onDismissLaunchError && (
+                      <button type="button" className="audit-tl-btn audit-tl-btn-small" onClick={props.onDismissLaunchError}>
+                        {t('auditTimeline.error.dismiss')}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+            {props.resumableUnknown && !auditActive && (
+              <div className="audit-tl-warn" role="alert" data-testid="audit-timeline-resumable-unknown">
+                <AlertTriangle size={13} aria-hidden="true" />
+                <div>
+                  <p>{t('auditTimeline.error.resumableUnknown')}</p>
+                  {props.onReloadResumable && (
+                    <button type="button" className="audit-tl-btn audit-tl-btn-small" onClick={props.onReloadResumable} data-testid="audit-timeline-resumable-reload">
+                      <RotateCcw size={12} /> {t('auditTimeline.error.retry')}
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+            {loadFailed && (
+              <div className="audit-tl-warn" role="alert" data-testid="audit-timeline-load-error">
+                <AlertTriangle size={13} aria-hidden="true" />
+                <div>
+                  <p>{t('auditTimeline.error.timeline')}</p>
+                  <button type="button" className="audit-tl-btn audit-tl-btn-small" onClick={() => setReloadTick(n => n + 1)} data-testid="audit-timeline-load-retry">
+                    <RotateCcw size={12} /> {t('auditTimeline.error.retry')}
+                  </button>
+                </div>
+              </div>
+            )}
             {consolidationRedone && (
               <p className="audit-tl-note">{t('auditTimeline.audit.consolidationNote')}</p>
             )}
@@ -565,7 +623,7 @@ export function AuditTimeline(props: AuditTimelineProps) {
                       </span>
                     </button>
                     {groupFailed && resumable && !auditActive && (
-                      <button type="button" className="audit-tl-btn audit-tl-btn-small audit-tl-btn-warn" onClick={props.onLaunch}>
+                      <button type="button" className="audit-tl-btn audit-tl-btn-small audit-tl-btn-warn" onClick={props.onLaunch} disabled={launchBlocked || !selected}>
                         <RotateCcw size={11} /> {t('auditTimeline.audit.resume')}
                       </button>
                     )}
@@ -604,12 +662,12 @@ export function AuditTimeline(props: AuditTimelineProps) {
                             {stepActions && (r.status === 'failed' || r.status === 'todo') && (
                               <span className="audit-tl-step-actions" data-testid={`audit-timeline-step-actions-${r.index}`}>
                                 {props.onRetryStep && (
-                                  <button type="button" className="audit-tl-btn audit-tl-btn-small audit-tl-btn-warn" onClick={() => props.onRetryStep?.(r.index)} data-testid={`audit-timeline-step-retry-${r.index}`}>
+                                  <button type="button" className="audit-tl-btn audit-tl-btn-small audit-tl-btn-warn" onClick={() => props.onRetryStep?.(r.index)} disabled={launchBlocked || !selected} data-testid={`audit-timeline-step-retry-${r.index}`}>
                                     <RotateCcw size={11} /> {t('auditTimeline.step.retry')}
                                   </button>
                                 )}
                                 {props.onAcceptStep && accepting !== r.index && (
-                                  <button type="button" className="audit-tl-btn audit-tl-btn-small" onClick={() => { setAccepting(r.index); setAcceptReason(''); }} data-testid={`audit-timeline-step-accept-${r.index}`}>
+                                  <button type="button" className="audit-tl-btn audit-tl-btn-small" onClick={() => { setAccepting(r.index); setAcceptReason(''); setAcceptError(null); }} data-testid={`audit-timeline-step-accept-${r.index}`}>
                                     <Check size={11} /> {t('auditTimeline.step.accept')}
                                   </button>
                                 )}
@@ -627,11 +685,16 @@ export function AuditTimeline(props: AuditTimelineProps) {
                                   rows={2}
                                   onChange={e => setAcceptReason(e.target.value)}
                                 />
+                                {acceptError && (
+                                  <span className="audit-tl-reason is-failed" role="alert" data-testid={`audit-timeline-accept-error-${r.index}`}>
+                                    {t('auditTimeline.step.acceptFailed', acceptError)}
+                                  </span>
+                                )}
                                 <span className="audit-tl-row">
                                   <button type="button" className="audit-tl-btn audit-tl-btn-small" disabled={acceptBusy} onClick={() => void submitAccept(r.index)} data-testid={`audit-timeline-accept-confirm-${r.index}`}>
                                     {acceptBusy ? <Loader2 size={11} className="spin" /> : <Check size={11} />} {t('auditTimeline.step.acceptConfirm')}
                                   </button>
-                                  <button type="button" className="audit-tl-btn audit-tl-btn-small" onClick={() => setAccepting(null)}>
+                                  <button type="button" className="audit-tl-btn audit-tl-btn-small" onClick={() => { setAccepting(null); setAcceptError(null); }}>
                                     {t('auditTimeline.step.acceptCancel')}
                                   </button>
                                 </span>
@@ -732,7 +795,7 @@ export function AuditTimeline(props: AuditTimelineProps) {
                 </ul>
               </div>
             )}
-            {runId === null && total === 0 && !auditActive && recorded.length === 0 && (
+            {runId === null && total === 0 && !auditActive && recorded.length === 0 && !loadFailed && (
               <p className="audit-tl-muted">{t('auditTimeline.audit.notStarted')}</p>
             )}
           </Phase>
@@ -756,7 +819,7 @@ export function AuditTimeline(props: AuditTimelineProps) {
                   type="button"
                   className="audit-tl-btn audit-tl-btn-small"
                   onClick={props.onLaunch}
-                  disabled={leaseOrphaned || !selected}
+                  disabled={launchBlocked || !selected}
                   data-testid="audit-timeline-validation-launch"
                 >
                   {runPending ? <RotateCcw size={12} /> : <Play size={12} />} {launchLabel}
@@ -888,14 +951,14 @@ export function AuditTimeline(props: AuditTimelineProps) {
                 </div>
               </div>
             )}
-            {audited && !resumable && !auditActive && (
+            {audited && !resumable && !props.resumableUnknown && !auditActive && (
               <p className="audit-tl-muted" data-testid="audit-timeline-reverify-hint">{t('auditTimeline.reverifyHint')}</p>
             )}
             <button
               type="button"
               className="audit-tl-btn audit-tl-btn-primary"
               onClick={props.onLaunch}
-              disabled={auditActive || leaseOrphaned || !selected || !agentChoices.some(g => g.items.some(i => i.usable))}
+              disabled={auditActive || launchBlocked || !selected || !agentChoices.some(g => g.items.some(i => i.usable))}
               data-testid="audit-timeline-launch"
             >
               {auditActive ? <Loader2 size={13} className="spin" aria-hidden="true" /> : <Play size={13} />} {launchLabel}
@@ -905,7 +968,7 @@ export function AuditTimeline(props: AuditTimelineProps) {
                 type="button"
                 className="audit-tl-btn audit-tl-btn-small"
                 onClick={() => setConfirmRelaunch(true)}
-                disabled={leaseOrphaned || !selected}
+                disabled={launchBlocked || !selected}
                 data-testid="audit-timeline-relaunch-full"
               >
                 {t('auditTimeline.relaunchFull')}

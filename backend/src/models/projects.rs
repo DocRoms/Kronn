@@ -1496,6 +1496,12 @@ pub struct LaunchAuditRequest {
     #[serde(default)]
     #[ts(optional)]
     pub retry_steps: Option<Vec<u32>>,
+    /// KT-1169 — a launch without `resume_run_id` is refused while the
+    /// project's latest run can be resumed, unless this explicit choice says
+    /// to run the whole audit again.
+    #[serde(default)]
+    #[ts(optional)]
+    pub fresh: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, TS)]

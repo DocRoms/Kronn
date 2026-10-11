@@ -162,11 +162,13 @@ export default function AuditRecapPanel({ projectId, refreshTrigger, selectedRun
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
   const [kindFilter, setKindFilter] = useState<string | null>(null);
   const [showAll, setShowAll] = useState(false);
+  // Bumped by "Réessayer" after a failed read (KT-1169).
+  const [reload, setReload] = useState(0);
 
   // Fetch history on mount + every refreshTrigger bump.
   useEffect(() => {
     let cancelled = false;
-    const key = `${projectId}:${refreshTrigger ?? 0}`;
+    const key = `${projectId}:${refreshTrigger ?? 0}:${reload}`;
     (async () => {
       try {
         const rows = await projectsApi.auditHistory(projectId);
@@ -179,9 +181,9 @@ export default function AuditRecapPanel({ projectId, refreshTrigger, selectedRun
       }
     })();
     return () => { cancelled = true; };
-  }, [projectId, refreshTrigger]);
+  }, [projectId, refreshTrigger, reload]);
 
-  const historyKey = `${projectId}:${refreshTrigger ?? 0}`;
+  const historyKey = `${projectId}:${refreshTrigger ?? 0}:${reload}`;
   const historyIsCurrent = historyResult?.key === historyKey;
   const history = historyIsCurrent ? historyResult.rows : EMPTY_AUDIT_RUNS;
   const loadingHistory = !historyIsCurrent;
@@ -207,7 +209,7 @@ export default function AuditRecapPanel({ projectId, refreshTrigger, selectedRun
       }
     })();
     return () => { cancelled = true; };
-  }, [latestRun]);
+  }, [latestRun, reload]);
 
   // Load steps for an older run expanded in the history drawer. The latest
   // run reuses the direct-detail request above instead of fetching twice.
@@ -226,7 +228,7 @@ export default function AuditRecapPanel({ projectId, refreshTrigger, selectedRun
       }
     })();
     return () => { cancelled = true; };
-  }, [expandedRunId, latestRun?.id]);
+  }, [expandedRunId, latestRun?.id, reload]);
 
   const latestStepsAreCurrent = latestRun !== null && latestStepsResult?.runId === latestRun.id;
   const latestSteps = latestStepsAreCurrent ? latestStepsResult.rows : EMPTY_AUDIT_STEPS;
@@ -318,10 +320,20 @@ export default function AuditRecapPanel({ projectId, refreshTrigger, selectedRun
     return status;
   };
 
-  if (history.length === 0 && !loadingHistory) return null;
+  const errorBlock = error && (
+    <div className="arp-error" role="alert" data-testid="audit-recap-error">
+      <p>{error}</p>
+      <button type="button" className="arp-retry" onClick={() => setReload(n => n + 1)} data-testid="audit-recap-retry">
+        {t('projects.docAi.auditRecap.retry')}
+      </button>
+    </div>
+  );
+
+  if (history.length === 0 && !loadingHistory && !error) return null;
 
   return (
     <>
+      {!drawerOpen && errorBlock}
       {loadingHistory && (
         <section className="arp-latest" data-testid="audit-recap-loading">
           <p>{t('common.loading')}</p>
@@ -492,7 +504,7 @@ export default function AuditRecapPanel({ projectId, refreshTrigger, selectedRun
 
             <div className="arp-drawer-body">
               {loadingHistory && <p>{t('common.loading')}</p>}
-              {error && <p className="arp-error">{error}</p>}
+              {errorBlock}
 
               {history.length > 0 && kindsInStrip.length > 1 && (
                 <div

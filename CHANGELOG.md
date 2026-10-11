@@ -74,6 +74,21 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- An audit error never stays on screen without a way out, and « Lancer
+  l'audit » always starts from what exists (KT-1169). A launch that stops on
+  an error, whether refused, cut off or offline, leaves a « Reprendre »
+  banner in the timeline that replays that same launch. An unreadable
+  timeline, recap or resume state says so with « Réessayer ». A refused
+  acceptance keeps its form and reason. The server now refuses a launch
+  without `resume_run_id` while the latest run can still be resumed, unless
+  the request carries `fresh: true`, the confirmed « Relancer quand même
+  tout l'audit » choice. A stale-sections refresh is refused in that case
+  too. Bridge agents get the run id to resume. When the card cannot tell
+  whether a run is resumable, launching waits, and a step retried alone
+  never turns into a whole audit. On a documented repository no launch
+  installs the template again. The states and their actions are listed in
+  `docs/architecture/audit-run-states.md`.
+
 - A task execution's progress no longer exposes the raw name of the running
   tool (KT-1124). `task_exec_status` returned it in
   `TaskExecutionProgress.reason`, and an MCP name such as `mcp__github__...`

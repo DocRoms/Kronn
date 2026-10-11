@@ -118,6 +118,15 @@ async fn run_full_retrying(
     resume_run_id: Option<String>,
     retry_steps: Option<Vec<u32>>,
 ) -> String {
+    launch_full(state, resume_run_id, retry_steps, None).await
+}
+
+async fn launch_full(
+    state: &AppState,
+    resume_run_id: Option<String>,
+    retry_steps: Option<Vec<u32>>,
+    fresh: Option<bool>,
+) -> String {
     let response = crate::api::audit::full::full_audit(
         axum::extract::State(state.clone()),
         axum::extract::Path(PROJECT_ID.to_string()),
@@ -129,6 +138,7 @@ async fn run_full_retrying(
             custom_prompt: None,
             resume_run_id,
             retry_steps,
+            fresh,
         }),
     )
     .await
@@ -840,4 +850,125 @@ async fn an_accepted_step_completes_the_run_and_the_project_validates() {
         crate::core::scanner::detect_audit_status(&fx.project.path().display().to_string()),
         crate::models::AiAuditStatus::Validated
     );
+}
+
+// ── KT-1169 — a launch never ignores an audit it could resume ────────────────
+
+/// Every file under `docs/`, by path, so a refused launch can prove it wrote nothing.
+fn docs_snapshot(project: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    fn walk(dir: &Path, root: &Path, out: &mut std::collections::BTreeMap<String, Vec<u8>>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                walk(&path, root, out);
+            } else {
+                let key = path.strip_prefix(root).unwrap().display().to_string();
+                out.insert(key, std::fs::read(&path).unwrap());
+            }
+        }
+    }
+    let mut out = std::collections::BTreeMap::new();
+    walk(&project.join("docs"), project, &mut out);
+    out
+}
+
+async fn latest_resumable_id(state: &AppState) -> Option<String> {
+    state
+        .db
+        .with_conn(|conn| crate::db::audit_runs::latest_resumable(conn, PROJECT_ID))
+        .await
+        .unwrap()
+        .map(|run| run.id)
+}
+
+async fn run_count(state: &AppState) -> usize {
+    state
+        .db
+        .with_conn(|conn| Ok(crate::db::audit_runs::list_recent(conn, PROJECT_ID, 100)?.len()))
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_launch_that_would_ignore_a_resumable_run_is_refused_unless_fresh() {
+    let fx = Audited::new().await;
+    fx.break_target("docs/coding-rules.md");
+    arm(fx.tools.path(), "noop", &fx.targets);
+    let broken = run_full(&fx.state, None).await;
+    let done = sse_events(&broken, "done").pop().expect("terminal done");
+    validation_settled(&fx.state, &done).await;
+    assert_eq!(done["status"], "interrupted", "{broken}");
+    let interrupted = done["audit_run_id"].as_str().unwrap().to_string();
+    assert_eq!(
+        latest_resumable_id(&fx.state).await.as_deref(),
+        Some(interrupted.as_str())
+    );
+    let docs_before = docs_snapshot(fx.project.path());
+    let runs_before = run_count(&fx.state).await;
+
+    // A plain launch is refused: no run, no agent, no document touched, and
+    // the interrupted run stays the one to resume.
+    arm(fx.tools.path(), "fill", &fx.targets);
+    std::fs::write(fx.tools.path().join("steps.log"), "").unwrap();
+    let refused = run_full(&fx.state, None).await;
+    let error = sse_events(&refused, "error")
+        .pop()
+        .unwrap_or_else(|| panic!("{refused}"));
+    let message = error["error"].as_str().unwrap();
+    assert!(message.contains(&interrupted), "{message}");
+    assert!(message.contains("resume_run_id"), "{message}");
+    assert!(sse_events(&refused, "accepted").is_empty(), "{refused}");
+    assert!(sse_events(&refused, "step_start").is_empty(), "{refused}");
+
+    // A refresh of stale sections would supersede it too.
+    let partial = crate::api::audit::drift::partial_audit(
+        axum::extract::State(fx.state.clone()),
+        axum::extract::Path(PROJECT_ID.to_string()),
+        axum::Json(crate::models::PartialAuditRequest {
+            agent: AgentType::ClaudeCode,
+            connection_id: None,
+            tier: None,
+            steps: vec![1],
+        }),
+    )
+    .await
+    .into_response();
+    let partial = sse_body(partial).await;
+    let error = sse_events(&partial, "error")
+        .pop()
+        .unwrap_or_else(|| panic!("{partial}"));
+    assert!(
+        error["error"].as_str().unwrap().contains("resume it"),
+        "{partial}"
+    );
+
+    assert_eq!(run_count(&fx.state).await, runs_before);
+    assert_eq!(
+        latest_resumable_id(&fx.state).await.as_deref(),
+        Some(interrupted.as_str())
+    );
+    assert_eq!(docs_snapshot(fx.project.path()), docs_before);
+    assert!(prompt_kinds(fx.tools.path()).is_empty(), "no agent ran");
+
+    // The explicit choice replays every step on the existing documents: the
+    // template is not installed again, and each filled document is re-verified.
+    arm(fx.tools.path(), "noop", &fx.targets);
+    let fresh = launch_full(&fx.state, None, None, Some(true)).await;
+    assert!(sse_events(&fresh, "error").is_empty(), "{fresh}");
+    assert_eq!(
+        started_steps(&fresh),
+        (1..=fx.total() as u64).collect::<Vec<_>>()
+    );
+    for event in sse_events(&fresh, "template_installed") {
+        assert_eq!(event["installed"], false, "{fresh}");
+    }
+    let kinds = prompt_kinds(fx.tools.path());
+    assert!(
+        kinds.contains(&("docs/AGENTS.md".to_string(), true)),
+        "a filled document is re-verified, not filled again: {kinds:?}"
+    );
+    let done = sse_events(&fresh, "done").pop().expect("terminal done");
+    assert_ne!(done["audit_run_id"], json!(interrupted));
 }

@@ -338,6 +338,7 @@ pub async fn full_audit(
 
     let resume_run_id_req = req.resume_run_id.clone();
     let retry_steps_req = req.retry_steps.clone();
+    let fresh_req = req.fresh.unwrap_or(false);
     let requested_kind = req.kind;
     let db = state.db.clone();
     let audit_tracker = state.audit_tracker.clone();
@@ -446,6 +447,21 @@ pub async fn full_audit(
                 }
             }
         } else {
+            // KT-1169 — a launch never ignores an audit it could resume.
+            let latest = db.with_conn({
+                let pid = project_id.clone();
+                move |conn| crate::db::audit_runs::latest_resumable(conn, &pid)
+            }).await;
+            let refusal = match latest {
+                Ok(latest) => fresh_launch_refusal(latest.as_ref(), fresh_req),
+                Err(e) => Some(format!("Could not read the project's latest audit run (db): {e} — launch refused.")),
+            };
+            if let Some(msg) = refusal {
+                yield Event::default().event("error").data(
+                    serde_json::json!({ "error": msg }).to_string(),
+                );
+                return;
+            }
             (requested_kind.unwrap_or_default(), 0u32)
         };
         let kind_label = kind.as_label();
@@ -3326,6 +3342,23 @@ pub(crate) fn accepted_steps(steps: &[crate::models::AuditRunStep]) -> Vec<Accep
             failure: s.step_warning.clone(),
         })
         .collect()
+}
+
+/// KT-1169 — why a launch without `resume_run_id` is refused: the project's
+/// latest run can still be resumed, and only an explicit `fresh` replays it all.
+pub(crate) fn fresh_launch_refusal(
+    latest_resumable: Option<&crate::models::AuditRun>,
+    fresh: bool,
+) -> Option<String> {
+    let run = latest_resumable?;
+    if fresh || crate::models::AuditKind::from_label(&run.kind).is_none() {
+        return None;
+    }
+    Some(format!(
+        "An interrupted audit can be resumed (run {}): resume it with resume_run_id, \
+         or run the whole audit again with fresh: true.",
+        run.id
+    ))
 }
 
 /// KT-1131 — the steps a single-step retry runs: each one must exist and must

@@ -4305,7 +4305,13 @@ resume_run_id?: string | null,
  * KT-1131 — with `resume_run_id`: retry only these 1-based failed steps.
  * The run's other failed steps stay failed, unrun. Absent = every one.
  */
-retry_steps?: Array<number>, };
+retry_steps?: Array<number>,
+/**
+ * KT-1169 — a launch without `resume_run_id` is refused while the
+ * project's latest run can be resumed, unless this explicit choice says
+ * to run the whole audit again.
+ */
+fresh?: boolean, };
 
 export type LaunchDiscussionActionRequest = { variables?: Record<string, string>,
 /**

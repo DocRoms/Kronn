@@ -224,7 +224,37 @@
 }
 
 .arp-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
   color: var(--kr-error);
+}
+
+.arp-error p {
+  margin: 0;
+  color: var(--kr-error);
+  overflow-wrap: anywhere;
+}
+
+.arp-retry {
+  font: inherit;
+  font-size: var(--kr-fs-xs, 12px);
+  padding: 2px 10px;
+  border-radius: var(--kr-r-md);
+  border: 1px solid var(--kr-border-strong);
+  background: var(--kr-bg-elevated);
+  color: var(--kr-text-primary);
+  cursor: pointer;
+}
+
+.arp-retry:hover {
+  background: var(--kr-bg-hover);
+}
+
+.arp-retry:focus-visible {
+  outline: 2px solid var(--kr-accent-ink);
+  outline-offset: 1px;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════

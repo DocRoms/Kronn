@@ -406,3 +406,67 @@ async fn a_validation_agent_waits_while_an_audit_of_its_project_runs() {
         .is_some_and(|e| e.starts_with("audit_running")));
     assert_eq!(held.attempts, 0, "a held turn spends no attempt");
 }
+
+/// KT-1169 — the launch gate: a resumable run refuses a launch that is not an
+/// explicit fresh one; a partial run, which the Full launch cannot resume, never does.
+#[tokio::test]
+async fn only_an_explicit_fresh_launch_supersedes_a_resumable_run() {
+    let state = state();
+    let project = tempfile::tempdir().unwrap();
+    seed_project(&state, project.path()).await;
+    let latest = |state: AppState| async move {
+        state
+            .db
+            .with_conn(|conn| crate::db::audit_runs::latest_resumable(conn, "p1"))
+            .await
+            .unwrap()
+    };
+    assert_eq!(
+        crate::api::audit::full::fresh_launch_refusal(None, false),
+        None
+    );
+
+    state
+        .db
+        .with_conn(|conn| {
+            insert_run(conn, "r1", 60)?;
+            crate::db::audit_runs::update_last_completed_step(conn, "r1", 3)?;
+            crate::db::audit_runs::mark_interrupted(conn, "r1", "step 4 failed")
+        })
+        .await
+        .unwrap();
+    let run = latest(state.clone()).await.expect("resumable");
+    let refusal =
+        crate::api::audit::full::fresh_launch_refusal(Some(&run), false).expect("refused");
+    assert!(
+        refusal.contains("r1") && refusal.contains("fresh: true"),
+        "{refusal}"
+    );
+    assert_eq!(
+        crate::api::audit::full::fresh_launch_refusal(Some(&run), true),
+        None
+    );
+
+    state
+        .db
+        .with_conn(|conn| {
+            crate::db::audit_runs::insert_running(
+                conn,
+                "p-run",
+                "p1",
+                "Partial",
+                "ClaudeCode",
+                chrono::Utc::now(),
+            )?;
+            crate::db::audit_runs::update_last_completed_step(conn, "p-run", 1)?;
+            crate::db::audit_runs::mark_interrupted(conn, "p-run", "stale")
+        })
+        .await
+        .unwrap();
+    let partial = latest(state.clone()).await.expect("latest is the partial");
+    assert_eq!(partial.id, "p-run");
+    assert_eq!(
+        crate::api::audit::full::fresh_launch_refusal(Some(&partial), false),
+        None
+    );
+}

@@ -442,6 +442,11 @@ export function ProjectCard({
   const [auditAbortController, setAuditAbortController] = useState<AbortController | null>(null);
   // KT-1134 — a cancel the backend has not acknowledged: the run may still go on.
   const [cancelPending, setCancelPending] = useState(false);
+  // KT-1169 — the last launch that stopped on an error, and how to replay it.
+  const [auditLaunchError, setAuditLaunchError] = useState<{ message: string; retry: () => void } | null>(null);
+  // A "Reprendre" replays the launch with the state of the moment it is clicked.
+  const handleFullAuditRef = useRef<(options?: { retrySteps?: number[]; fresh?: boolean }) => Promise<void>>(async () => {});
+  const startPartialAuditRef = useRef<(drift: DriftCheckResponse) => Promise<void>>(async () => {});
   // Re-arms the status poll: an external launch, or a cancel left pending.
   const [externalAdoptTick, setExternalAdoptTick] = useState(0);
   const [auditAgentChoice, setAuditAgentChoice] = useState<AgentType | undefined>(undefined);
@@ -494,14 +499,18 @@ export function ProjectCard({
   // flip to the dynamic resume CTA when an Interrupted run is on file
   // for this project. `null` = no resumable run; otherwise the row.
   const [resumableAudit, setResumableAudit] = useState<{ id: string; kind: AuditKind; last_completed_step: number; steps_to_redo?: number[]; started_at: string } | null>(null);
+  // Unknown is not "nothing to resume": launching waits until it is known (KT-1169).
+  const [resumableUnknown, setResumableUnknown] = useState(false);
+  const [resumableReload, setResumableReload] = useState(0);
   useEffect(() => {
     let cancelled = false;
     projectsApi.auditResumable(proj.id).then(row => {
       if (cancelled) return;
       setResumableAudit(row);
-    }).catch(() => { /* idle on error — button stays "Lancer" */ });
+      setResumableUnknown(false);
+    }).catch(() => { if (!cancelled) setResumableUnknown(true); });
     return () => { cancelled = true; };
-  }, [proj.id, proj.audit_status, auditActive, auditCompletedTick]);
+  }, [proj.id, proj.audit_status, auditActive, auditCompletedTick, resumableReload]);
 
   // KT-1181 — a documented repo never merged gets the template v2 merge before its audit.
   const templateMerge = useTemplateMergeOffer(
@@ -752,12 +761,19 @@ export function ProjectCard({
     // race-free guard — the second click reads the just-written ref and
     // bails out before the second SSE is dispatched.
     if (auditActiveRef.current) return;
-    auditActiveRef.current = true;
     // Resume support. When a resumable interrupted run exists we resume it
     // by id — the server derives the kind AND the checkpoint from that row,
     // so client state can never graft onto the wrong pipeline (Codex #3).
     // A fresh full audit ignores the resumable run on purpose (confirmed).
     const resumeRunId = options.fresh ? null : resumableAudit?.id ?? null;
+    const retry = () => { void handleFullAuditRef.current(options); };
+    // A step retried alone needs its run: never fall back to a whole audit.
+    if (options.retrySteps && !resumeRunId) {
+      setAuditLaunchError({ message: t('audit.retryNeedsRun'), retry: () => setResumableReload(n => n + 1) });
+      return;
+    }
+    auditActiveRef.current = true;
+    setAuditLaunchError(null);
     // Progress-bar total: the UI now exposes the complete chained audit only;
     // a resumed legacy targeted run still keeps the kind stored by the server.
     const effectiveKind = resumeRunId ? resumableAudit?.kind : 'Full';
@@ -799,6 +815,8 @@ export function ProjectCard({
         resume_run_id: resumeRunId,
         // KT-1131 — retry only these failed steps of the resumed run.
         retry_steps: resumeRunId && options.retrySteps ? options.retrySteps : undefined,
+        // KT-1169 — the confirmed choice to replay the whole audit.
+        fresh: options.fresh ? true : undefined,
         connection_id: auditConnectionId ?? undefined,
       }, {
         onTemplateInstalled: () => {},
@@ -927,6 +945,7 @@ export function ProjectCard({
           setAuditAbortController(null);
           clearAuditCheckpoint(proj.id);
           toast(t('audit.streamError', error || 'unknown error'), 'error');
+          setAuditLaunchError({ message: t('audit.streamError', error || 'unknown error'), retry });
           setAuditCompletedTick((t) => t + 1);
           onRefetch();
         },
@@ -937,6 +956,7 @@ export function ProjectCard({
       auditActiveRef.current = false;
       setAuditActive(false);
       clearAuditCheckpoint(proj.id);
+      setAuditLaunchError({ message: t('audit.streamError', userError(e)), retry });
       setAuditCompletedTick((t) => t + 1);
     } finally {
       setAuditAbortController(null);
@@ -946,6 +966,8 @@ export function ProjectCard({
   const startPartialAudit = useCallback(async (drift: DriftCheckResponse) => {
     if (auditActiveRef.current) return;
     auditActiveRef.current = true;
+    setAuditLaunchError(null);
+    const retry = () => { void startPartialAuditRef.current(drift); };
     const steps = drift.stale_sections.map(s => s.audit_step);
     const controller = new AbortController();
     setAuditAbortController(controller);
@@ -1023,6 +1045,7 @@ export function ProjectCard({
           setAuditAbortController(null);
           clearAuditCheckpoint(proj.id);
           toast(t('audit.partialStreamError', error || 'unknown error'), 'error');
+          setAuditLaunchError({ message: t('audit.partialStreamError', error || 'unknown error'), retry });
           setAuditCompletedTick((t) => t + 1);
           onRefetch();
         },
@@ -1033,11 +1056,17 @@ export function ProjectCard({
       auditActiveRef.current = false;
       setAuditActive(false);
       clearAuditCheckpoint(proj.id);
+      setAuditLaunchError({ message: t('audit.partialStreamError', userError(e)), retry });
       setAuditCompletedTick((t) => t + 1);
     } finally {
       setAuditAbortController(null);
     }
   }, [selectedAuditAgent, auditTierChoice, auditConnectionId, proj.id, t, toast, onRefetch, onRefetchDrift, onRefetchDiscussions, onOpenDiscussion, onNavigate]);
+
+  useEffect(() => {
+    handleFullAuditRef.current = handleFullAudit;
+    startPartialAuditRef.current = startPartialAudit;
+  }, [handleFullAudit, startPartialAudit]);
 
   // ─── Audit resume on mount ───────────────────────────────────────────────
   // When a local checkpoint indicates an audit was in-flight (tab switch, page
@@ -1331,7 +1360,7 @@ export function ProjectCard({
                 </button>
               )}
               {!auditActive && <SourcesBadge drift={driftStatus} />}
-              {!auditActive && driftStatus && driftStatus.stale_sections.length > 0 && (
+              {!auditActive && !resumableAudit && driftStatus && driftStatus.stale_sections.length > 0 && (
                 <>
                   <span
                     className="dash-badge-drift"
@@ -1541,7 +1570,7 @@ export function ProjectCard({
               </span>
             )}
             {/* Drift badge — hidden during active audit (#326 / F6) */}
-            {!auditActive && driftStatus && driftStatus.stale_sections.length > 0 && (
+            {!auditActive && !resumableAudit && driftStatus && driftStatus.stale_sections.length > 0 && (
               <>
                 <span
                   className="dash-badge-drift"
@@ -2454,6 +2483,10 @@ export function ProjectCard({
                     onCancel={handleCancelAudit}
                     cancelPending={cancelPending}
                     resumable={resumableAudit}
+                    resumableUnknown={resumableUnknown}
+                    onReloadResumable={() => setResumableReload(n => n + 1)}
+                    launchError={auditLaunchError}
+                    onDismissLaunchError={() => setAuditLaunchError(null)}
                     onLaunch={() => resumableAudit
                       ? void handleFullAudit()
                       : void templateMerge.gateLaunch(() => void handleFullAudit())}
@@ -2467,6 +2500,8 @@ export function ProjectCard({
                         setAuditCompletedTick(n => n + 1);
                       } catch (error) {
                         toast(userError(error), 'error');
+                        // The form stays open on its error, with its reason.
+                        throw error;
                       }
                     }}
                     onCleanupLease={async () => {

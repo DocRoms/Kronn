@@ -371,6 +371,24 @@ pub async fn partial_audit(
         // Its agent sessions get the audit MCP rule (no kronn-internal, no Memory).
         let _audit_session = crate::core::audit_mcp_filter::AuditSessionGuard::enter(&project_path);
 
+        // KT-1169 — a refresh run would supersede an audit that can still be
+        // resumed: that audit is finished first.
+        let latest = state.db.with_conn({
+            let pid = project_id_for_progress.clone();
+            move |conn| crate::db::audit_runs::latest_resumable(conn, &pid)
+        }).await;
+        let refusal = match latest {
+            Ok(latest) => super::full::fresh_launch_refusal(latest.as_ref(), false)
+                .map(|_| "An interrupted audit can be resumed: resume it, or accept its failed steps, before refreshing stale sections.".to_string()),
+            Err(e) => Some(format!("Could not read the project's latest audit run (db): {e} — refresh refused.")),
+        };
+        if let Some(msg) = refusal {
+            yield Event::default().event("error").data(
+                serde_json::json!({ "error": msg }).to_string(),
+            );
+            return;
+        }
+
         // A3 — partial runs get their own audit_runs row: history and the
         // resume/validate rules must see a failed or newer partial, not
         // skip it. Mandatory, like the full pipeline.

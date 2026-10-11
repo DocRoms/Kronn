@@ -5758,7 +5758,7 @@ const zh: TranslationDict = {
   "auditTimeline.group.consolidation": "整合",
   "auditTimeline.group.failed": "待恢复",
   "auditTimeline.relaunch": "重新核查文档",
-  "auditTimeline.reverifyHint": "已有审计：每个已填写的文档都会与当前代码核对。错误或过时的内容会被更正，仍然准确的内容不会被重写，人工维护的章节永远不会被修改。仍然准确的文档显示为“未变更”。",
+  "auditTimeline.reverifyHint": "已有审计：每个已填写的文档都会与当前代码核对。错误或过时的内容会被更正，仍然准确的内容不会被重写，人工维护的章节永远不会被修改。仍然准确的文档显示为“未变更”。已验证的项目将回到“待验证”。",
   "auditTimeline.news.title": "审计在 0.14.2 中有了变化",
   "auditTimeline.news.resumeTitle": "按步骤恢复。",
   "auditTimeline.news.resume": "失败的步骤可单独重跑，无需重做整个审计。",
@@ -6082,6 +6082,15 @@ const zh: TranslationDict = {
   "templateMerge.integrate.desc": "请将分支 {0} 合并到 {1}（或发起 PR）。在此之前，审计不再重复提示合并。",
   "templateMerge.integrate.currentBranch": "当前分支",
   "templateMerge.discarded": "已放弃合并：worktree 已删除，检出目录未受影响。",
+  "auditTimeline.error.title": "审计未能继续",
+  "auditTimeline.error.resume": "继续",
+  "auditTimeline.error.dismiss": "关闭",
+  "auditTimeline.error.retry": "重试",
+  "auditTimeline.error.resumableUnknown": "无法读取上一次审计的状态。在确认是否还有可继续的审计之前，无法启动。",
+  "auditTimeline.error.timeline": "无法加载审计历史。",
+  "auditTimeline.step.acceptFailed": "接受失败：{0}",
+  "audit.retryNeedsRun": "此步骤已无法单独重试：没有可继续的审计。“继续”会重新读取审计状态。",
+  "projects.docAi.auditRecap.retry": "重试",
 };
 
 export default zh;
