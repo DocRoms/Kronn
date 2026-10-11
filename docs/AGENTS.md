@@ -57,14 +57,14 @@ You may NEVER state a non-trivial technical fact (file paths, function / API / c
 Attach a structured citation to every non-trivial assertion:
 
 - `[src: file: <path>:<line>]` — e.g. `[src: file: backend/src/lib.rs:440]`
-- `[src: file: <path>:<start-end>]` — line range
+- `[src: file: <path>:<start-end>#<symbol>]` — range; anchor each doc citation on the symbol it names, found in the range
 - `[src: url: <url>]` — external doc
 - `[src: user: <YYYY-MM-DD>: <ref>]` — human confirmation
 - `[src: commit: <sha>]` — git commit
 
 A citation to a missing file/line or outside the project root (even absolute) is **rejected as fabricated**; in backticks a failure is only unverified. A code comment is a hint, never the fact.
 
-CI (`cargo test docs_citations`) fails on a `file:` citation in `docs/` (not `releases/`) or `backend/docs/` lacking a line, or whose root-relative path or line is missing; fenced code and `<placeholder>`s are skipped.
+CI (`cargo test docs_citations`) fails on a `file:` citation in `docs/` (not `releases/`) or `backend/docs/` lacking a line, whose root-relative path or line is missing, or whose anchor left the range; fenced code and `<placeholder>`s are skipped.
 
 Spec: [`agents-md-format-v1.md`](conventions/agents-md-format-v1.md). **Honest by design**: `verified` means the citation *exists*, not that the claim is *true*.
 <!-- kronn:section:end -->
@@ -128,9 +128,9 @@ Never load everything "just in case".
 - Do **not** edit `frontend/src/types/generated.ts` by hand — run `make typegen`.
 - Do **not** register two `.route()` calls with the same path in axum — chain methods: `.route("/path", get(h1).post(h2))`.
 - Do **not** forget `#[derive(PartialEq)]` on enums used in comparisons (`AgentType`, `MessageRole`).
-- Do **not** use the old axum 0.7 path-param syntax `:id` — axum 0.8 expects `{id}`. Failure to migrate means the route panics on registration.
+- Do **not** use the old axum 0.7 path-param syntax `:id` — axum 0.8 expects `{id}`; the old form panics on registration.
 - Do **not** wrap an extractor in `Option<Query<…>>` or `Option<ConnectInfo<…>>` — axum 0.8 dropped `OptionalFromRequestParts` for those. Use the concrete extractor with a sentinel default (`Query<…>` with `page=0` "no pagination") or wrap via `Option<Extension<…>>`.
-- Do **not** slice `&str` with a hard-coded byte index (`&s[..N]`) when truncating user/agent text — UTF-8 (French, emoji, accented filenames) panics at non-boundary bytes. Use `s.chars().take(N).collect::<String>()` instead. Pattern documented in `feedback_rust_str_slicing` memory.
+- Do **not** slice `&str` with a hard-coded byte index (`&s[..N]`) when truncating user/agent text — UTF-8 (French, emoji, accented filenames) panics at non-boundary bytes. Use `s.chars().take(N).collect::<String>()` instead.
 - Do **not** rely on `disabled={state}` alone to gate an async button handler — React's state update is async, so two synchronous clicks read the stale closure and fire two API calls. Use `useRef` + check at top of handler. Helper: `useAsyncGuard` in `frontend/src/hooks/useAsyncGuard.ts`.
 - Do **not** nest a `<button>` inside another `<button>` — invalid HTML and produces a React dev warning. Convert the outer to `<div role="button" tabIndex={0}>` with explicit `onKeyDown` for Enter/Space.
 ---

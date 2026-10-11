@@ -645,6 +645,19 @@ fn a_moved_citation_is_rewritten_to_its_new_line_outside_code_only() {
 }
 
 #[test]
+fn a_moved_citation_keeps_its_symbol_anchor() {
+    let range = Reanchor {
+        from: "src/lib.rs:5-7".into(),
+        to: "src/lib.rs:7-9".into(),
+        line: 7,
+        end_line: 9,
+    };
+    let (after, count) = rewrite_citations("A [src: src/lib.rs:5-7#retry ]\n", &[range], |_| true);
+    assert_eq!(count, 1);
+    assert_eq!(after, "A [src: src/lib.rs:7-9#retry ]\n");
+}
+
+#[test]
 fn re_anchoring_moves_the_fingerprints_and_leaves_broken_ones_stale() {
     let tmp = fixture();
     let dir = tmp.path();

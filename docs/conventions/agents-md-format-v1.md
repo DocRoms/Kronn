@@ -112,6 +112,11 @@ names, versions, behaviour). The grammar:
 - `[src: file: backend/src/api/mod.rs:14]` — file + single line.
 - `[src: file: backend/src/api/mod.rs:14-22]` — file + line range.
 - `[src: <path>:<line>]` — the `file:` type is the default.
+- `[src: file: backend/src/api/mod.rs:14-22#context_audit]` — line or range + **symbol anchor**.
+  The anchor (an identifier; `.` and `-` allowed inside, e.g. `Type.method`, `check-version`)
+  must appear as a whole word inside the cited lines. It is only read after a line spec. Use it
+  to say *what* the lines hold: when code moves, a stale range fails instead of silently
+  pointing beside the claim.
 - `[src: file: <path>.docx]` — file only. Required for a binary file (.docx,
   .pdf, images), which has no lines; detected by content, not extension. In audited `docs/`
   a text file always takes a line, and a binary file never does.
@@ -122,6 +127,10 @@ root (`../../etc/passwd`, an absolute path such as `/etc/passwd`, or a symlink l
 rejected as `outside_project` without ever touching a file outside the root. An absolute path
 under the root is verified like a relative one. This is the ungameable core — an agent cannot
 fabricate a file or line that actually exists.
+
+An anchor absent from the cited lines makes the citation `out_of_bounds` (the range is wrong
+for what it names); the detail says where the symbol does appear, if anywhere. The check is
+textual and deterministic: no code is parsed.
 
 A marker quoted in inline backticks is verified too: it is `verified` when it resolves, but a
 failure there counts as *unverified*, not fabricated, because backticks also quote the grammar
@@ -161,7 +170,7 @@ mode (`Settings → Anti-hallucination`, or `config.toml anti_hallucination_mode
 **P2 lint, concretely** — what is mechanically checked on each agent reply:
 1. A prose heuristic flags confident technical claims left **unsourced** (one confidence tier).
 2. Every `[src: …]` marker present is **mechanically verified**: file exists, path is jailed to
-   the project root, line/range is in bounds. A citation pointing at a non-existent or
+   the project root, line/range is in bounds, a `#symbol` anchor appears in the range. A citation pointing at a non-existent or
    out-of-project path is flagged **fabricated**; a `training-data` source is **rejected**.
 
 **Convention vs enforcement.** The markers and citation grammar above are a *writing

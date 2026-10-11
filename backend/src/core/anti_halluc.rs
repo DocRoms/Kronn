@@ -1282,14 +1282,23 @@ fn classify_source(raw: &str) -> (SourceKind, String) {
 /// The cited path and line span of a `file:` or `code-comment:` marker,
 /// cleaned exactly as the verifier cleans it. `None` for any other kind.
 pub(crate) fn file_citation(raw: &str) -> Option<(String, Option<(usize, usize)>)> {
+    file_citation_anchored(raw).map(|(path, lines, _)| (path, lines))
+}
+
+/// [`file_citation`] plus the `#symbol` anchor that may follow the line spec.
+pub(crate) fn file_citation_anchored(raw: &str) -> Option<FileCitation> {
     let (kind, reference) = classify_source(raw);
     if !matches!(kind, SourceKind::File | SourceKind::CodeComment) {
         return None;
     }
-    let (path, lines) = split_path_and_lines(clean_reference(&reference));
+    let (reference, anchor) = split_anchor(clean_reference(&reference));
+    let (path, lines) = split_path_and_lines(reference);
     let path = clean_reference(path);
-    (!path.is_empty()).then(|| (path.to_string(), lines))
+    (!path.is_empty()).then(|| (path.to_string(), lines, anchor.map(str::to_string)))
 }
+
+/// Path, line span and symbol anchor of a file citation.
+pub(crate) type FileCitation = (String, Option<(usize, usize)>, Option<String>);
 
 /// `(manager, package, checked date)` of a `deps:` marker. Package names may
 /// hold `/` and `@` (`@types/node`), so the manager ends at the first `/` and
@@ -1358,6 +1367,114 @@ fn parse_line_spec(s: &str) -> Option<(usize, usize)> {
             return None;
         }
         Some((n, n))
+    }
+}
+
+/// Peel a `#symbol` anchor off `path:line#symbol` / `path:start-end#symbol`.
+/// Only after a line spec: a `#` elsewhere stays part of the path.
+fn split_anchor(reference: &str) -> (&str, Option<&str>) {
+    let Some((head, symbol)) = reference.rsplit_once('#') else {
+        return (reference, None);
+    };
+    let head = head.trim_end();
+    let symbol = symbol.trim();
+    if is_anchor_symbol(symbol) && split_path_and_lines(head).1.is_some() {
+        (head, Some(symbol))
+    } else {
+        (reference, None)
+    }
+}
+
+/// An identifier, optionally dotted or dashed (`fn_name`, `Type.method`, `check-version`).
+fn is_anchor_symbol(s: &str) -> bool {
+    let mut chars = s.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '$' | '.' | '-'))
+        && !s.ends_with(['.', '-'])
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '$'
+}
+
+/// `symbol` appears in `line` as a whole word.
+fn contains_word(line: &str, symbol: &str) -> bool {
+    line.match_indices(symbol).any(|(at, _)| {
+        let before = line[..at].chars().next_back();
+        let after = line[at + symbol.len()..].chars().next();
+        !before.is_some_and(is_word_char) && !after.is_some_and(is_word_char)
+    })
+}
+
+/// 1-based lines of `path` holding `symbol` as a word; `None` when the file
+/// is unreadable or above the line-count cap.
+pub(crate) fn symbol_lines(path: &Path, symbol: &str) -> Option<Vec<usize>> {
+    if std::fs::metadata(path).ok()?.len() > LINE_COUNT_SIZE_CAP_BYTES {
+        return None;
+    }
+    let content = std::fs::read_to_string(path).ok()?;
+    Some(
+        content
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| contains_word(line, symbol))
+            .map(|(index, _)| index + 1)
+            .collect(),
+    )
+}
+
+/// `None` when `symbol` is inside `span` (or cannot be checked), else the
+/// lines of the file that do hold it, possibly none.
+pub(crate) fn anchor_miss(path: &Path, span: (usize, usize), symbol: &str) -> Option<Vec<usize>> {
+    let lines = symbol_lines(path, symbol)?;
+    let (start, end) = span;
+    (!lines.iter().any(|l| (start..=end).contains(l))).then_some(lines)
+}
+
+/// [`line_bounds_status`], then the anchor: a symbol absent from the cited
+/// lines makes the range wrong, so it reads as out of bounds.
+pub(crate) fn anchored_bounds_status(
+    candidate: &Path,
+    line_spec: Option<(usize, usize)>,
+    anchor: Option<&str>,
+) -> (SourceStatus, String) {
+    let verdict = line_bounds_status(candidate, line_spec);
+    let (Some(span), Some(symbol), SourceStatus::Verified) = (line_spec, anchor, verdict.0) else {
+        return verdict;
+    };
+    match anchor_miss(candidate, span, symbol) {
+        None => verdict,
+        Some(elsewhere) => (
+            SourceStatus::OutOfBounds,
+            anchor_miss_detail(span, symbol, &elsewhere),
+        ),
+    }
+}
+
+pub(crate) fn anchor_miss_detail(
+    span: (usize, usize),
+    symbol: &str,
+    elsewhere: &[usize],
+) -> String {
+    let (start, end) = span;
+    let range = if start == end {
+        format!("line {start}")
+    } else {
+        format!("lines {start}-{end}")
+    };
+    match elsewhere {
+        [] => format!("symbol `{symbol}` not in {range}, nor anywhere in the file"),
+        lines => {
+            let shown: Vec<String> = lines.iter().take(5).map(usize::to_string).collect();
+            let noun = if lines.len() == 1 { "line" } else { "lines" };
+            format!(
+                "symbol `{symbol}` not in {range}; it appears at {noun} {}",
+                shown.join(", ")
+            )
+        }
     }
 }
 
@@ -1873,6 +1990,7 @@ fn verify_file_ref_as_written(
         );
     }
 
+    let (reference, anchor) = split_anchor(reference);
     let (path_str, line_spec) = split_path_and_lines(reference);
     // Re-clean: the FP fix. Agents write `path`:line (markdown path in
     // backticks, the :line OUTSIDE them). At the top, `clean_reference` only
@@ -1897,7 +2015,7 @@ fn verify_file_ref_as_written(
             );
         };
         return match resolve_in_root(root, &rel) {
-            Jailed::Inside(found) => line_bounds_status(&found, line_spec),
+            Jailed::Inside(found) => anchored_bounds_status(&found, line_spec, anchor),
             Jailed::Missing => (
                 SourceStatus::NotFound,
                 format!("file not found: {}", path_str),
@@ -1921,7 +2039,7 @@ fn verify_file_ref_as_written(
         }
         all_escaped = false;
         match resolve_in_root(root, path) {
-            Jailed::Inside(found) => return line_bounds_status(&found, line_spec),
+            Jailed::Inside(found) => return anchored_bounds_status(&found, line_spec, anchor),
             Jailed::Missing => continue,
             Jailed::Escapes => {
                 return (
@@ -1950,7 +2068,7 @@ fn verify_file_ref_as_written(
     } else if !path_str.is_empty() && !path_str.contains('/') && !path_str.contains('\\') {
         match resolve_unique_basename(path_str, roots) {
             BasenameResolution::Unique(found) => {
-                let (status, detail) = line_bounds_status(&found, line_spec);
+                let (status, detail) = anchored_bounds_status(&found, line_spec, anchor);
                 let shown = roots
                     .iter()
                     .find_map(|r| found.strip_prefix(r).ok())
@@ -1979,7 +2097,7 @@ fn verify_file_ref_as_written(
         // match across the roots (incl. linked_repos) before giving up.
         match resolve_unique_path_suffix(path_str, roots) {
             BasenameResolution::Unique(found) => {
-                let (status, detail) = line_bounds_status(&found, line_spec);
+                let (status, detail) = anchored_bounds_status(&found, line_spec, anchor);
                 let shown = roots
                     .iter()
                     .find_map(|r| found.strip_prefix(r).ok())
@@ -6166,5 +6284,97 @@ mod deps_citation_tests {
     fn a_file_named_like_the_keyword_stays_a_file() {
         let (kind, _) = classify_source("deps_lock.rs:3");
         assert_eq!(kind, SourceKind::File);
+    }
+}
+
+#[cfg(test)]
+mod anchor_citations {
+    use super::*;
+
+    fn repo() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::write(
+            tmp.path().join("src/a.rs"),
+            "use x;\nfn retry_once() {}\n// retry_once_more\nfn other() {}\nlet v = retry_once();\n",
+        )
+        .unwrap();
+        tmp
+    }
+
+    fn check(raw: &str, root: &Path) -> SourceCheck {
+        verify_source_marker(raw, Some(root))
+    }
+
+    #[test]
+    fn the_anchor_is_parsed_after_a_line_spec_only() {
+        assert_eq!(
+            file_citation_anchored("file: src/a.rs:2-4#retry_once"),
+            Some(("src/a.rs".into(), Some((2, 4)), Some("retry_once".into())))
+        );
+        assert_eq!(
+            file_citation_anchored("src/a.rs:2#Type.method"),
+            Some(("src/a.rs".into(), Some((2, 2)), Some("Type.method".into())))
+        );
+        assert_eq!(
+            file_citation("file: src/a.rs:2#retry_once"),
+            Some(("src/a.rs".into(), Some((2, 2))))
+        );
+        // No line spec: the `#` stays in the path. Not an identifier: no anchor.
+        assert_eq!(
+            file_citation_anchored("file: docs/a.md#intro"),
+            Some(("docs/a.md#intro".into(), None, None))
+        );
+        assert_eq!(
+            file_citation_anchored("file: src/a.rs:2#9x").map(|c| c.2),
+            Some(None)
+        );
+    }
+
+    #[test]
+    fn a_symbol_inside_the_range_verifies() {
+        let tmp = repo();
+        let c = check("file: src/a.rs:1-2#retry_once", tmp.path());
+        assert_eq!(c.status, SourceStatus::Verified, "{}", c.detail);
+        assert_eq!(
+            check("src/a.rs:5#retry_once", tmp.path()).status,
+            SourceStatus::Verified
+        );
+    }
+
+    #[test]
+    fn a_symbol_outside_the_range_is_out_of_bounds_and_says_where_it_is() {
+        let tmp = repo();
+        // Line 3 holds `retry_once_more`, not the word `retry_once`.
+        let c = check("file: src/a.rs:3-4#retry_once", tmp.path());
+        assert_eq!(c.status, SourceStatus::OutOfBounds);
+        assert!(c.status.is_fabricated());
+        assert_eq!(
+            c.detail,
+            "symbol `retry_once` not in lines 3-4; it appears at lines 2, 5"
+        );
+        let c = check("file: src/a.rs:1#nowhere", tmp.path());
+        assert_eq!(
+            c.detail,
+            "symbol `nowhere` not in line 1, nor anywhere in the file"
+        );
+    }
+
+    #[test]
+    fn line_bounds_still_win_over_the_anchor() {
+        let tmp = repo();
+        let c = check("file: src/a.rs:4-9#other", tmp.path());
+        assert_eq!(c.status, SourceStatus::OutOfBounds);
+        assert_eq!(c.detail, "line 9 beyond file length 5");
+    }
+
+    #[test]
+    fn a_word_match_needs_boundaries() {
+        assert!(contains_word("fn retry_once() {}", "retry_once"));
+        assert!(contains_word("x.retry_once", "retry_once"));
+        assert!(!contains_word("retry_once_more", "retry_once"));
+        assert!(!contains_word("pre_retry_once", "retry_once"));
+        assert!(contains_word("make check-version:", "check-version"));
+        assert!(contains_word("é retry_once é", "retry_once"));
     }
 }

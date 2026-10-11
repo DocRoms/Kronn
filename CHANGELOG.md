@@ -62,6 +62,16 @@ Release notes for 0.9.3 and earlier are available in the
   found by, detection count, checked by, proof, reply, verdict — and the
   dropped and dismissed findings are stored (migration 257). Without the
   option the step is unchanged, byte for byte.
+- Citations can name what they point at (KT-1074):
+  `[src: file: path:120-140#symbol]`. The symbol must appear as a whole word
+  inside the cited lines; the check is textual, no code is parsed. The docs CI
+  check fails on an anchor that left its range and, when the symbol still
+  exists in the file, suggests the new range (`try path:436-465#symbol`). The
+  runtime verifier applies the same rule to agent and audit citations: a
+  missed anchor reads as `out_of_bounds` with a detail saying where the
+  symbol appears, so the existing red/amber badges are unchanged. Re-anchoring
+  a moved citation keeps its anchor. Documented in the citation spec and in
+  `docs/AGENTS.md`.
 - Audit versions and standards are judged from dated sources (KT-1000). The
   tech-debt step and the security pass get a « Technologies and standards »
   block: the project's stored dependency watch (version in place, latest,

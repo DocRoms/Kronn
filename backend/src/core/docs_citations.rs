@@ -4,10 +4,12 @@
 //! regular file by its path from the repo root (no basename or suffix walk, no
 //! absolute path) and carry a line or range that exists. Only a binary file
 //! may be cited without a line. Fenced code and placeholder examples are skipped.
+//! A `#symbol` anchor (KT-1074) must appear as a word inside the cited lines.
 
 use crate::core::anti_halluc::{
-    file_citation, is_binary_file, line_bounds_status, markers_at, partition_inline_code,
-    resolve_in_root, scan_fences, strip_inline_code, Jailed, SourceStatus,
+    anchor_miss, anchor_miss_detail, file_citation_anchored, is_binary_file, line_bounds_status,
+    markers_at, partition_inline_code, resolve_in_root, scan_fences, strip_inline_code, Jailed,
+    SourceStatus,
 };
 use std::path::{Path, PathBuf};
 
@@ -32,7 +34,12 @@ fn is_placeholder(citation: &str) -> bool {
 }
 
 /// `None` when the citation holds, else why it does not.
-fn check_reference(path: &str, lines: Option<(usize, usize)>, root: &Path) -> Option<String> {
+fn check_reference(
+    path: &str,
+    lines: Option<(usize, usize)>,
+    anchor: Option<&str>,
+    root: &Path,
+) -> Option<String> {
     let rel = Path::new(path);
     if rel.has_root() {
         return Some("absolute path: cite it relative to the repo root".into());
@@ -49,9 +56,43 @@ fn check_reference(path: &str, lines: Option<(usize, usize)>, root: &Path) -> Op
         None if is_binary_file(&found) => None,
         None => Some("no line: cite `path:line` or `path:start-end`".into()),
         Some(span) => match line_bounds_status(&found, Some(span)) {
-            (SourceStatus::Verified, _) => None,
+            (SourceStatus::Verified, _) => {
+                let symbol = anchor?;
+                let elsewhere = anchor_miss(&found, span, symbol)?;
+                let detail = anchor_miss_detail(span, symbol, &elsewhere);
+                let total = std::fs::read_to_string(&found).map_or(0, |t| t.lines().count());
+                Some(match suggested_span(span, &elsewhere, total) {
+                    Some((start, end)) => {
+                        format!(
+                            "{detail} — try `{path}:{}#{symbol}`",
+                            span_label(start, end)
+                        )
+                    }
+                    None => format!("{detail} — rewrite the claim or cite where it lives"),
+                })
+            }
             (_, detail) => Some(detail),
         },
+    }
+}
+
+/// The occurrence nearest the old start, keeping the cited span's length
+/// within the file.
+fn suggested_span(
+    span: (usize, usize),
+    occurrences: &[usize],
+    total: usize,
+) -> Option<(usize, usize)> {
+    let (start, end) = span;
+    let line = *occurrences.iter().min_by_key(|l| l.abs_diff(start))?;
+    Some((line, (line + (end - start)).min(total.max(line))))
+}
+
+fn span_label(start: usize, end: usize) -> String {
+    if start == end {
+        start.to_string()
+    } else {
+        format!("{start}-{end}")
     }
 }
 
@@ -93,8 +134,8 @@ pub fn check_doc(text: &str, root: &Path) -> Vec<DocCitationFailure> {
             if is_placeholder(&citation) {
                 return None;
             }
-            let (path, lines) = file_citation(&citation)?;
-            let reason = check_reference(&path, lines, root)?;
+            let (path, lines, anchor) = file_citation_anchored(&citation)?;
+            let reason = check_reference(&path, lines, anchor.as_deref(), root)?;
             Some(DocCitationFailure {
                 line,
                 citation,
@@ -285,6 +326,57 @@ mod tests {
             PathBuf::from("backend/docs/conventions/b.md")
         );
         assert_eq!(failures[0].1.line, 2);
+    }
+
+    #[test]
+    fn an_anchor_inside_the_range_passes() {
+        let tmp = repo();
+        let doc = "[src: file: src/a.rs:1-2#two] `[src: file: src/a.rs:3#three]`";
+        assert_eq!(check_doc(doc, tmp.path()), vec![]);
+    }
+
+    #[test]
+    fn a_moved_anchor_fails_with_the_new_range() {
+        let tmp = repo();
+        let root = tmp.path();
+        std::fs::write(
+            root.join("src/m.rs"),
+            "a\nb\nc\nd\nfn moved() {}\nf\ng\nh\nlet x = moved();\n",
+        )
+        .unwrap();
+        // The occurrence nearest the old start wins; the span keeps its length.
+        assert_eq!(
+            reasons("[src: file: src/m.rs:1-2#moved]", root),
+            ["symbol `moved` not in lines 1-2; it appears at lines 5, 9 — try `src/m.rs:5-6#moved`"]
+        );
+        assert_eq!(
+            reasons("[src: file: src/m.rs:8#moved]", root),
+            ["symbol `moved` not in line 8; it appears at lines 5, 9 — try `src/m.rs:9#moved`"]
+        );
+        // Clamped to the file's last line.
+        assert_eq!(
+            reasons("[src: file: src/m.rs:6-8#moved]", root),
+            ["symbol `moved` not in lines 6-8; it appears at lines 5, 9 — try `src/m.rs:5-7#moved`"]
+        );
+        // A tie keeps the earlier occurrence.
+        assert_eq!(
+            reasons("[src: file: src/m.rs:7-8#moved]", root),
+            ["symbol `moved` not in lines 7-8; it appears at lines 5, 9 — try `src/m.rs:5-6#moved`"]
+        );
+        std::fs::write(root.join("src/end.rs"), "a\nb\nc\nfn moved() {}\n").unwrap();
+        assert_eq!(
+            reasons("[src: file: src/end.rs:1-3#moved]", root),
+            ["symbol `moved` not in lines 1-3; it appears at line 4 — try `src/end.rs:4#moved`"]
+        );
+    }
+
+    #[test]
+    fn a_vanished_anchor_fails_without_a_suggestion() {
+        let tmp = repo();
+        assert_eq!(
+            reasons("[src: file: src/a.rs:1-3#gone]", tmp.path()),
+            ["symbol `gone` not in lines 1-3, nor anywhere in the file — rewrite the claim or cite where it lives"]
+        );
     }
 
     /// The gate itself: every citation in the repo's docs resolves.

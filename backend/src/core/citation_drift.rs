@@ -550,13 +550,17 @@ fn reanchored_inner(inner: &str, moves: &[Reanchor]) -> Option<String> {
     let to = moves.iter().find(|m| m.from == label)?;
     let trimmed = inner.trim_end();
     let colon = trimmed.rfind(':')?;
+    // A `#symbol` anchor follows the moved lines.
+    let anchor = trimmed[colon..]
+        .find('#')
+        .map_or("", |at| &trimmed[colon + at..]);
     let spec = if to.line == to.end_line {
         to.line.to_string()
     } else {
         format!("{}-{}", to.line, to.end_line)
     };
     Some(format!(
-        "{}{spec}{}",
+        "{}{spec}{anchor}{}",
         &trimmed[..=colon],
         &inner[trimmed.len()..]
     ))
