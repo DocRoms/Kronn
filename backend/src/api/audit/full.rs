@@ -1068,6 +1068,9 @@ pub async fn full_audit(
         // the same logical audit). Reconciliation unions TD ids from THESE,
         // never from an index a failed/warned step left stale on disk.
         let mut freshly_written_indices: Vec<String> = Vec::new();
+        // Docs a step of this launch proved it rewrote: only they get fresh
+        // citation fingerprints with the baseline.
+        let mut rewritten_docs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         let start = serde_json::json!({
             "total_steps": total_steps,
             "started_at": audit_started_at.to_rfc3339(),
@@ -2036,6 +2039,7 @@ pub async fn full_audit(
                     // is a pure function (`rewrite_proof_verdict`, unit tested
                     // below); this block only maps it to SSE events.
                     let mut step_unchanged = false;
+                    let mut target_rewritten = false;
                     if success && !documentary_repair_proven {
                         match rewrite_proof_verdict(
                             analysis_step.target_file,
@@ -2070,6 +2074,7 @@ pub async fn full_audit(
                                 );
                             }
                             RewriteProofVerdict::Proven => {
+                                target_rewritten = true;
                                 let target_path = project_path.join(analysis_step.target_file);
                                 // Substantial rewrite PROVEN — only now may we
                                 // stamp the curated audit dates (mirrors
@@ -2091,6 +2096,17 @@ pub async fn full_audit(
                                 }
                             }
                         }
+                    }
+
+                    if success && documentary_repair_proven {
+                        if let Some(before) = &documentary_snapshot {
+                            rewritten_docs.extend(super::document_repair::changed_recovery_paths(
+                                &project_path, before, &recovery_targets,
+                            ));
+                        }
+                    }
+                    if success && target_rewritten {
+                        rewritten_docs.insert(analysis_step.target_file.to_string());
                     }
 
                     let step_done = serde_json::json!({
@@ -2611,6 +2627,7 @@ pub async fn full_audit(
             // flag a stale sub-audit section and the partial path can refresh
             // exactly that step.
             let baseline_steps: Vec<super::AnalysisStep> = steps.clone();
+            let rewritten: Vec<String> = rewritten_docs.iter().cloned().collect();
             let baseline_written = tokio::task::spawn_blocking(move || -> Result<usize, String> {
                 // Freeze one quiesced source-tree snapshot and reuse it in
                 // every sentinel mapping. Recomputing the whole repository
@@ -2638,6 +2655,7 @@ pub async fn full_audit(
                     &pp,
                     &mappings,
                     stable_source_tree.as_deref(),
+                    &rewritten,
                 )?;
                 // Best-effort state marker — informational, not contractual.
                 if let Err(e) = crate::core::kronn_state::record_audit(&pp, "full") {

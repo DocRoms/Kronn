@@ -548,20 +548,22 @@ fn compute_step_checksums_impl(
 
 /// Write a `checksums.json` to the project's docs folder (post-pivot
 /// `docs/`, legacy `ai/`). Path-agnostic via `detect_docs_dir`.
+/// `rewritten_docs`: the docs a step of the run proved it rewrote.
 pub fn write_checksums_file(
     project_path: &Path,
     mappings: &[ChecksumMapping],
+    rewritten_docs: &[String],
 ) -> Result<(), String> {
     publish_checksums_file(project_path, mappings)?;
-    record_citations_after_audit(project_path);
+    record_citations_after_audit(project_path, rewritten_docs);
     Ok(())
 }
 
 /// A new baseline also re-fingerprints the citations of the docs the run
 /// rewrote. Best effort: a stale `citations.json` reads as "to re-verify",
 /// never as clean.
-fn record_citations_after_audit(project_path: &Path) {
-    if let Err(e) = crate::core::citation_drift::record_after_audit(project_path) {
+fn record_citations_after_audit(project_path: &Path, rewritten_docs: &[String]) {
+    if let Err(e) = crate::core::citation_drift::record_after_audit(project_path, rewritten_docs) {
         tracing::warn!("Citation fingerprints not refreshed after the audit: {e}");
     }
 }
@@ -632,6 +634,7 @@ fn write_checksums_file_fail_closed_with_after<F>(
     project_path: &Path,
     mappings: &[ChecksumMapping],
     expected_source_tree: Option<&str>,
+    rewritten_docs: &[String],
     after_publish: F,
 ) -> Result<(), String>
 where
@@ -667,7 +670,7 @@ where
             )),
         };
     }
-    record_citations_after_audit(project_path);
+    record_citations_after_audit(project_path, rewritten_docs);
     Ok(())
 }
 
@@ -677,11 +680,13 @@ pub fn write_checksums_file_fail_closed(
     project_path: &Path,
     mappings: &[ChecksumMapping],
     expected_source_tree: Option<&str>,
+    rewritten_docs: &[String],
 ) -> Result<(), String> {
     write_checksums_file_fail_closed_with_after(
         project_path,
         mappings,
         expected_source_tree,
+        rewritten_docs,
         || std::thread::sleep(SOURCE_TREE_QUIET_PERIOD),
     )
 }
@@ -700,6 +705,7 @@ where
         project_path,
         mappings,
         expected_source_tree,
+        &[],
         after_publish,
     )
 }

@@ -73,10 +73,23 @@ pub(super) fn feedback(diagnostics: &[Diagnostic]) -> String {
 }
 
 pub(super) fn recovery_changed(project: &Path, before: &Snapshot, recovery: &[Diagnostic]) -> bool {
-    recovery.iter().any(|d| {
-        std::fs::read_to_string(project.join(&d.path))
-            .is_ok_and(|after| before.get(&d.path).is_some_and(|prior| prior != &after))
-    })
+    !changed_recovery_paths(project, before, recovery).is_empty()
+}
+
+/// The recovery documents the attempt actually rewrote.
+pub(super) fn changed_recovery_paths(
+    project: &Path,
+    before: &Snapshot,
+    recovery: &[Diagnostic],
+) -> BTreeSet<String> {
+    recovery
+        .iter()
+        .filter(|d| {
+            std::fs::read_to_string(project.join(&d.path))
+                .is_ok_and(|after| before.get(&d.path).is_some_and(|prior| prior != &after))
+        })
+        .map(|d| d.path.clone())
+        .collect()
 }
 
 /// Save the sanitized original before either mechanical or model correction.

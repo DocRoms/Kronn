@@ -59,8 +59,8 @@ pub struct CitationFingerprint {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DocFingerprints {
-    /// Digest of the doc itself when its citations were recorded: an audit
-    /// re-records a doc only when it rewrote it.
+    /// Digest of the doc itself when its citations were recorded: a later
+    /// edit shows as `doc_changed`.
     pub doc_sha256: String,
     pub recorded_at: String,
     pub reason: RecordReason,
@@ -390,30 +390,26 @@ pub fn record_all(project_path: &Path) -> Result<(), String> {
     write(project_path, &mut file)
 }
 
-/// After an audit: a doc the run rewrote (or created) gets fresh fingerprints;
-/// a doc it left byte-identical keeps the ones its validation recorded, so a
-/// partial refresh never acknowledges the citations it did not look at.
-pub fn record_after_audit(project_path: &Path) -> Result<(), String> {
-    let previous = read_strict(project_path)?.unwrap_or_default();
-    let docs = doc_files(project_path);
-    if docs.is_empty() && previous.docs.is_empty() {
-        return Ok(());
+/// After an audit: only the docs a step of this run proved it rewrote get
+/// fresh fingerprints. Every other record stays, so a doc edited by hand keeps
+/// its broken citations "to re-verify" until a human or a rewrite checks them.
+pub fn record_after_audit(project_path: &Path, rewritten: &[String]) -> Result<(), String> {
+    let previous = read_strict(project_path)?;
+    let docs: BTreeSet<String> = doc_files(project_path).into_iter().collect();
+    let mut file = previous.clone().unwrap_or_default();
+    for doc in rewritten.iter().filter(|d| docs.contains(*d)) {
+        if let Some(content) = read_doc(project_path, doc) {
+            file.docs.insert(
+                doc.clone(),
+                fingerprint_doc(project_path, &content, RecordReason::Audit),
+            );
+        }
     }
-    let mut file = CitationsFile::default();
-    for doc in docs {
-        let Some(content) = read_doc(project_path, &doc) else {
-            continue;
-        };
-        let kept = previous
-            .docs
-            .get(&doc)
-            .filter(|prev| prev.doc_sha256 == sha256_hex(content.as_bytes()))
-            .cloned();
-        let entry =
-            kept.unwrap_or_else(|| fingerprint_doc(project_path, &content, RecordReason::Audit));
-        file.docs.insert(doc, entry);
-    }
-    if file == previous {
+    let unchanged = match &previous {
+        Some(prev) => *prev == file,
+        None => file.docs.is_empty(),
+    };
+    if unchanged {
         return Ok(());
     }
     write(project_path, &mut file)

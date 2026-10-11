@@ -206,6 +206,13 @@ Release notes for 0.9.3 and earlier are available in the
   not, because docs quote the grammar itself that way (`[src: file: <path>:<line>]`).
   `docs/AGENTS.md` and the citation spec say exactly this.
 
+- An audit no longer acknowledges the broken citations of a doc edited by hand
+  (KT-1187). After a Full audit or a partial refresh, only the docs a step of
+  that run proved it rewrote (its target, or a document its documentary
+  repair rewrote) get fresh citation fingerprints. A doc changed outside the
+  run keeps its record, so its broken citations stay « à re-vérifier » until
+  a validation, an acknowledgement or a rewrite checks them. A doc no step
+  wrote is no longer recorded by the run either.
 - An audit error never stays on screen without a way out, and « Lancer
   l'audit » always starts from what exists (KT-1169). A launch that stops on
   an error, whether refused, cut off or offline, leaves a « Reprendre »

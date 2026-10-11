@@ -129,7 +129,7 @@ fn commit_touching_no_cited_line_marks_nothing_stale() {
         mapping("docs/architecture.md", 3, dir),
         mapping("docs/glossary.md", 2, dir),
     ];
-    crate::core::checksums::write_checksums_file(dir, &mappings).unwrap();
+    crate::core::checksums::write_checksums_file(dir, &mappings, &[]).unwrap();
 
     // A new file and an edit on an uncited line: the whole-tree sentinel moves.
     edit_source(dir, |l| l[0] = "fn alpha() { // entry".to_string());
@@ -150,10 +150,14 @@ fn commit_touching_no_cited_line_marks_nothing_stale() {
 fn legacy_section_without_fingerprints_keeps_tree_drift() {
     let tmp = fixture();
     let dir = tmp.path();
-    crate::core::checksums::write_checksums_file(dir, &[mapping("docs/architecture.md", 3, dir)])
-        .unwrap();
+    crate::core::checksums::write_checksums_file(
+        dir,
+        &[mapping("docs/architecture.md", 3, dir)],
+        &[],
+    )
+    .unwrap();
     // A baseline from before per-citation drift: no citations.json.
-    fs::remove_file(dir.join("docs/citations.json")).unwrap();
+    assert!(!dir.join("docs/citations.json").exists());
     fs::write(dir.join("src/other.rs"), "pub fn other() {}\n").unwrap();
     commit_all(dir, "unrelated");
     let drift = crate::core::checksums::check_drift(dir);
@@ -172,6 +176,7 @@ fn modified_cited_line_marks_its_section_stale_and_names_it() {
             mapping("docs/architecture.md", 3, dir),
             mapping("docs/glossary.md", 2, dir),
         ],
+        &[],
     )
     .unwrap();
     // Re-indenting is not a change; a new value is.
@@ -245,8 +250,12 @@ fn moved_line_is_reanchored_not_stale() {
     let tmp = fixture();
     let dir = tmp.path();
     record_all(dir).unwrap();
-    crate::core::checksums::write_checksums_file(dir, &[mapping("docs/architecture.md", 3, dir)])
-        .unwrap();
+    crate::core::checksums::write_checksums_file(
+        dir,
+        &[mapping("docs/architecture.md", 3, dir)],
+        &[],
+    )
+    .unwrap();
     edit_source(dir, |l| {
         for i in 0..4 {
             l.insert(0, format!("// header {i}"));
@@ -320,6 +329,7 @@ fn acknowledgement_refreshes_one_section_without_rewriting_the_doc() {
             mapping("docs/architecture.md", 3, dir),
             mapping("docs/glossary.md", 2, dir),
         ],
+        &[],
     )
     .unwrap();
     edit_source(dir, |l| {
@@ -413,7 +423,7 @@ fn audit_rerecords_only_the_docs_it_rewrote() {
         "# Glossary\nTimeout [src: src/lib.rs:6]\n",
     )
     .unwrap();
-    record_after_audit(dir).unwrap();
+    record_after_audit(dir, &["docs/glossary.md".to_string()]).unwrap();
     let report = check(dir);
     assert!(!report.section("docs/glossary.md").unwrap().stale);
     assert!(
@@ -426,6 +436,57 @@ fn audit_rerecords_only_the_docs_it_rewrote() {
         file.docs["docs/architecture.md"].reason,
         RecordReason::Validation
     );
+}
+
+#[test]
+fn an_audit_never_acknowledges_a_doc_edited_outside_the_run() {
+    let tmp = fixture();
+    let dir = tmp.path();
+    record_all(dir).unwrap();
+    edit_source(dir, |l| l[5] = "    let timeout_ms = 1;".to_string());
+    // Edited by hand, its broken citation kept; the run rewrote the glossary.
+    let arch = dir.join("docs/architecture.md");
+    let edited = fs::read_to_string(&arch).unwrap() + "A note added by hand.\n";
+    fs::write(&arch, edited).unwrap();
+    fs::write(
+        dir.join("docs/glossary.md"),
+        "# Glossary\nTimeout [src: src/lib.rs:6]\n",
+    )
+    .unwrap();
+    fs::write(dir.join("docs/new-by-hand.md"), "New [src: src/lib.rs:6]\n").unwrap();
+    record_after_audit(dir, &["docs/glossary.md".to_string()]).unwrap();
+
+    let report = check(dir);
+    let section = report.section("docs/architecture.md").unwrap();
+    assert!(section.doc_changed && section.stale, "{section:?}");
+    assert_eq!(
+        states(&report, "docs/architecture.md"),
+        [("src/lib.rs:6".to_string(), CitationState::Changed)]
+    );
+    assert!(!report.section("docs/glossary.md").unwrap().stale);
+    let file = read_strict(dir).unwrap().unwrap();
+    assert_eq!(
+        file.docs["docs/architecture.md"].reason,
+        RecordReason::Validation
+    );
+    assert!(
+        !file.docs.contains_key("docs/new-by-hand.md"),
+        "a doc no step wrote is not recorded by the run"
+    );
+}
+
+#[test]
+fn an_audit_that_rewrote_nothing_leaves_the_store_untouched() {
+    let tmp = fixture();
+    let dir = tmp.path();
+    record_after_audit(dir, &[]).unwrap();
+    assert!(!dir.join("docs/citations.json").exists());
+    record_all(dir).unwrap();
+    let before = fs::read(dir.join("docs/citations.json")).unwrap();
+    fs::remove_file(dir.join("docs/glossary.md")).unwrap();
+    record_after_audit(dir, &["docs/glossary.md".to_string()]).unwrap();
+    assert_eq!(fs::read(dir.join("docs/citations.json")).unwrap(), before);
+    assert!(check(dir).section("docs/glossary.md").unwrap().doc_missing);
 }
 
 #[test]
@@ -451,7 +512,7 @@ fn malformed_store_reads_as_unknown_and_blocks_writers() {
     let dir = tmp.path();
     fs::write(dir.join("docs/citations.json"), "{ nope").unwrap();
     assert_eq!(check(dir).sources_state, SourcesState::Unknown);
-    assert!(record_after_audit(dir).is_err());
+    assert!(record_after_audit(dir, &["docs/glossary.md".to_string()]).is_err());
     assert!(acknowledge(dir, "docs/glossary.md").is_err());
     assert_eq!(
         fs::read_to_string(dir.join("docs/citations.json")).unwrap(),

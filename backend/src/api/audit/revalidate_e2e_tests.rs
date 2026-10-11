@@ -131,6 +131,31 @@ impl Validated {
         sse_body(response).await
     }
 
+    async fn partial(&self, steps: Vec<usize>) -> String {
+        let response = crate::api::audit::drift::partial_audit(
+            axum::extract::State(self.h.state.clone()),
+            axum::extract::Path(PROJECT_ID.to_string()),
+            axum::Json(crate::models::PartialAuditRequest {
+                agent: AgentType::ClaudeCode,
+                connection_id: None,
+                tier: None,
+                steps,
+            }),
+        )
+        .await
+        .into_response();
+        sse_body(response).await
+    }
+
+    fn record_of(&self, doc: &str) -> crate::core::citation_drift::DocFingerprints {
+        crate::core::citation_drift::read_strict(self.project())
+            .unwrap()
+            .expect("citations recorded")
+            .docs
+            .remove(doc)
+            .unwrap_or_else(|| panic!("no record for {doc}"))
+    }
+
     async fn run_count(&self) -> usize {
         self.h
             .state
@@ -500,4 +525,81 @@ async fn a_dead_citation_is_named_before_the_agent_and_never_ends_unchanged() {
         fx.sources_state(),
         crate::core::citation_drift::SourcesState::Clean
     );
+}
+
+/// KT-1187 — the citation broken under a doc edited by hand.
+fn broken_by_hand(fx: &Validated) -> Vec<(String, crate::core::citation_drift::CitationState)> {
+    let report = crate::core::citation_drift::check(fx.project());
+    let rules = report.section(RULES).expect("rules recorded");
+    assert!(rules.doc_changed, "{rules:?}");
+    rules
+        .citations
+        .iter()
+        .filter(|c| c.state.is_broken())
+        .map(|c| (c.cite.clone(), c.state))
+        .collect()
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_partial_refresh_never_acknowledges_a_doc_edited_by_hand() {
+    use crate::core::citation_drift::{CitationState, RecordReason, SourcesState};
+    let fx = Validated::new(|_| {}).await;
+    fx.edit_source(|lines| lines[2] = "fn renamed_error_mapper() {}".into());
+    append(fx.project(), RULES, "\nA note added by hand.\n");
+
+    // A refresh of another doc leaves the hand-edited one to re-verify.
+    arm(fx.h.tools.path(), "fill", &[GLOSSARY]);
+    let body = fx.partial(vec![fx.step_of(GLOSSARY) as usize]).await;
+    let done = sse_events(&body, "done").pop().expect("terminal done");
+    assert_eq!(done["status"], "complete", "{body}");
+    validation_settled(&fx.h.state, &done).await;
+    assert_eq!(
+        broken_by_hand(&fx),
+        [("src/kept.rs:3".to_string(), CitationState::Changed)]
+    );
+    assert_eq!(fx.sources_state(), SourcesState::NeedsReverification);
+    assert_eq!(fx.record_of(RULES).reason, RecordReason::Validation);
+    assert_eq!(fx.record_of(GLOSSARY).reason, RecordReason::Audit);
+
+    // A refresh that rewrites it records its citations afresh.
+    arm(fx.h.tools.path(), "fill", &[RULES]);
+    let body = fx.partial(vec![fx.step_of(RULES) as usize]).await;
+    let done = sse_events(&body, "done").pop().expect("terminal done");
+    assert_eq!(done["status"], "complete", "{body}");
+    validation_settled(&fx.h.state, &done).await;
+    assert_eq!(fx.record_of(RULES).reason, RecordReason::Audit);
+    assert_eq!(fx.sources_state(), SourcesState::Clean);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_full_audit_re_fingerprints_only_the_docs_its_steps_rewrote() {
+    use crate::core::citation_drift::{CitationState, RecordReason, SourcesState};
+    let fx = Validated::new(|_| {}).await;
+    fx.edit_source(|lines| lines[2] = "fn renamed_error_mapper() {}".into());
+    append(fx.project(), RULES, "\nA note added by hand.\n");
+
+    // Every step ends `unchanged`: no doc was rewritten by the run.
+    arm(fx.h.tools.path(), "noop", &fx.chain);
+    let body = run_full(&fx.h.state, None).await;
+    let done = sse_events(&body, "done").pop().expect("terminal done");
+    assert_eq!(done["status"], "complete", "{body}");
+    validation_settled(&fx.h.state, &done).await;
+    assert_eq!(
+        broken_by_hand(&fx),
+        [("src/kept.rs:3".to_string(), CitationState::Changed)]
+    );
+    assert_eq!(fx.record_of(RULES).reason, RecordReason::Validation);
+
+    // Every step rewrites its target: each is recorded afresh.
+    arm(fx.h.tools.path(), "fill", &fx.chain);
+    let body = run_full(&fx.h.state, None).await;
+    let done = sse_events(&body, "done").pop().expect("terminal done");
+    assert_eq!(done["status"], "complete", "{body}");
+    validation_settled(&fx.h.state, &done).await;
+    assert_eq!(fx.record_of(RULES).reason, RecordReason::Audit);
+    assert_eq!(fx.sources_state(), SourcesState::Clean);
 }

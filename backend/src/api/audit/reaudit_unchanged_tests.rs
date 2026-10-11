@@ -569,6 +569,16 @@ async fn a_reaudit_corrects_a_stale_citation_and_leaves_true_docs_unchanged() {
         .collect();
     assert!(!unchanged.contains(&(rules_step as u64)), "{second}");
     assert_eq!(unchanged.len(), documents_before.len(), "{second}");
+    // KT-1187 — only the corrected doc has its citations recorded afresh; the
+    // glossary a human edited keeps its record.
+    let citations = crate::core::citation_drift::check(project);
+    assert!(
+        !citations
+            .section("docs/coding-rules.md")
+            .unwrap()
+            .doc_changed
+    );
+    assert!(citations.section("docs/glossary.md").unwrap().doc_changed);
 
     // Two Full audits never wrote the operator's `.gitignore`; Kronn's own
     // path is excluded locally instead.

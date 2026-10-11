@@ -1493,8 +1493,11 @@ pub(crate) async fn run_partial_pipeline(
         if partial_success {
             if let Some(merged) = merged_baseline.clone() {
                 let pp = project_path.clone();
+                let rewritten: Vec<String> = succeeded_steps.iter()
+                    .map(|&n| chain[n - 1].target_file.to_string())
+                    .collect();
                 let write_res = tokio::task::spawn_blocking(move || -> Result<(), String> {
-                    crate::core::checksums::write_checksums_file(&pp, &merged)?;
+                    crate::core::checksums::write_checksums_file(&pp, &merged, &rewritten)?;
                     if let Err(e) = crate::core::kronn_state::record_audit(&pp, "partial") {
                         tracing::warn!("Failed to record partial audit in .kronn.json: {e}");
                     }
@@ -2094,7 +2097,7 @@ mod partial_finalize_tests {
             sources: vec!["src.rs".into()],
             checksums: std::collections::BTreeMap::new(),
         };
-        crate::core::checksums::write_checksums_file(tmp.path(), &[untargeted]).unwrap();
+        crate::core::checksums::write_checksums_file(tmp.path(), &[untargeted], &[]).unwrap();
 
         static SOURCES: &[&str] = &["src.rs"];
         let chain = vec![super::super::AnalysisStep {
