@@ -67,7 +67,7 @@ pub struct LegacyMigrationReport {
 }
 
 impl LegacyMigrationReport {
-    fn skipped(reason: impl Into<String>) -> Self {
+    pub(crate) fn skipped(reason: impl Into<String>) -> Self {
         Self {
             migrated: false,
             skip_reason: reason.into(),

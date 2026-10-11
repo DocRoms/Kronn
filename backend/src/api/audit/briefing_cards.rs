@@ -23,6 +23,8 @@ pub(crate) fn parse_task_ref(task_ref: &str) -> Option<(&str, &str)> {
 const FREE_FIELDS: [&str; 5] = ["purpose", "team", "maturity", "dependencies", "traps"];
 const NOT_PROVIDED: &str = "not_provided";
 const DOCS_DIR_DEFAULT: &str = "default";
+const EXISTING_OTHER: &str = "other_folder";
+const EXISTING_LEGACY: &str = "move_to_legacy";
 
 struct Wording {
     free: [&'static str; 5],
@@ -33,6 +35,11 @@ struct Wording {
     docs_dir: &'static str,
     docs_dir_context: &'static str,
     docs_dir_exists: &'static str,
+    existing: &'static str,
+    existing_other: &'static str,
+    existing_legacy: &'static str,
+    existing_warning: &'static str,
+    existing_site: &'static str,
     unknown: &'static str,
     facts: [&'static str; 8],
 }
@@ -54,6 +61,11 @@ fn wording(language: &str) -> Wording {
             docs_dir: "AI documentation folder",
             docs_dir_context: "Relative to the project root. Pick the proposal or answer with another folder.",
             docs_dir_exists: "The folder {0} used by Kronn already exists.",
+            existing: "The folder {0} holds documentation Kronn did not write. What should Kronn do?",
+            existing_other: "Put Kronn's docs in another folder (answer the folder card with its path)",
+            existing_legacy: "Move the existing docs to {0}legacy/",
+            existing_warning: "{1} file(s) move to {0}legacy/ and stay there until a human reviews them; the audit reads them as its primary source. Links to them will break.",
+            existing_site: " A static-site generator config ({0}) references the folder: it will need updating.",
             unknown: "I don't know",
             facts: [
                 "Issue tracker",
@@ -81,6 +93,11 @@ fn wording(language: &str) -> Wording {
             docs_dir: "Carpeta de la documentación IA",
             docs_dir_context: "Relativa a la raíz del proyecto. Elige la propuesta o responde con otra carpeta.",
             docs_dir_exists: "La carpeta {0} usada por Kronn ya existe.",
+            existing: "La carpeta {0} contiene documentación que Kronn no escribió. ¿Qué debe hacer Kronn?",
+            existing_other: "Poner la documentación de Kronn en otra carpeta (responde a la tarjeta de la carpeta con su ruta)",
+            existing_legacy: "Mover la documentación existente a {0}legacy/",
+            existing_warning: "{1} archivo(s) pasan a {0}legacy/ y se quedan ahí hasta que un humano los revise; la auditoría los lee como fuente principal. Los enlaces hacia ellos se romperán.",
+            existing_site: " Una configuración de generador de sitio estático ({0}) apunta a la carpeta: habrá que actualizarla.",
             unknown: "No lo sé",
             facts: [
                 "Gestor de tickets",
@@ -108,6 +125,11 @@ fn wording(language: &str) -> Wording {
             docs_dir: "Dossier de la documentation IA",
             docs_dir_context: "Relatif à la racine du projet. Choisis la proposition ou réponds avec un autre dossier.",
             docs_dir_exists: "Le dossier {0} utilisé par Kronn existe déjà.",
+            existing: "Le dossier {0} contient une documentation que Kronn n'a pas écrite. Que doit faire Kronn ?",
+            existing_other: "Placer la doc Kronn dans un autre dossier (réponds à la carte du dossier avec son chemin)",
+            existing_legacy: "Déplacer la doc existante dans {0}legacy/",
+            existing_warning: "{1} fichier(s) passent dans {0}legacy/ et y restent jusqu'à l'audit humain ; l'audit les lit comme source principale. Les liens vers eux casseront.",
+            existing_site: " Une configuration de générateur de site statique ({0}) référence le dossier : il faudra la mettre à jour.",
             unknown: "Je ne sais pas",
             facts: [
                 "Gestionnaire de tickets",
@@ -271,6 +293,35 @@ pub(crate) fn briefing_cards(
         DOCS_DIR_DEFAULT,
         &task_ref,
     ));
+    if let crate::core::docs_folder::DocsFolderState::HumanDocs {
+        files,
+        site_generator,
+        ..
+    } = &defaults.folder
+    {
+        let mut warning = w
+            .existing_warning
+            .replace("{0}", &folder)
+            .replace("{1}", &files.to_string());
+        if let Some(site) = site_generator {
+            warning.push_str(&w.existing_site.replace("{0}", site));
+        }
+        cards.push(card(
+            "briefing-existing-docs".into(),
+            &w.existing.replace("{0}", &folder),
+            Some(warning.clone()),
+            vec![
+                option(EXISTING_OTHER, w.existing_other),
+                serde_json::json!({
+                    "id": EXISTING_LEGACY,
+                    "label": w.existing_legacy.replace("{0}", &folder),
+                    "description": warning,
+                }),
+            ],
+            EXISTING_OTHER,
+            &task_ref,
+        ));
+    }
     cards
 }
 
@@ -340,6 +391,8 @@ pub(crate) fn answers_to_form(
         }),
         td_to_tasks: false,
         docs_dir: Some(docs_dir),
+        move_existing_to_legacy: find("existing-docs").and_then(|a| a.option)
+            == Some(EXISTING_LEGACY),
         ..BriefingFormRequest::default()
     })
 }
@@ -446,6 +499,22 @@ pub(crate) async fn briefing_gate(
         return Gate::Refuse(refusal(Some((discussion_id, cards))));
     }
     if bridge.own_run.is_some() {
+        // Unattended defaults never move anything: a folder holding a
+        // human's docs stops the launch (the safer of stopping and writing
+        // somewhere unexpected).
+        let defaults = briefing_defaults_for(state, &project).await;
+        if let crate::core::docs_folder::DocsFolderState::HumanDocs { files, .. } = defaults.folder
+        {
+            return Gate::Refuse(serde_json::json!({
+                "error": format!(
+                    "No briefing, and {}/ holds {files} file(s) Kronn did not write: an unattended \
+                     launch never moves them. Fill in the briefing and choose another folder or a move \
+                     to {}/legacy/.",
+                    defaults.docs_dir, defaults.docs_dir
+                ),
+                "error_code": ApiErrorCode::BriefingRequired.as_str(),
+            }));
+        }
         return match super::briefing::save_briefing_with(
             state,
             project_id,
@@ -681,6 +750,7 @@ mod tests {
             docs_dir: "docs".into(),
             docs_dir_source: super::super::briefing::BriefingDocsDirSource::Default,
             folder_exists: true,
+            folder: crate::core::docs_folder::DocsFolderState::KronnManaged,
         }
     }
 
@@ -742,7 +812,28 @@ mod tests {
         });
         answers[6].option = Some("jira");
         let form = answers_to_form(&answers, d).unwrap();
-        assert_eq!(form.purpose, "typed");
+        assert!(!form.move_existing_to_legacy, "no card, no move");
+        answers.push(CardAnswer {
+            key: "briefing-existing-docs",
+            option: Some(EXISTING_LEGACY),
+            text: None,
+        });
+        assert!(
+            answers_to_form(&answers, d)
+                .unwrap()
+                .move_existing_to_legacy
+        );
+        answers.pop();
+        answers.push(CardAnswer {
+            key: "briefing-existing-docs",
+            option: Some(EXISTING_OTHER),
+            text: None,
+        });
+        assert!(
+            !answers_to_form(&answers, d)
+                .unwrap()
+                .move_existing_to_legacy
+        );
         assert_eq!(form.docs_dir.as_deref(), Some(".ai"));
         assert_eq!(form.project.unwrap().tracker, BriefingTracker::Jira);
     }
@@ -952,5 +1043,37 @@ mod tests {
             "{notes}"
         );
         assert!(notes.contains("to be completed"), "{notes}");
+    }
+
+    #[test]
+    fn a_folder_of_human_docs_adds_the_explicit_choice_with_its_warning() {
+        let d = BriefingDefaults {
+            docs_dir: "docs".into(),
+            docs_dir_source: super::super::briefing::BriefingDocsDirSource::Existing,
+            folder_exists: true,
+            folder: crate::core::docs_folder::DocsFolderState::HumanDocs {
+                files: 7,
+                site_generator: Some("mkdocs.yml".into()),
+                legacy_exists: false,
+            },
+        };
+        let cards = briefing_cards("p1", "d1", "fr", &d);
+        let existing = cards.last().unwrap();
+        assert_eq!(existing["key"], "briefing-existing-docs");
+        let ids: Vec<_> = existing["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["id"].clone())
+            .collect();
+        assert_eq!(ids, vec!["other_folder", "move_to_legacy"]);
+        let warning = existing["context"].as_str().unwrap();
+        assert!(warning.contains("7 fichier(s)"), "{warning}");
+        assert!(warning.contains("casseront"), "{warning}");
+        assert!(warning.contains("mkdocs.yml"), "{warning}");
+        assert_eq!(
+            existing["recommended_option_ids"],
+            serde_json::json!(["other_folder"])
+        );
     }
 }

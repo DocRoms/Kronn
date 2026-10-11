@@ -48,7 +48,9 @@ async fn audited(h: &Harness, docs_root: &DocsRoot) -> Vec<String> {
     arm(h.tools.path(), "fill", &targets);
     settle_on_validation(h.tools.path());
     let body = run_full(&h.state, None).await;
-    let done = sse_events(&body, "done").pop().expect("terminal done");
+    let done = sse_events(&body, "done")
+        .pop()
+        .unwrap_or_else(|| panic!("no terminal done: {body}"));
     validation_settled(&h.state, &done).await;
     assert_eq!(done["status"], "complete", "{body}");
     (1..=targets.len())
@@ -302,4 +304,190 @@ fn a_template_merge_preview_on_a_dot_ai_project_targets_its_root() {
         .find(|f| f.path == ".ai/AGENTS.md")
         .expect("the entry is proposed");
     assert!(!entry.diff.contains("`docs/"), "{}", entry.diff);
+}
+
+// ─── Existing folder: old Kronn docs, human docs (KT-1192) ─────────────────
+
+fn briefing(
+    docs_dir: &str,
+    move_to_legacy: bool,
+) -> crate::api::audit::briefing::BriefingFormRequest {
+    crate::api::audit::briefing::BriefingFormRequest {
+        purpose: "P".into(),
+        team: "T".into(),
+        maturity: "M".into(),
+        dependencies: "D".into(),
+        traps: "Tr".into(),
+        // The scripted agent recognises step prompts by this marker.
+        additional: BRIEFING_MARKER.into(),
+        docs_dir: Some(docs_dir.into()),
+        move_existing_to_legacy: move_to_legacy,
+        ..Default::default()
+    }
+}
+
+fn human_docs(project: &Path) {
+    std::fs::create_dir_all(project.join("docs/guide")).unwrap();
+    std::fs::write(project.join("docs/install.md"), "# Install guide\n").unwrap();
+    std::fs::write(project.join("docs/guide/usage.md"), "# Usage\n").unwrap();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn human_docs_moved_to_legacy_on_choice_are_read_as_the_primary_source() {
+    let h = harness().await;
+    let project = h.project.path();
+    human_docs(project);
+    let _cleanup = Relocated(project.to_string_lossy().into_owned());
+    crate::api::audit::briefing::save_briefing_answers(
+        &h.state,
+        PROJECT_ID,
+        briefing("docs", true),
+    )
+    .await
+    .unwrap();
+    assert!(project.join("docs/legacy/install.md").is_file());
+    assert!(project.join("docs/legacy/guide/usage.md").is_file());
+    assert!(!project.join("docs/install.md").exists());
+
+    let prompts = audited(&h, &DocsRoot::default_root()).await;
+    assert!(prompts[0].contains("PRIMARY SOURCE"), "{}", prompts[0]);
+    assert!(prompts[0].contains("docs/legacy/"), "{}", prompts[0]);
+    assert!(project.join("docs/AGENTS.md").is_file());
+    assert_eq!(
+        std::fs::read_to_string(project.join("docs/legacy/install.md")).unwrap(),
+        "# Install guide\n"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn human_docs_with_another_folder_leave_everything_in_place() {
+    let h = harness().await;
+    let project = h.project.path();
+    human_docs(project);
+    let _cleanup = Relocated(project.to_string_lossy().into_owned());
+    crate::api::audit::briefing::save_briefing_answers(
+        &h.state,
+        PROJECT_ID,
+        briefing("kronn-docs", false),
+    )
+    .await
+    .unwrap();
+    audited(&h, &DocsRoot::from_rel("kronn-docs").unwrap()).await;
+    assert_eq!(
+        std::fs::read_to_string(project.join("docs/install.md")).unwrap(),
+        "# Install guide\n"
+    );
+    assert!(!project.join("docs/legacy").exists());
+    assert!(!project.join("docs/AGENTS.md").exists());
+    assert!(project.join("kronn-docs/AGENTS.md").is_file());
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn no_audit_moves_human_docs_without_the_choice() {
+    let h = harness().await;
+    let project = h.project.path();
+    human_docs(project);
+    // The briefing was saved before KT-1192: it made no choice.
+    arm(
+        h.tools.path(),
+        "fill",
+        &targets_for(&DocsRoot::default_root()),
+    );
+    let body = run_full(&h.state, None).await;
+    let error = sse_events(&body, "error").pop().expect("refused");
+    assert_eq!(error["error_code"], "docs_folder_choice_required", "{body}");
+    assert!(
+        error["error"].as_str().unwrap().contains("docs/legacy/"),
+        "{body}"
+    );
+    assert!(project.join("docs/install.md").is_file());
+    assert!(!project.join("docs/legacy").exists());
+    assert!(!project.join("docs/AGENTS.md").exists());
+
+    // The form refuses the same folder without the choice, with the warning.
+    let refused = crate::api::audit::briefing::save_briefing_answers(
+        &h.state,
+        PROJECT_ID,
+        briefing("docs", false),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        refused
+            .message()
+            .contains("already exists and holds 2 file(s)"),
+        "{refused:?}"
+    );
+    assert!(project.join("docs/install.md").is_file());
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn old_kronn_docs_are_updated_in_place_without_a_question() {
+    let h = harness().await;
+    let project = h.project.path();
+    audited(&h, &DocsRoot::default_root()).await;
+    crate::api::audit::briefing::save_briefing_answers(
+        &h.state,
+        PROJECT_ID,
+        briefing("docs", false),
+    )
+    .await
+    .unwrap();
+    arm(
+        h.tools.path(),
+        "noop",
+        &targets_for(&DocsRoot::default_root()),
+    );
+    let body = run_full(&h.state, None).await;
+    let done = sse_events(&body, "done").pop().expect("terminal done");
+    validation_settled(&h.state, &done).await;
+    assert_eq!(done["status"], "complete", "{body}");
+    assert!(!project.join("docs/legacy").exists());
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_0_8_style_kronn_folder_is_not_asked_about() {
+    let h = harness().await;
+    let project = h.project.path();
+    std::fs::create_dir_all(project.join("docs/architecture")).unwrap();
+    std::fs::write(
+        project.join("docs/AGENTS.md"),
+        "# Our project, edited by hand\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("docs/architecture/overview.md"),
+        "<!-- kronn:section name=\"overview\" curated=\"ai\" -->\nBody\n<!-- kronn:section:end -->\n",
+    )
+    .unwrap();
+    crate::api::audit::briefing::save_briefing_answers(
+        &h.state,
+        PROJECT_ID,
+        briefing("docs", false),
+    )
+    .await
+    .unwrap();
+    arm(
+        h.tools.path(),
+        "fill",
+        &targets_for(&DocsRoot::default_root()),
+    );
+    let body = run_full(&h.state, None).await;
+    assert!(
+        sse_events(&body, "error")
+            .iter()
+            .all(|e| e["error_code"] != "docs_folder_choice_required"),
+        "{body}"
+    );
+    assert!(!project.join("docs/legacy").exists());
 }

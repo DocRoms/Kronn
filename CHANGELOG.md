@@ -243,6 +243,17 @@ Release notes for 0.9.3 and earlier are available in the
   Kronn saves the briefing through the form's validation. A launch with no
   discussion (a workflow run) gets default answers, flagged « valeurs par
   défaut — à compléter » on the project card.
+- An existing AI doc folder is handled explicitly (KT-1192). Kronn's own docs,
+  recognised by `.kronn.json` or `kronn:` markers (any version, the AGENTS.md
+  signature only as a weak hint), are updated in place without a question.
+  A folder of human docs shows « Le dossier … utilisé par Kronn existe déjà »
+  and asks: put Kronn's docs in another folder, or move them to
+  `<folder>/legacy/` (file count, broken links and a detected mkdocs,
+  Docusaurus or VitePress config are stated first); the audit then reads
+  them as its primary source. The silent pre-audit move is gone: nothing
+  moves without that choice, never into an existing `legacy/`, and an audit
+  or unattended launch on such a folder without a choice stops with
+  `docs_folder_choice_required`.
 - Audit versions and standards are judged from dated sources (KT-1000). The
   tech-debt step and the security pass get a « Technologies and standards »
   block: the project's stored dependency watch (version in place, latest,

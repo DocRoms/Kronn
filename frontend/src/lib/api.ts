@@ -1302,6 +1302,8 @@ export const projects = {
     project_rules?: BriefingProjectRules;
     /** KT-1192 — the AI doc folder, relative to the project root. */
     docs_dir?: string;
+    /** KT-1192 — the human's explicit choice to move existing docs to `legacy/`. */
+    move_existing_to_legacy?: boolean;
   }) => api<boolean>('POST', `/projects/${id}/save-briefing`, form),
   /** KT-1183 — the cross-agent audit's cost range, scaled from the last measured run. */
   crossAuditEstimate: (id: string, agents: number) =>

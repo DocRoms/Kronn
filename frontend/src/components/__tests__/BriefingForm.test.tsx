@@ -237,7 +237,7 @@ describe('BriefingForm (0.8.5)', () => {
 
   it('pre-fills the AI doc folder and sends it with the answers (KT-1192)', async () => {
     vi.mocked(projectsApi.briefingDefaults).mockResolvedValueOnce({
-      docs_dir: '.ai', docs_dir_source: 'global_default', folder_exists: true,
+      docs_dir: '.ai', docs_dir_source: 'global_default', folder_exists: true, folder: { kind: 'missing' },
     });
     wrap(
       <BriefingForm
@@ -281,5 +281,85 @@ describe('BriefingForm (0.8.5)', () => {
       purpose: 'Not provided', traps: 'Not provided', docs_dir: 'docs',
     });
     await waitFor(() => expect(onSaved).toHaveBeenCalledWith(null));
+  });
+
+  it('asks for an explicit choice before touching human docs, with the warning (KT-1192)', async () => {
+    vi.mocked(projectsApi.briefingDefaults).mockResolvedValueOnce({
+      docs_dir: 'docs', docs_dir_source: 'existing', folder_exists: true,
+      folder: { kind: 'human_docs', files: 4, site_generator: 'mkdocs.yml', legacy_exists: false },
+    } as never);
+    const toast = vi.fn();
+    wrap(
+      <BriefingForm
+        projectId="p-1"
+        onClose={() => {}}
+        onSaved={() => {}}
+        agent="ClaudeCode"
+        tier="reasoning"
+        review={false}
+        toast={toast}
+      />
+    );
+    const choice = await screen.findByTestId('briefing-existing-docs');
+    expect(choice).toHaveTextContent('mkdocs.yml');
+    expect(choice).toHaveTextContent('4');
+    fillMandatory();
+    const form = screen.getByTestId('briefing-docs-dir-input').closest('form')!;
+    fireEvent.submit(form);
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.any(String), 'error'));
+    expect(projectsApi.saveBriefing).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByTestId('briefing-existing-legacy'));
+    fireEvent.submit(form);
+    await waitFor(() => expect(projectsApi.saveBriefing).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(projectsApi.saveBriefing).mock.calls[0][1]).toMatchObject({
+      docs_dir: 'docs', move_existing_to_legacy: true,
+    });
+  });
+
+  it('keeps the human docs where they are when another folder is typed', async () => {
+    vi.mocked(projectsApi.briefingDefaults).mockResolvedValueOnce({
+      docs_dir: 'docs', docs_dir_source: 'existing', folder_exists: true,
+      folder: { kind: 'human_docs', files: 4, site_generator: null, legacy_exists: false },
+    } as never);
+    wrap(
+      <BriefingForm
+        projectId="p-1"
+        onClose={() => {}}
+        onSaved={() => {}}
+        agent="ClaudeCode"
+        tier="reasoning"
+        review={false}
+        toast={() => {}}
+      />
+    );
+    await screen.findByTestId('briefing-existing-docs');
+    fireEvent.change(screen.getByTestId('briefing-docs-dir-input'), { target: { value: 'kronn-docs' } });
+    expect(screen.queryByTestId('briefing-existing-docs')).toBeNull();
+    fillMandatory();
+    fireEvent.submit(screen.getByTestId('briefing-docs-dir-input').closest('form')!);
+    await waitFor(() => expect(projectsApi.saveBriefing).toHaveBeenCalledTimes(1));
+    const sent = vi.mocked(projectsApi.saveBriefing).mock.calls[0][1];
+    expect(sent).toMatchObject({ docs_dir: 'kronn-docs' });
+    expect(sent).not.toHaveProperty('move_existing_to_legacy');
+  });
+
+  it('says a Kronn folder is updated in place, with nothing to choose', async () => {
+    vi.mocked(projectsApi.briefingDefaults).mockResolvedValueOnce({
+      docs_dir: 'docs', docs_dir_source: 'existing', folder_exists: true, folder: { kind: 'kronn_managed' },
+    } as never);
+    wrap(
+      <BriefingForm
+        projectId="p-1"
+        onClose={() => {}}
+        onSaved={() => {}}
+        agent="ClaudeCode"
+        tier="reasoning"
+        review={false}
+        toast={() => {}}
+      />
+    );
+    await waitFor(() => expect(screen.getByTestId('briefing-docs-dir-state').textContent).toMatch(/Kronn/));
+    expect(screen.queryByTestId('briefing-existing-docs')).toBeNull();
   });
 });

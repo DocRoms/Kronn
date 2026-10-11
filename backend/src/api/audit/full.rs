@@ -745,7 +745,32 @@ pub async fn full_audit(
         // baseline, which is rarely what the user wants.
         let is_full = matches!(kind, crate::models::AuditKind::Full);
         let status = scanner::detect_audit_status(&project_path_str);
-        let template_installed = is_full && matches!(status, AiAuditStatus::NoTemplate);
+        // KT-1192 — a folder whose human docs were moved to `legacy/` on the
+        // briefing's choice gets the templates too.
+        let moved_aside = docs_root.file(&project_path, "legacy").is_dir()
+            && !docs_root.file(&project_path, "AGENTS.md").is_file();
+        let template_installed =
+            is_full && (matches!(status, AiAuditStatus::NoTemplate) || moved_aside);
+        // A human's docs are never moved or written over without the
+        // briefing's explicit choice. A resume continues a run that already
+        // started on this folder.
+        if is_full && resume_run_id_req.is_none() {
+            if let crate::core::docs_folder::DocsFolderState::HumanDocs { files, .. } =
+                crate::core::docs_folder::folder_state(&project_path, docs_root.rel())
+            {
+                if let Ok(mut t) = audit_tracker.lock() { t.clear_progress(&project_id); }
+                let err = serde_json::json!({
+                    "error": format!(
+                        "The folder {}/ used by Kronn already exists and holds {files} file(s) Kronn did not write. \
+                         Open the briefing and choose: another folder, or move them to {}/legacy/.",
+                        docs_root.rel(), docs_root.rel()
+                    ),
+                    "error_code": "docs_folder_choice_required",
+                });
+                yield Event::default().event("error").data(err.to_string());
+                return;
+            }
+        }
         let configured_adapter =
             crate::core::root_agent_files::adapter_for_agent_type(&agent_type);
 
@@ -776,16 +801,9 @@ pub async fn full_audit(
                     }
                 }
 
-                // 0.8.3 (#272) — Pre-audit legacy docs migration. If the
-                // user pointed Kronn at a project with hand-curated docs
-                // (no Kronn signature in docs/AGENTS.md), move everything
-                // under docs/legacy/ BEFORE the template install. The
-                // audit prompt below is patched to read docs/legacy/**
-                // as the PRIMARY source of truth when filling fresh
-                // Kronn templates. Idempotent: already-Kronn-managed
-                // docs/ → no-op (the signature check returns true).
-                let legacy_report = crate::core::legacy_docs::migrate_user_docs_to_legacy_in(&docs_target, &install_root)
-                    .map_err(|e| format!("legacy docs migration failed: {}", e))?;
+                // KT-1192 — hand-curated docs move to `legacy/` only on the
+                // briefing's explicit choice, never silently here.
+                let legacy_report = crate::core::legacy_docs::LegacyMigrationReport::skipped("not-chosen");
 
                 let template_dir = crate::api::projects::resolve_templates_dir();
                 if !template_dir.exists() {

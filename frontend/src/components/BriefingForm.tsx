@@ -17,7 +17,7 @@ import { useT } from '../lib/I18nContext';
 import { projects as projectsApi } from '../lib/api';
 import { Save, X, Loader2 } from 'lucide-react';
 import type {
-  AgentType, BriefingDocLocation, BriefingFact, BriefingProjectAnswers, CrossAuditEstimate, LinkedRepo, ModelTier, ProjectRule,
+  AgentType, BriefingDefaults, BriefingDocLocation, BriefingFact, BriefingProjectAnswers, CrossAuditEstimate, LinkedRepo, ModelTier, ProjectRule,
   SavedBriefing,
 } from '../types/generated';
 import { AGENT_LABELS } from '../lib/constants';
@@ -217,6 +217,9 @@ export function BriefingForm({
   const [docsDir, setDocsDir] = useState('');
   const [docsDirLoaded, setDocsDirLoaded] = useState(false);
   const [docsDirExists, setDocsDirExists] = useState(false);
+  const [defaults, setDefaults] = useState<BriefingDefaults | null>(null);
+  // KT-1192 — human docs in the folder: nothing moves without this choice.
+  const [existingChoice, setExistingChoice] = useState<'other' | 'legacy' | null>(null);
 
   useEffect(() => {
     let live = true;
@@ -226,6 +229,7 @@ export function BriefingForm({
         if (!live) return;
         setDocsDir(value.docs_dir);
         setDocsDirExists(value.folder_exists);
+        setDefaults(value);
         setDocsDirLoaded(true);
       })
       .catch(() => { if (live) setDocsDirLoaded(true); });
@@ -254,8 +258,19 @@ export function BriefingForm({
   const setPerson = (role: string, field: 'name' | 'contact', value: string) =>
     setProject(p => ({ ...p, people: p.people.map(x => (x.role === role ? { ...x, [field]: value } : x)) }));
 
+  const normalizedDir = docsDir.trim().replace(/\/+$/, '');
+  const folder = defaults && normalizedDir === defaults.docs_dir ? defaults.folder : null;
+  const humanDocs = folder?.kind === 'human_docs' ? folder : null;
+  const moveToLegacy = !!humanDocs && existingChoice === 'legacy';
+  /** The human docs block the save until a choice keeps them safe. */
+  const existingBlocked = !!humanDocs && !moveToLegacy;
+
   // KT-1192 — one click: « Not provided » answers, the folder as shown.
   const saveDefaults = async () => {
+    if (existingBlocked) {
+      toast(t('briefing.existingChoiceRequired'), 'error');
+      return;
+    }
     setSubmitting(true);
     try {
       const notProvided = 'Not provided';
@@ -267,6 +282,7 @@ export function BriefingForm({
         traps: notProvided,
         additional: '',
         ...(docsDir.trim() ? { docs_dir: docsDir.trim() } : {}),
+        ...(moveToLegacy ? { move_existing_to_legacy: true } : {}),
       });
       toast(t('briefing.savedOnlyToast'), 'success');
       onSaved(null);
@@ -296,6 +312,10 @@ export function BriefingForm({
       toast(t('briefing.crossAudit.pickAgents'), 'error');
       return;
     }
+    if (existingBlocked) {
+      toast(t('briefing.existingChoiceRequired'), 'error');
+      return;
+    }
     setSubmitting(true);
     try {
       // 1. Save the answers — writes `docs/briefing.md` + DB notes.
@@ -314,6 +334,7 @@ export function BriefingForm({
         project_rules: { rules },
         cross_audit_agents: crossAudit ? crossAgents : [],
         ...(docsDir.trim() ? { docs_dir: docsDir.trim() } : {}),
+        ...(moveToLegacy ? { move_existing_to_legacy: true } : {}),
       });
       if (!review) {
         toast(t('briefing.savedOnlyToast'), 'success');
@@ -461,12 +482,46 @@ export function BriefingForm({
           onChange={e => setDocsDir(e.target.value)}
           data-testid="briefing-docs-dir-input"
         />
-        <span className="briefing-form-option-hint">
+        <span className="briefing-form-option-hint" data-testid="briefing-docs-dir-state">
           {docsDirExists && docsDir.trim()
-            ? t('briefing.docsDirExists', `${docsDir.trim().replace(/\/+$/, '')}/`)
+            ? t('briefing.docsDirExists', `${normalizedDir}/`)
             : t('briefing.docsDirHint')}
+          {folder?.kind === 'kronn_managed' && <> {t('briefing.folderKronn')}</>}
         </span>
       </label>
+      {humanDocs && (
+        <fieldset className="briefing-card" data-testid="briefing-existing-docs">
+          <legend className="briefing-form-q">{t('briefing.existingHuman', `${normalizedDir}/`, humanDocs.files)}</legend>
+          <label className="briefing-form-option">
+            <input
+              type="radio"
+              name="briefing-existing"
+              checked={existingChoice === 'other'}
+              onChange={() => setExistingChoice('other')}
+              data-testid="briefing-existing-other"
+            />
+            <span className="briefing-form-option-hint">{t('briefing.existingOther')}</span>
+          </label>
+          <label className="briefing-form-option">
+            <input
+              type="radio"
+              name="briefing-existing"
+              checked={existingChoice === 'legacy'}
+              disabled={humanDocs.legacy_exists}
+              onChange={() => setExistingChoice('legacy')}
+              data-testid="briefing-existing-legacy"
+            />
+            <span className="briefing-form-option-hint">
+              {t('briefing.existingLegacy', `${normalizedDir}/`)}
+              {' — '}
+              {humanDocs.legacy_exists
+                ? t('briefing.existingLegacyExists', `${normalizedDir}/legacy/`)
+                : t('briefing.existingWarning', humanDocs.files, `${normalizedDir}/legacy/`)}
+              {humanDocs.site_generator && <> {t('briefing.existingSite', humanDocs.site_generator)}</>}
+            </span>
+          </label>
+        </fieldset>
+      )}
 
       <section className="briefing-project" aria-labelledby="briefing-project-title">
         <h4 id="briefing-project-title" className="briefing-form-q">{t('briefing.project.title')}</h4>

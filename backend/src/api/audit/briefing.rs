@@ -366,6 +366,10 @@ pub struct BriefingFormRequest {
     /// root. Absent from older clients: the folder is left as it is.
     #[serde(default)]
     pub docs_dir: Option<String>,
+    /// KT-1192 — the folder holds docs Kronn did not write and the human chose
+    /// to move them to `<folder>/legacy/`. Without it, such a folder is refused.
+    #[serde(default)]
+    pub move_existing_to_legacy: bool,
 }
 
 /// Why a briefing was not saved.
@@ -401,6 +405,8 @@ pub struct BriefingDefaults {
     pub docs_dir_source: BriefingDocsDirSource,
     /// The folder already exists in the project.
     pub folder_exists: bool,
+    /// What the proposed folder already holds.
+    pub folder: crate::core::docs_folder::DocsFolderState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
@@ -449,6 +455,7 @@ pub(crate) fn briefing_defaults(
     };
     BriefingDefaults {
         folder_exists: project_root.join(&docs_dir).is_dir(),
+        folder: crate::core::docs_folder::folder_state(project_root, &docs_dir),
         docs_dir,
         docs_dir_source,
     }
@@ -496,16 +503,45 @@ fn apply_briefing_docs_dir(
     conn: &rusqlite::Connection,
     project: &Project,
     requested: &str,
+    move_existing_to_legacy: bool,
 ) -> Result<(), BriefingSaveError> {
+    use crate::core::docs_folder::{folder_state, DocsFolderState};
     use crate::core::docs_location;
     let root = crate::core::scanner::resolve_host_path(&project.path);
     let rel = docs_location::validate_for_project(&root, requested)
         .map_err(BriefingSaveError::DocsDir)?;
+    // A human's docs never move, and are never written over, without the
+    // explicit choice; old Kronn docs are updated in place, unasked.
+    let state = folder_state(&root, &rel);
+    if let DocsFolderState::HumanDocs {
+        files,
+        legacy_exists,
+        ..
+    } = &state
+    {
+        if !move_existing_to_legacy {
+            return Err(BriefingSaveError::DocsDir(format!(
+                "The folder {rel}/ used by Kronn already exists and holds {files} file(s) Kronn \
+                 did not write: choose another folder, or move them to {rel}/legacy/."
+            )));
+        }
+        if *legacy_exists {
+            return Err(BriefingSaveError::DocsDir(format!(
+                "{rel}/legacy/ already exists: Kronn never merges into it. Choose another folder."
+            )));
+        }
+    }
     let unconfigured = docs_location::resolve(&root, None).relative(&root);
-    let stored = (unconfigured.as_deref() != Some(rel.as_str())).then_some(rel);
+    let stored = (unconfigured.as_deref() != Some(rel.as_str())).then(|| rel.clone());
     crate::db::projects::set_project_docs_dir(conn, &project.id, stored.as_deref())
         .map_err(|e| BriefingSaveError::Internal(format!("DB error: {e}")))?;
     docs_location::set_project_override(&project.path, stored.as_deref());
+    if matches!(state, DocsFolderState::HumanDocs { .. }) {
+        let docs_root =
+            docs_location::DocsRoot::from_rel(&rel).map_err(BriefingSaveError::DocsDir)?;
+        crate::core::docs_folder::move_to_legacy(&root, &docs_root)
+            .map_err(BriefingSaveError::DocsDir)?;
+    }
     Ok(())
 }
 
@@ -604,7 +640,7 @@ pub(crate) fn save_briefing_in(
         .map(str::trim)
         .filter(|d| !d.is_empty())
     {
-        apply_briefing_docs_dir(conn, project, dir)?;
+        apply_briefing_docs_dir(conn, project, dir, form.move_existing_to_legacy)?;
     }
 
     // 3. Format the briefing.md body — same shape as

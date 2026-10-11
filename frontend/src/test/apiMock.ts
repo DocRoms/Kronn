@@ -293,7 +293,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       crossAuditEstimate: resolve({ agents: 2, cross_checked_steps: ['docs/inconsistencies-security.md'], low_factor: 2, high_factor: 4, max_cross_checked: 30, estimated: true }),
       briefingDocs: resolve([]),
       checkBriefingDoc: resolve({ path: '', kind: 'docs', is_dir: true, last_commit: null }),
-      briefingDefaults: resolve({ docs_dir: 'docs', docs_dir_source: 'default', folder_exists: false }),
+      briefingDefaults: resolve({ docs_dir: 'docs', docs_dir_source: 'default', folder_exists: false, folder: { kind: 'missing' } }),
       convertTdTasks: resolve({ created: 0, already_linked: 0, skipped: 0, themes: [], items: [] }),
       auditTds: resolve({
         items: [], counts: { pending: 0, confirmed: 0, accepted_decision: 0, deferred: 0, rejected: 0 },

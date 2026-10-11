@@ -1425,7 +1425,11 @@ docs_dir: string, docs_dir_source: BriefingDocsDirSource,
 /**
  * The folder already exists in the project.
  */
-folder_exists: boolean, };
+folder_exists: boolean,
+/**
+ * What the proposed folder already holds.
+ */
+folder: DocsFolderState, };
 
 /**
  * A location found in the repository, offered as a pre-filled answer.
@@ -3730,6 +3734,20 @@ changes: Array<ProvenanceChange>, };
  * Which rule picked the folder.
  */
 export type DocsDirSource = "project_override" | "detected";
+
+export type DocsFolderState = { "kind": "missing" } | { "kind": "kronn_managed" } | { "kind": "human_docs",
+/**
+ * Files a move to `legacy/` would carry.
+ */
+files: number,
+/**
+ * A static-site generator config that references the folder.
+ */
+site_generator: string | null,
+/**
+ * `<folder>/legacy/` already exists: Kronn never merges into it.
+ */
+legacy_exists: boolean, };
 
 export type DocWriter = "full_audit" | "partial_audit" | "revalidation" | "template_reinstall" | "document_repair" | "td_index";
 
