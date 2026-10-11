@@ -572,6 +572,9 @@ pub(crate) async fn run_partial_pipeline(
         } else {
             (Vec::new(), Vec::new())
         };
+        let version_ctx = super::version_context::VersionContext::load(
+            &state.db, &project_id_for_progress, &project_path, &project_path_str, &agent_launcher, &agent_type,
+        ).await;
 
         // Only steps whose agent actually SUCCEEDED get their baseline entry
         // refreshed — a failed section must stay stale (false-freshness
@@ -650,6 +653,9 @@ pub(crate) async fn run_partial_pipeline(
             }
             if analysis_step.target_file.ends_with("inconsistencies-tech-debt.md") {
                 full_prompt.push_str(&super::step8_context_block(&detector_signals, &prior_td_digests));
+            }
+            if let Some(block) = version_ctx.block_for(analysis_step.target_file) {
+                full_prompt.push_str(&block);
             }
             if let Some(block) = revalidation.as_ref().and_then(|r| r.blocks.get(&step)) {
                 full_prompt.push_str(block);
@@ -1033,7 +1039,7 @@ pub(crate) async fn run_partial_pipeline(
                         use super::anti_hallu_enforce::EnforceGateOutcome;
                         match super::anti_hallu_enforce::evaluate_enforce_gate(
                             enforce_mode, success, analysis_step.target_file,
-                            &project_path, attempt, max_attempts,
+                            &project_path, attempt, max_attempts, version_ctx.snapshot.as_ref(),
                         ) {
                             EnforceGateOutcome::NotApplicable => {}
                             EnforceGateOutcome::Unreadable(reason) => {

@@ -95,6 +95,7 @@ pub mod td_index;
 pub mod timezone;
 pub mod usage;
 pub mod user_context;
+pub mod version_sources;
 pub mod versions;
 pub mod vibe_trust;
 pub mod worktree;

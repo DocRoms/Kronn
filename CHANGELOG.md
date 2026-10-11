@@ -13,6 +13,21 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- Audit versions and standards are judged from dated sources (KT-1000). The
+  tech-debt step and the security pass get a « Technologies and standards »
+  block: the project's stored dependency watch (version in place, latest,
+  gap, check date; never refreshed by the audit) and the runtime versions the
+  repository pins (`node-version`/`python-version`/… in `.github/workflows`
+  and `.gitlab-ci.yml`, `.nvmrc`, `.node-version`, `.python-version`,
+  `.ruby-version`, `rust-toolchain(.toml)`, `.tool-versions`), each with its
+  citation. Kronn picks the live source from configuration — context7 when the
+  agent mounts it from the project's MCP config, else a web tool when the
+  agent has one (a direct Claude CLI with full access), else the dependency
+  watch — and the prompt states it. New citation kind
+  `[src: deps: <manager>/<package>@<YYYY-MM-DD>]`: in an audit it is checked
+  against the injected watch (absent row or other date = fabricated);
+  elsewhere it stays unchecked. The `Dependencies` coverage row must state
+  `source used: …` or `not verified: no source`, otherwise step 8 is re-run.
 - The audit recap now shows what a run consumed per phase and in total
   (KT-1084): the briefing, the audit steps and the validation discussion, each
   with its tokens (uncached input, output, cache) and cost, plus a grand total.

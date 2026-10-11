@@ -215,6 +215,9 @@ pub enum SourceKind {
     Commit,
     /// `api:` capture — treated like a URL (unchecked, no network at finalize).
     Api,
+    /// `deps: <manager>/<package>@<YYYY-MM-DD>` — a row of Kronn's dependency
+    /// watch; only an audit holding that snapshot can verify it.
+    Deps,
     /// A code comment — may point at a real file:line, so it is still
     /// existence-verified, but it is LOW trust (a comment is not authoritative).
     CodeComment,
@@ -1233,6 +1236,9 @@ fn classify_source(raw: &str) -> (SourceKind, String) {
     if let Some(r) = match_type_keyword(s, "api") {
         return (SourceKind::Api, r);
     }
+    if let Some(r) = match_type_keyword(s, "deps") {
+        return (SourceKind::Deps, r);
+    }
     if let Some(r) = match_type_keyword(s, "url") {
         return (SourceKind::Url, r);
     }
@@ -1255,6 +1261,24 @@ pub(crate) fn file_citation(raw: &str) -> Option<(String, Option<(usize, usize)>
     let (path, lines) = split_path_and_lines(clean_reference(&reference));
     let path = clean_reference(path);
     (!path.is_empty()).then(|| (path.to_string(), lines))
+}
+
+/// `(manager, package, checked date)` of a `deps:` marker. Package names may
+/// hold `/` and `@` (`@types/node`), so the manager ends at the first `/` and
+/// the date starts after the last `@`.
+pub(crate) fn dep_citation(raw: &str) -> Option<(String, String, String)> {
+    let (kind, reference) = classify_source(raw);
+    if kind != SourceKind::Deps {
+        return None;
+    }
+    let reference = clean_reference(&reference);
+    let (head, date) = reference.rsplit_once('@')?;
+    let (manager, package) = head.split_once('/')?;
+    let (manager, package, date) = (manager.trim(), package.trim(), date.trim());
+    if manager.is_empty() || package.is_empty() || date.is_empty() {
+        return None;
+    }
+    Some((manager.to_string(), package.to_string(), date.to_string()))
 }
 
 /// If `s` starts (case-insensitively) with `keyword` AT A TOKEN BOUNDARY
@@ -1408,6 +1432,10 @@ pub fn verify_source_marker_lanes(raw: &str, roots: &[&Path], lanes: &[LaneRoot]
         SourceKind::Commit => (
             SourceStatus::Unchecked,
             "commit ref — not verified".to_string(),
+        ),
+        SourceKind::Deps => (
+            SourceStatus::Unchecked,
+            "dependency watch row — verified only against an audit's snapshot".to_string(),
         ),
         SourceKind::User => (
             SourceStatus::Unchecked,
@@ -5815,5 +5843,40 @@ mod lane_origin {
             Some(SourceOrigin::worktree("0151-kt1181"))
         );
         std::fs::remove_dir_all(&checkout).ok();
+    }
+}
+
+#[cfg(test)]
+mod deps_citation_tests {
+    use super::*;
+
+    #[test]
+    fn deps_marker_is_its_own_kind_and_unchecked_without_a_snapshot() {
+        let check = verify_source_marker("deps: npm/react@2026-10-04", None);
+        assert_eq!(check.kind, SourceKind::Deps);
+        assert_eq!(check.status, SourceStatus::Unchecked);
+        assert!(!check.status.is_fabricated());
+    }
+
+    #[test]
+    fn dep_citation_splits_scoped_packages_and_rejects_partial_refs() {
+        assert_eq!(
+            dep_citation("deps: npm/@types/node@2026-10-04"),
+            Some(("npm".into(), "@types/node".into(), "2026-10-04".into()))
+        );
+        assert_eq!(
+            dep_citation("deps: cargo/serde@2026-10-04"),
+            Some(("cargo".into(), "serde".into(), "2026-10-04".into()))
+        );
+        assert_eq!(dep_citation("deps: npm/react"), None);
+        assert_eq!(dep_citation("deps: npm/@types/node"), None);
+        assert_eq!(dep_citation("deps: react@2026-10-04"), None);
+        assert_eq!(dep_citation("file: deps/npm.rs:1"), None);
+    }
+
+    #[test]
+    fn a_file_named_like_the_keyword_stays_a_file() {
+        let (kind, _) = classify_source("deps_lock.rs:3");
+        assert_eq!(kind, SourceKind::File);
     }
 }

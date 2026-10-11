@@ -179,6 +179,27 @@ not before.
   event: no client handler sees it, so it holds the connection without passing
   for model activity.
 
+## Version sources (KT-1000)
+
+The tech-debt step and the security pass judge versions from dated sources
+only. `VersionContext::load` reads the stored dependency watch (never
+refreshed: no network) and the runtime pins of the repository, then picks the
+live source with `select_version_source`: context7, else web, else the
+watch. What an agent reaches comes from `version_reach`:
+
+| Launch | context7 | Web |
+|---|---|---|
+| ACP session (default route of Claude, Codex, OpenCode…) | stdio `context7` server in `.mcp.json` | not claimed |
+| Direct Claude CLI (`DirectCliMigration`) | any `context7` entry in the `.mcp.json` it is handed | yes, with full access |
+| HTTP agent (Ollama, LiteLLM…) | no | no (`AUDIT_TOOLS` has no `web_fetch`) |
+| Other direct CLIs | not claimed | not claimed |
+
+The broker auto-approves `fetch`-kind tool calls, so an ACP runtime may well
+reach the web; Kronn has no declaration of which runtimes expose such a tool,
+so it does not claim it. A `[src: deps: …]` citation is checked against the
+injected watch by the enforce gate (`lint_step_file_with_deps`).
+`[src: file: backend/src/api/audit/agent_launch.rs:1]`
+
 ## What this does not cover
 
 - `full_audit`'s and `partial_audit`'s start of a **direct CLI** agent is

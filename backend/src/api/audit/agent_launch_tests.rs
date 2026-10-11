@@ -1842,3 +1842,104 @@ fn an_http_run_feeds_the_recent_actions_and_its_label_by_category_only() {
         "{all}"
     );
 }
+
+/// KT-1000 — the version-source cascade reads only what the launch establishes.
+#[test]
+fn version_reach_follows_what_each_launch_mounts() {
+    let claude = AgentType::ClaudeCode;
+    assert_eq!(
+        version_reach(true, false, true, &AgentType::LiteLlm),
+        VersionReach {
+            mcp: None,
+            web: false
+        }
+    );
+    assert_eq!(
+        version_reach(false, true, true, &claude),
+        VersionReach {
+            mcp: Some(true),
+            web: false
+        }
+    );
+    assert_eq!(
+        version_reach(false, false, true, &claude),
+        VersionReach {
+            mcp: Some(false),
+            web: true
+        }
+    );
+    assert_eq!(
+        version_reach(false, false, false, &claude),
+        VersionReach {
+            mcp: Some(false),
+            web: false
+        }
+    );
+    assert_eq!(
+        version_reach(false, false, true, &AgentType::Codex),
+        VersionReach {
+            mcp: None,
+            web: false
+        }
+    );
+}
+
+#[tokio::test]
+async fn version_source_inputs_read_the_mcp_config_the_agent_is_handed() {
+    use crate::core::version_sources::{select_version_source, VersionSource};
+    let state = litellm_state("http://127.0.0.1:1").await;
+    let project = tempfile::tempdir().unwrap();
+    let path = project.path();
+    let path_str = path.to_string_lossy().to_string();
+    let stdio =
+        r#"{"mcpServers":{"context7":{"command":"npx","args":["-y","@upstash/context7-mcp"]}}}"#;
+    let remote =
+        r#"{"mcpServers":{"context7":{"type":"http","url":"https://mcp.context7.com/mcp"}}}"#;
+
+    let acp = AuditAgentLauncher::with_route(
+        &state,
+        &AgentType::ClaudeCode,
+        crate::acp::AcpProductionRoute::AdaptedAcp,
+    )
+    .await;
+    let direct = AuditAgentLauncher::with_route(
+        &state,
+        &AgentType::ClaudeCode,
+        crate::acp::AcpProductionRoute::DirectCliMigration,
+    )
+    .await;
+    let http = AuditAgentLauncher::new(&state, &AgentType::LiteLlm).await;
+    let pick = |l: &AuditAgentLauncher, watch| {
+        select_version_source(l.version_source_inputs(
+            &AgentType::ClaudeCode,
+            path,
+            &path_str,
+            watch,
+        ))
+    };
+
+    std::fs::write(path.join(".mcp.json"), stdio).unwrap();
+    assert_eq!(pick(&acp, true), VersionSource::Context7);
+    assert_eq!(pick(&direct, true), VersionSource::Context7);
+    assert_eq!(
+        select_version_source(http.version_source_inputs(
+            &AgentType::LiteLlm,
+            path,
+            &path_str,
+            true
+        )),
+        VersionSource::DependencyWatch
+    );
+
+    std::fs::write(path.join(".mcp.json"), remote).unwrap();
+    assert_eq!(
+        pick(&acp, true),
+        VersionSource::DependencyWatch,
+        "an ACP session drops url-only servers"
+    );
+    assert_eq!(pick(&direct, false), VersionSource::Context7);
+
+    std::fs::remove_file(path.join(".mcp.json")).unwrap();
+    assert_eq!(pick(&direct, false), VersionSource::Web);
+    assert_eq!(pick(&acp, false), VersionSource::None);
+}

@@ -14,6 +14,7 @@
 //! retry loop, and only calls into these helpers.
 
 use crate::core::anti_halluc::{self, scan_fences, FenceScan, SourceCheck};
+use crate::core::version_sources::{verify_dep_marker, DependencySnapshot};
 use std::path::Path;
 
 /// Total attempts (1 initial + retries) allowed per step in enforce mode.
@@ -75,6 +76,28 @@ pub fn lint_step_file(content: &str, roots: &[&Path]) -> CitationVerdict {
         .sources
         .into_iter()
         .filter(|s| s.status.is_fabricated())
+        .collect();
+    CitationVerdict { fabricated }
+}
+
+/// [`lint_step_file`], with every `deps:` marker checked against the dependency
+/// watch the audit injected (KT-1000): a row it does not hold is fabricated.
+pub fn lint_step_file_with_deps(
+    content: &str,
+    roots: &[&Path],
+    deps: Option<&DependencySnapshot>,
+) -> CitationVerdict {
+    let report = anti_halluc::analyze_roots(content, roots);
+    let fabricated = report
+        .sources
+        .into_iter()
+        .filter_map(|mut source| {
+            if let Some((status, detail)) = verify_dep_marker(&source.raw, deps) {
+                source.status = status;
+                source.detail = detail;
+            }
+            source.status.is_fabricated().then_some(source)
+        })
         .collect();
     CitationVerdict { fabricated }
 }
@@ -996,6 +1019,7 @@ pub fn evaluate_enforce_gate(
     project_path: &Path,
     attempt: usize,
     max_attempts: usize,
+    deps: Option<&DependencySnapshot>,
 ) -> EnforceGateOutcome {
     if !enforce_mode || !step_success_so_far || target_file == "REVIEW" {
         return EnforceGateOutcome::NotApplicable;
@@ -1009,7 +1033,7 @@ pub fn evaluate_enforce_gate(
             ));
         }
     };
-    let verdict = lint_step_file(&written, &[project_path]);
+    let verdict = lint_step_file_with_deps(&written, &[project_path], deps);
     match decide(&verdict, attempt, max_attempts) {
         GateDecision::Retry => EnforceGateOutcome::Retry {
             feedback: corrective_feedback(target_file, &verdict),
@@ -1050,7 +1074,8 @@ mod enforce_gate_tests {
         let pre = target_snapshot(tmp.path(), "docs/architecture.md").unwrap();
         assert!(matches!(pre, TargetSnapshot::Present(_)));
 
-        let outcome = evaluate_enforce_gate(true, true, "docs/architecture.md", tmp.path(), 0, 3);
+        let outcome =
+            evaluate_enforce_gate(true, true, "docs/architecture.md", tmp.path(), 0, 3, None);
         assert!(
             matches!(outcome, EnforceGateOutcome::Pass { .. }),
             "lint-green must Pass"
@@ -1060,5 +1085,73 @@ mod enforce_gate_tests {
         assert_eq!(pre, post, "a passing gate must not fabricate a rewrite");
         let on_disk = std::fs::read_to_string(tmp.path().join("docs/architecture.md")).unwrap();
         assert_eq!(on_disk, stale, "byte-intact: the stale audit date survives");
+    }
+
+    fn watch() -> DependencySnapshot {
+        DependencySnapshot {
+            checked_on: "2026-10-04".into(),
+            packages: vec![crate::core::version_sources::WatchedPackage {
+                manager: "npm".into(),
+                manifest: "package.json".into(),
+                name: "react".into(),
+                current: "18.2.0".into(),
+                latest: "19.1.0".into(),
+                major: true,
+            }],
+            unchecked: vec![],
+            up_to_date: vec![],
+        }
+    }
+
+    /// KT-1000 — a `deps:` row the injected watch holds passes; one it does
+    /// not hold (or with another date, or with no watch) fails the gate.
+    #[test]
+    fn deps_citations_are_gated_against_the_injected_watch() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let roots = [tmp.path()];
+        let snap = watch();
+        let held = "React lags a major [src: deps: npm/react@2026-10-04].";
+        assert!(lint_step_file_with_deps(held, &roots, Some(&snap)).is_clean());
+
+        for bad in [
+            "Vue lags [src: deps: npm/vue@2026-10-04].",
+            "React lags [src: deps: npm/react@2026-09-01].",
+            "React lags [src: deps: npm/react].",
+        ] {
+            let verdict = lint_step_file_with_deps(bad, &roots, Some(&snap));
+            assert_eq!(verdict.count(), 1, "{bad}");
+        }
+        assert_eq!(lint_step_file_with_deps(held, &roots, None).count(), 1);
+        // Outside an audit the marker stays honestly unchecked.
+        assert!(lint_step_file(held, &roots).is_clean());
+
+        std::fs::create_dir_all(tmp.path().join("docs")).unwrap();
+        std::fs::write(
+            tmp.path().join("docs/inconsistencies-tech-debt.md"),
+            "Vue [src: deps: npm/vue@2026-10-04].\n",
+        )
+        .unwrap();
+        let outcome = evaluate_enforce_gate(
+            true,
+            true,
+            "docs/inconsistencies-tech-debt.md",
+            tmp.path(),
+            1,
+            3,
+            Some(&snap),
+        );
+        match outcome {
+            EnforceGateOutcome::Retry {
+                feedback,
+                fabricated,
+            } => {
+                assert_eq!(fabricated, 1);
+                assert!(
+                    feedback.contains("not in the dependency watch dated 2026-10-04"),
+                    "{feedback}"
+                );
+            }
+            _ => panic!("an absent deps row must be retried"),
+        }
     }
 }

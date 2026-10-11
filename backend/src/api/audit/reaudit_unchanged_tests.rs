@@ -78,6 +78,7 @@ case "$prompt" in
       mkdir -p "$(dirname "$f")"
       touch "$f"
       sed -e 's/{{{{[A-Z0-9_]*_OUTCOME}}}}/scanned — nothing substantiable/g' \
+          -e 's/{{{{DEP_EVIDENCE}}}}/not verified: no source/g' \
           -e 's/{{{{[A-Z0-9_]*}}}}/verified in the fixture repository/g' "$f" > "$f.next"
       if cmp -s "$f" "$f.next"; then
         printf '\nChecked by the audit: scanned — nothing substantiable.\n' >> "$f.next"

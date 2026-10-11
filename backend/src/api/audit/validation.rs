@@ -587,6 +587,12 @@ fn validate_dimension_coverage(content: &str) -> Result<(), String> {
                 dim
             ));
         }
+        if *dim == "Dependencies" && !o.starts_with("n/a") && !states_version_source(row) {
+            return Err(
+                "dimension `Dependencies`: evidence must state `source used: …` or `not verified: no source`"
+                    .to_string(),
+            );
+        }
         if o.starts_with("n/a") {
             // Reason after `N/A:` (or, failing that, the evidence cell) must be non-trivial.
             let reason = outcome
@@ -609,6 +615,13 @@ fn validate_dimension_coverage(content: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// KT-1000 — a Dependencies verdict names where its versions came from. A
+/// row Kronn's TD-index resync rewrote keeps the TDs, which carry the source.
+fn states_version_source(row: &str) -> bool {
+    let row = row.to_lowercase();
+    row.contains("source used:") || row.contains("not verified") || row.contains("kronn resync:")
 }
 
 /// Resolve the source-of-truth template path for a project-relative
@@ -728,7 +741,11 @@ mod tests {
             "## Dimension coverage\n\n| Dimension | Outcome | Evidence / reason |\n|---|---|---|\n",
         );
         for (dim, outcome, ev) in [
-            ("Dependencies", "findings", "TD-x"),
+            (
+                "Dependencies",
+                "findings",
+                "TD-x; source used: dependency watch dated 2026-10-04",
+            ),
             ("Security", "findings", "TD-y"),
             (
                 "Code quality",
@@ -933,6 +950,38 @@ mod tests {
             validate_dimension_coverage(&m).is_ok(),
             "embellished labels must still match"
         );
+    }
+
+    /// KT-1000 — a Dependencies verdict without its version source is refused;
+    /// N/A (no manifest) needs none.
+    #[test]
+    fn coverage_matrix_dependencies_row_must_state_its_version_source() {
+        let row =
+            "| Dependencies | findings | TD-x; source used: dependency watch dated 2026-10-04 |";
+        let silent = valid_coverage_matrix().replace(row, "| Dependencies | findings | TD-x |");
+        let err = validate_dimension_coverage(&silent).unwrap_err();
+        assert!(
+            err.contains("Dependencies") && err.contains("source used"),
+            "{err}"
+        );
+
+        let unverified = valid_coverage_matrix().replace(
+            row,
+            "| Dependencies | scanned — nothing substantiable | Not verified: no source for latest versions |",
+        );
+        assert!(validate_dimension_coverage(&unverified).is_ok());
+
+        let not_applicable = valid_coverage_matrix().replace(
+            row,
+            "| Dependencies | N/A: no package manifest | ls: no lockfile |",
+        );
+        assert!(validate_dimension_coverage(&not_applicable).is_ok());
+
+        let resynced = valid_coverage_matrix().replace(
+            row,
+            "| Dependencies | findings | Kronn resync: 1 active TD on file after the dimension audits: TD-1 (previous outcome: scanned) |",
+        );
+        assert!(validate_dimension_coverage(&resynced).is_ok());
     }
 
     #[test]

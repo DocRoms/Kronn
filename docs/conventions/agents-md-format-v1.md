@@ -101,6 +101,7 @@ names, versions, behaviour). The grammar:
 | `user` | **HIGH** | A traceable human declaration, e.g. `[src: user:romuald:2026-05-25: disc-123]`. Not machine-verifiable → `unchecked`, but a legitimate trust tier. |
 | `commit` | HIGH if recent | A commit hash. `unchecked`. |
 | `api` | HIGH if recent | A captured API response (`api_call_log#…`). `unchecked`. |
+| `deps` | HIGH, dated | A dependency-watch row: `deps: <manager>/<package>@<YYYY-MM-DD>`. An audit checks it against the snapshot it injected (absent = fabricated); elsewhere `unchecked`. |
 | `code-comment` | **LOW** ⚠️ | A code comment is **not authoritative** — a hint to verify, never a fact. |
 | `inferred` | **SOFT** | A derived guess, not a stated fact. |
 | `hypothesis` | **VERY SOFT** | Unverified, confirm before acting. |

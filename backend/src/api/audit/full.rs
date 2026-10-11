@@ -916,6 +916,13 @@ pub async fn full_audit(
             );
         }
 
+        // KT-1000 — read after the MCP swap: the source cascade depends on
+        // the servers the agent will actually be handed.
+        let version_ctx = super::version_context::VersionContext::load(
+            &db, &project_id, &project_path, &project_path_str, &agent_launcher, &agent_type,
+        ).await;
+        tracing::info!("audit {}: version source {:?}", project_id, version_ctx.source);
+
         // ── Phase 2: Run the assembled audit chain ──
         // Remove bootstrap prompt
         let index_file = project_path.join("docs/AGENTS.md");
@@ -1246,6 +1253,9 @@ pub async fn full_audit(
                 // Shared with the partial pipeline (Codex lot-3 #4): the
                 // detector signals and the known-debt digests travel together.
                 full_prompt.push_str(&super::step8_context_block(&detector_signals, &prior_td_digests));
+            }
+            if let Some(block) = version_ctx.block_for(analysis_step.target_file) {
+                full_prompt.push_str(&block);
             }
             // 0.8.3 (#272) — pre-existing user docs are migrated to
             // docs/legacy/ before the audit runs. Tell the agent to
@@ -1937,7 +1947,7 @@ pub async fn full_audit(
                         // lot-3 #8) — only the SSE mapping lives here.
                         match super::anti_hallu_enforce::evaluate_enforce_gate(
                             enforce_mode, success, analysis_step.target_file,
-                            &project_path, attempt, max_attempts,
+                            &project_path, attempt, max_attempts, version_ctx.snapshot.as_ref(),
                         ) {
                             EnforceGateOutcome::NotApplicable => {}
                             EnforceGateOutcome::Unreadable(reason) => {

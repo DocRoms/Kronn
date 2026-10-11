@@ -29,6 +29,7 @@ pub mod revalidate;
 pub mod run;
 pub mod validate;
 pub mod validation;
+mod version_context;
 
 pub use accept::*;
 pub use briefing::*;
@@ -509,7 +510,7 @@ For EVERY dimension, record exactly ONE outcome in the `## Dimension coverage` m
   - **N/A: <verifiable reason>** — the dimension cannot apply, with a reason a human can CHECK (\"no Dockerfile\", \"no DB/ORM layer\", \"no web surface\", \"no CI config\") — NEVER a vague \"not relevant\".\n\
 A dimension absent from the matrix, or marked with an unverifiable reason, = **incomplete audit**: a cheap structural validator FAILS this step (it gets re-run) on a missing / short / ill-formed matrix. The matrix **records** breadth + makes it reviewable (it is a declaration, not proof the scan happened — the detectors will anchor that); the TDs carry the depth.\n\n\
 The 10 dimensions:\n\
-- **Dependencies**: EOL/deprecated runtimes, frameworks, packages, or versions significantly behind stable.\n\
+- **Dependencies**: EOL/deprecated runtimes, frameworks, packages, or versions significantly behind stable — judged ONLY from the dated sources of the `Technologies and standards` block below, never from memory; the row's evidence states `source used: …` or `not verified: no source`.\n\
 - **Security**: hardcoded secrets (regex: API keys, tokens, OAuth client_secret), missing auth checks, injection vectors (SQL/XSS/command), insecure defaults, exposed debug endpoints, default credentials.\n\
 - **Code quality**: functions >50 lines, god classes, SRP violations, dead code, error swallowing (empty catch / let _ = / unwrap_or_default on Result).\n\
 - **Scalability**: N+1 queries, unbounded loops, missing pagination, memory leaks, missing indexes on hot queries.\n\
@@ -548,7 +549,7 @@ This rule is critical: the user wiped TDs once to evaluate a fresh audit, but mo
 \n\
 Fill `docs/inconsistencies-tech-debt.md` — replace ALL `{{PLACEHOLDERS}}` and `<!-- ... -->` comments. For every finding:\n\
 \n\
-1. **Outdated prerequisites table** in the index file: flag EOL/deprecated/behind-stable runtimes, frameworks, packages with the actual reality column.\n\
+1. **Outdated prerequisites table** in the index file: flag EOL/deprecated/behind-stable runtimes, frameworks, packages with the actual reality column and its dated source citation (or `not verified: no source`).\n\
 \n\
 2. **For each issue**: (a) create or update the TD detail file at `docs/tech-debt/TD-<date>-<slug>.md` first, then (b) add a one-line entry to the `Current list` table in the index. Do both or neither. For UPDATES of existing TDs (per § C), keep the original file name and date.\n\
 \n\
@@ -753,6 +754,7 @@ If NOT satisfied, emit a TD finding. These do NOT count against any cap.\n\n\
 **Dependencies & supply chain:**\n\
 - Lockfile present and tracked (`package-lock.json`, `pnpm-lock.yaml`, `composer.lock`, `Cargo.lock` for bins, `poetry.lock`, `Gemfile.lock`).\n\
 - Dependency risk signals you can VERIFY in the repo: lockfile pins to versions the project's own tooling flags (`cargo audit`/`npm audit`/`composer audit` output or config if present), deps several majors behind their manifest constraint, or abandoned forks. Do NOT assert specific CVEs from memory — model knowledge is stale; if no tooling output exists, record `Inferred` and suggest wiring an audit tool instead.\n\
+- Version gaps and EOL runtimes: judge them only from the `Technologies and standards` block below and cite its dated rows; otherwise write `not verified: no source`.\n\
 - CI runs a dependency audit step (`npm audit`, `pnpm audit`, `cargo audit`, `composer audit`, `pip-audit`, etc.) or has a Dependabot/Renovate config.\n\
 - No `npm install` / `pip install` of git URLs with `master`/`main` branches (must be tagged or pinned commit).\n\n\
 \

@@ -8347,7 +8347,7 @@ export type SourceFileNode = { path: string, name: string, is_dir: boolean, chil
 /**
  * What kind of source a `[src: …]` marker points at.
  */
-export type SourceKind = "file" | "url" | "user" | "commit" | "api" | "code_comment" | "inferred" | "hypothesis" | "training_data" | "other";
+export type SourceKind = "file" | "url" | "user" | "commit" | "api" | "deps" | "code_comment" | "inferred" | "hypothesis" | "training_data" | "other";
 
 export type SourceOrigin = { kind: SourceOriginKind,
 /**
