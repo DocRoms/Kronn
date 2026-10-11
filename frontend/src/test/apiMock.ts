@@ -247,6 +247,8 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       templateMergeStart: resolve(null),
       templateMergeAccept: resolve(null),
       templateMergeDiscard: resolve(undefined),
+      templateReinstallPlan: resolve(null),
+      templateReinstall: resolve(null),
       auditInfo: resolve({ files: [], todos: [] }),
       contextAudit: resolve({
         project_id: '',

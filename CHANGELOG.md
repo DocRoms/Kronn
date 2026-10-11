@@ -62,6 +62,20 @@ Release notes for 0.9.3 and earlier are available in the
   "not verified". A `docs/project.md` without its generated marker is never
   rewritten.
 
+- « Recréer les fichiers du template » (KT-1166): a damaged or missing AI-doc
+  template file can be reinstalled on purpose. The project card lists the files
+  that would be replaced and asks for confirmation; every replaced file is first
+  copied to `.kronn/audit/template-backups/<timestamp>/`, then the result names
+  what was replaced and where the originals are. Only the template's own files
+  are written and `owner="human"` sections are kept as they are. Files still
+  template-like or broken (empty, unfilled `{{placeholders}}`, unpaired section
+  markers) are repaired by default; files holding real audit content are listed
+  apart with a warning, unchecked, and replaced only when ticked (the POST takes
+  the explicit path list and refuses any path the plan does not offer). The action is
+  refused while an audit holds the project's lease. It is a human action: the
+  two routes (`GET .../template-reinstall/plan`, `POST .../template-reinstall`)
+  are off the bridge-token list and refuse a bridge caller. A failure keeps
+  « Reprendre ».
 - After an audit with failed steps, a single step can be retried alone, or a
   human can accept it as it stands (KT-1131). On each failed line of the
   timeline, « Relancer cette étape » resumes the interrupted run with

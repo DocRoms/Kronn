@@ -6997,9 +6997,36 @@ restored_from_files: number, };
 
 export type RefreshModelCatalogRequest = { runtime_target_id: string, agent_type: AgentType, force?: boolean, };
 
+export type ReinstallAction = "create" | "replace" | "unchanged";
+
+export type ReinstallFile = {
+/**
+ * Project-relative path.
+ */
+path: string, action: ReinstallAction,
+/**
+ * Set for `replace` only.
+ */
+kind: ReinstallKind | null,
+/**
+ * Human-owned sections of the current file that the reinstall keeps.
+ */
+kept_human_sections: Array<string>, };
+
+/**
+ * Why an existing file differs from the template.
+ */
+export type ReinstallKind = "damaged_or_template" | "filled";
+
 export type RemoteRepo = { name: string, full_name: string, clone_url: string, ssh_url: string, description: string | null, language: string | null, stargazers_count: number, updated_at: string, source: string, already_cloned: boolean, };
 
 export type RemovePlanningBlockerRequest = { actor?: PlanningActor, };
+
+export type ReplacedFile = { path: string,
+/**
+ * Project-relative path of the copy of the original.
+ */
+backup: string, };
 
 export type ReportTelemetryRequest = {
 /**
@@ -9053,6 +9080,29 @@ export type TemplateMergeView = { docs_dir: string, base: MergeBase, base_ref: s
  * Docs that only exist untracked in the checkout: a worktree cannot see them.
  */
 untracked_in_checkout: Array<string>, table_markdown: string, merge: TemplateMergeState, };
+
+export type TemplateReinstallPlan = { docs_dir: string, files: Array<ReinstallFile>,
+/**
+ * An audit holds the project's lease: the reinstall would be refused.
+ */
+audit_running: boolean, };
+
+export type TemplateReinstallReport = {
+/**
+ * Project-relative; `None` when nothing was replaced.
+ */
+backup_dir: string | null, replaced: Array<ReplacedFile>, created: Array<string>, unchanged: Array<string>,
+/**
+ * Differing files that were not selected, left as they are.
+ */
+skipped: Array<string>, kept_human_sections: Array<string>, };
+
+export type TemplateReinstallRequest = {
+/**
+ * Existing files to replace. `None`: the damaged ones only. Missing
+ * files are always created; a path the plan does not offer is refused.
+ */
+paths?: Array<string> | null, };
 
 export type TestApiCallRequest = {
 /**

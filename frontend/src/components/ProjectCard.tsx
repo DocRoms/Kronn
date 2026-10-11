@@ -11,6 +11,7 @@ import { unseenBasis } from '../lib/discussionUiUtils';
 import AuditRecapPanel from './AuditRecapPanel';
 import { AuditTimeline } from './AuditTimeline';
 import { TemplateMergeOfferSlot } from './TemplateMergePanel';
+import { TemplateReinstall } from './TemplateReinstall';
 import { useTemplateMergeOffer } from '../hooks/useTemplateMergeOffer';
 import type { AuditKind } from '../types/AuditKind';
 import { ProjectLinkedRepos } from './ProjectLinkedRepos';
@@ -2449,6 +2450,9 @@ export function ProjectCard({
                 )}
                 {!bootstrapInProgress && !auditActive && (
                   <TemplateMergeOfferSlot offer={templateMerge} projectId={proj.id} />
+                )}
+                {!bootstrapInProgress && !auditActive && proj.audit_status !== 'NoTemplate' && (
+                  <TemplateReinstall projectId={proj.id} />
                 )}
                 {!bootstrapInProgress && (
                   <AuditTimeline

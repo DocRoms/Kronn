@@ -1,7 +1,7 @@
 import type { AcceptAuditStepResponse, ArtifactBundle, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditRunCost, AuditStepInfo, AuditRecentActivity, AuditTokenBreakdown, EmbedOriginsChange } from '../types/generated';
 import type { BriefingProjectAnswers } from '../types/generated';
 import type { WorkerConnectivity } from '../types/generated';
-import type { MergeBase, TemplateMergeAccepted, TemplateMergeAcceptRequest, TemplateMergeRequest, TemplateMergeView } from '../types/generated';
+import type { TemplateReinstallRequest, TemplateReinstallPlan, TemplateReinstallReport, MergeBase, TemplateMergeAccepted, TemplateMergeAcceptRequest, TemplateMergeRequest, TemplateMergeView } from '../types/generated';
 import { readTextAttachmentPreview } from './textAttachmentPreview';
 import type {
   AssistantConversation,
@@ -1065,6 +1065,12 @@ export const projects = {
   /** Drop the merge worktree; the checkout is untouched. */
   templateMergeDiscard: (id: string) =>
     api<void>('DELETE', `/projects/${encodeURIComponent(id)}/template-merge`),
+  /** KT-1166 — what reinstalling the template files would replace (read-only). */
+  templateReinstallPlan: (id: string) =>
+    api<TemplateReinstallPlan>('GET', `/projects/${encodeURIComponent(id)}/template-reinstall/plan`),
+  /** Back up, then replace the template's own files; refused while an audit runs. */
+  templateReinstall: (id: string, paths: string[]) =>
+    api<TemplateReinstallReport>('POST', `/projects/${encodeURIComponent(id)}/template-reinstall`, { paths } satisfies TemplateReinstallRequest),
   clone: (req: CloneProjectRequest) => api<CloneProjectResponse>('POST', '/projects/clone', req),
   discoverRepos: (req?: DiscoverReposRequest) => api<DiscoverReposResponse>('POST', '/projects/discover-repos', req ?? { source_ids: [] }),
   installTemplate: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/install-template`),

@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 pub const STATE_DIR: &str = ".kronn/audit";
 pub const REPORT_FILE: &str = ".kronn/audit/document-optimization.json";
 pub const CITATION_ORIGINALS_DIR: &str = ".kronn/audit/citation-originals";
+const TEMPLATE_BACKUPS: &str = "template-backups";
 const LEGACY_REPORT_FILE: &str = "docs/.kronn-document-optimization.json";
 const LEGACY_CITATION_ORIGINALS_DIR: &str = "docs/.kronn-citation-originals";
 
@@ -54,6 +55,31 @@ pub fn state_dir(project: &Path) -> Result<PathBuf, String> {
         tracing::warn!("legacy audit files left in {}/docs: {e}", root.display());
     }
     Ok(dir)
+}
+
+/// A new, empty `template-backups/<stamp>` directory under the audit state:
+/// the originals a template reinstall is about to replace. A stamp already
+/// taken gets a numeric suffix, so one run never writes into another's folder.
+pub fn new_template_backup_dir(project: &Path, stamp: &str) -> Result<PathBuf, String> {
+    if stamp.is_empty() || !stamp.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err(format!("invalid backup stamp {stamp:?}"));
+    }
+    let parent = state_dir(project)?.join(TEMPLATE_BACKUPS);
+    ensure_real_dir(&parent)?;
+    for attempt in 0..100u32 {
+        let name = if attempt == 0 {
+            stamp.to_string()
+        } else {
+            format!("{stamp}-{attempt}")
+        };
+        let dir = parent.join(name);
+        match fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("create {}: {e}", dir.display())),
+        }
+    }
+    Err("no free template backup folder".into())
 }
 
 /// Content-addressed, create-new store: each distinct original is kept once.

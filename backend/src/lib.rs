@@ -1812,6 +1812,14 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             post(api::projects::install_template),
         )
         .route(
+            "/api/projects/{id}/template-reinstall/plan",
+            get(api::projects::template_reinstall::template_reinstall_plan),
+        )
+        .route(
+            "/api/projects/{id}/template-reinstall",
+            post(api::projects::template_reinstall::template_reinstall),
+        )
+        .route(
             "/api/projects/{id}/template-merge",
             post(api::projects::template_merge::template_merge_start)
                 .delete(api::projects::template_merge::template_merge_discard),

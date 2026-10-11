@@ -22,6 +22,7 @@ pub mod resources;
 pub mod skill_migration;
 pub mod template;
 pub mod template_merge;
+pub mod template_reinstall;
 pub mod used_skills;
 
 pub use anti_hallu_inject::*;
