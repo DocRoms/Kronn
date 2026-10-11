@@ -394,7 +394,8 @@ export function AuditTimeline(props: AuditTimelineProps) {
   // Per-step actions exist only on the run a resume continues.
   const stepActions = !auditActive && !!resumable && !leaseOrphaned;
   // No launch while the state it must start from is unknown or locked.
-  const launchBlocked = leaseOrphaned || !!props.resumableUnknown;
+  // KT-1192 — no audit starts without a briefing; the backend refuses it too.
+  const launchBlocked = leaseOrphaned || !!props.resumableUnknown || !props.briefingDone;
   // The latest run is interrupted: validating waits for its failed steps.
   const runPending = !!resumable && !auditActive;
   const validationRunning = props.validationInProgress && !auditActive;
@@ -448,7 +449,7 @@ export function AuditTimeline(props: AuditTimelineProps) {
         <ol className="audit-tl-phases" aria-label={t('auditTimeline.ariaPhases')}>
           <Phase
             status={props.briefingDone ? 'done' : 'pending'}
-            eyebrow={t('auditTimeline.phase.optional', 0)}
+            eyebrow={t('auditTimeline.phase.n', 0)}
             title={t('auditTimeline.briefing.title')}
             tag={props.briefingDone ? t('auditTimeline.status.saved') : t('auditTimeline.status.toFill')}
           >
@@ -487,7 +488,7 @@ export function AuditTimeline(props: AuditTimelineProps) {
               />
             ) : (
               <div className="audit-tl-row">
-                <p className="audit-tl-muted">{t('auditTimeline.briefing.intro')}</p>
+                <p className="audit-tl-muted" data-testid="audit-timeline-briefing-required">{t('auditTimeline.briefing.required')}</p>
                 <button
                   type="button"
                   className="audit-tl-btn audit-tl-btn-small"

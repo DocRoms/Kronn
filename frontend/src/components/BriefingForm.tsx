@@ -254,6 +254,30 @@ export function BriefingForm({
   const setPerson = (role: string, field: 'name' | 'contact', value: string) =>
     setProject(p => ({ ...p, people: p.people.map(x => (x.role === role ? { ...x, [field]: value } : x)) }));
 
+  // KT-1192 — one click: « Not provided » answers, the folder as shown.
+  const saveDefaults = async () => {
+    setSubmitting(true);
+    try {
+      const notProvided = 'Not provided';
+      await projectsApi.saveBriefing(projectId, {
+        purpose: notProvided,
+        team: notProvided,
+        maturity: notProvided,
+        dependencies: notProvided,
+        traps: notProvided,
+        additional: '',
+        ...(docsDir.trim() ? { docs_dir: docsDir.trim() } : {}),
+      });
+      toast(t('briefing.savedOnlyToast'), 'success');
+      onSaved(null);
+      onClose();
+    } catch (err) {
+      toast(String(err), 'error');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     // Q1-Q5 mandatory, mirror the backend validation so the user gets
@@ -349,6 +373,17 @@ export function BriefingForm({
           </button>
         </div>
       )}
+      <div className="briefing-form-defaults">
+        <button
+          type="button"
+          onClick={() => void saveDefaults()}
+          disabled={submitting || !docsDirLoaded}
+          data-testid="briefing-use-defaults"
+        >
+          {t('briefing.useDefaults')}
+        </button>
+        <span className="briefing-form-option-hint">{t('briefing.useDefaultsHint')}</span>
+      </div>
 
       <label>
         <span className="briefing-form-q">{t('briefing.q1Purpose')}</span>

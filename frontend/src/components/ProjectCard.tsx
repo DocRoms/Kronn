@@ -581,10 +581,9 @@ export function ProjectCard({
   // blocking the new "Définir le briefing" CTA. Same for validation
   // + bootstrap below.
   const briefingDisc = projDiscussions.find(d => isBriefingDisc(d.title) && !d.archived);
-  const briefingDone = proj.audit_status !== 'NoTemplate' && (
-    !!proj.briefing_notes ||
-    proj.audit_status === 'Audited' || proj.audit_status === 'Validated'
-  );
+  // KT-1192 — what the backend's gate checks: a saved briefing.
+  const briefingDone = !!proj.briefing_notes?.trim();
+  const briefingDefaults = !!proj.briefing_notes?.includes('kronn:briefing-defaults');
   const projMcps = mcpConfigs.filter(c => c.is_global || c.project_ids.includes(proj.id));
   const projWorkflows = workflows.filter(w => w.project_id === proj.id);
   const contextDrift = contextAudit?.drift;
@@ -1555,6 +1554,11 @@ export function ProjectCard({
                   }
                 </button>
               ) : null
+            )}
+            {briefingDefaults && (
+              <span className="dash-badge-briefing-defaults" data-testid="project-briefing-defaults">
+                <AlertTriangle size={9} /> {t('projects.briefingDefaultsBadge')}
+              </span>
             )}
             {!auditActive && (proj.tech_debt_count ?? 0) > 0 && (
               <button

@@ -259,4 +259,27 @@ describe('BriefingForm (0.8.5)', () => {
     await waitFor(() => expect(projectsApi.saveBriefing).toHaveBeenCalled());
     expect(vi.mocked(projectsApi.saveBriefing).mock.calls[0][1]).toMatchObject({ docs_dir: 'context' });
   });
+
+  it('saves default answers in one click (KT-1192)', async () => {
+    const onSaved = vi.fn();
+    wrap(
+      <BriefingForm
+        projectId="p-1"
+        onClose={() => {}}
+        onSaved={onSaved}
+        agent="ClaudeCode"
+        tier="reasoning"
+        review={false}
+        toast={() => {}}
+      />
+    );
+    const button = await screen.findByTestId('briefing-use-defaults');
+    await waitFor(() => expect(button).not.toBeDisabled());
+    fireEvent.click(button);
+    await waitFor(() => expect(projectsApi.saveBriefing).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(projectsApi.saveBriefing).mock.calls[0][1]).toMatchObject({
+      purpose: 'Not provided', traps: 'Not provided', docs_dir: 'docs',
+    });
+    await waitFor(() => expect(onSaved).toHaveBeenCalledWith(null));
+  });
 });

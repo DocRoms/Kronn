@@ -1884,7 +1884,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         .route(
             "/api/projects/{id}/partial-audit",
-            post(api::audit::partial_audit),
+            post(api::audit::briefing_cards::partial_audit_route),
         )
         .route(
             "/api/projects/{id}/revalidation",
@@ -1892,7 +1892,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         .route(
             "/api/projects/{id}/revalidate-audit",
-            post(api::audit::revalidate_audit),
+            post(api::audit::briefing_cards::revalidate_audit_route),
         )
         .route(
             "/api/projects/{id}/validate-audit",
@@ -1904,7 +1904,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         .route(
             "/api/projects/{id}/full-audit",
-            post(api::audit::full_audit),
+            post(api::audit::briefing_cards::full_audit_route),
         )
         .route(
             "/api/projects/{id}/cancel-audit",
@@ -2044,6 +2044,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/projects/{id}/briefing",
             get(api::audit::get_briefing).put(api::audit::set_briefing),
+        )
+        .route(
+            "/api/projects/{id}/briefing-status",
+            get(api::audit::briefing_cards::briefing_status),
         )
         .route(
             "/api/projects/{id}/briefing-defaults",

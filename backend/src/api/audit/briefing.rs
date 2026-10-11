@@ -492,45 +492,45 @@ pub async fn get_briefing_defaults(
 /// Record the folder the briefing chose. Stored as the project's override
 /// only when it differs from what the project resolves to without one, so a
 /// briefing that keeps the existing layout changes nothing.
-async fn apply_briefing_docs_dir(
-    state: &AppState,
+fn apply_briefing_docs_dir(
+    conn: &rusqlite::Connection,
     project: &Project,
     requested: &str,
 ) -> Result<(), BriefingSaveError> {
     use crate::core::docs_location;
     let root = crate::core::scanner::resolve_host_path(&project.path);
-    let requested = requested.to_string();
-    let checked = {
-        let root = root.clone();
-        tokio::task::spawn_blocking(move || {
-            let rel = docs_location::validate_for_project(&root, &requested)?;
-            let unconfigured = docs_location::resolve(&root, None).relative(&root);
-            Ok::<_, String>((unconfigured.as_deref() != Some(rel.as_str())).then_some(rel))
-        })
-        .await
-        .unwrap_or_else(|e| Err(format!("check failed: {e}")))
-    };
-    let stored = checked.map_err(BriefingSaveError::DocsDir)?;
-    let id = project.id.clone();
-    let value = stored.clone();
-    state
-        .db
-        .with_conn(move |conn| {
-            crate::db::projects::set_project_docs_dir(conn, &id, value.as_deref())
-        })
-        .await
+    let rel = docs_location::validate_for_project(&root, requested)
+        .map_err(BriefingSaveError::DocsDir)?;
+    let unconfigured = docs_location::resolve(&root, None).relative(&root);
+    let stored = (unconfigured.as_deref() != Some(rel.as_str())).then_some(rel);
+    crate::db::projects::set_project_docs_dir(conn, &project.id, stored.as_deref())
         .map_err(|e| BriefingSaveError::Internal(format!("DB error: {e}")))?;
     docs_location::set_project_override(&project.path, stored.as_deref());
     Ok(())
 }
 
-/// Save the briefing answers: validation, docs folder, `briefing.md` and the
-/// DB notes. Shared by the form and the briefing cards (KT-1192).
-pub(crate) async fn save_briefing_answers(
-    state: &AppState,
-    id: &str,
-    form: BriefingFormRequest,
-) -> Result<(), BriefingSaveError> {
+/// Marks a briefing Kronn wrote with default answers for an unattended
+/// launch: shown on the project card until a human completes it.
+pub(crate) const DEFAULTS_MARKER: &str = "<!-- kronn:briefing-defaults -->";
+
+/// The answers of a briefing written for an unattended launch: nothing is
+/// invented, every field says it is still to be completed.
+pub(crate) fn default_answers() -> BriefingFormRequest {
+    let todo = "Not provided — default answer, to be completed by a human.".to_string();
+    BriefingFormRequest {
+        purpose: todo.clone(),
+        team: todo.clone(),
+        maturity: todo.clone(),
+        dependencies: todo.clone(),
+        traps: todo,
+        additional: String::new(),
+        ..BriefingFormRequest::default()
+    }
+}
+
+/// The mandatory answers and the cross-audit agents, checked before anything
+/// is read or written.
+fn check_answers(form: &BriefingFormRequest) -> Result<(), BriefingSaveError> {
     // 1. Validate: Q1-Q5 are mandatory (matches the conversational flow).
     if form.purpose.trim().is_empty()
         || form.team.trim().is_empty()
@@ -558,6 +558,20 @@ pub(crate) async fn save_briefing_answers(
             ));
         }
     }
+    Ok(())
+}
+
+/// Save the briefing answers: validation, docs folder, `briefing.md` and the
+/// DB notes, in one connection. Shared by the form, the briefing cards and
+/// the unattended defaults (KT-1192).
+pub(crate) fn save_briefing_in(
+    conn: &rusqlite::Connection,
+    project: &Project,
+    form: &BriefingFormRequest,
+    defaults: bool,
+    docs_section: Option<&str>,
+) -> Result<(), BriefingSaveError> {
+    check_answers(form)?;
 
     let project_facts = match form
         .project
@@ -583,38 +597,17 @@ pub(crate) async fn save_briefing_answers(
         .as_ref()
         .and_then(super::briefing_rules::render_section);
 
-    // 2. Look up project for the on-disk path.
-    let pid = id.to_string();
-    let project = state
-        .db
-        .with_conn(move |conn| crate::db::projects::get_project(conn, &pid))
-        .await
-        .ok()
-        .flatten()
-        .ok_or(BriefingSaveError::NotFound)?;
-
-    // A location outside the repository, missing or contradicting another
-    // source of truth is refused before anything is written.
-    let project_path = crate::core::scanner::resolve_host_path(&project.path);
-    let docs_section = match form.existing_docs.as_ref() {
-        None => None,
-        Some(docs) => super::briefing_docs::normalize_with_dates(&project_path, docs)
-            .await
-            .map_err(BriefingSaveError::ExistingDocs)
-            .map(|docs| super::briefing_docs::render_section(&docs))?,
-    };
-
-    // 3. The docs folder first: `briefing.md` is written into it.
+    // 2. The docs folder first: `briefing.md` is written into it.
     if let Some(dir) = form
         .docs_dir
         .as_deref()
         .map(str::trim)
         .filter(|d| !d.is_empty())
     {
-        apply_briefing_docs_dir(state, &project, dir).await?;
+        apply_briefing_docs_dir(conn, project, dir)?;
     }
 
-    // 4. Format the briefing.md body — same shape as
+    // 3. Format the briefing.md body — same shape as
     // `build_briefing_prompt`'s STEP 2 instructions (EN spelling
     // because that's the canonical format the audit reads).
     let trap_lines = form.traps.trim();
@@ -645,36 +638,89 @@ pub(crate) async fn save_briefing_answers(
         traps_rendered,
         additional_rendered,
     );
-    for section in [project_facts, docs_section].into_iter().flatten() {
+    if defaults {
+        body = body.replacen(
+            "> Auto-generated by Kronn briefing form (no AI call). Source: user answers.\n",
+            &format!(
+                "{DEFAULTS_MARKER}\n> Default answers written by Kronn for an unattended launch: \
+                 to be completed by a human.\n"
+            ),
+            1,
+        );
+    }
+    for section in [project_facts.as_deref(), docs_section].into_iter().flatten() {
         body.push('\n');
-        body.push_str(&section);
+        body.push_str(section);
     }
     let body = with_all_kronn_options(body, form.td_to_tasks, &form.cross_audit_agents);
 
-    // 5. Write `briefing.md` on disk + persist briefing_notes in DB.
-    // The on-disk file is what the audit reads at Phase 1; the DB
-    // column is what the ProjectCard / API surfaces back to the UI.
-    // Pre-bootstrap projects have no docs folder yet: the DB only, and the
-    // audit's Phase 1 install picks it up via `resolve_briefing_notes`.
+    // 4. DB notes, then `briefing.md` on disk. Pre-bootstrap projects have no
+    // docs folder yet: the DB only, and the audit's Phase 1 install picks it
+    // up via `resolve_briefing_notes`.
+    match crate::db::projects::update_project_briefing_notes(conn, &project.id, Some(&body)) {
+        Ok(true) => {}
+        Ok(false) => return Err(BriefingSaveError::NotFound),
+        Err(e) => return Err(BriefingSaveError::Internal(format!("DB error: {e}"))),
+    }
+    let project_path = crate::core::scanner::resolve_host_path(&project.path);
     let docs_dir = crate::core::scanner::detect_docs_dir(&project_path);
     if docs_dir.is_dir() {
         let target = docs_dir.join("briefing.md");
+        crate::core::fs_guard::assert_contained_no_symlink(&project_path, &target)
+            .map_err(BriefingSaveError::DocsDir)?;
         std::fs::write(&target, &body).map_err(|e| {
             BriefingSaveError::Internal(format!("Failed to write {}: {}", target.display(), e))
         })?;
     }
+    Ok(())
+}
+
+/// `save_briefing_in` for a project id, on the database's connection.
+pub(crate) async fn save_briefing_answers(
+    state: &AppState,
+    id: &str,
+    form: BriefingFormRequest,
+) -> Result<(), BriefingSaveError> {
+    save_briefing_with(state, id, form, false).await
+}
+
+pub(crate) async fn save_briefing_with(
+    state: &AppState,
+    id: &str,
+    form: BriefingFormRequest,
+    defaults: bool,
+) -> Result<(), BriefingSaveError> {
+    check_answers(&form)?;
+    // The documentation locations are dated with `git log` (KT-999): checked
+    // here, off the connection, and refused before anything is written.
+    let docs_section = match form.existing_docs.as_ref() {
+        None => None,
+        Some(docs) => {
+            let lookup = id.to_string();
+            let project = state
+                .db
+                .with_read_conn(move |conn| crate::db::projects::get_project(conn, &lookup))
+                .await
+                .map_err(|e| BriefingSaveError::Internal(format!("DB error: {e}")))?
+                .ok_or(BriefingSaveError::NotFound)?;
+            let project_path = crate::core::scanner::resolve_host_path(&project.path);
+            let docs = super::briefing_docs::normalize_with_dates(&project_path, docs)
+                .await
+                .map_err(BriefingSaveError::ExistingDocs)?;
+            super::briefing_docs::render_section(&docs)
+        }
+    };
     let id = id.to_string();
-    match state
+    state
         .db
         .with_conn(move |conn| {
-            crate::db::projects::update_project_briefing_notes(conn, &id, Some(&body))
+            let Some(project) = crate::db::projects::get_project(conn, &id)? else {
+                return Ok(Err(BriefingSaveError::NotFound));
+            };
+            Ok(save_briefing_in(conn, &project, &form, defaults, docs_section.as_deref()))
         })
         .await
-    {
-        Ok(true) => Ok(()),
-        Ok(false) => Err(BriefingSaveError::NotFound),
-        Err(e) => Err(BriefingSaveError::Internal(format!("DB error: {}", e))),
-    }
+        .unwrap_or_else(|e| Err(BriefingSaveError::Internal(format!("DB error: {e}"))))
 }
 
 pub async fn save_briefing_form(

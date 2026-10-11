@@ -234,6 +234,15 @@ Release notes for 0.9.3 and earlier are available in the
   it sets the project's folder through the same containment check (400 on
   refusal); the default from Settings now only pre-fills this field and
   never applies to a project by itself.
+- No audit starts without a briefing (KT-1192): Full, partial, sub-audit and
+  revalidation launches answer `error_code: briefing_required`. In the UI
+  the briefing step is required and its form gets a one-click « Utiliser
+  les valeurs par défaut ». An MCP launch (`audit_launch`, `audit_prepare`)
+  receives the briefing as ready-to-post `kronn-question` cards in the
+  discussion's language; once every card is answered in that discussion,
+  Kronn saves the briefing through the form's validation. A launch with no
+  discussion (a workflow run) gets default answers, flagged « valeurs par
+  défaut — à compléter » on the project card.
 - Audit versions and standards are judged from dated sources (KT-1000). The
   tech-debt step and the security pass get a « Technologies and standards »
   block: the project's stored dependency watch (version in place, latest,

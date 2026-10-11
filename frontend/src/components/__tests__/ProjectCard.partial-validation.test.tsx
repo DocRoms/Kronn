@@ -35,7 +35,7 @@ const PROJECT: Project = {
   token_override: null,
   ai_config: { detected: false, configs: [] },
   audit_status: 'Audited',
-  ai_todo_count: 0, tech_debt_count: 3, needs_docs_migration: false, path_exists: true,
+  briefing_notes: '# Project Briefing', ai_todo_count: 0, tech_debt_count: 3, needs_docs_migration: false, path_exists: true,
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',
 };
@@ -204,9 +204,10 @@ describe('ProjectCard — full audit step_error visibility', () => {
       agents: [AGENT, CODEX_AGENT],
     });
     const trackerPrerequisite = screen.getByTestId('audit-tracker-prerequisite');
-    const briefingButton = screen.getByTestId('audit-timeline-briefing-open');
-    expect(trackerPrerequisite.compareDocumentPosition(briefingButton))
-      .toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    // The briefing is saved (KT-1192 gate): the prerequisite precedes the launch.
+    const launchButton = screen.getByTestId('audit-timeline-launch');
+    expect(trackerPrerequisite.compareDocumentPosition(launchButton) & Node.DOCUMENT_POSITION_FOLLOWING)
+      .toBeTruthy();
     expect(container.querySelector('select')).toBeNull();
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^Codex/ })); });
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: /disc\.tier\.economy/ })); });

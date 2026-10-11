@@ -45,7 +45,7 @@ function props(over: Partial<AuditTimelineProps> = {}): AuditTimelineProps {
     projectId: 'p1', auditStatus: 'TemplateInstalled', techDebtCount: 0,
     agents: [agent('ClaudeCode', 'Claude Code'), agent('LiteLlm', 'LiteLLM'), agent('Ollama', 'Ollama')],
     selectedAgent: 'ClaudeCode', selectedTier: 'reasoning', modelTiers: null, selectedConnectionId: null, onSelect: vi.fn(),
-    briefingDone: false, onBriefingSaved: vi.fn(), auditActive: false, liveStep: 0, liveTotal: 0,
+    briefingDone: true, onBriefingSaved: vi.fn(), auditActive: false, liveStep: 0, liveTotal: 0,
     liveFile: '', liveElapsed: null, liveTool: null, liveStartedAt: null, liveToolCalls: null, liveStepTokens: null,
     liveTotalTokens: null, onResumeBriefingDiscussion: null, onCancel: vi.fn(), resumable: null,
     onLaunch: vi.fn(), validationInProgress: false, onValidate: vi.fn(),
@@ -55,6 +55,16 @@ function props(over: Partial<AuditTimelineProps> = {}): AuditTimelineProps {
 }
 
 describe('AuditTimeline', () => {
+  it('refuses to launch without a briefing and says so (KT-1192)', () => {
+    const onLaunch = vi.fn();
+    wrap(<AuditTimeline {...props({ briefingDone: false, onLaunch })} />);
+    expect(screen.getByTestId('audit-timeline-briefing-required')).toBeInTheDocument();
+    const launch = screen.getByTestId('audit-timeline-launch');
+    expect(launch).toBeDisabled();
+    fireEvent.click(launch);
+    expect(onLaunch).not.toHaveBeenCalled();
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     try { localStorage.clear(); } catch { /* jsdom */ }
@@ -184,6 +194,7 @@ describe('AuditTimeline', () => {
       reasoning_model: 'or/reasoning', created_at: '', updated_at: '',
     }] as never);
     const p = props({
+      briefingDone: false,
       auditActive: true, liveStep: 1, liveTotal: 16, liveFile: 'docs/AGENTS.md',
       liveTool: 'Read', liveToolCalls: 7,
       selectedAgent: 'ClaudeCode', selectedTier: 'default',
@@ -471,7 +482,7 @@ describe('AuditTimeline', () => {
   });
 
   it('saves the briefing without creating a discussion', async () => {
-    const p = props();
+    const p = props({ briefingDone: false });
     wrap(<AuditTimeline {...p} />);
     fireEvent.click(screen.getByTestId('audit-timeline-briefing-open'));
     const fields = document.querySelectorAll('.briefing-form textarea');

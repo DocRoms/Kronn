@@ -1081,6 +1081,22 @@ fn answer_inner(
         text.as_deref().unwrap_or("")
     );
 
+    // KT-1192 — a briefing card: saved with the others once all are answered.
+    if let Some(task_ref) = question
+        .task_ref
+        .as_deref()
+        .filter(|r| r.starts_with(crate::api::audit::briefing_cards::TASK_REF_PREFIX))
+    {
+        crate::api::audit::briefing_cards::on_card_answered(
+            conn,
+            discussion_id,
+            task_ref,
+            &question,
+            selected.first().map(String::as_str),
+            text.as_deref(),
+        )
+        .map_err(AnswerError::Invalid)?;
+    }
     let audit_resolutions = if let Some(td_id) = question
         .task_ref
         .as_deref()

@@ -17,6 +17,7 @@ mod agent_launch;
 pub mod anti_hallu_enforce;
 pub mod anti_hallu_step;
 pub mod briefing;
+pub mod briefing_cards;
 pub(crate) mod briefing_docs;
 pub(crate) mod briefing_load;
 pub(crate) mod briefing_rules;
