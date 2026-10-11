@@ -16,9 +16,11 @@ import { useEffect, useState } from 'react';
 import { useT } from '../lib/I18nContext';
 import { projects as projectsApi } from '../lib/api';
 import { Save, X, Loader2 } from 'lucide-react';
-import type { AgentType, BriefingProjectAnswers, CrossAuditEstimate, ModelTier } from '../types/generated';
+import type { AgentType, BriefingDocLocation, BriefingProjectAnswers, CrossAuditEstimate, LinkedRepo, ModelTier } from '../types/generated';
 import { AGENT_LABELS } from '../lib/constants';
 import { formatUsd } from '../lib/audit-cost';
+import { BriefingExistingDocs } from './BriefingExistingDocs';
+import { ProjectLinkedRepos } from './ProjectLinkedRepos';
 import {
   BRIEFING_ENVIRONMENTS,
   BRIEFING_PROJECT_CARDS,
@@ -64,9 +66,15 @@ interface BriefingFormProps {
   /** Toast emitter — same shape as the rest of the dashboard. The
    * required (non-optional) kind matches Dashboard's stricter signature. */
   toast: (msg: string, kind: 'success' | 'error' | 'info' | 'warning') => void;
+  /** KT-999 — the project's linked repos; the section shows when given. */
+  linkedRepos?: LinkedRepo[];
+  /** Refetch the project after the linked repos changed. */
+  onLinkedReposChange?: () => void;
 }
 
-export function BriefingForm({ projectId, onClose, onSaved, agent, tier, review = true, toast }: BriefingFormProps) {
+export function BriefingForm({
+  projectId, onClose, onSaved, agent, tier, review = true, toast, linkedRepos, onLinkedReposChange,
+}: BriefingFormProps) {
   const { t, locale } = useT();
   const [form, setForm] = useState({
     purpose: '',
@@ -114,6 +122,7 @@ export function BriefingForm({ projectId, onClose, onSaved, agent, tier, review 
   };
   const [submitting, setSubmitting] = useState(false);
   const [project, setProject] = useState<BriefingProjectAnswers>(emptyProjectAnswers);
+  const [docs, setDocs] = useState<BriefingDocLocation[]>([]);
 
   const update = (key: keyof typeof form, value: string) => setForm(f => ({ ...f, [key]: value }));
   const choose = (key: BriefingChoiceCard['key'], id: string) =>
@@ -164,7 +173,13 @@ export function BriefingForm({ projectId, onClose, onSaved, agent, tier, review 
         forge_repo: project.forge === 'unknown' ? '' : project.forge_repo.trim(),
         people: project.people.filter(p => p.name.trim() || p.contact.trim()),
       };
-      await projectsApi.saveBriefing(projectId, { ...form, project: projectAnswers, td_to_tasks: tdToTasks, cross_audit_agents: crossAudit ? crossAgents : [] });
+      await projectsApi.saveBriefing(projectId, {
+        ...form,
+        project: projectAnswers,
+        td_to_tasks: tdToTasks,
+        existing_docs: { locations: docs },
+        cross_audit_agents: crossAudit ? crossAgents : [],
+      });
       if (!review) {
         toast(t('briefing.savedOnlyToast'), 'success');
         onSaved(null);
@@ -397,6 +412,21 @@ export function BriefingForm({ projectId, onClose, onSaved, agent, tier, review 
           <p className="briefing-form-intro">{t('briefing.project.peoplePrivacy')}</p>
         </fieldset>
       </section>
+
+      <BriefingExistingDocs projectId={projectId} onChange={setDocs} />
+
+      {linkedRepos && (
+        <section className="briefing-project" aria-labelledby="briefing-linked-title" data-testid="briefing-linked-repos">
+          <h4 id="briefing-linked-title" className="briefing-form-q">{t('briefing.linked.title')}</h4>
+          <p className="briefing-form-intro">{t('briefing.linked.intro')}</p>
+          <ProjectLinkedRepos
+            projectId={projectId}
+            currentRepos={linkedRepos}
+            onUpdate={onLinkedReposChange ?? (() => {})}
+            inlineSuggestions
+          />
+        </section>
+      )}
 
       <label className="briefing-form-option">
         <input

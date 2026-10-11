@@ -2104,3 +2104,102 @@ pub struct BriefingProjectAnswers {
     pub environments: Vec<BriefingEnvironment>,
     pub people: Vec<BriefingPerson>,
 }
+
+// ─── Existing documentation (KT-999) ───────────────────────────────────────
+
+/// What a documentation location is, classified by Kronn from its path.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, TS,
+)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum BriefingDocKind {
+    Readme,
+    #[default]
+    Docs,
+    Wiki,
+    Adr,
+    Api,
+    Contributing,
+    Markdown,
+}
+
+/// The state the user gives a location. `Unknown` is an unanswered state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum BriefingDocState {
+    #[default]
+    Unknown,
+    Recent,
+    Old,
+    Obsolete,
+    Partial,
+    Reference,
+}
+
+/// One documentation location recorded in the briefing.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(default)]
+pub struct BriefingDocLocation {
+    /// Repository-relative, normalised, `/`-separated.
+    pub path: String,
+    /// Recomputed by Kronn on save; the client's value is ignored.
+    pub kind: BriefingDocKind,
+    pub state: BriefingDocState,
+    pub note: String,
+    /// At most one source of truth per kind.
+    pub source_of_truth: bool,
+    /// `YYYY-MM-DD` of the last commit touching the path, read by Kronn on save.
+    pub last_commit: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(default)]
+pub struct BriefingDocsAnswers {
+    pub locations: Vec<BriefingDocLocation>,
+}
+
+/// A location found in the repository, offered as a pre-filled answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct BriefingDetectedDoc {
+    pub path: String,
+    pub kind: BriefingDocKind,
+    pub is_dir: bool,
+    pub last_commit: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+pub struct CheckBriefingDocRequest {
+    pub path: String,
+}
+
+/// The context entry point Kronn found in a linked repository.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkedRepoAiDoc {
+    /// `docs/AGENTS.md`.
+    AgentsMd,
+    /// Legacy `ai/index.md`.
+    LegacyAiIndex,
+    ReadmeOnly,
+    NoAiDoc,
+    /// A URL: nothing on this machine to check.
+    Remote,
+    /// The local path does not exist.
+    Missing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LinkedRepoDocStatus {
+    pub id: String,
+    pub ai_doc: LinkedRepoAiDoc,
+    /// Path of the entry point relative to the repository, when there is one.
+    pub doc_path: Option<String>,
+}

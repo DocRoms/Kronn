@@ -19,7 +19,7 @@ import { AuditStepActivity } from './AuditStepActivity';
 import { activityCategoryLabel } from '../lib/activity-category';
 import type {
   AgentDetection, AgentType, AuditEntry, AuditRecentActivity, AuditTimelineValidation, AuditTokenBreakdown,
-  ModelTier, ModelTiersConfig,
+  LinkedRepo, ModelTier, ModelTiersConfig,
 } from '../types/generated';
 import './AuditTimeline.css';
 
@@ -65,6 +65,9 @@ export interface AuditTimelineProps {
   onSelect: (agent: AgentType, tier: ModelTier, connectionId: string | null) => void;
   briefingDone: boolean;
   onBriefingSaved: () => void;
+  /** KT-999 — linked repos edited from the briefing form. */
+  linkedRepos?: LinkedRepo[];
+  onLinkedReposChange?: () => void;
   auditActive: boolean;
   liveStep: number;
   liveTotal: number;
@@ -467,6 +470,8 @@ export function AuditTimeline(props: AuditTimelineProps) {
                 onClose={() => setBriefingOpen(false)}
                 onSaved={() => { setBriefingOpen(false); props.onBriefingSaved(); }}
                 toast={props.toast}
+                linkedRepos={props.linkedRepos}
+                onLinkedReposChange={props.onLinkedReposChange}
               />
             ) : (
               <div className="audit-tl-row">

@@ -13,6 +13,26 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- The briefing asks about existing documentation and linked projects
+  (KT-999). « Existing documentation? » lists the locations Kronn finds in
+  the repository (`README*`, `docs/`, `doc/`, `wiki/`, ADR folders,
+  `CONTRIBUTING*`, root `*.md`, OpenAPI/Swagger files, `apidoc/`; symlinks
+  skipped), pre-checked, each with the date of its last commit (`git log -1`,
+  literal pathspec, bounded and timed out). A path can be added by hand: it
+  must be relative, without `..`, existing, and stay inside the repository
+  once symlinks are resolved, otherwise the server answers 400. Each kept
+  location gets a closed state (recent, old, obsolete, partial, reference), a
+  one-line note and, at most one per kind, the source-of-truth mark (never on
+  an obsolete location). The answers go to a `## Existing documentation`
+  section of `docs/briefing.md` with a machine copy, put back as answered
+  after the AI review, before `## Kronn options`. The section stays out of
+  the audit and review prompts until a bench run shows a gain. The linked
+  repos drawer is available in the briefing with one-click suggestions whose
+  description is left to fill in.
+- Linked repos show which AI doc they really have (KT-999): « doc IA »
+  (`docs/AGENTS.md` or the legacy `ai/index.md`), « README seulement » or
+  « pas de doc IA ».
+
 - CI checks the `[src: file:]` citations of Kronn's own docs (KT-1059). A
   test (`cargo test docs_citations`, run by the backend suite) walks
   `docs/**/*.md` (except the historical `docs/releases/`) and `backend/docs/`
@@ -268,6 +288,12 @@ Release notes for 0.9.3 and earlier are available in the
   centred until the rows above settle and stops on a wheel or touch. The
   asset inventory's « go to message » and the in-room search's
   previous/next had the same one-shot scroll and use the same pin.
+- The linked-repos block of audit prompts and `docs/linked-repos.md` no
+  longer claim that every Kronn-bootstrapped repo has a `docs/AGENTS.md`
+  (KT-999): each entry states the entry point Kronn found in that repo
+  (`docs/AGENTS.md`, legacy `ai/index.md`, README only, nothing, not checked
+  for a URL, or path not found).
+
 - Security: the citation verifier no longer marks a source outside the project
   `verified` (KT-1077). An absolute citation such as `[src: file: /etc/passwd:1]`
   used to pass on mere existence; it is now accepted only under a project root

@@ -223,6 +223,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       }),
       usedSkills: resolve([]),
       linkedReposCandidates: resolve([]),
+      linkedReposDocs: resolve([]),
       setLinkedRepos: resolve(true),
       dockerStatus: resolve({
         compose_present: false,
@@ -285,6 +286,8 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       startBriefing: resolve({ discussion_id: '' }),
       saveBriefing: resolve({}),
       crossAuditEstimate: resolve({ agents: 2, cross_checked_steps: ['docs/inconsistencies-security.md'], low_factor: 2, high_factor: 4, max_cross_checked: 30, estimated: true }),
+      briefingDocs: resolve([]),
+      checkBriefingDoc: resolve({ path: '', kind: 'docs', is_dir: true, last_commit: null }),
       convertTdTasks: resolve({ created: 0, already_linked: 0, skipped: 0, themes: [], items: [] }),
       listAiFiles: resolve([]),
       readAiFile: resolve({ path: '', content: '' }),

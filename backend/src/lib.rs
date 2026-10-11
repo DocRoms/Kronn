@@ -1996,6 +1996,20 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/projects/{id}/linked-repos/candidates",
             get(api::projects::linked_repos_candidates),
         )
+        // KT-999 — which AI doc each linked repo has, for the drawer badges.
+        .route(
+            "/api/projects/{id}/linked-repos/docs",
+            get(api::projects::linked_repos_docs),
+        )
+        // KT-999 — documentation locations for the briefing form.
+        .route(
+            "/api/projects/{id}/briefing/docs",
+            get(api::audit::detect_briefing_docs),
+        )
+        .route(
+            "/api/projects/{id}/briefing/docs/check",
+            post(api::audit::check_briefing_doc),
+        )
         .route(
             "/api/projects/{id}/briefing",
             get(api::audit::get_briefing).put(api::audit::set_briefing),

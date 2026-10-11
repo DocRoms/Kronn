@@ -2117,6 +2117,69 @@ html[data-density="large"] .dash-main {
   gap: var(--kr-sp-2);
 }
 
+/* KT-999 — existing documentation locations in the briefing. */
+.briefing-doc {
+  padding: var(--kr-sp-2) 0;
+  border-top: 1px dashed var(--kr-border-soft);
+}
+
+.briefing-doc legend.briefing-doc-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-2);
+}
+
+.briefing-doc-include {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.briefing-doc-kind,
+.briefing-doc-date {
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-muted);
+}
+
+.briefing-doc-extra,
+.briefing-doc-manual {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-2);
+}
+
+.briefing-doc-extra .briefing-card-input,
+.briefing-doc-manual .briefing-card-input {
+  flex: 1 1 200px;
+}
+
+.briefing-doc-sot {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--kr-fs-xs);
+}
+
+.briefing-doc-error {
+  margin: 0;
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-error);
+}
+
+/* KT-999 — which AI doc a linked repo really has. */
+.linked-repo-ai-doc {
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  font-size: var(--kr-fs-xs);
+}
+
+.linked-repo-ai-doc-ok { color: var(--kr-success); }
+.linked-repo-ai-doc-partial { color: var(--kr-warning); }
+.linked-repo-ai-doc-none { color: var(--kr-text-muted); }
+
 /* ── Running-agents badge (2026-06-24) ───────────────────────────────────
    Persistent nav indicator: agents still running server-side (incl.
    background/batch) so the user doesn't think nothing's happening and

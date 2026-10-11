@@ -50,7 +50,8 @@ describe('BriefingForm (0.8.5)', () => {
         toast={() => {}}
       />
     );
-    const textareas = screen.getAllByRole('textbox');
+    // The single-line inputs (KT-999 documentation path) are not questions.
+    const textareas = Array.from(document.querySelectorAll('textarea'));
     expect(textareas).toHaveLength(6);
     expect(textareas[0]).toBeRequired();
     expect(textareas[1]).toBeRequired();

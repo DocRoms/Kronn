@@ -1,5 +1,5 @@
 import type { AcceptAuditStepResponse, ArtifactBundle, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditRunCost, AuditStepInfo, AuditRecentActivity, AuditTokenBreakdown, EmbedOriginsChange } from '../types/generated';
-import type { BriefingProjectAnswers, CrossAuditEstimate } from '../types/generated';
+import type { BriefingDetectedDoc, BriefingDocsAnswers, BriefingProjectAnswers, CrossAuditEstimate, LinkedRepoDocStatus } from '../types/generated';
 import type { WorkerConnectivity } from '../types/generated';
 import type { TemplateReinstallRequest, TemplateReinstallPlan, TemplateReinstallReport, MergeBase, TemplateMergeAccepted, TemplateMergeAcceptRequest, TemplateMergeRequest, TemplateMergeView } from '../types/generated';
 import { readTextAttachmentPreview } from './textAttachmentPreview';
@@ -1286,10 +1286,17 @@ export const projects = {
     td_to_tasks?: boolean;
     /** KT-1183 — experimental cross-agent audit: 2 or 3 agents, empty = off. */
     cross_audit_agents?: AgentType[];
+    /** KT-999 — documentation locations, their state and sources of truth. */
+    existing_docs?: BriefingDocsAnswers;
   }) => api<boolean>('POST', `/projects/${id}/save-briefing`, form),
   /** KT-1183 — the cross-agent audit's cost range, scaled from the last measured run. */
   crossAuditEstimate: (id: string, agents: number) =>
     api<CrossAuditEstimate>('GET', `/projects/${id}/audit/cross-estimate?agents=${agents}`),
+  /** KT-999 — documentation locations found in the repository, with their last commit date. */
+  briefingDocs: (id: string) => api<BriefingDetectedDoc[]>('GET', `/projects/${id}/briefing/docs`),
+  /** KT-999 — a location typed by hand; rejected (400) outside the repository or when missing. */
+  checkBriefingDoc: (id: string, path: string) =>
+    api<BriefingDetectedDoc>('POST', `/projects/${id}/briefing/docs/check`, { path }),
   /** KT-1167 — the project's TD sheets as Kronn tasks; a re-click creates nothing. */
   convertTdTasks: (id: string) => api<TdTasksOutcome>('POST', `/projects/${id}/audit/td-tasks`),
   setDefaultSkills: (id: string, skillIds: string[]) => api<boolean>('PUT', `/projects/${id}/default-skills`, skillIds),
@@ -1310,6 +1317,8 @@ export const projects = {
    *  Kronn-known projects (excluding the current one) sorted by
    *  proximity (same-parent dir first, then alphabetical). Free-text
    *  location entry stays supported for off-Kronn repos. */
+  /** KT-999 — the AI doc each linked repo really has. */
+  linkedReposDocs: (id: string) => api<LinkedRepoDocStatus[]>('GET', `/projects/${id}/linked-repos/docs`),
   linkedReposCandidates: (id: string) =>
     api<Array<{ id: string; name: string; path: string; proximity_hint: string }>>('GET', `/projects/${id}/linked-repos/candidates`),
   listAiFiles: (id: string) => api<AiFileNode[]>('GET', `/projects/${id}/ai-files`),

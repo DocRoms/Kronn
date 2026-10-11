@@ -1061,6 +1061,32 @@ pub async fn linked_repos_candidates(
     }
 }
 
+/// `GET /api/projects/:id/linked-repos/docs` — KT-999: the context entry
+/// point each linked repo really has, for the UI badges.
+pub async fn linked_repos_docs(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<Vec<LinkedRepoDocStatus>>> {
+    let project = state
+        .db
+        .with_conn(move |conn| crate::db::projects::get_project(conn, &id))
+        .await;
+    let repos = match project {
+        Ok(Some(project)) => project.linked_repos,
+        Ok(None) => return Json(ApiResponse::err("Project not found")),
+        Err(e) => return Json(ApiResponse::err(format!("DB error: {e}"))),
+    };
+    let statuses = tokio::task::spawn_blocking(move || {
+        repos
+            .iter()
+            .map(crate::core::linked_repo_docs::status_of)
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap_or_default();
+    Json(ApiResponse::ok(statuses))
+}
+
 /// PUT /api/projects/:id/default-profile
 pub async fn set_default_profile(
     State(state): State<AppState>,

@@ -27,7 +27,7 @@ const GITHUB_PLUGIN: &str = "mcp-github";
 
 // ─── Validation ─────────────────────────────────────────────────────────────
 
-fn check_text(field: &str, value: &str, max: usize) -> Result<(), String> {
+pub(crate) fn check_text(field: &str, value: &str, max: usize) -> Result<(), String> {
     if value.chars().count() > max {
         return Err(format!("{field}: at most {max} characters"));
     }
@@ -240,7 +240,7 @@ fn role_label(v: BriefingPersonRole) -> &'static str {
 }
 
 /// Markdown-table-safe rendering of a user-entered value.
-fn cell(value: &str) -> String {
+pub(crate) fn cell(value: &str) -> String {
     value
         .replace('|', "\\|")
         .replace('<', "&lt;")
@@ -362,21 +362,25 @@ pub(crate) fn parse_answers(notes: &str) -> Option<BriefingProjectAnswers> {
     })
 }
 
-/// `notes` without its `## Project facts` section (heading to the next `## `
-/// heading or the end) and without any stray answers line.
-pub(crate) fn strip_facts_section(notes: &str) -> String {
+/// `notes` without the sections under `headings` (each from its heading to the
+/// next `## ` heading or the end) and without any line starting with one of
+/// `machine_prefixes`.
+pub(crate) fn strip_sections(notes: &str, headings: &[&str], machine_prefixes: &[&str]) -> String {
     let mut out = String::with_capacity(notes.len());
     let mut skipping = false;
     for line in notes.split_inclusive('\n') {
         let trimmed = line.trim_end();
-        if trimmed == FACTS_HEADING {
+        if headings.contains(&trimmed) {
             skipping = true;
             continue;
         }
         if skipping && trimmed.starts_with("## ") {
             skipping = false;
         }
-        if skipping || trimmed.trim_start().starts_with(ANSWERS_PREFIX) {
+        let machine = machine_prefixes
+            .iter()
+            .any(|p| trimmed.trim_start().starts_with(p));
+        if skipping || machine {
             continue;
         }
         out.push_str(line);
@@ -384,28 +388,64 @@ pub(crate) fn strip_facts_section(notes: &str) -> String {
     out
 }
 
-/// The briefing as the audit prompts see it: the human-readable facts stay,
-/// the machine copy (which repeats them) goes.
-pub(crate) fn strip_answers_line(notes: &str) -> String {
-    notes
-        .split_inclusive('\n')
-        .filter(|line| !line.trim_start().starts_with(ANSWERS_PREFIX))
-        .collect()
+/// `notes` without the form-owned sections (`## Project facts`,
+/// `## Existing documentation`) and without any stray machine copy.
+pub(crate) fn strip_facts_section(notes: &str) -> String {
+    strip_sections(
+        notes,
+        &[FACTS_HEADING, super::briefing_docs::DOCS_HEADING],
+        &[ANSWERS_PREFIX, super::briefing_docs::DOCS_ANSWERS_PREFIX],
+    )
 }
 
-/// After an AI review rewrote `docs/briefing.md`, put the form's project
-/// facts back exactly as answered: the reviewer may drop or garble them, and
-/// the answers belong to the form, not to the model.
+/// The briefing as the audit prompts see it: the human-readable facts stay,
+/// the machine copies (which repeat them) go.
+pub(crate) fn strip_answers_line(notes: &str) -> String {
+    strip_sections(
+        notes,
+        &[],
+        &[ANSWERS_PREFIX, super::briefing_docs::DOCS_ANSWERS_PREFIX],
+    )
+}
+
+/// After an AI review rewrote `docs/briefing.md`, put the form's sections back
+/// exactly as answered: the reviewer may drop or garble them, and the answers
+/// belong to the form, not to the model. They go before `## Kronn options`
+/// when the review kept it, so that section stays last.
 pub(crate) fn reattach_facts(previous: Option<&str>, reviewed: &str) -> String {
-    let Some(section) = previous
+    let facts = previous
         .and_then(parse_answers)
-        .and_then(|a| render_facts_section(&a))
-    else {
+        .and_then(|a| render_facts_section(&a));
+    let docs = previous
+        .and_then(super::briefing_docs::parse)
+        .and_then(|d| super::briefing_docs::render_section(&d));
+    if facts.is_none() && docs.is_none() {
         return reviewed.to_string();
+    }
+    let stripped = strip_facts_section(reviewed);
+    let options_at = stripped
+        .split_inclusive('\n')
+        .scan(0usize, |offset, line| {
+            let start = *offset;
+            *offset += line.len();
+            Some((start, line))
+        })
+        .find(|(_, line)| line.trim_end() == crate::core::td_tasks::BRIEFING_OPTIONS_HEADING)
+        .map(|(start, _)| start);
+    let (head, tail) = match options_at {
+        Some(at) => stripped.split_at(at),
+        None => (stripped.as_str(), ""),
     };
-    let mut body = strip_facts_section(reviewed).trim_end().to_string();
-    body.push_str("\n\n");
-    body.push_str(&section);
+    let mut body = head.trim_end().to_string();
+    body.push('\n');
+    for section in [facts, docs].into_iter().flatten() {
+        body.push('\n');
+        body.push_str(&section);
+    }
+    if !tail.is_empty() {
+        body.push('\n');
+        body.push_str(tail);
+    }
     body
 }
 

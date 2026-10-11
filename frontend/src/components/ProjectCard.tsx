@@ -2474,6 +2474,8 @@ export function ProjectCard({
                     }}
                     briefingDone={briefingDone}
                     onBriefingSaved={onRefetch}
+                    linkedRepos={proj.linked_repos ?? []}
+                    onLinkedReposChange={onRefetch}
                     auditActive={auditActive}
                     liveStep={auditStep}
                     liveTotal={auditTotalSteps}

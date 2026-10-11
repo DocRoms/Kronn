@@ -6,6 +6,8 @@
 
 use axum::{
     extract::{Path, State},
+    http::StatusCode,
+    response::{IntoResponse, Response},
     Json,
 };
 use chrono::Utc;
@@ -100,9 +102,10 @@ pub(crate) const BRIEFING_PROMPT_MAX_CHARS: usize = 6_000;
 /// The `## Project briefing` block appended to an audit step prompt, capped
 /// at [`BRIEFING_PROMPT_MAX_CHARS`] with an explicit truncation marker. The
 /// machine copy of the project answers is dropped: the readable facts above
-/// it say the same thing.
+/// it say the same thing. The documentation section stays out (KT-999).
 pub(crate) fn briefing_prompt_section(notes: &str) -> String {
-    let notes = super::project_doc::strip_answers_line(notes);
+    let notes = super::briefing_docs::strip_section(notes);
+    let notes = super::project_doc::strip_answers_line(&notes);
     let notes = notes.trim_end();
     let total = notes.chars().count();
     let body = if total <= BRIEFING_PROMPT_MAX_CHARS {
@@ -207,6 +210,8 @@ pub async fn start_briefing(
     let project_path = crate::core::scanner::resolve_host_path(&project.path);
     let prefilled =
         crate::api::projects::resolve_briefing_notes(&project_path, &project.briefing_notes);
+    // The documentation section is put back by `reattach_facts` after the review.
+    let prefilled = prefilled.map(|notes| super::briefing_docs::strip_section(&notes));
     let briefing_prompt = build_briefing_prompt(&language, prefilled.as_deref());
 
     // 4. Create discussion
@@ -328,13 +333,28 @@ pub struct BriefingFormRequest {
     /// KT-1183 — experimental cross-agent audit: 2 or 3 agents, empty = off.
     #[serde(default)]
     pub cross_audit_agents: Vec<AgentType>,
+    /// KT-999 — documentation locations and their state; absent from older clients.
+    #[serde(default)]
+    pub existing_docs: Option<BriefingDocsAnswers>,
 }
 
 pub async fn save_briefing_form(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(form): Json<BriefingFormRequest>,
-) -> Json<ApiResponse<bool>> {
+) -> Response {
+    save_briefing_form_inner(state, id, form).await
+}
+
+fn json_bool(response: ApiResponse<bool>) -> Response {
+    Json(response).into_response()
+}
+
+async fn save_briefing_form_inner(
+    state: AppState,
+    id: String,
+    form: BriefingFormRequest,
+) -> Response {
     // 1. Validate: Q1-Q5 are mandatory (matches the conversational flow).
     if form.purpose.trim().is_empty()
         || form.team.trim().is_empty()
@@ -342,7 +362,7 @@ pub async fn save_briefing_form(
         || form.dependencies.trim().is_empty()
         || form.traps.trim().is_empty()
     {
-        return Json(ApiResponse::err(
+        return json_bool(ApiResponse::err(
             "Q1-Q5 are mandatory (purpose, team, maturity, dependencies, traps). \
              Q6 (additional) is optional. Use \"Not provided\" or \"None\" if you \
              want to skip a mandatory question explicitly.",
@@ -369,7 +389,7 @@ pub async fn save_briefing_form(
     {
         None => None,
         Some(Ok(answers)) => super::project_doc::render_facts_section(&answers),
-        Some(Err(e)) => return Json(ApiResponse::err(e)),
+        Some(Err(e)) => return json_bool(ApiResponse::err(e)),
     };
 
     // 2. Look up project for the on-disk path.
@@ -381,7 +401,20 @@ pub async fn save_briefing_form(
         .ok()
         .flatten();
     let Some(project) = project else {
-        return Json(ApiResponse::err("Project not found"));
+        return json_bool(ApiResponse::err("Project not found"));
+    };
+
+    // A location outside the repository, missing or contradicting another
+    // source of truth is refused before anything is written.
+    let project_path = crate::core::scanner::resolve_host_path(&project.path);
+    let docs_section = match form.existing_docs.as_ref() {
+        None => None,
+        Some(docs) => match super::briefing_docs::normalize_with_dates(&project_path, docs).await {
+            Ok(docs) => super::briefing_docs::render_section(&docs),
+            Err(e) => {
+                return (StatusCode::BAD_REQUEST, Json(ApiResponse::<bool>::err(e))).into_response()
+            }
+        },
     };
 
     // 3. Format the briefing.md body — same shape as
@@ -415,7 +448,7 @@ pub async fn save_briefing_form(
         traps_rendered,
         additional_rendered,
     );
-    if let Some(section) = project_facts {
+    for section in [project_facts, docs_section].into_iter().flatten() {
         body.push('\n');
         body.push_str(&section);
     }
@@ -424,7 +457,6 @@ pub async fn save_briefing_form(
     // 4. Write `docs/briefing.md` on disk + persist briefing_notes in DB.
     // The on-disk file is what the audit reads at Phase 1; the DB
     // column is what the ProjectCard / API surfaces back to the UI.
-    let project_path = crate::core::scanner::resolve_host_path(&project.path);
     let docs_dir = crate::core::scanner::detect_docs_dir(&project_path);
     if !docs_dir.is_dir() {
         // Pre-bootstrap projects don't have docs/ yet — store in DB
@@ -438,14 +470,14 @@ pub async fn save_briefing_form(
             })
             .await
         {
-            Ok(true) => return Json(ApiResponse::ok(true)),
-            Ok(false) => return Json(ApiResponse::err("Project not found")),
-            Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
+            Ok(true) => return json_bool(ApiResponse::ok(true)),
+            Ok(false) => return json_bool(ApiResponse::err("Project not found")),
+            Err(e) => return json_bool(ApiResponse::err(format!("DB error: {}", e))),
         }
     }
     let target = docs_dir.join("briefing.md");
     if let Err(e) = std::fs::write(&target, &body) {
-        return Json(ApiResponse::err(format!(
+        return json_bool(ApiResponse::err(format!(
             "Failed to write {}: {}",
             target.display(),
             e
@@ -459,9 +491,9 @@ pub async fn save_briefing_form(
         })
         .await
     {
-        Ok(true) => Json(ApiResponse::ok(true)),
-        Ok(false) => Json(ApiResponse::err("Project not found")),
-        Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+        Ok(true) => json_bool(ApiResponse::ok(true)),
+        Ok(false) => json_bool(ApiResponse::err("Project not found")),
+        Err(e) => json_bool(ApiResponse::err(format!("DB error: {}", e))),
     }
 }
 

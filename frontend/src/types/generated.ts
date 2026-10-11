@@ -1391,6 +1391,44 @@ export type BriefingCommitConvention = "unknown" | "conventional" | "ticket_pref
 
 export type BriefingDefaultBranch = "unknown" | "main" | "master" | "develop" | "trunk";
 
+/**
+ * A location found in the repository, offered as a pre-filled answer.
+ */
+export type BriefingDetectedDoc = { path: string, kind: BriefingDocKind, is_dir: boolean, last_commit: string | null, };
+
+/**
+ * What a documentation location is, classified by Kronn from its path.
+ */
+export type BriefingDocKind = "readme" | "docs" | "wiki" | "adr" | "api" | "contributing" | "markdown";
+
+/**
+ * One documentation location recorded in the briefing.
+ */
+export type BriefingDocLocation = {
+/**
+ * Repository-relative, normalised, `/`-separated.
+ */
+path: string,
+/**
+ * Recomputed by Kronn on save; the client's value is ignored.
+ */
+kind: BriefingDocKind, state: BriefingDocState, note: string,
+/**
+ * At most one source of truth per kind.
+ */
+source_of_truth: boolean,
+/**
+ * `YYYY-MM-DD` of the last commit touching the path, read by Kronn on save.
+ */
+last_commit: string | null, };
+
+export type BriefingDocsAnswers = { locations: Array<BriefingDocLocation>, };
+
+/**
+ * The state the user gives a location. `Unknown` is an unanswered state.
+ */
+export type BriefingDocState = "unknown" | "recent" | "old" | "obsolete" | "partial" | "reference";
+
 export type BriefingEnvironment = { kind: BriefingEnvironmentKind, url: string, };
 
 export type BriefingEnvironmentKind = "local" | "dev" | "staging" | "preprod" | "production" | "preview";
@@ -1784,6 +1822,8 @@ detail?: string | null,
  * A launchable tier's pre-launch warning (model absent from the listing).
  */
 notice?: string | null, };
+
+export type CheckBriefingDocRequest = { path: string, };
 
 /**
  * What a CI check is known to be. `Unknown` is its own value: a check nobody
@@ -4555,6 +4595,11 @@ location: string,
 description?: string, };
 
 /**
+ * The context entry point Kronn found in a linked repository.
+ */
+export type LinkedRepoAiDoc = "agents_md" | "legacy_ai_index" | "readme_only" | "no_ai_doc" | "remote" | "missing";
+
+/**
  * 0.8.6 (#27) — One row in the linked-repos picker. Surfaces the
  * minimum needed for autocomplete : project id (for stable React
  * keys), human name, path, and a `proximity_hint` (`'same-parent'` |
@@ -4562,6 +4607,12 @@ description?: string, };
  * the top of the dropdown vs an "Other projects" group at the bottom.
  */
 export type LinkedRepoCandidate = { id: string, name: string, path: string, proximity_hint: string, };
+
+export type LinkedRepoDocStatus = { id: string, ai_doc: LinkedRepoAiDoc,
+/**
+ * Path of the entry point relative to the repository, when there is one.
+ */
+doc_path: string | null, };
 
 export type LinkLivePageDiscussionRequest = { discussion_id: string, relation?: LivePageDiscussionRelation | null, };
 

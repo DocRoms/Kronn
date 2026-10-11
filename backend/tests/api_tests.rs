@@ -23047,6 +23047,173 @@ mod cold_api_handlers_tests {
         );
     }
 
+    // KT-999 — existing documentation in the briefing.
+    fn briefing_with_docs(locations: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "purpose": "P", "team": "T", "maturity": "M",
+            "dependencies": "D", "traps": "Tr", "additional": "",
+            "existing_docs": { "locations": locations }
+        })
+    }
+
+    #[tokio::test]
+    async fn briefing_docs_are_detected_dated_and_recorded_in_the_briefing() {
+        let (_dir, repo) = seed_repo("brief-docs");
+        std::fs::create_dir_all(repo.join("docs/adr")).unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, json) = get_json(app, &format!("/api/projects/{pid}/briefing/docs")).await;
+        assert_eq!(st, StatusCode::OK);
+        let found = json["data"].as_array().expect("a list");
+        let readme = found
+            .iter()
+            .find(|d| d["path"] == "README.md")
+            .expect("README.md is detected");
+        assert_eq!(readme["kind"], "readme");
+        assert!(
+            readme["last_commit"]
+                .as_str()
+                .is_some_and(|d| d.len() == 10),
+            "{readme}"
+        );
+        assert!(found
+            .iter()
+            .any(|d| d["path"] == "docs/adr" && d["kind"] == "adr"));
+
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, json) = post_json(
+            app,
+            &format!("/api/projects/{pid}/save-briefing"),
+            briefing_with_docs(serde_json::json!([
+                {"path": "README.md", "state": "reference", "source_of_truth": true, "note": "setup"},
+                {"path": "./docs/adr/", "state": "partial"}
+            ])),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{json}");
+        assert_eq!(json["success"], serde_json::Value::Bool(true), "{json}");
+        let body = std::fs::read_to_string(repo.join("docs/briefing.md")).unwrap();
+        assert!(body.contains("## Existing documentation"), "{body}");
+        assert!(
+            body.contains("- `README.md` — README; reference; last commit "),
+            "{body}"
+        );
+        assert!(
+            body.contains("**source of truth** for the README — note: setup"),
+            "{body}"
+        );
+        assert!(
+            body.contains("- `docs/adr` — decision records (ADR); partial; last commit unknown"),
+            "{body}"
+        );
+        assert!(body.contains("<!-- kronn:existing-docs v1 "), "{body}");
+    }
+
+    #[tokio::test]
+    async fn briefing_docs_outside_the_repository_are_refused_with_400() {
+        let (_dir, repo) = seed_repo("brief-docs-out");
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        let outside_dir = tempfile::tempdir().unwrap();
+        let outside = outside_dir.path().to_path_buf();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, repo.join("escape")).unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+
+        let mut refused = vec!["../x", "/etc", "missing.md"];
+        if cfg!(unix) {
+            refused.push("escape");
+        }
+        for bad in refused {
+            let app = build_router_with_auth(state.clone(), false);
+            let (st, json) = post_json(
+                app,
+                &format!("/api/projects/{pid}/briefing/docs/check"),
+                serde_json::json!({ "path": bad }),
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "{bad}: {json}");
+            assert_eq!(json["success"], serde_json::Value::Bool(false));
+
+            let app = build_router_with_auth(state.clone(), false);
+            let (st, _) = post_json(
+                app,
+                &format!("/api/projects/{pid}/save-briefing"),
+                briefing_with_docs(serde_json::json!([{ "path": bad }])),
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "{bad}");
+        }
+        assert!(
+            !repo.join("docs/briefing.md").exists(),
+            "a refused save writes nothing"
+        );
+
+        // Two sources of truth of one kind are refused too.
+        std::fs::write(repo.join("README.fr.md"), "x").unwrap();
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, json) = post_json(
+            app,
+            &format!("/api/projects/{pid}/save-briefing"),
+            briefing_with_docs(serde_json::json!([
+                {"path": "README.md", "source_of_truth": true},
+                {"path": "README.fr.md", "source_of_truth": true}
+            ])),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{json}");
+
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, json) = post_json(
+            app,
+            &format!("/api/projects/{pid}/briefing/docs/check"),
+            serde_json::json!({ "path": "./docs/" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["data"]["path"], "docs");
+        assert_eq!(json["data"]["is_dir"], true);
+    }
+
+    #[tokio::test]
+    async fn linked_repos_docs_reports_the_ai_doc_of_each_repo() {
+        let (_dir, repo) = seed_repo("lr-docs");
+        let (_c1, with_doc) = seed_repo("lr-docs-agents");
+        std::fs::create_dir_all(with_doc.join("docs")).unwrap();
+        std::fs::write(with_doc.join("docs/AGENTS.md"), "x").unwrap();
+        let (_c2, readme_only) = seed_repo("lr-docs-readme");
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, json) = put_json(
+            app,
+            &format!("/api/projects/{pid}/linked-repos"),
+            serde_json::json!([
+                {"id": "a", "name": "a", "kind": "api", "location": with_doc.to_string_lossy()},
+                {"id": "r", "name": "r", "kind": "api", "location": readme_only.to_string_lossy()},
+                {"id": "u", "name": "u", "kind": "api", "location": "https://github.com/org/u"}
+            ]),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(true), "{json}");
+
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, json) = get_json(app, &format!("/api/projects/{pid}/linked-repos/docs")).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(
+            json["data"],
+            serde_json::json!([
+                {"id": "a", "ai_doc": "agents_md", "doc_path": "docs/AGENTS.md"},
+                {"id": "r", "ai_doc": "readme_only", "doc_path": "README.md"},
+                {"id": "u", "ai_doc": "remote", "doc_path": null}
+            ])
+        );
+    }
+
     // KT-1167 — the button: idempotent, a second click creates nothing.
     #[tokio::test]
     async fn td_tasks_endpoint_creates_once_then_reports_links() {
