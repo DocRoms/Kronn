@@ -227,5 +227,5 @@ explicit null, and preserves historical message models. Isolated API tests
 cover this path, not provider inference or a new browser qualification.
 [src: file: frontend/src/lib/agentSelection.ts:3-16#agentSettingsForSelection]
 [src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1361-1368#currentConnectionId]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:1163-1168#agentSettingsForSelection]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1160-1165#agentSettingsForSelection]
 [src: file: backend/tests/discussion_target_model.rs:99-211#changing_agent_clears_the_previous_explicit_model]

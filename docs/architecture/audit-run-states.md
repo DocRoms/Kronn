@@ -54,7 +54,7 @@ by a human (KT-1131). An accepted step keeps its failure on record:
   finalizes the run. It goes to `Completed`, writes its validation discussion,
   which lists the accepted steps apart, and makes the project validatable.
   The validate gate still requires the latest run to be `Completed`.
-  [src: file: backend/src/api/audit/validate.rs:143#Completed]
+  [src: file: backend/src/api/audit/validate.rs:152#Completed]
 
 ## Leases and agents that could block a project
 
@@ -117,7 +117,7 @@ by a human (KT-1131). An accepted step keeps its failure on record:
 | Card header | A stale-sections refresh failed or changed nothing. | The refresh button stays while the sections are stale. It is hidden while a run waits to be resumed, because the server refuses it then. |
 | Toasts during a run | A step failed or warned. | Informational: the run ends with that step's "Retry this step" and "Accept as it stands". |
 
-- Launch error banner. [src: file: frontend/src/components/AuditTimeline.tsx:565-566#launchError] [src: file: frontend/src/components/ProjectCard.tsx:952#setAuditLaunchError] [src: file: frontend/src/components/ProjectCard.tsx:450-451#auditLaunchError]
+- Launch error banner. [src: file: frontend/src/components/AuditTimeline.tsx:565-566#launchError] [src: file: frontend/src/components/ProjectCard.tsx:953#setAuditLaunchError] [src: file: frontend/src/components/ProjectCard.tsx:450-451#auditLaunchError]
 - Unknown resumable state, unreadable timeline. [src: file: frontend/src/components/AuditTimeline.tsx:584-585#resumableUnknown] [src: file: frontend/src/components/AuditTimeline.tsx:597-598#loadFailed]
 - Refused acceptance. [src: file: frontend/src/components/AuditTimeline.tsx:405#setAcceptError] [src: file: frontend/src/components/AuditTimeline.tsx:693-694#acceptError]
 - Recap read error. [src: file: frontend/src/components/AuditRecapPanel.tsx:342-347#errorBlock]
