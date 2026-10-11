@@ -394,6 +394,11 @@ pub(crate) async fn run_partial_pipeline(
             guard_project,
         );
         drop_guard.hold_lease();
+
+        // A flag left by a previous run's Stop must not stop this one.
+        if let Ok(mut tracker) = audit_tracker.lock() {
+            tracker.cancelled.remove(&project_id_for_progress);
+        }
         // Its agent sessions get the audit MCP rule (no kronn-internal, no Memory).
         let _audit_session = crate::core::audit_mcp_filter::AuditSessionGuard::enter(&project_path);
 

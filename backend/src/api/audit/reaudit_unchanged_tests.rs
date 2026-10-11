@@ -26,7 +26,7 @@ impl Drop for TemplatesEnv {
 /// A step whose number is listed in `fail` ends in a CLI error, its target
 /// untouched (KT-1131). Any other prompt — the validation — ends on the
 /// terminal signal, after settling the documents' leftover unknowns when
-/// `settle` exists.
+/// `settle` exists. A step prompt waits while `hold` exists.
 fn scripted_agent(tools: &Path, project: &Path) -> PathBuf {
     let state = tools.display();
     let project = project.display();
@@ -43,6 +43,7 @@ case "$prompt" in
     esac
     echo "$n $target $kind" >> '{state}/steps.log'
     printf '%s' "$prompt" > '{state}/prompt.'"$n"
+    while [ -f '{state}/hold' ]; do sleep 0.1; done
     if grep -qx "$n" '{state}/fail' 2>/dev/null; then
       printf '%s\n' '{{"type":"result","subtype":"error_during_execution","is_error":true,"usage":{{"input_tokens":1,"output_tokens":1}}}}'
       exit 1

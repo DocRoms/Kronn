@@ -117,7 +117,11 @@ impl Validated {
     }
 
     async fn revalidate(&self) -> String {
-        let response = crate::api::audit::revalidate_audit(
+        sse_body(self.revalidate_response().await).await
+    }
+
+    async fn revalidate_response(&self) -> axum::response::Response {
+        crate::api::audit::revalidate_audit(
             axum::extract::State(self.h.state.clone()),
             axum::extract::Path(PROJECT_ID.to_string()),
             axum::Json(crate::models::RevalidateAuditRequest {
@@ -127,12 +131,15 @@ impl Validated {
             }),
         )
         .await
-        .into_response();
-        sse_body(response).await
+        .into_response()
     }
 
     async fn partial(&self, steps: Vec<usize>) -> String {
-        let response = crate::api::audit::drift::partial_audit(
+        sse_body(self.partial_response(steps).await).await
+    }
+
+    async fn partial_response(&self, steps: Vec<usize>) -> axum::response::Response {
+        crate::api::audit::drift::partial_audit(
             axum::extract::State(self.h.state.clone()),
             axum::extract::Path(PROJECT_ID.to_string()),
             axum::Json(crate::models::PartialAuditRequest {
@@ -143,8 +150,39 @@ impl Validated {
             }),
         )
         .await
-        .into_response();
-        sse_body(response).await
+        .into_response()
+    }
+
+    /// A launch whose agent is held at its first prompt while Stop is pressed.
+    async fn stopped_during_step(
+        &self,
+        launch: impl std::future::Future<Output = String>,
+    ) -> String {
+        let hold = self.h.tools.path().join("hold");
+        std::fs::write(&hold, "").unwrap();
+        let stopper = async {
+            for _ in 0..1200 {
+                if !self.prompts().is_empty() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            assert!(!self.prompts().is_empty(), "the agent never started");
+            self.stop();
+            std::fs::remove_file(&hold).unwrap();
+        };
+        let (body, ()) = tokio::join!(launch, stopper);
+        body
+    }
+
+    fn stop(&self) {
+        self.h
+            .state
+            .audit_tracker
+            .lock()
+            .unwrap()
+            .cancelled
+            .insert(PROJECT_ID.to_string());
     }
 
     fn record_of(&self, doc: &str) -> crate::core::citation_drift::DocFingerprints {
@@ -209,25 +247,20 @@ async fn a_changed_cited_line_is_corrected_by_the_agent_and_the_badge_goes_back_
     );
 
     let before = std::fs::read_to_string(fx.project().join(RULES)).unwrap();
-    arm(fx.h.tools.path(), "revalidate", &[RULES]);
 
-    // A Stop that lands before the agent: the run ends Cancelled, nothing
-    // was rewritten, so the validation it revoked comes back.
-    fx.h.state
-        .audit_tracker
-        .lock()
-        .unwrap()
-        .cancelled
-        .insert(PROJECT_ID.to_string());
-    let body = fx.revalidate().await;
+    // A Stop while an agent that rewrote nothing runs: the run ends
+    // Cancelled, so the validation it revoked comes back.
+    arm(fx.h.tools.path(), "noop", &[RULES]);
+    let body = fx.stopped_during_step(fx.revalidate()).await;
     assert_eq!(sse_events(&body, "cancelled").len(), 1, "{body}");
     assert!(sse_events(&body, "done").is_empty(), "{body}");
-    assert!(fx.prompts().is_empty(), "{:?}", fx.prompts());
     assert_eq!(fx.audit_status(), crate::models::AiAuditStatus::Validated);
     assert_eq!(
         std::fs::read_to_string(fx.project().join(RULES)).unwrap(),
         before
     );
+    std::fs::write(fx.h.tools.path().join("steps.log"), "").unwrap();
+    arm(fx.h.tools.path(), "revalidate", &[RULES]);
 
     // « Reprendre » relaunches the same action.
     let body = fx.revalidate().await;
@@ -602,4 +635,31 @@ async fn a_full_audit_re_fingerprints_only_the_docs_its_steps_rewrote() {
     validation_settled(&fx.h.state, &done).await;
     assert_eq!(fx.record_of(RULES).reason, RecordReason::Audit);
     assert_eq!(fx.sources_state(), SourcesState::Clean);
+}
+
+/// KT-1188 — a Stop left over from a previous run does not stop a new refresh.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_partial_refresh_after_a_stop_runs_to_its_end() {
+    let fx = Validated::new(|_| {}).await;
+    let step = fx.step_of(GLOSSARY) as usize;
+
+    // A Stop nobody acknowledged leaves the flag set.
+    fx.stop();
+    arm(fx.h.tools.path(), "fill", &[GLOSSARY]);
+    let body = fx.partial(vec![step]).await;
+    assert!(sse_events(&body, "cancelled").is_empty(), "{body}");
+    let done = sse_events(&body, "done").pop().expect("terminal done");
+    assert_eq!(done["status"], "complete", "{body}");
+    assert_eq!(started_steps(&body), vec![step as u64], "{body}");
+    assert_eq!(fx.prompts().len(), 1, "{:?}", fx.prompts());
+    validation_settled(&fx.h.state, &done).await;
+
+    // A Stop pressed during the refresh still stops it.
+    std::fs::write(fx.h.tools.path().join("steps.log"), "").unwrap();
+    arm(fx.h.tools.path(), "noop", &[GLOSSARY]);
+    let body = fx.stopped_during_step(fx.partial(vec![step])).await;
+    assert_eq!(sse_events(&body, "cancelled").len(), 1, "{body}");
+    assert!(sse_events(&body, "done").is_empty(), "{body}");
 }

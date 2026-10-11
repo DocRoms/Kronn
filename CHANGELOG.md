@@ -206,6 +206,10 @@ Release notes for 0.9.3 and earlier are available in the
   not, because docs quote the grammar itself that way (`[src: file: <path>:<line>]`).
   `docs/AGENTS.md` and the citation spec say exactly this.
 
+- A stale-sections refresh launched after a Stop now runs (KT-1188). Like the
+  Full audit, the partial pipeline clears a cancellation flag left by a
+  previous run as soon as it holds the project lease, so a Stop nobody
+  acknowledged no longer stops the next refresh before its first step.
 - An audit no longer acknowledges the broken citations of a doc edited by hand
   (KT-1187). After a Full audit or a partial refresh, only the docs a step of
   that run proved it rewrote (its target, or a document its documentary
