@@ -62,9 +62,11 @@ Attach a structured citation to every non-trivial assertion:
 - `[src: user: <YYYY-MM-DD>: <ref>]` — human confirmation
 - `[src: commit: <sha>]` — git commit
 
-A citation to a missing file/line or outside the project root (even absolute) is **rejected as fabricated**; in backticks a failure is only unverified. A code comment is a hint to verify, never the fact itself.
+A citation to a missing file/line or outside the project root (even absolute) is **rejected as fabricated**; in backticks a failure is only unverified. A code comment is a hint, never the fact.
 
-Full spec: [`docs/conventions/agents-md-format-v1.md`](conventions/agents-md-format-v1.md). **Honest by design**: `verified` means the citation *exists*, not that the claim is *true*.
+CI (`cargo test docs_citations`) fails on a `file:` citation in `docs/` (not `releases/`) or `backend/docs/` lacking a line, or whose root-relative path or line is missing; fenced code and `<placeholder>`s are skipped.
+
+Spec: [`agents-md-format-v1.md`](conventions/agents-md-format-v1.md). **Honest by design**: `verified` means the citation *exists*, not that the claim is *true*.
 <!-- kronn:section:end -->
 
 ---
@@ -136,7 +138,7 @@ Never load everything "just in case".
 ## 4. Development constraints
 
 - **Docker-first**: the full app runs via `docker compose`. Backend, frontend, and gateway are separate services.
-- **Quality is mandatory**: `cargo clippy -- -D warnings` must pass. Frontend: `npx tsc --noEmit` + `pnpm test`. Shell: `make test-shell`. E2E: `pnpm test:e2e` (Playwright; backend must be running, Vite is auto-spawned). The `frontend/e2e/` tree has its own README — fixtures + page objects + 35+ specs covering the smoke surface, the wizard, the guided tour, MCP host-discovery, and the QP launch double-click race.
+- **Quality is mandatory**: `cargo clippy -- -D warnings` must pass. Frontend: `npx tsc --noEmit` + `pnpm test`. Shell: `make test-shell`. E2E: `pnpm test:e2e` (Playwright; backend must be running, Vite is auto-spawned). Fixtures, page objects and specs: `frontend/e2e/README.md`.
 - **Release versions are mechanically synchronized**: use `make bump V=x.y.z`,
   then `make check-version` before tagging. The guard compares `VERSION`, app
   manifests and lockfiles, the first changelog release, both READMEs (including
@@ -171,7 +173,7 @@ Never load everything "just in case".
 
 ## 5. Source of truth
 
-- Project documentation: `docs/AGENTS.md` (this file) + `~/.kronn/user-context/` for personal/role-specific overrides. The legacy `ai/` directory was migrated to `docs/` in 0.7.1 (kept here as historical note; tooling no longer reads from `ai/`).
+- Project documentation: `docs/AGENTS.md` (this file) + `~/.kronn/user-context/` for personal/role-specific overrides. The legacy `ai/` directory was migrated to `docs/` in 0.7.1; nothing reads `ai/`.
 - Rust data models: `backend/src/models/mod.rs`.
 - TypeScript types: `frontend/src/types/generated.ts` (auto-generated from Rust).
 - API routes: `backend/src/lib.rs` (router definition in `build_router()`).

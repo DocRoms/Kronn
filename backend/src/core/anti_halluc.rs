@@ -962,7 +962,7 @@ pub(crate) fn strip_inline_code(text: &str) -> String {
 
 /// [`strip_inline_code`]'s prose, plus the inner text of every dropped span,
 /// one span per line.
-fn partition_inline_code(text: &str) -> (String, String) {
+pub(crate) fn partition_inline_code(text: &str) -> (String, String) {
     let mut out = String::with_capacity(text.len());
     let mut spans = String::new();
     for line in text.lines() {
@@ -1174,6 +1174,14 @@ pub fn extract_quoted_source_markers(text: &str) -> Vec<String> {
 }
 
 fn markers_in(prose: &str) -> Vec<String> {
+    markers_at(prose)
+        .into_iter()
+        .map(|(_, inner)| inner)
+        .collect()
+}
+
+/// [`markers_in`] with the char offset of each marker's `[`.
+pub(crate) fn markers_at(prose: &str) -> Vec<(usize, String)> {
     let chars: Vec<char> = prose.chars().collect();
     let lower: Vec<char> = prose.to_ascii_lowercase().chars().collect();
     let needle: Vec<char> = "[src:".chars().collect();
@@ -1210,7 +1218,7 @@ fn markers_in(prose: &str) -> Vec<String> {
             if closed {
                 let inner = buf.trim();
                 if !inner.is_empty() {
-                    out.push(inner.to_string());
+                    out.push((i, inner.to_string()));
                 }
             }
             i = j + 1;
@@ -1523,7 +1531,7 @@ fn clean_reference(reference: &str) -> &str {
 }
 
 /// Line-bounds verdict for an existing candidate file.
-fn line_bounds_status(
+pub(crate) fn line_bounds_status(
     candidate: &Path,
     line_spec: Option<(usize, usize)>,
 ) -> (SourceStatus, String) {
@@ -1707,7 +1715,7 @@ fn resolve_unique_path_suffix(needle: &str, roots: &[&Path]) -> BasenameResoluti
 }
 
 /// Outcome of resolving a relative path inside one root.
-enum Jailed {
+pub(crate) enum Jailed {
     /// The real, symlink-free path of an existing entry inside the root.
     Inside(PathBuf),
     Missing,
@@ -1721,7 +1729,7 @@ const MAX_SYMLINK_HOPS: usize = 40;
 /// Resolve `rel` under `root` one component at a time with lstat/readlink
 /// only, so an escaping symlink is refused before its target is ever stat'ed:
 /// the verdict reveals nothing about files outside the root.
-fn resolve_in_root(root: &Path, rel: &Path) -> Jailed {
+pub(crate) fn resolve_in_root(root: &Path, rel: &Path) -> Jailed {
     use std::collections::VecDeque;
     use std::ffi::OsString;
     use std::path::Component;

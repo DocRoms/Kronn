@@ -25,6 +25,7 @@ pub mod default_todo;
 pub mod dependency_updates;
 pub mod desktop_port;
 pub mod directives;
+pub mod docs_citations;
 pub mod docs_merge;
 pub mod docs_migration;
 pub mod docs_sidecar;

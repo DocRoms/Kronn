@@ -13,6 +13,18 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- CI checks the `[src: file:]` citations of Kronn's own docs (KT-1059). A
+  test (`cargo test docs_citations`, run by the backend suite) walks
+  `docs/**/*.md` (except the historical `docs/releases/`) and `backend/docs/`
+  with the citation verifier's own extraction, path jail and line counting,
+  and fails on a citation that has no line, names a missing file or a
+  directory, is absolute or leaves the repo root, or points past the end of
+  the file. Only a binary file may be cited without a line. Fenced code and
+  placeholder examples (`<path>:<line>`) are skipped; a citation in backticks
+  is checked. The report lists `doc:line`, the citation and the reason. The
+  corpus was repaired to zero failures: every line-less citation now points
+  at the symbol it means, paths of moved or split files were re-located, and
+  sentences about code that no longer exists were rewritten.
 - Audit versions and standards are judged from dated sources (KT-1000). The
   tech-debt step and the security pass get a « Technologies and standards »
   block: the project's stored dependency watch (version in place, latest,
