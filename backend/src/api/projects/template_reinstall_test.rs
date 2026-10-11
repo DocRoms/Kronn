@@ -288,6 +288,26 @@ fn the_plan_tells_filled_files_from_damaged_ones() {
 }
 
 #[test]
+fn documentation_of_placeholder_syntax_in_code_is_not_damage() {
+    let fenced = "# Templating\n\n```hbs\nHello {{var}}\n```\n\nDone.\n";
+    let marker_example =
+        "# Markers\n\n```md\n<!-- kronn:section name=\"a\" owner=\"human\" -->\n```\n";
+    let inline = "# Time\n\nUse `{{time.now}}` in the prompt.\n";
+    for doc in [fenced, marker_example, inline] {
+        assert_eq!(classify(doc.as_bytes()), ReinstallKind::Filled, "{doc}");
+    }
+    // The real thing, outside code, still counts, even next to a fence.
+    for doc in [
+        "# Entry\n\nProject: {{PROJECT_NAME}}\n",
+        "# Entry\n\n```\nfine\n```\nStill {{X}} here\n",
+        "# Entry `code` then {{X}}\n",
+        "# Entry\n<!-- kronn:section name=\"a\" owner=\"audit\" -->\ntext\n```\n<!-- kronn:section:end -->\n```\n",
+    ] {
+        assert_eq!(classify(doc.as_bytes()), ReinstallKind::DamagedOrTemplate, "{doc}");
+    }
+}
+
+#[test]
 fn a_default_reinstall_leaves_a_filled_doc_alone_and_repairs_the_damaged_one() {
     let (_tmp, project, template) = fixture();
     write(&project, "docs/AGENTS.md", AUDITED);

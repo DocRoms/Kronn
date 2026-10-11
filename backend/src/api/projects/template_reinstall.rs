@@ -189,16 +189,36 @@ fn classify(old: &[u8]) -> ReinstallKind {
     let Ok(text) = std::str::from_utf8(old) else {
         return ReinstallKind::DamagedOrTemplate;
     };
-    let placeholder = text
+    // A doc that documents placeholder or marker syntax in a code block or a
+    // code span is not unfilled: only the prose outside code counts.
+    let prose = without_inline_code(&crate::core::anti_halluc::strip_fenced_code(text));
+    let placeholder = prose
         .find("{{")
-        .is_some_and(|open| text[open..].contains("}}"));
-    let opens = text.matches("<!-- kronn:section ").count();
-    let closes = text.matches("<!-- kronn:section:end").count();
+        .is_some_and(|open| prose[open..].contains("}}"));
+    let opens = prose.matches("<!-- kronn:section ").count();
+    let closes = prose.matches("<!-- kronn:section:end").count();
     if text.trim().is_empty() || placeholder || opens != closes {
         ReinstallKind::DamagedOrTemplate
     } else {
         ReinstallKind::Filled
     }
+}
+
+/// Each line without its closed backtick spans; an unmatched backtick is text.
+fn without_inline_code(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        let parts: Vec<&str> = line.split('`').collect();
+        let unmatched_tail = parts.len().is_multiple_of(2);
+        for (i, part) in parts.iter().enumerate() {
+            let in_span = i % 2 == 1 && !(unmatched_tail && i == parts.len() - 1);
+            if !in_span {
+                out.push_str(part);
+            }
+        }
+        out.push('\n');
+    }
+    out
 }
 
 /// The template's bytes with every human-owned section of `old` put back.
