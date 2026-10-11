@@ -340,7 +340,7 @@ async fn an_unreachable_endpoint_fails_its_agent_fast_and_the_others_still_start
     discussion(&room.db, "d-claude", "ClaudeCode", "default", None).await;
     let state = state_on(room.db.clone(), CLOSED_ENDPOINT);
 
-    let ((lite, lite_elapsed), (claude, _)) = tokio::join!(
+    let ((lite, _), (claude, _)) = tokio::join!(
         start(state.clone(), "d-lite"),
         start(state.clone(), "d-claude")
     );
@@ -348,8 +348,16 @@ async fn an_unreachable_endpoint_fails_its_agent_fast_and_the_others_still_start
     let AgentExecutionOutcome::PreflightFailed { diagnostic } = lite else {
         panic!("an unreachable endpoint refuses the start: {lite:?}");
     };
-    assert!(diagnostic.contains("refused"), "{diagnostic}");
-    assert!(lite_elapsed < Duration::from_secs(1), "{lite_elapsed:?}");
+    // Behaviour first: this wording and card detail exist only on the
+    // reachability-probe path. The runner's retried path (about 7 s over 3
+    // attempts) fails the agent with a different outcome and card.
+    assert!(
+        diagnostic.contains("endpoint unreachable before start"),
+        "{diagnostic}"
+    );
+    assert!(diagnostic.contains("(refused)"), "{diagnostic}");
+    // No wall-clock bound: under load 35 the probe path alone measured 4 to
+    // 12 s, past the old 7 s retried path, so time cannot tell them apart.
     let cards = system_cards(&room.db, "d-lite").await;
     assert_eq!(cards.len(), 1, "{cards:?}");
     assert_eq!(cards[0]["kind"], "agent_error");
@@ -358,6 +366,8 @@ async fn an_unreachable_endpoint_fails_its_agent_fast_and_the_others_still_start
         summary.contains("injoignable") && summary.contains("VPN"),
         "{summary}"
     );
+    let detail = cards[0]["detail"].as_str().unwrap();
+    assert!(detail.contains("endpoint probe before start"), "{detail}");
 
     assert!(
         !matches!(claude, AgentExecutionOutcome::PreflightFailed { .. }),
