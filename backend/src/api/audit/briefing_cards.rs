@@ -7,17 +7,26 @@ use crate::models::*;
 
 use super::briefing::{BriefingDefaults, BriefingFormRequest};
 
-/// Every briefing card carries `audit-briefing:<project>:<discussion>`: the
-/// answers are accepted only in that discussion, for that project.
+/// Every briefing card carries `audit-briefing:<project>:<discussion>:<set>`:
+/// the answers are accepted only in that discussion, for that project, and
+/// only for the latest set posted there.
 pub(crate) const TASK_REF_PREFIX: &str = "audit-briefing:";
 
-pub(crate) fn task_ref(project_id: &str, discussion_id: &str) -> String {
-    format!("{TASK_REF_PREFIX}{project_id}:{discussion_id}")
+pub(crate) fn task_ref(project_id: &str, discussion_id: &str, set: &str) -> String {
+    format!("{TASK_REF_PREFIX}{project_id}:{discussion_id}:{set}")
 }
 
-/// `(project, discussion)` of a briefing card's task reference.
-pub(crate) fn parse_task_ref(task_ref: &str) -> Option<(&str, &str)> {
-    task_ref.strip_prefix(TASK_REF_PREFIX)?.split_once(':')
+/// `(project, discussion, set)` of a briefing card's task reference.
+pub(crate) fn parse_task_ref(task_ref: &str) -> Option<(&str, &str, &str)> {
+    let mut parts = task_ref.strip_prefix(TASK_REF_PREFIX)?.splitn(3, ':');
+    let parsed = (parts.next()?, parts.next()?, parts.next()?);
+    (!parsed.2.is_empty()).then_some(parsed)
+}
+
+/// A card's key is `briefing-<field>.<set>`: question keys are unique per
+/// discussion, so a second request there needs keys of its own.
+fn field_key(key: &str) -> &str {
+    key.split_once('.').map_or(key, |(field, _)| field)
 }
 
 const FREE_FIELDS: [&str; 5] = ["purpose", "team", "maturity", "dependencies", "traps"];
@@ -237,15 +246,26 @@ fn card(
     })
 }
 
-/// The briefing as ready-to-post cards, in `language`.
+/// The briefing as ready-to-post cards, in `language`: a new set each call.
 pub(crate) fn briefing_cards(
     project_id: &str,
     discussion_id: &str,
     language: &str,
     defaults: &BriefingDefaults,
 ) -> Vec<serde_json::Value> {
+    let set = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
+    briefing_cards_set(project_id, discussion_id, language, defaults, &set)
+}
+
+fn briefing_cards_set(
+    project_id: &str,
+    discussion_id: &str,
+    language: &str,
+    defaults: &BriefingDefaults,
+    set: &str,
+) -> Vec<serde_json::Value> {
     let w = wording(language);
-    let task_ref = task_ref(project_id, discussion_id);
+    let task_ref = task_ref(project_id, discussion_id, set);
     let mut cards = Vec::new();
     for (field, question) in FREE_FIELDS.iter().zip(w.free) {
         cards.push(card(
@@ -321,6 +341,10 @@ pub(crate) fn briefing_cards(
             EXISTING_OTHER,
             &task_ref,
         ));
+    }
+    for card in &mut cards {
+        let key = format!("{}.{set}", card["key"].as_str().unwrap_or_default());
+        card["key"] = serde_json::json!(key);
     }
     cards
 }
@@ -678,7 +702,8 @@ pub async fn briefing_status(
 
 /// Called inside the answer transaction of a card whose task reference is a
 /// briefing's. Refuses a card answered outside its discussion or project;
-/// saves the briefing once every card of the set is answered.
+/// saves the briefing once every card of the latest set is answered, and
+/// returns what must run on disk after the answer is committed.
 pub(crate) fn on_card_answered(
     conn: &rusqlite::Connection,
     discussion_id: &str,
@@ -686,8 +711,8 @@ pub(crate) fn on_card_answered(
     question: &crate::db::discussion_questions::DiscussionQuestion,
     option: Option<&str>,
     text: Option<&str>,
-) -> Result<(), String> {
-    let (project_id, card_discussion) =
+) -> Result<Option<super::briefing::BriefingAfterCommit>, String> {
+    let (project_id, card_discussion, _) =
         parse_task_ref(task_ref).ok_or("malformed briefing card reference")?;
     if card_discussion != discussion_id {
         return Err("this briefing card belongs to another discussion".into());
@@ -701,6 +726,15 @@ pub(crate) fn on_card_answered(
     let questions = crate::db::discussion_questions::list(conn, discussion_id)
         .map_err(|e| e.to_string())?
         .questions;
+    // A later request superseded this set: its answers stay, nothing is saved.
+    let latest = questions.iter().rev().find_map(|q| {
+        let task_ref = q.task_ref.as_deref()?;
+        let (project, discussion, _) = parse_task_ref(task_ref)?;
+        (project == project_id && discussion == discussion_id).then_some(task_ref)
+    });
+    if latest != Some(task_ref) {
+        return Ok(None);
+    }
     let set: Vec<_> = questions
         .iter()
         .filter(|q| q.task_ref.as_deref() == Some(task_ref))
@@ -708,7 +742,7 @@ pub(crate) fn on_card_answered(
     let mut answers = Vec::with_capacity(set.len());
     let mut docs_default = String::new();
     for q in &set {
-        if q.key == "briefing-docs-dir" {
+        if field_key(&q.key) == "briefing-docs-dir" {
             docs_default = q
                 .options
                 .first()
@@ -717,28 +751,30 @@ pub(crate) fn on_card_answered(
         }
         if q.id == question.id {
             answers.push(CardAnswer {
-                key: &q.key,
+                key: field_key(&q.key),
                 option,
                 text,
             });
         } else if let Some(answer) = q.answer.as_ref() {
             answers.push(CardAnswer {
-                key: &q.key,
+                key: field_key(&q.key),
                 option: answer.selected_option_ids.first().map(String::as_str),
                 text: answer.text.as_deref(),
             });
         } else {
             // Another card of the set still waits for the human.
-            return Ok(());
+            return Ok(None);
         }
     }
     let Some(form) = answers_to_form(&answers, &docs_default) else {
-        return Ok(());
+        return Ok(None);
     };
     let project = crate::db::projects::get_project(conn, project_id)
         .map_err(|e| e.to_string())?
         .ok_or("project not found")?;
-    super::briefing::save_briefing_in(conn, &project, &form, false, None).map_err(|e| e.message())
+    super::briefing::save_briefing_in(conn, &project, &form, false, None)
+        .map(Some)
+        .map_err(|e| e.message())
 }
 
 #[cfg(test)]
@@ -756,13 +792,15 @@ mod tests {
 
     #[test]
     fn the_cards_are_valid_kronn_questions_bound_to_their_discussion() {
-        let cards = briefing_cards("p1", "d1", "fr", &defaults());
+        let cards = briefing_cards_set("p1", "d1", "fr", &defaults(), "s1");
         assert_eq!(cards.len(), 15);
         let mut keys = std::collections::HashSet::new();
         for card in &cards {
             assert_eq!(card["version"], 1);
-            assert_eq!(card["task_ref"], "audit-briefing:p1:d1");
-            assert!(keys.insert(card["key"].as_str().unwrap().to_string()));
+            assert_eq!(card["task_ref"], "audit-briefing:p1:d1:s1");
+            let key = card["key"].as_str().unwrap();
+            assert!(key.ends_with(".s1"), "{key}");
+            assert!(keys.insert(key.to_string()));
             assert!(card["options"].as_array().unwrap().len() <= 8);
         }
         let docs = cards.last().unwrap();
@@ -771,7 +809,17 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Le dossier docs/ utilisé par Kronn existe déjà"));
-        assert_eq!(parse_task_ref("audit-briefing:p1:d1"), Some(("p1", "d1")));
+        assert_eq!(
+            parse_task_ref("audit-briefing:p1:d1:s1"),
+            Some(("p1", "d1", "s1"))
+        );
+        assert_eq!(parse_task_ref("audit-briefing:p1:d1"), None);
+        // Each request is a set of its own: its keys never collide.
+        let again = briefing_cards("p1", "d1", "fr", &defaults());
+        assert_ne!(
+            again[0]["key"],
+            briefing_cards("p1", "d1", "fr", &defaults())[0]["key"]
+        );
         assert_eq!(
             briefing_cards("p1", "d1", "en", &defaults())[0]["question"],
             "What is this project for, and who uses it?"
@@ -933,10 +981,11 @@ mod tests {
         discussion: &str,
         question: &crate::db::discussion_questions::DiscussionQuestion,
     ) -> Result<(), String> {
-        let (selected, text) = match question.key.as_str() {
+        let (selected, text) = match field_key(&question.key) {
             "briefing-docs-dir" => (vec![], Some(".ai".to_string())),
             "briefing-tracker" => (vec!["jira".to_string()], None),
             "briefing-additional" => (vec![NOT_PROVIDED.to_string()], None),
+            "briefing-existing-docs" => (vec![EXISTING_LEGACY.to_string()], None),
             key if key.starts_with("briefing-") && question.options.len() == 1 => {
                 (vec![], Some(format!("answer to {key}")))
             }
@@ -1059,7 +1108,10 @@ mod tests {
         };
         let cards = briefing_cards("p1", "d1", "fr", &d);
         let existing = cards.last().unwrap();
-        assert_eq!(existing["key"], "briefing-existing-docs");
+        assert_eq!(
+            field_key(existing["key"].as_str().unwrap()),
+            "briefing-existing-docs"
+        );
         let ids: Vec<_> = existing["options"]
             .as_array()
             .unwrap()
@@ -1075,5 +1127,148 @@ mod tests {
             existing["recommended_option_ids"],
             serde_json::json!(["other_folder"])
         );
+    }
+
+    fn human_docs_defaults() -> BriefingDefaults {
+        BriefingDefaults {
+            docs_dir: ".ai".into(),
+            docs_dir_source: super::super::briefing::BriefingDocsDirSource::Existing,
+            folder_exists: true,
+            folder: crate::core::docs_folder::DocsFolderState::HumanDocs {
+                files: 1,
+                site_generator: None,
+                legacy_exists: false,
+            },
+        }
+    }
+
+    fn notes(conn: &rusqlite::Connection) -> Option<String> {
+        crate::db::projects::get_project_briefing_notes(conn, "p-cards").unwrap()
+    }
+
+    #[tokio::test]
+    async fn only_the_latest_set_of_cards_in_a_discussion_is_saved() {
+        let fx = fixture().await;
+        let path = fx.root.to_string_lossy().into_owned();
+        let old = briefing_cards_set("p-cards", "d-cards", "fr", &defaults(), "s1");
+        let new = briefing_cards_set("p-cards", "d-cards", "fr", &defaults(), "s2");
+        let outcome = fx
+            .state
+            .db
+            .with_conn(move |conn| {
+                post_cards(conn, "d-cards", "m-old", &old);
+                post_cards(conn, "d-cards", "m-new", &new);
+                let questions = crate::db::discussion_questions::list(conn, "d-cards")?.questions;
+                assert_eq!(questions.len(), 30, "both sets are recorded");
+                let in_set = |set: &str| {
+                    questions
+                        .iter()
+                        .filter(|q| q.task_ref.as_deref().is_some_and(|r| r.ends_with(set)))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                };
+                for q in in_set(":s1") {
+                    answer(conn, "d-cards", &q).map_err(|e| anyhow::anyhow!(e))?;
+                }
+                let after_superseded = notes(conn);
+                for q in in_set(":s2") {
+                    answer(conn, "d-cards", &q).map_err(|e| anyhow::anyhow!(e))?;
+                }
+                Ok((after_superseded, notes(conn)))
+            })
+            .await
+            .unwrap();
+        crate::core::docs_location::set_project_override(&path, None);
+        let (after_superseded, saved) = outcome;
+        assert_eq!(after_superseded, None, "a superseded set saves nothing");
+        assert!(saved
+            .expect("the latest set is saved")
+            .contains("answer to briefing-purpose"));
+    }
+
+    #[tokio::test]
+    async fn a_failed_form_save_moves_nothing_and_keeps_the_folder() {
+        let fx = fixture().await;
+        let path = fx.root.to_string_lossy().into_owned();
+        std::fs::create_dir_all(fx.root.join(".ai")).unwrap();
+        std::fs::write(fx.root.join(".ai/install.md"), "# Install\n").unwrap();
+        fx.state
+            .db
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    "CREATE TRIGGER fail_notes BEFORE UPDATE OF briefing_notes ON projects \
+                     BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let form = BriefingFormRequest {
+            purpose: "P".into(),
+            team: "T".into(),
+            maturity: "M".into(),
+            dependencies: "D".into(),
+            traps: "Tr".into(),
+            docs_dir: Some(".ai".into()),
+            move_existing_to_legacy: true,
+            ..BriefingFormRequest::default()
+        };
+        let saved = super::super::briefing::save_briefing_answers(&fx.state, "p-cards", form).await;
+        let dir = fx
+            .state
+            .db
+            .with_conn(|conn| crate::db::projects::project_docs_dir(conn, "p-cards"))
+            .await
+            .unwrap();
+        let root = crate::core::docs_location::DocsRoot::of(&fx.root);
+        crate::core::docs_location::set_project_override(&path, None);
+        assert!(saved.is_err(), "the injected DB failure fails the save");
+        assert!(fx.root.join(".ai/install.md").is_file());
+        assert!(!fx.root.join(".ai/legacy").exists());
+        assert_eq!(dir, None, "the folder choice is rolled back");
+        assert!(root.is_default(), "no override survives a failed save");
+    }
+
+    #[tokio::test]
+    async fn a_failed_card_answer_moves_nothing_and_a_committed_one_moves_on_choice() {
+        let fx = fixture().await;
+        let path = fx.root.to_string_lossy().into_owned();
+        std::fs::create_dir_all(fx.root.join(".ai")).unwrap();
+        std::fs::write(fx.root.join(".ai/install.md"), "# Install\n").unwrap();
+        let cards = briefing_cards_set("p-cards", "d-cards", "fr", &human_docs_defaults(), "s1");
+        assert_eq!(cards.len(), 16);
+        let root = fx.root.clone();
+        let outcome = fx
+            .state
+            .db
+            .with_conn(move |conn| {
+                post_cards(conn, "d-cards", "m-cards", &cards);
+                let questions = crate::db::discussion_questions::list(conn, "d-cards")?.questions;
+                let (last, rest) = questions.split_last().unwrap();
+                for q in rest {
+                    answer(conn, "d-cards", q).map_err(|e| anyhow::anyhow!(e))?;
+                }
+                conn.execute_batch(
+                    "CREATE TRIGGER fail_answer BEFORE UPDATE OF state ON discussion_questions \
+                     BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+                )?;
+                let failed = answer(conn, "d-cards", last);
+                let kept =
+                    root.join(".ai/install.md").is_file() && !root.join(".ai/legacy").exists();
+                let notes_after_failure = notes(conn);
+                conn.execute_batch("DROP TRIGGER fail_answer")?;
+                answer(conn, "d-cards", last).map_err(|e| anyhow::anyhow!(e))?;
+                Ok((failed, kept, notes_after_failure, notes(conn)))
+            })
+            .await
+            .unwrap();
+        crate::core::docs_location::set_project_override(&path, None);
+        let (failed, kept, notes_after_failure, saved) = outcome;
+        assert!(failed.is_err(), "the injected DB failure fails the answer");
+        assert!(kept, "nothing moves before the answer is committed");
+        assert_eq!(notes_after_failure, None);
+        assert!(saved.is_some());
+        assert!(fx.root.join(".ai/legacy/install.md").is_file());
+        assert!(!fx.root.join(".ai/install.md").exists());
     }
 }

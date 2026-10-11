@@ -496,14 +496,16 @@ pub async fn get_briefing_defaults(
     )))
 }
 
-/// Record the folder the briefing chose. Stored as the project's override
-/// only when it differs from what the project resolves to without one, so a
-/// briefing that keeps the existing layout changes nothing.
+/// Record the folder the briefing chose, in the caller's transaction. Stored
+/// as the project's override only when it differs from what the project
+/// resolves to without one, so a briefing that keeps the existing layout
+/// changes nothing. The override and the legacy move go to `after`.
 fn apply_briefing_docs_dir(
     conn: &rusqlite::Connection,
     project: &Project,
     requested: &str,
     move_existing_to_legacy: bool,
+    after: &mut BriefingAfterCommit,
 ) -> Result<(), BriefingSaveError> {
     use crate::core::docs_folder::{folder_state, DocsFolderState};
     use crate::core::docs_location;
@@ -535,14 +537,48 @@ fn apply_briefing_docs_dir(
     let stored = (unconfigured.as_deref() != Some(rel.as_str())).then(|| rel.clone());
     crate::db::projects::set_project_docs_dir(conn, &project.id, stored.as_deref())
         .map_err(|e| BriefingSaveError::Internal(format!("DB error: {e}")))?;
-    docs_location::set_project_override(&project.path, stored.as_deref());
+    after.docs_override = Some(stored);
     if matches!(state, DocsFolderState::HumanDocs { .. }) {
-        let docs_root =
-            docs_location::DocsRoot::from_rel(&rel).map_err(BriefingSaveError::DocsDir)?;
-        crate::core::docs_folder::move_to_legacy(&root, &docs_root)
-            .map_err(BriefingSaveError::DocsDir)?;
+        after.legacy_move =
+            Some(docs_location::DocsRoot::from_rel(&rel).map_err(BriefingSaveError::DocsDir)?);
     }
     Ok(())
+}
+
+/// What a saved briefing still does outside the database. A rename cannot be
+/// rolled back, so it runs only once the briefing's rows are committed.
+#[must_use = "apply it once the transaction is committed"]
+pub(crate) struct BriefingAfterCommit {
+    project_path: String,
+    root: std::path::PathBuf,
+    docs_override: Option<Option<String>>,
+    legacy_move: Option<crate::core::docs_location::DocsRoot>,
+    body: String,
+}
+
+impl BriefingAfterCommit {
+    /// The override, the explicit legacy move, then `briefing.md` in the
+    /// folder. Pre-bootstrap projects have no docs folder yet: the DB only,
+    /// and the audit's Phase 1 install picks it up via `resolve_briefing_notes`.
+    pub(crate) fn apply(self) -> Result<(), BriefingSaveError> {
+        if let Some(stored) = &self.docs_override {
+            crate::core::docs_location::set_project_override(&self.project_path, stored.as_deref());
+        }
+        if let Some(docs_root) = &self.legacy_move {
+            crate::core::docs_folder::move_to_legacy(&self.root, docs_root)
+                .map_err(BriefingSaveError::DocsDir)?;
+        }
+        let docs_dir = crate::core::scanner::detect_docs_dir(&self.root);
+        if docs_dir.is_dir() {
+            let target = docs_dir.join("briefing.md");
+            crate::core::fs_guard::assert_contained_no_symlink(&self.root, &target)
+                .map_err(BriefingSaveError::DocsDir)?;
+            std::fs::write(&target, &self.body).map_err(|e| {
+                BriefingSaveError::Internal(format!("Failed to write {}: {}", target.display(), e))
+            })?;
+        }
+        Ok(())
+    }
 }
 
 /// Marks a briefing Kronn wrote with default answers for an unattended
@@ -597,16 +633,23 @@ fn check_answers(form: &BriefingFormRequest) -> Result<(), BriefingSaveError> {
     Ok(())
 }
 
-/// Save the briefing answers: validation, docs folder, `briefing.md` and the
-/// DB notes, in one connection. Shared by the form, the briefing cards and
-/// the unattended defaults (KT-1192).
+/// Save the briefing answers: validation, docs folder and DB notes, in the
+/// caller's transaction; the returned effects run once it is committed.
+/// Shared by the form, the briefing cards and the unattended defaults (KT-1192).
 pub(crate) fn save_briefing_in(
     conn: &rusqlite::Connection,
     project: &Project,
     form: &BriefingFormRequest,
     defaults: bool,
     docs_section: Option<&str>,
-) -> Result<(), BriefingSaveError> {
+) -> Result<BriefingAfterCommit, BriefingSaveError> {
+    let mut after = BriefingAfterCommit {
+        project_path: project.path.clone(),
+        root: crate::core::scanner::resolve_host_path(&project.path),
+        docs_override: None,
+        legacy_move: None,
+        body: String::new(),
+    };
     check_answers(form)?;
 
     let project_facts = match form
@@ -640,7 +683,7 @@ pub(crate) fn save_briefing_in(
         .map(str::trim)
         .filter(|d| !d.is_empty())
     {
-        apply_briefing_docs_dir(conn, project, dir, form.move_existing_to_legacy)?;
+        apply_briefing_docs_dir(conn, project, dir, form.move_existing_to_legacy, &mut after)?;
     }
 
     // 3. Format the briefing.md body — same shape as
@@ -693,25 +736,14 @@ pub(crate) fn save_briefing_in(
     }
     let body = with_all_kronn_options(body, form.td_to_tasks, &form.cross_audit_agents);
 
-    // 4. DB notes, then `briefing.md` on disk. Pre-bootstrap projects have no
-    // docs folder yet: the DB only, and the audit's Phase 1 install picks it
-    // up via `resolve_briefing_notes`.
+    // 4. DB notes; `briefing.md` is written after the commit.
     match crate::db::projects::update_project_briefing_notes(conn, &project.id, Some(&body)) {
         Ok(true) => {}
         Ok(false) => return Err(BriefingSaveError::NotFound),
         Err(e) => return Err(BriefingSaveError::Internal(format!("DB error: {e}"))),
     }
-    let project_path = crate::core::scanner::resolve_host_path(&project.path);
-    let docs_dir = crate::core::scanner::detect_docs_dir(&project_path);
-    if docs_dir.is_dir() {
-        let target = docs_dir.join("briefing.md");
-        crate::core::fs_guard::assert_contained_no_symlink(&project_path, &target)
-            .map_err(BriefingSaveError::DocsDir)?;
-        std::fs::write(&target, &body).map_err(|e| {
-            BriefingSaveError::Internal(format!("Failed to write {}: {}", target.display(), e))
-        })?;
-    }
-    Ok(())
+    after.body = body;
+    Ok(after)
 }
 
 /// `save_briefing_in` for a project id, on the database's connection.
@@ -756,13 +788,14 @@ pub(crate) async fn save_briefing_with(
             let Some(project) = crate::db::projects::get_project(conn, &id)? else {
                 return Ok(Err(BriefingSaveError::NotFound));
             };
-            Ok(save_briefing_in(
-                conn,
-                &project,
-                &form,
-                defaults,
-                docs_section.as_deref(),
-            ))
+            let tx = conn.unchecked_transaction()?;
+            let after =
+                match save_briefing_in(&tx, &project, &form, defaults, docs_section.as_deref()) {
+                    Ok(after) => after,
+                    Err(e) => return Ok(Err(e)),
+                };
+            tx.commit()?;
+            Ok(after.apply())
         })
         .await
         .unwrap_or_else(|e| Err(BriefingSaveError::Internal(format!("DB error: {e}"))))

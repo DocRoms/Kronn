@@ -934,6 +934,7 @@ pub fn answer(
     }
     conn.execute_batch("SAVEPOINT answer_discussion_question")
         .map_err(anyhow::Error::from)?;
+    let mut briefing_after = None;
     let outcome = answer_inner(
         conn,
         discussion_id,
@@ -941,11 +942,19 @@ pub fn answer(
         request,
         author_pseudo,
         author_avatar_email,
+        &mut briefing_after,
     );
     match outcome {
         Ok(question) => {
             conn.execute_batch("RELEASE answer_discussion_question")
                 .map_err(anyhow::Error::from)?;
+            // A briefing's folder move and file run only once its rows are
+            // committed; a failure leaves the folder as it was (KT-1192).
+            if let Some(after) = briefing_after {
+                if let Err(e) = after.apply() {
+                    tracing::warn!("briefing saved, folder left as it was: {}", e.message());
+                }
+            }
             Ok(question)
         }
         Err(error) => {
@@ -964,6 +973,7 @@ fn answer_inner(
     request: &AnswerDiscussionQuestionRequest,
     author_pseudo: &str,
     author_avatar_email: Option<&str>,
+    briefing_after: &mut Option<crate::api::audit::briefing::BriefingAfterCommit>,
 ) -> Result<DiscussionQuestion, AnswerError> {
     let mut question = list(conn, discussion_id)?
         .questions
@@ -1087,7 +1097,7 @@ fn answer_inner(
         .as_deref()
         .filter(|r| r.starts_with(crate::api::audit::briefing_cards::TASK_REF_PREFIX))
     {
-        crate::api::audit::briefing_cards::on_card_answered(
+        *briefing_after = crate::api::audit::briefing_cards::on_card_answered(
             conn,
             discussion_id,
             task_ref,
