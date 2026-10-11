@@ -570,15 +570,16 @@ pub(crate) async fn run_partial_pipeline(
         // KT-1174 — only the ADRs in force and the TD record lines present
         // before this refresh settle a TD.
         let adr_baseline = crate::core::adr::StartOfRun::capture(&project_path.join("docs"));
-        let (detector_signals, prior_td_digests) = if step8_selected {
+        let (detector_signals, ecosystems, prior_td_digests) = if step8_selected {
             let p = project_path.clone();
-            let signals = tokio::task::spawn_blocking(move || {
-                crate::core::audit_detectors::run_detectors(&p)
+            let (signals, ecosystems) = tokio::task::spawn_blocking(move || {
+                let scan = crate::core::audit_detectors::scan_project(&p);
+                (scan.signals, scan.ecosystems)
             }).await.unwrap_or_default();
             let digests = super::reconciliation::digest_prior_tech_debt(&project_path.join("docs"));
-            (signals, digests)
+            (signals, ecosystems, digests)
         } else {
-            (Vec::new(), Vec::new())
+            (Vec::new(), Vec::new(), Vec::new())
         };
         let version_ctx = super::version_context::VersionContext::load(
             &state.db, &project_id_for_progress, &project_path, &project_path_str, &agent_launcher, &agent_type,
@@ -660,7 +661,7 @@ pub(crate) async fn run_partial_pipeline(
                 full_prompt.push_str(&format!("\n\n{}\n", block));
             }
             if analysis_step.target_file.ends_with("inconsistencies-tech-debt.md") {
-                full_prompt.push_str(&super::step8_context_block(&detector_signals, &prior_td_digests));
+                full_prompt.push_str(&super::step8_context_block(&detector_signals, &ecosystems, &prior_td_digests));
             }
             if let Some(block) = version_ctx.block_for(analysis_step.target_file) {
                 full_prompt.push_str(&block);

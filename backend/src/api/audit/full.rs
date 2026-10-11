@@ -1131,19 +1131,19 @@ pub async fn full_audit(
         // block is injected into the Step 8 (tech-debt) prompt as
         // ground-truth anchors the agent must account for. Off the async
         // executor (filesystem walk) via spawn_blocking.
-        let detector_signals: Vec<crate::core::audit_detectors::DetectedSignal> = {
+        let (detector_signals, ecosystems) = {
             let p = project_path.clone();
             match tokio::task::spawn_blocking(move || {
-                crate::core::audit_detectors::run_detectors(&p)
+                crate::core::audit_detectors::scan_project(&p)
             })
             .await
             {
-                Ok(sigs) => sigs,
+                Ok(scan) => (scan.signals, scan.ecosystems),
                 Err(e) => {
                     // Detector panic must not abort the audit, but it must not
                     // be silent either (consistency with chantier 3 logging).
                     tracing::error!("audit detectors panicked, Step 8 gets no signals: {e}");
-                    Vec::new()
+                    (Vec::new(), Vec::new())
                 }
             }
         };
@@ -1277,7 +1277,7 @@ pub async fn full_audit(
             if analysis_step.target_file.ends_with("inconsistencies-tech-debt.md") {
                 // Shared with the partial pipeline (Codex lot-3 #4): the
                 // detector signals and the known-debt digests travel together.
-                full_prompt.push_str(&super::step8_context_block(&detector_signals, &prior_td_digests));
+                full_prompt.push_str(&super::step8_context_block(&detector_signals, &ecosystems, &prior_td_digests));
             }
             if let Some(block) = version_ctx.block_for(analysis_step.target_file) {
                 full_prompt.push_str(&block);

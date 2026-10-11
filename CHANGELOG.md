@@ -25,6 +25,23 @@ Release notes for 0.9.3 and earlier are available in the
   corpus was repaired to zero failures: every line-less citation now points
   at the symbol it means, paths of moved or split files were re-located, and
   sentences about code that no longer exists were rewritten.
+- The audit's tech-debt baseline runs as code (KT-152). Fourteen new
+  deterministic detectors cover what the step 8 prompt used to ask the agent
+  to grep: Dockerfile (root user, no `HEALTHCHECK`, apt flags and list
+  cleanup, base image untagged or `latest`, `ADD` of a remote URL,
+  secret-named `ARG`), compose images untagged or `latest`, CI
+  (`StrictHostKeyChecking=no`, `pull_request_target`, actions on a moving
+  ref), tracked `.env` files (filenames only), templates (`<img>` without
+  `alt`, inline `<script>`/`<style>` over 50 lines) and OSS community files,
+  gated on OSS intent. Each finding carries `file:line` evidence, and step 8
+  is re-run when one is left unaddressed, like the existing detectors. PHP,
+  Node.js, Rust, Python and Go items (`display_errors`, `opcache`,
+  lockfile installs, `cargo deny`, `govulncheck`…) reach the prompt only
+  when that stack is detected. The step 8 prompt shrinks from 19,941 to
+  about 10,600 bytes (about 5,400 to 2,900 tokens); every former baseline
+  item is mapped to a detector, a stack item or a remaining prompt line by a
+  test.
+
 - Audit versions and standards are judged from dated sources (KT-1000). The
   tech-debt step and the security pass get a « Technologies and standards »
   block: the project's stored dependency watch (version in place, latest,
