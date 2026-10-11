@@ -330,6 +330,18 @@ Release notes for 0.9.3 and earlier are available in the
   Favoris until the run ended. Favoris now lists every pinned discussion,
   live ones first with their indicator, and « À suivre » keeps the unpinned
   live and unread work, so each discussion has one shortcut row.
+- Links inside project docs now open inside Kronn (KT-1200). A relative link
+  such as `testing-quality.md` or `../tech-debt/TD-….md` used to go to the
+  browser, which reloaded the app and opened nothing, since Kronn has no
+  router. The doc viewer now handles every link itself. A link to another doc
+  opens that doc in the viewer. The link is resolved from the current doc's
+  folder, falls back to the repository root, and never goes above it. A
+  `#section` link scrolls to the heading, since headings now carry slug ids.
+  A link to a source file, with or without `:line`, opens the source viewer
+  at that line. Web and `mailto:` links open in a new tab with
+  `rel="noopener noreferrer"`. A link to a missing doc, or to a path outside
+  the project, shows an inline message instead. A back button returns to the
+  previous doc.
 - One click on « Voir » in the pending-decisions banner now brings the
   decision card into view. It fired a single smooth `scrollIntoView`, aimed
   at the layout measured at the click; message rows use
