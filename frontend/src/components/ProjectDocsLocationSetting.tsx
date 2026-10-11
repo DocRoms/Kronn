@@ -72,7 +72,7 @@ export function ProjectDocsLocationSetting({ projectId, t }: Props) {
           type="text"
           className="set-input set-input-sm"
           value={draft}
-          placeholder={state?.default_dir ?? 'docs'}
+          placeholder="docs"
           aria-label={t('projects.docsLocation.inputLabel')}
           disabled={!state || saving}
           onChange={e => setDraft(e.target.value)}

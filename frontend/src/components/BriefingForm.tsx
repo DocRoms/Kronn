@@ -213,6 +213,24 @@ export function BriefingForm({
       data-note={fact}
     />
   );
+  // KT-1192 — pre-filled by the backend: override, existing folder, global default, docs.
+  const [docsDir, setDocsDir] = useState('');
+  const [docsDirLoaded, setDocsDirLoaded] = useState(false);
+  const [docsDirExists, setDocsDirExists] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    Promise.resolve()
+      .then(() => projectsApi.briefingDefaults(projectId))
+      .then(value => {
+        if (!live) return;
+        setDocsDir(value.docs_dir);
+        setDocsDirExists(value.folder_exists);
+        setDocsDirLoaded(true);
+      })
+      .catch(() => { if (live) setDocsDirLoaded(true); });
+    return () => { live = false; };
+  }, [projectId]);
 
   const update = (key: keyof typeof form, value: string) => setForm(f => ({ ...f, [key]: value }));
   const choose = (key: BriefingChoiceCard['key'], id: string) =>
@@ -271,6 +289,7 @@ export function BriefingForm({
         existing_docs: { locations: docs },
         project_rules: { rules },
         cross_audit_agents: crossAudit ? crossAgents : [],
+        ...(docsDir.trim() ? { docs_dir: docsDir.trim() } : {}),
       });
       if (!review) {
         toast(t('briefing.savedOnlyToast'), 'success');
@@ -394,6 +413,24 @@ export function BriefingForm({
           onChange={e => update('additional', e.target.value)}
           placeholder={t('briefing.q6Placeholder')}
         />
+      </label>
+
+      <label data-testid="briefing-docs-dir">
+        <span className="briefing-form-q">{t('briefing.docsDir')}</span>
+        <input
+          className="briefing-card-input"
+          value={docsDir}
+          disabled={!docsDirLoaded}
+          placeholder="docs"
+          maxLength={255}
+          onChange={e => setDocsDir(e.target.value)}
+          data-testid="briefing-docs-dir-input"
+        />
+        <span className="briefing-form-option-hint">
+          {docsDirExists && docsDir.trim()
+            ? t('briefing.docsDirExists', `${docsDir.trim().replace(/\/+$/, '')}/`)
+            : t('briefing.docsDirHint')}
+        </span>
       </label>
 
       <section className="briefing-project" aria-labelledby="briefing-project-title">

@@ -1232,26 +1232,6 @@ mod tests {
         assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 1);
     }
 
-    #[test]
-    fn the_global_default_moves_the_fresh_fallback_and_the_entry() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        crate::core::docs_location::set_global_default(Some("handbook"));
-        let fresh = detect_docs_dir(tmp.path());
-        std::fs::create_dir_all(tmp.path().join("handbook")).unwrap();
-        std::fs::write(tmp.path().join("handbook/AGENTS.md"), "# h\n").unwrap();
-        let entry = detect_docs_entry(tmp.path());
-        crate::core::docs_location::set_global_default(None);
-        assert_eq!(fresh, tmp.path().join("handbook"));
-        assert_eq!(entry, tmp.path().join("handbook/AGENTS.md"));
-        // Back to the historical fallback once cleared.
-        assert_eq!(
-            detect_docs_dir(tempfile::TempDir::new().unwrap().path())
-                .file_name()
-                .unwrap(),
-            "docs"
-        );
-    }
-
     // ─── scan_kronn_markers (0.8.3 Feasibility-Gated Implementation) ─────────
 
     #[test]

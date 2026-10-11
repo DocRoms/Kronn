@@ -1,8 +1,9 @@
 //! Where a project keeps its AI documentation (KT-263).
 //!
-//! Precedence: the project's own override, then the global default from the
-//! settings, then the historical detection order (`docs/` → `doc/` → `ai/`).
-//! With nothing configured the result is exactly the historical one.
+//! Precedence: the project's own override (set by the briefing or the project
+//! page), then the historical detection order (`docs/` → `doc/` → `ai/`).
+//! The global default from the settings only pre-fills the briefing
+//! (KT-1192): it never applies to a project by itself.
 //!
 //! A configured folder is also a write target (template install, kronn-state,
 //! checksums), so it must stay inside the project root with no symlink on the
@@ -35,7 +36,6 @@ const REFUSED_SENTINEL: &str = "\0kronn-refused-docs-location";
 #[serde(rename_all = "snake_case")]
 pub enum DocsDirSource {
     ProjectOverride,
-    GlobalDefault,
     Detected,
 }
 
@@ -160,21 +160,8 @@ pub fn validate_for_project(root: &Path, input: &str) -> Result<String, String> 
     Ok(rel)
 }
 
-fn entry_name(dir_rel: &str) -> &'static str {
-    // Same rule as `scanner::detect_docs_entry`: only an `ai` folder keeps index.md.
-    if dir_rel.rsplit('/').next() == Some("ai") {
-        "index.md"
-    } else {
-        "AGENTS.md"
-    }
-}
-
-/// Pure resolution, given the configuration explicitly.
-pub fn resolve(
-    root: &Path,
-    project_override: Option<&str>,
-    global_default: Option<&str>,
-) -> Resolution {
+/// Pure resolution, given the project's override explicitly.
+pub fn resolve(root: &Path, project_override: Option<&str>) -> Resolution {
     if let Some(rel) = project_override {
         return match contained_dir(root, rel) {
             Ok(dir) => Resolution {
@@ -189,100 +176,32 @@ pub fn resolve(
             },
         };
     }
-
-    let mut refused = None;
-    let mut candidates: Vec<(String, &'static str)> = Vec::new();
-    let mut default_dir = None;
-    if let Some(rel) = global_default {
-        match contained_dir(root, rel).and_then(|dir| normalize_relative(rel).map(|r| (dir, r))) {
-            Ok((dir, rel)) => {
-                candidates.push((rel.clone(), entry_name(&rel)));
-                default_dir = Some(dir);
-            }
-            Err(reason) => refused = Some(reason),
-        }
-    }
-    for (rel, entry) in LEGACY_CANDIDATES {
-        if !candidates.iter().any(|(existing, _)| existing == rel) {
-            candidates.push(((*rel).to_string(), entry));
-        }
-    }
-
-    let pick = |dir: PathBuf| {
-        let source = if default_dir.as_ref() == Some(&dir) {
-            DocsDirSource::GlobalDefault
-        } else {
-            DocsDirSource::Detected
-        };
-        Resolution {
-            dir,
-            source,
-            refused: refused.clone(),
-        }
+    let detected = |dir: PathBuf| Resolution {
+        dir,
+        source: DocsDirSource::Detected,
+        refused: None,
     };
     // An entry file is the strongest signal that an audit completed there.
-    for (rel, entry) in &candidates {
+    for (rel, entry) in LEGACY_CANDIDATES {
         if root.join(rel).join(entry).is_file() {
-            return pick(root.join(rel));
+            return detected(root.join(rel));
         }
     }
     // Then a folder that merely exists (half-finished bootstrap).
-    for (rel, _) in &candidates {
+    for (rel, _) in LEGACY_CANDIDATES {
         if root.join(rel).is_dir() {
-            return pick(root.join(rel));
+            return detected(root.join(rel));
         }
     }
-    pick(default_dir.clone().unwrap_or_else(|| root.join("docs")))
+    detected(root.join("docs"))
 }
 
 // ─── Process-wide configuration ─────────────────────────────────────────────
 //
-// Dozens of callers only hold a path, so the configuration lives here: the
-// global default from the settings, and overrides keyed by project root.
+// Dozens of callers only hold a path, so the overrides live here, keyed by
+// project root.
 
 static OVERRIDES: LazyLock<RwLock<HashMap<PathBuf, String>>> = LazyLock::new(Default::default);
-
-#[cfg(not(test))]
-static GLOBAL_DEFAULT: RwLock<Option<String>> = RwLock::new(None);
-
-// Per test thread: a default set by one test must not move another test's
-// fresh-project fallback.
-#[cfg(test)]
-thread_local! {
-    static GLOBAL_DEFAULT: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
-}
-
-/// Arm the global default (startup and settings save). An invalid value is
-/// ignored with a warning rather than half-applied.
-pub fn set_global_default(value: Option<&str>) {
-    let normalized = match value.map(normalize_relative).transpose() {
-        Ok(v) => v,
-        Err(reason) => {
-            tracing::warn!("default AI doc folder ignored: {reason}");
-            None
-        }
-    };
-    #[cfg(not(test))]
-    {
-        *GLOBAL_DEFAULT.write().unwrap_or_else(|e| e.into_inner()) = normalized;
-    }
-    #[cfg(test)]
-    GLOBAL_DEFAULT.with(|cell| *cell.borrow_mut() = normalized);
-}
-
-pub fn global_default() -> Option<String> {
-    #[cfg(not(test))]
-    {
-        GLOBAL_DEFAULT
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-    }
-    #[cfg(test)]
-    {
-        GLOBAL_DEFAULT.with(|cell| cell.borrow().clone())
-    }
-}
 
 /// Every spelling a caller may hand us for one project: as stored, as
 /// resolved for Docker, and both canonicalized.
@@ -364,8 +283,7 @@ fn override_for(root: &Path) -> Option<String> {
 /// Resolve `root` against the armed configuration.
 pub fn resolution(root: &Path) -> Resolution {
     let project_override = override_for(root);
-    let default = global_default();
-    resolve(root, project_override.as_deref(), default.as_deref())
+    resolve(root, project_override.as_deref())
 }
 
 /// The project's AI doc folder. A refused override yields a path no
@@ -605,66 +523,36 @@ mod tests {
     fn unconfigured_resolution_is_the_historical_order() {
         let t = tmp();
         let root = t.path();
-        let r = resolve(root, None, None);
+        let r = resolve(root, None);
         assert_eq!(
             (r.dir, r.source),
             (root.join("docs"), DocsDirSource::Detected)
         );
 
         std::fs::create_dir_all(root.join("ai")).unwrap();
-        assert_eq!(resolve(root, None, None).dir, root.join("ai"));
+        assert_eq!(resolve(root, None).dir, root.join("ai"));
         std::fs::create_dir_all(root.join("doc")).unwrap();
-        assert_eq!(resolve(root, None, None).dir, root.join("doc"));
+        assert_eq!(resolve(root, None).dir, root.join("doc"));
         mkfile(root, "ai/index.md");
-        assert_eq!(resolve(root, None, None).dir, root.join("ai"));
+        assert_eq!(resolve(root, None).dir, root.join("ai"));
         mkfile(root, "doc/AGENTS.md");
-        assert_eq!(resolve(root, None, None).dir, root.join("doc"));
+        assert_eq!(resolve(root, None).dir, root.join("doc"));
         mkfile(root, "docs/AGENTS.md");
-        let r = resolve(root, None, None);
+        let r = resolve(root, None);
         assert_eq!(r.dir, root.join("docs"));
         assert_eq!(r.refused, None);
     }
 
     #[test]
-    fn project_override_beats_global_default_and_detection() {
+    fn project_override_beats_detection() {
         let t = tmp();
         let root = t.path();
         mkfile(root, "docs/AGENTS.md");
         mkfile(root, "handbook/AGENTS.md");
-        let r = resolve(root, Some(".ai"), Some("handbook"));
+        let r = resolve(root, Some(".ai"));
         assert_eq!(r.dir, root.join(".ai"));
         assert_eq!(r.source, DocsDirSource::ProjectOverride);
         assert_eq!(r.relative(root).as_deref(), Some(".ai"));
-    }
-
-    #[test]
-    fn global_default_beats_detection_and_becomes_the_fresh_fallback() {
-        let t = tmp();
-        let root = t.path();
-        let r = resolve(root, None, Some("handbook"));
-        assert_eq!(
-            (r.dir, r.source),
-            (root.join("handbook"), DocsDirSource::GlobalDefault)
-        );
-
-        mkfile(root, "docs/AGENTS.md");
-        mkfile(root, "handbook/AGENTS.md");
-        assert_eq!(
-            resolve(root, None, Some("handbook")).dir,
-            root.join("handbook")
-        );
-    }
-
-    #[test]
-    fn global_default_does_not_hide_an_audited_legacy_folder() {
-        let t = tmp();
-        let root = t.path();
-        mkfile(root, "ai/index.md");
-        let r = resolve(root, None, Some("handbook"));
-        assert_eq!(
-            (r.dir, r.source),
-            (root.join("ai"), DocsDirSource::Detected)
-        );
     }
 
     #[cfg(unix)]
@@ -674,7 +562,7 @@ mod tests {
         let outside = tmp();
         let root = t.path();
         std::os::unix::fs::symlink(outside.path(), root.join(".ai")).unwrap();
-        let r = resolve(root, Some(".ai"), None);
+        let r = resolve(root, Some(".ai"));
         assert!(r.refused.as_deref().unwrap().contains("symlink"), "{r:?}");
         assert_eq!(r.relative(root), None);
         assert!(!r.dir.exists());
@@ -692,22 +580,6 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), root.join("packages")).unwrap();
         assert!(contained_dir(root, "packages/x/docs").is_err());
         assert!(validate_for_project(root, "packages/x/docs").is_err());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_symlinked_global_default_is_skipped_for_the_historical_order() {
-        let t = tmp();
-        let outside = tmp();
-        let root = t.path();
-        std::os::unix::fs::symlink(outside.path(), root.join("handbook")).unwrap();
-        mkfile(outside.path(), "AGENTS.md");
-        let r = resolve(root, None, Some("handbook"));
-        assert_eq!(
-            (r.dir.clone(), r.source),
-            (root.join("docs"), DocsDirSource::Detected)
-        );
-        assert!(r.refused.is_some());
     }
 
     #[test]
@@ -751,19 +623,6 @@ mod tests {
         assert_eq!(docs_dir(&a), a.join("docs"));
         assert_eq!(docs_dir(&b), b.join("ctx"));
         set_project_override(&b.to_string_lossy(), None);
-    }
-
-    #[test]
-    fn the_armed_global_default_is_read_by_the_resolver() {
-        let t = tmp();
-        let root = t.path();
-        set_global_default(Some("./handbook/"));
-        assert_eq!(global_default().as_deref(), Some("handbook"));
-        assert_eq!(docs_dir(root), root.join("handbook"));
-        set_global_default(Some("../escape"));
-        assert_eq!(global_default(), None);
-        set_global_default(None);
-        assert_eq!(docs_dir(root), root.join("docs"));
     }
 
     #[test]

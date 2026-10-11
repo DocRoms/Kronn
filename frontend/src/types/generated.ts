@@ -1415,6 +1415,19 @@ export type BriefingCommitConvention = "unknown" | "conventional" | "ticket_pref
 export type BriefingDefaultBranch = "unknown" | "main" | "master" | "develop" | "trunk";
 
 /**
+ * The folder the briefing proposes, and where the proposal comes from.
+ */
+export type BriefingDefaults = {
+/**
+ * Relative to the project root, without a trailing slash.
+ */
+docs_dir: string, docs_dir_source: BriefingDocsDirSource,
+/**
+ * The folder already exists in the project.
+ */
+folder_exists: boolean, };
+
+/**
  * A location found in the repository, offered as a pre-filled answer.
  */
 export type BriefingDetectedDoc = { path: string, kind: BriefingDocKind, is_dir: boolean, last_commit: string | null, };
@@ -1446,6 +1459,8 @@ source_of_truth: boolean,
 last_commit: string | null, };
 
 export type BriefingDocsAnswers = { locations: Array<BriefingDocLocation>, };
+
+export type BriefingDocsDirSource = "project_override" | "existing" | "global_default" | "default";
 
 /**
  * The state the user gives a location. `Unknown` is an unanswered state.
@@ -3711,12 +3726,12 @@ kronn_writes: Array<KronnWrite>,
  */
 changes: Array<ProvenanceChange>, };
 
-export type DocWriter = "full_audit" | "partial_audit" | "revalidation" | "template_reinstall" | "document_repair" | "td_index";
-
 /**
  * Which rule picked the folder.
  */
-export type DocsDirSource = "project_override" | "global_default" | "detected";
+export type DocsDirSource = "project_override" | "detected";
+
+export type DocWriter = "full_audit" | "partial_audit" | "revalidation" | "template_reinstall" | "document_repair" | "td_index";
 
 /**
  * What changed since a previous audit — KT-194 drift.
@@ -6449,7 +6464,8 @@ export type ProjectDocsLocation = {
  */
 override_dir: string | null,
 /**
- * The global default from the settings.
+ * The global default from the settings: it pre-fills the briefing and
+ * never applies by itself (KT-1192).
  */
 default_dir: string | null,
 /**

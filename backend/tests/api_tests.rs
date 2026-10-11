@@ -7824,6 +7824,91 @@ async fn a_project_ai_doc_folder_leaving_the_root_is_refused_with_a_400() {
     assert_eq!(unknown["error_code"], "not_found");
 }
 
+fn briefing_answers(docs_dir: Option<&str>) -> Value {
+    let mut body = serde_json::json!({
+        "purpose": "P", "team": "T", "maturity": "M",
+        "dependencies": "D", "traps": "Tr", "additional": ""
+    });
+    if let Some(dir) = docs_dir {
+        body["docs_dir"] = serde_json::json!(dir);
+    }
+    body
+}
+
+#[tokio::test]
+async fn a_global_default_only_prefills_the_briefing_until_the_briefing_is_saved() {
+    // KT-1192 — a fresh project with a global default of `.ai/` and no
+    // briefing resolves exactly as before; saving the briefing with the
+    // pre-filled folder makes it the project's.
+    let state = test_state();
+    state.config.write().await.scan.default_docs_dir = Some(".ai".into());
+    let repo = tempfile::tempdir().unwrap();
+    let root = repo.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    let project = docs_location_project("p-brief-dir", &root);
+    state
+        .db
+        .with_conn(move |conn| kronn::db::projects::insert_project(conn, &project))
+        .await
+        .unwrap();
+    let app = || build_router_with_auth(state.clone(), false);
+    let location = "/api/projects/p-brief-dir/docs-location";
+
+    let (_, read) = get_json(app(), location).await;
+    assert_eq!(read["data"]["effective_dir"], "docs", "{read}");
+    assert_eq!(read["data"]["default_dir"], ".ai", "{read}");
+    assert_eq!(
+        kronn::core::scanner::detect_docs_dir(&root),
+        root.join("docs")
+    );
+
+    let (_, defaults) = get_json(app(), "/api/projects/p-brief-dir/briefing-defaults").await;
+    assert_eq!(defaults["data"]["docs_dir"], ".ai", "{defaults}");
+    assert_eq!(defaults["data"]["docs_dir_source"], "global_default");
+    assert_eq!(defaults["data"]["folder_exists"], false);
+
+    let (status, refused) = post_json(
+        app(),
+        "/api/projects/p-brief-dir/save-briefing",
+        briefing_answers(Some("../outside")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert_eq!(refused["error_code"], "validation");
+    let (_, read) = get_json(app(), location).await;
+    assert!(read["data"]["override_dir"].is_null(), "{read}");
+
+    let (status, saved) = post_json(
+        app(),
+        "/api/projects/p-brief-dir/save-briefing",
+        briefing_answers(Some(".ai/")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["success"], true, "{saved}");
+    let (_, read) = get_json(app(), location).await;
+    assert_eq!(read["data"]["override_dir"], ".ai", "{read}");
+    assert_eq!(read["data"]["effective_dir"], ".ai");
+    assert_eq!(
+        kronn::core::scanner::detect_docs_dir(&root),
+        root.join(".ai")
+    );
+    let (_, defaults) = get_json(app(), "/api/projects/p-brief-dir/briefing-defaults").await;
+    assert_eq!(defaults["data"]["docs_dir_source"], "project_override");
+
+    // Keeping the folder the project would use anyway stores no override.
+    let (status, kept) = post_json(
+        app(),
+        "/api/projects/p-brief-dir/save-briefing",
+        briefing_answers(Some("docs")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{kept}");
+    let (_, read) = get_json(app(), location).await;
+    assert!(read["data"]["override_dir"].is_null(), "{read}");
+    assert_eq!(read["data"]["effective_dir"], "docs");
+}
+
 #[tokio::test]
 async fn the_default_ai_doc_folder_setting_refuses_unsafe_values_with_a_400() {
     // KT-263 — only refusals here: a saved default is process-wide and would

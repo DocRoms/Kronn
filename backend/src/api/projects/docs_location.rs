@@ -18,7 +18,8 @@ use crate::AppState;
 pub struct ProjectDocsLocation {
     /// The project's own override, as saved.
     pub override_dir: Option<String>,
-    /// The global default from the settings.
+    /// The global default from the settings: it pre-fills the briefing and
+    /// never applies by itself (KT-1192).
     pub default_dir: Option<String>,
     /// The folder in use, relative to the project root; `None` when refused.
     pub effective_dir: Option<String>,
@@ -34,10 +35,13 @@ pub struct SetProjectDocsLocation {
     pub dir: Option<String>,
 }
 
-fn view(project_path: &str, override_dir: Option<String>) -> ProjectDocsLocation {
+fn view(
+    project_path: &str,
+    override_dir: Option<String>,
+    default_dir: Option<String>,
+) -> ProjectDocsLocation {
     let root = crate::core::scanner::resolve_host_path(project_path);
-    let default_dir = docs_location::global_default();
-    let resolved = docs_location::resolve(&root, override_dir.as_deref(), default_dir.as_deref());
+    let resolved = docs_location::resolve(&root, override_dir.as_deref());
     ProjectDocsLocation {
         effective_dir: resolved.relative(&root),
         source: resolved.source,
@@ -86,7 +90,10 @@ pub async fn get(State(state): State<AppState>, Path(id): Path<String>) -> Respo
         })
         .await;
     match found {
-        Ok(Some((path, dir))) => Json(ApiResponse::ok(view(&path, dir))).into_response(),
+        Ok(Some((path, dir))) => {
+            let default_dir = state.config.read().await.scan.default_docs_dir.clone();
+            Json(ApiResponse::ok(view(&path, dir, default_dir))).into_response()
+        }
         Ok(None) => coded(
             StatusCode::NOT_FOUND,
             ApiErrorCode::NotFound,
@@ -171,7 +178,13 @@ pub async fn set(
         );
     }
     docs_location::set_project_override(&project.path, normalized.as_deref());
-    Json(ApiResponse::ok(view(&project.path, normalized))).into_response()
+    let default_dir = state.config.read().await.scan.default_docs_dir.clone();
+    Json(ApiResponse::ok(view(
+        &project.path,
+        normalized,
+        default_dir,
+    )))
+    .into_response()
 }
 
 #[cfg(test)]
@@ -182,12 +195,12 @@ mod tests {
     fn view_reports_the_override_its_folder_and_a_refusal() {
         let t = tempfile::tempdir().unwrap();
         let path = t.path().to_string_lossy().into_owned();
-        let v = view(&path, Some(".ai".into()));
+        let v = view(&path, Some(".ai".into()), None);
         assert_eq!(v.effective_dir.as_deref(), Some(".ai"));
         assert_eq!(v.source, DocsDirSource::ProjectOverride);
         assert_eq!(v.refused, None);
 
-        let v = view(&path, None);
+        let v = view(&path, None, None);
         assert_eq!(v.effective_dir.as_deref(), Some("docs"));
         assert_eq!(v.source, DocsDirSource::Detected);
 
@@ -195,7 +208,7 @@ mod tests {
         {
             let outside = tempfile::tempdir().unwrap();
             std::os::unix::fs::symlink(outside.path(), t.path().join("ctx")).unwrap();
-            let v = view(&path, Some("ctx".into()));
+            let v = view(&path, Some("ctx".into()), None);
             assert_eq!(v.effective_dir, None);
             assert!(v.refused.unwrap().contains("symlink"));
         }

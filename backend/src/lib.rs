@@ -39,13 +39,11 @@ pub use crate::workflows::WorkflowEngine;
 /// desktop) loads its config through this, so no scheduler tick or preview runs
 /// in the wrong zone and the first agent run already honours the saved mode.
 pub async fn load_startup_config() -> anyhow::Result<AppConfig> {
-    let config = load_startup_config_with(
+    load_startup_config_with(
         crate::core::timezone::detect_machine_timezone,
         crate::core::anti_halluc::set_mode,
     )
-    .await?;
-    crate::core::docs_location::set_global_default(config.scan.default_docs_dir.as_deref());
-    Ok(config)
+    .await
 }
 
 /// Arm every project's AI doc folder override from the database (KT-263).
@@ -2048,6 +2046,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             get(api::audit::get_briefing).put(api::audit::set_briefing),
         )
         .route(
+            "/api/projects/{id}/briefing-defaults",
+            get(api::audit::get_briefing_defaults),
+        )
+        .route(
             "/api/projects/{id}/start-briefing",
             post(api::audit::start_briefing),
         )
@@ -3929,10 +3931,6 @@ mod startup_config_tests {
                 "{entry} must arm the AI doc folder overrides at startup"
             );
         }
-        let lib = std::fs::read_to_string(root.join("backend/src/lib.rs")).unwrap();
-        assert!(lib.contains(
-            "crate::core::docs_location::set_global_default(config.scan.default_docs_dir.as_deref());"
-        ));
     }
 
     #[tokio::test]

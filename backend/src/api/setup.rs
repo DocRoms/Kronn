@@ -745,7 +745,6 @@ pub async fn save_default_docs_dir(
         )))
         .into_response();
     }
-    crate::core::docs_location::set_global_default(normalized.as_deref());
     Json(ApiResponse::ok(normalized)).into_response()
 }
 
@@ -5718,10 +5717,11 @@ mod default_docs_dir_tests {
         (status, serde_json::from_slice(&body).unwrap())
     }
 
-    /// KT-263: the default AI doc folder is normalized, persisted, armed for
-    /// the resolver, and refused with a 400 when it could leave a project.
+    /// KT-263: the default AI doc folder is normalized and persisted (it only
+    /// pre-fills the briefing, KT-1192), and refused with a 400 when it could
+    /// leave a project.
     #[tokio::test]
-    async fn default_docs_dir_is_normalized_saved_armed_and_refused_when_unsafe() {
+    async fn default_docs_dir_is_normalized_saved_and_refused_when_unsafe() {
         let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
         let config = std::sync::Arc::new(tokio::sync::RwLock::new(config::default_config()));
         let state = crate::AppState::new_defaults(config, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS);
@@ -5734,10 +5734,6 @@ mod default_docs_dir_tests {
         assert_eq!(body["data"], "handbook");
         assert_eq!(
             state.config.read().await.scan.default_docs_dir.as_deref(),
-            Some("handbook")
-        );
-        assert_eq!(
-            crate::core::docs_location::global_default().as_deref(),
             Some("handbook")
         );
 
@@ -5763,6 +5759,5 @@ mod default_docs_dir_tests {
         assert_eq!(status, StatusCode::OK, "{body}");
         assert!(body["data"].is_null());
         assert_eq!(state.config.read().await.scan.default_docs_dir, None);
-        assert_eq!(crate::core::docs_location::global_default(), None);
     }
 }

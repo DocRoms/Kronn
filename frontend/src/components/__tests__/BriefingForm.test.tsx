@@ -234,4 +234,29 @@ describe('BriefingForm (0.8.5)', () => {
       'p-on', expect.objectContaining({ cross_audit_agents: ['ClaudeCode', 'Codex'] }),
     ));
   });
+
+  it('pre-fills the AI doc folder and sends it with the answers (KT-1192)', async () => {
+    vi.mocked(projectsApi.briefingDefaults).mockResolvedValueOnce({
+      docs_dir: '.ai', docs_dir_source: 'global_default', folder_exists: true,
+    });
+    wrap(
+      <BriefingForm
+        projectId="p-1"
+        onClose={() => {}}
+        onSaved={() => {}}
+        agent="ClaudeCode"
+        tier="reasoning"
+        review={false}
+        toast={() => {}}
+      />
+    );
+    const input = await screen.findByTestId('briefing-docs-dir-input');
+    await waitFor(() => expect(input).toHaveValue('.ai'));
+    expect(screen.getByTestId('briefing-docs-dir')).toHaveTextContent('.ai/');
+    fireEvent.change(input, { target: { value: 'context' } });
+    fillMandatory();
+    fireEvent.submit(input.closest('form')!);
+    await waitFor(() => expect(projectsApi.saveBriefing).toHaveBeenCalled());
+    expect(vi.mocked(projectsApi.saveBriefing).mock.calls[0][1]).toMatchObject({ docs_dir: 'context' });
+  });
 });

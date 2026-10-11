@@ -45,20 +45,20 @@ describe('ProjectDocsLocationSetting (KT-263)', () => {
     expect(screen.getByTestId('project-docs-location-reset')).toBeInTheDocument();
   });
 
-  it('clears the override back to the default', async () => {
+  it('clears the override back to the detected folder', async () => {
     docsLocationMock.mockResolvedValue({
       override_dir: '.ai', default_dir: 'handbook', effective_dir: '.ai', source: 'project_override', refused: null,
     });
     setDocsLocationMock.mockResolvedValue({
-      override_dir: null, default_dir: 'handbook', effective_dir: 'handbook', source: 'global_default', refused: null,
+      override_dir: null, default_dir: 'handbook', effective_dir: 'docs', source: 'detected', refused: null,
     });
     render(<ProjectDocsLocationSetting projectId="p1" t={t} />);
     await waitFor(() => expect(screen.getByTestId('project-docs-location-reset')).toBeInTheDocument());
     fireEvent.click(screen.getByTestId('project-docs-location-reset'));
     await waitFor(() => expect(screen.getByTestId('project-docs-location-effective'))
-      .toHaveTextContent('projects.docsLocation.source.global_default:handbook/'));
+      .toHaveTextContent('projects.docsLocation.source.detected:docs/'));
     expect(setDocsLocationMock).toHaveBeenCalledWith('p1', null);
-    expect(screen.getByTestId('project-docs-location-input')).toHaveAttribute('placeholder', 'handbook');
+    expect(screen.getByTestId('project-docs-location-input')).toHaveAttribute('placeholder', 'docs');
   });
 
   it('surfaces the server refusal and keeps the saved value', async () => {

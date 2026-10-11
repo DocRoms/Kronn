@@ -214,8 +214,8 @@ Release notes for 0.9.3 and earlier are available in the
   nearest occurrence was the wrong one).
 - The AI doc folder is configurable (KT-263). Settings › Project scanning sets
   a default folder relative to every project root, and each project can
-  override it from its page; with neither, detection stays `docs/` → `doc/` →
-  `ai/`. Detection, the audit badge, the evidence file, the context audit, the
+  override it from its page; without an override, detection stays `docs/` →
+  `doc/` → `ai/`. Detection, the audit badge, the evidence file, the context audit, the
   redirectors and the doc viewer all read the same resolver. A folder that is
   absolute, uses `..`, points into `.git` or reaches outside the project
   through a symlink is refused with a 400 when saved and fails closed when
@@ -228,6 +228,12 @@ Release notes for 0.9.3 and earlier are available in the
   audits, sub-audits, revalidation, template reinstall and merge. A project
   without an override keeps `docs/` with byte-identical prompts. The legacy
   `ai/` → `docs/` migration still applies only to unconfigured projects.
+- The briefing asks for the « Dossier de la documentation IA » (KT-1192),
+  pre-filled with the project's override, else the folder it already
+  documents itself in, else the default from Settings, else `docs/`. Saving
+  it sets the project's folder through the same containment check (400 on
+  refusal); the default from Settings now only pre-fills this field and
+  never applies to a project by itself.
 - Audit versions and standards are judged from dated sources (KT-1000). The
   tech-debt step and the security pass get a « Technologies and standards »
   block: the project's stored dependency watch (version in place, latest,
