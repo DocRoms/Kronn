@@ -376,7 +376,7 @@ async fn save_briefing_form_inner(
             .map(crate::core::cross_audit::agent_label)
             .collect();
         if crate::core::cross_audit::parse_agent_list(&names.join(",")).is_none() {
-            return Json(ApiResponse::err(
+            return json_bool(ApiResponse::err(
                 "The cross-agent audit needs 2 or 3 distinct audit-capable agents (a Custom connection cannot be one).",
             ));
         }
