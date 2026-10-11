@@ -546,7 +546,9 @@ These are TDs from previous audits. For each finding you would emit:\n\
 For each: TD ID + your best guess (`fixed in commit X`, `no longer visible in source`, `out of scope this audit`, `uncertain`). \
 The pipeline will run a reconciliation pass after Step 8 to classify them definitively.\n\
 \n\
-This rule is critical: the user wiped TDs once to evaluate a fresh audit, but most users don't. Re-discovery under a new slug breaks their workflow.\n\n\
+This rule is critical: the user wiped TDs once to evaluate a fresh audit, but most users don't. Re-discovery under a new slug breaks their workflow.\n\
+\n\
+5. **Decisions are not debt**: read `docs/decisions.md` before emitting. A finding that an `accepted` ADR explains (e.g. CI triggered by a label as a budget guard) is a recorded choice: do NOT write a TD for it. An existing sheet it explains gets `- **Decision record**: ADR-NNNN` under its Status line. A `proposed` or `superseded` ADR covers nothing. Kronn settles every TD sheet an accepted ADR covers after the steps.\n\n\
 # D. OUTPUT FORMAT\n\
 \n\
 Fill `docs/inconsistencies-tech-debt.md` — replace ALL `{{PLACEHOLDERS}}` and `<!-- ... -->` comments. For every finding:\n\
@@ -568,7 +570,7 @@ Fill `docs/inconsistencies-tech-debt.md` — replace ALL `{{PLACEHOLDERS}}` and 
    - **Mitigated**: partial fix shipped, residual work tracked.\n\
    - **Confirmed by user**: only set by the validation phase after user confirms.\n\
    - **Rejected**: only set by the validation phase if user rejects — the next audit will NOT recreate this TD.\n\
-   - **Accepted decision**: only set by the validation phase when the user records the TD as an intentional trade-off in `docs/decisions.md`.\n\
+   - **Accepted decision**: only set by the validation phase when the user records the TD as an intentional trade-off in `docs/decisions.md`, or by Kronn when an accepted ADR covers the TD.\n\
    - **Deferred**: only set by the validation phase when the user postpones the TD decision.\n\
 \n\
 5. **Cap**: target 30 findings maximum. Critical + High findings (including all baseline checklist failures) are NEVER trimmed to fit the cap. Trim Medium and Low if needed. If you cannot stay under 30 even after trimming all Low, note the count of trimmed Medium in the index's `## Coverage gaps` section.\n\
@@ -665,25 +667,23 @@ Any surviving uppercase double-brace placeholder is a hard failure: the file loo
 \
 # PHASE 2 — Fill docs/decisions.md\n\
 \n\
-This file captures **intentional architectural choices** observed in the code that might look unusual to a newcomer (e.g., why a certain pattern was chosen over a simpler one). It is the *positive* counterpart to `inconsistencies-tech-debt.md` — choices the team made deliberately, NOT problems.\n\n\
+This file records **intentional architectural choices** as ADRs (architecture decision records): choices that might look unusual to a newcomer, made on purpose. It is the *positive* counterpart to `inconsistencies-tech-debt.md`. An ADR accepted before this run is never reported as debt: Kronn settles every TD sheet it covers. One this run writes or flips to `accepted` goes back to `proposed` for a human.\n\n\
 \
-Read the source code (entry points, key modules, configs) AND the docs you just reviewed in Phase 1. Replace the `{{DECISION_*}}` / `{{REASON}}` / `{{ANTI_PATTERN}}` / `{{FILE_OR_USER}}` placeholders with **real decisions** you can trace to evidence.\n\n\
+Read the source code (entry points, key modules, configs) AND the docs you just reviewed in Phase 1. Replace the placeholder entry with **real decisions** you can trace to evidence, one ADR per decision, in the format of the template's example:\n\
+- Heading `## ADR-NNNN: <title>`: ids are sequential and never reused; continue after the highest existing id.\n\
+- `- **Status**:` `proposed`, `accepted` or `superseded by ADR-NNNN`. Write `accepted` only when the source is `user`, `briefing.md`, or a rule the team already wrote down (legacy docs, AGENTS.md, a code comment that forbids changing it). A decision you only infer from code is `proposed`: only a human makes it `accepted`.\n\
+- `- **Date**:` YYYY-MM-DD, when the decision was taken if the source says so, else today.\n\
+- `- **Supersedes**:` / `- **Covers**:` / `- **Links**:` optional. `Covers` lists the TD ids or slugs this decision explains.\n\
+- `- **Source**:` a verifiable `file:line` (cite with `[src: file: path:line]`), `briefing.md`, or `user`. **FORBIDDEN**: `inferred from <evidence>`; a decision you cannot anchor to one concrete source does not belong here.\n\
+- `### Context`, `### Decision`, `### Consequences`: why it was needed, what was chosen, and what follows, including what NOT to do.\n\n\
 \
-Format each row:\n\
-- **Decision**: one-line summary of the choice (e.g., \"Subdomain-based locale routing\").\n\
-- **Why chosen**: rationale you can defend from the code or docs (e.g., \"SEO + hreflang correctness, simpler than middleware-based path prefixing\").\n\
-- **What NOT to do**: anti-pattern a newcomer might attempt (e.g., \"Don't add a `/fr/` path prefix — it would duplicate routes and break the `_alternates` SEO logic\").\n\
-- **Source**: MUST be one of: a verifiable `file:line` (cite with `[src: file: path:line]`), a `briefing.md` reference, OR `user` (i.e. confirmed in a previous validation discussion). **FORBIDDEN**: `inferred from <evidence>` — if you cannot pin a single concrete source, the decision does NOT belong here. The whole point of `decisions.md` is that future agents can verify each entry; an inferred 'why chosen' is a fabricated rationale that becomes doctrine.\n\n\
+Rules:\n\
+- **No count target**: record every real decision you can source, and none you cannot. Zero is a valid result: then replace the placeholder entry with `_No recorded decision yet._`.\n\
+- **Keep existing entries as written**: never renumber, rewrite or delete one. A decision that changed gets a new ADR whose `Supersedes` names the old one; the old one's status becoming `superseded by ADR-NNNN` is the only edit allowed.\n\
+- A table of an earlier format stays as it is; add new decisions as ADRs below it.\n\
+- **Do NOT invent**: a 'why' you cannot anchor in `file:line`, `briefing.md` or `user` is a post-hoc rationalisation, not a recorded decision.\n\n\
 \
-Quality rules:\n\
-- **Quality > quantity**: target 3-8 real decisions. A repo with 2 strong decisions is fine; a list of 15 fluff items is worse than 3 strong ones.\n\
-- **Do NOT invent**: every decision must be traceable to code or a user-confirmed source. If you can't cite evidence, skip it. A 'Why chosen' you cannot anchor in `file:line` or `user` is a post-hoc rationalisation, not a recorded decision — drop the row.\n\
-- **Examples** (good shape — adapt to the actual repo):\n\
-  · \"Single Mutex on SQLite\" → \"Single-writer model fits our access pattern; multi-writer would need WAL + busy_timeout tuning\" → \"Don't add a connection pool\" → `src/db/conn.rs:42`\n\
-  · \"No ORM\" → \"Pure SQL is faster for our 12-table schema; the maintenance cost of an ORM dependency exceeds the win\" → \"Don't introduce diesel/sea-orm\" → `src/db/queries.rs` + user\n\
-- Remove the `{{DECISION_2}}` row entirely if you only have one real decision (don't pad).\n\n\
-\
-**End state**: `docs/decisions.md` has zero `{{...}}` placeholders, contains 3-8 traceable decisions, and all OTHER docs/ files passed the Phase 1 review with markers cleaned up per the discipline rules above.",
+**End state**: `docs/decisions.md` has zero `{{...}}` placeholders, every ADR carries its id, title, status, date and the three sections, and all OTHER docs/ files passed the Phase 1 review with markers cleaned up per the discipline rules above.",
         sources: &["__GIT_SOURCE_TREE__"],
     },
 ];
@@ -1333,6 +1333,25 @@ pub(crate) fn step8_context_block(
         ));
     }
     out
+}
+
+/// The decisions in force since before the run (`baseline` is
+/// `decisions.md` as the run found it), for every step that writes TD sheets
+/// (an `inconsistencies-*.md` index). Empty for other steps and when none.
+pub(crate) fn decisions_context_block(
+    project: &std::path::Path,
+    step: &AnalysisStep,
+    baseline: &str,
+) -> String {
+    if !step.target_file.starts_with("docs/inconsistencies-") {
+        return String::new();
+    }
+    let block = crate::core::adr::in_force_prompt_block(&project.join("docs"), baseline);
+    if block.is_empty() {
+        block
+    } else {
+        format!("\n\n{block}")
+    }
 }
 
 /// Whether a chained step can be refreshed via partial-audit: only steps
@@ -2207,6 +2226,40 @@ mod prompt_tests {
                 || PROMPT_PREAMBLE.contains("Do not ask"),
             "PREAMBLE must explicitly forbid questions"
         );
+    }
+
+    #[test]
+    fn tech_debt_steps_consult_decisions_in_force() {
+        let td_step = ANALYSIS_STEPS
+            .iter()
+            .find(|s| s.target_file == "docs/inconsistencies-tech-debt.md")
+            .unwrap();
+        assert!(td_step.prompt.contains("Decisions are not debt"));
+        assert!(td_step
+            .prompt
+            .contains("read `docs/decisions.md` before emitting"));
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+        std::fs::write(
+            dir.path().join("docs/decisions.md"),
+            "## ADR-0001: CI is label-triggered\n\n- **Status**: accepted\n",
+        )
+        .unwrap();
+        let baseline = "## ADR-0001: CI is label-triggered\n\n- **Status**: accepted\n";
+        let block = decisions_context_block(dir.path(), td_step, baseline);
+        assert!(
+            block.contains("ADR-0001 — CI is label-triggered"),
+            "{block}"
+        );
+        // Every sub-audit writes TD sheets too.
+        assert!(!decisions_context_block(dir.path(), &SECURITY_STEPS[0], baseline).is_empty());
+        // A documentation step gets nothing.
+        assert_eq!(
+            decisions_context_block(dir.path(), &ANALYSIS_STEPS[0], baseline),
+            ""
+        );
+        // An ADR accepted during the run is not offered to later steps.
+        assert_eq!(decisions_context_block(dir.path(), td_step, ""), "");
     }
 
     #[test]

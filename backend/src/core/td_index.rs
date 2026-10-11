@@ -44,6 +44,14 @@ pub struct ResyncOutcome {
     pub reconciled_dimensions: Vec<String>,
     /// Set when the index was left alone, with the reason.
     pub skipped: Option<String>,
+    /// Sheets an accepted ADR settled before the rebuild (`TD → ADR`).
+    pub adr_settled: Vec<String>,
+    /// Sheets naming an ADR that is not in force (`TD → ADR`): still debt.
+    pub adr_not_in_force: Vec<String>,
+    /// Incomplete ADRs in `decisions.md`.
+    pub adr_problems: Vec<String>,
+    /// ADRs accepted during the run, set back to `proposed` for a human.
+    pub adr_downgraded: Vec<String>,
 }
 
 pub fn is_td_id(value: &str) -> bool {
@@ -587,15 +595,32 @@ pub fn resync_content(
         settled: sheets.len() - active,
         kept_without_sheet: kept.len(),
         reconciled_dimensions: reconciled,
-        skipped: None,
+        ..ResyncOutcome::default()
     };
     (text, outcome)
+}
+
+/// Settles the sheets a trusted ADR covers, then resyncs the central index
+/// from `<docs>/tech-debt/`: a finding a decision explains is never listed.
+pub fn resync(docs_dir: &Path, trust: crate::core::adr::Trust) -> Result<ResyncOutcome, String> {
+    let adr = crate::core::adr::settle_covered_sheets(docs_dir, trust);
+    let mut outcome = resync_index(docs_dir)?;
+    match adr {
+        Ok(adr) => {
+            outcome.adr_settled = adr.settled;
+            outcome.adr_not_in_force = adr.not_in_force;
+            outcome.adr_problems = adr.problems;
+            outcome.adr_downgraded = adr.downgraded;
+        }
+        Err(e) => tracing::warn!("ADR check before the tech-debt resync failed: {e}"),
+    }
+    Ok(outcome)
 }
 
 /// Resync `<docs>/inconsistencies-tech-debt.md` from `<docs>/tech-debt/`.
 /// Leaves the file alone when it is absent, a symlink, or carries a
 /// human-owned section; the `unindexed_td` diagnostic then reports the gap.
-pub fn resync(docs_dir: &Path) -> Result<ResyncOutcome, String> {
+fn resync_index(docs_dir: &Path) -> Result<ResyncOutcome, String> {
     let index = docs_dir.join(CENTRAL_INDEX);
     let skip = |why: &str| {
         Ok(ResyncOutcome {

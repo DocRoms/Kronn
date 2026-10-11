@@ -648,6 +648,23 @@ pub async fn full_audit(
         // KT-1134 — a validation agent of an earlier run writes docs/ too: it
         // stops before this run touches them.
         stop_validation_agents(&state_for_validation, &project_id).await;
+        // KT-1174 — decisions.md as the run found it: only the ADRs in force
+        // there settle a TD at the end. A resume keeps its predecessor's.
+        let adr_baseline = {
+            let docs = project_path.join("docs");
+            let found = tokio::task::spawn_blocking(move || crate::core::adr::read_decisions(&docs))
+                .await.unwrap_or_default();
+            let (run_id, previous_id, fallback) = (audit_run_id.clone(), resume_run_id_req.clone(), found.clone());
+            match db.with_conn(move |conn| {
+                crate::db::audit_runs::record_adr_baseline(conn, &run_id, previous_id.as_deref(), found)
+            }).await {
+                Ok(baseline) => baseline,
+                Err(e) => {
+                    tracing::warn!("Could not record the run's ADR baseline: {e}");
+                    fallback
+                }
+            }
+        };
 
         // CONTRACTUAL revocation (Codex A5): this run is about to mutate
         // docs/, so any prior "Validated" state is stale the moment we
@@ -1261,6 +1278,7 @@ pub async fn full_audit(
             if let Some(block) = version_ctx.block_for(analysis_step.target_file) {
                 full_prompt.push_str(&block);
             }
+            full_prompt.push_str(&super::decisions_context_block(&project_path, analysis_step, &adr_baseline));
             // 0.8.3 (#272) — pre-existing user docs are migrated to
             // docs/legacy/ before the audit runs. Tell the agent to
             // READ them FIRST as the primary source of truth when
@@ -2436,16 +2454,25 @@ pub async fn full_audit(
         // Lists every TD sheet, sub-audits included, in the central index.
         if outcome != RunOutcome::Nothing && should_optimize_documents(kind) {
             let docs = project_path.join("docs");
-            match tokio::task::spawn_blocking(move || crate::core::td_index::resync(&docs)).await {
+            let baseline = adr_baseline.clone();
+            match tokio::task::spawn_blocking(move || crate::core::td_index::resync(&docs, crate::core::adr::Trust::RunBaseline(&baseline))).await {
                 Ok(Ok(td)) => {
                     yield Event::default().event("td_index").data(serde_json::json!({
                         "changed": td.changed, "listed": td.listed, "settled": td.settled,
                         "kept_without_sheet": td.kept_without_sheet,
                         "reconciled_dimensions": td.reconciled_dimensions, "skipped": td.skipped,
+                        "adr_settled": td.adr_settled, "adr_not_in_force": td.adr_not_in_force,
+                        "adr_problems": td.adr_problems, "adr_downgraded": td.adr_downgraded,
                     }).to_string());
                 }
                 Ok(Err(e)) => tracing::warn!("Tech-debt index resync failed: {e} — audit continues"),
                 Err(e) => tracing::warn!("Tech-debt index resync panicked: {e} — audit continues"),
+            }
+        } else if outcome != RunOutcome::Nothing {
+            // A standalone sub-audit rebuilds no index, but an accepted ADR still settles its sheets.
+            let (docs, baseline) = (project_path.join("docs"), adr_baseline.clone());
+            if let Ok(Err(e)) = tokio::task::spawn_blocking(move || crate::core::adr::settle_covered_sheets(&docs, crate::core::adr::Trust::RunBaseline(&baseline))).await {
+                tracing::warn!("ADR check after the sub-audit failed: {e} — audit continues");
             }
         }
 

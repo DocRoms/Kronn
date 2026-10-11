@@ -405,6 +405,39 @@ pub fn set_run_provenance(
     Ok(())
 }
 
+/// Record the ADR baseline of run `id` and return it: its predecessor's when
+/// it resumes one that recorded a baseline, else `found` (`docs/decisions.md`
+/// as the run found it). A resume must not trust ADRs its predecessor wrote.
+pub fn record_adr_baseline(
+    conn: &Connection,
+    id: &str,
+    resumed_from: Option<&str>,
+    found: String,
+) -> Result<String> {
+    let inherited = match resumed_from {
+        Some(previous) => adr_baseline(conn, previous)?,
+        None => None,
+    };
+    let baseline = inherited.unwrap_or(found);
+    conn.execute(
+        "UPDATE audit_runs SET adr_baseline = ?2 WHERE id = ?1",
+        params![id, baseline],
+    )?;
+    Ok(baseline)
+}
+
+/// The `decisions.md` text a run started from, if it recorded one.
+pub fn adr_baseline(conn: &Connection, id: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT adr_baseline FROM audit_runs WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten())
+}
+
 /// Record the model the run's agent served, or the configured one labelled as
 /// such (KT-997). Updated as steps observe more of them.
 pub fn set_run_model(conn: &Connection, id: &str, model: &str) -> Result<()> {
@@ -1262,6 +1295,37 @@ pub fn price_steps(conn: &Connection, steps: &mut [AuditRunStep]) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_resume_keeps_the_adr_baseline_of_the_run_it_continues() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO projects (id, name, path, created_at, updated_at) VALUES ('p', 'p', '/p', 'now', 'now')",
+            [],
+        )
+        .unwrap();
+        for id in ["first", "second", "third"] {
+            insert_running(&conn, id, "p", "Full", "ClaudeCode", Utc::now()).unwrap();
+        }
+        let before = "## ADR-0001: before\n- **Status**: accepted\n".to_string();
+        assert_eq!(
+            record_adr_baseline(&conn, "first", None, before.clone()).unwrap(),
+            before
+        );
+        // The interrupted run's step 9 wrote an accepted ADR: the resume ignores it.
+        let after_step9 = format!("{before}## ADR-0002: late\n- **Status**: accepted\n");
+        assert_eq!(
+            record_adr_baseline(&conn, "second", Some("first"), after_step9.clone()).unwrap(),
+            before
+        );
+        assert_eq!(adr_baseline(&conn, "second").unwrap(), Some(before.clone()));
+        // A predecessor without a baseline (older row): what the run finds.
+        assert_eq!(
+            record_adr_baseline(&conn, "third", Some("missing"), after_step9.clone()).unwrap(),
+            after_step9
+        );
+    }
 
     fn fresh_conn() -> Connection {
         let conn = Connection::open_in_memory().unwrap();

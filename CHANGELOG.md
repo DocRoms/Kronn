@@ -166,6 +166,25 @@ Release notes for 0.9.3 and earlier are available in the
   "To re-verify" as soon as a citation breaks, with no new audit. An
   optional cron, `audit_reverify_cron` in `config.toml` (off by default),
   re-verifies every project on that schedule.
+- A decision is no longer reported as tech debt (KT-1174). The v2 template's
+  `docs/decisions.md` is now a list of ADRs, with no cap on their number:
+  `## ADR-NNNN: title`, then status (`proposed`, `accepted`, `superseded by
+  ADR-NNNN`), date, optional `Supersedes`, `Covers`, `Source` and `Links`,
+  and Context, Decision and Consequences sections. After the audit steps,
+  Kronn settles every TD sheet an accepted ADR covers, either because the ADR
+  lists its slug in `Covers` (a re-discovery on another day still matches)
+  or because the sheet names the ADR in `Decision record`: its status becomes
+  `Accepted decision`, the sheet points at the ADR, and the TD leaves the
+  index and the validation. `proposed` and superseded ADRs cover nothing.
+  Only an ADR already accepted when the run started (in that version: a
+  `Covers` entry added during the run does not count), or accepted by a human
+  in a validation card, may settle a TD. An ADR the run itself wrote or
+  flipped to `accepted` goes back to `proposed`, and the finding stays in the
+  validation, where accepting it as a decision records a covering ADR. A
+  resumed run keeps the baseline of the run it continues (migration 252,
+  `audit_runs.adr_baseline`). The steps that write TDs receive only the ADRs
+  in force before the run. Existing tables keep working: a row that links a
+  TD sheet still covers it.
 
 ### Fixed
 

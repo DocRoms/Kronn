@@ -1708,7 +1708,8 @@ mod tests {
             unindexed(root),
             vec!["docs/tech-debt/TD-20261003-missing.md"]
         );
-        crate::core::td_index::resync(&root.join("docs")).unwrap();
+        crate::core::td_index::resync(&root.join("docs"), crate::core::adr::Trust::RunBaseline(""))
+            .unwrap();
         assert!(unindexed(root).is_empty());
     }
 }

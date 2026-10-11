@@ -2,27 +2,74 @@
 
 > **TEMPLATE FILE.** Filled during audit Step 9 (final review + decisions). Do not invent decisions — they must come from code analysis or user confirmation.
 
-This file captures **intentional choices** — patterns that look unusual but are deliberate. It prevents agents from "fixing" things that aren't broken.
+This file records **intentional choices** as ADRs (architecture decision records): patterns that look unusual but are deliberate. It prevents agents from "fixing" things that aren't broken.
 
-It is the *positive* counterpart to `inconsistencies-tech-debt.md`: decisions the team made on purpose, NOT problems to fix.
+It is the *positive* counterpart to `inconsistencies-tech-debt.md`: decisions the team made on purpose, NOT problems to fix. An `accepted` ADR is never reported as debt: after each audit, Kronn settles every TD sheet it covers (status `Accepted decision`, with a `Decision record` line naming the ADR). Only an ADR accepted before the audit started, or by a human in a validation card, counts: one an audit writes as `accepted` goes back to `proposed`.
 
-## How to fill (audit Step 9)
+## ADR format
 
-- **Target 3-8 real decisions** observed in code + briefing. Quality > quantity — a list of 2 strong decisions is fine; 15 fluff items is worse than 3 strong ones.
-- **Every row must cite a source**: `file:line`, `briefing.md`, or `user` (if confirmed during validation). No inferred rows — a decision you cannot anchor to a source is a `<!-- TODO: ask user -->` question, not a decision.
-- **Remove unused rows entirely** — if the project has only one real decision, delete the `{{DECISION_2}}` placeholder row instead of padding.
+One `## ADR-NNNN: <title>` entry per decision. There is no count target: record every decision you can source, and none you cannot.
 
-## Examples (good shape — adapt to the actual repo)
+| Field | Required | Value |
+|-------|----------|-------|
+| `ADR-NNNN` (heading) | yes | Sequential id, never reused or renumbered |
+| Title (heading) | yes | The choice, in one line |
+| `Status` | yes | `proposed`, `accepted`, or `superseded by ADR-NNNN` |
+| `Date` | yes | `YYYY-MM-DD`, when the decision was taken |
+| `Supersedes` | no | ADR ids this decision replaces |
+| `Covers` | no | TD ids or slugs this decision explains (`TD-20260828-ci-label-gate` or `ci-label-gate`); a slug matches the finding on any date |
+| `Source` | yes | `file:line`, `briefing.md`, or `user` — never "inferred" |
+| `Links` | no | Tickets, PRs, docs |
+| `### Context` | yes | Why a decision was needed |
+| `### Decision` | yes | What was chosen |
+| `### Consequences` | yes | What follows, including what NOT to do |
 
-| Decision | Why chosen | What NOT to do | Source |
-|----------|-----------|---------------|--------|
-| Single Mutex on SQLite | Single-writer model fits our access pattern; multi-writer would need WAL + busy_timeout tuning | Don't add a connection pool | `src/db/conn.rs:42` |
-| No ORM | Pure SQL is faster for our 12-table schema; ORM dependency cost exceeds the win | Don't introduce diesel/sea-orm | `src/db/queries.rs` + user |
+- **Status.** `accepted` only when the source is `user`, `briefing.md`, or a rule the team already wrote down. A decision inferred from code alone is `proposed` until a human accepts it. `proposed` and `superseded` ADRs cover nothing.
+- **Changes.** Never edit or delete an entry to change a decision: add a new ADR whose `Supersedes` names the old one, and set the old one's status to `superseded by ADR-NNNN`.
+- **Legacy tables.** A table of an earlier format stays as written; add new decisions below it.
+
+## Example (good shape — adapt to the actual repo)
+
+```markdown
+## ADR-0001: CI runs only when a pull request carries the `ci` label
+
+- **Status**: accepted
+- **Date**: 2026-08-28
+- **Covers**: quality-gate-not-enforced
+- **Source**: `.github/workflows/ci.yml:3` + user
+- **Links**: docs/workflow/README.md
+
+### Context
+
+A full CI run costs about 40 minutes of paid runners. Most pushes are work in progress.
+
+### Decision
+
+CI is triggered by the `ci` label, added when the pull request is ready for review.
+
+### Consequences
+
+Unlabelled pushes get no CI feedback. Do NOT switch the workflow to `on: push` or "fix" the label trigger: the budget guard is deliberate.
+```
 
 ## Decisions
 
-<!-- Fill during audit. Each row should be traceable to code evidence or user confirmation. -->
-| Decision | Why chosen | What NOT to do | Source |
-|----------|-----------|---------------|--------|
-| {{DECISION_1}} | {{REASON}} | {{ANTI_PATTERN}} | {{FILE_OR_USER}} |
-| {{DECISION_2}} | {{REASON}} | {{ANTI_PATTERN}} | {{FILE_OR_USER}} |
+<!-- Fill during audit. Each ADR must be traceable to code evidence or user confirmation. Delete the placeholder entry below; if the project has no sourced decision yet, write `_No recorded decision yet._` instead. -->
+
+## ADR-0001: {{DECISION_TITLE}}
+
+- **Status**: {{STATUS}}
+- **Date**: {{DATE}}
+- **Source**: {{FILE_OR_USER}}
+
+### Context
+
+{{CONTEXT}}
+
+### Decision
+
+{{DECISION}}
+
+### Consequences
+
+{{CONSEQUENCES_AND_WHAT_NOT_TO_DO}}
