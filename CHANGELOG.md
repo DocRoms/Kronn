@@ -33,6 +33,20 @@ Release notes for 0.9.3 and earlier are available in the
   `file:line` proof, and no fix may break a ban. Each ban with a pattern is
   checked by a read-only detector (`project-ban`, no symlink followed, size
   and count caps) whose hits join the step 8 signals and need a disposition.
+- The briefing form reopens with the saved answers, and every project fact
+  takes an optional note (KT-1196). `GET /api/projects/{id}/briefing/answers`
+  reads `docs/briefing.md` (or the DB notes before the project has a docs
+  folder) back into the six questions, the project facts, the existing
+  documentation and the Kronn options; unknown or malformed parts are left
+  empty, and a section the form does not know stays inside the last answer
+  so a re-save keeps it. Saving again unchanged rewrites the same bytes.
+  Each fact (tracker, project key, forge, repository, default branch, commit
+  convention, sign-off, merge strategy, review, release cadence,
+  environments, people) gets « Note (facultatif) », up to 300 characters,
+  validated like the other briefing texts, stored in the machine copy (absent
+  when empty, so older briefings stay byte-identical), rendered next to its
+  fact in `## Project facts` and `docs/project.md`, given to the audit with
+  the fact and put back after an AI review.
 - The briefing asks about existing documentation and linked projects
   (KT-999). « Existing documentation? » lists the locations Kronn finds in
   the repository (`README*`, `docs/`, `doc/`, `wiki/`, ADR folders,

@@ -38,6 +38,7 @@ fn sample_answers() -> BriefingProjectAnswers {
             name: "Alice".into(),
             contact: "alice@example.com".into(),
         }],
+        notes: Default::default(),
     }
 }
 
@@ -442,4 +443,153 @@ fn project_md_is_never_written_through_a_symlink() {
     std::os::unix::fs::symlink(&outside, root.join("docs")).unwrap();
     assert!(write_project_doc(&root, &root.join("docs"), "x").is_err());
     assert!(!outside.join("project.md").exists());
+}
+
+// ─── Fact notes (KT-1196) ───────────────────────────────────────────────────
+
+const ALL_FACTS: [BriefingFact; 12] = [
+    BriefingFact::Tracker,
+    BriefingFact::TrackerKey,
+    BriefingFact::Forge,
+    BriefingFact::ForgeRepo,
+    BriefingFact::DefaultBranch,
+    BriefingFact::CommitConvention,
+    BriefingFact::Signoff,
+    BriefingFact::MergeStrategy,
+    BriefingFact::Review,
+    BriefingFact::ReleaseCadence,
+    BriefingFact::Environments,
+    BriefingFact::People,
+];
+
+fn answers_with_every_note() -> BriefingProjectAnswers {
+    let mut answers = sample_answers();
+    for fact in ALL_FACTS {
+        answers
+            .notes
+            .insert(fact, format!("how-{} works", fact_key(fact)));
+    }
+    normalize_answers(&answers).unwrap()
+}
+
+#[test]
+fn a_fact_note_is_trimmed_bounded_and_validated_like_the_other_texts() {
+    let with = |note: String| {
+        let mut answers = sample_answers();
+        answers.notes.insert(BriefingFact::Review, note);
+        normalize_answers(&answers)
+    };
+    let max = "é".repeat(FACT_NOTE_MAX_CHARS);
+    assert_eq!(
+        with(format!("  {max}  ")).unwrap().notes[&BriefingFact::Review],
+        max
+    );
+    let err = with("é".repeat(FACT_NOTE_MAX_CHARS + 1)).unwrap_err();
+    assert!(err.contains("notes.review: at most 300"), "{err}");
+    assert!(with("two\nlines".into()).is_err());
+    assert!(with("a <!-- b".into()).is_err());
+    assert!(with("{{ x }}".into()).is_err());
+    // Whitespace only is no note at all.
+    assert!(with("   ".into()).unwrap().notes.is_empty());
+}
+
+#[test]
+fn every_fact_note_is_rendered_next_to_its_fact_in_the_briefing() {
+    let answers = answers_with_every_note();
+    let section = render_facts_section(&answers).unwrap();
+    for fact in ALL_FACTS {
+        let line = format!(
+            "  - {} note: how-{} works\n",
+            fact_label(fact),
+            fact_key(fact)
+        );
+        assert!(section.contains(&line), "missing `{line}` in:\n{section}");
+    }
+    let review_line = section.find("- Review: One approval").unwrap();
+    let review_note = section.find("  - Review note:").unwrap();
+    let env_line = section.find("- Environments:").unwrap();
+    assert!(
+        review_line < review_note && review_note < env_line,
+        "{section}"
+    );
+    assert_eq!(parse_answers(&section), Some(answers.clone()));
+    // The note reaches the audit prompts with its fact.
+    let block = super::super::briefing::briefing_prompt_section(&section);
+    assert!(
+        block.contains("  - Review note: how-review works"),
+        "{block}"
+    );
+}
+
+#[test]
+fn a_note_on_an_unanswered_list_still_reaches_the_briefing() {
+    let mut answers = BriefingProjectAnswers::default();
+    answers
+        .notes
+        .insert(BriefingFact::People, "ask #team".into());
+    let section = render_facts_section(&answers).unwrap();
+    assert!(
+        section.contains("- People: not provided\n  - People note: ask #team\n"),
+        "{section}"
+    );
+}
+
+#[test]
+fn a_briefing_without_notes_keeps_its_machine_copy_unchanged() {
+    let section = render_facts_section(&normalize_answers(&sample_answers()).unwrap()).unwrap();
+    assert!(!section.contains("\"notes\""), "{section}");
+    assert!(!section.contains(" note: "), "{section}");
+}
+
+#[test]
+fn every_fact_note_is_rendered_in_project_md() {
+    let answers = answers_with_every_note();
+    let checks = ProjectChecks {
+        tracker_key: CheckStatus::NotApplicable,
+        forge_repo: CheckStatus::NotApplicable,
+        default_branch: CheckStatus::NotApplicable,
+        observed_default_branch: None,
+    };
+    let body = render_project_doc(&answers, false, &checks, "2026-10-11");
+    for expected in [
+        "| Tool | Jira — note: how-tracker works | — |",
+        "| Project key | `KR` — note: how-tracker_key works |",
+        "| Host | GitHub — note: how-forge works | — |",
+        "| Repository | `DocRoms/Kronn` — note: how-forge_repo works |",
+        "| Default branch | `main` — note: how-default_branch works |",
+        "| Commit convention | Conventional Commits — note: how-commit_convention works | — |",
+        "| Sign-off (`Signed-off-by`) | Required — note: how-signoff works | — |",
+        "| Merge strategy | Squash — note: how-merge_strategy works | — |",
+        "\nNote: how-environments works\n",
+        "\nNote: how-people works\n",
+        "| Review | One approval — note: how-review works |",
+        "| Release cadence | On demand — note: how-release_cadence works |",
+    ] {
+        assert!(body.contains(expected), "missing `{expected}` in:\n{body}");
+    }
+    // A table cell cannot be broken by a note.
+    let mut piped = answers.clone();
+    piped.notes.insert(BriefingFact::Review, "a | b <c>".into());
+    let body = render_project_doc(&piped, false, &checks, "2026-10-11");
+    assert!(
+        body.contains("| Review | One approval — note: a \\| b &lt;c&gt; |"),
+        "{body}"
+    );
+}
+
+#[test]
+fn fact_notes_are_put_back_after_a_review_rewrite() {
+    let answers = answers_with_every_note();
+    let section = render_facts_section(&answers).unwrap();
+    let previous = format!("# Project Briefing\n\n## Purpose\nOld\n\n{section}");
+    // The reviewer dropped every note.
+    let reviewed =
+        "# Project Briefing\n\n## Purpose\nRefined\n\n## Project facts\n- Tracker: Jira\n";
+    let merged = reattach_facts(Some(&previous), reviewed);
+    assert_eq!(parse_answers(&merged), Some(answers));
+    assert!(
+        merged.contains("  - Review note: how-review works\n"),
+        "{merged}"
+    );
+    assert!(merged.contains("Refined"));
 }

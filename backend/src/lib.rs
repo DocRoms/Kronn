@@ -2018,6 +2018,11 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/projects/{id}/briefing/docs/check",
             post(api::audit::check_briefing_doc),
         )
+        // KT-1196 — the saved briefing as answers, to pre-fill the form.
+        .route(
+            "/api/projects/{id}/briefing/answers",
+            get(api::audit::get_saved_briefing),
+        )
         .route(
             "/api/projects/{id}/briefing",
             get(api::audit::get_briefing).put(api::audit::set_briefing),

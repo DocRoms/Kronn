@@ -483,6 +483,32 @@ describe('AuditTimeline', () => {
     expect(p.onBriefingSaved).toHaveBeenCalledTimes(1);
   });
 
+  it('reopens a saved briefing pre-filled, never while an audit runs (KT-1196)', async () => {
+    vi.mocked(projectsApi.savedBriefing).mockResolvedValueOnce({
+      purpose: 'Saved purpose', team: 'T', maturity: 'M', dependencies: 'D', traps: 'X', additional: '',
+      project: null, existing_docs: null, td_to_tasks: false, cross_audit_agents: [],
+    });
+    const { unmount } = wrap(<AuditTimeline {...props({ briefingDone: true, auditActive: true })} />);
+    const locked = screen.getByTestId('audit-timeline-briefing-edit');
+    expect(locked).toBeDisabled();
+    expect(locked).toHaveAttribute('title');
+    unmount();
+
+    const p = props({ briefingDone: true });
+    wrap(<AuditTimeline {...p} />);
+    expect(screen.queryByTestId('audit-timeline-briefing-open')).toBeNull();
+    const edit = screen.getByTestId('audit-timeline-briefing-edit');
+    expect(edit).toHaveTextContent('Modifier le briefing');
+    fireEvent.click(edit);
+    await waitFor(() => expect(document.querySelector('.briefing-form textarea')).toHaveValue('Saved purpose'));
+    expect(projectsApi.savedBriefing).toHaveBeenCalledWith('p1');
+    await act(async () => { fireEvent.submit(document.querySelector('.briefing-form')!); });
+    await waitFor(() => expect(projectsApi.saveBriefing).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(projectsApi.saveBriefing).mock.calls[0][1].purpose).toBe('Saved purpose');
+    expect(p.onBriefingSaved).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('audit-timeline-briefing-edit')).toBeInTheDocument();
+  });
+
   it('explains once what changed, and remembers the dismissal', () => {
     const { unmount } = wrap(<AuditTimeline {...props()} />);
     const news = document.querySelector('.audit-tl-news')!;

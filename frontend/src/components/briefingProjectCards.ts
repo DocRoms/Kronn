@@ -6,6 +6,7 @@
  */
 import type {
   BriefingEnvironmentKind,
+  BriefingFact,
   BriefingPersonRole,
   BriefingProjectAnswers,
 } from '../types/generated';
@@ -29,6 +30,8 @@ export interface BriefingChoiceOption {
 
 export interface BriefingChoiceCard {
   key: ChoiceKey;
+  /** KT-1196 — the fact the card's optional note is attached to. */
+  fact: BriefingFact;
   questionKey: string;
   options: BriefingChoiceOption[];
 }
@@ -38,6 +41,7 @@ const UNKNOWN: BriefingChoiceOption = { id: 'unknown', labelKey: 'briefing.proje
 export const BRIEFING_PROJECT_CARDS: BriefingChoiceCard[] = [
   {
     key: 'tracker',
+    fact: 'tracker',
     questionKey: 'briefing.project.trackerQ',
     options: [
       { id: 'jira', literal: 'Jira' },
@@ -51,6 +55,7 @@ export const BRIEFING_PROJECT_CARDS: BriefingChoiceCard[] = [
   },
   {
     key: 'forge',
+    fact: 'forge',
     questionKey: 'briefing.project.forgeQ',
     options: [
       { id: 'github', literal: 'GitHub' },
@@ -63,6 +68,7 @@ export const BRIEFING_PROJECT_CARDS: BriefingChoiceCard[] = [
   },
   {
     key: 'default_branch',
+    fact: 'default_branch',
     questionKey: 'briefing.project.branchQ',
     options: [
       { id: 'main', literal: 'main' },
@@ -74,6 +80,7 @@ export const BRIEFING_PROJECT_CARDS: BriefingChoiceCard[] = [
   },
   {
     key: 'commit_convention',
+    fact: 'commit_convention',
     questionKey: 'briefing.project.commitQ',
     options: [
       { id: 'conventional', literal: 'Conventional Commits' },
@@ -84,6 +91,7 @@ export const BRIEFING_PROJECT_CARDS: BriefingChoiceCard[] = [
   },
   {
     key: 'signoff_required',
+    fact: 'signoff',
     questionKey: 'briefing.project.signoffQ',
     options: [
       { id: 'yes', labelKey: 'briefing.project.yes' },
@@ -93,6 +101,7 @@ export const BRIEFING_PROJECT_CARDS: BriefingChoiceCard[] = [
   },
   {
     key: 'merge_strategy',
+    fact: 'merge_strategy',
     questionKey: 'briefing.project.mergeQ',
     options: [
       { id: 'squash', literal: 'Squash' },
@@ -103,6 +112,7 @@ export const BRIEFING_PROJECT_CARDS: BriefingChoiceCard[] = [
   },
   {
     key: 'review_policy',
+    fact: 'review',
     questionKey: 'briefing.project.reviewQ',
     options: [
       { id: 'no_review', labelKey: 'briefing.project.reviewNone' },
@@ -113,6 +123,7 @@ export const BRIEFING_PROJECT_CARDS: BriefingChoiceCard[] = [
   },
   {
     key: 'release_cadence',
+    fact: 'release_cadence',
     questionKey: 'briefing.project.cadenceQ',
     options: [
       { id: 'continuous', labelKey: 'briefing.project.cadenceContinuous' },
@@ -158,3 +169,22 @@ export const emptyProjectAnswers = (): BriefingProjectAnswers => ({
 /** Trackers whose project key a card asks for. */
 export const trackerTakesKey = (tracker: BriefingProjectAnswers['tracker']) =>
   tracker === 'jira' || tracker === 'linear' || tracker === 'other';
+
+/** KT-1196 — longest note on one fact; the server enforces the same bound. */
+export const FACT_NOTE_MAX = 300;
+
+/**
+ * The notes worth sending: trimmed, empty ones dropped, and none on a key or
+ * repository the answers no longer carry. `undefined` when nothing is left.
+ */
+export function cleanFactNotes(project: BriefingProjectAnswers): BriefingProjectAnswers['notes'] {
+  const out: NonNullable<BriefingProjectAnswers['notes']> = {};
+  for (const [fact, note] of Object.entries(project.notes ?? {}) as [BriefingFact, string | undefined][]) {
+    const text = (note ?? '').trim();
+    if (!text) continue;
+    if (fact === 'tracker_key' && !trackerTakesKey(project.tracker)) continue;
+    if (fact === 'forge_repo' && project.forge === 'unknown') continue;
+    out[fact] = text;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}

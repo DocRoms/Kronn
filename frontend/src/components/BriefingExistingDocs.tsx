@@ -8,9 +8,10 @@ import { useEffect, useState } from 'react';
 import { Plus } from 'lucide-react';
 import { useT } from '../lib/I18nContext';
 import { projects as projectsApi } from '../lib/api';
-import type { BriefingDocKind, BriefingDocLocation, BriefingDocState } from '../types/generated';
+import type { BriefingDetectedDoc, BriefingDocKind, BriefingDocLocation, BriefingDocState } from '../types/generated';
 import {
-  BRIEFING_DOC_STATES, DOC_NOTE_MAX, DOC_PATH_MAX, rowsToLocations, setSourceOfTruth, toRow, type DocRow,
+  BRIEFING_DOC_STATES, DOC_NOTE_MAX, DOC_PATH_MAX, mergeSavedDocs, rowsToLocations, setSourceOfTruth, toRow,
+  type DocRow, type SavedDocs,
 } from './briefingDocs';
 
 const kindKey = (kind: BriefingDocKind) => `briefing.docs.kind.${kind}`;
@@ -18,12 +19,15 @@ const kindKey = (kind: BriefingDocKind) => `briefing.docs.kind.${kind}`;
 interface Props {
   projectId: string;
   onChange: (locations: BriefingDocLocation[]) => void;
+  /** KT-1196 — the saved answers the rows start from. */
+  saved?: SavedDocs;
 }
 
-export function BriefingExistingDocs({ projectId, onChange }: Props) {
+export function BriefingExistingDocs({ projectId, onChange, saved = null }: Props) {
   const { t } = useT();
   const [rows, setRows] = useState<DocRow[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [found, setFound] = useState<BriefingDetectedDoc[] | null>(null);
+  const loading = found === null || saved === 'loading';
   const [manual, setManual] = useState('');
   const [manualError, setManualError] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
@@ -31,11 +35,20 @@ export function BriefingExistingDocs({ projectId, onChange }: Props) {
   useEffect(() => {
     let cancelled = false;
     projectsApi.briefingDocs(projectId)
-      .then(found => { if (!cancelled) setRows(found.map(toRow)); })
-      .catch(e => console.warn('[BriefingExistingDocs] detection failed:', e))
-      .finally(() => { if (!cancelled) setLoading(false); });
+      .then(docs => { if (!cancelled) setFound(docs); })
+      .catch(e => {
+        console.warn('[BriefingExistingDocs] detection failed:', e);
+        if (!cancelled) setFound([]);
+      });
     return () => { cancelled = true; };
   }, [projectId]);
+
+  // Seeded once, during render, as soon as both the detection and the saved answers are known.
+  const [seeded, setSeeded] = useState(false);
+  if (!seeded && found !== null && saved !== 'loading') {
+    setSeeded(true);
+    setRows(mergeSavedDocs(found, saved));
+  }
 
   useEffect(() => { onChange(rowsToLocations(rows)); }, [rows, onChange]);
 

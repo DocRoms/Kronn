@@ -2289,6 +2289,46 @@ pub struct BriefingProjectAnswers {
     pub release_cadence: BriefingReleaseCadence,
     pub environments: Vec<BriefingEnvironment>,
     pub people: Vec<BriefingPerson>,
+    /// KT-1196 — optional free-text note per fact: the "how" a closed option
+    /// cannot say. Omitted when empty so older machine copies stay identical.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub notes: std::collections::BTreeMap<BriefingFact, String>,
+}
+
+/// A project fact a briefing note can be attached to (KT-1196).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum BriefingFact {
+    Tracker,
+    TrackerKey,
+    Forge,
+    ForgeRepo,
+    DefaultBranch,
+    CommitConvention,
+    Signoff,
+    MergeStrategy,
+    Review,
+    ReleaseCadence,
+    Environments,
+    People,
+}
+
+/// The saved briefing as the form's answers (KT-1196), read back from
+/// `docs/briefing.md` or the DB notes so the form opens pre-filled.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, TS)]
+#[ts(export)]
+pub struct SavedBriefing {
+    pub purpose: String,
+    pub team: String,
+    pub maturity: String,
+    pub dependencies: String,
+    pub traps: String,
+    pub additional: String,
+    pub project: Option<BriefingProjectAnswers>,
+    pub existing_docs: Option<BriefingDocsAnswers>,
+    pub td_to_tasks: bool,
+    pub cross_audit_agents: Vec<AgentType>,
 }
 
 // ─── Existing documentation (KT-999) ───────────────────────────────────────

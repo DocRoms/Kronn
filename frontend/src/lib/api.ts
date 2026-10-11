@@ -1,5 +1,5 @@
 import type { AcceptAuditStepResponse, ArtifactBundle, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditRunCost, AuditStepInfo, AuditRecentActivity, AuditTokenBreakdown, EmbedOriginsChange } from '../types/generated';
-import type { BriefingDetectedDoc, BriefingDocsAnswers, BriefingProjectAnswers, BriefingProjectRules, CrossAuditEstimate, LinkedRepoDocStatus } from '../types/generated';
+import type { BriefingDetectedDoc, BriefingDocsAnswers, BriefingProjectAnswers, BriefingProjectRules, CrossAuditEstimate, LinkedRepoDocStatus, SavedBriefing } from '../types/generated';
 import type { WorkerConnectivity } from '../types/generated';
 import type { DocProvenanceReport } from '../types/generated';
 import type { TemplateReinstallRequest, TemplateReinstallPlan, TemplateReinstallReport, MergeBase, TemplateMergeAccepted, TemplateMergeAcceptRequest, TemplateMergeRequest, TemplateMergeView } from '../types/generated';
@@ -1284,6 +1284,8 @@ export const projects = {
   revalidationPlan: (id: string) => api<RevalidationPlan>('GET', `/projects/${id}/revalidation`),
   getBriefing: (id: string) => api<string | null>('GET', `/projects/${id}/briefing`),
   setBriefing: (id: string, notes: string | null) => api<void>('PUT', `/projects/${id}/briefing`, { notes }),
+  /** KT-1196 — the saved briefing as the form's answers; `null` before the first save. */
+  savedBriefing: (id: string) => api<SavedBriefing | null>('GET', `/projects/${id}/briefing/answers`),
   startBriefing: (id: string, agent: AgentType, tier?: ModelTier) =>
     api<{ discussion_id: string }>('POST', `/projects/${id}/start-briefing`, { agent, tier }),
   /**

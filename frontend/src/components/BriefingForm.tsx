@@ -12,20 +12,26 @@
  * still pick the conversational variant if they prefer guidance —
  * both are surfaced side-by-side in ProjectCard.
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useT } from '../lib/I18nContext';
 import { projects as projectsApi } from '../lib/api';
 import { Save, X, Loader2 } from 'lucide-react';
-import type { AgentType, BriefingDocLocation, BriefingProjectAnswers, CrossAuditEstimate, LinkedRepo, ModelTier, ProjectRule } from '../types/generated';
+import type {
+  AgentType, BriefingDocLocation, BriefingFact, BriefingProjectAnswers, CrossAuditEstimate, LinkedRepo, ModelTier, ProjectRule,
+  SavedBriefing,
+} from '../types/generated';
 import { AGENT_LABELS } from '../lib/constants';
 import { formatUsd } from '../lib/audit-cost';
 import { BriefingExistingDocs } from './BriefingExistingDocs';
 import { BriefingProjectRules } from './BriefingProjectRules';
 import { ProjectLinkedRepos } from './ProjectLinkedRepos';
+import type { SavedDocs } from './briefingDocs';
 import {
   BRIEFING_ENVIRONMENTS,
   BRIEFING_PROJECT_CARDS,
   BRIEFING_ROLES,
+  FACT_NOTE_MAX,
+  cleanFactNotes,
   emptyProjectAnswers,
   trackerTakesKey,
   type BriefingChoiceCard,
@@ -125,6 +131,59 @@ export function BriefingForm({
   const [project, setProject] = useState<BriefingProjectAnswers>(emptyProjectAnswers);
   const [docs, setDocs] = useState<BriefingDocLocation[]>([]);
   const [rules, setRules] = useState<ProjectRule[]>([]);
+  // KT-1196 — the saved briefing pre-fills the form, unless the user already started typing.
+  const [savedDocs, setSavedDocs] = useState<SavedDocs>('loading');
+  const [prefilled, setPrefilled] = useState(false);
+  const touched = useRef(false);
+
+  useEffect(() => {
+    let live = true;
+    const apply = (saved: SavedBriefing) => {
+      setForm({
+        purpose: saved.purpose,
+        team: saved.team,
+        maturity: saved.maturity,
+        dependencies: saved.dependencies,
+        traps: saved.traps,
+        additional: saved.additional,
+      });
+      setProject({ ...emptyProjectAnswers(), ...(saved.project ?? {}) });
+      setTdToTasks(saved.td_to_tasks);
+      setCrossAudit(saved.cross_audit_agents.length > 0);
+      setCrossAgents(saved.cross_audit_agents);
+      setPrefilled(true);
+    };
+    projectsApi.savedBriefing(projectId)
+      .then(saved => {
+        if (!live) return;
+        if (saved && !touched.current) {
+          apply(saved);
+          // A saved briefing without the section kept no location.
+          setSavedDocs(saved.existing_docs?.locations ?? []);
+        } else {
+          setSavedDocs(null);
+        }
+      })
+      .catch(e => {
+        console.warn('[BriefingForm] saved briefing unavailable:', e);
+        if (live) setSavedDocs(null);
+      });
+    return () => { live = false; };
+  }, [projectId]);
+
+  const setNote = (fact: BriefingFact, value: string) =>
+    setProject(p => ({ ...p, notes: { ...(p.notes ?? {}), [fact]: value } }));
+  const noteInput = (fact: BriefingFact, label: string) => (
+    <input
+      className="briefing-card-input briefing-card-note"
+      aria-label={t('briefing.project.noteFor', label)}
+      placeholder={t('briefing.project.notePlaceholder')}
+      value={project.notes?.[fact] ?? ''}
+      maxLength={FACT_NOTE_MAX}
+      onChange={e => setNote(fact, e.target.value)}
+      data-note={fact}
+    />
+  );
 
   const update = (key: keyof typeof form, value: string) => setForm(f => ({ ...f, [key]: value }));
   const choose = (key: BriefingChoiceCard['key'], id: string) =>
@@ -174,6 +233,7 @@ export function BriefingForm({
         tracker_key: trackerTakesKey(project.tracker) ? project.tracker_key.trim() : '',
         forge_repo: project.forge === 'unknown' ? '' : project.forge_repo.trim(),
         people: project.people.filter(p => p.name.trim() || p.contact.trim()),
+        notes: cleanFactNotes(project),
       };
       await projectsApi.saveBriefing(projectId, {
         ...form,
@@ -216,7 +276,12 @@ export function BriefingForm({
   };
 
   return (
-    <form onSubmit={handleSubmit} className="briefing-form">
+    <form
+      onSubmit={handleSubmit}
+      className="briefing-form"
+      onChangeCapture={() => { touched.current = true; }}
+      onClickCapture={() => { touched.current = true; }}
+    >
       <div className="briefing-form-header">
         <h3>{t('briefing.formTitle')}</h3>
         <button type="button" className="briefing-form-close" onClick={onClose} aria-label={t('common.close')}>
@@ -224,6 +289,7 @@ export function BriefingForm({
         </button>
       </div>
       <p className="briefing-form-intro">{t('briefing.formIntro')}</p>
+      {prefilled && <p className="briefing-form-intro" data-testid="briefing-prefilled">{t('briefing.prefilled')}</p>}
 
       <label>
         <span className="briefing-form-q">{t('briefing.q1Purpose')}</span>
@@ -324,6 +390,8 @@ export function BriefingForm({
                 onChange={e => setProject(p => ({ ...p, tracker_key: e.target.value }))}
               />
             )}
+            {card.key === 'tracker' && trackerTakesKey(project.tracker)
+              && noteInput('tracker_key', t('briefing.project.trackerKey'))}
             {card.key === 'forge' && project.forge !== 'unknown' && (
               <input
                 className="briefing-card-input"
@@ -334,6 +402,9 @@ export function BriefingForm({
                 onChange={e => setProject(p => ({ ...p, forge_repo: e.target.value }))}
               />
             )}
+            {card.key === 'forge' && project.forge !== 'unknown'
+              && noteInput('forge_repo', t('briefing.project.forgeRepo'))}
+            {noteInput(card.fact, t(card.questionKey))}
           </fieldset>
         ))}
 
@@ -368,6 +439,7 @@ export function BriefingForm({
               onChange={e => setEnvUrl(env.kind, e.target.value)}
             />
           ))}
+          {noteInput('environments', t('briefing.project.envQ'))}
         </fieldset>
 
         <fieldset className="briefing-card" data-card="people">
@@ -412,11 +484,12 @@ export function BriefingForm({
               </div>
             );
           })}
+          {noteInput('people', t('briefing.project.peopleQ'))}
           <p className="briefing-form-intro">{t('briefing.project.peoplePrivacy')}</p>
         </fieldset>
       </section>
 
-      <BriefingExistingDocs projectId={projectId} onChange={setDocs} />
+      <BriefingExistingDocs projectId={projectId} onChange={setDocs} saved={savedDocs} />
 
       <BriefingProjectRules onChange={setRules} />
 

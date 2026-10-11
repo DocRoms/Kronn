@@ -2119,6 +2119,12 @@ button.dash-badge-tech-debt {
   min-width: 0;
 }
 
+/* KT-1196 — optional note under a project fact. */
+.briefing-card-note {
+  font-size: var(--kr-fs-xs);
+  border-style: dashed;
+}
+
 .briefing-card-person {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));

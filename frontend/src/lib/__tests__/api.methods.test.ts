@@ -179,6 +179,7 @@ describe('api.projects (rest)', () => {
   it('setLinkedRepos', async () => { await exec(projects.setLinkedRepos('p-1', []), 'PUT', '/projects/p-1/linked-repos'); });
   it('linkedReposCandidates', async () => { await exec(projects.linkedReposCandidates('p-1'), 'GET', '/projects/p-1/linked-repos/candidates'); });
   it('linkedReposDocs', async () => { await exec(projects.linkedReposDocs('p-1'), 'GET', '/projects/p-1/linked-repos/docs'); });
+  it('savedBriefing', async () => { await exec(projects.savedBriefing('p-1'), 'GET', '/projects/p-1/briefing/answers'); });
   it('briefingDocs', async () => { await exec(projects.briefingDocs('p-1'), 'GET', '/projects/p-1/briefing/docs'); });
   it('checkBriefingDoc sends the typed path', async () => {
     const b = await exec(projects.checkBriefingDoc('p-1', 'docs/guide'), 'POST', '/projects/p-1/briefing/docs/check');

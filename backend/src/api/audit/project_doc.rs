@@ -7,9 +7,9 @@ use std::future::Future;
 use std::path::Path;
 
 use crate::models::{
-    BriefingCommitConvention, BriefingDefaultBranch, BriefingEnvironmentKind, BriefingForge,
-    BriefingMergeStrategy, BriefingPersonRole, BriefingProjectAnswers, BriefingReleaseCadence,
-    BriefingReviewPolicy, BriefingTracker, BriefingYesNo,
+    BriefingCommitConvention, BriefingDefaultBranch, BriefingEnvironmentKind, BriefingFact,
+    BriefingForge, BriefingMergeStrategy, BriefingPersonRole, BriefingProjectAnswers,
+    BriefingReleaseCadence, BriefingReviewPolicy, BriefingTracker, BriefingYesNo,
 };
 
 /// Heading of the answers section inside `docs/briefing.md`.
@@ -22,6 +22,8 @@ const ANSWERS_SUFFIX: &str = " -->";
 pub(crate) const GENERATED_MARKER: &str = "<!-- kronn:generated=\"briefing\"";
 
 const NOT_PROVIDED: &str = "Not provided — ask before assuming.";
+/// Longest note attached to one project fact (KT-1196).
+pub(crate) const FACT_NOTE_MAX_CHARS: usize = 300;
 const JIRA_PLUGIN: &str = "mcp-atlassian";
 const GITHUB_PLUGIN: &str = "mcp-github";
 
@@ -136,10 +138,67 @@ pub(crate) fn normalize_answers(
     }
     out.people
         .retain(|p| !p.name.is_empty() || !p.contact.is_empty());
+
+    let mut notes = std::collections::BTreeMap::new();
+    for (fact, note) in &out.notes {
+        let note = note.trim();
+        if note.is_empty() {
+            continue;
+        }
+        check_text(
+            &format!("notes.{}", fact_key(*fact)),
+            note,
+            FACT_NOTE_MAX_CHARS,
+        )?;
+        notes.insert(*fact, note.to_string());
+    }
+    out.notes = notes;
     Ok(out)
 }
 
 // ─── Labels ─────────────────────────────────────────────────────────────────
+
+fn fact_key(v: BriefingFact) -> &'static str {
+    match v {
+        BriefingFact::Tracker => "tracker",
+        BriefingFact::TrackerKey => "tracker_key",
+        BriefingFact::Forge => "forge",
+        BriefingFact::ForgeRepo => "forge_repo",
+        BriefingFact::DefaultBranch => "default_branch",
+        BriefingFact::CommitConvention => "commit_convention",
+        BriefingFact::Signoff => "signoff",
+        BriefingFact::MergeStrategy => "merge_strategy",
+        BriefingFact::Review => "review",
+        BriefingFact::ReleaseCadence => "release_cadence",
+        BriefingFact::Environments => "environments",
+        BriefingFact::People => "people",
+    }
+}
+
+fn fact_label(v: BriefingFact) -> &'static str {
+    match v {
+        BriefingFact::Tracker => "Tracker",
+        BriefingFact::TrackerKey => "Project key",
+        BriefingFact::Forge => "Forge",
+        BriefingFact::ForgeRepo => "Repository",
+        BriefingFact::DefaultBranch => "Default branch",
+        BriefingFact::CommitConvention => "Commit convention",
+        BriefingFact::Signoff => "Sign-off",
+        BriefingFact::MergeStrategy => "Merge strategy",
+        BriefingFact::Review => "Review",
+        BriefingFact::ReleaseCadence => "Release cadence",
+        BriefingFact::Environments => "Environments",
+        BriefingFact::People => "People",
+    }
+}
+
+/// `value` followed by the fact's note, when the team wrote one.
+fn with_note(value: String, answers: &BriefingProjectAnswers, fact: BriefingFact) -> String {
+    match answers.notes.get(&fact) {
+        Some(note) => format!("{value} — note: {}", cell(note)),
+        None => value,
+    }
+}
 
 fn tracker_label(v: BriefingTracker) -> &'static str {
     match v {
@@ -285,10 +344,23 @@ pub(crate) fn render_facts_section(answers: &BriefingProjectAnswers) -> Option<S
     } else {
         format!(" — key `{}`", answers.tracker_key)
     };
+    let notes_of = |facts: &[BriefingFact]| -> String {
+        facts
+            .iter()
+            .filter_map(|f| {
+                let note = answers.notes.get(f)?;
+                Some(format!("  - {} note: {}\n", fact_label(*f), cell(note)))
+            })
+            .collect()
+    };
     out.push_str(&format!(
         "- Tracker: {}{key}\n",
         lower(tracker_label(answers.tracker))
     ));
+    out.push_str(&notes_of(&[
+        BriefingFact::Tracker,
+        BriefingFact::TrackerKey,
+    ]));
     let repo = if answers.forge_repo.is_empty() {
         String::new()
     } else {
@@ -301,17 +373,35 @@ pub(crate) fn render_facts_section(answers: &BriefingProjectAnswers) -> Option<S
         "- Forge: {}{repo}{branch}\n",
         lower(forge_label(answers.forge))
     ));
+    out.push_str(&notes_of(&[
+        BriefingFact::Forge,
+        BriefingFact::ForgeRepo,
+        BriefingFact::DefaultBranch,
+    ]));
     out.push_str(&format!(
         "- Commits: {}; sign-off: {}; merge: {}\n",
         lower(commit_label(answers.commit_convention)),
         lower(yes_no_label(answers.signoff_required)),
         lower(merge_label(answers.merge_strategy)),
     ));
+    out.push_str(&notes_of(&[
+        BriefingFact::CommitConvention,
+        BriefingFact::Signoff,
+        BriefingFact::MergeStrategy,
+    ]));
     out.push_str(&format!(
         "- Review: {}; releases: {}\n",
         lower(review_label(answers.review_policy)),
         lower(cadence_label(answers.release_cadence)),
     ));
+    out.push_str(&notes_of(&[
+        BriefingFact::Review,
+        BriefingFact::ReleaseCadence,
+    ]));
+    let env_note = notes_of(&[BriefingFact::Environments]);
+    if answers.environments.is_empty() && !env_note.is_empty() {
+        out.push_str("- Environments: not provided\n");
+    }
     if !answers.environments.is_empty() {
         let envs: Vec<String> = answers
             .environments
@@ -325,6 +415,11 @@ pub(crate) fn render_facts_section(answers: &BriefingProjectAnswers) -> Option<S
             })
             .collect();
         out.push_str(&format!("- Environments: {}\n", envs.join(", ")));
+    }
+    out.push_str(&env_note);
+    let people_note = notes_of(&[BriefingFact::People]);
+    if answers.people.is_empty() && !people_note.is_empty() {
+        out.push_str("- People: not provided\n");
     }
     if !answers.people.is_empty() {
         let people: Vec<String> = answers
@@ -342,6 +437,7 @@ pub(crate) fn render_facts_section(answers: &BriefingProjectAnswers) -> Option<S
             .collect();
         out.push_str(&format!("- People: {}\n", people.join("; ")));
     }
+    out.push_str(&people_note);
     // `<` and `>` are escaped so a value can never close the HTML comment.
     let json = serde_json::to_string(answers)
         .unwrap_or_else(|_| "{}".into())
@@ -763,30 +859,39 @@ pub(crate) fn render_project_doc(
     out.push_str(&format!("Last generated: {today}.\n\n"));
 
     out.push_str("## Tracker\n\n| Field | Value | Check |\n|-------|-------|-------|\n");
+    let note = |value: String, fact: BriefingFact| with_note(value, answers, fact);
     out.push_str(&format!(
         "| Tool | {} | — |\n",
-        tracker_label(answers.tracker)
+        note(tracker_label(answers.tracker).into(), BriefingFact::Tracker)
     ));
-    if !matches!(
+    let key_row = !matches!(
         answers.tracker,
         BriefingTracker::None | BriefingTracker::GithubIssues | BriefingTracker::GitlabIssues
-    ) {
+    );
+    if key_row || answers.notes.contains_key(&BriefingFact::TrackerKey) {
         out.push_str(&format!(
             "| Project key | {} | {} |\n",
-            code_or_not_provided(&answers.tracker_key),
+            note(
+                code_or_not_provided(&answers.tracker_key),
+                BriefingFact::TrackerKey
+            ),
             checks.tracker_key.render()
         ));
     }
 
     out.push_str("\n## Forge\n\n| Field | Value | Check |\n|-------|-------|-------|\n");
-    out.push_str(&format!("| Host | {} | — |\n", forge_label(answers.forge)));
+    out.push_str(&format!(
+        "| Host | {} | — |\n",
+        note(forge_label(answers.forge).into(), BriefingFact::Forge)
+    ));
     let repo = if repo_inferred {
         format!("`{}` (from the git remote)", answers.forge_repo)
     } else {
         code_or_not_provided(&answers.forge_repo)
     };
     out.push_str(&format!(
-        "| Repository | {repo} | {} |\n",
+        "| Repository | {} | {} |\n",
+        note(repo, BriefingFact::ForgeRepo),
         checks.forge_repo.render()
     ));
     let branch = match (
@@ -798,20 +903,30 @@ pub(crate) fn render_project_doc(
         (None, None) => NOT_PROVIDED.to_string(),
     };
     out.push_str(&format!(
-        "| Default branch | {branch} | {} |\n",
+        "| Default branch | {} | {} |\n",
+        note(branch, BriefingFact::DefaultBranch),
         checks.default_branch.render()
     ));
     out.push_str(&format!(
         "| Commit convention | {} | — |\n",
-        commit_label(answers.commit_convention)
+        note(
+            commit_label(answers.commit_convention).into(),
+            BriefingFact::CommitConvention
+        )
     ));
     out.push_str(&format!(
         "| Sign-off (`Signed-off-by`) | {} | — |\n",
-        yes_no_label(answers.signoff_required)
+        note(
+            yes_no_label(answers.signoff_required).into(),
+            BriefingFact::Signoff
+        )
     ));
     out.push_str(&format!(
         "| Merge strategy | {} | — |\n",
-        merge_label(answers.merge_strategy)
+        note(
+            merge_label(answers.merge_strategy).into(),
+            BriefingFact::MergeStrategy
+        )
     ));
 
     out.push_str("\n## Environments\n\n");
@@ -827,6 +942,9 @@ pub(crate) fn render_project_doc(
                 or_not_provided(&env.url)
             ));
         }
+    }
+    if let Some(n) = answers.notes.get(&BriefingFact::Environments) {
+        out.push_str(&format!("\nNote: {}\n", cell(n)));
     }
     out.push_str("\nNever write a secret value here; name the variable and where it comes from.\n");
 
@@ -845,6 +963,9 @@ pub(crate) fn render_project_doc(
             ));
         }
     }
+    if let Some(n) = answers.notes.get(&BriefingFact::People) {
+        out.push_str(&format!("\nNote: {}\n", cell(n)));
+    }
     out.push_str(
         "\nRoles and contacts exactly as entered in the briefing; nothing else about anyone is recorded here.\n",
     );
@@ -852,11 +973,17 @@ pub(crate) fn render_project_doc(
     out.push_str("\n## Process\n\n| Field | Value |\n|-------|-------|\n");
     out.push_str(&format!(
         "| Review | {} |\n",
-        review_label(answers.review_policy)
+        note(
+            review_label(answers.review_policy).into(),
+            BriefingFact::Review
+        )
     ));
     out.push_str(&format!(
         "| Release cadence | {} |\n",
-        cadence_label(answers.release_cadence)
+        note(
+            cadence_label(answers.release_cadence).into(),
+            BriefingFact::ReleaseCadence
+        )
     ));
     out
 }

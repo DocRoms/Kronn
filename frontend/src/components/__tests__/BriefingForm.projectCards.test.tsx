@@ -34,6 +34,13 @@ const card = (key: string) => {
   return el as HTMLElement;
 };
 
+/** The card's value field (key, repository, URL), never its optional note. */
+const valueInput = (key: string) => {
+  const el = card(key).querySelector('input:not([data-note])');
+  if (!el) throw new Error(`value input of ${key} missing`);
+  return el as HTMLInputElement;
+};
+
 const fillMandatory = () => {
   const textareas = document.querySelectorAll('textarea');
   ['Purpose', 'Team', 'Maturity', 'Deps', 'Traps'].forEach((v, i) =>
@@ -61,7 +68,7 @@ describe('BriefingForm project cards (KT-1173)', () => {
     }
     // The six legacy questions stay the only textareas.
     expect(document.querySelectorAll('textarea')).toHaveLength(6);
-    expect(card('tracker').querySelector('input')).toBeNull();
+    expect(card('tracker').querySelector('input:not([data-note])')).toBeNull();
   });
 
   it('a choice is exclusive inside its card', () => {
@@ -79,15 +86,14 @@ describe('BriefingForm project cards (KT-1173)', () => {
     fillMandatory();
 
     fireEvent.click(within(card('tracker')).getByRole('radio', { name: 'Jira' }));
-    const key = within(card('tracker')).getByRole('textbox');
-    fireEvent.change(key, { target: { value: 'KR' } });
+    fireEvent.change(valueInput('tracker'), { target: { value: 'KR' } });
     fireEvent.click(within(card('forge')).getByRole('radio', { name: 'GitHub' }));
-    fireEvent.change(within(card('forge')).getByRole('textbox'), { target: { value: 'DocRoms/Kronn' } });
+    fireEvent.change(valueInput('forge'), { target: { value: 'DocRoms/Kronn' } });
     fireEvent.click(within(card('default_branch')).getByRole('radio', { name: 'main' }));
 
     const envs = within(card('environments')).getAllByRole('checkbox');
     fireEvent.click(envs[4]); // production
-    fireEvent.change(within(card('environments')).getByRole('textbox'), {
+    fireEvent.change(valueInput('environments'), {
       target: { value: 'https://www.example.com' },
     });
 
@@ -122,9 +128,9 @@ describe('BriefingForm project cards (KT-1173)', () => {
     wrap();
     fillMandatory();
     fireEvent.click(within(card('tracker')).getByRole('radio', { name: 'Jira' }));
-    fireEvent.change(within(card('tracker')).getByRole('textbox'), { target: { value: 'KR' } });
+    fireEvent.change(valueInput('tracker'), { target: { value: 'KR' } });
     fireEvent.click(within(card('tracker')).getByRole('radio', { name: 'GitHub Issues' }));
-    expect(card('tracker').querySelector('input')).toBeNull();
+    expect(card('tracker').querySelector('input:not([data-note])')).toBeNull();
     submit();
     await waitFor(() => expect(projectsApi.saveBriefing).toHaveBeenCalledTimes(1));
     const payload = (projectsApi.saveBriefing as ReturnType<typeof vi.fn>).mock.calls[0][1];

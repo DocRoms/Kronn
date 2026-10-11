@@ -1433,6 +1433,11 @@ export type BriefingEnvironment = { kind: BriefingEnvironmentKind, url: string, 
 
 export type BriefingEnvironmentKind = "local" | "dev" | "staging" | "preprod" | "production" | "preview";
 
+/**
+ * A project fact a briefing note can be attached to (KT-1196).
+ */
+export type BriefingFact = "tracker" | "tracker_key" | "forge" | "forge_repo" | "default_branch" | "commit_convention" | "signoff" | "merge_strategy" | "review" | "release_cadence" | "environments" | "people";
+
 export type BriefingForge = "unknown" | "github" | "gitlab" | "bitbucket" | "azure_devops" | "other";
 
 export type BriefingMergeStrategy = "unknown" | "squash" | "rebase" | "merge_commit";
@@ -1455,7 +1460,12 @@ tracker_key: string, forge: BriefingForge,
 /**
  * `owner/name`; inferred from the project's git remote when empty.
  */
-forge_repo: string, default_branch: BriefingDefaultBranch, commit_convention: BriefingCommitConvention, signoff_required: BriefingYesNo, merge_strategy: BriefingMergeStrategy, review_policy: BriefingReviewPolicy, release_cadence: BriefingReleaseCadence, environments: Array<BriefingEnvironment>, people: Array<BriefingPerson>, };
+forge_repo: string, default_branch: BriefingDefaultBranch, commit_convention: BriefingCommitConvention, signoff_required: BriefingYesNo, merge_strategy: BriefingMergeStrategy, review_policy: BriefingReviewPolicy, release_cadence: BriefingReleaseCadence, environments: Array<BriefingEnvironment>, people: Array<BriefingPerson>,
+/**
+ * KT-1196 — optional free-text note per fact: the "how" a closed option
+ * cannot say. Omitted when empty so older machine copies stay identical.
+ */
+notes?: { [key in BriefingFact]?: string }, };
 
 export type BriefingProjectRules = { rules: Array<ProjectRule>, };
 
@@ -7796,6 +7806,12 @@ export type SafetyWarning = "sandbox_outside_container" | "limits_without_direct
 export type SagaResumeAction = "RebuildCandidate" | "RunValidations" | "ApplyFastForward" | "IdempotentClose" | "BlockDirtyTarget" | "NoOp";
 
 export type SaveApiKeyRequest = { id?: string | null, name: string, provider: string, value: string, };
+
+/**
+ * The saved briefing as the form's answers (KT-1196), read back from
+ * `docs/briefing.md` or the DB notes so the form opens pre-filled.
+ */
+export type SavedBriefing = { purpose: string, team: string, maturity: string, dependencies: string, traps: string, additional: string, project: BriefingProjectAnswers | null, existing_docs: BriefingDocsAnswers | null, td_to_tasks: boolean, cross_audit_agents: Array<AgentType>, };
 
 export type ScanConfig = { paths: Array<string>, ignore: Array<string>,
 /**

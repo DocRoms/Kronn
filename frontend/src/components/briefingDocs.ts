@@ -39,3 +39,32 @@ export function setSourceOfTruth(rows: DocRow[], path: string, on: boolean): Doc
     return r;
   });
 }
+
+/** The saved locations, `null` without a saved briefing, `'loading'` until it is known. */
+export type SavedDocs = BriefingDocLocation[] | null | 'loading';
+
+/**
+ * KT-1196 — rows for a re-opened briefing: the saved locations first, in their
+ * saved order and with their answers; a location detected since is offered
+ * unchecked, so saving unchanged writes the same section.
+ */
+export function mergeSavedDocs(found: BriefingDetectedDoc[], saved: BriefingDocLocation[] | null): DocRow[] {
+  if (saved === null) return found.map(toRow);
+  const kept: DocRow[] = saved.map(l => {
+    const detected = found.find(d => d.path === l.path);
+    return {
+      path: l.path,
+      kind: l.kind,
+      is_dir: detected?.is_dir ?? false,
+      last_commit: detected?.last_commit ?? l.last_commit ?? null,
+      included: true,
+      state: l.state,
+      note: l.note,
+      source_of_truth: l.source_of_truth,
+    };
+  });
+  const fresh = found
+    .filter(d => !saved.some(l => l.path === d.path))
+    .map(d => ({ ...toRow(d), included: false }));
+  return [...kept, ...fresh];
+}

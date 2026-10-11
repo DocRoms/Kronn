@@ -283,6 +283,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       auditRunsCleanup: resolve(0),
       checkDrift: resolve({ stale_steps: [], checksums_outdated: false }),
       getBriefing: resolve(null),
+      savedBriefing: resolve(null),
       startBriefing: resolve({ discussion_id: '' }),
       saveBriefing: resolve({}),
       crossAuditEstimate: resolve({ agents: 2, cross_checked_steps: ['docs/inconsistencies-security.md'], low_factor: 2, high_factor: 4, max_cross_checked: 30, estimated: true }),

@@ -452,9 +452,21 @@ export function AuditTimeline(props: AuditTimelineProps) {
             title={t('auditTimeline.briefing.title')}
             tag={props.briefingDone ? t('auditTimeline.status.saved') : t('auditTimeline.status.toFill')}
           >
-            {props.briefingDone ? (
-              <p className="audit-tl-muted">{t('auditTimeline.briefing.used')}</p>
-            ) : props.onResumeBriefingDiscussion ? (
+            {props.briefingDone && !briefingOpen ? (
+              <div className="audit-tl-row">
+                <p className="audit-tl-muted">{t('auditTimeline.briefing.used')}</p>
+                <button
+                  type="button"
+                  className="audit-tl-btn audit-tl-btn-small"
+                  onClick={() => setBriefingOpen(true)}
+                  disabled={auditActive}
+                  title={auditActive ? t('auditTimeline.briefing.lockedDuringAudit') : undefined}
+                  data-testid="audit-timeline-briefing-edit"
+                >
+                  <FileText size={12} /> {t('auditTimeline.briefing.edit')}
+                </button>
+              </div>
+            ) : !props.briefingDone && props.onResumeBriefingDiscussion ? (
               <div className="audit-tl-row">
                 <p className="audit-tl-muted">{t('auditTimeline.briefing.inDiscussion')}</p>
                 <button type="button" className="audit-tl-btn audit-tl-btn-small" onClick={props.onResumeBriefingDiscussion}>

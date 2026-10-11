@@ -23188,6 +23188,118 @@ mod cold_api_handlers_tests {
         })
     }
 
+    fn briefing_full_form() -> serde_json::Value {
+        serde_json::json!({
+            "purpose": "News site\n\nTwo paragraphs", "team": "Four devs",
+            "maturity": "Production", "dependencies": "- Jira\n- Fastly",
+            "traps": "Cache purge", "additional": "",
+            "project": {
+                "tracker": "jira", "tracker_key": "ew", "forge": "github",
+                "forge_repo": "euronews/front", "default_branch": "develop",
+                "commit_convention": "conventional", "signoff_required": "yes",
+                "merge_strategy": "squash", "review_policy": "two_approvals",
+                "release_cadence": "scheduled",
+                "environments": [{"kind": "production", "url": "https://www.example.com"}],
+                "people": [{"role": "devops", "name": "Sam", "contact": "#devops"}],
+                "notes": {
+                    "tracker": "Jira Cloud", "tracker_key": "EW board only",
+                    "forge": "GitHub Enterprise", "forge_repo": "monorepo",
+                    "default_branch": "develop, then main", "commit_convention": "type(scope)",
+                    "signoff": "DCO bot", "merge_strategy": "squash only",
+                    "review": "2 approbations, CODEOWNERS sur backend/, réglé dans la protection de branche GitHub",
+                    "release_cadence": "Tuesdays", "environments": "VPN for staging",
+                    "people": "  ask in #team  "
+                }
+            },
+            "existing_docs": {"locations": [
+                {"path": "README.md", "state": "reference", "source_of_truth": true, "note": "setup"}
+            ]},
+            "td_to_tasks": true,
+            "cross_audit_agents": ["ClaudeCode", "Codex"]
+        })
+    }
+
+    #[tokio::test]
+    async fn briefing_answers_prefill_every_section_and_an_unchanged_resave_is_byte_identical() {
+        let (_dir, repo) = seed_repo("brief-reload");
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, json) = get_json(app, &format!("/api/projects/{pid}/briefing/answers")).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(json["data"].is_null(), "no briefing yet: {json}");
+
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, json) = post_json(
+            app,
+            &format!("/api/projects/{pid}/save-briefing"),
+            briefing_full_form(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{json}");
+        assert_eq!(json["success"], serde_json::Value::Bool(true), "{json}");
+        let first = std::fs::read(repo.join("docs/briefing.md")).unwrap();
+        let text = String::from_utf8(first.clone()).unwrap();
+        assert!(
+            text.contains("  - Review note: 2 approbations, CODEOWNERS sur backend/"),
+            "{text}"
+        );
+
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, json) = get_json(app, &format!("/api/projects/{pid}/briefing/answers")).await;
+        assert_eq!(st, StatusCode::OK);
+        let saved = json["data"].clone();
+        assert_eq!(saved["purpose"], "News site\n\nTwo paragraphs");
+        assert_eq!(saved["team"], "Four devs");
+        assert_eq!(saved["maturity"], "Production");
+        assert_eq!(saved["dependencies"], "- Jira\n- Fastly");
+        assert_eq!(saved["traps"], "Cache purge");
+        assert_eq!(saved["additional"], "");
+        assert_eq!(saved["project"]["tracker_key"], "EW");
+        assert_eq!(saved["project"]["notes"]["people"], "ask in #team");
+        assert_eq!(saved["project"]["notes"].as_object().unwrap().len(), 12);
+        assert_eq!(saved["existing_docs"]["locations"][0]["path"], "README.md");
+        assert_eq!(saved["existing_docs"]["locations"][0]["note"], "setup");
+        assert_eq!(saved["td_to_tasks"], true);
+        assert_eq!(
+            saved["cross_audit_agents"],
+            serde_json::json!(["ClaudeCode", "Codex"])
+        );
+
+        // The form sends back what it loaded, untouched.
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, json) = post_json(app, &format!("/api/projects/{pid}/save-briefing"), saved).await;
+        assert_eq!(st, StatusCode::OK, "{json}");
+        assert_eq!(json["success"], serde_json::Value::Bool(true), "{json}");
+        assert_eq!(std::fs::read(repo.join("docs/briefing.md")).unwrap(), first);
+    }
+
+    #[tokio::test]
+    async fn briefing_answers_fall_back_to_the_db_notes_without_a_docs_folder() {
+        let (_dir, repo) = seed_repo("brief-reload-db");
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let mut form = briefing_full_form();
+        form["existing_docs"] = serde_json::Value::Null;
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, json) = post_json(app, &format!("/api/projects/{pid}/save-briefing"), form).await;
+        assert_eq!(st, StatusCode::OK, "{json}");
+        assert_eq!(json["success"], serde_json::Value::Bool(true), "{json}");
+        assert!(!repo.join("docs/briefing.md").exists());
+
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, json) = get_json(app, &format!("/api/projects/{pid}/briefing/answers")).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["data"]["team"], "Four devs");
+        assert_eq!(json["data"]["project"]["notes"]["signoff"], "DCO bot");
+
+        let app = build_router_with_auth(state.clone(), false);
+        let (_, json) = get_json(app, "/api/projects/nope/briefing/answers").await;
+        assert_eq!(json["success"], serde_json::Value::Bool(false));
+    }
+
     #[tokio::test]
     async fn briefing_docs_are_detected_dated_and_recorded_in_the_briefing() {
         let (_dir, repo) = seed_repo("brief-docs");
