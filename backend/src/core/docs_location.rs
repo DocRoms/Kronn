@@ -317,9 +317,17 @@ pub struct DocsRoot {
 }
 
 /// Interned relocations of `'static` prompt text: one leak per (root, text),
-/// bounded by the number of distinct roots times Kronn's own step strings.
+/// never twice. A root is a validated override or `docs`, so the leak grows
+/// only when a human saves a new folder (under 256 KiB each, tested).
 static RELOCATED: LazyLock<std::sync::Mutex<HashMap<(String, &'static str), &'static str>>> =
     LazyLock::new(Default::default);
+
+/// Distinct relocated roots this process interned text for.
+static INTERNED_ROOTS: LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    LazyLock::new(Default::default);
+
+/// Past this many roots in one process, each new one is logged.
+const INTERNED_ROOTS_WARN: usize = 64;
 
 impl DocsRoot {
     pub const DEFAULT: &'static str = "docs";
@@ -443,7 +451,17 @@ impl DocsRoot {
         }
         let relocated: &'static str = match self.relocate(text) {
             std::borrow::Cow::Borrowed(same) => same,
-            std::borrow::Cow::Owned(owned) => Box::leak(owned.into_boxed_str()),
+            std::borrow::Cow::Owned(owned) => {
+                let mut roots = INTERNED_ROOTS.lock().unwrap_or_else(|e| e.into_inner());
+                if roots.insert(self.rel.clone()) && roots.len() > INTERNED_ROOTS_WARN {
+                    tracing::warn!(
+                        "{} distinct AI doc folders relocated since start: each keeps its \
+                         prompt text until Kronn restarts",
+                        roots.len()
+                    );
+                }
+                Box::leak(owned.into_boxed_str())
+            }
         };
         cache.insert(key, relocated);
         relocated

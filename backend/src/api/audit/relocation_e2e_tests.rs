@@ -339,6 +339,39 @@ async fn provenance_citations_td_review_and_step_8_follow_a_dot_ai_root() {
     assert!(!project.join("docs").exists(), "{body}");
 }
 
+/// Each new root interns its relocated step text once; the process keeps it.
+/// The footprint per root stays bounded by Kronn's own step definitions.
+#[test]
+fn a_new_root_interns_a_bounded_footprint() {
+    let ai = DocsRoot::from_rel("some/deeper/folder-name").unwrap();
+    let mut bytes = 0usize;
+    for kind in [
+        crate::models::AuditKind::Full,
+        crate::models::AuditKind::Drift,
+        crate::models::AuditKind::Security,
+        crate::models::AuditKind::Docker,
+        crate::models::AuditKind::Performance,
+        crate::models::AuditKind::Accessibility,
+        crate::models::AuditKind::Rgaa,
+        crate::models::AuditKind::Database,
+        crate::models::AuditKind::ApiDesign,
+        crate::models::AuditKind::CodeQuality,
+    ] {
+        for step in crate::api::audit::assemble_chained_steps(kind) {
+            for text in [step.target_file, step.prompt]
+                .into_iter()
+                .chain(step.sources.iter().copied())
+            {
+                if let std::borrow::Cow::Owned(owned) = ai.relocate(text) {
+                    bytes += owned.len();
+                }
+            }
+        }
+    }
+    // About 92 KiB today: a budget, so a prompt that grows tenfold is seen.
+    assert!(bytes < 256 << 10, "{bytes} bytes interned per root");
+}
+
 #[test]
 fn the_default_root_leaves_every_step_and_prompt_untouched() {
     let docs = DocsRoot::default_root();
