@@ -47,7 +47,7 @@ host probe confirmed that Python, Write and shell redirection were all refused.
 Both the default [ACP adapters](acp-adapters.md) and the direct CLI route use
 this policy, overriding `full_access`. The Claude process cannot inherit the
 container sandbox-bypass marker when a mandatory sandbox policy is present.
-[src: file: backend/src/agents/runner.rs:4409-4413#read_only_repos]
+[src: file: backend/src/agents/runner.rs:4416-4420#read_only_repos]
 [src: file: backend/src/agents/runner.rs:13747-13757#CLAUDE_CODE_BUBBLEWRAP]
 [src: file: backend/src/acp/codex_adapter.rs:464-478#worker_args]
 

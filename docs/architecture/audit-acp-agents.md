@@ -94,7 +94,7 @@ Now an ACP agent is stopped like an HTTP agent (KT-924), through a token:
 
 The partial audit now checks the stop between two steps and after each step's
 agent, finalises the run as `Cancelled` and releases the project lease, like the
-Full audit [src: file: backend/src/api/audit/drift.rs:624-644#mark_cancelled] [src: file: backend/src/api/audit/drift.rs:983-1001#mark_cancelled]. A partial refresh that
+Full audit [src: file: backend/src/api/audit/drift.rs:645-665#mark_cancelled] [src: file: backend/src/api/audit/drift.rs:1004-1022#mark_cancelled]. A partial refresh that
 was cancelled does not refresh the baseline, so its sections stay reported as
 stale.
 
@@ -142,7 +142,7 @@ not before.
 - **Where the cost comes from.** Only what a runtime reports itself: Claude
   Code's `total_cost_usd` (its stream-json `result` line, or the adapter's
   `Cost` event) and OpenRouter's `usage.cost`, summed per response
-  [src: file: backend/src/agents/runner.rs:13953-13961#total_cost_usd] [src: file: backend/src/agents/runner.rs:5624-5626#usd_micros] [src: file: backend/src/agents/runner.rs:9754-9760#cost_usd_micros].
+  [src: file: backend/src/agents/runner.rs:13953-13961#total_cost_usd] [src: file: backend/src/agents/runner.rs:5631-5633#usd_micros] [src: file: backend/src/agents/runner.rs:9761-9767#cost_usd_micros].
   The recorded cost is never recomputed from a rate table; a finished step
   whose agent reported none is priced on read by `core::pricing` for the served
   model and shown as an estimate, never as a reported cost

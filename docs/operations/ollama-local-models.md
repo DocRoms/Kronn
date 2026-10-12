@@ -293,7 +293,7 @@ migration; no runner fallback revives them after deletion. Unit tests use the
 same resolver as production; the historical expectation helper itself is
 test-only and is not called by the resolver.
 [src: file: backend/src/agents/runner.rs:3624-3626#missing_ollama_model_error]
-[src: file: backend/src/agents/runner.rs:4157-4161#missing_ollama_model_error]
+[src: file: backend/src/agents/runner.rs:4164-4168#missing_ollama_model_error]
 [src: file: backend/src/core/model_catalog/mod.rs:143-150#migrate_hardcoded_catalog_once]
 [src: file: backend/src/core/model_catalog/mod.rs:106-110#migrated_default]
 
@@ -303,7 +303,7 @@ like the other HTTP families; it cannot choose or invoke an embedded model.
 This is based on the caller's control flow, not an assumption from its comment.
 [src: file: backend/src/agents/runner.rs:3313-3318#is_http_chat_agent]
 [src: file: backend/src/agents/runner.rs:4205-4230#start_ollama_http_with_idle]
-[src: file: backend/src/agents/runner.rs:4428-4435#agent_command_with_task_worker_policy]
+[src: file: backend/src/agents/runner.rs:4435-4442#agent_command_with_task_worker_policy]
 [src: file: backend/src/agents/runner.rs:13047-13056#Ollama]
 
 Preflight checks the exact durable target/tier assignment, including unavailable
@@ -454,8 +454,8 @@ gets depends on who runs the model, not only on the machine:
 
 | Rule | Window | Where |
 |---|---|---|
-| Memory band for 64 GiB, weights and cache cost not known | 65,536 | `ram_derived_ceiling` [src: file: backend/src/agents/runner.rs:6188#ram_derived_ceiling] |
-| Trained window (262,144 in the test fixtures), held to the band | 65,536, origin `machine_ceiling` | `resolve_ctx_cap_within` [src: file: backend/src/agents/runner.rs:6348#resolve_ctx_cap_within] |
+| Memory band for 64 GiB, weights and cache cost not known | 65,536 | `ram_derived_ceiling` [src: file: backend/src/agents/runner.rs:6195#ram_derived_ceiling] |
+| Trained window (262,144 in the test fixtures), held to the band | 65,536, origin `machine_ceiling` | `resolve_ctx_cap_within` [src: file: backend/src/agents/runner.rs:6355#resolve_ctx_cap_within] |
 | Same window, weights and attention shape known (KT-943) | 262,144, the whole window, origin `model_window` | `ceiling_for_model` [src: file: backend/src/agents/ollama_memory.rs:274#ceiling_for_model] |
 | Discussion principal (`ToolRunMode::General`) | the ceiling above — 262,144 once the model's shape is known, else 65,536 — requested up front because tools are declared | `worker_effective_ctx_cap` [src: file: backend/src/agents/runner.rs:227#worker_effective_ctx_cap] |
 | Task worker (`ToolRunMode::Worker`) on native MLX | 32,768 | `MLX_WORKER_EFFECTIVE_CTX_CAP` [src: file: backend/src/agents/runner.rs:104#MLX_WORKER_EFFECTIVE_CTX_CAP] |
@@ -803,7 +803,7 @@ where Ollama runs. [src: file: backend/src/api/ollama.rs:62-71#fetch_server_vers
    9428 of 9500 prompt tokens on a second turn). Older MLX servers lack
    prompt-prefix reuse (ollama/ollama#17829), which is not what a suggestion
    should steer a user to.
-   An unreadable version is not capable. [src: file: backend/src/agents/runner.rs:6761-6765#mlx_prefix_cache_reused]
+   An unreadable version is not capable. [src: file: backend/src/agents/runner.rs:6768-6772#mlx_prefix_cache_reused]
 
 When it is, the `-mlx` builds are listed first with an "Optimized for Mac" mark,
 then the portable list. Everywhere else the list is exactly the portable one.

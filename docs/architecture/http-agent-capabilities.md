@@ -51,7 +51,7 @@ capability they appear to have is a **tool Kronn executes server-side on their b
 
 The MCP bridge is deliberately not one of those capabilities. The HTTP path returns before
 any MCP environment is built [src: file: backend/src/agents/runner.rs:4209-4229#start_ollama_http_with_idle], and
-`--mcp-config` is a CLI-only argument [src: file: backend/src/agents/runner.rs:4453-4464#insert_claude_mcp_config].
+`--mcp-config` is a CLI-only argument [src: file: backend/src/agents/runner.rs:4460-4471#insert_claude_mcp_config].
 So "add a tool to the MCP server" never reaches an HTTP agent. Anything they must be able to
 do has to exist as a **native tool in Kronn's own catalogue**.
 
@@ -243,7 +243,7 @@ context fitting; an explicit thinking request removes Kronn's older Qwen
 round trips, rather than defining a total run budget. The provider may refuse
 a setting its selected model does not support. Kronn does not retry by dropping
 the saved control. [src: file: backend/src/agents/generation_settings.rs:39-70#apply_http]
-[src: file: backend/src/agents/runner.rs:9248#apply_http]
+[src: file: backend/src/agents/runner.rs:9255#apply_http]
 [src: url: https://docs.ollama.com/api/chat]
 [src: url: https://docs.ollama.com/capabilities/thinking]
 [src: url: https://docs.litellm.ai/docs/completion/input]
@@ -305,11 +305,11 @@ that "succeed" without writing anything.
 
 **Who is accepted.** Every agent but Vibe: the CLI agents (Claude Code, Codex,
 OpenCode, Gemini CLI, Kiro, GitHub Copilot) and the HTTP agents Ollama, LiteLLM,
-NVIDIA and Custom [src: file: backend/src/api/audit/mod.rs:1300-1315#agent_can_audit].
+NVIDIA and Custom [src: file: backend/src/api/audit/mod.rs:1366-1381#agent_can_audit].
 Vibe is refused because it has no file tools. Both launch endpoints (Full and
 partial) share the gate and its refusal message, which lists the accepted agents
 and is pinned to the gate by a test
-[src: file: backend/src/api/audit/mod.rs:2043-2069#a_refused_agent_is_told_who_is_accepted_and_the_message_matches_the_gate].
+[src: file: backend/src/api/audit/mod.rs:2109-2135#a_refused_agent_is_told_who_is_accepted_and_the_message_matches_the_gate].
 A hosted HTTP agent (NVIDIA, a Custom endpoint) receives the repository content the
 audit reads, so choosing one is choosing what leaves the machine.
 
@@ -332,7 +332,7 @@ No `web_fetch` (it would send the model off the project), no `git_commit` (the
 audit never commits), no plan, REST-plugin or discussion tools. A call to any
 other name is refused before a handler sees it, and so is a write to the
 target document of another step of the chain (the consolidation step excepted)
-[src: file: backend/src/api/agent_tools.rs:1604-1607#AUDIT_TOOLS]
+[src: file: backend/src/api/agent_tools.rs:1610-1613#AUDIT_TOOLS]
 [src: file: backend/src/api/agent_tools.rs:206-231#foreign_step_target_refusal].
 
 **What the audit prompt says about other repos (KT-926).** An audit's file tools
@@ -346,8 +346,8 @@ discussion or workflow Agent step does either (the audit's validation and
 briefing are discussions). The only
 other repos a step names are those the user linked to the project
 (`Project.linked_repos`), a voluntary declaration that stays in every step
-[src: file: backend/src/api/audit/full.rs:321-322#format_linked_repos_for_prompt]
-[src: file: backend/src/api/audit/drift.rs:337-338#format_linked_repos_for_prompt]. What remains: the block for a
+[src: file: backend/src/api/audit/full.rs:327-328#format_linked_repos_for_prompt]
+[src: file: backend/src/api/audit/drift.rs:347-348#format_linked_repos_for_prompt]. What remains: the block for a
 linked repo still says to start with `<repo-path>/docs/AGENTS.md`, a path an HTTP
 agent's tools refuse because it is outside the project, so for that agent the
 block is information, not something it can follow. Making that block
@@ -366,8 +366,8 @@ one.
 **Stopping.** An HTTP agent's request and tool loop are a task, not a process:
 killing the lifeline PID does not stop it. A Full audit therefore registers a
 cancellation token per step, and `cancel_audit` trips it
-[src: file: backend/src/api/audit/full.rs:1551-1556#agent_cancels]
-[src: file: backend/src/api/audit/full.rs:3918-3922#agent_cancels]. Since KT-927 the partial audit does
+[src: file: backend/src/api/audit/full.rs:1577-1582#agent_cancels]
+[src: file: backend/src/api/audit/full.rs:3956-3960#agent_cancels]. Since KT-927 the partial audit does
 the same, and so does an ACP agent, whose PID is a lifeline too: see
 [auditing with an ACP agent](audit-acp-agents.md).
 

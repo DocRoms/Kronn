@@ -47,8 +47,8 @@ per response as integer micro-USD and exposed by `reported_cost_usd_micros`;
 no cost, the sum is partial and the run's cost is `None` as well.
 [src: file: backend/src/agents/chat_codec.rs:160#cost_usd_micros]
 [src: file: backend/src/agents/runner.rs:1975-1980#cost_incomplete]
-[src: file: backend/src/api/audit/full.rs:1830#reported_cost_usd_micros]
-[src: file: backend/src/api/audit/drift.rs:927#reported_cost_usd_micros]
+[src: file: backend/src/api/audit/full.rs:1856#reported_cost_usd_micros]
+[src: file: backend/src/api/audit/drift.rs:948#reported_cost_usd_micros]
 
 Audit executors have a separate bounded policy: 64 calls per file mutation tool
 (`write_file`, `edit_file`, `edit_lines`, `insert_after_line`), 48 for
@@ -70,7 +70,7 @@ spent 1 500 000 cumulative input tokens (`KRONN_HTTP_AUDIT_STEP_INPUT_BUDGET`;
 the estimated prompt counts when the provider reports no usage). Tool results
 are not clamped on this wire, and discussion round caps still follow the
 advertised window (KT-998).
-[src: file: backend/src/agents/runner.rs:7905-7911#HOSTED_AUDIT_STEP_INPUT_BUDGET]
+[src: file: backend/src/agents/runner.rs:7912-7918#HOSTED_AUDIT_STEP_INPUT_BUDGET]
 [src: file: backend/src/agents/runner.rs:11837-11848#audit_budget_spent]
 
 Full audits check changed documents against the final documentary gate during
@@ -84,7 +84,7 @@ paths and ranges still block validation. Retry usage is included in the step
 total (KT-952).
 [src: file: backend/src/api/audit/document_repair.rs:114-183#split_verified_citations]
 [src: file: backend/src/core/audit_state.rs:12#CITATION_ORIGINALS_DIR]
-[src: file: backend/src/api/audit/full.rs:2037-2058#check_attempt]
+[src: file: backend/src/api/audit/full.rs:2063-2084#check_attempt]
 
 An incomplete dimension-coverage matrix also receives targeted feedback in a
 Full audit after the agent exits successfully. This shares the same three-attempt
@@ -93,12 +93,12 @@ recomputes the matrix failure from the current index before its first attempt.
 Invalid tables remain blocking, provider errors do not trigger this correction,
 and existing TD files and human sections remain protected (KT-956).
 [src: file: backend/src/api/audit/validation.rs:95-107#coverage_repair_feedback]
-[src: file: backend/src/api/audit/full.rs:1967-1982#coverage_repair_feedback]
+[src: file: backend/src/api/audit/full.rs:1993-2008#coverage_repair_feedback]
 
 A failed provider launch finalizes the step with its error and elapsed time.
 If a corrective attempt had already consumed tokens, that usage remains in the
 persisted step and its terminal SSE event; an unmeasured launch stays unknown.
-[src: file: backend/src/api/audit/full.rs:2329-2350#previous_attempt_usage]
+[src: file: backend/src/api/audit/full.rs:2355-2376#previous_attempt_usage]
 
 A provider error during a step also survives in its persisted warning and SSE
 recap. HTTP status 429 is identified as a rate limit or exhausted quota, not as
@@ -108,7 +108,7 @@ Partial files remain in place. This failure does not automatically retry the
 request after tool execution or replay that effect (KT-955).
 [src: file: backend/src/agents/http_diagnostics.rs:39-53#failure_summary]
 [src: file: backend/src/api/audit/validation.rs:118-157#with_http_diagnostics]
-[src: file: backend/src/agents/runner.rs:8443-8447#HTTP_PROVIDER_MAX_ATTEMPTS]
+[src: file: backend/src/agents/runner.rs:8450-8454#HTTP_PROVIDER_MAX_ATTEMPTS]
 
 The final gate also invalidates the relevant step rows so Resume names earlier
 documents that failed after their agent returned success. Recovery rechecks the
