@@ -223,13 +223,15 @@ pub(crate) struct RevalidationRun {
     pub blocks: HashMap<usize, String>,
 }
 
-/// After a revalidation that rewrote nothing — every agent step unchanged,
+/// After a partial run that rewrote nothing — every agent step unchanged,
 /// or stopped before writing — the validation it revoked at launch comes
-/// back: the docs are byte-identical to what the human validated.
+/// back: the docs are byte-identical to what the human validated. Only a
+/// `provenance` reason re-dates each doc's own validation.
 pub(crate) fn restore_validation_if_untouched(
     project_path: &FsPath,
     validated_at: Option<&str>,
     snapshots: &[(String, super::validation::TargetSnapshot)],
+    provenance: Option<crate::core::doc_provenance::ValidationReason>,
 ) -> bool {
     let Some(date) = validated_at else {
         return false;
@@ -240,12 +242,11 @@ pub(crate) fn restore_validation_if_untouched(
     if !(untouched && crate::core::kronn_state::restore_validated(project_path, date).is_ok()) {
         return false;
     }
+    let Some(reason) = provenance else {
+        return true;
+    };
     let docs: Vec<String> = snapshots.iter().map(|(target, _)| target.clone()).collect();
-    if let Err(e) = crate::core::doc_provenance::refresh_validation(
-        project_path,
-        &docs,
-        crate::core::doc_provenance::ValidationReason::Revalidation,
-    ) {
+    if let Err(e) = crate::core::doc_provenance::refresh_validation(project_path, &docs, reason) {
         tracing::warn!("Human-validation provenance not recorded: {e}");
     }
     true

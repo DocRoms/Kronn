@@ -740,6 +740,36 @@ pub fn read_checksums_file_strict(project_path: &Path) -> Result<Option<Checksum
         .map_err(|e| format!("checksums manifest malformed ({}): {e}", path.display()))
 }
 
+/// « Vérifié, inchangé » on stale sections: their mappings are recomputed from
+/// the current sources. The docs and the audit date stay as they are.
+pub fn acknowledge_sections(project_path: &Path, ai_files: &[String]) -> Result<(), String> {
+    if ai_files.is_empty() {
+        return Err("no section to acknowledge".into());
+    }
+    let mut file = read_checksums_file_strict(project_path)?
+        .ok_or_else(|| "no drift baseline: run the audit first".to_string())?;
+    for ai_file in ai_files {
+        let mut found = false;
+        for mapping in file.mappings.iter_mut().filter(|m| &m.ai_file == ai_file) {
+            let patterns: Vec<&str> = mapping.sources.iter().map(String::as_str).collect();
+            mapping.checksums = compute_step_checksums(project_path, &patterns);
+            found = true;
+        }
+        if !found {
+            return Err(format!("`{ai_file}` is not a section of the drift baseline"));
+        }
+    }
+    let json = serde_json::to_vec_pretty(&file).map_err(|e| format!("JSON serialize error: {e}"))?;
+    let path = crate::core::scanner::detect_docs_dir(project_path).join("checksums.json");
+    crate::core::mcp_scanner::atomic_write_bytes(&path, &json)?;
+    // The cache keys on the manifest mtime, which a same-second rewrite may keep.
+    DRIFT_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(project_path);
+    Ok(())
+}
+
 /// Check whether any audited sources have drifted since the last checksums were recorded.
 pub fn check_drift(project_path: &Path) -> DriftResult {
     let citations = crate::core::citation_drift::check(project_path);

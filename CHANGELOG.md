@@ -509,6 +509,21 @@ Release notes for 0.9.3 and earlier are available in the
   with the same action. The count comes from `GET /api/projects/{id}/drift`
   (`placeholder_docs`), so it survives a reload. It reads only the template's
   own files, and `TEMPLATE.md` templates are not counted.
+- A stale-sections refresh that re-verifies a section without rewriting it
+  now completes (KT-1207). It used to end Failed: the baseline stayed stale,
+  the validation revoked at launch stayed revoked, and the validate gate
+  refused the project until a whole 16-step audit ran. An `unchanged` step
+  now counts as re-verified: the run ends Completed and its sections get a
+  fresh baseline. Any partial run that rewrote nothing, stopped before its
+  first write included, restores the `validated_at` it revoked. When no
+  validation comes back, the re-verified sections get their own validation
+  discussion. An interrupted refresh now keeps what it did: the baseline is
+  merged for its done steps, and they get a validation discussion scoped to
+  them, while the run stays Interrupted. A new « Vérifié, inchangé » button
+  next to « Mettre à jour » marks the stale sections as still true without an
+  agent (`POST /api/projects/{id}/drift/acknowledge`). It refreshes their
+  checksum mappings, and their citation fingerprints when recorded, never
+  rewrites a doc, takes the audit lease, and is refused to a bridge token.
 - A favourite stays in Favoris while an agent runs or waits in it. From 20
   discussions on, a live pinned discussion moved to « À suivre » and left
   Favoris until the run ended. Favoris now lists every pinned discussion,

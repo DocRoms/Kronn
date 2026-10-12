@@ -5,7 +5,7 @@
 // refetch discussions, toast, open + NAVIGATE — without auto-running the
 // agent (the backend already spawned it post-commit). An interrupted
 // refresh must never toast green, and a user cancel must not fall into the
-// interrupted branch.
+// interrupted branch. A refresh that rewrote nothing completed (KT-1207).
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, act, fireEvent, screen } from '@testing-library/react';
@@ -125,7 +125,7 @@ describe('ProjectCard — partial refresh validation UX', () => {
     expect(props.onOpenDiscussion).not.toHaveBeenCalled();
   });
 
-  it('no_change: honest stale toast, no discussion, no relaunch nudge as success', async () => {
+  it('no_change: re-verified, the run completed — green toast, no discussion to open', async () => {
     vi.mocked(projectsApi.partialAuditStream).mockImplementation(async (_id, _req, handlers) => {
       handlers.onDone({
         status: 'no_change', discussionId: null, auditRunId: 'run-2',
@@ -134,11 +134,71 @@ describe('ProjectCard — partial refresh validation UX', () => {
     });
     const { props } = renderCard();
     await clickUpdate();
-    expect(props.toast).toHaveBeenCalledWith(expect.stringContaining('audit.partialNoChange'), 'error');
+    expect(props.toast).toHaveBeenCalledWith('audit.partialReverified 1', 'success');
     expect(props.onOpenDiscussion).not.toHaveBeenCalled();
-    const greens = (props.toast as ReturnType<typeof vi.fn>).mock.calls
-      .filter(([, kind]) => kind === 'success');
-    expect(greens).toHaveLength(0);
+    expect(props.onRefetchDrift).toHaveBeenCalledWith(PROJECT.id);
+  });
+
+  it('no_change with a discussion: opens the validation of the re-verified sections', async () => {
+    vi.mocked(projectsApi.partialAuditStream).mockImplementation(async (_id, _req, handlers) => {
+      handlers.onDone({
+        status: 'no_change', discussionId: 'd-reverified', auditRunId: 'run-4',
+        succeededSteps: [], unchangedSteps: [3], failedSteps: [],
+      });
+    });
+    const { props } = renderCard();
+    await clickUpdate();
+    expect(props.toast).toHaveBeenCalledWith('audit.partialReverifiedValidation 1', 'success');
+    expect(props.onOpenDiscussion).toHaveBeenCalledWith('d-reverified');
+    expect(props.onNavigate).toHaveBeenCalledWith('discussions');
+  });
+
+  it('interrupted with done steps: error toast naming their validation, no navigation', async () => {
+    vi.mocked(projectsApi.partialAuditStream).mockImplementation(async (_id, _req, handlers) => {
+      handlers.onDone({
+        status: 'interrupted', discussionId: 'd-done', auditRunId: 'run-5',
+        succeededSteps: [3], unchangedSteps: [], failedSteps: [8],
+      });
+    });
+    const { props } = renderCard();
+    await clickUpdate();
+    expect(props.toast).toHaveBeenCalledWith('audit.partialInterruptedValidation 1', 'error');
+    expect(props.onRefetchDiscussions).toHaveBeenCalled();
+    expect(props.onNavigate).not.toHaveBeenCalledWith('discussions');
+  });
+
+  it('« Vérifié, inchangé » acknowledges every stale section once, then refetches the drift', async () => {
+    let release: (() => void) | undefined;
+    vi.mocked(projectsApi.acknowledgeDrift).mockImplementation(
+      () => new Promise((resolve) => { release = () => resolve(DRIFT); }),
+    );
+    const { props } = renderCard({
+      driftStatus: {
+        ...DRIFT,
+        stale_sections: [
+          ...DRIFT.stale_sections,
+          { ai_file: 'docs/repo-map.md', audit_step: 9, changed_sources: [] },
+          { ai_file: 'docs/glossary.md', audit_step: 2, changed_sources: [] },
+        ],
+      },
+    });
+    const btn = await screen.findByTestId('project-drift-ack');
+    await act(async () => { fireEvent.click(btn); fireEvent.click(btn); await Promise.resolve(); });
+    expect(projectsApi.acknowledgeDrift).toHaveBeenCalledTimes(1);
+    expect(projectsApi.acknowledgeDrift).toHaveBeenCalledWith(PROJECT.id, ['docs/repo-map.md', 'docs/glossary.md']);
+    await act(async () => { release?.(); await Promise.resolve(); await Promise.resolve(); });
+    expect(props.toast).toHaveBeenCalledWith('audit.driftAckDone 2', 'success');
+    expect(props.onRefetchDrift).toHaveBeenCalledWith(PROJECT.id);
+  });
+
+  it('a refused acknowledgement says why and keeps the button', async () => {
+    vi.mocked(projectsApi.acknowledgeDrift).mockRejectedValue(new Error('An audit is currently running'));
+    const { props } = renderCard();
+    const btn = await screen.findByTestId('project-drift-ack');
+    await act(async () => { fireEvent.click(btn); await Promise.resolve(); await Promise.resolve(); });
+    expect(props.toast).toHaveBeenCalledWith(expect.stringContaining('audit.driftAckFailed'), 'error');
+    expect(props.onRefetchDrift).not.toHaveBeenCalled();
+    expect(screen.getByTestId('project-drift-ack')).not.toBeDisabled();
   });
 
   it('a non-terminal warning (stamp/baseline failure) toasts WITHOUT terminal cleanup', async () => {

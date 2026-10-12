@@ -34,7 +34,7 @@ import {
   FileCode, ShieldCheck, BookOpen, Rocket, Check, RefreshCw, Puzzle,
   FolderInput, Plug, X, FileText, DownloadCloud,
   Code2, GitBranch, Package, ListTodo,
-  CircleHelp, History, RotateCcw,
+  CircleHelp, History, RotateCcw, CheckCircle2,
   Container,
   Copy,
 } from 'lucide-react';
@@ -464,6 +464,9 @@ export function ProjectCard({
   /// `startPartialAudit` race-free against a double-click that fires
   /// before React re-renders.
   const auditActiveRef = useRef(false);
+  // KT-1207 — « Vérifié, inchangé » on the stale sections, one request at a time.
+  const driftAckRef = useRef(false);
+  const [driftAcking, setDriftAcking] = useState(false);
   /// Handle to the polling interval so we can clear it on unmount / done.
   const auditPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   /// `true` once the mount-time resume effect has run — avoids racing a
@@ -1032,10 +1035,18 @@ export function ProjectCard({
             onOpenDiscussion(info.discussionId);
             onNavigate('discussions');
           } else if (info?.status === 'no_change') {
-            // Honest: nothing was rewritten, sections stay stale — and NO
-            // "just relaunch" nudge (manual review/acceptance is a future
-            // feature, not an available action).
-            toast(t('audit.partialNoChange'), 'error');
+            // KT-1207 — re-verified unchanged: the run completed and the
+            // sections are fresh. A validation opens only when none came back.
+            if (info.discussionId) {
+              toast(t('audit.partialReverifiedValidation', String(info.unchangedSteps.length)), 'success');
+              onOpenDiscussion(info.discussionId);
+              onNavigate('discussions');
+            } else {
+              toast(t('audit.partialReverified', String(info.unchangedSteps.length)), 'success');
+            }
+          } else if (info?.discussionId) {
+            // Interrupted, but its done steps got their validation discussion.
+            toast(t('audit.partialInterruptedValidation', String(info.succeededSteps.length + info.unchangedSteps.length)), 'error');
           } else {
             // Interrupted: some sections stayed stale — never a green toast.
             toast(t('audit.partialInterrupted'), 'error');
@@ -1067,6 +1078,23 @@ export function ProjectCard({
       setAuditAbortController(null);
     }
   }, [selectedAuditAgent, auditTierChoice, auditConnectionId, proj.id, t, toast, onRefetch, onRefetchDrift, onRefetchDiscussions, onOpenDiscussion, onNavigate]);
+
+  const acknowledgeDrift = useCallback(async (drift: DriftCheckResponse) => {
+    if (driftAckRef.current || auditActiveRef.current) return;
+    driftAckRef.current = true;
+    setDriftAcking(true);
+    const sections = [...new Set(drift.stale_sections.map(s => s.ai_file))];
+    try {
+      await projectsApi.acknowledgeDrift(proj.id, sections);
+      toast(t('audit.driftAckDone', String(sections.length)), 'success');
+      onRefetchDrift(proj.id);
+    } catch (e) {
+      toast(t('audit.driftAckFailed', userError(e)), 'error');
+    } finally {
+      driftAckRef.current = false;
+      setDriftAcking(false);
+    }
+  }, [proj.id, t, toast, onRefetchDrift]);
 
   useEffect(() => {
     handleFullAuditRef.current = handleFullAudit;
@@ -1388,6 +1416,17 @@ export function ProjectCard({
                     <RefreshCw size={9} />
                     {t('audit.updateStale', String(driftStatus.stale_sections.length))}
                   </button>
+                  <button
+                    type="button"
+                    className="dash-drift-update-btn"
+                    data-testid="project-drift-ack"
+                    onClick={() => void acknowledgeDrift(driftStatus)}
+                    disabled={driftAcking}
+                    title={t('audit.driftAckHint')}
+                  >
+                    {driftAcking ? <Loader2 size={9} className="spin" /> : <CheckCircle2 size={9} />}
+                    {t('audit.driftAck')}
+                  </button>
                 </>
               )}
               {!auditActive && !resumableAudit && driftStatus && (
@@ -1608,6 +1647,20 @@ export function ProjectCard({
                 >
                   <RefreshCw size={9} />
                   {t('audit.updateStale', String(driftStatus.stale_sections.length))}
+                </button>
+                <button
+                  type="button"
+                  className="dash-drift-update-btn"
+                  data-testid="project-drift-ack"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void acknowledgeDrift(driftStatus);
+                  }}
+                  disabled={auditActive || driftAcking}
+                  title={t('audit.driftAckHint')}
+                >
+                  {driftAcking ? <Loader2 size={9} className="spin" /> : <CheckCircle2 size={9} />}
+                  {t('audit.driftAck')}
                 </button>
               </>
             )}

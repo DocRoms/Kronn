@@ -1793,6 +1793,14 @@ pub struct AcknowledgeCitationsRequest {
     pub doc: String,
 }
 
+/// `POST /api/projects/:id/drift/acknowledge` body: the stale sections (their
+/// `ai_file`) a human checked and found still true.
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct AcknowledgeDriftRequest {
+    pub sections: Vec<String>,
+}
+
 /// `GET /api/projects/:id/citation-drift`: broken and moved citations per
 /// section, plus the last scheduled re-verification.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

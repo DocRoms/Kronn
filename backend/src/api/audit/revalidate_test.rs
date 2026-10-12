@@ -213,12 +213,13 @@ fn the_validation_comes_back_only_when_no_target_changed() {
     )];
     crate::core::kronn_state::revoke_validated(dir).unwrap();
     // Nothing validated before: nothing to give back.
-    assert!(!restore_validation_if_untouched(dir, None, &snapshot));
+    assert!(!restore_validation_if_untouched(dir, None, &snapshot, None));
     fs::write(dir.join(RULES), "# Rules\nRewritten.\n").unwrap();
     assert!(!restore_validation_if_untouched(
         dir,
         Some(&date),
-        &snapshot
+        &snapshot,
+        None
     ));
     assert!(crate::core::kronn_state::read(dir)
         .unwrap()
@@ -231,7 +232,8 @@ fn the_validation_comes_back_only_when_no_target_changed() {
     assert!(restore_validation_if_untouched(
         dir,
         Some(&date),
-        &untouched
+        &untouched,
+        None
     ));
     assert_eq!(
         crate::core::kronn_state::read(dir).unwrap().validated_at,

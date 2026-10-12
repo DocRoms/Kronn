@@ -197,8 +197,28 @@ export function RevalidateAudit({
         </div>
       );
     }
-    if (partial.status === 'no_change') return <p className="rv-outcome" data-tone="warning">{t('audit.revalidate.done.noChange')}</p>;
-    return <p className="rv-outcome" data-tone="error" role="alert">{t('audit.revalidate.done.interrupted', String(partial.failedSteps.length))}</p>;
+    // KT-1207 — the done steps of a run that rewrote nothing, or of an
+    // interrupted one, may carry their own validation discussion.
+    const validationId = partial.discussionId;
+    const openValidation = validationId && (
+      <button type="button" className="rv-btn" onClick={() => { onOpenDiscussion(validationId); onNavigate('discussions'); }}>
+        {t('audit.revalidate.done.openValidation')}
+      </button>
+    );
+    if (partial.status === 'no_change') {
+      return (
+        <div className="rv-outcome" data-tone="warning">
+          <p>{t('audit.revalidate.done.noChange')}</p>
+          {openValidation}
+        </div>
+      );
+    }
+    return (
+      <div className="rv-outcome" data-tone="error" role="alert">
+        <p>{t('audit.revalidate.done.interrupted', String(partial.failedSteps.length))}</p>
+        {openValidation}
+      </div>
+    );
   };
 
   const needsResume = phase.kind === 'error' || phase.kind === 'cancelled'

@@ -118,7 +118,7 @@ by a human (KT-1131). An accepted step keeps its failure on record:
 | Timeline, validation | Validation refused. | "Validate" stays, next to the discussion. |
 | Recap panel | History or steps could not be read. | "Retry". |
 | Template merge panel | Plan, start, accept or discard failed. | "Resume" replays that operation (KT-1181). |
-| Card header | A stale-sections refresh failed or changed nothing. | The refresh button stays while the sections are stale. It is hidden while a run waits to be resumed, because the server refuses it then. |
+| Card header | A stale-sections refresh failed. | The refresh button stays while the sections are stale. It is hidden while a run waits to be resumed, because the server refuses it then. « Vérifié, inchangé » next to it settles the sections without an agent. |
 | Toasts during a run | A step failed or warned. | Informational: the run ends with that step's "Retry this step" and "Accept as it stands". |
 
 - Launch error banner. [src: file: frontend/src/components/AuditTimeline.tsx:581-582#launchError] [src: file: frontend/src/components/ProjectCard.tsx:954#setAuditLaunchError] [src: file: frontend/src/components/ProjectCard.tsx:452-453#auditLaunchError]
@@ -141,12 +141,43 @@ by a human (KT-1131). An accepted step keeps its failure on record:
   were re-fingerprinted even if the run was interrupted.
 - **Validation.** A run that rewrote no agent target, because every step
   ended `unchanged` or was stopped first, restores the `validated_at` it
-  revoked.
+  revoked, like any partial run (see below).
 
 Sources:
 
 - The plan and the re-anchoring. [src: file: backend/src/api/audit/revalidate.rs:49#plan] [src: file: backend/src/api/audit/revalidate.rs:123#apply_reanchors]
 - The partial pipeline the agent part reuses. [src: file: backend/src/api/audit/drift.rs:324#run_partial_pipeline]
+
+## Refreshing stale sections (KT-1207)
+
+A stale-sections refresh is a `Partial` run over the steps of the stale
+sections.
+
+- **Done steps.** A step is done when it succeeded or ended `unchanged`: an
+  unchanged step re-verified its section. The drift baseline is merged for
+  the done steps, whatever the run's status, after the terminal commit. A
+  failed step's section stays stale.
+  [src: file: backend/src/api/audit/drift.rs:1393-1395#done_steps] [src: file: backend/src/api/audit/drift.rs:1662#compute_merged_baseline]
+- **Status.** Without a failed step the run is `Completed`. The SSE `done`
+  reads `complete` when a step rewrote its target, `no_change` when none did.
+  With a failed step it is `Interrupted`.
+  [src: file: backend/src/api/audit/drift.rs:1713#partial_terminal]
+- **Validation.** The done steps get a validation discussion scoped to them,
+  linked in the terminal transaction, on an `Interrupted` run too: the
+  validate gate still refuses that run. A run that rewrote nothing, every
+  step unchanged or stopped before its first write, restores the
+  `validated_at` it revoked at launch, and then opens no discussion.
+  [src: file: backend/src/api/audit/drift.rs:1428-1429#restore_validation_if_untouched] [src: file: backend/src/api/audit/drift.rs:1471#pending_validation] [src: file: backend/src/api/audit/drift.rs:1772#Interrupted]
+- **Citations.** A section with recorded citations is judged by them. A
+  refresh re-fingerprints only the docs it rewrote, so such a section that
+  ended unchanged stays stale until a human confirms it.
+- **« Vérifié, inchangé ».**
+  `POST /api/projects/{id}/drift/acknowledge` refreshes the named sections'
+  baseline mappings, and their citation fingerprints when recorded. It runs
+  no agent and writes no doc. It is a human action only: the route is not on
+  the bridge list, and the handler refuses any bridge caller. It takes the
+  audit lease.
+  [src: file: backend/src/lib.rs:1852#drift/acknowledge] [src: file: backend/src/api/audit/drift.rs:81#bridge] [src: file: backend/src/api/audit/drift.rs:93#try_acquire_lease] [src: file: backend/src/core/checksums.rs:745#acknowledge_sections]
 
 ## The action offered in each state
 

@@ -286,6 +286,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       acceptAuditStep: resolve({ step: 1, accepted_by: 'operator', accepted_at: '2026-10-11T00:00:00Z', remaining_failed: [] }),
       auditRunsCleanup: resolve(0),
       checkDrift: resolve({ stale_steps: [], checksums_outdated: false }),
+      acknowledgeDrift: resolve({ audit_date: null, stale_sections: [], fresh_sections: [], total_sections: 0, sources_state: 'unknown', broken_citations: 0 }),
       getBriefing: resolve(null),
       savedBriefing: resolve(null),
       startBriefing: resolve({ discussion_id: '' }),

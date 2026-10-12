@@ -293,6 +293,22 @@ describe('RevalidateAudit', () => {
     expect(within(panel).getAllByTestId('revalidate-ack').length).toBeGreaterThan(0);
   });
 
+  it('a run that rewrote nothing on an unvalidated project opens its validation', async () => {
+    const props = setup();
+    const panel = await openPanel();
+    const handlers = await launchHeld();
+    await finish(() => handlers.onDone({
+      kind: 'agent',
+      info: {
+        status: 'no_change', discussionId: 'd-reverified', auditRunId: 'r4',
+        succeededSteps: [], unchangedSteps: [4], failedSteps: [],
+      },
+    }));
+    expect(await within(panel).findByText('audit.revalidate.done.noChange')).toBeInTheDocument();
+    fireEvent.click(within(panel).getByText('audit.revalidate.done.openValidation'));
+    expect(props.onOpenDiscussion).toHaveBeenCalledWith('d-reverified');
+  });
+
   it('re-anchoring alone ends clean without an agent', async () => {
     setup();
     const panel = await openPanel();

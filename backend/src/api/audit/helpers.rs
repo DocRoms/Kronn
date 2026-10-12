@@ -357,6 +357,41 @@ pub(crate) fn partial_run_block(
     block
 }
 
+/// The sections a partial refresh did not update: outside its validation's
+/// scope and still stale. Empty when every step is done.
+pub(crate) fn partial_refresh_failed_block(
+    failed: &[(u32, String)],
+    total_steps: u32,
+    language: &str,
+) -> String {
+    if failed.is_empty() {
+        return String::new();
+    }
+    let list = failed
+        .iter()
+        .map(|(step, file)| format!("- {step}/{total_steps} — `{file}`"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (title, intro, rule) = match language {
+        "en" => (
+            "## SECTIONS NOT REFRESHED — out of scope",
+            "This partial refresh could not update these sections (failed or stopped):",
+            "They are still stale: do not validate them, do not fix them, do not quote them as a reference. Tell the user in your first message: \"Update\" on the project card re-runs only these sections, and the project cannot be marked validated until a refresh completes.",
+        ),
+        "es" => (
+            "## SECCIONES NO ACTUALIZADAS — fuera del alcance",
+            "Este refresh parcial no pudo actualizar estas secciones (fallo o parada):",
+            "Siguen obsoletas: no las valides, no las corrijas, no las cites como referencia. Dile al usuario en tu primer mensaje: \"Actualizar\" en la tarjeta del proyecto relanza solo estas secciones, y el proyecto no puede marcarse como validado hasta que un refresh termine.",
+        ),
+        _ => (
+            "## SECTIONS NON MISES À JOUR — hors périmètre",
+            "Ce refresh partiel n'a pas pu mettre à jour ces sections (échec ou arrêt) :",
+            "Elles restent obsolètes : ne les valide pas, ne les corrige pas, ne les cite pas comme référence. Dis-le à l'utilisateur dans ton premier message : « Mettre à jour » sur la carte du projet relance uniquement ces sections, et le projet ne peut pas être marqué validé tant qu'un refresh n'a pas abouti.",
+        ),
+    };
+    format!("{title}\n{intro}\n{list}\n\n{rule}\n\n")
+}
+
 /// Dead references inside human-owned sections: the audit may not fix them,
 /// so the human is asked to. Empty when there is none.
 pub(crate) fn human_references_block(

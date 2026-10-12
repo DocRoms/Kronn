@@ -538,8 +538,9 @@ const isStepList = (v: unknown): v is number[] =>
  *  never coerced into a success:
  *  - the three lists partition `requestedSteps` exactly (disjoint, complete);
  *  - `complete`  ⇒ succeeded non-empty, failed empty, discussion + run ids;
- *  - `no_change` ⇒ only unchanged non-empty, no discussion;
- *  - `interrupted` ⇒ failed non-empty, no discussion. */
+ *  - `no_change` ⇒ only unchanged non-empty (re-verified, the run completed);
+ *    a discussion unless the validation came back (KT-1207);
+ *  - `interrupted` ⇒ failed non-empty; a discussion only for done steps. */
 function parsePartialDone(
   p: Record<string, unknown>,
   requestedSteps: number[],
@@ -592,16 +593,13 @@ function parsePartialDone(
       if (succeeded.length > 0 || failed.length > 0 || unchanged.length === 0) {
         return 'Malformed audit done event: no_change requires an all-unchanged partition';
       }
-      if (discussionId !== null) {
-        return 'Malformed audit done event: no_change cannot carry a discussion';
-      }
       break;
     case 'interrupted':
       if (failed.length === 0) {
         return 'Malformed audit done event: interrupted requires failed steps';
       }
-      if (discussionId !== null) {
-        return 'Malformed audit done event: interrupted cannot carry a discussion';
+      if (discussionId !== null && succeeded.length + unchanged.length === 0) {
+        return 'Malformed audit done event: an interrupted run without done steps cannot carry a discussion';
       }
       break;
   }
@@ -1265,6 +1263,9 @@ export const projects = {
       }>;
     }>('GET', `/discussions/${id}/source`),
   checkDrift: (id: string) => api<DriftCheckResponse>('GET', `/projects/${id}/drift`),
+  /** KT-1207 — « Vérifié, inchangé »: these stale sections still hold. */
+  acknowledgeDrift: (id: string, sections: string[]) =>
+    api<DriftCheckResponse>('POST', `/projects/${id}/drift/acknowledge`, { sections }),
   citationDrift: (id: string) => api<CitationDriftResponse>('GET', `/projects/${id}/citation-drift`),
   acknowledgeCitations: (id: string, doc: string) =>
     api<SectionCitations>('POST', `/projects/${id}/citation-drift/acknowledge`, { doc }),

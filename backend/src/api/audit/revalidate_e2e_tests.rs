@@ -762,3 +762,6 @@ async fn a_partial_refresh_after_a_stop_runs_to_its_end() {
     assert_eq!(sse_events(&body, "cancelled").len(), 1, "{body}");
     assert!(sse_events(&body, "done").is_empty(), "{body}");
 }
+
+#[path = "partial_refresh_e2e_tests.rs"]
+mod partial_refresh_e2e_tests;
