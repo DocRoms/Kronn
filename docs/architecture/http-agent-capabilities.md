@@ -346,8 +346,8 @@ discussion or workflow Agent step does either (the audit's validation and
 briefing are discussions). The only
 other repos a step names are those the user linked to the project
 (`Project.linked_repos`), a voluntary declaration that stays in every step
-[src: file: backend/src/api/audit/full.rs:327-328#format_linked_repos_for_prompt]
-[src: file: backend/src/api/audit/drift.rs:355-356#format_linked_repos_for_prompt]. What remains: the block for a
+[src: file: backend/src/api/audit/full.rs:329-330#format_linked_repos_for_prompt]
+[src: file: backend/src/api/audit/drift.rs:353-354#format_linked_repos_for_prompt]. What remains: the block for a
 linked repo still says to start with `<repo-path>/docs/AGENTS.md`, a path an HTTP
 agent's tools refuse because it is outside the project, so for that agent the
 block is information, not something it can follow. Making that block
@@ -366,8 +366,8 @@ one.
 **Stopping.** An HTTP agent's request and tool loop are a task, not a process:
 killing the lifeline PID does not stop it. A Full audit therefore registers a
 cancellation token per step, and `cancel_audit` trips it
-[src: file: backend/src/api/audit/full.rs:1577-1582#agent_cancels]
-[src: file: backend/src/api/audit/full.rs:3956-3960#agent_cancels]. Since KT-927 the partial audit does
+[src: file: backend/src/api/audit/full.rs:1582-1587#agent_cancels]
+[src: file: backend/src/api/audit/full.rs:3961-3965#agent_cancels]. Since KT-927 the partial audit does
 the same, and so does an ACP agent, whose PID is a lifeline too: see
 [auditing with an ACP agent](audit-acp-agents.md).
 
