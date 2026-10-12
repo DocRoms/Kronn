@@ -140,7 +140,8 @@ pub fn placeholder_docs(project: &Path, template_docs: &Path) -> Vec<Placeholder
         return Vec::new();
     };
     let docs_dir = scanner::detect_docs_dir(project);
-    let chain = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full);
+    let docs_root = crate::core::docs_location::DocsRoot::of(project);
+    let chain = crate::api::audit::steps_for(crate::models::AuditKind::Full, &docs_root);
     let mut out = Vec::new();
     for source in sources {
         let Ok(within) = source.strip_prefix(template_docs) else {
@@ -162,11 +163,13 @@ pub fn placeholder_docs(project: &Path, template_docs: &Path) -> Vec<Placeholder
             continue;
         }
         let within = within.to_string_lossy().replace('\\', "/");
-        // Step targets are spelled under `docs/` whatever the project's docs dir.
-        let target = format!("docs/{within}");
+        // Targets are relocated under the configured docs root, the run's own spelling.
+        let target = docs_root.path(&within);
         let step = chain
             .iter()
-            .position(|s| s.target_file == target && crate::api::audit::partial_selectable(s))
+            .position(|s| {
+                s.target_file == target && crate::api::audit::partial_selectable(s, &docs_root)
+            })
             .map(|i| i + 1);
         let path = dst
             .strip_prefix(project)

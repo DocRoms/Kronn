@@ -622,3 +622,25 @@ fn recreating_the_docs_entry_puts_the_project_back_to_template_installed() {
         Some(Some(1))
     );
 }
+
+#[test]
+fn a_configured_docs_root_maps_its_files_to_the_relocated_steps() {
+    let tmp = TempDir::new().unwrap();
+    let template = tmp.path().join("templates/docs");
+    write(&template, "glossary.md", "{{TERM_1}}\n");
+    let project = tmp.path().join("project");
+    write(&project, ".ai/glossary.md", "| {{TERM_1}} |\n");
+    let key = project.to_string_lossy().into_owned();
+    crate::core::docs_location::set_project_override(&key, Some(".ai"));
+
+    let docs = placeholder_docs(&project, &template);
+    crate::core::docs_location::set_project_override(&key, None);
+
+    assert_eq!(
+        docs,
+        vec![PlaceholderDoc {
+            path: ".ai/glossary.md".into(),
+            step: Some(2),
+        }]
+    );
+}
