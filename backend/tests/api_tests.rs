@@ -22616,6 +22616,37 @@ mod cold_api_handlers_tests {
     }
 
     #[tokio::test]
+    async fn check_drift_lists_the_template_docs_still_holding_placeholders() {
+        let (_dir, repo) = seed_repo("drift-placeholders");
+        let write = |rel: &str, body: &str| {
+            let path = repo.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        };
+        write("docs/AGENTS.md", "# Entry\n\nAudited.\n");
+        write("docs/coding-rules.md", "# Rules\n\nFilled.\n");
+        write("docs/glossary.md", "| {{TERM_1}} | {{DEFINITION_1}} |\n");
+        write("docs/workflow/tickets.md", "{{TRACKER}}\n");
+        write("docs/examples/TEMPLATE.md", "{{EXAMPLE_NAME}}\n");
+        write("docs/not-from-the-template.md", "{{ANYTHING}}\n");
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = get_json(app, &format!("/api/projects/{}/drift", pid)).await;
+
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(true), "{json}");
+        assert_eq!(
+            json["data"]["placeholder_docs"],
+            serde_json::json!([
+                { "path": "docs/glossary.md", "step": 2 },
+                { "path": "docs/workflow/tickets.md", "step": null },
+            ])
+        );
+    }
+
+    #[tokio::test]
     async fn check_drift_unknown_project_returns_err_envelope() {
         // Already covered by the wrong-id sweep but pinning here too
         // because the audit_status -> drift handoff is a critical UX path.

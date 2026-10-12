@@ -39,12 +39,19 @@ pub async fn check_drift(
     let project_path = scanner::resolve_host_path(&project.path);
 
     let result = tokio::task::spawn_blocking(move || {
-        crate::core::checksums::check_drift_cached(&project_path)
+        let placeholders = crate::api::projects::template_reinstall::placeholder_docs(
+            &project_path,
+            &crate::api::projects::template::resolve_templates_dir().join("docs"),
+        );
+        (
+            crate::core::checksums::check_drift_cached(&project_path),
+            placeholders,
+        )
     })
     .await;
 
     match result {
-        Ok(drift) => {
+        Ok((drift, placeholder_docs)) => {
             let response = DriftCheckResponse {
                 audit_date: drift.audit_date,
                 stale_sections: drift
@@ -60,6 +67,7 @@ pub async fn check_drift(
                 total_sections: drift.total_sections,
                 sources_state: drift.sources_state,
                 broken_citations: drift.broken_citations,
+                placeholder_docs,
             };
             Json(ApiResponse::ok(response))
         }

@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
-import { AlertTriangle, CheckCircle2, RotateCcw, Wrench } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, RefreshCw, RotateCcw, Wrench } from 'lucide-react';
 import { projects as projectsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import { errorText } from '../lib/templateMerge';
 import { LoadingState } from './LoadingState';
 import { useDialogFocus } from '../hooks/useDialogFocus';
-import type { TemplateReinstallPlan, TemplateReinstallReport } from '../types/generated';
+import { placeholderSteps } from '../lib/placeholderDocs';
+import type { PlaceholderDoc, TemplateReinstallPlan, TemplateReinstallReport } from '../types/generated';
 import './TemplateMergePanel.css';
 
 type Op = 'plan' | 'run';
@@ -17,12 +18,53 @@ type Phase =
   | { kind: 'done'; report: TemplateReinstallReport }
   | { kind: 'error'; op: Op; message: string; retry: () => void };
 
+/** Project-card badge: docs still holding placeholders, and the audit steps that fill them. */
+export function PlaceholderDocsBadge({ docs, disabled, onRun }: {
+  docs: readonly PlaceholderDoc[];
+  disabled?: boolean;
+  onRun: (steps: number[]) => void;
+}) {
+  const { t } = useT();
+  const steps = placeholderSteps(docs);
+  // Docs no step fills stay in the tooltip: a badge with no action would never go away.
+  if (steps.length === 0) return null;
+  const owned = docs.filter(d => d.step != null).map(d => d.path);
+  const unowned = docs.filter(d => d.step == null).map(d => d.path);
+  const title = [owned.join(', '), unowned.length > 0 ? t('audit.placeholderDocsUnowned', unowned.join(', ')) : '']
+    .filter(Boolean).join('\n');
+  return (
+    <>
+      <span className="dash-badge-drift" data-testid="project-placeholder-docs" title={title}>
+        <AlertTriangle size={9} />
+        {t('audit.placeholderDocs', String(owned.length))}
+      </span>
+      <button
+        type="button"
+        className="dash-drift-update-btn"
+        data-testid="project-placeholder-fill"
+        onClick={(e) => { e.stopPropagation(); onRun(steps); }}
+        disabled={disabled}
+        title={title}
+      >
+        <RefreshCw size={9} />
+        {t('audit.fillPlaceholders', String(steps.length))}
+      </button>
+    </>
+  );
+}
+
 /**
  * "Recréer les fichiers du template": reinstalls the template's own files
  * behind a confirmation that lists what is replaced. Every replaced file is
  * backed up by the server first; every failure keeps a "Reprendre" (KT-1169).
  */
-export function TemplateReinstall({ projectId }: { projectId: string }) {
+export function TemplateReinstall({ projectId, onRunSteps, onChanged }: {
+  projectId: string;
+  /** Launches the partial audit for these Full-chain steps. */
+  onRunSteps?: (steps: number[]) => void;
+  /** The docs changed on disk: the card refreshes its status and drift. */
+  onChanged?: () => void;
+}) {
   const { t } = useT();
   const [phase, setPhase] = useState<Phase>({ kind: 'idle' });
   const busy = useRef(false);
@@ -43,8 +85,11 @@ export function TemplateReinstall({ projectId }: { projectId: string }) {
   }, [run, projectId]);
 
   const reinstall = useCallback((paths: string[]) => {
-    run('run', () => projectsApi.templateReinstall(projectId, paths), report => setPhase({ kind: 'done', report }));
-  }, [run, projectId]);
+    run('run', () => projectsApi.templateReinstall(projectId, paths), report => {
+      setPhase({ kind: 'done', report });
+      onChanged?.();
+    });
+  }, [run, projectId, onChanged]);
 
   const close = () => setPhase({ kind: 'idle' });
   const openRef = useRef<HTMLButtonElement>(null);
@@ -119,11 +164,57 @@ export function TemplateReinstall({ projectId }: { projectId: string }) {
             {phase.report.to_reconfirm.length > 0 && (
               <p className="tm-small" data-testid="template-reinstall-reconfirm">{t('templateReinstall.done.reconfirm', phase.report.to_reconfirm.join(', '))}</p>
             )}
+            <NextStep report={phase.report} onRunSteps={onRunSteps ? (steps) => { close(); onRunSteps(steps); } : undefined} />
             <button type="button" className="tm-btn" onClick={close} ref={closeRef}>{t('templateMerge.close')}</button>
           </div>
         </div>
       )}
     </section>
+  );
+}
+
+/** What the reinstall left to fill, and the one action that fills it. */
+function NextStep({ report, onRunSteps }: {
+  report: TemplateReinstallReport;
+  onRunSteps?: (steps: number[]) => void;
+}) {
+  const { t } = useT();
+  // A raw entry means the whole docs tree is back to template: the full audit flow owns that.
+  if (report.audit_status === 'TemplateInstalled') {
+    return <p className="tm-small" data-testid="template-reinstall-entry-template">{t('templateReinstall.done.entryTemplate')}</p>;
+  }
+  const owned = report.placeholder_docs.filter(d => d.step != null);
+  const unowned = report.placeholder_docs.filter(d => d.step == null);
+  const steps = placeholderSteps(owned);
+  return (
+    <>
+      {owned.length > 0 && (
+        <div data-testid="template-reinstall-placeholders">
+          <p className="tm-small">{t('templateReinstall.done.placeholders', owned.length)}</p>
+          <ul className="tm-path-list">
+            {owned.map(d => <li key={d.path}><code>{d.path}</code></li>)}
+          </ul>
+          {onRunSteps && (
+            <button
+              type="button"
+              className="tm-btn tm-btn-primary"
+              onClick={() => onRunSteps(steps)}
+              data-testid="template-reinstall-run-steps"
+            >
+              <RefreshCw size={12} /> {t('templateReinstall.done.runSteps', steps.length)}
+            </button>
+          )}
+        </div>
+      )}
+      {unowned.length > 0 && (
+        <div data-testid="template-reinstall-unowned">
+          <p className="tm-small tm-dim">{t('templateReinstall.done.unowned')}</p>
+          <ul className="tm-path-list">
+            {unowned.map(d => <li key={d.path}><code>{d.path}</code></li>)}
+          </ul>
+        </div>
+      )}
+    </>
   );
 }
 

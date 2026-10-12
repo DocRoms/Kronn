@@ -12,7 +12,7 @@ import { onActivationKey } from '../lib/keyboardActivation';
 import AuditRecapPanel from './AuditRecapPanel';
 import { AuditTimeline } from './AuditTimeline';
 import { TemplateMergeOfferSlot } from './TemplateMergePanel';
-import { TemplateReinstall } from './TemplateReinstall';
+import { PlaceholderDocsBadge, TemplateReinstall } from './TemplateReinstall';
 import { useTemplateMergeOffer } from '../hooks/useTemplateMergeOffer';
 import type { AuditKind } from '../types/AuditKind';
 import { ProjectLinkedRepos } from './ProjectLinkedRepos';
@@ -453,7 +453,7 @@ export function ProjectCard({
   const [auditLaunchError, setAuditLaunchError] = useState<{ message: string; retry: () => void } | null>(null);
   // A "Reprendre" replays the launch with the state of the moment it is clicked.
   const handleFullAuditRef = useRef<(options?: { retrySteps?: number[]; fresh?: boolean }) => Promise<void>>(async () => {});
-  const startPartialAuditRef = useRef<(drift: DriftCheckResponse) => Promise<void>>(async () => {});
+  const startPartialAuditRef = useRef<(steps: number[]) => Promise<void>>(async () => {});
   // Re-arms the status poll: an external launch, or a cancel left pending.
   const [externalAdoptTick, setExternalAdoptTick] = useState(0);
   const [auditAgentChoice, setAuditAgentChoice] = useState<AgentType | undefined>(undefined);
@@ -969,12 +969,11 @@ export function ProjectCard({
     }
   }, [selectedAuditAgent, auditTierChoice, auditConnectionId, proj.id, t, toast, onRefetch, onRefetchDiscussions, onAutoRunDiscussion, onNavigate, resumableAudit]);
 
-  const startPartialAudit = useCallback(async (drift: DriftCheckResponse) => {
+  const startPartialAudit = useCallback(async (steps: number[]) => {
     if (auditActiveRef.current) return;
     auditActiveRef.current = true;
     setAuditLaunchError(null);
-    const retry = () => { void startPartialAuditRef.current(drift); };
-    const steps = drift.stale_sections.map(s => s.audit_step);
+    const retry = () => { void startPartialAuditRef.current(steps); };
     const controller = new AbortController();
     setAuditAbortController(controller);
     setAuditActive(true);
@@ -1383,13 +1382,16 @@ export function ProjectCard({
                     type="button"
                     className="dash-drift-update-btn"
                     data-testid="project-drift-update"
-                    onClick={() => startPartialAudit(driftStatus)}
+                    onClick={() => startPartialAudit(driftStatus.stale_sections.map(s => s.audit_step))}
                     title={t('audit.updateStale', String(driftStatus.stale_sections.length))}
                   >
                     <RefreshCw size={9} />
                     {t('audit.updateStale', String(driftStatus.stale_sections.length))}
                   </button>
                 </>
+              )}
+              {!auditActive && !resumableAudit && driftStatus && (
+                <PlaceholderDocsBadge docs={driftStatus.placeholder_docs ?? []} onRun={steps => { void startPartialAudit(steps); }} />
               )}
               <button
                 type="button"
@@ -1599,7 +1601,7 @@ export function ProjectCard({
                   className="dash-drift-update-btn"
                   onClick={(e) => {
                     e.stopPropagation();
-                    startPartialAudit(driftStatus);
+                    startPartialAudit(driftStatus.stale_sections.map(s => s.audit_step));
                   }}
                   disabled={auditActive}
                   title={t('audit.updateStale', String(driftStatus.stale_sections.length))}
@@ -1608,6 +1610,9 @@ export function ProjectCard({
                   {t('audit.updateStale', String(driftStatus.stale_sections.length))}
                 </button>
               </>
+            )}
+            {!auditActive && !resumableAudit && driftStatus && (
+              <PlaceholderDocsBadge docs={driftStatus.placeholder_docs ?? []} onRun={steps => { void startPartialAudit(steps); }} />
             )}
             {/* Audit date — hidden during active audit (#326 / F6) */}
             {!auditActive && driftStatus?.audit_date && (
@@ -2475,7 +2480,11 @@ export function ProjectCard({
                   <TemplateMergeOfferSlot offer={templateMerge} projectId={proj.id} />
                 )}
                 {!bootstrapInProgress && !auditActive && proj.audit_status !== 'NoTemplate' && (
-                  <TemplateReinstall projectId={proj.id} />
+                  <TemplateReinstall
+                    projectId={proj.id}
+                    onRunSteps={steps => { void startPartialAudit(steps); }}
+                    onChanged={() => { onRefetch(); onRefetchDrift(proj.id); }}
+                  />
                 )}
                 {!bootstrapInProgress && (
                   <AuditTimeline

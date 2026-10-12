@@ -482,6 +482,19 @@ Release notes for 0.9.3 and earlier are available in the
   git-excluded copy under its own `.kronn/context-files/` and that path in its
   prompt; a failed copy is logged and the original path given instead. Media
   already stored keep working: files are served from their recorded path.
+- « Recréer les fichiers du template » now ends with a next step (KT-1203).
+  The recreated files are raw templates, so they hold `{{PLACEHOLDERS}}`
+  until an audit fills them. The result lists each doc that still holds
+  placeholders, maps it to the audit step whose target it is, and offers one
+  button that runs the partial audit for exactly those steps (same lease and
+  saved briefing as « Mettre à jour »). Docs that no audit step targets are
+  listed as such, with no button. If the docs entry itself was recreated, the
+  project is back to `TemplateInstalled` and the result points to the full
+  audit instead. The confirmation says that recreated files stay empty until
+  those steps run. The project card shows the docs still holding placeholders,
+  with the same action. The count comes from `GET /api/projects/{id}/drift`
+  (`placeholder_docs`), so it survives a reload. It reads only the template's
+  own files, and `TEMPLATE.md` templates are not counted.
 - A favourite stays in Favoris while an agent runs or waits in it. From 20
   discussions on, a live pinned discussion moved to « À suivre » and left
   Favoris until the run ended. Favoris now lists every pinned discussion,

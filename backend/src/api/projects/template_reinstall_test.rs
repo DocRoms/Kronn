@@ -512,3 +512,113 @@ async fn a_bridge_caller_is_refused_and_the_routes_are_off_the_bridge_list() {
         );
     }
 }
+
+const VALIDATED_ENTRY: &str = "<!-- KRONN:VALIDATED -->\n# Entry\n\nAudited.\n";
+
+fn real_template() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../templates/docs")
+}
+
+fn step_of<'a>(docs: &'a [PlaceholderDoc], path: &str) -> Option<&'a PlaceholderDoc> {
+    docs.iter().find(|d| d.path == path)
+}
+
+#[test]
+fn the_report_lists_the_docs_left_with_placeholders_and_the_step_that_fills_each() {
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "docs/AGENTS.md", VALIDATED_ENTRY);
+    write(tmp.path(), "docs/glossary.md", "");
+
+    let report = reinstall(tmp.path(), &real_template(), "s1", None).unwrap();
+
+    let docs = &report.placeholder_docs;
+    assert_eq!(
+        step_of(docs, "docs/glossary.md").map(|d| d.step),
+        Some(Some(2)),
+        "{docs:?}"
+    );
+    assert_eq!(
+        step_of(docs, "docs/inconsistencies-tech-debt.md").map(|d| d.step),
+        Some(Some(8))
+    );
+    // No audit step targets it: said as such, never mapped to a made-up step.
+    assert_eq!(
+        step_of(docs, "docs/workflow/tickets.md").map(|d| d.step),
+        Some(None)
+    );
+    assert!(
+        step_of(docs, "docs/AGENTS.md").is_none(),
+        "the filled entry was left alone"
+    );
+    assert!(
+        docs.iter().all(|d| !d.path.ends_with("TEMPLATE.md")),
+        "a gabarit is a template by design: {docs:?}"
+    );
+    assert_eq!(report.audit_status, AiAuditStatus::Validated);
+}
+
+#[test]
+fn placeholders_are_read_in_the_projects_own_docs_dir() {
+    let tmp = TempDir::new().unwrap();
+    let template = tmp.path().join("templates/docs");
+    write(&template, "AGENTS.md", "{{PROJECT_NAME}}\n");
+    write(&template, "glossary.md", "{{TERM_1}}\n");
+    let project = tmp.path().join("project");
+    write(&project, "doc/AGENTS.md", AUDITED);
+    write(&project, "doc/glossary.md", "| {{TERM_1}} |\n");
+    write(&project, "docs/glossary.md", "| {{TERM_1}} |\n");
+
+    let docs = placeholder_docs(&project, &template);
+
+    assert_eq!(
+        docs,
+        vec![PlaceholderDoc {
+            path: "doc/glossary.md".into(),
+            step: Some(2),
+        }]
+    );
+}
+
+#[test]
+fn a_placeholder_quoted_in_code_or_a_missing_file_is_not_listed() {
+    let tmp = TempDir::new().unwrap();
+    let template = tmp.path().join("templates/docs");
+    write(&template, "glossary.md", "{{TERM_1}}\n");
+    write(&template, "repo-map.md", "{{TREE}}\n");
+    let project = tmp.path().join("project");
+    write(
+        &project,
+        "docs/glossary.md",
+        "Slots look like `{{TERM_1}}`.\n\n```\n{{TERM_2}}\n```\n",
+    );
+
+    assert!(placeholder_docs(&project, &template).is_empty());
+}
+
+#[test]
+fn recreating_the_docs_entry_puts_the_project_back_to_template_installed() {
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "docs/AGENTS.md", VALIDATED_ENTRY);
+    assert_eq!(
+        scanner::detect_audit_status(&tmp.path().to_string_lossy()),
+        AiAuditStatus::Validated
+    );
+
+    let report = reinstall(
+        tmp.path(),
+        &real_template(),
+        "s1",
+        Some(&["docs/AGENTS.md".to_string()]),
+    )
+    .unwrap();
+
+    assert_eq!(report.audit_status, AiAuditStatus::TemplateInstalled);
+    assert_eq!(
+        scanner::detect_audit_status(&tmp.path().to_string_lossy()),
+        AiAuditStatus::TemplateInstalled
+    );
+    assert_eq!(
+        step_of(&report.placeholder_docs, "docs/AGENTS.md").map(|d| d.step),
+        Some(Some(1))
+    );
+}

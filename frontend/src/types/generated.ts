@@ -3784,7 +3784,11 @@ export type DriftCheckResponse = { audit_date: string | null, stale_sections: Ar
 /**
  * "Sources clean" badge, recomputed from the cited lines.
  */
-sources_state: SourcesState, broken_citations: number, };
+sources_state: SourcesState, broken_citations: number,
+/**
+ * Template docs that still hold raw `{{PLACEHOLDERS}}` (KT-1203).
+ */
+placeholder_docs: Array<PlaceholderDoc>, };
 
 export type DriftSection = { ai_file: string, audit_step: number, changed_sources: Array<string>, };
 
@@ -6174,6 +6178,20 @@ resume_token: string,
  * without a fresh join. `None` for an unknown provider.
  */
 self_alias: string | null, cli_ordinal: number | null, };
+
+/**
+ * A template doc still holding raw `{{PLACEHOLDERS}}`, with the Full-chain
+ * step that fills it.
+ */
+export type PlaceholderDoc = {
+/**
+ * Project-relative path.
+ */
+path: string,
+/**
+ * 1-based step for `partial-audit`; `None` when no audit step targets the file.
+ */
+step: number | null, };
 
 export type PlanningActor = { kind: PlanningActorKind, id: string | null,
 /**
@@ -9493,7 +9511,15 @@ skipped: Array<string>,
 /**
  * Human-validated docs this reinstall rewrote, now to reconfirm.
  */
-to_reconfirm: Array<string>, };
+to_reconfirm: Array<string>,
+/**
+ * Template docs still holding placeholders afterwards, with their step.
+ */
+placeholder_docs: Array<PlaceholderDoc>,
+/**
+ * `TemplateInstalled` when the docs entry itself is a raw template again.
+ */
+audit_status: AiAuditStatus, };
 
 export type TemplateReinstallRequest = {
 /**
