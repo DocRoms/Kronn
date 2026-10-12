@@ -972,6 +972,7 @@ mod tests {
             author_cli_ordinal: None,
             model: None,
             lint_report: None,
+            session_continuity: None,
         };
         crate::db::discussions::insert_message(conn, discussion, &msg).unwrap();
     }
