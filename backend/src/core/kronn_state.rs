@@ -75,6 +75,11 @@ pub struct KronnState {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bootstrapped_at: Option<String>,
+
+    /// When an audit installed Kronn's template here: the folder is Kronn's
+    /// from then on, even if that first audit never finished.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_installed_at: Option<String>,
 }
 
 impl KronnState {
@@ -168,6 +173,15 @@ pub fn record_audit(project_path: &Path, audit_type: &str) -> Result<(), String>
         audit_type: audit_type.to_string(),
         provenance: AuditProvenance::KronnAudit,
     });
+    write(project_path, &mut state)
+}
+
+/// Record that an audit installed the template into the folder.
+pub fn mark_template_installed(project_path: &Path) -> Result<(), String> {
+    let mut state = load_for_mutation(project_path)?;
+    if state.template_installed_at.is_none() {
+        state.template_installed_at = Some(today_iso());
+    }
     write(project_path, &mut state)
 }
 

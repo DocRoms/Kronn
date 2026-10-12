@@ -436,6 +436,7 @@ pub(crate) fn briefing_defaults(
     project_root: &std::path::Path,
     stored_override: Option<&str>,
     global_default: Option<&str>,
+    recorded_run: bool,
 ) -> BriefingDefaults {
     use crate::core::docs_location;
     let (docs_dir, docs_dir_source) = if let Some(rel) =
@@ -460,7 +461,11 @@ pub(crate) fn briefing_defaults(
     };
     BriefingDefaults {
         folder_exists: project_root.join(&docs_dir).is_dir(),
-        folder: crate::core::docs_folder::folder_state(project_root, &docs_dir),
+        folder: crate::core::docs_folder::folder_state_with_runs(
+            project_root,
+            &docs_dir,
+            recorded_run,
+        ),
         docs_dir,
         docs_dir_source,
     }
@@ -479,10 +484,11 @@ pub async fn get_briefing_defaults(
                 return Ok(None);
             };
             let dir = crate::db::projects::project_docs_dir(conn, &lookup)?;
-            Ok(Some((project.path, dir)))
+            let ran = crate::db::audit_runs::has_any_full(conn, &lookup)?;
+            Ok(Some((project.path, dir, ran)))
         })
         .await;
-    let (path, stored) = match found {
+    let (path, stored, ran) = match found {
         Ok(Some(found)) => found,
         Ok(None) => {
             return Json(ApiResponse::err_coded(
@@ -498,6 +504,7 @@ pub async fn get_briefing_defaults(
         &root,
         stored.as_deref(),
         global.as_deref(),
+        ran,
     )))
 }
 
@@ -512,14 +519,16 @@ fn apply_briefing_docs_dir(
     move_existing_to_legacy: bool,
     after: &mut BriefingAfterCommit,
 ) -> Result<(), BriefingSaveError> {
-    use crate::core::docs_folder::{folder_state, DocsFolderState};
+    use crate::core::docs_folder::{folder_state_with_runs, DocsFolderState};
     use crate::core::docs_location;
     let root = crate::core::scanner::resolve_host_path(&project.path);
     let rel = docs_location::validate_for_project(&root, requested)
         .map_err(BriefingSaveError::DocsDir)?;
     // A human's docs never move, and are never written over, without the
     // explicit choice; old Kronn docs are updated in place, unasked.
-    let state = folder_state(&root, &rel);
+    let ran = crate::db::audit_runs::has_any_full(conn, &project.id)
+        .map_err(|e| BriefingSaveError::Internal(format!("DB error: {e}")))?;
+    let state = folder_state_with_runs(&root, &rel, ran);
     if let DocsFolderState::HumanDocs {
         files,
         legacy_exists,
@@ -893,7 +902,7 @@ mod tests {
         stored: Option<&str>,
         global: Option<&str>,
     ) -> (String, BriefingDocsDirSource) {
-        let d = briefing_defaults(root, stored, global);
+        let d = briefing_defaults(root, stored, global, false);
         (d.docs_dir, d.docs_dir_source)
     }
 
@@ -920,8 +929,8 @@ mod tests {
             defaults(root, Some("context"), Some(".ai")),
             ("context".into(), BriefingDocsDirSource::ProjectOverride)
         );
-        assert!(!briefing_defaults(root, Some("context"), None).folder_exists);
-        assert!(briefing_defaults(root, None, None).folder_exists);
+        assert!(!briefing_defaults(root, Some("context"), None, false).folder_exists);
+        assert!(briefing_defaults(root, None, None, false).folder_exists);
     }
 
     #[test]

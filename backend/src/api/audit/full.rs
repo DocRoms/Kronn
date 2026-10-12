@@ -361,11 +361,24 @@ pub async fn full_audit(
     // A human's docs are never moved or written over without the briefing's
     // explicit choice; refused before the run takes the project's lease. A
     // resume continues a run that already started on this folder.
+    // Read before this run records itself: only an earlier run is a proof.
+    let recorded_run = {
+        let id = project_id.clone();
+        state
+            .db
+            .with_read_conn(move |conn| crate::db::audit_runs::has_any_full(conn, &id))
+            .await
+            .unwrap_or(false)
+    };
     if resume_run_id_req.is_none()
         && matches!(req.kind.unwrap_or_default(), crate::models::AuditKind::Full)
     {
         if let crate::core::docs_folder::DocsFolderState::HumanDocs { files, .. } =
-            crate::core::docs_folder::folder_state(&project_path, docs_root.rel())
+            crate::core::docs_folder::folder_state_with_runs(
+                &project_path,
+                docs_root.rel(),
+                recorded_run,
+            )
         {
             return sse_refusal(serde_json::json!({
                 "error": format!(
@@ -768,7 +781,11 @@ pub async fn full_audit(
         use crate::core::docs_folder::DocsFolderState;
         // Decided from the folder's content, not the scanner status: a human
         // `docs/` or `AGENTS.md` reads TemplateInstalled without any template.
-        let folder = crate::core::docs_folder::folder_state(&project_path, docs_root.rel());
+        let folder = crate::core::docs_folder::folder_state_with_runs(
+            &project_path,
+            docs_root.rel(),
+            recorded_run,
+        );
         let template_installed = is_full && matches!(folder, DocsFolderState::Missing);
         // Kronn's own docs get the template files they lack, never over existing ones.
         let install_template =
@@ -814,6 +831,9 @@ pub async fn full_audit(
                 if docs_template.is_dir() {
                     crate::api::projects::copy_dir_nondestructive_in(&docs_template, &docs_target, &install_root)?;
                 }
+                // Ownership first: a run stopped before its end leaves a folder
+                // a fresh relaunch still reads as Kronn's.
+                crate::core::kronn_state::mark_template_installed(&project_path)?;
                 // The anti-hallucination section STEP 0 writes links to this
                 // spec: without it the documentary gate blocks step 1 of a
                 // first audit (same install as the template endpoint).

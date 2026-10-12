@@ -54,6 +54,16 @@ pub fn has_completed_full(conn: &Connection, project_id: &str) -> Result<bool> {
     Ok(count > 0)
 }
 
+/// Whether this instance ever ran a Full audit of the project, finished or not.
+pub fn has_any_full(conn: &Connection, project_id: &str) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM audit_runs WHERE project_id = ?1 AND kind = 'Full'",
+        [project_id],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
 pub fn has_running_for_project(conn: &Connection, project_id: &str) -> Result<bool> {
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM audit_runs WHERE project_id = ?1 AND status = 'Running'",

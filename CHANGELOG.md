@@ -459,6 +459,10 @@ Release notes for 0.9.3 and earlier are available in the
   starts, with the same answer for the UI and for MCP `audit_launch`. A project
   documented in `doc/` or `ai/` is audited there instead of in a second
   `docs/` tree, and a legacy `ai/index.md` layout is asked to migrate first.
+  The install records the folder as Kronn's in `.kronn.json` before step 1, so
+  a first audit that crashed or was cancelled relaunches fresh without the
+  folder question; a folder with Kronn's structural markers and a Full run this
+  instance recorded for the project counts as Kronn's too.
 
 - A native agent's reply to a joined CLI now reaches that CLI (KT-1201). When
   the room's agent answered a CLI turn without naming it, the reply had no

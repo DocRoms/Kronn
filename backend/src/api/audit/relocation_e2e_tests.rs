@@ -638,6 +638,10 @@ async fn a_0_8_style_kronn_folder_is_not_asked_about() {
 /// A Full launch through the HTTP route, as the UI (`bridge: false`) or an
 /// MCP agent (`bridge: true`) sends it: the briefing gate, then the audit.
 async fn launch_route(h: &Harness, bridge: bool) -> String {
+    launch_route_fresh(h, bridge, None).await
+}
+
+async fn launch_route_fresh(h: &Harness, bridge: bool, fresh: Option<bool>) -> String {
     let caller = bridge.then(|| {
         axum::Extension(crate::core::bridge_token::BridgeCaller {
             token_id: "t".into(),
@@ -659,7 +663,7 @@ async fn launch_route(h: &Harness, bridge: bool) -> String {
             custom_prompt: None,
             resume_run_id: None,
             retry_steps: None,
-            fresh: None,
+            fresh,
         }),
     )
     .await
@@ -874,4 +878,120 @@ async fn old_kronn_docs_get_the_files_they_lack_and_keep_the_others() {
         assert_eq!(std::fs::read(project.join(file)).ok(), before, "{file}");
     }
     assert!(!project.join("docs/legacy").exists());
+}
+
+// ─── A first audit that stopped early stays Kronn's ────────────────────────
+
+fn not_asked_about_the_folder(body: &str) {
+    assert!(
+        sse_events(body, "error")
+            .iter()
+            .all(|e| e["error_code"] != "docs_folder_choice_required"),
+        "{body}"
+    );
+    assert!(!sse_events(body, "start").is_empty(), "{body}");
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_first_audit_stopped_in_step_1_relaunches_fresh_on_both_routes() {
+    let h = harness().await;
+    let project = h.project.path();
+    let targets = targets_for(&DocsRoot::default_root());
+    arm(h.tools.path(), "fill", &targets);
+    fail_steps(h.tools.path(), &[1]);
+    let body = run_full(&h.state, None).await;
+    let done = sse_events(&body, "done").pop().expect("terminal done");
+    assert_ne!(done["status"], "complete", "{body}");
+    // The install recorded the folder as Kronn's before step 1 ran.
+    let state = crate::core::kronn_state::read(project).expect(".kronn.json");
+    assert!(state.template_installed_at.is_some(), "{state:?}");
+    assert!(!state.has_any_audit(), "{state:?}");
+    assert_eq!(
+        crate::core::docs_folder::folder_state(project, "docs"),
+        crate::core::docs_folder::DocsFolderState::KronnManaged
+    );
+
+    std::fs::write(project.join("NOTES.md"), "# Team notes\n").unwrap();
+    for bridge in [false, true] {
+        arm(h.tools.path(), "fill", &targets);
+        let body = launch_route_fresh(&h, bridge, Some(true)).await;
+        not_asked_about_the_folder(&body);
+        let done = sse_events(&body, "done").pop().expect("terminal done");
+        validation_settled(&h.state, &done).await;
+    }
+    assert_eq!(
+        std::fs::read_to_string(project.join("NOTES.md")).unwrap(),
+        "# Team notes\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(project.join("README.md")).unwrap(),
+        "# Fixture\n"
+    );
+    assert!(!project.join("docs/legacy").exists());
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_cancelled_first_run_without_state_is_kronns_only_with_a_recorded_run() {
+    let h = harness().await;
+    let project = h.project.path();
+    // Step 1 of a cancelled first run wrote the entry; nothing recorded on disk.
+    std::fs::create_dir_all(project.join("docs")).unwrap();
+    std::fs::write(
+        project.join("docs/AGENTS.md"),
+        "<!-- kronn:doc-version=\"1.0\" -->\n# Project\n\n<!-- kronn:section name=\"anti-hallu\" curated=\"ai\" -->\nBody\n<!-- kronn:section:end -->\n",
+    )
+    .unwrap();
+    // Without a run of this instance, markers alone are a human's docs.
+    refused_on_both_routes(&h, "docs_folder_choice_required", "docs/legacy/").await;
+
+    h.state
+        .db
+        .with_conn(|conn| {
+            crate::db::audit_runs::insert_running(
+                conn,
+                "cancelled-first",
+                PROJECT_ID,
+                "Full",
+                "ClaudeCode",
+                chrono::Utc::now(),
+            )?;
+            crate::db::audit_runs::mark_cancelled(conn, "cancelled-first")
+        })
+        .await
+        .unwrap();
+    // The briefing accepts the folder without a choice, then both routes launch.
+    crate::api::audit::briefing::save_briefing_answers(
+        &h.state,
+        PROJECT_ID,
+        briefing("docs", false),
+    )
+    .await
+    .unwrap();
+    for bridge in [false, true] {
+        arm(
+            h.tools.path(),
+            "fill",
+            &targets_for(&DocsRoot::default_root()),
+        );
+        let body = launch_route_fresh(&h, bridge, Some(true)).await;
+        not_asked_about_the_folder(&body);
+        let done = sse_events(&body, "done").pop().expect("terminal done");
+        validation_settled(&h.state, &done).await;
+    }
+    assert!(project
+        .join("docs/conventions/agents-md-format-v1.md")
+        .is_file());
+    assert!(!project.join("docs/legacy").exists());
+
+    // A run recorded for the project never makes an unmarked folder Kronn's.
+    std::fs::create_dir_all(project.join("manual")).unwrap();
+    std::fs::write(project.join("manual/guide.md"), "# Guide\n").unwrap();
+    assert!(matches!(
+        crate::core::docs_folder::folder_state_with_runs(project, "manual", true),
+        crate::core::docs_folder::DocsFolderState::HumanDocs { .. }
+    ));
 }

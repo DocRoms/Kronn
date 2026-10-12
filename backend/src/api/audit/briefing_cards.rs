@@ -559,15 +559,19 @@ pub(crate) async fn briefing_gate(
 
 async fn briefing_defaults_for(state: &crate::AppState, project: &Project) -> BriefingDefaults {
     let id = project.id.clone();
-    let stored = state
+    let (stored, ran) = state
         .db
-        .with_read_conn(move |conn| crate::db::projects::project_docs_dir(conn, &id))
+        .with_read_conn(move |conn| {
+            Ok((
+                crate::db::projects::project_docs_dir(conn, &id)?,
+                crate::db::audit_runs::has_any_full(conn, &id)?,
+            ))
+        })
         .await
-        .ok()
-        .flatten();
+        .unwrap_or_default();
     let global = state.config.read().await.scan.default_docs_dir.clone();
     let root = crate::core::scanner::resolve_host_path(&project.path);
-    super::briefing::briefing_defaults(&root, stored.as_deref(), global.as_deref())
+    super::briefing::briefing_defaults(&root, stored.as_deref(), global.as_deref(), ran)
 }
 
 fn sse_refusal(payload: serde_json::Value) -> axum::response::sse::Sse<super::SseStream> {
