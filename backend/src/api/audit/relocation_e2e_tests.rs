@@ -632,3 +632,246 @@ async fn a_0_8_style_kronn_folder_is_not_asked_about() {
     );
     assert!(!project.join("docs/legacy").exists());
 }
+
+// ─── Install decided from the folder, on both launch routes ────────────────
+
+/// A Full launch through the HTTP route, as the UI (`bridge: false`) or an
+/// MCP agent (`bridge: true`) sends it: the briefing gate, then the audit.
+async fn launch_route(h: &Harness, bridge: bool) -> String {
+    let caller = bridge.then(|| {
+        axum::Extension(crate::core::bridge_token::BridgeCaller {
+            token_id: "t".into(),
+            project: Some(PROJECT_ID.into()),
+            own_discussions: vec![],
+            own_run: None,
+            agent: None,
+        })
+    });
+    let response = crate::api::audit::briefing_cards::full_audit_route(
+        axum::extract::State(h.state.clone()),
+        axum::extract::Path(PROJECT_ID.to_string()),
+        caller,
+        axum::Json(crate::models::LaunchAuditRequest {
+            agent: AgentType::ClaudeCode,
+            connection_id: None,
+            tier: None,
+            kind: None,
+            custom_prompt: None,
+            resume_run_id: None,
+            retry_steps: None,
+            fresh: None,
+        }),
+    )
+    .await
+    .into_response();
+    sse_body(response).await
+}
+
+/// Every file under the project with its bytes, `.git/` excluded.
+fn snapshot(project: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    walkdir::WalkDir::new(project)
+        .into_iter()
+        .filter_entry(|e| e.file_name() != ".git")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .map(|e| {
+            let rel = e.path().strip_prefix(project).unwrap();
+            (
+                rel.to_string_lossy().into_owned(),
+                std::fs::read(e.path()).unwrap(),
+            )
+        })
+        .collect()
+}
+
+/// Both routes refuse with `code` and leave every file as it was.
+async fn refused_on_both_routes(h: &Harness, code: &str, mentions: &str) {
+    arm(
+        h.tools.path(),
+        "fill",
+        &targets_for(&DocsRoot::default_root()),
+    );
+    let before = snapshot(h.project.path());
+    for bridge in [false, true] {
+        let body = launch_route(h, bridge).await;
+        let error = sse_events(&body, "error")
+            .pop()
+            .unwrap_or_else(|| panic!("bridge={bridge}: not refused: {body}"));
+        assert_eq!(error["error_code"], code, "bridge={bridge}: {body}");
+        assert!(
+            error["error"].as_str().unwrap().contains(mentions),
+            "bridge={bridge}: {body}"
+        );
+        assert!(sse_events(&body, "start").is_empty(), "{body}");
+        assert_eq!(snapshot(h.project.path()), before, "bridge={bridge}");
+    }
+}
+
+/// `audited`, launched through the route.
+async fn audited_via_route(h: &Harness, docs_root: &DocsRoot, bridge: bool) {
+    arm(h.tools.path(), "fill", &targets_for(docs_root));
+    settle_on_validation(h.tools.path());
+    let body = launch_route(h, bridge).await;
+    let done = sse_events(&body, "done")
+        .pop()
+        .unwrap_or_else(|| panic!("no terminal done: {body}"));
+    validation_settled(&h.state, &done).await;
+    assert_eq!(done["status"], "complete", "{body}");
+}
+
+fn installed(project: &Path, rel: &str) {
+    for file in [
+        "AGENTS.md",
+        "conventions/agents-md-format-v1.md",
+        ".kronn.json",
+    ] {
+        assert!(project.join(rel).join(file).is_file(), "{rel}/{file}");
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_human_docusaurus_folder_is_refused_on_both_routes() {
+    let h = harness().await;
+    let project = h.project.path();
+    std::fs::create_dir_all(project.join("docs/guides")).unwrap();
+    std::fs::write(project.join("docs/intro.md"), "# Intro\n").unwrap();
+    std::fs::write(project.join("docs/guides/setup.mdx"), "# Setup\n").unwrap();
+    std::fs::write(
+        project.join("docusaurus.config.js"),
+        "module.exports = {};\n",
+    )
+    .unwrap();
+    refused_on_both_routes(&h, "docs_folder_choice_required", "docs/legacy/").await;
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_human_root_agents_md_gets_the_template_and_keeps_its_text() {
+    for bridge in [false, true] {
+        let h = harness().await;
+        let project = h.project.path();
+        std::fs::write(project.join("AGENTS.md"), "# Team rules\n\nUse tabs.\n").unwrap();
+        audited_via_route(&h, &DocsRoot::default_root(), bridge).await;
+        installed(project, "docs");
+        let root = std::fs::read_to_string(project.join("AGENTS.md")).unwrap();
+        assert!(
+            root.contains("# Team rules\n\nUse tabs.\n"),
+            "bridge={bridge}: {root}"
+        );
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn an_empty_docs_folder_gets_the_template() {
+    let h = harness().await;
+    let project = h.project.path();
+    std::fs::create_dir_all(project.join("docs")).unwrap();
+    assert_eq!(
+        crate::core::scanner::detect_audit_status(&project.to_string_lossy()),
+        crate::models::AiAuditStatus::TemplateInstalled
+    );
+    audited(&h, &DocsRoot::default_root()).await;
+    installed(project, "docs");
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_doc_folder_project_is_audited_there_and_nothing_lands_in_docs() {
+    let h = harness().await;
+    let project = h.project.path();
+    std::fs::create_dir_all(project.join("doc")).unwrap();
+    let doc = DocsRoot::from_rel("doc").unwrap();
+    assert_eq!(DocsRoot::for_project(project).unwrap(), doc);
+    audited_via_route(&h, &doc, true).await;
+    installed(project, "doc");
+    assert!(!project.join("docs").exists(), "nothing may land in docs/");
+    assert_eq!(
+        crate::core::scanner::detect_audit_status(&project.to_string_lossy()),
+        crate::models::AiAuditStatus::Audited
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_human_doc_folder_is_refused_on_both_routes() {
+    let h = harness().await;
+    std::fs::create_dir_all(h.project.path().join("doc")).unwrap();
+    std::fs::write(h.project.path().join("doc/manual.md"), "# Manual\n").unwrap();
+    refused_on_both_routes(&h, "docs_folder_choice_required", "doc/legacy/").await;
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn an_ai_folder_is_migrated_first_or_refused_as_human_docs() {
+    let h = harness().await;
+    let project = h.project.path();
+    std::fs::create_dir_all(project.join("ai")).unwrap();
+    std::fs::write(project.join("ai/index.md"), "# Legacy Kronn index\n").unwrap();
+    refused_on_both_routes(&h, "docs_migration_required", "Migrate it to docs/").await;
+    // The section refresh refuses the same layout.
+    let response = crate::api::audit::drift::partial_audit(
+        axum::extract::State(h.state.clone()),
+        axum::extract::Path(PROJECT_ID.to_string()),
+        axum::Json(crate::models::PartialAuditRequest {
+            agent: AgentType::ClaudeCode,
+            connection_id: None,
+            tier: None,
+            steps: vec![2],
+        }),
+    )
+    .await
+    .into_response();
+    let body = sse_body(response).await;
+    let error = sse_events(&body, "error").pop().expect("refused");
+    assert_eq!(error["error_code"], "docs_migration_required", "{body}");
+    assert!(!project.join("docs").exists());
+
+    // A human `ai/` folder is a folder like any other.
+    std::fs::remove_file(project.join("ai/index.md")).unwrap();
+    std::fs::write(project.join("ai/prompts.md"), "# Prompts\n").unwrap();
+    refused_on_both_routes(&h, "docs_folder_choice_required", "ai/legacy/").await;
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn old_kronn_docs_get_the_files_they_lack_and_keep_the_others() {
+    let h = harness().await;
+    let project = h.project.path();
+    audited(&h, &DocsRoot::default_root()).await;
+    let spec = project.join("docs/conventions/agents-md-format-v1.md");
+    std::fs::remove_file(&spec).unwrap();
+    let glossary = project.join("docs/glossary.md");
+    let mut edited = std::fs::read_to_string(&glossary).unwrap();
+    edited.push_str("\nTeam term: kept as written.\n");
+    std::fs::write(&glossary, &edited).unwrap();
+    std::fs::write(project.join("docs/team-notes.md"), "# Ours\n").unwrap();
+    // A top-up leaves the root agent files alone, even one the team deleted.
+    std::fs::remove_file(project.join("CLAUDE.md")).unwrap();
+    let root_files: Vec<_> = ["AGENTS.md", "CLAUDE.md"]
+        .iter()
+        .map(|f| (f, std::fs::read(project.join(f)).ok()))
+        .collect();
+
+    audited(&h, &DocsRoot::default_root()).await;
+    assert!(spec.is_file(), "the missing spec is installed again");
+    assert!(std::fs::read_to_string(&glossary)
+        .unwrap()
+        .contains("Team term: kept as written."));
+    assert_eq!(
+        std::fs::read_to_string(project.join("docs/team-notes.md")).unwrap(),
+        "# Ours\n"
+    );
+    for (file, before) in root_files {
+        assert_eq!(std::fs::read(project.join(file)).ok(), before, "{file}");
+    }
+    assert!(!project.join("docs/legacy").exists());
+}

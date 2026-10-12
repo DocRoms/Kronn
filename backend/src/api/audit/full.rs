@@ -261,13 +261,12 @@ pub(crate) async fn stop_validation_agents(state: &AppState, project_id: &str) -
 /// project, non-resumable run, already-running, unwired kind). Keeps the
 /// refusal shape identical everywhere so clients parse one `error` event.
 fn sse_error(msg: impl Into<String>) -> Sse<SseStream> {
-    let msg = msg.into();
+    sse_refusal(serde_json::json!({ "error": msg.into() }))
+}
+
+fn sse_refusal(payload: serde_json::Value) -> Sse<SseStream> {
     let stream: SseStream = Box::pin(futures::stream::once(async move {
-        Ok::<_, Infallible>(
-            Event::default()
-                .event("error")
-                .data(serde_json::json!({ "error": msg }).to_string()),
-        )
+        Ok::<_, Infallible>(Event::default().event("error").data(payload.to_string()))
     }));
     Sse::new(stream)
 }
@@ -303,6 +302,9 @@ pub async fn full_audit(
         Ok(docs_root) => docs_root,
         Err(reason) => return sse_error(reason),
     };
+    if let Some(refusal) = super::legacy_layout_refusal(&project_path) {
+        return sse_refusal(refusal);
+    }
     let project_default_skill_ids = project.default_skill_ids.clone();
     let briefing_notes =
         crate::api::projects::resolve_briefing_notes(&project_path, &project.briefing_notes);
@@ -356,6 +358,25 @@ pub async fn full_audit(
     };
 
     let resume_run_id_req = req.resume_run_id.clone();
+    // A human's docs are never moved or written over without the briefing's
+    // explicit choice; refused before the run takes the project's lease. A
+    // resume continues a run that already started on this folder.
+    if resume_run_id_req.is_none()
+        && matches!(req.kind.unwrap_or_default(), crate::models::AuditKind::Full)
+    {
+        if let crate::core::docs_folder::DocsFolderState::HumanDocs { files, .. } =
+            crate::core::docs_folder::folder_state(&project_path, docs_root.rel())
+        {
+            return sse_refusal(serde_json::json!({
+                "error": format!(
+                    "The folder {}/ used by Kronn already exists and holds {files} file(s) Kronn did not write. \
+                     Open the briefing and choose: another folder, or move them to {}/legacy/.",
+                    docs_root.rel(), docs_root.rel()
+                ),
+                "error_code": "docs_folder_choice_required",
+            }));
+        }
+    }
     let retry_steps_req = req.retry_steps.clone();
     let fresh_req = req.fresh.unwrap_or(false);
     let requested_kind = req.kind;
@@ -744,39 +765,21 @@ pub async fn full_audit(
         // bare project would produce findings against a non-existent
         // baseline, which is rarely what the user wants.
         let is_full = matches!(kind, crate::models::AuditKind::Full);
-        let status = scanner::detect_audit_status(&project_path_str);
-        // KT-1192 — a folder whose human docs were moved to `legacy/` on the
-        // briefing's choice gets the templates too.
-        let moved_aside = docs_root.file(&project_path, "legacy").is_dir()
-            && !docs_root.file(&project_path, "AGENTS.md").is_file();
-        let template_installed =
-            is_full && (matches!(status, AiAuditStatus::NoTemplate) || moved_aside);
-        // A human's docs are never moved or written over without the
-        // briefing's explicit choice. A resume continues a run that already
-        // started on this folder.
-        if is_full && resume_run_id_req.is_none() {
-            if let crate::core::docs_folder::DocsFolderState::HumanDocs { files, .. } =
-                crate::core::docs_folder::folder_state(&project_path, docs_root.rel())
-            {
-                if let Ok(mut t) = audit_tracker.lock() { t.clear_progress(&project_id); }
-                let err = serde_json::json!({
-                    "error": format!(
-                        "The folder {}/ used by Kronn already exists and holds {files} file(s) Kronn did not write. \
-                         Open the briefing and choose: another folder, or move them to {}/legacy/.",
-                        docs_root.rel(), docs_root.rel()
-                    ),
-                    "error_code": "docs_folder_choice_required",
-                });
-                yield Event::default().event("error").data(err.to_string());
-                return;
-            }
-        }
+        use crate::core::docs_folder::DocsFolderState;
+        // Decided from the folder's content, not the scanner status: a human
+        // `docs/` or `AGENTS.md` reads TemplateInstalled without any template.
+        let folder = crate::core::docs_folder::folder_state(&project_path, docs_root.rel());
+        let template_installed = is_full && matches!(folder, DocsFolderState::Missing);
+        // Kronn's own docs get the template files they lack, never over existing ones.
+        let install_template =
+            template_installed || (is_full && matches!(folder, DocsFolderState::KronnManaged));
         let configured_adapter =
             crate::core::root_agent_files::adapter_for_agent_type(&agent_type);
 
-        if template_installed {
+        if install_template {
             let pp = project_path_str.clone();
             let install_root = docs_root.clone();
+            let fresh_install = template_installed;
             let install_result = tokio::task::spawn_blocking(move || -> Result<(crate::core::legacy_docs::LegacyMigrationReport,), String> {
                 let project_path = scanner::resolve_host_path(&pp);
                 if !project_path.exists() {
@@ -789,11 +792,8 @@ pub async fn full_audit(
                     detected_adapters.insert(adapter);
                 }
 
-                // 0.7.1 — bootstrap to docs/ (or respect legacy ai/ when
-                // present). Permission check runs on whichever the project
-                // already uses, then template install lands at docs/ for
-                // fresh projects (default).
-                let docs_target = scanner::detect_docs_dir(&project_path);
+                // The run's root: the steps, checks and state files read the same folder.
+                let docs_target = install_root.dir(&project_path);
                 if docs_target.exists() {
                     if let Err(e) = check_ai_dir_permissions(&docs_target) {
                         return Err(format!("{}/ permission error: {}",
@@ -843,6 +843,11 @@ pub async fn full_audit(
                 // target repository or explicitly selected for this audit.
                 // Every emitted template is rendered before publication, so a
                 // crashed audit cannot leave raw placeholders.
+                // A top-up leaves the root agent files as the last audit left them.
+                if !fresh_install {
+                    runner::fix_file_ownership(&project_path);
+                    return Ok((legacy_report,));
+                }
                 let adapter_report =
                     crate::core::root_agent_files::install_detected_agent_files(
                         &project_path,

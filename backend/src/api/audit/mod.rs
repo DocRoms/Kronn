@@ -1161,6 +1161,18 @@ pub(crate) const REVERIFY_BLOCK: &str = "\
 4. In a section marked `owner=\"human\"`, correct only what the code contradicts: its owner reconfirms the change.\n\
 5. If everything is still accurate, leave the file byte-identical: the step then ends unchanged, a valid result.\n";
 
+/// A legacy `ai/index.md` layout is moved to `docs/` by its migration first:
+/// an audit there would write a second tree beside it.
+pub(crate) fn legacy_layout_refusal(project: &std::path::Path) -> Option<serde_json::Value> {
+    crate::core::scanner::needs_docs_migration(project).then(|| {
+        serde_json::json!({
+            "error": "This project still uses the legacy ai/index.md layout. \
+                      Migrate it to docs/ from the project card first, then launch the audit.",
+            "error_code": "docs_migration_required",
+        })
+    })
+}
+
 /// Whether this step re-verifies its target rather than filling it: a
 /// documentary step whose target exists with no raw placeholder left.
 pub(crate) fn reverifies_target(

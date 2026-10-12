@@ -89,7 +89,7 @@ case "$prompt" in
     ;;
   *)
     if [ -f '{state}/settle' ]; then
-      find '{project}/docs' '{project}/.ai' -name '*.md' -not -path '*/tech-debt/*' 2>/dev/null | while read -r f; do
+      find '{project}/docs' '{project}/.ai' '{project}/doc' -name '*.md' -not -path '*/tech-debt/*' 2>/dev/null | while read -r f; do
         sed -e 's/{{{{[A-Z0-9_]*}}}}/settled by the validation/g' -e 's/<!-- TODO:[^>]*-->//g' "$f" > "$f.next"
         mv "$f.next" "$f"
       done

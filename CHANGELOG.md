@@ -450,6 +450,16 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A Full audit installs its template from what the AI doc folder holds, not
+  from the project's displayed status (KT-1204). An empty `docs/`, or a folder
+  Kronn's docs left behind, read "template installed" and got no template, no
+  anti-hallucination spec and placeholder prompts for missing files. An empty
+  folder now gets the template, Kronn's own docs get the files they lack (never
+  over existing ones), and a folder of human docs is refused before the run
+  starts, with the same answer for the UI and for MCP `audit_launch`. A project
+  documented in `doc/` or `ai/` is audited there instead of in a second
+  `docs/` tree, and a legacy `ai/index.md` layout is asked to migrate first.
+
 - A native agent's reply to a joined CLI now reaches that CLI (KT-1201). When
   the room's agent answered a CLI turn without naming it, the reply had no
   target, and the bridge reported it as `withheld_by_routing` ("target another

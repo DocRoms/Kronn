@@ -477,7 +477,8 @@ pub fn detect_docs_dir(project_path: &Path) -> PathBuf {
 /// legacy `index.md` for projects that haven't migrated yet.
 pub fn detect_docs_entry(project_path: &Path) -> PathBuf {
     let dir = detect_docs_dir(project_path);
-    if dir.file_name().and_then(|n| n.to_str()) == Some("ai") {
+    // An audit run in an `ai/` folder writes `AGENTS.md` like any other root.
+    if dir.file_name().and_then(|n| n.to_str()) == Some("ai") && !dir.join("AGENTS.md").is_file() {
         dir.join("index.md")
     } else {
         dir.join("AGENTS.md")
@@ -856,6 +857,16 @@ pub fn is_wsl_unc_path_str(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_ai_folder_audited_in_place_is_entered_by_its_agents_md() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("ai")).unwrap();
+        assert_eq!(detect_docs_entry(root), root.join("ai/index.md"));
+        std::fs::write(root.join("ai/AGENTS.md"), "# Project\n").unwrap();
+        assert_eq!(detect_docs_entry(root), root.join("ai/AGENTS.md"));
+    }
     use serial_test::serial;
 
     // ─── shellexpand ────────────────────────────────────────────────────────

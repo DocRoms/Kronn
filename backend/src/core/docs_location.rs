@@ -346,9 +346,10 @@ impl DocsRoot {
         })
     }
 
-    /// The project's configured folder, else `docs/` (what the pipeline wrote
-    /// before KT-1192). A configured folder failing containment is an error:
-    /// the run is refused rather than written anywhere else.
+    /// The project's configured folder, else the one it already documents
+    /// itself in (`docs/`, `doc/`, `ai/`), else `docs/`: the same folder the
+    /// install and the scanner read. A configured folder failing containment
+    /// is an error: the run is refused rather than written anywhere else.
     pub fn for_project(root: &Path) -> Result<Self, String> {
         let resolved = resolution(root);
         if let Some(reason) = resolved
@@ -356,9 +357,6 @@ impl DocsRoot {
             .filter(|_| resolved.source == DocsDirSource::ProjectOverride)
         {
             return Err(reason);
-        }
-        if resolved.source == DocsDirSource::Detected {
-            return Ok(Self::default_root());
         }
         let rel = Resolution {
             dir: resolved.dir,
@@ -650,9 +648,13 @@ mod tests {
         std::fs::create_dir_all(root.join("ai")).unwrap();
         std::fs::write(root.join("ai/index.md"), "# legacy\n").unwrap();
         let path = root.to_string_lossy().into_owned();
-        // A detected legacy layout keeps the historical `docs/` pipeline.
+        // A detected layout is the pipeline's root, like the install's.
+        assert_eq!(DocsRoot::for_project(&root).unwrap().rel(), "ai");
+        std::fs::create_dir_all(root.join("doc")).unwrap();
+        std::fs::write(root.join("doc/AGENTS.md"), "# doc\n").unwrap();
+        assert_eq!(DocsRoot::for_project(&root).unwrap().rel(), "doc");
         assert_eq!(
-            DocsRoot::for_project(&root).unwrap(),
+            DocsRoot::for_project(&t.path().join("fresh")).unwrap(),
             DocsRoot::default_root()
         );
 

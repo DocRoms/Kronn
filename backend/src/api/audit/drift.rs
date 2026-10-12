@@ -203,6 +203,12 @@ pub async fn partial_audit(
             return Sse::new(stream);
         }
     };
+    if let Some(refusal) = super::legacy_layout_refusal(&project_path) {
+        let stream: SseStream = Box::pin(futures::stream::once(async move {
+            Ok::<_, Infallible>(Event::default().event("error").data(refusal.to_string()))
+        }));
+        return Sse::new(stream);
+    }
 
     // Validate requested step numbers against the FULL chained pipeline
     // (foundation 1..9 + chained sub-audits 10..16), not just the 9
