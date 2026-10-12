@@ -43,6 +43,7 @@ case "$prompt" in
     esac
     echo "$n $target $kind" >> '{state}/steps.log'
     printf '%s' "$prompt" > '{state}/prompt.'"$n"
+    if [ -f '{state}/undo' ]; then sh '{state}/undo'; rm -f '{state}/undo'; fi
     while [ -f '{state}/hold' ]; do sleep 0.1; done
     if grep -qx "$n" '{state}/fail' 2>/dev/null; then
       printf '%s\n' '{{"type":"result","subtype":"error_during_execution","is_error":true,"usage":{{"input_tokens":1,"output_tokens":1}}}}'
@@ -1022,3 +1023,138 @@ mod revalidate_e2e_tests;
 
 #[path = "relocation_e2e_tests.rs"]
 mod relocation_e2e_tests;
+
+/// KT-1208 — a re-audit cannot undo a human TD decision, a sheet that leaves
+/// the active list closes its task, and a partial refresh says it is
+/// single-agent when the briefing asks for the cross-agent audit.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_reaudit_keeps_human_td_decisions_and_a_refresh_says_it_is_single_agent() {
+    let fx = Audited::new().await;
+    let td = fx.project.path().join("docs/tech-debt");
+    std::fs::create_dir_all(&td).unwrap();
+    let sheet = |status: &str, title: &str| {
+        format!("---\ndescription: {title}\nmetadata:\n  type: tech-debt\n---\n# {title}\n\n- **Area**: `src/a.rs`\n- **Severity**: High\n- **Status**: {status}\n")
+    };
+    std::fs::write(
+        td.join("TD-20261001-rej.md"),
+        sheet("Rejected", "Unsafe call"),
+    )
+    .unwrap();
+    std::fs::write(
+        td.join("TD-20261001-adr.md"),
+        sheet("Accepted decision", "Global state"),
+    )
+    .unwrap();
+    // A Kronn task linked to a sheet the user rejected.
+    let source = crate::core::td_tasks::source_from(
+        "TD-20261001-rej",
+        &sheet("Verified in source", "Unsafe call"),
+        "docs/tech-debt/TD-20261001-rej.md".into(),
+    );
+    fx.state
+        .db
+        .with_conn(move |conn| {
+            crate::core::td_tasks::convert(conn, PROJECT_ID, &[source], &Default::default())
+        })
+        .await
+        .unwrap();
+    // The agent reverts the rejection, deletes the accepted sheet and
+    // recreates the rejected finding under a new id.
+    let rej = td.join("TD-20261001-rej.md");
+    let dup = fx.tools.path().join("dup.md");
+    std::fs::write(&dup, sheet("Verified in source", "Unsafe call")).unwrap();
+    let undo = format!(
+        "sed 's/Status\\*\\*: Rejected/Status**: Verified in source/' '{r}' > '{r}.n' && mv '{r}.n' '{r}'\nrm -f '{a}'\ncp '{dup}' '{d}'\n",
+        r = rej.display(),
+        a = td.join("TD-20261001-adr.md").display(),
+        d = td.join("TD-20261011-again.md").display(),
+        dup = dup.display(),
+    );
+    std::fs::write(fx.tools.path().join("undo"), undo).unwrap();
+    arm(fx.tools.path(), "noop", &fx.targets);
+    let body = run_full(&fx.state, None).await;
+    let done = sse_events(&body, "done")
+        .pop()
+        .unwrap_or_else(|| panic!("{body}"));
+    validation_settled(&fx.state, &done).await;
+    assert!(
+        !fx.tools.path().join("undo").exists(),
+        "the agent ran its edits"
+    );
+
+    let guarded = sse_events(&body, "td_decisions")
+        .pop()
+        .unwrap_or_else(|| panic!("{body}"));
+    assert_eq!(guarded["reverted"], json!(["TD-20261001-rej"]), "{guarded}");
+    assert_eq!(guarded["restored"], json!(["TD-20261001-adr"]), "{guarded}");
+    assert_eq!(
+        guarded["settled_duplicates"],
+        json!([["TD-20261011-again", "TD-20261001-rej"]]),
+        "{guarded}"
+    );
+    let decision = |id: &str| {
+        crate::core::audit_validation::td_decision(
+            &std::fs::read_to_string(td.join(format!("{id}.md"))).unwrap(),
+        )
+    };
+    use crate::core::audit_validation::TdDecision;
+    assert_eq!(decision("TD-20261001-rej"), Some(TdDecision::Rejected));
+    assert_eq!(
+        decision("TD-20261001-adr"),
+        Some(TdDecision::AcceptedDecision)
+    );
+    let status = fx
+        .state
+        .db
+        .with_conn(|conn| {
+            let key = crate::core::td_tasks::td_task_key(PROJECT_ID, "TD-20261001-rej");
+            let (id, _) = crate::db::planning::task_by_idempotency_key(conn, &key)?.unwrap();
+            Ok(crate::db::planning::get_task(conn, &id)?
+                .unwrap()
+                .summary
+                .status)
+        })
+        .await
+        .unwrap();
+    assert_eq!(status, crate::models::PlanningTaskStatus::Archived);
+
+    // A refresh of the security step under the cross-agent option.
+    let notes = format!(
+        "{BRIEFING_MARKER}\n{} ClaudeCode, Codex\n",
+        crate::core::cross_audit::BRIEFING_OPTION_PREFIX
+    );
+    fx.state
+        .db
+        .with_conn(move |conn| {
+            crate::db::projects::update_project_briefing_notes(conn, PROJECT_ID, Some(&notes))
+        })
+        .await
+        .unwrap();
+    let step = fx.step_of("docs/inconsistencies-security.md") as usize;
+    let partial = crate::api::audit::drift::partial_audit(
+        axum::extract::State(fx.state.clone()),
+        axum::extract::Path(PROJECT_ID.to_string()),
+        axum::Json(crate::models::PartialAuditRequest {
+            agent: AgentType::ClaudeCode,
+            connection_id: None,
+            tier: None,
+            steps: vec![step],
+        }),
+    )
+    .await
+    .into_response();
+    let partial = sse_body(partial).await;
+    let notice = sse_events(&partial, "single_agent")
+        .pop()
+        .unwrap_or_else(|| panic!("{partial}"));
+    assert!(
+        notice["message"].as_str().unwrap().contains("single-agent"),
+        "{partial}"
+    );
+    let done = sse_events(&partial, "done")
+        .pop()
+        .unwrap_or_else(|| panic!("{partial}"));
+    assert_eq!(done["cross_agent_skipped"], true, "{partial}");
+}

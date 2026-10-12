@@ -165,6 +165,23 @@ describe('projects.partialAuditStream', () => {
     expect(onDone).toHaveBeenCalledTimes(1);
   });
 
+  it('reports a single-agent refresh without ending the stream', async () => {
+    mockStreamingFetch([
+      sse('start', START_OK),
+      sse('single_agent', { message: 'single-agent' }),
+      sse('done', { ...DONE_OK, cross_agent_skipped: true }),
+    ]);
+    const { projects } = await import('../api');
+    const onSingleAgent = vi.fn();
+    const onDone = vi.fn();
+    await projects.partialAuditStream('p-1', REQ, {
+      onStepStart: vi.fn(), onChunk: vi.fn(), onStepDone: vi.fn(), onSingleAgent, onDone, onError: vi.fn(),
+    });
+    expect(onSingleAgent).toHaveBeenCalledTimes(1);
+    expect(onDone).toHaveBeenCalledTimes(1);
+    expect(onDone.mock.calls[0][0]?.status).toBe('complete');
+  });
+
   it('treats an aborted fetch as a clean done (no error)', async () => {
     mockAbortingFetch();
     const { projects } = await import('../api');

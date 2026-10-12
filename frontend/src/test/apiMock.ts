@@ -298,10 +298,10 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       convertTdTasks: resolve({ created: 0, already_linked: 0, skipped: 0, themes: [], items: [] }),
       auditTds: resolve({
         items: [], counts: { pending: 0, confirmed: 0, accepted_decision: 0, deferred: 0, rejected: 0 },
-        by_severity: [], gate: { blocking_total: 0, blocking_settled: 0, met: false },
-        validated: false, audit_date: null, validation_discussion_id: null,
+        by_severity: [], gate: { blocking_total: 0, blocking_settled: 0, met: false, open_disputes: 0 },
+        validated: false, audit_date: null, validation_discussion_id: null, dispute_discussion_id: null,
       }),
-      decideTds: resolve({ results: [], gate: { blocking_total: 0, blocking_settled: 0, met: false } }),
+      decideTds: resolve({ results: [], gate: { blocking_total: 0, blocking_settled: 0, met: false, open_disputes: 0 } }),
       createTdTask: resolve({ created: 0, already_linked: 0, skipped: 0, themes: [], items: [] }),
       tdTalk: resolve({ validation_discussion_id: null, discussion_id: null, messages: [] }),
       startTdTalk: resolve({ discussion_id: 'td-disc', created: true }),

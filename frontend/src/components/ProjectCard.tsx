@@ -1008,6 +1008,7 @@ export function ProjectCard({
         // NON-terminal (post-commit baseline failure): surface it, no cleanup
         // — the `done complete` that follows stays the terminal signal.
         onWarning: (message) => { toast(t('audit.streamWarning', message), 'error'); },
+        onSingleAgent: () => { toast(t('audit.partialSingleAgent'), 'info'); },
         onDone: (info) => {
           // A user cancel aborts the fetch and the parser reports a clean
           // done with no payload — the cancel handler already owns that UX

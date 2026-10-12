@@ -524,6 +524,26 @@ Release notes for 0.9.3 and earlier are available in the
   agent (`POST /api/projects/{id}/drift/acknowledge`). It refreshes their
   checksum mappings, and their citation fingerprints when recorded, never
   rewrites a doc, takes the audit lease, and is refused to a bridge token.
+- Tech-debt and cross-agent decisions now stick (KT-1208). Answering a
+  cross-agent dispute card applies it under the project's audit lease:
+  « dismiss » rejects the sheet, « keep » leaves it active, a refusal keeps
+  it disputed, and the sheet's Kronn block, the step index and the central
+  index say so instead of « human decision pending ». The project card shows
+  the open disputes with a link to their discussion, and `validate-audit`
+  refuses while one is open. Before a run Kronn snapshots the decided
+  sheets; afterwards it puts back a rejected or accepted sheet the run
+  deleted and any decision the run changed (a confirmed sheet the run
+  deleted stays deleted, reconciliation reports it), and flags a new sheet
+  that repeats a rejected or accepted one (same file, same problem). The
+  cross-agent pass reuses such a sheet instead of minting an id, keeps the
+  previous index's undetected rows, settled sheets and `owner="human"`
+  sections, and reports a step that rewrote nothing as `unchanged`. The
+  project badge and the health score count the same active sheets: rejected
+  and accepted sheets and `_`-prefixed reports are left out of both. The
+  Kronn task of a sheet that is rejected, accepted or removed is archived
+  (annotated only when work on it has started). A partial refresh states, in
+  its stream and its UI, that it runs single-agent when the briefing asks for
+  the cross-agent audit.
 - A favourite stays in Favoris while an agent runs or waits in it. From 20
   discussions on, a live pinned discussion moved to « À suivre » and left
   Favoris until the run ended. Favoris now lists every pinned discussion,

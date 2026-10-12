@@ -11,6 +11,62 @@ use crate::db::discussion_questions::{
 use crate::models::{ApiErrorCode, ApiResponse};
 use crate::AppState;
 
+/// Holds a project's audit lease for the life of a dispute decision.
+struct DisputeLease(
+    std::sync::Arc<std::sync::Mutex<crate::AuditTracker>>,
+    String,
+);
+
+impl Drop for DisputeLease {
+    fn drop(&mut self) {
+        if let Ok(mut tracker) = self.0.lock() {
+            tracker.release_lease(&self.1);
+        }
+    }
+}
+
+type Refusal = (StatusCode, Json<ApiResponse<DiscussionQuestion>>);
+
+/// A cross-agent dispute card rewrites a sheet and the indexes: it takes the
+/// project's audit lease, like every other writer of those files.
+async fn dispute_lease(
+    state: &AppState,
+    discussion_id: &str,
+    question_id: &str,
+) -> Result<Option<DisputeLease>, Box<Refusal>> {
+    let (discussion, question) = (discussion_id.to_string(), question_id.to_string());
+    let project = state
+        .db
+        .with_read_conn(move |conn| {
+            crate::db::audit_cross::dispute_project_of_question(conn, &discussion, &question)
+        })
+        .await
+        .map_err(|error| {
+            Box::new((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::err(error.to_string())),
+            ))
+        })?;
+    let Some(project_id) = project else {
+        return Ok(None);
+    };
+    let acquired = state
+        .audit_tracker
+        .lock()
+        .map(|mut tracker| tracker.try_acquire_lease(&project_id))
+        .unwrap_or(false);
+    if !acquired {
+        return Err(Box::new((
+            StatusCode::CONFLICT,
+            Json(ApiResponse::err_coded(
+                ApiErrorCode::Conflict,
+                "An audit is currently running on this project — decide this dispute once it has finished.",
+            )),
+        )));
+    }
+    Ok(Some(DisputeLease(state.audit_tracker.clone(), project_id)))
+}
+
 /// Launch a workflow declared by a resolved workflow-step question. The
 /// question row claims its run id first; creation and spawning happen only for
 /// the winning claim, so an HTTP replay observes the existing result.
@@ -164,6 +220,10 @@ pub async fn answer(
             config.server.avatar_email.clone(),
         )
     };
+    let _lease = match dispute_lease(&state, &discussion_id, &question_id).await {
+        Ok(lease) => lease,
+        Err(refusal) => return *refusal,
+    };
     let resolution_discussion_id = discussion_id.clone();
     let result = state
         .db
@@ -227,6 +287,10 @@ pub async fn decline(
                 .unwrap_or_else(|| "Human".into()),
             config.server.avatar_email.clone(),
         )
+    };
+    let _lease = match dispute_lease(&state, &discussion_id, &question_id).await {
+        Ok(lease) => lease,
+        Err(refusal) => return *refusal,
     };
     let resolution_discussion_id = discussion_id.clone();
     let result = state

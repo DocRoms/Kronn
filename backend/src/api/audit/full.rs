@@ -1066,6 +1066,8 @@ pub async fn full_audit(
         let pre_audit_td_snapshot = super::reconciliation::snapshot_tech_debt_dir(
             &docs_root.dir(&project_path),
         );
+        // KT-1208 — human TD decisions, restored after the run if it undid one.
+        let td_decisions_before = crate::core::td_decisions::snapshot(&docs_root.dir(&project_path));
 
         // chantier 4 (2026-06-04) — Option C re-audit dedup list. When the
         // project already has tech-debt entries, an in-place re-audit tends
@@ -1452,9 +1454,11 @@ pub async fn full_audit(
                         step_target: analysis_step.target_file.to_string(),
                     };
                     let outcome = super::cross_audit::run_cross_step(&runner, &project_path, agents, &full_prompt).await;
+                    let mut cross_unchanged = false;
                     let (mut success, mut warning, report) = match outcome {
                         Ok(mut report) => match super::cross_audit::write_outputs(&project_path, analysis_step.target_file, agents, &audit_run_id, &mut report) {
-                            Ok(()) => {
+                            Ok(changed) => {
+                                cross_unchanged = !changed;
                                 // KT-1079: the writes stay; validated docs are marked, a failed record only warns.
                                 let unmarked = super::helpers::mark_validated_doc_writes(
                                     &project_path,
@@ -1497,10 +1501,15 @@ pub async fn full_audit(
                     let cost = report.as_ref().and_then(|r| r.cost_usd_micros());
                     let duration_ms = step_started_at.elapsed().as_millis() as u64;
                     run_tokens.add(usage.total());
+                    if success && cross_unchanged {
+                        yield Event::default().event("step_unchanged").data(
+                            serde_json::json!({ "step": step, "file": file_label }).to_string(),
+                        );
+                    }
                     yield Event::default().event("step_done").data(serde_json::json!({
                         "step": step,
                         "success": success,
-                        "outcome": step_outcome_label(success, false),
+                        "outcome": step_outcome_label(success, cross_unchanged),
                         "file": file_label,
                         "tokens": usage.total(),
                         "duration_ms": duration_ms,
@@ -1513,7 +1522,7 @@ pub async fn full_audit(
                         if let Err(e) = db.with_conn(move |conn| {
                             crate::db::audit_runs::finalize_audit_step_with_outcome(
                                 conn, &run_id, step as u32, Utc::now(), duration_ms, &usage,
-                                recorded_total, success, warn_reason.as_deref(), false, false,
+                                recorded_total, success, warn_reason.as_deref(), false, success && cross_unchanged,
                             )?;
                             if let Some(cost) = cost {
                                 crate::db::audit_runs::set_step_cost(conn, &run_id, step as u32, cost)?;
@@ -2524,6 +2533,11 @@ pub async fn full_audit(
             }
         }
 
+        // Before reconciliation, which must not read a restored decision as a fix.
+        if let Some(event) = super::td_tasks::guard_decisions(&project_path, td_decisions_before).await {
+            yield event;
+        }
+
         // ── Phase 2.5: Reconciliation pass (0.8.2) ──
         // Only runs for Full audits — specialized kinds emit findings
         // into their own `inconsistencies-<kind>.md` file and would
@@ -3186,6 +3200,8 @@ pub async fn full_audit(
             warned_steps: progress.failed_steps().to_vec(),
             discussion_id: disc_id.clone(),
         });
+
+        super::td_tasks::close_after_audit(&db, &project_id, &project_path, &audit_run_id).await;
 
         // KT-1167 — the briefing asked for the tech debt as Kronn tasks. A
         // failure only warns: the audit itself is finished.
@@ -4134,20 +4150,9 @@ pub(crate) fn resume_drift_message(
     ))
 }
 
-/// True when a TD detail file's `- **Status**: <value>` line (mirrors the
-/// latest `audit_history` entry — see `mod.rs`'s Step 8 template) is
-/// `Rejected`. The user explicitly dismissed the finding during validation
-/// (Phase 2 "reject all/selected"); the file stays on disk as an audit
-/// trail (its row is removed from the index, not the detail file itself),
-/// so it must not keep weighing on the health score or severity tallies.
-fn td_status_is_rejected(content: &str) -> bool {
-    crate::core::audit_validation::td_decision(content)
-        == Some(crate::core::audit_validation::TdDecision::Rejected)
-}
-
-/// Scan every `TD-*.md` file in the tech-debt directory (skipping
-/// scaffolding/reconciliation reports and TDs the user explicitly
-/// `Rejected` during validation) and tally findings by severity.
+/// Scan every sheet of the tech-debt directory that is active debt (the
+/// same rule as the project badge: rejected and accepted sheets and
+/// `_`-prefixed reports are skipped) and tally findings by severity.
 ///
 /// The severity is matched from the line shape:
 ///   `- **Severity**: Critical | High | Medium | Low`
@@ -4164,18 +4169,13 @@ pub(crate) fn count_td_severities(td_dir: &std::path::Path) -> SeverityCounts {
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        // Skip scaffolding + reconciliation reports — same filter as
-        // `count_tech_debt` in scanner.rs to stay consistent.
-        if !name.ends_with(".md")
-            || name.starts_with('_')
-            || matches!(name, "README.md" | "TEMPLATE.md" | "_template.md")
-        {
+        let Some(id) = crate::core::td_index::counted_sheet_stem(name) else {
             continue;
-        }
+        };
         let Ok(content) = std::fs::read_to_string(&path) else {
             continue;
         };
-        if td_status_is_rejected(&content) {
+        if !crate::core::td_index::content_is_active(id, &content) {
             continue;
         }
         // Pick the FIRST Severity line — multiple lines in the same
@@ -6279,9 +6279,17 @@ mod severity_tests {
         )
         .unwrap();
 
+        // Accepted as a decision: not active debt either.
+        std::fs::write(
+            td_dir.join("TD-004.md"),
+            "# W\n- **Severity**: Medium\n- **Status**: Accepted decision\n",
+        )
+        .unwrap();
+
         let counts = count_td_severities(td_dir);
         assert_eq!(counts.critical, 1, "only the confirmed TD counts");
         assert_eq!(counts.high, 0, "the rejected High TD must not count");
+        assert_eq!(counts.medium, 0, "the accepted Medium TD must not count");
     }
 
     #[test]

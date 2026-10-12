@@ -66,6 +66,28 @@ describe('TechDebtBlock', () => {
     expect(screen.getByTestId('td-rule')).toHaveAttribute('data-met', 'true');
   });
 
+  it('flags open cross-agent disputes and links to their discussion', async () => {
+    const list = tdList([tdItem('TD-1', 'High', 'confirmed')]);
+    mocked(projectsApi.auditTds).mockResolvedValueOnce({
+      ...list,
+      gate: { ...list.gate, met: false, open_disputes: 2 },
+      dispute_discussion_id: 'disc-disputes',
+    });
+    const props = renderBlock();
+    expect(await screen.findByTestId('td-disputes')).toHaveTextContent('techDebt.disputes 2');
+    expect(screen.queryByTestId('td-validate')).toBeNull();
+    fireEvent.click(screen.getByTestId('td-disputes-link'));
+    expect(props.onOpenDiscussion).toHaveBeenCalledWith('disc-disputes');
+    expect(props.onNavigate).toHaveBeenCalledWith('discussions');
+  });
+
+  it('shows no dispute line when none is open', async () => {
+    mocked(projectsApi.auditTds).mockResolvedValueOnce(tdList([tdItem('TD-1', 'High')]));
+    renderBlock();
+    expect(await screen.findByTestId('td-block')).toBeInTheDocument();
+    expect(screen.queryByTestId('td-disputes')).toBeNull();
+  });
+
   it('opens the review screen', async () => {
     mocked(projectsApi.auditTds).mockResolvedValueOnce(tdList([tdItem('TD-1', 'High')]));
     renderBlock();

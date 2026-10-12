@@ -2009,6 +2009,10 @@ pub struct TdValidationGate {
     pub blocking_total: u32,
     pub blocking_settled: u32,
     pub met: bool,
+    /// Sheets whose cross-agent dispute card still waits for a human: none
+    /// may be open for the project to be validated.
+    #[serde(default)]
+    pub open_disputes: u32,
 }
 
 /// `GET /api/projects/:id/audit/tds`.
@@ -2022,6 +2026,9 @@ pub struct TdReviewList {
     pub validated: bool,
     pub audit_date: Option<DateTime<Utc>>,
     pub validation_discussion_id: Option<String>,
+    /// The discussion holding the oldest open dispute card.
+    #[serde(default)]
+    pub dispute_discussion_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

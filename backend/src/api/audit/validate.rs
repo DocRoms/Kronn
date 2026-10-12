@@ -88,11 +88,27 @@ pub async fn validate_audit(
     // KT-982 — settling every Critical and High sheet stands in for the
     // validation discussion's terminal marker.
     let td_gate_path = scanner::resolve_host_path(&project.path);
-    let td_gate_met = tokio::task::spawn_blocking(move || {
-        crate::core::td_review::validation_gate(&td_gate_path).met
+    let td_items = tokio::task::spawn_blocking(move || {
+        crate::core::td_review::validation_items(&td_gate_path)
     })
     .await
-    .unwrap_or(false);
+    .unwrap_or_default();
+    let td_gate_met = crate::core::td_review::gate(&td_items).met;
+
+    // A cross-agent dispute a human has not answered is an open question on
+    // the audit itself: the project cannot be validated over it.
+    let pid = project.id.clone();
+    let pending = state
+        .db
+        .with_read_conn(move |conn| crate::db::audit_cross::pending_disputes(conn, &pid))
+        .await;
+    let pending = match pending {
+        Ok(pending) => pending,
+        Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
+    };
+    if let Some(refusal) = open_disputes_refusal(&td_items, &pending) {
+        return Json(ApiResponse::err(refusal));
+    }
 
     let pid = project.id.clone();
     let gate = state
@@ -229,6 +245,23 @@ pub async fn validate_audit(
 
     let status = scanner::detect_audit_status(&project.path);
     Json(ApiResponse::ok(status))
+}
+
+/// Why validation is refused while dispute cards wait, if any do.
+pub(crate) fn open_disputes_refusal(
+    items: &[TdReviewItem],
+    pending: &[crate::db::audit_cross::PendingDispute],
+) -> Option<String> {
+    let open = crate::core::td_review::open_disputes(items, pending);
+    if open.is_empty() {
+        return None;
+    }
+    let ids: Vec<&str> = open.iter().map(|d| d.td_id.as_str()).collect();
+    Some(format!(
+        "{} cross-agent dispute(s) still await a human decision ({}): answer each card in the \"Cross-agent audit — disputes\" discussion, or settle those sheets in the tech-debt review, before the project can be validated.",
+        open.len(),
+        ids.join(", ")
+    ))
 }
 
 /// Documents Kronn owns that still carry a placeholder or a `TODO:` marker.

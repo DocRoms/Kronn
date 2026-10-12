@@ -739,3 +739,418 @@ async fn a_relocated_project_gets_the_cross_step_documents_under_its_root() {
     let estimate = estimate(2, None, None, &ai);
     assert_eq!(estimate.cross_checked_steps, vec![target.to_string()]);
 }
+
+// ── KT-1208: the human answer to a dispute card is applied ──
+
+struct Disputed {
+    dir: tempfile::TempDir,
+    state: AppState,
+    disc_id: String,
+    question_id: String,
+    td_id: String,
+    run_id: String,
+}
+
+async fn disputed_project() -> Disputed {
+    let dir = repo();
+    let fake = Fake::default()
+        .answer("detect", &CLAUDE, findings(&[sql()]))
+        .answer("detect", &CODEX, findings(&[]))
+        .answer(
+            "check",
+            &CODEX,
+            verdicts(serde_json::json!([{"id": "F1", "verdict": "refute", "argument": "AGAINST", "proof": guard_proof()}])),
+        )
+        .answer(
+            "reply",
+            &CLAUDE,
+            replies(serde_json::json!([{"id": "F1", "stance": "maintain", "argument": "FOR",
+                "proof": [{"file": "src/db.rs", "line": 4, "quote": "conn.execute(&q)"}]}])),
+        );
+    let agents = [CLAUDE, CODEX];
+    let mut report = run_cross_step(&fake, dir.path(), &agents, STEP_PROMPT)
+        .await
+        .unwrap();
+    write_outputs(
+        dir.path(),
+        "docs/inconsistencies-security.md",
+        &agents,
+        "run-1",
+        &mut report,
+    )
+    .unwrap();
+    let td_id = report.records[0].td_id.clone().unwrap();
+    let state = crate::api::other_projects_fixture::fresh_state();
+    crate::api::other_projects_fixture::register_project(
+        &state,
+        crate::api::other_projects_fixture::PROJECT_ID,
+        "audited",
+        &dir.path().to_string_lossy(),
+        serde_json::json!({}),
+    )
+    .await;
+    let run_id = Uuid::new_v4().to_string();
+    let disputes = dispute_discussion(
+        crate::api::other_projects_fixture::PROJECT_ID,
+        &CLAUDE,
+        "en",
+        ModelTier::Reasoning,
+        &report,
+    )
+    .unwrap();
+    let disc_id = disputes.0.id.clone();
+    let (rid, did) = (run_id.clone(), disc_id.clone());
+    let question_id = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::audit_runs::insert_running(
+                conn,
+                &rid,
+                crate::api::other_projects_fixture::PROJECT_ID,
+                "Security",
+                "ClaudeCode",
+                Utc::now(),
+            )?;
+            persist(
+                conn,
+                &rid,
+                1,
+                "docs/inconsistencies-security.md",
+                &agents,
+                &report,
+                Some(&disputes),
+            )?;
+            Ok(
+                crate::db::discussion_questions::list(conn, &did)?.questions[0]
+                    .id
+                    .clone(),
+            )
+        })
+        .await
+        .unwrap();
+    Disputed {
+        dir,
+        state,
+        disc_id,
+        question_id,
+        td_id,
+        run_id,
+    }
+}
+
+async fn answer_card(d: &Disputed, option: &str) -> axum::http::StatusCode {
+    crate::api::discussion_questions::answer(
+        axum::extract::State(d.state.clone()),
+        axum::extract::Path((d.disc_id.clone(), d.question_id.clone())),
+        axum::Json(
+            crate::db::discussion_questions::AnswerDiscussionQuestionRequest {
+                selected_option_ids: vec![option.to_string()],
+                item_answers: vec![],
+                text: None,
+                idempotency_key: format!("answer-{option}"),
+            },
+        ),
+    )
+    .await
+    .0
+}
+
+async fn pending(d: &Disputed) -> Vec<crate::db::audit_cross::PendingDispute> {
+    d.state
+        .db
+        .with_read_conn(|conn| {
+            crate::db::audit_cross::pending_disputes(
+                conn,
+                crate::api::other_projects_fixture::PROJECT_ID,
+            )
+        })
+        .await
+        .unwrap()
+}
+
+fn sheet_of(d: &Disputed) -> String {
+    std::fs::read_to_string(d.dir.path().join(format!("docs/tech-debt/{}.md", d.td_id))).unwrap()
+}
+
+fn index_of(d: &Disputed) -> String {
+    std::fs::read_to_string(d.dir.path().join("docs/inconsistencies-security.md")).unwrap()
+}
+
+#[tokio::test]
+async fn dismissing_a_dispute_rejects_the_sheet_and_clears_the_pending_label() {
+    let d = disputed_project().await;
+    assert!(index_of(&d).contains("(disputed — human decision pending)"));
+    let items = crate::core::td_review::read_items(&d.dir.path().join("docs"));
+    let open = pending(&d).await;
+    assert_eq!(open.len(), 1);
+    let refusal = crate::api::audit::validate::open_disputes_refusal(&items, &open).unwrap();
+    assert!(
+        refusal.contains(&d.td_id) && refusal.contains("1 cross-agent dispute"),
+        "{refusal}"
+    );
+
+    assert_eq!(answer_card(&d, "dismiss").await, axum::http::StatusCode::OK);
+    let sheet = sheet_of(&d);
+    assert_eq!(
+        crate::core::audit_validation::td_decision(&sheet),
+        Some(crate::core::audit_validation::TdDecision::Rejected)
+    );
+    assert!(
+        sheet.contains("- **Verdict**: disputed — dismissed by a human"),
+        "{sheet}"
+    );
+    let index = index_of(&d);
+    assert!(!index.contains("human decision pending"), "{index}");
+    assert!(index.contains("disputed — dismissed by a human"));
+    assert!(pending(&d).await.is_empty());
+    let rid = d.run_id.clone();
+    let rows = d
+        .state
+        .db
+        .with_read_conn(move |conn| crate::db::audit_cross::list_findings(conn, &rid))
+        .await
+        .unwrap();
+    assert_eq!(
+        rows[0].1.human_decision,
+        Some(crate::core::cross_audit::HumanDecision::Dismiss)
+    );
+    let items = crate::core::td_review::read_items(&d.dir.path().join("docs"));
+    assert!(crate::api::audit::validate::open_disputes_refusal(&items, &[]).is_none());
+}
+
+#[tokio::test]
+async fn keeping_a_dispute_leaves_the_sheet_active_and_says_so() {
+    let d = disputed_project().await;
+    let before = crate::core::td_index::parse_sheet(&d.td_id, &sheet_of(&d));
+    assert_eq!(answer_card(&d, "keep").await, axum::http::StatusCode::OK);
+    let after = crate::core::td_index::parse_sheet(&d.td_id, &sheet_of(&d));
+    assert!(after.is_active());
+    assert_eq!(after.status, before.status);
+    assert!(sheet_of(&d).contains("- **Verdict**: disputed — kept by a human"));
+    let index = index_of(&d);
+    assert!(index.contains("(disputed — kept by a human)") && !index.contains("decision pending"));
+    assert!(pending(&d).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_dispute_waits_for_a_running_audit_and_a_wrong_option_changes_nothing() {
+    let d = disputed_project().await;
+    let pid = crate::api::other_projects_fixture::PROJECT_ID;
+    assert!(d.state.audit_tracker.lock().unwrap().try_acquire_lease(pid));
+    let before = (sheet_of(&d), index_of(&d));
+    assert_eq!(
+        answer_card(&d, "dismiss").await,
+        axum::http::StatusCode::CONFLICT
+    );
+    assert_eq!((sheet_of(&d), index_of(&d)), before);
+    assert_eq!(pending(&d).await.len(), 1);
+    d.state.audit_tracker.lock().unwrap().release_lease(pid);
+    // An answer without keep or dismiss is refused, the card stays pending.
+    let status = crate::api::discussion_questions::answer(
+        axum::extract::State(d.state.clone()),
+        axum::extract::Path((d.disc_id.clone(), d.question_id.clone())),
+        axum::Json(
+            crate::db::discussion_questions::AnswerDiscussionQuestionRequest {
+                selected_option_ids: vec![],
+                item_answers: vec![],
+                text: Some("not sure".into()),
+                idempotency_key: "text".into(),
+            },
+        ),
+    )
+    .await
+    .0;
+    assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+    assert_eq!((sheet_of(&d), index_of(&d)), before);
+    assert_eq!(pending(&d).await.len(), 1);
+}
+
+#[tokio::test]
+async fn declining_a_dispute_keeps_the_finding_and_ends_the_pending_label() {
+    let d = disputed_project().await;
+    let status = crate::api::discussion_questions::decline(
+        axum::extract::State(d.state.clone()),
+        axum::extract::Path((d.disc_id.clone(), d.question_id.clone())),
+        axum::Json(
+            crate::db::discussion_questions::DeclineDiscussionQuestionRequest {
+                idempotency_key: "decline".into(),
+                reason: None,
+            },
+        ),
+    )
+    .await
+    .0;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let index = index_of(&d);
+    assert!(
+        index.contains("(disputed — left undecided by a human)"),
+        "{index}"
+    );
+    assert!(crate::core::td_index::parse_sheet(&d.td_id, &sheet_of(&d)).is_active());
+    assert!(pending(&d).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_card_outside_the_recorded_dispute_discussion_moves_nothing() {
+    let d = disputed_project().await;
+    let did = d.disc_id.clone();
+    let key = format!("cross-audit.run1.{}", d.td_id);
+    let found = d
+        .state
+        .db
+        .with_read_conn(move |conn| {
+            Ok((
+                crate::db::audit_cross::dispute_target(conn, &did, &key)?.is_some(),
+                crate::db::audit_cross::dispute_target(conn, "another-room", &key)?.is_some(),
+            ))
+        })
+        .await
+        .unwrap();
+    assert_eq!(found, (true, false));
+}
+
+#[tokio::test]
+async fn a_rerun_keeps_undetected_and_settled_rows_and_reports_unchanged() {
+    let dir = repo();
+    let agents = [CLAUDE, CODEX];
+    let confirmed = || {
+        Fake::default()
+            .answer("detect", &CLAUDE, findings(&[sql()]))
+            .answer("detect", &CODEX, findings(&[]))
+            .answer(
+                "check",
+                &CODEX,
+                verdicts(serde_json::json!([{"id": "F1", "verdict": "confirm", "argument": "real", "proof": []}])),
+            )
+    };
+    let mut first = run_cross_step(&confirmed(), dir.path(), &agents, STEP_PROMPT)
+        .await
+        .unwrap();
+    assert!(write_outputs(
+        dir.path(),
+        "docs/inconsistencies-security.md",
+        &agents,
+        "run-1",
+        &mut first
+    )
+    .unwrap());
+    let mut again = run_cross_step(&confirmed(), dir.path(), &agents, STEP_PROMPT)
+        .await
+        .unwrap();
+    assert!(
+        !write_outputs(
+            dir.path(),
+            "docs/inconsistencies-security.md",
+            &agents,
+            "run-2",
+            &mut again
+        )
+        .unwrap(),
+        "the same findings rewrite nothing: the step is unchanged"
+    );
+
+    // A person adds a row and a human-owned note; another sheet gets rejected.
+    let index_path = dir.path().join("docs/inconsistencies-security.md");
+    let td = dir.path().join("docs/tech-debt");
+    std::fs::write(
+        td.join("TD-20250101-rej.md"),
+        "# r\n- **Area**: `src/web.rs`\n- **Status**: Rejected\n- **Problem**: Old CORS\n",
+    )
+    .unwrap();
+    let human_row = "| TD-20250101-human | Written by a person | `src/web.rs` | Low |";
+    let edited = index_of_text(&index_path).replace(
+        "|----|---------|------|----------|\n",
+        &format!("|----|---------|------|----------|\n{human_row}\n"),
+    ) + "\nSee TD-20250101-rej.\n\n<!-- kronn:section name=\"notes\" owner=\"human\" -->\nKeep me.\n<!-- kronn:section:end -->\n";
+    std::fs::write(&index_path, &edited).unwrap();
+
+    // The next run finds nothing at all.
+    let empty = Fake::default()
+        .answer("detect", &CLAUDE, findings(&[]))
+        .answer("detect", &CODEX, findings(&[]));
+    let mut third = run_cross_step(&empty, dir.path(), &agents, STEP_PROMPT)
+        .await
+        .unwrap();
+    write_outputs(
+        dir.path(),
+        "docs/inconsistencies-security.md",
+        &agents,
+        "run-3",
+        &mut third,
+    )
+    .unwrap();
+    let index = index_of_text(&index_path);
+    let carried = index
+        .split(crate::core::cross_audit::CARRIED_HEADING)
+        .nth(1)
+        .unwrap();
+    assert!(carried.contains(human_row), "{index}");
+    assert!(
+        carried.contains("SQL query built with format!"),
+        "an active sheet is never dropped: {index}"
+    );
+    let settled = index
+        .split(crate::core::cross_audit::SETTLED_HEADING)
+        .nth(1)
+        .unwrap();
+    assert!(
+        settled.contains("`TD-20250101-rej` — Old CORS — rejected"),
+        "{index}"
+    );
+    assert!(
+        index.contains("Keep me."),
+        "a human-owned section survives: {index}"
+    );
+}
+
+fn index_of_text(path: &Path) -> String {
+    std::fs::read_to_string(path).unwrap()
+}
+
+#[tokio::test]
+async fn the_card_flags_an_open_dispute_and_validation_waits_for_it() {
+    let d = disputed_project().await;
+    let pid = crate::api::other_projects_fixture::PROJECT_ID.to_string();
+    let list = |state: AppState, pid: String| async move {
+        crate::api::audit::td_review::list_tds(
+            axum::extract::State(state),
+            axum::extract::Path(pid),
+        )
+        .await
+        .0
+        .data
+        .unwrap()
+    };
+    let before = list(d.state.clone(), pid.clone()).await;
+    assert_eq!(before.gate.open_disputes, 1);
+    assert!(!before.gate.met);
+    assert_eq!(
+        before.dispute_discussion_id.as_deref(),
+        Some(d.disc_id.as_str())
+    );
+    let refused = crate::api::audit::validate::validate_audit(
+        axum::extract::State(d.state.clone()),
+        axum::extract::Path(pid.clone()),
+    )
+    .await
+    .0;
+    assert!(refused
+        .error
+        .unwrap_or_default()
+        .contains("cross-agent dispute"));
+
+    assert_eq!(answer_card(&d, "keep").await, axum::http::StatusCode::OK);
+    let after = list(d.state.clone(), pid.clone()).await;
+    assert_eq!(after.gate.open_disputes, 0);
+    assert_eq!(after.dispute_discussion_id, None);
+    let next = crate::api::audit::validate::validate_audit(
+        axum::extract::State(d.state.clone()),
+        axum::extract::Path(pid),
+    )
+    .await
+    .0;
+    assert!(!next
+        .error
+        .unwrap_or_default()
+        .contains("cross-agent dispute"));
+}

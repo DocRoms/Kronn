@@ -88,6 +88,7 @@ struct ListContext {
     tasks: HashMap<String, TdLinkedTask>,
     mentions: HashMap<String, u32>,
     talks: HashMap<String, (String, u32)>,
+    disputes: Vec<crate::db::audit_cross::PendingDispute>,
 }
 
 fn list_context(conn: &Connection, project_id: &str) -> anyhow::Result<ListContext> {
@@ -147,6 +148,7 @@ fn list_context(conn: &Connection, project_id: &str) -> anyhow::Result<ListConte
         tasks,
         mentions,
         talks,
+        disputes: crate::db::audit_cross::pending_disputes(conn, project_id)?,
     })
 }
 
@@ -162,13 +164,15 @@ fn assemble(mut items: Vec<TdReviewItem>, context: ListContext, validated: bool)
         item.talk_count = mentions + talk_count;
     }
     let (counts, by_severity) = td_review::counts(&items);
+    let open = td_review::open_disputes(&items, &context.disputes);
     TdReviewList {
-        gate: td_review::gate(&items),
+        gate: td_review::with_disputes(td_review::gate(&items), open.len()),
         counts,
         by_severity,
         validated,
         audit_date: context.audit_date,
         validation_discussion_id: context.validation_discussion_id,
+        dispute_discussion_id: open.first().map(|d| d.discussion_id.clone()),
         items,
     }
 }
@@ -318,8 +322,26 @@ pub async fn decide_tds(
     }
     let _lease = LeaseGuard(state.audit_tracker.clone(), project.id.clone());
     let items = req.items;
+    let docs_root = DocsRoot::of(&project_path);
+    let docs_dir = docs_root.dir(&project_path);
+    let docs_rel = docs_root.rel().to_string();
     match tokio::task::spawn_blocking(move || decide_at(&project_path, &items)).await {
-        Ok(Ok(outcome)) => Json(ApiResponse::ok(outcome)),
+        Ok(Ok(mut outcome)) => {
+            let pid = project.id.clone();
+            let after = state
+                .db
+                .with_conn(move |conn| {
+                    td_tasks::close_inactive_logged(conn, &pid, &docs_dir, "tech-debt review");
+                    let pending = crate::db::audit_cross::pending_disputes(conn, &pid)?;
+                    Ok((td_review::read_items_rel(&docs_dir, &docs_rel), pending))
+                })
+                .await;
+            if let Ok((items, pending)) = after {
+                let open = td_review::open_disputes(&items, &pending).len();
+                outcome.gate = td_review::with_disputes(outcome.gate, open);
+            }
+            Json(ApiResponse::ok(outcome))
+        }
         Ok(Err(message)) => Json(ApiResponse::err_coded(ApiErrorCode::Validation, message)),
         Err(e) => Json(ApiResponse::err(format!("Task failed: {e}"))),
     }

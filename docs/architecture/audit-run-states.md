@@ -54,7 +54,7 @@ by a human (KT-1131). An accepted step keeps its failure on record:
   finalizes the run. It goes to `Completed`, writes its validation discussion,
   which lists the accepted steps apart, and makes the project validatable.
   The validate gate still requires the latest run to be `Completed`.
-  [src: file: backend/src/api/audit/validate.rs:152#Completed]
+  [src: file: backend/src/api/audit/validate.rs:168#Completed]
 
 ## Leases and agents that could block a project
 

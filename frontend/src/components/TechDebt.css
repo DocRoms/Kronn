@@ -88,6 +88,15 @@
   color: var(--kr-text-secondary);
 }
 .td-rule[data-met="true"] { color: var(--kr-success); }
+.td-disputes {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-warning);
+}
 
 .td-primary-btn, .td-secondary-btn, .td-link-btn, .td-icon-btn, .td-bulk-btn {
   display: inline-flex;

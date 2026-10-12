@@ -399,6 +399,33 @@ mod tests {
     }
 
     #[test]
+    fn count_tech_debt_counts_only_active_sheets_like_the_health_score() {
+        let tmp = tempfile::tempdir().unwrap();
+        let docs = tmp.path().join("docs");
+        let td = docs.join("tech-debt");
+        std::fs::create_dir_all(&td).unwrap();
+        let sheet = |status: &str| format!("# T\n- **Severity**: High\n- **Status**: {status}\n");
+        std::fs::write(td.join("TD-1-open.md"), sheet("Verified in source")).unwrap();
+        std::fs::write(td.join("TD-2-confirmed.md"), sheet("Confirmed by user")).unwrap();
+        std::fs::write(td.join("TD-3-deferred.md"), sheet("Deferred")).unwrap();
+        std::fs::write(td.join("TD-4-rejected.md"), sheet("Rejected")).unwrap();
+        std::fs::write(td.join("TD-5-accepted.md"), sheet("Accepted decision")).unwrap();
+        std::fs::write(td.join("_reconciliation-2026-10-11.md"), sheet("Open")).unwrap();
+        // A settled sheet's leftover index row does not bring it back.
+        std::fs::write(
+            docs.join("inconsistencies-tech-debt.md"),
+            "| TD-4-rejected | r | A | High |\n| TD-9-index-only | i | A | High |\n",
+        )
+        .unwrap();
+        assert_eq!(count_tech_debt(&tmp.path().to_string_lossy()), 4);
+        let severities = crate::api::audit::full::count_td_severities(&td);
+        assert_eq!(
+            severities.high, 3,
+            "the health score tallies the same active sheets"
+        );
+    }
+
+    #[test]
     fn count_tech_debt_legacy_ai_folder() {
         // Path-agnostic: a project still on the pre-0.7.1 layout
         // (legacy `ai/` directory) should still get its TDs counted.

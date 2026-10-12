@@ -882,6 +882,14 @@ fn decline_inner(
                         sans elle, ou reformule-la si la décision reste nécessaire."
         )
     );
+    if let Some(mut target) = cross_dispute_of(conn, discussion_id, &question.key)? {
+        crate::core::cross_audit_decision::apply(
+            conn,
+            &mut target,
+            crate::core::cross_audit::HumanDecision::Declined,
+        )
+        .map_err(AnswerError::Invalid)?;
+    }
     // Refusing a ceiling question is keeping the partial answer.
     let ceiling = super::discussion_ceiling_requests::decide(
         conn,
@@ -918,6 +926,23 @@ fn decline_inner(
     question.updated_at = record.answered_at.clone();
     question.answer = Some(record);
     Ok(question)
+}
+
+/// The cross-agent finding a card decides, when the card is a dispute card
+/// of the dispute discussion Kronn recorded.
+fn cross_dispute_of(
+    conn: &Connection,
+    discussion_id: &str,
+    key: &str,
+) -> Result<Option<crate::db::audit_cross::DisputeTarget>, AnswerError> {
+    if !key.starts_with(crate::core::cross_audit::QUESTION_KEY_PREFIX) {
+        return Ok(None);
+    }
+    Ok(crate::db::audit_cross::dispute_target(
+        conn,
+        discussion_id,
+        key,
+    )?)
 }
 
 pub fn answer(
@@ -1138,6 +1163,17 @@ fn answer_inner(
     } else {
         None
     };
+    let cross_dispute = cross_dispute_of(conn, discussion_id, &question.key)?;
+    if let Some(mut target) = cross_dispute.clone() {
+        let decision = selected
+            .first()
+            .and_then(|id| crate::core::cross_audit::HumanDecision::from_option_id(id))
+            .ok_or_else(|| {
+                AnswerError::Invalid("Choose keep or dismiss for a cross-agent dispute".into())
+            })?;
+        crate::core::cross_audit_decision::apply(conn, &mut target, decision)
+            .map_err(AnswerError::Invalid)?;
+    }
     if let Some(resolutions) = audit_resolutions.as_ref() {
         crate::core::audit_validation::apply_td_resolutions(
             conn,
@@ -1160,7 +1196,10 @@ fn answer_inner(
              ce qui y est déjà établi.",
         );
     }
-    let dispatch = if audit_resolutions.is_some() {
+    // The decision is applied by Kronn: no agent turn follows a dispute card.
+    let dispatch = if cross_dispute.is_some() {
+        false
+    } else if audit_resolutions.is_some() {
         let pending: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM discussion_questions WHERE discussion_id=?1 AND state='pending'",

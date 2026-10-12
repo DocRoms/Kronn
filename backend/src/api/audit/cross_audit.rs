@@ -352,28 +352,110 @@ pub(crate) fn heading_for(
     }
 }
 
+/// Writes `content` unless the file already holds it; true when it wrote.
+fn write_if_changed(path: &Path, content: &str) -> Result<bool, String> {
+    match std::fs::read_to_string(path) {
+        Ok(existing) if existing == content => Ok(false),
+        Ok(_) => std::fs::write(path, content)
+            .map(|()| true)
+            .map_err(|e| format!("write {}: {e}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::fs::write(path, content)
+            .map(|()| true)
+            .map_err(|e| format!("write {}: {e}", path.display())),
+        Err(e) => Err(format!("read {}: {e}", path.display())),
+    }
+}
+
+/// Rows of the previous index's findings tables (`| ID | Problem | …`).
+fn previous_finding_rows(previous: &str) -> Vec<(String, String)> {
+    let mut rows = Vec::new();
+    let mut in_table = false;
+    for line in previous.lines() {
+        let t = line.trim();
+        if t.starts_with("| ID | Problem |") {
+            in_table = true;
+            continue;
+        }
+        if !t.starts_with('|') {
+            in_table = false;
+            continue;
+        }
+        let first = t[1..].split('|').next().unwrap_or("").trim();
+        if in_table && crate::core::td_index::is_td_id(first) {
+            rows.push((first.to_string(), t.to_string()));
+        }
+    }
+    rows
+}
+
+/// What the previous index held that this run must not drop: rows it did
+/// not re-detect (an active sheet, or a row without a sheet that a person
+/// wrote), and settled sheets it named.
+type Carried = (Vec<String>, Vec<(String, String, String)>);
+
+fn carried_from_previous(previous: &str, td_dir: &Path, records: &[CrossFindingRecord]) -> Carried {
+    let redetected: std::collections::BTreeSet<&str> =
+        records.iter().filter_map(|r| r.td_id.as_deref()).collect();
+    let sheet = |id: &str| {
+        std::fs::read_to_string(td_dir.join(format!("{id}.md")))
+            .ok()
+            .map(|c| crate::core::td_index::parse_sheet(id, &c))
+    };
+    let mut rows: Vec<String> = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for (id, row) in previous_finding_rows(previous) {
+        if redetected.contains(id.as_str()) || !seen.insert(id.clone()) {
+            continue;
+        }
+        if sheet(&id).is_none_or(|s| s.is_active()) {
+            rows.push(row);
+        }
+    }
+    let mut settled = Vec::new();
+    for id in crate::core::td_review::mentioned_td_ids(previous) {
+        if redetected.contains(id.as_str()) {
+            continue;
+        }
+        if let Some(s) = sheet(&id).filter(|s| !s.is_active()) {
+            let label = match s.decision {
+                Some(crate::core::audit_validation::TdDecision::Rejected) => "rejected",
+                _ => "accepted as a decision",
+            };
+            settled.push((id, s.title, label.to_string()));
+        }
+    }
+    (rows, settled)
+}
+
 /// Step 8, on disk: TD ids, human-card keys, the index and the sheets. An
 /// existing sheet keeps its body; only its Kronn provenance block changes.
+/// The previous index's undetected rows, settled sheets and human-owned
+/// sections are kept. Returns whether any file changed.
 pub(crate) fn write_outputs(
     root: &Path,
     target_file: &str,
     agents: &[AgentType],
     run_id: &str,
     report: &mut CrossStepReport,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let docs_root = crate::core::docs_location::DocsRoot::of(root);
     let td_dir = docs_root.file(root, "tech-debt");
     std::fs::create_dir_all(&td_dir).map_err(|e| format!("create {}: {e}", td_dir.display()))?;
     let yyyymmdd = Utc::now().format("%Y%m%d").to_string();
     engine::assign_td_ids(&mut report.records, &td_dir, &yyyymmdd);
-    for record in report
-        .records
-        .iter_mut()
-        .filter(|r| r.outcome == Outcome::Disputed)
-    {
+    for record in report.records.iter_mut().filter(|r| r.awaits_human()) {
         record.question_key = Some(engine::question_key(run_id, record));
     }
-    for record in report.records.iter().filter(|r| r.outcome.in_audit()) {
+    let target = root.join(target_file);
+    crate::core::fs_guard::assert_contained_no_symlink(root, &target)?;
+    let previous = match std::fs::read_to_string(&target) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("read {}: {e}", target.display())),
+    };
+    let (carried_rows, settled) = carried_from_previous(&previous, &td_dir, &report.records);
+    let mut changed = false;
+    for record in report.records.iter().filter(|r| r.has_sheet()) {
         let Some(id) = record.td_id.as_deref() else {
             continue;
         };
@@ -384,7 +466,7 @@ pub(crate) fn write_outputs(
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => engine::render_td_sheet(record),
             Err(e) => return Err(format!("read {}: {e}", path.display())),
         };
-        std::fs::write(&path, content).map_err(|e| format!("write {}: {e}", path.display()))?;
+        changed |= write_if_changed(&path, &content)?;
     }
     let index = engine::render_index(&IndexInput {
         heading: heading_for(target_file, &docs_root),
@@ -393,10 +475,13 @@ pub(crate) fn write_outputs(
         dropped: &report.dropped,
         checklists: &report.checklists,
         failed_agents: &report.failed_agents,
+        carried_rows: &carried_rows,
+        settled: &settled,
     });
-    let target = root.join(target_file);
-    crate::core::fs_guard::assert_contained_no_symlink(root, &target)?;
-    std::fs::write(&target, index).map_err(|e| format!("write {}: {e}", target.display()))
+    let index = super::anti_hallu_enforce::enforce_human_owned_sections(&previous, &index)
+        .map_or(index, |(restored, _)| restored);
+    changed |= write_if_changed(&target, &index)?;
+    Ok(changed)
 }
 
 /// The human cards of the serious disagreements, in their own discussion:
@@ -411,7 +496,7 @@ pub(crate) fn dispute_discussion(
     let cards: Vec<String> = report
         .records
         .iter()
-        .filter(|r| r.outcome == Outcome::Disputed)
+        .filter(|r| r.awaits_human())
         .filter_map(engine::dispute_card)
         .collect();
     if cards.is_empty() {
@@ -548,6 +633,7 @@ pub(crate) fn summary_json(
         "dismissed": count(Outcome::Dismissed),
         "disputed": count(Outcome::Disputed),
         "not_cross_checked": count(Outcome::NotCrossChecked),
+        "kept_settled": report.records.iter().filter(|r| r.settled_as.is_some()).count(),
         "failed_agents": report.failed_agents.iter().map(|(a, _)| engine::agent_label(a)).collect::<Vec<_>>(),
         "dispute_discussion_id": dispute_discussion,
     })

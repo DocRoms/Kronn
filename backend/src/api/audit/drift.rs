@@ -443,6 +443,18 @@ pub(crate) async fn run_partial_pipeline(
         }
     };
     let chain = super::steps_for(crate::models::AuditKind::Full, &docs_root);
+    // KT-1208 — a partial refresh runs every step single-agent; it says so
+    // when the briefing asked for the cross-agent audit on a refreshed step.
+    let cross_agent_skipped = super::cross_audit::briefing_cross_agents(
+        briefing_notes.as_deref(),
+        project.briefing_notes.as_deref(),
+    )
+    .is_some()
+        && requested_steps.iter().any(|&n| {
+            chain.get(n.wrapping_sub(1)).is_some_and(|s| {
+                crate::core::cross_audit::is_cross_checked_target(s.target_file, &docs_root)
+            })
+        });
     let redact_targets: Vec<String> = chain.iter().map(|s| s.target_file.to_string()).collect();
     let first_chained_step = ANALYSIS_STEPS.len() + 1;
 
@@ -681,6 +693,12 @@ pub(crate) async fn run_partial_pipeline(
             "requested_steps": &requested_steps,
         });
         yield Event::default().event("start").data(start.to_string());
+        if cross_agent_skipped {
+            yield Event::default().event("single_agent").data(serde_json::json!({
+                "message": "This refresh runs single-agent: the cross-agent audit option applies to Full audits only.",
+            }).to_string());
+        }
+        let td_decisions_before = crate::core::td_decisions::snapshot(&docs_root.dir(&project_path));
 
         // Same-inputs parity with the Full pipeline (Codex lot-3 #4/#3):
         // when step 8 is selected, its deterministic detector signals AND
@@ -1678,6 +1696,11 @@ pub(crate) async fn run_partial_pipeline(
             }
         }
 
+        if let Some(event) = super::td_tasks::guard_decisions(&project_path, td_decisions_before).await {
+            yield event;
+        }
+        super::td_tasks::close_after_audit(&state.db, &project_id_for_progress, &project_path, &audit_run_id).await;
+
         let disc_id: Option<String> = pending_validation.as_ref().map(|(d, _)| d.id.clone());
         if let Some(vdisc) = disc_id.clone() {
             yield Event::default().event("validation_created").data(
@@ -1706,6 +1729,7 @@ pub(crate) async fn run_partial_pipeline(
             "discussion_id": disc_id,
             "audit_run_id": audit_run_id,
             "revalidation": revalidation.is_some(),
+            "cross_agent_skipped": cross_agent_skipped,
         });
         drop_guard.disarm();
         yield Event::default().event("done").data(done.to_string());

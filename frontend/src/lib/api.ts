@@ -1445,6 +1445,9 @@ export const projects = {
       /** NON-terminal warning after a committed run (e.g. baseline write
        * failed post-Completed) — `done` still follows and stays coherent. */
       onWarning?: (message: string) => void;
+      /** The briefing asks for the cross-agent audit, but a partial refresh
+       * runs every step single-agent. Informational, fired after `start`. */
+      onSingleAgent?: () => void;
       /** Typed terminal payload (matrix v2): `complete` | `interrupted` |
        * `no_change` + the exact requested-steps partition. Undefined on a
        * user abort (fetch cancelled before any done event). */
@@ -1495,6 +1498,7 @@ export const projects = {
             // the `done interrupted` that follows.
             case 'step_error': handlers.onStepError?.(p.error ?? 'Step error', p.step); break;
             case 'warning': handlers.onWarning?.(p.message ?? 'Audit warning'); break;
+            case 'single_agent': handlers.onSingleAgent?.(); break;
             case 'done': {
               // Runtime-validated: a malformed terminal payload must never
               // read as success.

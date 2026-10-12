@@ -9378,7 +9378,11 @@ talk_count: number, talk_discussion_id: string | null, };
 /**
  * `GET /api/projects/:id/audit/tds`.
  */
-export type TdReviewList = { items: Array<TdReviewItem>, counts: TdStateCounts, by_severity: Array<TdSeverityCount>, gate: TdValidationGate, validated: boolean, audit_date: string | null, validation_discussion_id: string | null, };
+export type TdReviewList = { items: Array<TdReviewItem>, counts: TdStateCounts, by_severity: Array<TdSeverityCount>, gate: TdValidationGate, validated: boolean, audit_date: string | null, validation_discussion_id: string | null,
+/**
+ * The discussion holding the oldest open dispute card.
+ */
+dispute_discussion_id: string | null, };
 
 /**
  * KT-982 — where a tech-debt sheet stands in the human review.
@@ -9443,7 +9447,12 @@ export type TdTaskTheme = { theme: string, label: string, task_reference: string
  * The rule that lets a project be validated without the discussion marker:
  * every Critical and High sheet settled (a deferral does not count).
  */
-export type TdValidationGate = { blocking_total: number, blocking_settled: number, met: boolean, };
+export type TdValidationGate = { blocking_total: number, blocking_settled: number, met: boolean,
+/**
+ * Sheets whose cross-agent dispute card still waits for a human: none
+ * may be open for the project to be validated.
+ */
+open_disputes: number, };
 
 export type TechDebtItem = { id: string, problem: string, area: string, severity: string, };
 

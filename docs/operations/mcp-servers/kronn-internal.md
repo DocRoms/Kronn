@@ -45,7 +45,7 @@ most 16 variables. Workflow ids are non-empty and at most 128 characters;
 variable names are 1–64 ASCII letters, digits, `_`, `-`, or `.`, and each value
 is a control-free string of at most 8,000 characters.
 `[src: file: backend/src/db/discussion_questions.rs:291-298#valid_resume_variable]`
-`[src: file: backend/src/api/discussion_questions.rs:17-63#launch_question_resume]`
+`[src: file: backend/src/api/discussion_questions.rs:73-119#launch_question_resume]`
 
 Pause execution, delegation and completion of the affected lot until the human
 answers. Continue unrelated tasks and keep listening with `disc_wait_for_peer`.
