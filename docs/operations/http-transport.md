@@ -47,8 +47,8 @@ per response as integer micro-USD and exposed by `reported_cost_usd_micros`;
 no cost, the sum is partial and the run's cost is `None` as well.
 [src: file: backend/src/agents/chat_codec.rs:160#cost_usd_micros]
 [src: file: backend/src/agents/runner.rs:1975-1980#cost_incomplete]
-[src: file: backend/src/api/audit/full.rs:1823#reported_cost_usd_micros]
-[src: file: backend/src/api/audit/drift.rs:921#reported_cost_usd_micros]
+[src: file: backend/src/api/audit/full.rs:1830#reported_cost_usd_micros]
+[src: file: backend/src/api/audit/drift.rs:927#reported_cost_usd_micros]
 
 Audit executors have a separate bounded policy: 64 calls per file mutation tool
 (`write_file`, `edit_file`, `edit_lines`, `insert_after_line`), 48 for
