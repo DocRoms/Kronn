@@ -32,3 +32,14 @@ export function rowsToRules(rows: RuleRow[]): ProjectRule[] {
         : null,
     }));
 }
+
+/** Saved answers as editor rows, ids from `firstId`. */
+export function rulesToRows(rules: ProjectRule[], firstId: number): RuleRow[] {
+  return rules.map((r, i) => ({
+    id: firstId + i,
+    kind: r.kind,
+    text: r.text,
+    patternKind: r.pattern?.kind ?? null,
+    pattern: r.pattern?.value ?? '',
+  }));
+}

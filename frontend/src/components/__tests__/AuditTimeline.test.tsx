@@ -486,7 +486,7 @@ describe('AuditTimeline', () => {
   it('reopens a saved briefing pre-filled, never while an audit runs (KT-1196)', async () => {
     vi.mocked(projectsApi.savedBriefing).mockResolvedValueOnce({
       purpose: 'Saved purpose', team: 'T', maturity: 'M', dependencies: 'D', traps: 'X', additional: '',
-      project: null, existing_docs: null, td_to_tasks: false, cross_audit_agents: [],
+      project: null, existing_docs: null, project_rules: null, td_to_tasks: false, cross_audit_agents: [],
     });
     const { unmount } = wrap(<AuditTimeline {...props({ briefingDone: true, auditActive: true })} />);
     const locked = screen.getByTestId('audit-timeline-briefing-edit');

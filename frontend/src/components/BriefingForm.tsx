@@ -132,6 +132,8 @@ export function BriefingForm({
   const [project, setProject] = useState<BriefingProjectAnswers>(emptyProjectAnswers);
   const [docs, setDocs] = useState<BriefingDocLocation[]>([]);
   const [rules, setRules] = useState<ProjectRule[]>([]);
+  const [rulesSeed, setRulesSeed] = useState<{ key: number; rules: ProjectRule[] }>({ key: 0, rules: [] });
+  const seedRules = (next: ProjectRule[]) => setRulesSeed(s => ({ key: s.key + 1, rules: next }));
   // KT-1196 — the saved briefing pre-fills the form. When it arrives after a
   // real change, only the still-empty sections are filled and a notice offers the rest.
   const [savedDocs, setSavedDocs] = useState<SavedDocs>('loading');
@@ -169,6 +171,7 @@ export function BriefingForm({
     setTdToTasks(saved.td_to_tasks);
     setCrossAudit(saved.cross_audit_agents.length > 0);
     setCrossAgents(saved.cross_audit_agents);
+    seedRules(saved.project_rules?.rules ?? []);
     setLateSaved(null);
     setPrefilled(true);
   };
@@ -185,6 +188,9 @@ export function BriefingForm({
     setTdToTasks(v => v || saved.td_to_tasks);
     setCrossAgents(list => (list.length > 0 ? list : saved.cross_audit_agents));
     setCrossAudit(on => on || saved.cross_audit_agents.length > 0);
+    // Rows without text count as empty: the saved rules replace them.
+    const savedRules = saved.project_rules?.rules ?? [];
+    if (rules.length === 0 && savedRules.length > 0) seedRules(savedRules);
     setLateSaved(saved);
   };
   if (incoming) {
@@ -525,7 +531,7 @@ export function BriefingForm({
 
       <BriefingExistingDocs projectId={projectId} onChange={setDocs} saved={savedDocs} />
 
-      <BriefingProjectRules onChange={setRules} />
+      <BriefingProjectRules key={rulesSeed.key} initial={rulesSeed.rules} onChange={setRules} />
 
       {linkedRepos && (
         <section className="briefing-project" aria-labelledby="briefing-linked-title" data-testid="briefing-linked-repos">

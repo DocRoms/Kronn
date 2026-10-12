@@ -7811,7 +7811,11 @@ export type SaveApiKeyRequest = { id?: string | null, name: string, provider: st
  * The saved briefing as the form's answers (KT-1196), read back from
  * `docs/briefing.md` or the DB notes so the form opens pre-filled.
  */
-export type SavedBriefing = { purpose: string, team: string, maturity: string, dependencies: string, traps: string, additional: string, project: BriefingProjectAnswers | null, existing_docs: BriefingDocsAnswers | null, td_to_tasks: boolean, cross_audit_agents: Array<AgentType>, };
+export type SavedBriefing = { purpose: string, team: string, maturity: string, dependencies: string, traps: string, additional: string, project: BriefingProjectAnswers | null, existing_docs: BriefingDocsAnswers | null,
+/**
+ * KT-1193 rules and bans, from their machine copy.
+ */
+project_rules: BriefingProjectRules | null, td_to_tasks: boolean, cross_audit_agents: Array<AgentType>, };
 
 export type ScanConfig = { paths: Array<string>, ignore: Array<string>,
 /**

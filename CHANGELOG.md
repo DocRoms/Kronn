@@ -54,6 +54,10 @@ Release notes for 0.9.3 and earlier are available in the
   saved briefing arrives after a real change, the typed text is kept, only
   the empty sections are filled from it, and « Charger le briefing
   enregistré » loads the rest, so a save never wipes what was not changed.
+  The rules and bans (KT-1193) reload into their editor too, following the
+  same late-prefill rule, so re-saving a reopened briefing no longer drops
+  them; `## Project rules` ends the last answer instead of being read into
+  it, and the reopened form is refused (409) while an audit runs.
 - The briefing asks about existing documentation and linked projects
   (KT-999). « Existing documentation? » lists the locations Kronn finds in
   the repository (`README*`, `docs/`, `doc/`, `wiki/`, ADR folders,

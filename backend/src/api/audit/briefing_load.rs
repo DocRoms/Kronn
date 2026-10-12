@@ -26,10 +26,11 @@ pub(crate) const ADDITIONAL_NONE: &str = "None.";
 /// next heading listed here or in [`QUESTION_HEADINGS`]; any other heading
 /// stays inside the answer, so a section the form does not know survives a
 /// re-save. A new form section must be added here.
-pub(crate) fn form_section_headings() -> [&'static str; 3] {
+pub(crate) fn form_section_headings() -> [&'static str; 4] {
     [
         super::project_doc::FACTS_HEADING,
         super::briefing_docs::DOCS_HEADING,
+        super::briefing_rules::RULES_HEADING,
         crate::core::td_tasks::BRIEFING_OPTIONS_HEADING,
     ]
 }
@@ -138,6 +139,7 @@ pub(crate) fn parse_saved_briefing(notes: &str) -> SavedBriefing {
         additional,
         project: super::project_doc::parse_answers(notes),
         existing_docs: super::briefing_docs::parse(notes),
+        project_rules: super::briefing_rules::parse(notes),
         td_to_tasks: crate::core::td_tasks::briefing_wants_td_tasks(notes),
         cross_audit_agents: crate::core::cross_audit::briefing_cross_agents(notes)
             .unwrap_or_default(),

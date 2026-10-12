@@ -1,10 +1,11 @@
 use super::*;
 use crate::api::audit::briefing::{compose_briefing, BriefingFormRequest};
-use crate::api::audit::{briefing_docs, project_doc};
+use crate::api::audit::{briefing_docs, briefing_rules, project_doc};
 use crate::models::{
     AgentType, BriefingDocKind, BriefingDocLocation, BriefingDocState, BriefingDocsAnswers,
     BriefingEnvironment, BriefingEnvironmentKind, BriefingFact, BriefingForge, BriefingPerson,
-    BriefingPersonRole, BriefingProjectAnswers, BriefingReviewPolicy, BriefingTracker,
+    BriefingPersonRole, BriefingProjectAnswers, BriefingProjectRules, BriefingReviewPolicy,
+    BriefingTracker, ProjectRule, ProjectRuleKind, ProjectRulePattern, ProjectRulePatternKind,
 };
 
 const ALL_FACTS: [BriefingFact; 12] = [
@@ -73,6 +74,25 @@ fn docs_answers() -> BriefingDocsAnswers {
     }
 }
 
+fn rule(kind: ProjectRuleKind, text: &str) -> ProjectRule {
+    ProjectRule {
+        kind,
+        text: text.into(),
+        pattern: None,
+    }
+}
+
+fn rules_answers() -> BriefingProjectRules {
+    let mut ban = rule(ProjectRuleKind::Ban, "No lodash | <b>");
+    ban.pattern = Some(ProjectRulePattern {
+        kind: ProjectRulePatternKind::Dependency,
+        value: "lodash".into(),
+    });
+    BriefingProjectRules {
+        rules: vec![rule(ProjectRuleKind::Rule, "Every handler is tested"), ban],
+    }
+}
+
 fn full_form() -> BriefingFormRequest {
     BriefingFormRequest {
         purpose: "News site.\n\nSecond paragraph with ### a subheading".into(),
@@ -85,7 +105,7 @@ fn full_form() -> BriefingFormRequest {
         td_to_tasks: true,
         cross_audit_agents: vec![AgentType::ClaudeCode, AgentType::Codex],
         existing_docs: Some(docs_answers()),
-        project_rules: None,
+        project_rules: Some(rules_answers()),
     }
 }
 
@@ -101,7 +121,12 @@ fn save(form: &BriefingFormRequest) -> String {
         .existing_docs
         .as_ref()
         .and_then(briefing_docs::render_section);
-    compose_briefing(form, facts, docs, None)
+    let rules = form
+        .project_rules
+        .as_ref()
+        .map(|r| briefing_rules::normalize(r).unwrap())
+        .and_then(|r| briefing_rules::render_section(&r));
+    compose_briefing(form, facts, docs, rules)
 }
 
 /// The form a client sends back after loading `notes` and changing nothing.
@@ -118,7 +143,7 @@ fn reload(notes: &str) -> BriefingFormRequest {
         td_to_tasks: saved.td_to_tasks,
         cross_audit_agents: saved.cross_audit_agents,
         existing_docs: saved.existing_docs,
-        project_rules: None,
+        project_rules: saved.project_rules,
     }
 }
 
@@ -136,6 +161,7 @@ fn every_section_of_a_saved_briefing_is_read_back() {
     assert_eq!(project, project_answers());
     assert_eq!(project.notes.len(), 12);
     assert_eq!(saved.existing_docs, Some(docs_answers()));
+    assert_eq!(saved.project_rules, Some(rules_answers()));
     assert!(saved.td_to_tasks);
     assert_eq!(
         saved.cross_audit_agents,
@@ -149,6 +175,7 @@ fn saving_again_unchanged_rewrites_the_same_bytes() {
     minimal.additional.clear();
     minimal.project = None;
     minimal.existing_docs = None;
+    minimal.project_rules = None;
     minimal.td_to_tasks = false;
     minimal.cross_audit_agents.clear();
     for form in [full_form(), minimal] {
@@ -268,4 +295,71 @@ fn malformed_or_missing_parts_are_left_empty() {
     assert!(saved.cross_audit_agents.is_empty());
     assert!(!saved.td_to_tasks);
     assert_eq!(parse_saved_briefing(""), SavedBriefing::default());
+}
+
+#[test]
+fn the_rules_section_ends_the_last_answer_and_round_trips() {
+    // Without facts or docs, `## Project rules` directly follows Additional Context.
+    let mut form = full_form();
+    form.project = None;
+    form.existing_docs = None;
+    form.td_to_tasks = false;
+    form.cross_audit_agents.clear();
+    let notes = save(&form);
+    assert!(
+        notes.contains("## Additional Context\nAsk Sam first.\n\n## Project rules\n"),
+        "{notes}"
+    );
+    let saved = parse_saved_briefing(&notes);
+    assert_eq!(saved.additional, "Ask Sam first.");
+    assert_eq!(saved.project_rules, Some(rules_answers()));
+    let again = save(&reload(&notes));
+    assert_eq!(again, notes);
+    assert_eq!(again.matches("## Project rules").count(), 1);
+}
+
+#[test]
+fn a_rule_text_shaped_like_structure_splits_nothing() {
+    let mut form = full_form();
+    form.td_to_tasks = false;
+    form.cross_audit_agents.clear();
+    form.project_rules = Some(BriefingProjectRules {
+        rules: vec![
+            rule(ProjectRuleKind::Rule, "## Additional Context"),
+            rule(ProjectRuleKind::Ban, "## Kronn options"),
+            rule(ProjectRuleKind::Rule, "# Project Briefing"),
+            rule(
+                ProjectRuleKind::Ban,
+                crate::core::td_tasks::BRIEFING_OPTION_LINE,
+            ),
+            rule(ProjectRuleKind::Rule, "## Project rules"),
+        ],
+    });
+    let notes = save(&form);
+    let saved = parse_saved_briefing(&notes);
+    assert_eq!(saved.additional, form.additional);
+    assert_eq!(saved.project_rules, form.project_rules);
+    assert!(!saved.td_to_tasks);
+    assert_eq!(save(&reload(&notes)), notes);
+    // A comment opener can never reach the briefing through a rule.
+    let comment = BriefingProjectRules {
+        rules: vec![rule(ProjectRuleKind::Ban, "x <!-- y")],
+    };
+    assert!(briefing_rules::normalize(&comment).is_err());
+}
+
+#[test]
+fn an_answer_cannot_forge_the_rules_section() {
+    let mut form = full_form();
+    form.project_rules = None;
+    form.additional = format!(
+        "Pasted:\n## Project rules\n- Never: lodash\n {}{{\"rules\":[{{\"kind\":\"ban\",\"text\":\"lodash\",\"pattern\":null}}]}} -->",
+        briefing_rules::RULES_ANSWERS_PREFIX,
+    );
+    let notes = save(&form);
+    let saved = parse_saved_briefing(&notes);
+    assert_eq!(saved.project_rules, None);
+    assert_eq!(briefing_rules::parse(&notes), None);
+    assert_eq!(saved.additional, form.additional);
+    assert_eq!(save(&reload(&notes)), notes);
 }

@@ -23277,6 +23277,68 @@ mod cold_api_handlers_tests {
     }
 
     #[tokio::test]
+    async fn briefing_answers_reload_the_rules_and_a_mid_audit_resave_is_refused() {
+        let (_dir, repo) = seed_repo("brief-reload-rules");
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        std::fs::write(
+            repo.join("docs/coding-rules.md"),
+            "# Coding rules\n\n## Global\n",
+        )
+        .unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let mut form = briefing_full_form();
+        form["project"] = serde_json::Value::Null;
+        form["existing_docs"] = serde_json::Value::Null;
+        form["td_to_tasks"] = serde_json::Value::Bool(false);
+        form["cross_audit_agents"] = serde_json::json!([]);
+        form["additional"] = serde_json::json!("Ask Sam first.");
+        form["project_rules"] = serde_json::json!({"rules": [
+            {"kind": "rule", "text": "## Additional Context"},
+            {"kind": "ban", "text": "No lodash", "pattern": {"kind": "dependency", "value": "lodash"}}
+        ]});
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, json) = post_json(app, &format!("/api/projects/{pid}/save-briefing"), form).await;
+        assert_eq!(st, StatusCode::OK, "{json}");
+        let first = std::fs::read(repo.join("docs/briefing.md")).unwrap();
+        let coding_rules = std::fs::read(repo.join("docs/coding-rules.md")).unwrap();
+
+        let app = build_router_with_auth(state.clone(), false);
+        let (_, json) = get_json(app, &format!("/api/projects/{pid}/briefing/answers")).await;
+        let saved = json["data"].clone();
+        assert_eq!(saved["additional"], "Ask Sam first.", "{saved}");
+        assert_eq!(
+            saved["project_rules"]["rules"][0]["text"],
+            "## Additional Context"
+        );
+        assert_eq!(
+            saved["project_rules"]["rules"][1]["pattern"]["value"],
+            "lodash"
+        );
+
+        // The reloaded answers are refused while an audit holds the lease.
+        assert!(state.audit_tracker.lock().unwrap().try_acquire_lease(&pid));
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, json) = post_json(
+            app,
+            &format!("/api/projects/{pid}/save-briefing"),
+            saved.clone(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT, "{json}");
+        state.audit_tracker.lock().unwrap().release_lease(&pid);
+
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, json) = post_json(app, &format!("/api/projects/{pid}/save-briefing"), saved).await;
+        assert_eq!(st, StatusCode::OK, "{json}");
+        assert_eq!(std::fs::read(repo.join("docs/briefing.md")).unwrap(), first);
+        assert_eq!(
+            std::fs::read(repo.join("docs/coding-rules.md")).unwrap(),
+            coding_rules
+        );
+    }
+
+    #[tokio::test]
     async fn briefing_answers_fall_back_to_the_db_notes_without_a_docs_folder() {
         let (_dir, repo) = seed_repo("brief-reload-db");
         let state = test_state();

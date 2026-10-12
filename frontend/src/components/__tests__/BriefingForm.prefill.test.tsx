@@ -51,6 +51,12 @@ const SAVED: SavedBriefing = {
       { path: 'README.md', kind: 'readme', state: 'reference', note: 'setup', source_of_truth: true, last_commit: '2024-03-02' },
     ],
   },
+  project_rules: {
+    rules: [
+      { kind: 'rule', text: 'Every handler is tested', pattern: null },
+      { kind: 'ban', text: 'No lodash', pattern: { kind: 'dependency', value: 'lodash' } },
+    ],
+  },
   td_to_tasks: true,
   cross_audit_agents: ['ClaudeCode', 'Codex'],
 };
@@ -112,6 +118,14 @@ describe('BriefingForm prefill (KT-1196)', () => {
     expect(note('tracker_key')).toHaveValue('board EW only');
     expect(note('forge')).toHaveValue('');
 
+    const rules = within(screen.getByTestId('briefing-rules'));
+    expect(rules.getByRole('textbox', { name: 'Ligne 1' })).toHaveValue('Every handler is tested');
+    expect(within(rules.getByRole('radiogroup', { name: 'Ligne 1 : toujours ou jamais' }))
+      .getByRole('radio', { name: 'Toujours' })).toHaveAttribute('aria-checked', 'true');
+    expect(rules.getByRole('textbox', { name: 'Ligne 2' })).toHaveValue('No lodash');
+    expect(rules.getByRole('combobox', { name: 'Motif vérifiable de la ligne 2' })).toHaveValue('dependency');
+    expect(rules.getByRole('textbox', { name: 'Motif de la ligne 2' })).toHaveValue('lodash');
+
     expect(screen.getByTestId('briefing-td-to-tasks')).toBeChecked();
     expect(screen.getByTestId('briefing-cross-audit')).toBeChecked();
     expect(screen.getByTestId('briefing-cross-agent-ClaudeCode')).toHaveAttribute('aria-checked', 'true');
@@ -152,6 +166,7 @@ describe('BriefingForm prefill (KT-1196)', () => {
     });
     expect(sent.td_to_tasks).toBe(true);
     expect(sent.cross_audit_agents).toEqual(['ClaudeCode', 'Codex']);
+    expect(sent.project_rules).toEqual(SAVED.project_rules);
   });
 
   it('without a saved briefing the form starts empty and keeps every detected location', async () => {
@@ -200,6 +215,7 @@ describe('BriefingForm prefill (KT-1196)', () => {
     expect(sent.existing_docs.locations.map((l: { path: string }) => l.path)).toEqual(['README.md']);
     expect(sent.td_to_tasks).toBe(true);
     expect(sent.cross_audit_agents).toEqual(['ClaudeCode', 'Codex']);
+    expect(sent.project_rules).toEqual(SAVED.project_rules);
 
     // « Charger le briefing enregistré » replaces the typed text too.
     fireEvent.click(within(notice).getByRole('button', { name: 'Charger le briefing enregistré' }));
@@ -217,6 +233,29 @@ describe('BriefingForm prefill (KT-1196)', () => {
     await screen.findByTestId('briefing-late-prefill');
     expect(checked('tracker')).toBe('Linear');
     expect(document.querySelectorAll('textarea')[1]).toHaveValue(SAVED.team);
+  });
+
+  it('after a typed rule, the saved rules do not replace it until the whole briefing is loaded', async () => {
+    let resolve: (v: SavedBriefing) => void = () => {};
+    mocked(projectsApi.savedBriefing).mockReturnValueOnce(new Promise<SavedBriefing>(r => { resolve = r; }));
+    mocked(projectsApi.saveBriefing).mockResolvedValue(true);
+    wrap();
+    fireEvent.click(screen.getByTestId('briefing-rules-add'));
+    const rules = () => within(screen.getByTestId('briefing-rules'));
+    fireEvent.change(rules().getByRole('textbox', { name: 'Ligne 1' }), { target: { value: 'Typed ban' } });
+    resolve(SAVED);
+    const notice = await screen.findByTestId('briefing-late-prefill');
+    expect(rules().getByRole('textbox', { name: 'Ligne 1' })).toHaveValue('Typed ban');
+    expect(rules().queryByRole('textbox', { name: 'Ligne 2' })).toBeNull();
+    // An empty question is still filled from the saved briefing.
+    expect(document.querySelectorAll('textarea')[1]).toHaveValue(SAVED.team);
+
+    fireEvent.click(within(notice).getByRole('button', { name: 'Charger le briefing enregistré' }));
+    expect(rules().getByRole('textbox', { name: 'Ligne 1' })).toHaveValue('Every handler is tested');
+    expect(rules().getByRole('textbox', { name: 'Ligne 2' })).toHaveValue('No lodash');
+    submit();
+    await waitFor(() => expect(projectsApi.saveBriefing).toHaveBeenCalledTimes(1));
+    expect(payload().project_rules).toEqual(SAVED.project_rules);
   });
 
   it('every project fact takes an optional note, sent trimmed with the answers', async () => {

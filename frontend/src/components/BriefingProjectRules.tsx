@@ -8,19 +8,21 @@ import { Plus, X } from 'lucide-react';
 import { useT } from '../lib/I18nContext';
 import type { ProjectRule, ProjectRuleKind, ProjectRulePatternKind } from '../types/generated';
 import {
-  PATTERN_PLACEHOLDERS, RULES_MAX, RULE_PATTERN_KINDS, RULE_PATTERN_MAX, RULE_TEXT_MAX, rowsToRules, type RuleRow,
+  PATTERN_PLACEHOLDERS, RULES_MAX, RULE_PATTERN_KINDS, RULE_PATTERN_MAX, RULE_TEXT_MAX, rowsToRules, rulesToRows, type RuleRow,
 } from './briefingRules';
 
 const KINDS: ProjectRuleKind[] = ['rule', 'ban'];
 
 interface Props {
   onChange: (rules: ProjectRule[]) => void;
+  /** Rows on mount; the parent remounts the editor (`key`) to load others. */
+  initial?: ProjectRule[];
 }
 
-export function BriefingProjectRules({ onChange }: Props) {
+export function BriefingProjectRules({ onChange, initial = [] }: Props) {
   const { t } = useT();
-  const nextId = useRef(1);
-  const [rows, setRows] = useState<RuleRow[]>([]);
+  const nextId = useRef(initial.length + 1);
+  const [rows, setRows] = useState<RuleRow[]>(() => rulesToRows(initial, 1));
 
   useEffect(() => { onChange(rowsToRules(rows)); }, [rows, onChange]);
 

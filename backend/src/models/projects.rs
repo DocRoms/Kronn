@@ -2327,6 +2327,8 @@ pub struct SavedBriefing {
     pub additional: String,
     pub project: Option<BriefingProjectAnswers>,
     pub existing_docs: Option<BriefingDocsAnswers>,
+    /// KT-1193 rules and bans, from their machine copy.
+    pub project_rules: Option<BriefingProjectRules>,
     pub td_to_tasks: bool,
     pub cross_audit_agents: Vec<AgentType>,
 }
