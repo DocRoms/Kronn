@@ -155,7 +155,7 @@ category without rewriting migrations 172/174, preserving the previous rows,
 identities, foreign keys, category checks and indexes.
 [src: file: frontend/src/lib/importantMessageDraft.ts:54-60#takeScalars]
 [src: file: backend/src/db/sql/175_important_message_information_category.sql:1-3#discussion_important_messages_next]
-[src: file: backend/src/db/migrations.rs:1697-1701#migration_175_preserves_populated_cards_and_closes_information_category]
+[src: file: backend/src/db/migrations.rs:1701-1705#migration_175_preserves_populated_cards_and_closes_information_category]
 
 ## Tests
 

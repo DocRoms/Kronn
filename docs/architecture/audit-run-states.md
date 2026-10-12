@@ -71,7 +71,7 @@ by a human (KT-1131). An accepted step keeps its failure on record:
   runs. While an audit of the project shows progress, such an agent is not
   started: its dispatch goes back to the queue with its attempts intact. A
   run clears its progress before it spawns its own validation agent.
-  [src: file: backend/src/api/audit/full.rs:665-667#stop_validation_agents] [src: file: backend/src/api/audit/full.rs:226#stop_validation_agents] [src: file: backend/src/api/discussions/runtime.rs:493#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1163-1166#hold_validation_during_audit] [src: file: backend/src/api/audit/full.rs:3129-3132#clear_progress]
+  [src: file: backend/src/api/audit/full.rs:665-667#stop_validation_agents] [src: file: backend/src/api/audit/full.rs:226#stop_validation_agents] [src: file: backend/src/api/discussions/runtime.rs:493#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1164-1167#hold_validation_during_audit] [src: file: backend/src/api/audit/full.rs:3129-3132#clear_progress]
 - **Cancel.** A cancel waits for the worker to acknowledge it. Without that
   acknowledgement it answers with an error, and the UI keeps the audit shown,
   marked "cancel pending". It deletes only the validation discussion linked to

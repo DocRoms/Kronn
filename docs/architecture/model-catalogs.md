@@ -264,7 +264,7 @@ preceding registered migration (161, the ACP session migration). Tests pin manua
 disappearance/reappearance, refresh errors, cache staleness, provider media
 capability isolation and same-model isolation across HTTP connections.
 Generated TypeScript remains owned by `make typegen`.
-[src: file: backend/src/db/migrations.rs:1863-1875#model_catalog_upgrades_from_its_immediate_predecessor]
+[src: file: backend/src/db/migrations.rs:1867-1879#model_catalog_upgrades_from_its_immediate_predecessor]
 [src: file: backend/src/db/model_catalog.rs:1311-1340#disappearance_downgrades_to_cached_never_deletes]
 [src: file: backend/src/db/model_catalog.rs:1504-1505#identical_http_model_ids_are_isolated_by_connection]
 [src: file: docs/testing-quality.md:15-16#typegen]
