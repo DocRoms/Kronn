@@ -72,21 +72,55 @@ pub async fn audit_steps() -> Json<ApiResponse<Vec<AuditStepInfo>>> {
     Json(ApiResponse::ok(steps))
 }
 
-/// 0.8.4 (#298) — fetch the most-recent **completed** audit run for a
-/// project, or `None`. Sister of `audit_latest_resumable` (which only
-/// returns Interrupted rows); this one returns Completed rows so the
-/// ProjectCard recap panel knows which `audit_run_id` to feed to
-/// `audit_run_steps` below.
+/// What a client needs to tell where a project's audits stand.
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct AuditLatest {
+    /// The newest run of any status: a Cancelled, Failed or Interrupted run
+    /// after a Completed one is the project's state, not history.
+    pub latest: Option<AuditRun>,
+    /// The newest Completed run, the health snapshot.
+    pub latest_completed: Option<AuditRun>,
+    /// 1-based steps a resume of `latest` runs; empty when it is not resumable.
+    pub steps_to_redo: Vec<u32>,
+    /// The lease is held by a run nobody can settle: every launch is refused
+    /// until the cleanup action releases it (KT-1134).
+    pub lease_orphaned: bool,
+}
+
+/// GET /api/projects/{id}/audit-latest
 pub async fn audit_latest(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Json<ApiResponse<Option<crate::models::AuditRun>>> {
+) -> Json<ApiResponse<AuditLatest>> {
+    let lease_orphaned = match state.audit_tracker.lock() {
+        Ok(t) => t.lease_orphaned(&id),
+        Err(_) => return Json(ApiResponse::err("audit tracker lock poisoned")),
+    };
     let result = state
         .db
-        .with_read_conn(move |conn| crate::db::audit_runs::latest_completed(conn, &id))
+        .with_read_conn(move |conn| {
+            let latest = crate::db::audit_runs::list_recent(conn, &id, 1)?
+                .into_iter()
+                .next();
+            let latest_completed = crate::db::audit_runs::latest_completed(conn, &id)?;
+            let steps_to_redo = match crate::db::audit_runs::latest_resumable(conn, &id)? {
+                Some(run) => {
+                    let steps = crate::db::audit_runs::list_audit_steps(conn, &run.id)?;
+                    ResumableAudit::new(run, &steps).steps_to_redo
+                }
+                None => Vec::new(),
+            };
+            Ok(AuditLatest {
+                latest,
+                latest_completed,
+                steps_to_redo,
+                lease_orphaned,
+            })
+        })
         .await;
     match result {
-        Ok(row) => Json(ApiResponse::ok(row)),
+        Ok(state) => Json(ApiResponse::ok(state)),
         Err(e) => Json(ApiResponse::err(format!("db: {e}"))),
     }
 }

@@ -404,6 +404,16 @@ Release notes for 0.9.3 and earlier are available in the
   which used to answer as if it were the CLI. A one-off agent is told it is
   not the joined CLI of its provider, whose turns it now sees labelled with
   the CLI alias. Joined CLIs need an MCP reload to load the new bridge.
+- The MCP `audit_status` tool reports where a project's audits really stand
+  (KT-1210). Its `latest` was the newest Completed run, so after a Cancelled,
+  Failed or step-0 Interrupted run an agent read « Completed, nothing to
+  resume ». `latest` is now the newest run of any status, next to
+  `latest_completed`, `steps_to_redo` and `lease_orphaned` (launches refused
+  until the cleanup action), read even while the tracker has a live entry.
+  `GET /api/projects/{id}/audit-latest` returns these four fields.
+  `audit_launch` takes `fresh` and `retry_steps`, the parameters the backend
+  refusal already asked for, and refuses contradictory combinations before
+  any call. The bridge is a long-running process: reload it to get the fix.
 - A favourite stays in Favoris while an agent runs or waits in it. From 20
   discussions on, a live pinned discussion moved to « À suivre » and left
   Favoris until the run ended. Favoris now lists every pinned discussion,

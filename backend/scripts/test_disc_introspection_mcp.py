@@ -7818,7 +7818,10 @@ class AuditToolsTests(unittest.TestCase):
             if path.endswith("/audit-status"):
                 return {"success": True, "data": None}
             if path.endswith("/audit-latest"):
-                return {"success": True, "data": {"run_id": "r-1", "status": "Completed"}}
+                return {"success": True, "data": {
+                    "latest": {"id": "r-1", "status": "Completed"},
+                    "latest_completed": {"id": "r-1", "status": "Completed"},
+                    "steps_to_redo": [], "lease_orphaned": False}}
             if path.endswith("/audit-resumable"):
                 return {"success": True, "data": None}
             raise AssertionError(f"unexpected path {path}")
@@ -7827,8 +7830,32 @@ class AuditToolsTests(unittest.TestCase):
             out = self.mod.call_audit_status({"project_id": "p1"})
         self.assertIsNone(out["live"])
         self.assertIsNone(out["bridge_stream"], "no local stream ever opened")
-        self.assertEqual(out["latest"]["run_id"], "r-1")
+        self.assertEqual(out["latest"]["id"], "r-1")
         self.assertIn("never means 'completed'", out["note"])
+
+    def test_audit_status_reports_the_true_latest_run_and_an_orphaned_lease(self):
+        # KT-1210 — a Cancelled run after a Completed one is the state, and the
+        # DB layer is read even while the tracker has a live entry.
+        def fake_http(method, path, body=None, **kwargs):
+            if path.endswith("/audit-status"):
+                return {"success": True, "data": {"phase": "auditing"}}
+            if path.endswith("/audit-latest"):
+                return {"success": True, "data": {
+                    "latest": {"id": "r-stop", "status": "Cancelled"},
+                    "latest_completed": {"id": "r-old", "status": "Completed"},
+                    "steps_to_redo": [5, 15], "lease_orphaned": True}}
+            if path.endswith("/audit-resumable"):
+                return {"success": True, "data": {"id": "r-stop"}}
+            raise AssertionError(f"unexpected path {path}")
+
+        with mock.patch.object(self.mod, "_http", side_effect=fake_http):
+            out = self.mod.call_audit_status({"project_id": "p1"})
+        self.assertEqual(out["live"], {"phase": "auditing"})
+        self.assertEqual(out["latest"]["status"], "Cancelled")
+        self.assertEqual(out["latest_completed"]["id"], "r-old")
+        self.assertEqual(out["resumable"], {"id": "r-stop"})
+        self.assertEqual(out["steps_to_redo"], [5, 15])
+        self.assertIs(out["lease_orphaned"], True)
 
     def test_audit_status_never_hands_the_agent_the_recent_actions(self):
         live = {"phase": "auditing", "current_tool": "Read", "current_tool_call_count": 3,
@@ -7847,6 +7874,46 @@ class AuditToolsTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     self.mod.call_audit_launch(
                         {"project_id": "p1", "mode": "partial", "steps": bad})
+
+    def test_full_launch_forwards_fresh_and_retry_steps(self):
+        # KT-1210 — the backend's refusal names `fresh: true`; the tool must
+        # be able to send it, and to retry chosen steps of a resumed run.
+        bodies = []
+
+        def fake_open(path, body):
+            bodies.append((path, body))
+            return self._FakeSse(self._sse("start", {"total_steps": 16}))
+
+        with mock.patch.object(self.mod, "_audit_open_sse", side_effect=fake_open):
+            self.mod.call_audit_launch(
+                {"project_id": "p1", "mode": "full", "agent": "Codex", "fresh": True})
+            with self.mod._AUDIT_LOCK:
+                self.mod._AUDIT_STREAMS.pop("p1", None)
+            self.mod.call_audit_launch(
+                {"project_id": "p1", "mode": "full", "agent": "Codex",
+                 "resume_run_id": "r-1", "retry_steps": [5]})
+        self.assertEqual(bodies[0], ("/api/projects/p1/full-audit",
+                                     {"agent": "Codex", "fresh": True}))
+        self.assertEqual(bodies[1][1], {"agent": "Codex", "resume_run_id": "r-1",
+                                        "retry_steps": [5]})
+
+    def test_fresh_and_retry_steps_misuse_is_refused_before_any_http(self):
+        bad_args = (
+            {"mode": "full", "retry_steps": [2]},
+            {"mode": "full", "resume_run_id": "r-1", "retry_steps": []},
+            {"mode": "full", "resume_run_id": "r-1", "retry_steps": [0]},
+            {"mode": "full", "resume_run_id": "r-1", "retry_steps": [True]},
+            {"mode": "full", "fresh": "yes"},
+            {"mode": "full", "fresh": True, "resume_run_id": "r-1"},
+            {"mode": "partial", "steps": [1], "fresh": True},
+            {"mode": "partial", "steps": [1], "resume_run_id": "r-1", "retry_steps": [1]},
+        )
+        with mock.patch.object(self.mod, "_audit_open_sse",
+                               side_effect=AssertionError("must not be called")):
+            for extra in bad_args:
+                with self.subTest(extra=extra), self.assertRaises(RuntimeError):
+                    self.mod.call_audit_launch({"project_id": "p1", **extra})
+        self.assertNotIn("p1", self.mod._AUDIT_STREAMS, "no phantom entry left")
 
     def test_blank_agent_falls_back_to_the_session_agent_type(self):
         # Copilot round 5: a whitespace `agent` must behave like an absent

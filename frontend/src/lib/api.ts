@@ -1,4 +1,4 @@
-import type { AcceptAuditStepResponse, ArtifactBundle, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditRunCost, AuditStepInfo, AuditRecentActivity, AuditTokenBreakdown, EmbedOriginsChange } from '../types/generated';
+import type { AcceptAuditStepResponse, ArtifactBundle, AuditLatest, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditRunCost, AuditStepInfo, AuditRecentActivity, AuditTokenBreakdown, EmbedOriginsChange } from '../types/generated';
 import type { BriefingDetectedDoc, BriefingDocsAnswers, BriefingProjectAnswers, BriefingProjectRules, CrossAuditEstimate, LinkedRepoDocStatus, SavedBriefing } from '../types/generated';
 import type { WorkerConnectivity } from '../types/generated';
 import type { DocProvenanceReport } from '../types/generated';
@@ -1161,24 +1161,10 @@ export const projects = {
     } | null>(
       'GET', `/projects/${id}/audit-resumable`,
     ),
-  /**
-   * 0.8.4 (#298) — most-recent completed audit for the project, or
-   * `null`. The ProjectCard recap panel uses this to find the
-   * `audit_run_id` to feed `auditRunSteps`.
-   */
+  /** Newest run of any status, newest Completed run, steps a resume redoes
+   *  and whether the lease is orphaned (KT-1210). */
   auditLatest: (id: string) =>
-    api<{
-      id: string;
-      project_id: string;
-      kind: string;
-      agent_type: string;
-      started_at: string;
-      ended_at?: string | null;
-      duration_ms?: number | null;
-      status: string;
-      td_total: number;
-      health_score?: number | null;
-    } | null>('GET', `/projects/${id}/audit-latest`),
+    api<AuditLatest>('GET', `/projects/${id}/audit-latest`),
   /**
    * 0.8.4 (#298) — recent audit history (Full + sub-audits combined),
    * newest first. Powers the chip strip on the recap panel so the user

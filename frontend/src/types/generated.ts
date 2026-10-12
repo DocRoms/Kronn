@@ -892,6 +892,29 @@ export type AuditInfo = { files: Array<AuditFileInfo>, todos: Array<AuditTodo>, 
 export type AuditKind = "Full" | "Drift" | "Security" | "Docker" | "Performance" | "Accessibility" | "Rgaa" | "Database" | "ApiDesign" | "CodeQuality" | "Custom";
 
 /**
+ * What a client needs to tell where a project's audits stand.
+ */
+export type AuditLatest = {
+/**
+ * The newest run of any status: a Cancelled, Failed or Interrupted run
+ * after a Completed one is the project's state, not history.
+ */
+latest: AuditRun | null,
+/**
+ * The newest Completed run, the health snapshot.
+ */
+latest_completed: AuditRun | null,
+/**
+ * 1-based steps a resume of `latest` runs; empty when it is not resumable.
+ */
+steps_to_redo: Array<number>,
+/**
+ * The lease is held by a run nobody can settle: every launch is refused
+ * until the cleanup action releases it (KT-1134).
+ */
+lease_orphaned: boolean, };
+
+/**
  * What one phase of an audit (briefing, audit steps, validation discussion)
  * consumed (KT-1084). Every figure is absent when nothing reported it: a phase
  * whose agents reported no usage is "not measured", never 0. A sum over items

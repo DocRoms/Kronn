@@ -24636,6 +24636,82 @@ Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what 
     }
 
     #[tokio::test]
+    async fn audit_latest_reports_the_newest_run_of_any_status() {
+        let state = test_state();
+        let (project_id, completed_id) = seed_project_with_audit_run(&state).await;
+        let pid = project_id.clone();
+        state
+            .db
+            .with_conn(move |conn| {
+                let at = chrono::Utc::now();
+                kronn::db::audit_runs::insert_running(
+                    conn,
+                    "r-cut",
+                    &pid,
+                    "Full",
+                    "ClaudeCode",
+                    at,
+                )?;
+                kronn::db::audit_runs::update_last_completed_step(conn, "r-cut", 3)?;
+                kronn::db::audit_runs::mark_interrupted(conn, "r-cut", "restart")?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, json) = get_json(app, &format!("/api/projects/{project_id}/audit-latest")).await;
+        assert_eq!(st, StatusCode::OK);
+        let data = &json["data"];
+        assert_eq!(data["latest"]["id"], "r-cut");
+        assert_eq!(data["latest"]["status"], "Interrupted");
+        assert_eq!(data["latest_completed"]["id"], completed_id.as_str());
+        // No step row was recorded, so a resume redoes the whole chain.
+        let redo: Vec<u64> = data["steps_to_redo"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64().unwrap())
+            .collect();
+        assert!(!redo.is_empty());
+        assert_eq!(redo, (1..=redo.len() as u64).collect::<Vec<_>>());
+        assert_eq!(data["lease_orphaned"], false);
+
+        // A newer Cancelled run is the state now: nothing to resume, and an
+        // orphaned lease is named.
+        let pid = project_id.clone();
+        state
+            .db
+            .with_conn(move |conn| {
+                let at = chrono::Utc::now() + chrono::Duration::seconds(5);
+                kronn::db::audit_runs::insert_running(
+                    conn,
+                    "r-stop",
+                    &pid,
+                    "Full",
+                    "ClaudeCode",
+                    at,
+                )?;
+                kronn::db::audit_runs::mark_cancelled(conn, "r-stop")?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        {
+            let mut t = state.audit_tracker.lock().unwrap();
+            t.try_acquire_lease(&project_id);
+            t.orphaned_leases.insert(project_id.clone());
+        }
+        let app = build_router_with_auth(state, false);
+        let (_, json) = get_json(app, &format!("/api/projects/{project_id}/audit-latest")).await;
+        let data = &json["data"];
+        assert_eq!(data["latest"]["id"], "r-stop");
+        assert_eq!(data["latest"]["status"], "Cancelled");
+        assert_eq!(data["latest_completed"]["id"], completed_id.as_str());
+        assert_eq!(data["steps_to_redo"], serde_json::json!([]));
+        assert_eq!(data["lease_orphaned"], true);
+    }
+
+    #[tokio::test]
     async fn audit_history_returns_array_with_seeded_run() {
         let state = test_state();
         let (project_id, _run_id) = seed_project_with_audit_run(&state).await;

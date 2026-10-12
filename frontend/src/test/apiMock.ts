@@ -354,10 +354,8 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       // = no resumable interrupted run, so the button stays "Lancer".
       // Tests can override per-case to simulate an interrupted audit.
       auditResumable: resolve(null),
-      // 0.8.4 (#298) — recap-panel inputs. Default to "no completed
-      // audit yet" so tests that don't care about the panel just see
-      // it stay hidden.
-      auditLatest: resolve(null),
+      // Default: no audit run yet.
+      auditLatest: resolve({ latest: null, latest_completed: null, steps_to_redo: [], lease_orphaned: false }),
       // 0.8.4 (#298) — recap chip strip. Default empty history; tests
       // override to seed the chip list.
       auditHistory: resolve([]),
