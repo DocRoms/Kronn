@@ -106,6 +106,7 @@ fn full_form() -> BriefingFormRequest {
         cross_audit_agents: vec![AgentType::ClaudeCode, AgentType::Codex],
         existing_docs: Some(docs_answers()),
         project_rules: Some(rules_answers()),
+        ..Default::default()
     }
 }
 
@@ -144,6 +145,7 @@ fn reload(notes: &str) -> BriefingFormRequest {
         cross_audit_agents: saved.cross_audit_agents,
         existing_docs: saved.existing_docs,
         project_rules: saved.project_rules,
+        ..Default::default()
     }
 }
 

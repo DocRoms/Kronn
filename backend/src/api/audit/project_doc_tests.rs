@@ -520,7 +520,10 @@ fn every_fact_note_is_rendered_next_to_its_fact_in_the_briefing() {
     );
     assert_eq!(parse_answers(&section), Some(answers.clone()));
     // The note reaches the audit prompts with its fact.
-    let block = super::super::briefing::briefing_prompt_section(&section);
+    let block = super::super::briefing::briefing_prompt_section(
+        &section,
+        &crate::core::docs_location::DocsRoot::default_root(),
+    );
     assert!(
         block.contains("  - Review note: how-review works"),
         "{block}"
