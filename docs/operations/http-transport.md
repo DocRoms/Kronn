@@ -48,7 +48,7 @@ no cost, the sum is partial and the run's cost is `None` as well.
 [src: file: backend/src/agents/chat_codec.rs:160#cost_usd_micros]
 [src: file: backend/src/agents/runner.rs:1984-1989#cost_incomplete]
 [src: file: backend/src/api/audit/full.rs:1881#reported_cost_usd_micros]
-[src: file: backend/src/api/audit/drift.rs:954#reported_cost_usd_micros]
+[src: file: backend/src/api/audit/drift.rs:962#reported_cost_usd_micros]
 
 Audit executors have a separate bounded policy: 64 calls per file mutation tool
 (`write_file`, `edit_file`, `edit_lines`, `insert_after_line`), 48 for

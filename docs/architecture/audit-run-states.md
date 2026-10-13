@@ -87,7 +87,7 @@ by a human (KT-1131). An accepted step keeps its failure on record:
   refused in the same case: it would supersede the run. The refusal names the
   run, so a bridge agent knows what to resume. A partial run, which the Full
   launch cannot resume, never refuses a launch.
-  [src: file: backend/src/api/audit/full.rs:505-511#fresh_launch_refusal] [src: file: backend/src/api/audit/full.rs:3602-3615#fresh_launch_refusal] [src: file: backend/src/api/audit/drift.rs:445-452#fresh_launch_refusal]
+  [src: file: backend/src/api/audit/full.rs:505-511#fresh_launch_refusal] [src: file: backend/src/api/audit/full.rs:3602-3615#fresh_launch_refusal] [src: file: backend/src/api/audit/drift.rs:459-466#fresh_launch_refusal]
 - **The existing docs are never injected again.** The template is installed
   only into an empty AI doc folder, decided from its content rather than the
   displayed status; Kronn's own docs only get the template files they lack.
@@ -146,7 +146,7 @@ by a human (KT-1131). An accepted step keeps its failure on record:
 Sources:
 
 - The plan and the re-anchoring. [src: file: backend/src/api/audit/revalidate.rs:49#plan] [src: file: backend/src/api/audit/revalidate.rs:123#apply_reanchors]
-- The partial pipeline the agent part reuses. [src: file: backend/src/api/audit/drift.rs:316#run_partial_pipeline]
+- The partial pipeline the agent part reuses. [src: file: backend/src/api/audit/drift.rs:324#run_partial_pipeline]
 
 ## The action offered in each state
 
