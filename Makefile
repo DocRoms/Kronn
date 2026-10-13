@@ -532,7 +532,7 @@ help:
 	@echo "  make bump V=x.y.z  Bump version everywhere"
 	@echo "  make check-version  Verify release version consistency"
 	@echo "  make check-diff     Whitespace/conflict markers in the branch diff"
-	@echo "  make docs-reanchor  Re-anchor moved doc citations, then check them all"
+	@echo "  make docs-reanchor [BASE=<rev>]  Re-anchor moved doc citations, then check them all"
 	@echo "  make desktop        Build desktop app (current platform)"
 	@echo "  make desktop-dev    Run desktop app (dev mode)"
 	@echo "  make desktop-target T=<triple>  Cross-compile desktop app"
@@ -593,8 +593,22 @@ check-version:
 check-diff:
 	@./scripts/check-diff.sh $(BASE)
 
-## Re-points a doc citation whose #symbol left its range, only when the symbol
-## occurs once in the cited file, then runs the strict citation check, which
-## lists what is left. DOCS="docs/a.md docs/b.md" limits both to those docs.
+## Re-points a doc citation whose #symbol left its range: unique symbol first,
+## then a safe line map through `git diff -U0 BASE HEAD`. In a pull-request CI
+## checkout BASE is its base parent; locally it defaults to the merge-base with
+## origin/HEAD (then origin/main or origin/master). DOCS="docs/a.md docs/b.md"
+## limits both the rewrite and the strict citation check to those docs.
 docs-reanchor:
-	cd backend && KRONN_DOCS_REANCHOR="$(or $(DOCS),all)" cargo test --lib core::docs_citations::tests::docs_citations_resolve_in_the_repo -- --nocapture
+	@base="$(BASE)"; \
+	if [ -z "$$base" ]; then \
+		if [ "$${GITHUB_EVENT_NAME:-}" = pull_request ] && git rev-parse --verify --quiet HEAD^2 >/dev/null; then \
+			base=HEAD^1; \
+		else \
+			target="$$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"; \
+			if [ -z "$$target" ] && git rev-parse --verify --quiet origin/main >/dev/null; then target=origin/main; fi; \
+			if [ -z "$$target" ] && git rev-parse --verify --quiet origin/master >/dev/null; then target=origin/master; fi; \
+			if [ -n "$$target" ]; then base="$$(git merge-base "$$target" HEAD 2>/dev/null || true)"; fi; \
+		fi; \
+	fi; \
+	if [ -z "$$base" ]; then echo "docs-reanchor: cannot resolve a target-branch merge-base; pass BASE=<rev>" >&2; exit 2; fi; \
+	cd backend && KRONN_DOCS_REANCHOR="$(or $(DOCS),all)" KRONN_DOCS_REANCHOR_BASE="$$base" cargo test --lib core::docs_citations::tests::docs_citations_resolve_in_the_repo -- --nocapture

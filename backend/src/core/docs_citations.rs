@@ -9,6 +9,8 @@
 //! KT-1195: CI scopes the gate per pull request ([`Scope`]) and
 //! `make docs-reanchor` repairs moved anchors ([`reanchor_corpus`]).
 
+mod diff_map;
+
 use crate::core::anti_halluc::{
     anchor_miss, anchor_miss_detail, file_citation_anchored, is_binary_file, line_bounds_status,
     markers_at, partition_inline_code, resolve_in_root, scan_fences, strip_inline_code, Jailed,
@@ -29,6 +31,8 @@ pub const CHANGED_ENV: &str = "KRONN_DOCS_CITATIONS_CHANGED";
 pub const REPORT_DIR_ENV: &str = "KRONN_DOCS_CITATIONS_REPORT_DIR";
 /// `all`, or the docs to re-anchor, space-separated: `make docs-reanchor`.
 pub const REANCHOR_ENV: &str = "KRONN_DOCS_REANCHOR";
+/// Git revision whose old line numbers the re-anchor run maps to `HEAD`.
+pub const REANCHOR_BASE_ENV: &str = "KRONN_DOCS_REANCHOR_BASE";
 /// A pull request that changes it is a release: every doc is checked.
 const RELEASE_MARKER: &str = "VERSION";
 
@@ -390,8 +394,8 @@ impl Verdict {
         }
         out.push_str(&format!(
             "**{total}** unresolved: {} blocking, {} warning(s). Scope: {}.\n\n\
-             Repair: `{}` re-anchors a range whose `#symbol` occurs once in the \
-             cited file; fix the rest by hand.\n\n",
+             Repair: `{}` re-anchors a range by a unique `#symbol` or a verified \
+             Git diff mapping; fix the rest by hand.\n\n",
             self.blocking.len(),
             self.warnings.len(),
             self.scope.label(),
@@ -415,8 +419,8 @@ impl Verdict {
     pub fn failure_message(&self) -> String {
         let mut out = format!(
             "{} doc citation(s) do not resolve ({}):\n{}\nRepair: `{}` re-anchors a range \
-             whose #symbol occurs once in the cited file; fix the rest by hand (path, line, \
-             or the claim).\n",
+             by a unique #symbol or a verified Git diff mapping; fix the rest by hand (path, \
+             line, or the claim).\n",
             self.blocking.len(),
             self.scope.label(),
             report(&self.blocking),
@@ -563,15 +567,99 @@ fn marker_inner_at(line: &str, citation: &str) -> Option<usize> {
     })
 }
 
-/// `text` with every moved anchor whose symbol occurs once re-pointed at it.
-fn reanchor_doc(doc: &Path, text: &str, root: &Path, outcome: &mut ReanchorOutcome) -> String {
+fn reanchor_span(
+    failure: &DocCitationFailure,
+    root: &Path,
+    diff: &mut Option<diff_map::DiffMap<'_>>,
+) -> Result<Option<(usize, usize)>, String> {
+    let Some(moved) = &failure.moved else {
+        return Ok(None);
+    };
+    // This remains the first rule: a unique symbol needs no Git history.
+    if moved.occurrences.len() == 1 {
+        return Ok(suggested_span(moved.span, &moved.occurrences, moved.total));
+    }
+    let Some((path, Some(old), Some(anchor))) = file_citation_anchored(&failure.citation) else {
+        return Ok(None);
+    };
+    let Some(mapped) = diff
+        .as_mut()
+        .map(|mapper| mapper.span(Path::new(&path), old))
+        .transpose()?
+        .flatten()
+    else {
+        return Ok(None);
+    };
+    // Mapping positions is not enough: the mapped range must still name the
+    // cited whole-word anchor under the verifier's exact rule.
+    Ok(anchor_miss(&root.join(path), mapped, &anchor)
+        .is_none()
+        .then_some(mapped))
+}
+
+/// Safe line moves in one doc, using the unique-symbol rule first and a Git
+/// diff only for the repeated-symbol cases it cannot settle.
+pub(crate) fn suggested_reanchors(
+    text: &str,
+    root: &Path,
+    base: Option<&str>,
+) -> Result<Vec<crate::core::citation_drift::Reanchor>, String> {
+    let mut diff = base.map(|base| diff_map::DiffMap::new(root, base));
+    let mut moves = Vec::new();
+    let mut conflicts = BTreeSet::new();
+    for failure in check_doc(text, root) {
+        let Some(span) = reanchor_span(&failure, root, &mut diff)? else {
+            continue;
+        };
+        let Some((path, Some(from), Some(_))) = file_citation_anchored(&failure.citation) else {
+            continue;
+        };
+        let from = crate::core::citation_drift::cite_label(&path, Some(from));
+        if conflicts.contains(&from) {
+            continue;
+        }
+        if let Some(existing) = moves
+            .iter()
+            .position(|existing: &crate::core::citation_drift::Reanchor| existing.from == from)
+        {
+            if (moves[existing].line, moves[existing].end_line) != span {
+                moves.remove(existing);
+                conflicts.insert(from);
+            }
+            continue;
+        }
+        moves.push(crate::core::citation_drift::Reanchor {
+            from,
+            to: crate::core::citation_drift::cite_label(&path, Some(span)),
+            line: span.0,
+            end_line: span.1,
+        });
+    }
+    Ok(moves)
+}
+
+/// Default base for audited-project revalidation.
+pub(crate) fn default_reanchor_base(root: &Path) -> Result<Option<String>, String> {
+    diff_map::default_merge_base(root)
+}
+
+/// `text` with every safely located moved anchor re-pointed at it.
+fn reanchor_doc(
+    doc: &Path,
+    text: &str,
+    root: &Path,
+    base: Option<&str>,
+    outcome: &mut ReanchorOutcome,
+) -> Result<String, String> {
     let mut out = text.to_string();
+    let mut diff = base.map(|base| diff_map::DiffMap::new(root, base));
     for failure in check_doc(text, root) {
         let Some(moved) = &failure.moved else {
             continue;
         };
-        // Several candidates: rewriting would guess which one the claim means.
-        if moved.occurrences.len() != 1 {
+        let Some(span) = reanchor_span(&failure, root, &mut diff)? else {
+            // Several candidates and no proof from the diff: rewriting would
+            // guess which one the claim means.
             outcome.ambiguous.push((
                 doc.to_path_buf(),
                 failure.line,
@@ -579,15 +667,13 @@ fn reanchor_doc(doc: &Path, text: &str, root: &Path, outcome: &mut ReanchorOutco
                 moved.occurrences.clone(),
             ));
             continue;
-        }
-        let edited = suggested_span(moved.span, &moved.occurrences, moved.total)
-            .and_then(|span| respan(&failure.citation, span))
-            .and_then(|new| {
-                let range = line_range(&out, failure.line)?;
-                let at = marker_inner_at(&out[range.clone()], &failure.citation)? + range.start;
-                out.replace_range(at..at + failure.citation.len(), &new);
-                Some(new)
-            });
+        };
+        let edited = respan(&failure.citation, span).and_then(|new| {
+            let range = line_range(&out, failure.line)?;
+            let at = marker_inner_at(&out[range.clone()], &failure.citation)? + range.start;
+            out.replace_range(at..at + failure.citation.len(), &new);
+            Some(new)
+        });
         match edited {
             Some(new) => {
                 outcome
@@ -599,12 +685,16 @@ fn reanchor_doc(doc: &Path, text: &str, root: &Path, outcome: &mut ReanchorOutco
                 .push((doc.to_path_buf(), failure.line, failure.citation)),
         }
     }
-    out
+    Ok(out)
 }
 
 /// Re-anchors the targeted docs of the corpus in place. Only files the gate
 /// reads are ever written.
-pub fn reanchor_corpus(root: &Path, target: &ReanchorTarget) -> std::io::Result<ReanchorOutcome> {
+pub fn reanchor_corpus(
+    root: &Path,
+    target: &ReanchorTarget,
+    base: Option<&str>,
+) -> Result<ReanchorOutcome, String> {
     let mut outcome = ReanchorOutcome::default();
     let docs = corpus(root);
     if let ReanchorTarget::Docs(wanted) = target {
@@ -616,10 +706,12 @@ pub fn reanchor_corpus(root: &Path, target: &ReanchorTarget) -> std::io::Result<
     }
     for doc in docs.iter().filter(|d| target.includes(d)) {
         let path = root.join(doc);
-        let text = std::fs::read_to_string(&path)?;
-        let new = reanchor_doc(doc, &text, root, &mut outcome);
+        let text = std::fs::read_to_string(&path)
+            .map_err(|error| format!("cannot read {}: {error}", doc.display()))?;
+        let new = reanchor_doc(doc, &text, root, base, &mut outcome)?;
         if new != text {
-            std::fs::write(&path, new)?;
+            std::fs::write(&path, new)
+                .map_err(|error| format!("cannot write {}: {error}", doc.display()))?;
         }
     }
     Ok(outcome)
@@ -645,7 +737,9 @@ pub fn gate(root: &Path, env: &dyn Fn(&str) -> Option<String>) -> Result<GateRun
     };
     let mut notes = String::new();
     if let Some(target) = env(REANCHOR_ENV).as_deref().and_then(ReanchorTarget::parse) {
-        let outcome = reanchor_corpus(root, &target).map_err(|e| format!("docs-reanchor: {e}"))?;
+        let base = env(REANCHOR_BASE_ENV).filter(|base| !base.trim().is_empty());
+        let outcome = reanchor_corpus(root, &target, base.as_deref())
+            .map_err(|e| format!("docs-reanchor: {e}"))?;
         notes = outcome.report();
         if let ReanchorTarget::Docs(docs) = target {
             scope = Scope::Files(docs);
@@ -664,6 +758,7 @@ pub fn gate(root: &Path, env: &dyn Fn(&str) -> Option<String>) -> Result<GateRun
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::process::Command;
 
     fn repo() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
@@ -1041,8 +1136,73 @@ mod tests {
         let path = root.join(doc);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, text).unwrap();
-        let outcome = reanchor_corpus(root, &ReanchorTarget::All).unwrap();
+        let outcome = reanchor_corpus(root, &ReanchorTarget::All, None).unwrap();
         (std::fs::read_to_string(&path).unwrap(), outcome)
+    }
+
+    fn git(root: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn git_commit(root: &Path, message: &str, paths: &[&str]) {
+        let mut add = vec!["add", "--"];
+        add.extend_from_slice(paths);
+        git(root, &add);
+        git(
+            root,
+            &[
+                "-c",
+                "user.name=Kronn Test",
+                "-c",
+                "user.email=kronn@example.invalid",
+                "commit",
+                "-m",
+                message,
+            ],
+        );
+    }
+
+    fn repeated_anchor_git_repo(change_endpoint: bool) -> tempfile::TempDir {
+        let tmp = repo();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(
+            root.join("src/m.rs"),
+            "fn target() {}\n\nfn helper() {}\nfn target() {\n    let first = 1;\n    let second = 2;\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("docs/a.md"),
+            "Target [src: file: src/m.rs:4-7#target].\n",
+        )
+        .unwrap();
+        git(root, &["init", "-b", "main"]);
+        git_commit(root, "baseline", &["src/m.rs", "docs/a.md"]);
+        git(root, &["switch", "-c", "feature"]);
+
+        let mut moved = String::from("fn target() {}\n\nfn helper() {}\n");
+        for index in 0..60 {
+            moved.push_str(&format!("// inserted {index}\n"));
+        }
+        moved.push_str(if change_endpoint {
+            "pub fn target() {\n"
+        } else {
+            "fn target() {\n"
+        });
+        moved.push_str("    let first = 1;\n    let second = 2;\n}\n");
+        std::fs::write(root.join("src/m.rs"), moved).unwrap();
+        git_commit(root, "move target", &["src/m.rs"]);
+        tmp
     }
 
     #[test]
@@ -1109,6 +1269,61 @@ mod tests {
             .contains("the symbol occurs at lines 2, 9: pick one by hand"));
         // The strict check still fails on it.
         assert_eq!(check_corpus(root).len(), 1);
+    }
+
+    #[test]
+    fn reanchoring_uses_the_diff_to_settle_a_repeated_symbol() {
+        let tmp = repeated_anchor_git_repo(false);
+        let root = tmp.path();
+        let run = run_gate(
+            root,
+            &[
+                (REANCHOR_ENV, "all".into()),
+                (REANCHOR_BASE_ENV, "main".into()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("docs/a.md")).unwrap(),
+            "Target [src: file: src/m.rs:64-67#target].\n"
+        );
+        assert!(
+            run.notes.contains("1 rewritten, 0 ambiguous"),
+            "{}",
+            run.notes
+        );
+        assert!(run.verdict.blocking.is_empty());
+    }
+
+    #[test]
+    fn reanchoring_keeps_changed_hunk_endpoints_ambiguous() {
+        let tmp = repeated_anchor_git_repo(true);
+        let root = tmp.path();
+        let original = std::fs::read_to_string(root.join("docs/a.md")).unwrap();
+        let run = run_gate(
+            root,
+            &[
+                (REANCHOR_ENV, "all".into()),
+                (REANCHOR_BASE_ENV, "main".into()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("docs/a.md")).unwrap(),
+            original
+        );
+        assert!(
+            run.notes.contains("0 rewritten, 1 ambiguous"),
+            "{}",
+            run.notes
+        );
+        assert!(
+            run.notes
+                .contains("the symbol occurs at lines 1, 64: pick one by hand"),
+            "{}",
+            run.notes
+        );
+        assert_eq!(run.verdict.blocking.len(), 1);
     }
 
     #[test]

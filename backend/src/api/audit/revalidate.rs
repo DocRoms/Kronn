@@ -69,7 +69,7 @@ pub fn plan(project_path: &FsPath) -> RevalidationPlan {
             broken: Vec::new(),
             human: Vec::new(),
         };
-        for citation in &section.citations {
+        for citation in reanchor_statuses(project_path, &content, section) {
             for (name, labels) in &human_sections {
                 if labels.contains(&citation.cite) {
                     entry.human.push(HumanCitationTodo {
@@ -154,6 +154,40 @@ pub(crate) fn apply_reanchors(project_path: &FsPath) -> Result<Vec<Reanchored>, 
         });
     }
     Ok(done)
+}
+
+fn reanchor_statuses(
+    project_path: &FsPath,
+    content: &str,
+    section: &citation_drift::SectionCitations,
+) -> Vec<CitationStatus> {
+    let base = crate::core::docs_citations::default_reanchor_base(project_path)
+        .inspect_err(|error| tracing::warn!("Citation diff mapping unavailable: {error}"))
+        .ok()
+        .flatten();
+    let moves =
+        crate::core::docs_citations::suggested_reanchors(content, project_path, base.as_deref())
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    doc = section.doc,
+                    "Citation diff mapping unavailable: {error}"
+                );
+                Vec::new()
+            });
+    section
+        .citations
+        .iter()
+        .cloned()
+        .map(|mut citation| {
+            if citation.state != CitationState::Moved {
+                if let Some(mapped) = moves.iter().find(|mapped| mapped.from == citation.cite) {
+                    citation.state = CitationState::Moved;
+                    citation.current_line = Some(mapped.line);
+                }
+            }
+            citation
+        })
+        .collect()
 }
 
 fn finding_line(c: &CitationStatus) -> String {

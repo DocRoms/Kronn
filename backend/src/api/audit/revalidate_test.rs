@@ -1,5 +1,6 @@
 use super::*;
 use std::fs;
+use std::process::Command;
 
 const RULES: &str = "docs/coding-rules.md";
 
@@ -37,6 +38,76 @@ fn drifted() -> tempfile::TempDir {
         "// header\nfn alpha() {\n    let retries = 3;\n}\n\nfn beta() {\n    let timeout_ms = 9000;\n}\n",
     )
     .unwrap();
+    tmp
+}
+
+fn git(dir: &FsPath, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn commit(dir: &FsPath, message: &str, paths: &[&str]) {
+    let mut add = vec!["add", "--"];
+    add.extend_from_slice(paths);
+    git(dir, &add);
+    git(
+        dir,
+        &[
+            "-c",
+            "user.name=Kronn Test",
+            "-c",
+            "user.email=kronn@example.invalid",
+            "commit",
+            "-m",
+            message,
+        ],
+    );
+}
+
+/// A repeated anchor whose second occurrence moves beyond the fingerprint
+/// search window. The optional edit puts the old range's first line inside a
+/// changed hunk, which must make diff mapping refuse it.
+fn repeated_anchor_repo(change_endpoint: bool) -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::create_dir_all(dir.join("docs")).unwrap();
+    fs::write(
+        dir.join("src/lib.rs"),
+        "fn target() {}\n\nfn helper() {}\nfn target() {\n    let first = 1;\n    let second = 2;\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join(RULES),
+        "# Rules\nTarget [src: file: src/lib.rs:4-7#target].\n",
+    )
+    .unwrap();
+    git(dir, &["init", "-b", "main"]);
+    commit(dir, "baseline", &["src/lib.rs", RULES]);
+    citation_drift::record_all(dir).unwrap();
+    git(dir, &["switch", "-c", "feature"]);
+
+    let mut moved = String::from("fn target() {}\n\nfn helper() {}\n");
+    for index in 0..60 {
+        moved.push_str(&format!("// inserted {index}\n"));
+    }
+    if change_endpoint {
+        moved.push_str("pub fn target() {\n");
+    } else {
+        moved.push_str("fn target() {\n");
+    }
+    moved.push_str("    let first = 1;\n    let second = 2;\n}\n");
+    fs::write(dir.join("src/lib.rs"), moved).unwrap();
+    commit(dir, "move target", &["src/lib.rs"]);
     tmp
 }
 
@@ -130,6 +201,48 @@ fn re_anchoring_rewrites_a_human_section_too_and_marks_it_to_reconfirm() {
     );
     // Idempotent: a second pass has nothing left to move.
     assert!(apply_reanchors(dir).unwrap().is_empty());
+}
+
+#[test]
+fn revalidation_uses_the_git_diff_to_disambiguate_a_repeated_anchor() {
+    let tmp = repeated_anchor_repo(false);
+    let dir = tmp.path();
+    let before = plan(dir);
+    let rules = before.sections.iter().find(|s| s.doc == RULES).unwrap();
+    assert_eq!(rules.action, RevalidationAction::Reanchor);
+    assert_eq!(rules.reanchor.len(), 1);
+    assert_eq!(rules.reanchor[0].current_line, Some(64));
+    assert!(rules.broken.is_empty());
+
+    let done = apply_reanchors(dir).unwrap();
+    assert_eq!(done.len(), 1);
+    assert_eq!(done[0].count, 1);
+    assert_eq!(
+        fs::read_to_string(dir.join(RULES)).unwrap(),
+        "# Rules\nTarget [src: file: src/lib.rs:64-67#target].\n"
+    );
+    assert!(plan(dir)
+        .sections
+        .iter()
+        .all(|section| section.doc != RULES));
+}
+
+#[test]
+fn revalidation_never_maps_an_endpoint_inside_a_changed_hunk() {
+    let tmp = repeated_anchor_repo(true);
+    let dir = tmp.path();
+    let before_doc = fs::read_to_string(dir.join(RULES)).unwrap();
+    let before = plan(dir);
+    let rules = before.sections.iter().find(|s| s.doc == RULES).unwrap();
+    assert_eq!(rules.action, RevalidationAction::Agent);
+    assert!(rules.reanchor.is_empty());
+    assert_eq!(
+        cites(&rules.broken),
+        vec![("src/lib.rs:4-7", CitationState::Changed)]
+    );
+
+    assert!(apply_reanchors(dir).unwrap().is_empty());
+    assert_eq!(fs::read_to_string(dir.join(RULES)).unwrap(), before_doc);
 }
 
 #[test]

@@ -141,9 +141,13 @@ textual and deterministic: no code is parsed.
 **One anchor rule, no tolerance window.** The runtime verifier, the `verified` badge it feeds
 and Kronn's docs check apply this same rule: the symbol is inside the cited lines, or the
 citation fails; one line past the range fails everywhere. A tool that re-anchors a moved
-citation rewrites the range only when the symbol occurs once in the cited file, keeping the
-span length and the anchor; with several occurrences a human picks the line. A missing file
-or line is never re-anchored.
+citation first rewrites the range when the symbol occurs once in the cited file. If the symbol
+occurs several times, the tool may instead map the old range's endpoints through a zero-context
+Git diff from the chosen base to `HEAD`; a line inside a changed hunk has no mapping, and the
+rewrite is allowed only when the mapped range still contains the symbol as a whole word. The
+path and anchor stay unchanged, and a single-line citation stays single-line while a range stays
+a range. Anything still ambiguous is listed with its candidate lines for a human to choose; a
+missing file or line is never re-anchored.
 
 A marker quoted in inline backticks is verified too: it is `verified` when it resolves, but a
 failure there counts as *unverified*, not fabricated, because backticks also quote the grammar
