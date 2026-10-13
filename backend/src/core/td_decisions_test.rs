@@ -162,3 +162,42 @@ fn settled_match_needs_the_same_file_and_problem() {
     assert!(settled_match("src/a.rs", "Unsafe call twice", &sheets).is_none());
     assert!(settled_match("Unknown", "Unsafe call", &sheets).is_none());
 }
+
+#[test]
+fn incomplete_findings_do_not_match_an_equally_incomplete_settled_sheet() {
+    for (area, title) in [
+        ("Unknown", "Unsafe call"),
+        ("", "Unsafe call"),
+        ("src/a.rs", ""),
+    ] {
+        let settled = parse_sheet("TD-1", &sheet("Rejected", area, title));
+        assert!(
+            settled_match(area, title, &[settled]).is_none(),
+            "an incomplete area/title must not flag an unrelated finding: {area:?}, {title:?}"
+        );
+    }
+}
+
+#[test]
+fn restoring_a_sheet_without_front_matter_preserves_the_agents_other_edits() {
+    let (_dir, docs) = setup();
+    let original =
+        "# Unsafe call\n\n- **Area**: `src/a.rs`\n- **Status**: Rejected\n\nOriginal evidence.\n";
+    write(&docs, "TD-1", original);
+    let snap = snapshot(&docs);
+    write(
+        &docs,
+        "TD-1",
+        &original
+            .replace("Rejected", "Verified in source")
+            .replace("Original evidence.", "Updated evidence from the run."),
+    );
+
+    let outcome = restore(&docs, &snap).unwrap();
+    assert_eq!(outcome.reverted, vec!["TD-1"]);
+    let restored = read(&docs, "TD-1");
+    assert_eq!(td_decision(&restored), Some(TdDecision::Rejected));
+    assert!(restored.contains("Updated evidence from the run."));
+    assert!(!restored.contains("reviewer:"));
+    assert!(restore(&docs, &snap).unwrap().is_empty());
+}
