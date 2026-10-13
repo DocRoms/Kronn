@@ -1233,7 +1233,14 @@ pub async fn orchestrate(
         }
     });
 
-    Sse::new(crate::core::sse_limits::bounded(stream))
+    Sse::new(crate::core::sse_limits::bounded(
+        // #234 — a cold local model is silent for minutes; the agent's own
+        // stall and global deadlines decide when it is dead, not the transport.
+        crate::core::sse_limits::with_heartbeat(
+            stream,
+            crate::core::sse_limits::HEARTBEAT_INTERVAL,
+        ),
+    ))
 }
 
 #[cfg(test)]
