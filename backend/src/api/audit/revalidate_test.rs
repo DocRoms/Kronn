@@ -111,6 +111,40 @@ fn repeated_anchor_repo(change_endpoint: bool) -> tempfile::TempDir {
     tmp
 }
 
+/// A repeated anchor sits on the old range's last line. The feature adds one
+/// block before that range and another inside it, so the mapped span grows.
+fn repeated_anchor_with_internal_insertion_repo() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::create_dir_all(dir.join("docs")).unwrap();
+    fs::write(
+        dir.join("src/lib.rs"),
+        "fn target() {}\n\nfn helper() {}\nfn scope() {\n    let first = 1;\n    let second = 2;\n    let third = 3;\n    fn target() {}\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join(RULES),
+        "# Rules\nTarget [src: file: src/lib.rs:4-8#target].\n",
+    )
+    .unwrap();
+    git(dir, &["init", "-b", "main"]);
+    commit(dir, "baseline", &["src/lib.rs", RULES]);
+    citation_drift::record_all(dir).unwrap();
+    git(dir, &["switch", "-c", "feature"]);
+
+    let mut moved = String::from("fn target() {}\n\nfn helper() {}\n");
+    for index in 0..60 {
+        moved.push_str(&format!("// before {index}\n"));
+    }
+    moved.push_str(
+        "fn scope() {\n    let first = 1;\n    // inside 0\n    // inside 1\n    let second = 2;\n    let third = 3;\n    fn target() {}\n}\n",
+    );
+    fs::write(dir.join("src/lib.rs"), moved).unwrap();
+    commit(dir, "move and widen target range", &["src/lib.rs"]);
+    tmp
+}
+
 fn rules_step() -> usize {
     owning_step(
         &super::super::assemble_chained_steps(AuditKind::Full),
@@ -225,6 +259,40 @@ fn revalidation_uses_the_git_diff_to_disambiguate_a_repeated_anchor() {
         .sections
         .iter()
         .all(|section| section.doc != RULES));
+}
+
+#[test]
+fn revalidation_keeps_the_diff_mapped_end_after_an_internal_insertion() {
+    let tmp = repeated_anchor_with_internal_insertion_repo();
+    let dir = tmp.path();
+    let before_doc = fs::read_to_string(dir.join(RULES)).unwrap();
+    let base = crate::core::docs_citations::default_reanchor_base(dir)
+        .unwrap()
+        .unwrap();
+    let mapped =
+        crate::core::docs_citations::suggested_reanchors(&before_doc, dir, Some(&base)).unwrap();
+    assert_eq!(mapped.len(), 1);
+    assert_eq!(mapped[0].line, 64);
+    assert_eq!(mapped[0].end_line, 70);
+
+    let before = plan(dir);
+    let rules = before.sections.iter().find(|s| s.doc == RULES).unwrap();
+    assert_eq!(rules.action, RevalidationAction::Reanchor);
+    assert_eq!(rules.reanchor.len(), 1);
+    assert_eq!(rules.reanchor[0].current_line, Some(mapped[0].line));
+
+    let done = apply_reanchors(dir).unwrap();
+    assert_eq!(done.len(), 1);
+    assert_eq!(done[0].count, 1);
+    let after_doc = fs::read_to_string(dir.join(RULES)).unwrap();
+    assert_eq!(
+        after_doc,
+        "# Rules\nTarget [src: file: src/lib.rs:64-70#target].\n"
+    );
+    assert!(
+        crate::core::docs_citations::check_doc(&after_doc, dir).is_empty(),
+        "the rewritten range must still resolve its anchor"
+    );
 }
 
 #[test]

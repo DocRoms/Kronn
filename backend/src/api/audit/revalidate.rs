@@ -123,13 +123,16 @@ pub(crate) struct Reanchored {
 pub(crate) fn apply_reanchors(project_path: &FsPath) -> Result<Vec<Reanchored>, String> {
     let mut done = Vec::new();
     for section in plan(project_path).sections {
-        let moves: Vec<Reanchor> = section.reanchor.iter().filter_map(Reanchor::of).collect();
-        if moves.is_empty() || section.doc_missing {
+        if section.reanchor.is_empty() || section.doc_missing {
             continue;
         }
         let path = project_path.join(&section.doc);
         let before = std::fs::read_to_string(&path)
             .map_err(|e| format!("Cannot read {}: {e}", section.doc))?;
+        let moves = reanchors_to_apply(project_path, &before, &section.doc, &section.reanchor);
+        if moves.is_empty() {
+            continue;
+        }
         let (after, count) = citation_drift::rewrite_citations(&before, &moves, |_| true);
         if count == 0 {
             continue;
@@ -161,19 +164,7 @@ fn reanchor_statuses(
     content: &str,
     section: &citation_drift::SectionCitations,
 ) -> Vec<CitationStatus> {
-    let base = crate::core::docs_citations::default_reanchor_base(project_path)
-        .inspect_err(|error| tracing::warn!("Citation diff mapping unavailable: {error}"))
-        .ok()
-        .flatten();
-    let moves =
-        crate::core::docs_citations::suggested_reanchors(content, project_path, base.as_deref())
-            .unwrap_or_else(|error| {
-                tracing::warn!(
-                    doc = section.doc,
-                    "Citation diff mapping unavailable: {error}"
-                );
-                Vec::new()
-            });
+    let moves = reanchor_suggestions(project_path, content, &section.doc);
     section
         .citations
         .iter()
@@ -186,6 +177,40 @@ fn reanchor_statuses(
                 }
             }
             citation
+        })
+        .collect()
+}
+
+fn reanchor_suggestions(project_path: &FsPath, content: &str, doc: &str) -> Vec<Reanchor> {
+    let base = crate::core::docs_citations::default_reanchor_base(project_path)
+        .inspect_err(|error| tracing::warn!("Citation diff mapping unavailable: {error}"))
+        .ok()
+        .flatten();
+    crate::core::docs_citations::suggested_reanchors(content, project_path, base.as_deref())
+        .unwrap_or_else(|error| {
+            tracing::warn!(doc, "Citation diff mapping unavailable: {error}");
+            Vec::new()
+        })
+}
+
+fn reanchors_to_apply(
+    project_path: &FsPath,
+    content: &str,
+    doc: &str,
+    statuses: &[CitationStatus],
+) -> Vec<Reanchor> {
+    let suggestions = reanchor_suggestions(project_path, content, doc);
+    statuses
+        .iter()
+        .filter_map(|status| {
+            let fallback = Reanchor::of(status)?;
+            Some(
+                suggestions
+                    .iter()
+                    .find(|mapped| mapped.from == fallback.from && mapped.line == fallback.line)
+                    .cloned()
+                    .unwrap_or(fallback),
+            )
         })
         .collect()
 }
