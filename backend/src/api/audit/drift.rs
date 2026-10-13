@@ -51,7 +51,9 @@ pub async fn check_drift(
     .await;
 
     match result {
-        Ok((drift, placeholder_docs)) => Json(ApiResponse::ok(drift_response(drift, placeholder_docs))),
+        Ok((drift, placeholder_docs)) => {
+            Json(ApiResponse::ok(drift_response(drift, placeholder_docs)))
+        }
         Err(e) => Json(ApiResponse::err(format!("Drift check failed: {}", e))),
     }
 }
@@ -1592,7 +1594,6 @@ pub(crate) async fn run_partial_pipeline(
         let terminal = partial_terminal(
             failed_steps.clone(),
             !succeeded_steps.is_empty(),
-            unchanged_steps.clone(),
             pending_validation.clone(),
         );
         let completed = !matches!(terminal, PartialTerminal::Interrupted { .. });
@@ -1652,13 +1653,23 @@ pub(crate) async fn run_partial_pipeline(
             }
         }
 
-        // KT-1168 — the docs the agent rewrote get fresh fingerprints, even
-        // when another step failed: a relaunch then resumes on the rest only.
-        if revalidation.is_some() {
-            let docs = refreshed_files.clone();
+        // A normal refresh accepts a gated unchanged step as re-verified.
+        // Revalidation keeps its explicit human acknowledgement for unchanged
+        // citations; only its rewritten targets receive new fingerprints.
+        let citation_docs: Vec<String> = if revalidation.is_some() {
+            refreshed_files.clone()
+        } else {
+            unchanged_steps.iter().map(|&n| chain[n - 1].target_file.to_string()).collect()
+        };
+        if !citation_docs.is_empty() {
+            let reason = if revalidation.is_some() {
+                crate::core::citation_drift::RecordReason::Revalidation
+            } else {
+                crate::core::citation_drift::RecordReason::Audit
+            };
             let pp = project_path.clone();
             let recorded = tokio::task::spawn_blocking(move || {
-                crate::core::citation_drift::record_docs(&pp, &docs, crate::core::citation_drift::RecordReason::Revalidation)
+                crate::core::citation_drift::record_docs(&pp, &citation_docs, reason)
             }).await.unwrap_or_else(|e| Err(format!("record task failed: {e}")));
             if let Err(e) = recorded {
                 yield Event::default().event("warning").data(
@@ -1769,16 +1780,18 @@ type PendingValidation = (Discussion, DiscussionMessage);
 pub(crate) fn partial_terminal(
     failed_steps: Vec<usize>,
     rewrote: bool,
-    unchanged_steps: Vec<usize>,
     validation: Option<PendingValidation>,
 ) -> PartialTerminal {
     let validation = validation.map(Box::new);
     if !failed_steps.is_empty() {
-        return PartialTerminal::Interrupted { failed_steps, validation };
+        return PartialTerminal::Interrupted {
+            failed_steps,
+            validation,
+        };
     }
     match validation {
         Some(pending) if rewrote => PartialTerminal::Success(pending),
-        validation => PartialTerminal::Reverified { unchanged_steps, validation },
+        validation => PartialTerminal::Reverified { validation },
     }
 }
 
@@ -1797,7 +1810,6 @@ pub(crate) enum PartialTerminal {
     /// Completed. A discussion only when the validation did not come back.
     /// The SSE layer reports `no_change`.
     Reverified {
-        unchanged_steps: Vec<usize>,
         validation: Option<Box<PendingValidation>>,
     },
 }
@@ -1825,9 +1837,13 @@ pub(crate) async fn finalize_partial_run(
                 complete_partial_run(&tx, &run_id, &project_path)?;
                 crate::db::audit_runs::set_validation_discussion(&tx, &run_id, &disc.id)?;
             }
-            PartialTerminal::Interrupted { failed_steps, validation } => {
+            PartialTerminal::Interrupted {
+                failed_steps,
+                validation,
+            } => {
                 crate::db::audit_runs::mark_interrupted_strict(
-                    &tx, &run_id,
+                    &tx,
+                    &run_id,
                     &format!("partial refresh incomplete (failed steps: {failed_steps:?})"),
                 )?;
                 if let Some(pending) = validation {
@@ -1852,7 +1868,9 @@ pub(crate) async fn finalize_partial_run(
         crate::db::audit_runs::set_step_outcomes(&tx, &run_id, &outcomes_json)?;
         tx.commit()?;
         Ok(())
-    }).await.map_err(|e| format!("terminal write failed: {e}"))
+    })
+    .await
+    .map_err(|e| format!("terminal write failed: {e}"))
 }
 
 /// Stamps a Running partial row Completed with the TD counts on disk.
@@ -1861,15 +1879,30 @@ fn complete_partial_run(
     run_id: &str,
     project_path: &std::path::Path,
 ) -> anyhow::Result<()> {
-    let td_dir = crate::core::docs_location::DocsRoot::of(project_path).file(project_path, "tech-debt");
+    let td_dir =
+        crate::core::docs_location::DocsRoot::of(project_path).file(project_path, "tech-debt");
     let counts = super::full::count_td_severities(&td_dir);
     let score = crate::models::compute_health_score(
-        counts.critical, counts.high, counts.medium, counts.low,
+        counts.critical,
+        counts.high,
+        counts.medium,
+        counts.low,
     );
     crate::db::audit_runs::complete(
-        tx, run_id, chrono::Utc::now(), "Completed",
-        counts.critical, counts.high, counts.medium, counts.low,
-        0, 0, 0, score, None, None,
+        tx,
+        run_id,
+        chrono::Utc::now(),
+        "Completed",
+        counts.critical,
+        counts.high,
+        counts.medium,
+        counts.low,
+        0,
+        0,
+        0,
+        score,
+        None,
+        None,
     )?;
     Ok(())
 }
@@ -2110,10 +2143,7 @@ mod partial_finalize_tests {
             &db,
             "run-p".into(),
             tmp.path().to_path_buf(),
-            PartialTerminal::Reverified {
-                unchanged_steps: vec![3, 8],
-                validation: None,
-            },
+            PartialTerminal::Reverified { validation: None },
             r#"{"requested":[3,8],"succeeded":[],"failed":[],"unchanged":[3,8]}"#.into(),
         )
         .await
@@ -2138,7 +2168,6 @@ mod partial_finalize_tests {
             "run-p".into(),
             tmp.path().to_path_buf(),
             PartialTerminal::Reverified {
-                unchanged_steps: vec![3],
                 validation: Some(Box::new(mini_disc("d-reverified", "p1"))),
             },
             r#"{"requested":[3],"succeeded":[],"failed":[],"unchanged":[3]}"#.into(),
@@ -2147,7 +2176,10 @@ mod partial_finalize_tests {
         .unwrap();
         let (run, disc_count) = run_and_discussions(&db).await;
         assert_eq!(run.status, "Completed");
-        assert_eq!(run.validation_discussion_id.as_deref(), Some("d-reverified"));
+        assert_eq!(
+            run.validation_discussion_id.as_deref(),
+            Some("d-reverified")
+        );
         assert_eq!(disc_count, 1);
     }
 
@@ -2180,24 +2212,36 @@ mod partial_finalize_tests {
     fn the_terminal_follows_the_partition() {
         let disc = || Some(mini_disc("d", "p"));
         assert!(matches!(
-            partial_terminal(vec![], true, vec![], disc()),
+            partial_terminal(vec![], true, disc()),
             PartialTerminal::Success(_)
         ));
         assert!(matches!(
-            partial_terminal(vec![], false, vec![2], None),
-            PartialTerminal::Reverified { validation: None, .. }
+            partial_terminal(vec![], false, None),
+            PartialTerminal::Reverified {
+                validation: None,
+                ..
+            }
         ));
         assert!(matches!(
-            partial_terminal(vec![], false, vec![2], disc()),
-            PartialTerminal::Reverified { validation: Some(_), .. }
+            partial_terminal(vec![], false, disc()),
+            PartialTerminal::Reverified {
+                validation: Some(_),
+                ..
+            }
         ));
         assert!(matches!(
-            partial_terminal(vec![4], true, vec![], disc()),
-            PartialTerminal::Interrupted { validation: Some(_), .. }
+            partial_terminal(vec![4], true, disc()),
+            PartialTerminal::Interrupted {
+                validation: Some(_),
+                ..
+            }
         ));
         assert!(matches!(
-            partial_terminal(vec![4], false, vec![], None),
-            PartialTerminal::Interrupted { validation: None, .. }
+            partial_terminal(vec![4], false, None),
+            PartialTerminal::Interrupted {
+                validation: None,
+                ..
+            }
         ));
     }
 
@@ -2218,10 +2262,7 @@ mod partial_finalize_tests {
                 failed_steps: vec![1],
                 validation: None,
             },
-            PartialTerminal::Reverified {
-                unchanged_steps: vec![1],
-                validation: None,
-            },
+            PartialTerminal::Reverified { validation: None },
         ] {
             let err = finalize_partial_run(
                 &db,
@@ -2288,10 +2329,7 @@ mod partial_finalize_tests {
             &db2,
             "run-p".into(),
             std::path::PathBuf::from("/tmp"),
-            PartialTerminal::Reverified {
-                unchanged_steps: vec![1],
-                validation: None,
-            },
+            PartialTerminal::Reverified { validation: None },
             r#"{"marker":"first-write"}"#.into(),
         )
         .await
@@ -2300,10 +2338,7 @@ mod partial_finalize_tests {
             &db2,
             "run-p".into(),
             std::path::PathBuf::from("/tmp"),
-            PartialTerminal::Reverified {
-                unchanged_steps: vec![1],
-                validation: None,
-            },
+            PartialTerminal::Reverified { validation: None },
             r#"{"marker":"second-write"}"#.into(),
         )
         .await
@@ -2331,10 +2366,7 @@ mod partial_finalize_tests {
                 failed_steps: vec![1],
                 validation: None,
             },
-            PartialTerminal::Reverified {
-                unchanged_steps: vec![1],
-                validation: None,
-            },
+            PartialTerminal::Reverified { validation: None },
         ] {
             let err = finalize_partial_run(
                 &db,
@@ -2437,10 +2469,7 @@ mod partial_finalize_tests {
             "interrupted"
         );
         assert_eq!(
-            done_status_of(&PartialTerminal::Reverified {
-                unchanged_steps: vec![1],
-                validation: None,
-            }),
+            done_status_of(&PartialTerminal::Reverified { validation: None }),
             "no_change"
         );
     }

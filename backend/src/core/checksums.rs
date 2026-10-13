@@ -756,10 +756,13 @@ pub fn acknowledge_sections(project_path: &Path, ai_files: &[String]) -> Result<
             found = true;
         }
         if !found {
-            return Err(format!("`{ai_file}` is not a section of the drift baseline"));
+            return Err(format!(
+                "`{ai_file}` is not a section of the drift baseline"
+            ));
         }
     }
-    let json = serde_json::to_vec_pretty(&file).map_err(|e| format!("JSON serialize error: {e}"))?;
+    let json =
+        serde_json::to_vec_pretty(&file).map_err(|e| format!("JSON serialize error: {e}"))?;
     let path = crate::core::scanner::detect_docs_dir(project_path).join("checksums.json");
     crate::core::mcp_scanner::atomic_write_bytes(&path, &json)?;
     // The cache keys on the manifest mtime, which a same-second rewrite may keep.

@@ -87,7 +87,7 @@ by a human (KT-1131). An accepted step keeps its failure on record:
   refused in the same case: it would supersede the run. The refusal names the
   run, so a bridge agent knows what to resume. A partial run, which the Full
   launch cannot resume, never refuses a launch.
-  [src: file: backend/src/api/audit/full.rs:505-511#fresh_launch_refusal] [src: file: backend/src/api/audit/full.rs:3602-3615#fresh_launch_refusal] [src: file: backend/src/api/audit/drift.rs:459-466#fresh_launch_refusal]
+  [src: file: backend/src/api/audit/full.rs:505-511#fresh_launch_refusal] [src: file: backend/src/api/audit/full.rs:3602-3615#fresh_launch_refusal] [src: file: backend/src/api/audit/drift.rs:525-532#fresh_launch_refusal]
 - **The existing docs are never injected again.** The template is installed
   only into an empty AI doc folder, decided from its content rather than the
   displayed status; Kronn's own docs only get the template files they lack.
@@ -103,7 +103,7 @@ by a human (KT-1131). An accepted step keeps its failure on record:
   run is resumable, it says so and offers "Retry". Every launch button stays
   disabled until it knows. A step retried alone never falls back to a whole
   audit when its run is no longer resumable.
-  [src: file: frontend/src/components/ProjectCard.tsx:507-510#resumableUnknown] [src: file: frontend/src/components/ProjectCard.tsx:772-777#retrySteps] [src: file: frontend/src/components/AuditTimeline.tsx:398#launchBlocked]
+  [src: file: frontend/src/components/ProjectCard.tsx:511-514#resumableUnknown] [src: file: frontend/src/components/ProjectCard.tsx:777-782#retrySteps] [src: file: frontend/src/components/AuditTimeline.tsx:398#launchBlocked]
 
 ## Every error carries its action (KT-1169)
 
@@ -121,7 +121,7 @@ by a human (KT-1131). An accepted step keeps its failure on record:
 | Card header | A stale-sections refresh failed. | The refresh button stays while the sections are stale. It is hidden while a run waits to be resumed, because the server refuses it then. « Vérifié, inchangé » next to it settles the sections without an agent. |
 | Toasts during a run | A step failed or warned. | Informational: the run ends with that step's "Retry this step" and "Accept as it stands". |
 
-- Launch error banner. [src: file: frontend/src/components/AuditTimeline.tsx:581-582#launchError] [src: file: frontend/src/components/ProjectCard.tsx:954#setAuditLaunchError] [src: file: frontend/src/components/ProjectCard.tsx:452-453#auditLaunchError]
+- Launch error banner. [src: file: frontend/src/components/AuditTimeline.tsx:581-582#launchError] [src: file: frontend/src/components/ProjectCard.tsx:957#setAuditLaunchError] [src: file: frontend/src/components/ProjectCard.tsx:452-453#auditLaunchError]
 - Unknown resumable state, unreadable timeline. [src: file: frontend/src/components/AuditTimeline.tsx:600-601#resumableUnknown] [src: file: frontend/src/components/AuditTimeline.tsx:613-614#loadFailed]
 - Refused acceptance. [src: file: frontend/src/components/AuditTimeline.tsx:406#setAcceptError] [src: file: frontend/src/components/AuditTimeline.tsx:709-710#acceptError]
 - Recap read error. [src: file: frontend/src/components/AuditRecapPanel.tsx:363-368#errorBlock]
@@ -146,7 +146,7 @@ by a human (KT-1131). An accepted step keeps its failure on record:
 Sources:
 
 - The plan and the re-anchoring. [src: file: backend/src/api/audit/revalidate.rs:49#plan] [src: file: backend/src/api/audit/revalidate.rs:123#apply_reanchors]
-- The partial pipeline the agent part reuses. [src: file: backend/src/api/audit/drift.rs:324#run_partial_pipeline]
+- The partial pipeline the agent part reuses. [src: file: backend/src/api/audit/drift.rs:390#run_partial_pipeline]
 
 ## Refreshing stale sections (KT-1207)
 
@@ -157,27 +157,30 @@ sections.
   unchanged step re-verified its section. The drift baseline is merged for
   the done steps, whatever the run's status, after the terminal commit. A
   failed step's section stays stale.
-  [src: file: backend/src/api/audit/drift.rs:1393-1395#done_steps] [src: file: backend/src/api/audit/drift.rs:1662#compute_merged_baseline]
+  [src: file: backend/src/api/audit/drift.rs:1442-1444#done_steps] [src: file: backend/src/api/audit/drift.rs:1723#compute_merged_baseline]
 - **Status.** Without a failed step the run is `Completed`. The SSE `done`
   reads `complete` when a step rewrote its target, `no_change` when none did.
   With a failed step it is `Interrupted`.
-  [src: file: backend/src/api/audit/drift.rs:1713#partial_terminal]
+  [src: file: backend/src/api/audit/drift.rs:1774#partial_terminal]
 - **Validation.** The done steps get a validation discussion scoped to them,
   linked in the terminal transaction, on an `Interrupted` run too: the
   validate gate still refuses that run. A run that rewrote nothing, every
   step unchanged or stopped before its first write, restores the
   `validated_at` it revoked at launch, and then opens no discussion.
-  [src: file: backend/src/api/audit/drift.rs:1428-1429#restore_validation_if_untouched] [src: file: backend/src/api/audit/drift.rs:1471#pending_validation] [src: file: backend/src/api/audit/drift.rs:1772#Interrupted]
+  [src: file: backend/src/api/audit/drift.rs:1477-1478#restore_validation_if_untouched] [src: file: backend/src/api/audit/drift.rs:1521#pending_validation] [src: file: backend/src/api/audit/drift.rs:1834#Interrupted]
 - **Citations.** A section with recorded citations is judged by them. A
-  refresh re-fingerprints only the docs it rewrote, so such a section that
-  ended unchanged stays stale until a human confirms it.
+  normal refresh re-fingerprints both rewritten and re-verified unchanged
+  sections after the terminal commit; failed sections keep their previous
+  fingerprints. Revalidation retains its explicit human acknowledgement for
+  unchanged citations.
+  [src: file: backend/src/api/audit/drift.rs:1653#citation_docs]
 - **« Vérifié, inchangé ».**
   `POST /api/projects/{id}/drift/acknowledge` refreshes the named sections'
   baseline mappings, and their citation fingerprints when recorded. It runs
   no agent and writes no doc. It is a human action only: the route is not on
   the bridge list, and the handler refuses any bridge caller. It takes the
   audit lease.
-  [src: file: backend/src/lib.rs:1852#drift/acknowledge] [src: file: backend/src/api/audit/drift.rs:81#bridge] [src: file: backend/src/api/audit/drift.rs:93#try_acquire_lease] [src: file: backend/src/core/checksums.rs:745#acknowledge_sections]
+  [src: file: backend/src/lib.rs:1870-1871#acknowledge_drift] [src: file: backend/src/api/audit/drift.rs:94#bridge] [src: file: backend/src/api/audit/drift.rs:106#try_acquire_lease] [src: file: backend/src/core/checksums.rs:745#acknowledge_sections]
 
 ## The action offered in each state
 
@@ -201,8 +204,8 @@ The validation phase never reads "running" while an audit runs.
 - Step status, accepted included. [src: file: frontend/src/components/AuditTimeline.tsx:154#stepStatus]
 - Launch label: resume, finalize, run again. [src: file: frontend/src/components/AuditTimeline.tsx:387#launchLabel]
 - Per-step actions only on the resumable run. [src: file: frontend/src/components/AuditTimeline.tsx:395#stepActions]
-- Validation phase is not running during an audit. [src: file: frontend/src/components/AuditTimeline.tsx:401#validationRunning] [src: file: frontend/src/components/ProjectCard.tsx:568-570#validationInProgress]
+- Validation phase is not running during an audit. [src: file: frontend/src/components/AuditTimeline.tsx:401#validationRunning] [src: file: frontend/src/components/ProjectCard.tsx:571-573#validationInProgress]
 - Validation phase hands over to the run. [src: file: frontend/src/components/AuditTimeline.tsx:825-827#runPending]
 - Confirmation before a fresh full audit. [src: file: frontend/src/components/AuditTimeline.tsx:987-988#confirmRelaunch]
 - Orphaned lease banner. [src: file: frontend/src/components/AuditTimeline.tsx:568-569#leaseOrphaned]
-- Cancel pending. [src: file: frontend/src/components/AuditTimeline.tsx:561-562#cancelPending] [src: file: frontend/src/components/ProjectCard.tsx:736-740#setCancelPending]
+- Cancel pending. [src: file: frontend/src/components/AuditTimeline.tsx:561-562#cancelPending] [src: file: frontend/src/components/ProjectCard.tsx:738-742#setCancelPending]

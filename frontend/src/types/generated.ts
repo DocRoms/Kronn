@@ -24,6 +24,12 @@ remaining_failed: Array<number>, };
  */
 export type AcknowledgeCitationsRequest = { doc: string, };
 
+/**
+ * `POST /api/projects/:id/drift/acknowledge` body: the stale sections (their
+ * `ai_file`) a human checked and found still true.
+ */
+export type AcknowledgeDriftRequest = { sections: Array<string>, };
+
 export type ActiveAgentDispatch = { id: string, trigger_message_id: string, agent_type: AgentType, status: string,
 /**
  * Number of times this durable dispatch has been claimed. A value above

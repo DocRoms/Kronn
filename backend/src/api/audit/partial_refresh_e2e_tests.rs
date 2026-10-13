@@ -21,12 +21,28 @@ fn stale(project: &Path) -> Vec<String> {
         .collect()
 }
 
+/// The doc's baseline mapping matches its sources as they are now.
+fn mapping_is_current(project: &Path, doc: &str) -> bool {
+    let file = crate::core::checksums::read_checksums_file_strict(project)
+        .unwrap()
+        .expect("baseline");
+    let mapping = file
+        .mappings
+        .iter()
+        .find(|m| m.ai_file == doc)
+        .expect("mapped");
+    let patterns: Vec<&str> = mapping.sources.iter().map(String::as_str).collect();
+    mapping.checksums == crate::core::checksums::compute_step_checksums(project, &patterns)
+}
+
 fn validated_at(project: &Path) -> Option<String> {
     crate::core::kronn_state::read(project).and_then(|s| s.validated_at)
 }
 
 async fn run_of(state: &AppState, done: &Value) -> crate::models::AuditRun {
-    persisted(state, done["audit_run_id"].as_str().unwrap()).await.0
+    persisted(state, done["audit_run_id"].as_str().unwrap())
+        .await
+        .0
 }
 
 #[tokio::test]
@@ -46,9 +62,35 @@ async fn a_section_re_verified_unchanged_completes_and_gives_the_validation_back
     assert_eq!(run.status, "Completed");
     assert!(run.validation_discussion_id.is_none());
     // Re-verified: the section is fresh and the validation is back as it was.
+    assert!(mapping_is_current(fx.project(), AGENTS));
     assert!(!stale(fx.project()).contains(&AGENTS.to_string()));
     assert_eq!(validated_at(fx.project()), Some(before));
     assert_eq!(fx.audit_status(), crate::models::AiAuditStatus::Validated);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_reverified_unchanged_section_refreshes_its_citation_fingerprints() {
+    let fx = Validated::new(|_| {}).await;
+    let validated_before = validated_at(fx.project()).expect("validated");
+    fx.edit_source(|lines| lines[2] = "fn renamed_error_mapper() {}".into());
+    assert!(stale(fx.project()).contains(&RULES.to_string()));
+    let doc_before = std::fs::read(fx.project().join(RULES)).unwrap();
+
+    arm(fx.h.tools.path(), "noop", &[RULES]);
+    let body = fx.partial(vec![fx.step_of(RULES) as usize]).await;
+    let done = sse_events(&body, "done").pop().expect("terminal done");
+    assert_eq!(done["status"], "no_change", "{body}");
+    assert_eq!(run_of(&fx.h.state, &done).await.status, "Completed");
+    assert!(done["discussion_id"].is_null(), "{body}");
+    assert!(!stale(fx.project()).contains(&RULES.to_string()));
+    assert_eq!(std::fs::read(fx.project().join(RULES)).unwrap(), doc_before);
+    assert_eq!(validated_at(fx.project()), Some(validated_before));
+    assert_eq!(
+        fx.sources_state(),
+        crate::core::citation_drift::SourcesState::Clean
+    );
 }
 
 #[tokio::test]
@@ -137,12 +179,17 @@ async fn an_interrupted_refresh_merges_its_done_steps_and_opens_their_validation
     );
     assert!(prompt.contains(&format!("`{AGENTS}`")), "{prompt}");
     // The done step's baseline is merged; the run still cannot be validated.
+    assert!(mapping_is_current(fx.project(), AGENTS));
     assert!(!stale(fx.project()).contains(&AGENTS.to_string()));
     validation_settled(&fx.h.state, &done).await;
     let refused = fx.validate().await;
     assert!(!refused.success);
     assert!(
-        refused.error.as_deref().unwrap_or("").contains("Interrupted"),
+        refused
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("Interrupted"),
         "{:?}",
         refused.error
     );
@@ -181,18 +228,16 @@ async fn verified_unchanged_freshens_a_checksum_section_for_a_human_only() {
     let fx = Validated::new(|_| {}).await;
     checksum_drift_on_agents(fx.project());
     let docs_before = docs_snapshot(fx.project());
-    let manifest =
-        || std::fs::read(fx.project().join("docs/checksums.json")).unwrap();
+    let manifest = || std::fs::read(fx.project().join("docs/checksums.json")).unwrap();
     let manifest_before = manifest();
 
     // Never an agent's decision, and never while an audit holds the lease.
     let refused = acknowledge(&fx, &[AGENTS], true).await;
     assert!(!refused.success);
-    assert!(crate::core::bridge_token::route_for(
-        "POST",
-        "/api/projects/{id}/drift/acknowledge"
-    )
-    .is_none());
+    assert!(
+        crate::core::bridge_token::route_for("POST", "/api/projects/{id}/drift/acknowledge")
+            .is_none()
+    );
     assert!(fx
         .h
         .state
@@ -202,7 +247,11 @@ async fn verified_unchanged_freshens_a_checksum_section_for_a_human_only() {
         .try_acquire_lease(PROJECT_ID));
     let refused = acknowledge(&fx, &[AGENTS], false).await;
     assert!(!refused.success);
-    fx.h.state.audit_tracker.lock().unwrap().release_lease(PROJECT_ID);
+    fx.h.state
+        .audit_tracker
+        .lock()
+        .unwrap()
+        .release_lease(PROJECT_ID);
     let refused = acknowledge(&fx, &["docs/not-a-section.md"], false).await;
     assert!(!refused.success);
     assert_eq!(manifest(), manifest_before);
@@ -226,7 +275,11 @@ async fn verified_unchanged_freshens_a_checksum_section_for_a_human_only() {
         .lock()
         .unwrap()
         .try_acquire_lease(PROJECT_ID));
-    fx.h.state.audit_tracker.lock().unwrap().release_lease(PROJECT_ID);
+    fx.h.state
+        .audit_tracker
+        .lock()
+        .unwrap()
+        .release_lease(PROJECT_ID);
 }
 
 #[tokio::test]
@@ -242,5 +295,8 @@ async fn verified_unchanged_also_settles_a_section_judged_by_its_citations() {
     assert!(acknowledged.success, "{:?}", acknowledged.error);
     assert!(!stale(fx.project()).contains(&RULES.to_string()));
     assert_eq!(std::fs::read(fx.project().join(RULES)).unwrap(), before);
-    assert_eq!(fx.record_of(RULES).reason, crate::core::citation_drift::RecordReason::Acknowledged);
+    assert_eq!(
+        fx.record_of(RULES).reason,
+        crate::core::citation_drift::RecordReason::Acknowledged
+    );
 }
