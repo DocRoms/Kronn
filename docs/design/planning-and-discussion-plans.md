@@ -171,7 +171,7 @@ Planning state changes, agents also receive a compact change notification and
 then pull only the required details. This prevents unrelated agents from paying
 for unused task content while ensuring “create the discussion plan” works on a
 new room. `[src: file: backend/src/api/disc_prompts.rs:471-492]`
-`[src: file: backend/src/api/discussions/streaming.rs:3268-3298]`
+`[src: file: backend/src/api/discussions/streaming.rs:3311-3341]`
 
 The intended read surface is:
 

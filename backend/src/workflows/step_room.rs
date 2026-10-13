@@ -251,23 +251,32 @@ pub async fn activate(
             sessions: Vec::new(),
         },
     );
-    let activity = {
+    let activity = loop {
         let run_id = run_id.to_string();
         let step_key = context.step_key.clone();
         let step_name = step.name.clone();
         let disc_id = context.discussion_id.clone();
         let agent_type = format!("{:?}", step.agent);
-        db.with_conn(move |conn| {
-            crate::db::workflow_step_rooms::begin_activity(
-                conn,
-                &run_id,
-                &step_key,
-                &step_name,
-                &disc_id,
-                &agent_type,
-            )
-        })
-        .await
+        let result = db
+            .with_conn(move |conn| {
+                crate::db::workflow_step_rooms::begin_activity(
+                    conn,
+                    &run_id,
+                    &step_key,
+                    &step_name,
+                    &disc_id,
+                    &agent_type,
+                )
+            })
+            .await;
+        match result {
+            Err(error) if error.to_string() == "workflow_observer_reply_running" => {
+                // The observer's short, read-only reply already owns the room.
+                // Wait instead of launching a second responder or failing the plan.
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+            result => break result,
+        }
     };
     if let Err(error) = activity {
         let _ = rooms.release(run_id, &capability_hash);

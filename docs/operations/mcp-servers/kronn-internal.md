@@ -402,7 +402,7 @@ membership ends with the step and at backend boot. Being a joined CLI, the step
 is pinned by `task_exec_launch` like any principal, so deliveries wake it, and
 a replayed step takes over the live executions its interrupted session steered.
 `[src: file: backend/src/workflows/step_room.rs:39-53#authorize]`
-`[src: file: backend/src/db/workflow_step_rooms.rs:175-291#revoke_all_after_restart]`
+`[src: file: backend/src/db/workflow_step_rooms.rs:178-294#revoke_all_after_restart]`
 The optional `validations` passed to `task_exec_launch` are principal-owned and
 persisted on the implicit single-task run. They use the same `ValidationSpec`
 contract as campaign runs and cannot be supplied or changed by the delivery
@@ -743,7 +743,7 @@ the MCP entry's `env_vars`. Kronn writes a narrow `KRONN_*` allowlist into the
 global Codex config and repeats it as a per-run `-c` override, so the dynamic
 discussion/task capability reaches that run immediately without rewriting
 shared config or leaking unrelated host variables.
-`[src: file: backend/src/agents/runner.rs:12636-12685#claude_task_worker_mcp_config]` `[src: file: backend/src/agents/runner.rs:2631-2659#KRONN_INTERNAL_CODEX_ENV_VARS]`
+`[src: file: backend/src/agents/runner.rs:12729-12778#claude_task_worker_mcp_config]` `[src: file: backend/src/agents/runner.rs:2631-2659#KRONN_INTERNAL_CODEX_ENV_VARS]`
 `[src: file: backend/src/api/discussions/streaming.rs:148-233#cli_task_worker_context]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:5740-5774#_spawned_task_worker_context]` `[src: file: backend/scripts/disc-introspection-mcp.py:11763-11776#_spawned_task_worker_mode]`
 
@@ -848,6 +848,21 @@ Missing/null provenance stays absent for historical runs; an explicit empty
 attempt list is preserved. The bridge does not look up today's model settings
 or infer attempts from output text.
 [src: file: backend/scripts/disc-introspection-mcp.py:8354-8357#agent_provenance]
+
+A recorded arbitration answer does not by itself restart its originating
+workflow: without a declared `resume`, no follow-up run is launched. When
+debugging a failed run, compare its output with the answer timestamps; the
+current decision history does not prove the earlier result incorporated it.
+[src: file: backend/src/db/discussion_questions.rs:624-642#claim_resume]
+
+Question `resume` starts a new run of the declared workflow, once per card;
+it does not resume a failed run in place or wait for every other question to
+be resolved. The target workflow must check its remaining decisions and
+domain prerequisites before proceeding. Workflow concurrency limits already
+support atomic admission per launch-variable key, within that workflow.
+[src: file: backend/src/db/discussion_questions.rs:624-681#claim_resume]
+[src: file: backend/src/api/discussion_questions.rs:36-64]
+[src: file: backend/src/workflows/concurrency.rs:106-136#insert_run_within_limit]
 
 ## Workflow readiness
 
@@ -1030,9 +1045,24 @@ other visible timeline message.
 
 [src: file: backend/src/api/disc_introspection.rs:585-626#disc_note_list]
 [src: file: backend/src/api/disc_invite.rs:249-416#note_count]
-[src: file: backend/src/api/disc_source.rs:1750-1772#disc_load_other]
-[src: file: backend/src/api/discussions/messaging.rs:441-457#MessageChannel]
+[src: file: backend/src/api/disc_source.rs:1751-1773#disc_load_other]
+[src: file: backend/src/api/discussions/messaging.rs:467-483#MessageChannel]
 [src: file: backend/src/db/discussions.rs:1411-1418#insert_note_message]
+
+A workflow Agent step receives its rendered `prompt_template` separately from
+the room transcript. A workflow may therefore inject a launch variable into
+that prompt and also copy it into a note for human traceability: the note's
+channel alone does not establish whether the agent received the same text.
+Inspect the step template and its launch inputs when investigating this case.
+[src: file: backend/src/workflows/steps.rs:160-166#build_step_prompt]
+[src: file: backend/src/workflows/steps.rs:1367-1372]
+
+Discussion creation currently persists an initial `User`/`main` message even
+when `initial_prompt` is empty and `no_agent` is true. An empty opening bubble
+therefore does not prove that a later workflow Agent step received an empty
+prompt; inspect the workflow input separately.
+[src: file: backend/src/api/discussions/crud.rs:512-522]
+[src: file: backend/src/api/discussions/crud.rs:630-647]
 
 ## Multi-agent collab — required protocol
 

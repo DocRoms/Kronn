@@ -498,7 +498,7 @@ attributable handoff — "typed assignments and handoffs, never dependent on Mar
 - **Concurrency** — one active TaskExecution per task (a partial-unique index, like the one-primary and
   one-live-session invariants). Across a parent discussion / OrchestrationRun, a configurable
   `max_concurrent_executions`, enforced via the `agent_dispatch_jobs` `group_id` concurrency limit
-  `[src: file: backend/src/db/agent_dispatch.rs:604-613]`.
+  `[src: file: backend/src/db/agent_dispatch.rs:611-620]`.
 - **Human escalation** — `Escalated` surfaces a Human Gate in the parent discussion (reuse the gate
   decide endpoint `[src: file: backend/src/api/workflows.rs:5741-5928]`): the user force-approves (→ `Integrating`),
   hands back with guidance (→ `Working`), or abandons (→ `Cancelled`). An optional

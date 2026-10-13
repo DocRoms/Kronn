@@ -9,6 +9,15 @@ pub(crate) struct ReadOnlyRepos {
 }
 
 impl ReadOnlyRepos {
+    /// A response needs no checkout and must never inherit a writable one.
+    pub(crate) fn response_only(agent: &AgentType) -> Result<Self, String> {
+        if cfg!(windows) || !matches!(agent, AgentType::ClaudeCode | AgentType::Codex) {
+            return Err("response-only replies require Claude Code or Codex on macOS/Linux, or an HTTP agent".into());
+        }
+        Ok(Self {
+            roots: vec![PathBuf::from("/")],
+        })
+    }
     #[cfg(test)]
     pub(crate) fn resolve(
         agent: &AgentType,

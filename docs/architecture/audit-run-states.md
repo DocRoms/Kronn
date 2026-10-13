@@ -22,7 +22,7 @@ Sources:
 - `Completed` or `Interrupted`, with the validation discussion, is one transaction. [src: file: backend/src/api/audit/full.rs:3472-3476#write_terminal_state]
 - `Interrupted` only moves a `Running` row. [src: file: backend/src/db/audit_runs.rs:540-547#mark_interrupted]
 - The worker marks a cancel before it acknowledges it. [src: file: backend/src/api/audit/full.rs:1186-1208#mark_cancelled] [src: file: backend/src/db/audit_runs.rs:160-161#mark_cancelled]
-- At boot, every `Running` row is a zombie and becomes `Interrupted`. [src: file: backend/src/db/mod.rs:283-287#reconcile_stale_runs] [src: file: backend/src/db/audit_runs.rs:574#reconcile_stale_runs]
+- At boot, every `Running` row is a zombie and becomes `Interrupted`. [src: file: backend/src/db/mod.rs:284-288#reconcile_stale_runs] [src: file: backend/src/db/audit_runs.rs:574#reconcile_stale_runs]
 - A run is resumable when it is the project's latest, `Interrupted`, with at least one done step. [src: file: backend/src/db/audit_runs.rs:653-655#latest_resumable]
 
 ## What counts as a done step

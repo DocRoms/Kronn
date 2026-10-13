@@ -103,7 +103,7 @@ This folder is the project's living knowledge base, shared by humans and AI agen
   one. See [discussion agent routing](architecture/discussion-agent-routing.md).
 - Multi-agent rooms survive a backend restart: a sibling's reply to the shared
   trigger no longer supersedes the siblings still waiting to run.
-  [src: file: backend/src/db/agent_dispatch.rs:755-790]
+  [src: file: backend/src/db/agent_dispatch.rs:762-797]
 - A human can decline an arbitration instead of answering it — a settled
   outcome that unblocks the lot without inventing a decision. See
   [`kronn-internal`](operations/mcp-servers/kronn-internal.md).

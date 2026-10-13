@@ -120,7 +120,7 @@ MLX observations are not evidence of determinism and do not justify enabling
 progressive loading for a model based on one apparently faster cell. GGUF uses
 the runner's greedy settings and fixed seed; those do not guarantee bitwise
 reproducibility on Metal. No aggregate latency or token saving is claimed.
-[src: file: backend/src/agents/runner.rs:7689-7732]
+[src: file: backend/src/agents/runner.rs:7782-7825]
 [src: file: docs/research/native-tool-catalogue-2026-09-22.json:44-2756]
 
 The frozen executable predates `b580bc2`, which fixes missing JSON commas in the

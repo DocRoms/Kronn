@@ -41,6 +41,9 @@ pub fn begin_activity(
         )
         .optional()?
         .ok_or_else(|| anyhow::anyhow!("workflow run is not running"))?;
+    if super::workflow_observer::reply_running(conn, disc_id)? {
+        bail!("workflow_observer_reply_running");
+    }
     conn.execute(
         "INSERT INTO workflow_step_room_activities (
              run_id, step_key, workflow_id, workflow_name, step_name, disc_id,

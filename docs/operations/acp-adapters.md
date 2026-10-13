@@ -47,7 +47,7 @@ with a resume hint, and `full_access` cannot override their worker policy.
 The common process launcher supplies delivery context and worktree-local
 temporary files. It removes inherited worker context from ordinary turns and
 the permissive container marker from workers.
-[src: file: backend/src/agents/runner.rs:4823-4849#adapter_task_worker_args]
+[src: file: backend/src/agents/runner.rs:4916-4942#adapter_task_worker_args]
 [src: file: backend/tests/adapter_worker_policy.rs:40-41#default_adapters_and_explicit_fallback_keep_worker_spawn_boundaries]
 
 Each adapter permits one active prompt at a time; sequential turns still resume
@@ -57,7 +57,7 @@ registered; abandoning the prompt releases its owned process group. Explicit
 cancellation reaps the child. Cleanup failures are reported through the same
 redacted runner diagnostic as prompt failures, never as a clean success.
 [src: file: backend/src/acp/adapter_process.rs:170-232#AdapterTurn]
-[src: file: backend/src/agents/runner.rs:5763-5773#acp_failure_diagnostic]
+[src: file: backend/src/agents/runner.rs:5856-5866#acp_failure_diagnostic]
 
 ## Packaged desktop bridge
 
@@ -70,7 +70,7 @@ The desktop resolves it through Tauri's resource directory and sets
 configured but missing executable fails closed instead of using a developer's
 source checkout. Docker and source development keep the existing script route.
 [src: file: desktop/src-tauri/src/main.rs:1133-1147#KRONN_INTERNAL_MCP_EXECUTABLE]
-[src: file: backend/src/agents/runner.rs:6105-6123#resolve_internal_mcp_command]
+[src: file: backend/src/agents/runner.rs:6198-6216#resolve_internal_mcp_command]
 
 The embedded backend exports its actual loopback port as `KRONN_BACKEND_URL`
 before starting agent dispatch and MCP configuration sync. Generated desktop
@@ -84,7 +84,7 @@ with a specific diagnostic; this does not disable ordinary Claude discussions
 or relax worker isolation. Workers run through WSL instead; the boundary
 (`WSLENV`, translated paths, backend URL in NAT mode, native ACP refusal) is in
 [`windows-wsl-agents.md`](windows-wsl-agents.md).
-[src: file: backend/src/agents/runner.rs:12354-12363#claude_task_worker_platform_check]
+[src: file: backend/src/agents/runner.rs:12447-12456#claude_task_worker_platform_check]
 [Claude sandbox platform support](https://code.claude.com/docs/en/sandboxing)
 
 After replacing a frozen bridge, reconnect the MCP session. Frozen and Windows
@@ -138,7 +138,7 @@ A native agent's `disc_append` can carry its runtime session id without having
 joined the room as a CLI peer. Such a post does not implicitly queue another
 answer from the discussion's principal. An actual joined CLI may still hand
 the turn back, and explicit recipients keep their existing routing.
-[src: file: backend/src/api/disc_source.rs:772-784#route_joined_peer_turn]
+[src: file: backend/src/api/disc_source.rs:773-785#route_joined_peer_turn]
 
 Claude's SDK model catalogue is discovered independently of these execution
 toggles. It uses an initialization-only, no-prompt CLI process, not the ACP
@@ -291,7 +291,7 @@ workflow Agent step is launched with. Undeclared, the argv is unchanged.
   [src: file: backend/src/acp/codex_adapter.rs:139-168#codex_project_mcp_override]
   [src: file: backend/src/models/workflows.rs:1539-1560#validate]
 - Native ACP agents: `session/new` offers only the narrowed bridge, or no
-  server. [src: file: backend/src/agents/runner.rs:5857-5878#declared_mcp_servers]
+  server. [src: file: backend/src/agents/runner.rs:5950-5971#declared_mcp_servers]
 - The bridge, given `--step-tools=`, lists and dispatches only those tools
   and sends no catalogue instructions on `initialize`.
   [src: file: backend/scripts/disc-introspection-mcp.py:5781-5797#_declared_step_tools]

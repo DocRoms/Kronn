@@ -24,7 +24,7 @@ five-minute cache keyed by command and working directory. Workflow attempts reta
 facts separately from the output, including through serialization and templates.
 Settings detection is a cached backend-level probe, not a record of a particular
 project's run. A missing version remains unknown.
-[src: file: backend/src/agents/runner.rs:4401]
+[src: file: backend/src/agents/runner.rs:4494]
 [src: file: backend/src/agents/provenance.rs:8]
 [src: file: backend/src/workflows/steps.rs:1208]
 [src: file: backend/src/workflows/template.rs:114]

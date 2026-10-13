@@ -16,12 +16,12 @@ worker. A catalogue over either bound is refused with the stable
 path does not exist is skipped with a warning: it has no worktree catalogue for
 the sandbox to enumerate. Any other unreadable Git root still fails closed with
 `claude_sandbox_catalogue_unreadable`, naming the project or linked repository
-(never its path). [src: file: backend/src/agents/runner.rs:7062]
+(never its path). [src: file: backend/src/agents/runner.rs:7155]
 [src: file: backend/src/api/orchestration.rs:5454]
 
 The worker remains fail-closed: sandbox availability is mandatory,
 unsandboxed commands are disabled, and the only explicit write root is the
-canonical managed task worktree. [src: file: backend/src/agents/runner.rs:6997-7019]
+canonical managed task worktree. [src: file: backend/src/agents/runner.rs:7090-7112]
 
 Regression coverage uses real synthetic Git common directories to exercise
 accepted and refused catalogue sizes, common-directory deduplication and

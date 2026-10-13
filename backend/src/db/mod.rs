@@ -67,6 +67,7 @@ pub mod ui_preferences;
 pub mod worker_deliveries;
 pub mod worker_offers;
 pub mod worker_reviews;
+pub mod workflow_observer;
 pub mod workflow_run_pins;
 pub mod workflow_step_rooms;
 pub mod workflow_watch_state;

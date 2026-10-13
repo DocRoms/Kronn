@@ -750,7 +750,8 @@ pub async fn disc_append(
             state
                 .db
                 .with_conn(move |conn| {
-                    let no_agent = crate::db::discussions::disc_is_no_agent(conn, &did)?;
+                    let no_agent = crate::db::discussions::disc_is_no_agent(conn, &did)?
+                        || crate::db::workflow_observer::enabled(conn, &did)?;
                     let native_eligible =
                         crate::db::discussion_sessions::count_eligible_responders_for_agent(
                             conn,

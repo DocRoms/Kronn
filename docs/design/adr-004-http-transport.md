@@ -26,7 +26,7 @@ agent, regardless of which named connection backs it. It replaces an inline
 ternary that used to live inside `start_ollama_http`, mirroring
 `acp::resolve_acp_route` being the sole ACP route decision point.
 [src: file: backend/src/http_transport.rs:28-41]
-[src: file: backend/src/agents/runner.rs:5111] (call site)
+[src: file: backend/src/agents/runner.rs:5204] (call site)
 
 ### Pre-dispatch capability gate
 
@@ -86,7 +86,7 @@ way:
   message (an explicit `Agent`-kind target from New Discussion) but lost the
   connection on every ordinary follow-up reply. Both resolution points now
   read the discussion's sticky `connection_id` instead.
-  [src: file: backend/src/api/discussions/messaging.rs:258-267]
+  [src: file: backend/src/api/discussions/messaging.rs:284-293]
   (`canonical_targets`'s `DiscussionAgent` branch)
   [src: file: backend/src/api/discussions/messaging.rs:78-91]
   (`native_dispatch_agents_for_targets`'s empty-target fallback)
@@ -106,7 +106,7 @@ the new `OrchestrationParticipant` type (replacing the bare
 `connection_id`, validated the same way and dispatched through the same
 `enqueue_with_connection`/`external_http_runtime` construction discussion
 dispatch already used. [src: file: backend/src/models/compare.rs:128-156]
-[src: file: backend/src/models/discussions.rs:792-808] (`OrchestrationParticipant`)
+[src: file: backend/src/models/discussions.rs:800-816] (`OrchestrationParticipant`)
 
 ## Consequences
 

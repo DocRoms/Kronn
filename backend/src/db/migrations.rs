@@ -945,6 +945,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "259_message_session_continuity",
         include_str!("sql/259_message_session_continuity.sql"),
     ),
+    (
+        "261_workflow_observer",
+        include_str!("sql/261_workflow_observer.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup` (owner-only) without the auth

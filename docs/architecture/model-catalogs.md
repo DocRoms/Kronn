@@ -38,7 +38,7 @@ hot-path tier lookup is then projected from catalog rows. Editing the manual
 catalog refreshes that projection; removing a migrated/manual row therefore
 does not make a hidden hard-coded fallback reappear.
 [src: file: backend/src/core/model_catalog/mod.rs:112-146#migrate_hardcoded_catalog_once]
-[src: file: backend/src/agents/runner.rs:3441-3460#resolve_model_flag]
+[src: file: backend/src/agents/runner.rs:3444-3463#resolve_model_flag]
 
 ## Discovery boundaries
 
@@ -116,7 +116,7 @@ that lists no models keeps its own default: there is nothing to match. A
 session that lists models without the chosen one used to be left on OpenCode's
 own default while every screen showed the chosen model; the launch is now
 refused, naming the model, before any prompt is sent.
-[src: file: backend/src/agents/runner.rs:5463-5497#offers_model_catalogue]
+[src: file: backend/src/agents/runner.rs:5556-5590#offers_model_catalogue]
 [src: file: backend/src/acp.rs:1886-1916#select_model]
 
 ## Launch safety and UI
@@ -135,7 +135,7 @@ this is permission to attempt execution, not proof of account access. Missing CL
 authentication failures and unavailable/unknown identities are not covered by
 that exception, and other runtimes keep their existing failure policy.
 [src: file: backend/src/core/model_catalog/mod.rs:1083-1098#retained_claude_model]
-[src: file: backend/src/api/discussions/streaming.rs:3832-3839#preflight_resolve]
+[src: file: backend/src/api/discussions/streaming.rs:3885-3892#preflight_resolve]
 [src: file: backend/src/workflows/runner.rs:1840-1878#preflight_resolve]
 [src: file: backend/src/workflows/steps.rs:1174-1213#preflight_workflow_launch]
 
@@ -195,16 +195,16 @@ candidate differs from an advertised mode only by case or whitespace, the
 refusal names that mode instead of the generic "catalogue does not list
 that combination" message, which otherwise reads as if the mode is entirely
 absent (KT-656).
-[src: file: backend/src/agents/runner.rs:3444-3586#resolve_reasoning_effort]
+[src: file: backend/src/agents/runner.rs:3447-3589#resolve_reasoning_effort]
 The direct Codex runner still starts a fresh execution on each turn; its ACP
 adapter supports thread resume. Claude supports resume on both routes. Effort
 is transmitted on every supported fresh/resumed invocation; this feature does
 not add resume to the direct Codex runner. Delegated task workers take the
 same route as ordinary turns, with their isolated worker arguments.
-[src: file: backend/src/agents/runner.rs:12902-12936#model_reasoning_effort]
+[src: file: backend/src/agents/runner.rs:12995-13029#model_reasoning_effort]
 [src: file: backend/src/acp/claude_adapter.rs:311-324#reasoning_effort]
 [src: file: backend/src/acp/codex_adapter.rs:462-501#model_reasoning_effort]
-[src: file: backend/src/agents/runner.rs:4823-4849#adapter_task_worker_args]
+[src: file: backend/src/agents/runner.rs:4916-4942#adapter_task_worker_args]
 
 Both standalone and embedded-desktop startup await catalog bootstrap before
 starting workflows or serving requests. Even after the one-time migration is
@@ -239,8 +239,8 @@ not a database error. This also applies to previously saved QPs whose effort
 was formerly inert; ignoring it silently would claim a setting was applied
 when it was not. QPs with no effort or only whitespace keep the old behavior.
 [src: file: backend/src/db/discussion_effort.rs:9-55#capture]
-[src: file: backend/src/api/discussions/crud.rs:721-728#UnresolvedQuickPromptEffort]
-[src: file: backend/src/api/discussions/streaming.rs:3745-3752#for_run]
+[src: file: backend/src/api/discussions/crud.rs:728-735#UnresolvedQuickPromptEffort]
+[src: file: backend/src/api/discussions/streaming.rs:3798-3805#for_run]
 
 These snapshots are local execution state, not a portable QP setting. Exporting
 or importing a QP preserves its editable `agent_settings`, while it does not
@@ -264,7 +264,7 @@ preceding registered migration (161, the ACP session migration). Tests pin manua
 disappearance/reappearance, refresh errors, cache staleness, provider media
 capability isolation and same-model isolation across HTTP connections.
 Generated TypeScript remains owned by `make typegen`.
-[src: file: backend/src/db/migrations.rs:1867-1879#model_catalog_upgrades_from_its_immediate_predecessor]
+[src: file: backend/src/db/migrations.rs:1871-1883#model_catalog_upgrades_from_its_immediate_predecessor]
 [src: file: backend/src/db/model_catalog.rs:1311-1340#disappearance_downgrades_to_cached_never_deletes]
 [src: file: backend/src/db/model_catalog.rs:1504-1505#identical_http_model_ids_are_isolated_by_connection]
 [src: file: docs/testing-quality.md:15-16#typegen]

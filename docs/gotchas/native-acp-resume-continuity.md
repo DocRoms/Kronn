@@ -7,7 +7,7 @@ directory. The discussion layer selects the resume identity and delta together;
 A first turn, incomplete checkpoint, missing marker or delta without a size
 saving uses the ordinary bounded full prompt and no resume identity.
 [src: file: backend/src/api/discussions/streaming.rs:1401-1502]
-[src: file: backend/src/agents/runner.rs:3150-3224]
+[src: file: backend/src/agents/runner.rs:3152-3227]
 
 ## Two boundaries, one completed turn
 
@@ -45,7 +45,7 @@ are never tested against a CLI-print conversation file. The direct CLI retires
 old progress before spawning, even if the next init event never arrives; a
 database failure there prevents the spawn rather than leaving a stale frontier.
 [src: file: backend/src/agents/runner.rs:2211-2280]
-[src: file: backend/src/agents/runner.rs:3309-3322]
+[src: file: backend/src/agents/runner.rs:3312-3325]
 [src: file: backend/src/api/discussions/streaming.rs:1435-1463]
 
 ## Negotiated resumption
@@ -65,7 +65,7 @@ The safe fresh-session fallback is restricted to absent resume capability or a
 positively identified missing session before a prompt is sent. Authentication,
 timeouts and ambiguous transport errors fail visibly. Prompt, cancellation and
 persistence failures are not followed by an automatic fresh-session replay.
-[src: file: backend/src/agents/runner.rs:3600-3798]
+[src: file: backend/src/agents/runner.rs:3603-3891]
 
 OpenCode v1.18.27 defines a structured missing-session error using code -32602,
 the exact message `session not found: <id>` and `data.sessionId`. The transport
@@ -83,7 +83,7 @@ Each agent reply records which path its turn took in
 discussion layer decides `new` and its reason; the runner reports a refused
 resume once the runtime answered it. Runtimes that never resume record nothing.
 [src: file: backend/src/api/discussions/streaming.rs:2289-2305#resume_with_delta_if_possible]
-[src: file: backend/src/agents/runner.rs:5351-5372#resume_refused]
+[src: file: backend/src/agents/runner.rs:5444-5465#resume_refused]
 
 ## Deterministic qualification boundaries
 
@@ -101,9 +101,9 @@ Additional tests cover scope isolation, stale turn/session events, incomplete
 legacy progress and atomic response/checkpoint rollback. Existing ACP fixtures
 cover capability absence, missing sessions, ambiguous errors, cancellation and
 redacted prompt/persistence failures.
-[src: file: backend/src/api/discussions/streaming.rs:5791-6085]
+[src: file: backend/src/api/discussions/streaming.rs:5852-6146]
 [src: file: backend/src/db/acp_runtime_sessions.rs:337-475]
-[src: file: backend/src/agents/runner.rs:10055-10236]
+[src: file: backend/src/agents/runner.rs:10148-10329]
 
 These tests do not launch a live provider or qualify real model behavior.
 Kronn normalizes ACP token counts but does not yet normalize optional cumulative

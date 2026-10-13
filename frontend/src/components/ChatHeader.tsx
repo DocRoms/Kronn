@@ -99,6 +99,7 @@ export function ChatHeader({
   const [nativeAgentMode, setNativeAgentMode] = useState<{
     discussionId: string;
     disabled: boolean;
+    workflowObserver?: boolean;
   } | null>(null);
   const [nativeAgentModeSaving, setNativeAgentModeSaving] = useState(false);
   const [sessionWorkspaces, setSessionWorkspaces] = useState<DiscussionWorkspace[]>([]);
@@ -129,7 +130,7 @@ export function ChatHeader({
       void discussionsApi.nativeAgentMode(discussion.id)
         .then(mode => {
           if (current) {
-            setNativeAgentMode({ discussionId: discussion.id, disabled: mode.disabled });
+            setNativeAgentMode({ discussionId: discussion.id, disabled: mode.disabled, workflowObserver: mode.workflow_observer === true });
           }
         })
         .catch(() => {
@@ -221,7 +222,7 @@ export function ChatHeader({
     setNativeAgentModeSaving(true);
     try {
       await discussionsApi.update(discussion.id, { no_agent: disabled });
-      setNativeAgentMode({ discussionId: discussion.id, disabled });
+      setNativeAgentMode(previous => ({ discussionId: discussion.id, disabled, workflowObserver: previous?.workflowObserver }));
       onDiscussionUpdated();
       toast(
         t(disabled ? 'disc.nativeAgentDisabledToast' : 'disc.nativeAgentEnabledToast'),
@@ -391,6 +392,11 @@ export function ChatHeader({
               answers by itself is the thing that changes what everything else
               on the row means. */}
           <span className="disc-native-agent-control">
+            {nativeAgentMode?.discussionId === discussion.id && nativeAgentMode.workflowObserver && !nativeAgentDisabled && (
+              <span className="text-muted" title={t('disc.workflowObserverHelp')} data-testid="workflow-observer-mode">
+                {t('disc.workflowObserver')}
+              </span>
+            )}
             {nativeAgentDisabled ? (
               <button
                 type="button"

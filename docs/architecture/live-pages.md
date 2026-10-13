@@ -51,6 +51,17 @@ an unspecified method is shown as unknown, not inferred.
 [src: file: backend/src/api/artifact_portability/import.rs:712-714#digest]
 [src: file: frontend/src/components/ArtifactImportDialog.tsx:67-70#setApprovedExecIds]
 
+Imported snapshots retain the publisher's values, including any identity a
+workflow previously collected from an API's current-user endpoint. They are
+not the recipient's identity: import copies dataset values as initial data,
+and the runtime delivers those stored datasets without resolving a viewer.
+When a Page uses such a dataset for a personal default, recollect using the
+recipient's configured connection and reopen the Page before checking that
+default; do not infer the viewer from an imported identity snapshot.
+[src: file: backend/src/api/artifact_portability.rs:114-122]
+[src: file: backend/src/api/artifact_portability/import.rs:827-839]
+[src: file: frontend/src/lib/live-page-sandbox.ts:314-333#runtimeData]
+
 Configured connections, their stored credentials, agent-library entries and
 local files are not bundled. Definitions retain those references; preview lists missing known
 plugin/model connections, skills, profiles and directives, and offers an
@@ -529,6 +540,36 @@ fence carries one intention.
 [src: file: frontend/src/hooks/useLivePageActions.ts:276-288#anyInFlight]
 [src: file: frontend/src/components/LivePageActionOverlay.tsx:40#Escape]
 [src: file: frontend/src/components/DiscussionActionCard.tsx:478-485#discussionActionOperations]
+
+When authoring a local row move after an action succeeds, preserve the row's
+detail fields and update any separate detail dataset and in-memory index before
+rendering the destination. In particular, keep descriptions and repository
+components when moving a ticket between queues; missing cached details must not
+be treated as a confirmed absence of components. Action-state marking and
+dataset delivery are separate bridge operations, so an action's `succeeded`
+state alone does not refresh those details.
+[src: file: frontend/src/lib/live-page-sandbox.ts:490-509#markActions]
+[src: file: frontend/src/lib/live-page-sandbox.ts:725-728]
+
+Authoring guidance for shared automation reports: the next action must be
+understandable without the author's operational knowledge. A failed attempt
+alone is not a sufficient reason to offer a retry: account for pending human
+decisions, configuration blockers and unfinished planning, and label blocked
+tasks explicitly. Keep attempt history distinct from the current work state.
+[src: user: 2026-10-13: autoCode shared-artifact retry UX]
+
+When a report shows planned workers, distinguish the requested capability tier
+from the worker and model actually used. A plan is not a reservation of provider
+capacity. The worker catalogue reports availability and per-tier refusals, and
+includes already-recorded quota exhaustion; it does not promise remaining
+tokens. Recheck the selected target with execution preflight before launching,
+preserve an existing execution when reassignment is possible, and present a
+resource wait separately from a failed plan. Do not send a generation request
+merely to guess whether a quota is available.
+[src: file: backend/src/models/orchestration.rs:1170-1193#TaskWorkerTier]
+[src: file: backend/src/api/orchestration.rs:10263-10306]
+[src: file: backend/src/api/orchestration.rs:10571-10613#bounded_provider_quota_details]
+[src: file: backend/src/api/orchestration.rs:10854-10883#task_exec_prepare]
 
 A `user_input` value may also carry a `<page.…>` `source_ref`: when the card
 opens, `POST /api/live-page-actions/{id}/prefill` resolves it server-side for

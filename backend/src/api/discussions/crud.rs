@@ -231,10 +231,17 @@ pub async fn native_agent_mode(
 ) -> Json<ApiResponse<DiscussionNativeAgentMode>> {
     match state
         .db
-        .with_read_conn(move |conn| crate::db::discussions::get_disc_no_agent(conn, &id))
+        .with_read_conn(move |conn| {
+            let disabled = crate::db::discussions::get_disc_no_agent(conn, &id)?;
+            let observer = crate::db::workflow_observer::enabled(conn, &id)?;
+            Ok(disabled.map(|disabled| DiscussionNativeAgentMode {
+                disabled,
+                workflow_observer: observer.then_some(true),
+            }))
+        })
         .await
     {
-        Ok(Some(disabled)) => Json(ApiResponse::ok(DiscussionNativeAgentMode { disabled })),
+        Ok(Some(mode)) => Json(ApiResponse::ok(mode)),
         Ok(None) => Json(ApiResponse::err("Discussion not found")),
         Err(error) => Json(ApiResponse::err(format!("DB error: {error}"))),
     }
@@ -750,6 +757,7 @@ pub async fn update(
     let new_connection_id = req.connection_id;
     let summary_strategy = req.summary_strategy;
     let no_agent = req.no_agent;
+    let workflow_observer = req.workflow_observer;
     let agent_handoffs_disabled = req.agent_handoffs_disabled;
     let agent_handoffs_unlimited = req.agent_handoffs_unlimited;
     let attach_agents = req.attach_agents;
@@ -872,6 +880,9 @@ pub async fn update(
             if let Some(disabled) = no_agent {
                 updated =
                     crate::db::discussions::set_disc_no_agent(conn, &id, disabled)? || updated;
+            }
+            if let Some(enabled) = workflow_observer {
+                updated = crate::db::workflow_observer::set_enabled(conn, &id, enabled)? || updated;
             }
             if agent_handoffs_disabled.is_some() || agent_handoffs_unlimited.is_some() {
                 updated = crate::db::discussions::set_disc_agent_handoff_policy(
@@ -1545,6 +1556,50 @@ mod tests {
                 native_agent_mode(State(state.clone()), Path("d-peer-only".to_string())).await;
             assert_eq!(persisted.0.data.expect("mode").disabled, disabled);
         }
+    }
+
+    #[tokio::test]
+    async fn workflow_observer_is_explicit_persistent_and_does_not_override_disable() {
+        let state = state_with_disc("observer-room").await;
+        let req = serde_json::from_value(serde_json::json!({
+            "workflow_observer": true, "no_agent": true,
+        }))
+        .unwrap();
+        assert!(
+            update(
+                State(state.clone()),
+                Path("observer-room".into()),
+                Json(req)
+            )
+            .await
+            .0
+            .success
+        );
+        let mode = native_agent_mode(State(state.clone()), Path("observer-room".into()))
+            .await
+            .0
+            .data
+            .unwrap();
+        assert!(mode.disabled);
+        assert_eq!(mode.workflow_observer, Some(true));
+        let req = serde_json::from_value(serde_json::json!({ "no_agent": false })).unwrap();
+        assert!(
+            update(
+                State(state.clone()),
+                Path("observer-room".into()),
+                Json(req)
+            )
+            .await
+            .0
+            .success
+        );
+        let mode = native_agent_mode(State(state), Path("observer-room".into()))
+            .await
+            .0
+            .data
+            .unwrap();
+        assert!(!mode.disabled);
+        assert_eq!(mode.workflow_observer, Some(true));
     }
 
     #[tokio::test]

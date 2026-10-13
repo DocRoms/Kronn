@@ -309,8 +309,8 @@ Resending the same agent no longer clears an existing connection or invalidates
 the summary cache. A lightweight agent lookup avoids loading the transcript
 merely to compare targets.
 [src: file: backend/src/models/discussions.rs:435-445]
-[src: file: backend/src/api/discussions/crud.rs:599-630]
-[src: file: backend/src/api/discussions/crud.rs:671-694]
+[src: file: backend/src/api/discussions/crud.rs:606-637]
+[src: file: backend/src/api/discussions/crud.rs:678-701]
 [src: file: backend/src/db/discussions.rs:1012-1020]
 
 Seven isolated Router/SQLite regressions cover changed and unchanged targets,
