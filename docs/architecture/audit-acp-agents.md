@@ -94,7 +94,7 @@ Now an ACP agent is stopped like an HTTP agent (KT-924), through a token:
 
 The partial audit now checks the stop between two steps and after each step's
 agent, finalises the run as `Cancelled` and releases the project lease, like the
-Full audit [src: file: backend/src/api/audit/drift.rs:726-746#mark_cancelled] [src: file: backend/src/api/audit/drift.rs:1100-1118#mark_cancelled]. A partial refresh that
+Full audit [src: file: backend/src/api/audit/drift.rs:744-764#mark_cancelled] [src: file: backend/src/api/audit/drift.rs:1118-1136#mark_cancelled]. A partial refresh that
 was cancelled does not refresh the baseline, so its sections stay reported as
 stale.
 

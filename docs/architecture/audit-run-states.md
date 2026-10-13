@@ -19,9 +19,9 @@ Sources:
 
 - The lease is the single gate of every launch. [src: file: backend/src/api/audit/full.rs:407-414#try_acquire_lease]
 - The row is inserted `Running`. [src: file: backend/src/db/audit_runs.rs:17-19#insert_running]
-- `Completed` or `Interrupted`, with the validation discussion, is one transaction. [src: file: backend/src/api/audit/full.rs:3497-3501#write_terminal_state]
+- `Completed` or `Interrupted`, with the validation discussion, is one transaction. [src: file: backend/src/api/audit/full.rs:3513-3517#write_terminal_state]
 - `Interrupted` only moves a `Running` row. [src: file: backend/src/db/audit_runs.rs:550-557#mark_interrupted]
-- The worker marks a cancel before it acknowledges it. [src: file: backend/src/api/audit/full.rs:1211-1233#mark_cancelled] [src: file: backend/src/db/audit_runs.rs:170-171#mark_cancelled]
+- The worker marks a cancel before it acknowledges it. [src: file: backend/src/api/audit/full.rs:1213-1235#mark_cancelled] [src: file: backend/src/db/audit_runs.rs:170-171#mark_cancelled]
 - At boot, every `Running` row is a zombie and becomes `Interrupted`. [src: file: backend/src/db/mod.rs:283-287#reconcile_stale_runs] [src: file: backend/src/db/audit_runs.rs:584#reconcile_stale_runs]
 - A run is resumable when it is the project's latest, `Interrupted`, with at least one done step. [src: file: backend/src/db/audit_runs.rs:663-665#latest_resumable]
 
@@ -32,8 +32,8 @@ by a human (KT-1131). An accepted step keeps its failure on record:
 `cli_success` stays false and `step_warning` keeps the reason. It gains
 `accepted_at`, `accepted_by` and `accepted_reason`.
 
-- Done steps, as a resume reads them. [src: file: backend/src/api/audit/full.rs:3570-3578#already_succeeded_step_indices]
-- Per-run outcomes keep `succeeded`, `unchanged`, `accepted` and `failed` apart. [src: file: backend/src/api/audit/full.rs:3279-3290#RunProgress]
+- Done steps, as a resume reads them. [src: file: backend/src/api/audit/full.rs:3586-3594#already_succeeded_step_indices]
+- Per-run outcomes keep `succeeded`, `unchanged`, `accepted` and `failed` apart. [src: file: backend/src/api/audit/full.rs:3295-3306#RunProgress]
 
 ## Recovering from failed steps
 
@@ -42,7 +42,7 @@ by a human (KT-1131). An accepted step keeps its failure on record:
 - **Retry one step** (`retry_steps` with `resume_run_id`) replays only the
   named steps. The other failed steps are copied as they ended and are not
   run (`step_skipped`, reason `not_retried`).
-  [src: file: backend/src/api/audit/full.rs:3614-3637#retry_selection] [src: file: backend/src/api/audit/full.rs:1281-1294#not_retried] [src: file: backend/src/db/audit_runs.rs:750-773#carry_over_failed_steps]
+  [src: file: backend/src/api/audit/full.rs:3630-3653#retry_selection] [src: file: backend/src/api/audit/full.rs:1283-1296#not_retried] [src: file: backend/src/db/audit_runs.rs:750-773#carry_over_failed_steps]
 - **Accept as it stands** is
   `POST /api/projects/{id}/audit-runs/{run_id}/steps/{step}/accept`. It is a
   human action only: the route is not on the bridge list, and the handler
@@ -71,12 +71,12 @@ by a human (KT-1131). An accepted step keeps its failure on record:
   runs. While an audit of the project shows progress, such an agent is not
   started: its dispatch goes back to the queue with its attempts intact. A
   run clears its progress before it spawns its own validation agent.
-  [src: file: backend/src/api/audit/full.rs:699-701#stop_validation_agents] [src: file: backend/src/api/audit/full.rs:226#stop_validation_agents] [src: file: backend/src/api/discussions/runtime.rs:493#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1164-1167#hold_validation_during_audit] [src: file: backend/src/api/audit/full.rs:3154-3157#clear_progress]
+  [src: file: backend/src/api/audit/full.rs:699-701#stop_validation_agents] [src: file: backend/src/api/audit/full.rs:226#stop_validation_agents] [src: file: backend/src/api/discussions/runtime.rs:493#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1164-1167#hold_validation_during_audit] [src: file: backend/src/api/audit/full.rs:3168-3171#clear_progress]
 - **Cancel.** A cancel waits for the worker to acknowledge it. Without that
   acknowledgement it answers with an error, and the UI keeps the audit shown,
   marked "cancel pending". It deletes only the validation discussion linked to
   the run it cancelled, never one an earlier run left behind.
-  [src: file: backend/src/api/audit/full.rs:3895-3916#delete_run_validation_discussion] [src: file: backend/src/api/audit/full.rs:4005-4017#wait_for_cancel_ack]
+  [src: file: backend/src/api/audit/full.rs:3911-3932#delete_run_validation_discussion] [src: file: backend/src/api/audit/full.rs:4021-4033#wait_for_cancel_ack]
 
 ## Launching from the existing state (KT-1169)
 
@@ -87,7 +87,7 @@ by a human (KT-1131). An accepted step keeps its failure on record:
   refused in the same case: it would supersede the run. The refusal names the
   run, so a bridge agent knows what to resume. A partial run, which the Full
   launch cannot resume, never refuses a launch.
-  [src: file: backend/src/api/audit/full.rs:505-511#fresh_launch_refusal] [src: file: backend/src/api/audit/full.rs:3602-3615#fresh_launch_refusal] [src: file: backend/src/api/audit/drift.rs:531-538#fresh_launch_refusal]
+  [src: file: backend/src/api/audit/full.rs:505-511#fresh_launch_refusal] [src: file: backend/src/api/audit/full.rs:3618-3631#fresh_launch_refusal] [src: file: backend/src/api/audit/drift.rs:543-550#fresh_launch_refusal]
 - **The existing docs are never injected again.** The template is installed
   only into an empty AI doc folder, decided from its content rather than the
   displayed status; Kronn's own docs only get the template files they lack.
@@ -157,23 +157,23 @@ sections.
   unchanged step re-verified its section. The drift baseline is merged for
   the done steps, whatever the run's status, after the terminal commit. A
   failed step's section stays stale.
-  [src: file: backend/src/api/audit/drift.rs:1448-1450#done_steps] [src: file: backend/src/api/audit/drift.rs:1729#compute_merged_baseline]
+  [src: file: backend/src/api/audit/drift.rs:1466-1468#done_steps] [src: file: backend/src/api/audit/drift.rs:1753#compute_merged_baseline]
 - **Status.** Without a failed step the run is `Completed`. The SSE `done`
   reads `complete` when a step rewrote its target, `no_change` when none did.
   With a failed step it is `Interrupted`.
-  [src: file: backend/src/api/audit/drift.rs:1780#partial_terminal]
+  [src: file: backend/src/api/audit/drift.rs:1804#partial_terminal]
 - **Validation.** The done steps get a validation discussion scoped to them,
   linked in the terminal transaction, on an `Interrupted` run too: the
   validate gate still refuses that run. A run that rewrote nothing, every
   step unchanged or stopped before its first write, restores the
   `validated_at` it revoked at launch, and then opens no discussion.
-  [src: file: backend/src/api/audit/drift.rs:1483-1484#restore_validation_if_untouched] [src: file: backend/src/api/audit/drift.rs:1527#pending_validation] [src: file: backend/src/api/audit/drift.rs:1840#Interrupted]
+  [src: file: backend/src/api/audit/drift.rs:1501-1502#restore_validation_if_untouched] [src: file: backend/src/api/audit/drift.rs:1545#pending_validation] [src: file: backend/src/api/audit/drift.rs:1864#Interrupted]
 - **Citations.** A section with recorded citations is judged by them. A
   normal refresh re-fingerprints both rewritten and re-verified unchanged
   sections after the terminal commit; failed sections keep their previous
   fingerprints. Revalidation retains its explicit human acknowledgement for
   unchanged citations.
-  [src: file: backend/src/api/audit/drift.rs:1659#citation_docs]
+  [src: file: backend/src/api/audit/drift.rs:1677#citation_docs]
 - **« Vérifié, inchangé ».**
   `POST /api/projects/{id}/drift/acknowledge` refreshes the named sections'
   baseline mappings, and their citation fingerprints when recorded. It runs

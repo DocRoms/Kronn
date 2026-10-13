@@ -1613,7 +1613,6 @@ const zh: TranslationDict = {
   "docReconfirm.writer.outside": "在 Kronn 之外修改",
   "audit.partialValidationCreated": "{0} 个部分已更新 — 已创建验证讨论，正在打开",
   "audit.partialInterrupted": "刷新不完整 — 部分部分仍为过时，重新运行更新",
-<<<<<<< HEAD
   "audit.partialReverified": "{0} 个部分已重新核实，无变化：不再标记为过时",
   "audit.partialReverifiedValidation": "{0} 个部分已重新核实，无变化 — 已创建验证讨论，正在打开",
   "audit.partialInterruptedValidation": "刷新不完整 — 已完成的 {0} 个部分已有验证讨论，其余部分仍为过时",
@@ -1621,10 +1620,7 @@ const zh: TranslationDict = {
   "audit.driftAckHint": "您已检查这些部分且内容仍然正确：它们将不再标记为过时，不会重写文档，也不会运行代理。",
   "audit.driftAckDone": "{0} 个部分已确认：不再标记为过时",
   "audit.driftAckFailed": "无法确认：{0}",
-=======
-  "audit.partialNoChange": "未重写任何内容 — 部分保持过时（后续需手动审查/接受）",
   "audit.partialSingleAgent": "此次刷新仅使用单个代理：跨代理审计选项仅适用于完整审计",
->>>>>>> e1a1c6b5e (fix(audit): TD and cross-agent decisions stick (KT-1208))
   "audit.streamWarning": "审计警告：{0}",
   "audit.noStale": "审计最新",
   "audit.auditDate": "审计于 {0}",
