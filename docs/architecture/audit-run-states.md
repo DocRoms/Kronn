@@ -87,7 +87,7 @@ by a human (KT-1131). An accepted step keeps its failure on record:
   refused in the same case: it would supersede the run. The refusal names the
   run, so a bridge agent knows what to resume. A partial run, which the Full
   launch cannot resume, never refuses a launch.
-  [src: file: backend/src/api/audit/full.rs:505-511#fresh_launch_refusal] [src: file: backend/src/api/audit/full.rs:3602-3615#fresh_launch_refusal] [src: file: backend/src/api/audit/drift.rs:525-532#fresh_launch_refusal]
+  [src: file: backend/src/api/audit/full.rs:505-511#fresh_launch_refusal] [src: file: backend/src/api/audit/full.rs:3602-3615#fresh_launch_refusal] [src: file: backend/src/api/audit/drift.rs:531-538#fresh_launch_refusal]
 - **The existing docs are never injected again.** The template is installed
   only into an empty AI doc folder, decided from its content rather than the
   displayed status; Kronn's own docs only get the template files they lack.
@@ -146,7 +146,7 @@ by a human (KT-1131). An accepted step keeps its failure on record:
 Sources:
 
 - The plan and the re-anchoring. [src: file: backend/src/api/audit/revalidate.rs:49#plan] [src: file: backend/src/api/audit/revalidate.rs:123#apply_reanchors]
-- The partial pipeline the agent part reuses. [src: file: backend/src/api/audit/drift.rs:390#run_partial_pipeline]
+- The partial pipeline the agent part reuses. [src: file: backend/src/api/audit/drift.rs:396#run_partial_pipeline]
 
 ## Refreshing stale sections (KT-1207)
 
@@ -157,23 +157,23 @@ sections.
   unchanged step re-verified its section. The drift baseline is merged for
   the done steps, whatever the run's status, after the terminal commit. A
   failed step's section stays stale.
-  [src: file: backend/src/api/audit/drift.rs:1442-1444#done_steps] [src: file: backend/src/api/audit/drift.rs:1723#compute_merged_baseline]
+  [src: file: backend/src/api/audit/drift.rs:1448-1450#done_steps] [src: file: backend/src/api/audit/drift.rs:1729#compute_merged_baseline]
 - **Status.** Without a failed step the run is `Completed`. The SSE `done`
   reads `complete` when a step rewrote its target, `no_change` when none did.
   With a failed step it is `Interrupted`.
-  [src: file: backend/src/api/audit/drift.rs:1774#partial_terminal]
+  [src: file: backend/src/api/audit/drift.rs:1780#partial_terminal]
 - **Validation.** The done steps get a validation discussion scoped to them,
   linked in the terminal transaction, on an `Interrupted` run too: the
   validate gate still refuses that run. A run that rewrote nothing, every
   step unchanged or stopped before its first write, restores the
   `validated_at` it revoked at launch, and then opens no discussion.
-  [src: file: backend/src/api/audit/drift.rs:1477-1478#restore_validation_if_untouched] [src: file: backend/src/api/audit/drift.rs:1521#pending_validation] [src: file: backend/src/api/audit/drift.rs:1834#Interrupted]
+  [src: file: backend/src/api/audit/drift.rs:1483-1484#restore_validation_if_untouched] [src: file: backend/src/api/audit/drift.rs:1527#pending_validation] [src: file: backend/src/api/audit/drift.rs:1840#Interrupted]
 - **Citations.** A section with recorded citations is judged by them. A
   normal refresh re-fingerprints both rewritten and re-verified unchanged
   sections after the terminal commit; failed sections keep their previous
   fingerprints. Revalidation retains its explicit human acknowledgement for
   unchanged citations.
-  [src: file: backend/src/api/audit/drift.rs:1653#citation_docs]
+  [src: file: backend/src/api/audit/drift.rs:1659#citation_docs]
 - **« Vérifié, inchangé ».**
   `POST /api/projects/{id}/drift/acknowledge` refreshes the named sections'
   baseline mappings, and their citation fingerprints when recorded. It runs
