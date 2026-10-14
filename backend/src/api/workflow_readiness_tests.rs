@@ -340,3 +340,83 @@ async fn a_triggered_child_s_blockers_reach_bundle_get_and_validate() {
         Some(from_bundle.blockers)
     );
 }
+
+/// A workflow imported from a repository runs only once a human approved its
+/// current content: the run aborts before its first step, so readiness, the
+/// list card and the run must agree instead of reporting it READY.
+#[tokio::test]
+async fn an_unapproved_repository_import_is_not_ready_until_a_human_approves_it() {
+    let state = state();
+    let request: CreateWorkflowRequest = serde_json::from_value(serde_json::json!({
+        "name": "imported", "project_id": null, "trigger": {"type": "Manual"},
+        "exec_allowlist": ["bash"],
+        "steps": [{"name": "t", "step_type": {"type": "Exec"},
+                   "exec_command": "bash", "exec_args": ["-c", "echo ok"]}]
+    }))
+    .unwrap();
+    let Json(created) = create_as(state.clone(), request, WorkflowWriter::Human).await;
+    let id = created.data.expect("created").id;
+    assert!(verdict(&state, &id).await.ready, "not imported: no gate");
+
+    let target = id.clone();
+    state
+        .db
+        .with_conn(move |conn| {
+            crate::db::repository_resources::upsert_alignment(
+                conn,
+                "repo",
+                "workflow",
+                "imported",
+                &target,
+                "repository-hash",
+                "database-hash",
+                "2026-10-14T10:00:00Z",
+                true,
+            )
+        })
+        .await
+        .unwrap();
+
+    let pending = verdict(&state, &id).await;
+    assert!(!pending.ready, "the run would abort: {}", pending.summary);
+    assert_eq!(pending.human_approval_count, 1);
+    let blocker = &pending.blockers[0];
+    assert_eq!(blocker.kind, WorkflowBlockerKind::HumanApproval);
+    assert_eq!(blocker.step, None, "a workflow-level refusal");
+    assert!(blocker.human_only);
+    assert_eq!(
+        blocker.reason.as_deref(),
+        Some("repository_approval_required")
+    );
+    assert!(
+        blocker.message.contains("must be approved"),
+        "{}",
+        blocker.message
+    );
+    let Json(list) = list_with_visibility(&state, None).await;
+    let card = list.data.unwrap().into_iter().find(|w| w.id == id).unwrap();
+    assert_eq!(card.blocker_count, Some(1));
+    assert_eq!(card.human_approval_count, Some(1));
+
+    let wf = load(&state, &id).await;
+    state
+        .db
+        .with_conn(move |conn| {
+            let mut portable = wf.clone();
+            crate::core::resource_refs::symbolize_workflow(conn, &mut portable)?;
+            let rendered =
+                crate::core::repository_resources::render_workflow(&portable, "imported")
+                    .map_err(anyhow::Error::msg)?;
+            crate::db::repository_resources::approve(
+                conn,
+                "repo",
+                "workflow",
+                "imported",
+                &crate::core::repository_resources::approval_hash(&rendered.document),
+            )
+        })
+        .await
+        .unwrap();
+    let approved = verdict(&state, &id).await;
+    assert!(approved.ready, "{:?}", approved.blockers);
+}

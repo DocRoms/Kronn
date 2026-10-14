@@ -1861,7 +1861,7 @@ pub(crate) async fn list_with_visibility(
                 .into_iter()
                 .map(|wf| {
                     let (blocker_count, human_approval_count) = crate::workflows::readiness::counts(
-                        &crate::workflows::readiness::assess(&wf, &by_id),
+                        &crate::workflows::readiness::assess_in_db(conn, &wf, &by_id),
                     );
                     let last_run = last_runs.remove(&wf.id);
 
@@ -1959,15 +1959,22 @@ pub async fn readiness(
 /// The readiness of a saved workflow against every workflow it may call; a
 /// failed load is reported as such, never as ready.
 pub(crate) async fn workflow_readiness(state: &AppState, wf: &Workflow) -> WorkflowReadiness {
+    // The run's repository-approval gate reads the database, so the check
+    // runs on the same connection as the workflow list.
+    let root = wf.clone();
     match state
         .db
-        .with_read_conn(crate::db::workflows::list_workflows)
+        .with_read_conn(move |conn| {
+            let all = crate::db::workflows::list_workflows(conn)?;
+            Ok(crate::workflows::readiness::assess_in_db(
+                conn,
+                &root,
+                &all.into_iter().map(|w| (w.id.clone(), w)).collect(),
+            ))
+        })
         .await
     {
-        Ok(all) => crate::workflows::readiness::assess(
-            wf,
-            &all.into_iter().map(|w| (w.id.clone(), w)).collect(),
-        ),
+        Ok(readiness) => readiness,
         Err(e) => crate::workflows::readiness::collection_failure(wf, &format!("DB error: {e}")),
     }
 }
