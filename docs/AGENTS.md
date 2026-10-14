@@ -88,6 +88,7 @@ Full spec: [`docs/conventions/agents-md-format-v1.md`](conventions/agents-md-for
 | RTK / compression integration | `docs/architecture/rtk-integration.md` |
 | Workflow engine work | `docs/architecture/overview.md`, `docs/inconsistencies-tech-debt.md`, `docs/coding-rules.md` |
 | Docker / deployment / starting the stack | `docs/operations/debug-operations.md`, `docs/operations/running-the-stack.md` |
+| **Background service** (`kronn service`, launchd / systemd) | `docs/operations/service.md` |
 | Secret themes / unlock features | `docs/operations/secret-themes.md` |
 | **Désagentification / `ApiCall` step** | `docs/operations/deagent-apicall.md` |
 | **Ollama local models** (offload, `num_ctx`, quality escalation) | `docs/operations/ollama-local-models.md` |

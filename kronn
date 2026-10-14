@@ -38,6 +38,7 @@ source "$KRONN_DIR/lib/tron.sh"
 source "$KRONN_DIR/lib/analyze.sh"
 source "$KRONN_DIR/lib/repos.sh"
 source "$KRONN_DIR/lib/api-client.sh"
+source "$KRONN_DIR/lib/service.sh"
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 # load_config / save_config live in lib/config.sh (sourced above) so they're
@@ -90,8 +91,24 @@ maybe_login_kiro() {
 
 # ─── Commands ────────────────────────────────────────────────────────────────
 
+# Docker / native dev modes build from a checkout (Makefile). A CLI staged in
+# the service release (current/cli) has none: say so instead of failing in make.
+_require_checkout() {
+    if [[ ! -f "$KRONN_DIR/Makefile" ]]; then
+        fail "This kronn runs from a service release ($KRONN_DIR), not from a checkout."
+        printf "  ${DIM}Run it from your Kronn clone (./kronn $1), or use ${BOLD}kronn service${RESET}${DIM} for the background service.${RESET}\n"
+        return 1
+    fi
+}
+
 cmd_start() {
     banner
+
+    # A running background service already serves the UI (and owns :3140).
+    if ! service_offer_stop; then
+        info "Kronn keeps running as a service: $(service_url)"
+        return 0
+    fi
 
     # Present the choice FIRST — agent detection is slow (~5-10s) and
     # completely unnecessary when the user just wants to launch the web UI.
@@ -112,6 +129,12 @@ cmd_start() {
 
 cmd_web() {
     step "Starting web interface"
+
+    _require_checkout web || return 1
+    if ! service_offer_stop; then
+        info "Kronn keeps running as a service: $(service_url)"
+        return 0
+    fi
 
     # macOS: the Docker stack runs in a Linux VM and CANNOT execute the user's
     # host CLIs — Darwin binaries can't run in the Linux container, and the
@@ -209,6 +232,8 @@ cmd_start_dev() {
     banner
     step "Native dev mode (no Docker)"
 
+    _require_checkout start-dev || return 1
+
     info "Runs Kronn against your HOST CLIs (Claude, Codex, …) with their real logins."
     printf "  ${DIM}No container → the backend resolves your host binaries directly (Keychain/OAuth OK).${RESET}\n"
     echo
@@ -255,6 +280,17 @@ cmd_start_dev() {
         reap_native_backend
         success "Previous native backend stopped."
     fi
+
+    # A background service owns :3140 and the data-dir lock. Offer to stop it
+    # (unload — KeepAlive would respawn a killed process) and bring it back
+    # when this dev run ends. The early trap covers the returns below; the
+    # full teardown trap installed later calls service_resume_after_dev too.
+    if ! service_offer_stop reload; then
+        info "Aborted — the service keeps running ($(service_url))."
+        return 0
+    fi
+    trap 'service_resume_after_dev' EXIT
+    trap 'exit 130' INT TERM
 
     # If something STILL answers on :3140 after the native reap, it's a Docker
     # Kronn (a different lifecycle) — the native backend can't bind the port.
@@ -303,7 +339,7 @@ cmd_start_dev() {
     # actual backend is a watcher grandchild that survives a single-pid kill
     # (the leak that stranded orphaned backends holding the data-dir lock). Kill
     # the direct child, then reap the grandchildren by pattern. Quiet on Ctrl+C.
-    trap 'kill "${KRONN_DEV_BACKEND_PID:-}" "${KRONN_DEV_FRONTEND_PID:-}" 2>/dev/null || true; reap_native_backend >/dev/null 2>&1 || true; rm -f "${KRONN_DEV_BACKEND_FAILURE_FILE:-}"' EXIT
+    trap 'kill "${KRONN_DEV_BACKEND_PID:-}" "${KRONN_DEV_FRONTEND_PID:-}" 2>/dev/null || true; reap_native_backend >/dev/null 2>&1 || true; rm -f "${KRONN_DEV_BACKEND_FAILURE_FILE:-}"; service_resume_after_dev' EXIT
     # An intentional Ctrl+C exits directly; the EXIT trap above performs the
     # cleanup without misreporting the resulting child deaths as a crash.
     trap 'exit 130' INT TERM
@@ -611,6 +647,13 @@ cmd_mcp() {
 cmd_status() {
     banner
 
+    # Installed background service: show its state first, then the usual
+    # overview (which talks to the service's backend through the API).
+    if service_is_installed; then
+        step "Background service"
+        cmd_service_status || true
+    fi
+
     # When the backend is running, delegate to the API — instant, complete
     # (includes Ollama, debug_mode, DB stats, etc.), zero duplication.
     if kronn_api_available; then
@@ -751,18 +794,33 @@ reap_native_backend() {
 
 cmd_stop() {
     step "Stopping Kronn"
+    if service_is_installed && service_is_running; then
+        service_unload && success "Background service stopped (start it again with: kronn service start)."
+    fi
     reap_native_backend                 # native start-dev stack (watchexec + kronn)
-    (cd "$KRONN_DIR" && make stop)      # Docker stack
+    # Docker stack — only from a checkout (a service release has no Makefile).
+    if [[ -f "$KRONN_DIR/Makefile" ]]; then
+        (cd "$KRONN_DIR" && make stop)
+    fi
     success "Kronn stopped."
 }
 
 cmd_restart() {
+    if service_is_installed; then
+        cmd_service_restart
+        return
+    fi
     cmd_stop
     echo
     cmd_web
 }
 
 cmd_logs() {
+    # Installed background service: its logs are the ones that matter.
+    if service_is_installed; then
+        cmd_service_logs
+        return
+    fi
     # Logs live in the Docker containers' stdout — no file on disk. This
     # wrapper calls `docker compose logs -f` so the user gets a live tail
     # from all services (backend, frontend, gateway). Ctrl+C detaches.
@@ -1099,9 +1157,10 @@ cmd_help() {
     echo
     printf "  ${CYAN}start${RESET}          Interactive flow (default)\n"
     printf "  ${CYAN}start-dev${RESET}      Run natively, no Docker (backend + Vite, hot-reload → UI on :5173)\n"
+    printf "  ${CYAN}service${RESET}        Run Kronn as a background service (install|start|stop|restart|status|logs|uninstall)\n"
     printf "  ${CYAN}stop${RESET}           Stop services\n"
     printf "  ${CYAN}restart${RESET}        Restart services\n"
-    printf "  ${CYAN}logs${RESET}           Show logs\n"
+    printf "  ${CYAN}logs${RESET}           Show logs (the service's when installed)\n"
     printf "  ${CYAN}status${RESET}         Overview (auto-delegates to API when backend is up)\n"
     printf "  ${CYAN}doctor${RESET}         Diagnose host-environment issues (uid-0 caches, missing CLIs, Docker, Vibe trust)\n"
     printf "  ${CYAN}agents${RESET}         List detected agents\n"
@@ -1256,6 +1315,7 @@ main() {
             ensure_in_path
             cmd_start_dev
             ;;
+        service)     cmd_service "$@" ;;
         stop)        cmd_stop ;;
         restart)     cmd_restart ;;
         logs)        cmd_logs ;;

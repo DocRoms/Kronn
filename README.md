@@ -134,6 +134,10 @@ cd Kronn
 > host agents (Claude, Codex, …) or read the Keychain — `start-dev` runs backend + UI
 > natively in one command. (`make install` also lands on the guided setup.)
 
+To keep Kronn running in the background with no terminal (macOS LaunchAgent /
+Linux `systemd --user`), use `./kronn service install`; see
+[docs/operations/service.md](docs/operations/service.md).
+
 `start-dev` is the contributor/development mode with backend hot-reload. It
 requires Rust, Node ≥ 24, pnpm and
 [Watchexec](https://watchexec.github.io/downloads/watchexec/):
