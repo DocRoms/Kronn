@@ -317,4 +317,3 @@ describe('ProjectCard — full audit step_error visibility', () => {
     expect(vi.mocked(projectsApi.partialAuditStream).mock.calls[0][1]).toMatchObject({ agent: 'ClaudeCode', steps: [2, 8] });
   });
 });
-
