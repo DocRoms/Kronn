@@ -780,6 +780,8 @@ cmd_service_usage() {
     printf "  ${CYAN}start${RESET} | ${CYAN}stop${RESET} | ${CYAN}restart${RESET}              Control the service\n"
     printf "  ${CYAN}status${RESET}                              Installed, running, version, URL, health\n"
     printf "  ${CYAN}logs${RESET} [--no-follow]                  Tail the service logs\n"
+    printf "  ${CYAN}update${RESET} [--to <ver>] [--check] [--force] [--yes]   Build and switch to the latest release (rolls back on failure)\n"
+    printf "  ${CYAN}rollback${RESET} [--yes]                    Go back to the previous release\n"
     printf "  ${CYAN}uninstall${RESET} [--yes] [--purge]         Remove the service (data dir is never touched)\n"
 }
 

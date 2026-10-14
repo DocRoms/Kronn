@@ -13,6 +13,17 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- `kronn service update` moves the background service to the latest release
+  (or `--to <X.Y.Z>`): it fetches the service clone, builds and stages the new
+  release next to the running one, waits for running workflows and agents to
+  finish (`KRONN_SERVICE_DRAIN_TIMEOUT`, default 30 minutes; `--force` skips
+  it), switches `current`, restarts and checks health. A release that does not
+  come up healthy is rolled back automatically, restoring the pre-migration
+  database backup when the new version migrated it. `--check` only reports
+  (exit 10 when an update exists). `kronn service rollback` goes back to the
+  previous release by hand. Old releases are pruned, keeping the 3 most recent
+  plus the current and previous ones.
+
 - The backend can run as a background service. With `KRONN_SERVICE=1` it
   resolves the login-shell PATH at startup, before agent detection, and merges
   it into its own, so agent CLIs are found under launchd or systemd. With

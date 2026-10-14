@@ -31,6 +31,8 @@ _kronn() {
         'restart:Restart the service'
         'status:Show installed, running, version, URL, health'
         'logs:Tail the service logs'
+        'update:Build and switch to the latest release (rolls back on failure)'
+        'rollback:Go back to the previous release'
         'uninstall:Remove the service (data is never touched)'
     )
 
@@ -39,7 +41,17 @@ _kronn() {
             _describe 'mcp command' mcp_commands
             ;;
         service)
-            _describe 'service command' service_commands
+            case "$words[3]" in
+                update)
+                    _arguments '--to[Target release version]:version:' '--check[Only report (exit 10 if an update exists)]' '--force[Do not wait for running work]' '(-y --yes)'{-y,--yes}'[Do not ask]'
+                    ;;
+                rollback)
+                    _arguments '(-y --yes)'{-y,--yes}'[Do not ask]'
+                    ;;
+                *)
+                    _describe 'service command' service_commands
+                    ;;
+            esac
             ;;
         *)
             _describe 'command' commands
