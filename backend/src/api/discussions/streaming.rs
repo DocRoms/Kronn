@@ -2419,6 +2419,18 @@ async fn resume_with_delta_if_possible(
     )
 }
 
+/// What the reply records once the runtime answered: a refused resume (the
+/// runtime fell back to the full history) overrides the plan made before the
+/// launch, which could only say "resumed" or "new".
+fn settle_turn_continuity(
+    resume_fallback: Option<crate::models::SessionContinuityReason>,
+    planned: Option<crate::models::SessionContinuity>,
+) -> Option<crate::models::SessionContinuity> {
+    resume_fallback
+        .map(crate::models::SessionContinuity::fallback_because)
+        .or(planned)
+}
+
 /// What an HTTP agent needs to deliver a discussion's images (KT-946): the images
 /// themselves, and which models of its target the catalogue declares as able to
 /// see. A catalogue that cannot be read is an empty set — "nobody said", which
@@ -4223,10 +4235,8 @@ pub(super) async fn make_agent_stream_inner(
                     crate::AgentRuntimeGuard::insert(&state.agent_runtime_registry, job_id.clone())
                 });
                 // A refused resume is only known once the runtime answered it.
-                let turn_continuity = process
-                    .resume_fallback()
-                    .map(crate::models::SessionContinuity::fallback_because)
-                    .or(session_continuity);
+                let turn_continuity =
+                    settle_turn_continuity(process.resume_fallback(), session_continuity);
                 let mut full_response = catalog_warning_notice
                     .as_ref()
                     .map(|notice| format!("{notice}\n\n"))
@@ -7904,7 +7914,7 @@ mod resume_delta_tests {
     //! an invisible one: the agent replies confidently to a history it was
     //! never given.
     use super::runner;
-    use super::{messages_not_yet_seen, resume_with_delta_if_possible};
+    use super::{messages_not_yet_seen, resume_with_delta_if_possible, settle_turn_continuity};
     use crate::agents::runner::AcpSessionStore;
     use crate::models::{AgentType, DiscussionMessage, MessageChannel, MessageRole};
     use chrono::Utc;
@@ -8178,6 +8188,25 @@ mod resume_delta_tests {
                 crate::models::SessionContinuityReason::DeltaNotSmaller
             ))
         );
+    }
+
+    /// KT-1202 — a resume the runtime refused is what the reply records, not
+    /// the "resumed" the launch had planned; without a refusal the plan stands.
+    #[test]
+    fn a_refused_resume_overrides_the_planned_continuity() {
+        use crate::models::{SessionContinuity, SessionContinuityReason as Reason};
+        assert_eq!(
+            settle_turn_continuity(
+                Some(Reason::SessionExpired),
+                Some(SessionContinuity::resumed())
+            ),
+            Some(SessionContinuity::fallback_because(Reason::SessionExpired))
+        );
+        assert_eq!(
+            settle_turn_continuity(None, Some(SessionContinuity::resumed())),
+            Some(SessionContinuity::resumed())
+        );
+        assert_eq!(settle_turn_continuity(None, None), None);
     }
 
     /// KT-1202 — a turn that cannot resume records why: nothing stored yet,
