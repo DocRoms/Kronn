@@ -30,10 +30,23 @@ pub async fn install_template(
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
+    if !state
+        .audit_tracker
+        .lock()
+        .map(|mut t| t.try_acquire_lease(&project.id))
+        .unwrap_or(false)
+    {
+        return Json(ApiResponse::err(
+            "An audit is running on this project — install the template once it has finished.",
+        ));
+    }
+    let lease =
+        super::template_reinstall::LeaseGuard(state.audit_tracker.clone(), project.id.clone());
     let project_path_str = project.path.clone();
 
     // Run filesystem I/O on blocking thread pool
     let install_result = tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let _lease = lease;
         let project_path = scanner::resolve_host_path(&project_path_str);
         if !project_path.exists() {
             return Err(format!(
@@ -84,6 +97,8 @@ pub async fn install_template(
         let docs_template = template_dir.join("docs");
         // Unconfigured, a missing folder resolves to `docs/` (fresh project).
         let docs_target = existing_docs;
+        let provenance_before = crate::core::doc_provenance::snapshot_tracked(&project_path)?;
+        crate::core::template_manifest::apply_renames(&project_path, &docs_template)?;
         let mut created_files = Vec::new();
         if docs_template.is_dir() {
             let docs_root = crate::core::docs_location::DocsRoot::for_project(&project_path)?;
@@ -93,23 +108,7 @@ pub async fn install_template(
                 &docs_root,
             )?);
         }
-        // 0.8.7 — copy the anti-hallu spec embedded in the binary into
-        // the project's `docs/conventions/` so any agent running on this
-        // project (with or without Kronn) can open the convention
-        // locally. Idempotent : skip if already present (re-install
-        // doesn't clobber user edits ; PR3 endpoint `/anti-hallu/inject`
-        // is the explicit re-sync path).
-        let conventions_dir = docs_target.join("conventions");
-        let spec_path = conventions_dir.join("agents-md-format-v1.md");
-        // no-follow primitive: a symlinked conventions/ (or dangling spec
-        // link) must never route this write outside the project.
-        if let Err(e) = crate::core::fs_guard::guarded_write_new(
-            &project_path,
-            &spec_path,
-            crate::core::anti_halluc::SPEC_AGENTS_MD_V1.as_bytes(),
-        ) {
-            tracing::warn!("anti-hallu spec not installed: {e}");
-        }
+        crate::core::template_manifest::record_install(&project_path, &docs_template)?;
         ensure_agent_writable_subfolders(&project_path, &docs_target);
         // Human-friendly landing page for `docs/`. Idempotent, best-effort.
         if let Err(e) = crate::core::docs_migration::ensure_docs_index(&project_path, &docs_target)
@@ -135,6 +134,14 @@ pub async fn install_template(
         // by construction, Codex A2): a pre-existing docs/ tree or root file
         // is user content and is never walked.
         let _ = crate::core::docs_migration::prefill_files(&project_path, &created_files);
+        crate::core::doc_provenance::note_snapshot_writes(
+            &project_path,
+            &provenance_before,
+            crate::core::doc_provenance::DocWriter::TemplateReinstall,
+        )
+        .map_err(|e| {
+            format!("Template files installed, but provenance could not be recorded: {e}")
+        })?;
 
         // KT-841 — no more "FIRST-RUN TASK" prompt injected into
         // docs/AGENTS.md at install time: that block lived in the exact

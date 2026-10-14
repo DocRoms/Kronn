@@ -93,7 +93,8 @@ pub async fn validate_audit(
     })
     .await
     .unwrap_or_default();
-    let td_gate_met = crate::core::td_review::gate(&td_items).met;
+    let td_gate = crate::core::td_review::gate(&td_items);
+    let td_gate_met = td_gate.blocking_total > 0 && td_gate.met;
 
     // A cross-agent dispute a human has not answered is an open question on
     // the audit itself: the project cannot be validated over it.
@@ -111,6 +112,7 @@ pub async fn validate_audit(
     }
 
     let pid = project.id.clone();
+    let cancel_registry = state.cancel_registry.clone();
     let gate = state
         .db
         .with_conn(move |conn| {
@@ -124,15 +126,32 @@ pub async fn validate_audit(
                 Some(disc_id) => crate::db::discussions::get_discussion(conn, &disc_id)?,
                 None => None,
             };
+            let is_active = |discussion: &Discussion| -> anyhow::Result<bool> {
+                Ok(discussion.awaiting_agent
+                    || crate::db::agent_dispatch::has_active_for_discussion(conn, &discussion.id)?
+                    || cancel_registry
+                        .lock()
+                        .map(|map| map.contains_key(&discussion.id))
+                        .unwrap_or(true))
+            };
+            let mut validation_agent_active =
+                disc.as_ref().map(is_active).transpose()?.unwrap_or(false);
             let linked_is_finished = disc.as_ref().is_some_and(validation_discussion_finished);
             if disc.as_ref().is_some_and(|discussion| discussion.archived) && !linked_is_finished {
                 let mut statement = conn.prepare(
                     "SELECT id FROM discussions
                      WHERE project_id=?1 AND archived=0 AND title LIKE 'Validation audit%'
+                       AND julianday(created_at) >= julianday(?2)
                      ORDER BY updated_at DESC, rowid DESC",
                 )?;
                 let candidate_ids = statement
-                    .query_map([&pid], |row| row.get::<_, String>(0))?
+                    .query_map(
+                        rusqlite::params![
+                            pid,
+                            latest.as_ref().map(|run| run.started_at.to_rfc3339())
+                        ],
+                        |row| row.get::<_, String>(0),
+                    )?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
                 drop(statement);
                 for candidate_id in candidate_ids {
@@ -142,6 +161,7 @@ pub async fn validate_audit(
                         continue;
                     };
                     if validation_discussion_finished(&candidate) {
+                        validation_agent_active |= is_active(&candidate)?;
                         if let Some(run) = latest.as_ref() {
                             crate::db::audit_runs::set_validation_discussion(
                                 conn,
@@ -154,12 +174,17 @@ pub async fn validate_audit(
                     }
                 }
             }
-            Ok((latest, disc))
+            let documents = latest
+                .as_ref()
+                .map(|run| crate::db::audit_documents::get(conn, &run.id))
+                .transpose()?
+                .flatten();
+            Ok((latest, disc, validation_agent_active, documents))
         })
         .await;
-    let optimize_documents = match gate {
+    let (optimize_documents, documents) = match gate {
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
-        Ok((latest, linked_disc)) => {
+        Ok((latest, linked_disc, validation_agent_active, documents)) => {
             let Some(run) = latest else {
                 return Json(ApiResponse::err(
                     "No audit run recorded for this project — run the audit first.",
@@ -170,6 +195,19 @@ pub async fn validate_audit(
                     "The latest audit run is {} — only a Completed run can be validated (resume or re-run it first).",
                     run.status
                 )));
+            }
+            if validation_agent_active {
+                return Json(ApiResponse::err(
+                    "The validation agent is still active or queued — wait for it to finish before validating.",
+                ));
+            }
+            if linked_disc
+                .as_ref()
+                .is_some_and(|disc| disc.project_id.as_deref() != Some(project.id.as_str()))
+            {
+                return Json(ApiResponse::err(
+                    "The linked validation discussion belongs to another project — refusing.",
+                ));
             }
             if !td_gate_met {
                 let Some(disc) = linked_disc else {
@@ -188,7 +226,7 @@ pub async fn validate_audit(
                     ));
                 }
             }
-            run.kind == "Full"
+            (run.kind == "Full", documents)
         }
     };
 
@@ -204,8 +242,12 @@ pub async fn validate_audit(
             ));
         }
 
+        let report = if optimize_documents {
+            crate::core::document_optimization::analyze_and_write(&project_path)?
+        } else {
+            crate::core::document_optimization::analyze(&project_path)?
+        };
         if optimize_documents {
-            let report = crate::core::document_optimization::analyze_and_write(&project_path)?;
             let blocking: Vec<String> = report
                 .blocking_diagnostics()
                 .map(|d| format!("{}: {} ({})", d.code, d.message, d.path))
@@ -216,15 +258,16 @@ pub async fn validate_audit(
                     blocking.join("; ")
                 ));
             }
-            let unresolved = unresolved_unknowns(&project_path, &report);
-            if !unresolved.is_empty() {
-                return Err(format!(
-                    "Unresolved unknowns remain (`{{{{...}}}}` or `<!-- TODO: ... -->`); the validation must settle them before the project is validated: {}",
-                    unresolved.join(", ")
-                ));
-            }
+        }
+        let unresolved = unresolved_unknowns(&project_path, &report);
+        if !unresolved.is_empty() {
+            return Err(format!(
+                "Unresolved unknowns remain (`{{{{...}}}}` or `<!-- TODO: ... -->`); the validation must settle them before the project is validated: {}",
+                unresolved.join(", ")
+            ));
         }
 
+        crate::core::audit_documents::verify(&project_path, documents.as_deref())?;
         crate::core::citation_drift::record_all(&project_path)?;
         // A failed record never refuses the validation: the docs simply read
         // as not yet human-validated.
@@ -375,6 +418,9 @@ mod validate_gate_tests {
                     conn, "r1", chrono::Utc::now(), "Completed",
                     0, 0, 0, 0, 0, 0, 0, 100, None, None,
                 )?;
+                crate::db::audit_documents::record(conn, "r1",
+                    &crate::core::audit_documents::capture_json(std::path::Path::new(&path))
+                        .map_err(anyhow::Error::msg)?)?;
             } else if status == "Interrupted" {
                 crate::db::audit_runs::update_last_completed_step(conn, "r1", 3)?;
                 crate::db::audit_runs::mark_interrupted(conn, "r1", "test")?;
@@ -404,6 +450,17 @@ mod validate_gate_tests {
             .0
     }
 
+    // Model the completed validation phase when a test writes its fixture
+    // docs after seed(). Production records this with the terminal reply.
+    async fn record_reviewed_documents(state: &AppState, path: &std::path::Path) {
+        let documents = crate::core::audit_documents::capture_json(path).unwrap();
+        state
+            .db
+            .with_conn(move |conn| crate::db::audit_documents::record(conn, "r1", &documents))
+            .await
+            .unwrap();
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn happy_path_latest_completed_linked_and_finished() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -422,6 +479,76 @@ mod validate_gate_tests {
             !state.audit_tracker.lock().unwrap().leased.contains("p1"),
             "the lease must be released after validation"
         );
+    }
+
+    #[tokio::test]
+    async fn a_legacy_completed_run_requires_a_new_audit_without_guessing_proof() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = test_state();
+        seed(
+            &state,
+            tmp.path(),
+            "Completed",
+            Some("d1"),
+            Some("KRONN:VALIDATION_COMPLETE"),
+        )
+        .await;
+        state
+            .db
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE audit_runs SET final_doc_fingerprints_json = NULL WHERE id = 'r1'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let response = call(&state).await;
+        assert!(!response.success);
+        let error = response.error.unwrap();
+        assert!(error.contains("run the audit again"), "{error}");
+        assert!(state
+            .db
+            .with_read_conn(|conn| crate::db::audit_documents::get(conn, "r1"))
+            .await
+            .unwrap()
+            .is_none());
+        assert!(crate::core::kronn_state::read(tmp.path()).is_none_or(|s| s.validated_at.is_none()));
+    }
+
+    #[tokio::test]
+    async fn documents_pulled_after_the_validation_finished_are_refused() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = test_state();
+        seed(
+            &state,
+            tmp.path(),
+            "Completed",
+            Some("d1"),
+            Some("KRONN:VALIDATION_COMPLETE"),
+        )
+        .await;
+        std::fs::write(
+            tmp.path().join("docs/AGENTS.md"),
+            "# Documents pulled after the audit\nNew unreviewed policy.\n",
+        )
+        .unwrap();
+        let response = call(&state).await;
+        assert!(
+            !response.success,
+            "unreviewed contents must not be validated"
+        );
+        let error = response.error.unwrap();
+        assert!(
+            error.contains("changed since") && error.contains("docs/AGENTS.md"),
+            "{error}"
+        );
+        assert!(crate::core::kronn_state::read(tmp.path()).is_none_or(|s| s.validated_at.is_none()));
+        assert!(crate::core::doc_provenance::report(tmp.path(), false)
+            .unwrap()
+            .docs
+            .is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -476,12 +603,13 @@ mod validate_gate_tests {
             "# Glossaire\n\n- **lot**: unknown.\n",
         )
         .unwrap();
+        record_reviewed_documents(&state, tmp.path()).await;
         let validated = call(&state).await;
         assert!(validated.success, "{:?}", validated.error);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn specialized_validation_does_not_apply_full_document_gate() {
+    async fn specialized_validation_checks_unknowns_without_writing_the_full_report() {
         let tmp = tempfile::TempDir::new().unwrap();
         let state = test_state();
         seed(
@@ -493,6 +621,7 @@ mod validate_gate_tests {
         )
         .await;
         std::fs::write(tmp.path().join("docs/AGENTS.md"), "# {{BROKEN_TEMPLATE}}\n").unwrap();
+        record_reviewed_documents(&state, tmp.path()).await;
         state
             .db
             .with_conn(|conn| {
@@ -507,10 +636,17 @@ mod validate_gate_tests {
 
         let response = call(&state).await;
         assert!(
-            response.success,
-            "specialized validation: {:?}",
-            response.error
+            !response.success,
+            "a specialized run cannot validate a template"
         );
+        assert!(response.error.unwrap().contains("Unresolved unknowns"));
+        std::fs::write(
+            tmp.path().join("docs/AGENTS.md"),
+            "# Completed documentation\n",
+        )
+        .unwrap();
+        record_reviewed_documents(&state, tmp.path()).await;
+        assert!(call(&state).await.success);
         assert!(!tmp
             .path()
             .join(crate::core::document_optimization::REPORT_FILE)
@@ -660,7 +796,7 @@ mod validate_gate_tests {
                 conn.execute(
                     "INSERT INTO discussions
                      (id, project_id, title, agent, language, created_at, updated_at)
-                     VALUES ('d-resumed', 'p1', 'Validation audit AI', 'ClaudeCode', 'fr', datetime('now'), datetime('now', '+1 second'))",
+                     VALUES ('d-resumed', 'p1', 'Validation audit AI', 'ClaudeCode', 'fr', datetime('now', '+1 second'), datetime('now', '+1 second'))",
                     [],
                 )?;
                 conn.execute(
@@ -795,6 +931,7 @@ mod validate_gate_tests {
         assert!(refused.error.unwrap().contains("has not finished"));
 
         write_td(tmp.path(), "TD-20261001-b", "High", "Accepted decision");
+        record_reviewed_documents(&state, tmp.path()).await;
         let validated = call(&state).await;
         assert!(validated.success, "{:?}", validated.error);
         assert_eq!(validated.data, Some(AiAuditStatus::Validated));
@@ -812,6 +949,7 @@ mod validate_gate_tests {
             .unwrap()
             .contains("no linked validation discussion"));
         write_td(tmp.path(), "TD-20261001-a", "High", "Rejected");
+        record_reviewed_documents(&state, tmp.path()).await;
         let validated = call(&state).await;
         assert!(validated.success, "{:?}", validated.error);
 
@@ -821,6 +959,85 @@ mod validate_gate_tests {
         write_td(tmp.path(), "TD-20261001-a", "High", "Rejected");
         let interrupted = call(&state).await;
         assert!(interrupted.error.unwrap().contains("only a Completed run"));
+    }
+
+    #[tokio::test]
+    async fn medium_and_low_sheets_do_not_replace_the_validation_discussion() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state();
+        seed(&state, tmp.path(), "Completed", None, None).await;
+        write_td(tmp.path(), "TD-20261001-a", "Medium", "Confirmed by user");
+        write_td(tmp.path(), "TD-20261001-b", "Low", "Rejected");
+        record_reviewed_documents(&state, tmp.path()).await;
+        let response = call(&state).await;
+        assert!(!response.success);
+        assert!(response
+            .error
+            .unwrap()
+            .contains("no linked validation discussion"));
+    }
+
+    #[tokio::test]
+    async fn a_pending_validation_dispatch_blocks_even_settled_blocking_sheets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state();
+        seed(
+            &state,
+            tmp.path(),
+            "Completed",
+            Some("d1"),
+            Some("KRONN:VALIDATION_COMPLETE"),
+        )
+        .await;
+        write_td(tmp.path(), "TD-20261001-a", "High", "Confirmed by user");
+        record_reviewed_documents(&state, tmp.path()).await;
+        state.db.with_conn(|conn| {
+            conn.execute("INSERT INTO messages (id, discussion_id, role, content, timestamp, tokens_used, sort_order)
+                VALUES ('dispatch-user', 'd1', 'User', 'Continue checking', datetime('now'), 0, 1)", [])?;
+            crate::db::agent_dispatch::enqueue_for_latest_user(conn,
+                crate::db::agent_dispatch::NewLatestUserDispatch {
+                    id: "job-validation", discussion_id: "d1", dedupe_key: "validation-regression",
+                    agent_override: None, chain_prompt_ids: &[], batch_item: None,
+                    group_id: None, group_concurrency_limit: None,
+                })?;
+            Ok(())
+        }).await.unwrap();
+        let response = call(&state).await;
+        assert!(!response.success);
+        assert!(response.error.unwrap().contains("validation agent"));
+        assert!(crate::core::kronn_state::read(tmp.path()).is_none_or(|s| s.validated_at.is_none()));
+    }
+
+    #[tokio::test]
+    async fn an_older_finished_lookalike_cannot_replace_an_archived_validation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state();
+        seed(
+            &state,
+            tmp.path(),
+            "Completed",
+            Some("d1"),
+            Some("Not finished"),
+        )
+        .await;
+        state.db.with_conn(|conn| {
+            conn.execute("UPDATE discussions SET archived=1 WHERE id='d1'", [])?;
+            conn.execute("INSERT INTO discussions (id, project_id, title, agent, language, created_at, updated_at)
+                VALUES ('old', 'p1', 'Validation audit AI', 'ClaudeCode', 'fr', datetime('now','-1 day'), datetime('now'))", [])?;
+            conn.execute("INSERT INTO messages (id, discussion_id, role, content, timestamp, tokens_used)
+                VALUES ('old-message', 'old', 'Agent', 'KRONN:VALIDATION_COMPLETE', datetime('now'), 0)", [])?;
+            Ok(())
+        }).await.unwrap();
+        let response = call(&state).await;
+        assert!(!response.success);
+        assert!(response.error.unwrap().contains("has not finished"));
+        let linked = state
+            .db
+            .with_conn(|conn| crate::db::audit_runs::get_by_id(conn, "r1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(linked.validation_discussion_id.as_deref(), Some("d1"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

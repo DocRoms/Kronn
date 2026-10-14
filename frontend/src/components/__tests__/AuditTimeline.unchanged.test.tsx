@@ -91,18 +91,20 @@ describe('AuditTimeline — unchanged steps', () => {
     await waitFor(() => expect(screen.getByTestId('audit-timeline-step-2')).toHaveClass('is-unchanged'));
   });
 
-  // KT-1132 — on an audited project the launch re-verifies the docs, and says so before it starts.
-  it('an audited project offers « Revérifier la doc » and explains it before launch', async () => {
+  // KT-1218 — audited projects expose the single verification entry point.
+  it('an audited project offers « Vérifier la doc » and explains the escalation before launch', async () => {
     mockSteps([{ id: 'run-1', kind: 'Full' }], [step(1)]);
     const onLaunch = vi.fn();
-    wrap(<AuditTimeline {...props({ onLaunch })} />);
+    const onVerifyDocs = vi.fn();
+    wrap(<AuditTimeline {...props({ onLaunch, onVerifyDocs })} />);
     const launch = await screen.findByTestId('audit-timeline-launch');
     expect(launch).toHaveTextContent(fr['auditTimeline.relaunch']);
-    expect(fr['auditTimeline.relaunch']).toBe('Revérifier la doc');
+    expect(fr['auditTimeline.relaunch']).toBe('Vérifier la doc');
     expect(screen.getByTestId('audit-timeline-reverify-hint')).toHaveTextContent(fr['auditTimeline.reverifyHint']);
     expect(onLaunch).not.toHaveBeenCalled();
     fireEvent.click(launch);
-    expect(onLaunch).toHaveBeenCalledTimes(1);
+    expect(onVerifyDocs).toHaveBeenCalledTimes(1);
+    expect(onLaunch).not.toHaveBeenCalled();
   });
 
   it('a first audit, a resume or a running audit carry no re-verification hint', async () => {

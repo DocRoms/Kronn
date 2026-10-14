@@ -1,6 +1,6 @@
 ---
 name: Audit Revalidation
-description: Re-verifies an audited documentation file against the current code, driven by the cited lines Kronn found changed or gone since validation. Kronn attaches it to the bounded agent pass of « Revalider l'audit »; it corrects what is false or stale, fixes broken citations, and leaves every true statement byte-identical.
+description: Re-verifies an audited documentation file against the current code, driven by the cited lines Kronn found changed or gone since validation. Kronn attaches it to the bounded agent pass of “Verify docs”; it corrects what is false or stale, fixes broken citations, and leaves every true statement byte-identical.
 icon: 🔁
 category: domain
 license: AGPL-3.0

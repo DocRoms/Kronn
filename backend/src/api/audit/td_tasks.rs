@@ -32,11 +32,11 @@ pub(crate) async fn convert_project_tds(
         .await
 }
 
-/// The briefing option, read from `docs/briefing.md` or the DB notes: an
-/// agent rewriting the file must not silently turn it off.
+/// The file is authoritative; DB notes only cover a file not installed yet.
 pub(crate) fn briefing_option_set(file_notes: Option<&str>, db_notes: Option<&str>) -> bool {
-    file_notes.is_some_and(td_tasks::briefing_wants_td_tasks)
-        || db_notes.is_some_and(td_tasks::briefing_wants_td_tasks)
+    file_notes
+        .or(db_notes)
+        .is_some_and(td_tasks::briefing_wants_td_tasks)
 }
 
 /// The conversion that closes a successful Full audit, when the briefing

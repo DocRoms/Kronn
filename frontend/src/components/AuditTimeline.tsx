@@ -17,6 +17,8 @@ import { costReasonKey, formatUsd, summarizeAuditCost, tokenBreakdownTitle } fro
 import { BriefingForm } from './BriefingForm';
 import { AuditStepActivity } from './AuditStepActivity';
 import { activityCategoryLabel } from '../lib/activity-category';
+import { DocStateSummary } from './DocStateSummary';
+import type { DocStateCounts } from './docState';
 import type {
   AgentDetection, AgentType, AuditEntry, AuditRecentActivity, AuditTimelineValidation, AuditTokenBreakdown,
   LinkedRepo, ModelTier, ModelTiersConfig,
@@ -114,6 +116,9 @@ export interface AuditTimelineProps {
   /** Opens a discussion, archived ones included. */
   onOpenValidation: (discussionId: string) => void;
   onViewTechDebts: () => void;
+  /** The same verifier opened from the compact project header and stale docs. */
+  onVerifyDocs?: () => void;
+  docStateCounts?: DocStateCounts | null;
   refreshTrigger: number;
   toast: (msg: string, kind: 'success' | 'error' | 'info' | 'warning') => void;
 }
@@ -223,6 +228,7 @@ export function AuditTimeline(props: AuditTimelineProps) {
   const [acceptError, setAcceptError] = useState<string | null>(null);
   // The recorded steps could not be read: never shown as "not started".
   const [loadFailed, setLoadFailed] = useState(false);
+  const [latestRunStatus, setLatestRunStatus] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -258,22 +264,24 @@ export function AuditTimeline(props: AuditTimelineProps) {
           if (!merged.has(row.step_index)) merged.set(row.step_index, row);
         }
       }
-      const latest = data.runs.find(run => run.kind === 'Full');
+      const latestFull = data.runs.find(run => run.kind === 'Full');
+      const latestRun = data.runs[0];
       return {
-        id: ids[0] ?? null, rows: [...merged.values()], td: latest?.td_total ?? 0,
+        id: ids[0] ?? null, rows: [...merged.values()], td: latestFull?.td_total ?? 0,
         recorded: data.recorded_audits, validation: data.latest_validation ?? null,
         orphaned: data.lease_orphaned === true,
+        latestStatus: latestRun?.status ?? null,
       };
     };
     load()
-      .then(({ id, rows, td, recorded: entries, validation, orphaned }) => {
+      .then(({ id, rows, td, recorded: entries, validation, orphaned, latestStatus }) => {
         if (alive) {
           setRunId(id); setSteps(rows); setTdTotal(td); setRecorded(entries);
-          setLinkedValidation(validation); setLeaseOrphaned(orphaned); setStepsLoaded(true);
+          setLinkedValidation(validation); setLeaseOrphaned(orphaned); setStepsLoaded(true); setLatestRunStatus(latestStatus);
           setLoadFailed(false);
         }
       })
-      .catch(() => { if (alive) { setSteps([]); setRecorded([]); setLinkedValidation(null); setStepsLoaded(true); setLoadFailed(true); } });
+      .catch(() => { if (alive) { setSteps([]); setRecorded([]); setLinkedValidation(null); setLatestRunStatus(null); setStepsLoaded(true); setLoadFailed(true); } });
     return () => { alive = false; };
   }, [projectId, resumable, refreshTrigger, auditActive, liveStep, reloadTick]);
 
@@ -379,8 +387,9 @@ export function AuditTimeline(props: AuditTimelineProps) {
     try { localStorage.setItem(NEWS_KEY, '1'); } catch { /* per-viewer convenience only */ }
   };
 
-  const validated = auditStatus === 'Validated';
-  const audited = auditStatus === 'Audited' || validated;
+  const completedLocalRun = stepsLoaded && !loadFailed && latestRunStatus === 'Completed';
+  const validated = auditStatus === 'Validated' && completedLocalRun;
+  const audited = auditStatus === 'Audited' || auditStatus === 'Validated';
   const templateInstalled = auditStatus !== 'NoTemplate';
   const auditNodeStatus: StepStatus = auditActive ? 'running'
     : failed.length > 0 ? 'failed' : audited ? 'done' : 'pending';
@@ -390,7 +399,7 @@ export function AuditTimeline(props: AuditTimelineProps) {
       // Every failed step was accepted: the resume only finalizes the run.
       : resumable.steps_to_redo ? t('auditTimeline.audit.finalize')
         : t('audit.resumeFromStep', resumable.last_completed_step + 1))
-    : audited ? t('auditTimeline.relaunch') : t('audit.startFullAudit');
+    : audited ? t('audit.revalidate.button') : t('audit.startFullAudit');
   // Per-step actions exist only on the run a resume continues.
   const stepActions = !auditActive && !!resumable && !leaseOrphaned;
   // No launch while the state it must start from is unknown or locked.
@@ -398,7 +407,8 @@ export function AuditTimeline(props: AuditTimelineProps) {
   const launchBlocked = leaseOrphaned || !!props.resumableUnknown || !props.briefingDone;
   // The latest run is interrupted: validating waits for its failed steps.
   const runPending = !!resumable && !auditActive;
-  const validationRunning = props.validationInProgress && !auditActive;
+  const validationRunning = completedLocalRun && linkedValidation !== null && !linkedValidation.finished && !auditActive;
+  const verifyEntry = audited && !resumable && props.onVerifyDocs !== undefined;
 
   const submitAccept = async (step: number) => {
     if (!props.onAcceptStep || acceptBusy) return;
@@ -442,6 +452,17 @@ export function AuditTimeline(props: AuditTimelineProps) {
           <button type="button" className="audit-tl-btn audit-tl-btn-small" onClick={dismissNews}>
             {t('auditTimeline.news.dismiss')}
           </button>
+        </section>
+      )}
+
+      {audited && (
+        <section className="audit-tl-doc-state" data-testid="audit-timeline-doc-state">
+          <DocStateSummary counts={props.docStateCounts ?? null} variant="block" />
+          {props.onVerifyDocs && (
+            <button type="button" className="audit-tl-btn audit-tl-btn-primary" onClick={props.onVerifyDocs}>
+              <ShieldCheck size={12} /> {t('audit.revalidate.button')}
+            </button>
+          )}
         </section>
       )}
 
@@ -823,11 +844,11 @@ export function AuditTimeline(props: AuditTimelineProps) {
           </Phase>
 
           <Phase
-            status={validated ? 'done' : validationRunning ? 'running' : audited && !runPending && !auditActive ? 'pending' : 'blocked'}
+            status={validated ? 'done' : validationRunning ? 'running' : completedLocalRun && !runPending && !auditActive ? 'pending' : 'blocked'}
             eyebrow={t('auditTimeline.phase.n', 3)}
             title={t('auditTimeline.validation.title')}
             tag={validated ? t('auditTimeline.status.done') : validationRunning ? t('auditTimeline.status.running')
-              : audited && !runPending && !auditActive ? t('auditTimeline.status.todo') : t('auditTimeline.status.waitingAudit')}
+              : completedLocalRun && !runPending && !auditActive ? t('auditTimeline.status.todo') : t('auditTimeline.status.waitingAudit')}
           >
             <p className="audit-tl-muted">{t('auditTimeline.validation.desc')}</p>
             {audited && tdTotal > 0 && (
@@ -847,7 +868,7 @@ export function AuditTimeline(props: AuditTimelineProps) {
                   {runPending ? <RotateCcw size={12} /> : <Play size={12} />} {launchLabel}
                 </button>
               </div>
-            ) : auditStatus === 'Audited' && linkedValidation?.finished ? (
+            ) : auditStatus === 'Audited' && completedLocalRun && linkedValidation?.finished ? (
               // The finished discussion is auto-archived: validate from here, never start a new one.
               <div className="audit-tl-validation-actions" data-testid="audit-timeline-validation-finished">
                 <p className="audit-tl-muted">{t('auditTimeline.validation.finished')}</p>
@@ -870,11 +891,15 @@ export function AuditTimeline(props: AuditTimelineProps) {
                   <FileText size={12} /> {t('auditTimeline.validation.viewDiscussion')}
                 </button>
               </div>
-            ) : audited && !validated && !auditActive && (
-              <button type="button" className="audit-tl-btn audit-tl-btn-small" onClick={props.onValidate}>
-                <ShieldCheck size={12} /> {validationRunning ? t('audit.resumeValidation') : t('audit.validate')}
+            ) : auditStatus === 'Audited' && completedLocalRun && linkedValidation && !linkedValidation.finished && !auditActive ? (
+              <button type="button" className="audit-tl-btn audit-tl-btn-small" onClick={() => props.onOpenValidation(linkedValidation.discussion_id)}>
+                <FileText size={12} /> {t('audit.resumeValidation')}
               </button>
-            )}
+            ) : auditStatus === 'Audited' && stepsLoaded && !loadFailed && !completedLocalRun && !runPending ? (
+              <p className="audit-tl-muted" data-testid="audit-timeline-validation-unavailable">{t('auditTimeline.validation.noCompletedRun')}</p>
+            ) : auditStatus === 'Audited' && completedLocalRun && linkedValidation === null ? (
+              <p className="audit-tl-muted" data-testid="audit-timeline-validation-unlinked">{t('auditTimeline.validation.unlinked')}</p>
+            ) : null}
           </Phase>
 
           <Phase
@@ -979,8 +1004,10 @@ export function AuditTimeline(props: AuditTimelineProps) {
             <button
               type="button"
               className="audit-tl-btn audit-tl-btn-primary"
-              onClick={props.onLaunch}
-              disabled={auditActive || launchBlocked || !selected || !agentChoices.some(g => g.items.some(i => i.usable))}
+              onClick={verifyEntry ? (props.onVerifyDocs ?? props.onLaunch) : props.onLaunch}
+              disabled={verifyEntry
+                ? auditActive || !!props.resumableUnknown
+                : auditActive || launchBlocked || !selected || !agentChoices.some(g => g.items.some(i => i.usable))}
               data-testid="audit-timeline-launch"
             >
               {auditActive ? <Loader2 size={13} className="spin" aria-hidden="true" /> : <Play size={13} />} {launchLabel}

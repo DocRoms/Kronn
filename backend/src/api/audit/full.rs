@@ -308,19 +308,13 @@ pub async fn full_audit(
     let project_default_skill_ids = project.default_skill_ids.clone();
     let briefing_notes =
         crate::api::projects::resolve_briefing_notes(&project_path, &project.briefing_notes);
-    let td_tasks_option = super::td_tasks::briefing_option_set(
-        briefing_notes.as_deref(),
-        project.briefing_notes.as_deref(),
-    );
+    let td_tasks_option = super::td_tasks::briefing_option_set(briefing_notes.as_deref(), None);
     // KT-1193 — the team's rules and bans: prompt block, detector, coding-rules doc.
     let project_rules = briefing_notes
         .as_deref()
         .and_then(super::briefing_rules::parse);
     // KT-1183 — experimental cross-agent audit; `None` keeps every step single-agent.
-    let cross_agents = super::cross_audit::briefing_cross_agents(
-        briefing_notes.as_deref(),
-        project.briefing_notes.as_deref(),
-    );
+    let cross_agents = super::cross_audit::briefing_cross_agents(briefing_notes.as_deref(), None);
     // KT-926 — the only other repos this prompt names are the ones the user
     // explicitly linked to the project. Never the list of the machine's Kronn
     // projects: the prompt goes to the model provider, and a companion list
@@ -771,6 +765,14 @@ pub async fn full_audit(
             }
         }
 
+        let run_docs_snapshot = match crate::core::doc_provenance::snapshot_tracked(&project_path) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                yield Event::default().event("error").data(serde_json::json!({"error": error, "fatal": true}).to_string());
+                return;
+            }
+        };
+
         // ── Phase 1: Install template if needed ──
         // 0.8.2 — Specialized audit kinds (non-Full) skip template
         // installation. They are focused re-scans that assume Full has
@@ -796,6 +798,7 @@ pub async fn full_audit(
         if install_template {
             let pp = project_path_str.clone();
             let install_root = docs_root.clone();
+            let install_briefing = briefing_notes.clone();
             let fresh_install = template_installed;
             let install_result = tokio::task::spawn_blocking(move || -> Result<(crate::core::legacy_docs::LegacyMigrationReport,), String> {
                 let project_path = scanner::resolve_host_path(&pp);
@@ -828,22 +831,15 @@ pub async fn full_audit(
                 }
 
                 let docs_template = template_dir.join("docs");
+                crate::core::template_manifest::apply_renames(&project_path, &docs_template)?;
                 if docs_template.is_dir() {
                     crate::api::projects::copy_dir_nondestructive_in(&docs_template, &docs_target, &install_root)?;
                 }
+                super::briefing::sync_briefing_file(&project_path, install_briefing.as_deref())?;
                 // Ownership first: a run stopped before its end leaves a folder
                 // a fresh relaunch still reads as Kronn's.
                 crate::core::kronn_state::mark_template_installed(&project_path)?;
-                // The anti-hallucination section STEP 0 writes links to this
-                // spec: without it the documentary gate blocks step 1 of a
-                // first audit (same install as the template endpoint).
-                if let Err(e) = crate::core::fs_guard::guarded_write_new(
-                    &project_path,
-                    &docs_target.join("conventions/agents-md-format-v1.md"),
-                    crate::core::anti_halluc::SPEC_AGENTS_MD_V1.as_bytes(),
-                ) {
-                    tracing::warn!("anti-hallu spec not installed: {e}");
-                }
+                crate::core::template_manifest::record_install(&project_path, &docs_template)?;
                 crate::api::projects::ensure_agent_writable_subfolders(&project_path, &docs_target);
 
                 // 0.8.4 (#295) — auto-write `docs/linked-repos.md` from
@@ -1005,6 +1001,12 @@ pub async fn full_audit(
             &db, &project_id, &project_path, &project_path_str, &agent_launcher, &agent_type,
         ).await;
         tracing::info!("audit {}: version source {:?}", project_id, version_ctx.source);
+
+        if let Err(error) = crate::core::doc_provenance::note_snapshot_writes(
+            &project_path, &run_docs_snapshot, crate::core::doc_provenance::DocWriter::FullAudit,
+        ) {
+            yield Event::default().event("step_warning").data(serde_json::json!({"step": 0, "reason": error}).to_string());
+        }
 
         // ── Phase 2: Run the assembled audit chain ──
         // Remove bootstrap prompt
@@ -1357,7 +1359,7 @@ pub async fn full_audit(
             // legacy/ subdir).
             let legacy_dir_exists = docs_root.file(&project_path, "legacy").is_dir();
             if legacy_dir_exists {
-                full_prompt.push_str(&docs_root.relocate("\n\n## Legacy docs (PRIMARY SOURCE for this audit)\nThis project had a hand-curated `docs/` folder BEFORE Kronn was bootstrapped. We moved that content under `docs/legacy/` so the freshly-installed Kronn templates don't collide with it. **READ every `*.md` under `docs/legacy/` BEFORE filling the Kronn templates.** That content is the human-curated knowledge — the README and source code alone would lose 6 months of accumulated context.\n\nWhen filling each Kronn template, cite the legacy source inline (`see docs/legacy/installation.md`, `cf docs/legacy/architecture/overview.md`) so the user can verify the mapping and decide what to keep / discard after the audit. After the audit, the user reviews `docs/legacy/` and either deletes it or migrates remaining pieces into the Kronn structure manually.\n\n**Navigation requirement for `docs/AGENTS.md` ONLY (Step 1):** when filling `docs/AGENTS.md`, add ONE line in the appropriate section (or a small dedicated `## Legacy docs (pre-Kronn snapshot)` section if none fits) that points future agents to `docs/legacy/` — wording like `> Hand-curated docs from before Kronn — see [docs/legacy/README.md](legacy/README.md) for context preserved from the previous structure.` Without this pointer the folder is invisible to anyone re-reading `AGENTS.md` next week. Do NOT add this line to other Kronn templates (`glossary.md`, `repo-map.md`, etc.) — the entry point is enough.\n"));
+                full_prompt.push_str(&docs_root.relocate(include_str!("prompts/legacy-docs.md")));
             }
             if let Some(ref block) = linked_repos_block {
                 full_prompt.push_str(&format!("\n\n{}\n", block));
@@ -1454,6 +1456,7 @@ pub async fn full_audit(
                         step_target: analysis_step.target_file.to_string(),
                     };
                     let outcome = super::cross_audit::run_cross_step(&runner, &project_path, agents, &full_prompt).await;
+                    let briefing_warning = super::helpers::restore_step_briefing(&project_path, &validated_docs_snapshot).err();
                     let mut cross_unchanged = false;
                     let (mut success, mut warning, report) = match outcome {
                         Ok(mut report) => match super::cross_audit::write_outputs(&project_path, analysis_step.target_file, agents, &audit_run_id, &mut report) {
@@ -1466,7 +1469,7 @@ pub async fn full_audit(
                                     crate::core::doc_provenance::DocWriter::FullAudit,
                                 )
                                 .err()
-                                .map(|e| format!("human-validation provenance not recorded for {file_label}: {e}"));
+                                .map(|e| format!("documentation protection notice for {file_label}: {e}"));
                                 let (ok, w) = super::validation::validate_step_output(true, &project_path, analysis_step.target_file);
                                 (ok, unmarked.or(w.map(|w| w.reason)), Some(report))
                             }
@@ -1474,6 +1477,7 @@ pub async fn full_audit(
                         },
                         Err(e) => (false, Some(format!("cross-agent audit: {e}")), None),
                     };
+                    warning = briefing_warning.or(warning);
                     if let Some(report) = report.as_ref() {
                         let disputes = super::cross_audit::dispute_discussion(&project_id, &agent_type, &language, audit_tier, report);
                         let mut dispute_id = disputes.as_ref().map(|(d, _)| d.id.clone());
@@ -1948,7 +1952,7 @@ pub async fn full_audit(
                         crate::core::doc_provenance::DocWriter::FullAudit,
                     ) {
                         let reason = format!(
-                            "human-validation provenance not recorded for {file_label}: {reason}"
+                            "documentation protection notice for {file_label}: {reason}"
                         );
                         tracing::warn!("Audit step {} ({}): {}", step, file_label, reason);
                         yield Event::default().event("step_warning").data(
@@ -2475,6 +2479,13 @@ pub async fn full_audit(
                     return;
                 }
             }
+            if let Err(reason) = super::helpers::mark_validated_doc_writes(
+                &project_path, &validated_docs_snapshot, crate::core::doc_provenance::DocWriter::FullAudit,
+            ) {
+                yield Event::default().event("step_warning").data(serde_json::json!({
+                    "step": step, "file": file_label, "reason": reason, "repaired_from_template": false,
+                }).to_string());
+            }
         }
 
         // ── Auto-detect project skills ──
@@ -2885,7 +2896,7 @@ pub async fn full_audit(
         let pp = project_path_str.clone();
         let audit_info = tokio::task::spawn_blocking(move || {
             compute_audit_info_sync(&pp)
-        }).await.unwrap_or_else(|_| AuditInfo { files: vec![], todos: vec![], tech_debt_items: vec![] });
+        }).await.unwrap_or_else(|_| AuditInfo { template_update: None, files: vec![], todos: vec![], tech_debt_items: vec![] });
 
         // Detect if project has an issue tracker MCP (GitHub, GitLab, Jira, Linear, etc.)
         let has_issue_tracker_mcp = detect_issue_tracker_mcp(&project_path);
@@ -3106,7 +3117,10 @@ pub async fn full_audit(
             } else {
                 serde_json::to_string(&recs).ok()
             };
-            (counts, resolved, new, carried, score, recs_json)
+            let documents = if audit_fully_succeeded {
+                Some(crate::core::audit_documents::capture_json(&project_path_for_count)?)
+            } else { None };
+            Ok::<_, String>((counts, resolved, new, carried, score, recs_json, documents))
         })
         .await;
         // The terminal write is AUTHORITATIVE and ATOMIC. Happy path: ONE
@@ -3120,7 +3134,7 @@ pub async fn full_audit(
         // a `done`, no disarm — the guard's Drop retries mark_interrupted and
         // keeps the lease fail-closed on failure.
         let finalize_result: Result<(), String> = match completion_counts {
-            Ok((counts, resolved, new, carried, score, recs_json)) => {
+            Ok(Ok((counts, resolved, new, carried, score, recs_json, documents))) => {
                 let write = TerminalWrite {
                     run_id: run_id_for_complete.clone(),
                     ended_at,
@@ -3131,6 +3145,7 @@ pub async fn full_audit(
                     carried,
                     score,
                     recs_json,
+                    documents,
                     validation: pending_validation.clone(),
                     interruption_reason: interruption_reason(
                         progress.succeeded_count(),
@@ -3144,6 +3159,7 @@ pub async fn full_audit(
                     .await
                     .map_err(|e| format!("terminal write failed: {e}"))
             }
+            Ok(Err(e)) => Err(e),
             Err(e) => Err(format!("completion metrics task failed: {e}")),
         };
 
@@ -3499,6 +3515,7 @@ pub(crate) struct TerminalWrite {
     pub carried: u32,
     pub score: u8,
     pub recs_json: Option<String>,
+    pub documents: Option<String>,
     /// The validation discussion and its prompt, inserted with the status in
     /// the SAME transaction. Present for a `Completed` run and — KT-931 — for
     /// an `Interrupted` partial run (the validation of its successful steps).
@@ -3543,6 +3560,14 @@ pub(crate) fn write_terminal_state(
         if let Some((disc, _)) = write.validation.as_ref() {
             crate::db::audit_runs::set_validation_discussion(&tx, &write.run_id, &disc.id)?;
         }
+        crate::db::audit_documents::record(
+            &tx,
+            &write.run_id,
+            write
+                .documents
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("Missing final document fingerprints"))?,
+        )?;
     } else {
         // 0.8.3 (#311) — mark as Interrupted (not Completed, not Failed):
         // the resume mechanism will pick this row up via `latest_resumable`
@@ -5301,6 +5326,7 @@ mod partial_run_tests {
             carried: 0,
             score: 100,
             recs_json: None,
+            documents: fully_succeeded.then(|| "{}".to_string()),
             validation,
             interruption_reason: interruption_reason(15, TOTAL, &[FAILED_STEP], &[FAILED_STEP]),
             step_outcomes_json: "{}".into(),

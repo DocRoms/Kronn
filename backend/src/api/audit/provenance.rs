@@ -82,11 +82,26 @@ pub async fn confirm_doc_provenance(
     }
     let tracker = state.audit_tracker.clone();
     let result = tokio::task::spawn_blocking(move || {
-        doc_provenance::confirm(&path, &req.docs)?;
-        doc_provenance::report(&path, false)
+        let confirmed = doc_provenance::confirm(&path, &req.docs)?;
+        let documents = crate::core::audit_documents::capture(&path)?;
+        Ok::<_, String>((doc_provenance::report(&path, false)?, confirmed, documents))
     })
     .await
     .unwrap_or_else(|e| Err(format!("Task failed: {e}")));
+    let result = match result {
+        Ok((report, confirmed, documents)) => {
+            let pid = project_id.clone();
+            state
+                .db
+                .with_conn(move |conn| {
+                    crate::db::audit_documents::confirm_paths(conn, &pid, &confirmed, &documents)
+                })
+                .await
+                .map(|()| report)
+                .map_err(|e| format!("Cannot record confirmed audit documents: {e}"))
+        }
+        Err(e) => Err(e),
+    };
     if let Ok(mut t) = tracker.lock() {
         t.release_lease(&project_id);
     }

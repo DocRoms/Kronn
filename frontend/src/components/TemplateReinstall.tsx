@@ -273,6 +273,14 @@ function ConfirmBody({ plan, onConfirm, onCancel, returnFocus }: {
           <span>{t('templateReinstall.auditRunning')}</span>
         </div>
       )}
+      {plan.template_update && plan.template_update.renames.length > 0 && (
+        <div className="tm-small" data-testid="template-reinstall-renames">
+          <p>{t('templateUpdate.renamePreserves')}</p>
+          <ul className="tm-path-list">{plan.template_update.renames.map(rename => (
+            <li key={rename.from}><code>{rename.from}</code> → <code>{rename.to}</code>{rename.conflict && <span> · {t('templateUpdate.conflict')}</span>}</li>
+          ))}</ul>
+        </div>
+      )}
       {nothingToDo ? (
         <p className="tm-summary" data-testid="template-reinstall-uptodate">{t('templateReinstall.upToDate')}</p>
       ) : (

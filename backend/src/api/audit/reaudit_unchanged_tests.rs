@@ -89,6 +89,7 @@ case "$prompt" in
     fi
     ;;
   *)
+    while [ -f '{state}/validation-hold' ]; do sleep 0.1; done
     if [ -f '{state}/settle' ]; then
       find '{project}/docs' '{project}/.ai' '{project}/doc' -name '*.md' -not -path '*/tech-debt/*' 2>/dev/null | while read -r f; do
         sed -e 's/{{{{[A-Z0-9_]*}}}}/settled by the validation/g' -e 's/<!-- TODO:[^>]*-->//g' "$f" > "$f.next"
@@ -190,18 +191,27 @@ async fn persisted(
 }
 
 /// The validation agent a run spawns runs detached and goes through the same
-/// scripted agent: let it answer before the next run re-arms the script.
+/// scripted agent: wait for its reply and dispatch cleanup before the next run
+/// validates the docs or re-arms the script.
 async fn validation_settled(state: &AppState, done: &Value) {
     let Some(id) = done["discussion_id"].as_str().map(str::to_string) else {
         return;
     };
     for _ in 0..600 {
         let id = id.clone();
+        let cancel_registry = state.cancel_registry.clone();
         let answered = state
             .db
             .with_conn(move |conn| {
-                Ok(crate::db::discussions::get_discussion(conn, &id)?
-                    .is_some_and(|d| d.messages.len() >= 2))
+                let discussion = crate::db::discussions::get_discussion(conn, &id)?;
+                Ok(
+                    discussion.is_some_and(|d| d.messages.len() >= 2 && !d.awaiting_agent)
+                        && !crate::db::agent_dispatch::has_active_for_discussion(conn, &id)?
+                        && !cancel_registry
+                            .lock()
+                            .map_err(|_| anyhow::anyhow!("cancel registry poisoned"))?
+                            .contains_key(&id),
+                )
             })
             .await
             .unwrap();
@@ -445,7 +455,10 @@ async fn a_reaudit_corrects_a_stale_citation_and_leaves_true_docs_unchanged() {
     validation_settled(state, &done).await;
     assert_eq!(done["status"], "complete", "{first}");
     assert!(
-        prompt_kinds(tools).iter().all(|(_, reverify)| !reverify),
+        prompt_kinds(tools)
+            .iter()
+            .take(crate::api::audit::REVERIFIED_STEPS)
+            .all(|(_, reverify)| !reverify),
         "a first audit fills templates: {:?}",
         prompt_kinds(tools)
     );
@@ -489,15 +502,10 @@ async fn a_reaudit_corrects_a_stale_citation_and_leaves_true_docs_unchanged() {
     assert_eq!(done["status"], "complete", "{second}");
     assert_eq!(done["steps_to_redo"], json!([]), "{second}");
 
-    // Steps 1 to 7 got the re-verification prompt, the others did not.
+    // Every step preserves statements that remain true.
     let kinds = prompt_kinds(tools);
     for (index, (target, reverify)) in kinds.iter().enumerate() {
-        assert_eq!(
-            *reverify,
-            index < crate::api::audit::REVERIFIED_STEPS,
-            "step {} ({target})",
-            index + 1
-        );
+        assert!(*reverify, "step {} ({target})", index + 1);
     }
 
     // The stale claims are gone, the true one stays; the agent's rewrite of
@@ -1110,14 +1118,15 @@ async fn a_reaudit_keeps_human_td_decisions_and_a_refresh_says_it_is_single_agen
         .db
         .with_conn(|conn| {
             let key = crate::core::td_tasks::td_task_key(PROJECT_ID, "TD-20261001-rej");
-            let Some((id, _)) = crate::db::planning::task_by_idempotency_key(conn, &key)? else {
-                return Ok(None);
-            };
-            Ok(crate::db::planning::get_task(conn, &id)?.map(|task| task.summary.status))
+            let (id, _) = crate::db::planning::task_by_idempotency_key(conn, &key)?
+                .ok_or_else(|| anyhow::anyhow!("expected TD task"))?;
+            Ok(crate::db::planning::get_task(conn, &id)?
+                .ok_or_else(|| anyhow::anyhow!("expected stored TD task"))?
+                .summary
+                .status)
         })
         .await
-        .unwrap()
-        .expect("the rejected TD keeps its task");
+        .unwrap();
     assert_eq!(status, crate::models::PlanningTaskStatus::Archived);
 
     // A refresh of the security step under the cross-agent option.
@@ -1125,6 +1134,7 @@ async fn a_reaudit_keeps_human_td_decisions_and_a_refresh_says_it_is_single_agen
         "{BRIEFING_MARKER}\n{} ClaudeCode, Codex\n",
         crate::core::cross_audit::BRIEFING_OPTION_PREFIX
     );
+    std::fs::write(fx.project.path().join("docs/briefing.md"), &notes).unwrap();
     fx.state
         .db
         .with_conn(move |conn| {

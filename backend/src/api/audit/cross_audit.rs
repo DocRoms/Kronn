@@ -24,8 +24,8 @@ pub(crate) fn briefing_cross_agents(
     db_notes: Option<&str>,
 ) -> Option<Vec<AgentType>> {
     file_notes
+        .or(db_notes)
         .and_then(engine::briefing_cross_agents)
-        .or_else(|| db_notes.and_then(engine::briefing_cross_agents))
 }
 
 /// What one model call returned.

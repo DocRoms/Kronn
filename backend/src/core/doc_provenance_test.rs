@@ -127,6 +127,38 @@ fn an_edit_outside_kronn_also_asks_for_reconfirmation_without_a_writer() {
 }
 
 #[test]
+fn reconfirmation_refuses_unresolved_templates_and_todos_atomically() {
+    let dir = project();
+    record_all(dir.path(), ValidationReason::AuditValidation).unwrap();
+    for bad in [
+        "# {{PROJECT_NAME}}\n",
+        "# Map\n<!-- TODO: ask the owner -->\n",
+    ] {
+        fs::write(dir.path().join("docs/repo-map.md"), bad).unwrap();
+        fs::write(
+            dir.path().join("docs/AGENTS.md"),
+            "# Valid changed content\n",
+        )
+        .unwrap();
+        let before = fs::read(dir.path().join("docs").join(PROVENANCE_FILENAME)).unwrap();
+        let error = confirm(dir.path(), &[]).unwrap_err();
+        assert!(error.contains("docs/repo-map.md"), "{error}");
+        assert_eq!(
+            fs::read(dir.path().join("docs").join(PROVENANCE_FILENAME)).unwrap(),
+            before
+        );
+        assert_eq!(report(dir.path(), false).unwrap().to_reconfirm, 2);
+    }
+    fs::write(
+        dir.path().join("docs/repo-map.md"),
+        "# Map\nThe example `{{PROJECT_NAME}}` is literal.\n",
+    )
+    .unwrap();
+    assert_eq!(confirm(dir.path(), &[]).unwrap().len(), 2);
+    assert_eq!(report(dir.path(), false).unwrap().to_reconfirm, 0);
+}
+
+#[test]
 fn a_write_into_an_owner_human_section_lands_and_records_the_human_text_as_before() {
     let dir = project();
     fs::write(dir.path().join("docs/AGENTS.md"), HUMAN_DOC).unwrap();
@@ -329,7 +361,10 @@ fn snapshot_tracks_recorded_and_human_docs_and_notes_their_writes() {
     fs::write(root.join("docs/glossary.md"), "# Glossary\n").unwrap();
     let snapshot = snapshot_tracked(root).unwrap();
     let docs: Vec<_> = snapshot.iter().map(|(d, _)| d.as_str()).collect();
-    assert_eq!(docs, ["docs/AGENTS.md", "docs/repo-map.md"]);
+    assert_eq!(
+        docs,
+        ["docs/AGENTS.md", "docs/glossary.md", "docs/repo-map.md"]
+    );
     fs::write(root.join("docs/repo-map.md"), "# Map\nchanged\n").unwrap();
     fs::write(
         root.join("docs/AGENTS.md"),
@@ -339,9 +374,9 @@ fn snapshot_tracks_recorded_and_human_docs_and_notes_their_writes() {
     fs::write(root.join("docs/glossary.md"), "# Glossary\nmore\n").unwrap();
     assert_eq!(
         note_snapshot_writes(root, &snapshot, DocWriter::FullAudit).unwrap(),
-        2
+        3
     );
-    assert_eq!(report(root, false).unwrap().to_reconfirm, 2);
+    assert_eq!(report(root, false).unwrap().to_reconfirm, 3);
 }
 
 #[test]
@@ -369,4 +404,175 @@ fn a_path_outside_the_docs_is_never_recorded() {
     )
     .unwrap();
     assert!(report(dir.path(), false).unwrap().docs.is_empty());
+}
+
+#[test]
+fn human_text_added_after_validation_is_the_next_write_baseline() {
+    for writer in [
+        DocWriter::FullAudit,
+        DocWriter::PartialAudit,
+        DocWriter::Revalidation,
+        DocWriter::TemplateReinstall,
+        DocWriter::DocumentRepair,
+        DocWriter::TdIndex,
+    ] {
+        let dir = project();
+        let root = dir.path();
+        record_all(root, ValidationReason::AuditValidation).unwrap();
+        let human = "# Map\nline two\n\nDécision humaine: préserver les données.\n";
+        fs::write(root.join("docs/repo-map.md"), human).unwrap();
+        let snapshot = snapshot_tracked(root).unwrap();
+        fs::write(root.join("docs/repo-map.md"), "# Map\nline two\n").unwrap();
+        note_snapshot_writes(root, &snapshot, writer).unwrap();
+        let report = report(root, true).unwrap();
+        let doc = report
+            .docs
+            .iter()
+            .find(|doc| doc.doc == "docs/repo-map.md")
+            .unwrap();
+        assert_eq!(doc.state, ProvenanceState::ToReconfirm, "{writer:?}");
+        assert_eq!(doc.changes[0].before.as_deref(), Some(human), "{writer:?}");
+        assert_eq!(doc.kronn_writes[0].writer, writer);
+    }
+}
+
+#[test]
+fn pending_losses_survive_human_edits_and_whole_audit_validation() {
+    let dir = project();
+    let root = dir.path();
+    record_all(root, ValidationReason::AuditValidation).unwrap();
+    kronn_writes(root, "docs/repo-map.md", "# Map\n", DocWriter::FullAudit);
+    let human = "# Map\nNew human rule.\n";
+    fs::write(root.join("docs/repo-map.md"), human).unwrap();
+    let snapshot = snapshot_tracked(root).unwrap();
+    fs::remove_file(root.join("docs/repo-map.md")).unwrap();
+    note_snapshot_writes(root, &snapshot, DocWriter::PartialAudit).unwrap();
+    record_all(root, ValidationReason::AuditValidation).unwrap();
+    let status = report(root, true).unwrap();
+    let doc = status
+        .docs
+        .iter()
+        .find(|doc| doc.doc == "docs/repo-map.md")
+        .unwrap();
+    assert_eq!(doc.state, ProvenanceState::ToReconfirm);
+    assert!(doc.changes.iter().all(|change| change.after.is_none()));
+    assert!(doc
+        .changes
+        .iter()
+        .any(|change| change.before.as_deref() == Some(human)));
+    assert!(doc
+        .changes
+        .iter()
+        .any(|change| change.before.as_deref() == Some("# Map\nline two\n")));
+    confirm(root, &[]).unwrap();
+    assert_eq!(report(root, true).unwrap().to_reconfirm, 0);
+}
+
+#[test]
+fn successive_kronn_writes_do_not_turn_an_agent_output_into_a_human_baseline() {
+    let dir = project();
+    let root = dir.path();
+    record_all(root, ValidationReason::AuditValidation).unwrap();
+    for output in ["# First rewrite\n", "# Second rewrite\n"] {
+        let snapshot = snapshot_tracked(root).unwrap();
+        fs::write(root.join("docs/repo-map.md"), output).unwrap();
+        note_snapshot_writes(root, &snapshot, DocWriter::FullAudit).unwrap();
+    }
+    record_all(root, ValidationReason::AuditValidation).unwrap();
+    let status = report(root, true).unwrap();
+    let doc = status
+        .docs
+        .iter()
+        .find(|doc| doc.doc == "docs/repo-map.md")
+        .unwrap();
+    assert_eq!(doc.changes.len(), 1);
+    assert_eq!(doc.changes[0].before.as_deref(), Some("# Map\nline two\n"));
+    assert_eq!(doc.changes[0].after.as_deref(), Some("# Second rewrite\n"));
+}
+
+#[test]
+fn snapshot_covers_unrecorded_nested_docs_and_reports_in_a_custom_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    crate::core::docs_location::set_project_override(&root.to_string_lossy(), Some("context"));
+    fs::create_dir_all(root.join("context/reports/deep")).unwrap();
+    fs::write(
+        root.join("context/reports/deep/human.md"),
+        "Do not remove this paragraph.\n",
+    )
+    .unwrap();
+    for excluded in ["legacy", "var"] {
+        fs::create_dir_all(root.join("context").join(excluded)).unwrap();
+        fs::write(
+            root.join("context").join(excluded).join("ignored.md"),
+            [0xff],
+        )
+        .unwrap();
+    }
+    let snapshot = snapshot_tracked(root).unwrap();
+    assert_eq!(snapshot.len(), 1);
+    fs::remove_file(root.join("context/reports/deep/human.md")).unwrap();
+    note_snapshot_writes(root, &snapshot, DocWriter::FullAudit).unwrap();
+    let status = report(root, true).unwrap();
+    assert_eq!(status.to_reconfirm, 1);
+    assert_eq!(
+        status.docs[0].changes[0].before.as_deref(),
+        Some("Do not remove this paragraph.\n")
+    );
+    assert_eq!(status.docs[0].changes[0].after, None);
+}
+
+#[test]
+fn generated_docs_only_need_reconfirmation_after_a_human_changes_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let snapshot = snapshot_tracked(root).unwrap();
+    fs::create_dir_all(root.join("docs")).unwrap();
+    fs::write(root.join("docs/AGENTS.md"), "# {{PROJECT_NAME}}\n").unwrap();
+    note_snapshot_writes(root, &snapshot, DocWriter::TemplateReinstall).unwrap();
+    let snapshot = snapshot_tracked(root).unwrap();
+    fs::write(root.join("docs/AGENTS.md"), "# Generated project\n").unwrap();
+    note_snapshot_writes(root, &snapshot, DocWriter::FullAudit).unwrap();
+    // Retries and the final mechanical pass still use the pre-step snapshot.
+    fs::write(
+        root.join("docs/AGENTS.md"),
+        "# Generated project\nStamped by Kronn.\n",
+    )
+    .unwrap();
+    note_snapshot_writes(root, &snapshot, DocWriter::FullAudit).unwrap();
+    assert_eq!(report(root, true).unwrap().to_reconfirm, 0);
+    fs::write(
+        root.join("docs/AGENTS.md"),
+        "# Generated project\nHuman decision.\n",
+    )
+    .unwrap();
+    let snapshot = snapshot_tracked(root).unwrap();
+    fs::write(root.join("docs/AGENTS.md"), "# Generated project\n").unwrap();
+    note_snapshot_writes(root, &snapshot, DocWriter::FullAudit).unwrap();
+    let status = report(root, true).unwrap();
+    assert_eq!(status.to_reconfirm, 1);
+    assert!(status.docs[0].changes[0]
+        .before
+        .as_deref()
+        .unwrap()
+        .contains("Human decision."));
+}
+
+#[cfg(unix)]
+#[test]
+fn snapshot_refuses_symlinks_instead_of_following_unmanaged_documents() {
+    let dir = project();
+    let outside = tempfile::tempdir().unwrap();
+    fs::write(
+        outside.path().join("unmanaged.md"),
+        "Outside the audit surface.",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        outside.path().join("unmanaged.md"),
+        dir.path().join("docs/link.md"),
+    )
+    .unwrap();
+    let error = snapshot_tracked(dir.path()).unwrap_err();
+    assert!(error.contains("symbolic link"), "{error}");
 }

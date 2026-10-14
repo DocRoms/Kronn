@@ -946,6 +946,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("sql/259_message_session_continuity.sql"),
     ),
     (
+        "260_audit_document_fingerprints",
+        include_str!("sql/260_audit_document_fingerprints.sql"),
+    ),
+    (
         "261_workflow_observer",
         include_str!("sql/261_workflow_observer.sql"),
     ),

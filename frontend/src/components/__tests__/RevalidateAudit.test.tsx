@@ -1,4 +1,4 @@
-// « Revalider l'audit » (KT-1168): the panel lists what the deterministic
+// « Vérifier la doc »: the panel lists what the deterministic
 // check found, acknowledges a section, runs the revalidation, and offers
 // « Reprendre » after every error, stop or interruption.
 
@@ -157,6 +157,59 @@ describe('RevalidateAudit', () => {
     expect(within(panel).getByTestId('revalidate-launch')).toBeEnabled();
   });
 
+  it('explains stale docs with their step, changed sources, and smallest actions', async () => {
+    vi.mocked(projectsApi.auditSteps).mockResolvedValueOnce([
+      { index: 4, target_file: 'docs/coding-rules.md' },
+    ] as never);
+    const onUpdateStale = vi.fn();
+    const onAcknowledgeStale = vi.fn();
+    const onReconfirm = vi.fn();
+    setup({
+      drift: {
+        audit_date: '2026-10-12',
+        stale_sections: [{
+          ai_file: 'docs/coding-rules.md',
+          audit_step: 4,
+          changed_sources: ['frontend/src/App.tsx', 'backend/src/main.rs'],
+        }],
+        fresh_sections: [], total_sections: 1, sources_state: 'needs_reverification',
+        broken_citations: 2, placeholder_docs: [],
+      },
+      reconfirmCount: 1,
+      docStateUnknown: false,
+      onUpdateStale,
+      onAcknowledgeStale,
+      onReconfirm,
+      onFullAudit: vi.fn(),
+    });
+
+    const panel = await openPanel();
+    const stale = within(panel).getByTestId('revalidate-stale-details');
+    expect(stale).toHaveTextContent('docState.stale.explanation');
+    expect(stale).toHaveTextContent('docs/coding-rules.md');
+    expect(stale).toHaveTextContent('docState.stale.step 4 docs/coding-rules.md');
+    expect(stale).toHaveTextContent('frontend/src/App.tsx');
+    expect(stale).toHaveTextContent('backend/src/main.rs');
+    expect(stale).toHaveTextContent('docState.stale.updateEffect');
+    expect(stale).toHaveTextContent('docState.stale.unchangedEffect');
+
+    const docState = within(panel).getByTestId('doc-state-block');
+    expect(within(docState).getByTestId('doc-state-broken')).toHaveTextContent('docState.action.fixBroken');
+    expect(within(docState).getByTestId('doc-state-reanchor')).toHaveTextContent('docState.action.reanchor');
+    expect(within(docState).getByTestId('doc-state-stale')).toHaveTextContent('docState.action.updateStale');
+    expect(within(docState).getByTestId('doc-state-reconfirm')).toHaveTextContent('docState.action.reconfirm');
+
+    fireEvent.click(within(docState).getByTestId('doc-state-stale'));
+    expect(onUpdateStale).toHaveBeenCalledWith([4]);
+    fireEvent.click(within(stale).getByTestId('revalidate-stale-ack'));
+    expect(onAcknowledgeStale).toHaveBeenCalledTimes(1);
+    fireEvent.click(within(docState).getByTestId('doc-state-reconfirm'));
+    expect(onReconfirm).toHaveBeenCalledTimes(1);
+    fireEvent.click(within(docState).getByTestId('doc-state-broken'));
+    expect(projectsApi.revalidateAuditStream).toHaveBeenCalledTimes(1);
+    expect(within(panel).getByText('docState.fullAudit.title')).toBeInTheDocument();
+  });
+
   it('« Vérifié, inchangé » acknowledges one section and reloads the plan', async () => {
     const props = setup();
     const panel = await openPanel();
@@ -205,6 +258,62 @@ describe('RevalidateAudit', () => {
       await Promise.resolve();
     });
     expect(projectsApi.cancelAudit).toHaveBeenCalledWith('p-reval');
+  });
+
+  it('keeps re-anchoring deterministic in a mixed plan, including after retry', async () => {
+    setup({
+      drift: {
+        audit_date: '2026-10-12', stale_sections: [], fresh_sections: [], total_sections: 2,
+        sources_state: 'needs_reverification', broken_citations: 1, placeholder_docs: [],
+      },
+      reconfirmCount: 0,
+    });
+    const panel = await openPanel();
+    let firstHandlers: Handlers | null = null;
+    vi.mocked(projectsApi.revalidateAuditStream).mockImplementationOnce(async (_id, _req, handlers) => {
+      firstHandlers = handlers;
+    });
+
+    fireEvent.click(within(panel).getByTestId('doc-state-reanchor'));
+    expect(projectsApi.revalidateAuditStream).toHaveBeenNthCalledWith(
+      1,
+      'p-reval',
+      { agent: 'ClaudeCode', tier: 'reasoning', connection_id: undefined, deterministic_only: true },
+      expect.any(Object),
+      expect.any(AbortSignal),
+    );
+
+    await finish(() => (firstHandlers as unknown as Handlers).onError('temporary failure'));
+    expect(await within(panel).findByRole('alert')).toHaveTextContent('audit.revalidate.error temporary failure');
+    let retryHandlers: Handlers | null = null;
+    vi.mocked(projectsApi.revalidateAuditStream).mockImplementationOnce(async (_id, _req, handlers) => {
+      retryHandlers = handlers;
+    });
+    await act(async () => {
+      fireEvent.click(within(panel).getByTestId('revalidate-resume'));
+      await Promise.resolve();
+    });
+
+    expect(projectsApi.revalidateAuditStream).toHaveBeenNthCalledWith(
+      2,
+      'p-reval',
+      { agent: 'ClaudeCode', tier: 'reasoning', connection_id: undefined, deterministic_only: true },
+      expect.any(Object),
+      expect.any(AbortSignal),
+    );
+
+    await finish(() => (retryHandlers as unknown as Handlers).onDone({
+      kind: 'deterministic', status: 'todo', reanchored: 1,
+    }));
+    vi.mocked(projectsApi.revalidateAuditStream).mockImplementationOnce(async () => {});
+    fireEvent.click(within(panel).getByTestId('doc-state-broken'));
+    expect(projectsApi.revalidateAuditStream).toHaveBeenNthCalledWith(
+      3,
+      'p-reval',
+      { agent: 'ClaudeCode', tier: 'reasoning', connection_id: undefined },
+      expect.any(Object),
+      expect.any(AbortSignal),
+    );
   });
 
   it('a stop ends on « Reprendre », which relaunches', async () => {
@@ -326,6 +435,36 @@ describe('RevalidateAudit', () => {
     const panel = await openPanel();
     expect(await within(panel).findByTestId('revalidate-unknown')).toBeInTheDocument();
     expect(within(panel).queryByTestId('revalidate-launch')).toBeNull();
+  });
+
+  it('allows a targeted prose check while citation fingerprints are unknown', async () => {
+    vi.mocked(projectsApi.revalidationPlan).mockResolvedValue({
+      sources_state: 'unknown',
+      agent_steps: [4],
+      reanchor_count: 0,
+      human_count: 0,
+      sections: [{
+        doc: 'docs/coding-rules.md', step: 4, action: 'agent', doc_missing: false,
+        reanchor: [], broken: [], human: [],
+      }],
+    });
+    setup();
+    const panel = await openPanel();
+
+    expect(await within(panel).findByTestId('revalidate-unknown'))
+      .toHaveTextContent('audit.revalidate.unknownWithAgentWork');
+    expect(within(panel).getByTestId('doc-state-block')).toHaveTextContent('docState.unknown');
+    expect(within(panel).getByTestId('revalidate-prose-changed'))
+      .toHaveTextContent('audit.revalidate.proseChanged');
+    expect(within(panel).getByTestId('revalidate-launch')).toBeEnabled();
+
+    await launchHeld();
+    expect(projectsApi.revalidateAuditStream).toHaveBeenCalledWith(
+      'p-reval',
+      { agent: 'ClaudeCode', tier: 'reasoning', connection_id: undefined },
+      expect.any(Object),
+      expect.any(AbortSignal),
+    );
   });
 });
 

@@ -62,6 +62,23 @@ fn a_replaced_file_is_backed_up_with_its_old_bytes_before_the_template_lands() {
 }
 
 #[test]
+fn unreadable_provenance_refuses_reinstall_before_any_template_write() {
+    let (_tmp, project, template) = fixture();
+    let original = "damaged {{PROJECT}} entry";
+    write(&project, "docs/AGENTS.md", original);
+    write(&project, "docs/provenance.json", "not valid JSON");
+
+    let error = reinstall(&project, &template, "blocked", None).unwrap_err();
+
+    assert!(error.contains("provenance.json"), "{error}");
+    assert_eq!(read(&project, "docs/AGENTS.md"), original);
+    assert!(!project.join("docs/architecture/overview.md").exists());
+    assert!(!project
+        .join(".kronn/audit/template-backups/blocked")
+        .exists());
+}
+
+#[test]
 fn only_the_templates_own_files_are_replaced() {
     let (_tmp, project, template) = fixture();
     write(&project, "docs/AGENTS.md", "mine {{X}}");
@@ -643,4 +660,52 @@ fn a_configured_docs_root_maps_its_files_to_the_relocated_steps() {
             step: Some(2),
         }]
     );
+}
+
+#[test]
+fn vue_jinja_and_twig_prose_are_filled_not_preselected_damage() {
+    for text in [
+        "Vue renders {{ message }}",
+        "Jinja renders {{ user.name }}",
+        "Twig renders {{ product|escape }}",
+        "Vue renders {{count}}",
+    ] {
+        assert_eq!(classify(text.as_bytes()), ReinstallKind::Filled, "{text}");
+    }
+    assert_eq!(
+        classify(b"Missing {{PROJECT_NAME}}"),
+        ReinstallKind::DamagedOrTemplate
+    );
+}
+
+#[test]
+fn upstream_catalogue_changes_do_not_make_local_filled_docs_damaged() {
+    let (_tmp, project, template) = fixture();
+    write(
+        &project,
+        "docs/AGENTS.md",
+        "# Filled by a human\nVue: {{ value }}",
+    );
+    crate::core::template_manifest::record_install(&project, &template).unwrap();
+    write(&template, "AGENTS.md", "# Updated upstream\n{{PROJECT}}");
+    let plan = plan_reinstall(&project, &template, false).unwrap();
+    assert!(plan.template_update.unwrap().available);
+    assert_eq!(
+        plan.files
+            .iter()
+            .find(|f| f.path == "docs/AGENTS.md")
+            .unwrap()
+            .kind,
+        Some(ReinstallKind::Filled)
+    );
+    let report = reinstall(&project, &template, "upstream-update", None).unwrap();
+    assert!(report.skipped.contains(&"docs/AGENTS.md".into()));
+    assert_eq!(
+        read(&project, "docs/AGENTS.md"),
+        "# Filled by a human\nVue: {{ value }}"
+    );
+    assert!(crate::core::kronn_state::read(&project)
+        .unwrap()
+        .template
+        .is_some());
 }

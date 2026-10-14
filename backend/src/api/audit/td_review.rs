@@ -325,21 +325,40 @@ pub async fn decide_tds(
     let docs_root = DocsRoot::of(&project_path);
     let docs_dir = docs_root.dir(&project_path);
     let docs_rel = docs_root.rel().to_string();
-    match tokio::task::spawn_blocking(move || decide_at(&project_path, &items)).await {
-        Ok(Ok(mut outcome)) => {
+    match tokio::task::spawn_blocking(move || {
+        let before = crate::core::audit_documents::capture(&project_path)?;
+        let outcome = decide_at(&project_path, &items)?;
+        let after = crate::core::audit_documents::capture(&project_path)?;
+        Ok::<_, String>((outcome, before, after))
+    })
+    .await
+    {
+        Ok(Ok((mut outcome, documents_before, documents_after))) => {
             let pid = project.id.clone();
             let after = state
                 .db
                 .with_conn(move |conn| {
+                    crate::db::audit_documents::advance_local_changes(
+                        conn,
+                        &pid,
+                        &documents_before,
+                        &documents_after,
+                    )?;
                     td_tasks::close_inactive_logged(conn, &pid, &docs_dir, "tech-debt review");
                     let pending = crate::db::audit_cross::pending_disputes(conn, &pid)?;
                     Ok((td_review::read_items_rel(&docs_dir, &docs_rel), pending))
                 })
                 .await;
-            if let Ok((items, pending)) = after {
-                let open = td_review::open_disputes(&items, &pending).len();
-                outcome.gate = td_review::with_disputes(outcome.gate, open);
-            }
+            let (items, pending) = match after {
+                Ok(result) => result,
+                Err(e) => {
+                    return Json(ApiResponse::err(format!(
+                        "Could not record the tech-debt review: {e}"
+                    )))
+                }
+            };
+            let open = td_review::open_disputes(&items, &pending).len();
+            outcome.gate = td_review::with_disputes(outcome.gate, open);
             Json(ApiResponse::ok(outcome))
         }
         Ok(Err(message)) => Json(ApiResponse::err_coded(ApiErrorCode::Validation, message)),

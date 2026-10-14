@@ -74,6 +74,8 @@ pub struct TemplateReinstallPlan {
     pub files: Vec<ReinstallFile>,
     /// An audit holds the project's lease: the reinstall would be refused.
     pub audit_running: bool,
+    #[ts(optional)]
+    pub template_update: Option<crate::core::template_manifest::TemplateUpdate>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -266,9 +268,7 @@ fn classify(old: &[u8]) -> ReinstallKind {
     // A doc that documents placeholder or marker syntax in a code block or a
     // code span is not unfilled: only the prose outside code counts.
     let prose = without_inline_code(&crate::core::anti_halluc::strip_fenced_code(text));
-    let placeholder = prose
-        .find("{{")
-        .is_some_and(|open| prose[open..].contains("}}"));
+    let placeholder = scanner::has_unfilled_placeholder(&prose);
     let opens = prose.matches("<!-- kronn:section ").count();
     let closes = prose.matches("<!-- kronn:section:end").count();
     if text.trim().is_empty() || placeholder || opens != closes {
@@ -327,6 +327,10 @@ pub fn plan_reinstall(
             })
             .collect(),
         audit_running,
+        template_update: Some(crate::core::template_manifest::check(
+            project,
+            template_docs,
+        )?),
     })
 }
 
@@ -381,6 +385,14 @@ pub fn reinstall(
             }
         }
     }
+    let creating: Vec<String> = prepared
+        .iter()
+        .filter(|p| p.action == ReinstallAction::Create)
+        .map(|p| p.rel.clone())
+        .collect();
+    let provenance_before = crate::core::doc_provenance::snapshot_tracked(project)?;
+    crate::core::template_manifest::apply_renames_in(project, template_docs, Some(&creating))?;
+    let (_, prepared) = prepare(project, template_docs)?;
     let chosen = |p: &Prepared| match (p.action, selection) {
         (ReinstallAction::Replace, Some(paths)) => paths.contains(&p.rel),
         (ReinstallAction::Replace, None) => p.kind == Some(ReinstallKind::DamagedOrTemplate),
@@ -489,6 +501,15 @@ pub fn reinstall(
         }
     }
 
+    crate::core::template_manifest::record_install(project, template_docs)?;
+    crate::core::doc_provenance::note_snapshot_writes(
+        project,
+        &provenance_before,
+        crate::core::doc_provenance::DocWriter::TemplateReinstall,
+    )
+    .map_err(|e| {
+        format!("Template files reinstalled, but provenance could not be recorded: {e}")
+    })?;
     let mut by_action: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     for file in &prepared {
         let key = match file.action {
@@ -514,9 +535,9 @@ pub fn reinstall(
     })
 }
 
-struct LeaseGuard(
-    std::sync::Arc<std::sync::Mutex<crate::AuditTracker>>,
-    String,
+pub(super) struct LeaseGuard(
+    pub(super) std::sync::Arc<std::sync::Mutex<crate::AuditTracker>>,
+    pub(super) String,
 );
 
 impl Drop for LeaseGuard {

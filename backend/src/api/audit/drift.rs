@@ -46,14 +46,21 @@ pub async fn check_drift(
         (
             crate::core::checksums::check_drift_cached(&project_path),
             placeholders,
+            crate::core::template_manifest::check(
+                &project_path,
+                &crate::api::projects::template::resolve_templates_dir().join("docs"),
+            )
+            .ok(),
         )
     })
     .await;
 
     match result {
-        Ok((drift, placeholder_docs)) => {
-            Json(ApiResponse::ok(drift_response(drift, placeholder_docs)))
-        }
+        Ok((drift, placeholder_docs, template_update)) => Json(ApiResponse::ok(drift_response(
+            drift,
+            placeholder_docs,
+            template_update,
+        ))),
         Err(e) => Json(ApiResponse::err(format!("Drift check failed: {}", e))),
     }
 }
@@ -61,8 +68,10 @@ pub async fn check_drift(
 fn drift_response(
     drift: crate::core::checksums::DriftResult,
     placeholder_docs: Vec<crate::models::PlaceholderDoc>,
+    template_update: Option<crate::core::template_manifest::TemplateUpdate>,
 ) -> DriftCheckResponse {
     DriftCheckResponse {
+        template_update,
         audit_date: drift.audit_date,
         stale_sections: drift
             .stale_sections
@@ -134,6 +143,11 @@ pub async fn acknowledge_drift(
         Ok(drift_response(
             crate::core::checksums::check_drift_cached(&project_path),
             placeholders,
+            crate::core::template_manifest::check(
+                &project_path,
+                &crate::api::projects::template::resolve_templates_dir().join("docs"),
+            )
+            .ok(),
         ))
     })
     .await
@@ -219,10 +233,25 @@ pub async fn acknowledge_citations(
         ) {
             tracing::warn!("Human-validation provenance not recorded: {e}");
         }
-        Ok(section)
+        let documents = crate::core::audit_documents::capture(&project_path)?;
+        Ok((section, req.doc, documents))
     })
     .await
     .unwrap_or_else(|e| Err(format!("Task failed: {e}")));
+    let result = match result {
+        Ok((section, doc, documents)) => {
+            let pid = project_id.clone();
+            state
+                .db
+                .with_conn(move |conn| {
+                    crate::db::audit_documents::confirm_paths(conn, &pid, &[doc], &documents)
+                })
+                .await
+                .map(|()| section)
+                .map_err(|e| format!("Cannot record acknowledged audit documents: {e}"))
+        }
+        Err(e) => Err(e),
+    };
     if let Ok(mut t) = tracker.lock() {
         t.release_lease(&project_id);
     }
@@ -445,16 +474,13 @@ pub(crate) async fn run_partial_pipeline(
     let chain = super::steps_for(crate::models::AuditKind::Full, &docs_root);
     // KT-1208 — a partial refresh runs every step single-agent; it says so
     // when the briefing asked for the cross-agent audit on a refreshed step.
-    let cross_agent_skipped = super::cross_audit::briefing_cross_agents(
-        briefing_notes.as_deref(),
-        project.briefing_notes.as_deref(),
-    )
-    .is_some()
-        && requested_steps.iter().any(|&n| {
-            chain.get(n.wrapping_sub(1)).is_some_and(|s| {
-                crate::core::cross_audit::is_cross_checked_target(s.target_file, &docs_root)
-            })
-        });
+    let cross_agent_skipped =
+        super::cross_audit::briefing_cross_agents(briefing_notes.as_deref(), None).is_some()
+            && requested_steps.iter().any(|&n| {
+                chain.get(n.wrapping_sub(1)).is_some_and(|s| {
+                    crate::core::cross_audit::is_cross_checked_target(s.target_file, &docs_root)
+                })
+            });
     let redact_targets: Vec<String> = chain.iter().map(|s| s.target_file.to_string()).collect();
     let first_chained_step = ANALYSIS_STEPS.len() + 1;
 
@@ -644,7 +670,6 @@ pub(crate) async fn run_partial_pipeline(
         // KT-1168 — the deterministic part first: moved citations follow
         // their line. Then every agent target is snapshotted so a run that
         // rewrites nothing can give the validation back.
-        let mut target_snapshots: Vec<(String, super::validation::TargetSnapshot)> = Vec::new();
         if revalidation.is_some() {
             let pp = project_path.clone();
             let reanchored = tokio::task::spawn_blocking(move || super::revalidate::apply_reanchors(&pp))
@@ -665,12 +690,16 @@ pub(crate) async fn run_partial_pipeline(
                 }
             }
         }
-        for &step in &requested_steps {
-            let target = chain[step - 1].target_file;
-            if let Ok(snapshot) = super::validation::target_snapshot(&project_path, target) {
-                target_snapshots.push((target.to_string(), snapshot));
+        let targets: Vec<&str> = requested_steps.iter().map(|&step| chain[step - 1].target_file).collect();
+        let target_snapshots = match super::helpers::validation_restore_snapshots(&project_path, &targets) {
+            Ok(snapshots) => snapshots,
+            Err(error) => {
+                yield Event::default().event("error").data(serde_json::json!({
+                    "error": format!("Could not snapshot validated documentation: {error} — refresh refused.")
+                }).to_string());
+                return;
             }
-        }
+        };
         let restore_reason = revalidation.is_some()
             .then_some(crate::core::doc_provenance::ValidationReason::Revalidation);
 
@@ -1100,7 +1129,7 @@ pub(crate) async fn run_partial_pipeline(
                         provenance_writer,
                     ) {
                         let reason = format!(
-                            "human-validation provenance not recorded for {file_label}: {reason}"
+                            "documentation protection notice for {file_label}: {reason}"
                         );
                         yield Event::default().event("step_warning").data(
                             serde_json::json!({
@@ -1421,6 +1450,13 @@ pub(crate) async fn run_partial_pipeline(
             }
             break 'attempts;
             } // 'attempts
+            if let Err(reason) = super::helpers::mark_validated_doc_writes(
+                &project_path, &validated_docs_snapshot, provenance_writer,
+            ) {
+                yield Event::default().event("step_warning").data(serde_json::json!({
+                    "step": step, "file": file_label, "reason": reason, "repaired_from_template": false,
+                }).to_string());
+            }
         }
 
         // PRE-PUBLICATION backstop. Baseline merge, TD extraction and
@@ -1903,6 +1939,8 @@ fn complete_partial_run(
     run_id: &str,
     project_path: &std::path::Path,
 ) -> anyhow::Result<()> {
+    let documents =
+        crate::core::audit_documents::capture_json(project_path).map_err(anyhow::Error::msg)?;
     let td_dir =
         crate::core::docs_location::DocsRoot::of(project_path).file(project_path, "tech-debt");
     let counts = super::full::count_td_severities(&td_dir);
@@ -1928,6 +1966,7 @@ fn complete_partial_run(
         None,
         None,
     )?;
+    crate::db::audit_documents::record(tx, run_id, &documents)?;
     Ok(())
 }
 
@@ -2052,6 +2091,7 @@ mod partial_finalize_tests {
         let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
         seed_run(&db).await;
         let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join("docs")).unwrap();
         finalize_partial_run(
             &db,
             "run-p".into(),
@@ -2163,6 +2203,7 @@ mod partial_finalize_tests {
         let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
         seed_run(&db).await;
         let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join("docs")).unwrap();
         finalize_partial_run(
             &db,
             "run-p".into(),
@@ -2187,6 +2228,7 @@ mod partial_finalize_tests {
         let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
         seed_run(&db).await;
         let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join("docs")).unwrap();
         finalize_partial_run(
             &db,
             "run-p".into(),
@@ -2349,10 +2391,12 @@ mod partial_finalize_tests {
 
         let db2 = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
         seed_run(&db2).await;
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("docs")).unwrap();
         finalize_partial_run(
             &db2,
             "run-p".into(),
-            std::path::PathBuf::from("/tmp"),
+            tmp.path().to_path_buf(),
             PartialTerminal::Reverified { validation: None },
             r#"{"marker":"first-write"}"#.into(),
         )
@@ -2361,7 +2405,7 @@ mod partial_finalize_tests {
         let err = finalize_partial_run(
             &db2,
             "run-p".into(),
-            std::path::PathBuf::from("/tmp"),
+            tmp.path().to_path_buf(),
             PartialTerminal::Reverified { validation: None },
             r#"{"marker":"second-write"}"#.into(),
         )

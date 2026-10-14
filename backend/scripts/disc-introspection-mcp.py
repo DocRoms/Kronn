@@ -2710,15 +2710,12 @@ TOOLS = [
     {
         "name": "audit_prepare",
         "description": (
-            "0.8.12 — Read a project's audit surface BEFORE launching: the "
-            "docs/ files with their filled/unfilled status, the open TODOs "
-            "and the tech-debt items. Returns the backend's AuditInfo "
-            "verbatim (`files`, `todos`, `tech_debt_items`) plus the "
-            "project's `audit_status`. Empty arrays do NOT mean 'clean': "
-            "when `audit_status` is `NoTemplate` there is simply nothing "
-            "to audit yet — call `audit_install_template` first. Use it to "
-            "brief yourself, pick between full/partial, and know what to "
-            "validate once the audit completes."
+            "Verify docs: read files, TODOs, debt, briefing and audit_status before launch. "
+            "template_update lists versions, missing files/steps and proven renames. "
+            "NoTemplate + empty files means no docs. Update via audit_install_template, "
+            "then audit_launch partial for non-null owning steps; unowned files stay manual. "
+            "Full audit is an explicit advanced option. "
+            "See tool_manual(audit_prepare)."
         ),
         "inputSchema": {
             "type": "object",
@@ -2731,11 +2728,10 @@ TOOLS = [
     {
         "name": "audit_install_template",
         "description": (
-            "0.9.0 — Step 0 of the audit pipeline (template → audit → "
-            "validation): install the docs/ template into a `NoTemplate` "
-            "project so `audit_launch` has a surface to fill. Idempotent "
-            "and non-destructive (never overwrites existing docs). Returns "
-            "the project's new `audit_status`."
+            "Install/update a project's docs template: add missing files, preserve existing "
+            "docs, move proven renames without clobbering, and refresh unchanged Kronn-owned "
+            "spec copies. Returns audit_status; refused during an audit. "
+            "See tool_manual(audit_prepare) for the update/fill flow."
         ),
         "inputSchema": {
             "type": "object",
@@ -2748,8 +2744,8 @@ TOOLS = [
     {
         "name": "audit_launch",
         "description": (
-            "Launch a detached audit; only a backend restart interrupts it. "
-            "`audit_status` says what can be resumed."
+            "Run the Verify docs fix detached; survives disconnect, not backend restart. "
+            "Resume via audit_status."
         ),
         "inputSchema": {
             "type": "object",
@@ -2758,7 +2754,7 @@ TOOLS = [
                 "mode": {
                     "type": "string",
                     "enum": ["full", "partial"],
-                    "description": "full = whole pipeline + validation discussion; partial = selected `steps` only (a fully-successful one also gets its run row and a scoped validation discussion).",
+                    "description": "partial = smallest fix on selected `steps`, with run row and scoped validation on success; full = advanced whole pipeline + validation discussion.",
                 },
                 "steps": {
                     "type": "array",
@@ -10321,9 +10317,25 @@ TOOL_MANUALS = {
         "accepts or rejects the candidate. Avoid `always`/`never` unless the evidence truly "
         "supports that scope. Discussion, project and agent provenance are inherited."
     ),
+    "audit_prepare": (
+        "Inspect `template_update`: installed/current versions, missing files with their "
+        "current Full-chain owning step (or null), proven renames, unresolved old paths, "
+        "and local spec edits. `template_update: null` is unknown, never up-to-date. "
+        "Missing docs under NoTemplate are an absent audit surface, not a clean audit.\n\n"
+        "When an update is available, call `audit_install_template`. It adds missing "
+        "files and safely moves only unique upstream-hash renames; occupied destinations "
+        "and ambiguous mappings remain for human reconciliation. Filled docs stay intact. "
+        "The anti-hallucination spec updates only when its bytes match a recorded or "
+        "verified historical bundled copy; local edits stay intact.\n\n"
+        "Read the new surface, then call `audit_launch(mode='partial', steps=[...])` "
+        "with only the distinct non-null owning steps of the new files. Files without "
+        "an owner need manual completion; never launch an empty partial audit. "
+        "Briefing requirements still apply."
+    ),
     "audit_launch": (
-        "Call `audit_prepare` first and read its briefing status. A full audit runs the complete "
-        "pipeline; a partial audit requires explicit 1-based step indices. Every audit runs "
+        "Use the 'Verify docs' sequence: call `audit_prepare` first, run deterministic checks, "
+        "then propose the smallest fix. A partial audit requires explicit 1-based step indices; "
+        "a full audit is an explicit advanced option that runs the complete pipeline. Every audit runs "
         "detached on the backend: this bridge only subscribes to its SSE, so closing or "
         "reloading this MCP does not interrupt it; only a backend restart does. Only one audit "
         "may run per project.\n\n"

@@ -3,8 +3,9 @@
 // gives the provenance back with a single request per click.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { render, fireEvent, screen, waitFor, within, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { useState } from 'react';
 import { buildApiMock } from '../../test/apiMock';
 import { expectFocusKeptIn } from '../../test/dialogFocus';
 
@@ -129,6 +130,52 @@ describe('DocReconfirm', () => {
     fireEvent.click(await screen.findByTestId('project-doc-reconfirm'));
     fireEvent.click(await screen.findByTestId('doc-reconfirm-confirm'));
     await waitFor(() => expect(toast).toHaveBeenCalledWith('docReconfirm.error lease held', 'error'));
+  });
+
+  it('loads details when a controlled parent opens the panel and closes on a read error', async () => {
+    provenance().mockImplementation((_id: string, detail = false) => detail
+      ? Promise.reject(new Error('read failed'))
+      : Promise.resolve(report([doc('docs/a.md')])));
+    const toast = vi.fn();
+    const onOpenChange = vi.fn();
+    function Harness() {
+      const [open, setOpen] = useState(true);
+      return (
+        <DocReconfirm
+          project={PROJECT}
+          auditActive={false}
+          toast={toast}
+          open={open}
+          onOpenChange={next => { onOpenChange(next); setOpen(next); }}
+          hideTrigger
+        />
+      );
+    }
+    render(<Harness />);
+
+    await waitFor(() => expect(provenance()).toHaveBeenCalledWith('p-doc', true));
+    expect(toast).toHaveBeenCalledWith('docReconfirm.error read failed', 'error');
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    expect(screen.queryByTestId('doc-reconfirm-panel')).toBeNull();
+  });
+
+  it('cancels a controlled detail read when the parent closes the panel', async () => {
+    let release: (value: DocProvenanceReport) => void = () => {};
+    provenance().mockImplementation((_id: string, detail = false) => detail
+      ? new Promise<DocProvenanceReport>(resolve => { release = resolve; })
+      : Promise.resolve(report([doc('docs/a.md')])));
+    const toast = vi.fn();
+    const { rerender } = render(
+      <DocReconfirm project={PROJECT} auditActive={false} toast={toast} open hideTrigger />,
+    );
+    expect(await screen.findByTestId('doc-reconfirm-panel')).toBeInTheDocument();
+
+    rerender(<DocReconfirm project={PROJECT} auditActive={false} toast={toast} open={false} hideTrigger />);
+    await act(async () => { release(report([doc('docs/late.md')])); await Promise.resolve(); });
+
+    expect(screen.queryByTestId('doc-reconfirm-panel')).toBeNull();
+    expect(screen.queryByText('docs/late.md')).toBeNull();
+    expect(toast).not.toHaveBeenCalled();
   });
 });
 

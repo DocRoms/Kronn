@@ -47,6 +47,7 @@ pub fn verify_evidence(evidence: &[Evidence], roots: &[&Path]) -> EvidenceReport
     let mut verified_count = 0;
     let mut human_validated_count = 0;
     let mut ai_doc_count = 0;
+    let mut citation_reports = std::collections::HashMap::new();
     for e in evidence {
         match e.kind.to_ascii_lowercase().as_str() {
             "file" | "code" | "code-comment" => {
@@ -54,7 +55,19 @@ pub fn verify_evidence(evidence: &[Evidence], roots: &[&Path]) -> EvidenceReport
                 let fab = c.status.is_fabricated();
                 any_fabricated |= fab;
                 let doc_provenance = roots.iter().find_map(|root| {
-                    crate::core::doc_provenance::source_provenance(root, &e.reference)
+                    let provenance =
+                        crate::core::doc_provenance::source_provenance(root, &e.reference)?;
+                    if provenance != SourceProvenance::HumanValidated {
+                        return Some(provenance);
+                    }
+                    let report = citation_reports
+                        .entry(*root)
+                        .or_insert_with(|| crate::core::citation_drift::check(root));
+                    crate::core::doc_provenance::source_provenance_with_citations(
+                        root,
+                        &e.reference,
+                        Some(report),
+                    )
                 });
                 if c.status == SourceStatus::Verified {
                     match doc_provenance {
@@ -260,10 +273,50 @@ mod tests {
             (0, 1),
             "modified since validation counts as AI-generated"
         );
+        crate::core::doc_provenance::confirm(&root, &["docs/AGENTS.md".into()]).unwrap();
+        let confirmed = verify_evidence(&evidence, &[root.as_path()]);
+        assert_eq!(
+            (confirmed.verified_count, confirmed.human_validated_count),
+            (1, 1)
+        );
         let code = verify_evidence(&[ev("file", "src/foo.rs:2")], &[root.as_path()]);
         assert_eq!(code.verified_count, 1, "code needs no validation");
         assert_eq!(code.checks[0].doc_provenance, None);
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn broken_citations_lower_the_trust_of_unchanged_validated_docs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir(root.join("docs")).unwrap();
+        std::fs::create_dir(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "fn checked_behavior() {}\n").unwrap();
+        std::fs::write(
+            root.join("docs/AGENTS.md"),
+            "# Docs\nBehavior [src: file: src/lib.rs:1].\n",
+        )
+        .unwrap();
+        crate::core::doc_provenance::record_all(
+            root,
+            crate::core::doc_provenance::ValidationReason::AuditValidation,
+        )
+        .unwrap();
+        crate::core::citation_drift::record_all(root).unwrap();
+        let evidence = [ev("file", "docs/AGENTS.md:2")];
+        assert_eq!(verify_evidence(&evidence, &[root]).verified_count, 1);
+        std::fs::write(root.join("src/lib.rs"), "fn different_behavior() {}\n").unwrap();
+        assert_eq!(crate::core::citation_drift::check(root).broken_count, 1);
+        let stale = verify_evidence(&evidence, &[root]);
+        assert_eq!((stale.verified_count, stale.ai_doc_count), (0, 1));
+        crate::core::doc_provenance::confirm(root, &["docs/AGENTS.md".into()]).unwrap();
+        assert_eq!(
+            verify_evidence(&evidence, &[root]).verified_count,
+            0,
+            "confirming the unchanged prose does not verify its changed source"
+        );
+        crate::core::citation_drift::acknowledge(root, "docs/AGENTS.md").unwrap();
+        assert_eq!(verify_evidence(&evidence, &[root]).verified_count, 1);
     }
 
     #[test]

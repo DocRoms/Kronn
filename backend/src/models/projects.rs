@@ -1725,6 +1725,9 @@ pub struct DiscoverReposResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct AuditInfo {
+    #[serde(default)]
+    #[ts(optional)]
+    pub template_update: Option<crate::core::template_manifest::TemplateUpdate>,
     pub files: Vec<AuditFileInfo>,
     pub todos: Vec<AuditTodo>,
     #[serde(default)]
@@ -1760,6 +1763,9 @@ pub struct AuditTodo {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct DriftCheckResponse {
+    #[serde(default)]
+    #[ts(optional)]
+    pub template_update: Option<crate::core::template_manifest::TemplateUpdate>,
     pub audit_date: Option<String>,
     pub stale_sections: Vec<DriftSection>,
     pub fresh_sections: Vec<String>,
@@ -2115,6 +2121,11 @@ pub struct TdTalkStart {
 #[ts(export)]
 pub struct RevalidateAuditRequest {
     pub agent: AgentType,
+    /// Apply only deterministic citation repairs, even when agent work remains.
+    /// Omitted or false preserves the existing combined reverification flow.
+    #[serde(default)]
+    #[ts(optional)]
+    pub deterministic_only: Option<bool>,
     #[serde(default)]
     #[ts(optional)]
     pub connection_id: Option<String>,

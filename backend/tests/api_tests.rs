@@ -7825,6 +7825,46 @@ async fn a_project_ai_doc_folder_leaving_the_root_is_refused_with_a_400() {
     assert_eq!(unknown["error_code"], "not_found");
 }
 
+#[tokio::test]
+async fn briefing_file_drives_http_reads_and_audited_project_cards() {
+    let state = test_state();
+    let repo = tempfile::tempdir().unwrap();
+    let docs = repo.path().join("docs");
+    std::fs::create_dir_all(&docs).unwrap();
+    std::fs::write(docs.join("AGENTS.md"), "# Project\nRead the briefing.\n").unwrap();
+    let mut project = docs_location_project("p-brief-source", repo.path());
+    project.briefing_notes = Some("Stale DB briefing".into());
+    state
+        .db
+        .with_conn(move |conn| kronn::db::projects::insert_project(conn, &project))
+        .await
+        .unwrap();
+    kronn::core::kronn_state::record_audit(repo.path(), "full").unwrap();
+    let app = || build_router_with_auth(state.clone(), false);
+    for body in ["# Briefing\nCommitted on another machine.\n", " \n"] {
+        std::fs::write(docs.join("briefing.md"), body).unwrap();
+        let expected = if body.trim().is_empty() {
+            Value::Null
+        } else {
+            Value::String(body.into())
+        };
+        let (_, briefing) = get_json(app(), "/api/projects/p-brief-source/briefing").await;
+        assert_eq!(briefing["success"], true, "{briefing}");
+        assert_eq!(briefing["data"], expected, "{briefing}");
+        let (_, card) = get_json(app(), "/api/projects/p-brief-source").await;
+        assert_eq!(card["data"]["audit_status"], "Audited", "{card}");
+        assert_eq!(card["data"]["briefing_notes"], expected, "{card}");
+        let (_, cards) = get_json(app(), "/api/projects").await;
+        let card = cards["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == "p-brief-source")
+            .unwrap();
+        assert_eq!(card["briefing_notes"], expected, "{cards}");
+    }
+}
+
 fn briefing_answers(docs_dir: Option<&str>) -> Value {
     let mut body = serde_json::json!({
         "purpose": "P", "team": "T", "maturity": "M",
@@ -22644,6 +22684,102 @@ mod cold_api_handlers_tests {
                 { "path": "docs/workflow/tickets.md", "step": null },
             ])
         );
+    }
+
+    #[tokio::test]
+    async fn older_template_update_is_visible_in_ui_drift_and_mcp_audit_info() {
+        let (_dir, repo) = seed_repo("template-update");
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        let original =
+            "<!-- kronn:doc-version=\"1.0\" -->\n# Audited documentation\nHuman content.";
+        std::fs::write(repo.join("docs/AGENTS.md"), original).unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+        for endpoint in ["drift", "audit-info"] {
+            let (status, json) =
+                get_json(app.clone(), &format!("/api/projects/{pid}/{endpoint}")).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(json["success"], true, "{json}");
+            let update = &json["data"]["template_update"];
+            assert_eq!(update["available"], true, "{json}");
+            assert_eq!(update["installed_version"], "1.0");
+            assert_eq!(update["current_version"], "1.1");
+            assert!(update["missing_files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["path"] == "docs/glossary.md" && f["step"].is_number()));
+            assert_eq!(update["renames"], serde_json::json!([]));
+        }
+        assert_eq!(
+            std::fs::read_to_string(repo.join("docs/AGENTS.md")).unwrap(),
+            original
+        );
+        assert!(
+            !repo.join("docs/.kronn.json").exists(),
+            "inspection does not install or rewrite state"
+        );
+    }
+
+    #[tokio::test]
+    async fn template_update_install_tracks_manifest_preserves_filled_docs_and_respects_audit_lease(
+    ) {
+        let (_dir, repo) = seed_repo("template-update-install");
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        let original = "# Human project docs\nVue example: {{ message }}";
+        std::fs::write(repo.join("docs/AGENTS.md"), original).unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state.clone(), false);
+        assert!(state.audit_tracker.lock().unwrap().try_acquire_lease(&pid));
+        let (_, refused) = post_json(
+            app.clone(),
+            &format!("/api/projects/{pid}/install-template"),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(refused["success"], false, "{refused}");
+        assert!(!repo.join("docs/environments.md").exists());
+        state.audit_tracker.lock().unwrap().release_lease(&pid);
+        std::fs::write(repo.join("docs/provenance.json"), "not valid JSON").unwrap();
+        let (_, refused) = post_json(
+            app.clone(),
+            &format!("/api/projects/{pid}/install-template"),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(refused["success"], false, "{refused}");
+        assert!(refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("provenance.json"));
+        assert!(!repo.join("docs/environments.md").exists());
+        std::fs::remove_file(repo.join("docs/provenance.json")).unwrap();
+        let (_, installed) = post_json(
+            app.clone(),
+            &format!("/api/projects/{pid}/install-template"),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(installed["success"], true, "{installed}");
+        assert!(repo.join("docs/environments.md").is_file());
+        assert_eq!(
+            std::fs::read_to_string(repo.join("docs/AGENTS.md")).unwrap(),
+            original
+        );
+        let recorded = kronn::core::kronn_state::read(&repo).unwrap();
+        assert_eq!(recorded.template.unwrap().version.as_deref(), Some("1.1"));
+        let (_, drift) = get_json(app, &format!("/api/projects/{pid}/drift")).await;
+        assert_eq!(
+            drift["data"]["template_update"]["available"], false,
+            "{drift}"
+        );
+        assert!(
+            state.audit_tracker.lock().unwrap().try_acquire_lease(&pid),
+            "install released the lease"
+        );
+        state.audit_tracker.lock().unwrap().release_lease(&pid);
     }
 
     #[tokio::test]

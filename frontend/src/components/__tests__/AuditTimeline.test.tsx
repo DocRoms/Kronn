@@ -65,6 +65,19 @@ describe('AuditTimeline', () => {
     expect(onLaunch).not.toHaveBeenCalled();
   });
 
+  it('opens the free verifier without requiring a briefing or an agent', async () => {
+    mockTimeline([{ id: 'run-1', status: 'Completed' }], [step(1)]);
+    const onVerifyDocs = vi.fn();
+    wrap(<AuditTimeline {...props({
+      auditStatus: 'Audited', briefingDone: false, agents: [], selectedAgent: null, onVerifyDocs,
+    })} />);
+
+    const launch = await screen.findByTestId('audit-timeline-launch');
+    expect(launch).toBeEnabled();
+    fireEvent.click(launch);
+    expect(onVerifyDocs).toHaveBeenCalledTimes(1);
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     try { localStorage.clear(); } catch { /* jsdom */ }
@@ -551,16 +564,73 @@ describe('AuditTimeline', () => {
     expect(p.onOpenValidation).toHaveBeenCalledWith('d-val');
   });
 
-  it('keeps starting or resuming a validation while the linked one is unfinished', async () => {
+  it('resumes the latest linked validation instead of creating another discussion', async () => {
     mockTimeline([{ id: 'run-1' }], [step(1)], [], { discussion_id: 'd-val', finished: false, archived: false });
     const p = props({ auditStatus: 'Audited' });
     wrap(<AuditTimeline {...p} />);
 
-    fireEvent.click(await screen.findByRole('button', { name: /Valider l'audit/ }));
-    expect(p.onValidate).toHaveBeenCalledTimes(1);
+    fireEvent.click(await screen.findByRole('button', { name: /Reprendre la validation/ }));
+    expect(p.onOpenValidation).toHaveBeenCalledWith('d-val');
+    expect(p.onValidate).not.toHaveBeenCalled();
     expect(p.onMarkValid).not.toHaveBeenCalled();
     expect(screen.queryByTestId('audit-timeline-validation-finished')).toBeNull();
     expect(screen.queryByRole('button', { name: /Voir la discussion de validation/ })).toBeNull();
+  });
+
+  it('never offers validation for a non-completed local run', async () => {
+    mockTimeline(
+      [{ id: 'run-1', status: 'Interrupted' }],
+      [step(1)],
+      [],
+      { discussion_id: 'd-val', finished: true, archived: true },
+    );
+    const p = props({ auditStatus: 'Audited' });
+    wrap(<AuditTimeline {...p} />);
+
+    expect(await screen.findByTestId('audit-timeline-validation-unavailable')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Valider l'audit/ })).toBeNull();
+    expect(p.onValidate).not.toHaveBeenCalled();
+  });
+
+  it.each(['Interrupted', 'Cancelled'])('a latest Security %s run blocks validation after an older completed Full run', async (status) => {
+    mockTimeline([
+      { id: 'security-latest', kind: 'Security', status },
+      { id: 'full-older', kind: 'Full', status: 'Completed' },
+    ], [step(1, { audit_run_id: 'full-older' })]);
+    const p = props({ auditStatus: 'Audited' });
+    wrap(<AuditTimeline {...p} />);
+
+    expect(await screen.findByTestId('audit-timeline-validation-unavailable')).toBeInTheDocument();
+    expect(screen.queryByTestId('audit-timeline-validation-unlinked')).toBeNull();
+    expect(screen.queryByRole('button', { name: /Valider l'audit/ })).toBeNull();
+    expect(p.onMarkValid).not.toHaveBeenCalled();
+  });
+
+  it('validates a completed Security run without requiring a local Full run', async () => {
+    mockTimeline(
+      [{ id: 'security-only', kind: 'Security', status: 'Completed' }],
+      [],
+      [],
+      { discussion_id: 'd-security', finished: true, archived: true },
+    );
+    const p = props({ auditStatus: 'Audited' });
+    wrap(<AuditTimeline {...p} />);
+
+    const block = await screen.findByTestId('audit-timeline-validation-finished');
+    fireEvent.click(within(block).getByRole('button', { name: /Voir la discussion de validation/ }));
+    expect(p.onOpenValidation).toHaveBeenCalledWith('d-security');
+    fireEvent.click(within(block).getByRole('button', { name: /Valider l'audit/ }));
+    await waitFor(() => expect(p.onMarkValid).toHaveBeenCalledTimes(1));
+  });
+
+  it('does not create a validation when a completed run has no linked latest_validation', async () => {
+    mockTimeline([{ id: 'run-1', status: 'Completed' }], [step(1)]);
+    const p = props({ auditStatus: 'Audited' });
+    wrap(<AuditTimeline {...p} />);
+
+    expect(await screen.findByTestId('audit-timeline-validation-unlinked')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Valider l'audit/ })).toBeNull();
+    expect(p.onValidate).not.toHaveBeenCalled();
   });
 
   it('announces step changes, not ticks, through a polite live region (KT-1072)', async () => {

@@ -176,6 +176,7 @@ async fn prompt_of(kind: Kind, linked: bool) -> (String, tempfile::TempDir) {
             let prompt = crate::api::audit::helpers::build_validation_prompt(
                 "en",
                 &AuditInfo {
+                    template_update: None,
                     files: vec![],
                     todos: vec![],
                     tech_debt_items: vec![],

@@ -196,6 +196,23 @@ fn the_plan_sorts_each_citation_into_reanchor_agent_human_or_manual() {
 }
 
 #[test]
+fn document_proof_plans_prose_edits_but_never_recreates_a_deleted_doc_silently() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::create_dir(tmp.path().join("docs")).unwrap();
+    fs::write(tmp.path().join(RULES), "# Reviewed policy\n").unwrap();
+    let documents = crate::core::audit_documents::capture_json(tmp.path()).unwrap();
+    fs::write(tmp.path().join(RULES), "# A changed policy\n").unwrap();
+    let changed = plan_with_documents(tmp.path(), Some(&documents)).unwrap();
+    assert_eq!(changed.agent_steps, vec![rules_step()]);
+    assert!(prompt_blocks(&changed)[&rules_step()].contains("content changed since"));
+    fs::remove_file(tmp.path().join(RULES)).unwrap();
+    let deleted = plan_with_documents(tmp.path(), Some(&documents)).unwrap();
+    assert!(deleted.agent_steps.is_empty());
+    assert_eq!(deleted.sections[0].action, RevalidationAction::Manual);
+    assert!(deleted.sections[0].doc_missing);
+}
+
+#[test]
 fn re_anchoring_rewrites_a_human_section_too_and_marks_it_to_reconfirm() {
     let tmp = drifted();
     let dir = tmp.path();

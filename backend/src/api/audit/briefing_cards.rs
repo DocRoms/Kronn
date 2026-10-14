@@ -492,8 +492,8 @@ pub(crate) enum Gate {
 
 /// No audit starts without a briefing (KT-1192). A UI launch is refused (the
 /// form opens); an MCP launch gets the briefing as cards for its discussion;
-/// an unattended one (a workflow run, no discussion) gets the default answers,
-/// flagged on the project card.
+/// workflow launches also refuse until a human saves answers or explicitly
+/// chooses the form's default answers.
 pub(crate) async fn briefing_gate(
     state: &crate::AppState,
     project_id: &str,
@@ -521,38 +521,6 @@ pub(crate) async fn briefing_gate(
         let defaults = briefing_defaults_for(state, &project).await;
         let cards = briefing_cards(project_id, &discussion_id, &language, &defaults);
         return Gate::Refuse(refusal(Some((discussion_id, cards))));
-    }
-    if bridge.own_run.is_some() {
-        // Unattended defaults never move anything: a folder holding a
-        // human's docs stops the launch (the safer of stopping and writing
-        // somewhere unexpected).
-        let defaults = briefing_defaults_for(state, &project).await;
-        if let crate::core::docs_folder::DocsFolderState::HumanDocs { files, .. } = defaults.folder
-        {
-            return Gate::Refuse(serde_json::json!({
-                "error": format!(
-                    "No briefing, and {}/ holds {files} file(s) Kronn did not write: an unattended \
-                     launch never moves them. Fill in the briefing and choose another folder or a move \
-                     to {}/legacy/.",
-                    defaults.docs_dir, defaults.docs_dir
-                ),
-                "error_code": ApiErrorCode::BriefingRequired.as_str(),
-            }));
-        }
-        return match super::briefing::save_briefing_with(
-            state,
-            project_id,
-            super::briefing::default_answers(),
-            true,
-        )
-        .await
-        {
-            Ok(()) => Gate::Proceed,
-            Err(error) => Gate::Refuse(serde_json::json!({
-                "error": format!("No briefing, and the default one could not be written: {}", error.message()),
-                "error_code": ApiErrorCode::BriefingRequired.as_str(),
-            })),
-        };
     }
     Gate::Refuse(refusal(None))
 }
@@ -776,7 +744,7 @@ pub(crate) fn on_card_answered(
     let project = crate::db::projects::get_project(conn, project_id)
         .map_err(|e| e.to_string())?
         .ok_or("project not found")?;
-    super::briefing::save_briefing_in(conn, &project, &form, false, None)
+    super::briefing::save_briefing_in(conn, &project, &form, None)
         .map(Some)
         .map_err(|e| e.message())
 }
@@ -1078,25 +1046,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unattended_launch_gets_the_flagged_defaults() {
+    async fn briefing_residuals_unattended_launch_requires_explicit_saved_defaults() {
         let fx = fixture().await;
         let caller = bridge(&[], Some("run-1"));
-        assert!(matches!(
-            briefing_gate(&fx.state, "p-cards", Some(&caller)).await,
-            Gate::Proceed
-        ));
+        let Gate::Refuse(payload) = briefing_gate(&fx.state, "p-cards", Some(&caller)).await else {
+            panic!("workflow launches cannot fabricate consent to skip briefing");
+        };
+        assert_eq!(payload["error_code"], "briefing_required");
         let notes = fx
             .state
             .db
             .with_conn(|conn| crate::db::projects::get_project_briefing_notes(conn, "p-cards"))
             .await
-            .unwrap()
             .unwrap();
-        assert!(
-            notes.contains(super::super::briefing::DEFAULTS_MARKER),
-            "{notes}"
-        );
-        assert!(notes.contains("to be completed"), "{notes}");
+        assert_eq!(notes, None);
+        assert!(!fx.root.join("docs").exists());
+        super::super::briefing::save_briefing_answers(
+            &fx.state,
+            "p-cards",
+            BriefingFormRequest {
+                purpose: "Not provided".into(),
+                team: "Not provided".into(),
+                maturity: "Not provided".into(),
+                dependencies: "Not provided".into(),
+                traps: "Not provided".into(),
+                ..BriefingFormRequest::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            briefing_gate(&fx.state, "p-cards", Some(&caller)).await,
+            Gate::Proceed
+        ));
     }
 
     #[test]

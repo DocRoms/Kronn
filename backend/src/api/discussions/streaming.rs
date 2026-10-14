@@ -4787,7 +4787,53 @@ pub(super) async fn make_agent_stream_inner(
                     full_response = "Validation bloquée : la suppression des secrets dans les artefacts d’audit a échoué après l’exécution de l’agent. Aucun signal de validation n’a été accepté.".to_string();
                 }
 
+                if success
+                    && super::ends_with_terminal_signal(&full_response, "KRONN:BRIEFING_COMPLETE")
+                {
+                    let saved = if let Some(pid) = disc_project_id.as_ref() {
+                        let resolved = crate::core::scanner::resolve_host_path(&project_path);
+                        let file =
+                            crate::core::scanner::detect_docs_dir(&resolved).join("briefing.md");
+                        crate::api::audit::briefing::complete_reviewed_briefing(
+                            &state,
+                            pid.clone(),
+                            file,
+                        )
+                        .await
+                    } else {
+                        Err("No project is linked to this briefing.".to_string())
+                    };
+                    if let Err(error) = saved {
+                        success = false;
+                        stopped_on_signal = None;
+                        full_response = format!("Briefing could not be completed. {error} The discussion stays open; save the briefing and try again.");
+                    }
+                }
+
                 let mut stderr_lines = process.captured_stderr_flushed().await;
+                // Capture only after the linked validation child has stopped
+                // and its artifacts have been sanitized. Later disk changes
+                // cannot borrow this reply's terminal marker.
+                let validation_documents = if success
+                    && super::ends_with_terminal_signal(&full_response, "KRONN:VALIDATION_COMPLETE")
+                {
+                    match validation_redaction_scope
+                        .as_ref()
+                        .map(|(root, _)| crate::core::audit_documents::capture_json(root))
+                        .transpose()
+                    {
+                        Ok(documents) => documents,
+                        Err(error) => {
+                            tracing::error!(disc_id = %disc_id, %error, "Cannot capture final validation documents");
+                            success = false;
+                            stopped_on_signal = None;
+                            full_response = "Validation blocked: the final documents could not be recorded. Reverify the documentation before validating.".to_string();
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
                 stderr_lines.extend(direct_tool_traces);
                 // `ollama_tokens:prompt:eval` is an internal accounting marker the
                 // token parser reads out of stderr. It has no meaning for a reader,
@@ -5303,7 +5349,7 @@ pub(super) async fn make_agent_stream_inner(
                     .db
                     .with_conn(move |conn| {
                         let outcome =
-                            crate::db::discussions::insert_native_agent_message_with_checkpoint(
+                            crate::db::discussions::insert_native_agent_message_with_audit_documents(
                                 conn,
                                 &did,
                                 &msg,
@@ -5314,6 +5360,7 @@ pub(super) async fn make_agent_stream_inner(
                                 handoffs_enabled,
                                 handoff_paid_limit,
                                 checkpoint.as_ref(),
+                                validation_documents.as_deref(),
                             )?;
                         // Best effort: the breakdown enriches the totals, and its
                         // absence only means "not reported" — it must never cost
@@ -5728,33 +5775,6 @@ pub(super) async fn make_agent_stream_inner(
                                 e,
                             ),
                         }
-                    }
-                }
-
-                // Detect KRONN:BRIEFING_COMPLETE marker
-                if success
-                    && agent_msg
-                        .content
-                        .to_uppercase()
-                        .contains("KRONN:BRIEFING_COMPLETE")
-                {
-                    if let Some(ref pid) = disc_project_id {
-                        let briefing_project_id = pid.clone();
-                        let briefing_project_path = project_path.clone();
-                        let briefing_state = state.clone();
-                        tokio::spawn(async move {
-                            // Path-agnostic — works on docs/ post-pivot AND legacy ai/.
-                            let resolved =
-                                crate::core::scanner::resolve_host_path(&briefing_project_path);
-                            let briefing_file = crate::core::scanner::detect_docs_dir(&resolved)
-                                .join("briefing.md");
-                            crate::api::audit::briefing::complete_reviewed_briefing(
-                                &briefing_state,
-                                briefing_project_id,
-                                briefing_file,
-                            )
-                            .await;
-                        });
                     }
                 }
 
@@ -9369,3 +9389,7 @@ mod http_run_progress_tests {
 #[cfg(test)]
 #[path = "streaming_pin_tests.rs"]
 mod pinned_batch_child_tests;
+
+#[cfg(test)]
+#[path = "streaming_briefing_tests.rs"]
+mod briefing_completion_tests;

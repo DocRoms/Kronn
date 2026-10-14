@@ -42,7 +42,7 @@ This is the supported escape hatch when a human or agent needs to discuss the
 syntax itself (write `` `@codex` `` rather than a live mention). The UI composer
 and MCP bridge apply the same exemption before resolving targets.
 [src: file: frontend/src/lib/messageTargets.ts:131-147#proseOnly]
-[src: file: backend/scripts/disc-introspection-mcp.py:5015-5026#_structured_message_targets]
+[src: file: backend/scripts/disc-introspection-mcp.py:5011-5022#_structured_message_targets]
 
 | Room mode | Target state | Result |
 |---|---|---|
@@ -154,7 +154,7 @@ on the root turn, or no marker), computed from `message_targets`.
 [src: file: backend/src/api/discussions/messaging.rs:115-158#enqueue_dispatches_for_trigger]
 [src: file: backend/src/api/discussions/crud.rs:894-898#attach_discussion_participants]
 [src: file: backend/src/api/discussions/streaming.rs:1930-1940#independent_sibling_notice]
-[src: file: backend/src/db/discussions.rs:1972-1986#already_scheduled]
+[src: file: backend/src/db/discussions.rs:2016-2030#already_scheduled]
 
 ## Joined agent turn (MCP)
 
@@ -164,7 +164,7 @@ from exact joined aliases (`@codex-cli`, `@codex-cli-2`, …) using the
 discussion's participant order. Several mentions fan out once per durable
 identity. The legacy single `target_agent` field remains accepted during
 rolling upgrades, with its historical provider-level semantics.
-[src: file: backend/scripts/disc-introspection-mcp.py:5015-5101#_structured_message_targets]
+[src: file: backend/scripts/disc-introspection-mcp.py:5011-5097#_structured_message_targets]
 [src: file: backend/src/api/disc_source.rs:434-454#legacy_requested_target]
 
 For each native identity, the message and its dispatch obligation commit in one

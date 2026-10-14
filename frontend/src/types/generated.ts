@@ -881,7 +881,7 @@ export type AuditFileInfo = { path: string, filled: boolean, };
 
 export type AuditFinding = { severity: string, what: string, where_: string, };
 
-export type AuditInfo = { files: Array<AuditFileInfo>, todos: Array<AuditTodo>, tech_debt_items: Array<TechDebtItem>, };
+export type AuditInfo = { template_update?: TemplateUpdate, files: Array<AuditFileInfo>, todos: Array<AuditTodo>, tech_debt_items: Array<TechDebtItem>, };
 
 /**
  * 0.8.2 — Specialized audit types ("Design C").
@@ -3786,7 +3786,7 @@ unused_files: Array<string>,
  */
 paid_agent_growth: Array<AgentContextGrowth>, };
 
-export type DriftCheckResponse = { audit_date: string | null, stale_sections: Array<DriftSection>, fresh_sections: Array<string>, total_sections: number,
+export type DriftCheckResponse = { template_update?: TemplateUpdate, audit_date: string | null, stale_sections: Array<DriftSection>, fresh_sections: Array<string>, total_sections: number,
 /**
  * "Sources clean" badge, recomputed from the cited lines.
  */
@@ -7549,7 +7549,12 @@ export type RetryAgentDispatchResponse = { dispatch_id: string, trigger_message_
 
 export type RetryConfig = { max_retries: number, backoff: string, };
 
-export type RevalidateAuditRequest = { agent: AgentType, connection_id?: string, tier?: ModelTier | null, };
+export type RevalidateAuditRequest = { agent: AgentType,
+/**
+ * Apply only deterministic citation repairs, even when agent work remains.
+ * Omitted or false preserves the existing combined reverification flow.
+ */
+deterministic_only?: boolean, connection_id?: string, tier?: ModelTier | null, };
 
 /**
  * What "Revalider l'audit" does with one section (KT-1168).
@@ -9512,7 +9517,7 @@ export type TemplateReinstallPlan = { docs_dir: string, files: Array<ReinstallFi
 /**
  * An audit holds the project's lease: the reinstall would be refused.
  */
-audit_running: boolean, };
+audit_running: boolean, template_update?: TemplateUpdate, };
 
 export type TemplateReinstallReport = {
 /**
@@ -9542,6 +9547,18 @@ export type TemplateReinstallRequest = {
  * files are always created; a path the plan does not offer is refused.
  */
 paths?: Array<string> | null, };
+
+export type TemplateRename = { from: string, to: string,
+/**
+ * An occupied destination is preserved and needs human reconciliation.
+ */
+conflict: boolean, };
+
+export type TemplateUpdate = { available: boolean, installed_version: string | null, current_version: string | null, missing_files: Array<PlaceholderDoc>, renames: Array<TemplateRename>,
+/**
+ * Removed upstream paths whose successor cannot be proven uniquely.
+ */
+unresolved_files: Array<string>, spec_modified: boolean, };
 
 export type TestApiCallRequest = {
 /**

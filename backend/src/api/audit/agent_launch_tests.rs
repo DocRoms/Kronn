@@ -290,7 +290,7 @@ fn assert_git_shows_only_docs(root: &Path) {
         let path = &line[3..];
         assert!(!path.contains(".kronn-"), "{status}");
         if line.starts_with("!! ") {
-            // `docs/var/` is the docs scratch area the install excludes locally.
+            // Template installation also excludes the documented scratch area.
             assert!(
                 path.starts_with(".kronn/") || path.starts_with("docs/var/"),
                 "{status}"

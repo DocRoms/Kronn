@@ -1531,7 +1531,7 @@ export const projects = {
    * relaunch resumes: the backend recomputes the plan every time. */
   revalidateAuditStream: async (
     id: string,
-    req: RevalidateAuditRequest,
+    req: RevalidateAuditRequest & { deterministic_only?: boolean },
     handlers: {
       onReanchored?: (doc: string, count: number) => void;
       onStepStart?: (step: number, total: number, file: string) => void;

@@ -69,7 +69,6 @@ fn checkbox_round_trips_through_the_briefing() {
     assert!(briefing_option_set(Some(&checked), None));
     assert_eq!(with_kronn_options(body.clone(), false), body);
     assert!(!briefing_option_set(Some(&body), None));
-    // An agent rewrote the file without the line: the DB notes still hold it.
-    assert!(briefing_option_set(Some(&body), Some(&checked)));
+    assert!(!briefing_option_set(Some(&body), Some(&checked)));
     assert!(!briefing_option_set(None, None));
 }

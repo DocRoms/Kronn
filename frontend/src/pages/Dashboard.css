@@ -2658,9 +2658,75 @@ button.dash-badge-tech-debt {
 
 .project-detail-actions {
   flex: 0 0 auto;
+  min-width: 0;
+  max-width: min(100%, 720px);
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: var(--kr-sp-3);
+}
+
+.project-audit-primary {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+  gap: var(--kr-sp-2);
+  padding: var(--kr-sp-1) var(--kr-sp-4);
+  border: 1px solid var(--kr-accent-border);
+  border-radius: var(--kr-r-pill);
+  background: var(--kr-accent-bg);
+  color: var(--kr-accent-text);
+  font: inherit;
+  font-size: var(--kr-fs-2xs);
+  font-weight: 750;
+  line-height: 1.4;
+  cursor: pointer;
+  white-space: normal;
+}
+
+.project-audit-primary:hover:not(:disabled) {
+  background: var(--kr-accent-bg-hover);
+}
+
+.project-audit-details {
+  min-width: 0;
+  flex: 1 0 100%;
+}
+
+.project-audit-details > summary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  float: right;
+  gap: var(--kr-sp-1);
+  padding: var(--kr-sp-1) var(--kr-sp-2);
+  border-radius: var(--kr-r-sm);
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-2xs);
+  cursor: pointer;
+  list-style: none;
+}
+
+.project-audit-details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.project-audit-details[open] > summary svg {
+  transform: rotate(180deg);
+}
+
+.project-audit-details-content {
+  display: flex;
+  clear: both;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: var(--kr-sp-2);
+  padding-top: var(--kr-sp-2);
+}
+
+.dash-card-header .project-audit-details-content {
+  justify-content: flex-start;
 }
 
 .project-detail-tabs {
@@ -3661,7 +3727,14 @@ button.dash-badge-tech-debt {
   }
 
   .project-detail-actions {
+    width: 100%;
     justify-content: flex-start;
+  }
+
+  .project-audit-details > summary,
+  .project-audit-details-content {
+    justify-content: flex-start;
+    float: none;
   }
 
   .project-detail-path {
@@ -3670,6 +3743,24 @@ button.dash-badge-tech-debt {
 }
 
 @media (max-width: 560px) {
+  .project-detail-actions > .project-status-chip,
+  .project-detail-actions > .project-audit-primary,
+  .project-detail-actions > .doc-state-summary {
+    max-width: 100%;
+    flex: 1 1 auto;
+  }
+
+  .dash-card-header {
+    align-items: flex-start;
+    gap: var(--kr-sp-3);
+    padding: var(--kr-sp-5);
+  }
+
+  .dash-card-header .project-audit-primary,
+  .dash-card-header .doc-state-summary {
+    max-width: 100%;
+  }
+
   .project-overview-context,
   .project-overview-grid {
     grid-template-columns: 1fr;

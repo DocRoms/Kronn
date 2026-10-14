@@ -7809,6 +7809,19 @@ class AuditToolsTests(unittest.TestCase):
             out = self.mod.call_audit_prepare({"project_id": "p1"})
         self.assertEqual(out, info, "AuditInfo must round-trip verbatim")
 
+    def test_audit_prepare_exposes_template_update_and_owning_steps_verbatim(self):
+        update = {"available": True, "installed_version": "1.0", "current_version": "1.1",
+                  "missing_files": [{"path": "docs/glossary.md", "step": 2}],
+                  "renames": [{"from": "docs/old.md", "to": "docs/new.md", "conflict": False}],
+                  "unresolved_files": [], "spec_modified": False}
+        info = {"files": [], "todos": [], "tech_debt_items": [], "template_update": update}
+        with mock.patch.object(self.mod, "_http", return_value={"success": True, "data": info}):
+            out = self.mod.call_audit_prepare({"project_id": "p1"})
+        self.assertEqual(out["template_update"], update)
+        description = next(t["description"] for t in self.mod.TOOLS if t["name"] == "audit_prepare")
+        self.assertIn("audit_install_template", description)
+        self.assertIn("owning steps", description)
+
     # ── audit_status ─────────────────────────────────────────────────
 
     def test_audit_status_null_live_falls_back_to_db_and_says_so(self):

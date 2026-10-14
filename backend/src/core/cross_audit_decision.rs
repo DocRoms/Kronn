@@ -67,6 +67,7 @@ pub fn apply(
     decision: HumanDecision,
 ) -> Result<(), String> {
     let root = crate::core::scanner::resolve_host_path(&target.project_path);
+    let documents_before = crate::core::audit_documents::capture(&root)?;
     let td_id = target
         .record
         .td_id
@@ -120,6 +121,14 @@ pub fn apply(
         &docs,
         "cross-agent dispute card",
     );
+    let documents_after = crate::core::audit_documents::capture(&root)?;
+    crate::db::audit_documents::advance_local_changes(
+        conn,
+        &target.project_id,
+        &documents_before,
+        &documents_after,
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 

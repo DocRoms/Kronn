@@ -80,6 +80,9 @@ pub struct KronnState {
     /// from then on, even if that first audit never finished.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template_installed_at: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<crate::core::template_manifest::TemplateManifest>,
 }
 
 impl KronnState {
@@ -123,7 +126,7 @@ fn read_for_mutation(project_path: &Path) -> Result<Option<KronnState>, String> 
 /// file, `Err` (with a warn) for an unreadable/corrupt one so the caller aborts
 /// instead of clobbering. Seeding from legacy evidence keeps a marker-only
 /// project's Validated/Bootstrapped state when its first state file is written.
-fn load_for_mutation(project_path: &Path) -> Result<KronnState, String> {
+pub(crate) fn load_for_mutation(project_path: &Path) -> Result<KronnState, String> {
     crate::core::docs_location::guard_write(project_path)?;
     read_for_mutation(project_path)
         .map(|state| {
@@ -167,6 +170,14 @@ fn kronn_version() -> String {
 /// full/partial run).
 pub fn record_audit(project_path: &Path, audit_type: &str) -> Result<(), String> {
     let mut state = load_for_mutation(project_path)?;
+    let templates = crate::api::projects::template::resolve_templates_dir().join("docs");
+    if templates.is_dir() {
+        state.template = Some(crate::core::template_manifest::for_audit(
+            project_path,
+            &templates,
+            state.template.as_ref(),
+        )?);
+    }
     state.audits.push(AuditEntry {
         date: today_iso(),
         kronn_version: kronn_version(),

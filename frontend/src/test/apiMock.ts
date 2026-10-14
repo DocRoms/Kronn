@@ -365,7 +365,10 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       // 0.8.4 (#298) — recap chip strip. Default empty history; tests
       // override to seed the chip list.
       auditHistory: resolve([]),
-      auditTimeline: resolve({ runs: [], steps: [], recorded_audits: [], recorded_validated_at: null }),
+      auditTimeline: resolve({
+        runs: [], steps: [], recorded_audits: [], recorded_validated_at: null,
+        latest_validation: null, lease_orphaned: false,
+      }),
       restoreAuditState: resolve({
         project_id: '', status: 'Audited', kind: 'kronn_audit',
         state_file: 'docs/.kronn.json', runtime_workspace: '.kronn/',

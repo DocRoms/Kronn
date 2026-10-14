@@ -1,6 +1,9 @@
 /* KT-977 — audit timeline. Theme tokens only (--kr-*). */
 .audit-tl { display: flex; flex-direction: column; gap: var(--kr-sp-8); padding: var(--kr-sp-6) 0; }
 
+.audit-tl-doc-state { display: grid; gap: var(--kr-sp-3); }
+.audit-tl-doc-state > .audit-tl-btn { justify-self: start; }
+
 .audit-tl-news {
   display: grid; grid-template-columns: auto 1fr auto; gap: var(--kr-sp-6); align-items: start;
   padding: var(--kr-sp-6) var(--kr-sp-8); border-radius: var(--kr-r-xl);

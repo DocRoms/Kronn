@@ -6,6 +6,7 @@ pub mod api_access_policies;
 pub mod api_call_logs;
 pub mod assistant_conversations;
 pub mod audit_cross;
+pub mod audit_documents;
 pub mod audit_run_cost;
 pub mod audit_runs;
 pub mod cli_telemetry;

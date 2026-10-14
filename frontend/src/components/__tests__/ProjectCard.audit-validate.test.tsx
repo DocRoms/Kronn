@@ -39,12 +39,12 @@ const ARCHIVED_VALIDATION = {
   id: 'd-val', project_id: 'p-val', title: 'Validation audit AI', archived: true,
 } as unknown as Discussion;
 
-function mockTimeline(latestValidation: unknown) {
+function mockTimeline(latestValidation: unknown, runs: unknown[] = [{
+  id: 'run-1', project_id: 'p-val', kind: 'Full', agent_type: 'ClaudeCode', started_at: '',
+  status: 'Completed', td_total: 0, validation_discussion_id: 'd-val',
+}]) {
   vi.mocked(projectsApi.auditTimeline).mockResolvedValue({
-    runs: [{
-      id: 'run-1', project_id: 'p-val', kind: 'Full', agent_type: 'ClaudeCode', started_at: '',
-      status: 'Completed', td_total: 0, validation_discussion_id: 'd-val',
-    }],
+    runs,
     steps: [], recorded_audits: [], recorded_validated_at: null, latest_validation: latestValidation,
   } as never);
 }
@@ -98,15 +98,54 @@ describe('ProjectCard — validating after the validation discussion finished', 
     expect(props.toast).not.toHaveBeenCalledWith('audit.done', 'success');
   });
 
-  it('an unfinished linked validation keeps offering to start one', async () => {
+  it('an unfinished linked validation resumes the linked discussion without creating another', async () => {
     mockTimeline({ discussion_id: 'd-val', finished: false, archived: true });
     const props = renderCard();
 
     await waitFor(() => expect(projectsApi.auditTimeline).toHaveBeenCalled());
-    const start = await screen.findByRole('button', { name: /audit\.validate/ });
+    const resume = await screen.findByRole('button', { name: /audit\.resumeValidation/ });
     expect(screen.queryByTestId('audit-timeline-validation-finished')).toBeNull();
-    fireEvent.click(start);
-    expect(props.onSetDiscPrefill).toHaveBeenCalledWith(expect.objectContaining({ projectId: 'p-val', locked: true }));
+    fireEvent.click(resume);
+    expect(props.onOpenDiscussion).toHaveBeenCalledWith('d-val');
+    expect(props.onSetDiscPrefill).not.toHaveBeenCalled();
+    expect(projectsApi.validateAudit).not.toHaveBeenCalled();
+  });
+
+  it('uses the latest specialized completed run and its exact validation link', async () => {
+    mockTimeline(
+      { discussion_id: 'd-security', finished: false, archived: false },
+      [{
+        id: 'run-security', project_id: 'p-val', kind: 'Security', agent_type: 'ClaudeCode', started_at: '',
+        status: 'Completed', td_total: 0, validation_discussion_id: 'd-security',
+      }],
+    );
+    const props = renderCard();
+
+    const badge = await screen.findByTestId('project-validation-badge');
+    fireEvent.click(badge);
+    expect(props.onOpenDiscussion).toHaveBeenCalledWith('d-security');
+    expect(props.onNavigate).toHaveBeenCalledWith('discussions');
+    expect(props.onSetDiscPrefill).not.toHaveBeenCalled();
+  });
+
+  it.each(['Interrupted', 'Cancelled'])('does not validate an older completed Full run after a newer Security %s run', async (status) => {
+    mockTimeline(
+      { discussion_id: 'd-val', finished: true, archived: true },
+      [
+        {
+          id: 'run-security', project_id: 'p-val', kind: 'Security', agent_type: 'ClaudeCode', started_at: '',
+          status, td_total: 0, validation_discussion_id: null,
+        },
+        {
+          id: 'run-full', project_id: 'p-val', kind: 'Full', agent_type: 'ClaudeCode', started_at: '',
+          status: 'Completed', td_total: 0, validation_discussion_id: 'd-val',
+        },
+      ],
+    );
+    renderCard();
+
+    expect(await screen.findByTestId('audit-timeline-validation-unavailable')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /audit\.validate/ })).toBeNull();
     expect(projectsApi.validateAudit).not.toHaveBeenCalled();
   });
 });

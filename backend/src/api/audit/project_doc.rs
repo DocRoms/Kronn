@@ -531,10 +531,29 @@ pub(crate) fn reattach_facts(previous: Option<&str>, reviewed: &str) -> String {
     let rules = previous
         .and_then(super::briefing_rules::parse)
         .and_then(|r| super::briefing_rules::render_section(&r));
-    if facts.is_none() && docs.is_none() && rules.is_none() {
+    let options = previous.and_then(|notes| {
+        let mut lines = notes
+            .split_inclusive('\n')
+            .skip_while(|line| line.trim_end() != crate::core::td_tasks::BRIEFING_OPTIONS_HEADING);
+        let heading = lines.next()?;
+        let mut section = heading.to_string();
+        section.extend(lines.take_while(|line| !line.starts_with("## ")));
+        Some(section)
+    });
+    if facts.is_none() && docs.is_none() && rules.is_none() && options.is_none() {
         return reviewed.to_string();
     }
     let stripped = strip_facts_section(reviewed);
+    let stripped = if let Some(options) = options {
+        let head = strip_sections(
+            &stripped,
+            &[crate::core::td_tasks::BRIEFING_OPTIONS_HEADING],
+            &[],
+        );
+        format!("{}\n\n{}", head.trim_end(), options)
+    } else {
+        stripped
+    };
     let options_at = stripped
         .split_inclusive('\n')
         .scan(0usize, |offset, line| {
@@ -1021,6 +1040,7 @@ pub(crate) fn write_project_doc(
 pub(crate) struct ProjectDocReport {
     pub written: bool,
     pub kept_human_owned: bool,
+    pub kept_without_answers: bool,
     pub mismatches: Vec<String>,
     pub error: Option<String>,
 }
@@ -1089,8 +1109,18 @@ pub(crate) async fn fill_project_doc_for_audit(
     if !docs_dir.is_dir() {
         return ProjectDocReport::default();
     }
-    let (answers, repo_inferred) =
-        effective_answers(briefing_notes.and_then(parse_answers), repo_url);
+    let answers = briefing_notes.and_then(parse_answers);
+    if answers.is_none() {
+        if let Ok(existing) = std::fs::read_to_string(docs_dir.join("project.md")) {
+            if !existing.contains("> **TEMPLATE FILE.**") {
+                return ProjectDocReport {
+                    kept_without_answers: true,
+                    ..ProjectDocReport::default()
+                };
+            }
+        }
+    }
+    let (answers, repo_inferred) = effective_answers(answers, repo_url);
 
     let secret = state.config.read().await.encryption_secret.clone();
     let plugins = match secret {

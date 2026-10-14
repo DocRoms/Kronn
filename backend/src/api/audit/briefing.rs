@@ -24,10 +24,16 @@ pub async fn get_briefing(
 ) -> Json<ApiResponse<Option<String>>> {
     match state
         .db
-        .with_conn(move |conn| crate::db::projects::get_project_briefing_notes(conn, &id))
+        .with_conn(move |conn| crate::db::projects::get_project(conn, &id))
         .await
     {
-        Ok(notes) => Json(ApiResponse::ok(notes)),
+        Ok(Some(project)) => {
+            let root = crate::core::scanner::resolve_host_path(&project.path);
+            Json(ApiResponse::ok(
+                crate::api::projects::resolve_briefing_notes(&root, &project.briefing_notes),
+            ))
+        }
+        Ok(None) => Json(ApiResponse::err("Project not found")),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
 }
@@ -151,47 +157,47 @@ pub(crate) async fn complete_reviewed_briefing(
     state: &AppState,
     project_id: String,
     briefing_file: std::path::PathBuf,
-) {
+) -> Result<(), String> {
     let file = briefing_file.clone();
-    let reviewed = tokio::task::spawn_blocking(move || std::fs::read_to_string(&file).ok())
+    let reviewed = tokio::task::spawn_blocking(move || std::fs::read_to_string(&file))
         .await
-        .unwrap_or(None);
-    let Some(reviewed) = reviewed else {
-        tracing::warn!(
-            "BRIEFING_COMPLETE detected but docs/briefing.md not found for project {}",
-            project_id
-        );
-        return;
-    };
+        .map_err(|e| format!("Briefing save interrupted: {e}"))?
+        .map_err(|e| {
+            format!(
+                "No briefing was stored: cannot read {}: {e}",
+                briefing_file.display()
+            )
+        })?;
+    if reviewed.trim().is_empty() {
+        return Err("No briefing was stored: the briefing file is empty.".into());
+    }
     let pid = project_id.clone();
     let previous = state
         .db
         .with_conn(move |conn| crate::db::projects::get_project_briefing_notes(conn, &pid))
         .await
-        .ok()
-        .flatten();
+        .map_err(|e| format!("Cannot read the saved briefing: {e}"))?;
     let content = super::project_doc::reattach_facts(previous.as_deref(), &reviewed);
     if content != reviewed {
-        let file = briefing_file.clone();
         let body = content.clone();
-        if let Ok(Err(e)) = tokio::task::spawn_blocking(move || std::fs::write(&file, body)).await {
-            tracing::warn!("Failed to restore the project facts in docs/briefing.md: {e}");
-        }
-    }
-    let pid = project_id.clone();
-    match state
-        .db
-        .with_conn(move |conn| {
-            crate::db::projects::update_project_briefing_notes(conn, &pid, Some(&content))
+        tokio::task::spawn_blocking(move || {
+            crate::core::mcp_scanner::atomic_write(&briefing_file, &body)
         })
         .await
-    {
-        Ok(_) => tracing::info!("Briefing notes saved for project {}", project_id),
-        Err(e) => tracing::error!(
-            "Failed to save briefing notes for project {}: {e}",
-            project_id
-        ),
+        .map_err(|e| format!("Briefing restore interrupted: {e}"))?
+        .map_err(|e| format!("Cannot restore the saved briefing answers: {e}"))?;
     }
+    let saved = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::projects::update_project_briefing_notes(conn, &project_id, Some(&content))
+        })
+        .await
+        .map_err(|e| format!("Cannot save the reviewed briefing: {e}"))?;
+    if !saved {
+        return Err("Cannot save the reviewed briefing: the project no longer exists.".into());
+    }
+    Ok(())
 }
 
 /// POST /api/projects/:id/start-briefing
@@ -229,6 +235,22 @@ pub async fn start_briefing(
     let project_path = crate::core::scanner::resolve_host_path(&project.path);
     let prefilled =
         crate::api::projects::resolve_briefing_notes(&project_path, &project.briefing_notes);
+    let (pid, original) = (id.clone(), prefilled.clone());
+    match state
+        .db
+        .with_conn(move |conn| {
+            crate::db::projects::update_project_briefing_notes(conn, &pid, original.as_deref())
+        })
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => return Json(ApiResponse::err("Project no longer exists")),
+        Err(e) => {
+            return Json(ApiResponse::err(format!(
+                "Cannot preserve the briefing before review: {e}"
+            )))
+        }
+    }
     // The documentation section is put back by `reattach_facts` after the review.
     let prefilled = prefilled.map(|notes| super::briefing_docs::strip_section(&notes));
     let briefing_prompt = super::helpers::build_briefing_prompt_in(
@@ -603,25 +625,6 @@ impl BriefingAfterCommit {
     }
 }
 
-/// Marks a briefing Kronn wrote with default answers for an unattended
-/// launch: shown on the project card until a human completes it.
-pub(crate) const DEFAULTS_MARKER: &str = "<!-- kronn:briefing-defaults -->";
-
-/// The answers of a briefing written for an unattended launch: nothing is
-/// invented, every field says it is still to be completed.
-pub(crate) fn default_answers() -> BriefingFormRequest {
-    let todo = "Not provided — default answer, to be completed by a human.".to_string();
-    BriefingFormRequest {
-        purpose: todo.clone(),
-        team: todo.clone(),
-        maturity: todo.clone(),
-        dependencies: todo.clone(),
-        traps: todo,
-        additional: String::new(),
-        ..BriefingFormRequest::default()
-    }
-}
-
 /// The mandatory answers and the cross-audit agents, checked before anything
 /// is read or written.
 fn check_answers(form: &BriefingFormRequest) -> Result<(), BriefingSaveError> {
@@ -657,12 +660,11 @@ fn check_answers(form: &BriefingFormRequest) -> Result<(), BriefingSaveError> {
 
 /// Save the briefing answers: validation, docs folder and DB notes, in the
 /// caller's transaction; the returned effects run once it is committed.
-/// Shared by the form, the briefing cards and the unattended defaults (KT-1192).
+/// Shared by the form and the briefing cards (KT-1192).
 pub(crate) fn save_briefing_in(
     conn: &rusqlite::Connection,
     project: &Project,
     form: &BriefingFormRequest,
-    defaults: bool,
     docs_section: Option<&str>,
 ) -> Result<BriefingAfterCommit, BriefingSaveError> {
     let mut after = BriefingAfterCommit {
@@ -708,23 +710,12 @@ pub(crate) fn save_briefing_in(
     }
 
     // 3. The briefing.md body (EN headings: the canonical format the audit reads).
-    let mut body = compose_briefing(
+    let body = compose_briefing(
         form,
         project_facts,
         docs_section.map(str::to_string),
         rules_section,
     );
-    if defaults {
-        body = body.replacen(
-            "> Auto-generated by Kronn briefing form (no AI call). Source: user answers.\n",
-            &format!(
-                "{DEFAULTS_MARKER}\n> Default answers written by Kronn for an unattended launch: \
-                 to be completed by a human.\n"
-            ),
-            1,
-        );
-    }
-
     // 4. DB notes; `briefing.md` is written after the commit.
     match crate::db::projects::update_project_briefing_notes(conn, &project.id, Some(&body)) {
         Ok(true) => {}
@@ -741,15 +732,6 @@ pub(crate) async fn save_briefing_answers(
     state: &AppState,
     id: &str,
     form: BriefingFormRequest,
-) -> Result<(), BriefingSaveError> {
-    save_briefing_with(state, id, form, false).await
-}
-
-pub(crate) async fn save_briefing_with(
-    state: &AppState,
-    id: &str,
-    form: BriefingFormRequest,
-    defaults: bool,
 ) -> Result<(), BriefingSaveError> {
     check_answers(&form)?;
     // The documentation locations are dated with `git log` (KT-999): checked
@@ -779,11 +761,10 @@ pub(crate) async fn save_briefing_with(
                 return Ok(Err(BriefingSaveError::NotFound));
             };
             let tx = conn.unchecked_transaction()?;
-            let after =
-                match save_briefing_in(&tx, &project, &form, defaults, docs_section.as_deref()) {
-                    Ok(after) => after,
-                    Err(e) => return Ok(Err(e)),
-                };
+            let after = match save_briefing_in(&tx, &project, &form, docs_section.as_deref()) {
+                Ok(after) => after,
+                Err(e) => return Ok(Err(e)),
+            };
             tx.commit()?;
             Ok(after.apply())
         })

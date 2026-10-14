@@ -71,6 +71,36 @@ async fn a_section_re_verified_unchanged_completes_and_gives_the_validation_back
 #[tokio::test]
 #[serial_test::serial]
 #[serial_test::serial(kronn_templates_env)]
+async fn an_unchanged_target_cannot_restore_validation_after_another_doc_changed() {
+    let fx = Validated::new(|_| {}).await;
+    checksum_drift_on_agents(fx.project());
+    arm(fx.h.tools.path(), "noop", &[AGENTS]);
+    std::fs::write(
+        fx.h.tools.path().join("undo"),
+        format!(
+            "printf '\\nAgent changed another document.\\n' >> '{}'\n",
+            fx.project().join(RULES).display()
+        ),
+    )
+    .unwrap();
+    let body = fx.partial(vec![fx.step_of(AGENTS) as usize]).await;
+    let done = sse_events(&body, "done").pop().expect("terminal done");
+    assert!(validated_at(fx.project()).is_none(), "{body}");
+    assert!(
+        done["discussion_id"].is_string(),
+        "changed docs require validation: {body}"
+    );
+    let provenance = crate::core::doc_provenance::report(fx.project(), false).unwrap();
+    assert!(provenance
+        .docs
+        .iter()
+        .any(|d| d.doc == RULES
+            && d.state == crate::core::doc_provenance::ProvenanceState::ToReconfirm));
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
 async fn a_reverified_unchanged_section_refreshes_its_citation_fingerprints() {
     let fx = Validated::new(|_| {}).await;
     let validated_before = validated_at(fx.project()).expect("validated");
@@ -101,6 +131,9 @@ async fn an_unvalidated_project_re_verified_unchanged_can_be_validated() {
     checksum_drift_on_agents(fx.project.path());
     assert!(validated_at(fx.project.path()).is_none());
 
+    // Partial runs also require unresolved templates to be settled before
+    // human validation, even when their selected target was unchanged.
+    settle_on_validation(fx.tools.path());
     arm(fx.tools.path(), "noop", &[AGENTS]);
     let response = crate::api::audit::drift::partial_audit(
         axum::extract::State(fx.state.clone()),

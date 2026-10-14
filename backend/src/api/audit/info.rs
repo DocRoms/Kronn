@@ -34,6 +34,7 @@ pub async fn audit_info(
     let result = tokio::task::spawn_blocking(move || compute_audit_info_sync(&project_path_str))
         .await
         .unwrap_or_else(|_| AuditInfo {
+            template_update: None,
             files: vec![],
             todos: vec![],
             tech_debt_items: vec![],

@@ -135,6 +135,47 @@ async fn a_full_audit_of_a_dot_ai_project_writes_everything_there_and_nothing_in
 #[tokio::test]
 #[serial_test::serial]
 #[serial_test::serial(kronn_templates_env)]
+async fn briefing_residuals_phase_one_materializes_notes_before_the_first_agent_step() {
+    for rel in ["docs", ".ai"] {
+        let h = harness().await;
+        let _relocated = relocate(h.project.path(), rel);
+        let root = DocsRoot::from_rel(rel).unwrap();
+        let notes = h
+            .state
+            .db
+            .with_conn(|conn| crate::db::projects::get_project_briefing_notes(conn, PROJECT_ID))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!root.dir(h.project.path()).exists());
+        arm(h.tools.path(), "fill", &targets_for(&root));
+        std::fs::write(
+            h.tools.path().join("undo"),
+            format!(
+                "cp '{}/briefing.md' '{}/briefing-before-agent'\n",
+                root.dir(h.project.path()).display(),
+                h.tools.path().display()
+            ),
+        )
+        .unwrap();
+        let body = run_full(&h.state, None).await;
+        let done = sse_events(&body, "done").pop().expect("terminal done");
+        validation_settled(&h.state, &done).await;
+        assert_eq!(done["status"], "complete", "{body}");
+        assert_eq!(
+            std::fs::read_to_string(h.tools.path().join("briefing-before-agent")).unwrap(),
+            notes
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.dir(h.project.path()).join("briefing.md")).unwrap(),
+            notes
+        );
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
 async fn a_partial_refresh_of_a_dot_ai_project_rewrites_its_section_there() {
     let h = harness().await;
     let project = h.project.path();
@@ -184,7 +225,13 @@ async fn a_revalidation_of_a_dot_ai_project_finds_and_fixes_its_citations_there(
     std::fs::create_dir_all(project.join("src")).unwrap();
     let lines: Vec<String> = (1..=6).map(|i| format!("fn cited_{i}() {{}}")).collect();
     std::fs::write(project.join("src/kept.rs"), lines.join("\n") + "\n").unwrap();
-    audited(&h, &ai).await;
+    arm(h.tools.path(), "fill", &targets_for(&ai));
+    settle_on_validation(h.tools.path());
+    std::fs::write(h.tools.path().join("validation-hold"), "").unwrap();
+    let body = run_full(&h.state, None).await;
+    let done = sse_events(&body, "done")
+        .pop()
+        .expect("completed full audit");
 
     let rules = ".ai/coding-rules.md";
     let mut content = std::fs::read_to_string(project.join(rules)).unwrap();
@@ -192,6 +239,8 @@ async fn a_revalidation_of_a_dot_ai_project_finds_and_fixes_its_citations_there(
         "\n## Verified facts\n\n- Errors are mapped in one place [src: file: src/kept.rs:3]\n",
     );
     std::fs::write(project.join(rules), content).unwrap();
+    std::fs::remove_file(h.tools.path().join("validation-hold")).unwrap();
+    validation_settled(&h.state, &done).await;
     let validated = crate::api::audit::validate_audit(
         axum::extract::State(h.state.clone()),
         axum::extract::Path(PROJECT_ID.to_string()),
@@ -218,6 +267,7 @@ async fn a_revalidation_of_a_dot_ai_project_finds_and_fixes_its_citations_there(
         axum::extract::State(h.state.clone()),
         axum::extract::Path(PROJECT_ID.to_string()),
         axum::Json(crate::models::RevalidateAuditRequest {
+            deterministic_only: None,
             agent: AgentType::ClaudeCode,
             connection_id: None,
             tier: None,
