@@ -290,7 +290,11 @@ fn assert_git_shows_only_docs(root: &Path) {
         let path = &line[3..];
         assert!(!path.contains(".kronn-"), "{status}");
         if line.starts_with("!! ") {
-            assert!(path.starts_with(".kronn/"), "{status}");
+            // `docs/var/` is the docs scratch area the install excludes locally.
+            assert!(
+                path.starts_with(".kronn/") || path.starts_with("docs/var/"),
+                "{status}"
+            );
         } else {
             // Documentation and its versioned metadata (`.kronn.json`, checksums).
             assert!(

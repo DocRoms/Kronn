@@ -1110,14 +1110,14 @@ async fn a_reaudit_keeps_human_td_decisions_and_a_refresh_says_it_is_single_agen
         .db
         .with_conn(|conn| {
             let key = crate::core::td_tasks::td_task_key(PROJECT_ID, "TD-20261001-rej");
-            let (id, _) = crate::db::planning::task_by_idempotency_key(conn, &key)?.unwrap();
-            Ok(crate::db::planning::get_task(conn, &id)?
-                .unwrap()
-                .summary
-                .status)
+            let Some((id, _)) = crate::db::planning::task_by_idempotency_key(conn, &key)? else {
+                return Ok(None);
+            };
+            Ok(crate::db::planning::get_task(conn, &id)?.map(|task| task.summary.status))
         })
         .await
-        .unwrap();
+        .unwrap()
+        .expect("the rejected TD keeps its task");
     assert_eq!(status, crate::models::PlanningTaskStatus::Archived);
 
     // A refresh of the security step under the cross-agent option.
