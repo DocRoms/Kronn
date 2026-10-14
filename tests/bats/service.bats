@@ -56,6 +56,8 @@ EOF
     # ui.sh's fail() only prints; restore the bats assertion boundary.
     source "$PROJECT_ROOT/tests/bats/bats-support/src/error.bash"
     export KRONN_CONFIG_DIR="$HOME/.config/kronn"
+    # Never pkill the developer's real Kronn from a test.
+    reap_native_backend() { echo "reap" >> "$CALLS"; }
 }
 
 teardown() {
@@ -401,6 +403,30 @@ fake_toolchain() {
     PATH="$TEST_TMPDIR/bin:$PATH"
     service_build_from_source() { return 0; }
     service_wait_healthy() { echo "$1" > "$STATE/health-version"; return 0; }
+}
+
+@test "install refuses to start next to another Kronn on the port when declined" {
+    fake_toolchain
+    make_fake_tree "$TEST_TMPDIR/checkout" 0.15.0
+    KRONN_DIR="$TEST_TMPDIR/checkout"
+    _service_port_answers() { return 0; }
+    ask_yn() { return 1; }
+    run cmd_service_install --from-checkout
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Another Kronn is already running"* ]]
+    ! grep -q "bootstrap" "$CALLS"
+    ! grep -q "reap" "$CALLS"
+}
+
+@test "install stops a native Kronn holding the port before loading the service" {
+    fake_toolchain
+    make_fake_tree "$TEST_TMPDIR/checkout" 0.15.0
+    KRONN_DIR="$TEST_TMPDIR/checkout"
+    _service_port_answers() { ! grep -q "reap" "$CALLS"; }
+    run cmd_service_install --from-checkout --yes
+    [ "$status" -eq 0 ]
+    grep -q "reap" "$CALLS"
+    grep -q "bootstrap" "$CALLS"
 }
 
 @test "service_missing_tools lists what is absent" {
