@@ -27,6 +27,7 @@ use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::core::task_worker_env::{Capability, ToolchainCapabilities};
 use crate::core::{scanner, worktree};
 use crate::db::orchestration::{CheckpointOutcome, ProvisioningCheckpoint};
 use crate::db::planning::StartTaskCheckpoint;
@@ -1775,8 +1776,31 @@ async fn provision_task_execution_inner(
         .await;
     }
 
+    // KT-1246 — a Claude task worker builds and tests in its own lane. The lane
+    // is provisioned and smoke-checked here, before the brief is written, so the
+    // brief states what the worker can really run. Other runtimes are unchanged.
+    let toolchain = if prepared.execution.worker_agent_type.as_deref() == Some("ClaudeCode") {
+        Some(
+            record_toolchain_smoke_check(
+                db,
+                &prepared.execution.id,
+                &worktree_path,
+                std::sync::Arc::new(crate::core::task_worker_env::ProcessProbeRunner),
+            )
+            .await,
+        )
+    } else {
+        None
+    };
+
     // ── Native worker: the single atomic "durably launchable" checkpoint. ──
-    let brief = build_brief(&prepared, &worktree_path_str, &branch, &base_sha);
+    let brief = build_brief(
+        &prepared,
+        &worktree_path_str,
+        &branch,
+        &base_sha,
+        toolchain.as_ref(),
+    );
     let outcome = {
         let exec_id = prepared.execution.id.clone();
         let sub = sub_disc_id.clone();
@@ -4861,6 +4885,7 @@ fn prepare_native_worker_manifest(
         "risks",
         "limitations",
         "summary",
+        "tests_executed",
     ];
     const MECHANICAL_FIELDS: &[&str] = &["version", "task_ref", "head_sha", "files_touched"];
     let mut mechanical = object
@@ -4914,6 +4939,14 @@ fn prepare_native_worker_manifest(
             "native delivery contains unsupported fields: {}",
             unsupported.join(", ")
         ));
+    }
+    // KT-1246 — a spawned worker must say outright whether it ran tests.
+    if !object.contains_key("tests_executed") {
+        refusals.push(
+            "native delivery must state `tests_executed` ({executed: bool, which: [commands]}); \
+             use {executed: false, which: []} when no test ran"
+                .to_string(),
+        );
     }
     if !refusals.is_empty() {
         return Err(refusals.join("; "));
@@ -6580,12 +6613,13 @@ fn build_brief(
     worktree_path: &str,
     branch: &str,
     base_sha: &str,
+    toolchain: Option<&ToolchainCapabilities>,
 ) -> DiscussionMessage {
     let can_run_shell = !matches!(
         prepared.execution.worker_agent_type.as_deref(),
         Some("Ollama" | "LiteLlm" | "Nvidia")
     );
-    let content = worker_brief_markdown(
+    let mut content = worker_brief_markdown(
         &prepared.task_reference,
         &prepared.task_title,
         &prepared.task_description,
@@ -6597,6 +6631,9 @@ fn build_brief(
         true,
         prepared.execution.worker_scope.as_ref(),
     );
+    if let Some(toolchain) = toolchain {
+        content = insert_toolchain_section(content, toolchain);
+    }
     orchestrator_message(
         format!(
             "orch-brief:{}:{}",
@@ -6604,6 +6641,77 @@ fn build_brief(
         ),
         content,
     )
+}
+
+/// The brief's "what you can run" section (KT-1246), from the launch-time smoke
+/// check: the worker reads it instead of discovering a refusal mid-task.
+fn toolchain_brief_section(toolchain: &ToolchainCapabilities) -> String {
+    let line = |label: &str, capability: &Capability| {
+        format!(
+            "- {label} : {} — {}\n",
+            if capability.available {
+                "✅ disponible"
+            } else {
+                "❌ indisponible"
+            },
+            capability.reason
+        )
+    };
+    format!(
+        "## Capacités de test (vérifiées au lancement)\n\
+         {rust}{frontend}{port}\
+         Lance uniquement ce qui est ✅. Une validation ❌ ne s'affirme jamais : reporte-la \
+         `skipped` avec la raison ci-dessus, le principal l'exécutera. `tests_executed` dit \
+         explicitement si au moins un test a réellement tourné et lesquels.\n\n",
+        rust = line("Tests Rust (`cargo nextest`)", &toolchain.rust_tests),
+        frontend = line("Tests frontend (`vitest`)", &toolchain.frontend_tests),
+        port = line("Binding de port loopback", &toolchain.port_binding),
+    )
+}
+
+/// Put the capability section right before the brief's `## Tests` section.
+fn insert_toolchain_section(content: String, toolchain: &ToolchainCapabilities) -> String {
+    let section = toolchain_brief_section(toolchain);
+    match content.find("## Tests\n") {
+        Some(at) => format!("{}{section}{}", &content[..at], &content[at..]),
+        None => format!("{content}\n\n{section}"),
+    }
+}
+
+/// Provision a Claude task worker's lane and check, with the worker's own
+/// environment, what it can build and test (KT-1246). Journalled on the
+/// execution; a check that cannot run is recorded as unverified, never raised.
+async fn record_toolchain_smoke_check(
+    db: &Database,
+    exec_id: &str,
+    worktree: &std::path::Path,
+    runner: std::sync::Arc<dyn crate::core::task_worker_env::ProbeRunner>,
+) -> ToolchainCapabilities {
+    let path = worktree.to_path_buf();
+    let capabilities = tokio::task::spawn_blocking(move || {
+        let loopback = crate::agents::runner::claude_task_worker_allows_loopback_binding(&path);
+        crate::core::task_worker_env::check_worktree(&path, loopback, runner.as_ref())
+    })
+    .await
+    .unwrap_or_else(|error| {
+        ToolchainCapabilities::unverified(&format!("the smoke check did not complete: {error}"))
+    });
+    let exec_id = exec_id.to_string();
+    let record = capabilities.clone();
+    if let Err(error) = db
+        .with_conn(move |conn| {
+            crate::db::orchestration::record_toolchain_capabilities(
+                conn,
+                &exec_id,
+                &record,
+                &backend_actor(),
+            )
+        })
+        .await
+    {
+        tracing::warn!("toolchain capability record not persisted: {error}");
+    }
+    capabilities
 }
 
 /// The CLI-worker brief, rebuilt at ACCEPTANCE time (KT-328 tranche 2) from the
@@ -7004,6 +7112,8 @@ fn worker_brief_markdown(
          - `dod_status` : exactement un `{ met, evidence }` par item de la DoD, dans l'ordre ci-dessus\n\
          - `docs`, `migrations`, `risks`, `limitations` : listes (mets `[]` explicitement si sans objet)\n\
          - `summary` : résumé court des changements\n\
+         - `tests_executed` : `{ executed: bool, which: [commandes] }` — obligatoire ; \
+           `{ executed: false, which: [] }` si aucun test n'a réellement tourné\n\
          N'invente et ne recopie aucun UUID, SHA ou inventaire : après autorisation, Kronn injecte lui-même `version`, `task_ref`, `head_sha`, `files_touched` et chaque `dod_id` depuis la tâche et le worktree exact."
             .to_string()
     };
@@ -12327,8 +12437,46 @@ pub fn parse_delivery_manifest(manifest_json: &str) -> Result<DeliveryManifestV1
         &crate::models::delivery_manifest_v1_schema(),
     )
     .map_err(|e| anyhow::anyhow!("DeliveryManifest v1 invalide : {e}"))?;
-    serde_json::from_str(manifest_json)
-        .context("DeliveryManifest v1 : structure JSON non conforme au contrat typé")
+    let manifest: DeliveryManifestV1 = serde_json::from_str(manifest_json)
+        .context("DeliveryManifest v1 : structure JSON non conforme au contrat typé")?;
+    validate_tests_executed(&manifest)?;
+    Ok(manifest)
+}
+
+/// KT-1246 — `tests_executed` must agree with the reported `tests`: a claim of
+/// "executed" names what ran and is backed by a pass/fail entry, and "not
+/// executed" names nothing. An absent field is accepted (legacy and joined-CLI
+/// deliveries); the spawned-worker projection refuses it earlier.
+fn validate_tests_executed(manifest: &DeliveryManifestV1) -> Result<()> {
+    let Some(declared) = manifest.tests_executed.as_ref() else {
+        return Ok(());
+    };
+    let ran = manifest.tests.iter().any(|test| {
+        matches!(
+            test.status,
+            crate::models::TestStatus::Pass | crate::models::TestStatus::Fail
+        )
+    });
+    if declared.executed {
+        if declared
+            .which
+            .iter()
+            .all(|command| command.trim().is_empty())
+        {
+            bail!("DeliveryManifest v1 : `tests_executed.executed` est vrai mais `which` ne nomme aucune commande");
+        }
+        if !ran {
+            bail!("DeliveryManifest v1 : `tests_executed.executed` est vrai mais aucun test n'est rapporté `pass` ou `fail`");
+        }
+    } else {
+        if !declared.which.is_empty() {
+            bail!("DeliveryManifest v1 : `tests_executed.executed` est faux mais `which` n'est pas vide");
+        }
+        if ran {
+            bail!("DeliveryManifest v1 : `tests_executed.executed` est faux mais des tests sont rapportés `pass` ou `fail`");
+        }
+    }
+    Ok(())
 }
 
 /// Validate + parse a submitted ReviewDecision against the v1 contract (KT-319).
@@ -22535,6 +22683,327 @@ pub(crate) mod tests {
         );
     }
 
+    // ── KT-1246 — tests_executed, capability section, smoke-check record. ──
+
+    fn manifest_with_tests_executed(
+        tests: serde_json::Value,
+        tests_executed: Option<serde_json::Value>,
+    ) -> String {
+        let mut manifest = serde_json::json!({
+            "version": "1", "task_ref": "KT-1246", "head_sha": "abcdef1234567",
+            "files_touched": [], "tests": tests, "dod_status": [],
+            "docs": [], "migrations": [], "risks": [], "limitations": [],
+            "summary": "x"
+        });
+        if let Some(value) = tests_executed {
+            manifest["tests_executed"] = value;
+        }
+        manifest.to_string()
+    }
+
+    #[test]
+    fn tests_executed_is_optional_for_legacy_and_joined_deliveries() {
+        let manifest =
+            parse_delivery_manifest(&manifest_with_tests_executed(serde_json::json!([]), None))
+                .expect("a delivery without the field stays readable");
+        assert_eq!(manifest.tests_executed, None);
+        // A legacy row serializes without inventing the field.
+        assert!(!serde_json::to_string(&manifest)
+            .unwrap()
+            .contains("tests_executed"));
+    }
+
+    #[test]
+    fn tests_executed_states_which_tests_ran() {
+        let ran = parse_delivery_manifest(&manifest_with_tests_executed(
+            serde_json::json!([{ "name": "unit", "status": "pass", "evidence": "exit 0" }]),
+            Some(serde_json::json!({
+                "executed": true,
+                "which": ["cargo nextest run -p kronn core::task_worker_env"]
+            })),
+        ))
+        .unwrap();
+        let declared = ran.tests_executed.unwrap();
+        assert!(declared.executed);
+        assert_eq!(declared.which.len(), 1);
+
+        let none = parse_delivery_manifest(&manifest_with_tests_executed(
+            serde_json::json!([{ "name": "unit", "status": "skipped", "evidence": "no shell" }]),
+            Some(serde_json::json!({ "executed": false, "which": [] })),
+        ))
+        .unwrap();
+        assert!(!none.tests_executed.unwrap().executed);
+    }
+
+    #[test]
+    fn tests_executed_must_agree_with_the_reported_tests() {
+        let refusal = |tests: serde_json::Value, declared: serde_json::Value| {
+            parse_delivery_manifest(&manifest_with_tests_executed(tests, Some(declared)))
+                .unwrap_err()
+                .to_string()
+        };
+        let pass = serde_json::json!([{ "name": "unit", "status": "pass", "evidence": "exit 0" }]);
+        let skipped =
+            serde_json::json!([{ "name": "unit", "status": "skipped", "evidence": "no shell" }]);
+
+        assert!(refusal(
+            pass.clone(),
+            serde_json::json!({ "executed": true, "which": [] })
+        )
+        .contains("ne nomme aucune commande"));
+        assert!(refusal(
+            skipped,
+            serde_json::json!({ "executed": true, "which": ["cargo test"] })
+        )
+        .contains("aucun test n'est rapporté"));
+        assert!(refusal(
+            serde_json::json!([]),
+            serde_json::json!({ "executed": false, "which": ["cargo test"] })
+        )
+        .contains("`which` n'est pas vide"));
+        assert!(
+            refusal(pass, serde_json::json!({ "executed": false, "which": [] }))
+                .contains("des tests sont rapportés")
+        );
+    }
+
+    #[test]
+    fn a_native_delivery_must_state_tests_executed() {
+        let dod: Vec<PlanningDodItem> = Vec::new();
+        let without = serde_json::json!({
+            "tests": [], "dod_status": [], "docs": [], "migrations": [],
+            "risks": [], "limitations": [], "summary": "x"
+        })
+        .to_string();
+        let error = prepare_native_worker_manifest(&without, &dod).unwrap_err();
+        assert!(error.contains("`tests_executed`"), "{error}");
+
+        let with = serde_json::json!({
+            "tests": [], "dod_status": [], "docs": [], "migrations": [],
+            "risks": [], "limitations": [], "summary": "x",
+            "tests_executed": { "executed": false, "which": [] }
+        })
+        .to_string();
+        let prepared = prepare_native_worker_manifest(&with, &dod).expect("accepted");
+        assert_eq!(prepared["tests_executed"]["executed"], false);
+    }
+
+    fn sample_toolchain() -> ToolchainCapabilities {
+        ToolchainCapabilities {
+            rust_tests: Capability {
+                available: true,
+                reason: "cargo nextest and the offline dependency cache work".into(),
+            },
+            frontend_tests: Capability {
+                available: false,
+                reason: "the main checkout has no frontend/node_modules".into(),
+            },
+            port_binding: Capability {
+                available: true,
+                reason: "loopback binding works".into(),
+            },
+        }
+    }
+
+    #[test]
+    fn the_brief_shows_the_capabilities_before_its_tests_section() {
+        let plain = worker_brief_markdown(
+            "KT-1246",
+            "Workers can build",
+            "Objectif",
+            &[],
+            "/wt/kt1246",
+            "kronn/task/KT-1246",
+            "abc1234",
+            true,
+            true,
+            None,
+        );
+        assert!(!plain.contains("Capacités de test"), "{plain}");
+
+        let brief = insert_toolchain_section(plain, &sample_toolchain());
+        let section = brief.find("## Capacités de test").expect("section present");
+        let tests = brief.find("## Tests\n").expect("tests section kept");
+        assert!(section < tests, "the capabilities come first");
+        assert!(brief.contains("✅ disponible — cargo nextest"), "{brief}");
+        assert!(
+            brief.contains("❌ indisponible — the main checkout has no frontend/node_modules"),
+            "{brief}"
+        );
+        assert!(brief.contains("`tests_executed`"));
+    }
+
+    struct FixedRunner(bool);
+
+    impl crate::core::task_worker_env::ProbeRunner for FixedRunner {
+        fn run(
+            &self,
+            probe: &crate::core::task_worker_env::ProbeCommand,
+        ) -> crate::core::task_worker_env::ProbeOutcome {
+            crate::core::task_worker_env::ProbeOutcome {
+                success: self.0,
+                detail: format!("{} {}", probe.program, probe.args.join(" ")),
+            }
+        }
+    }
+
+    /// A worktree of a provisioned execution that declares a Rust crate and a
+    /// frontend, with dependencies installed in the main checkout.
+    async fn provisioned_lane_for_smoke_check(
+        repo: &Path,
+        db: &Database,
+    ) -> (String, std::path::PathBuf) {
+        let (task_ref, parent_id, _pid) = seed(db, repo).await;
+        let exec = provision_single_task_execution(
+            db,
+            ProvisionInput {
+                task_reference: task_ref.clone(),
+                parent_discussion_id: parent_id,
+                worker: native_worker(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some("smoke-check".into()),
+            },
+        )
+        .await
+        .expect("provision");
+        let (worktree, _branch) =
+            worktree::task_worktree_layout(repo, &task_ref, exec_short(&exec.id)).unwrap();
+        std::fs::create_dir_all(worktree.join("backend")).unwrap();
+        std::fs::write(worktree.join("backend").join("Cargo.toml"), "").unwrap();
+        std::fs::create_dir_all(worktree.join("frontend")).unwrap();
+        std::fs::write(worktree.join("frontend").join("package.json"), "{}").unwrap();
+        let bin = repo.join("frontend").join("node_modules").join(".bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("vitest"), "#!/bin/sh\n").unwrap();
+        (exec.id, worktree)
+    }
+
+    #[tokio::test]
+    async fn a_successful_smoke_check_is_recorded_on_the_execution() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (exec_id, worktree) = provisioned_lane_for_smoke_check(repo.path(), &db).await;
+
+        let capabilities = record_toolchain_smoke_check(
+            &db,
+            &exec_id,
+            &worktree,
+            std::sync::Arc::new(FixedRunner(true)),
+        )
+        .await;
+
+        assert!(capabilities.rust_tests.available, "{capabilities:?}");
+        assert!(capabilities.frontend_tests.available, "{capabilities:?}");
+        let id = exec_id.clone();
+        let recorded = db
+            .with_conn(move |conn| {
+                crate::db::orchestration::latest_toolchain_capabilities(conn, &id)
+            })
+            .await
+            .unwrap();
+        assert_eq!(recorded, Some(capabilities));
+        // The lane the brief promised exists: target + link are in place.
+        assert!(repo.path().join("target").is_dir());
+        assert!(
+            std::fs::symlink_metadata(worktree.join("frontend").join("node_modules"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failing_smoke_check_is_recorded_with_its_reasons_and_the_latest_wins() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (exec_id, worktree) = provisioned_lane_for_smoke_check(repo.path(), &db).await;
+
+        let good = record_toolchain_smoke_check(
+            &db,
+            &exec_id,
+            &worktree,
+            std::sync::Arc::new(FixedRunner(true)),
+        )
+        .await;
+        let bad = record_toolchain_smoke_check(
+            &db,
+            &exec_id,
+            &worktree,
+            std::sync::Arc::new(FixedRunner(false)),
+        )
+        .await;
+
+        assert!(good.rust_tests.available);
+        assert!(!bad.rust_tests.available);
+        assert!(bad.rust_tests.reason.contains("cargo nextest --version"));
+        assert!(!bad.frontend_tests.available);
+        assert!(bad.frontend_tests.reason.contains("vitest --version"));
+        let id = exec_id.clone();
+        let recorded = db
+            .with_conn(move |conn| {
+                crate::db::orchestration::latest_toolchain_capabilities(conn, &id)
+            })
+            .await
+            .unwrap();
+        assert_eq!(recorded, Some(bad), "the latest finding is the record");
+        let id = exec_id.clone();
+        let findings = db
+            .with_conn(move |conn| {
+                Ok(crate::db::orchestration::list_execution_events(conn, &id)?
+                    .into_iter()
+                    .filter(|event| {
+                        event.action == crate::core::task_worker_env::TOOLCHAIN_EVENT_ACTION
+                    })
+                    .count())
+            })
+            .await
+            .unwrap();
+        // One finding written by the launch saga itself (a Claude worker), then
+        // the two explicit checks above: every attempt is journalled.
+        assert_eq!(findings, 3, "every attempt is journalled");
+    }
+
+    #[tokio::test]
+    async fn a_claude_worker_launch_journals_its_capabilities_and_another_runtime_does_not() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (exec_id, _worktree) = provisioned_lane_for_smoke_check(repo.path(), &db).await;
+        let id = exec_id.clone();
+        let launched = db
+            .with_conn(move |conn| {
+                crate::db::orchestration::latest_toolchain_capabilities(conn, &id)
+            })
+            .await
+            .unwrap()
+            .expect("the launch saga records what the Claude worker can run");
+        // The fixture repo has neither a Rust crate nor a frontend yet.
+        assert!(launched.rust_tests.reason.starts_with("not applicable"));
+        assert!(launched.frontend_tests.reason.starts_with("not applicable"));
+
+        let other = Database::open_in_memory().unwrap();
+        let (task_ref, parent_id, _pid) = seed(&other, repo.path()).await;
+        let exec = provision_single_task_execution(
+            &other,
+            ProvisionInput {
+                task_reference: task_ref,
+                parent_discussion_id: parent_id,
+                worker: MessageTarget::agent(AgentType::Codex),
+                base_rev: Some("main".into()),
+                idempotency_key: Some("codex-no-lane".into()),
+            },
+        )
+        .await
+        .expect("provision");
+        let id = exec.id.clone();
+        let recorded = other
+            .with_conn(move |conn| {
+                crate::db::orchestration::latest_toolchain_capabilities(conn, &id)
+            })
+            .await
+            .unwrap();
+        assert_eq!(recorded, None, "only Claude Code's sandbox was widened");
+    }
+
     #[tokio::test]
     async fn compensates_a_worktree_failure_then_resumes() {
         let repo = init_repo();
@@ -22655,7 +23124,7 @@ pub(crate) mod tests {
             dod: task.definition_of_done.clone(),
             already_launched: false,
         };
-        let brief = build_brief(&prepared, "/tmp/wt", "kronn/task/kt-x", "deadbeef");
+        let brief = build_brief(&prepared, "/tmp/wt", "kronn/task/kt-x", "deadbeef", None);
         let target = native_worker();
 
         let outcome = crate::db::orchestration::commit_provisioning_checkpoint(
@@ -23872,7 +24341,8 @@ pub(crate) mod tests {
             "migrations": [],
             "risks": [],
             "limitations": [],
-            "summary": "did the thing"
+            "summary": "did the thing",
+            "tests_executed": { "executed": false, "which": [] }
         })
         .to_string()
     }
@@ -24080,7 +24550,8 @@ pub(crate) mod tests {
             "migrations": [],
             "risks": [],
             "limitations": [],
-            "summary": "missing the required ordered DoD assertion"
+            "summary": "missing the required ordered DoD assertion",
+            "tests_executed": { "executed": false, "which": [] }
         })
         .to_string();
         let outcome = deliver_native_worker_manifest(

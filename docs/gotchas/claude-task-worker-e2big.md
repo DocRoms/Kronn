@@ -20,10 +20,67 @@ the sandbox to enumerate. Any other unreadable Git root still fails closed with
 [src: file: backend/src/api/orchestration.rs:5454]
 
 The worker remains fail-closed: sandbox availability is mandatory,
-unsandboxed commands are disabled, and the only explicit write root is the
-canonical managed task worktree. [src: file: backend/src/agents/runner.rs:7090-7112]
+unsandboxed commands are disabled, and the explicit write roots are the
+canonical managed task worktree and its lane's private Cargo target (see
+"Build and test policy" below). [src: file: backend/src/agents/runner.rs:7090-7112]
 
 Regression coverage uses real synthetic Git common directories to exercise
 accepted and refused catalogue sizes, common-directory deduplication and
 path-free diagnostics, and separately preserves the single task-worktree write
 boundary. [src: file: backend/src/agents/runner_test.rs:5399]
+
+## Build and test policy (KT-1246)
+
+A worker that cannot build or test forces the principal to re-run every
+delivery centrally. The Claude task-worker launch therefore prepares a *lane*
+(`backend/src/core/task_worker_env.rs`, runtime-agnostic) and widens the sandbox
+by exactly what building needs. Claude Code only: Codex and OpenCode workers
+keep their own sandbox and receive no lane variables.
+
+| Concern | Policy |
+| --- | --- |
+| Write roots | the worktree and `<repo>/target/wt-<lane>` (outside `backend/`: the dev backend's watcher restarts on writes there). A worktree outside the managed `<repo>/.kronn/worktrees/` layout keeps its target in `<worktree>/.kronn/target`. |
+| Reads | `filesystem.allowRead`: `~/.cargo/registry`, `~/.cargo/git`, existing pnpm stores, the main checkout's `frontend/node_modules`. Never a write root. |
+| Network | `network.allowLocalBinding: true` (loopback). No `allowedDomains`: no external host. |
+| Fail-closed | `enabled`, `failIfUnavailable`, `allowUnsandboxedCommands: false` unchanged; an unresolvable worktree still yields an empty write list and no network key. |
+| Environment | `KRONN_DATA_DIR=<worktree>/.kronn/data`, `CARGO_TARGET_DIR=<lane target>`, `CARGO_NET_OFFLINE=true`, and `CARGO_HOME=<lane target>/.kronn-cargo-home` when the registry link is in place. No `VAR=x cmd` prefix is needed. |
+| Cargo home | lane-private, so Cargo's package-cache lock is written inside the lane; `registry`, `git` and `config.toml` are symlinks to the host's (credentials are not linked). |
+| Frontend | `frontend/node_modules` is a symlink to the main checkout's, created without any network install. Missing there: frontend tests are reported unavailable. |
+
+Two side effects are deliberately neutralised, because both made a clean
+checkout look dirty during testing: `/target/wt-*/` is added to the main
+checkout's local Git exclude (the integration preflight refuses a dirty target)
+and `/frontend/node_modules` to the worktree's when a project only ignores
+`node_modules/` (directories only, a link is not one).
+
+### Smoke check and capability record
+
+Before the brief is written, the launch saga provisions the lane and runs a
+bounded check with the worker's own environment: `cargo nextest --version`,
+`cargo fetch --offline --locked` (proves the offline dependency cache; a cold
+`cargo check` would compile the whole graph), `node_modules/.bin/vitest
+--version`, and a loopback bind. The result, `rust_tests` / `frontend_tests` /
+`port_binding` each `{available, reason}`, is journalled on the execution as a
+`toolchain_capabilities` event (`db::orchestration::latest_toolchain_capabilities`
+reads the latest) and rendered in the brief under "Capacités de test". A check
+that cannot run is recorded as unavailable with the reason; it never blocks the
+launch.
+
+The check runs as ordinary child processes with the lane environment; it is not
+wrapped in Claude's own OS sandbox, so it proves the toolchain and the cache,
+not that the sandbox lets each syscall through. That is the live proof the
+principal performs with a real worker.
+
+### DeliveryManifest `tests_executed`
+
+`tests_executed: {executed: bool, which: [command]}` is required in a spawned
+worker's `task_exec_deliver` projection and optional for legacy and joined-CLI
+deliveries. `executed: true` needs named commands and at least one `pass`/`fail`
+test; `executed: false` needs `which: []` and no `pass`/`fail` test.
+
+### Known limits
+
+- Lane targets under `<repo>/target/wt-*` are not removed with the worktree.
+- A worker needing a crate absent from the host cache cannot fetch it.
+- Vite's dev server may refuse files outside its root through the
+  `node_modules` link; `vitest` runs are unaffected.

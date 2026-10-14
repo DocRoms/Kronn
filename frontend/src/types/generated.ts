@@ -2633,7 +2633,12 @@ export type DeleteManualModelRequest = { runtime_target_id: string, model_id: st
  * present even when empty, so "no migrations" is an explicit `[]`, never a
  * silent omission.
  */
-export type DeliveryManifestV1 = { version: string, task_ref: string, head_sha: string, files_touched: Array<ManifestFile>, tests: Array<ManifestTest>, dod_status: Array<ManifestDodStatus>, docs: Array<string>, migrations: Array<string>, risks: Array<string>, limitations: Array<string>, summary: string, };
+export type DeliveryManifestV1 = { version: string, task_ref: string, head_sha: string, files_touched: Array<ManifestFile>, tests: Array<ManifestTest>, dod_status: Array<ManifestDodStatus>, docs: Array<string>, migrations: Array<string>, risks: Array<string>, limitations: Array<string>, summary: string,
+/**
+ * KT-1246 — absent on deliveries made before the field existed and on
+ * joined-CLI deliveries; a spawned worker must always state it.
+ */
+tests_executed?: TestsExecuted | null, };
 
 export type DependencyCheckStatus = "UpToDate" | "UpdatesAvailable" | "Unsupported" | "Unavailable" | "Error" | "TimedOut";
 
@@ -9671,6 +9676,17 @@ mock_variables?: { [key in string]: string } | null,
  * Dry run: agent describes what it would do without executing any write actions
  */
 dry_run?: boolean, };
+
+/**
+ * KT-1246 — the worker's explicit statement of whether any test was actually
+ * executed, and which. Replaces a sentence at the end of a report: a reviewer
+ * reads `executed` and `which` instead of inferring them from `tests`.
+ */
+export type TestsExecuted = { executed: boolean,
+/**
+ * The commands (or suites) that ran. Empty exactly when `executed` is false.
+ */
+which: Array<string>, };
 
 /**
  * A move the audit suggests. Never applied.

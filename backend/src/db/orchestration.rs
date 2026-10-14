@@ -4890,6 +4890,48 @@ pub fn list_execution_events(conn: &Connection, exec_id: &str) -> Result<Vec<Tas
     Ok(events)
 }
 
+/// Journal what the launch-time toolchain smoke check found (KT-1246). The
+/// record is an append-only event, so a re-provisioned attempt keeps its own
+/// finding; readers take the latest.
+pub fn record_toolchain_capabilities(
+    conn: &Connection,
+    exec_id: &str,
+    capabilities: &crate::core::task_worker_env::ToolchainCapabilities,
+    actor: &OrchestrationActor,
+) -> Result<()> {
+    record_execution_event(
+        conn,
+        exec_id,
+        crate::core::task_worker_env::TOOLCHAIN_EVENT_ACTION,
+        None,
+        None,
+        actor,
+        serde_json::to_value(capabilities)?,
+    )
+}
+
+/// The most recent toolchain capability record of an execution, if any.
+pub fn latest_toolchain_capabilities(
+    conn: &Connection,
+    exec_id: &str,
+) -> Result<Option<crate::core::task_worker_env::ToolchainCapabilities>> {
+    let latest: Option<String> = conn
+        .query_row(
+            "SELECT changes_json FROM task_execution_events \
+             WHERE task_execution_id = ?1 AND action = ?2 \
+             ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            params![
+                exec_id,
+                crate::core::task_worker_env::TOOLCHAIN_EVENT_ACTION
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    latest
+        .map(|changes| serde_json::from_str(&changes).map_err(anyhow::Error::from))
+        .transpose()
+}
+
 const WORKER_SCOPE_REANCHORED: &str = "worker_scope_reanchored";
 
 /// The prelocalized scope the execution was launched with. Re-anchoring

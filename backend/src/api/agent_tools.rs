@@ -1493,6 +1493,12 @@ fn worker_room_catalogue(catalogue: Vec<Value>) -> Vec<Value> {
                     json!(["name", "status", "evidence"]);
                 properties["tests"]["items"]["additionalProperties"] = json!(false);
                 properties["dod_status"]["items"]["additionalProperties"] = json!(false);
+                // KT-1246 — a spawned worker states, explicitly, whether it ran
+                // any test and which, instead of a sentence in its summary.
+                properties["tests_executed"]["description"] = json!(
+                    "Whether any test was actually executed in this run, and which commands. `executed: false` requires `which: []`; `executed: true` requires the commands that ran, matching at least one `tests` entry reported pass or fail."
+                );
+                properties["tests_executed"]["additionalProperties"] = json!(false);
                 manifest_schema["additionalProperties"] = json!(false);
                 manifest_schema["required"] = json!([
                     "tests",
@@ -1501,7 +1507,8 @@ fn worker_room_catalogue(catalogue: Vec<Value>) -> Vec<Value> {
                     "migrations",
                     "risks",
                     "limitations",
-                    "summary"
+                    "summary",
+                    "tests_executed"
                 ]);
                 tool["function"]["parameters"]["properties"] = json!({
                     "manifest": manifest_schema
@@ -5146,8 +5153,13 @@ mod tests {
                 "migrations",
                 "risks",
                 "limitations",
-                "summary"
+                "summary",
+                "tests_executed"
             ])
+        );
+        assert_eq!(
+            projected["properties"]["tests_executed"]["required"],
+            json!(["executed", "which"])
         );
         for mechanical in ["version", "task_ref", "head_sha", "files_touched"] {
             assert!(projected["properties"].get(mechanical).is_none());

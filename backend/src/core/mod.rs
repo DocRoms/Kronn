@@ -105,6 +105,7 @@ pub mod skills;
 pub mod sse_limits;
 pub mod static_context;
 pub mod tailscale;
+pub mod task_worker_env;
 pub mod td_decisions;
 pub mod td_index;
 pub mod td_review;
