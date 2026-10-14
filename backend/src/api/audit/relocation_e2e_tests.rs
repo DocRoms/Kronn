@@ -1045,3 +1045,188 @@ async fn a_cancelled_first_run_without_state_is_kronns_only_with_a_recorded_run(
         crate::core::docs_folder::DocsFolderState::HumanDocs { .. }
     ));
 }
+
+// ─── Verification: an applied merge under `.ai/`, a golden for `docs/` ──────
+
+fn git_in(dir: &Path, args: &[&str]) {
+    let out = crate::core::cmd::git_cmd()
+        .args(["-c", "user.name=Test", "-c", "user.email=test@example.com"])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The merge is APPLIED (worktree written, files accepted and committed), not
+/// only previewed: every file lands under `.ai/`, none under `docs/`, in the
+/// worktree and in the commit, and the checkout stays untouched.
+#[test]
+fn an_applied_template_merge_on_a_dot_ai_project_writes_and_commits_under_its_root() {
+    use crate::api::projects::template_merge::{
+        accept_merge, discard_merge, run_merge_in_worktree, MergeBase,
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("repo");
+    std::fs::create_dir_all(&project).unwrap();
+    git_in(&project, &["init", "-q", "-b", "main"]);
+    std::fs::write(
+        project.join("AGENTS.md"),
+        "# Agent guide\n\n## Running tests\n\nmake test\n",
+    )
+    .unwrap();
+    std::fs::write(project.join("README.md"), "# Repo\n").unwrap();
+    git_in(&project, &["add", "-A"]);
+    git_in(&project, &["commit", "-q", "-m", "init"]);
+    let _relocated = relocate(&project, ".ai");
+    let templates = Path::new(env!("CARGO_MANIFEST_DIR")).join("../templates/docs");
+
+    let view = run_merge_in_worktree(&project, "Relocated", MergeBase::Local, &templates).unwrap();
+    assert_eq!(view.docs_dir, ".ai");
+    let worktree = PathBuf::from(view.worktree_path.clone().expect("a merge worktree"));
+    assert!(!view.files.is_empty());
+    assert!(
+        view.files.iter().all(|f| f.path.starts_with(".ai/")),
+        "{:?}",
+        view.files.iter().map(|f| &f.path).collect::<Vec<_>>()
+    );
+    // Written for real, relocated, and nothing under docs/ anywhere.
+    let entry = std::fs::read_to_string(worktree.join(".ai/AGENTS.md")).unwrap();
+    assert!(!entry.contains("`docs/"), "{entry}");
+    assert!(worktree.join(".ai/conventions/README.md").is_file());
+    assert!(
+        !worktree.join("docs").exists(),
+        "no docs/ in the merge worktree"
+    );
+    assert!(!project.join("docs").exists(), "no docs/ in the checkout");
+    assert!(!project.join(".ai").exists(), "the checkout is not written");
+
+    let accepted = accept_merge(
+        &project,
+        &[".ai/AGENTS.md".to_string(), ".ai/glossary.md".to_string()],
+    )
+    .unwrap();
+    let shown = crate::core::cmd::git_cmd()
+        .args(["show", "--name-only", "--format=", &accepted.commit])
+        .current_dir(&worktree)
+        .output()
+        .unwrap();
+    let committed: BTreeSet<String> = String::from_utf8_lossy(&shown.stdout)
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        committed,
+        [".ai/AGENTS.md", ".ai/glossary.md"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>()
+    );
+    // A path outside the root cannot be accepted into the commit.
+    assert!(accept_merge(&project, &["docs/AGENTS.md".to_string()]).is_err());
+    discard_merge(&project).unwrap();
+}
+
+/// What a default-root Full audit leaves in the project, one line per file:
+/// the sha256 of its bytes (dates, the project location and name masked), or
+/// `volatile` for state that embeds run ids and hashes of other files.
+fn default_root_snapshot(project: &Path, prompts: &[String]) -> String {
+    let date =
+        regex_lite::Regex::new(r"\d{4}-\d{2}-\d{2}([T ][0-9:.]+(Z|[+-]\d{2}:?\d{2})?)?").unwrap();
+    let location = project.display().to_string();
+    let canonical = project
+        .canonicalize()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| location.clone());
+    let name = project
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mask = |text: &str| {
+        let text = text
+            .replace(&canonical, "<PROJECT>")
+            .replace(&location, "<PROJECT>")
+            .replace(&name, "<NAME>");
+        date.replace_all(&text, "<DATE>").into_owned()
+    };
+    let mut lines: Vec<String> = Vec::new();
+    for entry in walkdir::WalkDir::new(project)
+        .sort_by_file_name()
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+    {
+        let rel = entry
+            .path()
+            .strip_prefix(project)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        if rel.starts_with(".git/") {
+            continue;
+        }
+        let bytes = std::fs::read(entry.path()).unwrap();
+        let volatile = matches!(
+            rel.as_str(),
+            "docs/.kronn.json"
+                | "docs/checksums.json"
+                | "docs/citations.json"
+                | "docs/provenance.json"
+        ) || rel.starts_with(".kronn/audit/");
+        let digest = if volatile {
+            "volatile".to_string()
+        } else {
+            let masked = mask(&String::from_utf8_lossy(&bytes));
+            crate::core::docs_merge::sha256_hex(masked.as_bytes())
+        };
+        lines.push(format!("{digest}  {rel}"));
+    }
+    for (n, prompt) in prompts.iter().enumerate() {
+        let digest = crate::core::docs_merge::sha256_hex(mask(prompt).as_bytes());
+        lines.push(format!("{digest}  prompt.{}", n + 1));
+    }
+    lines.join("\n") + "\n"
+}
+
+/// With the default `docs/` root a Full audit produces, byte for byte, the
+/// artefacts and step prompts recorded in `default_root.golden`. An intended
+/// change to a template or a prompt updates the golden in the same commit:
+/// the failure message prints the new content.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_default_docs_root_audit_is_byte_identical_to_its_golden() {
+    let h = harness().await;
+    let prompts = audited(&h, &DocsRoot::default_root()).await;
+    let actual = default_root_snapshot(h.project.path(), &prompts);
+    assert!(
+        actual.lines().any(|l| l.ends_with("  docs/AGENTS.md")),
+        "{actual}"
+    );
+    let golden = include_str!("default_root.golden");
+    if actual != golden {
+        let proposed = std::env::temp_dir().join("kronn-default-root.golden");
+        std::fs::write(&proposed, &actual).unwrap();
+        let (a, g): (Vec<&str>, Vec<&str>) = (actual.lines().collect(), golden.lines().collect());
+        let differing: Vec<String> = a
+            .iter()
+            .filter(|l| !g.contains(l))
+            .map(|l| format!("+ {l}"))
+            .chain(
+                g.iter()
+                    .filter(|l| !a.contains(l))
+                    .map(|l| format!("- {l}")),
+            )
+            .collect();
+        panic!(
+            "the default-root audit output changed; if intended, replace default_root.golden with {}:\n{}",
+            proposed.display(),
+            differing.join("\n")
+        );
+    }
+}
