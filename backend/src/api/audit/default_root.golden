@@ -1,4 +1,4 @@
-1ddafdaf78d462e573eda0fa4b5da9f8d12e9d5dddc0aed665620886417fbb91  .ai/mcp/mcp.json
+volatile  .ai/mcp/mcp.json
 cc6bdc30919245539189297fdafe70573240ec7987e0f4dcd427e11cfffb31ba  .claude/agents/architect.md
 636e36245c3a60aa54f5342e30a962638f2c8ab9aa412be35073ab0c97c017fb  .claude/agents/devils-advocate.md
 0d248225262c8dcd96cd5d31d643b652883484724714a349efaf37d7e2323369  .claude/agents/qa-engineer.md
@@ -15,14 +15,14 @@ f7922470284519c66aefd97b6719c34cc10bf31ddbe4e4be4ed3e61ffb44d31f  .claude/agents
 36b9e00474dbeff88a0d84cb2ad7eee7b77294b322bb75216b6cbb77700211f6  .gemini/agents/devils-advocate.md
 8419098f1dcfbabbc4f0a5c91aef64f1e157a5f4c54a2020385ef14f23b54293  .gemini/agents/qa-engineer.md
 20b204acf9068af92f721d7e379128a9a6121e5d75dabfd7ee4c6e8332ca9f39  .gemini/agents/tech-lead.md
-1ddafdaf78d462e573eda0fa4b5da9f8d12e9d5dddc0aed665620886417fbb91  .gemini/settings.json
-1ddafdaf78d462e573eda0fa4b5da9f8d12e9d5dddc0aed665620886417fbb91  .kiro/settings/mcp.json
+volatile  .gemini/settings.json
+volatile  .kiro/settings/mcp.json
 volatile  .kronn/audit/document-optimization.json
 volatile  .kronn/audit/validated-originals/f5644c78b77b5b417d1172728decf2427e3156148d59f7f3d21e85a94b2c1b8c.bak
 29e0381ab7727cabf4e2e376a13802181c29adbc2a9e24e369c486590545e4ee  .kronn/mcp-managed.json
 cc7671b8e29a1bc8b5075dfbdbc424054425a601849861698655aa49e36cea1e  .kronn/native-files.json
-1ddafdaf78d462e573eda0fa4b5da9f8d12e9d5dddc0aed665620886417fbb91  .mcp.json
-6d8253140558e87598790ab427f4cf7c12d88b539edb5ad75f56e75aaa50474f  .vibe/config.toml
+volatile  .mcp.json
+volatile  .vibe/config.toml
 b6714c74ccfedc1bd3d63e7e688dec6685200089759fb3be6c8e717e846bb204  AGENTS.md
 2d595c6065d1ba60e348743c8af993d331950ea07f399378472b7c5a0d563a18  CLAUDE.md
 7e98df7437f1b50bc0ea2ba7180f28bdb7a043cd2c6045e1783124cdba2fdcc5  README.md

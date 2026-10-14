@@ -1177,7 +1177,16 @@ fn default_root_snapshot(project: &Path, prompts: &[String]) -> String {
                 | "docs/checksums.json"
                 | "docs/citations.json"
                 | "docs/provenance.json"
-        ) || rel.starts_with(".kronn/audit/");
+        ) || rel.starts_with(".kronn/audit/")
+            // MCP host sync writes machine-specific paths into these.
+            || matches!(
+                rel.as_str(),
+                ".mcp.json"
+                    | ".ai/mcp/mcp.json"
+                    | ".gemini/settings.json"
+                    | ".kiro/settings/mcp.json"
+                    | ".vibe/config.toml"
+            );
         let digest = if volatile {
             "volatile".to_string()
         } else {
