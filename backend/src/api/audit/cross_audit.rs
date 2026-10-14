@@ -733,6 +733,7 @@ pub async fn cross_audit_estimate(
     }
 }
 
-#[cfg(test)]
+// Its fixtures script a `claude` shell program (`api::other_projects_fixture`).
+#[cfg(all(test, unix))]
 #[path = "cross_audit_tests.rs"]
 mod tests;

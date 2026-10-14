@@ -340,7 +340,6 @@ async fn a_refutation_without_proof_contests_and_a_proven_one_dismisses() {
     assert_eq!(report.records[0].td_id, None);
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn the_author_replies_once_and_a_serious_disagreement_becomes_a_human_card() {
     let dir = repo();
@@ -423,7 +422,6 @@ async fn the_author_replies_once_and_a_serious_disagreement_becomes_a_human_card
     assert_eq!(rows[0].1.question_key.as_deref(), Some(key.as_str()));
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn every_finding_keeps_its_provenance() {
     let dir = repo();
@@ -532,7 +530,6 @@ async fn usage_and_cost_add_up_over_every_call() {
     assert_eq!(report.cost_usd_micros(), Some(3_000));
 }
 
-#[cfg(unix)]
 async fn state_with_run() -> (AppState, String) {
     let state = crate::api::other_projects_fixture::fresh_state();
     crate::api::other_projects_fixture::register_project(
@@ -562,7 +559,6 @@ async fn state_with_run() -> (AppState, String) {
     (state, run_id)
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn the_estimate_scales_the_last_measured_single_agent_step() {
     let (state, run_id) = state_with_run().await;
@@ -755,7 +751,6 @@ struct Disputed {
     run_id: String,
 }
 
-#[cfg(unix)]
 async fn disputed_project() -> Disputed {
     let dir = repo();
     let fake = Fake::default()
@@ -860,7 +855,6 @@ async fn answer_card(d: &Disputed, option: &str) -> axum::http::StatusCode {
     .0
 }
 
-#[cfg(unix)]
 async fn pending(d: &Disputed) -> Vec<crate::db::audit_cross::PendingDispute> {
     d.state
         .db
@@ -938,7 +932,6 @@ async fn keeping_a_dispute_leaves_the_sheet_active_and_says_so() {
     assert!(pending(&d).await.is_empty());
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn a_dispute_waits_for_a_running_audit_and_a_wrong_option_changes_nothing() {
     let d = disputed_project().await;
@@ -1114,7 +1107,6 @@ fn index_of_text(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap()
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn the_card_flags_an_open_dispute_and_validation_waits_for_it() {
     let d = disputed_project().await;
