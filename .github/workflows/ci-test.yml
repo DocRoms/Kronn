@@ -69,15 +69,19 @@ jobs:
           fi
           echo "run=true" >> "$GITHUB_OUTPUT"
 
-  test-backend:
+  # The backend suite runs once, split in three: one job compiles the
+  # coverage-instrumented test binaries into a nextest archive, three shards
+  # each run a third of the tests from that archive, and `test-backend` merges
+  # their coverage profiles and enforces the floors on the whole suite. Merging
+  # profiles from separate extractions of one archive gives the same report as
+  # a single run. The 10-minute SLO (backend-ci-performance) covers the chain
+  # from this build to the end of `test-backend`, on a verified hot-cache hit.
+  # A push to main runs only this build, to refresh the shared cache.
+  test-backend-build:
     needs: require-ci-label
     if: needs.require-ci-label.outputs.run == 'true'
     runs-on: ubuntu-latest
-    # The one backend test pass: every lib, binary and integration test once,
-    # under nextest (one process per test) and coverage instrumentation, with
-    # the coverage floors enforced on that same run. A cache miss compiles the
-    # instrumented tree from scratch first. The 10-minute SLO is measured only
-    # on a verified hot-cache hit by backend-ci-performance.
+    # A cache miss compiles the instrumented tree from scratch.
     timeout-minutes: 40
     outputs:
       compiled_cache_hit: ${{ steps.verify-backend-cache.outputs.exact }}
@@ -205,79 +209,33 @@ jobs:
         if: github.event_name != 'push'
         run: cargo fmt --all -- --check
 
-      # A push to main only refreshes the shared cache: the merged tree was
-      # already tested on its pull request. Same command and flags as the
-      # measured step below, so the saved artifacts are exactly what a pull
-      # request compiles; the empty filter runs no test.
-      - name: Build the instrumented suite without running it (push to main)
-        if: github.event_name == 'push'
-        env:
-          NEXTEST_PROFILE: ci
-        run: cargo llvm-cov nextest --workspace --no-report -E 'none()' --no-tests=pass
-
-      # Same runner and configuration as `make test-backend-cov`
-      # (backend/.config/nextest.toml, profile `ci`).
-      - name: cargo llvm-cov nextest — measured backend critical path and coverage floor
-        if: github.event_name != 'push'
-        env:
-          NEXTEST_PROFILE: ci
-          # One profile per test process would be ~9,600 files and ~50 GB;
-          # LLVM merges them online into a pool of eight per binary instead.
-          LLVM_PROFILE_FILE_NAME: kronn-%8m.profraw
+      # Build once, on pull requests and on a push to main alike, so the
+      # cache main saves is exactly what a pull request compiles.
+      # CARGO_TARGET_DIR keeps the instrumented tree where the hot cache
+      # restores it. `eval`, not `source <(...)`: portable to any bash.
+      - name: Build the instrumented test archive
         run: |
-          cargo llvm-cov nextest --workspace --summary-only \
-            --fail-under-lines 83 \
-            --fail-under-functions 83 \
-            --fail-under-regions 83
+          export CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target/llvm-cov-target"
+          eval "$(cargo llvm-cov show-env --sh)"
+          cargo nextest archive --workspace --locked \
+            --archive-file "$RUNNER_TEMP/kronn-tests.tar.zst"
 
-      - name: cargo llvm-cov — key-management scoped floor
-        if: github.event_name != 'push'
-        run: ../scripts/check-keymgmt-coverage.sh
-
-      # The `ci` profile ran the ts-rs exports with the suite above.
-      - name: Setup Node.js
-        if: github.event_name != 'push'
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-
-      - name: Types — regenerate generated.ts and fail on drift
-        if: github.event_name != 'push'
-        run: |
-          node ../frontend/scripts/assemble-generated-types.mjs
-          git diff --exit-code ../frontend/src/types/generated.ts
-
-      # The suite's build already compiled the example; run it rather than
-      # compiling the library a second time.
       - name: Lint — no raw Command::new in prod code
         if: github.event_name != 'push'
         env:
           LLVM_PROFILE_FILE: /dev/null
         run: ../target/llvm-cov-target/debug/examples/lint-no-raw-command
 
-      - name: Locate nextest JUnit report
-        if: always() && github.event_name != 'push'
-        id: locate-backend-junit
-        # nextest writes its store under the *workspace root* (`backend/`),
-        # not under the target dir: `store.dir` defaults to `target/nextest`
-        # relative to the workspace root, whatever `--target-dir` says.
-        run: |
-          report=target/nextest/ci/junit.xml
-          if [ ! -s "$report" ]; then
-            echo "::error::nextest JUnit report not found at backend/$report"
-            find . ../target -maxdepth 6 -type f -name junit.xml -print 2>/dev/null || true
-            exit 1
-          fi
-          echo "path=backend/$report" >> "$GITHUB_OUTPUT"
-
-      - name: Upload nextest JUnit report
-        if: always() && steps.locate-backend-junit.outcome == 'success'
+      - name: Upload the instrumented test archive
+        if: github.event_name != 'push'
         uses: actions/upload-artifact@v4
         with:
-          name: backend-junit
-          path: ${{ steps.locate-backend-junit.outputs.path }}
+          name: backend-test-archive
+          path: ${{ runner.temp }}/kronn-tests.tar.zst
           if-no-files-found: error
-          retention-days: 7
+          # Already zstd-compressed.
+          compression-level: 0
+          retention-days: 1
 
       # On a warmup miss, validate the exact in-place directories before the
       # cache action persists them in its post-job hook. Cold measurements do
@@ -316,6 +274,150 @@ jobs:
             target/llvm-cov-target/debug/build
             target/llvm-cov-target/debug/deps
           key: ${{ steps.cache-backend-hot.outputs.cache-primary-key }}
+
+  test-backend-shard:
+    needs: [require-ci-label, test-backend-build]
+    if: needs.require-ci-label.outputs.run == 'true' && github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Download the instrumented test archive
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-test-archive
+          path: ${{ runner.temp }}
+
+      # `slice:` deals the tests round-robin, so each third costs about the
+      # same. `%8m` pools the profiles per binary: one file per test process
+      # would be thousands of multi-MB files. An extracted test binary no
+      # longer sits under the checkout, so it cannot find `templates/` by
+      # walking up from itself: point at it.
+      - name: Run test slice ${{ matrix.shard }}/3
+        env:
+          NEXTEST_PROFILE: ci
+          KRONN_TEMPLATES_DIR: ${{ github.workspace }}/templates
+          LLVM_PROFILE_FILE: ${{ runner.temp }}/profraw/shard-${{ matrix.shard }}-%8m.profraw
+        run: |
+          cargo nextest run --archive-file "$RUNNER_TEMP/kronn-tests.tar.zst" \
+            --workspace-remap "$PWD" \
+            --partition slice:${{ matrix.shard }}/3
+
+      - name: Upload coverage profiles
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-profraw-${{ matrix.shard }}
+          path: ${{ runner.temp }}/profraw/*.profraw
+          if-no-files-found: error
+          retention-days: 1
+
+      # nextest writes its store under the *workspace root* (`backend/`), not
+      # under the target dir: `store.dir` defaults to `target/nextest`
+      # relative to the workspace root.
+      - name: Upload nextest JUnit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-junit-${{ matrix.shard }}
+          path: backend/target/nextest/ci/junit.xml
+          if-no-files-found: error
+          retention-days: 7
+
+  test-backend:
+    needs: [require-ci-label, test-backend-build, test-backend-shard]
+    if: needs.require-ci-label.outputs.run == 'true' && github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov and cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov,cargo-nextest
+
+      - name: Download the instrumented test archive
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-test-archive
+          path: ${{ runner.temp }}
+
+      - name: Download every shard's coverage profiles
+        uses: actions/download-artifact@v4
+        with:
+          pattern: backend-profraw-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/profraw
+
+      # The report reads the binaries back from the archive and the profiles
+      # from beside them, exactly where `cargo llvm-cov` looks for both.
+      - name: Unpack the instrumented binaries next to the profiles
+        run: |
+          cov="$RUNNER_TEMP/cov"
+          mkdir -p "$cov"
+          cargo nextest list --archive-file "$RUNNER_TEMP/kronn-tests.tar.zst" \
+            --extract-to "$cov" --workspace-remap "$PWD" -E 'none()' > /dev/null
+          mv "$RUNNER_TEMP"/profraw/*.profraw "$cov/target/"
+          echo "KRONN_COV_TARGET=$cov/target" >> "$GITHUB_ENV"
+
+      - name: Coverage floor — the whole suite, every shard merged
+        run: |
+          export CARGO_TARGET_DIR="$KRONN_COV_TARGET"
+          eval "$(cargo llvm-cov show-env --sh)"
+          cargo llvm-cov report --summary-only \
+            --fail-under-lines 83 \
+            --fail-under-functions 83 \
+            --fail-under-regions 83
+
+      - name: cargo llvm-cov — key-management scoped floor
+        run: |
+          export CARGO_TARGET_DIR="$KRONN_COV_TARGET"
+          eval "$(cargo llvm-cov show-env --sh)"
+          ../scripts/check-keymgmt-coverage.sh
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # The ts-rs export tests were dealt across the shards; replay just them
+      # here so every binding is regenerated in one checkout.
+      - name: Types — regenerate generated.ts and fail on drift
+        env:
+          NEXTEST_PROFILE: ci
+          KRONN_TEMPLATES_DIR: ${{ github.workspace }}/templates
+          LLVM_PROFILE_FILE: /dev/null
+        run: |
+          cargo nextest run --archive-file "$RUNNER_TEMP/kronn-tests.tar.zst" \
+            --workspace-remap "$PWD" -E 'test(export_bindings)'
+          node ../frontend/scripts/assemble-generated-types.mjs
+          git diff --exit-code ../frontend/src/types/generated.ts
 
   test-backend-quality:
     needs: require-ci-label
@@ -853,6 +955,8 @@ jobs:
     if: always()
     needs:
       - require-ci-label
+      - test-backend-build
+      - test-backend-shard
       - test-backend
       - test-backend-quality
       - duplication-check
@@ -886,7 +990,7 @@ jobs:
     # This observer publishes timing evidence but never changes a functional
     # gate result: an SLO breach is a warning, while a real timeout still fails.
     if: always() && inputs.ref == '' && needs.require-ci-label.outputs.run == 'true' && github.event_name != 'push'
-    needs: [require-ci-label, test-backend, ci-quality-gates]
+    needs: [require-ci-label, test-backend-build, test-backend, ci-quality-gates]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -900,6 +1004,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           CI_CACHE_MODE: ${{ inputs.cache_mode || 'hot' }}
-          CI_COMPILED_CACHE_HIT: ${{ needs.test-backend.outputs.compiled_cache_hit }}
-          CI_COMPILED_CACHE_STATE: ${{ needs.test-backend.outputs.compiled_cache_state }}
+          CI_COMPILED_CACHE_HIT: ${{ needs.test-backend-build.outputs.compiled_cache_hit }}
+          CI_COMPILED_CACHE_STATE: ${{ needs.test-backend-build.outputs.compiled_cache_state }}
         run: node scripts/ci/backend_ci_slo.mjs
