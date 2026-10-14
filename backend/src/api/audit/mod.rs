@@ -24,6 +24,7 @@ pub(crate) mod briefing_load;
 mod briefing_residuals_tests;
 pub(crate) mod briefing_rules;
 pub mod cross_audit;
+pub(crate) mod docs_write;
 mod document_repair;
 pub mod drift;
 pub mod full;

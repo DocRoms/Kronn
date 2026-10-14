@@ -1028,7 +1028,7 @@ export function ProjectCard({
     }
   }, [selectedAuditAgent, auditTierChoice, auditConnectionId, proj.id, t, toast, onRefetch, onRefetchDiscussions, onAutoRunDiscussion, resumableAudit]);
 
-  const startPartialAudit = useCallback(async (steps: number[]) => {
+  const launchPartialAudit = useCallback(async (steps: number[]) => {
     if (auditActiveRef.current) return;
     auditActiveRef.current = true;
     setAuditLaunchError(null);
@@ -1134,6 +1134,10 @@ export function ProjectCard({
       setAuditAbortController(null);
     }
   }, [selectedAuditAgent, auditTierChoice, auditConnectionId, proj.id, t, toast, onRefetch, onRefetchDrift, onRefetchDiscussions, onOpenDiscussion]);
+
+  const startPartialAudit = useCallback(async (steps: number[]) => {
+    await templateMerge.gateLaunch(() => void launchPartialAudit(steps));
+  }, [templateMerge.gateLaunch, launchPartialAudit]);
 
   const acknowledgeDrift = useCallback(async (drift: DriftCheckResponse) => {
     if (driftAckRef.current || auditActiveRef.current) return;
@@ -1437,7 +1441,7 @@ export function ProjectCard({
       : cancelledFirstAudit
         ? { label: t('docState.action.relaunch'), run: () => void templateMerge.gateLaunch(() => void handleFullAudit({ fresh: true })) }
         : resumableAudit
-          ? { label: t('audit.resumeFromStep', resumableAudit.last_completed_step + 1), run: () => void handleFullAudit() }
+          ? { label: t('audit.resumeFromStep', resumableAudit.last_completed_step + 1), run: () => void templateMerge.gateLaunch(() => void handleFullAudit()) }
           : proj.audit_status === 'Audited' || proj.audit_status === 'Validated'
             ? { label: t('audit.revalidate.button'), run: () => setVerifyDocsOpen(true) }
             : { label: t('docState.action.openAudit'), run: openAuditView };
@@ -1762,6 +1766,7 @@ export function ProjectCard({
       </div>}
 
       <RevalidateAudit
+        gateLaunch={templateMerge.gateLaunch}
         project={proj}
         auditActive={auditActive}
         agent={selectedAuditAgent}
@@ -2702,10 +2707,8 @@ export function ProjectCard({
                     onReloadResumable={() => setResumableReload(n => n + 1)}
                     launchError={auditLaunchError}
                     onDismissLaunchError={() => setAuditLaunchError(null)}
-                    onLaunch={() => resumableAudit
-                      ? void handleFullAudit()
-                      : void templateMerge.gateLaunch(() => void handleFullAudit())}
-                    onRetryStep={(step) => void handleFullAudit({ retrySteps: [step] })}
+                    onLaunch={() => void templateMerge.gateLaunch(() => void handleFullAudit())}
+                    onRetryStep={(step) => void templateMerge.gateLaunch(() => void handleFullAudit({ retrySteps: [step] }))}
                     onRelaunchFull={() => void templateMerge.gateLaunch(() => void handleFullAudit({ fresh: true }))}
                     onAcceptStep={async (step, reason) => {
                       if (!resumableAudit) return;

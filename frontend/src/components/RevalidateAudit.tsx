@@ -23,6 +23,7 @@ type Phase =
   | { kind: 'error'; message: string; retry: 'plan' | 'run' };
 
 export interface RevalidateAuditProps {
+  gateLaunch?: (launch: () => void) => Promise<void>;
   project: Project;
   /** Another audit of this project is running: no launch meanwhile. */
   auditActive: boolean;
@@ -56,7 +57,7 @@ export interface RevalidateAuditProps {
  * the backend recomputes what is left from the fingerprints.
  */
 export function RevalidateAudit({
-  project, auditActive, agent, tier, connectionId, toast,
+  project, auditActive, agent, tier, connectionId, toast, gateLaunch,
   onRefetch, onRefetchDrift, onOpenDiscussion, onNavigate,
   open: controlledOpen, onOpenChange, hideTrigger = false,
   drift, reconfirmCount = null, docStateUnknown = false,
@@ -153,7 +154,7 @@ export function RevalidateAudit({
     void loadPlan(next);
   }, [loadPlan, onRefetch, onRefetchDrift, project.id]);
 
-  const launch = useCallback(async (deterministicOnly = false) => {
+  const runAudit = useCallback(async (deterministicOnly = false) => {
     if (runningRef.current) return;
     runningRef.current = true;
     deterministicOnlyRef.current = deterministicOnly;
@@ -178,6 +179,11 @@ export function RevalidateAudit({
       settled({ kind: 'error', message: String(e instanceof Error ? e.message : e), retry: 'run' });
     }
   }, [agent, tier, connectionId, plan, project.id, settled, toast]);
+
+  const launch = useCallback(async (deterministicOnly = false) => {
+    if (gateLaunch) await gateLaunch(() => void runAudit(deterministicOnly));
+    else await runAudit(deterministicOnly);
+  }, [gateLaunch, runAudit]);
 
   const stop = useCallback(async () => {
     try {

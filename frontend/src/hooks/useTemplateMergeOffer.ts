@@ -15,9 +15,9 @@ export interface TemplateMergeOffer {
   mode: TemplateMergeMode;
   open: () => void;
   close: () => void;
-  /** Runs `launch` at once, unless the repo is documented and not merged: then the merge panel opens first. */
+  /** Holds launch while accepted template commits await integration, or while an optional merge offer is open. */
   gateLaunch: (launch: () => void) => Promise<void>;
-  /** From the gate: run the audit that was held back, and stop offering for this session. */
+  /** Skips an optional offer; accepted commits awaiting integration cannot be bypassed. */
   launchAuditAnyway: () => void;
 }
 
@@ -42,7 +42,7 @@ export function useTemplateMergeOffer(
   useEffect(() => { planRef.current = plan; }, [plan]);
 
   useEffect(() => {
-    if (!candidate) {
+    if (!enabled) {
       request.current = null;
       return;
     }
@@ -55,22 +55,24 @@ export function useTemplateMergeOffer(
     // No state update when nothing changed: most projects read back no plan at all.
     void pending.then(p => { if (!cancelled && (p !== null || planRef.current !== null)) setPlan(p); });
     return () => { cancelled = true; };
-  }, [candidate, projectId, reads]);
+  }, [enabled, projectId, reads]);
 
   const eligible = candidate && offersTemplateMerge(plan);
-  const merge = candidate ? plan?.merge ?? null : null;
+  const merge = enabled ? plan?.merge ?? null : null;
   const status = templateMergeStatus(merge);
 
   const gateLaunch = useCallback(async (launch: () => void) => {
-    if (!candidate || skipped) { launch(); return; }
-    const current = request.current ? await request.current : plan;
-    if (offersTemplateMerge(current)) {
+    const current = request.current ? await request.current
+      : await Promise.resolve(projectsApi.templateMergePlan(projectId)).catch(() => null);
+    planRef.current = current ?? null;
+    if (current) setPlan(current);
+    if ((current?.merge.branch_ahead_commits ?? 0) > 0 || (candidate && !skipped && offersTemplateMerge(current))) {
       pendingLaunch.current = launch;
       setMode('gate');
       return;
     }
     launch();
-  }, [candidate, skipped, plan]);
+  }, [projectId, candidate, skipped]);
 
   const open = useCallback(() => setMode('browse'), []);
   const close = useCallback(() => {
@@ -79,6 +81,7 @@ export function useTemplateMergeOffer(
     setReads(n => n + 1);
   }, []);
   const launchAuditAnyway = useCallback(() => {
+    if ((planRef.current?.merge.branch_ahead_commits ?? 0) > 0) return;
     const launch = pendingLaunch.current;
     pendingLaunch.current = null;
     setSkipped(true);

@@ -535,19 +535,6 @@ pub fn reinstall(
     })
 }
 
-pub(super) struct LeaseGuard(
-    pub(super) std::sync::Arc<std::sync::Mutex<crate::AuditTracker>>,
-    pub(super) String,
-);
-
-impl Drop for LeaseGuard {
-    fn drop(&mut self) {
-        if let Ok(mut tracker) = self.0.lock() {
-            tracker.release_lease(&self.1);
-        }
-    }
-}
-
 async fn project_root(state: &AppState, id: String) -> Result<(PathBuf, String), String> {
     let project = state
         .db
@@ -603,27 +590,25 @@ pub(crate) async fn reinstall_for(
         Ok(found) => found,
         Err(e) => return Json(ApiResponse::err(e)),
     };
-    // The lease holds off an audit launch for the whole replacement.
-    let taken = state
-        .audit_tracker
-        .lock()
-        .map(|mut t| t.try_acquire_lease(&project_id))
-        .unwrap_or(false);
-    if !taken {
-        return Json(ApiResponse::err_coded(
-            ApiErrorCode::Conflict,
-            "An audit is running on this project: reinstall the template once it has finished.",
-        ));
-    }
-    let _lease = LeaseGuard(state.audit_tracker.clone(), project_id);
+    let lease =
+        match crate::api::audit::docs_write::DocsWriteLease::acquire(state, &project_id).await {
+            Ok(lease) => lease,
+            Err(error) => {
+                return Json(ApiResponse::err_coded(
+                    crate::models::ApiErrorCode::Conflict,
+                    error,
+                ))
+            }
+        };
     let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
-    let result = tokio::task::spawn_blocking(move || {
-        let report = reinstall(&root, &template_docs, &stamp, selection.as_deref())?;
-        crate::agents::runner::fix_file_ownership(&root);
-        Ok(report)
-    })
-    .await
-    .unwrap_or_else(|e| Err(format!("Task failed: {e}")));
+    let result = lease
+        .blocking(move || {
+            let report = reinstall(&root, &template_docs, &stamp, selection.as_deref())?;
+            crate::agents::runner::fix_file_ownership(&root);
+            Ok(report)
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("Task failed: {e}")));
     match result {
         Ok(report) => Json(ApiResponse::ok(report)),
         Err(e) => Json(ApiResponse::err(e)),

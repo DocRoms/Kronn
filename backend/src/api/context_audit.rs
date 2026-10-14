@@ -229,16 +229,24 @@ pub async fn attest_project_documentation(
         Ok(project) => project,
         Err(error) => return Json(ApiResponse::err(error)),
     };
+    let lease =
+        match crate::api::audit::docs_write::DocsWriteLease::acquire(&state, &project.id).await {
+            Ok(lease) => lease,
+            Err(error) => return Json(ApiResponse::err(error)),
+        };
     let project_path = project.path.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let root = crate::core::scanner::resolve_host_path(&project_path);
-        if !crate::core::scanner::detect_docs_entry(&root).is_file() {
-            return Err("documentation entry is missing — complete the template first".to_string());
-        }
-        crate::core::kronn_state::attest_documentation(&root)
-    })
-    .await
-    .unwrap_or_else(|error| Err(format!("attestation task failed: {error}")));
+    let result = lease
+        .blocking(move || {
+            let root = crate::core::scanner::resolve_host_path(&project_path);
+            if !crate::core::scanner::detect_docs_entry(&root).is_file() {
+                return Err(
+                    "documentation entry is missing — complete the template first".to_string(),
+                );
+            }
+            crate::core::kronn_state::attest_documentation(&root)
+        })
+        .await
+        .unwrap_or_else(|error| Err(format!("attestation task failed: {error}")));
     if let Err(error) = result {
         return Json(ApiResponse::err(error));
     }
@@ -259,13 +267,19 @@ pub async fn restore_audit_state(
         Ok(project) => project,
         Err(error) => return Json(ApiResponse::err(error)),
     };
+    let lease =
+        match crate::api::audit::docs_write::DocsWriteLease::acquire(&state, &project.id).await {
+            Ok(lease) => lease,
+            Err(error) => return Json(ApiResponse::err(error)),
+        };
     let project_path = project.path.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let root = crate::core::scanner::resolve_host_path(&project_path);
-        crate::core::kronn_state::restore_from_git_history(&root, &request.commit)
-    })
-    .await
-    .unwrap_or_else(|error| Err(format!("restore task failed: {error}")));
+    let result = lease
+        .blocking(move || {
+            let root = crate::core::scanner::resolve_host_path(&project_path);
+            crate::core::kronn_state::restore_from_git_history(&root, &request.commit)
+        })
+        .await
+        .unwrap_or_else(|error| Err(format!("restore task failed: {error}")));
     if let Err(error) = result {
         return Json(ApiResponse::err(error));
     }

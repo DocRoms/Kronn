@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
 fn test_state() -> AppState {

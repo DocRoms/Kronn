@@ -48,9 +48,6 @@ pub async fn set_briefing(
     Path(id): Path<String>,
     Json(req): Json<SetBriefingRequest>,
 ) -> Json<ApiResponse<bool>> {
-    if audit_running(&state, &id) {
-        return Json(ApiResponse::err(BRIEFING_LOCKED));
-    }
     let notes = req.notes.filter(|n| !n.trim().is_empty());
     let pid = id.clone();
     let project = state
@@ -62,6 +59,11 @@ pub async fn set_briefing(
     let Some(project) = project else {
         return Json(ApiResponse::err("Project not found"));
     };
+    let lease =
+        match crate::api::audit::docs_write::DocsWriteLease::acquire(&state, &project.id).await {
+            Ok(lease) => lease,
+            Err(error) => return Json(ApiResponse::err(error)),
+        };
     let project_path = crate::core::scanner::resolve_host_path(&project.path);
     if let Err(e) = sync_briefing_file(&project_path, notes.as_deref()) {
         return Json(ApiResponse::err(e));
@@ -69,6 +71,7 @@ pub async fn set_briefing(
     match state
         .db
         .with_conn(move |conn| {
+            let _lease = lease;
             crate::db::projects::update_project_briefing_notes(conn, &id, notes.as_deref())
         })
         .await
@@ -77,19 +80,6 @@ pub async fn set_briefing(
         Ok(false) => Json(ApiResponse::err("Project not found")),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
-}
-
-pub(crate) const BRIEFING_LOCKED: &str =
-    "The briefing is locked while an audit runs on this project: save it again once the audit ends.";
-
-/// An audit holds the project's lease: it read the briefing at launch and
-/// keeps syncing the coding-rules doc from it, so a save now would be undone.
-pub(crate) fn audit_running(state: &AppState, project_id: &str) -> bool {
-    state
-        .audit_tracker
-        .lock()
-        .map(|t| t.leased.contains(project_id))
-        .unwrap_or(true)
 }
 
 /// Mirror the notes into `<docs>/briefing.md`: written when set, removed when
@@ -158,8 +148,10 @@ pub(crate) async fn complete_reviewed_briefing(
     project_id: String,
     briefing_file: std::path::PathBuf,
 ) -> Result<(), String> {
+    let lease = crate::api::audit::docs_write::DocsWriteLease::acquire(state, &project_id).await?;
     let file = briefing_file.clone();
-    let reviewed = tokio::task::spawn_blocking(move || std::fs::read_to_string(&file))
+    let reviewed = lease
+        .blocking(move || std::fs::read_to_string(&file))
         .await
         .map_err(|e| format!("Briefing save interrupted: {e}"))?
         .map_err(|e| {
@@ -180,12 +172,11 @@ pub(crate) async fn complete_reviewed_briefing(
     let content = super::project_doc::reattach_facts(previous.as_deref(), &reviewed);
     if content != reviewed {
         let body = content.clone();
-        tokio::task::spawn_blocking(move || {
-            crate::core::mcp_scanner::atomic_write(&briefing_file, &body)
-        })
-        .await
-        .map_err(|e| format!("Briefing restore interrupted: {e}"))?
-        .map_err(|e| format!("Cannot restore the saved briefing answers: {e}"))?;
+        lease
+            .blocking(move || crate::core::mcp_scanner::atomic_write(&briefing_file, &body))
+            .await
+            .map_err(|e| format!("Briefing restore interrupted: {e}"))?
+            .map_err(|e| format!("Cannot restore the saved briefing answers: {e}"))?;
     }
     let saved = state
         .db
@@ -400,6 +391,7 @@ pub struct BriefingFormRequest {
 pub(crate) enum BriefingSaveError {
     /// An answer is missing or malformed.
     Invalid(String),
+    Busy(String),
     /// The docs folder leaves the project, or cannot be checked (HTTP 400).
     DocsDir(String),
     /// A listed documentation location is refused (HTTP 400, KT-999).
@@ -414,6 +406,7 @@ impl BriefingSaveError {
     pub(crate) fn message(&self) -> String {
         match self {
             Self::Invalid(m)
+            | Self::Busy(m)
             | Self::DocsDir(m)
             | Self::ExistingDocs(m)
             | Self::Rules(m)
@@ -733,6 +726,9 @@ pub(crate) async fn save_briefing_answers(
     id: &str,
     form: BriefingFormRequest,
 ) -> Result<(), BriefingSaveError> {
+    let lease = crate::api::audit::docs_write::DocsWriteLease::acquire(state, id)
+        .await
+        .map_err(BriefingSaveError::Busy)?;
     check_answers(&form)?;
     // The documentation locations are dated with `git log` (KT-999): checked
     // here, off the connection, and refused before anything is written.
@@ -757,6 +753,7 @@ pub(crate) async fn save_briefing_answers(
     state
         .db
         .with_conn(move |conn| {
+            let _lease = lease;
             let Some(project) = crate::db::projects::get_project(conn, &id)? else {
                 return Ok(Err(BriefingSaveError::NotFound));
             };
@@ -777,16 +774,13 @@ pub async fn save_briefing_form(
     Path(id): Path<String>,
     Json(form): Json<BriefingFormRequest>,
 ) -> Response {
-    // KT-1196 — a running audit reads the briefing: no save meanwhile.
-    if audit_running(&state, &id) {
-        return (
-            StatusCode::CONFLICT,
-            Json(ApiResponse::<bool>::err(BRIEFING_LOCKED)),
-        )
-            .into_response();
-    }
+    // KT-1196 — a running audit reads the briefing: `save_briefing_answers`
+    // refuses with the shared `DOCS_BUSY` while the audit holds the lease.
     match save_briefing_answers(&state, &id, form).await {
         Ok(()) => Json(ApiResponse::ok(true)).into_response(),
+        Err(BriefingSaveError::Busy(reason)) => {
+            (StatusCode::CONFLICT, Json(ApiResponse::<bool>::err(reason))).into_response()
+        }
         Err(BriefingSaveError::DocsDir(reason)) => (
             StatusCode::BAD_REQUEST,
             Json(ApiResponse::<bool>::err_coded(

@@ -321,6 +321,14 @@ pub fn merge_state(repo: &Path) -> TemplateMergeState {
     state
 }
 
+/// Refuse audits of a checkout that does not yet contain accepted template changes.
+pub(crate) fn audit_launch_refusal(repo: &Path) -> Option<String> {
+    (branch_exists(repo) && merge_branch_ahead(repo) > 0).then(|| format!(
+        "Template merge `{}` is pending integration — integrate its accepted commits into this checkout before launching an audit.",
+        docs_merge::MERGE_BRANCH,
+    ))
+}
+
 fn existing_merge_worktree(repo: &Path) -> Option<PathBuf> {
     let listing = git(repo, &["worktree", "list", "--porcelain"]).ok()?;
     let mut current: Option<PathBuf> = None;
@@ -605,14 +613,18 @@ pub async fn template_merge_start(
     body: Option<Json<TemplateMergeRequest>>,
 ) -> Json<ApiResponse<TemplateMergeView>> {
     let base = body.map(|Json(b)| b.base).unwrap_or_default();
+    let lease = match crate::api::audit::docs_write::DocsWriteLease::acquire(&state, &id).await {
+        Ok(lease) => lease,
+        Err(error) => return respond(Err(error)),
+    };
     let result = match project_root(&state, id).await {
-        Ok((root, name)) => {
-            blocking(move || {
+        Ok((root, name)) => lease
+            .blocking(move || {
                 let template = templates_docs_dir()?;
                 run_merge_in_worktree(&root, &name, base, &template)
             })
             .await
-        }
+            .unwrap_or_else(|error| Err(format!("Task failed: {error}"))),
         Err(e) => Err(e),
     };
     respond(result)
@@ -624,8 +636,15 @@ pub async fn template_merge_accept(
     AxPath(id): AxPath<String>,
     Json(body): Json<TemplateMergeAcceptRequest>,
 ) -> Json<ApiResponse<TemplateMergeAccepted>> {
+    let lease = match crate::api::audit::docs_write::DocsWriteLease::acquire(&state, &id).await {
+        Ok(lease) => lease,
+        Err(error) => return respond(Err(error)),
+    };
     let result = match project_root(&state, id).await {
-        Ok((root, _)) => blocking(move || accept_merge(&root, &body.paths)).await,
+        Ok((root, _)) => lease
+            .blocking(move || accept_merge(&root, &body.paths))
+            .await
+            .unwrap_or_else(|error| Err(format!("Task failed: {error}"))),
         Err(e) => Err(e),
     };
     respond(result)
@@ -636,8 +655,15 @@ pub async fn template_merge_discard(
     State(state): State<AppState>,
     AxPath(id): AxPath<String>,
 ) -> Json<ApiResponse<()>> {
+    let lease = match crate::api::audit::docs_write::DocsWriteLease::acquire(&state, &id).await {
+        Ok(lease) => lease,
+        Err(error) => return respond(Err(error)),
+    };
     let result = match project_root(&state, id).await {
-        Ok((root, _)) => blocking(move || discard_merge(&root)).await,
+        Ok((root, _)) => lease
+            .blocking(move || discard_merge(&root))
+            .await
+            .unwrap_or_else(|error| Err(format!("Task failed: {error}"))),
         Err(e) => Err(e),
     };
     respond(result)

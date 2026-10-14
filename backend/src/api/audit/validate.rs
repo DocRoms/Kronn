@@ -242,28 +242,11 @@ pub async fn validate_audit(
     //      UI — a POST fired before the validation finished is refused).
     // The project lease is held from the gate through mark_validated so no
     // concurrent run can mutate docs between the check and the write.
-    if !state
-        .audit_tracker
-        .lock()
-        .map(|mut t| t.try_acquire_lease(&project.id))
-        .unwrap_or(false)
-    {
-        return Json(ApiResponse::err(
-            "An audit is currently running on this project — validate once it has finished.",
-        ));
-    }
-    struct LeaseGuard(
-        std::sync::Arc<std::sync::Mutex<crate::AuditTracker>>,
-        String,
-    );
-    impl Drop for LeaseGuard {
-        fn drop(&mut self) {
-            if let Ok(mut t) = self.0.lock() {
-                t.release_lease(&self.1);
-            }
-        }
-    }
-    let _lease = LeaseGuard(state.audit_tracker.clone(), project.id.clone());
+    let lease =
+        match crate::api::audit::docs_write::DocsWriteLease::try_acquire(&state, &project.id) {
+            Ok(lease) => lease,
+            Err(error) => return Json(ApiResponse::err(error)),
+        };
 
     // KT-982 — settling every Critical and High sheet stands in for the
     // validation discussion's terminal marker.
@@ -440,9 +423,9 @@ pub async fn validate_audit(
             .and_then(|stored| stored.started_by)
     };
 
-    // Run filesystem I/O on blocking thread pool
     let by_for_file = by.clone();
-    let validate_result = tokio::task::spawn_blocking(move || -> Result<(), String> {
+    super::full::stop_validation_agents(&state, &project.id).await;
+    let validate_result = lease.blocking(move || -> Result<(), String> {
         let project_path = scanner::resolve_host_path(&project_path_str);
         let index_file = scanner::detect_docs_entry(&project_path);
 
@@ -567,23 +550,29 @@ pub async fn mark_bootstrapped(
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
+    let lease =
+        match crate::api::audit::docs_write::DocsWriteLease::acquire(&state, &project.id).await {
+            Ok(lease) => lease,
+            Err(error) => return Json(ApiResponse::err(error)),
+        };
     let project_path_str = project.path.clone();
 
-    let result = tokio::task::spawn_blocking(move || -> Result<(), String> {
-        let project_path = scanner::resolve_host_path(&project_path_str);
-        let index_file = scanner::detect_docs_entry(&project_path);
+    let result = lease
+        .blocking(move || -> Result<(), String> {
+            let project_path = scanner::resolve_host_path(&project_path_str);
+            let index_file = scanner::detect_docs_entry(&project_path);
 
-        if !index_file.exists() {
-            return Err(format!(
-                "{} not found",
-                crate::core::docs_location::DocsRoot::of(&project_path).path("AGENTS.md")
-            ));
-        }
+            if !index_file.exists() {
+                return Err(format!(
+                    "{} not found",
+                    crate::core::docs_location::DocsRoot::of(&project_path).path("AGENTS.md")
+                ));
+            }
 
-        kronn_state::mark_bootstrapped(&project_path)
-    })
-    .await
-    .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+            kronn_state::mark_bootstrapped(&project_path)
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     if let Err(e) = result {
         return Json(ApiResponse::err(e));
@@ -1403,8 +1392,23 @@ mod validate_gate_tests {
                 })?;
             Ok(())
         }).await.unwrap();
+        let token = tokio_util::sync::CancellationToken::new();
+        state
+            .cancel_registry
+            .lock()
+            .unwrap()
+            .insert("d1".into(), token.clone());
         let response = call(&state).await;
         assert!(!response.success);
+        assert!(
+            !token.is_cancelled(),
+            "validating must not stop the unfinished validator"
+        );
+        assert!(state
+            .db
+            .with_read_conn(|conn| crate::db::agent_dispatch::has_active_for_discussion(conn, "d1"))
+            .await
+            .unwrap());
         assert!(response.error.unwrap().contains("validation agent"));
         assert!(crate::core::kronn_state::read(tmp.path()).is_none_or(|s| s.validated_at.is_none()));
     }

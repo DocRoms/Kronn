@@ -3929,6 +3929,37 @@ pub(super) async fn make_agent_stream_inner(
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentStreamEvent>(64);
 
+    // Durable responses use their dispatch id as the cancellation key. This
+    // lets the UI stop one queued/running reply without killing a sibling from
+    // another turn in the same discussion. Legacy non-dispatch streams keep
+    // the discussion id key used by the global Stop action.
+
+    let cancel_guard = match crate::api::audit::docs_write::validation_cancel_guard(
+        &state,
+        disc_id.clone(),
+        dispatch_job_id.clone(),
+    )
+    .await
+    {
+        Ok(guard) => guard,
+        Err(reason) => {
+            if let Some(sender) = completion_tx.take() {
+                let _ = sender.send(AgentExecutionOutcome::RuntimeUnavailable {
+                    reason: reason.clone(),
+                });
+            }
+            let stream: SseStream = Box::pin(futures::stream::once(async move {
+                Ok::<_, Infallible>(
+                    Event::default()
+                        .event("error")
+                        .data(serde_json::json!({"error":reason}).to_string()),
+                )
+            }));
+            return Sse::new(prepend_initial_event(stream, initial_event.take()));
+        }
+    };
+    let cancel_token = cancel_guard.token.clone();
+
     // An agent run WILL start past this point (every preflight
     // early-return is above): mark the disc as owed a reply so a restart
     // before the first durable trace is caught by the boot reconcile.
@@ -3953,14 +3984,6 @@ pub(super) async fn make_agent_stream_inner(
             );
         }
     }
-
-    // Durable responses use their dispatch id as the cancellation key. This
-    // lets the UI stop one queued/running reply without killing a sibling from
-    // another turn in the same discussion. Legacy non-dispatch streams keep
-    // the discussion id key used by the global Stop action.
-    let cancel_key = dispatch_job_id.clone().unwrap_or_else(|| disc_id.clone());
-    let cancel_guard = crate::CancelGuard::insert(&state.cancel_registry, cancel_key);
-    let cancel_token = cancel_guard.token.clone();
 
     // Spawn background task — always saves to DB even if client disconnects
     let semaphore = state.agent_semaphore.clone();

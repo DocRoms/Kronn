@@ -6,7 +6,7 @@ use axum::extract::{Path, State};
 
 use crate::AppState;
 
-fn state() -> AppState {
+pub(super) fn state() -> AppState {
     AppState::new_defaults(
         std::sync::Arc::new(tokio::sync::RwLock::new(
             crate::core::config::default_config(),
@@ -16,7 +16,7 @@ fn state() -> AppState {
     )
 }
 
-async fn seed_project(state: &AppState, path: &std::path::Path) {
+pub(super) async fn seed_project(state: &AppState, path: &std::path::Path) {
     let path = path.to_string_lossy().into_owned();
     state
         .db
@@ -320,7 +320,9 @@ async fn a_lease_nobody_could_settle_is_signalled_then_released_by_the_cleanup()
 }
 
 /// A validation discussion of run `r1` with one queued agent turn.
-async fn queued_validation(state: &AppState) -> crate::db::agent_dispatch::AgentDispatchJob {
+pub(super) async fn queued_validation(
+    state: &AppState,
+) -> crate::db::agent_dispatch::AgentDispatchJob {
     state
         .db
         .with_conn(|conn| {
@@ -379,6 +381,41 @@ async fn a_validation_agent_waits_while_an_audit_of_its_project_runs() {
         .lock()
         .unwrap()
         .start_progress("p1", 16, "full_audit");
+    let job = state
+        .db
+        .with_conn(|conn| crate::db::agent_dispatch::claim(conn, "job-val"))
+        .await
+        .unwrap()
+        .expect("claimed");
+
+    let stream =
+        crate::api::discussions::runtime::stream_claimed_dispatch_job(state.clone(), job, None)
+            .await;
+    assert!(stream.is_none(), "no agent starts");
+    let held = state
+        .db
+        .with_conn(|conn| crate::db::agent_dispatch::get(conn, "job-val"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        held.status,
+        crate::db::agent_dispatch::DispatchStatus::Pending
+    );
+    assert!(held
+        .last_error
+        .as_deref()
+        .is_some_and(|e| e.starts_with("audit_running")));
+    assert_eq!(held.attempts, 0, "a held turn spends no attempt");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn docs_writer_lease_holds_validation_without_progress() {
+    let state = state();
+    let project = tempfile::tempdir().unwrap();
+    seed_project(&state, project.path()).await;
+    queued_validation(&state).await;
+    state.audit_tracker.lock().unwrap().try_acquire_lease("p1");
     let job = state
         .db
         .with_conn(|conn| crate::db::agent_dispatch::claim(conn, "job-val"))

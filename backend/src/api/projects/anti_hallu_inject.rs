@@ -131,6 +131,11 @@ pub async fn inject(
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
+    let _lease =
+        match crate::api::audit::docs_write::DocsWriteLease::acquire(&state, &project.id).await {
+            Ok(lease) => lease,
+            Err(error) => return Json(ApiResponse::err(error)),
+        };
     let project_path = scanner::resolve_host_path(&project.path);
     match crate::api::audit::anti_hallu_step::apply(&project_path) {
         Ok(result) => {
@@ -183,6 +188,11 @@ pub async fn sync_redirectors(
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
+    let _lease =
+        match crate::api::audit::docs_write::DocsWriteLease::acquire(&state, &project.id).await {
+            Ok(lease) => lease,
+            Err(error) => return Json(ApiResponse::err(error)),
+        };
     let project_path = scanner::resolve_host_path(&project.path);
     let template_dir = super::template::resolve_templates_dir();
     if !template_dir.exists() {

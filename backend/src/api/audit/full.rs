@@ -260,7 +260,7 @@ pub(crate) async fn stop_validation_agents(state: &AppState, project_id: &str) -
 /// One-shot SSE error response, used for every pre-launch refusal (bad
 /// project, non-resumable run, already-running, unwired kind). Keeps the
 /// refusal shape identical everywhere so clients parse one `error` event.
-fn sse_error(msg: impl Into<String>) -> Sse<SseStream> {
+pub(super) fn sse_error(msg: impl Into<String>) -> Sse<SseStream> {
     sse_refusal(serde_json::json!({ "error": msg.into() }))
 }
 
@@ -296,6 +296,9 @@ pub async fn full_audit(
     let project_id = project.id.clone();
     let project_path_str = project.path.clone();
     let project_path = scanner::resolve_host_path(&project.path);
+    if let Some(error) = crate::api::projects::template_merge::audit_launch_refusal(&project_path) {
+        return sse_error(error);
+    }
     // Every artefact derives from this one root (KT-1192); a configured
     // folder failing containment refuses the run.
     let docs_root = match crate::core::docs_location::DocsRoot::for_project(&project_path) {
@@ -420,6 +423,12 @@ pub async fn full_audit(
             project_id.clone(),
         );
         drop_guard.hold_lease();
+        if let Some(error) = crate::api::projects::template_merge::audit_launch_refusal(&project_path) {
+            drop_guard.disarm();
+            yield Event::default().event("error").data(serde_json::json!({"error":error}).to_string());
+            return;
+        }
+
 
         // Clear any stale cancellation flag for this project.
         if let Ok(mut tracker) = audit_tracker.lock() {
@@ -4081,6 +4090,11 @@ pub async fn cancel_audit(
         ));
     }
 
+    let lease =
+        match crate::api::audit::docs_write::DocsWriteLease::acquire(&state, &project_id).await {
+            Ok(lease) => lease,
+            Err(error) => return Json(ApiResponse::err(error)),
+        };
     // 2. Delete audit-created files — DATA-LOSS GUARDS via
     // `should_preserve_docs_folder()`.
     //
@@ -4110,12 +4124,13 @@ pub async fn cancel_audit(
     // overwritten on every audit run anyway. The operator never edits
     // them by hand.
     let project_path_str = project.path.clone();
-    let cleanup_result = tokio::task::spawn_blocking(move || -> Result<(), String> {
-        let project_path = scanner::resolve_host_path(&project_path_str);
-        cleanup_audit_files(&project_path)
-    })
-    .await
-    .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+    let cleanup_result = lease
+        .blocking(move || -> Result<(), String> {
+            let project_path = scanner::resolve_host_path(&project_path_str);
+            cleanup_audit_files(&project_path)
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     if let Err(e) = cleanup_result {
         // Clear cancellation flag before returning error

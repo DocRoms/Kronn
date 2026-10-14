@@ -30,49 +30,43 @@ pub async fn install_template(
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
-    if !state
-        .audit_tracker
-        .lock()
-        .map(|mut t| t.try_acquire_lease(&project.id))
-        .unwrap_or(false)
-    {
-        return Json(ApiResponse::err(
-            "An audit is running on this project — install the template once it has finished.",
-        ));
-    }
     let lease =
-        super::template_reinstall::LeaseGuard(state.audit_tracker.clone(), project.id.clone());
+        match crate::api::audit::docs_write::DocsWriteLease::acquire(&state, &project.id).await {
+            Ok(lease) => lease,
+            Err(error) => return Json(ApiResponse::err(error)),
+        };
     let project_path_str = project.path.clone();
 
     // Run filesystem I/O on blocking thread pool
-    let install_result = tokio::task::spawn_blocking(move || -> Result<(), String> {
-        let _lease = lease;
-        let project_path = scanner::resolve_host_path(&project_path_str);
-        if !project_path.exists() {
-            return Err(format!(
-                "Project path not found: {}",
-                project_path.display()
-            ));
-        }
-
-        // Snapshot target-specific agent integrations before Kronn creates
-        // any instruction file. The shared AGENTS.md is always installed;
-        // vendor adapters are created only for agents already declared by
-        // the repository.
-        let detected_adapters = crate::core::root_agent_files::detect_agent_adapters(&project_path);
-
-        // Permission check on whichever doc-folder the project already
-        // has (`docs/`, legacy `ai/`, or alt `doc/`). Fresh projects
-        // skip this — there's nothing to check yet.
-        // A configured folder that fails containment stops the install (KT-263).
-        let existing_docs = crate::core::docs_location::guard_write(&project_path)?;
-        if existing_docs.exists() {
-            if let Err(e) = crate::api::audit::check_ai_dir_permissions(&existing_docs) {
-                let folder_name = existing_docs
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("docs");
+    let install_result = lease
+        .blocking(move || -> Result<(), String> {
+            let project_path = scanner::resolve_host_path(&project_path_str);
+            if !project_path.exists() {
                 return Err(format!(
+                    "Project path not found: {}",
+                    project_path.display()
+                ));
+            }
+
+            // Snapshot target-specific agent integrations before Kronn creates
+            // any instruction file. The shared AGENTS.md is always installed;
+            // vendor adapters are created only for agents already declared by
+            // the repository.
+            let detected_adapters =
+                crate::core::root_agent_files::detect_agent_adapters(&project_path);
+
+            // Permission check on whichever doc-folder the project already
+            // has (`docs/`, legacy `ai/`, or alt `doc/`). Fresh projects
+            // skip this — there's nothing to check yet.
+            // A configured folder that fails containment stops the install (KT-263).
+            let existing_docs = crate::core::docs_location::guard_write(&project_path)?;
+            if existing_docs.exists() {
+                if let Err(e) = crate::api::audit::check_ai_dir_permissions(&existing_docs) {
+                    let folder_name = existing_docs
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("docs");
+                    return Err(format!(
                     "{}/ directory exists but has permission issues that could not be fixed: {}. \
                      Run: sudo chown -R $(id -u):$(id -g) {}/{}/",
                     folder_name,
@@ -80,86 +74,87 @@ pub async fn install_template(
                     project_path.display(),
                     folder_name
                 ));
+                }
             }
-        }
 
-        let template_dir = resolve_templates_dir();
-        if !template_dir.exists() {
-            return Err(format!(
-                "Templates directory not found: {}",
-                template_dir.display()
+            let template_dir = resolve_templates_dir();
+            if !template_dir.exists() {
+                return Err(format!(
+                    "Templates directory not found: {}",
+                    template_dir.display()
+                ));
+            }
+
+            // 0.7.1+ : ship the modern `docs/AGENTS.md` convention. Fresh
+            // projects always get docs/; legacy `ai/` projects keep their
+            // layout until the operator clicks Migrate.
+            let docs_template = template_dir.join("docs");
+            // Unconfigured, a missing folder resolves to `docs/` (fresh project).
+            let docs_target = existing_docs;
+            let provenance_before = crate::core::doc_provenance::snapshot_tracked(&project_path)?;
+            crate::core::template_manifest::apply_renames(&project_path, &docs_template)?;
+            let mut created_files = Vec::new();
+            if docs_template.is_dir() {
+                let docs_root = crate::core::docs_location::DocsRoot::for_project(&project_path)?;
+                created_files.extend(copy_dir_nondestructive_in(
+                    &docs_template,
+                    &docs_target,
+                    &docs_root,
+                )?);
+            }
+            crate::core::template_manifest::record_install(&project_path, &docs_template)?;
+            ensure_agent_writable_subfolders(&project_path, &docs_target);
+            // Human-friendly landing page for `docs/`. Idempotent, best-effort.
+            if let Err(e) =
+                crate::core::docs_migration::ensure_docs_index(&project_path, &docs_target)
+            {
+                tracing::warn!("docs index not installed: {e}");
+            }
+
+            let adapter_report = crate::core::root_agent_files::install_detected_agent_files(
+                &project_path,
+                &template_dir,
+                &detected_adapters,
+            );
+            created_files.extend(crate::core::root_agent_files::created_agent_paths(
+                &project_path,
+                &adapter_report,
             ));
-        }
+            for failure in adapter_report.failed {
+                tracing::warn!("Agent instruction install failed: {failure}");
+            }
 
-        // 0.7.1+ : ship the modern `docs/AGENTS.md` convention. Fresh
-        // projects always get docs/; legacy `ai/` projects keep their
-        // layout until the operator clicks Migrate.
-        let docs_template = template_dir.join("docs");
-        // Unconfigured, a missing folder resolves to `docs/` (fresh project).
-        let docs_target = existing_docs;
-        let provenance_before = crate::core::doc_provenance::snapshot_tracked(&project_path)?;
-        crate::core::template_manifest::apply_renames(&project_path, &docs_template)?;
-        let mut created_files = Vec::new();
-        if docs_template.is_dir() {
-            let docs_root = crate::core::docs_location::DocsRoot::for_project(&project_path)?;
-            created_files.extend(copy_dir_nondestructive_in(
-                &docs_template,
-                &docs_target,
-                &docs_root,
-            )?);
-        }
-        crate::core::template_manifest::record_install(&project_path, &docs_template)?;
-        ensure_agent_writable_subfolders(&project_path, &docs_target);
-        // Human-friendly landing page for `docs/`. Idempotent, best-effort.
-        if let Err(e) = crate::core::docs_migration::ensure_docs_index(&project_path, &docs_target)
-        {
-            tracing::warn!("docs index not installed: {e}");
-        }
+            // Pre-fill template placeholders with filesystem-derived defaults —
+            // scoped EXCLUSIVELY to the files this very call created (ownership
+            // by construction, Codex A2): a pre-existing docs/ tree or root file
+            // is user content and is never walked.
+            let _ = crate::core::docs_migration::prefill_files(&project_path, &created_files);
+            crate::core::doc_provenance::note_snapshot_writes(
+                &project_path,
+                &provenance_before,
+                crate::core::doc_provenance::DocWriter::TemplateReinstall,
+            )
+            .map_err(|e| {
+                format!("Template files installed, but provenance could not be recorded: {e}")
+            })?;
 
-        let adapter_report = crate::core::root_agent_files::install_detected_agent_files(
-            &project_path,
-            &template_dir,
-            &detected_adapters,
-        );
-        created_files.extend(crate::core::root_agent_files::created_agent_paths(
-            &project_path,
-            &adapter_report,
-        ));
-        for failure in adapter_report.failed {
-            tracing::warn!("Agent instruction install failed: {failure}");
-        }
+            // KT-841 — no more "FIRST-RUN TASK" prompt injected into
+            // docs/AGENTS.md at install time: that block lived in the exact
+            // file every subsequent agent reads as "the tiered context loader",
+            // so a run that never reached Step 9/10's self-delete (interrupted
+            // audit, or a manually-invoked agent that never ran Kronn's audit
+            // at all) left it there permanently, confusing later reads. The
+            // Full audit's own Step 1 prompt (`ANALYSIS_STEPS[0]`, sent
+            // directly to the agent, never persisted to disk) is already
+            // self-sufficient — it doesn't depend on this block. Kronn still
+            // strips the LEGACY marker from projects installed before this fix
+            // (see `remove_bootstrap_block`, called at Full-audit Phase 2).
+            runner::fix_file_ownership(&project_path);
 
-        // Pre-fill template placeholders with filesystem-derived defaults —
-        // scoped EXCLUSIVELY to the files this very call created (ownership
-        // by construction, Codex A2): a pre-existing docs/ tree or root file
-        // is user content and is never walked.
-        let _ = crate::core::docs_migration::prefill_files(&project_path, &created_files);
-        crate::core::doc_provenance::note_snapshot_writes(
-            &project_path,
-            &provenance_before,
-            crate::core::doc_provenance::DocWriter::TemplateReinstall,
-        )
-        .map_err(|e| {
-            format!("Template files installed, but provenance could not be recorded: {e}")
-        })?;
-
-        // KT-841 — no more "FIRST-RUN TASK" prompt injected into
-        // docs/AGENTS.md at install time: that block lived in the exact
-        // file every subsequent agent reads as "the tiered context loader",
-        // so a run that never reached Step 9/10's self-delete (interrupted
-        // audit, or a manually-invoked agent that never ran Kronn's audit
-        // at all) left it there permanently, confusing later reads. The
-        // Full audit's own Step 1 prompt (`ANALYSIS_STEPS[0]`, sent
-        // directly to the agent, never persisted to disk) is already
-        // self-sufficient — it doesn't depend on this block. Kronn still
-        // strips the LEGACY marker from projects installed before this fix
-        // (see `remove_bootstrap_block`, called at Full-audit Phase 2).
-        runner::fix_file_ownership(&project_path);
-
-        Ok(())
-    })
-    .await
-    .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+            Ok(())
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     if let Err(e) = install_result {
         return Json(ApiResponse::err(e));

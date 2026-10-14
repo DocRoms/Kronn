@@ -109,52 +109,44 @@ pub async fn acknowledge_drift(
         Ok(found) => found,
         Err(e) => return Json(ApiResponse::err(e)),
     };
-    if !state
-        .audit_tracker
-        .lock()
-        .map(|mut t| t.try_acquire_lease(&project_id))
-        .unwrap_or(false)
-    {
-        return Json(ApiResponse::err(
-            "An audit is currently running on this project — acknowledge once it has finished.",
-        ));
-    }
-    let tracker = state.audit_tracker.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        crate::core::checksums::acknowledge_sections(&project_path, &req.sections)?;
-        // A section with recorded citations is judged by them: acknowledge those too.
-        let recorded = crate::core::citation_drift::read_strict(&project_path)?
-            .map(|f| f.docs)
-            .unwrap_or_default();
-        for doc in req.sections.iter().filter(|d| recorded.contains_key(*d)) {
-            crate::core::citation_drift::acknowledge(&project_path, doc)?;
-        }
-        if let Err(e) = crate::core::doc_provenance::record_validation(
-            &project_path,
-            &req.sections,
-            crate::core::doc_provenance::ValidationReason::Acknowledged,
-        ) {
-            tracing::warn!("Human-validation provenance not recorded: {e}");
-        }
-        let placeholders = crate::api::projects::template_reinstall::placeholder_docs(
-            &project_path,
-            &crate::api::projects::template::resolve_templates_dir().join("docs"),
-        );
-        Ok(drift_response(
-            crate::core::checksums::check_drift_cached(&project_path),
-            placeholders,
-            crate::core::template_manifest::check(
+    let lease =
+        match crate::api::audit::docs_write::DocsWriteLease::acquire(&state, &project_id).await {
+            Ok(lease) => lease,
+            Err(error) => return Json(ApiResponse::err(error)),
+        };
+    let result = lease
+        .blocking(move || {
+            crate::core::checksums::acknowledge_sections(&project_path, &req.sections)?;
+            // A section with recorded citations is judged by them: acknowledge those too.
+            let recorded = crate::core::citation_drift::read_strict(&project_path)?
+                .map(|f| f.docs)
+                .unwrap_or_default();
+            for doc in req.sections.iter().filter(|d| recorded.contains_key(*d)) {
+                crate::core::citation_drift::acknowledge(&project_path, doc)?;
+            }
+            if let Err(e) = crate::core::doc_provenance::record_validation(
+                &project_path,
+                &req.sections,
+                crate::core::doc_provenance::ValidationReason::Acknowledged,
+            ) {
+                tracing::warn!("Human-validation provenance not recorded: {e}");
+            }
+            let placeholders = crate::api::projects::template_reinstall::placeholder_docs(
                 &project_path,
                 &crate::api::projects::template::resolve_templates_dir().join("docs"),
-            )
-            .ok(),
-        ))
-    })
-    .await
-    .unwrap_or_else(|e| Err(format!("Task failed: {e}")));
-    if let Ok(mut t) = tracker.lock() {
-        t.release_lease(&project_id);
-    }
+            );
+            Ok(drift_response(
+                crate::core::checksums::check_drift_cached(&project_path),
+                placeholders,
+                crate::core::template_manifest::check(
+                    &project_path,
+                    &crate::api::projects::template::resolve_templates_dir().join("docs"),
+                )
+                .ok(),
+            ))
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("Task failed: {e}")));
     match result {
         Ok(drift) => Json(ApiResponse::ok(drift)),
         Err(e) => Json(ApiResponse::err(e)),
@@ -213,31 +205,26 @@ pub async fn acknowledge_citations(
         Ok(found) => found,
         Err(e) => return Json(ApiResponse::err(e)),
     };
-    if !state
-        .audit_tracker
-        .lock()
-        .map(|mut t| t.try_acquire_lease(&project_id))
-        .unwrap_or(false)
-    {
-        return Json(ApiResponse::err(
-            "An audit is currently running on this project — acknowledge once it has finished.",
-        ));
-    }
-    let tracker = state.audit_tracker.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let section = crate::core::citation_drift::acknowledge(&project_path, &req.doc)?;
-        if let Err(e) = crate::core::doc_provenance::record_validation(
-            &project_path,
-            std::slice::from_ref(&req.doc),
-            crate::core::doc_provenance::ValidationReason::Acknowledged,
-        ) {
-            tracing::warn!("Human-validation provenance not recorded: {e}");
-        }
-        let documents = crate::core::audit_documents::capture(&project_path)?;
-        Ok((section, req.doc, documents))
-    })
-    .await
-    .unwrap_or_else(|e| Err(format!("Task failed: {e}")));
+    let lease =
+        match crate::api::audit::docs_write::DocsWriteLease::acquire(&state, &project_id).await {
+            Ok(lease) => lease,
+            Err(error) => return Json(ApiResponse::err(error)),
+        };
+    let result = lease
+        .blocking(move || {
+            let section = crate::core::citation_drift::acknowledge(&project_path, &req.doc)?;
+            if let Err(e) = crate::core::doc_provenance::record_validation(
+                &project_path,
+                std::slice::from_ref(&req.doc),
+                crate::core::doc_provenance::ValidationReason::Acknowledged,
+            ) {
+                tracing::warn!("Human-validation provenance not recorded: {e}");
+            }
+            let documents = crate::core::audit_documents::capture(&project_path)?;
+            Ok((section, req.doc, documents))
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("Task failed: {e}")));
     let result = match result {
         Ok((section, doc, documents)) => {
             let pid = project_id.clone();
@@ -252,9 +239,6 @@ pub async fn acknowledge_citations(
         }
         Err(e) => Err(e),
     };
-    if let Ok(mut t) = tracker.lock() {
-        t.release_lease(&project_id);
-    }
     match result {
         Ok(section) => Json(ApiResponse::ok(section)),
         Err(e) => Json(ApiResponse::err(e)),
@@ -293,6 +277,9 @@ pub async fn partial_audit(
     // Safety: early return above guarantees project is Some
     let project = project.expect("project is Some after early return");
     let project_path = scanner::resolve_host_path(&project.path);
+    if let Some(error) = crate::api::projects::template_merge::audit_launch_refusal(&project_path) {
+        return super::full::sse_error(error);
+    }
     // One root for every artefact (KT-1192); a broken override refuses.
     let docs_root = match crate::core::docs_location::DocsRoot::for_project(&project_path) {
         Ok(docs_root) => docs_root,
@@ -551,6 +538,12 @@ pub(crate) async fn run_partial_pipeline(
             guard_project,
         );
         drop_guard.hold_lease();
+        if let Some(error) = crate::api::projects::template_merge::audit_launch_refusal(&project_path) {
+            drop_guard.disarm();
+            yield Event::default().event("error").data(serde_json::json!({"error":error}).to_string());
+            return;
+        }
+
 
         // A flag left by a previous run's Stop must not stop this one.
         if let Ok(mut tracker) = audit_tracker.lock() {

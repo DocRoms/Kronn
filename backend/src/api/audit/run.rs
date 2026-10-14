@@ -551,3 +551,7 @@ mod audit_status_tests {
 #[cfg(test)]
 #[path = "run_states_tests.rs"]
 mod run_states_tests;
+
+#[cfg(test)]
+#[path = "docs_writer_tests.rs"]
+mod docs_writer_tests;

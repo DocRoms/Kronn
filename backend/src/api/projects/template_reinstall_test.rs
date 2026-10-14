@@ -466,7 +466,10 @@ async fn a_held_audit_lease_refuses_the_reinstall_and_touches_nothing() {
 
     assert!(!response.success);
     assert_eq!(response.error_code.as_deref(), Some("conflict"));
-    assert!(response.error.unwrap().contains("audit is running"));
+    assert_eq!(
+        response.error.as_deref(),
+        Some(crate::api::audit::docs_write::DOCS_BUSY)
+    );
     assert_eq!(read(&project, "docs/AGENTS.md"), "mine {{X}}");
     assert!(!project.join(".kronn").exists());
     // The plan says so too, so the UI can disable the action.

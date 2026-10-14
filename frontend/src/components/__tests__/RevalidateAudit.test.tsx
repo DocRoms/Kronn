@@ -115,6 +115,18 @@ beforeEach(() => {
 });
 
 describe('RevalidateAudit', () => {
+  it('waits for the template integration gate before starting a revalidation', async () => {
+    let pending: (() => void) | null = null;
+    const gateLaunch = vi.fn(async (launch: () => void) => { pending = launch; });
+    setup({ gateLaunch });
+    await openPanel();
+    await act(async () => { fireEvent.click(await screen.findByTestId('revalidate-launch')); });
+    expect(gateLaunch).toHaveBeenCalledTimes(1);
+    expect(projectsApi.revalidateAuditStream).not.toHaveBeenCalled();
+    await act(async () => { pending?.(); });
+    expect(projectsApi.revalidateAuditStream).toHaveBeenCalledTimes(1);
+  });
+
   it('shows only for an audited or validated project', () => {
     setup({ project: { ...PROJECT, audit_status: 'NoTemplate' } });
     expect(screen.queryByTestId('project-revalidate')).toBeNull();

@@ -255,7 +255,7 @@ describe('audit entry point', () => {
     const audited = renderHook(() => useTemplateMergeOffer('p2', 'Audited', true));
     await act(() => audited.result.current.gateLaunch(audit));
     expect(audit).toHaveBeenCalledTimes(2);
-    expect(api.templateMergePlan).toHaveBeenCalledTimes(1);
+    expect(api.templateMergePlan).toHaveBeenCalledTimes(2);
   });
 
   it('a plan read failure never blocks the audit', async () => {
@@ -376,7 +376,7 @@ describe('merge already on disk (KT-1182)', () => {
     expect(screen.getByTestId('template-merge-gate')).toHaveTextContent('Une fusion du template v2 est en cours');
   });
 
-  it('"Lancer l\'audit" stops re-offering the merge once accepted commits wait to be integrated', async () => {
+  it('"Lancer l\'audit" blocks the launch until accepted commits are integrated', async () => {
     const audit = vi.fn();
     api.templateMergePlan.mockResolvedValue(plan({ merge: TO_INTEGRATE }));
     const { result: hook } = renderHook(() => useTemplateMergeOffer('p1', 'TemplateInstalled', true));
@@ -384,8 +384,10 @@ describe('merge already on disk (KT-1182)', () => {
     expect(hook.current.eligible).toBe(false);
     await act(() => hook.current.gateLaunch(audit));
     await act(() => hook.current.gateLaunch(audit));
-    expect(audit).toHaveBeenCalledTimes(2);
-    expect(hook.current.mode).toBe('closed');
+    expect(audit).not.toHaveBeenCalled();
+    expect(hook.current.mode).toBe('gate');
+    act(() => hook.current.launchAuditAnyway());
+    expect(audit).not.toHaveBeenCalled();
   });
 
   it('"Lancer l\'audit" with an unfinished merge opens it first, and re-reads the state on close', async () => {
@@ -402,7 +404,29 @@ describe('merge already on disk (KT-1182)', () => {
     await waitFor(() => expect(hook.current.status).toBe('to_integrate'));
     expect(api.templateMergePlan).toHaveBeenCalledTimes(2);
     await act(() => hook.current.gateLaunch(audit));
+    expect(audit).not.toHaveBeenCalled();
+    api.templateMergePlan.mockResolvedValue(plan({ merge: mergeState(), files: [], correspondence: [] }));
+    act(() => hook.current.close());
+    await waitFor(() => expect(hook.current.status).toBe('none'));
+    await act(() => hook.current.gateLaunch(audit));
     expect(audit).toHaveBeenCalledTimes(1);
+  });
+
+  it('blocks an already audited project while accepted template commits wait', async () => {
+    const audit = vi.fn();
+    api.templateMergePlan.mockResolvedValue(plan({ merge: TO_INTEGRATE }));
+    const { result: hook } = renderHook(() => useTemplateMergeOffer('p1', 'Audited', true));
+    await waitFor(() => expect(hook.current.status).toBe('to_integrate'));
+    await act(() => hook.current.gateLaunch(audit));
+    expect(audit).not.toHaveBeenCalled();
+    expect(hook.current.mode).toBe('gate');
+  });
+
+  it('does not offer a bypass after the merge has accepted commits', async () => {
+    api.templateMergePlan.mockResolvedValue(plan({ merge: TO_INTEGRATE }));
+    wrap(<TemplateMergePanel projectId="p1" gate onLaunchAuditAnyway={vi.fn()} />);
+    await screen.findByText(/Intégrer.*commit/i);
+    expect(screen.queryByRole('button', { name: "Lancer l'audit sans fusionner" })).toBeNull();
   });
 
   it('the slot banner says "à intégrer" or offers to resume, by status', () => {

@@ -439,6 +439,9 @@ pub async fn revalidate_audit(
         Err(e) => return single_error(e),
     };
     let project_path = scanner::resolve_host_path(&project.path);
+    if let Some(error) = crate::api::projects::template_merge::audit_launch_refusal(&project_path) {
+        return single_error(error);
+    }
     // A configured folder failing containment refuses the run (KT-1192).
     if let Err(reason) = crate::core::docs_location::DocsRoot::for_project(&project_path) {
         return single_error(reason);
@@ -494,15 +497,19 @@ fn deterministic_only(
     project_path: std::path::PathBuf,
 ) -> Sse<SseStream> {
     let stream: SseStream = Box::pin(async_stream::try_stream! {
-        let tracker = state.audit_tracker.clone();
-        if !tracker.lock().map(|mut t| t.try_acquire_lease(&project_id)).unwrap_or(false) {
-            yield Event::default().event("error").data(serde_json::json!({
-                "error": "An audit is currently running on this project; revalidate once it has finished.",
-            }).to_string());
+        let lease = match crate::api::audit::docs_write::DocsWriteLease::acquire(&state, &project_id).await {
+            Ok(lease) => lease,
+            Err(error) => {
+                yield Event::default().event("error").data(serde_json::json!({"error":error}).to_string());
+                return;
+            }
+        };
+        if let Some(error) = crate::api::projects::template_merge::audit_launch_refusal(&project_path) {
+            yield Event::default().event("error").data(serde_json::json!({"error":error}).to_string());
             return;
         }
         let path = project_path.clone();
-        let applied = tokio::task::spawn_blocking(move || {
+        let applied = lease.blocking(move || {
             let before = crate::core::audit_documents::capture(&path)?;
             let reanchored = apply_reanchors(&path)?;
             let after = crate::core::audit_documents::capture(&path)?;
@@ -519,7 +526,7 @@ fn deterministic_only(
                 }).await {
                     Ok(documents) => {
                         let path = project_path.clone();
-                        tokio::task::spawn_blocking(move || {
+                        lease.blocking(move || {
                             plan_with_documents(&path, documents.as_deref()).map(|plan| (reanchored, plan))
                         }).await.unwrap_or_else(|e| Err(format!("Task failed: {e}")))
                     }
@@ -528,9 +535,7 @@ fn deterministic_only(
             }
             Err(e) => Err(e),
         };
-        if let Ok(mut t) = tracker.lock() {
-            t.release_lease(&project_id);
-        }
+        drop(lease);
         match applied {
             Ok((reanchored, after)) => {
                 for doc in &reanchored {
