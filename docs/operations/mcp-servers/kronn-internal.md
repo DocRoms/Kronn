@@ -385,7 +385,11 @@ native agent during its turn. For the latter Kronn injects
 `KRONN_ROOM_AGENT_CONTEXT` (room, provider, running dispatch, trigger message)
 into the bridge environment; the backend accepts it only while that dispatch
 runs in the room, for the same provider, and never for a delegated worker's
-dispatch.
+dispatch. The same identity covers the whole principal lifecycle:
+`task_exec_prepare`, `task_exec_launch`, `task_exec_status`,
+`task_exec_review`, `task_exec_cancel`, `task_exec_resume` and
+`task_exec_reassign`, so the agent that launched an execution can also follow,
+decide and stop it in a later turn of the same room.
 A Claude Code or Codex workflow Agent step with a `room_id` (a template
 rendering to a discussion id) is principal of that room without a `kr-join`
 token; other providers have no bridge to carry it, so the step is refused. On
