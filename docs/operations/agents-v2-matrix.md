@@ -118,7 +118,7 @@ the same job.
   negotiated `session/resume` contract and exact proof boundaries.
   [src: file: backend/src/agents/runner.rs:2764-2824#completion_checkpoint]
   [src: file: backend/src/api/discussions/streaming.rs:2223-2290#resume_with_delta_if_possible]
-  [src: file: backend/src/api/discussions/streaming.rs:8327-8335#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
+  [src: file: backend/src/api/discussions/streaming.rs:8355-8363#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
 - **Kronn does not yet normalize ACP's optional session cost.** The current
   upstream v1 schema supports `usage_update.cost` as a cumulative amount with
   an explicit currency; this is not a per-turn USD price. Kronn's native ACP
