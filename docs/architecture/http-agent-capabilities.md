@@ -1,7 +1,7 @@
 # HTTP-agent capabilities — what API-mode agents may and may not do
 
 > Scope: the agents Kronn drives over an HTTP chat API rather than a local CLI process —
-> `Ollama`, `LiteLlm`, `Nvidia` and `Custom` connections [src: file: backend/src/agents/runner.rs:3351-3356#is_http_chat_agent].
+> `Ollama`, `LiteLlm`, `Nvidia` and `Custom` connections [src: file: backend/src/agents/runner.rs:3348-3353#is_http_chat_agent].
 > This file is the boundary future capability requests are judged against (KT-338).
 
 ## The rule that governs everything Kronn injects
@@ -50,8 +50,8 @@ MCP bridge. HTTP agents have none of that: they are a request/response loop, and
 capability they appear to have is a **tool Kronn executes server-side on their behalf**.
 
 The MCP bridge is deliberately not one of those capabilities. The HTTP path returns before
-any MCP environment is built [src: file: backend/src/agents/runner.rs:4337-4357#start_ollama_http_with_idle], and
-`--mcp-config` is a CLI-only argument [src: file: backend/src/agents/runner.rs:4588-4599#insert_claude_mcp_config].
+any MCP environment is built [src: file: backend/src/agents/runner.rs:4244-4264#start_ollama_http_with_idle], and
+`--mcp-config` is a CLI-only argument [src: file: backend/src/agents/runner.rs:4495-4506#insert_claude_mcp_config].
 So "add a tool to the MCP server" never reaches an HTTP agent. Anything they must be able to
 do has to exist as a **native tool in Kronn's own catalogue**.
 
@@ -219,7 +219,7 @@ rest of the discussion, or keep the partial answer.
 * **In a discussion, the round ceiling is no longer a failure.** The round's calls are
   refused, the model answers with what it has, and the question follows. A workflow step or
   a worker still fails with its reason: there is no one there to answer.
-  [src: file: backend/src/agents/runner.rs:10673-10713#ask_on_ceiling]
+  [src: file: backend/src/agents/runner.rs:10580-10620#ask_on_ceiling]
   [src: file: backend/src/api/discussions/ceilings.rs:117-161#ceiling_question]
 
 ## Saved Quick Prompt generation settings (KT-670)
@@ -234,7 +234,7 @@ mutable Quick Prompt. CLI effort keeps its existing snapshot format.
 [src: file: backend/src/api/mcp_remote.rs:584-612#create_batch_run_with_launch_settings]
 [src: file: backend/src/db/discussion_launch_settings.rs:18-117#capture]
 [src: file: backend/src/db/sql/186_discussion_http_settings.sql:1-10#discussion_http_settings]
-[src: file: backend/src/api/discussions/crud.rs:615-626#capture]
+[src: file: backend/src/api/discussions/crud.rs:608-619#capture]
 
 HTTP launches transmit explicit `reasoning_effort` and `max_tokens` on the
 OpenAI-compatible wire. Ollama receives `think` and `options.num_predict` after
@@ -243,7 +243,7 @@ context fitting; an explicit thinking request removes Kronn's older Qwen
 round trips, rather than defining a total run budget. The provider may refuse
 a setting its selected model does not support. Kronn does not retry by dropping
 the saved control. [src: file: backend/src/agents/generation_settings.rs:39-70#apply_http]
-[src: file: backend/src/agents/runner.rs:9391#apply_http]
+[src: file: backend/src/agents/runner.rs:9298#apply_http]
 [src: url: https://docs.ollama.com/api/chat]
 [src: url: https://docs.ollama.com/capabilities/thinking]
 [src: url: https://docs.litellm.ai/docs/completion/input]
@@ -257,7 +257,7 @@ overrides are outside this single-launch snapshot change.
 [src: file: backend/src/api/agent_quick_prompt_tests.rs:550-603#quick_prompt_unsupported_saved_limit_refuses_without_a_child_or_dispatch_job]
 [src: file: backend/src/agents/generation_settings.rs:5-28#validate]
 [src: file: backend/src/workflows/steps.rs:1356-1360#reasoning_effort_override]
-[src: file: backend/src/agents/runner.rs:3883-3887#validate]
+[src: file: backend/src/agents/runner.rs:3790-3794#validate]
 
 The HTTP regression launches through the native QP tool and the discussion
 stream, edits the template while the job is queued, then inspects both requests
@@ -289,7 +289,7 @@ Tiering reduces the initial declaration text, not the context capacity required
 to reach every family. Window reservation counts the whole reachable catalogue,
 including JSON separators, before loading a family. A regression test checks
 exact byte counts and an unchanged window through every family load.
-[src: file: backend/src/agents/runner.rs:6911-6940#reachable_tools_bytes]
+[src: file: backend/src/agents/runner.rs:6818-6847#reachable_tools_bytes]
 [src: file: backend/src/agents/runner_test.rs:1586-1624#the_window_does_not_move_when_a_run_loads_a_tool_family]
 
 ## Audits (KT-924)
@@ -415,7 +415,7 @@ shipping it. Three things changed:
   on a later turn keeps it. A result that was already an extract gets no paths,
   which would not apply to the response the next `extract` runs on, and is told to
   select less. Other tools are shortened exactly as before
-  [src: file: backend/src/agents/runner.rs:7164-7192#shape_of]
+  [src: file: backend/src/agents/runner.rs:7071-7099#shape_of]
   [src: file: backend/src/agents/runner.rs:7198-7223#working_extract_examples].
 - **A call that differs only by its `extract` or its query is not a repeat.** The
   duplicate guard compares the tool name and every argument, sorted by key, so an
@@ -474,7 +474,7 @@ undergo the existing clamping. This protects a protocol contract;
 it does not establish model authoring quality. The measured attempts and their
 execution checks are recorded in
 [`native-workflow-2026-09-22.md`](../research/native-workflow-2026-09-22.md).
-[src: file: backend/src/agents/runner.rs:7607-7615#workflow_step_schema]
+[src: file: backend/src/agents/runner.rs:7521-7529#workflow_step_schema]
 [src: file: backend/src/agents/runner_test.rs:2275-2342#authoring_schemas_survive_clamping_when_tool_history_fills_the_window]
 
 ### Further capabilities

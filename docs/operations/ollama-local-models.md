@@ -292,8 +292,8 @@ actionable Settings/override message. Historical seeds are written once by the
 migration; no runner fallback revives them after deletion. Unit tests use the
 same resolver as production; the historical expectation helper itself is
 test-only and is not called by the resolver.
-[src: file: backend/src/agents/runner.rs:3662-3664#missing_ollama_model_error]
-[src: file: backend/src/agents/runner.rs:4292-4296#missing_ollama_model_error]
+[src: file: backend/src/agents/runner.rs:3659-3661#missing_ollama_model_error]
+[src: file: backend/src/agents/runner.rs:4199-4203#missing_ollama_model_error]
 [src: file: backend/src/core/model_catalog/mod.rs:143-150#migrate_hardcoded_catalog_once]
 [src: file: backend/src/core/model_catalog/mod.rs:106-110#migrated_default]
 
@@ -301,10 +301,10 @@ Ollama is always routed through HTTP before the production command-builder
 call. Its command-builder branch is a non-inference `echo` sentinel,
 like the other HTTP families; it cannot choose or invoke an embedded model.
 This is based on the caller's control flow, not an assumption from its comment.
-[src: file: backend/src/agents/runner.rs:3351-3356#is_http_chat_agent]
-[src: file: backend/src/agents/runner.rs:4333-4358#start_ollama_http_with_idle]
-[src: file: backend/src/agents/runner.rs:4563-4570#agent_command_with_task_worker_policy]
-[src: file: backend/src/agents/runner.rs:13184-13193#Ollama]
+[src: file: backend/src/agents/runner.rs:3348-3353#is_http_chat_agent]
+[src: file: backend/src/agents/runner.rs:4240-4265#start_ollama_http_with_idle]
+[src: file: backend/src/agents/runner.rs:4470-4477#agent_command_with_task_worker_policy]
+[src: file: backend/src/agents/runner.rs:13091-13100#Ollama]
 
 Preflight checks the exact durable target/tier assignment, including unavailable
 rows, before using any HTTP Default assignment. Otherwise the launch cache's
@@ -340,7 +340,7 @@ launch (`crud.rs` stamps `discussions.model` from the QP).
 
 ## "Stable output", NOT bit-exact determinism
 
-`build_ollama_chat_body` [src: file: backend/src/agents/runner.rs:7872-7901#build_ollama_chat_body] sends
+`build_ollama_chat_body` [src: file: backend/src/agents/runner.rs:7779-7808#build_ollama_chat_body] sends
 `temperature:0, top_k:1, seed:42` as INTERNAL constants (no per-step knob).
 On Apple Metal the float reduction order isn't guaranteed, so two logits within
 epsilon can flip the argmax (more so under Q4 quant) → output is *greedy-stable*,
@@ -454,8 +454,8 @@ gets depends on who runs the model, not only on the machine:
 
 | Rule | Window | Where |
 |---|---|---|
-| Memory band for 64 GiB, weights and cache cost not known | 65,536 | `ram_derived_ceiling` [src: file: backend/src/agents/runner.rs:6331#ram_derived_ceiling] |
-| Trained window (262,144 in the test fixtures), held to the band | 65,536, origin `machine_ceiling` | `resolve_ctx_cap_within` [src: file: backend/src/agents/runner.rs:6491#resolve_ctx_cap_within] |
+| Memory band for 64 GiB, weights and cache cost not known | 65,536 | `ram_derived_ceiling` [src: file: backend/src/agents/runner.rs:6238#ram_derived_ceiling] |
+| Trained window (262,144 in the test fixtures), held to the band | 65,536, origin `machine_ceiling` | `resolve_ctx_cap_within` [src: file: backend/src/agents/runner.rs:6398#resolve_ctx_cap_within] |
 | Same window, weights and attention shape known (KT-943) | 262,144, the whole window, origin `model_window` | `ceiling_for_model` [src: file: backend/src/agents/ollama_memory.rs:274#ceiling_for_model] |
 | Discussion principal (`ToolRunMode::General`) | the ceiling above — 262,144 once the model's shape is known, else 65,536 — requested up front because tools are declared | `worker_effective_ctx_cap` [src: file: backend/src/agents/runner.rs:227#worker_effective_ctx_cap] |
 | Task worker (`ToolRunMode::Worker`) on native MLX | 32,768 | `MLX_WORKER_EFFECTIVE_CTX_CAP` [src: file: backend/src/agents/runner.rs:104#MLX_WORKER_EFFECTIVE_CTX_CAP] |
@@ -473,7 +473,7 @@ the model has been loaded at two different windows, the cache cost measured on
 the server replaces the computed one in the formula of KT-943 (and, off Apple
 Silicon, the 70 %-of-memory rule: what is left of 70 % of memory after the
 weights, over that cost)
-[src: file: backend/src/agents/runner.rs:6586-6593#measured_kv_bytes_per_token] [src: file: backend/src/agents/runner.rs:6596-6610#RAM_SHARE_FOR_MODEL].
+[src: file: backend/src/agents/runner.rs:6493-6500#measured_kv_bytes_per_token] [src: file: backend/src/agents/runner.rs:6503-6517#RAM_SHARE_FOR_MODEL].
 
 So the 32K ceiling is a worker's and not a discussion's, and a discussion on this
 Mac is at the ceiling resolved above — the model's whole 262,144 when its
@@ -635,8 +635,8 @@ policy is unchanged: `Fail` rejects output that remains invalid, while
 `Continue` may keep invalid raw output. Prompt-based output is not a guarantee
 of schema compliance. Repeated launches, including a repair launch, negotiate
 the capability independently; no persistent capability cache is written.
-`[src: file: backend/src/agents/runner.rs:8708-8742#rejects_structured_output]`
-`[src: file: backend/src/agents/runner.rs:9464-9490#format_fallback_notice]`
+`[src: file: backend/src/agents/runner.rs:8615-8649#rejects_structured_output]`
+`[src: file: backend/src/agents/runner.rs:9371-9397#format_fallback_notice]`
 `[src: file: backend/src/workflows/steps.rs:1070-1093#ollama_envelope_format]`
 
 **Quality escalation** (`steps.rs::escalation_step`): if a LOCAL (Ollama)
@@ -803,7 +803,7 @@ where Ollama runs. [src: file: backend/src/api/ollama.rs:62-71#fetch_server_vers
    9428 of 9500 prompt tokens on a second turn). Older MLX servers lack
    prompt-prefix reuse (ollama/ollama#17829), which is not what a suggestion
    should steer a user to.
-   An unreadable version is not capable. [src: file: backend/src/agents/runner.rs:6904-6908#mlx_prefix_cache_reused]
+   An unreadable version is not capable. [src: file: backend/src/agents/runner.rs:6811-6815#mlx_prefix_cache_reused]
 
 When it is, the `-mlx` builds are listed first with an "Optimized for Mac" mark,
 then the portable list. Everywhere else the list is exactly the portable one.

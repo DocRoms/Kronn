@@ -118,7 +118,7 @@ the same job.
   negotiated `session/resume` contract and exact proof boundaries.
   [src: file: backend/src/agents/runner.rs:2764-2824#completion_checkpoint]
   [src: file: backend/src/api/discussions/streaming.rs:2223-2290#resume_with_delta_if_possible]
-  [src: file: backend/src/api/discussions/streaming.rs:8355-8363#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
+  [src: file: backend/src/api/discussions/streaming.rs:8294-8302#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
 - **Kronn does not yet normalize ACP's optional session cost.** The current
   upstream v1 schema supports `usage_update.cost` as a cumulative amount with
   an explicit currency; this is not a per-turn USD price. Kronn's native ACP
@@ -171,7 +171,7 @@ for creation, resume and its existing fallback, streaming, usage, cancellation,
 and prompt/persistence failures. They do not invoke an agent CLI, and ACP token
 usage still has no implied price.
 [src: file: backend/src/agents/runner.rs:5804-5865#acp_failure_diagnostic]
-[src: file: backend/src/agents/runner.rs:15012-15091#run_acp_session_reports_redacted_prompt_and_persistence_failures]
+[src: file: backend/src/agents/runner.rs:14979-15058#run_acp_session_reports_redacted_prompt_and_persistence_failures]
 [src: file: backend/src/core/redact.rs:522-528#redact_for_audit_artifact]
 
 ## Settings catalogue correction (KT-531 / KT-597)

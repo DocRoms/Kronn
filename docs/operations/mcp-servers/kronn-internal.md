@@ -743,7 +743,7 @@ the MCP entry's `env_vars`. Kronn writes a narrow `KRONN_*` allowlist into the
 global Codex config and repeats it as a per-run `-c` override, so the dynamic
 discussion/task capability reaches that run immediately without rewriting
 shared config or leaking unrelated host variables.
-`[src: file: backend/src/agents/runner.rs:12729-12778#claude_task_worker_mcp_config]` `[src: file: backend/src/agents/runner.rs:2631-2659#KRONN_INTERNAL_CODEX_ENV_VARS]`
+`[src: file: backend/src/agents/runner.rs:12636-12685#claude_task_worker_mcp_config]` `[src: file: backend/src/agents/runner.rs:2631-2659#KRONN_INTERNAL_CODEX_ENV_VARS]`
 `[src: file: backend/src/api/discussions/streaming.rs:148-233#cli_task_worker_context]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:5736-5770#_spawned_task_worker_context]` `[src: file: backend/scripts/disc-introspection-mcp.py:11774-11787#_spawned_task_worker_mode]`
 
@@ -1046,7 +1046,7 @@ other visible timeline message.
 [src: file: backend/src/api/disc_introspection.rs:585-626#disc_note_list]
 [src: file: backend/src/api/disc_invite.rs:249-416#note_count]
 [src: file: backend/src/api/disc_source.rs:1751-1773#disc_load_other]
-[src: file: backend/src/api/discussions/messaging.rs:467-483#MessageChannel]
+[src: file: backend/src/api/discussions/messaging.rs:441-457#MessageChannel]
 [src: file: backend/src/db/discussions.rs:1411-1418#insert_note_message]
 
 A workflow Agent step receives its rendered `prompt_template` separately from

@@ -23,7 +23,7 @@ includes external Git metadata for linked worktrees. Missing/non-Git paths,
 permission-pattern characters, overlap with the working directory, unsupported
 agents and native Windows launches are rejected before dispatch. The list does
 not accept workflow template expressions.
-[src: file: backend/src/agents/read_only_repos.rs:32-69#resolve_with_dirs]
+[src: file: backend/src/agents/read_only_repos.rs:23-60#resolve_with_dirs]
 [src: file: backend/src/api/workflow_step_schema.json:31#read_only_repos]
 
 Claude receives `--add-dir` together with `Edit` deny rules and sandbox
@@ -47,8 +47,8 @@ host probe confirmed that Python, Write and shell redirection were all refused.
 Both the default [ACP adapters](acp-adapters.md) and the direct CLI route use
 this policy, overriding `full_access`. The Claude process cannot inherit the
 container sandbox-bypass marker when a mandatory sandbox policy is present.
-[src: file: backend/src/agents/runner.rs:4544-4548#read_only_repos]
-[src: file: backend/src/agents/runner.rs:13884-13894#CLAUDE_CODE_BUBBLEWRAP]
+[src: file: backend/src/agents/runner.rs:4451-4455#read_only_repos]
+[src: file: backend/src/agents/runner.rs:13791-13801#CLAUDE_CODE_BUBBLEWRAP]
 [src: file: backend/src/acp/codex_adapter.rs:464-478#worker_args]
 
 All Codex `exec` launches, with or without `--strict-config`, receive one
@@ -56,8 +56,8 @@ All Codex `exec` launches, with or without `--strict-config`, receive one
 applicable, its `KRONN_HOST_HOME` alias for `/host-home`. The same launcher
 handles direct CLI, adapter, worker and resumed turns. Path keys are serialized
 as TOML; identical aliases are deduplicated.
-[src: file: backend/src/agents/runner.rs:13637-13656#codex_project_trust_override]
-[src: file: backend/src/agents/runner.rs:13637-13650#codex_project_trust_override]
+[src: file: backend/src/agents/runner.rs:13544-13563#codex_project_trust_override]
+[src: file: backend/src/agents/runner.rs:13544-13557#codex_project_trust_override]
 
 The principal's 2026-09-28 check found that Codex 0.156.1 rejects the previous
 dotted `projects."<path>".trust_level` override under `--strict-config`, even
@@ -160,7 +160,7 @@ path, since the cwd is the copy. The copy goes with the artifacts directory.
 The automated policy and dispatch regressions use temporary repositories and
 fake CLI processes. They verify declarations and arguments; they do not prove
 vendor sandbox enforcement.
-[src: file: backend/src/agents/read_only_repos.rs:250-271#fixture]
+[src: file: backend/src/agents/read_only_repos.rs:241-262#fixture]
 [src: file: backend/tests/adapter_worker_policy.rs:41#default_adapters_and_explicit_fallback_keep_worker_spawn_boundaries]
 
 The dispatch regression checks initial and resumed Codex adapter arguments:
