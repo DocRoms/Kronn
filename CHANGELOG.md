@@ -11,6 +11,16 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+### Added
+
+- The backend can run as a background service. With `KRONN_SERVICE=1` it
+  resolves the login-shell PATH at startup, before agent detection, and merges
+  it into its own, so agent CLIs are found under launchd or systemd. With
+  `KRONN_UI_DIST=<dir>` (holding an `index.html`) it serves the built web UI on
+  the API port; API routes keep precedence. Both are off by default. The
+  login-shell discovery moved from the desktop app into the shared backend
+  library (`core::shell_path`), with no change for the desktop.
+
 ### Changed
 
 - The macOS and Windows portability CI job compiles only the four suites it
