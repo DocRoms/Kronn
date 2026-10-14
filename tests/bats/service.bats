@@ -595,6 +595,8 @@ fake_toolchain() {
 @test "cmd_service rejects unknown subcommands and update/rollback when absent" {
     run cmd_service bogus
     [ "$status" -ne 0 ]
+    # The real lib/service-update.sh is sourced now: simulate a CLI without it.
+    unset -f cmd_service_update cmd_service_rollback
     run cmd_service update
     [ "$status" -ne 0 ]
     [[ "$output" == *"not available"* ]]
