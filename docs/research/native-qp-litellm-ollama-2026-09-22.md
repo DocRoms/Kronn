@@ -116,4 +116,4 @@ since landed: a named connection is probed over the network, and an address
 that does not resolve is reported unreachable.
 [src: user: 2026-09-22: litellm-live-access-20260922]
 [src: file: backend/src/core/endpoint_reachability.rs:1-7]
-[src: file: backend/src/api/orchestration.rs:16122-16153#a_named_connection_failing_dns_is_unreachable_like_the_legacy_family]
+[src: file: backend/src/api/orchestration.rs:16695-16726#a_named_connection_failing_dns_is_unreachable_like_the_legacy_family]

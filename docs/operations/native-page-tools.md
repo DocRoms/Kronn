@@ -9,7 +9,7 @@ exists on the MCP bridge only; native discussion agents do not get it. See
 objects, not an HTML preview.
 [src: file: backend/src/api/agent_tools.rs:1869-1871#execute_page_tool]
 [src: file: backend/src/api/agent_page_tools.rs:171-384#execute_page_tool]
-[src: file: backend/scripts/disc-introspection-mcp.py:7980-7986#call_page_delete_dataset]
+[src: file: backend/scripts/disc-introspection-mcp.py:7974-7980#call_page_delete_dataset]
 
 Native and bridge access are two policies, not one:
 
@@ -133,4 +133,4 @@ other declaration changes, the Page delta does not. These are byte counts, not
 provider token measurements. The bridge
 declarations keep their own byte ceiling (84,429 bytes, `mcp_surface_budget.py`).
 [src: file: backend/src/api/agent_page_tests.rs:380-405#native_page_surface_has_a_bounded_measured_cost]
-[src: file: backend/scripts/ci/mcp_surface_budget.py:154#CATALOGUE_MAX_BYTES]
+[src: file: backend/scripts/ci/mcp_surface_budget.py:158#CATALOGUE_MAX_BYTES]

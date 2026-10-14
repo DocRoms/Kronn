@@ -42,8 +42,8 @@ drives a task execution (0.15.0 adds `DelegateSubtasks`).
   `[src: file: backend/src/db/orchestration.rs:3744-3753#ReviewCheckpoint]`
   `[src: file: backend/src/db/orchestration.rs:3775-3787#ReviewCheckpointOutcome]`
 - **Reassignment** is its own operation (`reassign_execution`), and a human
-  decision has `human_review`. `[src: file: backend/src/api/orchestration.rs:12061-12073#reassign_execution]`
-  `[src: file: backend/src/api/orchestration.rs:15280-15289#human_review]`
+  decision has `human_review`. `[src: file: backend/src/api/orchestration.rs:12087-12099#reassign_execution]`
+  `[src: file: backend/src/api/orchestration.rs:15410-15419#human_review]`
 - **Integration saga.** `run_integration` integrates an `Approved` execution
   into `run.target_branch`, through the single worktree where that branch is
   checked out (or by moving the ref when no worktree has it), refusing a dirty
@@ -78,8 +78,8 @@ branch. Checked against the code:
   the discussion, or the room's native agent during its own running turn. The
   review obligation and the escalation are messages posted to the principal of
   that discussion.
-  `[src: file: backend/src/api/orchestration.rs:12491-12504#principal_is_authorized]`
-  `[src: file: backend/src/api/orchestration.rs:12506-12548#room_agent_is_authorized]`
+  `[src: file: backend/src/api/orchestration.rs:12541-12554#principal_is_authorized]`
+  `[src: file: backend/src/api/orchestration.rs:12612-12654#room_agent_is_authorized]`
   `[src: file: backend/src/api/orchestration.rs:6081-6088#deliver_worker_manifest]`
   `[src: file: backend/src/db/orchestration.rs:3695-3702#EscalationDelivery]`
 - A workflow run works in its own worktree on branch
@@ -142,7 +142,7 @@ Behaviour:
    500 ms, capped at 170 s).
    `[src: file: backend/src/workflows/delegate_subtasks_step.rs:42-45#IDLE_POLL]`
    `[src: file: backend/src/workflows/delegate_subtasks_step.rs:279-289#idle]`
-   `[src: file: backend/src/api/orchestration.rs:13708-13746#wait_for_execution_status]`
+   `[src: file: backend/src/api/orchestration.rs:13814-13852#wait_for_execution_status]`
 4. On each `AwaitingReview`: start **one fresh reviewer session** with a
    compact context (task title, DoD, delivered diff against `base_sha`, the
    worker's manifest and the validation results), no room history and no MCP

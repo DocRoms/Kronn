@@ -76,7 +76,7 @@ holds unmerged paths, nothing is removed. Each distinct *kept* reason is recorde
 `worktree_release_kept` event, a release as `worktree_released`. Evidence patches are not cleaned up by Kronn.
 
 [src: file: backend/src/api/orchestration.rs:3840-3852#cleanup_integrated_execution]
-[src: file: backend/src/api/orchestration.rs:11567-11578#settle_cancelled_workspace]
+[src: file: backend/src/api/orchestration.rs:11593-11604#settle_cancelled_workspace]
 
 ### The sweeper's rules
 
@@ -118,7 +118,7 @@ Kronn reads the free space of the volume holding the worktrees and `target/` (O(
    space is free) and posts a system message in the **principal room**.
 
 [src: file: backend/src/api/disk.rs:791-857#ensure_launch_headroom]
-[src: file: backend/src/api/orchestration.rs:8566-8589#post_disk_pressure_alert]
+[src: file: backend/src/api/orchestration.rs:8592-8615#post_disk_pressure_alert]
 
 Until a config is published at boot the guard is off (`0`), so a process that never loaded one — a unit
 test — is never refused by a threshold nobody chose.
@@ -146,7 +146,7 @@ provisioning and builds; see [worktree-build-artifacts.md](worktree-build-artifa
   an agent, which can tell the user instead. [src: file: backend/src/api/disk.rs:932-944#run_purge]
 - MCP tool **`disk_usage`** (`project_id`) — the scoped report above, read-only, bounded to the 25 largest
   entries. It never calls the purge; a leftover `purge_orphans: true` argument returns a note that purging
-  is a human action in Settings > Disk. [src: file: backend/scripts/disc-introspection-mcp.py:7720-7752#call_disk_usage]
+  is a human action in Settings > Disk. [src: file: backend/scripts/disc-introspection-mcp.py:7714-7746#call_disk_usage]
 - **Settings → Disk** — measure on demand (never on page open), totals by kind, the table, **Purge
   orphans**, a per-entry delete behind a confirmation, and the two thresholds.
 
