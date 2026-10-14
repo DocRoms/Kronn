@@ -585,7 +585,7 @@ pub async fn orchestrate(
 
     let disc_id = id.clone();
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentStreamEvent>(128);
+    let (tx, rx) = tokio::sync::mpsc::channel::<AgentStreamEvent>(128);
 
     // Spawn background task — always saves to DB even if client disconnects
     let semaphore = state.agent_semaphore.clone();
@@ -1191,7 +1191,16 @@ pub async fn orchestrate(
         });
     });
 
-    // Thin SSE reader — just maps channel events to SSE
+    orchestration_event_sse(rx)
+}
+
+/// The SSE response of an orchestration: a thin reader mapping channel events
+/// to SSE, in the [`agent_run`](crate::core::sse_limits::agent_run) envelope.
+/// #234 — a cold local model is silent for minutes; the agent's own stall and
+/// global deadlines decide when it is dead, not the transport.
+fn orchestration_event_sse(
+    mut rx: tokio::sync::mpsc::Receiver<AgentStreamEvent>,
+) -> Sse<SseStream> {
     let stream: SseStream = Box::pin(async_stream::try_stream! {
         while let Some(evt) = rx.recv().await {
             match evt {
@@ -1233,19 +1242,32 @@ pub async fn orchestrate(
         }
     });
 
-    Sse::new(crate::core::sse_limits::bounded(
-        // #234 — a cold local model is silent for minutes; the agent's own
-        // stall and global deadlines decide when it is dead, not the transport.
-        crate::core::sse_limits::with_heartbeat(
-            stream,
-            crate::core::sse_limits::HEARTBEAT_INTERVAL,
-        ),
-    ))
+    Sse::new(crate::core::sse_limits::agent_run(stream))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression for #234 at the orchestration stream itself: an agent
+    /// silent longer than the transport idle limit still reaches the client.
+    #[tokio::test(start_paused = true)]
+    async fn an_agent_reply_after_a_long_silence_reaches_the_client() {
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        tokio::spawn(async move {
+            let start = serde_json::json!({ "agent": "local" });
+            tx.send(AgentStreamEvent::AgentStart { data: start })
+                .await
+                .unwrap();
+            tokio::time::sleep(crate::core::sse_limits::IDLE_TIMEOUT * 2).await;
+            let data = serde_json::json!({ "text": "late answer" });
+            tx.send(AgentStreamEvent::Chunk { data }).await.unwrap();
+        });
+        let text = crate::core::sse_limits::sse_text(orchestration_event_sse(rx)).await;
+        assert!(text.contains("late answer"), "{text}");
+        assert!(!text.contains("event: error"), "{text}");
+        assert!(text.contains(": keepalive"), "{text}");
+    }
 
     #[test]
     fn orchestration_spawn_policy_equips_every_http_worker_but_not_summaries() {

@@ -121,6 +121,29 @@ pub fn with_heartbeat(inner: SseStream, every: Duration) -> SseStream {
     })
 }
 
+/// The envelope of every SSE stream fed by an agent run: [`with_heartbeat`]
+/// inside [`bounded`]. Discussions, orchestration, workflow runs and audits go
+/// through it so a silent model is judged by the agent's own deadlines only.
+pub fn agent_run(inner: SseStream) -> SseStream {
+    bounded(with_heartbeat(inner, HEARTBEAT_INTERVAL))
+}
+
+/// Render a whole SSE response as text, for tests of the handlers that build one.
+#[cfg(test)]
+pub(crate) async fn sse_text(sse: axum::response::sse::Sse<SseStream>) -> String {
+    use axum::response::IntoResponse;
+    use http_body_util::BodyExt;
+
+    let body = sse
+        .into_response()
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    String::from_utf8(body.to_vec()).unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,17 +196,7 @@ mod tests {
     }
 
     async fn sse_text(stream: SseStream) -> String {
-        use axum::response::IntoResponse;
-        use http_body_util::BodyExt;
-
-        let body = axum::response::sse::Sse::new(stream)
-            .into_response()
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes();
-        String::from_utf8(body.to_vec()).unwrap()
+        super::sse_text(axum::response::sse::Sse::new(stream)).await
     }
 
     /// A producer that stays silent for `silence`, then sends one chunk and ends

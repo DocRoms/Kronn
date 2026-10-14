@@ -4837,7 +4837,7 @@ pub async fn trigger(
             )
         })
         .unwrap_or_default();
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::workflows::runner::RunEvent>(32);
+    let (tx, rx) = tokio::sync::mpsc::channel::<crate::workflows::runner::RunEvent>(32);
     let run = match start_manual_run(
         &state,
         &id,
@@ -4859,10 +4859,19 @@ pub async fn trigger(
     tracing::info!("Workflow run created: {} for workflow {}", run.id, id);
 
     // Stream events as SSE
-    let run_id = run.id.clone();
+    run_event_sse(serde_json::json!({ "run_id": run.id }), rx)
+}
+
+/// The SSE response of a workflow run (triggered or a single test step): a
+/// `run_start` event, then the runner's events, in the
+/// [`agent_run`](crate::core::sse_limits::agent_run) envelope. #234 — an Agent
+/// step on a cold local model is silent for minutes; the step's own stall and
+/// the run's guards decide when it is dead, not the transport.
+fn run_event_sse(
+    start: serde_json::Value,
+    mut rx: tokio::sync::mpsc::Receiver<crate::workflows::runner::RunEvent>,
+) -> Sse<SseStream> {
     let stream: SseStream = Box::pin(async_stream::try_stream! {
-        // Send initial run info
-        let start = serde_json::json!({ "run_id": run_id });
         yield Event::default().event("run_start").data(start.to_string());
 
         // Forward events from the runner
@@ -4904,7 +4913,7 @@ pub async fn trigger(
         }
     });
 
-    Sse::new(crate::core::sse_limits::bounded(stream))
+    Sse::new(crate::core::sse_limits::agent_run(stream))
 }
 
 fn sse_error(msg: impl Into<String>) -> Sse<SseStream> {
@@ -5276,7 +5285,7 @@ pub async fn test_step(
             step.prompt_template
         );
     }
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::workflows::runner::RunEvent>(64);
+    let (tx, rx) = tokio::sync::mpsc::channel::<crate::workflows::runner::RunEvent>(64);
 
     tokio::spawn(async move {
         let _ = tx
@@ -5333,47 +5342,10 @@ pub async fn test_step(
             .await;
     });
 
-    let stream: SseStream = Box::pin(async_stream::try_stream! {
-        yield Event::default().event("run_start").data(
-            serde_json::json!({ "run_id": "test", "test_mode": true }).to_string()
-        );
-        while let Some(evt) = rx.recv().await {
-            match &evt {
-                crate::workflows::runner::RunEvent::StepStart { step_name, step_index, total_steps } => {
-                    yield Event::default().event("step_start").data(
-                        serde_json::json!({ "step_name": step_name, "step_index": step_index, "total_steps": total_steps }).to_string()
-                    );
-                }
-                crate::workflows::runner::RunEvent::StepProgress { text } => {
-                    yield Event::default().event("step_progress").data(
-                        serde_json::json!({ "text": text }).to_string()
-                    );
-                }
-                crate::workflows::runner::RunEvent::StepDone { step_result } => {
-                    yield Event::default().event("step_done").data(
-                        serde_json::to_value(step_result).unwrap_or_default().to_string()
-                    );
-                }
-                crate::workflows::runner::RunEvent::RunDone { status } => {
-                    yield Event::default().event("run_done").data(
-                        serde_json::json!({ "status": status }).to_string()
-                    );
-                }
-                crate::workflows::runner::RunEvent::GuardTriggered { kind, threshold, actual } => {
-                    yield Event::default().event("guard_triggered").data(
-                        serde_json::json!({ "kind": kind, "threshold": threshold, "actual": actual }).to_string()
-                    );
-                }
-                crate::workflows::runner::RunEvent::RunError { error } => {
-                    yield Event::default().event("error").data(
-                        serde_json::json!({ "error": error }).to_string()
-                    );
-                }
-            }
-        }
-    });
-
-    Sse::new(crate::core::sse_limits::bounded(stream))
+    run_event_sse(
+        serde_json::json!({ "run_id": "test", "test_mode": true }),
+        rx,
+    )
 }
 
 /// GET /api/workflows/:id/runs
@@ -7211,6 +7183,26 @@ mod readiness_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression for #234 on workflow runs and "test step": an Agent step
+    /// silent longer than the transport idle limit still reaches the client.
+    #[tokio::test(start_paused = true)]
+    async fn a_step_progress_after_a_long_silence_reaches_the_client() {
+        use crate::workflows::runner::RunEvent;
+
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        tokio::spawn(async move {
+            tokio::time::sleep(crate::core::sse_limits::IDLE_TIMEOUT * 2).await;
+            let text = "late answer".to_string();
+            tx.send(RunEvent::StepProgress { text }).await.unwrap();
+        });
+        let start = serde_json::json!({ "run_id": "r-1" });
+        let text = crate::core::sse_limits::sse_text(run_event_sse(start, rx)).await;
+        assert!(text.contains("event: run_start"), "{text}");
+        assert!(text.contains("late answer"), "{text}");
+        assert!(!text.contains("event: error"), "{text}");
+        assert!(text.contains(": keepalive"), "{text}");
+    }
 
     // ── Delete cancels live child agents ──────────────────
     use std::sync::Arc;
