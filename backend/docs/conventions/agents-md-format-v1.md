@@ -68,6 +68,28 @@ is strictly opt-in by presence.
   what the person approved in `docs/provenance.json`, next to `citations.json`.
   No marker is added to the prose. A doc whose validated text changed reads as
   AI-generated, for the learning gate too, until it is reconfirmed.
+- **Text added between runs** — audits snapshot every Markdown document in the
+  resolved documentation directory, excluding its `legacy/` and `var/`
+  subdirectories. Symbolic links are refused. A change since the last Kronn write or
+  validation becomes the next diff's baseline, including unmarked human text.
+  Older unreviewed baselines remain available, and whole-audit validation does
+  not clear pending reconfirmations. Generated files are tracked separately
+  until a human changes or validates them.
+  [src: file: backend/src/core/doc_provenance.rs:341-357#record_all]
+  [src: file: backend/src/core/doc_provenance.rs:475-507#snapshot_tracked]
+  [src: file: backend/src/core/doc_provenance.rs:511-563#note_snapshot_writes]
+- **Briefing protection** — each audit step snapshots the briefing and restores
+  a rewrite, deletion or unauthorized creation with a visible warning. Review
+  completion requires a nonempty file and a successful save; a failure remains
+  visible in the open discussion. Reviews restore saved project facts, rules,
+  documentation choices and Kronn options before storing the result.
+  [src: file: backend/src/api/audit/helpers.rs:972-1005#restore_step_briefing]
+  [src: file: backend/src/api/audit/briefing.rs:150-193#complete_reviewed_briefing]
+  [src: file: backend/src/api/audit/project_doc.rs:524-592#reattach_facts]
+- **Keep accurate prose** — finding and review steps also reverify existing
+  documentation and must keep true statements as written.
+  [src: file: backend/src/api/audit/mod.rs:448#REVERIFY_BLOCK]
+  [src: file: backend/src/api/audit/mod.rs:464-476#reverifies_target]
 - **Asymmetric conversion** — a human may convert a `curated="ai"` section to
   `curated="human"`. The reverse never happens automatically: human authority outranks AI,
   never the other way around.
