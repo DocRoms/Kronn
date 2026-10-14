@@ -309,7 +309,7 @@ timeline and a stale document's viewer. It has no lifecycle of its own.
 - **One name on every surface.** The MCP descriptions and manuals say
   “Verify docs” like the English label, present the full audit as an advanced
   option, and carry none of the retired CTA names.
-  [src: file: backend/scripts/test_disc_introspection_mcp.py:8084-8110#test_audit_surface_uses_the_verify_docs_vocabulary_of_the_ui]
+  [src: file: backend/scripts/test_disc_introspection_mcp.py:8172-8198#test_audit_surface_uses_the_verify_docs_vocabulary_of_the_ui]
 - **Header layout.** The compact header keeps the status, one next action, the
   doc-state summary and the « Détails » disclosure without overlap at 360, 768
   and 1440 px, closed and open.

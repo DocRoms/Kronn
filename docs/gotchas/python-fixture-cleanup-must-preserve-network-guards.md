@@ -13,4 +13,4 @@ Keep each patcher and register only its own `stop` method with `addCleanup`.
 The grant fixture now additionally checks guard identity after its own cleanups.
 This is fixture ownership, not a change to the bridge's publication policy.
 [src: file: backend/scripts/test_disc_introspection_mcp.py:54-70#_AMBIENT_URLOPEN]
-[src: file: backend/scripts/test_disc_introspection_mcp.py:585-619#DiscAppendPublicationGrantTests]
+[src: file: backend/scripts/test_disc_introspection_mcp.py:595-629#DiscAppendPublicationGrantTests]

@@ -1144,18 +1144,19 @@ TOOLS = [
     {
         "name": "task_exec_review",
         "description": (
-            "Decide a delivered task attempt as the principal (identity comes from this "
-            "bridge's session; the worker only if the run enables self-review). approve "
-            "is REFUSED if the manifest is missing, the worktree HEAD drifted since "
-            "delivery, or a DoD is unmet; request_changes hands your findings to the "
-            "worker and keeps the worktree. A non-party gets one opaque refusal."
+            "Decide a delivered task attempt as the principal (identity: the room's "
+            "native agent in its own turn, else this bridge's joined CLI session; the "
+            "worker only if the run enables self-review). approve is REFUSED without a "
+            "manifest, after HEAD drift since delivery, or with a DoD unmet; "
+            "request_changes hands your findings to the worker, keeps the worktree. "
+            "A non-party gets one opaque refusal."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "task_execution_id": {
                     "type": "string",
-                    "description": "The execution whose delivered attempt you are reviewing.",
+                    "description": "The execution under review.",
                 },
                 "decision": {
                     "type": "object",
@@ -5835,8 +5836,10 @@ def _ensure_workflow_step_membership():
 
 
 def _task_exec_principal(tool_name):
-    """Principal identity fields for prepare/launch: the room's native agent
-    when Kronn launched this bridge for it, otherwise the joined CLI session."""
+    """Principal identity fields for every principal task_exec_* call (prepare,
+    launch, status, review, cancel, resume, reassign): the room's native agent
+    when Kronn launched this bridge for it, otherwise the joined CLI session.
+    One identity for the whole lifecycle, so whoever launched can also decide."""
     room_agent = _room_agent_context(tool_name)
     if room_agent is not None:
         return {"room_agent": room_agent}
@@ -6223,11 +6226,10 @@ def call_task_exec_status(args):
     execution_id = (args.get("task_execution_id") or args.get("task_reference") or "").strip()
     if not execution_id:
         raise RuntimeError("task_exec_status: task_execution_id or task_reference is required")
-    source_agent, source_session_id = _task_exec_identity("task_exec_status")
     result = _unwrap(_http(
         "POST",
         f"/api/orchestration/tool/executions/{urllib.parse.quote(execution_id, safe='')}/status",
-        {"source_agent": source_agent, "source_session_id": source_session_id, **options},
+        {**_task_exec_principal("task_exec_status"), **options},
     ))
     if options.get("view") == "compact":
         # The backend already derives `next_action` for this projection.
@@ -6274,11 +6276,10 @@ def call_task_exec_resume(args):
     execution_id = (args.get("task_execution_id") or "").strip()
     if not execution_id:
         raise RuntimeError("task_exec_resume: task_execution_id is required")
-    source_agent, source_session_id = _task_exec_identity("task_exec_resume")
     return _unwrap(_http(
         "POST",
         f"/api/orchestration/tool/executions/{urllib.parse.quote(execution_id, safe='')}/resume",
-        {"source_agent": source_agent, "source_session_id": source_session_id},
+        _task_exec_principal("task_exec_resume"),
     ))
 
 
@@ -6287,12 +6288,7 @@ def call_task_exec_cancel(args):
     reason = (args.get("reason") or "").strip()
     if not execution_id or not reason:
         raise RuntimeError("task_exec_cancel: task_execution_id and reason are required")
-    source_agent, source_session_id = _task_exec_identity("task_exec_cancel")
-    body = {
-        "source_agent": source_agent,
-        "source_session_id": source_session_id,
-        "reason": reason,
-    }
+    body = {**_task_exec_principal("task_exec_cancel"), "reason": reason}
     if args.get("cleanup_policy") is not None:
         body["cleanup_policy"] = args["cleanup_policy"]
     return _unwrap(_http(
@@ -6327,12 +6323,10 @@ def call_task_exec_reassign(args):
         if not isinstance(validations, list):
             raise RuntimeError("task_exec_reassign: `validations` must be an array")
         change = {"validations": validations}
-    source_agent, source_session_id = _task_exec_identity("task_exec_reassign")
     return _task_exec_request(
         f"/api/orchestration/tool/executions/{urllib.parse.quote(execution_id, safe='')}/reassign",
         {
-            "source_agent": source_agent,
-            "source_session_id": source_session_id,
+            **_task_exec_principal("task_exec_reassign"),
             **change,
             "reason": reason,
         },
@@ -6483,14 +6477,15 @@ def call_task_exec_commit(args):
 def call_task_exec_review(args):
     """Decide a delivered attempt as the principal (KT-319 tranche 3a). Pass the
     `task_execution_id` and a ReviewDecision v1 `decision` object; identity is
-    DERIVED SERVER-SIDE from this bridge's active room session, and the backend
-    authorizes you as a PARTY to the execution — the parent-room principal, or the
-    worker only when the run explicitly allows self-review. approve is refused if the
-    manifest is missing, the worktree HEAD drifted, or a DoD is unmet; request_changes
-    bumps the round and hands your findings to the worker in its sub-discussion,
-    keeping the worktree. A refused decision surfaces an opaque reason (not found /
-    not addressed to you) or a specific state (not reviewable, self-review forbidden,
-    approve refused, invalid decision)."""
+    DERIVED by the bridge (the room's native agent during its own turn, else its
+    joined CLI session), and the backend authorizes you as a PARTY to the execution
+    — the parent-room principal, or the worker only when the run explicitly allows
+    self-review. approve is refused if the manifest is missing, the worktree HEAD
+    drifted, or a DoD is unmet; request_changes bumps the round and hands your
+    findings to the worker in its sub-discussion, keeping the worktree. A refused
+    decision surfaces an opaque reason (not found / not addressed to you) or a
+    specific state (not reviewable, self-review forbidden, approve refused, invalid
+    decision)."""
     task_execution_id = (args.get("task_execution_id") or "").strip()
     if not task_execution_id:
         raise RuntimeError("task_exec_review: task_execution_id is required")
@@ -6499,15 +6494,14 @@ def call_task_exec_review(args):
         raise RuntimeError(
             "task_exec_review: decision (a ReviewDecision v1 object) is required"
         )
-    source_agent, source_session_id = _task_exec_identity("task_exec_review")
     # `_unwrap` raises on a refused decision, preserving the backend's message. The
-    # caller sends only the execution id + decision; the bridge derives its active
-    # identity itself, so the model can never name a session id.
+    # caller sends only the execution id + decision; the bridge derives its identity
+    # itself (the room's native agent, else the joined CLI session, exactly as for
+    # task_exec_launch), so the model can never name a session id.
     return _unwrap(_http("POST", "/api/orchestration/review", {
         "task_execution_id": task_execution_id,
         "decision": decision,
-        "source_agent": source_agent,
-        "source_session_id": source_session_id,
+        **_task_exec_principal("task_exec_review"),
     }))
 
 

@@ -74,7 +74,7 @@ Awareness batches are bounded (20/wake), explicitly flagged
 never end a quiet wait. The bridge itself does not return merely because one
 server poll was quiet.
 [src: file: backend/src/api/disc_invite.rs:1071-1075#AWARENESS_MAX_MESSAGES] [src: file: backend/src/api/disc_invite.rs:1135-1142#awareness]
-[src: file: backend/src/api/disc_invite.rs:1716-1735#load_awareness_batch] [src: file: backend/scripts/disc-introspection-mcp.py:7237-7248#_WAIT_MIN_QUIET_POLL_SECS]
+[src: file: backend/src/api/disc_invite.rs:1716-1735#load_awareness_batch] [src: file: backend/scripts/disc-introspection-mcp.py:7231-7242#_WAIT_MIN_QUIET_POLL_SECS]
 [src: file: docs/architecture/discussion-agent-routing.md:87-99#awareness_offered_upto]
 
 ## 3 bis — Bridge guarantee vs host capability
@@ -152,7 +152,7 @@ context the short alias stays free (both identities may be wanted).
   native identity rotated (fresh session id) needs one `disc_join` with
   a token, which mints its credential — one-shot, by design. Unacked
   awareness survives reloads (server cursors, migrations 105/106).
-  [src: file: backend/scripts/disc-introspection-mcp.py:3562-3571#_BINDING_DIR]
+  [src: file: backend/scripts/disc-introspection-mcp.py:3563-3572#_BINDING_DIR]
   [src: file: backend/src/db/sql/106_awareness_offered_cursor.sql:1-11#awareness_offered_upto]
 
 ## 7. Autocomplete presentation (KT-211 contract)

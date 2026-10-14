@@ -96,7 +96,7 @@ or relax worker isolation. Workers run through WSL instead; the boundary
 After replacing a frozen bridge, reconnect the MCP session. Frozen and Windows
 runtimes report that a restart is required instead of attempting the Unix
 file-descriptor script reload used during source development.
-[src: file: backend/scripts/disc-introspection-mcp.py:11432-11442#_schedule_bridge_reload]
+[src: file: backend/scripts/disc-introspection-mcp.py:11426-11436#_schedule_bridge_reload]
 
 The desktop sidecar build runs an MCP smoke test from a relocated directory
 with spaces and non-ASCII characters, an empty PATH and an ephemeral HTTP
