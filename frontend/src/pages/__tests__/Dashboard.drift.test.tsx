@@ -4,6 +4,7 @@
 import { act, cleanup, fireEvent, render } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../lib/I18nContext';
+import { withDashboardRoutes } from '../../test/routerWrapper';
 import type { Project } from '../../types/generated';
 
 vi.mock('../../hooks/useWebSocket', () => ({
@@ -36,9 +37,9 @@ const project = (id: string, audit_status: Project['audit_status']): Project => 
   updated_at: '2026-01-01T00:00:00Z',
 });
 
-async function renderDashboard() {
+async function renderDashboard(initialPath: string) {
   await act(async () => {
-    render(<I18nProvider><Dashboard onReset={vi.fn()} /></I18nProvider>);
+    render(<I18nProvider>{withDashboardRoutes(<Dashboard onReset={vi.fn()} />, initialPath)}</I18nProvider>);
   });
 }
 
@@ -67,14 +68,12 @@ afterEach(() => {
 
 describe('Dashboard — drift requests', () => {
   it('asks nothing outside the Projects page', async () => {
-    sessionStorage.setItem('kronn:navigation:page', 'discussions');
-    await renderDashboard();
+    await renderDashboard('/discussions');
     expect(projectsApi.checkDrift).not.toHaveBeenCalled();
   });
 
   it('asks once per audited project, not again when the page is revisited', async () => {
-    sessionStorage.setItem('kronn:navigation:page', 'projects');
-    await renderDashboard();
+    await renderDashboard('/projects');
     expect(vi.mocked(projectsApi.checkDrift).mock.calls).toEqual([['audited']]);
 
     await openPage('nav-discussions');

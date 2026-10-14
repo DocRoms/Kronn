@@ -9,7 +9,7 @@ configuration. A comparison run from weeks ago would then silently display
 whatever model is configured *today* for that agent/tier, as if it were the
 model that actually answered. The fallback now resolves to the plain generic
 label only, never a live config lookup.
-[src: file: frontend/src/components/BatchComparePanel.tsx:195-197]
+[src: file: frontend/src/components/BatchComparePanel.tsx:197-199]
 [src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:455-457]
 
 ## `discussion.model` is a forward override, never a record of what answered
@@ -24,7 +24,7 @@ only from `answer.model` (normalized, the response that actually produced the
 compared answer) or, failing that, the last message in history that recorded
 a concrete `model` — never from `discussion.model`.
 [src: file: frontend/src/types/generated.ts:1793-1798]
-[src: file: frontend/src/components/BatchComparePanel.tsx:195-197]
+[src: file: frontend/src/components/BatchComparePanel.tsx:197-199]
 [src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:455-457]
 
 Both ranking card and main column now badge the model to disclose its
@@ -36,7 +36,7 @@ the final answer itself, `modelUnknown` when nothing was ever recorded and the
 generic default label is shown, and no badge at all when the final answer
 itself carries the model.
 [src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:477-478]
-[src: file: frontend/src/components/BatchComparePanel.tsx:233-237]
+[src: file: frontend/src/components/BatchComparePanel.tsx:235-239]
 
 ### `lastRecordedModel` is bounded to strictly before the compared answer
 
@@ -52,14 +52,14 @@ message's index, so only genuinely earlier records can surface as
 stays unbounded — there's no answer's provenance to protect at that point, so
 any recorded model (e.g. from a System message documenting an attempted model
 before failing) is legitimately shown.
-[src: file: frontend/src/components/BatchComparePanel.tsx:43-57]
+[src: file: frontend/src/components/BatchComparePanel.tsx:45-59]
 [src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:47-61]
 
 Both panels also normalize model ids consistently: an empty or
 whitespace-only string is treated as absent (trimmed, `''` → `null`), the same
 as a `null`/`undefined` field, so stray whitespace from a legacy row cannot
 silently pass through as if it were a real recorded model.
-[src: file: frontend/src/components/BatchComparePanel.tsx:59-62]
+[src: file: frontend/src/components/BatchComparePanel.tsx:61-64]
 [src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:63-66]
 
 Connection identity resolution itself (`compareAgentLabel` /
@@ -85,7 +85,7 @@ suffix bypassed entirely. The judge/improver pickers in
 The fix removes the manual `suffix` override so the Compare selector reuses
 the same catalogue+identity resolution as every other `AgentSwitchPicker`
 caller.
-[src: file: frontend/src/pages/WorkflowsPage.tsx:3203-3232]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:3222-3251]
 [src: file: frontend/src/components/AgentSwitchPicker.tsx:108-123]
 [src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:343-354]
 
@@ -106,7 +106,7 @@ no-answer discussion with only a System-recorded model must still surface it
 The launch-target fix is covered by switching a named connection's compare
 target to a tier it never configured and asserting its own `default_model`
 surfaces instead of the generic label.
-[src: file: frontend/src/components/__tests__/BatchComparePanel.test.tsx:476-698]
+[src: file: frontend/src/components/__tests__/BatchComparePanel.test.tsx:505-727]
 [src: file: frontend/src/components/__tests__/BatchCompareDetailsPanel.test.tsx:1-370]
 [src: file: frontend/src/pages/__tests__/WorkflowsPage.qp-launch.test.tsx:591-643]
 

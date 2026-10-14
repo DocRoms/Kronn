@@ -439,8 +439,8 @@ Branch `archive/feat-0.13.0-portable-prototype-20260830`.
   levels, repository alignment states, selection and `kronn/` preview remain
   visible [src: file: frontend/src/components/ProjectRepositoryResourcesPanel.tsx:124-155].
 - The Overview shows the linked MCP count and companion repositories, and owns
-  the project deletion controls [src: file: frontend/src/components/ProjectCard.tsx:2395]
-  [src: file: frontend/src/components/ProjectCard.tsx:2411].
+  the project deletion controls [src: file: frontend/src/components/ProjectCard.tsx:2365]
+  [src: file: frontend/src/components/ProjectCard.tsx:2381].
 - **Automations and Artifacts pages**: grouped by project; everything not
   linked to a project goes into « Général ».
 - Simple and fast first: the listing reads existing rows and a cheap hash

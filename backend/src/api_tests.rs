@@ -1633,6 +1633,87 @@ mod tests {
         assert!(asset.headers().contains_key("content-security-policy"));
     }
 
+    /// A deep address of the app (a reload on `/projects/<id>/code?file=…`, a
+    /// shared discussion, a standalone Page) is answered by the SPA fallback
+    /// with the same frame policy as `/`: the app, its CSP, the marker that
+    /// says which sources it was served with, and after a revocation the new
+    /// policy on a conditional reload, never a 304 with the old one.
+    #[tokio::test]
+    async fn deep_app_addresses_carry_the_host_frame_policy() {
+        let dist = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dist.path().join("index.html"),
+            "<!doctype html><html><head><title>k</title></head></html>",
+        )
+        .unwrap();
+        let state = test_state();
+        state.config.write().await.embed_allowed_origins = vec!["https://suno.com".to_string()];
+        let app = crate::api::live_pages::serve_app_documents(dist.path(), state.clone());
+        let document = |uri: &'static str, if_modified_since: bool| {
+            let mut request = Request::builder().uri(uri).header("accept", "text/html");
+            if if_modified_since {
+                request = request.header("if-modified-since", "Sat, 01 Jan 2100 00:00:00 GMT");
+            }
+            app.clone().oneshot(request.body(Body::empty()).unwrap())
+        };
+        let allowed = "frame-src 'self' https://suno.com; child-src 'self' https://suno.com; worker-src 'self' blob:";
+
+        for uri in [
+            "/projects/p1/code?file=README.md",
+            "/discussions/d1",
+            "/standalone/pages/p1",
+        ] {
+            let response = document(uri, false).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            assert_eq!(
+                response.headers()["content-security-policy"],
+                allowed,
+                "{uri}"
+            );
+            assert!(response.headers().get("etag").is_none(), "{uri}");
+            let body = String::from_utf8(
+                response
+                    .into_body()
+                    .collect()
+                    .await
+                    .unwrap()
+                    .to_bytes()
+                    .to_vec(),
+            )
+            .unwrap();
+            assert!(body.contains("<title>k</title>"), "{uri}: the app itself");
+            let marker = body
+                .split("<meta name=\"kronn-served-frame-src\" content=\"")
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+                .unwrap_or_else(|| panic!("{uri}: marker after <head>"))
+                .replace("&#39;", "'");
+            assert_eq!(marker, "'self' https://suno.com", "{uri}");
+        }
+
+        // Revoked, then a conditional reload of a deep address: the new policy.
+        state.config.write().await.embed_allowed_origins.clear();
+        let reload = document("/projects/p1/code?file=README.md", true)
+            .await
+            .unwrap();
+        assert_eq!(reload.status(), StatusCode::OK);
+        assert_eq!(
+            reload.headers()["content-security-policy"],
+            "frame-src 'self'; child-src 'self'; worker-src 'self' blob:"
+        );
+        let body = String::from_utf8(
+            reload
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(body.contains("<meta name=\"kronn-served-frame-src\" content=\"&#39;self&#39;\""));
+    }
+
     /// `/api/health` exposes `in_docker` (a bool) so the UI can gate the
     /// agent Install button — installs land in the container under Docker, so
     /// the UI must point to the host-side CLI instead. Health is unauthed.

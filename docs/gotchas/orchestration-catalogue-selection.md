@@ -6,7 +6,7 @@ The model override is cleared only by a successful explicit target change;
 opening, searching, or a failed catalogue read leaves the stored value alone.
 An override absent from the saved catalogue remains visible as unverified so it
 can be preserved rather than silently replaced. [src: file: frontend/src/components/TaskLaunchDialog.tsx:139-145]
-[src: file: frontend/src/components/DiscussionPlanPanel.tsx:387-392]
+[src: file: frontend/src/components/DiscussionPlanPanel.tsx:391-396]
 
 The launch dialog must let picker-owned Escape handling finish first: the model
 picker prevents the event, while the agent picker’s portal is recognised before

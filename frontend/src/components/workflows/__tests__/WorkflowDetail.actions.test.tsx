@@ -171,6 +171,19 @@ describe('WorkflowDetail — header actions', () => {
     expect(getRun).toHaveBeenCalledWith('wf-1', 'collect-run');
   });
 
+  it('opens a run in a new tab on a Ctrl-click on its row, without expanding it', () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const { container } = renderDetail({ runs: [mkRun({ id: 'run-42', status: 'Success' })] });
+    const row = container.querySelector<HTMLButtonElement>('.wf-run-compact')!;
+    expect(row).toHaveAttribute('aria-expanded', 'false');
+
+    fireEvent.click(row, { ctrlKey: true });
+
+    expect(open).toHaveBeenCalledWith(`${window.location.origin}/workflows/wf-1/runs/run-42`, '_blank', 'noopener,noreferrer');
+    expect(row).toHaveAttribute('aria-expanded', 'false');
+    open.mockRestore();
+  });
+
   it('shows copied feedback on the workflow ID pill while copying the full ID', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, 'clipboard', {

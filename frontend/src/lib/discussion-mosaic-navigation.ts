@@ -1,12 +1,11 @@
 import { livePageMosaicLayouts, type LivePageMosaicLayout } from './live-page-navigation';
+import { STANDALONE_PATHS } from './routes';
 
-export const DISCUSSION_MOSAIC_PREFIX = '#discussions/mosaic?';
 export const MAX_MOSAIC_DISCUSSIONS = 12;
 export type DiscussionMosaicLayout = LivePageMosaicLayout;
 
-export function discussionMosaicRoute(hash: string): { discussionIds: string[]; layout: DiscussionMosaicLayout } | null {
-  if (!hash.startsWith(DISCUSSION_MOSAIC_PREFIX)) return null;
-  const params = new URLSearchParams(hash.slice(DISCUSSION_MOSAIC_PREFIX.length));
+/** The discussions and layout a mosaic address asks for, or null when it is not a valid mosaic. */
+export function discussionMosaicRoute(params: URLSearchParams): { discussionIds: string[]; layout: DiscussionMosaicLayout } | null {
   const discussionIds = [...new Set(params.getAll('discussion').map(id => id.trim()).filter(Boolean))];
   if (discussionIds.length < 2 || discussionIds.length > MAX_MOSAIC_DISCUSSIONS
     || discussionIds.some(id => id.length > 128 || id.includes(','))) return null;
@@ -17,14 +16,19 @@ export function discussionMosaicRoute(hash: string): { discussionIds: string[]; 
   };
 }
 
-export function discussionMosaicUrl(
-  ids: string[],
-  layout: DiscussionMosaicLayout = 'auto',
-  location: Pick<Location, 'origin' | 'pathname'> = window.location,
-): string {
+export function discussionMosaicSearch(ids: string[], layout: DiscussionMosaicLayout = 'auto'): URLSearchParams {
   const unique = [...new Set(ids.map(id => id.trim()).filter(Boolean))];
   const params = new URLSearchParams();
   unique.forEach(id => params.append('discussion', id));
   params.set('layout', livePageMosaicLayouts(unique.length).includes(layout) ? layout : 'auto');
-  return `${location.origin}${location.pathname}${DISCUSSION_MOSAIC_PREFIX}${params.toString()}`;
+  return params;
+}
+
+/** The shareable address of a mosaic of discussions. */
+export function discussionMosaicUrl(
+  ids: string[],
+  layout: DiscussionMosaicLayout = 'auto',
+  location: Pick<Location, 'origin'> = window.location,
+): string {
+  return `${location.origin}${STANDALONE_PATHS.discussionsMosaic}?${discussionMosaicSearch(ids, layout)}`;
 }

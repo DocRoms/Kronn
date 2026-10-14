@@ -90,6 +90,33 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+describe('SwipeableDiscItem — open in a new tab', () => {
+  it('opens a Ctrl-click or a middle click in a new tab, without selecting here or starting a swipe', () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const capture = vi.spyOn(Element.prototype, 'setPointerCapture');
+    const { row, onSelect } = renderItem();
+
+    fireEvent.pointerDown(row, { clientX: 100, pointerId: 1, ctrlKey: true });
+    fireEvent.pointerUp(row, { clientX: 100, pointerId: 1, ctrlKey: true });
+    fireEvent.click(row, { ctrlKey: true });
+    expect(capture).not.toHaveBeenCalled();
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(open).toHaveBeenCalledWith(expect.stringMatching(/\/discussions\/disc-alpha$/), '_blank', 'noopener,noreferrer');
+
+    fireEvent.pointerDown(row, { clientX: 100, pointerId: 2, button: 1 });
+    fireEvent.pointerUp(row, { clientX: 100, pointerId: 2, button: 1 });
+    fireEvent(row, new MouseEvent('auxclick', { bubbles: true, cancelable: true, button: 1 }));
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(open).toHaveBeenCalledTimes(2);
+
+    // The plain click still selects here.
+    fireEvent.click(row);
+    expect(onSelect).toHaveBeenCalledTimes(1);
+    open.mockRestore();
+    capture.mockRestore();
+  });
+});
+
 describe('SwipeableDiscItem — pointer/swipe gesture', () => {
   it('invokes setPointerCapture on pointerDown', () => {
     const spy = vi.spyOn(Element.prototype, 'setPointerCapture');

@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { ExternalLink, Pencil, Settings, Star } from 'lucide-react';
 import { useT } from '../lib/I18nContext';
+import { newTabClickProps } from '../lib/newTabNavigation';
+import { PAGE_PATHS } from '../lib/routes';
 import { projectsUsingSkill, skillOrigin, type RepositorySkillOrigin } from '../lib/automationSkills';
 import { catalogSkillTraits } from '../lib/skillGroups';
 import type { Project, ProjectRepositoryResourceStatus, Skill } from '../types/generated';
@@ -217,7 +219,12 @@ export function SkillSheet({ skill, projects, usedBy, repository, contentStatus,
               </button>
             )}
             {onOpenSettings && (
-              <button type="button" className="skill-sheet-action" onClick={onOpenSettings}>
+              <button
+                type="button"
+                className="skill-sheet-action"
+                {...newTabClickProps(PAGE_PATHS.settings)}
+                onClick={onOpenSettings}
+              >
                 <Settings size={12} aria-hidden="true" /> {t('automation.skill.openSettings')}
               </button>
             )}

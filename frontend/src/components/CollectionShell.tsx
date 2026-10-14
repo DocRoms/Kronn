@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { newTabClickProps, type NewTabClickProps } from '../lib/newTabNavigation';
 import { ChevronLeft, ChevronRight, ListChecks, Loader2, Menu, MoreHorizontal, Search, Star, X } from 'lucide-react';
 import './CollectionShell.css';
 
@@ -43,7 +44,7 @@ export interface CollectionAction<TItem> {
 /** Props for a custom row's native focusable control. The caller owns any
  * list-item wrapper; the shell deliberately does not override the control's
  * native button role. */
-export interface CollectionRowProps {
+export interface CollectionRowProps extends NewTabClickProps {
   className: string;
   'aria-current'?: 'true';
   onClick: () => void;
@@ -132,6 +133,9 @@ export interface CollectionShellProps<TItem> {
   items: TItem[];
   getId: (item: TItem) => CollectionItemId;
   getLabel: (item: TItem) => string;
+  /** The address an item opens at: a modified or middle click on its row
+   *  opens it in a new tab. */
+  getItemPath?: (item: TItem) => string | null;
   isFavorite?: (item: TItem) => boolean;
   onToggleFavorite?: (item: TItem) => void;
   filters?: CollectionFilter<TItem>[];
@@ -249,7 +253,7 @@ export function CollectionSidebarRail({
  * filtering, selection, responsive sidebar and context-menu behaviour.
  */
 export function CollectionShell<TItem>({
-  ariaLabel, items, getId, getLabel, isFavorite, onToggleFavorite, filters = [], itemFilter, filterQuery = true,
+  ariaLabel, items, getId, getLabel, getItemPath, isFavorite, onToggleFavorite, filters = [], itemFilter, filterQuery = true,
   persistence, selectedId, onSelect, selectedIds, onSelectedIdsChange, actions = [],
   title, titleCount, headerActions, hideSelectMultipleMenu = false, slots, isMobile = false, sidebarOnly = false, sidebarClassName = '', globalSearchShortcut = false, showSearchClear = false, shortcutsEnabled = true, showControls = true, sidebarOpen = true, onSidebarOpenChange, onSearchSubmit, labels,
 }: CollectionShellProps<TItem>) {
@@ -429,6 +433,7 @@ export function CollectionShell<TItem>({
     isMultiSelected: item => multiSelectionVisible && (selectedIds?.has(getId(item)) ?? false),
     toggleMultiSelection,
     getRowProps: item => ({
+      ...newTabClickProps(getItemPath?.(item)),
       className: 'collection-shell-row-button',
       'aria-current': selectedId === getId(item) ? 'true' : undefined,
       onClick: () => selectItem(item),
@@ -518,7 +523,7 @@ export function CollectionShell<TItem>({
             const selected = selectedId === id;
             return <li key={id} className="collection-shell-row" data-selected={selected} data-multi-selected={multiSelected}>
               {multiSelectionVisible && <input type="checkbox" aria-label={`${getLabel(item)} ${labels.selectItem}`} checked={multiSelected} onChange={() => toggleMultiSelection(id)} />}
-              <button type="button" className="collection-shell-row-button" aria-current={selected ? 'true' : undefined} onClick={() => selectItem(item)}>{slots.renderItem?.(item, { selected, multiSelected }) ?? getLabel(item)}</button>
+              <button type="button" {...newTabClickProps(getItemPath?.(item))} className="collection-shell-row-button" aria-current={selected ? 'true' : undefined} onClick={() => selectItem(item)}>{slots.renderItem?.(item, { selected, multiSelected }) ?? getLabel(item)}</button>
               {isFavorite && onToggleFavorite && <button type="button" className="collection-shell-favorite" aria-label={`${labels.favorites} · ${getLabel(item)}`} aria-pressed={isFavorite(item)} onClick={() => onToggleFavorite(item)}><Star size={14} fill={isFavorite(item) ? 'currentColor' : 'none'} /></button>}
             </li>;
           })}

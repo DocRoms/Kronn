@@ -130,7 +130,7 @@ describe('DiscussionSidebar — bulk selection', () => {
     const link = screen.getByRole('link', { name: 'disc.mosaic.open' });
     expect(link).toHaveAttribute('target', '_blank');
     expect(link).toHaveAttribute('rel', 'noopener noreferrer');
-    expect(link.getAttribute('href')).toContain('#discussions/mosaic?discussion=disc-a&discussion=disc-b&layout=auto');
+    expect(link.getAttribute('href')).toBe(`${window.location.origin}/standalone/discussions/mosaic?discussion=disc-a&discussion=disc-b&layout=auto`);
     link.addEventListener('click', event => event.preventDefault());
     fireEvent.click(link);
     expect(screen.getByText('disc.bulk.selected:2')).toBeInTheDocument();

@@ -1,6 +1,6 @@
 # Plugin favorite persistence
 
-Plugin favorites remain browser-local through `usePersistentIdSet` and the `kronn:collection-favorites:plugins` key. [src: file: frontend/src/components/plugins/usePluginListState.ts:61]
+Plugin favorites remain browser-local through `usePersistentIdSet` and the `kronn:collection-favorites:plugins` key. [src: file: frontend/src/components/plugins/usePluginListState.ts:65]
 
 The MCP client contract has overview, registry, rescan, test, bundle, config, probe, secret, and context operations, but no plugin-favorite persistence operation. [src: file: frontend/src/lib/api.ts:1380]
 

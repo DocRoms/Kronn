@@ -10,7 +10,7 @@ locally recorded answer cannot overwrite it.
 
 [src: file: frontend/src/lib/discussionQuestions.ts:40-130]
 [src: file: frontend/src/components/DiscussionQuestionBanner.tsx:14-25]
-[src: file: frontend/src/pages/DiscussionsPage.tsx:4024-4027]
+[src: file: frontend/src/pages/DiscussionsPage.tsx:4103-4106]
 
 When the panel rail floats and message search is closed, the arbitration
 banner reserves the rail's horizontal footprint for its reveal button. Opening

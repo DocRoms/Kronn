@@ -790,14 +790,14 @@ The MCP `initialize` instructions expose this contract before any room tool is
 called, and `disc_join` repeats it in the room protocol. The full document and
 diagram examples remain on demand in the Kronn Docs skill so the permanent MCP
 catalogue does not pay for a long manual.
-`[src: file: frontend/src/components/MessageBubble.tsx:1376-1434]`
+`[src: file: frontend/src/components/MessageBubble.tsx:1373-1431]`
 `[src: file: frontend/src/components/MermaidDiagram.tsx:97-108]`
 `[src: file: backend/src/api/disc_prompts.rs:390-398]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:8212-8222]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:634-643]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:4101-4174]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:4871-4893]`
-`[src: file: frontend/src/components/MessageAttachments.tsx:80-287]`
+`[src: file: frontend/src/components/MessageAttachments.tsx:82-291]`
 `[src: file: frontend/src/components/DiscussionAssetsPanel.tsx:16-146]`
 
 Agent-library catalogs deliberately stay compact:
@@ -971,7 +971,7 @@ summaries, and `workflow_run_get` truncates step outputs. `task_list`,
 
 Every discussion message exposes the same `#xxxxxxxx` header pill as discussions
 and workflows; clicking it copies the full stable message UUID.
-[src: file: frontend/src/components/MessageBubble.tsx:289-404]
+[src: file: frontend/src/components/MessageBubble.tsx:291-405]
 `disc_get_message` accepts that UUID, the compact `MSG-xxxxxxxx` reference
 returned by the API, or the existing positive/negative `idx`. Pass `before`
 and/or `after` (0–10) to retrieve only the nearby messages needed for context:

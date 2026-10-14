@@ -250,8 +250,8 @@ explained disabled option, and clears an incompatible effort in the same save
 that changes the model. Even without available modes, the control remains
 usable to clear an invalid saved effort. Other runtime cards state that effort
 is unsupported.
-[src: file: frontend/src/components/settings/AgentsSection.tsx:150-205]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:1245-1310]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:169-219]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:1259-1324]
 
 ## Migration and test invariants
 

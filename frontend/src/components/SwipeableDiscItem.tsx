@@ -1,4 +1,6 @@
 import { useState, useRef, useEffect, memo } from 'react';
+import { newTabClickProps } from '../lib/newTabNavigation';
+import { discussionPath } from '../lib/routes';
 import type { ReactNode } from 'react';
 import {
   ShieldCheck, Zap, Rocket, GitBranch, Loader2, Users, Users2, Square,
@@ -99,6 +101,9 @@ export const SwipeableDiscItem = memo(function SwipeableDiscItem({
 
   const handlePointerDown = (e: React.PointerEvent) => {
     if (selectionMode) return;
+    // A middle or modified press opens the discussion in a new tab (the click
+    // handlers below): it must not start a swipe, whose release selects here.
+    if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey) return;
     startX.current = e.clientX;
     currentX.current = e.clientX;
     setSwiping(true);
@@ -208,6 +213,7 @@ export const SwipeableDiscItem = memo(function SwipeableDiscItem({
           aria-current={!selectionMode && isActive ? 'true' : undefined}
           aria-checked={selectionMode ? isSelected : undefined}
           aria-label={`${disc.title} — ${msgCount} messages, ${visibleAgent}`}
+          {...newTabClickProps(selectionMode ? null : discussionPath(disc.id))}
           onClick={handleOpenClick}
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}

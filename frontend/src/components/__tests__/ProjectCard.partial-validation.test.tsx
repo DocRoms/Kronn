@@ -23,7 +23,7 @@ vi.mock('../../hooks/useMediaQuery', () => ({ useIsMobile: () => false }));
 import { ProjectCard } from '../ProjectCard';
 import { projects as projectsApi } from '../../lib/api';
 import type { PartialDoneInfo } from '../../lib/api';
-import type { Project, AgentDetection, DriftCheckResponse } from '../../types/generated';
+import type { Project, AgentDetection, DriftCheckResponse, Discussion } from '../../types/generated';
 
 const noop = () => {};
 
@@ -101,8 +101,9 @@ describe('ProjectCard — partial refresh validation UX', () => {
     await clickUpdate();
     expect(props.onRefetchDiscussions).toHaveBeenCalled();
     expect(props.toast).toHaveBeenCalledWith(expect.stringContaining('audit.partialValidationCreated'), 'success');
+    // Opening the discussion is the navigation: it lands on its address.
     expect(props.onOpenDiscussion).toHaveBeenCalledWith('d-scoped');
-    expect(props.onNavigate).toHaveBeenCalledWith('discussions');
+    expect(props.onNavigate).not.toHaveBeenCalled();
     expect(props.onAutoRunDiscussion).not.toHaveBeenCalled();
   });
 
@@ -228,5 +229,43 @@ describe('ProjectCard — full audit step_error visibility', () => {
     const greens = (props.toast as ReturnType<typeof vi.fn>).mock.calls
       .filter(([, kind]) => kind === 'success');
     expect(greens).toHaveLength(0);
+  });
+});
+
+// ── Addresses: the validation badge and the tracker hint open their page in
+// a new tab on a modified click, and keep their in-app navigation otherwise.
+describe('ProjectCard — new-tab addresses', () => {
+  it('the validation-in-progress badge opens its discussion in a new tab on Ctrl-click', async () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const validation = {
+      id: 'd-running-val', project_id: PROJECT.id, title: 'Validation audit AI', archived: false,
+    } as unknown as Discussion;
+    const { props, container } = renderCard({ discussions: [validation], driftStatus: null });
+    const badge = container.querySelector('.dash-badge-orange.cursor-pointer') as HTMLElement;
+    expect(badge).not.toBeNull();
+
+    fireEvent.click(badge, { ctrlKey: true });
+    expect(open).toHaveBeenCalledWith(`${window.location.origin}/discussions/d-running-val`, '_blank', 'noopener,noreferrer');
+    expect(props.onOpenDiscussion).not.toHaveBeenCalled();
+
+    fireEvent.click(badge);
+    expect(props.onOpenDiscussion).toHaveBeenCalledWith('d-running-val');
+    expect(open).toHaveBeenCalledTimes(1);
+    open.mockRestore();
+  });
+
+  it('the tracker hint configure button opens /plugins in a new tab on Ctrl-click', () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const { props } = renderCard({ project: { ...PROJECT, audit_status: 'TemplateInstalled' }, driftStatus: null });
+    const hint = screen.getByTestId('audit-tracker-prerequisite');
+    const configure = hint.querySelector('.dash-tracker-hint-actions .dash-icon-btn:not(.dash-tracker-hint-dismiss)') as HTMLElement;
+
+    fireEvent.click(configure, { ctrlKey: true });
+    expect(open).toHaveBeenCalledWith(`${window.location.origin}/plugins`, '_blank', 'noopener,noreferrer');
+    expect(props.onNavigate).not.toHaveBeenCalled();
+
+    fireEvent.click(configure);
+    expect(props.onNavigate).toHaveBeenCalledWith('mcps');
+    open.mockRestore();
   });
 });

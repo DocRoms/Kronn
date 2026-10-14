@@ -50,11 +50,11 @@ test.describe('Discussion inline action — launch', () => {
     expect(appended.data.appended).toBe(1);
 
     const dashboard = new DashboardPage(page);
-    // Direct navigation to the same #discussion-<id> deep link a Live Page's
+    // Direct navigation to the same `/discussions/<id>` address a Live Page's
     // "open discussion" action produces (`openStandaloneDiscussion` in
     // `frontend/src/lib/live-page-navigation.ts`) — proves it is a real,
     // standalone entry point, not only reachable via `window.open`.
-    await page.goto(`/#discussion-${discId}`);
+    await page.goto(`/discussions/${discId}`);
     await dashboard.navDiscussions.waitFor({ state: 'visible', timeout: 15_000 });
 
     const card = page.locator('[data-testid^="discussion-action-"]');
