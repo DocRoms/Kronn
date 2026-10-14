@@ -80,7 +80,9 @@ async function mockBackend(page: Page) {
       tech_debt_count: 0,
       needs_docs_migration: false,
       default_skill_ids: [],
-      briefing_notes: null,
+      // KT-1192: no audit starts without a saved briefing, so the launch the
+      // merge hooks into stays disabled on a project that has none.
+      briefing_notes: 'Documented front_apollo repo, merged from template v2.',
       linked_repos: [],
       created_at: '2026-01-01T00:00:00Z',
       updated_at: '2026-01-01T00:00:00Z',
