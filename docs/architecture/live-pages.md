@@ -9,7 +9,7 @@ contracts. An Artifact is the same persisted resource; renaming its product
 label does not migrate or duplicate it. Historical code and documentation use
 “Page” for that domain model.
 [src: file: frontend/src/lib/i18n/locales/en.ts:152-153#nav.pages]
-[src: file: frontend/src/lib/live-page-navigation.ts:4-5#STANDALONE_LIVE_PAGE_HASH_PREFIX]
+[src: file: frontend/src/lib/live-page-navigation.ts:50-55#standaloneLivePageUrl]
 
 ## Portable JSON bundles
 
@@ -250,7 +250,7 @@ normalization per observation and retain `observed_at` plus
 `workflow_run_id`. `[src: file: frontend/src/lib/live-page-csv.ts:1-106#recordsToRows]` The
 export uses a semicolon for French and Spanish UI locales so spreadsheet tools
 configured with those regional separators open columns directly; other locales
-keep the standard comma. `[src: file: frontend/src/pages/PagesPage.tsx:454-466#delimiter]`
+keep the standard comma. `[src: file: frontend/src/pages/PagesPage.tsx:475-487#delimiter]`
 
 ## Theme and refresh behavior
 
@@ -334,7 +334,7 @@ value and the Page the frame shows; it stores it in the host's `localStorage`
 (`kronn:page-pref:<page id>:<key>`, errors swallowed) and never acts on it.
 `runtimeData` hands the stored flags back as `KronnPageData.prefs`.
 `[src: file: frontend/src/lib/live-page-sandbox.ts:579-582#KronnPagePref]`
-`[src: file: frontend/src/lib/live-page-sandbox.ts:881-887#LIVE_PAGE_PREF_KEYS]`
+`[src: file: frontend/src/lib/live-page-sandbox.ts:888-894#LIVE_PAGE_PREF_KEYS]`
 
 `TaskBoard` (zero tokens) reads or changes the planning tasks carrying the
 board tag; it refuses any task without it. The order of open cards lives in
@@ -358,7 +358,7 @@ tokens pass: keys `^[a-z][a-z0-9_]{0,31}$`, values `^[A-Za-z0-9_.-]{0,64}$`,
 at most 8, first occurrence wins; anything else is dropped. The embedded viewer
 and mosaic tiles have no URL of their own and send no `params` key. Parameters
 are hints for the Page's own rendering, never an authorization input.
-`[src: file: frontend/src/lib/live-page-navigation.ts:43-73#livePageViewParams]`
+`[src: file: frontend/src/lib/live-page-navigation.ts:40-70#livePageViewParams]`
 `[src: file: frontend/src/lib/live-page-sandbox.ts:314-325#runtimeData]`
 
 The embedded viewer, standalone Page and mosaic skip automatic data
@@ -536,7 +536,7 @@ fence carries one intention.
 [src: file: backend/src/db/live_page_actions.rs:620-624#latest_launches_for_live_page]
 [src: file: frontend/src/lib/live-page-sandbox.ts:296-311#postLivePageActionStates]
 [src: file: frontend/src/lib/live-page-sandbox.ts:490-509#markActions]
-[src: file: frontend/src/lib/live-page-sandbox.ts:337-340#ACTION_STATE_STYLE]
+[src: file: frontend/src/lib/live-page-sandbox.ts:339-342#ACTION_STATE_STYLE]
 [src: file: frontend/src/hooks/useLivePageActions.ts:174-218#handleIntent]
 [src: file: frontend/src/hooks/useLivePageActions.ts:276-288#anyInFlight]
 [src: file: frontend/src/components/LivePageActionOverlay.tsx:40#Escape]
@@ -602,7 +602,7 @@ its discussions under a child batch run. Each one carries its agent's state
 and the head of its latest answer, where agents put their verdict. A launch
 whose result is a discussion reads `GET /api/discussions/{id}/outcome`.
 `[src: file: backend/src/db/run_outcome.rs:61-70#for_run]`
-`[src: file: frontend/src/components/RunOutcomePanel.tsx:22-27#RunOutcomePanel]`
+`[src: file: frontend/src/components/RunOutcomePanel.tsx:24-29#RunOutcomePanel]`
 
 Agents learn this contract where they write Page HTML: the MCP manuals of
 `page_create` and `page_update_html` share one text (one block per row,
@@ -632,10 +632,10 @@ even when two tiles share the same `action_ref` string for different Pages.
 `[src: file: frontend/src/hooks/useLivePageActions.ts:220-227#handleChanged]`
 `[src: file: frontend/src/components/LivePageActionOverlay.tsx:105-116#LivePageActionCard]`
 The standalone tab and mosaic tiles have no Dashboard shell to navigate
-within, so a terminal action's "open discussion" jump opens it in a fresh
-same-origin tab addressed by `#discussion-<id>` instead of switching in place.
-It still seeds the session-storage checkpoint Dashboard reads on mount
-(`dashboard-navigation.ts`), so a reload of the original tab keeps its place. `[src: file: frontend/src/lib/live-page-navigation.ts:144-164#openStandaloneDiscussion]`
+within, so a terminal action's "open discussion" jump seeds the same
+session-storage reload checkpoint Dashboard already reads on mount
+(`dashboard-navigation.ts`) and opens it in a fresh same-origin tab instead of
+switching in place. `[src: file: frontend/src/lib/live-page-navigation.ts:114-120#openStandaloneDiscussion]`
 
 Workflow export bundle v2 includes each statically referenced Page's current
 HTML template and dataset contract, then remaps every `PublishPageData.page_id`
@@ -849,7 +849,7 @@ host-owned content.
 
 Host. The relay checks the list structurally (bounded, finite rectangles, key
 grammar, URL length; a malformed clip becomes an empty one, never none)
-[src: file: frontend/src/lib/live-page-sandbox.ts:176-178#parseLivePageEmbeds], then
+[src: file: frontend/src/lib/live-page-sandbox.ts:178-180#parseLivePageEmbeds], then
 `planLivePageEmbeds` decides: nothing before the allowed sites are known; an
 allowed origin gets a player (at most 8); a valid URL from another site gets a
 warning drawn by Kronn (at most 8), naming the origin, with a "Configure

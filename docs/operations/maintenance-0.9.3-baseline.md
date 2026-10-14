@@ -91,7 +91,7 @@ without the programmatic API consumed by typescript-eslint, the official
 side-by-side arrangement keeps `@typescript/typescript6` aliased as the
 `typescript` package and exposes its `tsc6` binary through
 `typecheck:legacy`. Both compiler paths are explicit CI gates.
-[src: file: frontend/package.json:11-13#tsc6] [src: file: frontend/package.json:55-63#typescript6]
+[src: file: frontend/package.json:11-13#tsc6] [src: file: frontend/package.json:64-70#typescript6]
 [src: file: .github/workflows/ci-test.yml:457-466#typecheck] [src: url:
 https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/]
 

@@ -283,7 +283,7 @@ including old deletions or imported workflows. It waits for a successful
 catalogue read and clears the warning when the reference is replaced or removed.
 The warning identifies the step and missing id and remains visible across wizard
 stages. [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:1353-1365#missingQuickApis]
-[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:1424-1431#missingQuickApiReference]
+[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:1435-1442#missingQuickApiReference]
 
 ## Run-anchored time templates
 

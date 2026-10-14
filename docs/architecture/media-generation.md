@@ -197,7 +197,7 @@ across a generation error, and the same idempotency key is retained for an
 explicit identical retry; the UI never automatically repeats an ambiguous
 billable request. `[src: file: frontend/src/components/NewDiscussionForm.tsx:397-415#createMediaDiscussion]`
 `[src: file: frontend/src/components/MediaGenerateForm.tsx:476-532#submit]`
-`[src: file: frontend/src/pages/DiscussionsPage.tsx:2537-2556#handleCreateMediaDiscussion]`
+`[src: file: frontend/src/pages/DiscussionsPage.tsx:2615-2634#handleCreateMediaDiscussion]`
 
 ## What a model accepts, read rather than assumed
 

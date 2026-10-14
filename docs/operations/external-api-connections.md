@@ -4,7 +4,7 @@ Kronn's **Settings → Agents → External API mode** manages named connections 
 OpenAI-compatible chat services. LiteLLM, NVIDIA and OpenRouter provide endpoint
 presets; `Other` uses the same contract for an operator-supplied service. Every
 connection owns a display name, a unique discussion alias, an endpoint and
-optional Economy, Default and Reasoning models. [src: file: frontend/src/components/settings/AgentsSection.tsx:1777-1782#ExternalApiSection]
+optional Economy, Default and Reasoning models. [src: file: frontend/src/components/settings/AgentsSection.tsx:1791-1796#ExternalApiSection]
 [src: file: backend/src/models/external_api_connection.rs:11-20#ExternalApiConnection]
 
 The required HTTP surface is `GET /v1/models` plus
@@ -204,7 +204,7 @@ previously saved connection values into the compatibility configuration still
 read by the runner. This prevents selector tooltips and executions from keeping
 stale pre-migration model names. [src: file: backend/src/api/external_api_connections.rs:2009-2013#sync_runtime_config]
 [src: file: backend/src/db/external_api_connections.rs:21-47#sync_runtime_config]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:1777-1782#onModelTiersChanged]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:1795-1800#onModelTiersChanged]
 
 After upgrading, verify both migrated cards, run their connection tests and
 confirm the intended models for all three tiers before using them.

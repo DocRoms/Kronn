@@ -103,7 +103,7 @@ by a human (KT-1131). An accepted step keeps its failure on record:
   run is resumable, it says so and offers "Retry". Every launch button stays
   disabled until it knows. A step retried alone never falls back to a whole
   audit when its run is no longer resumable.
-  [src: file: frontend/src/components/ProjectCard.tsx:526-535#resumableUnknown] [src: file: frontend/src/components/ProjectCard.tsx:862-865#retrySteps] [src: file: frontend/src/components/AuditTimeline.tsx:405-407#launchBlocked]
+  [src: file: frontend/src/components/ProjectCard.tsx:499-508#resumableUnknown] [src: file: frontend/src/components/ProjectCard.tsx:835-838#retrySteps] [src: file: frontend/src/components/AuditTimeline.tsx:405-407#launchBlocked]
 
 ## Every error carries its action (KT-1169)
 
@@ -121,18 +121,18 @@ by a human (KT-1131). An accepted step keeps its failure on record:
 | Verify-docs dialog | A stale-sections refresh failed. | The stale section stays in the single doc-state block. “Update affected steps” retries the partial run; “Verified, unchanged” settles it without an agent. Both remain unavailable while a resumable run takes priority. |
 | Toasts during a run | A step failed or warned. | Informational: the run ends with that step's "Retry this step" and "Accept as it stands". |
 
-- Launch error banner. [src: file: frontend/src/components/AuditTimeline.tsx:602-619#launchError] [src: file: frontend/src/components/ProjectCard.tsx:1034-1042#setAuditLaunchError] [src: file: frontend/src/components/ProjectCard.tsx:471#auditLaunchError]
+- Launch error banner. [src: file: frontend/src/components/AuditTimeline.tsx:602-619#launchError] [src: file: frontend/src/components/ProjectCard.tsx:1034-1042#setAuditLaunchError] [src: file: frontend/src/components/ProjectCard.tsx:444#auditLaunchError]
 - Unknown resumable state, unreadable timeline. [src: file: frontend/src/components/AuditTimeline.tsx:621-632#resumableUnknown] [src: file: frontend/src/components/AuditTimeline.tsx:634-636#loadFailed]
 - Refused acceptance. [src: file: frontend/src/components/AuditTimeline.tsx:415-421#setAcceptError] [src: file: frontend/src/components/AuditTimeline.tsx:730-733#acceptError]
 - Validation prerequisites and linked actions. [src: file: frontend/src/components/AuditTimeline.tsx:870-900#completedLocalRun]
-- Verify-docs actions and resumable priority. [src: file: frontend/src/components/RevalidateAudit.tsx:355-386#onUpdateStale] [src: file: frontend/src/components/ProjectCard.tsx:1459-1471#primaryAuditAction]
+- Verify-docs actions and resumable priority. [src: file: frontend/src/components/RevalidateAudit.tsx:355-386#onUpdateStale] [src: file: frontend/src/components/ProjectCard.tsx:1430-1442#primaryAuditAction]
 - Recap read error. [src: file: frontend/src/components/AuditRecapPanel.tsx:363-368#errorBlock]
 
 ## “Verify docs” escalation (KT-1168, KT-1206, KT-1218)
 
 “Verify docs” is the single entry point in the project header, the audit
 timeline and a stale document's viewer. It has no lifecycle of its own.
-[src: file: frontend/src/components/ProjectCard.tsx:1545-1559#project-audit-primary]
+[src: file: frontend/src/components/ProjectCard.tsx:1516-1530#project-audit-primary]
 [src: file: frontend/src/components/AuditTimeline.tsx:458-463#onVerifyDocs]
 [src: file: frontend/src/components/AiDocViewer.tsx:529-538#onOpenDocState]
 
@@ -141,7 +141,7 @@ timeline and a stale document's viewer. It has no lifecycle of its own.
   human-validated docs to reconfirm. Template placeholders keep their separate
   targeted fill action below the block. A missing drift, revalidation-plan or
   provenance response is shown as unknown, never clean or validated.
-  [src: file: frontend/src/components/ProjectCard.tsx:1395-1411#docStateUnknown]
+  [src: file: frontend/src/components/ProjectCard.tsx:1366-1382#docStateUnknown]
   [src: file: frontend/src/components/DocStateSummary.tsx:67-84#doc-state-counts]
 - **Deterministic first.** Opening the entry point computes the citation plan
   without an agent. Re-anchoring moved citations is also deterministic.
@@ -222,8 +222,8 @@ sections.
 The compact header exposes only the honest status, its primary next action and
 the doc-state summary. One “Details” disclosure contains secondary metadata and
 actions. Three pre-audit cases override the legacy `TemplateInstalled` label:
-[src: file: frontend/src/components/ProjectCard.tsx:1402-1445#auditHeaderStatus]
-[src: file: frontend/src/components/ProjectCard.tsx:1627-1645#project-audit-details]
+[src: file: frontend/src/components/ProjectCard.tsx:1373-1416#auditHeaderStatus]
+[src: file: frontend/src/components/ProjectCard.tsx:1599-1617#project-audit-details]
 
 - a human-owned docs folder asks the user to choose where Kronn writes;
 - a cancelled first run names its cancellation date and offers a relaunch;
@@ -251,18 +251,18 @@ The validation phase never reads "running" while an audit runs. It derives its
 action from the latest local run of any kind and that run's `latest_validation`;
 an older completed Full or Partial run cannot authorize Validate after a newer
 specialized run. Discussion-title guesses never authorize Validate.
-[src: file: frontend/src/components/ProjectCard.tsx:577-583#latest]
+[src: file: frontend/src/components/ProjectCard.tsx:550-556#latest]
 [src: file: frontend/src/components/AuditTimeline.tsx:256-274#latestRun]
 [src: file: frontend/src/components/AuditTimeline.tsx:845-900#linkedValidation]
 
 - Step status, accepted included. [src: file: frontend/src/components/AuditTimeline.tsx:159#stepStatus]
 - Launch label: resume, finalize, run again. [src: file: frontend/src/components/AuditTimeline.tsx:395-401#launchLabel]
 - Per-step actions only on the resumable run. [src: file: frontend/src/components/AuditTimeline.tsx:403-404#stepActions]
-- Validation phase is not running during an audit. [src: file: frontend/src/components/AuditTimeline.tsx:409-410#validationRunning] [src: file: frontend/src/components/ProjectCard.tsx:652-656#validationInProgress]
+- Validation phase is not running during an audit. [src: file: frontend/src/components/AuditTimeline.tsx:409-410#validationRunning] [src: file: frontend/src/components/ProjectCard.tsx:625-629#validationInProgress]
 - Validation phase hands over to the run. [src: file: frontend/src/components/AuditTimeline.tsx:856-868#runPending]
 - Confirmation before a fresh full audit. [src: file: frontend/src/components/AuditTimeline.tsx:1023-1045#confirmRelaunch]
 - Orphaned lease banner. [src: file: frontend/src/components/AuditTimeline.tsx:589-600#leaseOrphaned]
-- Cancel pending. [src: file: frontend/src/components/AuditTimeline.tsx:586-587#cancelPending] [src: file: frontend/src/components/ProjectCard.tsx:469#cancelPending]
+- Cancel pending. [src: file: frontend/src/components/AuditTimeline.tsx:586-587#cancelPending] [src: file: frontend/src/components/ProjectCard.tsx:442#cancelPending]
 
 ## Validation and document trust (KT-1206)
 

@@ -6,7 +6,7 @@ settings. An empty or absent list retains the existing launch policy. This is
 an explicit per-step declaration; listing a companion project in documentation
 does not automatically grant access.
 [src: file: backend/src/models/workflows.rs:962-966#read_only_repos]
-[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4488-4495#read_only_repos]
+[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4493-4500#read_only_repos]
 
 ```json
 {
