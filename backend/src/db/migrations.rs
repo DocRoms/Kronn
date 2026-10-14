@@ -3494,11 +3494,12 @@ mod tests {
             },
         )
         .unwrap();
-        crate::db::agent_dispatch::claim(&conn, "job-upgrade")
-            .unwrap()
-            .unwrap();
+        // The claim is written by hand: today's claim() reads tables later
+        // migrations add, which this 155-era schema does not have.
         conn.execute(
-            "UPDATE agent_dispatch_jobs SET connection_id = 'router' WHERE id = 'job-upgrade'",
+            "UPDATE agent_dispatch_jobs
+                SET status = 'Running', attempts = attempts + 1, connection_id = 'router'
+              WHERE id = 'job-upgrade'",
             [],
         )
         .unwrap();

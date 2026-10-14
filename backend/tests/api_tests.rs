@@ -22988,6 +22988,8 @@ mod cold_api_handlers_tests {
         .unwrap();
         let state = test_state();
         let pid = seed_project_with_repo(&state, &repo).await;
+        // A revalidation is an audit run, and no audit starts without a briefing.
+        std::fs::write(repo.join("docs/briefing.md"), "Test briefing content\n").unwrap();
         seed_completed_validation(&state, &pid).await;
         let (_, json) = post_json(
             build_router_with_auth(state.clone(), false),
