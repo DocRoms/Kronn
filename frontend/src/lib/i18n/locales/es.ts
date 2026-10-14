@@ -2940,8 +2940,6 @@ const es: TranslationDict = {
   'disc.nativeAgentDisable': 'Desactivar el agente de la discusión',
   'disc.nativeAgentEnable': 'Reactivar el agente de la discusión',
   'disc.nativeAgentDisabled': 'Agente de discusión desactivado',
-  'disc.workflowObserver': 'Seguimiento del workflow',
-  'disc.workflowObserverHelp': 'Explica los bloqueos y las próximas acciones sin iniciar trabajo. Espera a la etapa activa y responde si aún no lo ha hecho.',
   'disc.nativeAgentDisabledToast': 'El agente de la discusión está desactivado; solo responderán los agentes unidos.',
   'disc.nativeAgentEnabledToast': 'El agente de la discusión se ha reactivado.',
   'disc.modelTier': 'Modo IA',

@@ -2556,33 +2556,6 @@ pub(super) async fn make_agent_stream_inner(
         }
     };
     let agent_type = agent_override.unwrap_or_else(|| disc.agent.clone());
-    let observer_context = {
-        let did = discussion_id.clone();
-        state
-            .db
-            .with_read_conn(move |conn| {
-                if crate::db::workflow_observer::enabled(conn, &did)? {
-                    crate::db::workflow_observer::context(conn, &did).map(Some)
-                } else {
-                    Ok(None)
-                }
-            })
-            .await
-    };
-    let observer_context = match observer_context {
-        Ok(context) => context,
-        Err(error) => {
-            tracing::error!(%discussion_id, %error, "Unable to verify workflow reply policy");
-            finish_tracked_preflight(&mut completion_tx, "unable to verify workflow reply policy");
-            let stream: SseStream = Box::pin(futures::stream::once(async {
-                Ok::<_, Infallible>(Event::default().event("error").data(
-                    "{\"error\":\"Unable to read the workflow state; reply was not started\"}",
-                ))
-            }));
-            return Sse::new(prepend_initial_event(stream, initial_event.take()));
-        }
-    };
-    let workflow_observer = observer_context.is_some();
     // A reply with no dispatch job carries no connection (the non-dispatch
     // branch above fills it with None). The discussion holds the durable
     // sticky target for exactly this case (KT-545 DoD #4) — without this
@@ -2710,21 +2683,9 @@ pub(super) async fn make_agent_stream_inner(
             crate::http_transport::connection_tier_model(connection, disc_tier)
         })
     });
-    let skill_ids = if workflow_observer {
-        Vec::new()
-    } else {
-        disc.skill_ids.clone()
-    };
-    let directive_ids = if workflow_observer {
-        Vec::new()
-    } else {
-        disc.directive_ids.clone()
-    };
-    let profile_ids = if workflow_observer {
-        Vec::new()
-    } else {
-        disc.profile_ids.clone()
-    };
+    let skill_ids = disc.skill_ids.clone();
+    let directive_ids = disc.directive_ids.clone();
+    let profile_ids = disc.profile_ids.clone();
     // KT-923 — a skill only the project's repository holds is read from that
     // repository now, at send time: a SKILL.md edited since the last message
     // is read again, and one that cannot be is said so in the reply rather than
@@ -2750,7 +2711,7 @@ pub(super) async fn make_agent_stream_inner(
         &agent_type,
         dispatch_trigger_message_id.clone(),
         dispatch_job_id.clone(),
-        tool_free_judge || workflow_observer,
+        tool_free_judge,
     )
     .await
     {
@@ -2810,7 +2771,7 @@ pub(super) async fn make_agent_stream_inner(
             return Sse::new(prepend_initial_event(stream, initial_event.take()));
         }
     };
-    let cli_room_agent_context = if cli_task_worker_context.is_some() || workflow_observer {
+    let cli_room_agent_context = if cli_task_worker_context.is_some() {
         None
     } else {
         cli_room_agent_context(
@@ -2821,14 +2782,12 @@ pub(super) async fn make_agent_stream_inner(
         )
         .await
     };
-    let mut workspace_path = if workflow_observer {
-        Some(std::env::temp_dir().to_string_lossy().into_owned())
-    } else if tool_free_judge {
+    let mut workspace_path = if tool_free_judge {
         None
     } else {
         disc.workspace_path.clone()
     };
-    let project_path = if tool_free_judge || workflow_observer {
+    let project_path = if tool_free_judge {
         String::new()
     } else if let Some(ref pid) = disc.project_id {
         let pid = pid.clone();
@@ -3146,7 +3105,7 @@ pub(super) async fn make_agent_stream_inner(
     // For general discussions (no project), write .mcp.json + build MCP context.
     // For project discussions, also ensure the .mcp.json is fresh on disk
     // (covers the case where MCPs were added/toggled since the last sync).
-    let global_mcp_context = if tool_free_judge || workflow_observer {
+    let global_mcp_context = if tool_free_judge {
         // The verdict must be reproducible from the captured payload alone.
         // `Some("")` explicitly overrides both project and global MCP config.
         Some(String::new())
@@ -3311,9 +3270,7 @@ pub(super) async fn make_agent_stream_inner(
     };
 
     // Load context files for prompt injection
-    let (context_files_prompt, context_image_entries) = if workflow_observer {
-        (String::new(), Vec::new())
-    } else {
+    let (context_files_prompt, context_image_entries) = {
         let did = discussion_id.clone();
         let entries = state
             .db
@@ -3568,8 +3525,7 @@ pub(super) async fn make_agent_stream_inner(
         .filter_map(agent_alias)
         .collect::<Vec<_>>()
         .join(", ");
-    let context_files_prompt = if !workflow_observer
-        && handoffs_enabled
+    let context_files_prompt = if handoffs_enabled
         && !handoffs_disabled
         && !attached_aliases.is_empty()
     {
@@ -3601,11 +3557,6 @@ pub(super) async fn make_agent_stream_inner(
         context_files_prompt
     };
 
-    let context_files_prompt = if let Some(context) = observer_context {
-        context
-    } else {
-        context_files_prompt
-    };
     // Estimate extra_context size so build_agent_prompt can respect the agent's budget.
     // This mirrors what runner::start_agent_with_config will build.
     let extra_context_len = estimate_extra_context_len(
@@ -3748,11 +3699,7 @@ pub(super) async fn make_agent_stream_inner(
     let pinned_snapshot_release = pinned_snapshot_key
         .clone()
         .map(crate::core::resource_snapshot::RunSnapshotGuard::new);
-    let prompt = if workflow_observer {
-        crate::db::workflow_observer::prompt(&prompt_disc)
-    } else {
-        build_agent_prompt(&prompt_disc, &agent_type, extra_context_len)
-    };
+    let prompt = build_agent_prompt(&prompt_disc, &agent_type, extra_context_len);
 
     // KT-562 — the same discussion, re-narrated in full at every turn, is what
     // made Kronn slower than the same CLI driven by hand. Continue the
@@ -3768,7 +3715,7 @@ pub(super) async fn make_agent_stream_inner(
             &prompt_disc,
             extra_context_len,
             prompt,
-            cli_task_worker_context.is_some() || workflow_observer,
+            cli_task_worker_context.is_some(),
         )
         .await;
 
@@ -4179,19 +4126,11 @@ pub(super) async fn make_agent_stream_inner(
                 worker.agent_type.clone(),
             )
         });
-        let observer_tools = crate::models::StepTools::default();
         match runner::start_agent_with_config(runner::AgentStartConfig {
             provenance: served_model
                 .as_ref()
                 .map(crate::api::delivery_publication::ServedModelRecorder::capture),
-            project_id: if workflow_observer {
-                None
-            } else {
-                disc_project_id.as_deref()
-            },
-            response_only: workflow_observer,
-            step_tools: (workflow_observer && !runner::is_http_chat_agent(&agent_type))
-                .then_some(&observer_tools),
+            project_id: disc_project_id.as_deref(),
             work_dir: workspace_path.as_deref(),
             full_access,
             skill_ids: &skill_ids,
@@ -5268,7 +5207,7 @@ pub(super) async fn make_agent_stream_inner(
                 // partial output still carries it. Stored per-message so the UI
                 // can show "Ollama · qwen3:32b" even when the model changes
                 // mid-thread. `None` for provider-default runs with no flag.
-                let candidate_handoffs = if child_run_was_success && !workflow_observer {
+                let candidate_handoffs = if child_run_was_success {
                     marked_handoffs
                         .into_iter()
                         .filter(|candidate| attached_handoff_agents.contains(candidate))
@@ -5499,7 +5438,7 @@ pub(super) async fn make_agent_stream_inner(
                 // only respect markers if the agent actually emitted
                 // one — defensive, no behaviour change for them.
                 let markers = super::slash_markers::parse_markers(&agent_msg.content);
-                if !workflow_observer && !markers.is_empty() {
+                if !markers.is_empty() {
                     let resolutions =
                         super::slash_markers::resolve_markers(&state, &disc_id, &markers).await;
                     for body in resolutions {

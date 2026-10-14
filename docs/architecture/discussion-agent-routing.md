@@ -204,46 +204,6 @@ principal use a structured target; autonomous rooms use no-agent mode.
 
 ## When a start is refused
 
-### Workflow follow-up replies
-
-Workflow rooms can opt into `workflow_observer` through the discussion PATCH
-API. This is separate from `no_agent`: disabling the native responder still
-disables these replies. Read back `GET /api/discussions/{id}/native-agent` and
-verify `workflow_observer: true` before enabling native replies, since older
-servers ignore unknown PATCH fields. Existing rooms are not inferred from their
-title or silently migrated. [src: file: backend/src/api/discussions/crud.rs:236]
-[src: file: backend/src/api/discussions/crud.rs:884]
-
-An ordinary human turn reaches the current workflow-step members and queues a
-durable native fallback. The queue waits while an Agent step owns the room; a
-new step waits if the follow-up is already running. A substantive main-channel
-answer from a verified workflow member, linked with the exact
-`reply_to_message_id`, settles the fallback. Progress reports, notes and another
-peer's answer do not acknowledge it. Workflow Agent prompts must preserve that
-reply link. Agent appends never wake the observer themselves.
-[src: file: backend/src/api/discussions/messaging.rs:207]
-[src: file: backend/src/db/workflow_observer.rs:24]
-[src: file: backend/src/db/workflow_observer.rs:69]
-[src: file: backend/src/api/disc_source.rs:753]
-
-The follow-up receives bounded main-channel history, linked task details,
-durable human decisions and recent workflow results. It does not read notes or
-encrypted launch variables. HTTP responders receive no tool executor;
-Claude/Codex responders receive an empty declared tool set and a read-only
-filesystem policy, with no project workspace, mutation capability, coding
-session resume, handoff or slash-marker execution. Unsupported transports fail
-closed. A requested plan correction is explained and routed to the existing
-human action; sending a question is not approval to implement it.
-[src: file: backend/src/db/workflow_observer.rs:99]
-[src: file: backend/src/agents/runner.rs:3763]
-[src: file: backend/src/agents/read_only_repos.rs:13]
-[src: file: backend/src/api/discussions/streaming.rs:4175]
-
-The room header labels the mode as workflow follow-up. Native dispatch errors
-continue through the standard durable refusal/retry UI. This mode does not
-introduce an automatic provider fallback or promise an exact remaining token
-balance. [src: file: frontend/src/components/ChatHeader.tsx:395]
-
 A dispatch that never reaches the agent is settled as a refused preflight, and the
 reason it was refused is persisted on the job (`agent_dispatch_jobs.last_error`) and
 shown in the room. That is recent: until 0.13.0 both code paths that settle a refusal

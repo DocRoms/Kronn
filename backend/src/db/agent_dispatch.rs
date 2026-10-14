@@ -476,7 +476,6 @@ fn older_runnable_in_discussion(alias: &str) -> String {
 
 pub fn list_runnable_ids(conn: &Connection, limit: usize) -> Result<Vec<String>> {
     let older = older_runnable_in_discussion("candidate");
-    let observer_waiting = super::workflow_observer::waiting_sql("candidate");
     let mut statement = conn.prepare(&format!(
         "SELECT candidate.id
          FROM agent_dispatch_jobs AS candidate
@@ -493,7 +492,6 @@ pub fn list_runnable_ids(conn: &Connection, limit: usize) -> Result<Vec<String>>
                )
            )
            AND NOT {older}
-           AND NOT {observer_waiting}
          ORDER BY candidate.created_at, candidate.id LIMIT ?3",
     ))?;
     let rows = statement.query_map(
@@ -567,15 +565,11 @@ pub fn claim_with_limits(
     id: &str,
     limits: Option<&str>,
 ) -> Result<Option<AgentDispatchJob>> {
-    if super::workflow_observer::settle_answered(conn, id)? {
-        return Ok(None);
-    }
     let now = Utc::now().to_rfc3339();
     let candidate_agent = effective_agent("candidate");
     let family_agent = effective_agent("family");
     let local_family_agent = effective_agent("local_family");
     let older = older_runnable_in_discussion("candidate");
-    let observer_waiting = super::workflow_observer::waiting_sql("candidate");
     conn.query_row(
         &format!(
             "UPDATE agent_dispatch_jobs AS candidate
@@ -607,7 +601,6 @@ pub fn claim_with_limits(
                      AND same_discussion.status = 'Running'
                )
                AND NOT {older}
-               AND NOT {observer_waiting}
                AND (
                     group_id IS NULL
                     OR group_concurrency_limit IS NULL

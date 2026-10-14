@@ -2940,8 +2940,6 @@ const en: TranslationDict = {
   'disc.nativeAgentDisable': 'Disable the discussion agent',
   'disc.nativeAgentEnable': 'Re-enable the discussion agent',
   'disc.nativeAgentDisabled': 'Discussion agent disabled',
-  'disc.workflowObserver': 'Workflow follow-up',
-  'disc.workflowObserverHelp': 'Explains blockers and next actions without starting work. Waits for an active step and replies if it has not already answered.',
   'disc.nativeAgentDisabledToast': 'The discussion agent is disabled; only joined agents will reply.',
   'disc.nativeAgentEnabledToast': 'The discussion agent is enabled again.',
   'disc.modelTier': 'AI mode',

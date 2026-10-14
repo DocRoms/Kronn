@@ -612,11 +612,6 @@ pub struct UpdateDiscussionRequest {
     /// peers remain participants and continue receiving turns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_agent: Option<bool>,
-    /// Explain the linked workflow and plan using a restricted native reply.
-    /// Replies wait for active workflow steps; this does not override no_agent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub workflow_observer: Option<bool>,
     /// Disable generated agent-to-agent handoffs for this discussion even
     /// when the global opt-in is enabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -643,9 +638,6 @@ pub struct UpdateDiscussionRequest {
 #[ts(export)]
 pub struct DiscussionNativeAgentMode {
     pub disabled: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub workflow_observer: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

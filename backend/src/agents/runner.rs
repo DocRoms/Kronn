@@ -2982,8 +2982,6 @@ pub struct AgentStartConfig<'a> {
     pub read_only_dirs: &'a [String],
     /// KT-908 — the tools a workflow Agent step declared; `None` = unchanged.
     pub step_tools: Option<&'a crate::models::StepTools>,
-    /// Restricted conversational reply: no mutation tools or resumable coding session.
-    pub response_only: bool,
     pub prompt: &'a str,
     pub tokens: &'a TokensConfig,
     pub full_access: bool,
@@ -3157,7 +3155,6 @@ impl<'a> AgentStartConfig<'a> {
             read_only_repos: &[],
             read_only_dirs: &[],
             step_tools: None,
-            response_only: false,
             full_access: false,
             skill_ids: &[],
             repository_skills: &[],
@@ -3760,94 +3757,8 @@ pub fn task_worker_route_policy(
     }
 }
 
-fn validate_response_only(config: &AgentStartConfig<'_>) -> Result<(), String> {
-    if !config.project_path.is_empty()
-        || config.project_id.is_some()
-        || config.cli_resume_id.is_some()
-        || config.task_worker_context.is_some()
-        || config.room_agent_context.is_some()
-        || config.workflow_step_context.is_some()
-        || config.tools.is_some()
-        || !config.skill_ids.is_empty()
-        || !config.repository_skills.is_empty()
-        || !config.directive_ids.is_empty()
-        || !config.profile_ids.is_empty()
-    {
-        return Err(
-            "response-only reply cannot inherit execution authority or a coding session".into(),
-        );
-    }
-    if !is_http_chat_agent(config.agent_type) {
-        super::read_only_repos::ReadOnlyRepos::response_only(config.agent_type)?;
-        if config
-            .step_tools
-            .is_none_or(|tools| !tools.cli.is_empty() || !tools.kronn_internal.is_empty())
-        {
-            return Err("response-only reply requires an empty declared tool set".into());
-        }
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod workflow_observer_policy_tests {
-    use super::*;
-
-    #[test]
-    fn response_only_requires_empty_tools_and_refuses_coding_authority() {
-        let tokens: TokensConfig = serde_json::from_value(serde_json::json!({})).unwrap();
-        let agent = AgentType::Codex;
-        let tools = crate::models::StepTools::default();
-        let mut config = AgentStartConfig::new(&agent, "", "Explain the blockers", &tokens);
-        config.response_only = true;
-        assert!(validate_response_only(&config).is_err());
-        config.step_tools = Some(&tools);
-        assert!(validate_response_only(&config).is_ok());
-        config.cli_resume_id = Some("old-coding-session");
-        assert!(validate_response_only(&config).is_err());
-        config.cli_resume_id = None;
-        config.project_path = "/repo";
-        assert!(validate_response_only(&config).is_err());
-        config.project_path = "";
-        let mutation_tools = crate::models::StepTools {
-            cli: vec![],
-            kronn_internal: vec!["task_exec_launch".into()],
-        };
-        config.step_tools = Some(&mutation_tools);
-        assert!(validate_response_only(&config).is_err());
-    }
-
-    #[test]
-    fn response_only_policy_removes_full_access_and_denies_repository_writes() {
-        use super::super::read_only_repos::ReadOnlyRepos;
-        for agent in [AgentType::Codex, AgentType::ClaudeCode] {
-            let policy = ReadOnlyRepos::response_only(&agent).unwrap();
-            let mut args = vec![
-                "--dangerously-skip-permissions".into(),
-                "--sandbox=danger-full-access".into(),
-                "prompt".into(),
-            ];
-            policy.apply(&agent, std::path::Path::new("/tmp"), &mut args);
-            assert!(!args
-                .iter()
-                .any(|arg| arg.contains("danger-full-access")
-                    || arg == "--dangerously-skip-permissions"));
-            if agent == AgentType::Codex {
-                assert!(args.iter().any(|arg| arg.contains("workspace_roots={}")));
-                assert!(args.iter().any(|arg| arg == "--ignore-user-config"));
-            } else {
-                assert!(args.iter().any(|arg| arg.contains("\"denyWrite\":[\"/\"]")));
-            }
-        }
-        assert!(ReadOnlyRepos::response_only(&AgentType::OpenCode).is_err());
-    }
-}
-
 /// Start an agent process with full configuration.
 pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<AgentProcess, String> {
-    if config.response_only {
-        validate_response_only(&config)?;
-    }
     // Every route (discussion, room, workflow step, Quick Prompt, audit,
     // resume) launches through here: a native runtime without full access is
     // refused before anything is prepared or spawned, never upgraded.
@@ -3865,11 +3776,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             "read_only_repos is a workflow Agent policy, not a task-worker override".into(),
         );
     }
-    let read_only_repos = if config.response_only && !is_http_chat_agent(config.agent_type) {
-        Some(super::read_only_repos::ReadOnlyRepos::response_only(
-            config.agent_type,
-        )?)
-    } else if !has_read_only_paths {
+    let read_only_repos = if !has_read_only_paths {
         None
     } else {
         let work_dir = resolve_agent_work_dir(config.work_dir, config.project_path)?;

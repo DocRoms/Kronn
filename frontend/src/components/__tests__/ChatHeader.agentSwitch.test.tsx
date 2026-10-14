@@ -355,17 +355,6 @@ describe('ChatHeader — shared agent switcher', () => {
     expect(screen.getByRole('menu')).toBeInTheDocument();
   });
 
-  it('explains the restricted workflow responder and keeps it across disable/enable', async () => {
-    vi.mocked(discussionsApi.nativeAgentMode).mockResolvedValue({ disabled: false, workflow_observer: true });
-    renderHeader();
-    expect(await screen.findByTestId('workflow-observer-mode')).toHaveTextContent('disc.workflowObserver');
-    expect(screen.getByTestId('workflow-observer-mode')).toHaveAttribute('title', 'disc.workflowObserverHelp');
-    fireEvent.click(screen.getByRole('button', { name: 'disc.nativeAgentDisable' }));
-    await waitFor(() => expect(screen.queryByTestId('workflow-observer-mode')).not.toBeInTheDocument());
-    fireEvent.click(screen.getByRole('button', { name: 'disc.nativeAgentEnable' }));
-    expect(await screen.findByTestId('workflow-observer-mode')).toBeInTheDocument();
-  });
-
   it('loads a persistent peer-only mode and can reactivate the native agent', async () => {
     vi.mocked(discussionsApi.nativeAgentMode).mockResolvedValue({ disabled: true });
     const { onDiscussionUpdated } = renderHeader();

@@ -2916,8 +2916,6 @@ const zh: TranslationDict = {
   "disc.nativeAgentDisable": "禁用讨论代理",
   "disc.nativeAgentEnable": "重新启用讨论代理",
   "disc.nativeAgentDisabled": "讨论代理已禁用",
-  "disc.workflowObserver": "工作流跟进",
-  "disc.workflowObserverHelp": "解释阻碍和后续操作，不会启动工作。等待活动步骤结束；若尚未回复，则提供回答。",
   "disc.nativeAgentDisabledToast": "讨论代理已禁用；仅已加入的代理会回复。",
   "disc.nativeAgentEnabledToast": "讨论代理已重新启用。",
   "disc.modelTier": "AI 模式",

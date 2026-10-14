@@ -203,23 +203,11 @@ pub(crate) async fn canonical_targets(
             let sessions = crate::db::discussion_sessions::list_sessions(conn, &did, false)?;
             let connections = crate::db::external_api_connections::list(conn)?;
             let no_agent = crate::db::discussions::disc_is_no_agent(conn, &did)?;
-            let observer_targets =
-                if !no_agent && crate::db::workflow_observer::enabled(conn, &did)? {
-                    crate::db::workflow_observer::active_targets(conn, &did)?
-                } else {
-                    Vec::new()
-                };
-            Ok((
-                discussion,
-                sessions,
-                connections,
-                no_agent,
-                observer_targets,
-            ))
+            Ok((discussion, sessions, connections, no_agent))
         })
         .await
         .map_err(|error| error.to_string())?;
-    let (discussion, sessions, connections, no_agent, observer_targets) = context;
+    let (discussion, sessions, connections, no_agent) = context;
 
     // A room whose native agent is off still has readers: the sessions joined
     // to it. Without this, an ordinary turn there resolves to no target at
@@ -263,21 +251,7 @@ pub(crate) async fn canonical_targets(
     } else {
         Vec::new()
     };
-    let implicit_principal = !target_all
-        && (requested.is_empty()
-            || requested
-                .iter()
-                .all(|target| target.kind == MessageTargetKind::DiscussionAgent));
     candidates.extend(requested);
-    if implicit_principal && !observer_targets.is_empty() {
-        if candidates.is_empty() {
-            candidates.push(
-                MessageTarget::discussion_agent(discussion.agent.clone())
-                    .with_tier(discussion.tier),
-            );
-        }
-        candidates.extend(observer_targets);
-    }
 
     let mut targets = Vec::with_capacity(candidates.len());
     for target in candidates {
@@ -2401,53 +2375,6 @@ mod tests {
         )
         .await;
         assert_eq!(conflict.status(), StatusCode::CONFLICT);
-    }
-
-    #[tokio::test]
-    async fn workflow_observer_accepts_and_queues_human_question_once_during_a_step() {
-        let disc = "d-observer";
-        let state = make_state_with_disc(disc).await;
-        state.db.with_conn(move |conn| {
-            crate::db::workflow_observer::set_enabled(conn, disc, true)?;
-            let now = Utc::now().to_rfc3339();
-            conn.execute("INSERT INTO workflows (id,name,trigger_json,steps_json,created_at,updated_at) VALUES ('wf-observer','Plan','{}','[]',?1,?1)", [&now])?;
-            conn.execute("INSERT INTO workflow_runs (id,workflow_id,status,started_at) VALUES ('run-observer','wf-observer','Running',?1)", [&now])?;
-            crate::db::workflow_step_rooms::begin_activity(conn, "run-observer", "plan", "Plan", disc, "Codex")?;
-            Ok(())
-        }).await.unwrap();
-        for duplicate in [false, true] {
-            let req = serde_json::from_value(serde_json::json!({
-                "content": "Quels sont les blocages ?",
-                "client_message_id": "92f9e34f-5b38-4a3b-95b9-66d1010347bc",
-            }))
-            .unwrap();
-            let response = send_message(State(state.clone()), Path(disc.into()), Json(req)).await;
-            let body = sse_body_to_string(response).await;
-            assert!(body.contains("event: accepted"), "{body}");
-            assert!(
-                body.contains(&format!("\"duplicate\":{duplicate}")),
-                "{body}"
-            );
-        }
-        state
-            .db
-            .with_conn(move |conn| {
-                let jobs = crate::db::agent_dispatch::list_active_for_discussion(
-                    conn,
-                    disc,
-                    &AgentType::Ollama,
-                )?;
-                assert_eq!(jobs.len(), 1);
-                assert!(crate::db::agent_dispatch::list_runnable_ids(conn, 10)?.is_empty());
-                assert_eq!(
-                    conn.query_row("SELECT COUNT(*) FROM task_executions", [], |r| r
-                        .get::<_, i64>(0))?,
-                    0
-                );
-                Ok(())
-            })
-            .await
-            .unwrap();
     }
 
     #[tokio::test]

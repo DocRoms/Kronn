@@ -3508,7 +3508,7 @@ export type DiscussionMonitorMessage = { id: string, role: string, channel: stri
 
 export type DiscussionMonitorPreview = { plan: PlanningPlanStats, title: string, shared_id: string | null, agent: AgentType | null, connection_name: string | null, awaiting_agent: boolean, agent_running: boolean, progress_phase: string | null, pending_question_count: number, updated_at: string, messages: Array<DiscussionMonitorMessage>, partial_response: DiscussionMonitorMessage | null, };
 
-export type DiscussionNativeAgentMode = { disabled: boolean, workflow_observer?: boolean, };
+export type DiscussionNativeAgentMode = { disabled: boolean, };
 
 export type DiscussionNote = { sort_order: number, message: DiscussionMessage, attachments: Array<MessageAttachment>,
 /**
@@ -9899,11 +9899,6 @@ summary_strategy?: SummaryStrategy | null,
  * peers remain participants and continue receiving turns.
  */
 no_agent?: boolean | null,
-/**
- * Explain the linked workflow and plan using a restricted native reply.
- * Replies wait for active workflow steps; this does not override no_agent.
- */
-workflow_observer?: boolean,
 /**
  * Disable generated agent-to-agent handoffs for this discussion even
  * when the global opt-in is enabled.
