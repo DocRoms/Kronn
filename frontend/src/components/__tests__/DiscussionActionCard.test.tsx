@@ -274,6 +274,28 @@ describe('DiscussionActionCard', () => {
     expect(screen.queryByTestId('action-card-relaunch')).not.toBeInTheDocument();
   });
 
+  // The card's own `discussion-action-card__open` button never renders once a
+  // result discussion exists (the outcome panel takes over), so the result is
+  // opened from the outcome panel inside the expanded card.
+  it('opens the result discussion address in a new tab on a Ctrl-click', async () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const onOpenDiscussion = vi.fn();
+    render(
+      <DiscussionActionCard
+        action={action({ state: 'succeeded', result_discussion_id: 'disc-result' })}
+        onChanged={vi.fn()}
+        onOpenDiscussion={onOpenDiscussion}
+      />,
+    );
+    expand();
+    fireEvent.click(await screen.findByTestId('run-outcome-open'), { ctrlKey: true });
+    expect(open).toHaveBeenCalledWith(
+      `${window.location.origin}/discussions/disc-result`, '_blank', 'noopener,noreferrer',
+    );
+    expect(onOpenDiscussion).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
+
   it('renders the shared run deep-link card after a QA/QE/Workflow launch', () => {
     render(
       <DiscussionActionCard

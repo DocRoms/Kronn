@@ -173,10 +173,12 @@ Kronn/
 │   ├── vite.config.ts          # Build config + test config (vitest) + code splitting
 │   ├── eslint.config.js        # ESLint 10 flat config (typescript-eslint strict)
 │   └── src/
-│       ├── main.tsx            # React DOM entry
-│       ├── App.tsx             # Router (setup wizard vs dashboard) + ErrorBoundary + React.lazy code splitting
+│       ├── main.tsx            # React DOM entry — mounts the router
+│       ├── router.tsx          # createAppRouter(): `App` as root route + the dashboard route table
+│       ├── App.tsx             # Root route: setup wizard vs standalone views vs dashboard + ErrorBoundary + React.lazy code splitting
+│       ├── routes/             # Route components (lazy chunks): one per dashboard page (outlet context → page props) and one per whole-window view. appRoutes.tsx / dashboardRoutes.tsx are the route tables, RouteShell the per-page error zone + loader
 │       ├── pages/
-│       │   ├── Dashboard.tsx   # Main UI shell (~1525L) — nav bar, page routing, shared state. Project list extracted to components/ProjectList + ProjectCard
+│       │   ├── Dashboard.tsx   # Main UI shell (~1280L) — nav bar, shared state, outlet for the routed page (see docs/architecture/ui-structure.md § Routing). Project list extracted to components/ProjectList + ProjectCard
 │       │   ├── SettingsPage.tsx # Settings (~1917L) — Identity/Agents-first information architecture, capabilities, interface, experience/projects, system/data
 │       │   ├── DiscussionsPage.tsx # Discussions orchestrator (~4286L) — state, durable send receipts, streaming, reconnect resync, callbacks. Split into components below.
 │       │   ├── McpPage.tsx     # MCP management (registry, configs, inline secret editing with per-field visibility, context files, project toggles)

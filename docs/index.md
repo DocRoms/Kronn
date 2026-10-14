@@ -89,7 +89,7 @@ This folder is the project's living knowledge base, shared by humans and AI agen
 - Settings includes a local-icon Ko-fi link to support Kronn; the GitHub funding
   declaration is present in the repository, while GitHub-side button activation
   remains dependent on the default branch and Sponsorships configuration.
-  [src: file: frontend/src/pages/SettingsPage.tsx:78-108]
+  [src: file: frontend/src/pages/SettingsPage.tsx:82-112]
   [src: file: .github/FUNDING.yml:1]
 - A configured external API connection is an agent everywhere, not only in the
   router: mentionable, coloured, listed in the worker catalogue with the media

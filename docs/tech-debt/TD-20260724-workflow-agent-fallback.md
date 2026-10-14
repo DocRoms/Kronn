@@ -281,7 +281,7 @@ backend/src/api/audit/mod.rs:1222-1250]
 `DiscussionMessage` already persists the actual `agent_type`, `model_tier`, and
 concrete `model`. `StepResult` already has `step_agent` and `step_model`, and
 Run Detail renders them. [src: file: backend/src/models/workflows.rs:1115-1169]
-[src: file: frontend/src/components/workflows/RunDetail.tsx:1030-1045]
+[src: file: frontend/src/components/workflows/RunDetail.tsx:1033-1048]
 
 That is not sufficient for fallback because failed attempts disappear and a
 workflow result currently stamps the agent/model from the configured step,

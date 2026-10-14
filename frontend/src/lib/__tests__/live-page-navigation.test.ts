@@ -1,60 +1,48 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  embedSettingsHash,
-  embedSettingsRoute,
+  embedSettingsOrigin,
   livePageMosaicLayouts,
+  livePageMosaicRoute,
+  livePageMosaicSearch,
   openEmbedSettings,
   openStandaloneDiscussion,
-  standaloneDiscussionId,
   standaloneDiscussionUrl,
-  standaloneDiscussionMessageId,
   standaloneDiscussionMessageUrl,
-  standaloneLivePageId,
-  standaloneLivePageMosaic,
   standaloneLivePageMosaicUrl,
-  standaloneLivePageRoute,
   standaloneLivePageUrl,
   livePageViewParams,
 } from '../live-page-navigation';
+import { legacyHashToPath } from '../legacyRoutes';
+import { embedSettingsPath } from '../routes';
+
+const mosaicRoute = (url: string) => livePageMosaicRoute(new URL(url).searchParams);
 
 describe('standalone Live Page navigation', () => {
   it('keeps message provenance shareable without changing the discussion identity', () => {
-    const url = standaloneDiscussionMessageUrl('disc?é', 'msg/🦀', { origin: 'http://localhost:5173', pathname: '/' });
-    const hash = new URL(url).hash;
-    expect(standaloneDiscussionId(hash)).toBe('disc?é');
-    expect(standaloneDiscussionMessageId(hash)).toBe('msg/🦀');
-    expect(standaloneDiscussionMessageId('#discussion-one')).toBeNull();
-    expect(standaloneDiscussionMessageId('#page/one?message=msg')).toBeNull();
-    expect(standaloneDiscussionMessageId('#discussion-one?message=')).toBeNull();
+    const url = new URL(standaloneDiscussionMessageUrl('disc?é', 'msg/🦀', { origin: 'http://localhost:5173' }));
+    expect(url.pathname).toBe('/discussions/disc%3F%C3%A9');
+    expect(url.searchParams.get('message')).toBe('msg/🦀');
+    expect(new URL(standaloneDiscussionUrl('disc?é', { origin: 'http://localhost:5173' })).search).toBe('');
   });
   afterEach(() => {
     sessionStorage.clear();
   });
 
-  it('builds a stable same-origin URL and decodes its Page id', () => {
-    const url = standaloneLivePageUrl('page/équipe', {
-      origin: 'http://localhost:5173',
-      pathname: '/index.html',
-    } as Location);
+  it('gives a Page a same-origin address that encodes its id, wherever the reader stands', () => {
+    const url = standaloneLivePageUrl('page/équipe', { origin: 'http://localhost:5173' });
 
-    expect(url).toBe('http://localhost:5173/index.html#page/page%2F%C3%A9quipe');
-    expect(standaloneLivePageId(new URL(url).hash)).toBe('page/équipe');
+    expect(url).toBe('http://localhost:5173/standalone/pages/page%2F%C3%A9quipe');
+    expect(decodeURIComponent(new URL(url).pathname.split('/').pop()!)).toBe('page/équipe');
   });
 
-  it('ignores unrelated, empty and malformed hashes', () => {
-    expect(standaloneLivePageId('#project-page-1')).toBeNull();
-    expect(standaloneLivePageId('#page/')).toBeNull();
-    expect(standaloneLivePageId('#page/%E0%A4%A')).toBeNull();
-  });
-
-  it('splits view parameters from the Page id, which stays percent-encoded', () => {
-    expect(standaloneLivePageRoute('#page/4f38f114?tv=1')).toEqual({ pageId: '4f38f114', params: { tv: '1' } });
-    expect(standaloneLivePageRoute('#page/4f38f114')).toEqual({ pageId: '4f38f114', params: {} });
-    expect(standaloneLivePageId('#page/4f38f114?tv=1&scene=standup')).toBe('4f38f114');
+  it('carries view parameters in the query, apart from the Page id, which stays percent-encoded', () => {
     // A literal « ? » inside an id is always encoded by standaloneLivePageUrl.
-    const url = standaloneLivePageUrl('a?b', { origin: 'http://localhost:5173', pathname: '/' } as Location);
-    expect(standaloneLivePageRoute(new URL(url).hash + '?tv=1')).toEqual({ pageId: 'a?b', params: { tv: '1' } });
-    expect(standaloneLivePageRoute('#page/?tv=1')).toBeNull();
+    const url = new URL(`${standaloneLivePageUrl('a?b', { origin: 'http://localhost:5173' })}?tv=1`);
+    expect(decodeURIComponent(url.pathname.split('/').pop()!)).toBe('a?b');
+    expect(livePageViewParams(url.search)).toEqual({ tv: '1' });
+    // The links written before keep their parameters.
+    expect(legacyHashToPath('#page/4f38f114?tv=1&scene=standup')).toBe('/standalone/pages/4f38f114?tv=1&scene=standup');
+    expect(legacyHashToPath('#page/?tv=1')).toBe('/standalone/pages/?tv=1');
   });
 
   it('keeps only short plain view parameters', () => {
@@ -65,15 +53,15 @@ describe('standalone Live Page navigation', () => {
     expect(Object.keys(livePageViewParams(many))).toHaveLength(8);
   });
 
-  it('builds and parses a multi-Page mosaic URL without losing Page ids', () => {
+  it('builds and parses a multi-Page mosaic address without losing Page ids', () => {
     const url = standaloneLivePageMosaicUrl(
       ['page/équipe', 'page 2', 'page/équipe'],
       'two-columns',
-      { origin: 'http://localhost:5173', pathname: '/index.html' } as Location,
+      { origin: 'http://localhost:5173' },
     );
 
-    expect(url).toBe('http://localhost:5173/index.html#pages/mosaic?page=page%2F%C3%A9quipe&page=page+2&layout=two-columns');
-    expect(standaloneLivePageMosaic(new URL(url).hash)).toEqual({
+    expect(url).toBe('http://localhost:5173/standalone/pages/mosaic?page=page%2F%C3%A9quipe&page=page+2&layout=two-columns');
+    expect(mosaicRoute(url)).toEqual({
       pageIds: ['page/équipe', 'page 2'],
       layout: 'two-columns',
     });
@@ -85,69 +73,68 @@ describe('standalone Live Page navigation', () => {
       'auto', 'three-top', 'three-bottom', 'three-left', 'three-right',
     ]);
     expect(livePageMosaicLayouts(4)).toEqual(['auto']);
-    expect(standaloneLivePageMosaic('#pages/mosaic?page=one&page=two&page=three&layout=two-columns'))
+    expect(livePageMosaicRoute(new URLSearchParams('page=one&page=two&page=three&layout=two-columns')))
       .toEqual({ pageIds: ['one', 'two', 'three'], layout: 'auto' });
-    expect(standaloneLivePageMosaic('#pages/mosaic?page=one&layout=auto')).toBeNull();
+    expect(livePageMosaicRoute(new URLSearchParams('page=one&layout=auto'))).toBeNull();
+    expect(livePageMosaicRoute(new URLSearchParams(''))).toBeNull();
+    expect(livePageMosaicSearch(['one', 'two', 'three'], 'two-columns').get('layout')).toBe('auto');
   });
 
   it('opens a shareable address, and needs no back-reference to do it', () => {
     const open = vi.fn();
 
-    openStandaloneDiscussion('disc-42', { origin: 'http://localhost:5173', pathname: '/index.html' } as Location, open);
+    openStandaloneDiscussion('disc-42', { origin: 'http://localhost:5173' }, open);
 
-    // Still seeded: a reload of the ORIGINAL tab must keep its place.
-    expect(sessionStorage.getItem('kronn:navigation:page')).toBe('discussions');
-    expect(sessionStorage.getItem('kronn:navigation:discussion')).toBe('disc-42');
     // The new tab carries the discussion in its own URL, so nothing has to be
     // cloned across windows — which is what lets it open with no opener.
+    expect(sessionStorage.getItem('kronn:navigation:discussion')).toBeNull();
     expect(open).toHaveBeenCalledWith(
-      'http://localhost:5173/index.html#discussion-disc-42',
+      'http://localhost:5173/discussions/disc-42',
       '_blank',
       'noopener,noreferrer',
     );
   });
 
-  it('builds a discussion address that survives a copy-paste, and reads it back', () => {
-    const url = standaloneDiscussionUrl('disc/é 42', {
-      origin: 'http://localhost:5173',
-      pathname: '/index.html',
-    } as Location);
+  it('builds a discussion address that survives a copy-paste, wherever the reader stands', () => {
+    const url = standaloneDiscussionUrl('disc/é 42', { origin: 'http://localhost:5173' });
 
-    expect(url).toBe('http://localhost:5173/index.html#discussion-disc%2F%C3%A9%2042');
-    expect(standaloneDiscussionId(new URL(url).hash)).toBe('disc/é 42');
-  });
-
-  it('ignores a hash that names no discussion', () => {
-    expect(standaloneDiscussionId('#page/one')).toBeNull();
-    expect(standaloneDiscussionId('#discussion-')).toBeNull();
-    expect(standaloneDiscussionId('#discussion-%E0%A4%A')).toBeNull();
-    expect(standaloneDiscussionId('')).toBeNull();
+    expect(url).toBe('http://localhost:5173/discussions/disc%2F%C3%A9%2042');
+    expect(decodeURIComponent(new URL(url).pathname.split('/').pop()!)).toBe('disc/é 42');
   });
 });
 
 describe('allowed-sites settings link', () => {
-  it('round-trips the origin to prefill, and ignores other hashes', () => {
-    expect(embedSettingsHash('https://player.example.com:8443')).toBe('#settings/artifacts?origin=https%3A%2F%2Fplayer.example.com%3A8443');
-    expect(embedSettingsRoute(embedSettingsHash('https://player.example.com:8443'))).toEqual({ origin: 'https://player.example.com:8443' });
-    expect(embedSettingsRoute('#settings/artifacts')).toEqual({ origin: '' });
-    expect(embedSettingsRoute('#settings/artifactsx')).toBeNull();
-    expect(embedSettingsRoute('#page/abc')).toBeNull();
+  it('round-trips the origin to prefill', () => {
+    const path = embedSettingsPath('https://player.example.com:8443');
+    expect(path).toBe('/config/artifacts?origin=https%3A%2F%2Fplayer.example.com%3A8443');
+    expect(embedSettingsOrigin(new URL(path, 'http://localhost').search)).toBe('https://player.example.com:8443');
+    expect(embedSettingsPath()).toBe('/config/artifacts');
+    expect(embedSettingsOrigin('')).toBe('');
+    expect(embedSettingsOrigin(`?origin=${'a'.repeat(2049)}`)).toBe('');
+  });
+
+  it('keeps the links written before pointing at the section', () => {
+    expect(legacyHashToPath('#settings/artifacts?origin=https%3A%2F%2Fvimeo.com')).toBe('/config/artifacts?origin=https%3A%2F%2Fvimeo.com');
+    expect(legacyHashToPath('#settings/artifacts')).toBe('/config/artifacts');
+    expect(legacyHashToPath('#settings/artifactsx')).toBeNull();
   });
 
   it('keeps a standalone Page running and opens the settings in a new tab', () => {
     const open = vi.fn();
-    openEmbedSettings('https://vimeo.com', { origin: 'http://localhost:3140', pathname: '/', hash: '#page/wall?tv=1' }, open);
-    expect(open).toHaveBeenCalledWith('http://localhost:3140/#settings/artifacts?origin=https%3A%2F%2Fvimeo.com', '_blank', 'noopener,noreferrer');
+    const navigate = vi.fn();
+    openEmbedSettings('https://vimeo.com', { origin: 'http://localhost:3140', pathname: '/standalone/pages/wall' }, open, navigate);
+    expect(open).toHaveBeenCalledWith('http://localhost:3140/config/artifacts?origin=https%3A%2F%2Fvimeo.com', '_blank', 'noopener,noreferrer');
     open.mockClear();
-    openEmbedSettings('https://vimeo.com', { origin: 'http://localhost:3140', pathname: '/', hash: '#pages/mosaic?page=a&page=b' }, open);
+    openEmbedSettings('https://vimeo.com', { origin: 'http://localhost:3140', pathname: '/standalone/pages/mosaic' }, open, navigate);
     expect(open).toHaveBeenCalledTimes(1);
+    expect(navigate).not.toHaveBeenCalled();
   });
 
   it('navigates the current tab from inside the app', () => {
     const open = vi.fn();
-    openEmbedSettings('https://vimeo.com', { origin: 'http://localhost:3140', pathname: '/', hash: '' }, open);
+    const navigate = vi.fn();
+    openEmbedSettings('https://vimeo.com', { origin: 'http://localhost:3140', pathname: '/pages/wall' }, open, navigate);
     expect(open).not.toHaveBeenCalled();
-    expect(window.location.hash).toBe('#settings/artifacts?origin=https%3A%2F%2Fvimeo.com');
-    window.location.hash = '';
+    expect(navigate).toHaveBeenCalledWith('/config/artifacts?origin=https%3A%2F%2Fvimeo.com');
   });
 });

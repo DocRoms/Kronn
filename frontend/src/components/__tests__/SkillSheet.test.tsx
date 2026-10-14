@@ -105,6 +105,34 @@ describe('SkillSheet', () => {
     expect(onOpenSettings).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    ['a Ctrl-click', { ctrlKey: true }],
+    ['a Cmd-click', { metaKey: true }],
+  ])('opens Configuration in a new tab on %s, and leaves this page where it is', (_name, modifier) => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const onOpenSettings = vi.fn();
+    renderSheet({ onOpenSettings });
+
+    fireEvent.click(screen.getByRole('button', { name: 'automation.skill.openSettings' }), modifier);
+
+    expect(open).toHaveBeenCalledWith(`${window.location.origin}/config`, '_blank', 'noopener,noreferrer');
+    expect(onOpenSettings).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
+
+  it('opens Configuration in a new tab on a middle click', () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const onOpenSettings = vi.fn();
+    renderSheet({ onOpenSettings });
+
+    fireEvent(screen.getByRole('button', { name: 'automation.skill.openSettings' }),
+      new MouseEvent('auxclick', { bubbles: true, cancelable: true, button: 1 }));
+
+    expect(open).toHaveBeenCalledWith(`${window.location.origin}/config`, '_blank', 'noopener,noreferrer');
+    expect(onOpenSettings).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
+
   it('offers no Settings link when the page has nowhere to send it', () => {
     renderSheet();
     expect(screen.queryByRole('button', { name: 'automation.skill.openSettings' })).toBeNull();

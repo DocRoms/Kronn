@@ -1,6 +1,7 @@
 import type { AgentReadiness, AgentType } from '../types/generated';
 import { AGENT_LABELS } from '../lib/constants';
-import { blockingAgents, readinessIcon, readinessMessage } from '../lib/agentReadiness';
+import { blockingAgents, readinessFixPath, readinessIcon, readinessMessage } from '../lib/agentReadiness';
+import { newTabClickProps } from '../lib/newTabNavigation';
 import { X } from 'lucide-react';
 
 type Translate = (key: string, ...args: (string | number)[]) => string;
@@ -52,7 +53,12 @@ export function AgentReadinessPanel({
               {result?.status === 'not_ready' && (
                 <span className="agent-readiness-row-actions">
                   {onFix && (
-                    <button type="button" className="btn btn-sm btn-ghost" onClick={() => onFix(result)}>
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-ghost"
+                      {...newTabClickProps(readinessFixPath(result))}
+                      onClick={() => onFix(result)}
+                    >
                       {t('readiness.fix')}
                     </button>
                   )}

@@ -37,7 +37,7 @@ describe('LivePageSlugEditor', () => {
     fireEvent.click(screen.getByRole('button', { name: /mon-suivi-v2/ }));
     const input = screen.getByRole('textbox');
     fireEvent.change(input, { target: { value: ' suivi-team-front ' } });
-    expect(screen.getByTestId('live-page-slug-preview').textContent).toContain('#page/suivi-team-front');
+    expect(screen.getByTestId('live-page-slug-preview').textContent).toContain('/standalone/pages/suivi-team-front');
     fireEvent.submit(input.closest('form')!);
     await waitFor(() => expect(onSaved).toHaveBeenCalledWith(updated));
     expect(pagesApi.update).toHaveBeenCalledWith('page-1', { slug: 'suivi-team-front' });

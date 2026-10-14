@@ -3,7 +3,7 @@
 ## Product naming and compatibility
 
 The UI calls this library **Artifacts**. Existing `page_*` MCP tools,
-`/api/pages` endpoints, `#page/…` and `#pages/mosaic?…` URLs, `PublishPageData`
+`/api/pages` endpoints, `/standalone/pages/…` and `/standalone/pages/mosaic?…` URLs, `PublishPageData`
 workflow steps, stored IDs and sandbox event names keep their established
 contracts. An Artifact is the same persisted resource; renaming its product
 label does not migrate or duplicate it. Historical code and documentation use
@@ -348,8 +348,9 @@ column, which the Page binds to for "end of column" moves.
 
 ## View parameters
 
-The standalone tab accepts display hints after the Page id:
-`#page/<id>?tv=1&scene=standup`. The id stays percent-encoded by
+The standalone address accepts display hints in its query:
+`/standalone/pages/<id>?tv=1&scene=standup` (a legacy `#page/<id>?…` link
+redirects there with them). The id stays percent-encoded by
 `standaloneLivePageUrl`, so a literal `?` can only start the parameters.
 They reach the Page as `KronnPageData.page.params` (and in every
 `kronn:page-data` event), for example to open a wall-screen layout. Only plain
@@ -853,12 +854,15 @@ grammar, URL length; a malformed clip becomes an empty one, never none)
 allowed origin gets a player (at most 8); a valid URL from another site gets a
 warning drawn by Kronn (at most 8), naming the origin, with a "Configure
 allowed domains" button that opens the settings with that origin typed in,
-never added. Inside the app the current tab navigates
-(`#settings/artifacts?origin=…`); a standalone Page or mosaic keeps running and
-opens the settings in a new tab.
-[src: file: frontend/src/lib/live-page-embeds.ts:82#planLivePageEmbeds]
-[src: file: frontend/src/lib/live-page-navigation.ts:185-196#openEmbedSettings]
-[src: file: frontend/src/pages/Dashboard.tsx:240-245#followEmbedSettingsLink]
+never added. Inside the app the current tab navigates to
+`/config/artifacts?origin=…`, an arrival consumed into `/config` so a reload
+or a Back never types it in again (the legacy `#settings/artifacts?origin=…`
+redirects there); a standalone Page or mosaic keeps running and opens the
+settings in a new tab.
+[src: file: frontend/src/lib/live-page-embeds.ts:71]
+[src: file: frontend/src/lib/live-page-navigation.ts:139-157]
+[src: file: frontend/src/routes/SettingsRoute.tsx:16-35]
+[src: file: frontend/src/lib/legacyRoutes.ts:31-38]
 `LivePageEmbedOverlay` renders a layer sized to the iframe's content box with
 `overflow: hidden`, so content is clipped to the Page and can never cover host
 UI; each item is also cut with `clip-path: inset(…)` to the reported `clip`,

@@ -287,6 +287,14 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       auditRunsCleanup: resolve(0),
       checkDrift: resolve({ stale_steps: [], checksums_outdated: false }),
       acknowledgeDrift: resolve({ audit_date: null, stale_sections: [], fresh_sections: [], total_sections: 0, sources_state: 'unknown', broken_citations: 0 }),
+      // Code view: source browsing.
+      listSourceFiles: resolve({ entries: [], truncated: false }),
+      readSourceFile: resolve({ path: '', content: '' }),
+      searchSourceFiles: resolve([]),
+      getSourceExclusions: resolve([]),
+      setSourceExclusions: resolve([]),
+      gitBlame: resolve({ path: '', lines: [] }),
+      gitCommitDetail: resolve(null),
       getBriefing: resolve(null),
       savedBriefing: resolve(null),
       startBriefing: resolve({ discussion_id: '' }),
@@ -755,6 +763,8 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       list: resolve([]),
       get: resolve(null),
       purge: resolve(0),
+      // The Plugins page asks which endpoints keep failing.
+      drift: resolve([]),
     },
 
     orchestration: {

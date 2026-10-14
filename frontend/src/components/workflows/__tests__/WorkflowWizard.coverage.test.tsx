@@ -809,6 +809,62 @@ describe('WorkflowWizard — data pipeline forms', () => {
     expect(onNavigatePage).toHaveBeenCalledWith('page-1');
   });
 
+  it('opens the selected Page in a new tab on a Ctrl-click, without opening it here', async () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const onNavigatePage = vi.fn();
+    pageListMock.mockResolvedValue([{
+      id: 'page-1', project_id: null, title: 'Adobe Signals', slug: 'adobe-signals',
+      current_revision_id: 'rev-1', data_revision: 0,
+      created_at: '2026-08-13T10:00:00Z', updated_at: '2026-08-13T10:00:00Z', last_published_at: null,
+    }]);
+    renderWizard({
+      onNavigatePage,
+      editWorkflow: mkWorkflow({ steps: [
+        mkStep({ name: 'collect' }),
+        mkStep({
+          name: 'publish',
+          step_type: { type: 'PublishPageData' },
+          page_publish: { page_id: 'page-1', writes: [{
+            dataset: 'summary', operation: 'replace', value_from: 'steps.collect.data',
+            observed_at: null, dedupe_key: null, key_field: null,
+          }] },
+        }),
+      ] }),
+    });
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.next'));
+
+    expect(await screen.findByText('#page-1')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('wiz.publishPageOpen'), { ctrlKey: true });
+    expect(open).toHaveBeenCalledWith(`${window.location.origin}/pages/page-1`, '_blank', 'noopener,noreferrer');
+    expect(onNavigatePage).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
+
+  it('links a restricted agent step to the Configuration address, followed in the app on a plain click only', () => {
+    const onNavigateSettings = vi.fn();
+    renderWizard({
+      onNavigateSettings,
+      agentAccess: { claude_code: { full_access: false } } as unknown as ComponentProps<typeof WorkflowWizard>['agentAccess'],
+      // Two steps: a single-step manual workflow opens in the simple mode.
+      editWorkflow: mkWorkflow({ steps: [mkStep({ name: 'agent' }), mkStep({ name: 'later' })] }),
+    });
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.next'));
+
+    const link = screen.getAllByText('config.restrictedAgentLink')[0];
+    expect(link.tagName).toBe('A');
+    expect(link).toHaveAttribute('href', '/config');
+
+    const modified = new MouseEvent('click', { bubbles: true, cancelable: true, ctrlKey: true });
+    link.dispatchEvent(modified);
+    expect(modified.defaultPrevented).toBe(false);
+    expect(onNavigateSettings).not.toHaveBeenCalled();
+
+    fireEvent.click(link);
+    expect(onNavigateSettings).toHaveBeenCalledTimes(1);
+  });
+
   it('explains where reusable Quick Prompts are created', () => {
     toSteps([mkStep({ name: 'agent' }), mkStep({ name: 'later' })]);
     expect(screen.getAllByLabelText('wiz.agentQpPickerInfo')).toHaveLength(2);

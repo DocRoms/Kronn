@@ -1,4 +1,6 @@
 import { useState, useRef, useEffect, useMemo, Fragment } from 'react';
+import { newTabClickProps } from '../../lib/newTabNavigation';
+import { livePagePath, workflowPath } from '../../lib/routes';
 import { useT } from '../../lib/I18nContext';
 import { UnsafeStepsPanel } from './UnsafeStepsPanel';
 import { SafetyWarnings } from './SafetyWarnings';
@@ -788,6 +790,7 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
               <button
                 type="button"
                 className="wf-step-page-link"
+                {...newTabClickProps(livePagePath(publishPageId))}
                 onClick={() => onNavigatePage(publishPageId)}
               >
                 <Eye size={11} /> {t('wiz.publishPageOpen')}
@@ -2497,6 +2500,7 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
               data-status={run.status}
               data-outcome={isNoOpRun(run) ? 'no_op' : undefined}
               aria-expanded={expanded}
+              {...newTabClickProps(workflowPath(workflow.id, run.id))}
               onClick={() => toggleRunExpanded(run.id)}
             >
               <span className="wf-step-dot wf-run-compact-dot" style={{ width: 8, height: 8 }} />

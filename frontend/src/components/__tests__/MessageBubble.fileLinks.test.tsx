@@ -3,10 +3,10 @@
 // must never become an <a> resolving against Kronn's own origin.
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { MarkdownContent } from '../MessageBubble';
+import { MarkdownContent, MessageBubble } from '../MessageBubble';
 import { MessageFileLinkContext } from '../../lib/messageFileLinkContext';
-import { discussions } from '../../lib/api';
-import type { ContextFile } from '../../types/generated';
+import { discussions, projects } from '../../lib/api';
+import type { ContextFile, DiscussionMessage } from '../../types/generated';
 
 const GIF = '/private/var/folders/nm/T/sax-groove-loop.gif';
 
@@ -129,5 +129,35 @@ describe('MarkdownContent — links to local files', () => {
     expect(blob).toHaveBeenCalledWith('disc-1', 'two');
     unmount();
     expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:two');
+  });
+
+  it('opens a project file link in a new tab on Ctrl-click, at its code-view address', () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const readSourceFile = vi.spyOn(projects, 'readSourceFile');
+    const onNavigate = vi.fn();
+    const noop = () => {};
+    const msg: DiscussionMessage = {
+      id: 'msg-file', role: 'Agent', channel: 'main', content: 'See [a.ts](src/a.ts:12).',
+      agent_type: 'ClaudeCode', timestamp: '2026-10-02T00:00:00Z', tokens_used: 0,
+      auth_mode: null, model_tier: null, author_pseudo: null, author_avatar_email: null,
+    };
+    render(
+      <MessageBubble
+        msg={msg} idx={0} isLastUser={false} isLastAgent isEditing={false} isCopied={false}
+        isTtsActive={false} ttsState="idle" isExpandedSummary={false} prevUserTs={null}
+        defaultAgent="ClaudeCode" summaryCache={null} language="fr" sending={false} editingText=""
+        hasFullAccess={false} onCopy={noop} onTts={noop} onEditStart={noop} onEditCancel={noop}
+        onEditSubmit={noop} onEditTextChange={noop} onRetry={noop} onExpandSummary={noop}
+        onNavigate={onNavigate} discussionId="disc-1" projectId="proj-1" t={(key: string) => key}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'disc.localFile.openInProject' }), { ctrlKey: true });
+
+    expect(open).toHaveBeenCalledWith(
+      `${window.location.origin}/projects/proj-1/code?file=src%2Fa.ts&line=12`, '_blank', 'noopener,noreferrer',
+    );
+    expect(readSourceFile).not.toHaveBeenCalled();
+    expect(onNavigate).not.toHaveBeenCalled();
   });
 });

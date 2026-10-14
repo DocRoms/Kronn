@@ -4,6 +4,8 @@
 // unmount). Disk-backed text opens an escaped, bounded preview; unsupported
 // files remain filename chips. Lives in its own file so the lifecycle is testable in
 // isolation from the heavy MessageBubble.
+import { newTabClickProps } from '../lib/newTabNavigation';
+import { discussionPath } from '../lib/routes';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { ChevronLeft, ChevronRight, Download, ExternalLink, FileText, Image as ImageIcon, Loader2, MessageSquare, Scissors, Sparkles, Trash2, X } from 'lucide-react';
@@ -109,7 +111,7 @@ function ExtractedFromDetails({ file, source, t, onOpenSource }: {
   );
 }
 
-function AttachmentThumb({ file, url, failed, t, onOpen, onPrepareMedia, variant, onNavigateMessage }: {
+function AttachmentThumb({ file, url, failed, t, onOpen, onPrepareMedia, variant, onNavigateMessage, messagePath }: {
   file: ContextFile;
   url?: string;
   failed: boolean;
@@ -118,6 +120,8 @@ function AttachmentThumb({ file, url, failed, t, onOpen, onPrepareMedia, variant
   onPrepareMedia?: () => void;
   variant: 'message' | 'library';
   onNavigateMessage?: (messageId: string) => void;
+  /** The address of a message of this discussion (a new tab on a modified click). */
+  messagePath?: (messageId: string) => string;
 }) {
   const isImage = isImageFile(file);
   const isVideo = isVideoFile(file);
@@ -278,6 +282,7 @@ function AttachmentThumb({ file, url, failed, t, onOpen, onPrepareMedia, variant
           <button
             type="button"
             className="disc-asset-card-action"
+            {...newTabClickProps(onNavigateMessage && messagePath ? messagePath(messageId) : null)}
             onClick={() => onNavigateMessage?.(messageId)}
             title={t('disc.assets.goToMessage')}
             aria-label={t('disc.assets.goToMessageFor', file.filename)}
@@ -605,6 +610,7 @@ export function MessageAttachments({
             onPrepareMedia={() => loadMediaUrl(file)}
             variant={variant}
             onNavigateMessage={onNavigateMessage}
+            messagePath={messageId => discussionPath(discussionId, messageId)}
           />
         ))}
       </div>

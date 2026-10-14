@@ -7,8 +7,8 @@ human-gated proposal cards and delta-only prompt notifications are implemented.
 `[src: file: backend/src/db/sql/081_planning_tasks.sql:1-99]`
 `[src: file: backend/src/api/planning.rs:1-156]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:169-365]`
-`[src: file: frontend/src/pages/PlanningPage.tsx:1-650]`
-`[src: file: frontend/src/components/DiscussionPlanPanel.tsx:1-300]`
+`[src: file: frontend/src/pages/PlanningPage.tsx:1-654]`
+`[src: file: frontend/src/components/DiscussionPlanPanel.tsx:1-304]`
 
 This document is the implementation brief for a future Planning workspace and
 the smaller discussion-plan panel that exposes the same task data inside a
@@ -227,8 +227,8 @@ offer both “Create only” and “Create and run”. `[src: user: 2026-07-24: 
 6. **Project workspace — implemented** — project cards expose their linked
    tasks, quick creation/completion and direct navigation to each task's global
    Planning detail without duplicating task state.
-   `[src: file: frontend/src/components/ProjectTasksPanel.tsx:1-200]`
-   `[src: file: frontend/src/pages/Dashboard.tsx:1260-1310]`
+   `[src: file: frontend/src/components/ProjectTasksPanel.tsx:1-203]`
+   `[src: file: frontend/src/routes/ProjectsRoute.tsx:42-48]`
 7. **Deferred delegation** — task-to-discussion briefing and agent launch only
    after the task workflow is proven manually.
 

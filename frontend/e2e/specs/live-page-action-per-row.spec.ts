@@ -47,7 +47,7 @@ test.describe('Live Page inline action — each row is its own launch', () => {
     expect(pageResponse.ok()).toBe(true);
     const pageId = ((await pageResponse.json()) as { data: { id: string } }).data.id;
 
-    await page.goto(`/#page/${pageId}`);
+    await page.goto(`/standalone/pages/${encodeURIComponent(pageId)}`);
     const frame = page.frameLocator('[data-testid="standalone-live-page-frame"]');
     const card = page.locator('[data-testid^="live-page-action-"]');
     const output = page.getByTestId('run-status-card-exec-output');

@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
+import { newTabClickProps } from '../lib/newTabNavigation';
+import { discussionPath } from '../lib/routes';
 import { AlertTriangle, CheckCircle2, ExternalLink, Loader2, MessageSquare, X } from 'lucide-react';
 import { runsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
@@ -76,7 +78,7 @@ export function RunOutcomePanel({
   if (unavailable && !outcome) {
     return discussionId ? (
       <div className="run-outcome" data-testid="run-outcome">
-        <button type="button" className="run-outcome__open" data-testid="run-outcome-open" onClick={() => onOpenDiscussion(discussionId)}>
+        <button type="button" className="run-outcome__open" data-testid="run-outcome-open" {...newTabClickProps(discussionPath(discussionId))} onClick={() => onOpenDiscussion(discussionId)}>
           <ExternalLink size={12} aria-hidden /> {t('disc.action.openDiscussion')}
         </button>
       </div>
@@ -105,7 +107,7 @@ export function RunOutcomePanel({
               </div>
             )}
             {discussion.diagnostic && <p className="run-outcome__diagnostic" role="alert">{discussion.diagnostic}</p>}
-            <button type="button" className="run-outcome__open" data-testid="run-outcome-open" onClick={() => onOpenDiscussion(discussion.id)}>
+            <button type="button" className="run-outcome__open" data-testid="run-outcome-open" {...newTabClickProps(discussionPath(discussion.id))} onClick={() => onOpenDiscussion(discussion.id)}>
               <ExternalLink size={12} aria-hidden /> {t('disc.action.openDiscussion')}
             </button>
           </li>

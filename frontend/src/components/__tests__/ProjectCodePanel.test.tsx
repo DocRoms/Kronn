@@ -12,15 +12,17 @@ vi.mock('../../lib/I18nContext', () => ({
 // The stub exposes the KT-75 callback so the panel's tab can be driven without
 // mounting the real blame gutter.
 vi.mock('../SourceCodeViewer', () => ({
-  SourceCodeViewer: ({ projectId, initialPath, onOpenCommit }: {
+  SourceCodeViewer: ({ projectId, initialPath, onOpenCommit, onPathChange }: {
     projectId: string;
     initialPath?: string | null;
     onOpenCommit?: (sha: string) => void;
+    onPathChange?: (path: string) => void;
   }) => (
     <div data-testid="source-viewer">
       {projectId}:{initialPath ?? 'root'}
       <button type="button" data-testid="stub-open-a" onClick={() => onOpenCommit?.('aaaaaaa1')}>a</button>
       <button type="button" data-testid="stub-open-b" onClick={() => onOpenCommit?.('bbbbbbb2')}>b</button>
+      <button type="button" data-testid="stub-open-file" onClick={() => onPathChange?.('src/other.ts')}>file</button>
     </div>
   ),
 }));
@@ -87,6 +89,15 @@ describe('ProjectCodePanel', () => {
     render(<ProjectCodePanel projectId="project-1" initialPath="compose.yaml" />);
 
     expect(screen.getByTestId('source-viewer')).toHaveTextContent('project-1:compose.yaml');
+  });
+
+  it('relays the file the reader opens in the source explorer', () => {
+    const onPathChange = vi.fn();
+    render(<ProjectCodePanel projectId="project-1" initialPath="compose.yaml" onPathChange={onPathChange} />);
+
+    fireEvent.click(screen.getByTestId('stub-open-file'));
+
+    expect(onPathChange).toHaveBeenCalledExactlyOnceWith('src/other.ts');
   });
 
   it('loads the cumulative branch diff when a committed file is selected', async () => {

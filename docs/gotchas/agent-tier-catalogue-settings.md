@@ -11,7 +11,7 @@ option. Cache provenance never becomes a live discovery merely because the
 snapshot request succeeded. Clearing an override is an explicit action; its
 placeholder and card preview show the catalogue's tier assignment when known.
 [src: file: frontend/src/lib/modelCatalogSelection.ts:76-113]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:1215-1238]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:1229-1252]
 
 The settings endpoint replaces the whole model-tier document. Before a save,
 the editor rereads it and merges only the selected agent/tier, guarded against
@@ -19,7 +19,7 @@ synchronous re-entry. It updates its displayed state after a successful write,
 not optimistically. This preserves edits already saved by another card, but is
 not a server-side compare-and-swap guarantee against another client writing
 between that GET and POST.
-[src: file: frontend/src/components/settings/AgentsSection.tsx:149-168]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:168-187]
 
 The component regressions cover dynamic IDs, runtime separation, OpenCode,
 manual Kiro/Vibe entries, unavailable/cache metadata, empty/error recovery,
@@ -115,8 +115,8 @@ selection; alternative choices resolve their own tiers. The Quick Prompt
 caller still explicitly clears its old override when choosing a new agent/tier.
 [src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:5-27]
 [src: file: frontend/src/components/ChatHeader.tsx:418-428]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:1223-1244]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:2850-2857]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1242-1263]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:2869-2876]
 
 KT-627 separately removed the HTTP runner's embedded fallback and qualified
 production-library resolution/preflight. The final migration and cross-surface
@@ -174,7 +174,7 @@ keep their exact session and stable ordinal, expose no model tier, and do not
 change native preferences. New-discussion submissions retain the immutable
 connection and explicitly selected tier.
 [src: file: frontend/src/lib/mentionTierSelection.ts:6-16]
-[src: file: frontend/src/components/NewDiscussionForm.tsx:717-745]
+[src: file: frontend/src/components/NewDiscussionForm.tsx:720-748]
 [src: file: frontend/src/components/__tests__/ComposerMentionCatalog.test.tsx:142-256]
 
 The new regressions use API fixtures, including colliding IDs in two HTTP
@@ -192,7 +192,7 @@ tier. Canonical alias prefixes rank before additional substring matches, so
 typing `@co` still highlights Codex before a Claude Code substring result.
 [src: file: frontend/src/lib/modelCatalogSelection.ts:36-45]
 [src: file: frontend/src/components/ChatInput.tsx:674-695]
-[src: file: frontend/src/components/NewDiscussionForm.tsx:209-213]
+[src: file: frontend/src/components/NewDiscussionForm.tsx:212-216]
 [src: file: frontend/src/lib/mention-autocomplete.ts:7-26]
 
 The unfinished search token accepts Unicode letters and common model-ID
@@ -229,7 +229,7 @@ Unavailable known entries remain disabled. Clearing an override is explicit
 and leaves tier resolution to the caller/backend.
 [src: file: frontend/src/components/ModelCatalogPicker.tsx:22-68]
 [src: file: frontend/src/components/workflows/QuickPromptForm.tsx:308-315]
-[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4131-4146]
+[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4136-4151]
 
 Reasoning choices come from the effective model's `reasoning_modes`, not a
 fixed low/medium/high list. An existing value absent from that list is retained
@@ -260,18 +260,18 @@ clears it for a connectionless agent. A change between two connections of the
 same agent family and tier is still a real target change, not a no-op. Merely
 opening, editing or rereading the catalogue preserves the saved overrides.
 [src: file: frontend/src/lib/agentSelection.ts:1-16]
-[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:261-277]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:821-844]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:1223-1244]
+[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:264-280]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:831-854]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1242-1263]
 
 The creation wizard, full editor, inline inspector, pipeline and QP card receive
 the configured named targets. Their selectors display the saved explicit model
 and pass the selected immutable connection instead of carrying an old one via
 an object spread. Component tests inspect the actual update payloads and exact
 connection callback; these are not live workflow/provider executions.
-[src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1300-1330]
+[src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1303-1333]
 [src: file: frontend/src/components/workflows/__tests__/WorkflowWizard.test.tsx:523-574]
-[src: file: frontend/src/components/workflows/__tests__/WorkflowDetail.steps.test.tsx:444-483]
+[src: file: frontend/src/components/workflows/__tests__/WorkflowDetail.steps.test.tsx:456-495]
 
 ## Workflow compensation targets
 
@@ -282,10 +282,10 @@ agent or tier change clears the old model and reasoning override while retaining
 configuration. The callback updates only the compensation step, not the main
 pipeline. Search, exact connection namespaces, provenance and unavailable tiers
 therefore share the existing picker behavior.
-[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:262-298]
-[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4469-4473]
-[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4548-4553]
-[src: file: frontend/src/components/workflows/__tests__/WorkflowWizard.coverage.test.tsx:829-895]
+[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:265-303]
+[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4474-4478]
+[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4553-4558]
+[src: file: frontend/src/components/workflows/__tests__/WorkflowWizard.coverage.test.tsx:885-951]
 
 Five picker controls failed against the previous compensation form; the
 unchanged-target control passed. The corrected two wizard suites pass 108 tests.

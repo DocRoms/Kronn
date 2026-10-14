@@ -731,8 +731,8 @@ pub fn list_participant_views(conn: &Connection, disc_id: &str) -> Result<Vec<Pa
     // invisible and unmentionable. Only a row nobody has heard from is a wreck.
     let is_stale = |participant: &ParticipantView| {
         participant.presence_state == PresenceState::Offline
-            && !parse_ts_opt(participant.last_seen.as_deref())
-                .is_some_and(|seen| now - seen <= RECENTLY_SEEN_WINDOW)
+            && parse_ts_opt(participant.last_seen.as_deref())
+                .is_none_or(|seen| now - seen > RECENTLY_SEEN_WINDOW)
     };
     let agents_with_reachable_session: std::collections::HashSet<String> = rows
         .iter()

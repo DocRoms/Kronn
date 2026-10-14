@@ -51,6 +51,19 @@ describe('RunOutcomePanel', () => {
     expect(onOpen).toHaveBeenCalledWith('disc-triage');
   });
 
+  it('opens the result discussion in a new tab on a Ctrl-click, without navigating in the app', async () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    api.outcome.mockResolvedValue(outcome([discussion()]));
+    const onOpen = vi.fn();
+    render(<RunOutcomePanel runId="run-wf" runActive={false} onOpenDiscussion={onOpen} />);
+
+    fireEvent.click(await screen.findByTestId('run-outcome-open'), { ctrlKey: true });
+
+    expect(open).toHaveBeenCalledWith(`${window.location.origin}/discussions/disc-triage`, '_blank', 'noopener,noreferrer');
+    expect(onOpen).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
+
   it('keeps following while the agent works, and stops once it has answered', async () => {
     vi.useFakeTimers();
     api.outcome

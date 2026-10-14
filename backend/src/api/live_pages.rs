@@ -853,10 +853,10 @@ const MAX_APP_DOCUMENT_BYTES: usize = 4 * 1024 * 1024;
 /// The app's built frontend, served with the host frame policy. The desktop
 /// serves its documents through this, the only place they get a CSP there.
 pub fn serve_app_documents(dist_dir: &std::path::Path, state: AppState) -> axum::Router {
+    // The files of the build, then the app for every client-side route
+    // (`/discussions/<id>`, …): a reload on a deep address is not a 404.
     axum::Router::new()
-        .fallback_service(
-            tower_http::services::ServeDir::new(dist_dir).append_index_html_on_directories(true),
-        )
+        .fallback_service(crate::core::frontend_spa::frontend_spa_service(dist_dir))
         .layer(axum::middleware::from_fn_with_state(
             state,
             document_frame_policy,

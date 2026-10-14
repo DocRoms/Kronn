@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, act, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
+import { withDashboardRoutes } from '../../test/routerWrapper';
 
 // Mock everything Dashboard touches at mount. The bootstrap auto-pick is the
 // only behavior under test, so the rest is stubbed to no-op responses.
@@ -83,7 +84,7 @@ afterEach(() => {
 const wrap = async (ui: React.ReactElement) => {
   let result: ReturnType<typeof render>;
   await act(async () => {
-    result = render(<I18nProvider>{ui}</I18nProvider>);
+    result = render(<I18nProvider>{withDashboardRoutes(ui)}</I18nProvider>);
   });
   // Allow API mocks + effects to settle.
   await act(async () => { await new Promise(r => setTimeout(r, 0)); });

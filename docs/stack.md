@@ -16,7 +16,7 @@ the row and its citation together.
 | Layer | Technology |
 |-------|------------|
 | Backend | Rust (axum 0.8, tokio 1.x, serde 1, anyhow 1, rusqlite 0.39, ts-rs 12, reqwest 0.13, calamine 0.36, pdf-extract 0.12) `[src: file: backend/Cargo.toml:18-101]` |
-| Frontend | React 19 + stable TypeScript 7 native compiler; TypeScript 6 alias retained for API-dependent lint tooling (Vite 8 / rolldown, Lucide icons 1.x). Node >= 23.6 per `engines`; CI runs Node 24 `[src: file: frontend/package.json:6-65]` |
+| Frontend | React 19 + stable TypeScript 7 native compiler; TypeScript 6 alias retained for API-dependent lint tooling (Vite 8 / rolldown, Lucide icons 1.x). Node >= 23.6 per `engines`; CI runs Node 24 `[src: file: frontend/package.json:6-66]` |
 | Styling | CSS tokens + utility classes + component classes (`src/styles/`). Inline `style={{}}` only for dynamic values. No CSS framework |
 | i18n | Custom lightweight system (fr/en/es/zh, one lazy chunk per locale), localStorage, no external lib `[src: file: frontend/src/lib/i18n.ts:6-11]` |
 | Type bridge | ts-rs (Rust → TypeScript) |
