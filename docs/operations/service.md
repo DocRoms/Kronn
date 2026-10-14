@@ -8,9 +8,8 @@ The service never runs from your development checkout. It runs a staged,
 immutable release under `~/.kronn/service`, so a `git pull`, a branch switch or
 a `cargo clean` in the checkout cannot affect it.
 
-> Scope of this page: install, layout, lifecycle commands, logs and coexistence
-> with `start-dev`. `kronn service update` / `rollback` are covered with the
-> update tooling.
+> Scope of this page: install, layout, lifecycle commands, logs, coexistence
+> with `start-dev`, update and rollback.
 
 ## Install
 
@@ -94,6 +93,8 @@ The unit starts `~/.kronn/service/current/bin/kronn` with:
 | `kronn service restart` | `launchctl kickstart -k` / `systemctl --user restart` |
 | `kronn service status` | installed, running, current version, URL, health |
 | `kronn service logs [--no-follow]` | tail the two log files / `journalctl --user -u kronn -f` |
+| `kronn service update [--to <X.Y.Z>] [--check] [--force] [--yes]` | see [Update](#update) |
+| `kronn service rollback [--yes]` | see [Rollback](#rollback) |
 | `kronn service uninstall [--yes] [--purge]` | unload and remove the unit; asks before deleting `~/.kronn/service` (`--purge` deletes without asking, `--yes` keeps it) |
 
 The usual commands follow the service once it is installed: `kronn stop`
@@ -130,9 +131,87 @@ service running and the command exits.
   `lib/service.sh`; `tests/bats/service.bats` uses them to avoid the real
   service manager and the real `$HOME`.
 
+## Update
+
+```bash
+kronn service update               # latest X.Y.Z tag
+kronn service update --check       # report only
+kronn service update --to 0.15.1   # a specific tag (downgrades are allowed)
+kronn service update --force       # do not wait for running work
+kronn service update --yes         # no questions
+```
+
+Steps, in order (nothing live changes before step 6):
+
+1. refuse unless the service is installed; take `update.lock` (a directory with
+   a `pid` file; a lock whose pid is dead is cleared, a live one refuses);
+2. `git -C src fetch --tags --force origin`; the target is `--to` (it must be an
+   existing `X.Y.Z` tag) or the highest tag;
+3. target equal to the current version: "already up to date", exit 0.
+   `--check` stops here and prints current and target;
+4. `git -C src checkout --detach <tag>` (refused when `src/` has local
+   modifications), build and stage `releases/<tag>`. A release that is already
+   staged is reused without a rebuild;
+5. drain: wait until nothing is in flight. The check reads two backend routes
+   with the CLI's usual Bearer token (`~/.config/kronn/.auth_token`):
+   `GET /api/workflows` (a latest run in `Running` or `Pending`, same reading as
+   the `workflow_active_runs` tool; `WaitingApproval` waits for a human and does
+   not block) and `GET /api/discussions/running` (live agent streams). When the
+   timeout elapses it asks whether to restart anyway (`--yes` restarts, declining
+   aborts with nothing changed). If the API is unreachable it warns and proceeds.
+   `--force` skips the wait;
+6. record the previous version (`previous`) and the modification time of the
+   database backup (`update.state`), switch `current`, restart, wait for
+   `/api/health` to report the target version;
+7. on failure: automatic rollback (below), exit 1. On success: prune
+   `releases/` (3 most recent by semver, never the current or the previous
+   one) and print the `## [<version>]` section of the changelog.
+
+The CLI that runs the update lives in the old release directory, which is never
+modified, so an update can replace the script that is executing it.
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | updated, or already up to date |
+| 1 | failure (including an update that was rolled back), refused, aborted |
+| 10 | `--check` only: an update is available |
+
+### Environment
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `KRONN_SERVICE_DRAIN_TIMEOUT` | `1800` | seconds to wait for running work |
+| `KRONN_SERVICE_DRAIN_INTERVAL` | `10` | seconds between two drain polls |
+| `KRONN_SERVICE_HEALTH_TIMEOUT` | `90` | seconds to wait for a healthy backend after a switch |
+| `KRONN_DATA_DIR` | platform data dir | where the database lives (same override as the backend) |
+
+## Rollback
+
+`kronn service rollback [--yes]` returns to the release stored in `previous`
+(running it again goes forward again). An automatic rollback after a failed
+update runs the same code:
+
+1. stop the service;
+2. if the database backup `<data dir>/kronn.db.backup` (written by the backend
+   before a migration) is newer than it was before the update, the new version
+   migrated the database. The current database is moved to
+   `kronn.db.failed-<version>` together with its `-wal` and `-shm` files, and
+   the backup is copied back. The manual command asks first, because everything
+   written since the update is dropped (the failed database is kept);
+3. switch `current` back, load the service, wait for the previous version to be
+   healthy.
+
+Without an update record (`update.state`) a manual rollback only switches the
+release and leaves the database alone.
+
 ## Where the code lives
 
 - `lib/service.sh`: layout, unit rendering, staging, symlink switch, service
   manager calls, commands. Sourced by `kronn`.
+- `lib/service-update.sh`: update, drain, rollback, pruning. Sourced by `kronn`.
+- `tests/bats/service_update.bats`: update and rollback against a local bare
+  repository, a fake build and fake `launchctl`.
 - `tests/bats/service.bats`: rendering, staging, switching, tag sorting and
   command routing against fake `launchctl` / `systemctl`.

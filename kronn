@@ -39,6 +39,7 @@ source "$KRONN_DIR/lib/analyze.sh"
 source "$KRONN_DIR/lib/repos.sh"
 source "$KRONN_DIR/lib/api-client.sh"
 source "$KRONN_DIR/lib/service.sh"
+source "$KRONN_DIR/lib/service-update.sh"
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 # load_config / save_config live in lib/config.sh (sourced above) so they're
@@ -1157,7 +1158,7 @@ cmd_help() {
     echo
     printf "  ${CYAN}start${RESET}          Interactive flow (default)\n"
     printf "  ${CYAN}start-dev${RESET}      Run natively, no Docker (backend + Vite, hot-reload → UI on :5173)\n"
-    printf "  ${CYAN}service${RESET}        Run Kronn as a background service (install|start|stop|restart|status|logs|uninstall)\n"
+    printf "  ${CYAN}service${RESET}        Run Kronn as a background service (install|start|stop|restart|status|logs|update|rollback|uninstall)\n"
     printf "  ${CYAN}stop${RESET}           Stop services\n"
     printf "  ${CYAN}restart${RESET}        Restart services\n"
     printf "  ${CYAN}logs${RESET}           Show logs (the service's when installed)\n"
