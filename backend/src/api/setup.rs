@@ -5721,7 +5721,13 @@ mod default_docs_dir_tests {
     /// pre-fills the briefing, KT-1192), and refused with a 400 when it could
     /// leave a project.
     #[tokio::test]
+    #[serial_test::serial]
     async fn default_docs_dir_is_normalized_saved_and_refused_when_unsafe() {
+        // Saving persists config.toml: never the developer's real one.
+        let _restore =
+            crate::core::mcp_scanner::host_sync_tests::EnvRestore::capture(&["KRONN_DATA_DIR"]);
+        let data = tempfile::tempdir().unwrap();
+        crate::core::child_env::set_var("KRONN_DATA_DIR", data.path());
         let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
         let config = std::sync::Arc::new(tokio::sync::RwLock::new(config::default_config()));
         let state = crate::AppState::new_defaults(config, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS);

@@ -755,6 +755,7 @@ struct Disputed {
     run_id: String,
 }
 
+#[cfg(unix)]
 async fn disputed_project() -> Disputed {
     let dir = repo();
     let fake = Fake::default()
@@ -859,6 +860,7 @@ async fn answer_card(d: &Disputed, option: &str) -> axum::http::StatusCode {
     .0
 }
 
+#[cfg(unix)]
 async fn pending(d: &Disputed) -> Vec<crate::db::audit_cross::PendingDispute> {
     d.state
         .db
@@ -936,6 +938,7 @@ async fn keeping_a_dispute_leaves_the_sheet_active_and_says_so() {
     assert!(pending(&d).await.is_empty());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_dispute_waits_for_a_running_audit_and_a_wrong_option_changes_nothing() {
     let d = disputed_project().await;
@@ -1111,6 +1114,7 @@ fn index_of_text(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap()
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn the_card_flags_an_open_dispute_and_validation_waits_for_it() {
     let d = disputed_project().await;
