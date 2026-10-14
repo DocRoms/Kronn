@@ -10,6 +10,29 @@ Release notes for 0.9.3 and earlier are available in the
 ---
 
 ## [0.15.1] - 2026-10-22
+## [Unreleased]
+
+### Added
+
+- The backend can run as a background service. With `KRONN_SERVICE=1` it
+  resolves the login-shell PATH at startup, before agent detection, and merges
+  it into its own, so agent CLIs are found under launchd or systemd. With
+  `KRONN_UI_DIST=<dir>` (holding an `index.html`) it serves the built web UI on
+  the API port; API routes keep precedence. Both are off by default. The
+  login-shell discovery moved from the desktop app into the shared backend
+  library (`core::shell_path`), with no change for the desktop.
+
+### Changed
+
+- The dark theme is now VS Code's Dark Modern palette: flat greys,
+  `#0078d4` filled controls and `#4daafc` accents, no glow, scanlines or
+  aurora. It applies to everyone on Dark or on System with a dark OS, with
+  no setting to change. It is held to the dark-theme contrast floors (4.5:1
+  for every text role) and covered by the dark-theme axe pass. The former
+  purple palette, with its neon effects, becomes the secret Arcade theme,
+  unlocked with a code in Settings like the other secret themes.
+
+## [0.15.1] - 2026-10-21
 
 ### Added
 
