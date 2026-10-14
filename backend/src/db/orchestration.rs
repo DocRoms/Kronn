@@ -5284,6 +5284,49 @@ fn recovery_row(row: &Row) -> rusqlite::Result<TaskExecutionRecovery> {
     })
 }
 
+/// KT-1247 — a silent worker must be detectable even when the campaign set no
+/// resilience policy (every campaign so far). Twenty minutes without a tool
+/// call, a message, a commit or a delivery is the default; both defaults can be
+/// moved globally through the environment, and per campaign through the
+/// `orchestration_run_resilience_policy` row, which always wins.
+pub const DEFAULT_ACTIVITY_TIMEOUT_SECS: u32 = 20 * 60;
+/// How long a delivery may sit unreviewed before the principal is alerted.
+pub const DEFAULT_REVIEW_TIMEOUT_SECS: u32 = 4 * 60 * 60;
+const ACTIVITY_TIMEOUT_ENV: &str = "KRONN_TASK_ACTIVITY_TIMEOUT_SECS";
+const REVIEW_TIMEOUT_ENV: &str = "KRONN_TASK_REVIEW_TIMEOUT_SECS";
+
+fn timeout_secs_from_env(name: &str, fallback: u32) -> u32 {
+    crate::core::child_env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|seconds| *seconds > 0)
+        .unwrap_or(fallback)
+}
+
+/// Global default activity timeout (`KRONN_TASK_ACTIVITY_TIMEOUT_SECS`).
+pub fn default_activity_timeout_secs() -> u32 {
+    timeout_secs_from_env(ACTIVITY_TIMEOUT_ENV, DEFAULT_ACTIVITY_TIMEOUT_SECS)
+}
+
+/// Global default review timeout (`KRONN_TASK_REVIEW_TIMEOUT_SECS`).
+pub fn default_review_timeout_secs() -> u32 {
+    timeout_secs_from_env(REVIEW_TIMEOUT_ENV, DEFAULT_REVIEW_TIMEOUT_SECS)
+}
+
+/// The activity clock a status owes. A worker owes activity only while it is
+/// `Working`; the default therefore arms nowhere else, so an `Interrupted`,
+/// `AwaitingReview` or `Escalated` row is never "silent". An explicit campaign
+/// policy keeps the clock it always armed.
+fn effective_activity_secs(policy: Option<i64>, status: TaskExecutionStatus) -> Option<i64> {
+    policy.or_else(|| {
+        (status == TaskExecutionStatus::Working).then(|| i64::from(default_activity_timeout_secs()))
+    })
+}
+
+fn effective_review_secs(policy: Option<i64>) -> i64 {
+    policy.unwrap_or_else(|| i64::from(default_review_timeout_secs()))
+}
+
 pub fn get_resilience_policy(
     conn: &Connection,
     run_id: &str,
@@ -5379,14 +5422,16 @@ pub fn set_execution_recovery(
     let total_deadline = run
         .timeout_secs
         .map(|seconds| execution.created_at + chrono::Duration::seconds(i64::from(seconds)));
-    let activity_deadline = policy
-        .activity_timeout_secs
-        .map(|seconds| now + chrono::Duration::seconds(i64::from(seconds)));
+    let activity_deadline =
+        effective_activity_secs(policy.activity_timeout_secs.map(i64::from), execution.status)
+            .map(|seconds| now + chrono::Duration::seconds(seconds));
     let review_deadline =
         if execution.interrupted_from_status == Some(TaskExecutionStatus::AwaitingReview) {
-            policy
-                .review_timeout_secs
-                .map(|seconds| now + chrono::Duration::seconds(i64::from(seconds)))
+            Some(
+                now + chrono::Duration::seconds(effective_review_secs(
+                    policy.review_timeout_secs.map(i64::from),
+                )),
+            )
         } else {
             None
         };
@@ -5474,9 +5519,11 @@ pub fn touch_execution_activity(conn: &Connection, exec_id: &str) -> Result<()> 
     else {
         return Ok(());
     };
-    let deadline = activity_secs.map(|seconds| now + chrono::Duration::seconds(seconds));
-    let review_deadline = if status == TaskExecutionStatus::AwaitingReview.as_str() {
-        review_secs.map(|seconds| now + chrono::Duration::seconds(seconds))
+    let current_status = TaskExecutionStatus::from_str(&status)?;
+    let deadline = effective_activity_secs(activity_secs, current_status)
+        .map(|seconds| now + chrono::Duration::seconds(seconds));
+    let review_deadline = if current_status == TaskExecutionStatus::AwaitingReview {
+        Some(now + chrono::Duration::seconds(effective_review_secs(review_secs)))
     } else {
         None
     };
@@ -5515,6 +5562,44 @@ pub fn touch_execution_activity(conn: &Connection, exec_id: &str) -> Result<()> 
             human_started.map(|value| value.to_rfc3339()),
         ],
     )?;
+    Ok(())
+}
+
+/// Push the silent-worker clock of the `Working` execution owning this dispatch.
+/// Best effort by design: failing to move a clock must never fail the progress
+/// write or the message that carries the activity.
+pub fn note_dispatch_activity(conn: &Connection, dispatch_id: &str) -> Result<()> {
+    let exec_id: Option<String> = conn
+        .query_row(
+            "SELECT id FROM task_executions \
+             WHERE dispatch_job_id = ?1 AND status = 'Working' LIMIT 1",
+            [dispatch_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(exec_id) = exec_id {
+        if let Err(error) = touch_execution_activity(conn, &exec_id) {
+            tracing::warn!(execution_id = %exec_id, "could not push activity clock: {error}");
+        }
+    }
+    Ok(())
+}
+
+/// Same, keyed by the worker room a message was posted in.
+pub fn note_room_activity(conn: &Connection, discussion_id: &str) -> Result<()> {
+    let exec_id: Option<String> = conn
+        .query_row(
+            "SELECT id FROM task_executions \
+             WHERE sub_discussion_id = ?1 AND status = 'Working' LIMIT 1",
+            [discussion_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(exec_id) = exec_id {
+        if let Err(error) = touch_execution_activity(conn, &exec_id) {
+            tracing::warn!(execution_id = %exec_id, "could not push activity clock: {error}");
+        }
+    }
     Ok(())
 }
 
@@ -5559,11 +5644,114 @@ pub fn expired_execution_timeouts(
             if since + chrono::Duration::seconds(seconds) <= now {
                 expired.push((id, ExecutionTimeoutKind::HumanWait));
             }
-        } else if parse(activity).is_some_and(|deadline| deadline <= now) {
+        } else if status == TaskExecutionStatus::Working.as_str()
+            && parse(activity).is_some_and(|deadline| deadline <= now)
+        {
+            // Only a worker that owes work can be silent. A delivered attempt
+            // (`AwaitingReview`) or a parked one is never an activity timeout.
             expired.push((id, ExecutionTimeoutKind::Activity));
         }
     }
     Ok(expired)
+}
+
+/// Alert the principal room that an execution needs a decision, without
+/// deciding for it. The message names the execution, its child room and the
+/// concrete options; it is posted in the transaction that parked the row.
+fn notify_principal_of_timeout(
+    conn: &Connection,
+    exec_id: &str,
+    kind: ExecutionTimeoutKind,
+    timeout_secs: Option<i64>,
+) -> Result<()> {
+    let context: Option<(String, Option<String>, i64, String)> = conn
+        .query_row(
+            "SELECT e.parent_discussion_id, e.sub_discussion_id, t.task_number, t.title \
+             FROM task_executions e \
+             JOIN planning_tasks t ON t.id = e.task_id \
+             WHERE e.id = ?1",
+            [exec_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    let Some((parent, child, task_number, title)) = context else {
+        return Ok(());
+    };
+    let Some(principal) = crate::db::discussions::get_discussion(conn, &parent)? else {
+        return Ok(());
+    };
+    let reference = format!("KT-{task_number}");
+    let child_link = child
+        .as_deref()
+        .map(|id| format!(" Sous-discussion : `{id}`."))
+        .unwrap_or_default();
+    let minutes = timeout_secs.map(|seconds| (seconds + 59) / 60);
+    let (label, body) = match kind {
+        ExecutionTimeoutKind::Activity => (
+            "activity_timeout",
+            format!(
+                "Le worker n'a produit aucune activité (appel d'outil, message, commit ou \
+                 livraison){} : l'exécution est passée en `Interrupted` (origine `Working`), \
+                 `resume_worker`. Le worktree et la branche sont conservés. Décide :\n\n\
+                 1. **Reprendre le même worker** — `task_exec_resume` ;\n\
+                 2. **Réaffecter à un autre worker** — `task_exec_reassign` ;\n\
+                 3. **Reprendre la main** — `task_exec_reassign` vers ta propre session CLI.",
+                minutes
+                    .map(|minutes| format!(" depuis {minutes} min"))
+                    .unwrap_or_default()
+            ),
+        ),
+        ExecutionTimeoutKind::ReviewWait => (
+            "review_wait_timeout",
+            format!(
+                "Une livraison attend ta revue{} sans décision. Rien n'a été approuvé, rejeté \
+                 ni annulé : la livraison, le worktree et la branche sont intacts. Relis-la puis \
+                 appelle `task_exec_review` (approuver ou demander des changements), ou \
+                 `task_exec_reassign` / `task_exec_cancel` si le travail doit être repris.",
+                minutes
+                    .map(|minutes| format!(" depuis {minutes} min"))
+                    .unwrap_or_default()
+            ),
+        ),
+        _ => return Ok(()),
+    };
+    let message = DiscussionMessage {
+        id: format!("orch-principal-timeout:{exec_id}:{label}:{}", Uuid::new_v4()),
+        role: MessageRole::User,
+        channel: MessageChannel::Main,
+        content: format!(
+            "**Événement d'orchestration — {reference}**\n\n\
+             L'exécution `{exec_id}` (**{title}**) demande une décision.{child_link} {body}"
+        ),
+        agent_type: None,
+        timestamp: Utc::now(),
+        tokens_used: 0,
+        session_tokens_at_message: None,
+        recovered_partial: false,
+        auth_mode: None,
+        model_tier: None,
+        model: None,
+        cost_usd: None,
+        author_pseudo: Some("Orchestrateur".to_string()),
+        author_avatar_email: None,
+        source_msg_id: None,
+        duration_ms: None,
+        lint_report: None,
+        target_agent: None,
+        reply_to_message_id: None,
+        author_cli_ordinal: None,
+        session_continuity: None,
+    };
+    let targets = [principal_notice_target(conn, exec_id, principal.agent)?];
+    crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
+        conn,
+        &parent,
+        &message,
+        &targets,
+        &[],
+        None,
+    )?;
+    Ok(())
 }
 
 pub fn apply_execution_timeout(
@@ -5584,61 +5772,76 @@ pub fn apply_execution_timeout(
             ExecutionTimeoutKind::HumanWait => "human_wait_timeout",
         };
         if kind == ExecutionTimeoutKind::Activity {
-            let watchdog_redispatches: u32 = conn
+            // KT-1247 — a silent worker is handed back, never discarded. The
+            // clock only means something while the attempt is `Working`: a
+            // delivery that already moved the row on (`AwaitingReview`) or a
+            // parked row owes no activity, so the stale deadline is disarmed
+            // and nothing is interrupted.
+            if execution.status != TaskExecutionStatus::Working {
+                conn.execute(
+                    "UPDATE task_execution_recovery SET activity_deadline_at = NULL, \
+                            updated_at = ?2 WHERE task_execution_id = ?1",
+                    params![exec_id, Utc::now().to_rfc3339()],
+                )?;
+                return Ok(false);
+            }
+            // Activity may have landed between the scan and this apply.
+            let pushed: Option<String> = conn
                 .query_row(
-                    "SELECT watchdog_redispatches FROM task_execution_recovery \
+                    "SELECT activity_deadline_at FROM task_execution_recovery \
                      WHERE task_execution_id = ?1",
                     [exec_id],
-                    |row| Ok(row.get::<_, i64>(0)?.max(0) as u32),
+                    |row| row.get(0),
                 )
                 .optional()?
-                .unwrap_or(0);
-            if watchdog_redispatches == 0 {
-                if let Some(dispatch_id) = execution.dispatch_job_id.as_deref() {
-                    if crate::db::agent_dispatch::apply_watchdog_stall(conn, dispatch_id)?
-                        == crate::db::agent_dispatch::WatchdogTransition::Redispatched
-                    {
-                        let activity_timeout_secs: Option<i64> = conn
-                            .query_row(
-                                "SELECT policy.activity_timeout_secs \
-                                 FROM orchestration_run_resilience_policy policy \
-                                 WHERE policy.orchestration_run_id = ?1",
-                                [&execution.orchestration_run_id],
-                                |row| row.get(0),
-                            )
-                            .optional()?
-                            .flatten();
-                        let now = Utc::now();
-                        let next_deadline = activity_timeout_secs
-                            .map(|seconds| now + chrono::Duration::seconds(seconds));
-                        conn.execute(
-                            "UPDATE task_execution_recovery \
-                             SET watchdog_redispatches = 1, recovery_action = 'resume_worker', \
-                                 recovery_reason = 'watchdog_stall_redispatch', \
-                                 last_activity_at = ?2, activity_deadline_at = ?3, \
-                                 pending = 1, updated_at = ?2 WHERE task_execution_id = ?1",
-                            params![
-                                exec_id,
-                                now.to_rfc3339(),
-                                next_deadline.map(|value| value.to_rfc3339()),
-                            ],
-                        )?;
-                        record_reconciliation_event(
-                            conn,
-                            "execution",
-                            exec_id,
-                            "watchdog_stall_redispatch",
-                            serde_json::json!({"dispatch_job_id": dispatch_id}),
-                        )?;
-                        return Ok(true);
-                    }
-                }
-            } else if let Some(dispatch_id) = execution.dispatch_job_id.as_deref() {
-                // The only retry budget was already consumed. Settle the
-                // dispatch cause before escalating the business execution so
-                // attention/presence readers see the same honest state.
-                let _ = crate::db::agent_dispatch::apply_watchdog_stall(conn, dispatch_id)?;
+                .flatten();
+            if pushed.is_some_and(|value| parse_dt(value) > Utc::now()) {
+                return Ok(false);
             }
+            let policy_secs = get_resilience_policy(conn, &execution.orchestration_run_id)?
+                .activity_timeout_secs
+                .map(i64::from);
+            let timeout_secs = effective_activity_secs(policy_secs, TaskExecutionStatus::Working);
+            // The provider run is settled with the execution so the later
+            // resume enqueues a fresh dispatch instead of mistaking a dead
+            // Running row for a live worker.
+            if let Some(dispatch_id) = execution.dispatch_job_id.as_deref() {
+                crate::db::agent_dispatch::mark_failed_with_kind(
+                    conn,
+                    dispatch_id,
+                    "activity_timeout: no worker activity before the deadline",
+                    "dispatch_stalled",
+                )?;
+            }
+            record_reconciliation_event(
+                conn,
+                "execution",
+                exec_id,
+                label,
+                serde_json::json!({ "status": execution.status.as_str() }),
+            )?;
+            transition_execution(
+                conn,
+                exec_id,
+                TaskExecutionStatus::Interrupted,
+                &OrchestrationActor {
+                    kind: PlanningActorKind::System,
+                    id: Some("orchestration-watchdog".into()),
+                    session_id: None,
+                    source_message_id: None,
+                },
+                serde_json::json!({ "timeout_kind": label }),
+            )?;
+            conn.execute(
+                "UPDATE task_execution_recovery SET activity_deadline_at = NULL, \
+                        review_deadline_at = NULL, human_wait_started_at = NULL, \
+                        recovery_action = 'resume_worker', recovery_reason = ?2, \
+                        pending = 1, updated_at = ?3 \
+                 WHERE task_execution_id = ?1",
+                params![exec_id, label, Utc::now().to_rfc3339()],
+            )?;
+            notify_principal_of_timeout(conn, exec_id, kind, timeout_secs)?;
+            return Ok(true);
         }
         record_reconciliation_event(
             conn,
@@ -5669,6 +5872,21 @@ pub fn apply_execution_timeout(
              WHERE task_execution_id = ?1",
             params![exec_id, label, Utc::now().to_rfc3339()],
         )?;
+        if kind == ExecutionTimeoutKind::ReviewWait
+            && execution.status == TaskExecutionStatus::AwaitingReview
+        {
+            // KT-1247 — the delivery is untouched and no review is written: the
+            // principal is alerted, and only the principal decides.
+            let policy_secs = get_resilience_policy(conn, &execution.orchestration_run_id)?
+                .review_timeout_secs
+                .map(i64::from);
+            notify_principal_of_timeout(
+                conn,
+                exec_id,
+                kind,
+                Some(effective_review_secs(policy_secs)),
+            )?;
+        }
         Ok(true)
     })
 }

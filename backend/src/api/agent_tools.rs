@@ -1641,6 +1641,16 @@ impl ToolExecutor for KronnToolExecutor {
                 ),
             );
         }
+        // KT-1247 — any tool call a worker makes from its execution room is
+        // activity: it pushes the silent-worker clock. Best effort, and a no-op
+        // for every room that does not belong to a `Working` execution.
+        if let Some(room) = self.disc_id.clone() {
+            let _ = self
+                .state
+                .db
+                .with_conn(move |conn| crate::db::orchestration::note_room_activity(conn, &room))
+                .await;
+        }
         use axum::extract::{Path, State};
         use axum::Json;
 

@@ -2924,6 +2924,12 @@ fn insert_message_inner(
         )?;
     }
 
+    // KT-1247 — a message from the worker is activity: it pushes the silent-
+    // worker clock of the execution that owns this room.
+    if matches!(msg.role, crate::models::MessageRole::Agent) {
+        let _ = super::orchestration::note_room_activity(conn, discussion_id);
+    }
+
     Ok(next_order)
 }
 

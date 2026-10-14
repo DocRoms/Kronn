@@ -605,13 +605,9 @@ pub fn start_resilience_watchdog(state: AppState) {
                         .ok()
                         .flatten()
                 };
-                if matches!(
-                    kind,
-                    crate::models::ExecutionTimeoutKind::Activity
-                        | crate::models::ExecutionTimeoutKind::TotalDuration
-                ) {
+                let cancel_provider_run = || {
                     if let (Some((dispatch, child)), Ok(registry)) =
-                        (keys, state.cancel_registry.lock())
+                        (keys.as_ref(), state.cancel_registry.lock())
                     {
                         for key in [dispatch.as_deref(), child.as_deref()]
                             .into_iter()
@@ -622,20 +618,36 @@ pub fn start_resilience_watchdog(state: AppState) {
                             }
                         }
                     }
+                };
+                // A total deadline cancels first, as it always did. A silent
+                // worker (KT-1247) is settled FIRST — dispatch failed, execution
+                // `Interrupted` — and only then is its process stopped, so the
+                // run's own teardown finds the row already parked instead of
+                // racing the interruption. A worker that produced activity in
+                // the meantime is not applied, hence never stopped.
+                if kind == crate::models::ExecutionTimeoutKind::TotalDuration {
+                    cancel_provider_run();
                 }
                 let id = execution_id.clone();
-                if let Err(error) = state
+                match state
                     .db
                     .with_conn(move |conn| {
                         crate::db::orchestration::apply_execution_timeout(conn, &id, kind)
                     })
                     .await
                 {
-                    tracing::warn!(
-                        execution_id,
-                        ?kind,
-                        "orchestration timeout apply failed: {error}"
-                    );
+                    Ok(applied) => {
+                        if applied && kind == crate::models::ExecutionTimeoutKind::Activity {
+                            cancel_provider_run();
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            execution_id,
+                            ?kind,
+                            "orchestration timeout apply failed: {error}"
+                        );
+                    }
                 }
             }
 

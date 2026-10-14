@@ -1529,7 +1529,7 @@ fn timeout_scan_reports_activity_total_review_and_human_wait_distinctly() {
 }
 
 #[test]
-fn activity_watchdog_redispatches_once_then_escalates_execution() {
+fn activity_watchdog_interrupts_a_silent_dispatched_worker_and_settles_its_dispatch() {
     let conn = setup();
     seed_task(&conn, "t-watchdog", 1210);
     let execution = launch_single_task(
@@ -1605,7 +1605,187 @@ fn activity_watchdog_redispatches_once_then_escalates_execution() {
     )
     .unwrap();
 
+    // KT-1247 — a silent worker is interrupted on the FIRST expiry (no blind
+    // redispatch) and stays resumable: Working origin, resume_worker, pending.
     assert!(apply_execution_timeout(&conn, &execution.id, ExecutionTimeoutKind::Activity).unwrap());
+    let interrupted = get_task_execution(&conn, &execution.id).unwrap().unwrap();
+    assert_eq!(interrupted.status, TaskExecutionStatus::Interrupted);
+    assert_eq!(
+        interrupted.interrupted_from_status,
+        Some(TaskExecutionStatus::Working)
+    );
+    let job = crate::db::agent_dispatch::get(&conn, "watchdog-dispatch")
+        .unwrap()
+        .unwrap();
+    assert_eq!(job.status, crate::db::agent_dispatch::DispatchStatus::Failed);
+    assert_eq!(job.failure_kind.as_deref(), Some("dispatch_stalled"));
+    let recovery = get_execution_recovery(&conn, &execution.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovery.recovery_action, ExecutionRecoveryAction::ResumeWorker);
+    assert_eq!(recovery.recovery_reason, "activity_timeout");
+    assert!(recovery.pending);
+    assert_eq!(recovery.watchdog_redispatches, 0);
+    assert!(recovery.activity_deadline_at.is_none());
+}
+
+/// A `Working` execution on a worker room, with the recovery clocks armed by the
+/// real transition path, for the KT-1247 silent-worker tests.
+fn working_execution(conn: &Connection, task: &str, number: i64) -> TaskExecution {
+    seed_task(conn, task, number);
+    let execution = launch_single_task(conn, &LaunchSingleTaskInput::new(task, DISC), &backend_actor())
+        .unwrap()
+        .execution;
+    for to in [TaskExecutionStatus::Provisioning, TaskExecutionStatus::Working] {
+        transition_execution(conn, &execution.id, to, &backend_actor(), serde_json::json!({}))
+            .unwrap();
+    }
+    get_task_execution(conn, &execution.id).unwrap().unwrap()
+}
+
+fn parent_room_alerts(conn: &Connection) -> Vec<String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT content FROM messages WHERE discussion_id = ?1 \
+             AND id LIKE 'orch-principal-timeout:%' ORDER BY sort_order",
+        )
+        .unwrap();
+    stmt.query_map([DISC], |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+#[test]
+fn a_run_without_a_policy_still_gets_the_default_activity_deadline() {
+    let conn = setup();
+    let execution = working_execution(&conn, "t-default-clock", 1300);
+    let policy = get_resilience_policy(&conn, &execution.orchestration_run_id).unwrap();
+    assert_eq!(policy.activity_timeout_secs, None, "no policy row exists");
+
+    let recovery = get_execution_recovery(&conn, &execution.id)
+        .unwrap()
+        .unwrap();
+    let deadline = recovery
+        .activity_deadline_at
+        .expect("the default arms the activity clock");
+    let armed = (deadline - recovery.last_activity_at).num_seconds();
+    assert_eq!(armed, i64::from(default_activity_timeout_secs()));
+    assert_eq!(armed, i64::from(DEFAULT_ACTIVITY_TIMEOUT_SECS));
+}
+
+#[test]
+fn a_campaign_policy_overrides_the_default_activity_deadline() {
+    let conn = setup();
+    seed_task(&conn, "t-policy-clock", 1301);
+    let execution = launch_single_task(
+        &conn,
+        &LaunchSingleTaskInput::new("t-policy-clock", DISC),
+        &backend_actor(),
+    )
+    .unwrap()
+    .execution;
+    set_resilience_policy(
+        &conn,
+        &execution.orchestration_run_id,
+        &OrchestrationResiliencePolicy {
+            activity_timeout_secs: Some(90),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for to in [TaskExecutionStatus::Provisioning, TaskExecutionStatus::Working] {
+        transition_execution(&conn, &execution.id, to, &backend_actor(), serde_json::json!({}))
+            .unwrap();
+    }
+    let recovery = get_execution_recovery(&conn, &execution.id)
+        .unwrap()
+        .unwrap();
+    let armed = (recovery.activity_deadline_at.unwrap() - recovery.last_activity_at).num_seconds();
+    assert_eq!(armed, 90);
+}
+
+#[test]
+fn a_silent_working_worker_is_interrupted_resumable_and_the_principal_is_told() {
+    let conn = setup();
+    let execution = working_execution(&conn, "t-silent", 1302);
+    conn.execute(
+        "UPDATE task_execution_recovery SET activity_deadline_at = '2020-01-01T00:00:00Z' \
+         WHERE task_execution_id = ?1",
+        [&execution.id],
+    )
+    .unwrap();
+
+    let expired = expired_execution_timeouts(&conn, Utc::now()).unwrap();
+    assert_eq!(
+        expired,
+        vec![(execution.id.clone(), ExecutionTimeoutKind::Activity)]
+    );
+    assert!(apply_execution_timeout(&conn, &execution.id, ExecutionTimeoutKind::Activity).unwrap());
+
+    let after = get_task_execution(&conn, &execution.id).unwrap().unwrap();
+    assert_eq!(after.status, TaskExecutionStatus::Interrupted);
+    assert_eq!(
+        after.interrupted_from_status,
+        Some(TaskExecutionStatus::Working)
+    );
+    assert_eq!(after.workspace_id, execution.workspace_id, "worktree kept");
+    assert_eq!(after.child_branch, execution.child_branch, "branch kept");
+    let recovery = get_execution_recovery(&conn, &execution.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovery.recovery_action, ExecutionRecoveryAction::ResumeWorker);
+    assert!(recovery.pending);
+
+    let alerts = parent_room_alerts(&conn);
+    assert_eq!(alerts.len(), 1, "{alerts:?}");
+    for option in ["task_exec_resume", "task_exec_reassign", "Reprendre la main"] {
+        assert!(alerts[0].contains(option), "{option} missing: {}", alerts[0]);
+    }
+    assert!(alerts[0].contains(&execution.id));
+
+    // An interrupted row is not silent: the scan no longer reports it.
+    assert!(expired_execution_timeouts(&conn, Utc::now())
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn activity_pushes_the_deadline_and_a_pushed_deadline_is_not_applied() {
+    let conn = setup();
+    let execution = working_execution(&conn, "t-active", 1303);
+    conn.execute(
+        "UPDATE task_execution_recovery SET activity_deadline_at = '2020-01-01T00:00:00Z' \
+         WHERE task_execution_id = ?1",
+        [&execution.id],
+    )
+    .unwrap();
+    assert_eq!(expired_execution_timeouts(&conn, Utc::now()).unwrap().len(), 1);
+
+    // The worker speaks in its room: the clock moves forward.
+    let room = "d-active-room";
+    conn.execute(
+        "INSERT INTO discussions (id, title, created_at, updated_at) VALUES (?1, 'W', ?2, ?2)",
+        params![room, Utc::now().to_rfc3339()],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE task_executions SET sub_discussion_id = ?2 WHERE id = ?1",
+        params![execution.id, room],
+    )
+    .unwrap();
+    note_room_activity(&conn, room).unwrap();
+
+    let recovery = get_execution_recovery(&conn, &execution.id)
+        .unwrap()
+        .unwrap();
+    assert!(recovery.activity_deadline_at.unwrap() > Utc::now());
+    assert!(expired_execution_timeouts(&conn, Utc::now())
+        .unwrap()
+        .is_empty());
+
+    // A stale scan result must not interrupt a worker that just proved alive.
+    assert!(!apply_execution_timeout(&conn, &execution.id, ExecutionTimeoutKind::Activity).unwrap());
     assert_eq!(
         get_task_execution(&conn, &execution.id)
             .unwrap()
@@ -1613,45 +1793,163 @@ fn activity_watchdog_redispatches_once_then_escalates_execution() {
             .status,
         TaskExecutionStatus::Working
     );
-    let first = crate::db::agent_dispatch::get(&conn, "watchdog-dispatch")
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        first.status,
-        crate::db::agent_dispatch::DispatchStatus::Pending
-    );
-    assert_eq!(first.watchdog_redispatches, 1);
-    assert_eq!(
-        get_execution_recovery(&conn, &execution.id)
-            .unwrap()
-            .unwrap()
-            .watchdog_redispatches,
-        1
-    );
+    assert!(parent_room_alerts(&conn).is_empty());
+}
 
-    conn.execute(
-        "UPDATE agent_dispatch_jobs SET available_at = ?1 WHERE id = 'watchdog-dispatch'",
-        [Utc::now().to_rfc3339()],
+#[test]
+fn a_delivered_attempt_is_never_interrupted_by_the_activity_clock() {
+    let conn = setup();
+    let execution = working_execution(&conn, "t-delivered", 1304);
+    transition_execution(
+        &conn,
+        &execution.id,
+        TaskExecutionStatus::AwaitingReview,
+        &backend_actor(),
+        serde_json::json!({}),
     )
     .unwrap();
-    crate::db::agent_dispatch::claim(&conn, "watchdog-dispatch").unwrap();
-    crate::db::agent_dispatch::mark_agent_started(&conn, "watchdog-dispatch").unwrap();
-    assert!(apply_execution_timeout(&conn, &execution.id, ExecutionTimeoutKind::Activity).unwrap());
+    conn.execute(
+        "UPDATE task_execution_recovery SET activity_deadline_at = '2020-01-01T00:00:00Z' \
+         WHERE task_execution_id = ?1",
+        [&execution.id],
+    )
+    .unwrap();
+
+    assert!(expired_execution_timeouts(&conn, Utc::now())
+        .unwrap()
+        .is_empty());
+    assert!(!apply_execution_timeout(&conn, &execution.id, ExecutionTimeoutKind::Activity).unwrap());
     assert_eq!(
         get_task_execution(&conn, &execution.id)
             .unwrap()
             .unwrap()
             .status,
-        TaskExecutionStatus::Escalated
+        TaskExecutionStatus::AwaitingReview
     );
+    assert!(parent_room_alerts(&conn).is_empty());
+}
+
+#[test]
+fn an_interrupted_silent_worker_resumes_to_working_and_rearms_the_clock() {
+    let conn = setup();
+    let execution = working_execution(&conn, "t-resume", 1305);
+    conn.execute(
+        "UPDATE task_execution_recovery SET activity_deadline_at = '2020-01-01T00:00:00Z' \
+         WHERE task_execution_id = ?1",
+        [&execution.id],
+    )
+    .unwrap();
+    assert!(apply_execution_timeout(&conn, &execution.id, ExecutionTimeoutKind::Activity).unwrap());
+
+    // `interrupted_resume_allowed` holds for the exact origin: resume.
+    assert!(TaskExecutionStatus::interrupted_resume_allowed(
+        TaskExecutionStatus::Working,
+        TaskExecutionStatus::Working
+    ));
+    assert!(transition_execution(
+        &conn,
+        &execution.id,
+        TaskExecutionStatus::Working,
+        &backend_actor(),
+        serde_json::json!({ "recovery": "resume_worker" }),
+    )
+    .unwrap());
+    let resumed = get_task_execution(&conn, &execution.id).unwrap().unwrap();
+    assert_eq!(resumed.status, TaskExecutionStatus::Working);
+    assert_eq!(resumed.interrupted_from_status, None);
+    let recovery = get_execution_recovery(&conn, &execution.id)
+        .unwrap()
+        .unwrap();
+    assert!(
+        recovery.activity_deadline_at.unwrap() > Utc::now(),
+        "the resumed worker owes activity again"
+    );
+}
+
+#[test]
+fn an_interrupted_silent_worker_can_be_reassigned() {
+    let conn = setup();
+    let execution = working_execution(&conn, "t-reassign", 1306);
+    conn.execute(
+        "UPDATE task_execution_recovery SET activity_deadline_at = '2020-01-01T00:00:00Z' \
+         WHERE task_execution_id = ?1",
+        [&execution.id],
+    )
+    .unwrap();
+    assert!(apply_execution_timeout(&conn, &execution.id, ExecutionTimeoutKind::Activity).unwrap());
+
+    reassign_execution_worker(
+        &conn,
+        &execution.id,
+        &CampaignWorkerSelection {
+            target: MessageTarget::agent(AgentType::Codex),
+            model: None,
+            profile_id: None,
+        },
+        "the worker went silent",
+        &backend_actor(),
+    )
+    .expect("reassignment is allowed from the interrupted row");
+    let reassigned = get_task_execution(&conn, &execution.id).unwrap().unwrap();
+    assert_eq!(reassigned.workspace_id, execution.workspace_id);
+    assert_eq!(reassigned.child_branch, execution.child_branch);
+}
+
+#[test]
+fn an_unreviewed_delivery_alerts_the_principal_without_deciding() {
+    let conn = setup();
+    let execution = working_execution(&conn, "t-review-wait", 1307);
+    transition_execution(
+        &conn,
+        &execution.id,
+        TaskExecutionStatus::AwaitingReview,
+        &backend_actor(),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    // The default review clock is armed by the transition itself.
+    let recovery = get_execution_recovery(&conn, &execution.id)
+        .unwrap()
+        .unwrap();
+    let armed = (recovery.review_deadline_at.unwrap() - recovery.last_activity_at).num_seconds();
+    assert_eq!(armed, i64::from(default_review_timeout_secs()));
+
+    conn.execute(
+        "UPDATE task_execution_recovery SET review_deadline_at = '2020-01-01T00:00:00Z' \
+         WHERE task_execution_id = ?1",
+        [&execution.id],
+    )
+    .unwrap();
     assert_eq!(
-        crate::db::agent_dispatch::get(&conn, "watchdog-dispatch")
-            .unwrap()
-            .unwrap()
-            .failure_kind
-            .as_deref(),
-        Some("dispatch_stalled")
+        expired_execution_timeouts(&conn, Utc::now()).unwrap(),
+        vec![(execution.id.clone(), ExecutionTimeoutKind::ReviewWait)]
     );
+    assert!(apply_execution_timeout(&conn, &execution.id, ExecutionTimeoutKind::ReviewWait).unwrap());
+
+    // No review row and no approval: only an alert, the delivery is not touched.
+    let reviews: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM task_execution_reviews WHERE task_execution_id = ?1",
+            [&execution.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(reviews, 0);
+    let after = get_task_execution(&conn, &execution.id).unwrap().unwrap();
+    assert!(
+        !matches!(
+            after.status,
+            TaskExecutionStatus::Approved
+                | TaskExecutionStatus::Done
+                | TaskExecutionStatus::Cancelled
+                | TaskExecutionStatus::ChangesRequested
+        ),
+        "{:?}",
+        after.status
+    );
+    let alerts = parent_room_alerts(&conn);
+    assert_eq!(alerts.len(), 1, "{alerts:?}");
+    assert!(alerts[0].contains("task_exec_review"), "{}", alerts[0]);
 }
 
 #[test]

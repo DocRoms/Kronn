@@ -877,12 +877,18 @@ pub fn mark_progress(
     detail: Option<&str>,
 ) -> Result<bool> {
     let now = Utc::now().to_rfc3339();
-    Ok(conn.execute(
+    let changed = conn.execute(
         "UPDATE agent_dispatch_jobs SET progress_phase = ?2, progress_detail = ?3,
              last_progress_at = ?4, updated_at = ?4
          WHERE id = ?1 AND status = 'Running'",
         params![id, phase, detail, now],
-    )? > 0)
+    )? > 0;
+    if changed {
+        // KT-1247 — a provider/tool boundary is worker activity: it pushes the
+        // silent-worker clock of the execution this dispatch belongs to.
+        let _ = super::orchestration::note_dispatch_activity(conn, id);
+    }
+    Ok(changed)
 }
 
 pub fn mark_completed(conn: &Connection, id: &str) -> Result<bool> {
