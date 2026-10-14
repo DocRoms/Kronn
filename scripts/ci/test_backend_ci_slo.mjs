@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { SLO_MS, comparableSuccessfulHotRuns, effectiveMeasurementMode, fastLoopDurationMs, formatDuration, runnerMilliseconds, hasPartiallyRestoredCompiledCache, hasRestoredCompiledCache, markdown, percentile, requireCurrentBackendJob, summarizeBackendJobs, timingStatus, validateCompiledCacheState } from "./backend_ci_slo.mjs";
+import { SLO_MS, collapseBackendJobs, comparableSuccessfulHotRuns, effectiveMeasurementMode, fastLoopDurationMs, formatDuration, runnerMilliseconds, hasPartiallyRestoredCompiledCache, hasRestoredCompiledCache, markdown, percentile, requireCurrentBackendJob, summarizeBackendJobs, timingStatus, validateCompiledCacheState } from "./backend_ci_slo.mjs";
 
 const at = (minutes) => `2026-08-31T00:${String(minutes).padStart(2, "0")}:00Z`;
 const job = (start, end) => ({ name: "test-backend", started_at: at(start), completed_at: at(end) });
@@ -73,3 +73,22 @@ assert.equal(runnerMilliseconds(runJobs), 19 * 60 * 1000);
 const totalsReport = markdown(summary, completedJob, "hot", true, { fastLoopMs: 14 * 60 * 1000, runnerMs: 19 * 60 * 1000 });
 assert.match(totalsReport, /Trigger to ci-quality-gates \| 14m 0s/);
 assert.match(totalsReport, /Runner time, all jobs of this run \| 19m 0s/);
+
+// Sharded runs: the critical path spans build start to report end, and the
+// cache evidence recorded by the build counts for the merged job.
+const sharded = collapseBackendJobs([
+  { name: "test-backend-build", status: "completed", started_at: at(0), completed_at: at(9), steps: [{ name: "Record compiled cache hit", conclusion: "success" }] },
+  { name: "test-backend-shard (1)", status: "completed", started_at: at(9), completed_at: at(14) },
+  { name: "test-backend", status: "completed", started_at: at(14), completed_at: at(16), steps: [] },
+]);
+assert.equal(sharded.some((entry) => entry.name === "test-backend-build"), false);
+assert.equal(requireCurrentBackendJob(sharded).durationMs, 16 * 60 * 1000);
+assert.equal(hasRestoredCompiledCache(sharded.find((entry) => entry.name === "test-backend")), true);
+assert.equal(summarizeBackendJobs(sharded).samples[0].durationMs, 16 * 60 * 1000);
+const legacy = [{ name: "test-backend", status: "completed", started_at: at(0), completed_at: at(12) }];
+assert.deepEqual(collapseBackendJobs(legacy), legacy);
+const buildRunning = collapseBackendJobs([
+  { name: "test-backend-build", status: "in_progress", started_at: at(0), completed_at: null },
+  { name: "test-backend", status: "completed", started_at: at(1), completed_at: at(2) },
+]);
+assert.throws(() => requireCurrentBackendJob(buildRunning), /not complete/);

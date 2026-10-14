@@ -105,7 +105,7 @@ standalone Rust test files; a `#[cfg(test)]` on their parent module does not
 exclude their contents. Propagate fallible fixture setup inside the closure
 and assert its result after awaiting it.
 `[src: file: backend/scripts/ci/lint_with_conn_unwrap.py:79-115]`
-`[src: file: .github/workflows/ci-test.yml:378-382]`
+`[src: file: .github/workflows/ci-test.yml:480-484]`
 
 Supervisor cleanup must also reap live shell jobs whose PID was not yet recorded:
 a termination signal can arrive between the fork and that assignment, leaving
@@ -116,13 +116,23 @@ TERM at this boundary for both the backend and the watcher.
 
 ## Backend CI timing SLO
 
-`test-backend` is the measured backend critical-path job and the only backend
-test pass: formatting, then every library, binary and integration test once
-under cargo-nextest with coverage instrumentation
-(`NEXTEST_PROFILE=ci cargo llvm-cov nextest`), the 83 % floors and the
-key-management per-file floors on that same run, then the generated-type drift
-check and the raw-command lint on the build it already made. `make
-test-backend-cov` runs the same command locally. Before this layout the suite ran
+The backend suite is the measured critical path and runs once, split in
+three. `test-backend-build` checks formatting, compiles every library, binary
+and integration test with coverage instrumentation into a nextest archive
+(`cargo llvm-cov show-env` then `cargo nextest archive`), and runs the
+raw-command lint. Three `test-backend-shard` jobs each run a third of the tests
+from that archive (`--partition slice:N/3`, `NEXTEST_PROFILE=ci`), and
+`test-backend` merges their coverage profiles against the archived binaries,
+enforces the 83 % floors and the key-management per-file floors on the whole
+suite, then replays the ts-rs export tests for the generated-type drift check.
+An extracted test binary no longer sits under the checkout, so the shards and
+the replay set `KRONN_TEMPLATES_DIR` to the repository's `templates/`.
+Merging the profiles of separate archive extractions gives the same report as
+a single run (checked on 2026-10-14 with a 131-test subset: identical line,
+function and region totals). `make test-backend-cov` keeps the single-run
+command locally. The SLO observer measures from the start of
+`test-backend-build` to the end of `test-backend`, and reads the cache state
+from the build. Before this layout the suite ran
 twice, once in `test-backend` (`cargo test`) and once instrumented in
 `test-backend-coverage`; the history below measures that older layout.
 Clippy and the project-specific budget checks run in `test-backend-quality`,
@@ -134,7 +144,7 @@ restore from the exact key or a same-OS fallback prefix; only `push` runs on
 directories and writes a versioned marker (`.kronn-backend-cache-v3`) when a
 complete bounded cache exists. Profraw files, the nextest store and other
 transient trees are never archived.
-[src: file: .github/workflows/ci-test.yml:98-303]
+[src: file: .github/workflows/ci-test.yml:102-261]
 
 The clippy, e2e dev-profile, release and portability caches follow the same
 restore-on-pull-request, save-on-main model: Actions scopes a cache created by
@@ -144,16 +154,16 @@ read. See [actions-cache-scope](gotchas/actions-cache-scope.md).
 
 A push to `main` only refreshes those caches. The merged tree was already
 tested on its pull request, so each Rust job compiles exactly what a pull
-request compiles and saves it, without running a test:
-`cargo llvm-cov nextest --workspace --no-report -E 'none()' --no-tests=pass`
-for the instrumented suite, `cargo clippy` for the clippy cache, the dev
+request compiles and saves it, without running a test: the same instrumented
+archive build for the backend suite (no shard, report or timing job runs),
+`cargo clippy` for the clippy cache, the dev
 backend build for e2e, `cargo test --lib --no-run` for portability, and the
 release build. Jobs with no Rust cache are skipped on a push, and the
 aggregates accept those skips only for a push. A save runs only on
 `success()`: a half-built tree saved under the exact key would be restored
 as a hit, and never replaced, until the next `Cargo.lock` change. The
 backend save keeps its own verified `ready` marker instead.
-[src: file: .github/workflows/ci-test.yml:339-372] [src: file: .github/workflows/ci-test.yml:640-667]
+[src: file: .github/workflows/ci-test.yml:441-474] [src: file: .github/workflows/ci-test.yml:742-769]
 [src: file: .github/workflows/ci-build.yml:194-235] [src: file: .github/workflows/ci-build.yml:251-276]
 
 The backend performance observer publishes the duration for every eligible run
@@ -172,24 +182,24 @@ a verified restored compiled cache. The v3 key cannot restore the former
 debug layout, so the first run is an explicit warmup.
 [src: file: .cargo/config.toml:1-6] [src: file: scripts/ci/backend_ci_slo.mjs:1-176]
 The observer's Node unit test runs in the blocking `test-python` gate.
-[src: file: .github/workflows/ci-test.yml:474-495]
+[src: file: .github/workflows/ci-test.yml:576-597]
 
-The backend job now fails its artifact step when nextest does not produce the
-expected JUnit report, then uploads it as `backend-junit`. nextest writes its
+Each shard fails its artifact step when nextest does not produce the expected
+JUnit report, then uploads it as `backend-junit-N` (N = 1 to 3). nextest writes its
 store under the workspace root, so the report is
 `backend/target/nextest/ci/junit.xml`, not under `target/llvm-cov-target`.
 [src: url: https://nexte.st/docs/configuration/reference/] To inspect the slowest
 Rust tests after a green run:
 
 ```bash
-gh run download <run-id> -n backend-junit -D /tmp/kronn-backend-junit
+gh run download <run-id> -p 'backend-junit-*' -D /tmp/kronn-backend-junit
 python3 - <<'PY'
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
-report = Path("/tmp/kronn-backend-junit/junit.xml")
 cases = []
-for case in ET.parse(report).iter("testcase"):
+for report in Path("/tmp/kronn-backend-junit").glob("*/junit.xml"):
+  for case in ET.parse(report).iter("testcase"):
     seconds = float(case.attrib.get("time", "0") or 0)
     cases.append((seconds, case.attrib.get("classname", ""), case.attrib.get("name", "")))
 for seconds, classname, name in sorted(cases, reverse=True)[:10]:
@@ -197,7 +207,7 @@ for seconds, classname, name in sorted(cases, reverse=True)[:10]:
 PY
 ```
 
-[src: file: .github/workflows/ci-test.yml:258-280]
+[src: file: .github/workflows/ci-test.yml:278-340]
 
 Run `CI Tests` manually with `cache_mode=hot` for a warmed compiled-artifact
 measurement or `cache_mode=cold` for a current-run-only cold measurement.
@@ -256,7 +266,7 @@ gate is skipped or fails. A timeout is a functional failure; the SLO observer
 does not retry, sleep, or mask it. An SLO breach is a warning, while missing,
 duplicate, incomplete, or contradictory measurement evidence fails the
 observer instead of publishing a misleading timing.
-[src: file: .github/workflows/ci-test.yml:8-14] [src: file: .github/workflows/ci-test.yml:849-883]
+[src: file: .github/workflows/ci-test.yml:8-14] [src: file: .github/workflows/ci-test.yml:951-987]
 
 ## Test placement
 
