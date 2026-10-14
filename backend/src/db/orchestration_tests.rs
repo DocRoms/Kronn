@@ -1693,6 +1693,81 @@ fn a_run_without_a_policy_still_gets_the_default_activity_deadline() {
     assert_eq!(armed, i64::from(DEFAULT_ACTIVITY_TIMEOUT_SECS));
 }
 
+/// A worker inside one long tool call (a cold `cargo build` under load) is
+/// busy, not silent; past the in-flight cap a stuck tool is caught again.
+#[test]
+fn a_tool_still_running_is_activity_until_its_cap() {
+    let conn = setup();
+    let execution = working_execution(&conn, "t-tool-in-flight", 1302);
+    conn.execute(
+        "INSERT INTO messages (id, discussion_id, role, content, timestamp, sort_order) \
+         VALUES ('msg-tool', ?1, 'User', 'work', '2026-01-01T00:00:00Z', 1)",
+        [DISC],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO agent_dispatch_jobs (id, discussion_id, trigger_message_id, \
+             trigger_sort_order, dedupe_key, chain_prompt_ids_json, status, available_at, \
+             created_at, updated_at) VALUES ('dispatch-tool', ?1, 'msg-tool', 1, \
+             'tool-dedupe', '[]', 'Running', '2026-01-01T00:00:00Z', \
+             '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        [DISC],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE task_executions SET dispatch_job_id = 'dispatch-tool' WHERE id = ?1",
+        [&execution.id],
+    )
+    .unwrap();
+    let past = (Utc::now() - chrono::Duration::minutes(30)).to_rfc3339();
+    conn.execute(
+        "UPDATE task_execution_recovery SET activity_deadline_at = ?2 WHERE task_execution_id = ?1",
+        params![execution.id, past],
+    )
+    .unwrap();
+    let set_phase = |phase: &str, minutes_ago: i64| {
+        let at = (Utc::now() - chrono::Duration::minutes(minutes_ago)).to_rfc3339();
+        conn.execute(
+            "UPDATE agent_dispatch_jobs SET progress_phase = ?1, last_progress_at = ?2 \
+             WHERE id = 'dispatch-tool'",
+            params![phase, at],
+        )
+        .unwrap();
+    };
+    let expired_ids = || -> Vec<String> {
+        expired_execution_timeouts(&conn, Utc::now())
+            .unwrap()
+            .into_iter()
+            .filter(|(_, kind)| *kind == ExecutionTimeoutKind::Activity)
+            .map(|(id, _)| id)
+            .collect()
+    };
+
+    // A tool started 25 min ago and still running: busy.
+    set_phase("tool_activity", 25);
+    assert!(
+        !expired_ids().contains(&execution.id),
+        "a running tool is activity"
+    );
+
+    // The same tool past the cap: hung, silent again.
+    set_phase(
+        "tool_activity",
+        i64::from(tool_in_flight_cap_secs()) / 60 + 5,
+    );
+    assert!(
+        expired_ids().contains(&execution.id),
+        "a tool past the cap is hung"
+    );
+
+    // Between tools, the activity deadline alone decides.
+    set_phase("upstream_wait", 25);
+    assert!(
+        expired_ids().contains(&execution.id),
+        "no tool in flight: silent"
+    );
+}
+
 #[test]
 fn a_campaign_policy_overrides_the_default_activity_deadline() {
     let conn = setup();
