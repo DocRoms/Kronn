@@ -301,7 +301,7 @@ Historical runs without fingerprints require a new audit before signoff.
 [src: file: backend/src/core/audit_documents.rs:13#capture]
 [src: file: backend/src/core/audit_documents.rs:53#verify]
 [src: file: backend/src/db/discussions.rs:1868#insert_native_agent_message_with_audit_documents]
-[src: file: backend/src/api/discussions/streaming.rs:4756#validation_documents]
+[src: file: backend/src/api/discussions/streaming.rs:4766#validation_documents]
 [src: file: backend/src/db/sql/260_audit_document_fingerprints.sql:1]
 
 The explicit re-anchor action sends `deterministic_only: true`. It returns the

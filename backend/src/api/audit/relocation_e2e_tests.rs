@@ -1219,7 +1219,14 @@ async fn a_default_docs_root_audit_is_byte_identical_to_its_golden() {
     );
     let golden = include_str!("default_root.golden");
     if actual != golden {
-        let proposed = std::env::temp_dir().join("kronn-default-root.golden");
+        let proposed = tempfile::Builder::new()
+            .prefix("kronn-default-root-")
+            .suffix(".golden")
+            .tempfile()
+            .unwrap()
+            .into_temp_path()
+            .keep()
+            .unwrap();
         std::fs::write(&proposed, &actual).unwrap();
         let (a, g): (Vec<&str>, Vec<&str>) = (actual.lines().collect(), golden.lines().collect());
         let differing: Vec<String> = a
