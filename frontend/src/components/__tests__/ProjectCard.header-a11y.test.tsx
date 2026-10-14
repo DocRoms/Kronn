@@ -206,6 +206,93 @@ describe('ProjectCard — header accessibility', () => {
     expect(within(header).getByTestId('project-doc-state-summary')).toHaveTextContent('docState.summaryAttention 1');
   });
 
+  // KT-1206 DoD 1: the "validated, modified since" badge carries its action.
+  // The status chip alone is not enough: the card must offer Revalidate next
+  // to it, and both the primary action and the doc-state summary must open the
+  // single "Verify docs" panel that holds the per-signal actions.
+  describe('validated, modified since — the badge carries its action', () => {
+    const driftedValidated = () => {
+      vi.mocked(projectsApi.auditTimeline).mockResolvedValue({
+        runs: [{
+          id: 'run-1', project_id: 'p-1', kind: 'Full', agent_type: 'ClaudeCode',
+          started_at: '2026-10-12T10:00:00Z', status: 'Completed', td_total: 0,
+        }],
+        steps: [], recorded_audits: [], recorded_validated_at: null,
+        latest_validation: null, lease_orphaned: false,
+      } as never);
+      vi.mocked(projectsApi.docProvenance).mockResolvedValue({ docs: [], to_reconfirm: 1 } as never);
+      vi.mocked(projectsApi.revalidationPlan).mockResolvedValue({
+        sources_state: 'needs_reverification', sections: [], agent_steps: [], reanchor_count: 0, human_count: 0,
+      });
+      renderCard({
+        project: { audit_status: 'Validated' },
+        driftStatus: {
+          audit_date: '2026-10-12', stale_sections: [], fresh_sections: [], total_sections: 0,
+          sources_state: 'needs_reverification', broken_citations: 0, placeholder_docs: [],
+        },
+      });
+    };
+
+    it('shows the drift label together with a Revalidate action', async () => {
+      driftedValidated();
+      const header = document.querySelector('.dash-card-header') as HTMLElement;
+      await waitFor(() => expect(within(header).getByText('docState.status.validatedModified')).toBeInTheDocument());
+      // The plain "validated" success label is gone while drift is pending.
+      expect(within(header).queryByText('projects.master.status.validated')).toBeNull();
+      const action = within(header).getByTestId('project-revalidate');
+      expect(action).toHaveTextContent('audit.revalidate.button');
+      expect(action).toBeEnabled();
+    });
+
+    it('the Revalidate action on the badge opens the panel with the reconfirm action', async () => {
+      driftedValidated();
+      const header = document.querySelector('.dash-card-header') as HTMLElement;
+      await waitFor(() => expect(within(header).getByText('docState.status.validatedModified')).toBeInTheDocument());
+      expect(screen.queryByTestId('revalidate-panel')).toBeNull();
+
+      await userEvent.click(within(header).getByTestId('project-revalidate'));
+
+      const panel = await screen.findByTestId('revalidate-panel');
+      expect(within(panel).getByTestId('revalidate-reconfirm-action')).toBeInTheDocument();
+    });
+
+    it('the doc-state summary on the card opens the same panel', async () => {
+      driftedValidated();
+      const header = document.querySelector('.dash-card-header') as HTMLElement;
+      await waitFor(() => expect(within(header).getByTestId('project-doc-state-summary')).toHaveTextContent('docState.summaryAttention 1'));
+      expect(screen.queryByTestId('revalidate-panel')).toBeNull();
+
+      await userEvent.click(within(header).getByTestId('project-doc-state-summary'));
+
+      expect(await screen.findByTestId('revalidate-panel')).toBeInTheDocument();
+    });
+
+    it('keeps the plain validated badge, and no drift label, when nothing drifted', async () => {
+      vi.mocked(projectsApi.auditTimeline).mockResolvedValue({
+        runs: [{
+          id: 'run-1', project_id: 'p-1', kind: 'Full', agent_type: 'ClaudeCode',
+          started_at: '2026-10-12T10:00:00Z', status: 'Completed', td_total: 0,
+        }],
+        steps: [], recorded_audits: [], recorded_validated_at: null,
+        latest_validation: null, lease_orphaned: false,
+      } as never);
+      vi.mocked(projectsApi.docProvenance).mockResolvedValue({ docs: [], to_reconfirm: 0 });
+      vi.mocked(projectsApi.revalidationPlan).mockResolvedValue({
+        sources_state: 'clean', sections: [], agent_steps: [], reanchor_count: 0, human_count: 0,
+      });
+      renderCard({
+        project: { audit_status: 'Validated' },
+        driftStatus: {
+          audit_date: '2026-10-12', stale_sections: [], fresh_sections: [], total_sections: 0,
+          sources_state: 'clean', broken_citations: 0, placeholder_docs: [],
+        },
+      });
+      const header = document.querySelector('.dash-card-header') as HTMLElement;
+      await waitFor(() => expect(within(header).getByText('projects.master.status.validated')).toBeInTheDocument());
+      expect(within(header).queryByText('docState.status.validatedModified')).toBeNull();
+    });
+  });
+
   it('keeps the doc state unknown when the revalidation plan cannot be loaded', async () => {
     vi.mocked(projectsApi.auditTimeline).mockResolvedValue({
       runs: [{
