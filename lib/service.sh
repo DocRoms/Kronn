@@ -479,6 +479,31 @@ service_resume_after_dev() {
 
 # ─── Commands ───────────────────────────────────────────────────────────────
 
+# Another Kronn (start-dev, Docker) already answering on the port would hold the
+# data-dir lock, so the service would crash-loop while the health check reads
+# the OTHER backend — same version — and reports a false success. Stop a native
+# one (asked first); a Docker one needs `kronn stop`.
+_service_port_answers() {
+    curl -fsS -o /dev/null --max-time 2 "http://127.0.0.1:$(service_port)/api/health" 2>/dev/null
+}
+
+_service_free_port_for_install() {
+    service_is_running && return 0
+    _service_port_answers || return 0
+    warn "Another Kronn is already running on :$(service_port) (start-dev or Docker)."
+    printf "  ${DIM}The service cannot start next to it (same port, same data-dir lock).${RESET}\n"
+    if ! _service_confirm "Stop it now? Running agents in it are interrupted."; then
+        info "Aborted — stop it (kronn stop), then run: kronn service start"
+        return 1
+    fi
+    reap_native_backend >/dev/null 2>&1 || true
+    if _service_port_answers; then
+        fail "Something still answers on :$(service_port) — a Docker Kronn? Run: kronn stop"
+        return 1
+    fi
+    success "Previous Kronn stopped."
+}
+
 _service_confirm() {
     [[ "${_SERVICE_ASSUME_YES:-0}" == "1" ]] && return 0
     ask_yn "$1"
@@ -600,6 +625,7 @@ cmd_service_install() {
     service_write_unit || return 1
     success "Service definition written: $(service_unit_path)"
 
+    _service_free_port_for_install || return 1
     service_load || { fail "Could not load the service ($(service_label))."; return 1; }
     info "Waiting for the backend to answer on $(service_url) ..."
     if service_wait_healthy "$base_version" "${KRONN_SERVICE_HEALTH_TIMEOUT:-90}"; then
