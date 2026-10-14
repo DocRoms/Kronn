@@ -365,9 +365,20 @@ describe('ProjectCard — new-tab addresses', () => {
     const validation = {
       id: 'd-running-val', project_id: PROJECT.id, title: 'Validation audit AI', archived: false,
     } as unknown as Discussion;
-    const { props, container } = renderCard({ discussions: [validation], driftStatus: null });
-    const badge = container.querySelector('.dash-badge-orange.cursor-pointer') as HTMLElement;
-    expect(badge).not.toBeNull();
+    // The badge follows the run's recorded validation link (KT-1206), never a
+    // guess from the discussion title.
+    vi.mocked(projectsApi.auditTimeline).mockResolvedValue({
+      runs: [{
+        id: 'run-val', project_id: PROJECT.id, kind: 'Full', agent_type: 'ClaudeCode',
+        started_at: '2026-10-12T10:00:00Z', status: 'Completed', td_total: 0,
+        validation_discussion_id: 'd-running-val',
+      }],
+      steps: [], recorded_audits: [], recorded_validated_at: null,
+      latest_validation: { discussion_id: 'd-running-val', finished: false, archived: false },
+      lease_orphaned: false,
+    } as never);
+    const { props } = renderCard({ discussions: [validation], driftStatus: null });
+    const badge = await screen.findByTestId('project-validation-badge');
 
     fireEvent.click(badge, { ctrlKey: true });
     expect(open).toHaveBeenCalledWith(`${window.location.origin}/discussions/d-running-val`, '_blank', 'noopener,noreferrer');

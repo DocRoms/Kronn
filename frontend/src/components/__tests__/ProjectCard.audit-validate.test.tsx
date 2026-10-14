@@ -124,7 +124,8 @@ describe('ProjectCard — validating after the validation discussion finished', 
     const badge = await screen.findByTestId('project-validation-badge');
     fireEvent.click(badge);
     expect(props.onOpenDiscussion).toHaveBeenCalledWith('d-security');
-    expect(props.onNavigate).toHaveBeenCalledWith('discussions');
+    // Opening the discussion is the navigation: it lands on its own address.
+    expect(props.onNavigate).not.toHaveBeenCalled();
     expect(props.onSetDiscPrefill).not.toHaveBeenCalled();
   });
 

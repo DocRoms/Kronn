@@ -164,6 +164,21 @@ timeline and a stale document's viewer. It has no lifecycle of its own.
   “to reconfirm”; it does not silently replace the human decision.
   [src: file: backend/src/api/audit/drift.rs:437-464#briefing_notes]
   [src: file: backend/src/api/audit/drift.rs:1126-1134#mark_validated_doc_writes]
+- **One explanation, three doors.** The header summary and primary action, the
+  timeline's doc-state block and launch entry, and the banner of a stale
+  document all open the same dialog: why the sections are stale, each doc
+  with its audit step and changed sources, and what “Update” and “Verified,
+  unchanged” do. The last commit that touched the changed sources is not in
+  the drift response, so it is not shown.
+  [src: file: frontend/src/components/__tests__/ProjectCard.stale-explanation.test.tsx:141#KT-1218]
+- **One name on every surface.** The MCP descriptions and manuals say
+  “Verify docs” like the English label, present the full audit as an advanced
+  option, and carry none of the retired CTA names.
+  [src: file: backend/scripts/test_disc_introspection_mcp.py:7825#test_audit_surface_uses_the_verify_docs_vocabulary_of_the_ui]
+- **Header layout.** The compact header keeps the status, one next action, the
+  doc-state summary and the « Détails » disclosure without overlap at 360, 768
+  and 1440 px, closed and open.
+  [src: file: frontend/e2e/specs/audit-card-states.spec.ts:294#width]
 
 - **Deterministic part.** It runs under the project's audit lease and leaves
   no run row. Moved citations outside human sections get their new line

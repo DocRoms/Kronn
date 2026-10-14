@@ -304,7 +304,8 @@ describe('ProjectCard — header accessibility', () => {
       badge.focus();
       await userEvent.keyboard(' ');
       expect(onOpenDiscussion).toHaveBeenCalledWith('d-val');
-      expect(onNavigate).toHaveBeenCalledWith('discussions');
+      // Opening the discussion is the navigation: it lands on its own address.
+      expect(onNavigate).not.toHaveBeenCalled();
     });
 
     it('the tech-debt badge is a keyboard-reachable button', async () => {

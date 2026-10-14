@@ -289,44 +289,65 @@ test.describe('Audit card & tab states (0.9.0 dogfooding)', () => {
     await expect(page.getByTestId('project-audit-progress')).toHaveCount(0);
   });
 
-  test('compact audit header controls stay inside a 360 px viewport without overlap', async ({ page }) => {
-    const projectId = 'pw-audit-narrow-fixture';
-    await page.setViewportSize({ width: 360, height: 800 });
-    mockProjectsList(page, projectId);
-    mockDrift(page, projectId);
-    mockVerificationSurface(page, projectId);
-    mockAuditStatus(page, projectId);
+  // KT-1218 — the compact header holds at a phone, a tablet and a wide desktop
+  // width, with the « Détails » disclosure closed and open.
+  for (const width of [360, 768, 1440]) {
+    test(`compact audit header controls stay inside a ${width} px viewport without overlap`, async ({ page }) => {
+      const projectId = `pw-audit-narrow-fixture-${width}`;
+      await page.setViewportSize({ width, height: 900 });
+      mockProjectsList(page, projectId);
+      mockDrift(page, projectId);
+      mockVerificationSurface(page, projectId);
+      mockAuditStatus(page, projectId);
 
-    const dashboard = new DashboardPage(page);
-    await dashboard.goto();
-    await selectFixtureProject(page, projectId);
-    await expect(page.getByTestId('project-doc-state-summary')).toContainText('3 à vérifier', { timeout: 10_000 });
+      const dashboard = new DashboardPage(page);
+      await dashboard.goto();
+      await selectFixtureProject(page, projectId);
+      await expect(page.getByTestId('project-doc-state-summary')).toContainText('3 à vérifier', { timeout: 10_000 });
 
-    const controls = page.locator([
-      '.project-detail-actions > .project-status-chip',
-      '.project-detail-actions > .project-audit-primary',
-      '.project-detail-actions > .doc-state-summary',
-      '.project-detail-actions > .project-audit-details > summary',
-      '.dash-card-header .project-status-chip',
-      '.dash-card-header .project-audit-primary',
-      '.dash-card-header .doc-state-summary',
-      '.dash-card-header .project-audit-details > summary',
-    ].join(', '));
-    await expect(controls).toHaveCount(4);
-    const boxes = await controls.evaluateAll(elements => elements.map(element => {
-      const box = element.getBoundingClientRect();
-      return { left: box.left, right: box.right, top: box.top, bottom: box.bottom };
-    }));
-    for (const box of boxes) {
-      expect(box.left).toBeGreaterThanOrEqual(0);
-      expect(box.right).toBeLessThanOrEqual(360);
-    }
-    for (let left = 0; left < boxes.length; left += 1) {
-      for (let right = left + 1; right < boxes.length; right += 1) {
-        const overlapWidth = Math.min(boxes[left].right, boxes[right].right) - Math.max(boxes[left].left, boxes[right].left);
-        const overlapHeight = Math.min(boxes[left].bottom, boxes[right].bottom) - Math.max(boxes[left].top, boxes[right].top);
-        expect(Math.max(0, overlapWidth) * Math.max(0, overlapHeight)).toBe(0);
-      }
-    }
-  });
+      const measure = async (selector: string) => page.locator(selector).evaluateAll(elements => elements
+        .filter(element => {
+          const box = element.getBoundingClientRect();
+          return box.width > 0 && box.height > 0;
+        })
+        .map(element => {
+          const box = element.getBoundingClientRect();
+          return { left: box.left, right: box.right, top: box.top, bottom: box.bottom };
+        }));
+      const expectNoOverlap = (boxes: { left: number; right: number; top: number; bottom: number }[]) => {
+        for (const box of boxes) {
+          expect(box.left).toBeGreaterThanOrEqual(0);
+          expect(box.right).toBeLessThanOrEqual(width);
+        }
+        for (let left = 0; left < boxes.length; left += 1) {
+          for (let right = left + 1; right < boxes.length; right += 1) {
+            const overlapWidth = Math.min(boxes[left].right, boxes[right].right) - Math.max(boxes[left].left, boxes[right].left);
+            const overlapHeight = Math.min(boxes[left].bottom, boxes[right].bottom) - Math.max(boxes[left].top, boxes[right].top);
+            expect(Math.max(0, overlapWidth) * Math.max(0, overlapHeight)).toBe(0);
+          }
+        }
+      };
+
+      const controls = [
+        '.project-detail-actions > .project-status-chip',
+        '.project-detail-actions > .project-audit-primary',
+        '.project-detail-actions > .doc-state-summary',
+        '.project-detail-actions > .project-audit-details > summary',
+        '.dash-card-header .project-status-chip',
+        '.dash-card-header .project-audit-primary',
+        '.dash-card-header .doc-state-summary',
+        '.dash-card-header .project-audit-details > summary',
+      ].join(', ');
+      await expect(page.locator(controls)).toHaveCount(4);
+      expectNoOverlap(await measure(controls));
+
+      // Opening « Détails » reveals the rest without colliding with the essentials.
+      await page.locator('.project-detail-actions > .project-audit-details > summary').click();
+      await expect(page.locator('.project-detail-actions .project-audit-details-content')).toBeVisible();
+      expectNoOverlap(await measure([
+        controls,
+        '.project-detail-actions .project-audit-details-content > *',
+      ].join(', ')));
+    });
+  }
 });
