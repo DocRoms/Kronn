@@ -1299,6 +1299,40 @@ class TaskExecPrincipalSurfaceTests(unittest.TestCase):
             self.assertNotIn("source_agent", body)
             self.assertNotIn("source_session_id", body)
 
+    def test_a_room_native_agent_follows_decides_and_stops_what_it_launched(self):
+        # Regression: a room's native agent could launch an execution but every
+        # later principal call sent a CLI session it does not have, so status,
+        # review and cancel were refused as "not addressed to this session".
+        context = {
+            "discussion_id": "disc-parent", "agent_type": "Codex",
+            "dispatch_job_id": "job-2", "source_message_id": "msg-2",
+        }
+        http = mock.MagicMock(return_value={"success": True, "data": {}})
+        identity = mock.MagicMock(side_effect=AssertionError("CLI identity must not be read"))
+        calls = [
+            (self.mod.call_task_exec_status, {"task_execution_id": "exec-1"}),
+            (self.mod.call_task_exec_review, {
+                "task_execution_id": "exec-1",
+                "decision": {"version": 1, "task_ref": "KT-10", "decision": "approve"},
+            }),
+            (self.mod.call_task_exec_cancel, {"task_execution_id": "exec-1", "reason": "stuck"}),
+            (self.mod.call_task_exec_resume, {"task_execution_id": "exec-1"}),
+            (self.mod.call_task_exec_reassign, {
+                "task_execution_id": "exec-1", "reason": "retry", "validations": [],
+            }),
+        ]
+        with mock.patch.dict(os.environ, {"KRONN_ROOM_AGENT_CONTEXT": json.dumps(context)}), \
+                mock.patch.object(self.mod, "_task_exec_identity", identity), \
+                mock.patch.object(self.mod, "_http", http):
+            for call, args in calls:
+                call(args)
+        self.assertEqual(len(http.call_args_list), len(calls))
+        for recorded_call in http.call_args_list:
+            body = recorded_call.args[2]
+            self.assertEqual(body["room_agent"], context)
+            self.assertNotIn("source_agent", body)
+            self.assertNotIn("source_session_id", body)
+
     def test_an_incomplete_room_agent_context_fails_closed_before_http(self):
         http = mock.MagicMock()
         with mock.patch.dict(os.environ, {"KRONN_ROOM_AGENT_CONTEXT": json.dumps({"discussion_id": "disc-parent"})}), \

@@ -146,6 +146,10 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # declaration went 2_746 -> 2_732.
 # KT-1381: `media_generate` says "media source" (the local ComfyUI counts),
 # 3 B shorter than "HTTP connection"; the ComfyUI detail lives in its manual.
+# #241: `task_exec_review` says whose identity the bridge sends (the room's
+# native agent in its own turn, else the joined CLI session), paid for inside
+# its own declaration (shorter refusal clause and `task_execution_id` text);
+# re-measured on the rebased tree: exactly 84_843 B, net zero, ceiling unchanged.
 CATALOGUE_MAX_BYTES = 84_843
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
