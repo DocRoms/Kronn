@@ -70,7 +70,7 @@ alone does not establish a user-visible duration.
    [src: file: frontend/src/components/MessageBubble.tsx:2203-2216#ReactMarkdown]
    Each message first renders as plain text and upgrades to Markdown once it is
    near the viewport or the browser is idle, so every message is still parsed.
-   [src: file: frontend/src/components/MessageBubble.tsx:2128-2160#canDefer]
+   [src: file: frontend/src/components/MessageBubble.tsx:2129-2161#canDefer]
    There is a per-message
    200,000-character fallback that avoids this Markdown path for very large
    individual messages; it does not cap the count of ordinary messages.
@@ -102,7 +102,7 @@ alone does not establish a user-visible duration.
    [src: file: frontend/src/hooks/useRafBatchedStream.ts:20-49#useRafBatchedStream]
    The active streaming text is
    deferred before being passed to the streaming reply renderer.
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:1642-1645#deferredStreamingText]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:1651-1654#deferredStreamingText]
 
 ## Findings and priorities
 

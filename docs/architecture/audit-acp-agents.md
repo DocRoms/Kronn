@@ -142,11 +142,11 @@ not before.
 - **Where the cost comes from.** Only what a runtime reports itself: Claude
   Code's `total_cost_usd` (its stream-json `result` line, or the adapter's
   `Cost` event) and OpenRouter's `usage.cost`, summed per response
-  [src: file: backend/src/agents/runner.rs:13997-14005#total_cost_usd] [src: file: backend/src/agents/runner.rs:5673-5675#usd_micros] [src: file: backend/src/agents/runner.rs:9804-9810#cost_usd_micros].
+  [src: file: backend/src/agents/runner.rs:14025-14033#total_cost_usd] [src: file: backend/src/agents/runner.rs:5673-5675#usd_micros] [src: file: backend/src/agents/runner.rs:9804-9810#cost_usd_micros].
   The recorded cost is never recomputed from a rate table; a finished step
   whose agent reported none is priced on read by `core::pricing` for the served
   model and shown as an estimate, never as a reported cost
-  [src: file: backend/src/db/audit_runs.rs:1264-1267#price_steps].
+  [src: file: backend/src/db/audit_runs.rs:1272-1275#price_steps].
 - **Per step.** `audit_run_steps.cost_usd_micros` (integer micro-USD) sums the
   step's attempts. It stays `NULL` when any attempt that ran reported no cost:
   a sum over a silent attempt would be a floor shown as the whole. A reported

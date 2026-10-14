@@ -23605,7 +23605,11 @@ mod cold_api_handlers_tests {
         .await;
         assert_eq!(st, StatusCode::CONFLICT, "{json}");
         assert!(
-            json["error"].as_str().unwrap_or("").contains("locked"),
+            // KT-1212: every docs writer refuses with the shared DOCS_BUSY message.
+            json["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("currently running"),
             "{json}"
         );
         assert!(!repo.join("docs/briefing.md").exists());

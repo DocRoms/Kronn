@@ -541,9 +541,9 @@ impl ProbeRunner for ProcessProbeRunner {
             success: false,
             detail,
         };
-        let mut command = std::process::Command::new(&probe.program);
+        let mut command =
+            crate::core::cmd::sync_cmd(&probe.program, crate::core::child_env::ChildRoute::Tool);
         command.args(&probe.args).current_dir(&probe.cwd);
-        crate::core::child_env::isolate(&mut command, crate::core::child_env::ChildRoute::Tool);
         for (name, value) in &probe.env {
             command.env(name, value);
         }

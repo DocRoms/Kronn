@@ -84,7 +84,7 @@ with a specific diagnostic; this does not disable ordinary Claude discussions
 or relax worker isolation. Workers run through WSL instead; the boundary
 (`WSLENV`, translated paths, backend URL in NAT mode, native ACP refusal) is in
 [`windows-wsl-agents.md`](windows-wsl-agents.md).
-[src: file: backend/src/agents/runner.rs:12354-12363#claude_task_worker_platform_check]
+[src: file: backend/src/agents/runner.rs:12375-12384#claude_task_worker_platform_check]
 [Claude sandbox platform support](https://code.claude.com/docs/en/sandboxing)
 
 After replacing a frozen bridge, reconnect the MCP session. Frozen and Windows

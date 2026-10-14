@@ -302,14 +302,13 @@ pub async fn validate_audit(
             // Durable completion (KT-1122): the stamp written with the signal,
             // else the earliest clean signal in the messages — later messages
             // never undo it.
-            let completion_of = |run: Option<&AuditRun>, discussion: Option<&Discussion>| {
-                match (run, discussion) {
+            let completion_of =
+                |run: Option<&AuditRun>, discussion: Option<&Discussion>| match (run, discussion) {
                     (Some(run), Some(discussion)) => {
                         record::effective_completion(conn, &run.id, &discussion.id)
                     }
                     _ => Ok(None),
-                }
-            };
+                };
             let linked_is_finished = completion_of(latest.as_ref(), disc.as_ref())?.is_some();
             if disc.as_ref().is_some_and(|discussion| discussion.archived) && !linked_is_finished {
                 let mut statement = conn.prepare(
@@ -1139,8 +1138,20 @@ mod validate_gate_tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let state = test_state();
         seed(&state, tmp.path(), "Completed", Some("d1"), None).await;
-        push_agent_message(&state, "m-signal", "Fin.\nKRONN:VALIDATION_COMPLETE", "2026-08-28T21:37:00Z").await;
-        push_agent_message(&state, "m-pr", "Commit poussé (PR #34)", "2026-08-29T08:00:00Z").await;
+        push_agent_message(
+            &state,
+            "m-signal",
+            "Fin.\nKRONN:VALIDATION_COMPLETE",
+            "2026-08-28T21:37:00Z",
+        )
+        .await;
+        push_agent_message(
+            &state,
+            "m-pr",
+            "Commit poussé (PR #34)",
+            "2026-08-29T08:00:00Z",
+        )
+        .await;
         push_agent_message(&state, "m-dod", "DoD mise à jour", "2026-08-29T08:05:00Z").await;
         state
             .db
@@ -1155,7 +1166,10 @@ mod validate_gate_tests {
             .await
             .expect("linked validation");
         assert!(reported.finished && reported.archived);
-        assert_eq!(reported.completed_at.as_deref(), Some("2026-08-28T21:37:00+00:00"));
+        assert_eq!(
+            reported.completed_at.as_deref(),
+            Some("2026-08-28T21:37:00+00:00")
+        );
         assert_eq!(timeline_block(&state).await, None, "the server accepts");
 
         // The stamp, not the messages, carries it: even a pruned signal
@@ -1177,15 +1191,31 @@ mod validate_gate_tests {
     async fn the_server_verdict_agrees_with_the_gate_when_the_ui_cannot_validate() {
         let tmp = tempfile::TempDir::new().unwrap();
         let state = test_state();
-        seed(&state, tmp.path(), "Completed", Some("d1"), Some("Encore en cours")).await;
-        assert_eq!(timeline_block(&state).await, Some(ValidationBlock::NotFinished));
+        seed(
+            &state,
+            tmp.path(),
+            "Completed",
+            Some("d1"),
+            Some("Encore en cours"),
+        )
+        .await;
+        assert_eq!(
+            timeline_block(&state).await,
+            Some(ValidationBlock::NotFinished)
+        );
         let refused = call(&state).await;
         assert!(!refused.success);
         assert!(refused.error.unwrap().contains("has not finished"));
 
         // `**KRONN:…` (the stream truncated inside the emphasis): the UI and
         // the gate used to disagree on it; now both read one parser.
-        push_agent_message(&state, "m-bold", "Fin.\n**KRONN:VALIDATION_COMPLETE", "2026-08-28T21:40:00Z").await;
+        push_agent_message(
+            &state,
+            "m-bold",
+            "Fin.\n**KRONN:VALIDATION_COMPLETE",
+            "2026-08-28T21:40:00Z",
+        )
+        .await;
         assert_eq!(timeline_block(&state).await, None);
         assert!(call(&state).await.success);
     }
@@ -1197,7 +1227,14 @@ mod validate_gate_tests {
     async fn the_resumed_validation_is_the_runs_link_even_for_a_sub_audit() {
         let tmp = tempfile::TempDir::new().unwrap();
         let state = test_state();
-        seed(&state, tmp.path(), "Completed", Some("d-run"), Some("Encore en cours")).await;
+        seed(
+            &state,
+            tmp.path(),
+            "Completed",
+            Some("d-run"),
+            Some("Encore en cours"),
+        )
+        .await;
         state
             .db
             .with_conn(|conn| {
@@ -1218,7 +1255,9 @@ mod validate_gate_tests {
             .await
             .unwrap();
 
-        let reported = timeline_validation(&state).await.expect("linked validation");
+        let reported = timeline_validation(&state)
+            .await
+            .expect("linked validation");
         assert_eq!(reported.discussion_id, "d-run");
         assert!(!reported.finished);
         let verdict = state
@@ -1237,7 +1276,14 @@ mod validate_gate_tests {
     async fn an_instance_without_the_run_is_read_only_and_says_why() {
         let tmp = tempfile::TempDir::new().unwrap();
         let state = test_state();
-        seed(&state, tmp.path(), "Completed", Some("d1"), Some("Fin.\nKRONN:VALIDATION_COMPLETE")).await;
+        seed(
+            &state,
+            tmp.path(),
+            "Completed",
+            Some("d1"),
+            Some("Fin.\nKRONN:VALIDATION_COMPLETE"),
+        )
+        .await;
         state
             .db
             .with_conn(|conn| {
@@ -1247,7 +1293,10 @@ mod validate_gate_tests {
             .await
             .unwrap();
         assert!(timeline_validation(&state).await.is_none());
-        assert_eq!(timeline_block(&state).await, Some(ValidationBlock::NoLocalRun));
+        assert_eq!(
+            timeline_block(&state).await,
+            Some(ValidationBlock::NoLocalRun)
+        );
         let response = call(&state).await;
         assert!(!response.success);
         let reason = response.error.unwrap();
@@ -1259,14 +1308,25 @@ mod validate_gate_tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let state = test_state();
         state.config.write().await.server.pseudo = Some("  Romu ".into());
-        seed(&state, tmp.path(), "Completed", Some("d1"), Some("Fin.\nKRONN:VALIDATION_COMPLETE")).await;
+        seed(
+            &state,
+            tmp.path(),
+            "Completed",
+            Some("d1"),
+            Some("Fin.\nKRONN:VALIDATION_COMPLETE"),
+        )
+        .await;
         state
             .db
             .with_conn(|conn| crate::db::audit_validation::set_started_by(conn, "r1", "Audit-Bot"))
             .await
             .unwrap();
         assert_eq!(
-            timeline_validation(&state).await.unwrap().started_by.as_deref(),
+            timeline_validation(&state)
+                .await
+                .unwrap()
+                .started_by
+                .as_deref(),
             Some("Audit-Bot")
         );
 
@@ -1276,13 +1336,17 @@ mod validate_gate_tests {
         let file = kronn_state::read(tmp.path()).expect(".kronn.json written");
         assert_eq!(file.validated_by.as_deref(), Some("Romu"));
         assert_eq!(file.validation_started_by.as_deref(), Some("Audit-Bot"));
-        let data = crate::api::audit::run::audit_timeline(State(state.clone()), AxPath("p1".to_string()))
-            .await
-            .0
-            .data
-            .expect("timeline");
+        let data =
+            crate::api::audit::run::audit_timeline(State(state.clone()), AxPath("p1".to_string()))
+                .await
+                .0
+                .data
+                .expect("timeline");
         assert_eq!(data.recorded_validated_by.as_deref(), Some("Romu"));
-        assert_eq!(data.recorded_validation_started_by.as_deref(), Some("Audit-Bot"));
+        assert_eq!(
+            data.recorded_validation_started_by.as_deref(),
+            Some("Audit-Bot")
+        );
         let shown = data.latest_validation.expect("validation");
         assert_eq!(shown.validated_by.as_deref(), Some("Romu"));
         assert!(shown.validated_at.is_some());

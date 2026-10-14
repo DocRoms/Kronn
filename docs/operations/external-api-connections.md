@@ -155,7 +155,7 @@ identity source once the detailed discussion is loaded. OpenAI-compatible
 usage markers are also counted for `Custom`, so OpenRouter token totals follow
 the same per-turn aggregation as LiteLLM and NVIDIA.
 [src: file: frontend/src/lib/externalAgentIdentity.ts:81-107#discussionConnectionId]
-[src: file: backend/src/agents/runner.rs:14126-14190#parse_token_usage]
+[src: file: backend/src/agents/runner.rs:14154-14218#parse_token_usage]
 
 Aliases are unique without regard to case. If an alias is already owned by
 another connection, create or update fails instead of silently routing to the
@@ -245,7 +245,7 @@ the runtime-resolution guide.
   tried instead. The catalogue now answers in every discussion, and a
   generation accepts the connection's id, alias or display name; a refusal
   lists the connections that can generate the requested modality.
-  [src: file: backend/src/api/orchestration.rs:10811-10817#task_worker_catalogue]
+  [src: file: backend/src/api/orchestration.rs:10933-10939#task_worker_catalogue]
   [src: file: backend/scripts/disc-introspection-mcp.py:5988-5993#call_agent_list]
   [src: file: backend/src/db/external_api_connections.rs:144-162#resolve]
   [src: file: backend/src/api/media.rs:150-189#ConnectionReference]

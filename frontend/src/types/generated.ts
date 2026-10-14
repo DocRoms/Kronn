@@ -9674,6 +9674,17 @@ is_empty: boolean,
 error: string | null, };
 
 /**
+ * KT-1246 — the worker's explicit statement of whether any test was actually
+ * executed, and which. Replaces a sentence at the end of a report: a reviewer
+ * reads `executed` and `which` instead of inferring them from `tests`.
+ */
+export type TestsExecuted = { executed: boolean,
+/**
+ * The commands (or suites) that ran. Empty exactly when `executed` is false.
+ */
+which: Array<string>, };
+
+/**
  * A test verdict in a [`DeliveryManifestV1`].
  */
 export type TestStatus = "pass" | "fail" | "skipped";
@@ -9691,17 +9702,6 @@ mock_variables?: { [key in string]: string } | null,
  * Dry run: agent describes what it would do without executing any write actions
  */
 dry_run?: boolean, };
-
-/**
- * KT-1246 — the worker's explicit statement of whether any test was actually
- * executed, and which. Replaces a sentence at the end of a report: a reviewer
- * reads `executed` and `which` instead of inferring them from `tests`.
- */
-export type TestsExecuted = { executed: boolean,
-/**
- * The commands (or suites) that ran. Empty exactly when `executed` is false.
- */
-which: Array<string>, };
 
 /**
  * A move the audit suggests. Never applied.

@@ -48,7 +48,7 @@ Both the default [ACP adapters](acp-adapters.md) and the direct CLI route use
 this policy, overriding `full_access`. The Claude process cannot inherit the
 container sandbox-bypass marker when a mandatory sandbox policy is present.
 [src: file: backend/src/agents/runner.rs:4451-4455#read_only_repos]
-[src: file: backend/src/agents/runner.rs:13791-13801#CLAUDE_CODE_BUBBLEWRAP]
+[src: file: backend/src/agents/runner.rs:13812-13822#CLAUDE_CODE_BUBBLEWRAP]
 [src: file: backend/src/acp/codex_adapter.rs:464-478#worker_args]
 
 All Codex `exec` launches, with or without `--strict-config`, receive one
@@ -56,8 +56,8 @@ All Codex `exec` launches, with or without `--strict-config`, receive one
 applicable, its `KRONN_HOST_HOME` alias for `/host-home`. The same launcher
 handles direct CLI, adapter, worker and resumed turns. Path keys are serialized
 as TOML; identical aliases are deduplicated.
-[src: file: backend/src/agents/runner.rs:13544-13563#codex_project_trust_override]
-[src: file: backend/src/agents/runner.rs:13544-13557#codex_project_trust_override]
+[src: file: backend/src/agents/runner.rs:13565-13584#codex_project_trust_override]
+[src: file: backend/src/agents/runner.rs:13565-13578#codex_project_trust_override]
 
 The principal's 2026-09-28 check found that Codex 0.156.1 rejects the previous
 dotted `projects."<path>".trust_level` override under `--strict-config`, even
@@ -171,7 +171,7 @@ for exactly one inline `projects` override and rejects dotted trust keys,
 including ordinary non-strict and direct launches. Unit coverage checks host
 aliases, duplicate aliases and path escaping.
 [src: file: backend/tests/adapter_worker_policy.rs:196-220#trust_level]
-[src: file: backend/src/agents/runner_test.rs:10710#codex_project_trust_override_preserves_paths_and_host_alias]
+[src: file: backend/src/agents/runner_test.rs:10889#codex_project_trust_override_preserves_paths_and_host_alias]
 [src: file: backend/src/acp/codex_adapter.rs:139-143#codex_project_mcp_override]
 
 Run the opt-in host probe with authenticated Claude Code and Codex installations

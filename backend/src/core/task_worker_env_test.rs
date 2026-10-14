@@ -580,7 +580,8 @@ fn a_project_without_cargo_or_frontend_reports_not_applicable() {
 
 #[test]
 fn an_unpreparable_lane_is_unverified_not_an_error() {
-    let missing = std::env::temp_dir().join("kronn-kt-1246-does-not-exist");
+    let scratch = tempfile::tempdir().unwrap();
+    let missing = scratch.path().join("kronn-kt-1246-does-not-exist");
     let capabilities = check_worktree(&missing, true, &ScriptedRunner::passing());
 
     assert!(!capabilities.any_available());

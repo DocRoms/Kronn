@@ -1617,12 +1617,18 @@ fn activity_watchdog_interrupts_a_silent_dispatched_worker_and_settles_its_dispa
     let job = crate::db::agent_dispatch::get(&conn, "watchdog-dispatch")
         .unwrap()
         .unwrap();
-    assert_eq!(job.status, crate::db::agent_dispatch::DispatchStatus::Failed);
+    assert_eq!(
+        job.status,
+        crate::db::agent_dispatch::DispatchStatus::Failed
+    );
     assert_eq!(job.failure_kind.as_deref(), Some("dispatch_stalled"));
     let recovery = get_execution_recovery(&conn, &execution.id)
         .unwrap()
         .unwrap();
-    assert_eq!(recovery.recovery_action, ExecutionRecoveryAction::ResumeWorker);
+    assert_eq!(
+        recovery.recovery_action,
+        ExecutionRecoveryAction::ResumeWorker
+    );
     assert_eq!(recovery.recovery_reason, "activity_timeout");
     assert!(recovery.pending);
     assert_eq!(recovery.watchdog_redispatches, 0);
@@ -1633,12 +1639,25 @@ fn activity_watchdog_interrupts_a_silent_dispatched_worker_and_settles_its_dispa
 /// real transition path, for the KT-1247 silent-worker tests.
 fn working_execution(conn: &Connection, task: &str, number: i64) -> TaskExecution {
     seed_task(conn, task, number);
-    let execution = launch_single_task(conn, &LaunchSingleTaskInput::new(task, DISC), &backend_actor())
-        .unwrap()
-        .execution;
-    for to in [TaskExecutionStatus::Provisioning, TaskExecutionStatus::Working] {
-        transition_execution(conn, &execution.id, to, &backend_actor(), serde_json::json!({}))
-            .unwrap();
+    let execution = launch_single_task(
+        conn,
+        &LaunchSingleTaskInput::new(task, DISC),
+        &backend_actor(),
+    )
+    .unwrap()
+    .execution;
+    for to in [
+        TaskExecutionStatus::Provisioning,
+        TaskExecutionStatus::Working,
+    ] {
+        transition_execution(
+            conn,
+            &execution.id,
+            to,
+            &backend_actor(),
+            serde_json::json!({}),
+        )
+        .unwrap();
     }
     get_task_execution(conn, &execution.id).unwrap().unwrap()
 }
@@ -1694,9 +1713,18 @@ fn a_campaign_policy_overrides_the_default_activity_deadline() {
         },
     )
     .unwrap();
-    for to in [TaskExecutionStatus::Provisioning, TaskExecutionStatus::Working] {
-        transition_execution(&conn, &execution.id, to, &backend_actor(), serde_json::json!({}))
-            .unwrap();
+    for to in [
+        TaskExecutionStatus::Provisioning,
+        TaskExecutionStatus::Working,
+    ] {
+        transition_execution(
+            &conn,
+            &execution.id,
+            to,
+            &backend_actor(),
+            serde_json::json!({}),
+        )
+        .unwrap();
     }
     let recovery = get_execution_recovery(&conn, &execution.id)
         .unwrap()
@@ -1734,13 +1762,24 @@ fn a_silent_working_worker_is_interrupted_resumable_and_the_principal_is_told() 
     let recovery = get_execution_recovery(&conn, &execution.id)
         .unwrap()
         .unwrap();
-    assert_eq!(recovery.recovery_action, ExecutionRecoveryAction::ResumeWorker);
+    assert_eq!(
+        recovery.recovery_action,
+        ExecutionRecoveryAction::ResumeWorker
+    );
     assert!(recovery.pending);
 
     let alerts = parent_room_alerts(&conn);
     assert_eq!(alerts.len(), 1, "{alerts:?}");
-    for option in ["task_exec_resume", "task_exec_reassign", "Reprendre la main"] {
-        assert!(alerts[0].contains(option), "{option} missing: {}", alerts[0]);
+    for option in [
+        "task_exec_resume",
+        "task_exec_reassign",
+        "Reprendre la main",
+    ] {
+        assert!(
+            alerts[0].contains(option),
+            "{option} missing: {}",
+            alerts[0]
+        );
     }
     assert!(alerts[0].contains(&execution.id));
 
@@ -1760,7 +1799,10 @@ fn activity_pushes_the_deadline_and_a_pushed_deadline_is_not_applied() {
         [&execution.id],
     )
     .unwrap();
-    assert_eq!(expired_execution_timeouts(&conn, Utc::now()).unwrap().len(), 1);
+    assert_eq!(
+        expired_execution_timeouts(&conn, Utc::now()).unwrap().len(),
+        1
+    );
 
     // The worker speaks in its room: the clock moves forward.
     let room = "d-active-room";
@@ -1785,7 +1827,9 @@ fn activity_pushes_the_deadline_and_a_pushed_deadline_is_not_applied() {
         .is_empty());
 
     // A stale scan result must not interrupt a worker that just proved alive.
-    assert!(!apply_execution_timeout(&conn, &execution.id, ExecutionTimeoutKind::Activity).unwrap());
+    assert!(
+        !apply_execution_timeout(&conn, &execution.id, ExecutionTimeoutKind::Activity).unwrap()
+    );
     assert_eq!(
         get_task_execution(&conn, &execution.id)
             .unwrap()
@@ -1818,7 +1862,9 @@ fn a_delivered_attempt_is_never_interrupted_by_the_activity_clock() {
     assert!(expired_execution_timeouts(&conn, Utc::now())
         .unwrap()
         .is_empty());
-    assert!(!apply_execution_timeout(&conn, &execution.id, ExecutionTimeoutKind::Activity).unwrap());
+    assert!(
+        !apply_execution_timeout(&conn, &execution.id, ExecutionTimeoutKind::Activity).unwrap()
+    );
     assert_eq!(
         get_task_execution(&conn, &execution.id)
             .unwrap()
@@ -1924,7 +1970,9 @@ fn an_unreviewed_delivery_alerts_the_principal_without_deciding() {
         expired_execution_timeouts(&conn, Utc::now()).unwrap(),
         vec![(execution.id.clone(), ExecutionTimeoutKind::ReviewWait)]
     );
-    assert!(apply_execution_timeout(&conn, &execution.id, ExecutionTimeoutKind::ReviewWait).unwrap());
+    assert!(
+        apply_execution_timeout(&conn, &execution.id, ExecutionTimeoutKind::ReviewWait).unwrap()
+    );
 
     // No review row and no approval: only an alert, the delivery is not touched.
     let reviews: i64 = conn

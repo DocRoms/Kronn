@@ -20,7 +20,7 @@ Briefing saves, reviewed briefing completion, and briefing/dispute card answers
 use the same guard. A card decision keeps its guard inside the database worker
 that applies the resulting filesystem changes.
 [src: file: backend/src/api/audit/briefing.rs:46-81#set_briefing]
-[src: file: backend/src/api/audit/briefing.rs:162-205#complete_reviewed_briefing]
+[src: file: backend/src/api/audit/briefing.rs:146-189#complete_reviewed_briefing]
 [src: file: backend/src/api/audit/briefing.rs:740-783#save_briefing_answers]
 [src: file: backend/src/api/discussion_questions.rs:14-64#dispute_lease]
 [src: file: backend/src/api/discussion_questions.rs:201-239#answer]
@@ -41,7 +41,7 @@ registered token. A dispatch already stopped by a writer cannot start afterward.
 Human audit validation is deliberately different: it takes the lease first but
 checks its completion gates before stopping validation agents. An unfinished
 validator remains active and the validation request fails.
-[src: file: backend/src/api/audit/validate.rs:38-217#validate_audit]
+[src: file: backend/src/api/audit/validate.rs:218-397#validate_audit]
 
 Accepted template commits must be integrated into the current checkout before
 Full, Partial, or revalidation launches. The backend checks the merge branch

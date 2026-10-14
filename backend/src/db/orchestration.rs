@@ -5422,9 +5422,11 @@ pub fn set_execution_recovery(
     let total_deadline = run
         .timeout_secs
         .map(|seconds| execution.created_at + chrono::Duration::seconds(i64::from(seconds)));
-    let activity_deadline =
-        effective_activity_secs(policy.activity_timeout_secs.map(i64::from), execution.status)
-            .map(|seconds| now + chrono::Duration::seconds(seconds));
+    let activity_deadline = effective_activity_secs(
+        policy.activity_timeout_secs.map(i64::from),
+        execution.status,
+    )
+    .map(|seconds| now + chrono::Duration::seconds(seconds));
     let review_deadline =
         if execution.interrupted_from_status == Some(TaskExecutionStatus::AwaitingReview) {
             Some(
@@ -5716,7 +5718,10 @@ fn notify_principal_of_timeout(
         _ => return Ok(()),
     };
     let message = DiscussionMessage {
-        id: format!("orch-principal-timeout:{exec_id}:{label}:{}", Uuid::new_v4()),
+        id: format!(
+            "orch-principal-timeout:{exec_id}:{label}:{}",
+            Uuid::new_v4()
+        ),
         role: MessageRole::User,
         channel: MessageChannel::Main,
         content: format!(

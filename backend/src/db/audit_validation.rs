@@ -281,7 +281,8 @@ mod tests {
         .unwrap();
     }
 
-    const PROMPT: &str = "Valide.\n\n## Sortie\némets la phrase exacte : \"KRONN:VALIDATION_COMPLETE\".";
+    const PROMPT: &str =
+        "Valide.\n\n## Sortie\némets la phrase exacte : \"KRONN:VALIDATION_COMPLETE\".";
 
     fn completed_run(conn: &Connection, id: &str, started: &str, disc: &str) {
         let started = chrono::DateTime::parse_from_rfc3339(started)
@@ -290,15 +291,32 @@ mod tests {
         crate::db::audit_runs::insert_running(conn, id, "p1", "Full", "ClaudeCode", started)
             .unwrap();
         crate::db::audit_runs::complete(
-            conn, id, started, "Completed", 0, 0, 0, 0, 0, 0, 0, 100, None, None,
+            conn,
+            id,
+            started,
+            "Completed",
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            100,
+            None,
+            None,
         )
         .unwrap();
         crate::db::audit_runs::set_validation_discussion(conn, id, disc).unwrap();
     }
 
     fn archived(conn: &Connection, id: &str) -> bool {
-        conn.query_row("SELECT archived FROM discussions WHERE id = ?1", [id], |r| r.get(0))
-            .unwrap()
+        conn.query_row(
+            "SELECT archived FROM discussions WHERE id = ?1",
+            [id],
+            |r| r.get(0),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -307,14 +325,24 @@ mod tests {
         assert!(is_validation_signal("Done.\n**KRONN:VALIDATION_COMPLETE**"));
         assert!(is_validation_signal("Done.\n**KRONN:VALIDATION_COMPLETE"));
         assert!(is_validation_signal("Done.\n`KRONN:VALIDATION_COMPLETE`\n"));
-        assert!(!is_validation_signal("I will emit KRONN:VALIDATION_COMPLETE later."));
-        assert!(!is_validation_signal("KRONN:VALIDATION_COMPLETE\nmore work"));
+        assert!(!is_validation_signal(
+            "I will emit KRONN:VALIDATION_COMPLETE later."
+        ));
+        assert!(!is_validation_signal(
+            "KRONN:VALIDATION_COMPLETE\nmore work"
+        ));
     }
 
     #[test]
     fn completion_is_set_once_and_survives_later_messages() {
         let conn = conn();
-        discussion(&conn, "d1", "Validation audit AI", "2026-08-28T20:00:00+00:00", false);
+        discussion(
+            &conn,
+            "d1",
+            "Validation audit AI",
+            "2026-08-28T20:00:00+00:00",
+            false,
+        );
         completed_run(&conn, "r1", "2026-08-28T19:00:00+00:00", "d1");
         on_agent_message(&conn, "d1", "m1", "Phase 1 done", "t1").unwrap();
         assert_eq!(record(&conn, "r1").unwrap().completed_at, None);
@@ -329,7 +357,13 @@ mod tests {
     #[test]
     fn inserting_an_agent_message_stamps_the_run_through_the_real_write_path() {
         let conn = conn();
-        discussion(&conn, "d1", "Validation audit AI", "2026-08-28T20:00:00+00:00", false);
+        discussion(
+            &conn,
+            "d1",
+            "Validation audit AI",
+            "2026-08-28T20:00:00+00:00",
+            false,
+        );
         completed_run(&conn, "r1", "2026-08-28T19:00:00+00:00", "d1");
         let mut msg: crate::models::DiscussionMessage = serde_json::from_value(serde_json::json!({
             "id": "m-signal", "role": "Agent", "content": "Fin.\nKRONN:VALIDATION_COMPLETE",
@@ -343,7 +377,10 @@ mod tests {
         let stored = record(&conn, "r1").unwrap();
         assert_eq!(stored.completed_message_id.as_deref(), Some("m-signal"));
         assert_eq!(
-            effective_completion(&conn, "r1", "d1").unwrap().map(|c| c.0).as_deref(),
+            effective_completion(&conn, "r1", "d1")
+                .unwrap()
+                .map(|c| c.0)
+                .as_deref(),
             Some("m-signal")
         );
     }
@@ -351,7 +388,13 @@ mod tests {
     #[test]
     fn relinking_to_another_discussion_drops_the_previous_completion() {
         let conn = conn();
-        discussion(&conn, "d1", "Validation audit AI", "2026-08-28T20:00:00+00:00", true);
+        discussion(
+            &conn,
+            "d1",
+            "Validation audit AI",
+            "2026-08-28T20:00:00+00:00",
+            true,
+        );
         completed_run(&conn, "r1", "2026-08-28T19:00:00+00:00", "d1");
         record_completion(&conn, "d1", "m", "t").unwrap();
         crate::db::audit_runs::set_validation_discussion(&conn, "r1", "d1").unwrap();
@@ -365,33 +408,106 @@ mod tests {
         let conn = conn();
         // front-africanews: the linked validation signalled, then got more
         // agent messages; an April validation of an older audit is still open.
-        discussion(&conn, "linked", "Validation audit AI", "2026-08-28T20:00:00+00:00", true);
+        discussion(
+            &conn,
+            "linked",
+            "Validation audit AI",
+            "2026-08-28T20:00:00+00:00",
+            true,
+        );
         message(&conn, "linked", "l0", 0, "User", PROMPT);
-        message(&conn, "linked", "l1", 1, "Agent", "Fin.\nKRONN:VALIDATION_COMPLETE");
-        message(&conn, "linked", "l2", 2, "Agent", "Commit pushed for PR #34");
-        discussion(&conn, "april", "Validation audit AI", "2026-04-02T10:00:00+00:00", false);
+        message(
+            &conn,
+            "linked",
+            "l1",
+            1,
+            "Agent",
+            "Fin.\nKRONN:VALIDATION_COMPLETE",
+        );
+        message(
+            &conn,
+            "linked",
+            "l2",
+            2,
+            "Agent",
+            "Commit pushed for PR #34",
+        );
+        discussion(
+            &conn,
+            "april",
+            "Validation audit AI",
+            "2026-04-02T10:00:00+00:00",
+            false,
+        );
         message(&conn, "april", "a0", 0, "User", PROMPT);
-        discussion(&conn, "sub", "Validation audit RGAA 4.1", "2026-04-03T10:00:00+00:00", false);
+        discussion(
+            &conn,
+            "sub",
+            "Validation audit RGAA 4.1",
+            "2026-04-03T10:00:00+00:00",
+            false,
+        );
         message(&conn, "sub", "s0", 0, "User", PROMPT);
         // Look-alikes that must stay open.
-        discussion(&conn, "forged", "Validation audit AI", "2026-04-04T10:00:00+00:00", false);
+        discussion(
+            &conn,
+            "forged",
+            "Validation audit AI",
+            "2026-04-04T10:00:00+00:00",
+            false,
+        );
         message(&conn, "forged", "f0", 0, "User", "please validate");
-        discussion(&conn, "retitled", "My notes", "2026-04-05T10:00:00+00:00", false);
+        discussion(
+            &conn,
+            "retitled",
+            "My notes",
+            "2026-04-05T10:00:00+00:00",
+            false,
+        );
         message(&conn, "retitled", "t0", 0, "User", PROMPT);
-        discussion(&conn, "busy", "Validation audit AI", "2026-04-06T10:00:00+00:00", false);
+        discussion(
+            &conn,
+            "busy",
+            "Validation audit AI",
+            "2026-04-06T10:00:00+00:00",
+            false,
+        );
         message(&conn, "busy", "b0", 0, "User", PROMPT);
-        conn.execute("UPDATE discussions SET awaiting_agent = 1 WHERE id = 'busy'", []).unwrap();
-        discussion(&conn, "newer", "Validation audit AI", "2026-09-01T10:00:00+00:00", false);
+        conn.execute(
+            "UPDATE discussions SET awaiting_agent = 1 WHERE id = 'busy'",
+            [],
+        )
+        .unwrap();
+        discussion(
+            &conn,
+            "newer",
+            "Validation audit AI",
+            "2026-09-01T10:00:00+00:00",
+            false,
+        );
         message(&conn, "newer", "n0", 0, "User", PROMPT);
         completed_run(&conn, "r1", "2026-08-28T19:00:00+00:00", "linked");
 
         let first = repair(&conn).unwrap();
-        assert_eq!(first, RepairReport { completed: 1, archived: 2 });
-        assert_eq!(record(&conn, "r1").unwrap().completed_message_id.as_deref(), Some("l1"));
+        assert_eq!(
+            first,
+            RepairReport {
+                completed: 1,
+                archived: 2
+            }
+        );
+        assert_eq!(
+            record(&conn, "r1").unwrap().completed_message_id.as_deref(),
+            Some("l1")
+        );
         assert!(archived(&conn, "april") && archived(&conn, "sub"));
         for open in ["forged", "retitled", "busy", "newer"] {
             assert!(!archived(&conn, open), "{open} must stay open");
         }
-        assert_eq!(repair(&conn).unwrap(), RepairReport::default(), "idempotent");
+        assert_eq!(
+            repair(&conn).unwrap(),
+            RepairReport::default(),
+            "idempotent"
+        );
     }
 }

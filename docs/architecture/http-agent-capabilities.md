@@ -83,7 +83,7 @@ And, since 0.13.0, media generation: `media_generate` and `media_job_status`
 catalogue, so an HTTP agent replying in a discussion has them, and a bounded worker keeps
 them — they are deliberately absent from the principal-only list a worker room strips
 [src: file: backend/src/api/agent_tools.rs:1396-1447#NOT_FOR_A_WORKER]. A Workflow Agent step does not: only a
-discussion run adds the orchestration tools [src: file: backend/src/api/agent_tools.rs:1523-1541#orchestration_tool_catalogue].
+discussion run adds the orchestration tools [src: file: backend/src/api/agent_tools.rs:1530-1548#orchestration_tool_catalogue].
 
 Until then only CLI agents could generate an image or a video, because the tools were
 declared in the MCP bridge and an HTTP agent structurally cannot reach it. The capability
@@ -274,7 +274,7 @@ setting `KRONN_TIERED_TOOLS=1` starts with the core tools and an index of the
 `pages`, `media`, `delegation`, `edit` and `automations` families. `tools_load` adds a family
 for the remainder of the run. Bounded workers cannot expand their catalogue.
 [src: file: backend/src/api/agent_tools.rs:329-405#TOOL_FAMILIES]
-[src: file: backend/src/api/agent_tools.rs:2304-2310#tools_load]
+[src: file: backend/src/api/agent_tools.rs:2321-2327#tools_load]
 
 The native dispatcher now routes `tools_load` correctly. Earlier benchmarks used
 a substitute dispatcher and their claimed savings did not validate this path.
@@ -332,7 +332,7 @@ No `web_fetch` (it would send the model off the project), no `git_commit` (the
 audit never commits), no plan, REST-plugin or discussion tools. A call to any
 other name is refused before a handler sees it, and so is a write to the
 target document of another step of the chain (the consolidation step excepted)
-[src: file: backend/src/api/agent_tools.rs:1610-1613#AUDIT_TOOLS]
+[src: file: backend/src/api/agent_tools.rs:1617-1620#AUDIT_TOOLS]
 [src: file: backend/src/api/agent_tools.rs:206-231#foreign_step_target_refusal].
 
 **What the audit prompt says about other repos (KT-926).** An audit's file tools
@@ -346,8 +346,8 @@ discussion or workflow Agent step does either (the audit's validation and
 briefing are discussions). The only
 other repos a step names are those the user linked to the project
 (`Project.linked_repos`), a voluntary declaration that stays in every step
-[src: file: backend/src/api/audit/full.rs:323-324#format_linked_repos_for_prompt]
-[src: file: backend/src/api/audit/drift.rs:463-464#format_linked_repos_for_prompt]. What remains: the block for a
+[src: file: backend/src/api/audit/full.rs:326-327#format_linked_repos_for_prompt]
+[src: file: backend/src/api/audit/drift.rs:450-451#format_linked_repos_for_prompt]. What remains: the block for a
 linked repo still says to start with `<repo-path>/docs/AGENTS.md`, a path an HTTP
 agent's tools refuse because it is outside the project, so for that agent the
 block is information, not something it can follow. Making that block
@@ -366,8 +366,8 @@ one.
 **Stopping.** An HTTP agent's request and tool loop are a task, not a process:
 killing the lifeline PID does not stop it. A Full audit therefore registers a
 cancellation token per step, and `cancel_audit` trips it
-[src: file: backend/src/api/audit/full.rs:1615-1620#agent_cancels]
-[src: file: backend/src/api/audit/full.rs:4022-4026#agent_cancels]. Since KT-927 the partial audit does
+[src: file: backend/src/api/audit/full.rs:1624-1629#agent_cancels]
+[src: file: backend/src/api/audit/full.rs:4045-4049#agent_cancels]. Since KT-927 the partial audit does
 the same, and so does an ACP agent, whose PID is a lifeline too: see
 [auditing with an ACP agent](audit-acp-agents.md).
 

@@ -54,7 +54,7 @@ autocomplete must always show which one is being picked (KT-211).
   Claude CLI unless Claude is the room's own agent. That CLI gets the
   wake and no punctual agent is spawned; with two candidate CLIs and no
   reply context nothing is guessed.
-  [src: file: backend/src/db/discussions.rs:4023-4049#agent_alias_cli_target]
+  [src: file: backend/src/db/discussions.rs:4036-4062#agent_alias_cli_target]
   [src: file: backend/src/db/discussions.rs:1965-1995#providers_resolved_to_cli]
   [src: file: backend/src/api/disc_source.rs:678-730#agent_alias_cli_target]
 
