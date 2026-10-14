@@ -1,4 +1,5 @@
-import { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, lazy, Suspense } from 'react';
+import { Navigate, Outlet, useLocation } from 'react-router';
 import { setup as setupApi, config as configApi, health as healthApi } from './lib/api';
 import {
   RETRY_DELAY,
@@ -10,24 +11,23 @@ import {
 } from './lib/appBoot';
 import type { SetupStatus } from './types/generated';
 import { ErrorBoundary } from './components/ErrorBoundary';
-import { UpdateBanner } from './components/UpdateBanner';
-import { BackendStatus } from './components/BackendStatus';
 import { LoadingState } from './components/LoadingState';
 import { AuthLockedScreen } from './components/AuthLockedScreen';
-import { KeyLockedBanner } from './components/KeyLockedBanner';
 import { ApiRequestError } from './lib/apiRequestError';
 import { armBootScreen } from './lib/bootScreen';
-import { standaloneLivePageMosaic, standaloneLivePageRoute } from './lib/live-page-navigation';
-import { discussionMosaicRoute } from './lib/discussion-mosaic-navigation';
+import { legacyHashToPath } from './lib/legacyRoutes';
+import type { AppOutletContext } from './lib/appContext';
 import './App.css';
 
 const SetupWizard = lazy(() => import('./pages/SetupWizard').then(m => ({ default: m.SetupWizard })));
-const Dashboard = lazy(() => import('./pages/Dashboard').then(m => ({ default: m.Dashboard })));
-const StandaloneLivePage = lazy(() => import('./pages/StandaloneLivePage').then(m => ({ default: m.StandaloneLivePage })));
-const StandaloneLivePageMosaic = lazy(() => import('./pages/StandaloneLivePageMosaic').then(m => ({ default: m.StandaloneLivePageMosaic })));
-const StandaloneDiscussionMosaic = lazy(() => import('./pages/StandaloneDiscussionMosaic').then(m => ({ default: m.StandaloneDiscussionMosaic })));
 
+/**
+ * The root route. It gates on setup, then hands over to its outlet: the
+ * dashboard shell or a whole-window view, whichever the address names
+ * (`routes/appRoutes.tsx`).
+ */
 export function App() {
+  const { hash } = useLocation();
   const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(readCachedSetupStatus);
   const setupStatusRef = useRef<SetupStatus | null>(setupStatus);
   const [loading, setLoading] = useState(setupStatus === null);
@@ -45,7 +45,6 @@ export function App() {
   const retries = useRef(0);
   // Retries never give up while the backend is down; they stop with the app.
   const mounted = useRef(true);
-  const [, setRouteRevision] = useState(0);
 
   const applySetupStatus = useCallback((status: SetupStatus) => {
     setupStatusRef.current = status;
@@ -126,15 +125,6 @@ export function App() {
     return () => { mounted.current = false; };
   }, [fetchStatus]);
   useEffect(() => { healthApi.get().then(h => setInDocker(h.in_docker)).catch(() => {}); }, []);
-  useEffect(() => {
-    const updateRoute = () => setRouteRevision(revision => revision + 1);
-    window.addEventListener('hashchange', updateRoute);
-    window.addEventListener('popstate', updateRoute);
-    return () => {
-      window.removeEventListener('hashchange', updateRoute);
-      window.removeEventListener('popstate', updateRoute);
-    };
-  }, []);
 
   // Intercept external link clicks in Tauri desktop only.
   // Tauri webview doesn't handle target="_blank" — we call /api/open-url
@@ -166,9 +156,33 @@ export function App() {
     return () => document.removeEventListener('click', handler);
   }, []);
 
+  const dismissResetError = useCallback(() => setResetError(null), []);
+  const resetSetup = useCallback(() => {
+    clearCachedSetupStatus();
+    setupStatusRef.current = null;
+    setupApi.reset().then(() => {
+      setSetupStatus(null);
+      setLoading(true);
+      setupApi.getStatus().then(applySetupStatus).finally(() => setLoading(false));
+    }).catch(e => {
+      // A failed reset is said on screen (the backend names what was not done).
+      setResetError(e instanceof Error ? e.message : String(e));
+      fetchStatus(true);
+    });
+  }, [applySetupStatus, fetchStatus]);
+  const outletContext = useMemo<AppOutletContext>(
+    () => ({ resetSetup, resetError, dismissResetError }),
+    [resetSetup, resetError, dismissResetError],
+  );
+
   if (authLocked) {
     return <AuthLockedScreen onRestored={() => window.location.reload()} />;
   }
+
+  // A deep link from before pages had addresses: send it to the address
+  // that replaced it, whatever else is going on.
+  const legacyPath = legacyHashToPath(hash);
+  if (legacyPath) return <Navigate to={legacyPath} replace />;
 
   if (loading) {
     return <LoadingState fullscreen phase={slowStart ? 'slow' : 'connecting'} onRetry={slowStart ? () => fetchStatus(true) : undefined} />;
@@ -192,68 +206,6 @@ export function App() {
     );
   }
 
-  const discussionMosaic = discussionMosaicRoute(window.location.hash);
-  if (discussionMosaic) {
-    return (
-      <ErrorBoundary>
-        <Suspense fallback={<LoadingState fullscreen />}>
-          <StandaloneDiscussionMosaic {...discussionMosaic} />
-        </Suspense>
-      </ErrorBoundary>
-    );
-  }
-
-  const standaloneMosaic = standaloneLivePageMosaic(window.location.hash);
-  if (standaloneMosaic) {
-    return (
-      <ErrorBoundary>
-        <Suspense fallback={<LoadingState fullscreen />}>
-          <StandaloneLivePageMosaic
-            pageIds={standaloneMosaic.pageIds}
-            layout={standaloneMosaic.layout}
-          />
-        </Suspense>
-      </ErrorBoundary>
-    );
-  }
-
-  const standalonePage = standaloneLivePageRoute(window.location.hash);
-  if (standalonePage) {
-    return (
-      <ErrorBoundary>
-        <Suspense fallback={<LoadingState fullscreen />}>
-          <StandaloneLivePage pageId={standalonePage.pageId} params={standalonePage.params} />
-        </Suspense>
-      </ErrorBoundary>
-    );
-  }
-
-  // Setup complete → show dashboard
-  return (
-    <ErrorBoundary>
-      <Suspense fallback={<LoadingState fullscreen />}>
-        <UpdateBanner />
-        <BackendStatus />
-        <KeyLockedBanner />
-        {resetError && (
-          <div className="set-expose-warn" role="alert" data-testid="reset-error">
-            <span>{resetError}</span>
-            <button type="button" className="btn btn-ghost" onClick={() => setResetError(null)}>×</button>
-          </div>
-        )}
-        <Dashboard onReset={() => {
-          clearCachedSetupStatus();
-          setupStatusRef.current = null;
-          setupApi.reset().then(() => {
-            setSetupStatus(null);
-            setLoading(true);
-            setupApi.getStatus().then(applySetupStatus).finally(() => setLoading(false));
-          }).catch(e => {
-            setResetError(e instanceof Error ? e.message : String(e));
-            fetchStatus(true);
-          });
-        }} />
-      </Suspense>
-    </ErrorBoundary>
-  );
+  // Setup complete → whatever the address names, with the means to start over.
+  return <Outlet context={outletContext} />;
 }

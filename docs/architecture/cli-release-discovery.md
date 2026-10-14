@@ -62,4 +62,4 @@ The shared frontend API mock includes the generated RTK response shape because
 the version read is no longer conditional on an installed RTK binary.
 [src: file: backend/src/core/versions.rs:512]
 [src: file: backend/tests/api_tests.rs:27]
-[src: file: frontend/src/test/apiMock.ts:532]
+[src: file: frontend/src/test/apiMock.ts:540]

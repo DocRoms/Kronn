@@ -114,6 +114,35 @@ describe('BatchComparePanel', () => {
     expect(onOpenDiscussion).toHaveBeenCalledWith('disc-claude');
   });
 
+  it('opens a compared discussion in a new tab on a Ctrl-click, without opening it in the app', () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const onOpenDiscussion = vi.fn();
+    render(
+      <BatchComparePanel
+        runId="run-1"
+        label="Compare Jira"
+        discussions={[
+          discussion('disc-codex', 'Codex', 'default', 'Codex answer'),
+          discussion('disc-claude', 'ClaudeCode', 'reasoning', 'Claude answer'),
+        ]}
+        loading={false}
+        error={null}
+        availableAgents={['Codex', 'ClaudeCode']}
+        runningIds={new Set()}
+        onRefresh={vi.fn()}
+        onOpenDiscussion={onOpenDiscussion}
+        onClose={vi.fn()}
+        t={(key: string) => key}
+      />,
+    );
+
+    fireEvent.click(screen.getAllByRole('button', { name: /disc.compare.openDiscussion/ })[1], { ctrlKey: true });
+
+    expect(open).toHaveBeenCalledWith(`${window.location.origin}/discussions/disc-claude`, '_blank', 'noopener,noreferrer');
+    expect(onOpenDiscussion).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
+
   it('moves columns left and right while keeping their answers attached', () => {
     const rendered = render(
       <BatchComparePanel

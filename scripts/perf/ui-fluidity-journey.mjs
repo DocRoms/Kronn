@@ -163,8 +163,7 @@ for (const pass of ['cold', 'warm']) {
 }
 if (ROOM) {
   await step('room · open', async () => {
-    await page.evaluate((id) => { location.hash = `#discussion-${id}`; }, ROOM);
-    await page.reload();
+    await page.goto(`/discussions/${encodeURIComponent(ROOM)}`);
     await page.locator('.disc-msg-bubble').last().waitFor({ timeout: 90000 });
   });
   await step('room · idle 20 s', () => page.waitForTimeout(20000));

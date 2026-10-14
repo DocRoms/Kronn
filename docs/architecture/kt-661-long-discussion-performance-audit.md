@@ -62,7 +62,7 @@ alone does not establish a user-visible duration.
    frontend/src/components/MessageBubble.tsx:1823-1875] There is a per-message
    200,000-character fallback that avoids this Markdown path for very large
    individual messages; it does not cap the count of ordinary messages.
-   [src: file: frontend/src/components/MessageBubble.tsx:1666-1706]
+   [src: file: frontend/src/components/MessageBubble.tsx:1663-1703]
 5. In-transcript search walks each rendered message row, then scans each row's
    rendered text nodes. For every match, the range helper locates start and end
    nodes by linear `find` calls. [src: file:

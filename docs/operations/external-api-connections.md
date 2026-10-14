@@ -4,7 +4,7 @@ Kronn's **Settings → Agents → External API mode** manages named connections 
 OpenAI-compatible chat services. LiteLLM, NVIDIA and OpenRouter provide endpoint
 presets; `Other` uses the same contract for an operator-supplied service. Every
 connection owns a display name, a unique discussion alias, an endpoint and
-optional Economy, Default and Reasoning models. [src: file: frontend/src/components/settings/AgentsSection.tsx:1536-1538]
+optional Economy, Default and Reasoning models. [src: file: frontend/src/components/settings/AgentsSection.tsx:1550-1552]
 [src: file: backend/src/models/external_api_connection.rs:5-30]
 
 The required HTTP surface is `GET /v1/models` plus
@@ -138,8 +138,8 @@ The new-discussion form merges configured OpenRouter/Other aliases with native
 agent aliases. Each alias exposes its Economy, Default and Reasoning model in
 the shared selector, and creation persists the connection-qualified initial
 target rather than only the generic `Custom` wire type.
-[src: file: frontend/src/components/NewDiscussionForm.tsx:186-212]
-[src: file: frontend/src/components/NewDiscussionForm.tsx:489-543]
+[src: file: frontend/src/components/NewDiscussionForm.tsx:189-215]
+[src: file: frontend/src/components/NewDiscussionForm.tsx:492-546]
 
 Discussion headers, messages and comparison views recover the provider name
 from that durable `MessageTarget.connection_id`; editable titles are not the
@@ -196,7 +196,7 @@ previously saved connection values into the compatibility configuration still
 read by the runner. This prevents selector tooltips and executions from keeping
 stale pre-migration model names. [src: file: backend/src/api/external_api_connections.rs:595-695]
 [src: file: backend/src/db/external_api_connections.rs:18-59]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:1535-1544]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:1549-1558]
 
 After upgrading, verify both migrated cards, run their connection tests and
 confirm the intended models for all three tiers before using them.

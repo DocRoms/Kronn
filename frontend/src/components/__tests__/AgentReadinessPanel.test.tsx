@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { AgentReadinessNotice, AgentReadinessPanel } from '../AgentReadinessPanel';
-import { readinessMessage } from '../../lib/agentReadiness';
+import { readinessFixPath, readinessMessage } from '../../lib/agentReadiness';
 import type { AgentReadiness } from '../../types/generated';
 
 const t = (key: string, ...args: (string | number)[]) =>
@@ -31,6 +31,45 @@ describe('readinessMessage', () => {
     expect(readinessMessage(result({
       reason: 'session_failed', message_key: 'readiness.reason.session_failed', detail: 'MCP exited',
     }), t)).toBe('readiness.reason.session_failed(OpenCode|MCP exited)');
+  });
+});
+
+describe('readinessFixPath', () => {
+  it('sends a session that would not start to the plugins, anything else to the agent settings', () => {
+    expect(readinessFixPath(result({ reason: 'session_timeout' }))).toBe('/plugins');
+    expect(readinessFixPath(result({ reason: 'session_failed' }))).toBe('/plugins');
+    expect(readinessFixPath(result({ reason: 'not_logged_in' }))).toBe('/config#settings-agent-config');
+    expect(readinessFixPath(result({ reason: 'not_installed' }))).toBe('/config#settings-agent-config');
+  });
+});
+
+describe('AgentReadinessPanel — fix in a new tab', () => {
+  it.each([
+    ['a session that would not start', { reason: 'session_timeout' as const }, '/plugins'],
+    ['an agent that is not logged in', { reason: 'not_logged_in' as const, message_key: 'readiness.reason.not_logged_in' }, '/config#settings-agent-config'],
+  ])('opens where %s is fixed in a new tab on a Ctrl-click, without fixing here', (_name, overrides, path) => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const onFix = vi.fn();
+    render(<AgentReadinessPanel agents={['OpenCode']} results={[result(overrides)]} onFix={onFix} t={t} />);
+
+    fireEvent.click(screen.getByText('readiness.fix'), { ctrlKey: true });
+
+    expect(open).toHaveBeenCalledWith(`${window.location.origin}${path}`, '_blank', 'noopener,noreferrer');
+    expect(onFix).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
+
+  it('fixes in this tab on a plain click', () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const onFix = vi.fn();
+    const failing = result({});
+    render(<AgentReadinessPanel agents={['OpenCode']} results={[failing]} onFix={onFix} t={t} />);
+
+    fireEvent.click(screen.getByText('readiness.fix'));
+
+    expect(onFix).toHaveBeenCalledExactlyOnceWith(failing);
+    expect(open).not.toHaveBeenCalled();
+    open.mockRestore();
   });
 });
 

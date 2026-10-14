@@ -1,5 +1,6 @@
 import type { AgentReadiness, AgentType } from '../types/generated';
 import { AGENT_LABELS } from './constants';
+import { PAGE_PATHS, settingsSectionPath } from './routes';
 
 type Translate = (key: string, ...args: (string | number)[]) => string;
 
@@ -36,9 +37,15 @@ export function blockingAgents(results: AgentReadiness[]): AgentType[] {
 }
 
 /** Where the user fixes this reason: project MCP servers, or the agent's settings. */
-export function readinessFixTarget(result: AgentReadiness): { page: string; scrollTo?: string } {
+export function readinessFixTarget(result: AgentReadiness): { page: 'mcps' | 'settings'; scrollTo?: string } {
   if (result.reason === 'session_timeout' || result.reason === 'session_failed') {
     return { page: 'mcps' };
   }
   return { page: 'settings', scrollTo: 'settings-agent-config' };
+}
+
+/** The address of that place, for a link or a new tab. */
+export function readinessFixPath(result: AgentReadiness): string {
+  const target = readinessFixTarget(result);
+  return target.scrollTo ? settingsSectionPath(target.scrollTo) : PAGE_PATHS[target.page];
 }

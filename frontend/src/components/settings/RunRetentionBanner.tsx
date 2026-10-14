@@ -3,12 +3,13 @@ import { DatabaseZap, X } from 'lucide-react';
 import { config } from '../../lib/api';
 import { useT } from '../../lib/I18nContext';
 import { safeGetItem, safeSetItem } from '../../lib/safeStorage';
+import { settingsSectionPath } from '../../lib/routes';
+import { AppLink } from '../AppLink';
 import './RunRetentionBanner.css';
 
 export const RUN_RETENTION_BANNER_KEY = 'kronn:runRetentionBannerDismissed';
 /** Past this size a dismissal no longer hides the banner. */
 export const RUN_RETENTION_REAPPEAR_BYTES = 2 * 1024 * 1024 * 1024;
-export const RETENTION_FOCUS_KEY = 'kronn:settings:focus';
 export const RETENTION_FOCUS_TARGET = 'run-payload-retention';
 
 function formatBytes(bytes: number): string {
@@ -20,6 +21,8 @@ function formatBytes(bytes: number): string {
 interface Props {
   /** Known retention window; when omitted the banner reads it from the server config. */
   retentionDays?: number;
+  /** A plain click on the setting link, in this tab: navigate (or, on
+   *  Configuration itself, scroll) to `/config#run-payload-retention`. */
   onOpenSetting: () => void;
 }
 
@@ -66,9 +69,9 @@ export function RunRetentionBanner({ retentionDays, onOpenSetting }: Props) {
         <strong>{t('config.runRetentionBannerTitle')}</strong>
         {bytes !== null && <span>{t('config.runRetentionBannerSize', formatBytes(bytes))}</span>}
         <div className="rr-banner-actions">
-          <button type="button" className="rr-btn" onClick={onOpenSetting}>
+          <AppLink className="rr-btn" to={settingsSectionPath(RETENTION_FOCUS_TARGET)} onNavigate={onOpenSetting}>
             {t('config.runRetentionBannerOpen')}
-          </button>
+          </AppLink>
           <button type="button" className="rr-btn" onClick={dismiss}>
             <X size={12} aria-hidden="true" /> {t('config.runRetentionBannerDismiss')}
           </button>

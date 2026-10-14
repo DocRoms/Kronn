@@ -18,9 +18,9 @@ component when that table changed. The arbitration card was below this
 component, so changing its identity remounted the form instead of updating props.
 The form's draft, selection and in-flight guard are local state/refs.
 [src: commit: 6503ecd14af145a5f668e1afd845b6f839abc7ef]
-`[src: file: frontend/src/pages/DiscussionsPage.tsx:893-894]`
-`[src: file: frontend/src/pages/DiscussionsPage.tsx:1083-1095]`
-`[src: file: frontend/src/components/MessageBubble.tsx:1054-1062]`
+`[src: file: frontend/src/pages/DiscussionsPage.tsx:929-930]`
+`[src: file: frontend/src/pages/DiscussionsPage.tsx:1128-1140]`
+`[src: file: frontend/src/components/MessageBubble.tsx:1055-1063]`
 `[src: file: frontend/src/components/DiscussionQuestionCard.tsx:100-117]`
 
 ## Deterministic local evidence
@@ -51,8 +51,8 @@ stable, and supplies fresh values through a per-message React context. Polling
 is unchanged and citation verdicts still update. Question/planning-card keys
 include the discussion, message and fence identity, so changing the question
 does not transfer the previous draft.
-`[src: file: frontend/src/components/MessageBubble.tsx:1693-1731]`
-`[src: file: frontend/src/components/MessageBubble.tsx:1756-1797]`
+`[src: file: frontend/src/components/MessageBubble.tsx:1690-1728]`
+`[src: file: frontend/src/components/MessageBubble.tsx:1755-1797]`
 `[src: file: frontend/src/components/MessageBubble.tsx:1830-1851]`
 
 Seven product regressions cover question-store refresh, same-reference and

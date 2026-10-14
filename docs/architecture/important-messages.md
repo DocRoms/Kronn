@@ -114,7 +114,7 @@ The bar re-fetches when the transcript's newest durable message id changes
 fetch per arrival, not one per render or per bubble, and never stuck on the
 first GET while a new card lands.
 [src: file: frontend/src/components/ImportantMessageCard.tsx:156-162]
-[src: file: frontend/src/pages/DiscussionsPage.tsx:4052-4059]
+[src: file: frontend/src/pages/DiscussionsPage.tsx:4131-4138]
 
 ## Human form (0.13.0, KT-643)
 
@@ -125,8 +125,8 @@ complete or otherwise modify a task. The card's task link resolves a fresh plan
 and opens that exact task; a removed link or unavailable plan is explained
 instead of selecting an unrelated task.
 [src: file: frontend/src/components/ImportantMessageForm.tsx:1]
-[src: file: frontend/src/pages/DiscussionsPage.tsx:1340]
-[src: file: frontend/src/components/DiscussionPlanPanel.tsx:59]
+[src: file: frontend/src/pages/DiscussionsPage.tsx:1385]
+[src: file: frontend/src/components/DiscussionPlanPanel.tsx:62]
 
 The publication-key field appears only inside the open form. It uses the
 existing enrolled credential and single-use proof; Settings remains the place

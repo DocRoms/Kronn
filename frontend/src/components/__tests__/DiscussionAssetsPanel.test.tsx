@@ -155,6 +155,29 @@ describe('DiscussionAssetsPanel', () => {
     expect(onNavigateMessage).toHaveBeenCalledWith('message-source');
   });
 
+  it('opens the source message address in a new tab on a Ctrl-click', () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const onNavigateMessage = vi.fn();
+    render(
+      <DiscussionAssetsPanel
+        discussionId="disc-1"
+        files={[file(7, { filename: 'evidence.txt', message_id: 'message-source' })]}
+        onClose={vi.fn()}
+        onNavigateMessage={onNavigateMessage}
+        t={t}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', {
+      name: 'disc.assets.goToMessageFor:evidence.txt',
+    }), { ctrlKey: true });
+    expect(open).toHaveBeenCalledWith(
+      `${window.location.origin}/discussions/disc-1?message=message-source`, '_blank', 'noopener,noreferrer',
+    );
+    expect(onNavigateMessage).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
+
   it('downloads a disk-backed asset on demand', async () => {
     const blob = new Blob(['csv'], { type: 'text/csv' });
     discussionsApi.contextFileBlob.mockResolvedValueOnce(blob);
