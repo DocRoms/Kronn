@@ -595,7 +595,7 @@ reports one precise manual reconnect/recovery action instead.
 `[src: file: backend/scripts/disc-introspection-mcp.py:2839-2868#_restore_reload_handoff]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:11276-11284#_close_inherited_reload_artifact]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:11921-11934#list_changed]`
-`[src: file: backend/scripts/test_disc_introspection_mcp.py:8343-8359#test_reload_is_not_deferred_by_a_detached_full_audit]`
+`[src: file: backend/scripts/test_disc_introspection_mcp.py:8385-8401#test_reload_is_not_deferred_by_a_detached_full_audit]`
 
 The replacement process restores the room and durable read cursor through the
 existing binding files; no invitation token is needed. A changed mtime with
