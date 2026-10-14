@@ -341,12 +341,32 @@ async fn a_changed_cited_line_is_corrected_by_the_agent_and_the_badge_goes_back_
     let validated = fx.validate().await;
     assert!(validated.success, "{:?}", validated.error);
     assert_eq!(fx.audit_status(), crate::models::AiAuditStatus::Validated);
+    // KT-1209: validating never silently accepts a Kronn rewrite of a
+    // human-owned section; only the owner's explicit confirmation does.
+    assert_eq!(
+        crate::core::doc_provenance::report(fx.project(), false)
+            .unwrap()
+            .to_reconfirm,
+        1,
+        "validating again must not confirm the rewrite on the human's behalf"
+    );
+    let confirmed = crate::api::audit::confirm_doc_provenance(
+        axum::extract::State(fx.h.state.clone()),
+        axum::extract::Path(PROJECT_ID.to_string()),
+        None,
+        axum::Json(crate::core::doc_provenance::ConfirmDocsRequest {
+            docs: vec![RULES.into()],
+        }),
+    )
+    .await
+    .0;
+    assert!(confirmed.success, "{:?}", confirmed.error);
     assert_eq!(
         crate::core::doc_provenance::report(fx.project(), false)
             .unwrap()
             .to_reconfirm,
         0,
-        "validating again confirms the rewrite"
+        "the explicit confirmation accepts the rewrite"
     );
 }
 

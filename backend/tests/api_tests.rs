@@ -12065,10 +12065,15 @@ fn analysis_steps_tech_debt_creates_detail_files() {
 
 #[test]
 fn analysis_steps_tech_debt_checks_outdated_prerequisites() {
-    let source = include_str!("../src/api/audit/mod.rs");
+    // KT-153: the step prompts live in embedded Markdown, not in mod.rs.
+    let source = include_str!("../src/api/audit/prompts/step8-tech-debt.md");
     // The tech debt step should mention checking for outdated prerequisites
     assert!(
-        source.contains("deprecated") || source.contains("EOL") || source.contains("outdated"),
+        source.contains("Outdated prerequisites"),
+        "Tech debt step should instruct filling the outdated prerequisites table"
+    );
+    assert!(
+        source.contains("deprecated") || source.contains("EOL"),
         "Tech debt step should instruct checking for outdated prerequisites"
     );
 }
@@ -22057,6 +22062,31 @@ mod cold_api_handlers_tests {
         }).await.unwrap();
     }
 
+    /// `seed_completed_validation` for a project whose docs are already on
+    /// disk: also record the final document fingerprints the way a completed
+    /// audit's terminal transaction does, so the KT-1206 gate sees a baseline
+    /// matching the reviewed contents (and still refuses any later edit).
+    async fn seed_completed_validation_with_docs(
+        state: &AppState,
+        project_id: &str,
+        repo: &std::path::Path,
+    ) {
+        seed_completed_validation(state, project_id).await;
+        let documents = kronn::core::audit_documents::capture_json(repo).unwrap();
+        let pid = project_id.to_string();
+        state
+            .db
+            .with_conn(move |conn| {
+                let run = kronn::db::audit_runs::list_recent(conn, &pid, 1)?
+                    .into_iter()
+                    .next()
+                    .expect("the seeded run");
+                kronn::db::audit_documents::record(conn, &run.id, &documents)
+            })
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn project_git_status_real_repo_returns_envelope() {
         let (_dir, repo) = seed_repo("proj-status");
@@ -23023,7 +23053,7 @@ mod cold_api_handlers_tests {
         std::fs::write(repo.join("docs/AGENTS.md"), "# AGENTS\n").unwrap();
         let state = test_state();
         let pid = seed_project_with_repo(&state, &repo).await;
-        seed_completed_validation(&state, &pid).await;
+        seed_completed_validation_with_docs(&state, &pid, &repo).await;
         let app = build_router_with_auth(state, false);
 
         let (st, json) = post_json(
@@ -23033,7 +23063,7 @@ mod cold_api_handlers_tests {
         )
         .await;
         assert_eq!(st, StatusCode::OK);
-        assert_eq!(json["success"], serde_json::Value::Bool(true));
+        assert_eq!(json["success"], serde_json::Value::Bool(true), "{json}");
 
         let kronn_state = repo.join("docs/.kronn.json");
         assert!(kronn_state.exists(), "docs/.kronn.json must be created");
@@ -23057,7 +23087,7 @@ mod cold_api_handlers_tests {
         .unwrap();
         let state = test_state();
         let pid = seed_project_with_repo(&state, &repo).await;
-        seed_completed_validation(&state, &pid).await;
+        seed_completed_validation_with_docs(&state, &pid, &repo).await;
 
         let (_, json) = post_json(
             build_router_with_auth(state.clone(), false),
@@ -23126,7 +23156,7 @@ mod cold_api_handlers_tests {
         let pid = seed_project_with_repo(&state, &repo).await;
         // A revalidation is an audit run, and no audit starts without a briefing.
         std::fs::write(repo.join("docs/briefing.md"), "Test briefing content\n").unwrap();
-        seed_completed_validation(&state, &pid).await;
+        seed_completed_validation_with_docs(&state, &pid, &repo).await;
         let (_, json) = post_json(
             build_router_with_auth(state.clone(), false),
             &format!("/api/projects/{pid}/validate-audit"),
@@ -23199,7 +23229,7 @@ mod cold_api_handlers_tests {
         std::fs::write(repo.join("docs/AGENTS.md"), "# AGENTS\n").unwrap();
         let state = test_state();
         let pid = seed_project_with_repo(&state, &repo).await;
-        seed_completed_validation(&state, &pid).await;
+        seed_completed_validation_with_docs(&state, &pid, &repo).await;
 
         // First call.
         let (_, first_response) = post_json(
@@ -23208,7 +23238,11 @@ mod cold_api_handlers_tests {
             serde_json::json!({}),
         )
         .await;
-        assert_eq!(first_response["success"], serde_json::Value::Bool(true));
+        assert_eq!(
+            first_response["success"],
+            serde_json::Value::Bool(true),
+            "{first_response}"
+        );
         let first = std::fs::read_to_string(repo.join("docs/.kronn.json")).unwrap();
 
         // Second call (could be hours / days later).
@@ -23218,7 +23252,11 @@ mod cold_api_handlers_tests {
             serde_json::json!({}),
         )
         .await;
-        assert_eq!(second_response["success"], serde_json::Value::Bool(true));
+        assert_eq!(
+            second_response["success"],
+            serde_json::Value::Bool(true),
+            "{second_response}"
+        );
         let second = std::fs::read_to_string(repo.join("docs/.kronn.json")).unwrap();
 
         // The validated_at line must be unchanged (both runs happen on
