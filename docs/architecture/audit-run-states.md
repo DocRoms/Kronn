@@ -329,6 +329,44 @@ as human-validated evidence until its trust conditions hold again.
 [src: file: backend/src/core/doc_provenance.rs:772#source_provenance_with_citations]
 [src: file: backend/src/core/learning_gate.rs:66#source_provenance_with_citations]
 
+## Validation completion, reasons and provenance (KT-1122)
+
+- **One parser, one verdict.** The terminal signal is the last line of an agent
+  message, `**`, backticks and `_` tolerated. The backend parses it once; the
+  UI reads `finished` from `GET /api/projects/:id/validation-state` (and the
+  timeline's `latest_validation`). The only client-side copy is
+  `endsWithValidationSignal`, for the per-message "view tech debts" button, on
+  the same rule.
+  [src: file: backend/src/db/audit_validation.rs:18#is_validation_signal]
+  [src: file: frontend/src/lib/validationSignal.ts:18#endsWithValidationSignal]
+- **Completion is durable.** The first clean signal stamps
+  `audit_runs.validation_completed_at` and the id of that message, in the write
+  path of the agent message (migration 262). Later messages (a commit note, a
+  DoD update) never undo it; only relinking the run to a different discussion
+  clears it.
+  [src: file: backend/src/db/audit_validation.rs:97#on_agent_message]
+  [src: file: backend/src/db/audit_validation.rs:113#effective_completion]
+- **A reason, not a failing button.** The server states why a validation is not
+  possible (`ValidationBlock`: no local run, audit running, run not completed,
+  no linked discussion, discussion missing, foreign discussion, not finished).
+  The timeline and the discussion banners show it instead of the action. A
+  validation discussion that is not the latest run's is flagged as superseded.
+  [src: file: backend/src/api/audit/validate.rs:41#ValidationBlock]
+  [src: file: backend/src/api/audit/validate.rs:116#validation_state]
+- **Peers are read-only.** An instance without the run (a P2P peer, another
+  clone) has nothing to validate: `validate-audit` refuses with
+  `no_local_run`. Validation happens on the instance that ran the audit.
+- **Who.** The operator pseudo of the instance that ran the audit is recorded
+  as `validation_started_by` when the validation is opened, and as
+  `validated_by` when it is validated, on the run row and in
+  `docs/.kronn.json` (`validated_by`, `validation_started_by`).
+  [src: file: backend/src/core/kronn_state.rs:239#mark_validated_by]
+- **Boot repair.** At startup, completions already visible in the messages are
+  stamped, and open validations an older audit left behind are archived only
+  when title and first message carry the generated provenance, they predate the
+  latest linked run, and no agent is queued, running or awaited. Idempotent.
+  [src: file: backend/src/db/audit_validation.rs:183#repair]
+
 ## Template updates after an audit
 
 Kronn stores the upstream template version and per-file hashes in the docs

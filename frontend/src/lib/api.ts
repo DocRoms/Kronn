@@ -167,6 +167,7 @@ import type {
   DependencyUpdateSummary,
   AuditEvidenceResponse,
   AuditTimelineData,
+  ValidationState,
   ContextAuditResponse,
   ModelTier,
   ModelTiersConfig,
@@ -1125,6 +1126,8 @@ export const projects = {
   /** Recent runs, their steps and the branch's recorded audits, in one request. */
   auditTimeline: (id: string) => api<AuditTimelineData>('GET', `/projects/${id}/audit-timeline`),
   validateAudit: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/validate-audit`),
+  /** KT-1122 — the server's verdict on validating the latest run (the one parser). */
+  validationState: (id: string) => api<ValidationState>('GET', `/projects/${id}/validation-state`),
   markBootstrapped: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/mark-bootstrapped`),
   cancelAudit: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/cancel-audit`),
   /** KT-1131 — a human accepts a failed step of the latest interrupted run. */

@@ -20,7 +20,7 @@ import { activityCategoryLabel } from '../lib/activity-category';
 import { DocStateSummary } from './DocStateSummary';
 import type { DocStateCounts } from './docState';
 import type {
-  AgentDetection, AgentType, AuditEntry, AuditRecentActivity, AuditTimelineValidation, AuditTokenBreakdown,
+  AgentDetection, AgentType, AuditEntry, AuditRecentActivity, AuditTimelineValidation, AuditTokenBreakdown, ValidationBlock,
   LinkedRepo, ModelTier, ModelTiersConfig,
 } from '../types/generated';
 import './AuditTimeline.css';
@@ -216,6 +216,12 @@ export function AuditTimeline(props: AuditTimelineProps) {
   // Audits the branch's `.kronn.json` records: another instance, an attestation.
   const [recorded, setRecorded] = useState<AuditEntry[]>([]);
   const [linkedValidation, setLinkedValidation] = useState<AuditTimelineValidation | null>(null);
+  // KT-1122 — why the server would refuse a validation now (null = it accepts),
+  // and who opened / validated it, as `.kronn.json` records them.
+  const [validationBlock, setValidationBlock] = useState<ValidationBlock | null>(null);
+  const [validatedBy, setValidatedBy] = useState<string | null>(null);
+  const [recordedStartedBy, setRecordedStartedBy] = useState<string | null>(null);
+  const [recordedValidatedAt, setRecordedValidatedAt] = useState<string | null>(null);
   const [marking, setMarking] = useState(false);
   const [leaseOrphaned, setLeaseOrphaned] = useState(false);
   const [releasing, setReleasing] = useState(false);
@@ -269,19 +275,24 @@ export function AuditTimeline(props: AuditTimelineProps) {
       return {
         id: ids[0] ?? null, rows: [...merged.values()], td: latestFull?.td_total ?? 0,
         recorded: data.recorded_audits, validation: data.latest_validation ?? null,
+        block: data.validation_block ?? null,
+        validatedBy: data.recorded_validated_by ?? null,
+        startedBy: data.recorded_validation_started_by ?? null,
+        validatedAt: data.recorded_validated_at ?? null,
         orphaned: data.lease_orphaned === true,
         latestStatus: latestRun?.status ?? null,
       };
     };
     load()
-      .then(({ id, rows, td, recorded: entries, validation, orphaned, latestStatus }) => {
+      .then(({ id, rows, td, recorded: entries, validation, block, validatedBy: by, startedBy, validatedAt, orphaned, latestStatus }) => {
         if (alive) {
           setRunId(id); setSteps(rows); setTdTotal(td); setRecorded(entries);
           setLinkedValidation(validation); setLeaseOrphaned(orphaned); setStepsLoaded(true); setLatestRunStatus(latestStatus);
+          setValidationBlock(block); setValidatedBy(by); setRecordedStartedBy(startedBy); setRecordedValidatedAt(validatedAt);
           setLoadFailed(false);
         }
       })
-      .catch(() => { if (alive) { setSteps([]); setRecorded([]); setLinkedValidation(null); setLatestRunStatus(null); setStepsLoaded(true); setLoadFailed(true); } });
+      .catch(() => { if (alive) { setSteps([]); setRecorded([]); setLinkedValidation(null); setValidationBlock(null); setLatestRunStatus(null); setStepsLoaded(true); setLoadFailed(true); } });
     return () => { alive = false; };
   }, [projectId, resumable, refreshTrigger, auditActive, liveStep, reloadTick]);
 
@@ -872,17 +883,29 @@ export function AuditTimeline(props: AuditTimelineProps) {
               // The finished discussion is auto-archived: validate from here, never start a new one.
               <div className="audit-tl-validation-actions" data-testid="audit-timeline-validation-finished">
                 <p className="audit-tl-muted">{t('auditTimeline.validation.finished')}</p>
-                <button
-                  type="button"
-                  className="audit-tl-btn audit-tl-btn-small"
-                  disabled={marking}
-                  onClick={() => {
-                    setMarking(true);
-                    void props.onMarkValid().finally(() => setMarking(false));
-                  }}
-                >
-                  {marking ? <Loader2 size={12} className="spin" /> : <ShieldCheck size={12} />} {t('audit.validate')}
-                </button>
+                {linkedValidation.started_by && (
+                  <p className="audit-tl-muted" data-testid="audit-timeline-validation-started-by">
+                    {t('auditTimeline.validation.startedBy', linkedValidation.started_by)}
+                  </p>
+                )}
+                {validationBlock ? (
+                  // The server would refuse: the reason, not a button that fails.
+                  <p className="audit-tl-muted" data-testid="audit-timeline-validation-block">
+                    {t(`auditTimeline.validation.block.${validationBlock}`)}
+                  </p>
+                ) : (
+                  <button
+                    type="button"
+                    className="audit-tl-btn audit-tl-btn-small"
+                    disabled={marking}
+                    onClick={() => {
+                      setMarking(true);
+                      void props.onMarkValid().finally(() => setMarking(false));
+                    }}
+                  >
+                    {marking ? <Loader2 size={12} className="spin" /> : <ShieldCheck size={12} />} {t('audit.validate')}
+                  </button>
+                )}
                 <button
                   type="button"
                   className="audit-tl-btn audit-tl-btn-small"
@@ -896,7 +919,12 @@ export function AuditTimeline(props: AuditTimelineProps) {
                 <FileText size={12} /> {t('audit.resumeValidation')}
               </button>
             ) : auditStatus === 'Audited' && stepsLoaded && !loadFailed && !completedLocalRun && !runPending ? (
-              <p className="audit-tl-muted" data-testid="audit-timeline-validation-unavailable">{t('auditTimeline.validation.noCompletedRun')}</p>
+              <p className="audit-tl-muted" data-testid="audit-timeline-validation-unavailable">
+                {/* A peer or clone that never ran the audit is read-only: say it. */}
+                {validationBlock === 'no_local_run'
+                  ? t('auditTimeline.validation.block.no_local_run')
+                  : t('auditTimeline.validation.noCompletedRun')}
+              </p>
             ) : auditStatus === 'Audited' && completedLocalRun && linkedValidation === null ? (
               <p className="audit-tl-muted" data-testid="audit-timeline-validation-unlinked">{t('auditTimeline.validation.unlinked')}</p>
             ) : null}
@@ -910,6 +938,16 @@ export function AuditTimeline(props: AuditTimelineProps) {
             last
           >
             <p className="audit-tl-muted">{t('auditTimeline.validated.desc')}</p>
+            {validated && (validatedBy || recordedStartedBy) && (
+              <p className="audit-tl-muted" data-testid="audit-timeline-validated-by">
+                {[
+                  recordedStartedBy ? t('auditTimeline.validation.startedBy', recordedStartedBy) : null,
+                  validatedBy
+                    ? t('auditTimeline.validation.validatedBy', validatedBy, recordedValidatedAt ?? '')
+                    : null,
+                ].filter(Boolean).join(' · ')}
+              </p>
+            )}
             {validated && props.techDebtCount > 0 && (
               <button type="button" className="audit-tl-btn audit-tl-btn-small" onClick={props.onViewTechDebts}>
                 {t('audit.viewTechDebts', props.techDebtCount)}

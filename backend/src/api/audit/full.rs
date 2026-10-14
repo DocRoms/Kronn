@@ -3179,6 +3179,20 @@ pub async fn full_audit(
             return;
         }
 
+        // KT-1122 — who opened this validation: the operator whose audit
+        // just created and linked it. Best-effort, never fails the run.
+        if pending_validation.is_some() {
+            let by = super::validate::operator_pseudo(&state_for_validation).await;
+            let run_for_by = run_id_for_complete.clone();
+            if let Err(e) = db
+                .with_conn(move |conn| {
+                    crate::db::audit_validation::set_started_by(conn, &run_for_by, &by)
+                })
+                .await
+            {
+                tracing::warn!("Validation starter not recorded: {e}");
+            }
+        }
         // ── Terminal status durably persisted — side effects may fire. ──
         // Progress goes first: the validation agent below is held back while an
         // audit of the project shows progress (KT-1134).

@@ -49,6 +49,7 @@ import { discussions as discussionsApi, executionVariables, projects as projects
 import { isPreviewableAttachment } from '../lib/mediaKind';
 import { attachmentForLink, fileLinkUrlTransform, linkKind, projectFileTarget, unavailableFileReason } from '../lib/localFileLinks';
 import { MessageFileLinkContext, type MessageFileLinkContextValue } from '../lib/messageFileLinkContext';
+import { endsWithValidationSignal } from '../lib/validationSignal';
 import {
   Cpu, AlertTriangle, Zap, Loader2, Pause, Play,
   Key, Settings, Send, Pencil, RotateCcw, Check, Copy, Clock, ShieldCheck,
@@ -1300,7 +1301,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             as the auth-error / timeout CTAs above (button below the
             bubble, before the footer). `onNavigate` lands on the
             project's own address, so no extra plumbing is needed. */}
-        {projectId && /KRONN:VALIDATION_COMPLETE/i.test(msg.content) && (
+        {projectId && endsWithValidationSignal(msg.content) && (
           <div className="disc-auth-error-cta">
             <button
               className="disc-scan-btn"

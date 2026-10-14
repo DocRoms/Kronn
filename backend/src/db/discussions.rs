@@ -2922,6 +2922,13 @@ fn insert_message_inner(
             &msg.id,
             &msg.content,
         )?;
+        super::audit_validation::on_agent_message(
+            conn,
+            discussion_id,
+            &msg.id,
+            &msg.content,
+            &msg.timestamp.to_rfc3339(),
+        )?;
     }
 
     // KT-1247 — a message from the worker is activity: it pushes the silent-

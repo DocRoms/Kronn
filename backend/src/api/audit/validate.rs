@@ -13,24 +13,204 @@ use axum::{
     Json,
 };
 
+use rusqlite::OptionalExtension;
+
 use crate::core::{kronn_state, scanner};
+use crate::db::audit_validation as record;
 use crate::models::*;
 use crate::AppState;
 
-/// Whether a validation discussion's last Agent message ends on the terminal
-/// signal: the gate below and the audit timeline must agree on "finished".
+/// Whether a validation discussion has signalled completion in its messages:
+/// some Agent message of the main channel ends on the terminal signal. A
+/// later message never undoes it (KT-1122) — the durable stamp on the run
+/// (`db::audit_validation`) is the same fact recorded at the time.
 pub(crate) fn validation_discussion_finished(discussion: &Discussion) -> bool {
-    discussion
-        .messages
-        .iter()
-        .rev()
-        .find(|message| matches!(message.role, MessageRole::Agent))
-        .is_some_and(|message| {
-            crate::api::discussions::ends_with_terminal_signal(
-                &message.content,
-                "KRONN:VALIDATION_COMPLETE",
+    discussion.messages.iter().any(|message| {
+        matches!(message.role, MessageRole::Agent)
+            && matches!(message.channel, MessageChannel::Main)
+            && record::is_validation_signal(&message.content)
+    })
+}
+
+/// Why validating the project's latest audit run is not possible now. The
+/// timeline and the discussion banners show this reason instead of offering
+/// an action the server would refuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum ValidationBlock {
+    /// This instance never ran the audit (a P2P peer, another clone): it is
+    /// read-only and cannot validate.
+    NoLocalRun,
+    AuditRunning,
+    RunNotCompleted,
+    NoLinkedDiscussion,
+    DiscussionMissing,
+    ForeignDiscussion,
+    NotFinished,
+}
+
+impl ValidationBlock {
+    pub(crate) fn message(self, run_status: Option<&str>) -> String {
+        match self {
+            Self::NoLocalRun => "No audit run recorded for this project on this instance — run the audit first; a peer without the run is read-only and validates on the instance that ran it.".into(),
+            Self::AuditRunning => "An audit is currently running on this project — validate once it has finished.".into(),
+            Self::RunNotCompleted => format!(
+                "The latest audit run is {} — only a Completed run can be validated (resume or re-run it first).",
+                run_status.unwrap_or("unknown")
+            ),
+            Self::NoLinkedDiscussion => "The latest completed run carries no linked validation discussion — only the discussion the audit itself created (and linked in the same transaction) can validate it, unless every Critical and High tech-debt sheet is settled.".into(),
+            Self::DiscussionMissing => "The linked validation discussion no longer exists — re-run the audit.".into(),
+            Self::ForeignDiscussion => "The linked validation discussion belongs to another project — refusing.".into(),
+            Self::NotFinished => "The validation discussion has not finished — the agent must end on KRONN:VALIDATION_COMPLETE, or every Critical and High tech-debt sheet must be settled, before the project can be marked validated.".into(),
+        }
+    }
+}
+
+/// The validation of a project's latest audit run, and what can be done.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct ValidationState {
+    pub project_id: String,
+    pub run_id: Option<String>,
+    pub run_status: Option<String>,
+    /// The discussion linked to the latest run (never a title match).
+    pub discussion_id: Option<String>,
+    pub archived: bool,
+    /// The linked discussion has signalled completion; never undone.
+    pub finished: bool,
+    pub completed_at: Option<String>,
+    pub completed_message_id: Option<String>,
+    /// Pseudo of the operator whose audit opened the validation.
+    pub started_by: Option<String>,
+    pub validated_by: Option<String>,
+    pub validated_at: Option<String>,
+    /// The server accepts a validation now (the tech-debt sheet path, which
+    /// reads the filesystem, is decided by the POST itself).
+    pub can_validate: bool,
+    pub blocked: Option<ValidationBlock>,
+}
+
+impl ValidationState {
+    fn empty(project_id: &str, blocked: ValidationBlock) -> Self {
+        Self {
+            project_id: project_id.to_string(),
+            run_id: None,
+            run_status: None,
+            discussion_id: None,
+            archived: false,
+            finished: false,
+            completed_at: None,
+            completed_message_id: None,
+            started_by: None,
+            validated_by: None,
+            validated_at: None,
+            can_validate: false,
+            blocked: Some(blocked),
+        }
+    }
+}
+
+/// The single read-side gate of the timeline and the validation-state
+/// endpoint; the POST below applies the same durable completion.
+pub(crate) fn validation_state(
+    conn: &rusqlite::Connection,
+    project_id: &str,
+    audit_running: bool,
+) -> anyhow::Result<ValidationState> {
+    let Some(run) = crate::db::audit_runs::list_recent(conn, project_id, 1)?
+        .into_iter()
+        .next()
+    else {
+        return Ok(ValidationState::empty(
+            project_id,
+            ValidationBlock::NoLocalRun,
+        ));
+    };
+    let stored = record::record(conn, &run.id)?;
+    let mut state = ValidationState::empty(project_id, ValidationBlock::NoLinkedDiscussion);
+    state.run_id = Some(run.id.clone());
+    state.run_status = Some(run.status.clone());
+    state.started_by = stored.started_by;
+    state.validated_by = stored.validated_by;
+    state.validated_at = stored.validated_at;
+    state.discussion_id = run.validation_discussion_id.clone();
+
+    let linked: Option<(Option<String>, bool)> = match run.validation_discussion_id.as_deref() {
+        Some(disc_id) => conn
+            .query_row(
+                "SELECT project_id, archived FROM discussions WHERE id = ?1",
+                [disc_id],
+                |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, bool>(1)?)),
             )
-        })
+            .optional()?,
+        None => None,
+    };
+    if let (Some(disc_id), Some((_, archived))) =
+        (run.validation_discussion_id.as_deref(), linked.as_ref())
+    {
+        state.archived = *archived;
+        if let Some((message_id, at)) = record::effective_completion(conn, &run.id, disc_id)? {
+            state.finished = true;
+            state.completed_message_id = Some(message_id);
+            state.completed_at = Some(at);
+        }
+    }
+    state.blocked = if audit_running {
+        Some(ValidationBlock::AuditRunning)
+    } else if run.status != "Completed" {
+        Some(ValidationBlock::RunNotCompleted)
+    } else if run.validation_discussion_id.is_none() {
+        Some(ValidationBlock::NoLinkedDiscussion)
+    } else {
+        match &linked {
+            None => Some(ValidationBlock::DiscussionMissing),
+            Some((owner, _)) if owner.as_deref() != Some(project_id) => {
+                Some(ValidationBlock::ForeignDiscussion)
+            }
+            Some(_) if !state.finished => Some(ValidationBlock::NotFinished),
+            Some(_) => None,
+        }
+    };
+    state.can_validate = state.blocked.is_none();
+    Ok(state)
+}
+
+fn audit_running(state: &AppState, project_id: &str) -> bool {
+    state
+        .audit_tracker
+        .lock()
+        .map(|tracker| tracker.leased.contains(project_id))
+        .unwrap_or(true)
+}
+
+/// The pseudo recorded as who started or validated, from this instance.
+pub(crate) async fn operator_pseudo(state: &AppState) -> String {
+    let config = state.config.read().await;
+    config
+        .server
+        .pseudo
+        .as_deref()
+        .map(str::trim)
+        .filter(|pseudo| !pseudo.is_empty())
+        .unwrap_or("anonymous")
+        .to_string()
+}
+
+/// GET /api/projects/{id}/validation-state
+pub async fn get_validation_state(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<ValidationState>> {
+    let running = audit_running(&state, &id);
+    match state
+        .db
+        .with_read_conn(move |conn| validation_state(conn, &id, running))
+        .await
+    {
+        Ok(found) => Json(ApiResponse::ok(found)),
+        Err(e) => Json(ApiResponse::err(format!("db: {e}"))),
+    }
 }
 
 /// POST /api/projects/:id/validate-audit
@@ -136,7 +316,18 @@ pub async fn validate_audit(
             };
             let mut validation_agent_active =
                 disc.as_ref().map(is_active).transpose()?.unwrap_or(false);
-            let linked_is_finished = disc.as_ref().is_some_and(validation_discussion_finished);
+            // Durable completion (KT-1122): the stamp written with the signal,
+            // else the earliest clean signal in the messages — later messages
+            // never undo it.
+            let completion_of = |run: Option<&AuditRun>, discussion: Option<&Discussion>| {
+                match (run, discussion) {
+                    (Some(run), Some(discussion)) => {
+                        record::effective_completion(conn, &run.id, &discussion.id)
+                    }
+                    _ => Ok(None),
+                }
+            };
+            let linked_is_finished = completion_of(latest.as_ref(), disc.as_ref())?.is_some();
             if disc.as_ref().is_some_and(|discussion| discussion.archived) && !linked_is_finished {
                 let mut statement = conn.prepare(
                     "SELECT id FROM discussions
@@ -168,6 +359,11 @@ pub async fn validate_audit(
                                 &run.id,
                                 &candidate.id,
                             )?;
+                            if let Some((message_id, at)) =
+                                record::first_signal(conn, &candidate.id)?
+                            {
+                                record::record_completion(conn, &candidate.id, &message_id, &at)?;
+                            }
                         }
                         disc = Some(candidate);
                         break;
@@ -179,16 +375,17 @@ pub async fn validate_audit(
                 .map(|run| crate::db::audit_documents::get(conn, &run.id))
                 .transpose()?
                 .flatten();
-            Ok((latest, disc, validation_agent_active, documents))
+            let finished = completion_of(latest.as_ref(), disc.as_ref())?;
+            Ok((latest, disc, validation_agent_active, documents, finished))
         })
         .await;
-    let (optimize_documents, documents) = match gate {
+    let (optimize_documents, documents, run_id) = match gate {
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
-        Ok((latest, linked_disc, validation_agent_active, documents)) => {
+        Ok((latest, linked_disc, validation_agent_active, documents, finished)) => {
+            // An instance without the run (P2P peer, another clone) is
+            // read-only: it has nothing to validate.
             let Some(run) = latest else {
-                return Json(ApiResponse::err(
-                    "No audit run recorded for this project — run the audit first.",
-                ));
+                return Json(ApiResponse::err(ValidationBlock::NoLocalRun.message(None)));
             };
             if run.status != "Completed" {
                 return Json(ApiResponse::err(format!(
@@ -220,17 +417,31 @@ pub async fn validate_audit(
                         "The linked validation discussion belongs to another project — refusing.",
                     ));
                 }
-                if !validation_discussion_finished(&disc) {
+                if finished.is_none() {
                     return Json(ApiResponse::err(
                         "The validation discussion has not finished — the agent must end on KRONN:VALIDATION_COMPLETE, or every Critical and High tech-debt sheet must be settled, before the project can be marked validated.",
                     ));
                 }
             }
-            (run.kind == "Full", documents)
+            (run.kind == "Full", documents, run.id)
         }
     };
 
+    // Who opened this validation and who validates it (KT-1122): recorded on
+    // the run and in `docs/.kronn.json`, so a clone shows who signed off.
+    let by = operator_pseudo(&state).await;
+    let started_by = {
+        let run_id = run_id.clone();
+        state
+            .db
+            .with_read_conn(move |conn| record::record(conn, &run_id))
+            .await
+            .ok()
+            .and_then(|stored| stored.started_by)
+    };
+
     // Run filesystem I/O on blocking thread pool
+    let by_for_file = by.clone();
     let validate_result = tokio::task::spawn_blocking(move || -> Result<(), String> {
         let project_path = scanner::resolve_host_path(&project_path_str);
         let index_file = scanner::detect_docs_entry(&project_path);
@@ -277,13 +488,21 @@ pub async fn validate_audit(
         ) {
             tracing::warn!("Human-validation provenance not recorded: {e}");
         }
-        kronn_state::mark_validated(&project_path)
+        kronn_state::mark_validated_by(&project_path, &by_for_file, started_by.as_deref())
     })
     .await
     .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     if let Err(e) = validate_result {
         return Json(ApiResponse::err(e));
+    }
+    let at = chrono::Utc::now().to_rfc3339();
+    if let Err(e) = state
+        .db
+        .with_conn(move |conn| record::record_validated(conn, &run_id, &by, &at))
+        .await
+    {
+        tracing::warn!("Validated in .kronn.json but not on the run row: {e}");
     }
 
     let status = scanner::detect_audit_status(&project.path);
@@ -884,6 +1103,7 @@ mod validate_gate_tests {
             .await
             .expect("linked validation");
         assert!(!reported.finished && !reported.archived);
+        assert_eq!(reported.completed_at, None);
 
         let tmp = tempfile::TempDir::new().unwrap();
         let state = test_state();
@@ -896,6 +1116,187 @@ mod validate_gate_tests {
         )
         .await;
         assert!(timeline_validation(&state).await.is_none());
+    }
+
+    async fn push_agent_message(state: &AppState, id: &str, content: &str, at: &str) {
+        let msg: DiscussionMessage = serde_json::from_value(serde_json::json!({
+            "id": id, "role": "Agent", "content": content,
+            "timestamp": at, "tokens_used": 0
+        }))
+        .unwrap();
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::discussions::insert_message(conn, "d1", &msg)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn timeline_block(state: &AppState) -> Option<ValidationBlock> {
+        crate::api::audit::run::audit_timeline(State(state.clone()), AxPath("p1".to_string()))
+            .await
+            .0
+            .data
+            .expect("timeline")
+            .validation_block
+    }
+
+    // KT-1122: the signal is recorded when it arrives; the later commit note
+    // or DoD update (front-africanews) never makes the validation unfinished.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_finished_validation_stays_finished_after_later_agent_messages() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = test_state();
+        seed(&state, tmp.path(), "Completed", Some("d1"), None).await;
+        push_agent_message(&state, "m-signal", "Fin.\nKRONN:VALIDATION_COMPLETE", "2026-08-28T21:37:00Z").await;
+        push_agent_message(&state, "m-pr", "Commit poussé (PR #34)", "2026-08-29T08:00:00Z").await;
+        push_agent_message(&state, "m-dod", "DoD mise à jour", "2026-08-29T08:05:00Z").await;
+        state
+            .db
+            .with_conn(|conn| {
+                conn.execute("UPDATE discussions SET archived=1 WHERE id='d1'", [])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let reported = timeline_validation(&state)
+            .await
+            .expect("linked validation");
+        assert!(reported.finished && reported.archived);
+        assert_eq!(reported.completed_at.as_deref(), Some("2026-08-28T21:37:00+00:00"));
+        assert_eq!(timeline_block(&state).await, None, "the server accepts");
+
+        // The stamp, not the messages, carries it: even a pruned signal
+        // message does not reopen the validation.
+        state
+            .db
+            .with_conn(|conn| {
+                conn.execute("DELETE FROM messages WHERE id='m-signal'", [])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(timeline_validation(&state).await.unwrap().finished);
+        let response = call(&state).await;
+        assert!(response.success, "{:?}", response.error);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_server_verdict_agrees_with_the_gate_when_the_ui_cannot_validate() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = test_state();
+        seed(&state, tmp.path(), "Completed", Some("d1"), Some("Encore en cours")).await;
+        assert_eq!(timeline_block(&state).await, Some(ValidationBlock::NotFinished));
+        let refused = call(&state).await;
+        assert!(!refused.success);
+        assert!(refused.error.unwrap().contains("has not finished"));
+
+        // `**KRONN:…` (the stream truncated inside the emphasis): the UI and
+        // the gate used to disagree on it; now both read one parser.
+        push_agent_message(&state, "m-bold", "Fin.\n**KRONN:VALIDATION_COMPLETE", "2026-08-28T21:40:00Z").await;
+        assert_eq!(timeline_block(&state).await, None);
+        assert!(call(&state).await.success);
+    }
+
+    // KT-1122: "resume validation" targets the discussion linked to the latest
+    // run — a sub-audit's included — never an older, still open discussion that
+    // merely carries a generated validation title (front-africanews, April).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_resumed_validation_is_the_runs_link_even_for_a_sub_audit() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = test_state();
+        seed(&state, tmp.path(), "Completed", Some("d-run"), Some("Encore en cours")).await;
+        state
+            .db
+            .with_conn(|conn| {
+                conn.execute("UPDATE audit_runs SET kind='Security' WHERE id='r1'", [])?;
+                conn.execute(
+                    "UPDATE discussions SET title='Validation audit Security' WHERE id='d-run'",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO discussions
+                     (id, project_id, title, agent, language, created_at, updated_at)
+                     VALUES ('d-april', 'p1', 'Validation audit AI', 'ClaudeCode', 'fr',
+                             '2026-04-02T10:00:00Z', '2026-04-02T10:00:00Z')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let reported = timeline_validation(&state).await.expect("linked validation");
+        assert_eq!(reported.discussion_id, "d-run");
+        assert!(!reported.finished);
+        let verdict = state
+            .db
+            .with_read_conn(|conn| validation_state(conn, "p1", false))
+            .await
+            .unwrap();
+        assert_eq!(verdict.discussion_id.as_deref(), Some("d-run"));
+        assert_eq!(verdict.blocked, Some(ValidationBlock::NotFinished));
+    }
+
+    // KT-1122 rule: an instance without the run (P2P peer, another clone) is
+    // read-only — it states why and never validates, not even a project whose
+    // docs are shared.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_instance_without_the_run_is_read_only_and_says_why() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = test_state();
+        seed(&state, tmp.path(), "Completed", Some("d1"), Some("Fin.\nKRONN:VALIDATION_COMPLETE")).await;
+        state
+            .db
+            .with_conn(|conn| {
+                conn.execute("DELETE FROM audit_runs WHERE id='r1'", [])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(timeline_validation(&state).await.is_none());
+        assert_eq!(timeline_block(&state).await, Some(ValidationBlock::NoLocalRun));
+        let response = call(&state).await;
+        assert!(!response.success);
+        let reason = response.error.unwrap();
+        assert!(reason.contains("read-only"), "{reason}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn who_opened_and_who_validated_are_recorded_and_shown() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = test_state();
+        state.config.write().await.server.pseudo = Some("  Romu ".into());
+        seed(&state, tmp.path(), "Completed", Some("d1"), Some("Fin.\nKRONN:VALIDATION_COMPLETE")).await;
+        state
+            .db
+            .with_conn(|conn| crate::db::audit_validation::set_started_by(conn, "r1", "Audit-Bot"))
+            .await
+            .unwrap();
+        assert_eq!(
+            timeline_validation(&state).await.unwrap().started_by.as_deref(),
+            Some("Audit-Bot")
+        );
+
+        let response = call(&state).await;
+        assert!(response.success, "{:?}", response.error);
+
+        let file = kronn_state::read(tmp.path()).expect(".kronn.json written");
+        assert_eq!(file.validated_by.as_deref(), Some("Romu"));
+        assert_eq!(file.validation_started_by.as_deref(), Some("Audit-Bot"));
+        let data = crate::api::audit::run::audit_timeline(State(state.clone()), AxPath("p1".to_string()))
+            .await
+            .0
+            .data
+            .expect("timeline");
+        assert_eq!(data.recorded_validated_by.as_deref(), Some("Romu"));
+        assert_eq!(data.recorded_validation_started_by.as_deref(), Some("Audit-Bot"));
+        let shown = data.latest_validation.expect("validation");
+        assert_eq!(shown.validated_by.as_deref(), Some("Romu"));
+        assert!(shown.validated_at.is_some());
     }
 
     fn write_td(tmp: &std::path::Path, id: &str, severity: &str, status: &str) {

@@ -108,6 +108,36 @@ describe('MessageBubble — KRONN:VALIDATION_COMPLETE CTA', () => {
     expect(screen.queryByText('audit.viewTechDebtsAfterValidation')).toBeNull();
   });
 
+  // KT-1122 — one parser: a mention mid-text is not the signal (the gate
+  // refuses it), and the emphasis the stream leaves behind still is one.
+  it('hides the CTA when the marker is only mentioned before more text', () => {
+    render(
+      <I18nProvider>
+        <MessageBubble
+          {...baseProps}
+          msg={makeAgentMessage('KRONN:VALIDATION_COMPLETE puis la suite du travail')}
+          projectId="proj-xyz"
+          onNavigate={() => {}}
+        />
+      </I18nProvider>
+    );
+    expect(screen.queryByText('audit.viewTechDebtsAfterValidation')).toBeNull();
+  });
+
+  it('shows the CTA when the signal is wrapped in emphasis on the last line', () => {
+    render(
+      <I18nProvider>
+        <MessageBubble
+          {...baseProps}
+          msg={makeAgentMessage('Done.\n\n**KRONN:VALIDATION_COMPLETE')}
+          projectId="proj-xyz"
+          onNavigate={() => {}}
+        />
+      </I18nProvider>
+    );
+    expect(screen.getByText('audit.viewTechDebtsAfterValidation')).toBeInTheDocument();
+  });
+
   it('hides the CTA when the marker is absent (normal message)', () => {
     render(
       <I18nProvider>

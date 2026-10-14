@@ -1674,6 +1674,22 @@ pub(crate) async fn run_partial_pipeline(
             return;
         }
 
+        // KT-1122 — who opened this partial run's validation. Best-effort:
+        // never fails a run whose terminal status is already committed.
+        if pending_validation.is_some() {
+            let by = super::validate::operator_pseudo(&state).await;
+            let run_for_by = audit_run_id.clone();
+            if let Err(e) = state
+                .db
+                .with_conn(move |conn| {
+                    crate::db::audit_validation::set_started_by(conn, &run_for_by, &by)
+                })
+                .await
+            {
+                tracing::warn!("Validation starter not recorded: {e}");
+            }
+        }
+
         // Baseline write STRICTLY after the committed terminal status
         // (Codex lot-2 #4): a DB failure above never leaves drift green,
         // and a write failure here is the conservative direction (the

@@ -282,6 +282,8 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
         resumable_after_step: null, state_in_history: null,
       }),
       validateAudit: resolve('NoTemplate'),
+      // KT-1122 — null = verdict unknown: banners offer nothing until a test sets one.
+      validationState: resolve(null),
       cancelAudit: resolve('NoTemplate'),
       acceptAuditStep: resolve({ step: 1, accepted_by: 'operator', accepted_at: '2026-10-11T00:00:00Z', remaining_failed: [] }),
       auditRunsCleanup: resolve(0),

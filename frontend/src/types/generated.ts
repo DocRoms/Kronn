@@ -1251,6 +1251,11 @@ steps: Array<AuditRunStep>,
  */
 recorded_audits: Array<AuditEntry>, recorded_validated_at: string | null,
 /**
+ * Who validated and who opened the validation, from `.kronn.json`
+ * (only while `recorded_validated_at` is set).
+ */
+recorded_validated_by: string | null, recorded_validation_started_by: string | null,
+/**
  * The validation discussion linked to the latest run when that run is
  * Completed, archived or not: the timeline offers to validate once it
  * has finished.
@@ -1260,13 +1265,23 @@ latest_validation: AuditTimelineValidation | null,
  * The project's audit lease is held by a run that could not be settled:
  * every launch is refused until the cleanup action releases it (KT-1134).
  */
-lease_orphaned: boolean, };
+lease_orphaned: boolean,
+/**
+ * Why the server would refuse a validation now (`None` = it accepts):
+ * the UI shows the reason instead of offering the action.
+ */
+validation_block: ValidationBlock | null, };
 
 export type AuditTimelineValidation = { discussion_id: string,
 /**
- * Same terminal-signal parser as the validate-audit gate.
+ * The server's verdict, from the durable completion stamp: the one
+ * parser of the signal lives in the backend.
  */
-finished: boolean, archived: boolean, };
+finished: boolean, archived: boolean, completed_at: string | null,
+/**
+ * Pseudo of the operator whose audit opened the validation.
+ */
+started_by: string | null, validated_by: string | null, validated_at: string | null, };
 
 export type AuditTodo = { file: string, line: number, text: string, };
 
@@ -10080,12 +10095,41 @@ model_breakdowns: Array<UsageModelBreakdown>, input_tokens: number, output_token
  */
 export type UsageTotals = { input_tokens: number, output_tokens: number, cache_creation_tokens: number, cache_read_tokens: number, total_tokens: number, total_cost: number, };
 
+/**
+ * Why validating the project's latest audit run is not possible now. The
+ * timeline and the discussion banners show this reason instead of offering
+ * an action the server would refuse.
+ */
+export type ValidationBlock = "no_local_run" | "audit_running" | "run_not_completed" | "no_linked_discussion" | "discussion_missing" | "foreign_discussion" | "not_finished";
+
 export type ValidationReason = "audit_validation" | "validation_card" | "acknowledged" | "revalidation" | "confirmed" | "human_owned";
 
 /**
  * One validation to run on the candidate before the parent is advanced (§6).
  */
 export type ValidationSpec = { command: string, quick_exec_id?: string | null, timeout_secs?: number | null, };
+
+/**
+ * The validation of a project's latest audit run, and what can be done.
+ */
+export type ValidationState = { project_id: string, run_id: string | null, run_status: string | null,
+/**
+ * The discussion linked to the latest run (never a title match).
+ */
+discussion_id: string | null, archived: boolean,
+/**
+ * The linked discussion has signalled completion; never undone.
+ */
+finished: boolean, completed_at: string | null, completed_message_id: string | null,
+/**
+ * Pseudo of the operator whose audit opened the validation.
+ */
+started_by: string | null, validated_by: string | null, validated_at: string | null,
+/**
+ * The server accepts a validation now (the tech-debt sheet path, which
+ * reads the filesystem, is decided by the POST itself).
+ */
+can_validate: boolean, blocked: ValidationBlock | null, };
 
 export type VersionCheck = { current: string, latest: string | null, release_url: string | null, up_to_date: boolean, };
 

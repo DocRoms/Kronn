@@ -73,6 +73,15 @@ pub struct KronnState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub validated_at: Option<String>,
 
+    /// Pseudo of the operator who validated (KT-1122). Meaningful only next
+    /// to `validated_at`: a revocation clears the date and leaves this stale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validated_by: Option<String>,
+
+    /// Pseudo of the operator whose audit opened the validation (KT-1122).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation_started_by: Option<String>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bootstrapped_at: Option<String>,
 
@@ -221,6 +230,24 @@ pub fn mark_validated(project_path: &Path) -> Result<(), String> {
     let mut state = load_for_mutation(project_path)?;
     if state.validated_at.is_none() {
         state.validated_at = Some(today_iso());
+    }
+    write(project_path, &mut state)
+}
+
+/// Set `validated_at` (kept if already set) and record who validated and who
+/// opened the validation, so a clone shows who signed off (KT-1122).
+pub fn mark_validated_by(
+    project_path: &Path,
+    by: &str,
+    started_by: Option<&str>,
+) -> Result<(), String> {
+    let mut state = load_for_mutation(project_path)?;
+    if state.validated_at.is_none() {
+        state.validated_at = Some(today_iso());
+    }
+    state.validated_by = Some(by.to_string());
+    if let Some(started_by) = started_by {
+        state.validation_started_by = Some(started_by.to_string());
     }
     write(project_path, &mut state)
 }

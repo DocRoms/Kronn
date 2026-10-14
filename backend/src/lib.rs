@@ -1903,6 +1903,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             post(api::audit::validate_audit),
         )
         .route(
+            "/api/projects/{id}/validation-state",
+            get(api::audit::get_validation_state),
+        )
+        .route(
             "/api/projects/{id}/mark-bootstrapped",
             post(api::audit::mark_bootstrapped),
         )

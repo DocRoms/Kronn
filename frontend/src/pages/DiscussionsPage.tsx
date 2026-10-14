@@ -49,6 +49,8 @@ import type { Project, AgentDetection, AgentReadiness, Discussion, DiscussionDet
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useStableCallback } from '../hooks/useStableCallback';
 import { useQpChain } from '../hooks/useQpChain';
+import { useValidationState } from '../hooks/useValidationState';
+import { validationBanner } from '../lib/validationBanner';
 import { useMessageQueue, type QueuedMessage, type QueuedMessageControl } from '../hooks/useMessageQueue';
 import { useRafBatchedStream } from '../hooks/useRafBatchedStream';
 import { buildStreamingFlush } from '../lib/stream-flush';
@@ -1539,7 +1541,14 @@ export function DiscussionsPage({
   const activeDiscussionUnseenBasis = activeDiscussion ? unseenBasis(activeDiscussion) : 0;
 
   const sending = activeDiscussionId ? !!sendingMap[activeDiscussionId] : false;
-  const interruptedStream = activeDiscussionId ? interruptedStreams[activeDiscussionId] : undefined;
+  // KT-1122 — the validation banners read the server's verdict for the
+  // project's latest run (link + durable completion), not the discussion's
+  // title or the text of its last message. Re-read as the discussion moves.
+  const validationState = useValidationState(
+    activeDiscussion?.project_id,
+    `${activeDiscussionId ?? ''}:${activeDiscussion?.messages.length ?? 0}:${sending ? 1 : 0}`,
+  );
+  const interruptedStream =activeDiscussionId ? interruptedStreams[activeDiscussionId] : undefined;
   const durablePartial = activeDiscussion?.partial_response;
   // #220 — the local stream can drop while the server keeps running the agent;
   // only a run the server no longer reports is "interrupted".
@@ -4792,8 +4801,32 @@ export function DiscussionsPage({
 
                 const proj = projects.find(p => p.id === activeDiscussion.project_id);
                 const projDiscs = allDiscussions.filter(d => d.project_id === activeDiscussion.project_id && d.id !== activeDiscussion.id);
-                const validationDisc = projDiscs.find(d => d.title === 'Validation audit AI');
-                const auditDone = proj && (proj.audit_status === 'Audited' || proj.audit_status === 'Validated');
+                // The validation of the LATEST run (the server's link), never
+                // the first discussion titled like one: an older audit's, an
+                // archived one or a project already Validated has nothing to resume.
+                const linkedValidation = validationState?.discussion_id
+                  ? projDiscs.find(d => d.id === validationState.discussion_id)
+                  : undefined;
+                const auditDone = proj && proj.audit_status === 'Audited';
+                const validationDisc = auditDone && linkedValidation && !linkedValidation.archived
+                  ? linkedValidation
+                  : undefined;
+                if (proj?.audit_status === 'Validated') return null;
+
+                // The linked validation finished and was auto-archived: what is
+                // left is validating the audit, from the project.
+                if (auditDone && linkedValidation?.archived && validationState?.finished) {
+                  return (
+                    <div className="disc-cta-banner" data-variant="accent">
+                      <p className="disc-cta-text" data-variant="accent">
+                        <ShieldCheck size={14} /> {t('audit.validationComplete')}
+                      </p>
+                      <button className="disc-cta-btn" data-variant="accent" {...newTabClickProps(activeDiscussion.project_id ? projectPath(activeDiscussion.project_id) : null)} onClick={() => { if (activeDiscussion.project_id) onNavigate('projects', { projectId: activeDiscussion.project_id, projectAt: { view: 'audit' } }); }}>
+                        <Play size={12} /> {t('audit.goToProject')}
+                      </button>
+                    </div>
+                  );
+                }
 
                 // State 3: Audit done + validation discussion exists → go to validation
                 if (auditDone && validationDisc) {
@@ -4838,13 +4871,38 @@ export function DiscussionsPage({
 
               {/* Validation complete banner */}
               {(() => {
-                if (activeDiscussion.title !== 'Validation audit AI' || !activeDiscussion.project_id) return null;
+                if (!isValidationDisc(activeDiscussion.title) || !activeDiscussion.project_id) return null;
                 const proj = projects.find(p => p.id === activeDiscussion.project_id);
-                if (!proj || proj.audit_status !== 'Audited') return null;
-                const valAgentMsgs = activeDiscussion.messages.filter((m, idx) => m.role === 'Agent' && idx > 0);
-                const lastAgentMsg = valAgentMsgs.length > 0 ? valAgentMsgs[valAgentMsgs.length - 1] : null;
-                const isComplete = lastAgentMsg && lastAgentMsg.content.toUpperCase().includes('KRONN:VALIDATION_COMPLETE');
-                if (!isComplete) return null;
+                if (!proj) return null;
+                const banner = validationBanner(validationState, activeDiscussion.id, proj.audit_status);
+                if (banner.kind === 'none') return null;
+                // A validation of an older audit run: say so, point at the
+                // one that counts, and offer nothing the server would refuse.
+                if (banner.kind === 'superseded') {
+                  const currentId = banner.currentDiscussionId;
+                  return (
+                    <div className="disc-cta-banner" data-variant="warning" data-testid="validation-superseded-banner">
+                      <p className="disc-cta-text" data-variant="warning">
+                        <AlertTriangle size={14} /> {t('audit.validationSuperseded')}
+                      </p>
+                      {currentId && (
+                        <button className="disc-cta-btn" data-variant="warning" onClick={() => { setActiveDiscussionId(currentId); }}>
+                          <MessageSquare size={12} /> {t('audit.resumeValidation')}
+                        </button>
+                      )}
+                    </div>
+                  );
+                }
+                // Finished, yet the server would refuse: show why, not a button.
+                if (banner.kind === 'blocked') {
+                  return (
+                    <div className="disc-cta-banner" data-variant="warning" data-testid="validation-blocked-banner">
+                      <p className="disc-cta-text" data-variant="warning">
+                        <AlertTriangle size={14} /> {banner.block ? t(`auditTimeline.validation.block.${banner.block}`) : t('audit.validationComplete')}
+                      </p>
+                    </div>
+                  );
+                }
                 return (
                   <div className="disc-cta-banner" data-variant="accent">
                     <p className="disc-cta-text" data-variant="accent">
@@ -4883,11 +4941,10 @@ export function DiscussionsPage({
                   Always offered (no team-size gate) — solo devs are the
                   biggest beneficiaries of mobile-issue → AutoPilot. */}
               {(() => {
-                if (activeDiscussion.title !== 'Validation audit AI' || !activeDiscussion.project_id) return null;
-                const valAgentMsgs = activeDiscussion.messages.filter((m, idx) => m.role === 'Agent' && idx > 0);
-                const lastAgentMsg = valAgentMsgs.length > 0 ? valAgentMsgs[valAgentMsgs.length - 1] : null;
-                const isComplete = lastAgentMsg && lastAgentMsg.content.toUpperCase().includes('KRONN:VALIDATION_COMPLETE');
-                if (!isComplete) return null;
+                if (!activeDiscussion.project_id || !validationState) return null;
+                // The server's verdict for THIS discussion: it is the latest
+                // run's validation and it signalled completion (durable).
+                if (validationState.discussion_id !== activeDiscussion.id || !validationState.finished) return null;
                 if (!onLaunchWorkflowFromPreset) return null;
                 const projectId = activeDiscussion.project_id;
                 return (

@@ -274,7 +274,15 @@ pub fn latest_completed(conn: &Connection, project_id: &str) -> Result<Option<Au
 /// trusts only this durable link, never title/date heuristics.
 pub fn set_validation_discussion(conn: &Connection, run_id: &str, disc_id: &str) -> Result<()> {
     let affected = conn.execute(
-        "UPDATE audit_runs SET validation_discussion_id = ?2 WHERE id = ?1",
+        // A different discussion starts a fresh validation: the completion
+        // stamped for the previous one (KT-1122) does not carry over.
+        "UPDATE audit_runs SET
+             validation_completed_at = CASE
+                 WHEN validation_discussion_id IS ?2 THEN validation_completed_at END,
+             validation_completed_message_id = CASE
+                 WHEN validation_discussion_id IS ?2 THEN validation_completed_message_id END,
+             validation_discussion_id = ?2
+         WHERE id = ?1",
         params![run_id, disc_id],
     )?;
     anyhow::ensure!(
@@ -1392,7 +1400,9 @@ mod tests {
                 branch TEXT,
                 source_fingerprint TEXT,
                 model TEXT,
-                project_profile_draft TEXT
+                project_profile_draft TEXT,
+                validation_completed_at TEXT,
+                validation_completed_message_id TEXT
             );
             CREATE TABLE audit_run_steps (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
