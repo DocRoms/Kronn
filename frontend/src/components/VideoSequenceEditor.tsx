@@ -329,7 +329,9 @@ export function VideoSequenceEditor({
             <dd data-testid="video-sequence-total-duration">
               {zones.included.length - totals.unknownDurations > 0 ? formatDuration(totals.durationMs, t) : '—'}
               {totals.unknownDurations > 0 && (
-                <small>{t('disc.assets.unknownDurations', totals.unknownDurations)}</small>
+                <small title={t('disc.assets.unknownDurations', totals.unknownDurations)}>
+                  {t('disc.assets.unknownDurations', totals.unknownDurations)}
+                </small>
               )}
             </dd>
           </div>

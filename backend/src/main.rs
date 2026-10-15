@@ -735,10 +735,7 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     // below never holds the single DB connection.
     {
         let db = state.db.clone();
-        match db
-            .with_conn(|conn| kronn::db::projects::list_projects(conn))
-            .await
-        {
+        match db.with_conn(kronn::db::projects::list_projects).await {
             Ok(projects) => {
                 let cleanup = tokio::task::spawn_blocking(move || {
                     for p in &projects {

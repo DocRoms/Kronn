@@ -2362,7 +2362,11 @@ host_sync?: HostSyncMode,
  */
 custom_spec?: CustomApiPayload | null, };
 
-export type CreatePlanningDodItem = { id: string | null, sentence: string, completed: boolean, };
+export type CreatePlanningDodItem = { id: string | null, sentence: string, completed: boolean,
+/**
+ * KT-1254 — `None` keeps an existing item's mode (`Worker` for a new one).
+ */
+verification?: PlanningDodVerification, };
 
 export type CreatePlanningTaskLink = { label: string, url: string, };
 
@@ -6371,10 +6375,27 @@ actionable: boolean, };
 
 export type PlanningDodItem = { id: string, sentence: string, completed: boolean, position: number,
 /**
- * KT-1262 — what the item was ticked on when an approve integrated.
- * `None` for an item ticked by hand or not ticked.
+ * KT-1254 — who proves the item and when. `Worker` (default) is covered by
+ * the delivery; `PostIntegration` is the principal's live check, made
+ * after integration, and never blocks approve.
  */
-evidence: string | null, };
+verification: PlanningDodVerification,
+/**
+ * KT-1254 / KT-1262 — the proof the item was ticked on: the principal's
+ * live evidence for a post-integration item, or what an integrating
+ * approve verified for a worker item. Cleared when the item is unticked.
+ */
+evidence?: string | null, };
+
+/**
+ * KT-1254 — how a DoD item is verified.
+ */
+export type PlanningDodVerification = "worker" | "post_integration";
+
+/**
+ * KT-1254 — a pending principal live check, as the plan shows it.
+ */
+export type PlanningLiveCheck = { dod_id: string, sentence: string, };
 
 export type PlanningPlacement = "active" | "later";
 
@@ -6418,7 +6439,12 @@ export type PlanningTaskDetail = { subtasks: Array<PlanningTaskSummary>, descrip
  * KT-154 — manual assignees first (assignment order), then the worker of a
  * live TaskExecution when it is not already assigned by hand.
  */
-assignees: Array<PlanningAssignee>, created_at: string, updated_at: string, };
+assignees: Array<PlanningAssignee>,
+/**
+ * KT-1254 — unticked post-integration DoD items: the principal's live
+ * checks still owed on this task.
+ */
+live_checks?: Array<PlanningLiveCheck>, created_at: string, updated_at: string, };
 
 export type PlanningTaskEvent = { id: string, action: string, actor_kind: PlanningActorKind, actor_id: string | null, actor_session_id: string | null, changes: JsonValue, source_message_id: string | null, created_at: string, };
 
@@ -6435,7 +6461,12 @@ export type PlanningTaskSummary = { id: string, reference: string, parent_id: st
  * KT-154 — manual assignees first (assignment order), then the worker of a
  * live TaskExecution when it is not already assigned by hand.
  */
-assignees: Array<PlanningAssignee>, created_at: string, updated_at: string, };
+assignees: Array<PlanningAssignee>,
+/**
+ * KT-1254 — unticked post-integration DoD items: the principal's live
+ * checks still owed on this task.
+ */
+live_checks?: Array<PlanningLiveCheck>, created_at: string, updated_at: string, };
 
 export type PlanningWorkspaceSummary = { id: string, disc_id: string, branch: string, state: string, ownership: string, session_agent_type: string | null, };
 
@@ -7802,7 +7833,13 @@ dod_verifications: Array<ReviewDodVerification>, comment: string | null, finding
  * persisted inside the attempt-scoped ReviewDecision, never inferred from a
  * mutable Planning checkbox.
  */
-export type ReviewDodVerification = { dod_id: string, met: boolean, evidence: string, };
+export type ReviewDodVerification = { dod_id: string, met: boolean, evidence: string,
+/**
+ * KT-1254 — `post_integration` (with `met: false`) declares the item a
+ * principal live check made after integration: approve integrates with it
+ * pending and the task closes once it is ticked with evidence.
+ */
+verification?: PlanningDodVerification | null, };
 
 /**
  * A structured review finding (ADR §5). `issue` is required; `path` / `line`
@@ -10142,7 +10179,11 @@ export type UpdateMcpConfigRequest = { label?: string | null, env?: Record<strin
 
 export type UpdateMcpContextRequest = { content: string, };
 
-export type UpdatePlanningDodItemRequest = { completed: boolean, actor?: PlanningActor, };
+export type UpdatePlanningDodItemRequest = { completed: boolean,
+/**
+ * Required to tick a post-integration item: the principal's live proof.
+ */
+evidence?: string | null, actor?: PlanningActor, };
 
 export type UpdatePlanningTaskRequest = { title?: string | null, description?: string | null, status?: PlanningTaskStatus | null, priority?: PlanningTaskPriority | null, parent_id?: string | null | null, blocked_reason?: string | null | null, rank?: number | null, project_ids?: Array<string> | null, tags?: Array<string> | null, definition_of_done?: Array<CreatePlanningDodItem> | null, links?: Array<CreatePlanningTaskLink> | null, actor?: PlanningActor, };
 

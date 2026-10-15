@@ -351,7 +351,7 @@ describe('DiscussionPlanPanel', () => {
     }));
     mocks.get.mockResolvedValue(detail({
       status: 'in_progress',
-      definition_of_done: [{ id: 'dod-1', sentence: 'The code compiles', completed: false, position: 0, evidence: null }],
+      definition_of_done: [{ id: 'dod-1', sentence: 'The code compiles', completed: false, position: 0, verification: 'worker' }],
     }));
     mocks.discussionLinks.mockResolvedValue([{
       execution_id: 'exec-1', orchestration_run_id: 'run-1', task_id: 'task-1',
@@ -367,7 +367,7 @@ describe('DiscussionPlanPanel', () => {
         workspace_canonical_path: '/tmp/worker',
       },
       target_branch: 'main',
-      definition_of_done: [{ id: 'dod-1', sentence: 'The code compiles', completed: false, position: 0, evidence: null }],
+      definition_of_done: [{ id: 'dod-1', sentence: 'The code compiles', completed: false, position: 0, verification: 'worker' }],
       attempts: [{
         attempt_no: 2,
         delivery: { head_sha: 'abc12345' },
@@ -580,7 +580,7 @@ describe('DiscussionPlanPanel', () => {
         sentence: 'Ship the focused test',
         completed: false,
         position: 0,
-        evidence: null,
+        verification: 'worker',
       }],
     });
     const updated = detail({
@@ -589,7 +589,7 @@ describe('DiscussionPlanPanel', () => {
         sentence: 'Ship the focused test',
         completed: true,
         position: 0,
-        evidence: 'Verified by the principal',
+        verification: 'worker',
       }],
     });
     mocks.get.mockResolvedValueOnce(initial).mockResolvedValue(updated);

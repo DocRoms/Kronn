@@ -921,13 +921,14 @@ fn build_tool_catalogue() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "task_update_dod",
-                "description": "Check or uncheck one DoD item atomically, using ids returned by task_get.",
+                "description": "Check or uncheck one DoD item atomically, using ids returned by task_get. A post_integration item is the principal's live check: ticking it needs evidence.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "task_id": { "type": "string" },
                         "dod_id": { "type": "string" },
-                        "completed": { "type": "boolean" }
+                        "completed": { "type": "boolean" },
+                        "evidence": { "type": "string" }
                     },
                     "required": ["task_id", "dod_id", "completed"]
                 },
@@ -1221,10 +1222,10 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
         ),
         tool(
             "task_exec_review",
-            "As the parent-room principal, submit a ReviewDecision v1. Approval is guarded and must name the exact reviewed_head_sha plus one dod_verifications entry per DoD item, each with non-empty evidence from your own validation; a mutable Planning checkbox is not review evidence. request_changes requires an actionable comment.",
+            "As the parent-room principal, submit a ReviewDecision v1. Approval is guarded and must name the exact reviewed_head_sha plus one dod_verifications entry per DoD item (except a post-integration live check), each with non-empty evidence from your own validation; a mutable Planning checkbox is not review evidence. request_changes requires an actionable comment.",
             json!({
                 "task_execution_id": {"type": "string"},
-                "decision": {"type": "object", "description": "ReviewDecision v1: version \"1\" (string), task_ref, decision ('approve' | 'request_changes'), reviewed_head_sha (required for approve), dod_verifications [{dod_id, met, evidence}] (one per DoD item, required for approve), comment (required for request_changes), findings [{path?, line?, issue}]."}
+                "decision": {"type": "object", "description": "ReviewDecision v1: version \"1\" (string), task_ref, decision ('approve' | 'request_changes'), reviewed_head_sha (required for approve), dod_verifications [{dod_id, met, evidence, verification?}] (required for approve: one per DoD item except a live check, which is `post_integration` + met false, never a blocker), comment (required for request_changes), findings [{path?, line?, issue}]."}
             }),
             json!(["task_execution_id", "decision"]),
         ),
@@ -2182,6 +2183,7 @@ impl ToolExecutor for KronnToolExecutor {
                 let request = UpdatePlanningDodItemRequest {
                     completed,
                     actor: self.actor(),
+                    evidence: required_string(call, "evidence"),
                 };
                 let Json(res) = crate::api::planning::update_dod_item(
                     State(self.state.clone()),
@@ -4935,7 +4937,9 @@ mod tests {
         for field in [
             "version \"1\" (string)",
             "reviewed_head_sha",
-            "dod_verifications [{dod_id, met, evidence}]",
+            "dod_verifications [{dod_id, met, evidence, verification?}]",
+            "one per DoD item except a live check",
+            "post_integration",
             "comment",
             "findings",
         ] {

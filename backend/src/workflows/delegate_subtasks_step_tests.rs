@@ -336,6 +336,7 @@ async fn fixture(count: usize, blocked_by: &[(usize, usize)]) -> Fixture {
                     id: None,
                     sentence: format!("{title} is written to its file"),
                     completed: false,
+                    verification: None,
                 }],
                 links: vec![],
                 actor: test_actor(),

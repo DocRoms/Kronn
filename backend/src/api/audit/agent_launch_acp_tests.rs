@@ -824,7 +824,7 @@ async fn a_backend_crash_mid_step_is_settled_at_boot(pipeline: Pipeline) {
     // Boot.
     let settled = state
         .db
-        .with_conn(|conn| crate::api::audit::step_guard::settle_unfinished_at_boot(conn))
+        .with_conn(crate::api::audit::step_guard::settle_unfinished_at_boot)
         .await
         .unwrap();
     assert_eq!(settled, 1, "{pipeline:?}");
@@ -929,7 +929,7 @@ async fn a_direct_cli_step_records_and_clears_its_process_group(pipeline: Pipeli
     let recorded = || {
         state
             .db
-            .with_conn(|conn| crate::db::audit_runs::recorded_agent_processes(conn))
+            .with_conn(crate::db::audit_runs::recorded_agent_processes)
     };
     let mut found = Vec::new();
     for _ in 0..500 {

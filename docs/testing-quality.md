@@ -123,6 +123,15 @@ and a TERM-during-build test guard both.
 `[src: file: scripts/dev-backend-supervisor.sh:90-103]`
 `[src: file: tests/bats/ui.bats:704-808]`
 
+### Doc citations in CI
+
+The citation check (`cargo test docs_citations`) is scoped on a pull request:
+CI lists the paths the pull request changes and the check blocks only on the
+docs among them; a pull request that changes no doc gets the result as a counted
+warning. A pull request that changes `VERSION`, a push and a manual run stay
+strict over every doc [src: file: backend/src/core/docs_citations.rs:29#CHANGED_ENV].
+`make docs-reanchor` repairs moved citations before a release.
+
 ## Backend CI timing SLO
 
 The backend suite is the measured critical path and runs once, split in

@@ -4790,6 +4790,35 @@ fn approved_dod_evidence(conn: &Connection, exec_id: &str) -> Result<Vec<(String
     Ok(evidence)
 }
 
+/// KT-1262 — the worker DoD items the Integrated checkpoint would leave
+/// unticked: unticked now and not verified by the approved attempt. A
+/// post-integration live check is not one. Read BEFORE the git apply, so an item
+/// added between approve and integration holds the approval while the target is
+/// untouched, instead of parking an execution whose code already landed.
+pub fn unverified_worker_dod(conn: &Connection, exec_id: &str) -> Result<Vec<(String, String)>> {
+    let Some(task_id) = conn
+        .query_row(
+            "SELECT task_id FROM task_executions WHERE id = ?1",
+            params![exec_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    else {
+        return Ok(Vec::new());
+    };
+    let verified = approved_dod_evidence(conn, exec_id)?
+        .into_iter()
+        .filter(|(_, evidence)| !evidence.trim().is_empty())
+        .map(|(dod_id, _)| dod_id)
+        .collect::<std::collections::HashSet<_>>();
+    Ok(
+        crate::db::planning::unticked_worker_dod_within_tx(conn, &task_id)?
+            .into_iter()
+            .filter(|(dod_id, _)| !verified.contains(dod_id))
+            .collect(),
+    )
+}
+
 /// Commit one integration-saga step: pin its checkpoint columns and its transition
 /// in a single transaction (ADR §4bis, KT-320 DoD-7). The four columns declared by
 /// migration 127 come alive here — until this, the boot-time reconciliation reasoned
@@ -4855,17 +4884,10 @@ pub fn commit_integration_checkpoint(
                 |row| row.get(0),
             )?;
             // KT-1262 — the approve's evidence reaches the DoD before the task
-            // completes, and a task with an unticked item that is not a
-            // post-integration check does not complete at all.
+            // completes; `mark_task_done_within_tx` then refuses a task that
+            // still has an unticked worker item (the transaction rolls back).
             let verified = approved_dod_evidence(&tx, exec_id)?;
             crate::db::planning::tick_verified_dod_within_tx(&tx, &task_id, &verified, actor)?;
-            let unticked = crate::db::planning::unticked_dod_within_tx(&tx, &task_id)?;
-            if unticked
-                .iter()
-                .any(|(_, sentence)| !crate::db::planning::is_post_integration_check(sentence))
-            {
-                return Ok(IntegrationCheckpointOutcome::TaskNotCompletable);
-            }
             if !crate::db::planning::mark_task_done_within_tx(&tx, &task_id, actor)? {
                 return Ok(IntegrationCheckpointOutcome::TaskNotCompletable);
             }

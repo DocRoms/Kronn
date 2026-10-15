@@ -569,8 +569,8 @@ resource wait separately from a failed plan. Do not send a generation request
 merely to guess whether a quota is available.
 [src: file: backend/src/models/orchestration.rs:1170-1193#TaskWorkerTier]
 [src: file: backend/src/api/orchestration.rs:10263-10306]
-[src: file: backend/src/api/orchestration.rs:11106-11148#bounded_provider_quota_details]
-[src: file: backend/src/api/orchestration.rs:11410-11439#task_exec_prepare]
+[src: file: backend/src/api/orchestration.rs:11169-11211#bounded_provider_quota_details]
+[src: file: backend/src/api/orchestration.rs:11473-11502#task_exec_prepare]
 
 A `user_input` value may also carry a `<page.…>` `source_ref`: when the card
 opens, `POST /api/live-page-actions/{id}/prefill` resolves it server-side for
@@ -610,7 +610,7 @@ Agents learn this contract where they write Page HTML: the MCP manuals of
 block's reference must stay stable across revisions since it ties a button to
 its past launches, and the `workflow-architect` skill carries the same rules.
 `[src: file: backend/scripts/disc-introspection-mcp.py:9861-9896#_PAGE_ACTION_CONTRACT]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:10188-10197#page_update_html]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10202-10211#page_update_html]`
 `[src: file: backend/src/skills/workflow-architect.md:384-391#data-kronn-action-state]`
 Active and terminal execution rendering delegates to the common
 `RunStatusCard` contract used by Discussions. A Quick Prompt result records

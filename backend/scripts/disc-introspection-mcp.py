@@ -571,10 +571,10 @@ TOOLS = [
     {
         "name": "task_update_dod",
         "description": (
-            "Check or uncheck one Definition of Done item atomically. Use the "
-            "DoD item id returned by task_get. Prefer this over replacing the "
-            "whole definition_of_done array when only completion changed: two "
-            "agents can update different items without overwriting each other."
+            "Check or uncheck one DoD item atomically, by the id task_get "
+            "returns; prefer it to replacing the whole array. A "
+            "post_integration item is the principal's live check: ticking it "
+            "needs `evidence`."
         ),
         "inputSchema": {
             "type": "object",
@@ -582,6 +582,7 @@ TOOLS = [
                 "task_id": {"type": "string"},
                 "dod_id": {"type": "string"},
                 "completed": {"type": "boolean"},
+                "evidence": {"type": "string"},
                 "source_message_id": {"type": "string"},
             },
             "required": ["task_id", "dod_id", "completed"],
@@ -766,12 +767,10 @@ TOOLS = [
             "finds the room again via `disc_find_by_session` without a fresh "
             "invite token. ⚠ EVERY ARGUMENT IS OPTIONAL: called bare, "
             "`disc_link({})` binds THIS CLI session to the currently-bound "
-            "disc (the bridge derives your session id). `disc_join` already "
-            "does this for you; call this only "
-            "to bind a disc you reached another way. Safe by default: if that "
-            "session already owns another discussion the call fails instead of "
-            "silently stealing it. Set force_reassign=true only when the user "
-            "explicitly asks to transfer ownership."
+            "disc. `disc_join` already does this; call this only for a disc "
+            "you reached another way. A session that already owns another "
+            "discussion fails instead of being stolen: set force_reassign=true "
+            "only when the user explicitly asks to transfer ownership."
         ),
         "inputSchema": {
             "type": "object",
@@ -794,15 +793,12 @@ TOOLS = [
     {
         "name": "disc_transfer_session",
         "description": (
-            "Explicitly hand THIS durable CLI session from its previous room "
-            "to the room currently joined by this bridge. Use only after the "
-            "human clearly asks to change rooms. `from_disc_id` pins the room "
-            "the caller expects to release and `confirm_transfer=true` is "
-            "mandatory; ownership changes or missing confirmation fail closed. "
-            "The backend atomically moves the binding and returns "
-            "`session_bound: true`. "
-            "Afterward, a bare `disc_find_by_session({})` resumes this new room "
-            "after an MCP reload."
+            "Hand THIS durable CLI session from its previous room to the room "
+            "this bridge has joined, only after the human clearly asks to "
+            "change rooms. `from_disc_id` pins the room you expect to release "
+            "and `confirm_transfer=true` is mandatory; a missing confirmation "
+            "or an ownership change fails closed. The binding moves "
+            "atomically (`session_bound: true`)."
         ),
         "inputSchema": {
             "type": "object",
@@ -890,14 +886,12 @@ TOOLS = [
         "description": (
             "Declare or refresh THIS joined CLI session's Git worktree in the "
             "current discussion. `workspace_path` defaults to the bridge's "
-            "current directory; Kronn canonicalizes it and reads the real "
-            "branch + HEAD from Git, so never guess or send those fields. "
-            "Optionally link the workspace to a planning task with "
-            "`task_ref`. The path must be a registered worktree of "
-            "the discussion project's primary or linked repositories, and one "
-            "physical worktree cannot belong to two discussions. The result "
-            "always has a `blockers` array: guards on success, or the "
-            "refusal's blocker."
+            "current directory; Kronn reads the real branch + HEAD from Git, "
+            "so never send those fields. Optionally link a planning task with "
+            "`task_ref`. The path must be a registered worktree of the "
+            "discussion project's repositories, and one physical worktree "
+            "cannot belong to two discussions. The result always has a "
+            "`blockers` array: guards on success, or the refusal's blocker."
         ),
         "inputSchema": {
             "type": "object",
@@ -1124,9 +1118,26 @@ TOOLS = [
                     "description": (
                         "DeliveryManifest v1: version \"1\" (string), task_ref, head_sha, "
                         "files_touched, tests, dod_status, docs, migrations, risks, "
-                        "limitations, summary, tests_executed {executed: bool, which: "
-                        "[commands]} (required)."
+                        "limitations, summary, tests_executed (required)."
                     ),
+                    # Declared here, inside the literal the budget gate measures:
+                    # the spawned-worker projection in `_visible_tools` reuses it.
+                    "properties": {
+                        "tests_executed": {
+                            "type": "object",
+                            "description": (
+                                "Whether a test really ran, and which commands: "
+                                "`executed: false` needs `which: []`; `true` needs the "
+                                "commands, matching a pass/fail `tests` entry."
+                            ),
+                            "additionalProperties": False,
+                            "required": ["executed", "which"],
+                            "properties": {
+                                "executed": {"type": "boolean"},
+                                "which": {"type": "array", "items": {"type": "string"}},
+                            },
+                        },
+                    },
                 },
             },
             "required": ["task_execution_id", "manifest"],
@@ -1153,9 +1164,11 @@ TOOLS = [
                     "description": (
                         "ReviewDecision v1: version \"1\" (string), task_ref, decision "
                         "('approve' | 'request_changes'), reviewed_head_sha (required for "
-                        "approve), dod_verifications [{dod_id, met, evidence}] (one per DoD "
-                        "item, required for approve), comment (required for "
-                        "request_changes), findings [{path?, line?, issue}]."
+                        "approve), dod_verifications [{dod_id, met, evidence, "
+                        "verification?}] (required for approve: one per DoD item except a "
+                        "live check, which is `post_integration` + met false, never a "
+                        "blocker), comment (required for request_changes), findings "
+                        "[{path?, line?, issue}]."
                     ),
                 },
             },
@@ -1191,12 +1204,11 @@ TOOLS = [
             "Look up the Kronn disc_id bound to a CLI session, or `null` if "
             "none. ⚠ BOTH ARGUMENTS ARE OPTIONAL: called bare, "
             "`disc_find_by_session({})` answers which room MY session is "
-            "bound to and actively restores THIS bridge's runtime binding "
-            "and durable read cursor after an MCP reload. A legacy session "
-            "with no local resume credential returns `rejoin_required: true` "
-            "and needs one fresh kr-join bootstrap. "
-            "Also the way to decide between `disc_create` (no prior thread) "
-            "and `disc_append` (resume an existing one)."
+            "bound to and restores THIS bridge's runtime binding and durable "
+            "read cursor after an MCP reload. A legacy session with no local "
+            "resume credential returns `rejoin_required: true` and needs one "
+            "fresh kr-join bootstrap. Decides between `disc_create` (no prior "
+            "thread) and `disc_append` (resume)."
         ),
         "inputSchema": {
             "type": "object",
@@ -4904,6 +4916,7 @@ def call_task_update_dod(args):
             f"/api/planning/tasks/{encoded_task}/dod/{encoded_dod}",
             {
                 "completed": args["completed"],
+                "evidence": args.get("evidence"),
                 "actor": _planning_actor(args),
             },
         )),
@@ -5927,21 +5940,10 @@ def _visible_tools():
             "risks": {"type": "array", "items": {"type": "string"}},
             "limitations": {"type": "array", "items": {"type": "string"}},
             "summary": {"type": "string", "minLength": 1},
-            "tests_executed": {
-                "type": "object",
-                "description": (
-                    "Whether any test was actually executed in this run, and which "
-                    "commands. `executed: false` requires `which: []`; `executed: "
-                    "true` requires the commands that ran, matching at least one "
-                    "`tests` entry reported pass or fail."
-                ),
-                "additionalProperties": False,
-                "required": ["executed", "which"],
-                "properties": {
-                    "executed": {"type": "boolean"},
-                    "which": {"type": "array", "items": {"type": "string"}},
-                },
-            },
+            # Declared in the TOOLS literal (the budget gate counts it there).
+            "tests_executed": delivery["inputSchema"]["properties"]["manifest"][
+                "properties"
+            ]["tests_executed"],
         },
     }
     status = next(item for item in TOOLS if item["name"] == "task_exec_status")
@@ -10022,6 +10024,18 @@ TOOL_MANUALS = {
         "Launch may persist principal-owned `validations: [{command, quick_exec_id?, "
         "timeout_secs?}]`; never copy gates from the worker manifest. Reuse one idempotency key "
         "if the launch response is lost.\n\n"
+        "**Live checks.** A DoD item that can only be proven once the code is integrated and "
+        "running (a replay on a real input) is a principal live check. Only the principal of the "
+        "task's execution, or a human, may declare or remove it: a worker, an HTTP agent or an "
+        "anonymous agent is refused. Declare it either with `task_update` while the execution is "
+        "live (`definition_of_done` item `{id, sentence, verification: \"post_integration\"}`) or "
+        "at review, with a `dod_verifications` entry `{dod_id, met: false, evidence, "
+        "verification: \"post_integration\"}`; `task_create` cannot, a new task has no execution. "
+        "The worker reports it `met: false` honestly; approve integrates with it pending, the task "
+        "stays open and the plan lists it as a live check. Run it yourself after integration, then "
+        "tick it with `task_update_dod({completed: true, evidence})`: evidence is mandatory, and "
+        "the task closes on the last tick. Downgrading it to a worker check and ticking it in "
+        "one write is refused.\n\n"
         "**Validations contract.** Kronn runs each `command` on the candidate at integration, "
         "after review — NOT through a shell. The command is split on whitespace into ONE binary "
         "and its literal arguments, then run like a Quick Exec:\n"

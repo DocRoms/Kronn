@@ -481,12 +481,14 @@ Release notes for 0.9.3 and earlier are available in the
 - An approve that integrates now ticks the Definition of Done items it
   verified and stores their evidence on the item (the principal's
   `dod_verifications`, else the worker's own `dod_status`), so a task no longer
-  reaches `done` with its DoD at 0/N while the evidence exists. The checkpoint
-  refuses a task that would reach `done` with an unticked item, except a
-  `Post-integration` check. `task_exec_deliver` and `task_exec_review` name
-  the fields the backend requires (`tests_executed`, `reviewed_head_sha`,
-  `dod_verifications`, the string version `"1"`), and a spawned worker's
-  manifest schema requires `tests_executed`.
+  reaches `done` with its DoD at 0/N while the evidence exists. A task with an
+  unticked worker item is held BEFORE the git apply (the target does not move);
+  the only exception is a KT-1254 `post_integration` live check, which an
+  integration never ticks and which keeps the task open. `task_exec_deliver` and
+  `task_exec_review` name the fields the backend requires (`tests_executed`,
+  `reviewed_head_sha`, `dod_verifications`, the string version `"1"`), and a
+  spawned worker's `tests_executed` schema is declared in the measured `TOOLS`
+  literal.
 
 - The default-docs-root golden no longer depends on the day it runs: the
   compact date every step prompt opens with is masked like the dashed one.
