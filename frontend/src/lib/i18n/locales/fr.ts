@@ -914,6 +914,7 @@ const fr: TranslationDict = {
   'projects.master.overview.dependencyUnsupported': 'Analyse non prise en charge',
   'projects.master.overview.dependencyToolUnavailable': 'Outil indisponible',
   'projects.master.overview.dependencyTimedOut': 'Délai dépassé',
+  'projects.master.overview.dependencyNotInstalled': 'Dépendances non installées',
   'projects.master.overview.dependencyCheckFailed': 'Vérification impossible',
   'projects.source.loading': 'Chargement du code source…',
   'projects.source.loadingTreeBackground': 'Chargement du reste du projet en arrière-plan',

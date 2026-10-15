@@ -5,7 +5,7 @@ import { useT } from '../../lib/I18nContext';
 import { useCachedResource } from '../../hooks/useCachedResource';
 import type { DependencyUpdateSummary } from '../../types/generated';
 
-const INCOMPLETE = ['Unsupported', 'Unavailable', 'Error', 'TimedOut'];
+const INCOMPLETE = ['Unsupported', 'Unavailable', 'Error', 'TimedOut', 'NotInstalled'];
 
 /** The project's dependency freshness: last known result at once, refreshed behind it. */
 export function ProjectDependenciesBlock({ projectId, enabled }: { projectId: string; enabled: boolean }) {
@@ -156,7 +156,9 @@ export function ProjectDependenciesBlock({ projectId, enabled }: { projectId: st
                     ? t('projects.master.overview.dependencyToolUnavailable')
                     : manager.status === 'TimedOut'
                       ? t('projects.master.overview.dependencyTimedOut')
-                      : t('projects.master.overview.dependencyCheckFailed');
+                      : manager.status === 'NotInstalled'
+                        ? t('projects.master.overview.dependencyNotInstalled')
+                        : t('projects.master.overview.dependencyCheckFailed');
             const tone = manager.status === 'UpdatesAvailable'
               ? 'warning'
               : manager.status === 'UpToDate' ? 'success' : 'muted';

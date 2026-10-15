@@ -73,6 +73,17 @@ describe('ProjectDependenciesBlock', () => {
       expect(screen.getAllByText('projects.master.overview.dependenciesUnavailable').length).toBeGreaterThan(0));
   });
 
+  it('never reads a not-installed manifest as up to date (KT-1279)', async () => {
+    dependencyUpdatesMock.mockResolvedValueOnce(deps({
+      managers: [{ manager: 'JS / TS', manifest: 'package.json', status: 'NotInstalled', outdated: 0, major: 0, packages: [] }],
+    }));
+    render(<ProjectDependenciesBlock projectId="p5" enabled />);
+    await screen.findByText('projects.master.overview.dependencyNotInstalled');
+    expect(screen.queryByText('projects.master.overview.dependenciesUpToDate')).toBeNull();
+    expect(screen.queryByText('projects.master.overview.dependencyUpToDate')).toBeNull();
+    expect(screen.getAllByText('projects.master.overview.dependenciesPartial').length).toBeGreaterThan(0);
+  });
+
   it('fetches nothing while disabled', () => {
     render(<ProjectDependenciesBlock projectId="p4" enabled={false} />);
     expect(dependencyUpdatesMock).not.toHaveBeenCalled();

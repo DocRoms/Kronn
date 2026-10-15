@@ -288,3 +288,129 @@ fn the_stack_table_block_feeds_the_currency_cells_and_asks_for_no_td() {
     assert!(judged.contains("`Dependencies` coverage row"));
     assert!(judged.contains("becomes a TD"));
 }
+
+/// A front-apollo-shaped tree (KT-1279): the reusable workflow's input is
+/// `nodeversion`, Jenkins pins Node in an agent label, the Dockerfile in FROM.
+fn front_apollo_like(root: &Path) {
+    std::fs::create_dir_all(root.join(".github/workflows")).unwrap();
+    std::fs::write(
+        root.join(".github/workflows/CI_Quality-test.yaml"),
+        "name: Quality\njobs:\n  quality:\n    uses: org/shared/.github/workflows/quality.yaml@main\n    with:\n      nodeversion: 20\n      workdir: .\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("Jenkinsfile"),
+        "pipeline {\n  agent { label 'slavenodejs18' }\n  tools {\n    nodejs 'NodeJS 22.3'\n  }\n  stages { }\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("Dockerfile"),
+        "ARG NODE_VERSION=21\nFROM --platform=linux/amd64 docker.io/library/node:20.11-alpine AS build\nFROM nginx:1.25\nFROM node:${NODE_VERSION}\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn reusable_workflow_inputs_jenkinsfile_and_dockerfile_pins_are_found() {
+    let dir = tempfile::tempdir().unwrap();
+    front_apollo_like(dir.path());
+
+    let rows: Vec<(String, String, String, usize)> = ci_runtime_versions(dir.path())
+        .into_iter()
+        .map(|r| (r.runtime, r.version, r.file, r.line))
+        .collect();
+    let row = |v: &str, f: &str, l: usize| ("node".to_string(), v.to_string(), f.to_string(), l);
+    assert_eq!(
+        rows,
+        vec![
+            row("20", ".github/workflows/CI_Quality-test.yaml", 6),
+            row("18", "Jenkinsfile", 2),
+            row("22.3", "Jenkinsfile", 4),
+            row("21", "Dockerfile", 1),
+            row("20.11", "Dockerfile", 2),
+        ]
+    );
+}
+
+#[test]
+fn a_node_version_input_is_matched_in_any_spelling_and_by_its_default() {
+    let mut out = Vec::new();
+    scan_workflow(
+        "on:\n  workflow_call:\n    inputs:\n      node_version:\n        type: string\n        default: '18'\n      NodeVersion: 16\n      node-version-file: .nvmrc\n      nodeversionX: 4\n",
+        "w.yml",
+        &mut out,
+    );
+    let rows: Vec<_> = out.iter().map(|r| (r.version.as_str(), r.line)).collect();
+    assert_eq!(rows, vec![("18", 6), ("16", 7)]);
+}
+
+#[test]
+fn jenkins_labels_and_tools_only_match_node_versions() {
+    let mut out = Vec::new();
+    scan_jenkinsfile(
+        "agent { label 'maven3' }\nagent { label \"node-20\" }\nnodejs(nodeJSInstallationName: 'Node 18')\n// nodejs '14'\nlabel 'nodeless'\n",
+        "Jenkinsfile",
+        &mut out,
+    );
+    let rows: Vec<_> = out.iter().map(|r| (r.version.as_str(), r.line)).collect();
+    assert_eq!(rows, vec![("20", 2), ("18", 3)]);
+}
+
+#[test]
+fn ci_files_present_lists_what_exists_whether_parsed_or_not() {
+    let dir = tempfile::tempdir().unwrap();
+    front_apollo_like(dir.path());
+    std::fs::write(dir.path().join(".gitlab-ci.yml"), "stages: []\n").unwrap();
+    assert_eq!(
+        ci_files_present(dir.path()),
+        vec![
+            ".github/workflows/CI_Quality-test.yaml",
+            ".gitlab-ci.yml",
+            "Jenkinsfile",
+            "Dockerfile",
+        ]
+    );
+    assert!(ci_files_present(tempfile::tempdir().unwrap().path()).is_empty());
+}
+
+#[test]
+fn an_empty_pin_table_says_none_parsed_and_lists_the_ci_files() {
+    let files = vec![
+        ".github/workflows/ci.yml".to_string(),
+        "Jenkinsfile".to_string(),
+    ];
+    let block = render_version_block_with_ci(
+        VersionPurpose::Judgement,
+        VersionSource::DependencyWatch,
+        None,
+        &[],
+        &files,
+        "2026-10-16",
+    );
+    assert!(block.contains("None parsed by Kronn"), "{block}");
+    assert!(!block.contains("None found"), "{block}");
+    assert!(
+        block.contains("CI files present: `.github/workflows/ci.yml`, `Jenkinsfile`"),
+        "{block}"
+    );
+
+    let bare = render_version_block(VersionSource::DependencyWatch, None, &[], "2026-10-16");
+    assert!(bare.contains("None parsed by Kronn"), "{bare}");
+    assert!(bare.contains("no CI file was found either"), "{bare}");
+}
+
+#[test]
+fn a_not_installed_manifest_is_listed_as_unchecked() {
+    let mut s = summary();
+    s.managers[2].status = DependencyCheckStatus::NotInstalled;
+    s.managers[2].manifest = "package.json".into();
+    let snap = DependencySnapshot::from_summary(&s);
+    assert!(snap
+        .unchecked
+        .iter()
+        .any(|m| m.manifest == "package.json" && m.status == DependencyCheckStatus::NotInstalled));
+    assert!(!snap
+        .up_to_date
+        .iter()
+        .any(|(_, manifest)| manifest == "package.json"));
+}

@@ -2736,7 +2736,7 @@ export type DeliveryManifestV1 = { version: string, task_ref: string, head_sha: 
  */
 tests_executed?: TestsExecuted | null, };
 
-export type DependencyCheckStatus = "UpToDate" | "UpdatesAvailable" | "Unsupported" | "Unavailable" | "Error" | "TimedOut";
+export type DependencyCheckStatus = "UpToDate" | "UpdatesAvailable" | "Unsupported" | "Unavailable" | "Error" | "TimedOut" | "NotInstalled";
 
 export type DependencyManagerUpdate = { manager: string, manifest: string, status: DependencyCheckStatus, outdated: number, major: number, packages?: Array<DependencyUpdatePackage>, };
 

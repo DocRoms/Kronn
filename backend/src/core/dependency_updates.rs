@@ -600,12 +600,11 @@ fn parse_renovate_updates(
             let Some(manifest) = fallback_manifest(kind, package_file, manifests) else {
                 continue;
             };
-            let packages = by_manifest
-                .entry(manifest.relative_path.clone())
-                .or_default();
             let Some(dependencies) = file.get("deps").and_then(Value::as_array) else {
                 continue;
             };
+            let mut packages = Vec::new();
+            let mut resolved = false;
             for dependency in dependencies {
                 let Some(name) = dependency
                     .get("depName")
@@ -622,6 +621,18 @@ fn parse_renovate_updates(
                 else {
                     continue;
                 };
+                // A skipped dependency, a failed lookup or a dependency that
+                // was never looked up (no `updates` array) is not a verdict.
+                if dependency.get("skipReason").is_some()
+                    || !dependency.get("updates").is_some_and(Value::is_array)
+                    || dependency
+                        .get("warnings")
+                        .and_then(Value::as_array)
+                        .is_some_and(|warnings| !warnings.is_empty())
+                {
+                    continue;
+                }
+                resolved = true;
                 let Some(latest) = dependency
                     .get("updates")
                     .and_then(Value::as_array)
@@ -634,6 +645,14 @@ fn parse_renovate_updates(
                 if let Some(package) = update_package(name, current, latest) {
                     packages.push(package);
                 }
+            }
+            // A package file Renovate listed without resolving one dependency
+            // says nothing: it must not read "up to date" (KT-1279).
+            if resolved {
+                by_manifest
+                    .entry(manifest.relative_path.clone())
+                    .or_default()
+                    .extend(packages);
             }
         }
     }
@@ -691,17 +710,10 @@ async fn check_manifest(manifest: DetectedManifest) -> DependencyManagerUpdate {
     }
 
     let (program, args): (&str, Vec<&str>) = match manifest.kind {
-        ManagerKind::JavaScript if manifest.covers_nested => (
+        ManagerKind::JavaScript => (
             "npm",
-            vec![
-                "outdated",
-                "--json",
-                "--long",
-                "--workspaces",
-                "--include-workspace-root",
-            ],
+            npm_outdated_args(manifest.covers_nested, js_dependencies_installed(&manifest)),
         ),
-        ManagerKind::JavaScript => ("npm", vec!["outdated", "--json", "--long"]),
         ManagerKind::Composer => (
             "composer",
             vec![
@@ -775,14 +787,75 @@ async fn check_manifest(manifest: DetectedManifest) -> DependencyManagerUpdate {
     };
     match parsed {
         Ok(packages) if output.status.success() || !packages.is_empty() => {
-            finalize_manager(&manifest, packages)
+            settle_checked(&manifest, packages)
         }
         Ok(_) => empty_manager(&manifest, DependencyCheckStatus::Error),
         Err(_) if output.status.success() && stdout.trim().is_empty() => {
-            finalize_manager(&manifest, Vec::new())
+            settle_checked(&manifest, Vec::new())
         }
         Err(_) => empty_manager(&manifest, DependencyCheckStatus::Error),
     }
+}
+
+/// `npm outdated` reads installed versions from `node_modules`. Without it
+/// the workspace flags make npm 11 print `{}` and exit 0 without querying the
+/// registry (KT-1279), so they are only passed to an installed tree.
+fn npm_outdated_args(covers_nested: bool, installed: bool) -> Vec<&'static str> {
+    let mut args = vec!["outdated", "--json", "--long"];
+    if covers_nested && installed {
+        args.extend(["--workspaces", "--include-workspace-root"]);
+    }
+    args
+}
+
+/// Whether the manifest's directory holds an installed dependency tree.
+fn js_dependencies_installed(manifest: &DetectedManifest) -> bool {
+    std::fs::read_dir(manifest.directory.join("node_modules"))
+        .is_ok_and(|mut entries| entries.next().is_some())
+}
+
+/// Whether a `package.json` has anything to install: dependencies of its own,
+/// or workspace members that have some.
+fn js_declares_dependencies(path: &Path) -> bool {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return true;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&content) else {
+        return true;
+    };
+    value.get("workspaces").is_some()
+        || [
+            "dependencies",
+            "devDependencies",
+            "optionalDependencies",
+            "peerDependencies",
+        ]
+        .iter()
+        .any(|key| {
+            value
+                .get(key)
+                .and_then(Value::as_object)
+                .is_some_and(|dependencies| !dependencies.is_empty())
+        })
+}
+
+/// A tool answered and printed `packages`. An empty answer is "up to date"
+/// only when the tool provably inspected something: a JS manifest with
+/// dependencies and no `node_modules` has nothing npm could compare, so it
+/// stays incomplete and the Renovate fallback (which reads the lockfile)
+/// decides.
+fn settle_checked(
+    manifest: &DetectedManifest,
+    packages: Vec<DependencyUpdatePackage>,
+) -> DependencyManagerUpdate {
+    let nothing_inspected = manifest.kind == ManagerKind::JavaScript
+        && packages.is_empty()
+        && !js_dependencies_installed(manifest)
+        && js_declares_dependencies(&manifest.directory.join("package.json"));
+    if nothing_inspected {
+        return empty_manager(manifest, DependencyCheckStatus::NotInstalled);
+    }
+    finalize_manager(manifest, packages)
 }
 
 fn empty_manager(
@@ -1368,5 +1441,205 @@ mod tests {
         assert_eq!(update.packages.len(), MAX_PACKAGES_RETURNED);
         assert_eq!(update.packages[0].name, "shlex");
         assert!(update.packages[0].major);
+    }
+
+    /// A fake `npm` that records its argv and prints `stdout`; returns the
+    /// manager row `check_manifest` built for `directory`.
+    #[cfg(unix)]
+    fn check_with_fake_npm(
+        directory: &Path,
+        covers_nested: bool,
+        stdout: &str,
+    ) -> (DependencyManagerUpdate, Vec<String>) {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = tempfile::TempDir::new().unwrap();
+        let argv = bin.path().join("npm.argv");
+        let script = bin.path().join("npm");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\ncat <<'JSON'\n{}\nJSON\n",
+                argv.display(),
+                stdout
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Pay the first-exec scan outside the deadline under test.
+        assert!(std::process::Command::new(&script)
+            .status()
+            .unwrap()
+            .success());
+        let manifest = DetectedManifest {
+            kind: ManagerKind::JavaScript,
+            project_root: directory.to_path_buf(),
+            directory: directory.to_path_buf(),
+            relative_path: "package.json".into(),
+            covers_nested,
+        };
+        let path = format!("{}:/usr/bin:/bin", bin.path().display());
+        let update = crate::core::child_env::with_parent_env(
+            &[("PATH", path.as_str()), ("HOME", "/home/u")],
+            || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(check_manifest(manifest))
+            },
+        );
+        let recorded = std::fs::read_to_string(&argv)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        (update, recorded)
+    }
+
+    fn js_project(workspaces: bool, installed: bool) -> tempfile::TempDir {
+        let temp = tempfile::TempDir::new().unwrap();
+        let workspaces = if workspaces {
+            r#""workspaces":["packages/*"],"#
+        } else {
+            ""
+        };
+        std::fs::write(
+            temp.path().join("package.json"),
+            format!(r#"{{{workspaces}"dependencies":{{"joi":"^17.0.0"}}}}"#),
+        )
+        .unwrap();
+        if installed {
+            std::fs::create_dir_all(temp.path().join("node_modules/joi")).unwrap();
+        }
+        temp
+    }
+
+    const WORKSPACE_FLAGS: [&str; 2] = ["--workspaces", "--include-workspace-root"];
+
+    #[test]
+    fn npm_workspace_flags_are_only_passed_to_an_installed_tree() {
+        assert_eq!(
+            npm_outdated_args(true, true),
+            vec![
+                "outdated",
+                "--json",
+                "--long",
+                "--workspaces",
+                "--include-workspace-root"
+            ]
+        );
+        assert_eq!(
+            npm_outdated_args(true, false),
+            vec!["outdated", "--json", "--long"]
+        );
+        assert_eq!(
+            npm_outdated_args(false, true),
+            vec!["outdated", "--json", "--long"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_workspace_with_node_modules_runs_npm_with_the_workspace_flags() {
+        let project = js_project(true, true);
+        let (update, argv) = check_with_fake_npm(project.path(), true, "{}");
+        assert_eq!(
+            argv,
+            ["outdated", "--json", "--long"]
+                .iter()
+                .chain(&WORKSPACE_FLAGS)
+                .map(|a| a.to_string())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(update.status, DependencyCheckStatus::UpToDate);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_workspace_without_node_modules_drops_the_flags_and_never_reads_up_to_date() {
+        let project = js_project(true, false);
+        let (update, argv) = check_with_fake_npm(project.path(), true, "{}");
+        assert_eq!(argv, vec!["outdated", "--json", "--long"]);
+        assert_eq!(update.status, DependencyCheckStatus::NotInstalled);
+        assert!(!dependency_check_complete(&update.status));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_plain_manifest_without_node_modules_is_not_installed_not_up_to_date() {
+        let project = js_project(false, false);
+        for empty in ["{}", ""] {
+            let (update, argv) = check_with_fake_npm(project.path(), false, empty);
+            assert_eq!(argv, vec!["outdated", "--json", "--long"]);
+            assert_eq!(
+                update.status,
+                DependencyCheckStatus::NotInstalled,
+                "{empty:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn outdated_rows_without_node_modules_still_report_updates() {
+        let project = js_project(true, false);
+        let (update, _) = check_with_fake_npm(
+            project.path(),
+            true,
+            r#"{"joi":{"wanted":"17.13.0","latest":"18.0.0"}}"#,
+        );
+        assert_eq!(update.status, DependencyCheckStatus::UpdatesAvailable);
+        assert_eq!(update.major, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_manifest_with_nothing_to_install_is_up_to_date_without_node_modules() {
+        let project = tempfile::TempDir::new().unwrap();
+        std::fs::write(project.path().join("package.json"), r#"{"name":"x"}"#).unwrap();
+        let (update, _) = check_with_fake_npm(project.path(), false, "{}");
+        assert_eq!(update.status, DependencyCheckStatus::UpToDate);
+    }
+
+    #[test]
+    fn a_renovate_package_file_without_resolved_dependencies_is_not_a_verdict() {
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(temp.path().join("package.json"), "{}").unwrap();
+        let manifests = detect_manifests(temp.path());
+
+        let listed_only = r#"{"config":{"npm":[{"packageFile":"package.json","deps":[]}]},"msg":"packageFiles with updates"}"#;
+        assert!(parse_renovate_updates(listed_only, &manifests)
+            .unwrap()
+            .is_empty());
+
+        let no_deps_key = r#"{"config":{"npm":[{"packageFile":"package.json"}]},"msg":"packageFiles with updates"}"#;
+        assert!(parse_renovate_updates(no_deps_key, &manifests)
+            .unwrap()
+            .is_empty());
+
+        let skipped = r#"{"config":{"npm":[{"packageFile":"package.json","deps":[{"depName":"a","currentValue":"1.0.0","skipReason":"invalid-version","updates":[]},{"depName":"b","currentValue":"1.0.0","warnings":[{"message":"lookup failed"}],"updates":[]},{"depName":"c","currentValue":"1.0.0"}]}]},"msg":"packageFiles with updates"}"#;
+        assert!(parse_renovate_updates(skipped, &manifests)
+            .unwrap()
+            .is_empty());
+
+        let resolved = r#"{"config":{"npm":[{"packageFile":"package.json","deps":[{"depName":"a","currentValue":"1.0.0","updates":[]}]}]},"msg":"packageFiles with updates"}"#;
+        let parsed = parse_renovate_updates(resolved, &manifests).unwrap();
+        assert_eq!(parsed["package.json"].len(), 0);
+        assert!(parsed.contains_key("package.json"));
+    }
+
+    #[test]
+    fn an_unresolved_renovate_file_leaves_the_manager_incomplete() {
+        // The merge only finalizes a manager Renovate has an entry for.
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(temp.path().join("package.json"), "{}").unwrap();
+        let manifests = detect_manifests(temp.path());
+        let output = r#"{"config":{"npm":[{"packageFile":"package.json","deps":[]}]},"msg":"packageFiles with updates"}"#;
+        let fallback = parse_renovate_updates(output, &manifests).unwrap();
+        let mut manager = empty_manager(&manifests[0], DependencyCheckStatus::NotInstalled);
+        if let Some(packages) = fallback.get(&manager.manifest) {
+            finalize_manager_update(&mut manager, packages.clone());
+        }
+        assert_eq!(manager.status, DependencyCheckStatus::NotInstalled);
     }
 }

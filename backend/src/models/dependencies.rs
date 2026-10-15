@@ -11,6 +11,9 @@ pub enum DependencyCheckStatus {
     Unavailable,
     Error,
     TimedOut,
+    /// A JS manifest whose dependencies are not installed: npm cannot know
+    /// the installed versions, so "nothing outdated" would be a guess.
+    NotInstalled,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, TS, PartialEq, Eq)]

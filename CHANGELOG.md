@@ -478,6 +478,21 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- The version watch no longer tells the audit a JS project is up to date when
+  it could not look (KT-1279). A `package.json` without `node_modules` got
+  `npm outdated --workspaces`, which prints `{}` and exits 0 without querying
+  the registry, and that read « up to date » so the Renovate fallback never
+  ran: the workspace flags are now passed only to an installed tree, and an
+  empty answer for a manifest that declares dependencies but has none
+  installed is the new `NotInstalled` status (incomplete, Renovate decides,
+  listed as unchecked in the audit block). A Renovate package file with no
+  resolved dependency (none listed, skipped, failed lookup) no longer
+  finalizes as up to date either. The runtime pins also read a reusable
+  workflow's `nodeversion` / `node_version` input (and its `default:`), a
+  Jenkinsfile's `nodejs '…'` tool and node-versioned agent label, and a
+  Dockerfile's `FROM node:<v>` / `ARG NODE_VERSION`; when nothing is parsed the
+  audit block says « None parsed by Kronn » and lists the CI files present
+  instead of « None found ».
 - What a task worker starts ends with its dispatch, and Vite runs in its lane
   (KT-1266). A backend or a Vite started from the agent's shell tool ran in a
   process group of its own and kept listening on the lane's ports after the
