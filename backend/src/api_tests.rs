@@ -1747,8 +1747,15 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(root.status(), StatusCode::OK);
-        let html = String::from_utf8(root.into_body().collect().await.unwrap().to_bytes().to_vec())
-            .unwrap();
+        let html = String::from_utf8(
+            root.into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
         assert!(html.contains("kronn-ui"), "{html}");
 
         let health = app

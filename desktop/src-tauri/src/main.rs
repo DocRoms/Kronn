@@ -1175,10 +1175,22 @@ mod enrich_path_tests {
     #[test]
     fn the_lan_guard_treats_every_bind_all_host_alike() {
         for host in ["0.0.0.0", "::"] {
-            assert!(embedded_lan_guard(host, false, false, false).is_some(), "{host}");
-            assert!(embedded_lan_guard(host, true, false, false).is_some(), "{host}");
-            assert!(embedded_lan_guard(host, true, true, false).is_none(), "{host}");
-            assert!(embedded_lan_guard(host, false, false, true).is_none(), "{host}");
+            assert!(
+                embedded_lan_guard(host, false, false, false).is_some(),
+                "{host}"
+            );
+            assert!(
+                embedded_lan_guard(host, true, false, false).is_some(),
+                "{host}"
+            );
+            assert!(
+                embedded_lan_guard(host, true, true, false).is_none(),
+                "{host}"
+            );
+            assert!(
+                embedded_lan_guard(host, false, false, true).is_none(),
+                "{host}"
+            );
         }
         assert!(embedded_lan_guard("127.0.0.1", false, false, false).is_none());
         // `::` survives configure_embedded_server, so the guard must see it.
@@ -1460,9 +1472,7 @@ mod enrich_path_tests {
     #[test]
     fn startup_path_code_emits_no_tracing_event() {
         let source = include_str!("main.rs");
-        for signature in [
-            "fn enrich_path() -> StartupLog {",
-        ] {
+        for signature in ["fn enrich_path() -> StartupLog {"] {
             let start = source.find(signature).unwrap();
             let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
             for event in [
