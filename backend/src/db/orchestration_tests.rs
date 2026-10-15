@@ -1676,6 +1676,7 @@ fn parent_room_alerts(conn: &Connection) -> Vec<String> {
 }
 
 #[test]
+#[serial_test::serial(task_timeout_env)]
 fn a_run_without_a_policy_still_gets_the_default_activity_deadline() {
     let conn = setup();
     let execution = working_execution(&conn, "t-default-clock", 1300);
@@ -1691,6 +1692,81 @@ fn a_run_without_a_policy_still_gets_the_default_activity_deadline() {
     let armed = (deadline - recovery.last_activity_at).num_seconds();
     assert_eq!(armed, i64::from(default_activity_timeout_secs()));
     assert_eq!(armed, i64::from(DEFAULT_ACTIVITY_TIMEOUT_SECS));
+}
+
+/// A worker inside one long tool call (a cold `cargo build` under load) is
+/// busy, not silent; past the in-flight cap a stuck tool is caught again.
+#[test]
+fn a_tool_still_running_is_activity_until_its_cap() {
+    let conn = setup();
+    let execution = working_execution(&conn, "t-tool-in-flight", 1302);
+    conn.execute(
+        "INSERT INTO messages (id, discussion_id, role, content, timestamp, sort_order) \
+         VALUES ('msg-tool', ?1, 'User', 'work', '2026-01-01T00:00:00Z', 1)",
+        [DISC],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO agent_dispatch_jobs (id, discussion_id, trigger_message_id, \
+             trigger_sort_order, dedupe_key, chain_prompt_ids_json, status, available_at, \
+             created_at, updated_at) VALUES ('dispatch-tool', ?1, 'msg-tool', 1, \
+             'tool-dedupe', '[]', 'Running', '2026-01-01T00:00:00Z', \
+             '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        [DISC],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE task_executions SET dispatch_job_id = 'dispatch-tool' WHERE id = ?1",
+        [&execution.id],
+    )
+    .unwrap();
+    let past = (Utc::now() - chrono::Duration::minutes(30)).to_rfc3339();
+    conn.execute(
+        "UPDATE task_execution_recovery SET activity_deadline_at = ?2 WHERE task_execution_id = ?1",
+        params![execution.id, past],
+    )
+    .unwrap();
+    let set_phase = |phase: &str, minutes_ago: i64| {
+        let at = (Utc::now() - chrono::Duration::minutes(minutes_ago)).to_rfc3339();
+        conn.execute(
+            "UPDATE agent_dispatch_jobs SET progress_phase = ?1, last_progress_at = ?2 \
+             WHERE id = 'dispatch-tool'",
+            params![phase, at],
+        )
+        .unwrap();
+    };
+    let expired_ids = || -> Vec<String> {
+        expired_execution_timeouts(&conn, Utc::now())
+            .unwrap()
+            .into_iter()
+            .filter(|(_, kind)| *kind == ExecutionTimeoutKind::Activity)
+            .map(|(id, _)| id)
+            .collect()
+    };
+
+    // A tool started 25 min ago and still running: busy.
+    set_phase("tool_activity", 25);
+    assert!(
+        !expired_ids().contains(&execution.id),
+        "a running tool is activity"
+    );
+
+    // The same tool past the cap: hung, silent again.
+    set_phase(
+        "tool_activity",
+        i64::from(tool_in_flight_cap_secs()) / 60 + 5,
+    );
+    assert!(
+        expired_ids().contains(&execution.id),
+        "a tool past the cap is hung"
+    );
+
+    // Between tools, the activity deadline alone decides.
+    set_phase("upstream_wait", 25);
+    assert!(
+        expired_ids().contains(&execution.id),
+        "no tool in flight: silent"
+    );
 }
 
 #[test]
@@ -1731,6 +1807,153 @@ fn a_campaign_policy_overrides_the_default_activity_deadline() {
         .unwrap();
     let armed = (recovery.activity_deadline_at.unwrap() - recovery.last_activity_at).num_seconds();
     assert_eq!(armed, 90);
+}
+
+/// Sets a process-wide timeout variable for one test and puts it back on drop
+/// (also on panic). Only used under `serial(task_timeout_env)`.
+struct TimeoutEnv(&'static str);
+
+impl TimeoutEnv {
+    fn set(name: &'static str, value: &str) -> Self {
+        crate::core::child_env::set_var(name, value);
+        TimeoutEnv(name)
+    }
+}
+
+impl Drop for TimeoutEnv {
+    fn drop(&mut self) {
+        crate::core::child_env::remove_var(self.0);
+    }
+}
+
+fn armed_activity_secs(conn: &Connection, execution: &TaskExecution) -> i64 {
+    let recovery = get_execution_recovery(conn, &execution.id)
+        .unwrap()
+        .unwrap();
+    (recovery.activity_deadline_at.unwrap() - recovery.last_activity_at).num_seconds()
+}
+
+fn armed_review_secs(conn: &Connection, execution: &TaskExecution) -> i64 {
+    let recovery = get_execution_recovery(conn, &execution.id)
+        .unwrap()
+        .unwrap();
+    (recovery.review_deadline_at.unwrap() - recovery.last_activity_at).num_seconds()
+}
+
+fn into_review(conn: &Connection, execution: &TaskExecution) {
+    transition_execution(
+        conn,
+        &execution.id,
+        TaskExecutionStatus::AwaitingReview,
+        &backend_actor(),
+        serde_json::json!({}),
+    )
+    .unwrap();
+}
+
+#[test]
+#[serial_test::serial(task_timeout_env)]
+fn the_global_activity_timeout_env_moves_the_default_and_the_policy_still_wins() {
+    let conn = setup();
+    {
+        let _env = TimeoutEnv::set("KRONN_TASK_ACTIVITY_TIMEOUT_SECS", "7777");
+        assert_eq!(default_activity_timeout_secs(), 7777);
+
+        // A run with no policy row is armed from the environment, not the const.
+        let execution = working_execution(&conn, "t-env-activity", 1330);
+        assert_eq!(armed_activity_secs(&conn, &execution), 7777);
+
+        // A campaign policy keeps priority over the global value.
+        seed_task(&conn, "t-env-activity-policy", 1331);
+        let overridden = launch_single_task(
+            &conn,
+            &LaunchSingleTaskInput::new("t-env-activity-policy", DISC),
+            &backend_actor(),
+        )
+        .unwrap()
+        .execution;
+        set_resilience_policy(
+            &conn,
+            &overridden.orchestration_run_id,
+            &OrchestrationResiliencePolicy {
+                activity_timeout_secs: Some(90),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for to in [
+            TaskExecutionStatus::Provisioning,
+            TaskExecutionStatus::Working,
+        ] {
+            transition_execution(
+                &conn,
+                &overridden.id,
+                to,
+                &backend_actor(),
+                serde_json::json!({}),
+            )
+            .unwrap();
+        }
+        assert_eq!(armed_activity_secs(&conn, &overridden), 90);
+    }
+    // Back to the built-in default once the variable is gone.
+    assert_eq!(
+        default_activity_timeout_secs(),
+        DEFAULT_ACTIVITY_TIMEOUT_SECS
+    );
+}
+
+#[test]
+#[serial_test::serial(task_timeout_env)]
+fn an_unusable_activity_timeout_env_falls_back_to_the_built_in_default() {
+    for bad in ["0", "-5", "abc", "", "  ", "12.5"] {
+        let _env = TimeoutEnv::set("KRONN_TASK_ACTIVITY_TIMEOUT_SECS", bad);
+        assert_eq!(
+            default_activity_timeout_secs(),
+            DEFAULT_ACTIVITY_TIMEOUT_SECS,
+            "{bad:?} must not disable or corrupt the activity clock"
+        );
+    }
+    // Surrounding whitespace is tolerated.
+    let _env = TimeoutEnv::set("KRONN_TASK_ACTIVITY_TIMEOUT_SECS", " 300 ");
+    assert_eq!(default_activity_timeout_secs(), 300);
+}
+
+#[test]
+#[serial_test::serial(task_timeout_env)]
+fn the_global_review_timeout_env_moves_the_default_and_the_policy_still_wins() {
+    let conn = setup();
+    {
+        let _env = TimeoutEnv::set("KRONN_TASK_REVIEW_TIMEOUT_SECS", "8888");
+        assert_eq!(default_review_timeout_secs(), 8888);
+        let execution = working_execution(&conn, "t-env-review", 1332);
+        into_review(&conn, &execution);
+        assert_eq!(armed_review_secs(&conn, &execution), 8888);
+
+        // The campaign's review timeout keeps priority over the global value.
+        let with_policy = working_execution(&conn, "t-env-review-policy", 1333);
+        set_resilience_policy(
+            &conn,
+            &with_policy.orchestration_run_id,
+            &OrchestrationResiliencePolicy {
+                review_timeout_secs: Some(120),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        into_review(&conn, &with_policy);
+        assert_eq!(armed_review_secs(&conn, &with_policy), 120);
+    }
+    assert_eq!(default_review_timeout_secs(), DEFAULT_REVIEW_TIMEOUT_SECS);
+
+    for bad in ["0", "abc", ""] {
+        let _env = TimeoutEnv::set("KRONN_TASK_REVIEW_TIMEOUT_SECS", bad);
+        assert_eq!(
+            default_review_timeout_secs(),
+            DEFAULT_REVIEW_TIMEOUT_SECS,
+            "{bad:?} must fall back to the built-in review default"
+        );
+    }
 }
 
 #[test]
@@ -1942,6 +2165,7 @@ fn an_interrupted_silent_worker_can_be_reassigned() {
 }
 
 #[test]
+#[serial_test::serial(task_timeout_env)]
 fn an_unreviewed_delivery_alerts_the_principal_without_deciding() {
     let conn = setup();
     let execution = working_execution(&conn, "t-review-wait", 1307);
