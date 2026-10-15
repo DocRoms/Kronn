@@ -88,12 +88,22 @@ This project uses an AI-optimized context system in `ai/`. Before making changes
 1. Fork the repo and create a branch from `main`
 2. Follow the coding rules documented in `ai/coding-rules.md`
 3. **Sign off every commit** (`git commit -s`)
-4. Test your changes:
+4. **Keep the history small**: a small change lands in 3 commits at most.
+   Squash review follow-ups and fixups into the commit they correct, and
+   rebase on `main` rather than merging it: `main` only accepts rebase
+   merges, so a merge commit has to be removed before the pull request lands.
+5. Test your changes:
    - Backend: `make test-backend` (cargo-nextest, the runner CI uses; `make install-dev-tools` installs it), `cd backend && cargo clippy --all-targets -- -D warnings`, and `make test-backend-cov` for the coverage floors
    - Frontend: `pnpm build && pnpm lint && pnpm test`
    - Shell: `make test-shell`
    - E2E (Playwright, optional but recommended for UI changes): `make test-e2e` — requires the backend running. See [`frontend/e2e/README.md`](frontend/e2e/README.md) for the full setup + how to add a spec.
-5. Write a clear PR description with a summary and test plan
+6. Fill in the pull request template (`.github/pull_request_template.md`):
+   `Closes #<issue>` when the change answers an issue (GitHub links and
+   closes it, and reviews check the change against it), then Summary,
+   Changes, Test plan (the commands you ran and what you checked) and For the
+   review (where to look closely, what is out of scope). Its comments are
+   guidance and stay hidden once published; leave them, there is nothing to
+   delete.
 
 ## CI labels
 
@@ -121,7 +131,9 @@ after pushing), CI Verdict re-runs it once and repeats the new verdict; the
 real job results then replace the skipped ones on the same run. On a fork,
 whose token cannot re-run, a maintainer uses "Re-run all jobs" on that run.
 After a change of base, push a commit or close and reopen the pull request.
-Pushes to `main` and release tags run both test workflows.
+A push to `main` only builds and saves the shared Rust caches, without running
+the tests its pull request already passed; a release tag runs neither workflow
+and only builds the installers and the draft release.
 
 Which checks matter: `ci-quality-gates` and `ci-build-gates`. They report on
 every pull-request event, from whichever workflow ran last, and are the
