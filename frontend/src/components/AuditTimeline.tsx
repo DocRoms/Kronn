@@ -94,7 +94,7 @@ export interface AuditTimelineProps {
   onCancel: () => void;
   /** The backend has not acknowledged the cancel yet: the audit may still run. */
   cancelPending?: boolean;
-  resumable: { id: string; steps_to_redo?: number[]; last_completed_step: number } | null;
+  resumable: { id: string; steps_to_redo?: number[]; last_completed_step: number; from_repository?: boolean } | null;
   /** Whether a run can be resumed is not known: launching waits for it (KT-1169). */
   resumableUnknown?: boolean;
   onReloadResumable?: () => void;
@@ -420,7 +420,9 @@ export function AuditTimeline(props: AuditTimelineProps) {
         : t('audit.resumeFromStep', resumable.last_completed_step + 1))
     : audited ? t('audit.revalidate.button') : t('audit.startFullAudit');
   // Per-step actions exist only on the run a resume continues.
-  const stepActions = !auditActive && !!resumable && !leaseOrphaned;
+  // A run still in the repository has no local row to retry or accept a step
+  // on: the resume adopts it first.
+  const stepActions = !auditActive && !!resumable && !resumable.from_repository && !leaseOrphaned;
   // No launch while the state it must start from is unknown or locked.
   // KT-1192 — no audit starts without a briefing; the backend refuses it too.
   const launchBlocked = leaseOrphaned || !!props.resumableUnknown || !props.briefingDone;
@@ -891,7 +893,7 @@ export function AuditTimeline(props: AuditTimelineProps) {
                 {!repoRun.committed && (
                   <p className="audit-tl-muted" data-testid="audit-timeline-repo-run-uncommitted">{t('auditTimeline.repo.uncommitted')}</p>
                 )}
-                {repoRun.resumable && (
+                {repoRun.resumable && resumable?.id === repoRun.run_id && (
                   <p className="audit-tl-muted" data-testid="audit-timeline-repo-run-resumable">{t('auditTimeline.repo.resumable')}</p>
                 )}
                 {repoCanValidate && !repoRun.validated_at ? (

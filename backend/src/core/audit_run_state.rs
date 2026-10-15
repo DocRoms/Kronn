@@ -112,7 +112,6 @@ pub struct RunState {
     pub started_by: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resumed_from: Option<String>,
-    pub kronn_version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template_version: Option<String>,
     /// SHA-256 of `<docs>/briefing.md` when the run started.
@@ -156,7 +155,14 @@ pub fn file_digest(project: &Path, target: &str) -> Option<String> {
     if !meta.is_file() {
         return None;
     }
-    std::fs::read(&path).ok().map(|bytes| sha256_hex(&bytes))
+    // A symbolic link in a parent directory passes the check above and would
+    // read outside the project: the resolved file must stay inside it.
+    let resolved = std::fs::canonicalize(&path).ok()?;
+    let root = std::fs::canonicalize(project).ok()?;
+    if !resolved.starts_with(&root) {
+        return None;
+    }
+    std::fs::read(&resolved).ok().map(|bytes| sha256_hex(&bytes))
 }
 
 impl RunState {
@@ -262,6 +268,12 @@ fn committed_text(project: &Path) -> Option<String> {
         .success()
         .then(|| String::from_utf8(output.stdout).ok())
         .flatten()
+}
+
+/// The state `HEAD` holds, parsed: the copy a human committed, whatever the
+/// working tree says since.
+pub fn committed_state(project: &Path) -> Option<RunState> {
+    RunState::parse(&committed_text(project)?)
 }
 
 /// Read the working-tree file and say whether it is the committed one.

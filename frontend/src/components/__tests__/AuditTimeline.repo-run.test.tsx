@@ -71,7 +71,12 @@ describe('AuditTimeline — the audit run of the repository', () => {
 
   it('shows the colleague’s run: steps done, to resume, TD settled', async () => {
     mockTimeline({ repo: repoRun() });
-    wrap(<AuditTimeline {...props()} />);
+    wrap(<AuditTimeline {...props({
+      resumable: {
+        id: 'run-elsewhere', last_completed_step: 9, steps_to_redo: [10, 11, 12, 13, 14, 15, 16],
+        from_repository: true,
+      },
+    })} />);
     const summary = await screen.findByTestId('audit-timeline-repo-run-summary');
     expect(summary.textContent).toContain('Colleague');
     expect(summary.textContent).toContain('1-9');
@@ -80,6 +85,25 @@ describe('AuditTimeline — the audit run of the repository', () => {
     expect(screen.getByTestId('audit-timeline-repo-run-td').textContent).toContain('40');
     expect(screen.getByTestId('audit-timeline-repo-run-resumable')).toBeTruthy();
     expect(screen.queryByTestId('audit-timeline-repo-run-validate')).toBeNull();
+  });
+
+  it('never says the run can be resumed here when no resume is offered', async () => {
+    mockTimeline({ repo: repoRun() });
+    wrap(<AuditTimeline {...props({ resumable: null })} />);
+    await screen.findByTestId('audit-timeline-repo-run-summary');
+    expect(screen.queryByTestId('audit-timeline-repo-run-resumable')).toBeNull();
+  });
+
+  it('offers no per-step retry or accept on a run that is still in the repository', async () => {
+    mockTimeline({ repo: repoRun() });
+    wrap(<AuditTimeline {...props({
+      resumable: {
+        id: 'run-elsewhere', last_completed_step: 9, steps_to_redo: [10, 11], from_repository: true,
+      },
+    })} />);
+    await screen.findByTestId('audit-timeline-repo-run-summary');
+    expect(screen.queryByTestId('audit-timeline-step-retry-10')).toBeNull();
+    expect(screen.queryByTestId('audit-timeline-step-accept-10')).toBeNull();
   });
 
   it('says a step whose file changed is to re-verify, never done', async () => {

@@ -432,17 +432,40 @@ pub async fn audit_latest_resumable(
     let result = state
         .db
         .with_conn(move |conn| {
-            let Some(run) = crate::db::audit_runs::latest_resumable(conn, &id)? else {
-                return Ok(None);
+            let latest = crate::db::audit_runs::list_recent(conn, &id, 1)?
+                .into_iter()
+                .next();
+            let resumable = match crate::db::audit_runs::latest_resumable(conn, &id)? {
+                Some(run) => {
+                    let steps = crate::db::audit_runs::list_audit_steps(conn, &run.id)?;
+                    Some(ResumableAudit::new(run, &steps))
+                }
+                None => None,
             };
-            let steps = crate::db::audit_runs::list_audit_steps(conn, &run.id)?;
-            Ok(Some(ResumableAudit::new(run, &steps)))
+            let project = crate::db::projects::get_project(conn, &id)?;
+            Ok((latest, resumable, project))
         })
         .await;
-    match result {
-        Ok(row) => Json(ApiResponse::ok(row)),
-        Err(e) => Json(ApiResponse::err(format!("db: {e}"))),
-    }
+    let (latest, local, project) = match result {
+        Ok(found) => found,
+        Err(e) => return Json(ApiResponse::err(format!("db: {e}"))),
+    };
+    // KT-1199 — the committed run a colleague left unfinished is resumable
+    // here when it is the project's state (no local run, or newer than it):
+    // the launch sends its id and adopts it. A run this instance holds is
+    // never shadowed by an older file.
+    let Some(project) = project else {
+        return Json(ApiResponse::ok(local));
+    };
+    let path = crate::core::scanner::resolve_host_path(&project.path);
+    let from_repo = tokio::task::spawn_blocking(move || {
+        super::run_state::repo_view(&path, latest.as_ref())
+            .and_then(|view| ResumableAudit::from_repo(&view))
+    })
+    .await
+    .ok()
+    .flatten();
+    Json(ApiResponse::ok(from_repo.or(local)))
 }
 
 /// An interrupted run and what a resume would run (KT-931). `last_completed_step`
@@ -455,9 +478,44 @@ pub struct ResumableAudit {
     /// 1-based steps a resume runs: the ones that failed and the ones that
     /// never ran. Empty when the run's kind is unknown.
     steps_to_redo: Vec<u32>,
+    /// KT-1199 — the run is the one the repository describes (a colleague's
+    /// commit), not a row of this instance: the launch adopts it.
+    from_repository: bool,
 }
 
 impl ResumableAudit {
+    /// The committed, unfinished run of the repository, when it is the
+    /// project's state here and has trusted steps to continue from.
+    fn from_repo(view: &super::run_state::RepoAuditRun) -> Option<Self> {
+        if !view.newer_than_local || !view.resumable || view.done_steps.is_empty() {
+            return None;
+        }
+        let run: crate::models::AuditRun = serde_json::from_value(serde_json::json!({
+            "id": view.run_id,
+            "project_id": "",
+            "kind": view.kind,
+            "agent_type": "repository",
+            "started_at": view.started_at,
+            "ended_at": view.updated_at,
+            "status": "Interrupted",
+            "last_completed_step": view.done_steps.len(),
+        }))
+        .ok()?;
+        let mut steps_to_redo: Vec<u32> = view
+            .resume_steps
+            .iter()
+            .chain(view.recheck_steps.iter())
+            .copied()
+            .collect();
+        steps_to_redo.sort_unstable();
+        steps_to_redo.dedup();
+        Some(Self {
+            run,
+            steps_to_redo,
+            from_repository: true,
+        })
+    }
+
     fn new(run: crate::models::AuditRun, steps: &[crate::models::AuditRunStep]) -> Self {
         let steps_to_redo = match crate::models::AuditKind::from_label(&run.kind) {
             Some(kind) => {
@@ -467,7 +525,11 @@ impl ResumableAudit {
             }
             None => Vec::new(),
         };
-        Self { run, steps_to_redo }
+        Self {
+            run,
+            steps_to_redo,
+            from_repository: false,
+        }
     }
 }
 

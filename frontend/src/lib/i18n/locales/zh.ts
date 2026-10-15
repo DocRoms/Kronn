@@ -6316,7 +6316,7 @@ const zh: TranslationDict = {
   "auditTimeline.validation.tdCount": "上一次审计产生了 {0} 条技术债记录，待复查。",
   "auditTimeline.validation.finished": "验证讨论已结束：只需确认审计即可。",
   "auditTimeline.validation.viewDiscussion": "查看验证讨论",
-  "auditTimeline.validation.block.no_local_run": "只读：此实例从未运行过该审计。对等节点或其他克隆无法验证——请在运行审计的实例上验证。",
+  "auditTimeline.validation.block.no_local_run": "只读：此实例未运行过该审计，且仓库中没有审计运行状态。在仓库提交了已完成（Completed）且通过各项检查的审计运行状态之前，保持只读——请在此运行审计，或获取同事的提交。",
   "auditTimeline.validation.block.audit_running": "该项目正在运行审计：请在其完成后再验证。",
   "auditTimeline.validation.block.run_not_completed": "最近一次审计尚未完成：请先重试或接受其失败的步骤。",
   "auditTimeline.validation.block.no_linked_discussion": "最近一次已完成的审计没有关联的验证讨论：无法通过讨论进行验证。",

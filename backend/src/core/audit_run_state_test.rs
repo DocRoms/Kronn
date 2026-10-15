@@ -35,7 +35,6 @@ fn state() -> RunState {
         updated_at: "2026-10-11T08:20:00+00:00".into(),
         started_by: "romu".into(),
         resumed_from: None,
-        kronn_version: "0.15.1".into(),
         template_version: Some("0.15.0".into()),
         briefing_digest: Some("cc".into()),
         total_steps: 4,
@@ -222,4 +221,19 @@ fn a_target_outside_the_project_has_no_digest() {
     assert_eq!(file_digest(dir.path(), "../outside.md"), None);
     assert_eq!(file_digest(dir.path(), "/etc/hosts"), None);
     assert_eq!(file_digest(dir.path(), "Final review"), None);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_target_reached_through_a_symlinked_directory_outside_the_project_has_no_digest() {
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("secret.md"), "outside the project").unwrap();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(project.path().join("docs")).unwrap();
+    std::fs::write(project.path().join("docs/inside.md"), "inside").unwrap();
+    std::os::unix::fs::symlink(outside.path(), project.path().join("docs/linked")).unwrap();
+
+    assert!(file_digest(project.path(), "docs/inside.md").is_some());
+    // The last component is a regular file, a parent is a link out.
+    assert_eq!(file_digest(project.path(), "docs/linked/secret.md"), None);
 }

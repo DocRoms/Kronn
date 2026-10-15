@@ -39,8 +39,10 @@ pub(crate) fn validation_discussion_finished(discussion: &Discussion) -> bool {
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
 pub enum ValidationBlock {
-    /// This instance never ran the audit (a P2P peer, another clone): it is
-    /// read-only and cannot validate.
+    /// This instance never ran the audit (a P2P peer, another clone) and the
+    /// repository carries no run state either: read-only unless the
+    /// repository carries a committed, Completed run state that passes the
+    /// gates (KT-1199) — then it validates from that state.
     NoLocalRun,
     AuditRunning,
     RunNotCompleted,
@@ -59,7 +61,7 @@ pub enum ValidationBlock {
 impl ValidationBlock {
     pub(crate) fn message(self, run_status: Option<&str>) -> String {
         match self {
-            Self::NoLocalRun => "No audit run recorded for this project on this instance — run the audit first; a peer without the run is read-only and validates on the instance that ran it.".into(),
+            Self::NoLocalRun => "No audit run recorded for this project on this instance and no audit run state in the repository — read-only until the repository carries a committed, Completed run state that passes the gates (run the audit here, or fetch the commit of the colleague who ran it).".into(),
             Self::AuditRunning => "An audit is currently running on this project — validate once it has finished.".into(),
             Self::RunNotCompleted => format!(
                 "The latest audit run is {} — only a Completed run can be validated (resume or re-run it first).",
@@ -507,8 +509,8 @@ pub async fn validate_audit(
         }
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
         Ok((latest, linked_disc, validation_agent_active, documents, finished)) => {
-            // An instance without the run (P2P peer, another clone) is
-            // read-only: it has nothing to validate.
+            // No local run and no usable repository state (`from_repo` is
+            // handled above): read-only, there is nothing to validate.
             let Some(run) = latest else {
                 return Json(ApiResponse::err(ValidationBlock::NoLocalRun.message(None)));
             };
@@ -568,6 +570,29 @@ pub async fn validate_audit(
         }
     };
     let validated_run_id = run_id.clone();
+    // The rows this instance holds of the run it validates: the source the
+    // run's digests are rebuilt from afterwards (the repository's own run is
+    // rebuilt from its committed copy).
+    let local_rows = if from_repo {
+        None
+    } else {
+        let run_id = run_id.clone();
+        state
+            .db
+            .with_read_conn(move |conn| {
+                let Some(run) = crate::db::audit_runs::get_by_id(conn, &run_id)? else {
+                    return Ok(None);
+                };
+                Ok(Some(super::run_state::LocalRunRows {
+                    steps: crate::db::audit_runs::list_audit_steps(conn, &run_id)?,
+                    baseline: crate::db::audit_runs::adr_baseline(conn, &run_id)?,
+                    run,
+                }))
+            })
+            .await
+            .ok()
+            .flatten()
+    };
 
     let by_for_file = by.clone();
     super::full::stop_validation_agents(&state, &project.id).await;
@@ -623,7 +648,7 @@ pub async fn validate_audit(
         }
         kronn_state::mark_validated_by(&project_path, &by_for_file, started_by.as_deref())?;
         // The run's digests follow the documents the human just validated.
-        super::run_state::refresh_validated_digests(&project_path, &validated_run_id);
+        super::run_state::refresh_validated_digests(&project_path, &validated_run_id, local_rows);
         Ok(())
     })
     .await
@@ -1423,9 +1448,10 @@ mod validate_gate_tests {
         assert_eq!(verdict.blocked, Some(ValidationBlock::NotFinished));
     }
 
-    // KT-1122 rule: an instance without the run (P2P peer, another clone) is
-    // read-only — it states why and never validates, not even a project whose
-    // docs are shared.
+    // KT-1122 rule, as KT-1199 amends it: an instance without the run (P2P
+    // peer, another clone) is read-only unless the repository carries a
+    // committed, Completed run state that passes the gates. Without one it
+    // states why and never validates, not even a project whose docs are shared.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_instance_without_the_run_is_read_only_and_says_why() {
         let tmp = tempfile::TempDir::new().unwrap();

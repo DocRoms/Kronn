@@ -170,7 +170,6 @@ fn committed_run(
         updated_at: updated_at.into(),
         started_by: "Alice".into(),
         resumed_from: None,
-        kronn_version: "0.15.1".into(),
         template_version: None,
         briefing_digest: None,
         total_steps: 3,
@@ -794,4 +793,262 @@ async fn nothing_in_the_repository_leaves_the_local_gate_untouched() {
     .await
     .0;
     assert!(refused.error.unwrap().contains("No audit run recorded"));
+}
+
+// ── Review of KT-1199: the rule, the resume offer, the trusted rebuild ──
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_clone_validates_only_from_a_committed_completed_state_that_passes() {
+    let dir = repo();
+    let root = dir.path().to_path_buf();
+    let state = test_state();
+    register(&state, &root).await;
+    settle_sheet(&root, "TD-20261011-a", "High", "Confirmed by user");
+    let shown = || async {
+        crate::api::audit::validate::get_validation_state(
+            axum::extract::State(state.clone()),
+            axum::extract::Path("p1".to_string()),
+        )
+        .await
+        .0
+        .data
+        .unwrap()
+    };
+    let validate = || async {
+        crate::api::audit::validate_audit(
+            axum::extract::State(state.clone()),
+            axum::extract::Path("p1".to_string()),
+        )
+        .await
+        .0
+    };
+
+    // A clone WITHOUT a committed state: read-only, and it says what lifts it.
+    let without = shown().await;
+    assert_eq!(
+        without.blocked,
+        Some(crate::api::audit::validate::ValidationBlock::NoLocalRun)
+    );
+    assert!(!without.can_validate);
+    let refused = validate().await;
+    assert!(!refused.success);
+    let reason = refused.error.unwrap();
+    assert!(
+        reason.contains("read-only until the repository carries a committed, Completed run state"),
+        "{reason}"
+    );
+    assert_eq!(validated_at(&root), None);
+
+    // The same clone once the repository carries a committed, Completed
+    // state that passes the gates: allowed, from the repository.
+    let finished = committed_run(
+        &root,
+        "run-alice",
+        "Completed",
+        &[1, 2, 3],
+        "2026-10-11T09:00:00+00:00",
+    );
+    repo_state::write(&root, &finished).unwrap();
+    commit_all(&root, "audit completed");
+    let with = shown().await;
+    assert_eq!(
+        with.source,
+        crate::api::audit::validate::ValidationSource::Repo
+    );
+    assert_eq!(with.blocked, None);
+    assert!(with.can_validate, "{with:?}");
+    let validated = validate().await;
+    assert!(validated.success, "{:?}", validated.error);
+    assert_eq!(validated.data, Some(AiAuditStatus::Validated));
+    assert!(validated_at(&root).is_some());
+}
+
+async fn resumable(state: &AppState) -> Option<serde_json::Value> {
+    let found = crate::api::audit::audit_latest_resumable(
+        axum::extract::State(state.clone()),
+        axum::extract::Path("p1".to_string()),
+    )
+    .await
+    .0;
+    assert!(found.success, "{:?}", found.error);
+    found
+        .data
+        .map(|row| serde_json::to_value(row).unwrap())
+        .filter(|value| !value.is_null())
+}
+
+#[tokio::test]
+async fn audit_resumable_offers_the_run_a_colleague_committed_and_the_launch_adopts_it() {
+    let dir = repo();
+    let root = dir.path().to_path_buf();
+    let state = test_state();
+    register(&state, &root).await;
+    let interrupted = committed_run(
+        &root,
+        "run-alice",
+        "Interrupted",
+        &[1, 2],
+        "2026-10-11T08:30:00+00:00",
+    );
+    repo_state::write(&root, &interrupted).unwrap();
+
+    // Not committed: nothing is offered.
+    assert!(resumable(&state).await.is_none());
+
+    commit_all(&root, "audit: steps 1-2");
+    let offered = resumable(&state).await.expect("the repository run is offered");
+    assert_eq!(offered["id"], "run-alice");
+    assert_eq!(offered["kind"], "Full");
+    assert_eq!(offered["from_repository"], true);
+    assert_eq!(offered["last_completed_step"], 2);
+    assert_eq!(offered["steps_to_redo"], serde_json::json!([3]));
+
+    // A step document edited since is offered back to be replayed.
+    std::fs::write(root.join("docs/glossary.md"), "# Glossary\nEdited.\n").unwrap();
+    let edited = resumable(&state).await.unwrap();
+    assert_eq!(edited["steps_to_redo"], serde_json::json!([2, 3]));
+    assert_eq!(edited["last_completed_step"], 1);
+
+    // The launch sends this id: it adopts the run, which is then a local
+    // resumable run, no longer shown as the repository's.
+    let (rr, rid) = (root.clone(), "run-alice".to_string());
+    state
+        .db
+        .with_conn(move |conn| Ok(adopt_repo_run(conn, "p1", &rr, &rid)))
+        .await
+        .unwrap()
+        .unwrap();
+    let adopted = resumable(&state).await.unwrap();
+    assert_eq!(adopted["id"], "run-alice");
+    assert_eq!(adopted["from_repository"], false);
+}
+
+#[tokio::test]
+async fn a_newer_local_run_or_a_finished_repository_run_is_never_offered() {
+    let dir = repo();
+    let root = dir.path().to_path_buf();
+    let state = test_state();
+    register(&state, &root).await;
+    let completed = committed_run(
+        &root,
+        "run-alice",
+        "Completed",
+        &[1, 2, 3],
+        "2026-10-11T08:30:00+00:00",
+    );
+    repo_state::write(&root, &completed).unwrap();
+    commit_all(&root, "audit completed");
+    assert!(resumable(&state).await.is_none(), "nothing left to resume");
+
+    let interrupted = committed_run(
+        &root,
+        "run-alice",
+        "Interrupted",
+        &[1, 2],
+        "2026-10-11T08:30:00+00:00",
+    );
+    repo_state::write(&root, &interrupted).unwrap();
+    commit_all(&root, "audit interrupted");
+    assert!(resumable(&state).await.is_some());
+
+    // This instance ran a later audit: the file is the older attempt.
+    state
+        .db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO audit_runs (id, project_id, kind, agent_type, started_at, ended_at, status)
+                 VALUES ('local-new', 'p1', 'Full', 'ClaudeCode',
+                         '2026-10-12T08:00:00+00:00', '2026-10-12T09:00:00+00:00', 'Completed')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(resumable(&state).await.is_none());
+}
+
+#[test]
+fn the_digests_after_a_validation_come_from_the_committed_copy_not_the_working_tree() {
+    let dir = repo();
+    let root = dir.path().to_path_buf();
+    let run = committed_run(
+        &root,
+        "run-alice",
+        "Completed",
+        &[1, 2, 3],
+        "2026-10-11T09:00:00+00:00",
+    );
+    repo_state::write(&root, &run).unwrap();
+    commit_all(&root, "audit completed");
+
+    // An agent rewrites the file after the commit, then the validation
+    // settles a step's document.
+    let mut forged = run.clone();
+    forged.run_id = "forged".into();
+    forged.started_by = "Mallory".into();
+    repo_state::write(&root, &forged).unwrap();
+    std::fs::write(root.join("docs/glossary.md"), "# Glossary\nSettled.\n").unwrap();
+
+    refresh_validated_digests(&root, "run-alice", None);
+    let after = read_state(&root);
+    assert_eq!(after.run_id, "run-alice");
+    assert_eq!(after.started_by, "Alice");
+    assert!(repo_state::assess(&root, &after)
+        .iter()
+        .all(|s| s.verdict == StepVerdict::Trusted));
+}
+
+#[tokio::test]
+async fn after_a_validation_the_digests_are_rebuilt_from_the_rows_not_from_the_file() {
+    let dir = repo();
+    let root = dir.path().to_path_buf();
+    let state = test_state();
+    register(&state, &root).await;
+    let writer = writer(&root, "run-local", None);
+    state
+        .db
+        .with_conn(move |conn| {
+            start_run(conn, "run-local");
+            for step in 1..=3 {
+                finish_step(conn, "run-local", step, true);
+            }
+            conn.execute(
+                "UPDATE audit_runs SET status = 'Completed', ended_at = ?1 WHERE id = 'run-local'",
+                [chrono::Utc::now().to_rfc3339()],
+            )?;
+            writer.sync(conn, true);
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    // An agent marks step 3 failed in the (uncommitted) file; the
+    // validation then settles that step's document.
+    let mut forged = read_state(&root);
+    let step = forged.steps.get_mut("003").unwrap();
+    step.status = StepStatus::Failed;
+    step.digest = None;
+    repo_state::write(&root, &forged).unwrap();
+    std::fs::write(root.join("docs/repo-map.md"), "# Repo map\nSettled.\n").unwrap();
+
+    let rows = state
+        .db
+        .with_conn(|conn| {
+            Ok(LocalRunRows {
+                run: crate::db::audit_runs::get_by_id(conn, "run-local")?.unwrap(),
+                steps: crate::db::audit_runs::list_audit_steps(conn, "run-local")?,
+                baseline: crate::db::audit_runs::adr_baseline(conn, "run-local")?,
+            })
+        })
+        .await
+        .unwrap();
+    refresh_validated_digests(&root, "run-local", Some(rows));
+    let after = read_state(&root);
+    let step = after.step(3).unwrap();
+    assert_eq!(step.status, StepStatus::Done, "the DB row decides");
+    assert_eq!(
+        step.digest,
+        repo_state::file_digest(&root, "docs/repo-map.md")
+    );
 }

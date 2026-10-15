@@ -179,7 +179,6 @@ impl RunStateWriter {
             updated_at: updated.to_rfc3339(),
             started_by: self.meta.started_by.clone(),
             resumed_from: self.meta.resumed_from.clone(),
-            kronn_version: env!("CARGO_PKG_VERSION").to_string(),
             template_version: self.meta.template_version.clone(),
             briefing_digest: self.meta.briefing_digest.clone(),
             total_steps: steps.len() as u32,
@@ -374,23 +373,74 @@ impl RepoRefusal {
     }
 }
 
+/// What a validation rebuilds the run's digests from: never the working-tree
+/// file, which may be uncommitted and edited by an agent.
+pub(crate) struct LocalRunRows {
+    pub run: AuditRun,
+    pub steps: Vec<AuditRunStep>,
+    pub baseline: Option<crate::core::adr::StartOfRun>,
+}
+
 /// After a validation: the human accepted the documents as they stand, so
 /// the run's digests follow them (the validation may have settled sheets
-/// that are step targets). Only the run that was validated is touched.
-pub(crate) fn refresh_validated_digests(project: &std::path::Path, run_id: &str) {
-    let RepoProbe::Found { state, .. } = repo_state::probe(project) else {
-        return;
-    };
-    if state.run_id != run_id {
-        return;
-    }
-    let mut state = *state;
-    for step in state.steps.values_mut() {
-        if step.status.is_done() && repo_state::is_file_target(&step.target) {
-            step.digest = repo_state::file_digest(project, &step.target);
+/// that are step targets). Only the run that was validated is touched, and
+/// it is rebuilt from a trusted source: this instance's rows when it ran the
+/// audit, the committed (`HEAD`) copy of the file otherwise. The working-tree
+/// file only lends its descriptive header (who started it, the template
+/// version, the briefing digest).
+pub(crate) fn refresh_validated_digests(
+    project: &std::path::Path,
+    run_id: &str,
+    local: Option<LocalRunRows>,
+) {
+    let result = match local {
+        Some(local) => {
+            let RepoProbe::Found { state: header, .. } = repo_state::probe(project) else {
+                return;
+            };
+            if header.run_id != run_id || local.run.id != run_id {
+                return;
+            }
+            let planned = header
+                .indexed_steps()
+                .map(|(index, step)| (index, step.target.clone()))
+                .collect();
+            let writer = RunStateWriter::new(
+                project.to_path_buf(),
+                run_id.to_string(),
+                RunStateMeta {
+                    started_by: header.started_by.clone(),
+                    resumed_from: header.resumed_from.clone(),
+                    template_version: header.template_version.clone(),
+                    briefing_digest: header.briefing_digest.clone(),
+                },
+                planned,
+            );
+            let state = writer.build(
+                &local.run,
+                &local.steps,
+                local.baseline,
+                &mut BTreeMap::new(),
+                true,
+            );
+            repo_state::write(project, &state)
         }
-    }
-    if let Err(e) = repo_state::write(project, &state) {
+        None => {
+            let Some(mut state) = repo_state::committed_state(project) else {
+                return;
+            };
+            if state.run_id != run_id {
+                return;
+            }
+            for step in state.steps.values_mut() {
+                if step.status.is_done() && repo_state::is_file_target(&step.target) {
+                    step.digest = repo_state::file_digest(project, &step.target);
+                }
+            }
+            repo_state::write(project, &state)
+        }
+    };
+    if let Err(e) = result {
         tracing::warn!("Audit run state not refreshed after validation: {e}");
     }
 }
