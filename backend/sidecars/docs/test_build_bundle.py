@@ -224,8 +224,12 @@ class NativeLibraryEnvironmentTests(unittest.TestCase):
             self.assertNotIn("workflow_call:", workflow)
             # Label-gated jobs follow the route job, which lets every event
             # but a pull request through: a manual dispatch runs them all.
+            # A push to main may skip a job that only matters on reviews.
             gated = re.findall(
-                rf"^    if: needs\.{route}\.outputs\.run == 'true'$", workflow, re.MULTILINE
+                rf"^    if: needs\.{route}\.outputs\.run == 'true'"
+                r"(?: && github\.event_name != 'push')?$",
+                workflow,
+                re.MULTILINE,
             )
             self.assertGreaterEqual(len(gated), minimum, name)
             route_job = workflow[workflow.index(f"\n  {route}:\n"):]
