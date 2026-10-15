@@ -2632,6 +2632,7 @@ const en: TranslationDict = {
   'disc.thinking': '{0} is thinking...',
   'disc.running': 'Agent running...',
   'disc.workflowStepRunning': 'Workflow step running…',
+  'disc.workflowStepPreparing': 'The workflow is preparing — its agent has not joined the room yet…',
   'disc.workflowRun': 'Run {0}',
   'disc.workflowStepAgent': 'workflow agent',
   'disc.workflow': 'Workflow',

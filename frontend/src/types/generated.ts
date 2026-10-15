@@ -56,7 +56,19 @@ connection_id?: string,
  */
 progress_phase?: string, };
 
-export type ActiveWorkflowStep = { agent_type: AgentType, started_at: string, run_id: string, workflow_id: string, workflow_name: string, step_key: string, step_name: string, };
+export type ActiveWorkflowStep = { agent_type: AgentType, started_at: string,
+/**
+ * KT-1252 — the `run_id` of the room's live `AgentRunProgress` frames for
+ * this step: the bubble reads the run's phase and tool activity from the
+ * run-progress store under it. Absent while the step has none.
+ */
+progress_run_id?: string,
+/**
+ * KT-1252 — the run targets this room but its agent has not entered it
+ * yet. `step_*` then name the step the run executes now (the preparation),
+ * and `agent_type` the agent about to enter.
+ */
+preparing?: boolean, run_id: string, workflow_id: string, workflow_name: string, step_key: string, step_name: string, };
 
 /**
  * What kind of action an agent's tool call is, from a fixed table
@@ -11329,4 +11341,4 @@ started_at: string,
 /**
  * Increases with every frame of one run.
  */
-seq: number, progress: AgentRunProgress, } | { "type": "embed_origins_changed" } | { "type": "live_page_data_changed", page_id: string, data_revision: number, };
+seq: number, progress: AgentRunProgress, } | { "type": "workflow_step_room_changed", discussion_id: string, } | { "type": "embed_origins_changed" } | { "type": "live_page_data_changed", page_id: string, data_revision: number, };

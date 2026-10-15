@@ -551,16 +551,18 @@ impl AppState {
             .map(|config| (config.server.p2p_enabled, config.encryption_secret.clone()))
             .unwrap_or((false, None));
         db.assistant_guard().set_key(key);
+        let ws_broadcast = Arc::new(ws_tx);
+        let live_runs: Arc<crate::agents::run_progress::LiveRuns> = Arc::default();
         Self {
             p2p: Arc::new(P2pGate::new(p2p_enabled)),
             config,
             db,
             agent_semaphore: Arc::new(Semaphore::new(max_agents)),
             audit_tracker: Arc::new(Mutex::new(AuditTracker::default())),
-            ws_broadcast: Arc::new(ws_tx),
+            ws_broadcast: ws_broadcast.clone(),
             cancel_registry: Arc::new(Mutex::new(HashMap::new())),
             agent_runtime_registry: Arc::new(Mutex::new(HashSet::new())),
-            live_runs: Arc::default(),
+            live_runs: live_runs.clone(),
             execution_resumes: Arc::new(Mutex::new(HashSet::new())),
             oauth2_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             dependency_update_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -570,7 +572,9 @@ impl AppState {
             ollama_base_url_override: None,
             ollama_registry_override: None,
             data_dir_lock: None,
-            workflow_step_rooms: Arc::default(),
+            workflow_step_rooms: Arc::new(
+                crate::workflows::step_room::WorkflowStepRooms::publishing(ws_broadcast, live_runs),
+            ),
         }
     }
 

@@ -107,8 +107,11 @@ fn spawn_step_activity_publisher(
     step_name: String,
     mut activity: tokio::sync::watch::Receiver<Option<AgentActivity>>,
     stop: tokio_util::sync::CancellationToken,
+    progress: Option<crate::agents::run_progress::RunProgress>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        // Calls already handed to the room's live progress.
+        let mut reported = 0u32;
         loop {
             tokio::select! {
                 biased;
@@ -122,6 +125,21 @@ fn spawn_step_activity_publisher(
             let Some(latest) = activity.borrow_and_update().clone() else {
                 continue;
             };
+            if let Some(progress) = &progress {
+                // KT-1252 — the room's bubble reads the same activity. Calls
+                // that came between two reads count with the latest category.
+                let new_calls = latest.calls.saturating_sub(reported);
+                reported = reported.max(latest.calls);
+                if new_calls == 0 {
+                    progress.beat();
+                }
+                for _ in 0..new_calls.min(64) {
+                    progress.tool(&crate::agents::activity::ToolActivityUpdate::of_category(
+                        None,
+                        latest.category,
+                    ));
+                }
+            }
             let (run_id, step_name) = (run_id.clone(), step_name.clone());
             match db
                 .with_conn(move |conn| {
@@ -1179,6 +1197,27 @@ async fn execute_run_body(
     // StoppedByGuard/WaitingApproval). Acquired only AFTER the run is claimed
     // Running — a run cancelled before it starts keeps nothing awake.
     let _power_lease = crate::core::power_guard::acquire();
+
+    // KT-1252 — the room this run's Agent step will enter shows the workflow
+    // and the step it executes meanwhile, from the first moment a launch
+    // variable or a literal names it. Released with the run, whichever way it
+    // ends. The loop below announces again as steps complete.
+    let room_targets = super::step_room::RoomTargetWatch::new(&state.workflow_step_rooms, &run.id);
+    {
+        let mut launch_ctx = TemplateContext::with_time_anchor(run.started_at);
+        if let Some(ref trigger_ctx) = run.trigger_context {
+            inject_trigger_context(&mut launch_ctx, trigger_ctx);
+        }
+        room_targets
+            .announce(
+                &db,
+                run.project_id.as_deref().or(workflow.project_id.as_deref()),
+                workflow,
+                next_step_index_for_resume(&workflow.steps, &run.step_results),
+                &launch_ctx,
+            )
+            .await;
+    }
 
     // Resolve the project once: its path, and how it prepares a
     // worktree. A worktree is invisible to containers mounted on the main
@@ -2238,6 +2277,15 @@ async fn execute_run_body(
             total_steps,
             step.name
         );
+        room_targets
+            .announce(
+                &db,
+                run.project_id.as_deref().or(workflow.project_id.as_deref()),
+                workflow,
+                step_idx,
+                &ctx,
+            )
+            .await;
 
         // Journal the intent BEFORE invoking a mechanically side-effecting
         // executor. If the process dies after the external effect commits but
@@ -2504,8 +2552,18 @@ async fn execute_run_body(
                         let (progress_tx, mut progress_rx) =
                             tokio::sync::mpsc::channel::<String>(256);
                         let forwarder_tx = events_tx.clone();
+                        // KT-1252 — the step's live progress in its room: the
+                        // agent's output and tool calls reach it as they come.
+                        let room_progress = step_room.as_ref().map(|room| room.progress().clone());
+                        if let Some(progress) = &room_progress {
+                            progress.phase(AgentRunPhase::StartingCli);
+                        }
+                        let forwarder_progress = room_progress.clone();
                         let forwarder = tokio::spawn(async move {
                             while let Some(text) = progress_rx.recv().await {
+                                if let Some(progress) = &forwarder_progress {
+                                    progress.text();
+                                }
                                 if let Some(ref tx) = forwarder_tx {
                                     try_emit_run_event(Some(tx), RunEvent::StepProgress { text });
                                 }
@@ -2522,6 +2580,7 @@ async fn execute_run_body(
                             step.name.clone(),
                             activity_rx,
                             activity_stop.clone(),
+                            room_progress,
                         );
                         let activity_stop = activity_stop.drop_guard();
                         // 0.8.2 — Stamp the wall-clock step start so the
@@ -2554,7 +2613,12 @@ async fn execute_run_body(
                         )
                         .await;
                         if let Some(room) = step_room {
-                            room.finish().await;
+                            let stop = match outcome.result.status {
+                                RunStatus::Success => AgentRunStop::Finished,
+                                RunStatus::Cancelled => AgentRunStop::Cancelled,
+                                _ => AgentRunStop::Failed,
+                            };
+                            room.finish_as(stop).await;
                         }
                         // execute_step took ownership of progress_tx and dropped
                         // it on return → the forwarder's recv() now yields None
@@ -3690,7 +3754,12 @@ async fn execute_run_body(
                                 )
                                 .await;
                                 if let Some(room) = step_room {
-                                    room.finish().await;
+                                    let stop = match outcome.result.status {
+                                        RunStatus::Success => AgentRunStop::Finished,
+                                        RunStatus::Cancelled => AgentRunStop::Cancelled,
+                                        _ => AgentRunStop::Failed,
+                                    };
+                                    room.finish_as(stop).await;
                                 }
                                 outcome
                             }
