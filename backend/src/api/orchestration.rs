@@ -754,11 +754,13 @@ fn integration_recovery_decision(
         (Some(project_path), Some(target)) => {
             let repo = scanner::resolve_host_path(project_path);
             let tip = worktree::resolve_commit(&repo, target).ok();
-            let checkout = worktree::integration_target_worktree(&repo, target);
+            // A target no worktree has checked out has nothing to be dirty:
+            // only an unreadable or ambiguous target is an unknown state.
+            let checkout = worktree::integration_target(&repo, target);
             let dirty = checkout
                 .as_ref()
                 .ok()
-                .and_then(|path| worktree::worktree_dirty_files(path).ok())
+                .and_then(|target| worktree::integration_target_dirty_files(target).ok())
                 .map(|files| !files.is_empty())
                 .unwrap_or(true);
             // The target may have moved past a candidate it already contains
@@ -2213,9 +2215,15 @@ fn target_checkout_fix(repo_path: &std::path::Path, target: &str) -> (BlockedRea
 
 /// Name the fix for a fast-forward the target checkout refused.
 fn apply_refusal_fix(repo_path: &std::path::Path, target: &str) -> (BlockedReasonCode, String) {
-    match worktree::integration_target_worktree(repo_path, target) {
+    match worktree::integration_target(repo_path, target) {
         Err(_) => target_checkout_fix(repo_path, target),
-        Ok(checkout) => match worktree::worktree_dirty_files(&checkout) {
+        Ok(worktree::IntegrationTarget::NotCheckedOut { branch }) => (
+            BlockedReasonCode::IntegrationRefused,
+            format!(
+                "Vérifie que `{branch}` n'a pas avancé ni été extraite dans un worktree pendant l'intégration, puis relance-la."
+            ),
+        ),
+        Ok(worktree::IntegrationTarget::CheckedOut(checkout)) => match worktree::worktree_dirty_files(&checkout) {
             Ok(dirty) if !dirty.is_empty() => (
                 BlockedReasonCode::IntegrationRefused,
                 format!(
@@ -2373,8 +2381,8 @@ pub async fn run_integration(
     };
     let repo_path = scanner::resolve_host_path(&project_path);
     let child = std::path::Path::new(&child_path);
-    let target_checkout = match worktree::integration_target_worktree(&repo_path, &target_branch) {
-        Ok(path) => path,
+    let target_shape = match worktree::integration_target(&repo_path, &target_branch) {
+        Ok(shape) => shape,
         Err(reason) => {
             let (code, fix) = target_checkout_fix(&repo_path, &target_branch);
             return hold_integration(db, exec_id, code, reason, &fix).await;
@@ -2382,31 +2390,34 @@ pub async fn run_integration(
     };
 
     // ── Preflight: never apply over uncommitted work ──
-    match worktree::worktree_dirty_files(&target_checkout) {
-        Ok(dirty) if !dirty.is_empty() => {
-            return hold_integration(
-                db,
-                exec_id,
-                generic,
-                format!("target has {} uncommitted file(s)", dirty.len()),
-                &format!(
-                    "Committe ou retire les fichiers non commités de `{}`.",
-                    target_checkout.display()
-                ),
-            )
-            .await;
+    // A target checked out nowhere has no working tree to protect.
+    if let worktree::IntegrationTarget::CheckedOut(target_checkout) = &target_shape {
+        match worktree::worktree_dirty_files(target_checkout) {
+            Ok(dirty) if !dirty.is_empty() => {
+                return hold_integration(
+                    db,
+                    exec_id,
+                    generic,
+                    format!("target has {} uncommitted file(s)", dirty.len()),
+                    &format!(
+                        "Committe ou retire les fichiers non commités de `{}`.",
+                        target_checkout.display()
+                    ),
+                )
+                .await;
+            }
+            Err(e) => {
+                return hold_integration(
+                    db,
+                    exec_id,
+                    generic,
+                    e,
+                    &format!("Vérifie l'état Git de `{}`.", target_checkout.display()),
+                )
+                .await;
+            }
+            Ok(_) => {}
         }
-        Err(e) => {
-            return hold_integration(
-                db,
-                exec_id,
-                generic,
-                e,
-                &format!("Vérifie l'état Git de `{}`.", target_checkout.display()),
-            )
-            .await;
-        }
-        Ok(_) => {}
     }
     if let Err(error) = worktree::resolve_commit(child, "HEAD") {
         return hold_integration(
@@ -2871,10 +2882,10 @@ async fn finish_recovered_apply(
         .candidate_merge_sha
         .as_deref()
         .ok_or_else(|| internal("candidate merge SHA is missing".into()))?;
-    let (target_checkout, real_tip) =
-        match worktree::integration_target_worktree(repo, target_branch)
-            .and_then(|path| worktree::resolve_commit(&path, "HEAD").map(|tip| (path, tip)))
-        {
+    let (target_shape, real_tip) =
+        match worktree::integration_target(repo, target_branch).and_then(|shape| {
+            worktree::integration_target_tip(repo, target_branch).map(|tip| (shape, tip))
+        }) {
             Ok(target) => target,
             Err(error) => {
                 let id = execution.id.clone();
@@ -2906,7 +2917,7 @@ async fn finish_recovered_apply(
     // Git already landed before the old process died, possibly with more work on
     // top since. Do not replay it.
     let already_applied = real_tip == merge_sha
-        || worktree::is_ancestor(&target_checkout, merge_sha, &real_tip)
+        || worktree::is_ancestor(repo, merge_sha, &real_tip)
             .map_err(|error| internal(format!("cannot compare target with candidate: {error}")))?;
     let integrated = if already_applied {
         claim_recovered_apply(db, &execution.id, "idempotent_close_recheck_complete").await?;
@@ -2939,7 +2950,7 @@ async fn finish_recovered_apply(
             .map_err(|error| internal(error.to_string()))?;
             return Err(internal(reason));
         }
-        let dirty = worktree::worktree_dirty_files(&target_checkout)
+        let dirty = worktree::integration_target_dirty_files(&target_shape)
             .map_err(|error| internal(format!("cannot inspect target cleanliness: {error}")))?;
         if !dirty.is_empty() {
             let id = execution.id.clone();
@@ -8581,9 +8592,9 @@ async fn resume_blocked_apply(
         .ok_or_else(|| ProvisionError::CheckpointRefused("run has no target branch".into()))?;
     let target =
         worktree::resolve_local_branch(&repo, target).map_err(ProvisionError::CheckpointRefused)?;
-    let target_checkout = worktree::integration_target_worktree(&repo, &target)
-        .map_err(ProvisionError::CheckpointRefused)?;
-    let dirty = worktree::worktree_dirty_files(&target_checkout)
+    let target_shape =
+        worktree::integration_target(&repo, &target).map_err(ProvisionError::CheckpointRefused)?;
+    let dirty = worktree::integration_target_dirty_files(&target_shape)
         .map_err(|error| ProvisionError::CheckpointRefused(error.to_string()))?;
     if !dirty.is_empty() {
         return Err(ProvisionError::CheckpointRefused(format!(
@@ -18512,13 +18523,13 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn refused_integration_on_an_unchecked_out_target_is_held_and_announced() {
+    async fn refused_integration_on_a_doubly_checked_out_target_is_held_and_announced() {
         let repo = init_repo();
         let db = Database::open_in_memory().unwrap();
         let (execution, _, _) = approved_execution_with_commit(
             &db,
             repo.path(),
-            "target-without-worktree",
+            "target-with-two-worktrees",
             "worker.txt",
             "validated",
             vec![],
@@ -18527,6 +18538,23 @@ pub(crate) mod tests {
         assert!(git(repo.path(), &["branch", "feature-target", "main"])
             .status
             .success());
+        let checkouts = tempfile::tempdir().unwrap();
+        let first = checkouts.path().join("first");
+        let second = checkouts.path().join("second");
+        for checkout in [&first, &second] {
+            assert!(git(
+                repo.path(),
+                &[
+                    "worktree",
+                    "add",
+                    "--force",
+                    checkout.to_str().unwrap(),
+                    "feature-target"
+                ]
+            )
+            .status
+            .success());
+        }
         let run_id = execution.orchestration_run_id.clone();
         db.with_conn(move |conn| {
             conn.execute(
@@ -18571,7 +18599,7 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(posted.len(), 1, "a repeated refusal must not spam the room");
         assert!(
-            posted[0].contains("git worktree add <chemin> feature-target"),
+            posted[0].contains("Garde `feature-target` extraite dans un seul worktree"),
             "the notice must name the fix: {}",
             posted[0]
         );
@@ -18585,17 +18613,10 @@ pub(crate) mod tests {
             "the held approval needs attention"
         );
 
-        // Once the branch is checked out, the same durable approval integrates.
-        let target_dir = tempfile::tempdir().unwrap();
-        let target = target_dir.path().join("feature");
+        // Once the branch is checked out exactly once, the same durable approval integrates.
         assert!(git(
             repo.path(),
-            &[
-                "worktree",
-                "add",
-                target.to_str().unwrap(),
-                "feature-target"
-            ]
+            &["worktree", "remove", "--force", second.to_str().unwrap()]
         )
         .status
         .success());
@@ -19012,7 +19033,7 @@ pub(crate) mod tests {
     #[derive(Clone, Copy, Debug)]
     enum ApplyRefusal {
         DirtyTarget,
-        TargetCheckoutRemoved,
+        TargetCheckedOutTwice,
     }
 
     async fn assert_apply_refusal_parks_and_resumes(case: ApplyRefusal) {
@@ -19021,15 +19042,17 @@ pub(crate) mod tests {
         let target_dir = tempfile::tempdir().unwrap();
         let target = match case {
             ApplyRefusal::DirtyTarget => repo.path().to_path_buf(),
-            ApplyRefusal::TargetCheckoutRemoved => target_dir.path().join("feature"),
+            ApplyRefusal::TargetCheckedOutTwice => target_dir.path().join("feature"),
         };
         let action = match case {
             ApplyRefusal::DirtyTarget => {
                 "    open(os.path.join(target, 'concurrent.txt'), 'w').write('wip')"
             }
-            ApplyRefusal::TargetCheckoutRemoved => {
-                "    subprocess.run(['git', '-C', repo, 'worktree', 'remove', '--force', target], \
-                 check=True)"
+            // A second checkout appears while the validation runs: the target
+            // is no longer checked out exactly once, so the apply is refused.
+            ApplyRefusal::TargetCheckedOutTwice => {
+                "    subprocess.run(['git', '-C', repo, 'worktree', 'add', '--force', \
+                 target + '-second', 'feature-target'], check=True)"
             }
         };
         let paths = format!(
@@ -19059,7 +19082,7 @@ pub(crate) mod tests {
         .await;
         let branch = match case {
             ApplyRefusal::DirtyTarget => "main",
-            ApplyRefusal::TargetCheckoutRemoved => {
+            ApplyRefusal::TargetCheckedOutTwice => {
                 assert!(git(repo.path(), &["branch", "feature-target", "main"])
                     .status
                     .success());
@@ -19106,9 +19129,9 @@ pub(crate) mod tests {
                 BlockedReasonCode::IntegrationRefused,
                 "Committe ou retire les fichiers non commités",
             ),
-            ApplyRefusal::TargetCheckoutRemoved => (
+            ApplyRefusal::TargetCheckedOutTwice => (
                 BlockedReasonCode::IntegrationTargetNotCheckedOut,
-                "git worktree add <chemin> feature-target",
+                "Garde `feature-target` extraite dans un seul worktree",
             ),
         };
         assert_eq!(held.blocked_reason_code, Some(code), "{case:?}");
@@ -19123,15 +19146,11 @@ pub(crate) mod tests {
             ApplyRefusal::DirtyTarget => {
                 std::fs::remove_file(target.join("concurrent.txt")).unwrap();
             }
-            ApplyRefusal::TargetCheckoutRemoved => {
+            ApplyRefusal::TargetCheckedOutTwice => {
+                let second = format!("{}-second", target.to_str().unwrap());
                 assert!(git(
                     repo.path(),
-                    &[
-                        "worktree",
-                        "add",
-                        target.to_str().unwrap(),
-                        "feature-target"
-                    ]
+                    &["worktree", "remove", "--force", second.as_str()]
                 )
                 .status
                 .success());
@@ -19154,7 +19173,7 @@ pub(crate) mod tests {
     async fn every_refused_apply_parks_blocked_with_a_code_and_resumes() {
         for case in [
             ApplyRefusal::DirtyTarget,
-            ApplyRefusal::TargetCheckoutRemoved,
+            ApplyRefusal::TargetCheckedOutTwice,
         ] {
             assert_apply_refusal_parks_and_resumes(case).await;
         }
@@ -19579,6 +19598,319 @@ pub(crate) mod tests {
                 }
             ));
             assert_eq!(git_rev(&target, "HEAD"), sha);
+        }
+    }
+
+    /// An execution armed to apply onto `review-target`, a local branch no worktree
+    /// has checked out. Returns the execution, its child worktree, the pinned
+    /// target tip and the validated candidate.
+    async fn armed_apply_on_unchecked_out_target(
+        db: &Database,
+        repo: &Path,
+        key: &str,
+    ) -> (TaskExecution, std::path::PathBuf, String, String) {
+        let (execution, _, child) =
+            approved_execution_with_commit(db, repo, key, "worker.txt", "validated", vec![]).await;
+        let original = git_rev(repo, "main");
+        assert!(git(repo, &["branch", "review-target", "main"])
+            .status
+            .success());
+        let run_id = execution.orchestration_run_id.clone();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE orchestration_runs SET target_branch = 'review-target' WHERE id = ?1",
+                [run_id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        checkpoint(
+            db,
+            &execution.id,
+            CheckpointStep::Anchored(original.clone()),
+        )
+        .await
+        .unwrap();
+        let worktree::CandidateOutcome::Built { sha } =
+            worktree::build_candidate(&child, &original).unwrap()
+        else {
+            panic!("candidate");
+        };
+        checkpoint(db, &execution.id, CheckpointStep::Built(sha.clone()))
+            .await
+            .unwrap();
+        checkpoint(db, &execution.id, CheckpointStep::Validating)
+            .await
+            .unwrap();
+        let backup = worktree::write_backup_ref(repo, &backup_slug(&execution), &original).unwrap();
+        checkpoint(db, &execution.id, CheckpointStep::Armed(backup))
+            .await
+            .unwrap();
+        (execution, child, original, sha)
+    }
+
+    /// Park an armed apply the way a crash (`boot`) or a refused apply leaves it.
+    async fn park_applying(db: &Database, exec_id: &str, boot: bool) {
+        let id = exec_id.to_string();
+        db.with_conn(move |conn| {
+            if boot {
+                crate::db::orchestration::transition_execution(
+                    conn,
+                    &id,
+                    TaskExecutionStatus::Interrupted,
+                    &backend_actor(),
+                    serde_json::json!({"reason":"boot"}),
+                )?;
+            } else {
+                crate::db::orchestration::block_execution(
+                    conn,
+                    &id,
+                    &backend_actor(),
+                    "apply previously refused",
+                    None,
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    async fn recovery_action_of(db: &Database, exec_id: &str) -> ExecutionRecoveryAction {
+        let id = exec_id.to_string();
+        db.with_conn(move |conn| crate::db::orchestration::get_execution_recovery(conn, &id))
+            .await
+            .unwrap()
+            .expect("a recovery decision")
+            .recovery_action
+    }
+
+    /// Point the run at `review-target` and branch it off `main`.
+    async fn pin_unchecked_out_target(db: &Database, repo: &Path, execution: &TaskExecution) {
+        assert!(git(repo, &["branch", "review-target", "main"])
+            .status
+            .success());
+        let run_id = execution.orchestration_run_id.clone();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE orchestration_runs SET target_branch = 'review-target' WHERE id = ?1",
+                [run_id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_unchecked_out_target_integrates_by_compare_and_swap_without_touching_a_checkout() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (execution, _, _) = approved_execution_with_commit(
+            &db,
+            repo.path(),
+            "update-ref-target",
+            "worker.txt",
+            "validated",
+            vec![],
+        )
+        .await;
+        let original = git_rev(repo.path(), "main");
+        pin_unchecked_out_target(&db, repo.path(), &execution).await;
+        // Work in progress in the only checkout must neither block nor be touched.
+        std::fs::write(repo.path().join("user.txt"), "preserve exactly").unwrap();
+        let index_before = std::fs::read(repo.path().join(".git/index")).unwrap();
+
+        let outcome = run_integration(&db, &execution.id).await.unwrap();
+        let IntegrationOutcome::Integrated { sha } = outcome else {
+            panic!("got {outcome:?}");
+        };
+        assert_eq!(git_rev(repo.path(), "review-target"), sha);
+        assert!(worktree::is_ancestor(repo.path(), &original, &sha).unwrap());
+        assert_eq!(git_rev(repo.path(), "main"), original, "main is untouched");
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("user.txt")).unwrap(),
+            "preserve exactly"
+        );
+        assert!(!repo.path().join("worker.txt").exists());
+        assert_eq!(
+            std::fs::read(repo.path().join(".git/index")).unwrap(),
+            index_before,
+            "no checkout index is rewritten"
+        );
+        let done = exec_of(&db, &execution.id).await;
+        assert_eq!(done.status, TaskExecutionStatus::Done);
+        assert_eq!(done.integrated_sha.as_deref(), Some(sha.as_str()));
+        assert_eq!(done.blocked_reason_code, None);
+    }
+
+    #[tokio::test]
+    async fn an_unchecked_out_target_that_moves_during_validation_is_rebuilt_never_overwritten() {
+        let repo = init_repo();
+        let control = tempfile::tempdir().unwrap();
+        let paths = format!(
+            "control, repo = {:?}, {:?}",
+            control.path().to_str().unwrap(),
+            repo.path().to_str().unwrap()
+        );
+        let validation = scripted_validation(
+            control.path(),
+            &[
+                "import os, subprocess",
+                &paths,
+                "if not os.path.exists(os.path.join(control, 'stop')):",
+                "    open(os.path.join(control, 'stop'), 'w').write('')",
+                "    subprocess.run(['git', '-C', repo, 'commit', '--allow-empty', '-m', 'concurrent landing'], check=True)",
+                "    subprocess.run(['git', '-C', repo, 'branch', '-f', 'review-target', 'main'], check=True)",
+            ],
+        );
+        let db = Database::open_in_memory().unwrap();
+        let (execution, _, _) = approved_execution_with_commit(
+            &db,
+            repo.path(),
+            "update-ref-moved",
+            "worker.txt",
+            "validated",
+            vec![validation],
+        )
+        .await;
+        pin_unchecked_out_target(&db, repo.path(), &execution).await;
+        let original = git_rev(repo.path(), "review-target");
+
+        let outcome = run_integration(&db, &execution.id).await.unwrap();
+        let IntegrationOutcome::Integrated { sha } = outcome else {
+            panic!("got {outcome:?}");
+        };
+        let landed_meanwhile = git_rev(repo.path(), "main");
+        assert_ne!(landed_meanwhile, original);
+        // The concurrent landing is an ancestor of the integrated tip: it was
+        // absorbed by a rebuild, not overwritten.
+        assert!(worktree::is_ancestor(repo.path(), &landed_meanwhile, &sha).unwrap());
+        assert_eq!(git_rev(repo.path(), "review-target"), sha);
+        let done = exec_of(&db, &execution.id).await;
+        assert_eq!(
+            done.candidate_target_sha.as_deref(),
+            Some(landed_meanwhile.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unchecked_out_target_resumes_an_armed_apply_after_boot_or_a_block() {
+        for boot in [true, false] {
+            let repo = init_repo();
+            let db = Database::open_in_memory().unwrap();
+            let (execution, _, original, sha) =
+                armed_apply_on_unchecked_out_target(&db, repo.path(), "update-ref-resume").await;
+            std::fs::write(repo.path().join("user.txt"), "preserve exactly").unwrap();
+            park_applying(&db, &execution.id, boot).await;
+            let outcome = if boot {
+                classify_interrupted_execution(&db, &execution.id, &[AgentType::ClaudeCode])
+                    .await
+                    .unwrap();
+                let action = recovery_action_of(&db, &execution.id).await;
+                assert_eq!(
+                    action,
+                    ExecutionRecoveryAction::ApplyFastForward,
+                    "a target checked out nowhere is clean, not an unknown state"
+                );
+                resume_recovered_integration(&db, &execution.id, action)
+                    .await
+                    .unwrap()
+            } else {
+                resume_blocked_apply(&db, &execution.id).await.unwrap()
+            };
+            assert!(
+                matches!(outcome, IntegrationOutcome::Integrated { .. }),
+                "boot={boot}: {outcome:?}"
+            );
+            assert_eq!(git_rev(repo.path(), "review-target"), sha, "boot={boot}");
+            assert_eq!(git_rev(repo.path(), "main"), original, "boot={boot}");
+            assert_eq!(
+                std::fs::read_to_string(repo.path().join("user.txt")).unwrap(),
+                "preserve exactly"
+            );
+            assert!(!repo.path().join("worker.txt").exists());
+            let done = exec_of(&db, &execution.id).await;
+            assert_eq!(done.status, TaskExecutionStatus::Done, "boot={boot}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unchecked_out_target_that_moved_is_rebuilt_on_recovery_not_parked() {
+        for boot in [true, false] {
+            let repo = init_repo();
+            let db = Database::open_in_memory().unwrap();
+            let (execution, _, _, stale) =
+                armed_apply_on_unchecked_out_target(&db, repo.path(), "update-ref-drift").await;
+            // Another integration lands on the target meanwhile.
+            std::fs::write(repo.path().join("other.txt"), "other").unwrap();
+            for args in [vec!["add", "other.txt"], vec!["commit", "-m", "other work"]] {
+                assert!(git(repo.path(), &args).status.success());
+            }
+            assert!(git(repo.path(), &["branch", "-f", "review-target", "main"])
+                .status
+                .success());
+            let moved = git_rev(repo.path(), "review-target");
+            park_applying(&db, &execution.id, boot).await;
+            let outcome = if boot {
+                classify_interrupted_execution(&db, &execution.id, &[AgentType::ClaudeCode])
+                    .await
+                    .unwrap();
+                let action = recovery_action_of(&db, &execution.id).await;
+                assert_eq!(action, ExecutionRecoveryAction::RebuildCandidate);
+                resume_recovered_integration(&db, &execution.id, action)
+                    .await
+                    .unwrap()
+            } else {
+                resume_blocked_apply(&db, &execution.id).await.unwrap()
+            };
+            let IntegrationOutcome::Integrated { sha } = outcome else {
+                panic!("boot={boot}: {outcome:?}");
+            };
+            assert_ne!(
+                sha, stale,
+                "boot={boot}: the stale candidate is not replayed"
+            );
+            assert!(worktree::is_ancestor(repo.path(), &moved, &sha).unwrap());
+            assert_eq!(git_rev(repo.path(), "review-target"), sha, "boot={boot}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unchecked_out_target_that_already_holds_the_candidate_closes_idempotently() {
+        for boot in [true, false] {
+            let repo = init_repo();
+            let db = Database::open_in_memory().unwrap();
+            let (execution, _, _, sha) =
+                armed_apply_on_unchecked_out_target(&db, repo.path(), "update-ref-landed").await;
+            // The apply landed, then the process died before recording it.
+            assert!(git(
+                repo.path(),
+                &["update-ref", "refs/heads/review-target", &sha]
+            )
+            .status
+            .success());
+            park_applying(&db, &execution.id, boot).await;
+            let outcome = if boot {
+                classify_interrupted_execution(&db, &execution.id, &[AgentType::ClaudeCode])
+                    .await
+                    .unwrap();
+                let action = recovery_action_of(&db, &execution.id).await;
+                assert_eq!(action, ExecutionRecoveryAction::IdempotentClose);
+                resume_recovered_integration(&db, &execution.id, action)
+                    .await
+                    .unwrap()
+            } else {
+                resume_blocked_apply(&db, &execution.id).await.unwrap()
+            };
+            assert!(
+                matches!(outcome, IntegrationOutcome::Integrated { .. }),
+                "boot={boot}: {outcome:?}"
+            );
+            assert_eq!(git_rev(repo.path(), "review-target"), sha, "boot={boot}");
+            let done = exec_of(&db, &execution.id).await;
+            assert_eq!(done.integrated_sha.as_deref(), Some(sha.as_str()));
         }
     }
 
