@@ -2381,6 +2381,7 @@ const zh: TranslationDict = {
   "planning.allGroupLater": "稍后",
   "planning.allEmpty": "无任务匹配此搜索。",
   "planning.blockerCount": "{0} 个阻塞",
+  "planning.liveCheckCount": "{0} 个待执行的集成后实时检查",
   "planning.taskActions": "任务操作",
   "planning.dependencyNeighborhood": "依赖关系网络",
   "planning.blockedBy": "被…阻塞",

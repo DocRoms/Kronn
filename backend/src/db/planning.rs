@@ -11,8 +11,9 @@ use crate::models::{
     CreatePlanningTaskLink, CreatePlanningTaskRequest, DiscussionPlan,
     LinkPlanningDiscussionRequest, MessageTargetKind, ModelTier, PlanningActor, PlanningActorKind,
     PlanningAssignee, PlanningAssigneeInput, PlanningAssigneeRole, PlanningAssigneeSource,
-    PlanningDependencySummary, PlanningDiscussionRelation, PlanningDodItem, PlanningPlacement,
-    PlanningPlanStats, PlanningTaskChange, PlanningTaskDetail, PlanningTaskEvent, PlanningTaskLink,
+    PlanningDependencySummary, PlanningDiscussionRelation, PlanningDodItem,
+    PlanningDodVerification, PlanningLiveCheck, PlanningPlacement, PlanningPlanStats,
+    PlanningTaskChange, PlanningTaskDetail, PlanningTaskEvent, PlanningTaskLink,
     PlanningTaskListQuery, PlanningTaskListResponse, PlanningTaskPriority, PlanningTaskStatus,
     PlanningTaskSummary, PlanningWorkspaceSummary, TaskExecutionStatus,
     UnassignPlanningTaskRequest, UnlinkPlanningDiscussionRequest, UpdatePlanningDodItemRequest,
@@ -521,31 +522,48 @@ fn replace_dod(conn: &Connection, task_id: &str, items: &[CreatePlanningDodItem]
             .filter(|id| !retained_ids.contains(*id));
         if let Some(existing_id) = requested_id.or(fallback_id) {
             retained_ids.insert(existing_id.to_string());
+            let (stored_mode, stored_evidence): (String, Option<String>) = conn.query_row(
+                "SELECT verification, evidence FROM planning_task_dod_items WHERE id = ?1",
+                [existing_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let mode = item
+                .verification
+                .unwrap_or_else(|| PlanningDodVerification::from_db(&stored_mode));
+            // A live check is only ever ticked with evidence (`update_dod_item`);
+            // replacing the array must not be a way around that.
+            let completed = item.completed
+                && (mode == PlanningDodVerification::Worker || stored_evidence.is_some());
             conn.execute(
                 "UPDATE planning_task_dod_items
-                 SET sentence = ?3, completed = ?4, position = ?5, updated_at = ?6
+                 SET sentence = ?3, completed = ?4, position = ?5, updated_at = ?6,
+                     verification = ?7
                  WHERE id = ?1 AND task_id = ?2",
                 params![
                     existing_id,
                     task_id,
                     item.sentence.trim(),
-                    item.completed,
+                    completed,
                     position as i64,
                     now,
+                    mode.as_str(),
                 ],
             )?;
         } else {
+            let mode = item.verification.unwrap_or_default();
+            let completed = item.completed && mode == PlanningDodVerification::Worker;
             conn.execute(
                 "INSERT INTO planning_task_dod_items
-                 (id, task_id, sentence, completed, position, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+                 (id, task_id, sentence, completed, position, created_at, updated_at, verification)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7)",
                 params![
                     Uuid::new_v4().to_string(),
                     task_id,
                     item.sentence.trim(),
-                    item.completed,
+                    completed,
                     position as i64,
                     now,
+                    mode.as_str(),
                 ],
             )?;
         }
@@ -1033,6 +1051,40 @@ fn actor_assignee(
     }))
 }
 
+/// KT-1254 — the unticked post-integration DoD items, grouped by task. `scope`
+/// is a fixed SQL predicate over `t` (the task) taking the single `?1` bind.
+fn load_live_checks(
+    conn: &Connection,
+    scope: &str,
+    bind: &str,
+) -> Result<std::collections::HashMap<String, Vec<PlanningLiveCheck>>> {
+    let mut statement = conn.prepare(&format!(
+        "SELECT d.task_id, d.id, d.sentence
+           FROM planning_task_dod_items d
+           JOIN planning_tasks t ON t.id = d.task_id
+          WHERE {scope}
+            AND d.verification = 'post_integration' AND d.completed = 0
+          ORDER BY d.task_id, d.position"
+    ))?;
+    let rows = statement
+        .query_map([bind], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                PlanningLiveCheck {
+                    dod_id: row.get(1)?,
+                    sentence: row.get(2)?,
+                },
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut grouped: std::collections::HashMap<String, Vec<PlanningLiveCheck>> =
+        std::collections::HashMap::new();
+    for (task_id, check) in rows {
+        grouped.entry(task_id).or_default().push(check);
+    }
+    Ok(grouped)
+}
+
 fn get_summary(conn: &Connection, task_id: &str) -> Result<Option<PlanningTaskSummary>> {
     let row = conn
         .query_row(
@@ -1097,8 +1149,12 @@ fn get_summary(conn: &Connection, task_id: &str) -> Result<Option<PlanningTaskSu
     let assignees = load_assignees(conn, AssigneeScope::Task(&id))?
         .remove(&id)
         .unwrap_or_default();
+    let live_checks = load_live_checks(conn, "t.id = ?1", &id)?
+        .remove(&id)
+        .unwrap_or_default();
     Ok(Some(PlanningTaskSummary {
         assignees,
+        live_checks,
         project_ids: load_string_list(
             conn,
             "SELECT project_id
@@ -1402,7 +1458,7 @@ pub fn get_task(conn: &Connection, task_id: &str) -> Result<Option<PlanningTaskD
 
     let definition_of_done = {
         let mut statement = conn.prepare(
-            "SELECT id, sentence, completed, position
+            "SELECT id, sentence, completed, position, verification, evidence
              FROM planning_task_dod_items WHERE task_id = ?1 ORDER BY position",
         )?;
         let items = statement
@@ -1412,6 +1468,8 @@ pub fn get_task(conn: &Connection, task_id: &str) -> Result<Option<PlanningTaskD
                     sentence: row.get(1)?,
                     completed: row.get(2)?,
                     position: row.get(3)?,
+                    verification: PlanningDodVerification::from_db(&row.get::<_, String>(4)?),
+                    evidence: row.get(5)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1729,6 +1787,37 @@ pub fn mark_task_done_within_tx(
     actor: &PlanningActor,
 ) -> Result<bool> {
     validate_actor(actor)?;
+    // KT-1254 — a pending principal live check keeps the task open: the code is
+    // integrated, but the task closes only when the check is ticked with
+    // evidence (`update_dod_item`). Same CAS: the task must still be in progress.
+    let pending_live_checks: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM planning_task_dod_items
+          WHERE task_id = ?1 AND verification = 'post_integration' AND completed = 0",
+        [task_id],
+        |row| row.get(0),
+    )?;
+    if pending_live_checks > 0 {
+        let in_progress: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM planning_tasks WHERE id = ?1 AND status = 'in_progress')",
+            [task_id],
+            |row| row.get(0),
+        )?;
+        if !in_progress {
+            return Ok(false);
+        }
+        insert_event(
+            tx,
+            task_id,
+            "integrated_pending_live_check",
+            actor,
+            serde_json::json!({
+                "status": "in_progress",
+                "via": "orchestration_integration",
+                "pending_live_checks": pending_live_checks,
+            }),
+        )?;
+        return Ok(true);
+    }
     let changed = tx.execute(
         "UPDATE planning_tasks
             SET status = 'done', blocked_reason = NULL, updated_at = ?2
@@ -1778,6 +1867,45 @@ pub fn restore_task_todo_after_cancellation(
     Ok(changed > 0)
 }
 
+/// KT-1254 — the principal declares, at review, that these unticked DoD items
+/// are live checks to make after integration. Idempotent; an item already
+/// ticked (a proof was recorded) is left alone.
+pub fn mark_dod_post_integration(
+    conn: &Connection,
+    task_id: &str,
+    dod_ids: &[String],
+    actor: &PlanningActor,
+) -> Result<()> {
+    validate_actor(actor)?;
+    let mut changed_ids = Vec::new();
+    for dod_id in dod_ids {
+        let changed = conn.execute(
+            "UPDATE planning_task_dod_items
+                SET verification = 'post_integration', updated_at = ?3
+              WHERE id = ?1 AND task_id = ?2 AND completed = 0
+                AND verification <> 'post_integration'",
+            params![dod_id, task_id, Utc::now().to_rfc3339()],
+        )?;
+        if changed > 0 {
+            changed_ids.push(dod_id.as_str());
+        }
+    }
+    if !changed_ids.is_empty() {
+        insert_event(
+            conn,
+            task_id,
+            "dod_verification",
+            actor,
+            serde_json::json!({
+                "dod_ids": changed_ids,
+                "verification": "post_integration",
+                "via": "review",
+            }),
+        )?;
+    }
+    Ok(())
+}
+
 pub fn update_dod_item(
     conn: &Connection,
     task_reference: &str,
@@ -1787,15 +1915,50 @@ pub fn update_dod_item(
     let task_id = resolve_task_id(conn, task_reference)?;
     validate_actor(&request.actor)?;
     let transaction = NestableTx::begin(conn)?;
-    let changed = transaction.execute(
-        "UPDATE planning_task_dod_items
-         SET completed = ?3, updated_at = ?4
-         WHERE id = ?1 AND task_id = ?2",
-        params![dod_id, task_id, request.completed, Utc::now().to_rfc3339(),],
-    )?;
-    if changed == 0 {
+    let mode: Option<String> = transaction
+        .query_row(
+            "SELECT verification FROM planning_task_dod_items WHERE id = ?1 AND task_id = ?2",
+            params![dod_id, task_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(mode) = mode else {
         bail!("Definition of Done item not found");
+    };
+    let live_check =
+        PlanningDodVerification::from_db(&mode) == PlanningDodVerification::PostIntegration;
+    // KT-1254 — a live check is ticked with the principal's evidence, never
+    // bare; unticking it drops that evidence.
+    let evidence = request
+        .evidence
+        .as_deref()
+        .map(str::trim)
+        .filter(|evidence| !evidence.is_empty());
+    if live_check && request.completed && evidence.is_none() {
+        bail!(
+            "A post-integration DoD item is ticked with non-empty `evidence` from the live check"
+        );
     }
+    if evidence.is_some_and(|evidence| evidence.chars().count() > 2_000) {
+        bail!("DoD evidence must be at most 2000 characters");
+    }
+    let stored_evidence = if live_check && request.completed {
+        evidence
+    } else {
+        None
+    };
+    transaction.execute(
+        "UPDATE planning_task_dod_items
+         SET completed = ?3, evidence = ?5, updated_at = ?4
+         WHERE id = ?1 AND task_id = ?2",
+        params![
+            dod_id,
+            task_id,
+            request.completed,
+            Utc::now().to_rfc3339(),
+            stored_evidence,
+        ],
+    )?;
     insert_event(
         &transaction,
         &task_id,
@@ -1804,8 +1967,26 @@ pub fn update_dod_item(
         serde_json::json!({
             "dod_id": dod_id,
             "completed": request.completed,
+            "verification": mode,
+            "evidence": stored_evidence,
         }),
     )?;
+    if live_check && request.completed {
+        // The last pending live check of an INTEGRATED task closes it: the
+        // execution already landed, only this proof was owed.
+        let closable: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM task_executions
+                            WHERE task_id = ?1 AND status = 'Done' AND integrated_sha IS NOT NULL)
+                AND NOT EXISTS(SELECT 1 FROM planning_task_dod_items
+                                WHERE task_id = ?1 AND verification = 'post_integration'
+                                  AND completed = 0)",
+            [&task_id],
+            |row| row.get(0),
+        )?;
+        if closable {
+            mark_task_done_within_tx(&transaction, &task_id, &request.actor)?;
+        }
+    }
     transaction.commit()?;
     get_task(conn, &task_id)?.context("Updated planning task disappeared")
 }
@@ -2209,6 +2390,11 @@ fn load_summaries_for_discussion(
     )?;
 
     let mut assignees = load_assignees(conn, AssigneeScope::Discussion(discussion_id))?;
+    let mut live_checks = load_live_checks(
+        conn,
+        "t.id IN (SELECT task_id FROM planning_task_discussions WHERE discussion_id = ?1)",
+        discussion_id,
+    )?;
 
     let mut stmt = conn.prepare(
         "SELECT t.id, t.task_number, t.parent_id, p.task_number, p.title,
@@ -2287,6 +2473,7 @@ fn load_summaries_for_discussion(
         ) = raw;
         let summary = PlanningTaskSummary {
             assignees: assignees.remove(&id).unwrap_or_default(),
+            live_checks: live_checks.remove(&id).unwrap_or_default(),
             project_ids: projects.get(&id).cloned().unwrap_or_default(),
             discussion_ids: discussions.get(&id).cloned().unwrap_or_default(),
             tags: tags.get(&id).cloned().unwrap_or_default(),
@@ -3178,11 +3365,13 @@ mod tests {
                 id: None,
                 sentence: "First".into(),
                 completed: false,
+                verification: None,
             },
             CreatePlanningDodItem {
                 id: None,
                 sentence: "Second".into(),
                 completed: false,
+                verification: None,
             },
         ];
         let task = create_task(&connection, &create).unwrap();
@@ -3195,11 +3384,13 @@ mod tests {
                 id: Some(second_id.clone()),
                 sentence: "Second".into(),
                 completed: false,
+                verification: None,
             },
             CreatePlanningDodItem {
                 id: Some(first_id.clone()),
                 sentence: "First renamed".into(),
                 completed: false,
+                verification: None,
             },
         ]);
         let replaced = update_task(&connection, &task.summary.id, &replace).unwrap();
@@ -3213,6 +3404,7 @@ mod tests {
             &UpdatePlanningDodItemRequest {
                 completed: true,
                 actor: PlanningActor::default(),
+                evidence: None,
             },
         )
         .unwrap();
@@ -3223,10 +3415,99 @@ mod tests {
             &UpdatePlanningDodItemRequest {
                 completed: true,
                 actor: PlanningActor::default(),
+                evidence: None,
             },
         )
         .unwrap();
         assert!(updated.definition_of_done.iter().all(|item| item.completed));
+    }
+
+    /// KT-1254 — a post-integration item is a live check: listed on the summary
+    /// while unticked, ticked only with evidence (not via an array replace), and
+    /// it keeps its mode when the array is replaced without one.
+    #[test]
+    fn a_post_integration_dod_is_a_live_check_ticked_only_with_evidence() {
+        let connection = connection();
+        let dod = |sentence: &str, verification| CreatePlanningDodItem {
+            id: None,
+            sentence: sentence.into(),
+            completed: false,
+            verification,
+        };
+        let mut create = request("Live check");
+        create.definition_of_done = vec![
+            dod("Unit tests pass", None),
+            dod(
+                "Replayed on a real framing",
+                Some(PlanningDodVerification::PostIntegration),
+            ),
+        ];
+        let task = create_task(&connection, &create).unwrap();
+        let (worker_id, live_id) = (
+            task.definition_of_done[0].id.clone(),
+            task.definition_of_done[1].id.clone(),
+        );
+        assert_eq!(
+            task.definition_of_done[0].verification,
+            PlanningDodVerification::Worker
+        );
+        assert_eq!(task.summary.live_checks.len(), 1);
+        assert_eq!(task.summary.live_checks[0].dod_id, live_id);
+
+        // Replacing the array without a mode keeps it; `completed: true` cannot
+        // tick a live check that has no evidence.
+        let mut replace = update_request();
+        replace.definition_of_done = Some(vec![
+            CreatePlanningDodItem {
+                id: Some(worker_id.clone()),
+                sentence: "Unit tests pass".into(),
+                completed: true,
+                verification: None,
+            },
+            CreatePlanningDodItem {
+                id: Some(live_id.clone()),
+                sentence: "Replayed on a real framing".into(),
+                completed: true,
+                verification: None,
+            },
+        ]);
+        let replaced = update_task(&connection, &task.summary.id, &replace).unwrap();
+        assert!(replaced.definition_of_done[0].completed);
+        assert!(!replaced.definition_of_done[1].completed);
+        assert_eq!(
+            replaced.definition_of_done[1].verification,
+            PlanningDodVerification::PostIntegration
+        );
+
+        let bare = update_dod_item(
+            &connection,
+            &task.summary.id,
+            &live_id,
+            &UpdatePlanningDodItemRequest {
+                completed: true,
+                actor: PlanningActor::default(),
+                evidence: Some("  ".into()),
+            },
+        );
+        assert!(bare.is_err(), "a blank evidence is no evidence");
+        let ticked = update_dod_item(
+            &connection,
+            &task.summary.id,
+            &live_id,
+            &UpdatePlanningDodItemRequest {
+                completed: true,
+                actor: PlanningActor::default(),
+                evidence: Some("replayed on a real framing: ok".into()),
+            },
+        )
+        .unwrap();
+        assert!(ticked.summary.live_checks.is_empty());
+        assert_eq!(
+            ticked.definition_of_done[1].evidence.as_deref(),
+            Some("replayed on a real framing: ok")
+        );
+        // No integrated execution: ticking alone never closes a task.
+        assert_eq!(ticked.summary.status, PlanningTaskStatus::Todo);
     }
 
     // ── KT-30A — compact bounded plan projection ────────────────────────────

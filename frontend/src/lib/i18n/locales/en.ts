@@ -2399,6 +2399,7 @@ const en: TranslationDict = {
   'planning.allGroupLater': 'Later',
   'planning.allEmpty': 'No task matches this search.',
   'planning.blockerCount': '{0} blockers',
+  'planning.liveCheckCount': '{0} live check(s) pending',
   'planning.taskActions': 'Task actions',
   'planning.dependencyNeighborhood': 'Dependency neighborhood',
   'planning.blockedBy': 'Blocked by',

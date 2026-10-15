@@ -7149,7 +7149,7 @@ async fn orchestrator_return_resume_route_authenticates_and_replays_exact_rotati
             parent_id: None,
             project_ids: vec!["return-http-project".into()],
             tags: vec![],
-            definition_of_done: vec![kronn::models::CreatePlanningDodItem { id: None, sentence: "worker returns".into(), completed: false }],
+            definition_of_done: vec![kronn::models::CreatePlanningDodItem { id: None, sentence: "worker returns".into(), completed: false, verification: None }],
             links: vec![],
             actor: kronn::models::PlanningActor { kind: kronn::models::PlanningActorKind::Backend, id: Some("api-test".into()), session_id: None, source_message_id: None },
         })?;

@@ -664,6 +664,14 @@ export function DiscussionPlanPanel({
               {t('planning.blockerCount', relation.active_blockers.length)}
             </span>
           )}
+          {(relation.task.live_checks?.length ?? 0) > 0 && (
+            <span
+              data-kind="live-check"
+              title={relation.task.live_checks?.map(check => check.sentence).join('\n')}
+            >
+              {t('planning.liveCheckCount', relation.task.live_checks?.length ?? 0)}
+            </span>
+          )}
           <TaskAssigneeChips assignees={relation.task.assignees} max={2} />
         </span>
         {relation.task.parent_reference && (
