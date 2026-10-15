@@ -177,6 +177,13 @@ impl WorkerLane {
         roots
     }
 
+    /// The lane's own scratch directory (KT-1255): inside the Cargo target, so
+    /// inside a write root, and the `TMPDIR` of a sandboxed lane build, which
+    /// is thereby granted no global `/tmp`.
+    pub fn tmp_dir(&self) -> PathBuf {
+        self.cargo_target_dir.join(".kronn-tmp")
+    }
+
     /// Directories the worker reads but never writes: the host's dependency
     /// caches and the main checkout's installed frontend dependencies.
     pub fn read_roots(&self, caches: &SharedCaches) -> Vec<PathBuf> {
@@ -724,6 +731,13 @@ pub trait ProbeRunner: Send + Sync {
         let _ = cancel;
         self.run(probe)
     }
+
+    /// Whether every command this runner starts runs under the worker's sandbox
+    /// profile (KT-1255, `core::task_worker_sandbox`). The plain process runner
+    /// does not: it is for Kronn's own commands, never for a lane's build.
+    fn confined(&self) -> bool {
+        false
+    }
 }
 
 /// Runs probes as real child processes with the sealed Kronn environment plus
@@ -750,10 +764,8 @@ impl ProbeRunner for ProcessProbeRunner {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        // Its own process group, so a timeout or a cancel takes `cargo`'s
-        // `rustc` children with it instead of leaving them compiling.
         #[cfg(unix)]
-        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        detach_from_terminal(&mut command);
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => return failure(format!("cannot start `{}`: {error}", probe.program)),
@@ -799,8 +811,32 @@ impl ProbeRunner for ProcessProbeRunner {
     }
 }
 
-/// Kill the probe and everything it started (it leads its own process group),
-/// then reap it.
+/// Start `command` in a session of its own (KT-1255).
+///
+/// The session leader is also the leader of a fresh process group, so a
+/// timeout or a cancel takes `cargo`'s `rustc` children with it instead of
+/// leaving them compiling (`kill_process_tree`). And, unlike a bare
+/// `process_group(0)` — which stays in the backend's session — the command has
+/// no controlling terminal: a worker-written `build.rs` cannot open `/dev/tty`
+/// and push keystrokes into the operator's shell (`TIOCSTI`) when the backend
+/// runs in a terminal. `setsid` must not follow `setpgid` (a group leader
+/// cannot create a session), so this replaces `process_group`, never adds to it.
+#[cfg(unix)]
+pub(crate) fn detach_from_terminal(command: &mut std::process::Command) {
+    // SAFETY: the hook only calls `setsid`, which is async-signal-safe, and
+    // touches no memory of the parent.
+    unsafe {
+        std::os::unix::process::CommandExt::pre_exec(command, || {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+/// Kill the probe and everything it started (it leads its own session and
+/// process group), then reap it.
 fn kill_process_tree(child: &mut std::process::Child) {
     #[cfg(unix)]
     {
@@ -946,7 +982,7 @@ fn check_rust(
     ))
 }
 
-fn check_frontend(
+pub(crate) fn check_frontend(
     lane: &WorkerLane,
     provisioned: &Provisioned,
     env: &[(String, OsString)],

@@ -125,6 +125,6 @@ five Page declarations removed. The opt-in core is 15,850 bytes; the
 separately serialized Page family is 2,787 bytes (including its array
 envelope), of which KT-1098's optional `slug` on `page_update_html` costs
 25 bytes. These are byte counts, not provider token measurements. The bridge
-declarations keep their own byte ceiling (85,003 bytes, `mcp_surface_budget.py`).
+declarations keep their own byte ceiling (84,967 bytes, `mcp_surface_budget.py`).
 [src: file: backend/src/api/agent_page_tests.rs:327-345#native_page_surface_has_a_bounded_measured_cost]
-[src: file: backend/scripts/ci/mcp_surface_budget.py:115#CATALOGUE_MAX_BYTES]
+[src: file: backend/scripts/ci/mcp_surface_budget.py:123#CATALOGUE_MAX_BYTES]

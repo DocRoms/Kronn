@@ -112,6 +112,7 @@ pub mod static_context;
 pub mod tailscale;
 pub mod task_worker_env;
 pub mod task_worker_lane_warm;
+pub mod task_worker_sandbox;
 pub mod td_decisions;
 pub mod td_index;
 pub mod td_review;

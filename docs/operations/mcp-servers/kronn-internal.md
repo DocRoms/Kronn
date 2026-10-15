@@ -721,13 +721,18 @@ The child room's initial task brief is pinned across prompt truncation. For a
 native HTTP worker or a spawned host CLI worker,
 `task_exec_deliver(manifest)` exposes only semantic fields:
 tests, ordered `{met, evidence}` DoD assertions, docs, migrations, risks,
-limitations and summary. After exact worker authorization, Kronn derives the
+limitations, summary and `tests_executed {executed, which}` (required; its
+schema is declared in the measured `TOOLS` literal and reused by this
+projection). After exact worker authorization, Kronn derives the
 contract version, task reference, committed HEAD/file inventory and the
 launch-time snapshotted DoD ids; a later DoD reorder/replacement is refused.
 The persisted result is still a complete DeliveryManifest v1. A joined CLI
 session and public/principal delivery retain the full manifest schema.
 Principal approval is bound to that delivery's exact HEAD and must include one
-non-empty evidence record for every current DoD id, all marked met. Worker
+non-empty evidence record for every current DoD id (except a KT-1254
+`post_integration` live check), all marked met. An integrating approve then
+ticks those items and stores that evidence on each (KT-1262); a worker item left
+unticked holds the integration before the git apply. Worker
 claims and the task's live checkbox state remain useful context but never
 substitute for the principal's attempt-scoped review. Only after approval does
 Kronn execute the persisted mechanical validations on the ephemeral merge
