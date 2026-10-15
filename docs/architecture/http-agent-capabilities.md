@@ -274,7 +274,7 @@ setting `KRONN_TIERED_TOOLS=1` starts with the core tools and an index of the
 `pages`, `media`, `delegation`, `edit` and `automations` families. `tools_load` adds a family
 for the remainder of the run. Bounded workers cannot expand their catalogue.
 [src: file: backend/src/api/agent_tools.rs:329-405#TOOL_FAMILIES]
-[src: file: backend/src/api/agent_tools.rs:2321-2327#tools_load]
+[src: file: backend/src/api/agent_tools.rs:2323-2329#tools_load]
 
 The native dispatcher now routes `tools_load` correctly. Earlier benchmarks used
 a substitute dispatcher and their claimed savings did not validate this path.
@@ -332,7 +332,7 @@ No `web_fetch` (it would send the model off the project), no `git_commit` (the
 audit never commits), no plan, REST-plugin or discussion tools. A call to any
 other name is refused before a handler sees it, and so is a write to the
 target document of another step of the chain (the consolidation step excepted)
-[src: file: backend/src/api/agent_tools.rs:1617-1620#AUDIT_TOOLS]
+[src: file: backend/src/api/agent_tools.rs:1618-1621#AUDIT_TOOLS]
 [src: file: backend/src/api/agent_tools.rs:206-231#foreign_step_target_refusal].
 
 **What the audit prompt says about other repos (KT-926).** An audit's file tools
