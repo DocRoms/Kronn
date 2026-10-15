@@ -620,11 +620,17 @@ fn replace_dod(
                 // principal's call, and the proof goes with it.
                 ensure_live_check_principal(conn, Some(task_id), actor, true)?;
             }
+            // The evidence follows the tick (KT-1262): kept while the item stays
+            // ticked in the same mode, dropped by an untick or a mode change so
+            // a stale proof can never tick the item under another contract.
+            let kept_evidence = (mode == stored_mode && item.completed)
+                .then_some(stored_evidence)
+                .flatten();
             if mode == PlanningDodVerification::PostIntegration {
                 // Ticked only through `update_dod_item`, with evidence: an
                 // array replace may keep a tick that carries evidence, never
                 // create one.
-                if item.completed && stored_evidence.is_none() {
+                if item.completed && kept_evidence.is_none() {
                     bail!(
                         "A post-integration DoD item cannot be ticked without evidence; \
                          use task_update_dod with `evidence` once the check ran"
@@ -639,12 +645,6 @@ fn replace_dod(
                      and ticked in the same write"
                 );
             }
-            // Evidence lives only on a ticked live check: an untick or a
-            // downgrade drops it, so a stale proof can never re-tick the item.
-            let kept_evidence = (mode == PlanningDodVerification::PostIntegration
-                && item.completed)
-                .then_some(stored_evidence)
-                .flatten();
             conn.execute(
                 "UPDATE planning_task_dod_items
                  SET sentence = ?3, completed = ?4, position = ?5, updated_at = ?6,
@@ -1968,12 +1968,20 @@ pub fn mark_task_in_progress_within_tx(
 /// not a broad task update: if the task is no longer `in_progress`, the caller
 /// must roll the integration checkpoint back rather than leave execution/task
 /// states disagreeing about completion.
+///
+/// KT-1262 — a task never completes with an unticked worker DoD item: the
+/// caller ticks what the approve verified first, and a remaining one refuses
+/// (`Ok(false)`, same as a task that left `in_progress`). Only a pending
+/// post-integration live check may stay unticked, and it keeps the task open.
 pub fn mark_task_done_within_tx(
     tx: &Connection,
     task_id: &str,
     actor: &PlanningActor,
 ) -> Result<bool> {
     validate_actor(actor)?;
+    if !unticked_worker_dod_within_tx(tx, task_id)?.is_empty() {
+        return Ok(false);
+    }
     // KT-1254 — a pending principal live check keeps the task open: the code is
     // integrated, but the task closes only when the check is ticked with
     // evidence (`update_dod_item`). Same CAS: the task must still be in progress.
@@ -2022,6 +2030,69 @@ pub fn mark_task_done_within_tx(
         serde_json::json!({ "status": "done", "via": "orchestration_integration" }),
     )?;
     Ok(true)
+}
+
+/// KT-1262 — tick the worker DoD items an approve verified as met and keep the
+/// evidence they were verified on. Runs in the transaction that completes the
+/// task, so a task never reads `done` while the evidence that exists is missing
+/// from its DoD. A post-integration live check is never ticked here: only
+/// `update_dod_item` ticks it, with the evidence of the live check itself.
+pub fn tick_verified_dod_within_tx(
+    tx: &Connection,
+    task_id: &str,
+    verified: &[(String, String)],
+    actor: &PlanningActor,
+) -> Result<()> {
+    validate_actor(actor)?;
+    let now = Utc::now().to_rfc3339();
+    for (dod_id, evidence) in verified {
+        let evidence: String = evidence.trim().chars().take(2_000).collect();
+        if evidence.is_empty() {
+            continue;
+        }
+        let changed = tx.execute(
+            "UPDATE planning_task_dod_items
+                SET completed = 1, evidence = ?3, updated_at = ?4
+              WHERE id = ?1 AND task_id = ?2 AND verification = 'worker'
+                AND (completed = 0 OR evidence IS NOT ?3)",
+            params![dod_id, task_id, evidence, now],
+        )?;
+        if changed == 0 {
+            continue;
+        }
+        insert_event(
+            tx,
+            task_id,
+            "dod_updated",
+            actor,
+            serde_json::json!({
+                "dod_id": dod_id,
+                "completed": true,
+                "verification": "worker",
+                "evidence": evidence,
+                "via": "orchestration_integration",
+            }),
+        )?;
+    }
+    Ok(())
+}
+
+/// KT-1262 — the worker DoD items of a task that are still unticked, as
+/// `(id, sentence)`. A pending post-integration live check is not one: it is
+/// the principal's call after integration and keeps the task open instead.
+pub fn unticked_worker_dod_within_tx(
+    tx: &Connection,
+    task_id: &str,
+) -> Result<Vec<(String, String)>> {
+    let mut statement = tx.prepare(
+        "SELECT id, sentence FROM planning_task_dod_items
+          WHERE task_id = ?1 AND completed = 0 AND verification = 'worker'
+          ORDER BY position",
+    )?;
+    let items = statement
+        .query_map([task_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(items)
 }
 
 /// Return a task owned by a cancelled orchestration execution to the ready
@@ -2102,14 +2173,15 @@ pub fn update_dod_item(
     let task_id = resolve_task_id(conn, task_reference)?;
     validate_actor(&request.actor)?;
     let transaction = NestableTx::begin(conn)?;
-    let mode: Option<String> = transaction
+    let stored: Option<(String, bool, Option<String>)> = transaction
         .query_row(
-            "SELECT verification FROM planning_task_dod_items WHERE id = ?1 AND task_id = ?2",
+            "SELECT verification, completed, evidence
+               FROM planning_task_dod_items WHERE id = ?1 AND task_id = ?2",
             params![dod_id, task_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
-    let Some(mode) = mode else {
+    let Some((mode, was_completed, previous_evidence)) = stored else {
         bail!("Definition of Done item not found");
     };
     let live_check =
@@ -2118,7 +2190,10 @@ pub fn update_dod_item(
         ensure_live_check_principal(&transaction, Some(&task_id), &request.actor, true)?;
     }
     // KT-1254 — a live check is ticked with the principal's evidence, never
-    // bare; unticking it drops that evidence.
+    // bare. KT-1262 — one rule for every item: the evidence follows the tick. A
+    // tick carrying evidence stores it; re-ticking an already ticked worker item
+    // without evidence keeps what the integrating approve recorded; an untick
+    // drops it.
     let evidence = request
         .evidence
         .as_deref()
@@ -2132,8 +2207,10 @@ pub fn update_dod_item(
     if evidence.is_some_and(|evidence| evidence.chars().count() > 2_000) {
         bail!("DoD evidence must be at most 2000 characters");
     }
-    let stored_evidence = if live_check && request.completed {
+    let stored_evidence: Option<String> = if request.completed {
         evidence
+            .map(str::to_string)
+            .or_else(|| previous_evidence.filter(|_| was_completed && !live_check))
     } else {
         None
     };
