@@ -2743,11 +2743,6 @@ export function ProjectCard({
                       }
                     }}
                     validationInProgress={validationInProgress}
-                    onValidate={() => {
-                      if (headerTimeline?.validation) {
-                        onOpenDiscussion(headerTimeline.validation.discussion_id);
-                      }
-                    }}
                     onMarkValid={async () => {
                       try {
                         await projectsApi.validateAudit(proj.id);

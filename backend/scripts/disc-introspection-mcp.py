@@ -767,12 +767,10 @@ TOOLS = [
             "finds the room again via `disc_find_by_session` without a fresh "
             "invite token. ⚠ EVERY ARGUMENT IS OPTIONAL: called bare, "
             "`disc_link({})` binds THIS CLI session to the currently-bound "
-            "disc (the bridge derives your session id). `disc_join` already "
-            "does this for you; call this only "
-            "to bind a disc you reached another way. Safe by default: if that "
-            "session already owns another discussion the call fails instead of "
-            "silently stealing it. Set force_reassign=true only when the user "
-            "explicitly asks to transfer ownership."
+            "disc. `disc_join` already does this; call this only for a disc "
+            "you reached another way. A session that already owns another "
+            "discussion fails instead of being stolen: set force_reassign=true "
+            "only when the user explicitly asks to transfer ownership."
         ),
         "inputSchema": {
             "type": "object",
@@ -795,15 +793,12 @@ TOOLS = [
     {
         "name": "disc_transfer_session",
         "description": (
-            "Explicitly hand THIS durable CLI session from its previous room "
-            "to the room currently joined by this bridge. Use only after the "
-            "human clearly asks to change rooms. `from_disc_id` pins the room "
-            "the caller expects to release and `confirm_transfer=true` is "
-            "mandatory; ownership changes or missing confirmation fail closed. "
-            "The backend atomically moves the binding and returns "
-            "`session_bound: true`. "
-            "Afterward, a bare `disc_find_by_session({})` resumes this new room "
-            "after an MCP reload."
+            "Hand THIS durable CLI session from its previous room to the room "
+            "this bridge has joined, only after the human clearly asks to "
+            "change rooms. `from_disc_id` pins the room you expect to release "
+            "and `confirm_transfer=true` is mandatory; a missing confirmation "
+            "or an ownership change fails closed. The binding moves "
+            "atomically (`session_bound: true`)."
         ),
         "inputSchema": {
             "type": "object",
@@ -891,14 +886,12 @@ TOOLS = [
         "description": (
             "Declare or refresh THIS joined CLI session's Git worktree in the "
             "current discussion. `workspace_path` defaults to the bridge's "
-            "current directory; Kronn canonicalizes it and reads the real "
-            "branch + HEAD from Git, so never guess or send those fields. "
-            "Optionally link the workspace to a planning task with "
-            "`task_ref`. The path must be a registered worktree of "
-            "the discussion project's primary or linked repositories, and one "
-            "physical worktree cannot belong to two discussions. The result "
-            "always has a `blockers` array: guards on success, or the "
-            "refusal's blocker."
+            "current directory; Kronn reads the real branch + HEAD from Git, "
+            "so never send those fields. Optionally link a planning task with "
+            "`task_ref`. The path must be a registered worktree of the "
+            "discussion project's repositories, and one physical worktree "
+            "cannot belong to two discussions. The result always has a "
+            "`blockers` array: guards on success, or the refusal's blocker."
         ),
         "inputSchema": {
             "type": "object",
@@ -1027,10 +1020,10 @@ TOOLS = [
     {
         "name": "task_exec_cancel",
         "description": (
-            "Cancel a non-terminal TaskExecution as its principal. Kronn cancels due/live "
-            "dispatches; completed commits and audit history are preserved. The worktree is "
-            "kept by default; `remove_if_clean` removes only a proven-clean owned worktree "
-            "and refuses dirty or unproven paths."
+            "Cancel a non-terminal TaskExecution as its principal. Dispatches stop, commits "
+            "stay, the task status is NOT changed (to relaunch: task_update status=todo). "
+            "Worktree kept by default; `remove_if_clean` removes only a proven-clean owned "
+            "one, refusing dirty/unproven paths."
         ),
         "inputSchema": {
             "type": "object",
@@ -1108,11 +1101,10 @@ TOOLS = [
     {
         "name": "task_exec_deliver",
         "description": (
-            "Submit your DeliveryManifest v1 when the task's DoD is met. Identity is derived "
-            "from this bridge's durable session, and only the execution's EXACT worker is "
-            "accepted. On success the execution flips to AwaitingReview and the principal is "
-            "woken: call this BEFORE announcing 'ready for review'. A malformed manifest is "
-            "refused."
+            "Submit your DeliveryManifest v1 when the task's DoD is met; only the execution's "
+            "EXACT worker is accepted (identity comes from this bridge's session). On success "
+            "the execution flips to AwaitingReview and the principal is woken: call this "
+            "BEFORE announcing 'ready for review'. A malformed manifest is refused."
         ),
         "inputSchema": {
             "type": "object",
@@ -1124,10 +1116,28 @@ TOOLS = [
                 "manifest": {
                     "type": "object",
                     "description": (
-                        "The DeliveryManifest v1 object: version, task_ref, head_sha, "
+                        "DeliveryManifest v1: version \"1\" (string), task_ref, head_sha, "
                         "files_touched, tests, dod_status, docs, migrations, risks, "
-                        "limitations, summary (see the brief's delivery format)."
+                        "limitations, summary, tests_executed (required)."
                     ),
+                    # Declared here, inside the literal the budget gate measures:
+                    # the spawned-worker projection in `_visible_tools` reuses it.
+                    "properties": {
+                        "tests_executed": {
+                            "type": "object",
+                            "description": (
+                                "Whether a test really ran, and which commands: "
+                                "`executed: false` needs `which: []`; `true` needs the "
+                                "commands, matching a pass/fail `tests` entry."
+                            ),
+                            "additionalProperties": False,
+                            "required": ["executed", "which"],
+                            "properties": {
+                                "executed": {"type": "boolean"},
+                                "which": {"type": "array", "items": {"type": "string"}},
+                            },
+                        },
+                    },
                 },
             },
             "required": ["task_execution_id", "manifest"],
@@ -1136,14 +1146,11 @@ TOOLS = [
     {
         "name": "task_exec_review",
         "description": (
-            "Decide a delivered task attempt as the principal. Pass the "
-            "`task_execution_id` and a ReviewDecision v1 `decision` object. "
-            "Your identity comes from this bridge's durable session; you must be a party: the "
-            "parent-room principal, or the worker only if the run enables "
-            "self-review. approve is REFUSED if the manifest is missing, the "
-            "worktree HEAD drifted since delivery, or a DoD is unmet; "
-            "request_changes hands your findings to the worker in its sub-discussion "
-            "and keeps the worktree. A caller who is not a party gets one opaque refusal."
+            "Decide a delivered task attempt as the principal (identity comes from this "
+            "bridge's session; the worker only if the run enables self-review). approve "
+            "is REFUSED if the manifest is missing, the worktree HEAD drifted since "
+            "delivery, or a DoD is unmet; request_changes hands your findings to the "
+            "worker and keeps the worktree. A non-party gets one opaque refusal."
         ),
         "inputSchema": {
             "type": "object",
@@ -1155,11 +1162,13 @@ TOOLS = [
                 "decision": {
                     "type": "object",
                     "description": (
-                        "The ReviewDecision v1 object: version, task_ref, decision "
-                        "('approve' | 'request_changes'), comment (required for "
-                        "request_changes), optional findings [{path?, line?, issue}], "
-                        "dod_verifications [{dod_id, met, evidence, verification?}]; "
-                        "`post_integration` + met false = your live check, not a blocker."
+                        "ReviewDecision v1: version \"1\" (string), task_ref, decision "
+                        "('approve' | 'request_changes'), reviewed_head_sha (required for "
+                        "approve), dod_verifications [{dod_id, met, evidence, "
+                        "verification?}] (required for approve: one per DoD item except a "
+                        "live check, which is `post_integration` + met false, never a "
+                        "blocker), comment (required for request_changes), findings "
+                        "[{path?, line?, issue}]."
                     ),
                 },
             },
@@ -1195,12 +1204,11 @@ TOOLS = [
             "Look up the Kronn disc_id bound to a CLI session, or `null` if "
             "none. ⚠ BOTH ARGUMENTS ARE OPTIONAL: called bare, "
             "`disc_find_by_session({})` answers which room MY session is "
-            "bound to and actively restores THIS bridge's runtime binding "
-            "and durable read cursor after an MCP reload. A legacy session "
-            "with no local resume credential returns `rejoin_required: true` "
-            "and needs one fresh kr-join bootstrap. "
-            "Also the way to decide between `disc_create` (no prior thread) "
-            "and `disc_append` (resume an existing one)."
+            "bound to and restores THIS bridge's runtime binding and durable "
+            "read cursor after an MCP reload. A legacy session with no local "
+            "resume credential returns `rejoin_required: true` and needs one "
+            "fresh kr-join bootstrap. Decides between `disc_create` (no prior "
+            "thread) and `disc_append` (resume)."
         ),
         "inputSchema": {
             "type": "object",
@@ -5892,7 +5900,7 @@ def _visible_tools():
         "additionalProperties": False,
         "required": [
             "tests", "dod_status", "docs", "migrations", "risks",
-            "limitations", "summary",
+            "limitations", "summary", "tests_executed",
         ],
         "properties": {
             "tests": {
@@ -5932,6 +5940,10 @@ def _visible_tools():
             "risks": {"type": "array", "items": {"type": "string"}},
             "limitations": {"type": "array", "items": {"type": "string"}},
             "summary": {"type": "string", "minLength": 1},
+            # Declared in the TOOLS literal (the budget gate counts it there).
+            "tests_executed": delivery["inputSchema"]["properties"]["manifest"][
+                "properties"
+            ]["tests_executed"],
         },
     }
     status = next(item for item in TOOLS if item["name"] == "task_exec_status")

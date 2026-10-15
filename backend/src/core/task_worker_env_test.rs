@@ -313,32 +313,114 @@ fn the_launch_environment_reaches_the_spawned_command() {
 // ── Provisioning ─────────────────────────────────────────────────────────
 
 #[test]
-fn frontend_deps_are_a_link_to_the_main_checkout_and_never_a_write_root() {
+fn frontend_deps_are_linked_entry_by_entry_and_never_a_write_root() {
     let fx = fixture();
     fx.with_project_files();
     let source = fx.with_main_node_modules();
+    // What a run of the main checkout's Vite left: it must not be shared.
+    std::fs::create_dir_all(source.join(".vite-temp")).unwrap();
+    std::fs::create_dir_all(source.join("react")).unwrap();
     let home = fake_cargo_home(true);
     let lane = fx.lane();
 
     let provisioned = lane.provision(&caches_of(&home, &fx));
 
-    let link = fx.worktree.join("frontend").join("node_modules");
+    let modules = fx.worktree.join("frontend").join("node_modules");
     assert_eq!(
         provisioned.frontend_deps,
         FrontendDeps::Linked(source.clone())
     );
-    assert!(std::fs::symlink_metadata(&link)
-        .unwrap()
-        .file_type()
-        .is_symlink());
-    assert_eq!(std::fs::read_link(&link).unwrap(), source);
-    assert!(link.join(".bin").join("vitest").exists());
-    // Read-only: what the link resolves to is outside every write root, so the
-    // sandbox refuses a write through it.
+    // A real directory (so Vite's config loader can write its bundle there),
+    // whose entries are the read-only links.
+    let metadata = std::fs::symlink_metadata(&modules).unwrap();
+    assert!(metadata.is_dir() && !metadata.file_type().is_symlink());
+    assert_eq!(
+        std::fs::read_link(modules.join("react")).unwrap(),
+        source.join("react")
+    );
+    assert!(modules.join(".bin").join("vitest").exists());
+    assert!(!modules.join(".vite-temp").exists());
+    // KT-1266: the config bundle's directory is writable, and lands in the lane.
+    std::fs::create_dir_all(modules.join(".vite-temp")).unwrap();
+    std::fs::write(modules.join(".vite-temp").join("vite.config.ts.mjs"), "x").unwrap();
+    assert!(!source
+        .join(".vite-temp")
+        .join("vite.config.ts.mjs")
+        .exists());
+    // Read-only: what the entries resolve to is outside every write root, so
+    // the sandbox refuses a write through them.
     for root in lane.write_roots() {
         assert!(!source.starts_with(&root), "{source:?} is under {root:?}");
     }
     assert!(lane.read_roots(&caches_of(&home, &fx)).contains(&source));
+}
+
+#[test]
+fn a_whole_directory_link_from_before_is_replaced_by_the_layer() {
+    let fx = fixture();
+    fx.with_project_files();
+    let source = fx.with_main_node_modules();
+    let modules = fx.worktree.join("frontend").join("node_modules");
+    std::os::unix::fs::symlink(&source, &modules).unwrap();
+    let home = fake_cargo_home(true);
+
+    let provisioned = fx.lane().provision(&caches_of(&home, &fx));
+
+    assert_eq!(provisioned.frontend_deps, FrontendDeps::Linked(source));
+    assert!(!std::fs::symlink_metadata(&modules)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    std::fs::create_dir_all(modules.join(".vite-temp")).unwrap();
+}
+
+#[test]
+fn a_package_installed_in_the_main_checkout_since_is_linked_on_the_next_launch() {
+    let fx = fixture();
+    fx.with_project_files();
+    let source = fx.with_main_node_modules();
+    let home = fake_cargo_home(true);
+    let lane = fx.lane();
+    lane.provision(&caches_of(&home, &fx));
+    std::fs::create_dir_all(source.join("zod")).unwrap();
+
+    let second = lane.provision(&caches_of(&home, &fx));
+
+    assert_eq!(second.frontend_deps, FrontendDeps::AlreadyPresent);
+    assert!(fx
+        .worktree
+        .join("frontend")
+        .join("node_modules")
+        .join("zod")
+        .exists());
+}
+
+#[test]
+fn an_entry_the_lane_already_has_does_not_stop_the_entries_after_it() {
+    let fx = fixture();
+    let source = fx.with_main_node_modules();
+    for name in ["aaa", "mmm", "zzz"] {
+        std::fs::create_dir_all(source.join(name)).unwrap();
+    }
+    let destination = fx.worktree.join("frontend").join("node_modules");
+    // The lane already holds a real directory under one of the names.
+    std::fs::create_dir_all(destination.join("mmm")).unwrap();
+
+    let result = link_entries(&source, &destination);
+
+    assert!(result.is_err(), "the conflict is reported");
+    assert!(std::fs::symlink_metadata(destination.join("mmm"))
+        .unwrap()
+        .is_dir());
+    for name in ["aaa", "zzz", ".bin"] {
+        assert!(
+            std::fs::symlink_metadata(destination.join(name))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "{name} must be linked whatever the directory order"
+        );
+    }
 }
 
 #[test]
@@ -573,7 +655,8 @@ fn a_failing_nextest_marks_rust_unavailable_and_says_why() {
         "frontend is independent"
     );
     // The offline fetch is not attempted once nextest is known missing.
-    assert_eq!(runner.calls.lock().unwrap().len(), 2);
+    // nextest, then the frontend's two probes; never the offline fetch.
+    assert_eq!(runner.calls.lock().unwrap().len(), 3);
 }
 
 #[test]
@@ -602,6 +685,26 @@ fn a_failing_vitest_marks_frontend_unavailable() {
         .frontend_tests
         .reason
         .contains("vitest --version"));
+    assert!(capabilities.rust_tests.available);
+}
+
+#[test]
+fn a_vitest_that_cannot_load_its_config_marks_frontend_unavailable() {
+    // KT-1266: `--version` passes while the config bundle cannot be written.
+    let (_fx, _home, lane, provisioned) = ready_lane();
+    let runner = ScriptedRunner::failing_on("--passWithNoTests");
+
+    let capabilities = smoke_check_with(&lane, &provisioned, true, &runner, &bind_ok);
+
+    assert!(!capabilities.frontend_tests.available);
+    assert!(
+        capabilities
+            .frontend_tests
+            .reason
+            .contains("cannot load its config"),
+        "{}",
+        capabilities.frontend_tests.reason
+    );
     assert!(capabilities.rust_tests.available);
 }
 

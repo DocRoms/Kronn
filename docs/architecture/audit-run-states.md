@@ -174,7 +174,7 @@ timeline and a stale document's viewer. It has no lifecycle of its own.
 - **One name on every surface.** The MCP descriptions and manuals say
   “Verify docs” like the English label, present the full audit as an advanced
   option, and carry none of the retired CTA names.
-  [src: file: backend/scripts/test_disc_introspection_mcp.py:7825#test_audit_surface_uses_the_verify_docs_vocabulary_of_the_ui]
+  [src: file: backend/scripts/test_disc_introspection_mcp.py:7874#test_audit_surface_uses_the_verify_docs_vocabulary_of_the_ui]
 - **Header layout.** The compact header keeps the status, one next action, the
   doc-state summary and the « Détails » disclosure without overlap at 360, 768
   and 1440 px, closed and open.
@@ -271,7 +271,7 @@ specialized run. Discussion-title guesses never authorize Validate.
 [src: file: frontend/src/components/AuditTimeline.tsx:968-1064#linkedValidation]
 
 - Step status, accepted included. [src: file: frontend/src/components/AuditTimeline.tsx:178#stepStatus]
-- Launch label: resume, finalize, run again. [src: file: frontend/src/components/AuditTimeline.tsx:458-464#launchLabel]
+- Launch label: resume, finalize, run again. [src: file: frontend/src/components/AuditTimeline.tsx:459-466#launchLabel]
 - Per-step actions only on the resumable run. [src: file: frontend/src/components/AuditTimeline.tsx:470#stepActions]
 - Validation phase is not running during an audit. [src: file: frontend/src/components/AuditTimeline.tsx:475-476#validationRunning] [src: file: frontend/src/components/ProjectCard.tsx:625-629#validationInProgress]
 - Validation phase hands over to the run. [src: file: frontend/src/components/AuditTimeline.tsx:969-981#runPending]

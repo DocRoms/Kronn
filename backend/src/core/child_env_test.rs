@@ -320,6 +320,8 @@ fn a_worker_launch_carries_no_room_or_step_identity() {
     apply_agent_launch(&mut command, work.path(), &launch, None).unwrap();
     let set = env_of(&command);
     assert!(set["KRONN_TASK_WORKER_CONTEXT"].contains("exec-1"));
+    // KT-1266: what the worker starts is stopped by this id when the dispatch ends.
+    assert_eq!(set[crate::core::dispatch_reaper::DISPATCH_ENV], "j");
     assert!(!set.contains_key("KRONN_ROOM_AGENT_CONTEXT"));
     assert!(!set.contains_key("KRONN_BACKEND_URL"));
 }

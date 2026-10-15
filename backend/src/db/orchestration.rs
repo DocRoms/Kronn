@@ -4930,6 +4930,80 @@ pub enum IntegrationCheckpointOutcome {
     ExecutionRaced,
 }
 
+/// The DoD items the approved attempt verified as met, with the evidence each
+/// one carries. A principal's `dod_verifications` entry wins; an item it does not
+/// name falls back to the delivery manifest's own `met` claim (a human approve
+/// supplies no principal evidence). Unreadable stored JSON yields nothing: the
+/// unticked-item guard then refuses the completion instead of guessing.
+fn approved_dod_evidence(conn: &Connection, exec_id: &str) -> Result<Vec<(String, String)>> {
+    let Some(attempt_no) = conn
+        .query_row(
+            "SELECT attempt_no FROM task_executions WHERE id = ?1",
+            params![exec_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+    else {
+        return Ok(Vec::new());
+    };
+    let attempt_no = attempt_no as u32;
+    let mut evidence: Vec<(String, String)> = Vec::new();
+    if let Some(delivery) = crate::db::worker_deliveries::get_delivery(conn, exec_id, attempt_no)? {
+        if let Ok(manifest) =
+            serde_json::from_str::<crate::models::DeliveryManifestV1>(&delivery.manifest_json)
+        {
+            for status in manifest.dod_status.into_iter().filter(|status| status.met) {
+                let text = status.evidence.unwrap_or_default();
+                if !text.trim().is_empty() {
+                    evidence.push((status.dod_id, text));
+                }
+            }
+        }
+    }
+    if let Some(review) = crate::db::worker_reviews::get_review(conn, exec_id, attempt_no)? {
+        if let Ok(decision) =
+            serde_json::from_str::<crate::models::ReviewDecisionV1>(&review.decision_json)
+        {
+            if decision.decision == crate::models::ReviewVerdict::Approve {
+                for verification in decision.dod_verifications.into_iter().filter(|v| v.met) {
+                    evidence.retain(|(id, _)| *id != verification.dod_id);
+                    evidence.push((verification.dod_id, verification.evidence));
+                }
+            }
+        }
+    }
+    Ok(evidence)
+}
+
+/// KT-1262 — the worker DoD items the Integrated checkpoint would leave
+/// unticked: unticked now and not verified by the approved attempt. A
+/// post-integration live check is not one. Read BEFORE the git apply, so an item
+/// added between approve and integration holds the approval while the target is
+/// untouched, instead of parking an execution whose code already landed.
+pub fn unverified_worker_dod(conn: &Connection, exec_id: &str) -> Result<Vec<(String, String)>> {
+    let Some(task_id) = conn
+        .query_row(
+            "SELECT task_id FROM task_executions WHERE id = ?1",
+            params![exec_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    else {
+        return Ok(Vec::new());
+    };
+    let verified = approved_dod_evidence(conn, exec_id)?
+        .into_iter()
+        .filter(|(_, evidence)| !evidence.trim().is_empty())
+        .map(|(dod_id, _)| dod_id)
+        .collect::<std::collections::HashSet<_>>();
+    Ok(
+        crate::db::planning::unticked_worker_dod_within_tx(conn, &task_id)?
+            .into_iter()
+            .filter(|(dod_id, _)| !verified.contains(dod_id))
+            .collect(),
+    )
+}
+
 /// Commit one integration-saga step: pin its checkpoint columns and its transition
 /// in a single transaction (ADR §4bis, KT-320 DoD-7). The four columns declared by
 /// migration 127 come alive here — until this, the boot-time reconciliation reasoned
@@ -4994,6 +5068,11 @@ pub fn commit_integration_checkpoint(
                 [exec_id],
                 |row| row.get(0),
             )?;
+            // KT-1262 — the approve's evidence reaches the DoD before the task
+            // completes; `mark_task_done_within_tx` then refuses a task that
+            // still has an unticked worker item (the transaction rolls back).
+            let verified = approved_dod_evidence(&tx, exec_id)?;
+            crate::db::planning::tick_verified_dod_within_tx(&tx, &task_id, &verified, actor)?;
             if !crate::db::planning::mark_task_done_within_tx(&tx, &task_id, actor)? {
                 return Ok(IntegrationCheckpointOutcome::TaskNotCompletable);
             }
@@ -6627,7 +6706,8 @@ pub fn cancel_execution_tree(
             "UPDATE task_executions SET outcome_reason = ?2 WHERE id = ?1",
             params![exec_id, reason],
         )?;
-        crate::db::planning::restore_task_todo_after_cancellation(conn, &execution.task_id, actor)?;
+        // KT-1267 — the task status is deliberately left alone: the work may
+        // already be integrated by hand, so the principal decides (done / todo).
         record_reconciliation_event(
             conn,
             "execution",

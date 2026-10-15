@@ -478,6 +478,48 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- What a task worker starts ends with its dispatch, and Vite runs in its lane
+  (KT-1266). A backend or a Vite started from the agent's shell tool ran in a
+  process group of its own and kept listening on the lane's ports after the
+  turn; the worker's processes now carry their dispatch id and every process
+  carrying it is stopped when the dispatch completes, fails, is cancelled or is
+  found dead, with the descendants that stayed in its session (what a shared
+  daemon adopted in a session of its own is left alone). A pid is signalled
+  only after its start time and its tag or session are checked again, so a
+  reused pid is never touched. `frontend/node_modules` of a lane is a real
+  directory of links, so Vite and vitest write their config bundle there
+  instead of failing with EPERM on `node_modules/.vite-temp`, with no flag;
+  the smoke check loads the config under the worker sandbox profile (it runs
+  worker-written code), and the brief says how to recover.
+
+- Cancelling an execution no longer resets its task to `todo` (KT-1267). A
+  task whose work was integrated by hand (KT-1250's `3dcdbc892`) fell back to
+  `todo` the moment its execution was cancelled, so the roadmap counted it as
+  not started. The cancel now leaves the task status alone, whatever it is
+  (`in_progress`, `done`...): the principal decides. The cancel result and the
+  `task_exec_cancel` description say so, and that running the task again means
+  setting it back to `todo` first (`task_update status=todo`); the launch
+  preflight refuses any other status, so a cancelled `in_progress` task is no
+  longer put back in the ready queue automatically.
+- A task worker's lane build runs under the worker's sandbox profile
+  (KT-1255). The first `cargo test --no-run` and the toolchain smoke check were
+  started by Kronn as the host user, so a relaunch that rebuilt after the
+  worker changed `Cargo.lock` or wrote a `build.rs` would have compiled
+  worker-written code with the host's rights. They now run under macOS
+  Seatbelt (Linux: bubblewrap), deny by default: writes only under the
+  worker's write roots and the lane's own temp dir (no global `/tmp`), no
+  outbound connection of any kind (loopback and Unix sockets included; only a
+  loopback bind), Mach lookups limited to four named services (so no
+  `launchctl submit`, `open` or XPC), and on Linux fresh network, PID and IPC
+  namespaces with `/run` and `/tmp` emptied. A host with no usable sandbox
+  refuses the build and says so, it never runs it unconfined: the first build
+  and the smoke check are then recorded as failed and the worker launches cold.
+  The probe also starts in a session of its own (`setsid`), with no controlling
+  terminal, and the profile denies read, write and ioctl on every terminal
+  (`/dev/tty`, `ttysNNN`, ptys, `/dev/console`) and grants no `pseudo-tty`: a
+  `build.rs` cannot push keystrokes (`TIOCSTI`) into the operator's shell when
+  the backend runs in a terminal.
+
 - A task worker's lane target (`target/wt-<lane>`) is removed with its clean
   worktree (KT-1256). It lives outside the worktree, so integration and
   cancellation never took it, and each one is a copy-on-write clone of the main
@@ -492,6 +534,17 @@ Release notes for 0.9.3 and earlier are available in the
   sizes), `POST /api/maintenance/lane-targets/reclaim` removes the named lanes
   after re-judging each, and the boot report lists the same. Every removal is
   audited as `lane_target_reclaimed` / `lane_target_refused`.
+- An approve that integrates now ticks the Definition of Done items it
+  verified and stores their evidence on the item (the principal's
+  `dod_verifications`, else the worker's own `dod_status`), so a task no longer
+  reaches `done` with its DoD at 0/N while the evidence exists. A task with an
+  unticked worker item is held BEFORE the git apply (the target does not move);
+  the only exception is a KT-1254 `post_integration` live check, which an
+  integration never ticks and which keeps the task open. `task_exec_deliver` and
+  `task_exec_review` name the fields the backend requires (`tests_executed`,
+  `reviewed_head_sha`, `dod_verifications`, the string version `"1"`), and a
+  spawned worker's `tests_executed` schema is declared in the measured `TOOLS`
+  literal.
 
 - The default-docs-root golden no longer depends on the day it runs: the
   compact date every step prompt opens with is masked like the dashed one.

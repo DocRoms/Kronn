@@ -317,7 +317,9 @@ pub struct PlanningDodItem {
     /// after integration, and never blocks approve.
     #[serde(default)]
     pub verification: PlanningDodVerification,
-    /// Principal evidence recorded when a post-integration item is ticked.
+    /// KT-1254 / KT-1262 — the proof the item was ticked on: the principal's
+    /// live evidence for a post-integration item, or what an integrating
+    /// approve verified for a worker item. Cleared when the item is unticked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence: Option<String>,
 }

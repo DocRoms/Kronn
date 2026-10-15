@@ -763,6 +763,9 @@ pub fn start_resilience_watchdog(state: AppState) {
                 if is_live || job.failure_kind.as_deref() == Some("quota_exhausted") {
                     continue;
                 }
+                // KT-1266 — the run is gone (a restarted backend, a lost
+                // stream): what the worker started under it is not.
+                crate::api::discussions::runtime::reap_task_worker_processes(&state, &job.id).await;
                 let job_id = job.id.clone();
                 let transition = state
                     .db
@@ -2007,10 +2010,13 @@ async fn wait_for_warm_up_to_settle(exec_id: &str, timeout: std::time::Duration)
 /// `Provisioning` (any cancel path — a run cancel, a reassignment — ends it).
 const WARM_UP_STATE_POLL: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// The probe runner of a task worker's launch: the real processes, except in
-/// tests, which register a runner per repository to control the first build.
+/// The probe runner of a task worker's launch: real processes confined to the
+/// worker's sandbox profile (KT-1255), so a build script or proc-macro the
+/// worker wrote is never compiled with the host's rights. Tests register a
+/// runner per repository to control the first build.
 fn worker_probe_runner(
     repo_path: &str,
+    worktree: &std::path::Path,
 ) -> std::sync::Arc<dyn crate::core::task_worker_env::ProbeRunner> {
     #[cfg(test)]
     if let Some(runner) = test_probe_runners()
@@ -2021,7 +2027,9 @@ fn worker_probe_runner(
         return runner.clone();
     }
     let _ = repo_path;
-    std::sync::Arc::new(crate::core::task_worker_env::ProcessProbeRunner)
+    std::sync::Arc::new(
+        crate::core::task_worker_sandbox::SandboxedProbeRunner::for_worktree(worktree),
+    )
 }
 
 #[cfg(test)]
@@ -2189,7 +2197,7 @@ async fn finish_native_provisioning(
             prepared.execution.attempt_no,
             &sub_disc_id,
             &worktree_path,
-            worker_probe_runner(&prepared.repo_path),
+            worker_probe_runner(&prepared.repo_path, &worktree_path),
             warm_cancel,
         )
         .await;
@@ -2210,7 +2218,7 @@ async fn finish_native_provisioning(
                 db,
                 &prepared.execution.id,
                 &worktree_path,
-                worker_probe_runner(&prepared.repo_path),
+                worker_probe_runner(&prepared.repo_path, &worktree_path),
             )
             .await,
         )
@@ -2743,6 +2751,32 @@ pub async fn run_integration(
     // The target must be pinned: an unpinned branch is exactly the case where the
     // engine would guess which history to advance.
     let generic = BlockedReasonCode::IntegrationRefused;
+    // KT-1262 — the DoD is checked BEFORE anything touches the target: an item
+    // added after the approve, which neither the approve nor the delivery
+    // verified, holds the approval here. The Integrated checkpoint refuses the
+    // same shape, but only after the target moved.
+    let unverified = {
+        let id = exec_id.to_string();
+        db.with_conn(move |conn| crate::db::orchestration::unverified_worker_dod(conn, &id))
+            .await
+            .map_err(|e| internal(e.to_string()))?
+    };
+    if !unverified.is_empty() {
+        let listed = unverified
+            .iter()
+            .map(|(dod_id, sentence)| format!("`{dod_id}` ({sentence})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return hold_integration(
+            db,
+            exec_id,
+            generic,
+            format!("the DoD has item(s) the approve did not verify: {listed}"),
+            "Relance une revue : approuve avec une entrée `dod_verifications` pour chaque \
+             item de DoD (ou déclare-le `post_integration`).",
+        )
+        .await;
+    }
     let Some(target_branch) = run.target_branch.clone() else {
         return hold_integration(
             db,
@@ -7316,7 +7350,12 @@ fn toolchain_brief_section(toolchain: &ToolchainCapabilities) -> String {
          `$VITE_DEV_PORT` (déjà dans ton environnement ; Vite proxifie vers \
          `$KRONN_VITE_BACKEND_URL`). Lance le binaire de ta lane (`$CARGO_TARGET_DIR/debug/kronn`). \
          N'écoute jamais sur 3140 ni 5173 : c'est le Kronn de l'hôte, et tu détournerais l'UI \
-         et les autres workers.\n\
+         et les autres workers. Ce que tu démarres s'arrête avec ton tour : Kronn termine tout \
+         processus lancé par ta session quand le dispatch finit.\n\
+         Vite et vitest se lancent tels quels (`vitest run`, `vite --port $VITE_DEV_PORT`) : le \
+         `node_modules` de ta lane est un dossier inscriptible, Vite y écrit son bundle de \
+         configuration. Si tu vois `EPERM` sur `node_modules/.vite-temp`, relance avec \
+         `--configLoader native`.\n\
          Lance uniquement ce qui est ✅. Une validation ❌ ne s'affirme jamais : reporte-la \
          `skipped` avec la raison ci-dessus, le principal l'exécutera. `tests_executed` dit \
          explicitement si au moins un test a réellement tourné et lesquels.\n\n",
@@ -9985,6 +10024,22 @@ async fn wait_for_cancelled_dispatches_to_settle(
     }
 }
 
+/// What a cancel tells the principal about the task it left alone (KT-1267).
+/// Cancelling never moves the task: the work may already be integrated by
+/// hand, so the status stays the principal's to set.
+fn cancelled_task_status_note(status: PlanningTaskStatus) -> String {
+    match status {
+        PlanningTaskStatus::Todo => {
+            "task status kept: todo; it can be prepared again directly".to_string()
+        }
+        other => format!(
+            "task status kept: {}; to run it again, set it back to todo (task_update \
+             status=todo) before task_exec_prepare, or leave it if the work is integrated",
+            other.as_str()
+        ),
+    }
+}
+
 pub async fn cancel_execution(
     State(state): State<AppState>,
     Path(exec_id): Path<String>,
@@ -10118,7 +10173,14 @@ pub async fn cancel_execution(
         .db
         .with_conn(move |conn| {
             let mut view = recovery_view(conn, &id)?;
-            view.outcome = Some(outcome);
+            // KT-1267 — the cancel leaves the task status alone; say what it
+            // is and how to relaunch, since the launch preflight wants `todo`.
+            let task_status = crate::db::planning::get_task(conn, &view.execution.task_id)?
+                .map(|task| task.summary.status);
+            view.outcome = Some(match task_status {
+                Some(status) => format!("{outcome}; {}", cancelled_task_status_note(status)),
+                None => outcome,
+            });
             view.cancellation_signal_sent = Some(cancellation_signal_sent);
             view.termination_confirmed = Some(termination_confirmed);
             Ok(view)
@@ -15956,7 +16018,13 @@ pub(crate) mod tests {
                 definition_of_done: vec![CreatePlanningDodItem {
                     id: None,
                     sentence: "Le module compile et les tests passent.".into(),
-                    completed: false,
+                    // KT-1262: the integration tests reach `Approved` by direct
+                    // transition, past the approve guards that verify the DoD; the
+                    // item stands for one an approve already ticked, as the
+                    // checkpoint refuses a task that would reach `done` with an
+                    // unticked worker item. Tests that approve through the guards
+                    // start from `unticked_dod`.
+                    completed: true,
                     verification: None,
                 }],
                 links: vec![],
@@ -19496,7 +19564,13 @@ pub(crate) mod tests {
                             definition_of_done: vec![CreatePlanningDodItem {
                                 id: None,
                                 sentence: "Le module compile.".into(),
-                                completed: false,
+                                // KT-1262: the integration tests reach `Approved`
+                                // by direct transition, past the approve guards
+                                // that verify the DoD; the item stands for one an
+                                // approve already ticked, as the checkpoint
+                                // refuses a task that would reach `done` with an
+                                // unticked worker item.
+                                completed: true,
                                 verification: None,
                             }],
                             links: vec![],
@@ -23960,6 +24034,8 @@ pub(crate) mod tests {
         // Whatever the worker serves takes its lane ports, never the host Kronn's.
         assert!(brief.contains("`$KRONN_PORT`"), "{brief}");
         assert!(brief.contains("`$VITE_DEV_PORT`"), "{brief}");
+        assert!(brief.contains("--configLoader native"), "{brief}");
+        assert!(brief.contains("s'arrête avec ton tour"), "{brief}");
         assert!(brief.contains("jamais sur 3140 ni 5173"), "{brief}");
     }
 
@@ -24032,14 +24108,17 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(recorded, Some(capabilities));
-        // The lane the brief promised exists: target + link are in place.
+        // The lane the brief promised exists: target + links are in place. The
+        // modules directory is the lane's own (KT-1266: Vite must be able to
+        // write its config bundle there); its entries are the links.
         assert!(repo.path().join("target").is_dir());
-        assert!(
-            std::fs::symlink_metadata(worktree.join("frontend").join("node_modules"))
-                .unwrap()
-                .file_type()
-                .is_symlink()
-        );
+        let modules = worktree.join("frontend").join("node_modules");
+        let metadata = std::fs::symlink_metadata(&modules).unwrap();
+        assert!(metadata.is_dir() && !metadata.file_type().is_symlink());
+        assert!(std::fs::symlink_metadata(modules.join(".bin"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     #[tokio::test]
@@ -24267,6 +24346,15 @@ pub(crate) mod tests {
             .lock()
             .unwrap()
             .insert(repo.to_string_lossy().to_string(), runner);
+    }
+
+    /// KT-1255 — what a launch builds with is the worker's sandbox, not the
+    /// host user's bare process runner.
+    #[test]
+    fn a_launch_without_a_registered_test_runner_builds_under_the_worker_sandbox() {
+        let worktree = tempfile::tempdir().unwrap();
+        let runner = worker_probe_runner("/no/such/repo/kt-1255", worktree.path());
+        assert!(runner.confined());
     }
 
     async fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
@@ -29016,7 +29104,25 @@ pub(crate) mod tests {
         );
     }
 
+    /// The shared fixture seeds a DoD an approve already ticked (see
+    /// `create_todo_task`); a test that approves through the guards starts from
+    /// the pending state a real delivery has.
+    async fn unticked_dod(db: &Database, exec_id: &str) {
+        let task_id = exec_of(db, exec_id).await.task_id;
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE planning_task_dod_items SET completed = 0, evidence = NULL
+                  WHERE task_id = ?1",
+                rusqlite::params![task_id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
     async fn mark_dod_post_integration_in_db(db: &Database, exec_id: &str, dod_id: &str) {
+        unticked_dod(db, exec_id).await;
         let task_id = exec_of(db, exec_id).await.task_id;
         let dod_id = dod_id.to_string();
         db.with_conn(move |conn| {
@@ -29162,6 +29268,7 @@ pub(crate) mod tests {
         let repo = init_repo();
         let db = Database::open_in_memory().unwrap();
         let (_task_ref, parent_id, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        unticked_dod(&db, &exec_id).await;
         let path = managed_worktree_path(&db, &exec_id).await;
         let head = git_rev(Path::new(&path), "HEAD");
         let dod_id = dod_id_for_execution(&db, &exec_id).await;
@@ -29351,6 +29458,111 @@ pub(crate) mod tests {
             ticked.definition_of_done[0].evidence.as_deref(),
             Some("replayed live: ok")
         );
+    }
+
+    fn approve_with_evidence(repo_head: &str, dod_id: &str, evidence: &str) -> String {
+        serde_json::json!({
+            "version": "1",
+            "task_ref": "KT-319",
+            "decision": "approve",
+            "reviewed_head_sha": repo_head,
+            "dod_verifications": [{ "dod_id": dod_id, "met": true, "evidence": evidence }],
+        })
+        .to_string()
+    }
+
+    /// KT-1262 — end to end: the approve that integrates leaves the DoD ticked
+    /// with the principal's evidence on the item, and the task done.
+    #[tokio::test]
+    async fn an_integrating_approve_ticks_the_dod_with_the_principal_evidence() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_parent, _child, exec_id, _head, path) =
+            delivered_awaiting_review(&db, repo.path()).await;
+        unticked_dod(&db, &exec_id).await;
+        let dod_id = dod_id_for_execution(&db, &exec_id).await;
+        let task_id = exec_of(&db, &exec_id).await.task_id;
+
+        let decision = approve_with_evidence(
+            &git_rev(Path::new(&path), "HEAD"),
+            &dod_id,
+            "ran the suite on the delivered head: green",
+        );
+        let reviewed = decide_review(&db, &exec_id, &decision, "ClaudeCode", "sess-b")
+            .await
+            .unwrap();
+        continue_approved_review(&db, reviewed).await.unwrap();
+
+        let task = db
+            .with_conn(move |conn| crate::db::planning::get_task(conn, &task_id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(task.summary.status, PlanningTaskStatus::Done);
+        assert!(task.definition_of_done[0].completed);
+        assert_eq!(
+            task.definition_of_done[0].evidence.as_deref(),
+            Some("ran the suite on the delivered head: green")
+        );
+    }
+
+    /// KT-1262 — a DoD item added between approve and integration is neither
+    /// verified by the approve nor a live check: the integration is held BEFORE
+    /// the git apply, so the target does not move and no execution is parked
+    /// with its code already on it.
+    #[tokio::test]
+    async fn a_dod_item_added_after_the_approve_holds_the_integration_before_the_apply() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_parent, _child, exec_id, _head, path) =
+            delivered_awaiting_review(&db, repo.path()).await;
+        unticked_dod(&db, &exec_id).await;
+        let dod_id = dod_id_for_execution(&db, &exec_id).await;
+        let task_id = exec_of(&db, &exec_id).await.task_id;
+        let target_before = git_rev(repo.path(), "main");
+
+        let decision = approve_with_evidence(&git_rev(Path::new(&path), "HEAD"), &dod_id, "green");
+        let reviewed = decide_review(&db, &exec_id, &decision, "ClaudeCode", "sess-b")
+            .await
+            .unwrap();
+        // Between approve and integration someone adds an item.
+        let added = {
+            let task_id = task_id.clone();
+            db.with_conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO planning_task_dod_items
+                     (id, task_id, sentence, completed, position, created_at, updated_at)
+                     VALUES ('added-late', ?1, 'a late requirement', 0, 1, ?2, ?2)",
+                    rusqlite::params![task_id, chrono::Utc::now().to_rfc3339()],
+                )?;
+                Ok(())
+            })
+            .await
+        };
+        added.unwrap();
+
+        let refused = continue_approved_review(&db, reviewed).await;
+        match refused {
+            Err(ProvisionError::NotLaunchable(reason)) => {
+                assert!(reason.contains("added-late"), "{reason}")
+            }
+            other => panic!("the late DoD item must hold the integration, got {other:?}"),
+        }
+        assert_eq!(
+            git_rev(repo.path(), "main"),
+            target_before,
+            "the target must not have moved"
+        );
+        let execution = exec_of(&db, &exec_id).await;
+        assert!(execution.integrated_sha.is_none());
+        assert_ne!(execution.status, TaskExecutionStatus::Done);
+        assert_ne!(execution.status, TaskExecutionStatus::Applying);
+        let task = db
+            .with_conn(move |conn| crate::db::planning::get_task(conn, &task_id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(task.summary.status, PlanningTaskStatus::Done);
     }
 
     /// Waits for `expected`, failing at once on a state it can no longer leave.
@@ -29767,7 +29979,7 @@ pub(crate) mod tests {
         let execution = provision_single_task_execution(
             &db,
             ProvisionInput {
-                task_reference: task_ref,
+                task_reference: task_ref.clone(),
                 parent_discussion_id: parent_id,
                 worker: native_worker(),
                 base_rev: Some("main".into()),
@@ -29777,6 +29989,19 @@ pub(crate) mod tests {
         .await
         .unwrap();
         let worktree_path = managed_worktree_path(&db, &execution.id).await;
+        // KT-1267 — provisioning started the task; a cancel must not undo that.
+        let task_status_before = {
+            let task_ref = task_ref.clone();
+            db.with_conn(move |conn| {
+                Ok(crate::db::planning::get_task(conn, &task_ref)?
+                    .unwrap()
+                    .summary
+                    .status)
+            })
+            .await
+            .unwrap()
+        };
+        assert_ne!(task_status_before, PlanningTaskStatus::Todo);
         let dispatch_id = execution.dispatch_job_id.clone().unwrap();
         let state = AppState::new_defaults(
             std::sync::Arc::new(tokio::sync::RwLock::new(
@@ -29823,6 +30048,26 @@ pub(crate) mod tests {
             .outcome
             .as_deref()
             .is_some_and(|value| value.contains("policy=preserve")));
+        let task_status_after = db
+            .with_conn(move |conn| {
+                Ok(crate::db::planning::get_task(conn, &task_ref)?
+                    .unwrap()
+                    .summary
+                    .status)
+            })
+            .await
+            .unwrap();
+        assert_eq!(task_status_after, task_status_before);
+        let expected_note = format!("task status kept: {}", task_status_before.as_str());
+        assert!(
+            receipt
+                .outcome
+                .as_deref()
+                .is_some_and(|value| value.contains(&expected_note)
+                    && value.contains("task_update status=todo")),
+            "the receipt says the status is kept and how to relaunch: {:?}",
+            receipt.outcome
+        );
         assert!(worker_finished.load(std::sync::atomic::Ordering::SeqCst));
         assert!(!peer_token.is_cancelled(), "a sibling dispatch is isolated");
         assert!(

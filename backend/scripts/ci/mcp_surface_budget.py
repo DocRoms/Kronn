@@ -112,7 +112,18 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # never an approve blocker; `task_create` cannot declare one, a new task has no
 # execution); paid for by dropping what `task_exec_review`'s `decision` schema
 # already said and tightening its identity sentence, ceiling lowered by 86 B.
-CATALOGUE_MAX_BYTES = 85_003
+# KT-1262: `task_exec_deliver` and `task_exec_review` name the fields the
+# backend requires (`tests_executed`, `reviewed_head_sha`, `dod_verifications`,
+# the string version "1"). The spawned worker's `tests_executed` schema is now
+# declared inside the TOOLS literal (the projection in `_visible_tools` reuses
+# it), so this gate measures it; the disc_link, disc_find_by_session,
+# disc_transfer_session and disc_workspace_set descriptions were tightened to
+# pay for it. Pinned to the payload measured on the merged tree, 84_967 B
+# (85_003 -> 84_967).
+# KT-1267: `task_exec_cancel` says the task status is left alone and how to
+# relaunch, inside the bytes of the text it replaces; ceiling lowered by 1 B
+# (84_967 -> 84_966).
+CATALOGUE_MAX_BYTES = 84_966
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is

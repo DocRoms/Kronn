@@ -615,7 +615,7 @@ fn interrupted_integration_may_rebuild_after_validation_or_apply_drift() {
 }
 
 #[test]
-fn cancellation_cascades_dispatch_and_returns_plan_task_to_todo() {
+fn cancellation_cascades_dispatch_and_leaves_the_plan_task_status_to_the_principal() {
     let conn = setup();
     seed_plan_task(&conn, "t-cancel-tree", 1101, 0, "active");
     let execution = launch_single_task(
@@ -698,7 +698,7 @@ fn cancellation_cascades_dispatch_and_returns_plan_task_to_todo() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(task, "todo");
+    assert_eq!(task, "in_progress");
 }
 
 #[test]
@@ -4866,6 +4866,380 @@ fn integrated_checkpoint_rolls_back_when_plan_task_is_not_in_progress() {
         integrated, None,
         "integrated_sha rolled back with the refused task CAS"
     );
+}
+
+/// Drive a fresh execution to `Applying` with a candidate pinned and its task
+/// `InProgress`, carrying `dod` items (`(id, sentence, completed)`), so the next
+/// step is the `Integrated` checkpoint. Returns the execution id and its attempt.
+fn applying_with_dod(
+    conn: &Connection,
+    task_id: &str,
+    number: i64,
+    dod: &[(&str, &str, bool)],
+) -> (String, u32) {
+    let exec = launch_and_drive(
+        conn,
+        task_id,
+        number,
+        &[
+            TaskExecutionStatus::Provisioning,
+            TaskExecutionStatus::Working,
+            TaskExecutionStatus::AwaitingReview,
+            TaskExecutionStatus::Approved,
+            TaskExecutionStatus::Integrating,
+            TaskExecutionStatus::Validating,
+            TaskExecutionStatus::Applying,
+        ],
+    );
+    for (position, (id, sentence, completed)) in dod.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO planning_task_dod_items \
+             (id, task_id, sentence, completed, position, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            params![id, task_id, sentence, completed, position as i64],
+        )
+        .unwrap();
+    }
+    conn.execute(
+        "UPDATE task_executions SET candidate_merge_sha = ?2 WHERE id = ?1",
+        params![exec, INTEGRATED],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE planning_tasks SET status = 'in_progress' WHERE id = ?1",
+        [task_id],
+    )
+    .unwrap();
+    let attempt = get_task_execution(conn, &exec).unwrap().unwrap().attempt_no;
+    (exec, attempt)
+}
+
+const INTEGRATED: &str = "dddddddddddddddddddddddddddddddddddddddd";
+
+fn dod_state(conn: &Connection, task_id: &str) -> Vec<(String, bool, Option<String>)> {
+    let mut statement = conn
+        .prepare(
+            "SELECT id, completed, evidence FROM planning_task_dod_items \
+             WHERE task_id = ?1 ORDER BY position",
+        )
+        .unwrap();
+    statement
+        .query_map([task_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+}
+
+/// KT-1262: an approve that integrates ticks every DoD item the principal
+/// verified as met and stores the evidence on the item; an item the principal
+/// did not name falls back to the manifest's own met claim.
+#[test]
+fn an_integrating_approve_ticks_the_verified_dod_items_with_their_evidence() {
+    let conn = setup();
+    let (exec, attempt) = applying_with_dod(
+        &conn,
+        "t-dod-tick",
+        904,
+        &[("dod-a", "A holds", false), ("dod-b", "B holds", false)],
+    );
+    crate::db::worker_deliveries::upsert_delivery(
+        &conn,
+        &exec,
+        attempt,
+        "abcdef1234567",
+        &serde_json::json!({
+            "version": "1", "task_ref": "KT-904", "head_sha": "abcdef1234567",
+            "files_touched": [], "tests": [],
+            "dod_status": [
+                {"dod_id": "dod-a", "met": true, "evidence": "worker says A"},
+                {"dod_id": "dod-b", "met": true, "evidence": "worker says B"}
+            ],
+            "docs": [], "migrations": [], "risks": [], "limitations": [],
+            "summary": "s"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    crate::db::worker_reviews::upsert_review(
+        &conn,
+        &exec,
+        attempt,
+        "approve",
+        &serde_json::json!({
+            "version": "1", "task_ref": "KT-904", "decision": "approve",
+            "reviewed_head_sha": "abcdef1234567",
+            "dod_verifications": [
+                {"dod_id": "dod-a", "met": true, "evidence": "principal ran the test"}
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let outcome = commit_integration_checkpoint(
+        &conn,
+        &exec,
+        IntegrationStep::Integrated {
+            integrated_sha: INTEGRATED,
+        },
+        &backend_actor(),
+    )
+    .unwrap();
+    assert_eq!(
+        outcome,
+        IntegrationCheckpointOutcome::Committed {
+            status: TaskExecutionStatus::Done
+        }
+    );
+    assert_eq!(
+        dod_state(&conn, "t-dod-tick"),
+        vec![
+            (
+                "dod-a".to_string(),
+                true,
+                Some("principal ran the test".to_string())
+            ),
+            ("dod-b".to_string(), true, Some("worker says B".to_string())),
+        ]
+    );
+    let events: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM planning_task_events \
+             WHERE task_id = 't-dod-tick' AND action = 'dod_updated'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(events, 2, "each tick is journalled on the task");
+}
+
+/// KT-1262: a task never reaches `done` with an unticked DoD item, unless that
+/// item is a post-integration check.
+#[test]
+fn a_task_does_not_reach_done_with_an_unticked_dod_item_unless_it_is_post_integration() {
+    let conn = setup();
+    // No delivery, no review: nothing verified the item.
+    let (exec, _) = applying_with_dod(&conn, "t-dod-unticked", 905, &[("dod-x", "X holds", false)]);
+    let refused = commit_integration_checkpoint(
+        &conn,
+        &exec,
+        IntegrationStep::Integrated {
+            integrated_sha: INTEGRATED,
+        },
+        &backend_actor(),
+    )
+    .unwrap();
+    assert_eq!(refused, IntegrationCheckpointOutcome::TaskNotCompletable);
+    let task_status: String = conn
+        .query_row(
+            "SELECT status FROM planning_tasks WHERE id = 't-dod-unticked'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(task_status, "in_progress");
+    assert_eq!(
+        get_task_execution(&conn, &exec).unwrap().unwrap().status,
+        TaskExecutionStatus::Applying
+    );
+
+    // The same task shape, with the open item a KT-1254 live check
+    // (`verification = 'post_integration'`): the execution lands, the item stays
+    // pending and the task stays open until the principal ticks it.
+    let (exec, attempt) = applying_with_dod(
+        &conn,
+        "t-dod-post",
+        906,
+        &[
+            ("dod-y", "Y holds", false),
+            ("dod-z", "Smoke test on main", false),
+        ],
+    );
+    conn.execute(
+        "UPDATE planning_task_dod_items SET verification = 'post_integration' WHERE id = 'dod-z'",
+        [],
+    )
+    .unwrap();
+    crate::db::worker_reviews::upsert_review(
+        &conn,
+        &exec,
+        attempt,
+        "approve",
+        &serde_json::json!({
+            "version": "1", "task_ref": "KT-906", "decision": "approve",
+            "reviewed_head_sha": "abcdef1234567",
+            "dod_verifications": [
+                {"dod_id": "dod-y", "met": true, "evidence": "ran Y"},
+                // Even a `met` claim made before integration never ticks a live check.
+                {"dod_id": "dod-z", "met": true, "evidence": "claimed before the live check"}
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let landed = commit_integration_checkpoint(
+        &conn,
+        &exec,
+        IntegrationStep::Integrated {
+            integrated_sha: INTEGRATED,
+        },
+        &backend_actor(),
+    )
+    .unwrap();
+    assert_eq!(
+        landed,
+        IntegrationCheckpointOutcome::Committed {
+            status: TaskExecutionStatus::Done
+        }
+    );
+    assert_eq!(
+        dod_state(&conn, "t-dod-post"),
+        vec![
+            ("dod-y".to_string(), true, Some("ran Y".to_string())),
+            ("dod-z".to_string(), false, None),
+        ]
+    );
+    let task_status: String = conn
+        .query_row(
+            "SELECT status FROM planning_tasks WHERE id = 't-dod-post'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        task_status, "in_progress",
+        "a pending live check keeps it open"
+    );
+
+    // The live check closes the task only once ticked with evidence.
+    let tick = |evidence: Option<&str>| {
+        crate::db::planning::update_dod_item(
+            &conn,
+            "t-dod-post",
+            "dod-z",
+            &crate::models::UpdatePlanningDodItemRequest {
+                completed: true,
+                evidence: evidence.map(str::to_string),
+                actor: crate::models::PlanningActor::default(),
+            },
+        )
+    };
+    assert!(tick(None).is_err(), "a live check is never ticked bare");
+    tick(Some("replayed on the integrated target: ok")).unwrap();
+    assert_eq!(
+        dod_state(&conn, "t-dod-post"),
+        vec![
+            ("dod-y".to_string(), true, Some("ran Y".to_string())),
+            (
+                "dod-z".to_string(),
+                true,
+                Some("replayed on the integrated target: ok".to_string())
+            ),
+        ]
+    );
+    let task_status: String = conn
+        .query_row(
+            "SELECT status FROM planning_tasks WHERE id = 't-dod-post'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(task_status, "done");
+}
+
+/// KT-1262 — what a later manual re-tick or untick does to the evidence an
+/// integrating approve stored on a worker item: an untick drops it (the proof
+/// went with the tick), a bare re-tick leaves the item ticked without evidence,
+/// a re-tick of a ticked item keeps it, and a tick with evidence replaces it. An
+/// array replace keeps it while the item stays ticked and drops it otherwise.
+#[test]
+fn the_evidence_an_integration_stored_follows_the_tick_of_a_worker_item() {
+    let conn = setup();
+    let (exec, attempt) =
+        applying_with_dod(&conn, "t-dod-evidence", 907, &[("dod-e", "E holds", false)]);
+    crate::db::worker_reviews::upsert_review(
+        &conn,
+        &exec,
+        attempt,
+        "approve",
+        &serde_json::json!({
+            "version": "1", "task_ref": "KT-907", "decision": "approve",
+            "reviewed_head_sha": "abcdef1234567",
+            "dod_verifications": [{"dod_id": "dod-e", "met": true, "evidence": "principal ran E"}]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    commit_integration_checkpoint(
+        &conn,
+        &exec,
+        IntegrationStep::Integrated {
+            integrated_sha: INTEGRATED,
+        },
+        &backend_actor(),
+    )
+    .unwrap();
+    let state = |conn: &Connection| dod_state(conn, "t-dod-evidence").remove(0);
+    let set = |completed: bool, evidence: Option<&str>| {
+        crate::db::planning::update_dod_item(
+            &conn,
+            "t-dod-evidence",
+            "dod-e",
+            &crate::models::UpdatePlanningDodItemRequest {
+                completed,
+                evidence: evidence.map(str::to_string),
+                actor: crate::models::PlanningActor::default(),
+            },
+        )
+        .unwrap();
+    };
+    let replace = |completed: bool| {
+        crate::db::planning::update_task(
+            &conn,
+            "t-dod-evidence",
+            &crate::models::UpdatePlanningTaskRequest {
+                title: None,
+                description: None,
+                status: None,
+                priority: None,
+                parent_id: None,
+                blocked_reason: None,
+                rank: None,
+                project_ids: None,
+                tags: None,
+                definition_of_done: Some(vec![crate::models::CreatePlanningDodItem {
+                    id: Some("dod-e".into()),
+                    sentence: "E holds".into(),
+                    completed,
+                    verification: None,
+                }]),
+                links: None,
+                actor: crate::models::PlanningActor::default(),
+            },
+        )
+        .unwrap();
+    };
+    let ticked_with = |text: &str| ("dod-e".to_string(), true, Some(text.to_string()));
+
+    assert_eq!(state(&conn), ticked_with("principal ran E"));
+    // Re-ticking a ticked item without evidence, or an array replace that keeps
+    // it ticked, leaves the proof alone.
+    set(true, None);
+    assert_eq!(state(&conn), ticked_with("principal ran E"));
+    replace(true);
+    assert_eq!(state(&conn), ticked_with("principal ran E"));
+    // A tick that carries evidence replaces it.
+    set(true, Some("  re-verified by hand  "));
+    assert_eq!(state(&conn), ticked_with("re-verified by hand"));
+    // An untick drops it, by either path.
+    set(false, None);
+    assert_eq!(state(&conn), ("dod-e".to_string(), false, None));
+    // A bare re-tick is a manual tick: ticked, no evidence invented.
+    set(true, None);
+    assert_eq!(state(&conn), ("dod-e".to_string(), true, None));
+    set(true, Some("proof"));
+    replace(false);
+    assert_eq!(state(&conn), ("dod-e".to_string(), false, None));
 }
 
 #[test]

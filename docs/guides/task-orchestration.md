@@ -257,10 +257,49 @@ The limits worth knowing:
 - Nothing in this section is inferred. No metric, timestamp or verdict is
   derived from the worker's own claims.
 
+### The Definition of Done after an integration
+
+An approve that integrates ticks the DoD items it verified, in the same
+transaction that marks the task `done`. An item the principal named in
+`dod_verifications` carries the principal's evidence; one it did not name (a
+human approve supplies none) carries the worker's own `dod_status` evidence.
+The evidence is stored on the item (`evidence` on the DoD item) and shown with
+it. Only worker items are ticked this way: a `post_integration` live check
+(above) is never ticked by an integration, whatever the review said about it,
+because its evidence must come from the live check itself.
+
+A task does not reach `done` with an unticked worker DoD item. The one
+exception is the KT-1254 live check, which is not asked of the approve and keeps
+the task `in_progress` until the principal ticks it with evidence. There is a
+single model for it: the item's `verification` column, no sentence convention.
+
+The guard runs twice. BEFORE the integration touches the target, an item that
+neither the approve nor the delivery verified (one added between approve and
+integration, say) holds the approval as `IntegrationRefused`: the target does not
+move and no execution is left parked with its code already on it. The
+`Integrated` checkpoint then re-checks in the same transaction as the `done`
+move, and rolls back on a leftover.
+
+What a later manual write does to the evidence of a worker item:
+
+- `task_update_dod` with `completed: false` (or a definition-of-done replace that
+  unticks the item) drops it: the proof went with the tick.
+- Ticking again without `evidence` leaves a ticked item's evidence alone, and
+  ticks an unticked one with no evidence (a manual tick invents none).
+- Ticking with `evidence` replaces it; a replace that keeps the item ticked, in
+  the same mode, keeps it, and changing the mode drops it.
+
+Only the integration path enforces the guard; a task a human sets to `done` in
+the Planning page is not checked.
+
 ## Stop or reassign
 
 **Stop** cancels live dispatch and preserves the child branch/worktree for
-inspection. It does not force-delete local work.
+inspection. It does not force-delete local work. It never changes the task's
+status (KT-1267): an `in_progress` or `done` task stays so, because the work may
+already be integrated by hand and the principal decides. To run the task again,
+set it back to `todo` first (`task_update status=todo`); the launch preflight
+refuses any other status.
 
 **Reassign** is available only in resumable worker states. Choose another
 allowed agent/model; Kronn keeps the task, child discussion and Git lineage so
@@ -280,7 +319,7 @@ durable child discussion that the runtime will actually execute.
 | Target checkout missing or ambiguous | Restore exactly one checkout of the pinned local target branch before retrying; Kronn does not choose or switch a branch for you. |
 | Missing workspace | Restore/register the project workspace; do not edit execution rows manually. |
 | Interrupted after restart | Read the persisted reason, verify the worker/worktree, then use the guarded resume/reassign action. |
-| Initial CLI offer never accepted | Resume/reassign do not apply to `Blocked` from `Provisioning`. The principal may cancel with workspace preservation, verify the old execution is terminal, then select the exact available CLI and prepare a new execution for the same task. Launch only after a fresh launchable preflight confirms no active duplicate. Do not silently substitute a different CLI identity. |
+| Initial CLI offer never accepted | Resume/reassign do not apply to `Blocked` from `Provisioning`. The principal may cancel with workspace preservation, verify the old execution is terminal, set the task back to `todo` (`task_update status=todo`; the cancel keeps its status, usually `in_progress`, and the launch preflight refuses any other status), then select the exact available CLI and prepare a new execution for the same task. Launch only after a fresh launchable preflight confirms no active duplicate. Do not silently substitute a different CLI identity. |
 | Review budget exhausted | Decide in the parent discussion whether to expand scope, create a follow-up task or stop. |
 
 Do not repair orchestration by manually changing SQLite rows. The status,
