@@ -900,3 +900,241 @@ fn a_probe_runs_in_a_session_of_its_own() {
     assert_eq!(sid, pid, "the probe leads its own session: {outcome:?}");
     assert_ne!(sid, our_sid, "the probe left the backend's session");
 }
+
+// ── Quick Exec validations of a worker's tree (KT-1268) ──────────────────
+
+#[test]
+fn a_host_without_a_sandbox_gets_no_confinement_and_provisions_nothing() {
+    let layout = layout();
+    let lane = WorkerLane::for_worktree(&layout.worktree).unwrap();
+
+    let refusal = Confinement::with_mechanism(&layout.worktree, None).unwrap_err();
+
+    assert!(refusal.contains("never run unconfined"), "{refusal}");
+    assert!(refusal.contains("no sandbox"), "{refusal}");
+    assert!(
+        !lane.cargo_target_dir.exists(),
+        "a refused host must not have a lane prepared for it"
+    );
+}
+
+#[test]
+fn a_confinement_wraps_a_command_in_the_lane_profile_with_the_lane_environment() {
+    let layout = layout();
+    let lane = WorkerLane::for_worktree(&layout.worktree).unwrap();
+    for mechanism in [Mechanism::Seatbelt, Mechanism::Bubblewrap] {
+        let confinement = Confinement::with_mechanism(&layout.worktree, Some(mechanism)).unwrap();
+        assert_eq!(confinement.policy(), &SandboxPolicy::for_lane(&lane));
+
+        let mut command = probe("cargo", &["test", "--no-run"], &layout.worktree);
+        command.env = vec![("CARGO_TARGET_DIR".into(), "/explicit/target".into())];
+        let wrapped = confinement.wrap(&command);
+
+        // The command is the sandbox mechanism's argument, never a program of its own.
+        match mechanism {
+            Mechanism::Seatbelt => {
+                assert_eq!(wrapped.program, SANDBOX_EXEC);
+                assert!(wrapped.args[1].contains("(deny default)"), "{wrapped:?}");
+            }
+            Mechanism::Bubblewrap => {
+                assert_eq!(wrapped.program, BWRAP);
+                assert!(wrapped.args.contains(&"--unshare-net".to_string()));
+            }
+        }
+        assert_eq!(
+            &wrapped.args[wrapped.args.len() - 3..],
+            ["cargo", "test", "--no-run"]
+        );
+        assert_eq!(wrapped.cwd, layout.worktree);
+
+        let value = |name: &str| -> Vec<OsString> {
+            wrapped
+                .env
+                .iter()
+                .filter(|(set, _)| set == name)
+                .map(|(_, value)| value.clone())
+                .collect()
+        };
+        // The lane's own environment is there, below what the probe sets.
+        assert_eq!(
+            value("CARGO_TARGET_DIR"),
+            vec![OsString::from("/explicit/target")]
+        );
+        assert_eq!(value("CARGO_NET_OFFLINE"), vec![OsString::from("true")]);
+        assert_eq!(
+            value("KRONN_DATA_DIR"),
+            vec![lane.data_dir.clone().into_os_string()]
+        );
+        // And the only scratch space is the lane's.
+        assert_eq!(
+            value("TMPDIR"),
+            vec![real_path(&lane.tmp_dir()).into_os_string()]
+        );
+    }
+}
+
+/// `binary argv` validated as a Quick Exec spec rooted at `cwd`.
+fn quick_spec(
+    binary: &str,
+    argv: &[&str],
+    cwd: &Path,
+    timeout_secs: u64,
+) -> crate::core::quick_exec::ValidatedSpec {
+    crate::core::quick_exec::validate(
+        &crate::core::quick_exec::QuickExecSpec {
+            binary: binary.into(),
+            argv: argv.iter().map(|arg| arg.to_string()).collect(),
+            cwd: cwd.to_path_buf(),
+            timeout_secs: Some(timeout_secs),
+            stdin: None,
+            summariser: crate::core::quick_exec::Summariser::Generic,
+        },
+        &[cwd.to_path_buf()],
+    )
+    .unwrap()
+}
+
+fn run_confined_blocking(
+    spec: &crate::core::quick_exec::ValidatedSpec,
+    confinement: &Confinement,
+) -> crate::core::quick_exec::QuickExecResult {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(crate::core::quick_exec::run_confined(
+            spec,
+            None,
+            &CancellationToken::new(),
+            confinement,
+        ))
+        .unwrap()
+}
+
+/// A crate at the root of the layout's worktree whose build script is
+/// `build_rs`, built as a Quick Exec validation under the real OS sandbox.
+fn validate_under_the_os_sandbox(
+    mechanism: Mechanism,
+    layout: &Layout,
+    build_rs: &str,
+) -> crate::core::quick_exec::QuickExecResult {
+    let root = &layout.worktree;
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"escape\"\nversion = \"0.0.0\"\nedition = \"2021\"\nbuild = \"build.rs\"\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("src").join("lib.rs"), "").unwrap();
+    std::fs::write(root.join("build.rs"), build_rs).unwrap();
+
+    let confinement = Confinement::with_mechanism(root, Some(mechanism)).unwrap();
+    run_confined_blocking(
+        &quick_spec("cargo", &["build", "--offline"], root, 300),
+        &confinement,
+    )
+}
+
+#[test]
+fn a_validation_build_script_writing_outside_the_lane_is_denied_by_the_os() {
+    let Some(mechanism) = live_mechanism() else {
+        return;
+    };
+    let layout = layout();
+    let outside_dir = outside_dir();
+    let outside = outside_dir
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("escaped.txt");
+    let inside = layout.worktree.join("inside.txt");
+
+    let result = validate_under_the_os_sandbox(
+        mechanism,
+        &layout,
+        &format!(
+            "fn main() {{\n    std::fs::write({inside:?}, \"x\").unwrap();\n    \
+             std::fs::write({outside:?}, \"x\").expect(\"write outside the lane\");\n}}\n"
+        ),
+    );
+
+    assert!(!result.status.is_success(), "{result:?}");
+    assert!(!outside.exists(), "the escape reached the host's disk");
+    assert!(
+        inside.exists(),
+        "the validation ran and wrote inside its lane"
+    );
+}
+
+#[test]
+fn a_validation_build_script_connecting_to_loopback_is_denied_by_the_os() {
+    let Some(mechanism) = live_mechanism() else {
+        return;
+    };
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let layout = layout();
+    let inside = layout.worktree.join("inside.txt");
+
+    let result = validate_under_the_os_sandbox(
+        mechanism,
+        &layout,
+        &format!(
+            "fn main() {{\n    std::fs::write({inside:?}, \"x\").unwrap();\n    \
+             std::net::TcpStream::connect(\"127.0.0.1:{port}\").expect(\"loopback\");\n}}\n"
+        ),
+    );
+
+    assert!(!result.status.is_success(), "{result:?}");
+    assert!(inside.exists(), "the validation ran inside its lane");
+    assert!(
+        listener.accept().is_err(),
+        "the connection reached the local service"
+    );
+}
+
+#[test]
+fn an_ordinary_validation_build_passes_under_the_os_sandbox() {
+    let Some(mechanism) = live_mechanism() else {
+        return;
+    };
+    let layout = layout();
+
+    let result = validate_under_the_os_sandbox(
+        mechanism,
+        &layout,
+        "fn main() {\n    let out = std::env::var(\"OUT_DIR\").unwrap();\n    \
+         std::fs::write(std::path::Path::new(&out).join(\"generated.rs\"), \"\").unwrap();\n}\n",
+    );
+
+    assert!(result.status.is_success(), "{result:?}");
+    let lane = WorkerLane::for_worktree(&layout.worktree).unwrap();
+    assert!(
+        lane.cargo_target_dir.join("debug").exists(),
+        "the artifacts landed in the lane's target"
+    );
+}
+
+/// A timeout ends a confined command promptly and reports it as a timeout.
+#[test]
+fn a_confined_validation_that_times_out_is_reported_timed_out() {
+    let Some(mechanism) = live_mechanism() else {
+        return;
+    };
+    let layout = layout();
+    let confinement = Confinement::with_mechanism(&layout.worktree, Some(mechanism)).unwrap();
+
+    let started = std::time::Instant::now();
+    let result = run_confined_blocking(
+        &quick_spec("sleep", &["30"], &layout.worktree, 1),
+        &confinement,
+    );
+
+    assert_eq!(
+        result.status,
+        crate::core::quick_exec::QuickExecStatus::TimedOut,
+        "{result:?}"
+    );
+    assert!(started.elapsed() < Duration::from_secs(20), "{result:?}");
+}

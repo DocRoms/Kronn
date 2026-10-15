@@ -496,6 +496,17 @@ Release notes for 0.9.3 and earlier are available in the
   (`/dev/tty`, `ttysNNN`, ptys, `/dev/console`) and grants no `pseudo-tty`: a
   `build.rs` cannot push keystrokes (`TIOCSTI`) into the operator's shell when
   the backend runs in a terminal.
+- The principal's persisted validations run under that same sandbox (KT-1268).
+  At integration, `cargo test`, `vitest` and the `cargo metadata` that sizes
+  their target ran through Quick Exec as the host user in the worker's tree, so
+  a changed `build.rs`, proc-macro, test or `.cargo/config.toml` ran with the
+  host's rights. They now use the lane's profile and launcher (own session, no
+  terminal, lane environment, process group killed on timeout): no write
+  outside the worker's roots and the lane's temp dir, no connection, loopback
+  included. A host with no sandbox refuses the validation with that reason —
+  recorded as a failed validation, sent back to the worker — and never runs it
+  unconfined. A validation that needs the network or a path outside the lane
+  (a `git` write, an explicit `--target-dir` elsewhere) now fails there.
 
 - A task worker's lane target (`target/wt-<lane>`) is removed with its clean
   worktree (KT-1256). It lives outside the worktree, so integration and

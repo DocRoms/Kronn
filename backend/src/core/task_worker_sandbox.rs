@@ -17,6 +17,13 @@
 //! a short list, fresh PID/IPC namespaces on Linux. It fails closed: a host
 //! with no usable sandbox mechanism refuses the command and says why, it
 //! never falls back to running it unconfined.
+//!
+//! KT-1268: the principal's persisted validations (`cargo test`, `vitest`, the
+//! `cargo metadata` that sizes their target) are Quick Exec commands run in
+//! the worker's tree at integration — the same worker-written `build.rs`,
+//! proc-macros and tests. [`Confinement`] is this profile and this launcher
+//! (own session, no terminal) for a Quick Exec command: there is no second
+//! profile.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -24,8 +31,9 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
+use crate::core::child_env::ChildRoute;
 use crate::core::task_worker_env::{
-    ProbeCommand, ProbeOutcome, ProbeRunner, ProcessProbeRunner, WorkerLane,
+    prepare_launch, ProbeCommand, ProbeOutcome, ProbeRunner, ProcessProbeRunner, WorkerLane,
 };
 
 /// macOS' Seatbelt front-end.
@@ -277,6 +285,110 @@ pub fn confine(mechanism: Mechanism, policy: &SandboxPolicy, probe: &ProbeComman
     }
 }
 
+/// Why nothing can be confined on this host. `subject` is what would have run.
+fn no_mechanism_reason(subject: &str) -> String {
+    format!(
+        "this host has no sandbox Kronn can run {subject} under (macOS Seatbelt or Linux \
+         bubblewrap); worker-written code is never run unconfined"
+    )
+}
+
+/// The lane's sandbox, ready to launch a Quick Exec command in a worker's tree
+/// (KT-1268): the profile of [`SandboxPolicy::for_lane`] through the host's
+/// [`Mechanism`], and the lane's own environment. It exists only when the host
+/// has a mechanism, so holding one is the proof that a command it launches is
+/// confined; without one, [`Confinement::for_worktree`] says why instead.
+#[derive(Debug, Clone)]
+pub struct Confinement {
+    mechanism: Mechanism,
+    policy: SandboxPolicy,
+    lane_env: Vec<(String, OsString)>,
+}
+
+impl Confinement {
+    /// The confinement of a task worktree on this host.
+    pub fn for_worktree(work_dir: &Path) -> Result<Self, String> {
+        Self::with_mechanism(work_dir, Mechanism::of_host())
+    }
+
+    /// [`Confinement::for_worktree`] with the host's mechanism injected, so the
+    /// refusal of a host without one is testable on any host. Nothing is
+    /// provisioned for a host that has none.
+    pub fn with_mechanism(work_dir: &Path, mechanism: Option<Mechanism>) -> Result<Self, String> {
+        let mechanism =
+            mechanism.ok_or_else(|| no_mechanism_reason("a validation of a worker's tree"))?;
+        let (lane, provisioned) = prepare_launch(work_dir)?;
+        for warning in &provisioned.warnings {
+            tracing::warn!(lane = %lane.name, "task worker lane: {warning}");
+        }
+        let policy = SandboxPolicy::for_lane(&lane);
+        // The command's only scratch space must exist before it starts: the
+        // sandbox grants no other.
+        let temp_dir = real_path(&policy.temp_dir);
+        std::fs::create_dir_all(&temp_dir).map_err(|error| {
+            format!(
+                "cannot create the lane's temp dir {}: {error}",
+                temp_dir.display()
+            )
+        })?;
+        let lane_env = lane
+            .env(&provisioned)
+            .into_iter()
+            .map(|(name, value)| (name.to_string(), value))
+            .collect();
+        Ok(Self {
+            mechanism,
+            policy,
+            lane_env,
+        })
+    }
+
+    pub fn mechanism(&self) -> Mechanism {
+        self.mechanism
+    }
+
+    pub fn policy(&self) -> &SandboxPolicy {
+        &self.policy
+    }
+
+    /// `probe` under the OS sandbox, with the lane's environment beneath its
+    /// own: a value the probe sets (a `--target-dir` override) wins. Pure.
+    pub fn wrap(&self, probe: &ProbeCommand) -> ProbeCommand {
+        let mut env: Vec<(String, OsString)> = self
+            .lane_env
+            .iter()
+            .filter(|(name, _)| !probe.env.iter().any(|(set, _)| set == name))
+            .cloned()
+            .collect();
+        env.extend(probe.env.iter().cloned());
+        confine(
+            self.mechanism,
+            &self.policy,
+            &ProbeCommand {
+                env,
+                ..probe.clone()
+            },
+        )
+    }
+
+    /// The process that runs `probe` confined: the sealed environment of
+    /// `route`, in a session of its own with no controlling terminal
+    /// ([`crate::core::task_worker_env::detach_from_terminal`], the launcher of
+    /// the lane's first build). Not started.
+    pub fn command(&self, probe: &ProbeCommand, route: ChildRoute) -> tokio::process::Command {
+        let wrapped = self.wrap(probe);
+        let mut command = crate::core::cmd::async_cmd(&wrapped.program, route);
+        command.args(&wrapped.args).current_dir(&wrapped.cwd);
+        for (name, value) in &wrapped.env {
+            command.env(name, value);
+        }
+        crate::core::child_env::seal(command.as_std_mut(), route, &[]);
+        #[cfg(unix)]
+        crate::core::task_worker_env::detach_from_terminal(command.as_std_mut());
+        command
+    }
+}
+
 /// Runs probes under the worker's sandbox, through `inner`.
 pub struct SandboxedProbeRunner {
     /// `Err` when the policy could not be derived: every probe is refused.
@@ -331,11 +443,7 @@ impl ProbeRunner for SandboxedProbeRunner {
             }
         };
         let Some(mechanism) = self.mechanism else {
-            return Self::refuse(
-                "this host has no sandbox Kronn can run a lane build under (macOS Seatbelt or \
-                 Linux bubblewrap); a worker build is never run unconfined"
-                    .to_string(),
-            );
+            return Self::refuse(no_mechanism_reason("a lane build"));
         };
         // The command's only scratch space must exist before it starts: the
         // sandbox grants no other.

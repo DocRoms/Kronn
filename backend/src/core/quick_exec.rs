@@ -11,6 +11,8 @@
 //! the bounded cwd below.
 
 use crate::core::cmd::async_cmd;
+use crate::core::task_worker_env::ProbeCommand;
+use crate::core::task_worker_sandbox::Confinement;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
@@ -504,13 +506,31 @@ enum Outcome {
 
 /// The process a validated spec starts, before stdio: the resolved binary,
 /// its argv and cwd, and a built environment (KT-1006). Nothing is inherited.
-fn build_command(spec: &ValidatedSpec) -> tokio::process::Command {
-    let mut command = async_cmd(
-        resolve_binary(spec),
-        crate::core::child_env::ChildRoute::QuickExec,
-    );
-    command.args(&spec.argv).current_dir(&spec.cwd);
-    command
+///
+/// With a [`Confinement`] (KT-1268) the same process runs under the lane's OS
+/// sandbox, started the way the lane's first build is.
+fn build_command(
+    spec: &ValidatedSpec,
+    confinement: Option<&Confinement>,
+) -> tokio::process::Command {
+    let route = crate::core::child_env::ChildRoute::QuickExec;
+    match confinement {
+        None => {
+            let mut command = async_cmd(resolve_binary(spec), route);
+            command.args(&spec.argv).current_dir(&spec.cwd);
+            command
+        }
+        Some(confinement) => confinement.command(
+            &ProbeCommand {
+                program: resolve_binary(spec).to_string_lossy().into_owned(),
+                args: spec.argv.clone(),
+                cwd: spec.cwd.clone(),
+                env: Vec::new(),
+                timeout: std::time::Duration::from_secs(spec.timeout_secs),
+            },
+            route,
+        ),
+    }
 }
 
 /// Spawn a validated spec and return its bounded result.
@@ -518,14 +538,39 @@ fn build_command(spec: &ValidatedSpec) -> tokio::process::Command {
 /// `artifact_dir` receives the full streams. When it is `None` the streams are
 /// summarised and dropped — the result then says so via `artifact: None`, so a
 /// reader can tell "not kept" from "empty".
+///
+/// The command runs with the backend's own rights: use [`run_confined`] for
+/// anything a task worker wrote.
 pub async fn run(
     spec: &ValidatedSpec,
     artifact_dir: Option<&Path>,
     cancel: &CancellationToken,
 ) -> Result<QuickExecResult> {
+    run_with(spec, artifact_dir, cancel, None).await
+}
+
+/// [`run`] under the worker's sandbox (KT-1268): what the command may write is
+/// the lane's roots and its temp dir, it reaches no network (loopback included)
+/// and has no terminal. A timeout or a cancel takes the command's whole process
+/// group down, not only its leader.
+pub async fn run_confined(
+    spec: &ValidatedSpec,
+    artifact_dir: Option<&Path>,
+    cancel: &CancellationToken,
+    confinement: &Confinement,
+) -> Result<QuickExecResult> {
+    run_with(spec, artifact_dir, cancel, Some(confinement)).await
+}
+
+async fn run_with(
+    spec: &ValidatedSpec,
+    artifact_dir: Option<&Path>,
+    cancel: &CancellationToken,
+    confinement: Option<&Confinement>,
+) -> Result<QuickExecResult> {
     let started = std::time::Instant::now();
 
-    let mut command = build_command(spec);
+    let mut command = build_command(spec, confinement);
     command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -547,6 +592,11 @@ pub async fn run(
             ))
         }
     };
+
+    // A confined command leads a session of its own (`Confinement::command`),
+    // so its group is its whole process tree.
+    #[cfg(unix)]
+    let confined_group = confinement.and(child.id());
 
     if let (Some(data), Some(mut pipe)) = (spec.stdin.clone(), child.stdin.take()) {
         // In a task: a child that never reads its stdin would block us here.
@@ -578,6 +628,14 @@ pub async fn run(
         Outcome::Exited(status) => Some(*status),
         // Both remaining paths mean we are ending the process, not that it ended.
         _ => {
+            #[cfg(unix)]
+            if let Some(group) = confined_group {
+                // SAFETY: `killpg` takes a plain process-group id; the child
+                // was spawned as the leader of this group.
+                unsafe {
+                    libc::killpg(group as libc::pid_t, libc::SIGKILL);
+                }
+            }
             let _ = child.start_kill();
             child.wait().await.ok()
         }

@@ -4260,15 +4260,103 @@ async fn run_pending_validations(
 
 /// Run one declared validation inside the child worktree, through the same
 /// allowlist every other Kronn-run command goes through.
+///
+/// The tree is the worker's: its `build.rs`, proc-macros, tests and
+/// `.cargo/config.toml` are code. Every command of the validation — Cargo's
+/// target resolution included — therefore runs under the lane's sandbox
+/// profile (KT-1268), and a host that has none refuses the validation.
 async fn run_one_validation(
     spec: &crate::models::ValidationSpec,
     cwd: &std::path::Path,
 ) -> (Option<i32>, i64, String) {
-    let build_path = match validation_build_path(spec, cwd).await {
+    match validation_launch(cwd) {
+        Ok(launch) => run_one_validation_with(spec, cwd, &launch).await,
+        // Recorded like any failed validation: recovery cannot advance the
+        // candidate as though the command had run.
+        Err(reason) => (None, 0, format!("refused: {reason}")),
+    }
+}
+
+async fn run_one_validation_with(
+    spec: &crate::models::ValidationSpec,
+    cwd: &std::path::Path,
+    launch: &ValidationLaunch,
+) -> (Option<i32>, i64, String) {
+    let build_path = match validation_build_path(spec, cwd, launch).await {
         Ok(path) => path,
         Err(reason) => return (None, 0, format!("refused: {reason}")),
     };
-    run_one_validation_checked(spec, cwd, &build_path, worktree::ensure_build_disk_headroom).await
+    run_one_validation_checked(
+        spec,
+        cwd,
+        &build_path,
+        launch,
+        worktree::ensure_build_disk_headroom,
+    )
+    .await
+}
+
+/// How the commands of one validation are started (KT-1268).
+enum ValidationLaunch {
+    /// Under the lane's sandbox: the only variant a shipped build has.
+    Confined(crate::core::task_worker_sandbox::Confinement),
+    /// With the backend's rights. Tests only: most of them validate a scripted
+    /// command in a temporary directory that is not a lane.
+    #[cfg(test)]
+    Unconfined,
+}
+
+impl ValidationLaunch {
+    fn confinement(&self) -> Option<&crate::core::task_worker_sandbox::Confinement> {
+        match self {
+            Self::Confined(confinement) => Some(confinement),
+            #[cfg(test)]
+            Self::Unconfined => None,
+        }
+    }
+}
+
+/// The confinement of the tree `cwd`, or why none exists on this host.
+#[cfg(not(test))]
+fn validation_launch(cwd: &std::path::Path) -> Result<ValidationLaunch, String> {
+    crate::core::task_worker_sandbox::Confinement::for_worktree(cwd).map(ValidationLaunch::Confined)
+}
+
+/// Tests choose, per directory, the mechanism the host "has"
+/// (`Mechanism::of_host()` for the real one, `None` for a host without any);
+/// a directory they did not register runs unconfined.
+#[cfg(test)]
+fn validation_launch(cwd: &std::path::Path) -> Result<ValidationLaunch, String> {
+    let registered = test_validation_mechanisms()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(cwd)
+        .copied();
+    match registered {
+        Some(mechanism) => {
+            crate::core::task_worker_sandbox::Confinement::with_mechanism(cwd, mechanism)
+                .map(ValidationLaunch::Confined)
+        }
+        None => Ok(ValidationLaunch::Unconfined),
+    }
+}
+
+#[cfg(test)]
+fn test_validation_mechanisms() -> &'static std::sync::Mutex<
+    std::collections::HashMap<
+        std::path::PathBuf,
+        Option<crate::core::task_worker_sandbox::Mechanism>,
+    >,
+> {
+    static MECHANISMS: std::sync::OnceLock<
+        std::sync::Mutex<
+            std::collections::HashMap<
+                std::path::PathBuf,
+                Option<crate::core::task_worker_sandbox::Mechanism>,
+            >,
+        >,
+    > = std::sync::OnceLock::new();
+    MECHANISMS.get_or_init(Default::default)
 }
 
 /// Resolve Cargo's own effective target directory before a validation build.
@@ -4282,13 +4370,14 @@ async fn run_one_validation(
 async fn validation_build_path(
     spec: &crate::models::ValidationSpec,
     cwd: &std::path::Path,
+    launch: &ValidationLaunch,
 ) -> Result<std::path::PathBuf, String> {
     const METADATA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
     let Some(words) = validation_cargo_argv(&spec.command)? else {
         return Ok(cwd.to_path_buf());
     };
 
-    let mut metadata = validation_metadata_command(&words, cwd)?;
+    let mut metadata = validation_metadata_command(&words, cwd, launch)?;
     let mut child = metadata.spawn().map_err(|error| {
         format!(
             "cannot resolve Cargo target for validation in {}: {error}",
@@ -4330,26 +4419,37 @@ async fn validation_build_path(
 
 /// The `cargo metadata` process [`validation_build_path`] starts for a
 /// validation's Cargo argv (`words`, without `cargo`).
+///
+/// `cargo metadata` runs `rustc -vV` through the worker's own
+/// `.cargo/config.toml` (`build.rustc-wrapper`): it is worker-written code like
+/// the validation, and starts under the same confinement (KT-1268).
 fn validation_metadata_command(
     words: &[&str],
     cwd: &std::path::Path,
+    launch: &ValidationLaunch,
 ) -> Result<tokio::process::Command, String> {
+    use crate::core::task_worker_env::ProbeCommand;
     // Cargo reads the repository's `.cargo/config.toml`: the Quick Exec
     // environment, as for the validation itself (KT-1006).
     let route = crate::core::child_env::ChildRoute::QuickExec;
-    let mut metadata = crate::core::cmd::async_cmd("cargo", route);
-    metadata
-        .current_dir(cwd)
+    let mut probe = ProbeCommand {
+        program: "cargo".to_string(),
         // Resolution must neither fetch dependencies nor wait forever before a
         // validation can be refused. `metadata` only needs the local manifest
         // graph to return Cargo's effective target directory.
-        .args([
+        args: [
             "metadata",
             "--no-deps",
             "--format-version",
             "1",
             "--offline",
-        ]);
+        ]
+        .map(String::from)
+        .to_vec(),
+        cwd: cwd.to_path_buf(),
+        env: Vec::new(),
+        timeout: std::time::Duration::from_secs(15),
+    };
     // Preserve the validation's manifest and configuration options. Validations
     // are normally launched from the repository root, including commands such
     // as `cargo test --manifest-path backend/Cargo.toml`; resolving metadata in
@@ -4358,6 +4458,13 @@ fn validation_metadata_command(
     // override retains the effective output directory for that one invocation.
     // Cargo's validation subcommand is ignored; only its global resolution
     // options are forwarded to metadata, wherever the literal argv placed them.
+    // A later `--target-dir` replaces an earlier one, as it does for Cargo.
+    fn set_target_dir(probe: &mut ProbeCommand, value: &str) {
+        probe.env.retain(|(name, _)| name != "CARGO_TARGET_DIR");
+        probe
+            .env
+            .push(("CARGO_TARGET_DIR".to_string(), value.into()));
+    }
     let mut index = 0;
     while index < words.len() {
         let word = words[index];
@@ -4365,25 +4472,40 @@ fn validation_metadata_command(
             let value = words.get(index + 1).ok_or_else(|| {
                 "validation cargo command has --target-dir without a directory".to_string()
             })?;
-            metadata.env("CARGO_TARGET_DIR", value);
+            set_target_dir(&mut probe, value);
             index += 2;
             continue;
         } else if let Some(value) = word.strip_prefix("--target-dir=") {
-            metadata.env("CARGO_TARGET_DIR", value);
+            set_target_dir(&mut probe, value);
         } else if word == "--manifest-path" || word == "--config" {
             let value = words
                 .get(index + 1)
                 .ok_or_else(|| format!("validation cargo command has {word} without a value"))?;
-            metadata.arg(word).arg(value);
+            probe.args.extend([word.to_string(), value.to_string()]);
             index += 2;
             continue;
         } else if let Some(value) = word.strip_prefix("--manifest-path=") {
-            metadata.arg("--manifest-path").arg(value);
+            probe
+                .args
+                .extend(["--manifest-path".to_string(), value.to_string()]);
         } else if let Some(value) = word.strip_prefix("--config=") {
-            metadata.arg("--config").arg(value);
+            probe
+                .args
+                .extend(["--config".to_string(), value.to_string()]);
         }
         index += 1;
     }
+    let mut metadata = match launch.confinement() {
+        Some(confinement) => confinement.command(&probe, route),
+        None => {
+            let mut command = crate::core::cmd::async_cmd(&probe.program, route);
+            command.args(&probe.args).current_dir(&probe.cwd);
+            for (name, value) in &probe.env {
+                command.env(name, value);
+            }
+            command
+        }
+    };
     crate::core::child_env::seal(metadata.as_std_mut(), route, &[]);
     metadata
         .stdout(std::process::Stdio::piped())
@@ -4467,6 +4589,7 @@ async fn run_one_validation_checked(
     spec: &crate::models::ValidationSpec,
     cwd: &std::path::Path,
     build_path: &std::path::Path,
+    launch: &ValidationLaunch,
     check_headroom: impl FnOnce(&std::path::Path) -> Result<(), String>,
 ) -> (Option<i32>, i64, String) {
     run_one_validation_checked_with_runner(
@@ -4476,7 +4599,13 @@ async fn run_one_validation_checked(
         check_headroom,
         |validated| async move {
             let cancel = tokio_util::sync::CancellationToken::new();
-            crate::core::quick_exec::run(&validated, None, &cancel).await
+            match launch.confinement() {
+                Some(confinement) => {
+                    crate::core::quick_exec::run_confined(&validated, None, &cancel, confinement)
+                        .await
+                }
+                None => crate::core::quick_exec::run(&validated, None, &cancel).await,
+            }
         },
     )
     .await
@@ -18615,8 +18744,14 @@ pub(crate) mod tests {
                     .expect("Quick Exec timeout cap fits u32"),
             ),
         };
-        let (exit_code, _duration_ms, output) =
-            run_one_validation_checked(&spec, cwd.path(), cwd.path(), |_| Ok(())).await;
+        let (exit_code, _duration_ms, output) = run_one_validation_checked(
+            &spec,
+            cwd.path(),
+            cwd.path(),
+            &ValidationLaunch::Unconfined,
+            |_| Ok(()),
+        )
+        .await;
 
         assert_eq!(exit_code, Some(0));
         assert!(output.contains("legacy validation timeout 1801s clamped to 1800s"));
@@ -18674,7 +18809,9 @@ pub(crate) mod tests {
             timeout_secs: Some(5),
         };
 
-        let resolved = validation_build_path(&spec, project.path()).await.unwrap();
+        let resolved = validation_build_path(&spec, project.path(), &ValidationLaunch::Unconfined)
+            .await
+            .unwrap();
         assert_eq!(resolved, target);
     }
 
@@ -18685,8 +18822,12 @@ pub(crate) mod tests {
         use crate::core::child_env::probe;
         let dir = tempfile::tempdir().unwrap();
         let command = probe::with_secret_parent("/usr/bin", "/home/u", || {
-            validation_metadata_command(&["check", "--target-dir", "/elsewhere"], dir.path())
-                .unwrap()
+            validation_metadata_command(
+                &["check", "--target-dir", "/elsewhere"],
+                dir.path(),
+                &ValidationLaunch::Unconfined,
+            )
+            .unwrap()
         });
         probe::assert_built_without_secrets(command.as_std(), "/usr/bin", &[]);
         assert_eq!(
@@ -18720,7 +18861,9 @@ pub(crate) mod tests {
             timeout_secs: Some(5),
         };
 
-        let resolved = validation_build_path(&spec, project.path()).await.unwrap();
+        let resolved = validation_build_path(&spec, project.path(), &ValidationLaunch::Unconfined)
+            .await
+            .unwrap();
         assert_eq!(resolved, target);
     }
 
@@ -18770,7 +18913,9 @@ pub(crate) mod tests {
                 timeout_secs: Some(5),
             };
             assert_eq!(
-                validation_build_path(&spec, project.path()).await.unwrap(),
+                validation_build_path(&spec, project.path(), &ValidationLaunch::Unconfined)
+                    .await
+                    .unwrap(),
                 project.path().canonicalize().unwrap().join(target_name),
                 "{prefix} must use Cargo's effective target"
             );
@@ -18791,7 +18936,9 @@ pub(crate) mod tests {
                 timeout_secs: Some(5),
             };
             assert!(
-                validation_build_path(&spec, cwd.path()).await.is_err(),
+                validation_build_path(&spec, cwd.path(), &ValidationLaunch::Unconfined)
+                    .await
+                    .is_err(),
                 "{command} must be refused before metadata runs"
             );
         }
@@ -18859,6 +19006,163 @@ pub(crate) mod tests {
             sentinel.exists(),
             "the permitted validation did not reach spawn"
         );
+    }
+
+    /// A crate at `root` whose build script runs `build_rs`.
+    fn crate_with_build_script(root: &std::path::Path, build_rs: &str) {
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"worker\"\nversion = \"0.0.0\"\nedition = \"2021\"\nbuild = \"build.rs\"\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src").join("lib.rs"), "").unwrap();
+        std::fs::write(root.join("build.rs"), build_rs).unwrap();
+    }
+
+    /// KT-1268 — a host with no sandbox mechanism never runs the validation of
+    /// a worker's tree: it is refused, with the reason, before any process.
+    #[tokio::test]
+    async fn validation_of_a_worker_tree_is_refused_when_the_host_has_no_sandbox() {
+        let tree = tempfile::tempdir().unwrap();
+        let marker = tree.path().join("build-script-ran");
+        crate_with_build_script(
+            tree.path(),
+            &format!("fn main() {{ std::fs::write({marker:?}, \"x\").unwrap(); }}\n"),
+        );
+        test_validation_mechanisms()
+            .lock()
+            .unwrap()
+            .insert(tree.path().to_path_buf(), None);
+
+        for command in ["cargo build --offline", "cargo test --offline", "true"] {
+            let spec = ValidationSpec {
+                command: command.into(),
+                quick_exec_id: None,
+                timeout_secs: Some(60),
+            };
+            let (code, _duration, summary) = run_one_validation(&spec, tree.path()).await;
+
+            assert_eq!(code, None, "{command}: {summary}");
+            assert!(summary.starts_with("refused:"), "{command}: {summary}");
+            assert!(
+                summary.contains("never run unconfined"),
+                "the refusal names why: {summary}"
+            );
+        }
+        assert!(!marker.exists(), "worker-written code ran unconfined");
+    }
+
+    /// The launch of a directory no test registered stays the plain one, and a
+    /// registered mechanism is the one the confinement is built from.
+    #[test]
+    fn validation_launch_follows_the_host_mechanism_of_the_tree() {
+        let tree = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            validation_launch(tree.path()),
+            Ok(ValidationLaunch::Unconfined)
+        ));
+
+        test_validation_mechanisms()
+            .lock()
+            .unwrap()
+            .insert(tree.path().to_path_buf(), None);
+        assert!(validation_launch(tree.path()).is_err());
+
+        test_validation_mechanisms().lock().unwrap().insert(
+            tree.path().to_path_buf(),
+            Some(crate::core::task_worker_sandbox::Mechanism::Seatbelt),
+        );
+        let launch = validation_launch(tree.path()).unwrap();
+        assert!(
+            launch.confinement().is_some(),
+            "a host with a mechanism confines the validation"
+        );
+    }
+
+    /// The host's sandbox, when this process may apply it (never from inside
+    /// another sandbox: macOS refuses a nested Seatbelt).
+    fn host_sandbox_that_applies() -> Option<crate::core::task_worker_sandbox::Mechanism> {
+        use crate::core::task_worker_sandbox::Mechanism;
+        let mechanism = Mechanism::of_host()?;
+        let mut command = crate::core::cmd::sync_cmd(
+            match mechanism {
+                Mechanism::Seatbelt => "/usr/bin/sandbox-exec",
+                Mechanism::Bubblewrap => "bwrap",
+            },
+            crate::core::child_env::ChildRoute::Tool,
+        );
+        match mechanism {
+            Mechanism::Seatbelt => {
+                command.args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
+            }
+            Mechanism::Bubblewrap => command.args(["--ro-bind", "/", "/", "true"]),
+        };
+        let applies = command.output().is_ok_and(|output| output.status.success());
+        if !applies {
+            eprintln!("skipped: the OS sandbox cannot be applied from this process");
+        }
+        applies.then_some(mechanism)
+    }
+
+    /// KT-1268 — the validation of a worker's tree runs under the lane's
+    /// sandbox: its build script writes inside the lane, cannot write outside
+    /// it, cannot reach a loopback service.
+    #[tokio::test]
+    async fn validation_of_a_worker_tree_runs_under_the_lane_sandbox() {
+        let Some(mechanism) = host_sandbox_that_applies() else {
+            return;
+        };
+        let repo = tempfile::tempdir().unwrap().keep().canonicalize().unwrap();
+        let worktree = repo
+            .join(".kronn")
+            .join("worktrees")
+            .join("task-kt-1268-live");
+        let outside_dir = tempfile::tempdir().unwrap();
+        let outside = outside_dir.path().canonicalize().unwrap().join("escaped");
+        let inside = worktree.join("inside");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        crate_with_build_script(
+            &worktree,
+            &format!(
+                "fn main() {{\n    std::fs::write({inside:?}, \"x\").unwrap();\n    \
+                 let _ = std::net::TcpStream::connect(\"127.0.0.1:{port}\")\n        \
+                 .map(|_| std::fs::write({outside:?}.to_string() + \".net\", \"x\"));\n    \
+                 std::fs::write({outside:?}, \"x\").expect(\"write outside the lane\");\n}}\n"
+            ),
+        );
+        test_validation_mechanisms()
+            .lock()
+            .unwrap()
+            .insert(worktree.clone(), Some(mechanism));
+        let spec = ValidationSpec {
+            command: "cargo build --offline".into(),
+            quick_exec_id: None,
+            timeout_secs: Some(300),
+        };
+
+        let (code, _duration, summary) = run_one_validation(&spec, &worktree).await;
+
+        let escaped = outside.exists();
+        let connected = outside.with_extension("net").exists() || {
+            let mut net = outside.clone().into_os_string();
+            net.push(".net");
+            std::path::PathBuf::from(net).exists()
+        };
+        let accepted = listener.accept().is_ok();
+        let ran_inside = inside.exists();
+        let _ = std::fs::remove_dir_all(&repo);
+
+        assert_ne!(
+            code,
+            Some(0),
+            "the escape must fail the validation: {summary}"
+        );
+        assert!(ran_inside, "the build script ran in its lane: {summary}");
+        assert!(!escaped, "the build script wrote outside the lane");
+        assert!(!connected && !accepted, "the build script reached loopback");
     }
 
     #[tokio::test]
