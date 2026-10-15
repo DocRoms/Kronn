@@ -10469,6 +10469,19 @@ class PlanningToolTests(unittest.TestCase):
         self.assertEqual(body["completed"], True)
         self.assertEqual(body["actor"]["id"], "Codex")
 
+    def test_task_update_dod_forwards_the_live_check_evidence(self):
+        # KT-1254 — a post_integration item is ticked with the principal's proof.
+        with mock.patch.object(self.mod, "_http", self.fake_http), \
+             mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"):
+            self.mod.call_task_update_dod({
+                "task_id": "KT-42",
+                "dod_id": "dod-a",
+                "completed": True,
+                "evidence": "replayed on a real framing: ok",
+            })
+        _method, _path, body = self.fake_http.call_args.args
+        self.assertEqual(body["evidence"], "replayed on a real framing: ok")
+
     def test_task_assign_without_assignee_names_the_caller_session(self):
         # KT-154 — "myself" is resolved server-side from the durable session, so
         # the bridge never invents a provider-only identity.

@@ -2415,6 +2415,7 @@ const fr: TranslationDict = {
   'planning.allGroupLater': 'Plus tard',
   'planning.allEmpty': 'Aucune tâche ne correspond à cette recherche.',
   'planning.blockerCount': '{0} bloqueurs',
+  'planning.liveCheckCount': '{0} vérification(s) en direct en attente',
   'planning.taskActions': 'Actions de la tâche',
   'planning.dependencyNeighborhood': 'Voisinage de dépendances',
   'planning.blockedBy': 'Bloquée par',

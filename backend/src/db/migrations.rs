@@ -958,6 +958,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("sql/263_planning_task_assignees.sql"),
     ),
     (
+        "264_planning_dod_post_integration",
+        include_str!("sql/264_planning_dod_post_integration.sql"),
+    ),
+    (
         "265_audit_cancel_and_integrity",
         include_str!("sql/265_audit_cancel_and_integrity.sql"),
     ),
