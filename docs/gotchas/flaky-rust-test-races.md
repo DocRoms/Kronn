@@ -22,5 +22,12 @@ seen in October 2026, with their fixes:
   case never failed locally. Fixed in d528cada (#249): the copy keeps the
   real index's mtime, and a test pins the case.
   [src: commit: d528cada]
+- **An instant read after a guard drops orders nothing.** `P2pGate` tests
+  the write side waiting for a read guard; the publication thread took
+  `Instant::now()` after `drop(guard)`, where the writer may already hold the
+  lock and have taken its own instant, so `off >= finished` failed once on
+  CI (PR #245) with no related change. Read the instant before the drop: the
+  writer cannot proceed before it.
+  [src: file: backend/src/api/ws.rs:2538-2541]
 
 Related: [testing-quality](../testing-quality.md).
