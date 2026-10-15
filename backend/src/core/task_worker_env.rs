@@ -26,8 +26,17 @@ pub const KRONN_DATA_DIR_ENV: &str = "KRONN_DATA_DIR";
 pub const CARGO_TARGET_DIR_ENV: &str = "CARGO_TARGET_DIR";
 /// Cargo never reaches a registry from a worker (supply chain).
 pub const CARGO_NET_OFFLINE_ENV: &str = "CARGO_NET_OFFLINE";
-/// The lane's private Cargo home: lock files land there, the registry is linked.
+/// The lane's Cargo home. By default the host's own, which the sandbox only
+/// reads: Cargo fingerprints a registry crate by the absolute path of its
+/// sources, so a lane under another `CARGO_HOME` can never reuse a warm target
+/// and recompiles every dependency (KT-1250, measured). With
+/// [`PRIVATE_CARGO_HOME_ENV`] set it is the lane's private home instead: lock
+/// files land there, the registry is linked, credentials never are.
 pub const CARGO_HOME_ENV: &str = "CARGO_HOME";
+/// Set to `1`/`true` to give every lane the private `CARGO_HOME` of KT-1246
+/// instead of the host's. A warm target is then reusable by no other lane (nor
+/// by the main checkout's), so seeding is skipped.
+pub const PRIVATE_CARGO_HOME_ENV: &str = "KRONN_WORKER_PRIVATE_CARGO_HOME";
 /// Caps one worker's compilation (KT-1250); the host-wide cap on concurrently
 /// compiling workers is `core::task_worker_lane_warm`.
 pub const CARGO_BUILD_JOBS_ENV: &str = "CARGO_BUILD_JOBS";
@@ -125,7 +134,8 @@ impl WorkerLane {
     }
 
     /// Directories the worker may write: its worktree and, when it lives
-    /// outside it, the lane's Cargo target (the private `CARGO_HOME` is inside).
+    /// outside it, the lane's Cargo target (the private `CARGO_HOME`, when one
+    /// is used, is inside). The host's own `CARGO_HOME` is never writable.
     pub fn write_roots(&self) -> Vec<PathBuf> {
         let mut roots = vec![self.worktree.clone()];
         if !self.cargo_target_dir.starts_with(&self.worktree) {
@@ -163,10 +173,25 @@ impl WorkerLane {
                 OsString::from(crate::core::task_worker_lane_warm::worker_build_jobs().to_string()),
             ),
         ];
-        if provisioned.cargo_home_ready {
-            env.push((CARGO_HOME_ENV, self.cargo_home.clone().into_os_string()));
+        if let Some(home) = self.effective_cargo_home(provisioned) {
+            env.push((CARGO_HOME_ENV, home.into_os_string()));
         }
         env
+    }
+
+    /// The `CARGO_HOME` this lane's Cargo runs with, when one is set at all: the
+    /// host's own (same absolute registry paths as the main checkout's builds,
+    /// so a warm target is reusable) unless the private home was asked for.
+    pub fn effective_cargo_home(&self, provisioned: &Provisioned) -> Option<PathBuf> {
+        if !provisioned.cargo_home_ready {
+            return None;
+        }
+        Some(
+            provisioned
+                .shared_cargo_home
+                .clone()
+                .unwrap_or_else(|| self.cargo_home.clone()),
+        )
     }
 
     fn frontend_dir(&self) -> PathBuf {
@@ -184,6 +209,12 @@ impl WorkerLane {
     /// result (and ends up in the capability record), never raised, so a missing
     /// cache degrades to "cannot run those tests" instead of "cannot start".
     pub fn provision(&self, caches: &SharedCaches) -> Provisioned {
+        self.provision_with(caches, private_cargo_home_requested())
+    }
+
+    /// [`WorkerLane::provision`] with the `CARGO_HOME` choice made explicit:
+    /// `private_cargo_home` keeps KT-1246's lane-private home.
+    pub fn provision_with(&self, caches: &SharedCaches, private_cargo_home: bool) -> Provisioned {
         let mut warnings = Vec::new();
         // A lane target beside the repo must never make the main checkout look
         // dirty: the integration preflight refuses a dirty target. A project
@@ -207,6 +238,10 @@ impl WorkerLane {
             }
         }
         let cargo_home_ready = self.link_cargo_home(caches, &mut warnings);
+        let shared_cargo_home = caches
+            .cargo_home
+            .clone()
+            .filter(|_| cargo_home_ready && !private_cargo_home);
         let frontend_deps = self.link_frontend_deps();
         // A `node_modules/` rule matches directories only, so the link would
         // show as an untracked file and the delivery would find the worktree
@@ -222,6 +257,7 @@ impl WorkerLane {
         Provisioned {
             frontend_deps,
             cargo_home_ready,
+            shared_cargo_home,
             warnings,
         }
     }
@@ -290,11 +326,20 @@ pub enum FrontendDeps {
     Failed(String),
 }
 
+fn private_cargo_home_requested() -> bool {
+    crate::core::child_env::var_os(PRIVATE_CARGO_HOME_ENV)
+        .and_then(|value| value.into_string().ok())
+        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes"))
+}
+
 /// What [`WorkerLane::provision`] managed to prepare.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Provisioned {
     pub frontend_deps: FrontendDeps,
     pub cargo_home_ready: bool,
+    /// The host's own `CARGO_HOME`, when the lane runs with it rather than with
+    /// its private one (see [`CARGO_HOME_ENV`]).
+    pub shared_cargo_home: Option<PathBuf>,
     pub warnings: Vec<String>,
 }
 

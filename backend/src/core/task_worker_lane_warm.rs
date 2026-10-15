@@ -191,6 +191,34 @@ impl BuildGate {
     }
 }
 
+impl BuildGate {
+    /// [`BuildGate::acquire`] that gives up after `max_wait`, so a queue that
+    /// never drains cannot hold a worker in `Provisioning` forever.
+    pub fn acquire_within(
+        &self,
+        limit: usize,
+        max_wait: Duration,
+        on_wait: impl FnOnce(usize),
+    ) -> Option<BuildPermit<'_>> {
+        let limit = limit.max(1);
+        let deadline = Instant::now() + max_wait;
+        let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
+        if *running >= limit {
+            on_wait(*running);
+            while *running >= limit {
+                let remaining = deadline.checked_duration_since(Instant::now())?;
+                running = self
+                    .released
+                    .wait_timeout(running, remaining)
+                    .unwrap_or_else(|e| e.into_inner())
+                    .0;
+            }
+        }
+        *running += 1;
+        Some(BuildPermit { gate: self })
+    }
+}
+
 impl Default for BuildGate {
     fn default() -> Self {
         Self::new()
@@ -289,6 +317,33 @@ impl WarmStartRecord {
 struct WarmMarker {
     lock_hash: String,
     completed_unix: u64,
+    /// The `CARGO_HOME` the build ran under. Cargo fingerprints a registry
+    /// crate by the absolute path of its sources, so a target is only reusable
+    /// under the same home: a clone made under another one recompiles every
+    /// dependency (measured on this host: no reuse at all).
+    #[serde(default)]
+    cargo_home: Option<PathBuf>,
+}
+
+/// Which Cargo home a lane's builds run under, for judging whether a warm
+/// target can be reused by it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HomeKey {
+    /// The `CARGO_HOME` of the lane's environment; `None` leaves Cargo's host
+    /// default, which is the home the main checkout's builds use.
+    cargo_home: Option<PathBuf>,
+    /// Whether the main checkout's `target/` was built under that same home.
+    main_checkout_reusable: bool,
+}
+
+impl HomeKey {
+    pub fn of(lane: &WorkerLane, provisioned: &Provisioned) -> Self {
+        let private = provisioned.cargo_home_ready && provisioned.shared_cargo_home.is_none();
+        Self {
+            cargo_home: lane.effective_cargo_home(provisioned),
+            main_checkout_reusable: !private,
+        }
+    }
 }
 
 // ─── Seeding ──────────────────────────────────────────────────────────────
@@ -383,7 +438,7 @@ fn marker_mtime(target: &Path) -> SystemTime {
 /// build is for the same `Cargo.lock`, then the main checkout's `target/`.
 /// The lane itself is never a source, and a lane target without a marker (never
 /// finished a first build) is not one either.
-fn seed_candidates(lane: &WorkerLane, lock_hash: &str) -> Vec<SeedCandidate> {
+fn seed_candidates(lane: &WorkerLane, lock_hash: &str, home: &HomeKey) -> Vec<SeedCandidate> {
     let Some(target_root) = lane
         .main_checkout
         .as_ref()
@@ -403,7 +458,11 @@ fn seed_candidates(lane: &WorkerLane, lock_hash: &str) -> Vec<SeedCandidate> {
         })
         .map(|entry| entry.path())
         .filter(|path| *path != lane.cargo_target_dir && path.join(DEBUG_DIR).is_dir())
-        .filter(|path| read_marker(path).is_some_and(|marker| marker.lock_hash == lock_hash))
+        .filter(|path| {
+            read_marker(path).is_some_and(|marker| {
+                marker.lock_hash == lock_hash && marker.cargo_home == home.cargo_home
+            })
+        })
         .map(|path| (marker_mtime(&path), path))
         .collect();
     lanes.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
@@ -414,7 +473,7 @@ fn seed_candidates(lane: &WorkerLane, lock_hash: &str) -> Vec<SeedCandidate> {
             kind: SeedSourceKind::Lane,
         })
         .collect();
-    if target_root.join(DEBUG_DIR).is_dir() {
+    if home.main_checkout_reusable && target_root.join(DEBUG_DIR).is_dir() {
         candidates.push(SeedCandidate {
             target: target_root.to_path_buf(),
             kind: SeedSourceKind::MainCheckout,
@@ -435,17 +494,29 @@ fn lock_source_shared(debug_dir: &Path) -> Result<std::fs::File, String> {
 
 /// Seed `lane`'s `debug/` from the best warm source. Never raises: the outcome
 /// says what happened and an unseedable lane just starts empty.
-fn seed_lane(lane: &WorkerLane, lock_hash: &str, clone: CloneTree<'_>) -> SeedOutcome {
+fn seed_lane(
+    lane: &WorkerLane,
+    lock_hash: &str,
+    home: &HomeKey,
+    clone: CloneTree<'_>,
+) -> SeedOutcome {
     let destination = lane.cargo_target_dir.join(DEBUG_DIR);
     if destination.exists() {
         return SeedOutcome::AlreadyPresent;
     }
-    let candidates = seed_candidates(lane, lock_hash);
+    let candidates = seed_candidates(lane, lock_hash, home);
     if candidates.is_empty() {
+        let main_note = if home.main_checkout_reusable {
+            "the main checkout has no target/debug"
+        } else {
+            "the main checkout's target was built under the host's CARGO_HOME, which this \
+             lane does not use"
+        };
         return SeedOutcome::NoSource {
-            reason: "no lane target holds a build for this Cargo.lock and the main checkout has \
-                     no target/debug"
-                .into(),
+            reason: format!(
+                "no lane target holds a build for this Cargo.lock under this CARGO_HOME and \
+                 {main_note}"
+            ),
         };
     }
     let staging = lane
@@ -496,9 +567,10 @@ fn seed_lane(lane: &WorkerLane, lock_hash: &str, clone: CloneTree<'_>) -> SeedOu
 
 // ─── Warm start ───────────────────────────────────────────────────────────
 
-fn write_marker(lane: &WorkerLane, lock_hash: &str) -> io::Result<()> {
+fn write_marker(lane: &WorkerLane, lock_hash: &str, home: &HomeKey) -> io::Result<()> {
     let marker = WarmMarker {
         lock_hash: lock_hash.to_string(),
+        cargo_home: home.cargo_home.clone(),
         completed_unix: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|elapsed| elapsed.as_secs())
@@ -528,6 +600,7 @@ pub fn warm_lane(
     on_wait: impl FnOnce(usize),
 ) -> WarmStartRecord {
     let jobs = settings.build_jobs;
+    let home = HomeKey::of(lane, provisioned);
     let Some((manifest_dir, lock_hash)) = manifest_and_lock_hash(lane) else {
         return WarmStartRecord::not_applicable(
             "no Cargo.toml at the worktree root or in backend/",
@@ -544,7 +617,7 @@ pub fn warm_lane(
         );
     }
     let seed = match &lock_hash {
-        Some(hash) => seed_lane(lane, hash, clone),
+        Some(hash) => seed_lane(lane, hash, &home, clone),
         None => SeedOutcome::NoSource {
             reason: "the worktree has no Cargo.lock to match a warm target against".into(),
         },
@@ -584,10 +657,29 @@ pub fn warm_lane(
 
     let queued = Instant::now();
     let mut waited = false;
-    let permit = gate.acquire(settings.max_concurrent_builds, |ahead| {
-        waited = true;
-        on_wait(ahead);
-    });
+    let Some(permit) = gate.acquire_within(
+        settings.max_concurrent_builds,
+        settings.first_build_timeout,
+        |ahead| {
+            waited = true;
+            on_wait(ahead);
+        },
+    ) else {
+        // Never stall a worker behind a queue that does not drain: it starts
+        // with the target it has, as before KT-1250.
+        return WarmStartRecord {
+            lock_hash,
+            seed,
+            build_jobs: jobs,
+            first_build: FirstBuild::Skipped {
+                reason: format!(
+                    "no build slot freed within {}s: the worker starts with the target it has",
+                    settings.first_build_timeout.as_secs()
+                ),
+            },
+            queued_ms: queued.elapsed().as_millis() as u64,
+        };
+    };
     let queued_ms = if waited {
         queued.elapsed().as_millis() as u64
     } else {
@@ -615,7 +707,7 @@ pub fn warm_lane(
 
     let first_build = if outcome.success {
         if let Some(hash) = &lock_hash {
-            if let Err(error) = write_marker(lane, hash) {
+            if let Err(error) = write_marker(lane, hash, &home) {
                 tracing::warn!(lane = %lane.name, "warm marker not written: {error}");
             }
         }
@@ -635,6 +727,23 @@ pub fn warm_lane(
         first_build,
         queued_ms,
     }
+}
+
+/// Will warming this worktree's lane run a first build? Side-effect free: the
+/// launch uses it to decide whether the worker's start has to wait for one (and
+/// is therefore handed to a background task) or can go on at once.
+pub fn first_build_pending(work_dir: &Path) -> bool {
+    let Ok(worktree) = work_dir.canonicalize() else {
+        return false;
+    };
+    let Ok(lane) = WorkerLane::for_worktree(&worktree) else {
+        return false;
+    };
+    let Some((_, Some(hash))) = manifest_and_lock_hash(&lane) else {
+        return false;
+    };
+    !(lane.cargo_target_dir.join(DEBUG_DIR).is_dir()
+        && read_marker(&lane.cargo_target_dir).is_some_and(|marker| marker.lock_hash == hash))
 }
 
 /// Provision the lane of `work_dir`, then [`warm_lane`] it with the host's

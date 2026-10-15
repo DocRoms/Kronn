@@ -52,6 +52,7 @@ impl Fixture {
             serde_json::to_vec(&WarmMarker {
                 lock_hash: hash_of(lock),
                 completed_unix: 1,
+                cargo_home: None,
             })
             .unwrap(),
         )
@@ -153,8 +154,35 @@ fn provisioned() -> Provisioned {
     Provisioned {
         frontend_deps: crate::core::task_worker_env::FrontendDeps::NotApplicable,
         cargo_home_ready: false,
+        shared_cargo_home: None,
         warnings: Vec::new(),
     }
+}
+
+/// A lane whose Cargo home is ready: the host's own (`shared`) or its private one.
+fn provisioned_with_home(shared: Option<&Path>) -> Provisioned {
+    Provisioned {
+        cargo_home_ready: true,
+        shared_cargo_home: shared.map(Path::to_path_buf),
+        ..provisioned()
+    }
+}
+
+fn warm_under(
+    lane: &WorkerLane,
+    provisioned: &Provisioned,
+    runner: &dyn ProbeRunner,
+    clone: &RecordingClone,
+) -> WarmStartRecord {
+    warm_lane(
+        lane,
+        provisioned,
+        &settings(),
+        &BuildGate::new(),
+        runner,
+        &|source, destination| clone.call(source, destination),
+        |_| {},
+    )
 }
 
 fn warm(
@@ -420,7 +448,8 @@ fn a_source_cannot_start_a_build_while_it_is_being_cloned() {
     let observed = build_could_start.clone();
     let lock_path = source.join(DEBUG_DIR).join(CARGO_BUILD_LOCK);
 
-    let outcome = seed_lane(&lane, &hash_of(LOCK_A), &|from, to| {
+    let home = HomeKey::of(&lane, &provisioned());
+    let outcome = seed_lane(&lane, &hash_of(LOCK_A), &home, &|from, to| {
         let cargo = std::fs::File::open(&lock_path).unwrap();
         *observed.lock().unwrap() = Some(FileExt::try_lock_exclusive(&cargo).is_ok());
         copy_dir(from, to)
@@ -788,4 +817,177 @@ fn a_second_lane_waits_for_the_first_build_and_reports_the_queue() {
     assert_eq!(first.queued_ms, 0);
     assert!(matches!(second.first_build, FirstBuild::Succeeded { .. }));
     assert_eq!(gate.running(), 0);
+}
+
+#[test]
+fn a_lane_under_a_private_cargo_home_is_not_seeded_from_the_main_target() {
+    // Cargo fingerprints a registry crate by the absolute path of its sources:
+    // a clone of a target built under the host's CARGO_HOME recompiles every
+    // dependency under another one, so cloning it would cost and gain nothing.
+    let fx = fixture();
+    fx.main_target();
+    let lane = fx.lane("kt-1250-private", LOCK_A);
+    let clone = RecordingClone::new();
+
+    let record = warm_under(
+        &lane,
+        &provisioned_with_home(None),
+        &ScriptedBuild::ok(),
+        &clone,
+    );
+
+    assert!(
+        matches!(record.seed, SeedOutcome::NoSource { .. }),
+        "{:?}",
+        record.seed
+    );
+    assert!(clone.calls().is_empty(), "nothing was cloned");
+}
+
+#[test]
+fn a_lane_under_the_host_cargo_home_is_seeded_from_the_main_target() {
+    let fx = fixture();
+    let main = fx.main_target();
+    let lane = fx.lane("kt-1250-shared", LOCK_A);
+    let clone = RecordingClone::new();
+
+    let record = warm_under(
+        &lane,
+        &provisioned_with_home(Some(Path::new("/host/.cargo"))),
+        &ScriptedBuild::ok(),
+        &clone,
+    );
+
+    match record.seed {
+        SeedOutcome::Cloned { source, kind, .. } => {
+            assert_eq!(source, main);
+            assert_eq!(kind, SeedSourceKind::MainCheckout);
+        }
+        other => panic!("expected a clone of the main target, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_warm_lane_is_only_a_source_for_lanes_under_the_same_cargo_home() {
+    let fx = fixture();
+    let host = Path::new("/host/.cargo");
+    let ok = ScriptedBuild::ok();
+
+    let first = fx.lane("kt-1250-a", LOCK_A);
+    fx.write_build(&first.cargo_target_dir, "a");
+    let built = warm_under(
+        &first,
+        &provisioned_with_home(Some(host)),
+        &ok,
+        &RecordingClone::new(),
+    );
+    assert!(matches!(built.first_build, FirstBuild::Succeeded { .. }));
+    assert_eq!(
+        read_marker(&first.cargo_target_dir)
+            .unwrap()
+            .cargo_home
+            .as_deref(),
+        Some(host),
+        "the marker records the home the build ran under"
+    );
+
+    let same_home = fx.lane("kt-1250-b", LOCK_A);
+    let seeded = warm_under(
+        &same_home,
+        &provisioned_with_home(Some(host)),
+        &ok,
+        &RecordingClone::new(),
+    );
+    match seeded.seed {
+        SeedOutcome::Cloned { source, kind, .. } => {
+            assert_eq!(source, first.cargo_target_dir);
+            assert_eq!(kind, SeedSourceKind::Lane);
+        }
+        other => panic!("expected a clone of the warm lane, got {other:?}"),
+    }
+
+    let other_home = fx.lane("kt-1250-c", LOCK_A);
+    let clone = RecordingClone::new();
+    let unseeded = warm_under(&other_home, &provisioned_with_home(None), &ok, &clone);
+    assert!(
+        matches!(unseeded.seed, SeedOutcome::NoSource { .. }),
+        "{:?}",
+        unseeded.seed
+    );
+    assert!(clone.calls().is_empty());
+}
+
+#[test]
+fn a_bounded_wait_gives_up_when_the_gate_never_drains_and_runs_when_it_does() {
+    let gate = BuildGate::new();
+    let held = gate.try_acquire(1).expect("the running build");
+
+    let mut announced = None;
+    let refused = gate.acquire_within(1, Duration::from_millis(50), |ahead| {
+        announced = Some(ahead)
+    });
+    assert!(refused.is_none(), "a full gate refuses after the bound");
+    assert_eq!(announced, Some(1), "it still said it was queued");
+    assert_eq!(gate.running(), 1, "a refused wait takes no slot");
+
+    drop(held);
+    let granted = gate.acquire_within(1, Duration::from_millis(50), |_| {});
+    assert!(granted.is_some(), "a free gate grants at once");
+    assert_eq!(gate.running(), 1);
+}
+
+#[test]
+fn a_worker_stuck_behind_a_full_gate_starts_with_the_target_it_has() {
+    let fx = fixture();
+    let lane = fx.lane("kt-1250-stuck", LOCK_A);
+    let gate = BuildGate::new();
+    let _held = gate.try_acquire(1).expect("the running build");
+    let runner = ScriptedBuild::ok();
+    let settings = WarmStartSettings::resolve(Some("2"), Some("1"), Some("1"), 8);
+
+    let started = Instant::now();
+    let record = warm_lane(
+        &lane,
+        &provisioned(),
+        &settings,
+        &gate,
+        &runner,
+        &|_, _| Err(io::Error::from(io::ErrorKind::Unsupported)),
+        |_| {},
+    );
+
+    assert!(started.elapsed() < Duration::from_secs(30));
+    assert!(
+        matches!(record.first_build, FirstBuild::Skipped { .. }),
+        "{record:?}"
+    );
+    assert!(runner.calls().is_empty(), "no build ran outside the gate");
+    assert!(
+        read_marker(&lane.cargo_target_dir).is_none(),
+        "an unbuilt lane is never marked warm"
+    );
+}
+
+#[test]
+fn a_first_build_is_pending_only_for_a_lock_that_is_not_already_built() {
+    let fx = fixture();
+    let lane = fx.lane("kt-1250-pending", LOCK_A);
+    assert!(first_build_pending(&lane.worktree));
+
+    fx.write_build(&lane.cargo_target_dir, "built");
+    write_marker(&lane, &hash_of(LOCK_A), &HomeKey::of(&lane, &provisioned())).unwrap();
+    assert!(
+        !first_build_pending(&lane.worktree),
+        "a lane built for this lock has nothing left to build"
+    );
+
+    std::fs::write(lane.worktree.join("backend").join("Cargo.lock"), LOCK_B).unwrap();
+    assert!(
+        first_build_pending(&lane.worktree),
+        "a changed lock needs a build again"
+    );
+
+    let none = fx.repo.join("no-crate");
+    std::fs::create_dir_all(&none).unwrap();
+    assert!(!first_build_pending(&none), "no crate, no first build");
 }

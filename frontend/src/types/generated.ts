@@ -9211,7 +9211,7 @@ warnings?: Array<CampaignTaskReason>, active_execution: TaskExecution | null, };
 
 export type TaskExecutionProgress = { phase: TaskExecutionProgressPhase, reason: string | null, queue_position: number | null, queued_since: string | null, process_alive: boolean | null, last_reliable_signal_at: string | null, telemetry_mode: TaskExecutionTelemetryMode, };
 
-export type TaskExecutionProgressPhase = "queued" | "launching" | "upstream_wait" | "tool_activity" | "delivering" | "completed" | "failed" | "unknown";
+export type TaskExecutionProgressPhase = "warming" | "queued" | "launching" | "upstream_wait" | "tool_activity" | "delivering" | "completed" | "failed" | "unknown";
 
 /**
  * Recovery projection kept separately from the business state machine.
