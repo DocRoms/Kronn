@@ -47,6 +47,7 @@ function summary(overrides: Partial<PlanningTaskSummary> = {}): PlanningTaskSumm
     discussion_ids: [],
     tags: ['platform'],
     blocker_count: 0,
+    assignees: [],
     created_at: '2026-07-25T00:00:00Z',
     updated_at: '2026-07-25T00:00:00Z',
     ...overrides,

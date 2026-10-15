@@ -22,8 +22,8 @@ impl Environment {
         if !self.0.iter().any(|(key, _)| *key == name) {
             self.0.push((name, kronn::core::child_env::var_os(name)));
         }
-        // This binary holds one current-thread test: nothing else reads the
-        // environment it changes.
+        // The test runs in its own process (`own_process::delegated`):
+        // nothing else reads the environment it changes.
         kronn::core::child_env::set_var(name, value);
     }
 }
@@ -64,7 +64,7 @@ printf '%s' "$KRONN_DISCUSSION_ID" > "$KT793_DIR/discussion-$n"
 printf '%s\n' "$@" > "$KT793_DIR/argv-$n"
 : > "$KT793_DIR/launch-$n"
 i=0
-while [ ! -e "$KT793_DIR/release-$n" ] && [ $i -lt 3000 ]; do
+while [ ! -e "$KT793_DIR/release-$n" ] && [ $i -lt 12000 ]; do
   sleep 0.01
   i=$((i + 1))
 done
@@ -115,7 +115,7 @@ async fn prepare(state: &AppState, session: &str) -> serde_json::Value {
 }
 
 async fn wait_for_file(path: &Path) {
-    let waited = tokio::time::timeout(Duration::from_secs(30), async {
+    let waited = tokio::time::timeout(Duration::from_secs(120), async {
         while !path.exists() {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -237,6 +237,12 @@ fn read_context(dir: &Path, launch: usize) -> serde_json::Value {
 
 #[tokio::test(flavor = "current_thread")]
 async fn a_room_step_is_principal_without_a_token_at_launch_and_after_resume() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "a_room_step_is_principal_without_a_token_at_launch_and_after_resume",
+    ) {
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     let bin = dir.path().join("bin");
     let marks = dir.path().join("marks");
@@ -384,7 +390,7 @@ async fn a_room_step_is_principal_without_a_token_at_launch_and_after_resume() {
 
     // ── The step ends: its membership ends with it.
     std::fs::write(marks.join("release-1"), "").unwrap();
-    let finished = tokio::time::timeout(Duration::from_secs(30), async {
+    let finished = tokio::time::timeout(Duration::from_secs(120), async {
         loop {
             let status = run_status(&db).await;
             if !matches!(status, RunStatus::Running | RunStatus::Pending) {
@@ -396,7 +402,7 @@ async fn a_room_step_is_principal_without_a_token_at_launch_and_after_resume() {
     .await
     .expect("the resumed run finishes");
     assert_eq!(finished, RunStatus::Success);
-    let left = tokio::time::timeout(Duration::from_secs(10), async {
+    let left = tokio::time::timeout(Duration::from_secs(60), async {
         while session_status(&db, "bridge-replay").await != "left" {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }

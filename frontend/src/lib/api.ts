@@ -245,6 +245,8 @@ import type {
   ProposalDecisionResponse,
   ProposalListResponse,
   RemovePlanningBlockerRequest,
+  AssignPlanningTaskRequest,
+  UnassignPlanningTaskRequest,
   UpdatePlanningDodItemRequest,
   UpdatePlanningTaskRequest,
   TelemetryCoverage,
@@ -1167,6 +1169,9 @@ export const projects = {
        *  Absent from a backend that predates it. */
       steps_to_redo?: number[];
       started_at: string;
+      /** KT-1199 — the run is the one a colleague committed in the
+       *  repository, not a row of this instance: the launch adopts it. */
+      from_repository?: boolean;
     } | null>(
       'GET', `/projects/${id}/audit-resumable`,
     ),
@@ -2634,6 +2639,19 @@ export const planning = {
     `/planning/tasks/${encodeURIComponent(taskId)}/blockers/${encodeURIComponent(blockerTaskId)}`,
     request,
   ),
+  /** KT-154 — put an agent on a task (idempotent on its typed identity). */
+  assign: (taskId: string, request: AssignPlanningTaskRequest) =>
+    api<PlanningTaskDetail>(
+      'POST',
+      `/planning/tasks/${encodeURIComponent(taskId)}/assignees`,
+      request,
+    ),
+  unassign: (taskId: string, request: UnassignPlanningTaskRequest) =>
+    api<PlanningTaskDetail>(
+      'DELETE',
+      `/planning/tasks/${encodeURIComponent(taskId)}/assignees`,
+      request,
+    ),
   discussionPlan: (discussionId: string) =>
     api<DiscussionPlan>('GET', `/discussions/${encodeURIComponent(discussionId)}/plan`),
   proposals: (discussionId: string, pendingOnly = true) => {

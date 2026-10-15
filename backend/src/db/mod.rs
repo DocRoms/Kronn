@@ -402,6 +402,23 @@ impl Database {
         &self.path
     }
 
+    /// A second handle on the SAME connections, for work that must outlive the
+    /// request that started it (a detached task cannot borrow the caller's
+    /// `&Database`). Reads, writes, the change signal and the assistant guard
+    /// are shared; the boot-interrupted list and the catalogue refresh locks
+    /// are NOT — drain and lock them on the original only.
+    pub(crate) fn share_handle(&self) -> Database {
+        Database {
+            conn: Arc::clone(&self.conn),
+            read_conn: self.read_conn.clone(),
+            path: self.path.clone(),
+            boot_interrupted: Mutex::new(Vec::new()),
+            catalog_refresh_locks: Mutex::new(std::collections::HashMap::new()),
+            resource_changes: Arc::clone(&self.resource_changes),
+            assistant_guard: Arc::clone(&self.assistant_guard),
+        }
+    }
+
     pub(crate) async fn lock_catalog_refresh(
         &self,
         target: &str,

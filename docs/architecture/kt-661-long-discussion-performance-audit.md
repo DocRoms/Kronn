@@ -55,7 +55,7 @@ alone does not establish a user-visible duration.
    conversation order and builds lookup maps, memoized per transcript change;
    the memoized element list then makes several more passes to calculate
    metadata and reply/turn anchors.
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:3321-3336#transcriptIndex]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:3332-3347#transcriptIndex]
    [src: file: frontend/src/pages/DiscussionsPage.tsx:3877-3945#transcriptElements]
 3. The conversation-order projection maps every message and sorts the resulting
    array; resolving a reply chain can walk up to 16 links for an eligible row.
@@ -82,7 +82,7 @@ alone does not establish a user-visible duration.
    [src: file: frontend/src/lib/discussionMessageSearch.ts:3-39#findRenderedTextRanges]
 6. The active-detail change also triggers an effect that filters the complete
    array to mark the discussion seen.
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:2022-2036#markDiscussionSeen]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:2033-2047#markDiscussionSeen]
    The code-count refresh
    effect is similarly keyed to the message-array length.
    [src: file: frontend/src/pages/DiscussionsPage.tsx:2199-2223#setPendingFilesCount]
@@ -93,10 +93,10 @@ alone does not establish a user-visible duration.
    `scrollTop = scrollHeight` on animation frames for up to 700 ms; the effect
    is reached after a non-empty message list loads.
    [src: file: frontend/src/pages/DiscussionsPage.tsx:2091-2118#scrollToBottomSettled]
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:2171-2183#lastSettledDiscIdRef]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:2182-2194#lastSettledDiscIdRef]
 2. For streaming content while stuck to the bottom, the page calls
    `scrollIntoView` no more often than once per 250 ms.
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:2137-2147#lastScrollRef]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:2148-2158#lastScrollRef]
 3. Incoming stream chunks are buffered and flush at most once per animation
    frame into the discussion streaming map.
    [src: file: frontend/src/hooks/useRafBatchedStream.ts:20-49#useRafBatchedStream]

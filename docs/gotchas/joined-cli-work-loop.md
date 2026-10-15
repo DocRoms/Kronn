@@ -9,7 +9,7 @@ following that order could wait indefinitely before reaching the work clause.
 It also requested a substantive first reply before reading the shared plan.
 This is an instruction-order defect, not proof that a particular CLI host
 caused a reported stop or imposed a specific timeout.
-[src: file: backend/scripts/disc-introspection-mcp.py:6840-6849]
+[src: file: backend/scripts/disc-introspection-mcp.py:6899-6908]
 [src: file: backend/scripts/test_disc_introspection_mcp.py:10233-10252]
 
 The join protocol now orders introduction, plan read, addressed initial turns,
@@ -20,7 +20,7 @@ when no actionable work or execution needs following. The bridge's wait,
 routing, cancellation and durable-cursor functions are unchanged.
 [src: file: backend/src/api/disc_invite.rs:487-519]
 [src: file: backend/src/api/disc_invite.rs:557-597]
-[src: file: backend/scripts/disc-introspection-mcp.py:6867-6938]
+[src: file: backend/scripts/disc-introspection-mcp.py:6926-6997]
 
 Each bounded step has a room announcement and an evidence/limits update.
 Delegated milestones belong in the parent room too. An exact CLI target in
@@ -42,11 +42,11 @@ shared `ROOM_WORK_PROTOCOL` supplies both join/wait manuals and the initialize
 orientation, including plan-first ordering, parent-room milestones and exact
 CLI routing. It no longer promises that cursor reads can never be replayed or
 that quiet returns cost nothing. The bridge's runtime functions did not change.
-[src: file: backend/scripts/disc-introspection-mcp.py:1250-1274]
-[src: file: backend/scripts/disc-introspection-mcp.py:9356-9373]
-[src: file: backend/scripts/disc-introspection-mcp.py:9504]
-[src: file: backend/scripts/disc-introspection-mcp.py:9745-9749]
-[src: file: backend/scripts/disc-introspection-mcp.py:10841]
+[src: file: backend/scripts/disc-introspection-mcp.py:1273-1297]
+[src: file: backend/scripts/disc-introspection-mcp.py:9415-9432]
+[src: file: backend/scripts/disc-introspection-mcp.py:9563]
+[src: file: backend/scripts/disc-introspection-mcp.py:9804-9808]
+[src: file: backend/scripts/disc-introspection-mcp.py:10914]
 
 ## Deaf windows in the bridge wait (KT-703)
 
@@ -59,7 +59,7 @@ the next poll, so a reply could take more than 8 minutes while presence showed
 the session as dormant but present. The bridge now chains polls without a pause,
 with a 1-second floor if the server answers early. The server's pacing values
 and the `next_poll_at` presence projection are unchanged.
-[src: file: backend/scripts/disc-introspection-mcp.py:7308-7417]
+[src: file: backend/scripts/disc-introspection-mcp.py:7367-7476]
 [src: file: backend/src/api/disc_introspection.rs:175-185]
 
 The `session_budget` block on a wake said "rotate this session" to any long

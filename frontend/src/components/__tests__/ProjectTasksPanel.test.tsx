@@ -35,6 +35,7 @@ const task: PlanningTaskSummary = {
   discussion_ids: ['discussion-1'],
   tags: [],
   blocker_count: 0,
+  assignees: [],
   created_at: '2026-07-25T10:00:00Z',
   updated_at: '2026-07-25T10:00:00Z',
 };

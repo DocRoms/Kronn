@@ -1740,6 +1740,16 @@ export function DiscussionsPage({
       receiveRunFrame(msg);
       return;
     }
+    // KT-1252 — a workflow step entered, left or changed what it shows in this
+    // room: read the room now rather than at the next poll, and its live
+    // progress, which may have published before this page could hear it.
+    if (msg.type === 'workflow_step_room_changed') {
+      if (activeDiscussionId && msg.discussion_id === activeDiscussionId) {
+        void reloadDiscussion(activeDiscussionId);
+        loadRunProgress(activeDiscussionId);
+      }
+      return;
+    }
     if (msg.type === 'shared_run_updated') {
       // A brand-new media job (not yet in the by-message map) needs a relist
       // so its placeholder appears; a known one's own RunStatusCard
@@ -1920,6 +1930,7 @@ export function DiscussionsPage({
     activeDiscussionId,
     contactsList,
     loadContextFiles,
+    loadRunProgress,
     refetchBatchSummaries,
     refetchDiscussions,
     reloadDiscussion,
@@ -4712,6 +4723,7 @@ export function DiscussionsPage({
                 <WorkflowStepActivityBubble
                   key={`${step.run_id}:${step.step_key}`}
                   step={step}
+                  discussionId={activeDiscussion.id}
                 />
               ))}
 

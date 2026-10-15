@@ -636,6 +636,8 @@ mod tests {
             ("backend/tests/api_tests.rs", 1),
             // macOS test only: the helper process and the ps/pgrep/lsof probes
             ("backend/tests/power_guard_orphan.rs", 1),
+            // test only: re-runs a state-owning test alone in a child of the same binary
+            ("backend/tests/support/own_process.rs", 1),
         ]
         .into_iter()
         .map(|(file, n)| (file.to_string(), n))

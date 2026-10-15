@@ -4932,6 +4932,93 @@ pub fn latest_toolchain_capabilities(
         .transpose()
 }
 
+/// Journal how a lane started (KT-1250): where its target was seeded from and
+/// how long its first build took, so the gain of a warm start is measurable.
+/// A sibling of the capability record; readers take the latest.
+pub fn record_lane_warm_start(
+    conn: &Connection,
+    exec_id: &str,
+    record: &crate::core::task_worker_lane_warm::WarmStartRecord,
+    actor: &OrchestrationActor,
+) -> Result<()> {
+    record_execution_event(
+        conn,
+        exec_id,
+        crate::core::task_worker_lane_warm::WARM_START_EVENT_ACTION,
+        None,
+        None,
+        actor,
+        serde_json::to_value(record)?,
+    )
+}
+
+/// The most recent warm-start record of an execution, if any.
+pub fn latest_lane_warm_start(
+    conn: &Connection,
+    exec_id: &str,
+) -> Result<Option<crate::core::task_worker_lane_warm::WarmStartRecord>> {
+    let latest: Option<String> = conn
+        .query_row(
+            "SELECT changes_json FROM task_execution_events \
+             WHERE task_execution_id = ?1 AND action = ?2 \
+             ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            params![
+                exec_id,
+                crate::core::task_worker_lane_warm::WARM_START_EVENT_ACTION
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    latest
+        .map(|changes| serde_json::from_str(&changes).map_err(anyhow::Error::from))
+        .transpose()
+}
+
+/// Action of the event that says a lane is warming (KT-1250): its first build
+/// is queued or running and the worker is not dispatched yet.
+const LANE_WARMING_ACTION: &str = "lane_warming";
+
+/// Journal that the execution's lane started warming, with the longest the
+/// warm-up may take before the worker starts regardless.
+pub fn record_lane_warming(
+    conn: &Connection,
+    exec_id: &str,
+    bound_secs: u64,
+    actor: &OrchestrationActor,
+) -> Result<()> {
+    record_execution_event(
+        conn,
+        exec_id,
+        LANE_WARMING_ACTION,
+        None,
+        None,
+        actor,
+        serde_json::json!({ "bound_secs": bound_secs }),
+    )
+}
+
+/// Since when the execution's lane has been warming: the latest `lane_warming`
+/// event not yet followed by a `lane_warm_start` record. `None` once the
+/// warm-up has finished (or never started).
+pub fn lane_warming_since(conn: &Connection, exec_id: &str) -> Result<Option<DateTime<Utc>>> {
+    let since: Option<String> = conn
+        .query_row(
+            "SELECT created_at FROM task_execution_events \
+             WHERE task_execution_id = ?1 AND action = ?2 \
+               AND rowid > COALESCE((SELECT MAX(rowid) FROM task_execution_events \
+                                      WHERE task_execution_id = ?1 AND action = ?3), 0) \
+             ORDER BY rowid DESC LIMIT 1",
+            params![
+                exec_id,
+                LANE_WARMING_ACTION,
+                crate::core::task_worker_lane_warm::WARM_START_EVENT_ACTION
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(since.map(parse_dt))
+}
+
 const WORKER_SCOPE_REANCHORED: &str = "worker_scope_reanchored";
 
 /// The prelocalized scope the execution was launched with. Re-anchoring
@@ -5293,6 +5380,27 @@ pub const DEFAULT_ACTIVITY_TIMEOUT_SECS: u32 = 20 * 60;
 /// How long a delivery may sit unreviewed before the principal is alerted.
 pub const DEFAULT_REVIEW_TIMEOUT_SECS: u32 = 4 * 60 * 60;
 const ACTIVITY_TIMEOUT_ENV: &str = "KRONN_TASK_ACTIVITY_TIMEOUT_SECS";
+/// How long a single tool call (a cold `cargo build`, a full test suite) may
+/// run before the worker counts as silent again.
+const TOOL_IN_FLIGHT_CAP_ENV: &str = "KRONN_TASK_TOOL_IN_FLIGHT_CAP_SECS";
+const DEFAULT_TOOL_IN_FLIGHT_CAP_SECS: u32 = 2 * 60 * 60;
+
+pub fn tool_in_flight_cap_secs() -> u32 {
+    crate::core::child_env::var(TOOL_IN_FLIGHT_CAP_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|seconds| *seconds > 0)
+        .unwrap_or(DEFAULT_TOOL_IN_FLIGHT_CAP_SECS)
+}
+
+/// A tool that started and has not finished is activity: a worker compiling
+/// for 25 minutes is busy, not silent. Past the cap it is treated as hung.
+fn tool_in_flight(phase: Option<&str>, started: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
+    phase == Some("tool_activity")
+        && started.is_some_and(|started| {
+            started + chrono::Duration::seconds(i64::from(tool_in_flight_cap_secs())) > now
+        })
+}
 const REVIEW_TIMEOUT_ENV: &str = "KRONN_TASK_REVIEW_TIMEOUT_SECS";
 
 fn timeout_secs_from_env(name: &str, fallback: u32) -> u32 {
@@ -5614,11 +5722,13 @@ pub fn expired_execution_timeouts(
     let mut stmt = conn.prepare(
         "SELECT r.task_execution_id, e.status, r.total_deadline_at, \
                 r.activity_deadline_at, r.review_deadline_at, r.human_wait_started_at, \
-                p.human_wait_timeout_secs \
+                p.human_wait_timeout_secs, d.progress_phase, d.last_progress_at \
          FROM task_execution_recovery r \
          JOIN task_executions e ON e.id = r.task_execution_id \
          LEFT JOIN orchestration_run_resilience_policy p \
            ON p.orchestration_run_id = e.orchestration_run_id \
+         LEFT JOIN agent_dispatch_jobs d \
+           ON d.id = e.dispatch_job_id AND d.status = 'Running' \
          WHERE e.status NOT IN ('Done', 'Failed', 'Cancelled')",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -5630,11 +5740,13 @@ pub fn expired_execution_timeouts(
             row.get::<_, Option<String>>(4)?,
             row.get::<_, Option<String>>(5)?,
             row.get::<_, Option<i64>>(6)?,
+            row.get::<_, Option<String>>(7)?,
+            row.get::<_, Option<String>>(8)?,
         ))
     })?;
     let mut expired = Vec::new();
     for row in rows {
-        let (id, status, total, activity, review, human_since, human_secs) = row?;
+        let (id, status, total, activity, review, human_since, human_secs, phase, phase_at) = row?;
         let parse = |value: Option<String>| value.map(parse_dt);
         if parse(total).is_some_and(|deadline| deadline <= now) {
             expired.push((id, ExecutionTimeoutKind::TotalDuration));
@@ -5648,6 +5760,7 @@ pub fn expired_execution_timeouts(
             }
         } else if status == TaskExecutionStatus::Working.as_str()
             && parse(activity).is_some_and(|deadline| deadline <= now)
+            && !tool_in_flight(phase.as_deref(), phase_at.map(parse_dt), now)
         {
             // Only a worker that owes work can be silent. A delivered attempt
             // (`AwaitingReview`) or a parked one is never an activity timeout.

@@ -909,3 +909,9 @@
   .orch-launch-validations { grid-column: auto; }
   .orch-campaign-item { align-items: stretch; flex-direction: column; }
 }
+
+/* KT-154 — assignees block of the task sheet. */
+.plan-task-assignees {
+  display: grid;
+  gap: var(--kr-sp-3);
+}

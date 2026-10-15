@@ -43,12 +43,31 @@ const planView = {
   existing_targets: ['docs/AGENTS.md'],
   untracked_in_checkout: ['docs/draft-notes.md'],
   table_markdown: '',
+  // KT-1212: the plan always says where the merge stands on disk. Never
+  // started here: no worktree, no branch, nothing to integrate.
+  merge: {
+    branch: 'kronn/template-v2-merge',
+    worktree_exists: false,
+    worktree_path: null,
+    branch_exists: false,
+    branch_ahead_commits: 0,
+    pending_files: 0,
+    checkout_branch: 'main',
+  },
 };
 
 const resultView = {
   ...planView,
   worktree_path: '/repos/front_apollo/.kronn/worktrees/template-v2-merge',
   branch: 'kronn/template-v2-merge',
+  // Started: the worktree holds both proposed files, none accepted yet.
+  merge: {
+    ...planView.merge,
+    worktree_exists: true,
+    worktree_path: '/repos/front_apollo/.kronn/worktrees/template-v2-merge',
+    branch_exists: true,
+    pending_files: 2,
+  },
   files: [
     {
       path: 'docs/testing-quality.md', outcome: 'created', imported_sections: 1,

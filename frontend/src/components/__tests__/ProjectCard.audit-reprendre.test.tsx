@@ -131,6 +131,22 @@ describe('ProjectCard — KT-1169 "Reprendre" after every audit error', () => {
     expect(launches()[1].fresh).toBeUndefined();
   });
 
+  it('resuming a run a colleague committed adopts it: the launch sends the repository run id', async () => {
+    vi.mocked(projectsApi.auditResumable).mockResolvedValue({
+      id: 'run-elsewhere', kind: 'Full', last_completed_step: 9, steps_to_redo: [10, 11, 12],
+      started_at: '2026-10-11T09:00:00Z', from_repository: true,
+    });
+    renderCard();
+    const launch = await screen.findByTestId('audit-timeline-launch');
+    await waitFor(() => expect(launch).toBeEnabled());
+    expect(launch).toHaveTextContent('audit.resumeRedoSteps');
+    await act(async () => { fireEvent.click(launch); });
+    await waitFor(() => expect(launches()).toHaveLength(1));
+    expect(launches()[0]).toMatchObject({ resume_run_id: 'run-elsewhere' });
+    expect(launches()[0].fresh).toBeUndefined();
+    expect(launches()[0].retry_steps).toBeUndefined();
+  });
+
   it('when the run to resume cannot be read, nothing launches until it is', async () => {
     vi.mocked(projectsApi.auditResumable).mockRejectedValueOnce(new Error('offline'));
     renderCard();

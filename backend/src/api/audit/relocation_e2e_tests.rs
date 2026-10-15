@@ -1174,6 +1174,8 @@ fn default_root_snapshot(project: &Path, prompts: &[String]) -> String {
         let volatile = matches!(
             rel.as_str(),
             "docs/.kronn.json"
+                // Carries the operator label and the run id (KT-1199).
+                | "docs/.kronn-audit-run.json"
                 | "docs/checksums.json"
                 | "docs/citations.json"
                 | "docs/provenance.json"

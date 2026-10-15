@@ -95,6 +95,8 @@ pub fn list_active_for_discussion(
             identity: identity_from_row(row, 0)?,
             agent_type: crate::db::discussions::parse_agent_type(&agent)?,
             started_at: row.get(6)?,
+            progress_run_id: None,
+            preparing: false,
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()

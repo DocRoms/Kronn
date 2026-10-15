@@ -15,9 +15,9 @@
 - **Scope**: KT-315 (objective), KT-316 (this ADR). Downstream: KT-317…KT-326.
 - **Upstream context**: `planning-and-discussion-plans.md` slice 7 ("Deferred delegation —
   task-to-discussion briefing and agent launch only after the task workflow is proven
-  manually") `[src: file: docs/design/planning-and-discussion-plans.md:232-233#Deferred]` and the
+  manually") `[src: file: docs/design/planning-and-discussion-plans.md:252-253#Deferred]` and the
   "Create only / Create and run" delegation decision
-  `[src: file: docs/design/planning-and-discussion-plans.md:210-211#delegation]`. This ADR turns that
+  `[src: file: docs/design/planning-and-discussion-plans.md:211-212#delegation]`. This ADR turns that
   deferred flow into a durable, backend-owned lifecycle.
 
 ---
@@ -64,7 +64,7 @@ composition and one genuinely new capability (protected merge), not reinvention.
 | Managed-worktree creator (branch-name based) | `core/worktree.rs:179-249` | Must accept `git worktree add -b <child> <path> <base_sha>` (SHA arg, not branch name). |
 | `head_sha` snapshot column (inert for lineage) | `db/sql/101_discussion_workspaces.sql:17` | Becomes the pinned base for a child. |
 | "Ahead of base" preservation check | `workflows/workspace.rs:118-163` | Becomes the merge-eligibility gate. |
-| `disc_create` / `disc_create_room` MCP tools | `disc-introspection-mcp.py:537-559,958-995` | Extend to accept `profile_ids/skill_ids/directive_ids/model` (already HTTP-side at `models/discussions.rs:355-366`) so a worker can be spawned bound. |
+| `disc_create` / `disc_create_room` MCP tools | `disc-introspection-mcp.py:537-559,983-1020` | Extend to accept `profile_ids/skill_ids/directive_ids/model` (already HTTP-side at `models/discussions.rs:355-366`) so a worker can be spawned bound. |
 | `actor_kind` CHECK (`human`,`agent` only) | `db/sql/081_planning_tasks.sql:92` | Add a `backend`/`system` actor so autonomous transitions are attributable. |
 | `triage_manifest_schema` + `AgentDecision` gate lifecycle | `workflows/triage.rs:47-119`, `models/agent_decisions.rs:53-77` | Generalize from run-scope to a discussion/task-scoped DeliveryManifest + review verdict. |
 | Batch completion hook (settles a workflow run) | `api/discussions/runtime.rs:76-105` | Add a branch that appends the deliverable into the **parent discussion** and wakes its agent. |
@@ -343,7 +343,7 @@ Integration is only ever toward an **explicitly pinned** target. No implicit bra
      `refs/kronn-backup/<task-id>-<exec-short>` at `candidate_target_sha` before the candidate is built
      `[src: file: backend/src/core/worktree.rs:1436-1464#write_backup_ref]`. `fast_forward_target_to`
      verifies that the parent tip is **still exactly `candidate_target_sha`** (a compare-and-swap) and
-     that the parent worktree is **clean** `[src: file: backend/src/core/worktree.rs:1530-1542#fast_forward_target_to]`.
+     that the parent worktree is **clean** `[src: file: backend/src/core/worktree.rs:1628-1648#fast_forward_target_to]`.
   4. Advance the parent to `candidate_merge_sha` **fast-forward only** — a deterministic, short,
      verifiable mutation (the candidate already contains `candidate_target_sha` as an ancestor).
   5. **Never** `stash`, and **never** silently `update-ref` a checked-out branch. If the parent has
@@ -351,7 +351,7 @@ Integration is only ever toward an **explicitly pinned** target. No implicit bra
      rebuilt on the new tip (→ `Integrating`), never forced through.
 - **Cleanup** — on `Done`, the child worktree is torn down
   (`remove_integrated_task_worktree`, which ends in `remove_discussion_worktree`,
-  `[src: file: backend/src/core/worktree.rs:2118-2186#remove_integrated_task_worktree]`) and the sub-discussion
+  `[src: file: backend/src/core/worktree.rs:2224-2292#remove_integrated_task_worktree]`) and the sub-discussion
   archived. On `Cancelled`/`Failed`, the child branch is preserved for inspection and the worktree
   removed only if clean.
 
@@ -414,7 +414,7 @@ restart. Boot first quiesces due dispatches and moves non-terminal executions to
 same SQLite boundary, then classifies the checkpoint against discussions, worker availability,
 workspace ownership and the real Git refs. A pending decision survives a second crash and is consumed
 only by an explicit guarded resume `[src: file: backend/src/api/orchestration.rs:267-367#reconcile_at_boot]`
-`[src: file: backend/src/db/orchestration.rs:5413-5484#set_execution_recovery]`. The runtime watchdog uses four independent clocks — total
+`[src: file: backend/src/db/orchestration.rs:5521-5592#set_execution_recovery]`. The runtime watchdog uses four independent clocks — total
 duration, activity, review wait and human wait — so an acknowledged human gate is never mistaken for a
 dead worker `[src: file: backend/src/api/orchestration.rs:566-722#start_resilience_watchdog]`.
 

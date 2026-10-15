@@ -17,7 +17,7 @@ use super::AcpAgent;
 pub const SECRET_FILE_ENV: &str = "KRONN_BRIDGE_SECRET_ENV_FILE";
 
 /// Values the bridge reads that hold no secret.
-const PLAIN: &[&str] = &[
+pub(crate) const PLAIN: &[&str] = &[
     "KRONN_DISCUSSION_ID",
     "KRONN_BACKEND_URL",
     "KRONN_ROOM_AGENT_CONTEXT",
@@ -26,7 +26,7 @@ const PLAIN: &[&str] = &[
 
 /// Values the bridge reads that are secrets: the launch's bridge token and a
 /// workflow step's capability.
-const SECRET: &[&str] = &[
+pub(crate) const SECRET: &[&str] = &[
     crate::core::child_env::BRIDGE_TOKEN_ENV,
     "KRONN_WORKFLOW_STEP_CONTEXT",
 ];

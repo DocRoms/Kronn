@@ -234,7 +234,7 @@ mutable Quick Prompt. CLI effort keeps its existing snapshot format.
 [src: file: backend/src/api/mcp_remote.rs:584-612#create_batch_run_with_launch_settings]
 [src: file: backend/src/db/discussion_launch_settings.rs:18-117#capture]
 [src: file: backend/src/db/sql/186_discussion_http_settings.sql:1-10#discussion_http_settings]
-[src: file: backend/src/api/discussions/crud.rs:608-619#capture]
+[src: file: backend/src/api/discussions/crud.rs:620-631#capture]
 
 HTTP launches transmit explicit `reasoning_effort` and `max_tokens` on the
 OpenAI-compatible wire. Ollama receives `think` and `options.num_predict` after
@@ -366,8 +366,8 @@ one.
 **Stopping.** An HTTP agent's request and tool loop are a task, not a process:
 killing the lifeline PID does not stop it. A Full audit therefore registers a
 cancellation token per step, and `cancel_audit` trips it
-[src: file: backend/src/api/audit/full.rs:1624-1629#agent_cancels]
-[src: file: backend/src/api/audit/full.rs:4045-4049#agent_cancels]. Since KT-927 the partial audit does
+[src: file: backend/src/api/audit/full.rs:1680-1685#agent_cancels]
+[src: file: backend/src/api/audit/full.rs:4108-4112#agent_cancels]. Since KT-927 the partial audit does
 the same, and so does an ACP agent, whose PID is a lifeline too: see
 [auditing with an ACP agent](audit-acp-agents.md).
 
@@ -463,7 +463,7 @@ contract and can request one step type or shared section. This avoids paying
 the full schema on every turn while keeping both interfaces on the same source.
 The examples are deserialized as real `WorkflowStep` values in regression tests.
 [src: file: backend/src/api/workflow_step_schema.json:1-467#fields_by_type]
-[src: file: backend/scripts/disc-introspection-mcp.py:9376-9378#call_workflow_step_schema]
+[src: file: backend/scripts/disc-introspection-mcp.py:9435-9437#call_workflow_step_schema]
 [src: file: backend/src/api/agent_workflow_tests.rs:146-170#workflow_schema_sections_preserve_the_canonical_contract]
 
 Ollama tool-result clamping preserves this authoring contract as complete JSON

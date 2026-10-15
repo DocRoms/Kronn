@@ -1579,6 +1579,9 @@ pub struct TaskExecutionDetail {
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
 pub enum TaskExecutionProgressPhase {
+    /// The lane's first build is queued or running; the worker is not
+    /// dispatched yet (KT-1250). Bounded: it ends with the worker dispatched.
+    Warming,
     Queued,
     Launching,
     UpstreamWait,
