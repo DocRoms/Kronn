@@ -478,6 +478,15 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A task worker's lane build runs under the worker's sandbox profile
+  (KT-1255). The first `cargo test --no-run` and the toolchain smoke check were
+  started by Kronn as the host user, so a relaunch that rebuilt after the
+  worker changed `Cargo.lock` or wrote a `build.rs` would have compiled
+  worker-written code with the host's rights. They now run under macOS
+  Seatbelt (Linux: bubblewrap) with the worker's write roots, its lane and
+  temp directories only, and loopback-only network; a host with no usable
+  sandbox refuses the build and says so, it never runs it unconfined.
+
 - The default-docs-root golden no longer depends on the day it runs: the
   compact date every step prompt opens with is masked like the dashed one.
 

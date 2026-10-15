@@ -1920,10 +1920,13 @@ async fn wait_for_warm_up_to_settle(exec_id: &str, timeout: std::time::Duration)
 /// `Provisioning` (any cancel path — a run cancel, a reassignment — ends it).
 const WARM_UP_STATE_POLL: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// The probe runner of a task worker's launch: the real processes, except in
-/// tests, which register a runner per repository to control the first build.
+/// The probe runner of a task worker's launch: real processes confined to the
+/// worker's sandbox profile (KT-1255), so a build script or proc-macro the
+/// worker wrote is never compiled with the host's rights. Tests register a
+/// runner per repository to control the first build.
 fn worker_probe_runner(
     repo_path: &str,
+    worktree: &std::path::Path,
 ) -> std::sync::Arc<dyn crate::core::task_worker_env::ProbeRunner> {
     #[cfg(test)]
     if let Some(runner) = test_probe_runners()
@@ -1934,7 +1937,9 @@ fn worker_probe_runner(
         return runner.clone();
     }
     let _ = repo_path;
-    std::sync::Arc::new(crate::core::task_worker_env::ProcessProbeRunner)
+    std::sync::Arc::new(
+        crate::core::task_worker_sandbox::SandboxedProbeRunner::for_worktree(worktree),
+    )
 }
 
 #[cfg(test)]
@@ -2093,7 +2098,7 @@ async fn finish_native_provisioning(
             prepared.execution.attempt_no,
             &sub_disc_id,
             &worktree_path,
-            worker_probe_runner(&prepared.repo_path),
+            worker_probe_runner(&prepared.repo_path, &worktree_path),
             warm_cancel,
         )
         .await;
@@ -2114,7 +2119,7 @@ async fn finish_native_provisioning(
                 db,
                 &prepared.execution.id,
                 &worktree_path,
-                worker_probe_runner(&prepared.repo_path),
+                worker_probe_runner(&prepared.repo_path, &worktree_path),
             )
             .await,
         )
@@ -23924,6 +23929,15 @@ pub(crate) mod tests {
             .lock()
             .unwrap()
             .insert(repo.to_string_lossy().to_string(), runner);
+    }
+
+    /// KT-1255 — what a launch builds with is the worker's sandbox, not the
+    /// host user's bare process runner.
+    #[test]
+    fn a_launch_without_a_registered_test_runner_builds_under_the_worker_sandbox() {
+        let worktree = tempfile::tempdir().unwrap();
+        let runner = worker_probe_runner("/no/such/repo/kt-1255", worktree.path());
+        assert!(runner.confined());
     }
 
     async fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {

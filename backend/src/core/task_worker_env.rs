@@ -633,6 +633,13 @@ pub trait ProbeRunner: Send + Sync {
         let _ = cancel;
         self.run(probe)
     }
+
+    /// Whether every command this runner starts runs under the worker's sandbox
+    /// profile (KT-1255, `core::task_worker_sandbox`). The plain process runner
+    /// does not: it is for Kronn's own commands, never for a lane's build.
+    fn confined(&self) -> bool {
+        false
+    }
 }
 
 /// Runs probes as real child processes with the sealed Kronn environment plus
