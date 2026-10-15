@@ -178,6 +178,21 @@ pub struct OrchestrationBootReport {
     pub deferred_resumes: Vec<String>,
     pub orphan_workspaces_removed: usize,
     pub orphan_workspaces_preserved: usize,
+    /// Lane targets Kronn marked, whose execution finished and whose worktree
+    /// is gone, removed at boot (KT-1256).
+    pub orphan_lane_targets_removed: usize,
+    /// Marked lanes of a finished execution that were not removed: the
+    /// worktree is still there (clean or dirty) or a refusal; reasons in
+    /// `lane_target_report`.
+    pub orphan_lane_targets_preserved: usize,
+    /// Bytes the removed lane targets held, floored at the scan budget.
+    pub orphan_lane_target_bytes: u64,
+    /// `wt-*` directories without Kronn's ownership marker: reported, never
+    /// touched.
+    pub lane_targets_unmarked: usize,
+    /// The sweep's dry-run view in plain lines, one per lane target that was
+    /// removed, could be removed, was kept or is not Kronn's.
+    pub lane_target_report: Vec<String>,
     pub errors: Vec<String>,
 }
 
@@ -463,6 +478,78 @@ async fn reconcile_at_boot_with_agents(
                     orphan.id
                 ));
             }
+        }
+    }
+
+    // KT-1256 — a lane target outlives its worktree whenever the removal that
+    // should have taken it was a crash, a refusal or a build away. Only lanes
+    // Kronn marked are candidates, judged from durable state per project; one
+    // project's failure never stops the rest.
+    let projects = state
+        .db
+        .with_conn(crate::db::projects::list_projects)
+        .await
+        .unwrap_or_else(|error| {
+            report
+                .errors
+                .push(format!("lane target sweep project scan: {error}"));
+            Vec::new()
+        });
+    for project in projects {
+        let repo = scanner::resolve_host_path(&project.path);
+        if !repo.join("target").is_dir() {
+            continue;
+        }
+        // Boot deletes only what is provably Kronn's, finished and already
+        // detached from its worktree; every other `wt-*` is reported.
+        match sweep_project_lane_targets(
+            &state.db,
+            &project.id,
+            &repo,
+            worktree::LaneSweepScope::WorktreeGone,
+        )
+        .await
+        {
+            Ok(sweep) => {
+                report.orphan_lane_targets_removed += sweep.removed.len();
+                report.orphan_lane_target_bytes += sweep.bytes_removed();
+                report.lane_targets_unmarked += sweep.unmarked.len();
+                report.orphan_lane_targets_preserved += sweep.would_remove.len() + sweep.kept.len();
+                for (owner, removed) in &sweep.removed {
+                    report.lane_target_report.push(format!(
+                        "removed {} ({} bytes{}; execution {})",
+                        removed.target_path.display(),
+                        removed.bytes_reclaimed,
+                        if removed.bytes_are_partial { "+" } else { "" },
+                        owner.execution_id
+                    ));
+                }
+                for (owner, removable) in &sweep.would_remove {
+                    report.lane_target_report.push(format!(
+                        "reclaimable, kept with its clean worktree: {} ({} bytes{}; execution {})",
+                        removable.target_path.display(),
+                        removable.bytes_reclaimed,
+                        if removable.bytes_are_partial { "+" } else { "" },
+                        owner.execution_id
+                    ));
+                }
+                for (path, reason) in &sweep.kept {
+                    report
+                        .lane_target_report
+                        .push(format!("kept {}: {reason}", path.display()));
+                }
+                for path in &sweep.unmarked {
+                    report.lane_target_report.push(format!(
+                        "not Kronn's, untouched: {} (no {} marker)",
+                        path.display(),
+                        worktree::LANE_OWNER_MARKER
+                    ));
+                }
+            }
+            Err(error) => report.errors.push(format!(
+                "lane target sweep of project {}: {error}",
+                project.id
+            )),
         }
     }
     report
@@ -2090,6 +2177,15 @@ async fn finish_native_provisioning(
     // is provisioned and smoke-checked here, before the brief is written, so the
     // brief states what the worker can really run. Other runtimes are unchanged.
     let toolchain = if prepared.execution.worker_agent_type.as_deref() == Some("ClaudeCode") {
+        // KT-1256 — the lane target is stamped with the execution it was made
+        // for before anything is built in it: that marker is the only thing
+        // that lets a later sweep treat the directory as Kronn's to remove.
+        mark_lane_target_for_execution(
+            std::path::Path::new(&prepared.repo_path),
+            &worktree_path,
+            &prepared.execution.id,
+        )
+        .await;
         // KT-1250 — the lane target is seeded from a warm one and its first build
         // runs here, under the host's cap, so the worker starts warm.
         let warm = record_lane_warm_start(
@@ -3504,6 +3600,10 @@ async fn cleanup_integrated_execution(
     };
     match worktree::remove_integrated_task_worktree(repo_path, child_path, branch, integrated_sha) {
         Ok(()) => {
+            // KT-1256 — the lane target lives outside the worktree and is named
+            // after it, so the removal above never took it. Before the intent
+            // is retired: the audit finds its execution by the checkout path.
+            reclaim_lane_target(db, repo_path, child_path).await;
             // Never erase the ownership proof while a checkout still exists.
             // Once Git cleanup is confirmed, retire the intent + stale child
             // coordinates atomically; the transcript/sub-discussion survives.
@@ -3546,6 +3646,146 @@ async fn cleanup_integrated_execution(
         }
     }
     Ok(())
+}
+
+/// Remove the lane target (`<repo>/target/wt-<lane>`) of a task worktree that
+/// was just removed clean (KT-1256).
+///
+/// Never fails the caller, for the reason [`reclaim_preserved_worktree_artifacts`]
+/// gives; a refusal (a build still holding the lock, a symlink) is logged and
+/// audited, and the orphan sweep picks the directory up later.
+async fn reclaim_lane_target(db: &Database, repo_path: &std::path::Path, child_path: &str) {
+    let lane_target =
+        match worktree::lane_target_for_worktree(repo_path, std::path::Path::new(child_path)) {
+            Ok(path) => path,
+            Err(reason) => {
+                tracing::warn!(worktree = %child_path, "lane target reclaim skipped: {reason}");
+                return;
+            }
+        };
+    let outcome = worktree::remove_lane_target(repo_path, &lane_target)
+        .map(|report| (report.bytes_reclaimed, report.bytes_are_partial));
+    if let Err(reason) = &outcome {
+        tracing::warn!(lane_target = %lane_target.display(), "lane target kept: {reason}");
+    }
+    let canonical = child_path.to_string();
+    let target = lane_target.to_string_lossy().to_string();
+    if let Err(error) = db
+        .with_conn(move |conn| {
+            crate::db::orchestration::record_lane_target_reclaim(conn, &canonical, &target, outcome)
+        })
+        .await
+    {
+        tracing::warn!(worktree = %child_path, "lane target reclaim audit failed: {error}");
+    }
+}
+
+/// What a lane-target sweep needs from durable state: for each marked lane,
+/// why it must stay (absent = its execution is provably finished).
+async fn lane_target_claims(
+    db: &Database,
+    project_id: &str,
+    repo_path: &std::path::Path,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    let repo = repo_path.to_path_buf();
+    let owners = tokio::task::spawn_blocking(move || worktree::lane_target_owners(&repo))
+        .await
+        .map_err(|error| format!("lane target scan failed: {error}"))?;
+    let pid = project_id.to_string();
+    db.with_conn(move |conn| crate::db::orchestration::lane_target_claims(conn, &pid, &owners))
+        .await
+        .map_err(|error| format!("durable state unreadable: {error}"))
+}
+
+/// Record, per lane target, what a sweep removed (an execution's event log
+/// outlives the log line that would otherwise be the only trace).
+async fn audit_lane_target_sweep(db: &Database, sweep: &worktree::LaneTargetSweep) {
+    for (owner, report) in &sweep.removed {
+        let execution_id = owner.execution_id.clone();
+        let target = report.target_path.to_string_lossy().to_string();
+        let outcome = Ok((report.bytes_reclaimed, report.bytes_are_partial));
+        if let Err(error) = db
+            .with_conn(move |conn| {
+                crate::db::orchestration::record_lane_target_reclaim_for_execution(
+                    conn,
+                    &execution_id,
+                    &target,
+                    outcome,
+                )
+            })
+            .await
+        {
+            tracing::warn!(lane = %owner.lane, "lane target sweep audit failed: {error}");
+        }
+    }
+}
+
+/// One pass over a project's `target/wt-*` directories (KT-1256).
+///
+/// Only a lane carrying Kronn's ownership marker is ever a candidate, and only
+/// when durable state proves its execution finished and its worktree is gone
+/// (or clean, with the wider `scope`). Everything else is reported and left as
+/// it is: `scope` [`worktree::LaneSweepScope::ReportOnly`] is the dry run.
+pub async fn sweep_project_lane_targets(
+    db: &Database,
+    project_id: &str,
+    repo_path: &std::path::Path,
+    scope: worktree::LaneSweepScope,
+) -> Result<worktree::LaneTargetSweep, String> {
+    let claims = lane_target_claims(db, project_id, repo_path).await?;
+    let repo = repo_path.to_path_buf();
+    let sweep = tokio::task::spawn_blocking(move || {
+        let judge = |owner: &worktree::LaneOwner| match claims.get(&owner.lane) {
+            Some(reason) => Err(reason.clone()),
+            None => Ok(()),
+        };
+        worktree::sweep_lane_targets(&repo, &judge, scope)
+    })
+    .await
+    .map_err(|error| format!("lane target sweep failed: {error}"))?;
+    audit_lane_target_sweep(db, &sweep).await;
+    Ok(sweep)
+}
+
+/// Reclaim exactly the named lane targets (KT-1256), each re-judged now: the
+/// dry run informs the human, it never authorises the deletion. The result is
+/// the sweep outcome per named path, in the order given.
+pub async fn reclaim_named_lane_targets(
+    db: &Database,
+    project_id: &str,
+    repo_path: &std::path::Path,
+    targets: Vec<std::path::PathBuf>,
+) -> Result<Vec<(std::path::PathBuf, worktree::LaneTargetOutcome)>, String> {
+    let claims = lane_target_claims(db, project_id, repo_path).await?;
+    let repo = repo_path.to_path_buf();
+    let outcomes = tokio::task::spawn_blocking(move || {
+        let judge = |owner: &worktree::LaneOwner| match claims.get(&owner.lane) {
+            Some(reason) => Err(reason.clone()),
+            None => Ok(()),
+        };
+        targets
+            .into_iter()
+            .map(|target| {
+                let outcome = worktree::process_lane_target(
+                    &repo,
+                    &target,
+                    &judge,
+                    worktree::LaneSweepScope::WorktreeGoneOrClean,
+                );
+                (target, outcome)
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .map_err(|error| format!("lane target reclaim failed: {error}"))?;
+    let mut removed = worktree::LaneTargetSweep::default();
+    for (_, outcome) in &outcomes {
+        if let worktree::LaneTargetOutcome::Removed(owner, report) = outcome {
+            removed.removed.push((owner.clone(), report.clone()));
+        }
+    }
+    audit_lane_target_sweep(db, &removed).await;
+    Ok(outcomes)
 }
 
 /// Give back the build artefacts of a worktree that was deliberately kept.
@@ -7100,6 +7340,33 @@ fn insert_toolchain_section(content: String, toolchain: &ToolchainCapabilities) 
     }
 }
 
+/// Write the lane target's ownership marker (KT-1256). Never raised: a lane
+/// that could not be marked is only ever reported by the sweep, never removed.
+async fn mark_lane_target_for_execution(
+    repo_path: &std::path::Path,
+    worktree: &std::path::Path,
+    exec_id: &str,
+) {
+    let (repo, worktree_path, id) = (
+        repo_path.to_path_buf(),
+        worktree.to_path_buf(),
+        exec_id.to_string(),
+    );
+    match tokio::task::spawn_blocking(move || {
+        worktree::mark_lane_target(&repo, &worktree_path, &id)
+    })
+    .await
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(reason)) => {
+            tracing::warn!(execution_id = %exec_id, "lane target not marked: {reason}");
+        }
+        Err(error) => {
+            tracing::warn!(execution_id = %exec_id, "lane target marking did not complete: {error}");
+        }
+    }
+}
+
 /// Start a Claude task worker's lane warm (KT-1250): seed its Cargo target with
 /// a copy-on-write clone of a warm one, then run its first build under the
 /// host's concurrency cap, saying so in the worker's room when it has to queue.
@@ -9654,6 +9921,10 @@ async fn settle_cancelled_workspace(
         match worktree::remove_cancelled_task_worktree(&repo, &checkout, &workspace.branch) {
             Ok(()) => {
                 survives = false;
+                // KT-1256 — the checkout is gone, so is the lane it built in.
+                // The DB's own path string, because the audit looks the row up
+                // by that exact value.
+                reclaim_lane_target(db, &repo, path).await;
                 let id = exec_id.to_string();
                 let final_head = workspace.head_sha.clone();
                 if let Err(error) = db
@@ -29645,6 +29916,342 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert!(audited >= 1, "the reclaim must leave a durable event");
+    }
+
+    /// KT-1256 — a lane target as a worker leaves it, outside the worktree.
+    fn seed_lane_target_of(repo: &Path, worktree: &str) -> std::path::PathBuf {
+        let lane_target =
+            worktree::lane_target_for_worktree(repo, std::path::Path::new(worktree)).unwrap();
+        std::fs::create_dir_all(lane_target.join("debug")).unwrap();
+        std::fs::write(lane_target.join("debug/kronn"), vec![0u8; 2048]).unwrap();
+        lane_target
+    }
+
+    async fn lane_target_events(db: &Database, action: &'static str) -> i64 {
+        db.with_conn(move |conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM task_execution_events WHERE action = ?1",
+                [action],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap()
+    }
+
+    /// KT-1256 — DoD 1: an integrated execution's clean worktree is removed
+    /// and its lane target goes with it; the main target stays.
+    #[tokio::test]
+    async fn an_integrated_executions_lane_target_is_removed_with_its_clean_worktree() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_task, _parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        let path = managed_worktree_path(&db, &exec_id).await;
+        let lane_target = seed_lane_target_of(repo.path(), &path);
+        let main_debug = repo.path().join("target/debug");
+        std::fs::create_dir_all(&main_debug).unwrap();
+        let head = String::from_utf8(
+            crate::core::cmd::git_cmd()
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&path)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        let execution = exec_of(&db, &exec_id).await;
+
+        cleanup_integrated_execution(&db, &execution, repo.path(), &path, &head)
+            .await
+            .unwrap();
+
+        assert!(
+            !std::path::Path::new(&path).exists(),
+            "the clean worktree is removed"
+        );
+        assert!(!lane_target.exists(), "and its lane target with it");
+        assert!(main_debug.exists(), "the main target is not a lane");
+        assert_eq!(
+            lane_target_events(&db, "lane_target_reclaimed").await,
+            1,
+            "the reclaim is audited against the execution"
+        );
+    }
+
+    /// KT-1256 — DoD 1, cancellation: `RemoveIfClean` takes the lane target
+    /// with the checkout.
+    #[tokio::test]
+    async fn a_cancelled_executions_lane_target_is_removed_with_its_clean_worktree() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_task, _parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        let path = managed_worktree_path(&db, &exec_id).await;
+        let lane_target = seed_lane_target_of(repo.path(), &path);
+
+        let eid = exec_id.clone();
+        db.with_conn(move |conn| {
+            crate::db::orchestration::cancel_execution_tree(conn, &eid, "test", &backend_actor())
+        })
+        .await
+        .unwrap();
+        let workspace = {
+            let eid = exec_id.clone();
+            db.with_conn(move |conn| {
+                crate::db::discussion_workspaces::get_managed_for_execution(conn, &eid)
+            })
+            .await
+            .unwrap()
+        };
+        let outcome = settle_cancelled_workspace(
+            &db,
+            &exec_id,
+            crate::models::CancellationCleanupPolicy::RemoveIfClean,
+            workspace,
+            Some(repo.path().to_string_lossy().to_string()),
+        )
+        .await;
+
+        assert!(outcome.contains("clean checkout removed"), "{outcome}");
+        assert!(!std::path::Path::new(&path).exists());
+        assert!(!lane_target.exists(), "the lane target is removed with it");
+    }
+
+    /// What the DB-driven sweep tests share: an execution with a managed
+    /// worktree, its lane target stamped as provisioning does, and an
+    /// unmarked `wt-*` a human built.
+    struct LaneFixture {
+        repo: tempfile::TempDir,
+        db: Database,
+        exec_id: String,
+        path: String,
+        project_id: String,
+        lane_target: std::path::PathBuf,
+        human_target: std::path::PathBuf,
+    }
+
+    async fn lane_fixture() -> LaneFixture {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_task, _parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        let path = managed_worktree_path(&db, &exec_id).await;
+        let project_id = {
+            let eid = exec_id.clone();
+            db.with_conn(move |conn| {
+                crate::db::discussion_workspaces::get_managed_for_execution(conn, &eid)
+            })
+            .await
+            .unwrap()
+            .expect("workspace")
+            .project_id
+        };
+        let lane_target =
+            worktree::mark_lane_target(repo.path(), std::path::Path::new(&path), &exec_id).unwrap();
+        std::fs::create_dir_all(lane_target.join("debug")).unwrap();
+        std::fs::write(lane_target.join("debug/kronn"), vec![0u8; 2048]).unwrap();
+        // The principal's own integration target: a `wt-*` with no workspace
+        // row and no marker.
+        let human_target = repo.path().join("target/wt-0151-integration");
+        std::fs::create_dir_all(human_target.join("debug")).unwrap();
+        std::fs::write(human_target.join("debug/kronn"), b"hand built").unwrap();
+        LaneFixture {
+            repo,
+            db,
+            exec_id,
+            path,
+            project_id,
+            lane_target,
+            human_target,
+        }
+    }
+
+    impl LaneFixture {
+        async fn sweep(&self, scope: worktree::LaneSweepScope) -> worktree::LaneTargetSweep {
+            sweep_project_lane_targets(&self.db, &self.project_id, self.repo.path(), scope)
+                .await
+                .unwrap()
+        }
+
+        async fn cancel(&self) {
+            let eid = self.exec_id.clone();
+            self.db
+                .with_conn(move |conn| {
+                    crate::db::orchestration::cancel_execution_tree(
+                        conn,
+                        &eid,
+                        "test",
+                        &backend_actor(),
+                    )
+                })
+                .await
+                .unwrap();
+        }
+    }
+
+    /// KT-1256 — an unmarked `wt-*` is never Kronn's to delete, finished
+    /// execution or not: it is reported and left exactly as it was.
+    #[tokio::test]
+    async fn an_unmarked_wt_directory_survives_the_sweep() {
+        let fx = lane_fixture().await;
+        fx.cancel().await;
+
+        let sweep = fx
+            .sweep(worktree::LaneSweepScope::WorktreeGoneOrClean)
+            .await;
+
+        assert!(fx.human_target.join("debug/kronn").exists());
+        assert!(sweep.unmarked.contains(&fx.human_target), "{sweep:?}");
+        assert!(!sweep
+            .removed
+            .iter()
+            .any(|(_, r)| r.target_path == fx.human_target));
+    }
+
+    /// KT-1256 — a marked lane of an execution that is still alive stays.
+    #[tokio::test]
+    async fn a_marked_lane_of_a_live_execution_survives_the_sweep() {
+        let fx = lane_fixture().await;
+        assert!(!exec_of(&fx.db, &fx.exec_id).await.status.is_terminal());
+
+        let sweep = fx
+            .sweep(worktree::LaneSweepScope::WorktreeGoneOrClean)
+            .await;
+
+        assert!(fx.lane_target.join("debug/kronn").exists());
+        assert!(sweep.removed.is_empty(), "{sweep:?}");
+        assert_eq!(sweep.claimed.len(), 1, "{sweep:?}");
+        assert_eq!(sweep.claimed[0].0, fx.lane_target);
+    }
+
+    /// KT-1256 — a finished execution whose dirty worktree is preserved keeps
+    /// its lane target with it.
+    #[tokio::test]
+    async fn a_marked_lane_of_a_finished_execution_with_a_kept_dirty_worktree_survives() {
+        let fx = lane_fixture().await;
+        std::fs::write(
+            std::path::Path::new(&fx.path).join("work-in-progress.rs"),
+            "fn wip() {}\n",
+        )
+        .unwrap();
+        fx.cancel().await;
+        assert!(exec_of(&fx.db, &fx.exec_id).await.status.is_terminal());
+
+        let sweep = fx
+            .sweep(worktree::LaneSweepScope::WorktreeGoneOrClean)
+            .await;
+
+        assert!(fx.lane_target.join("debug/kronn").exists(), "{sweep:?}");
+        assert!(
+            sweep.removed.is_empty() && sweep.would_remove.is_empty(),
+            "{sweep:?}"
+        );
+        assert!(
+            sweep
+                .kept
+                .iter()
+                .any(|(path, reason)| path == &fx.lane_target && reason.contains("uncommitted")),
+            "{sweep:?}"
+        );
+        assert_eq!(lane_target_events(&fx.db, "lane_target_reclaimed").await, 0);
+    }
+
+    /// KT-1256 — DoD 2: a marked lane of a finished execution whose worktree
+    /// is gone is removed, reported by the dry run first, and audited.
+    #[tokio::test]
+    async fn a_marked_lane_of_a_finished_execution_with_a_removed_worktree_is_removed() {
+        let fx = lane_fixture().await;
+        fx.cancel().await;
+        worktree::remove_discussion_worktree(fx.repo.path(), &fx.path, true).unwrap();
+        assert!(!std::path::Path::new(&fx.path).exists());
+
+        let dry = fx.sweep(worktree::LaneSweepScope::ReportOnly).await;
+        assert_eq!(dry.would_remove.len(), 1, "{dry:?}");
+        assert!(dry.would_remove[0].1.bytes_reclaimed > 0);
+        assert!(fx.lane_target.exists(), "a dry run deletes nothing");
+
+        // Boot's scope: the worktree is gone, so the lane goes.
+        let sweep = fx.sweep(worktree::LaneSweepScope::WorktreeGone).await;
+
+        assert!(!fx.lane_target.exists(), "{sweep:?}");
+        assert_eq!(sweep.removed.len(), 1, "{sweep:?}");
+        assert!(sweep.bytes_removed() > 0);
+        assert!(fx.human_target.exists(), "the unmarked target is untouched");
+        assert_eq!(
+            lane_target_events(&fx.db, "lane_target_reclaimed").await,
+            1,
+            "the removal is audited against the execution the marker names"
+        );
+    }
+
+    /// KT-1256 — an execution the database has never heard of is not proof of
+    /// anything: its marked lane stays.
+    #[tokio::test]
+    async fn a_marked_lane_whose_execution_is_unknown_survives_the_sweep() {
+        let fx = lane_fixture().await;
+        let ghost = fx.repo.path().join(".kronn/worktrees/task-kt-ghost-0000");
+        let ghost_lane =
+            worktree::mark_lane_target(fx.repo.path(), &ghost, "no-such-execution").unwrap();
+
+        let sweep = fx
+            .sweep(worktree::LaneSweepScope::WorktreeGoneOrClean)
+            .await;
+
+        assert!(ghost_lane.exists(), "{sweep:?}");
+        assert!(
+            sweep
+                .claimed
+                .iter()
+                .any(|(path, reason)| path == &ghost_lane && reason.contains("not in the database")),
+            "{sweep:?}"
+        );
+    }
+
+    /// KT-1256 — the named reclaim re-judges each path: it takes a finished
+    /// execution's clean-worktree lane and refuses an unmarked one.
+    #[tokio::test]
+    async fn a_named_reclaim_takes_only_what_the_sweep_would() {
+        let fx = lane_fixture().await;
+        fx.cancel().await;
+
+        let outcomes = reclaim_named_lane_targets(
+            &fx.db,
+            &fx.project_id,
+            fx.repo.path(),
+            vec![fx.human_target.clone(), fx.lane_target.clone()],
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            outcomes[0].1,
+            worktree::LaneTargetOutcome::Unmarked
+        ));
+        assert!(matches!(
+            outcomes[1].1,
+            worktree::LaneTargetOutcome::Removed(..)
+        ));
+        assert!(fx.human_target.exists());
+        assert!(!fx.lane_target.exists());
+        assert_eq!(lane_target_events(&fx.db, "lane_target_reclaimed").await, 1);
+    }
+
+    /// KT-1256 — provisioning stamps the lane it creates, so a later sweep can
+    /// prove the directory is Kronn's.
+    #[tokio::test]
+    async fn provisioning_a_claude_worker_marks_its_lane_target() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let runner = HeldFirstBuild::succeeding();
+        let _release = ReleaseOnDrop(runner.clone());
+        let launched = launch_with_cargo_crate(&db, repo.path(), runner.clone(), "lane-mark").await;
+        runner.release();
+        wait_for_status(&db, &launched.id, TaskExecutionStatus::Working).await;
+
+        let owners = worktree::lane_target_owners(repo.path());
+
+        assert_eq!(owners.len(), 1, "{owners:?}");
+        assert_eq!(owners[0].execution_id, launched.id);
     }
 
     /// KT-402 — the undelivered-worker notice's deterministic id exists so a

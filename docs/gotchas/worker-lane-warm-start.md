@@ -67,7 +67,12 @@ smoke check nor the dispatch happens.
 - The gate governs Kronn's first build only. Builds a worker later runs itself
   are capped by `CARGO_BUILD_JOBS` alone, so several workers compiling at once
   can still load the host.
-- Lane targets are never cleaned up; `target/wt-*` grows with every task.
+- A lane target is removed with its clean worktree (integration, `RemoveIfClean`
+  cancellation) and swept at boot only when it carries `.kronn-lane.json`, its
+  execution is finished and its worktree is gone. A lane whose worktree is kept
+  dirty stays, and a lane provisioned before KT-1256 has no marker and is only
+  reported (`GET /api/maintenance/lane-targets`). `target/wt-*` therefore still
+  grows until those are reclaimed by name.
 - The first build runs outside the sandbox on the worktree as it is at warm-up.
   It is pristine on a first launch, but a relaunched lane whose `Cargo.lock`
   changed is built from worker-modified sources (build scripts, proc macros).

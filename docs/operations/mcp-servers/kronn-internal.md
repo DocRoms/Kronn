@@ -259,7 +259,7 @@ thread again: ask before renaming a room you did not open.
    The worker of a live task execution is shown from the execution itself and
    is not removable here.
    `[src: file: backend/scripts/disc-introspection-mcp.py:4971-4988#call_task_assign]`
-   `[src: file: backend/src/db/planning.rs:996-1034#actor_assignee]`
+   `[src: file: backend/src/db/planning.rs:1166-1204#actor_assignee]`
    `proposal_list` and `proposal_get` expose the human validation inbox as
    read-only context; no MCP tool can accept or reject a proposal.
    `[src: file: backend/scripts/disc-introspection-mcp.py:4712-4756#call_proposal_get]`
@@ -443,7 +443,7 @@ before anything is created, so a bad gate is no longer found at integration,
 after the worker delivered and the review passed. The contract is served by
 `tool_manual({tool: "task_exec_prepare"})`.
 `[src: file: backend/src/core/quick_exec.rs:50-64#ALLOWED_BINARIES]` `[src: file: backend/src/core/quick_exec.rs:300-345#check_command_line]`
-`[src: file: backend/src/api/orchestration.rs:7934-7944#validations_refusal]`
+`[src: file: backend/src/api/orchestration.rs:7997-8007#validations_refusal]`
 
 To correct the gates of an execution that already exists, the principal calls
 `task_exec_reassign({task_execution_id, validations, reason})` — `validations`
@@ -461,7 +461,7 @@ because that tool is already the principal's amendment of a live execution:
 principal-only, reason-journaled, room and evidence kept. `task_exec_review` would
 have let a self-reviewing worker weaken its own gates and ties the swap to the
 persisted `ReviewDecision v1`; `task_exec_prepare` is documented as mutation-free.
-`[src: file: backend/src/api/orchestration.rs:10274-10302#execution_amendment]`
+`[src: file: backend/src/api/orchestration.rs:10337-10365#execution_amendment]`
 
 The worker brief of a worker with a shell says who runs which gates: the worker
 runs the TARGETED tests, the long validations the principal persisted are played
@@ -478,9 +478,9 @@ decision, or an approved integration held on a coded cause. The principal may th
 the parent checkout and recorded SHAs, refuses dirty or unrelated states, and
 returns the existing terminal result when the same successful resume is
 retried. The tool cannot advance provisioning- or review-owned checkpoints.
-[src: file: backend/src/api/orchestration.rs:11686-11712#compact_next_action]
-[src: file: backend/src/api/orchestration.rs:8979-8992#resume_blocked_apply]
-[src: file: backend/src/api/orchestration.rs:11972-12015#task_exec_resume]
+[src: file: backend/src/api/orchestration.rs:11749-11775#compact_next_action]
+[src: file: backend/src/api/orchestration.rs:9042-9055#resume_blocked_apply]
+[src: file: backend/src/api/orchestration.rs:12035-12078#task_exec_resume]
 [src: file: backend/scripts/disc-introspection-mcp.py:6154-6232#call_task_exec_resume]
 
 An approved delivery the integration sends back (a red validation, a merge
@@ -497,7 +497,7 @@ candidate are not run again. The relaunched worker is stood down first, and the
 call is refused once the worker committed or left changes since the send-back,
 or delivered again (that delivery is reviewed instead). Attempts stay monotonic:
 the re-validation does not rewind the attempt the send-back opened.
-[src: file: backend/src/api/orchestration.rs:3786-3793#send_back] [src: file: backend/src/api/orchestration.rs:9055-9141#revalidate_sent_back_execution]
+[src: file: backend/src/api/orchestration.rs:3786-3793#send_back] [src: file: backend/src/api/orchestration.rs:9118-9204#revalidate_sent_back_execution]
 [src: file: backend/src/db/orchestration.rs:3826-3900#reopen_approval_after_rework]
 
 `task_exec_status({view: "compact"})` returns id, task, status, attempt,
@@ -529,7 +529,7 @@ integration refusal, campaign pause, undelivered worker, terminal state)
 address the joined CLI that last launched, reviewed, resumed or reassigned it
 while that session remains in the room, so its `disc_wait_for_peer` wakes on
 them; without such a session they address the room's configured agent.
-`[src: file: backend/src/api/orchestration.rs:11565-11617#wait_for_execution_status]`
+`[src: file: backend/src/api/orchestration.rs:11628-11680#wait_for_execution_status]`
 `[src: file: backend/src/db/orchestration.rs:4442-4485#principal_notice_target]`
 
 When the worker identity is not already known, call `agent_list()` first and
@@ -558,7 +558,7 @@ human pasting a connection id. The two delegation tools keep that guard.
 alias or display name; a name two connections share is refused rather than
 guessed, and every refusal lists the connections that can generate the
 modality asked for, with their ids.
-[src: file: backend/src/api/orchestration.rs:10912-10957#MediaModality] [src: file: backend/src/api/media.rs:150-205#ConnectionReference]
+[src: file: backend/src/api/orchestration.rs:10975-11020#MediaModality] [src: file: backend/src/api/media.rs:150-205#ConnectionReference]
 [src: file: backend/src/db/external_api_connections.rs:131-160#resolve]
 
 The catalogue reports `configured` and `reachable`
@@ -605,13 +605,13 @@ A running audit does not defer the reload: it runs detached on the
 backend and the bridge only subscribes to its SSE. Retry the refused mutation once with the same idempotency
 key. If preflight, handoff or reexec fails, the bridge stops automatic attempts and
 reports one precise manual reconnect/recovery action instead.
-`[src: file: backend/scripts/disc-introspection-mcp.py:10552-10561#_require_fresh_bridge]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:11365-11385#_bridge_stale_result]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:11149-11173#_schedule_bridge_reload]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:11184-11245#_perform_scheduled_bridge_reload]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10566-10575#_require_fresh_bridge]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:11379-11399#_bridge_stale_result]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:11163-11187#_schedule_bridge_reload]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:11198-11259#_perform_scheduled_bridge_reload]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:2859-2888#_restore_reload_handoff]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:11350-11358#_close_inherited_reload_artifact]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:11995-12008#list_changed]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:11364-11372#_close_inherited_reload_artifact]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:12021-12034#list_changed]`
 `[src: file: backend/scripts/test_disc_introspection_mcp.py:8385-8401#test_reload_is_not_deferred_by_a_detached_full_audit]`
 
 The replacement process restores the room and durable read cursor through the
@@ -620,8 +620,8 @@ identical contents is not stale. `task_exec_status` remains available for
 recovery; every orchestration mutation stays fail-closed until the fresh bridge
 is ready.
 `[src: file: backend/scripts/disc-introspection-mcp.py:4040-4058#_attempt_resume]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:10538-10549#_bridge_freshness]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:10563-10578#_GUARDED_ORCHESTRATION_TOOLS]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10552-10563#_bridge_freshness]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10577-10592#_GUARDED_ORCHESTRATION_TOOLS]`
 
 The first transition to this fingerprinted bridge cannot be self-protected by a
 process that loaded the preceding schema. After upgrading to 0.11.0, reconnect
@@ -654,7 +654,7 @@ refusal. Planning event rows separately persist `actor_session_id`, so two
 concurrent sessions of the same provider remain distinguishable in the audit
 trail.
 `[src: file: backend/scripts/disc-introspection-mcp.py:5694-5709#_task_exec_identity]`
-`[src: file: backend/src/api/orchestration.rs:10328-10338#principal_cli_is_authorized]`
+`[src: file: backend/src/api/orchestration.rs:10391-10401#principal_cli_is_authorized]`
 `[src: file: backend/src/api/agent_tools.rs:3787-3823#native_execution_for_caller]`
 `[src: file: backend/src/db/sql/136_planning_actor_session.sql:1-5#actor_session_id]`
 
@@ -686,14 +686,14 @@ input schema — the model supplies only `offer_id`; there is no fallback to
 agent-type/alias matching or any other permissive resolution if either is missing.
 [src: file: backend/src/api/orchestration.rs:4439-4459#accept_worker_offer_and_attach]
 [src: file: backend/src/api/orchestration.rs:4577-4595#worker_cli_session_id]
-[src: file: backend/src/api/orchestration.rs:12360-12372#source_binding_session_id]
+[src: file: backend/src/api/orchestration.rs:12423-12435#source_binding_session_id]
 [src: file: backend/scripts/disc-introspection-mcp.py:6288-6323#call_task_exec_accept_worker_offer]
 
 `task_exec_deliver` does not perform a room return: the execution transitions to
 `AwaitingReview` while the CLI is already in its principal room. The legacy
 terminal return remains only as compatibility for executions accepted by older
 bridges that physically moved a session into a child room.
-[src: file: backend/src/api/orchestration.rs:25538-25542#every_terminal_state_keeps_execution_scoped_cli_in_its_origin]
+[src: file: backend/src/api/orchestration.rs:25610-25614#every_terminal_state_keeps_execution_scoped_cli_in_its_origin]
 [src: file: backend/src/db/cli_worker_bindings.rs:78-165#return_to_origin]
 
 Collapsing the live and reload-stable identities, as an earlier revision did,
@@ -704,7 +704,7 @@ and fails the request explicitly (`source_agent, source_session_id, and
 source_binding_session_id are required`), not silently with a stale or wrong
 attach. If `task_exec_accept_worker_offer` refuses this way, reconnect the
 `kronn-internal` MCP server for that session before retrying.
-`[src: file: backend/src/api/orchestration.rs:12360-12372#source_binding_session_id]`
+`[src: file: backend/src/api/orchestration.rs:12423-12435#source_binding_session_id]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:6303-6328#source_binding_session_id]`
 
 `task_exec_reassign(reason)` persists the reason and includes it verbatim in
@@ -762,7 +762,7 @@ discussion/task capability reaches that run immediately without rewriting
 shared config or leaking unrelated host variables.
 `[src: file: backend/src/agents/runner.rs:12657-12706#claude_task_worker_mcp_config]` `[src: file: backend/src/agents/runner.rs:2631-2659#KRONN_INTERNAL_CODEX_ENV_VARS]`
 `[src: file: backend/src/api/discussions/streaming.rs:148-233#cli_task_worker_context]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:5795-5829#_spawned_task_worker_context]` `[src: file: backend/scripts/disc-introspection-mcp.py:11848-11861#_spawned_task_worker_mode]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:5795-5829#_spawned_task_worker_context]` `[src: file: backend/scripts/disc-introspection-mcp.py:11862-11875#_spawned_task_worker_mode]`
 
 Native HTTP workers can finish the Git side of that contract without receiving
 a shell. Their catalogue includes `git_commit`, but execution is refused unless
@@ -986,7 +986,7 @@ summaries, and `workflow_run_get` truncates step outputs. `task_list`,
   durable-key overrides are refused before HTTP. A missing joined session is
   an error, never a reason to select another participant or reassign a worktree.
   Restore this caller's binding before retrying; do not substitute a peer's id.
-  `[src: file: backend/scripts/disc-introspection-mcp.py:6598-6623#_workspace_identity]`
+  `[src: file: backend/scripts/disc-introspection-mcp.py:6600-6625#_workspace_identity]`
   `[src: file: backend/src/api/disc_workspace.rs:234-259#session_context]`
 - Call `disc_workspace_set({task_ref: "KT-140"})` from the worktree root (or
   pass an explicit `workspace_path`) whenever the CLI changes worktree or
@@ -1196,7 +1196,7 @@ the other manuals. Native tools read the same registry that the MCP bridge
 fetches through `GET /api/signals/catalog`; the bridge fails explicitly if that
 read fails, rather than substituting a stale local schema.
 [src: file: backend/src/api/signal_catalog.rs:10-18#catalogue]
-[src: file: backend/scripts/disc-introspection-mcp.py:10518-10529#TOOL_MANUALS]
+[src: file: backend/scripts/disc-introspection-mcp.py:10532-10543#TOOL_MANUALS]
 
 Version 1 describes the `kronn-action` Markdown fence for existing Quick Prompts,
 Quick APIs, Quick Execs and workflows. It includes target-discovery tools, a

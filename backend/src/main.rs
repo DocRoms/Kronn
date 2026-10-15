@@ -426,6 +426,7 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     if orchestration_recovery.interrupted > 0
         || !orchestration_recovery.deferred_resumes.is_empty()
         || orchestration_recovery.orphan_workspaces_removed > 0
+        || orchestration_recovery.orphan_lane_targets_removed > 0
         || !orchestration_recovery.errors.is_empty()
     {
         tracing::warn!(
@@ -435,9 +436,18 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
             deferred = orchestration_recovery.deferred_resumes.len(),
             orphans_removed = orchestration_recovery.orphan_workspaces_removed,
             orphans_preserved = orchestration_recovery.orphan_workspaces_preserved,
+            lane_targets_removed = orchestration_recovery.orphan_lane_targets_removed,
+            lane_targets_preserved = orchestration_recovery.orphan_lane_targets_preserved,
+            lane_target_bytes = orchestration_recovery.orphan_lane_target_bytes,
+            lane_targets_unmarked = orchestration_recovery.lane_targets_unmarked,
             errors = ?orchestration_recovery.errors,
             "Task orchestration boot reconciliation completed"
         );
+    }
+    // KT-1256 — the lane-target sweep's readable view: what boot removed, what
+    // it would remove, what it kept and which `target/wt-*` are not Kronn's.
+    for line in &orchestration_recovery.lane_target_report {
+        tracing::info!("lane targets: {line}");
     }
     kronn::api::orchestration::start_resilience_watchdog(state.clone());
 
@@ -735,10 +745,7 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     // below never holds the single DB connection.
     {
         let db = state.db.clone();
-        match db
-            .with_conn(|conn| kronn::db::projects::list_projects(conn))
-            .await
-        {
+        match db.with_conn(kronn::db::projects::list_projects).await {
             Ok(projects) => {
                 let cleanup = tokio::task::spawn_blocking(move || {
                     for p in &projects {

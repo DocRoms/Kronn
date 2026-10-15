@@ -497,6 +497,21 @@ Release notes for 0.9.3 and earlier are available in the
   `build.rs` cannot push keystrokes (`TIOCSTI`) into the operator's shell when
   the backend runs in a terminal.
 
+- A task worker's lane target (`target/wt-<lane>`) is removed with its clean
+  worktree (KT-1256). It lives outside the worktree, so integration and
+  cancellation never took it, and each one is a copy-on-write clone of the main
+  target that turns into real disk once the main target is rebuilt. Kronn now
+  stamps every lane it provisions with `.kronn-lane.json` (the execution it was
+  made for) and only ever deletes a stamped lane: a `wt-*` directory without
+  the marker (a human's or another tool's) is reported and never touched. At
+  boot a stamped lane is removed only when its execution is finished and its
+  worktree is gone; a finished execution's dirty, preserved worktree keeps its
+  lane. A running Cargo build always refuses. `GET /api/maintenance/lane-targets`
+  is the dry run (what is reclaimable, claimed, kept or not Kronn's, with
+  sizes), `POST /api/maintenance/lane-targets/reclaim` removes the named lanes
+  after re-judging each, and the boot report lists the same. Every removal is
+  audited as `lane_target_reclaimed` / `lane_target_refused`.
+
 - The default-docs-root golden no longer depends on the day it runs: the
   compact date every step prompt opens with is masked like the dashed one.
 
