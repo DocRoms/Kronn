@@ -2137,7 +2137,7 @@ fn condition_description(keyword: &str) -> &str {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::models::{ConditionAction, StepConditionRule};
@@ -2950,7 +2950,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod drive_agent_to_output_tests {
     //! Unit tests for the workflow Agent-step consumption loop, driven by a
     //! scripted `AgentIo` (0.8.8 test-seam). Pins text/token accumulation,
@@ -3302,15 +3302,15 @@ mod drive_agent_to_output_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "steps_provenance_test.rs"]
 mod provenance_tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "steps_attempt_session_test.rs"]
 mod attempt_session_tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod http_native_tool_step_tests {
     use super::*;
     use crate::agents::tools::{ToolCall, ToolExecutor, ToolOutcome};

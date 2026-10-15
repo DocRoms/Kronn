@@ -254,7 +254,7 @@ pub(super) fn check_attempt(
     Ok(blocking)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

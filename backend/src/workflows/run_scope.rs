@@ -33,7 +33,7 @@ pub fn page_projects(
     Ok(projects)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

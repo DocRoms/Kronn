@@ -752,7 +752,7 @@ fn pick_option(options: &[Value], preferred_kinds: &[&str]) -> Option<String> {
     None
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

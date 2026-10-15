@@ -339,6 +339,6 @@ pub struct UploadContextFileResponse {
     pub suggested_skills: Vec<String>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "tests.rs"]
 mod tests;

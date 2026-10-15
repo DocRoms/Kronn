@@ -4478,7 +4478,7 @@ fn resolve_host_path(path: &str) -> String {
 
 // ─── Tests for Phase-3 host_sync (merge logic) ───────────────────────────────
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod inject_context_tests {
     use super::should_inject_mcp_context;
 
@@ -4509,7 +4509,7 @@ mod inject_context_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod host_sync_tests {
     use super::*;
     use serial_test::serial;

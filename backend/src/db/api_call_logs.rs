@@ -360,7 +360,7 @@ pub fn get(conn: &Connection, id: &str) -> rusqlite::Result<Option<ApiCallLog>> 
     .optional()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::db::migrations;

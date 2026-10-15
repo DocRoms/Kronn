@@ -962,7 +962,7 @@ fn has_visible_files(dir: &Path) -> bool {
     false
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     /// Test-only stand-in for the removed global walk: enumerates the
     /// fixture's docs/*.md + root redirectors and prefills THAT list —

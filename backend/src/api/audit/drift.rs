@@ -1448,7 +1448,7 @@ pub(crate) async fn finalize_partial_run(
     }).await.map_err(|e| format!("terminal write failed: {e}"))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod partial_finalize_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};

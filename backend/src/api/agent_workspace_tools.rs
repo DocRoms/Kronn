@@ -2174,7 +2174,7 @@ pub fn list_files_payload(
     }))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use wiremock::matchers::{method, path};
@@ -3988,7 +3988,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod real_repo_probe {
     use super::*;
 

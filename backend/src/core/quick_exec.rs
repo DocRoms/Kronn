@@ -940,6 +940,6 @@ pub fn prune_artifacts(dir: &Path, max_total_bytes: u64) -> Result<usize> {
     Ok(removed)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "quick_exec_test.rs"]
 mod quick_exec_test;

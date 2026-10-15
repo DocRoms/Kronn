@@ -20,6 +20,14 @@ path = "src/main.rs"
 name = "it"
 path = "tests/it.rs"
 
+[features]
+# `full-tests` (default) compiles every unit-test module. The macOS portability
+# job turns it off (`--no-default-features`) and compiles only the four suites
+# it runs: the full lib-test binary (9 200 tests) needs more memory than the
+# 7 GB GitHub macOS runner has and spends its time swapping.
+default = ["full-tests"]
+full-tests = []
+
 [dependencies]
 # Web framework
 axum = { version = "0.8", features = ["ws", "macros", "multipart"] }

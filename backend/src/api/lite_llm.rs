@@ -616,7 +616,7 @@ pub async fn retry_model(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use serial_test::serial;

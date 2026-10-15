@@ -361,7 +361,7 @@ each diff below and apply it by hand if you agree with it.\n"
     out
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use std::fs;
@@ -1008,7 +1008,7 @@ pub fn evaluate_enforce_gate(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod enforce_gate_tests {
     use super::*;
 

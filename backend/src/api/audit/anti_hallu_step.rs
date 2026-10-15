@@ -283,7 +283,7 @@ fn insert_new(content: &str) -> (String, AntiHalluApplyResult) {
     (out, AntiHalluApplyResult::Inserted)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

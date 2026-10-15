@@ -3357,7 +3357,7 @@ pub async fn browse(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::core::config;
@@ -5477,7 +5477,7 @@ debug_mode = false
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod frontend_origin_tests {
     use super::normalize_origin_list;
 

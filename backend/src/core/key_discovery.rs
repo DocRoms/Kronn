@@ -235,7 +235,7 @@ pub fn write_gemini_key(key: Option<&str>) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use serial_test::serial;

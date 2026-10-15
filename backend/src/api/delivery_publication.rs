@@ -546,7 +546,7 @@ fn parse_rfc3339(value: &str) -> Option<DateTime<Utc>> {
         .map(|parsed| parsed.with_timezone(&Utc))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::{

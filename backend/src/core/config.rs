@@ -968,7 +968,7 @@ pub async fn is_first_run() -> Result<bool> {
     Ok(key_only_file(&content).ok().flatten().is_some())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

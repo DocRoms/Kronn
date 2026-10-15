@@ -632,7 +632,7 @@ fn template_source_for(target_file: &str) -> Option<PathBuf> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use serial_test::serial;

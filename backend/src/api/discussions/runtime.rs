@@ -1232,7 +1232,7 @@ pub(crate) fn render_chain_qp_prompt(
     out
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod chain_render_tests {
     use super::{
         dispatch_target_tier, persist_dispatch_settlement, render_chain_qp_prompt,

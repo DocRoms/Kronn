@@ -460,10 +460,10 @@ pub(super) fn run_model_label(observed: &[String], configured: Option<&str>) -> 
         .map(|model| format!("{model} (configured)"))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "agent_launch_tests.rs"]
 mod tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "agent_launch_acp_tests.rs"]
 mod acp_tests;

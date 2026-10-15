@@ -52,7 +52,7 @@ pub fn replace_snapshot(conn: &Connection, project_id: &str, current: &ContextAu
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::core::context_audit::{audit_repo, drift};

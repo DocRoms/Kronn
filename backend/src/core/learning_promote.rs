@@ -121,7 +121,7 @@ pub fn promote_to_file(target: &Path, learning: &Learning, roots: &[&Path]) -> R
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::models::learnings::{Evidence, Learning, LearningKind, LearningStatus};

@@ -2666,7 +2666,7 @@ async fn until_fetch_unentitled(state: &AppState, caller_code: &str, disc_id: &s
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::core::config::default_config;

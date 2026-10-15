@@ -236,7 +236,7 @@ pub fn redact_url_query(url: &Url) -> String {
     s.trim_end_matches('?').to_string()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

@@ -356,7 +356,7 @@ impl SharedBudget {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod shared_budget_deadline_tests {
     use super::SharedBudget;
 
@@ -4849,7 +4849,7 @@ fn interrupted_step_tokens(step_type: &StepType) -> Option<u64> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 
@@ -10495,7 +10495,7 @@ mod tests {
     mod workflow_safety_runs;
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod preflight_validation_tests {
     use crate::models::AgentType;
 

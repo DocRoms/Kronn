@@ -2486,6 +2486,6 @@ pub fn scope_response(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "bridge_token_test.rs"]
 mod bridge_token_test;

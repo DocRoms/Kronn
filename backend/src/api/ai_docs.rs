@@ -1479,7 +1479,7 @@ pub async fn read_doc_asset(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

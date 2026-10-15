@@ -305,7 +305,7 @@ pub(crate) async fn resync_project_assets(state: &AppState, project_id: &str) {
         .await;
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

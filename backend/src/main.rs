@@ -942,7 +942,7 @@ async fn shutdown_signal() {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

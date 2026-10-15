@@ -1,5 +1,12 @@
 // Test fixtures may start processes directly; production code cannot (clippy.toml).
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
+// Without `full-tests` (the macOS portability job) most unit-test modules are
+// configured out, so test-only helpers that remain `cfg(test)` go unused.
+// Scoped to test builds: production code keeps both lints with any feature set.
+#![cfg_attr(
+    all(test, not(feature = "full-tests")),
+    allow(dead_code, unused_imports)
+)]
 
 pub mod acp;
 pub mod agents;
@@ -11,7 +18,7 @@ pub mod http_transport;
 pub mod models;
 pub mod workflows;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod api_tests;
 
 use axum::{
@@ -3158,7 +3165,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
     router.with_state(state)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod audit_tracker_tests {
     use super::AuditTracker;
 
@@ -3343,7 +3350,7 @@ mod audit_tracker_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod cancel_guard_tests {
     use super::CancelGuard;
     use std::collections::HashMap;
@@ -3371,7 +3378,7 @@ mod cancel_guard_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod auth_tests {
     use super::{auth_allows, auth_locked_allows, is_local_ip};
     use axum::http::Method;
@@ -3643,7 +3650,7 @@ mod auth_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod startup_config_tests {
     use super::*;
     use chrono_tz::Tz;

@@ -735,7 +735,7 @@ pub fn manifest_to_decisions(
     out
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::workflows::template;

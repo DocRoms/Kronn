@@ -3,7 +3,7 @@
 /// Each test spins up a real Axum router backed by an in-memory SQLite database,
 /// sends HTTP requests via `tower::ServiceExt::oneshot`, and asserts on the JSON
 /// responses — exactly the same way Axum's own examples do it.
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};

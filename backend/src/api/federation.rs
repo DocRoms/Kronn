@@ -561,7 +561,7 @@ pub async fn fetch_and_store_attachment(
     });
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::core::config::default_config;
@@ -708,7 +708,7 @@ pub(crate) fn b64_len_within_cap(b64_len: usize, cap: usize) -> bool {
     b64_len <= cap.saturating_mul(4) / 3 + 1024
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod transfer_cap_tests {
     use super::*;
 

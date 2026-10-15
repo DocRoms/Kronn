@@ -231,7 +231,7 @@ pub const MAX_OBSERVATION_AGE: Duration = Duration::from_secs(60);
 pub static SHARED: LazyLock<ReachabilityCache> =
     LazyLock::new(|| ReachabilityCache::new(CACHE_TTL));
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

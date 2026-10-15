@@ -2114,7 +2114,7 @@ fn deno_roles(args: &[String], tainted: &[bool], depth: usize) -> Vec<Role> {
     roles
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::core::inline_code::{first_unsafe_placeholder, rendered_refusal, InlineFinding};

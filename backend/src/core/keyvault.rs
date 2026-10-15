@@ -422,7 +422,7 @@ impl KeyStore {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use serial_test::serial;

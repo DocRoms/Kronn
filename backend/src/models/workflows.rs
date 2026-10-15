@@ -2673,7 +2673,7 @@ pub struct TestStepRequest {
     pub dry_run: bool,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod step_deserialization_tests {
     use super::*;
 

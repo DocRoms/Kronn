@@ -517,7 +517,7 @@ pub fn delete_project_discussions(conn: &Connection, project_id: &str) -> Result
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod dependency_monitoring_tests {
     use super::*;
     use crate::db::migrations;

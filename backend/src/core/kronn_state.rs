@@ -422,6 +422,6 @@ pub fn restore_from_git_history(project_path: &Path, commit: &str) -> Result<(),
     crate::core::mcp_scanner::atomic_write_bytes(&target, &content)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "kronn_state_test.rs"]
 mod tests;

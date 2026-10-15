@@ -290,7 +290,7 @@ pub fn parse_proposal_items(json: &str) -> Option<Vec<ParsedProposalItem>> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod parse_tests {
     use super::*;
 
@@ -602,7 +602,7 @@ pub fn list_proposals(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod ingest_tests {
     use super::*;
 
@@ -1205,7 +1205,7 @@ fn current_aggregate(conn: &Connection, proposal_id: &str) -> Result<ProposalAgg
         .ok_or_else(|| anyhow::anyhow!("invalid proposal aggregate state `{s}`"))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod decision_tests {
     use super::*;
 

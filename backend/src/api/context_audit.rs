@@ -381,7 +381,7 @@ pub async fn accept_project_context_baseline(
     }))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use axum::extract::{Path as AxPath, State};

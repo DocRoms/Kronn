@@ -707,7 +707,7 @@ pub fn mime_from_extension(filename: &str) -> &'static str {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 
@@ -1350,7 +1350,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod federated_storage_tests {
     use super::*;
 

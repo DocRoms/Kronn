@@ -1926,7 +1926,7 @@ fn load_grouped_by_task<'a>(
     Ok(grouped)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::db::migrations;

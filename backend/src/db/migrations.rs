@@ -1444,7 +1444,7 @@ pub(crate) fn run_through(conn: &Connection, stop_after: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

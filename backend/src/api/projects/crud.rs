@@ -1147,7 +1147,7 @@ pub async fn remap_path(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod linked_repos_candidates_tests {
     use super::*;
 
@@ -1218,7 +1218,7 @@ mod linked_repos_candidates_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod bidirectional_link_tests {
     use super::*;
     use crate::models::{AiAuditStatus, AiConfigStatus};

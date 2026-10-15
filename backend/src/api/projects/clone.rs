@@ -532,7 +532,7 @@ pub async fn clone_and_remap(
     }))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod clone_auth_tests {
     use super::*;
 

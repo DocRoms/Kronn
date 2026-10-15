@@ -178,7 +178,7 @@ They are NOT shared with peers via Kronn's P2P system unless you explicitly
 opt in (no current path for that — would land as a future feature).
 "#;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use serial_test::serial;
