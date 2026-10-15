@@ -92,6 +92,7 @@ pub async fn list(
 fn load_detail(
     conn: &rusqlite::Connection,
     id: &str,
+    rooms: &crate::workflows::step_room::WorkflowStepRooms,
 ) -> anyhow::Result<Option<crate::models::DiscussionDetail>> {
     let id = id.to_string();
     let Some(discussion) = crate::db::discussions::get_discussion(conn, &id)? else {
@@ -99,8 +100,13 @@ fn load_detail(
     };
     let active_agent_dispatches =
         crate::db::agent_dispatch::list_active_for_discussion(conn, &id, &discussion.agent)?;
-    let active_workflow_steps =
-        crate::db::workflow_step_rooms::list_active_for_discussion(conn, &id)?;
+    // KT-1252 — the persisted steps, with their live-progress run and the
+    // runs that will enter this room once their preparation is done.
+    let active_workflow_steps = rooms.project(
+        conn,
+        &id,
+        crate::db::workflow_step_rooms::list_active_for_discussion(conn, &id)?,
+    );
     let workflow_step_authors = crate::db::workflow_step_rooms::message_authors(conn, &id)?;
     let partial_response =
         crate::db::discussions::get_in_flight_agent_response(conn, &id, &discussion.agent)?;
@@ -137,7 +143,12 @@ pub async fn get(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<crate::models::DiscussionDetail>> {
-    match state.db.with_conn(move |conn| load_detail(conn, &id)).await {
+    let rooms = state.workflow_step_rooms.clone();
+    match state
+        .db
+        .with_conn(move |conn| load_detail(conn, &id, &rooms))
+        .await
+    {
         Ok(Some(d)) => Json(ApiResponse::ok(d)),
         Ok(None) => Json(ApiResponse::err("Discussion not found")),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
@@ -189,10 +200,11 @@ pub async fn poll(
     Path(id): Path<String>,
     Query(query): Query<DiscussionPollQuery>,
 ) -> Json<ApiResponse<DiscussionPoll>> {
+    let rooms = state.workflow_step_rooms.clone();
     let loaded = state
         .db
         .with_conn(move |conn| {
-            let Some(detail) = load_detail(conn, &id)? else {
+            let Some(detail) = load_detail(conn, &id, &rooms)? else {
                 return Ok(None);
             };
             let value = serde_json::to_value(&detail)?;
@@ -1287,7 +1299,14 @@ mod tests {
                     Some("sess-claude"),
                     "peer",
                 )?;
-                Ok((claude, load_detail(conn, "d-unknown")?))
+                Ok((
+                    claude,
+                    load_detail(
+                        conn,
+                        "d-unknown",
+                        &crate::workflows::step_room::WorkflowStepRooms::default(),
+                    )?,
+                ))
             })
             .await
             .unwrap();

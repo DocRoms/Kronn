@@ -31,6 +31,17 @@ pub struct ActiveWorkflowStep {
     pub identity: WorkflowStepIdentity,
     pub agent_type: AgentType,
     pub started_at: String,
+    /// KT-1252 — the `run_id` of the room's live `AgentRunProgress` frames for
+    /// this step: the bubble reads the run's phase and tool activity from the
+    /// run-progress store under it. Absent while the step has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub progress_run_id: Option<String>,
+    /// KT-1252 — the run targets this room but its agent has not entered it
+    /// yet. `step_*` then name the step the run executes now (the preparation),
+    /// and `agent_type` the agent about to enter.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub preparing: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

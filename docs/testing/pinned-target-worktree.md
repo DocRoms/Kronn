@@ -39,3 +39,24 @@ Formatting, diff hygiene and strict all-target clippy also passed.
 These are disposable Git/SQLite tests. They do not mutate the operator's
 checkout or prove that an already-running backend has loaded the new binary.
 Full-release qualification remains a separate gate.
+
+## Target checked out nowhere (KT-835)
+
+`integration_target` resolves one of two shapes. *Checked out once* keeps the
+behaviour above, unchanged. *Not checked out* (no worktree has the branch) reads
+the tip from `refs/heads/<branch>`, has no working tree to be dirty, and phase 2
+is `is_ancestor(expected_tip, candidate)` then
+`git update-ref -m <reason> refs/heads/<branch> <candidate> <expected_tip>`: git
+refuses when the ref moved since the review (the compare-and-swap), and the ref
+is read back afterwards. No checkout's working tree or index is read or written.
+Several checkouts are still refused.
+
+The shape is read again inside `fast_forward_target_to`, so a target that became
+checked out between phases takes the checkout guards (a ref moved under a
+checkout would leave its index and files stale). Every recovery path classifies
+"not checked out" as clean: `integration_recovery_decision`, the
+`run_integration` preflight, `finish_recovered_apply` and `resume_blocked_apply`
+(rebuild on drift, idempotent close when the candidate already landed, apply when
+the tip is still the pinned one). Tests: `unchecked_out_target_*` in
+`core::worktree::tests` and `an_unchecked_out_target_*` in
+`api::orchestration::tests`.

@@ -121,8 +121,7 @@ after pushing), CI Verdict re-runs it once and repeats the new verdict; the
 real job results then replace the skipped ones on the same run. On a fork,
 whose token cannot re-run, a maintainer uses "Re-run all jobs" on that run.
 After a change of base, push a commit or close and reopen the pull request.
-Pushes to `main` and release tags do not rerun them; see
-[CI on main and on release tags](#ci-on-main-and-on-release-tags).
+Pushes to `main` and release tags run both test workflows.
 
 Which checks matter: `ci-quality-gates` and `ci-build-gates`. They report on
 every pull-request event, from whichever workflow ran last, and are the
@@ -152,40 +151,6 @@ gh api -X PUT repos/DocRoms/Kronn/rulesets/13870406 --input ruleset.json
 The ruleset already requires branches to be up to date, so a base branch that
 only advances (no pull-request event) still forces a new push, which re-runs
 both test workflows.
-
-## CI on main and on release tags
-
-The ruleset requires pull requests to be up to date with `main` and merges
-them by rebase, so the tree that lands on `main` is the tree the pull request
-tested green. Neither a push to `main` nor a release tag runs the suites again
-on that tree.
-
-- **Push to `main`**: **CI Cache** (`ci-cache.yml`) runs instead of CI Tests
-  and CI Build. A pull request can restore the caches of `main`, never those
-  of another pull request, so this workflow fills them: one job per cache CI
-  Tests and CI Build read, with the same key, paths and runner, that builds
-  what the matching job builds (instrumented test binaries, clippy, the dev
-  and release backends, cargo-audit, the portability test binaries, the
-  Windows exporter's pip and MSYS2 packages) and runs no test. Each job looks
-  its key up first and stops when `main` already has it, which is the common
-  case: keys change with `backend/Cargo.lock`. A red CI Cache run means a
-  build broke on `main` (a new stable Rust lint, for instance), not a test.
-  `backend/scripts/test_cli_docker_wrappers.py` fails when a cache block of
-  CI Tests or CI Build has no identical twin in CI Cache: change both.
-- **Release tag**: **Desktop Build** (`desktop-build.yml`) first looks for
-  proof, per workflow, that a pull-request run passed on the same tree
-  (`scripts/ci/tested_tree_proof.sh`, job `tested-tree`). It compares
-  `git rev-parse <tag>^{tree}` with the head tree of recent CI Tests and CI
-  Build runs, and accepts the newest one whose aggregate verdict step ("Gate
-  verdict for pull_request #N head H base B", the identity CI Verdict reads)
-  passed, provided base B is an ancestor of head H (so the merge it tested is
-  H's own tree). Without proof, or when the lookup fails, that workflow reruns
-  on the release commit as before. `release-gates` fails unless each workflow
-  is either proven or green on the rerun, and the release job needs it.
-
-To test `main` or a tag by hand, dispatch CI Tests or CI Build with its `ref`.
-The backend timing observer (`backend-ci-performance`) only ever compared
-pull-request runs, so it lost nothing; the README badge follows Desktop Build.
 
 ## Reporting Bugs
 

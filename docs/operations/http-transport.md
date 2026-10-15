@@ -47,8 +47,8 @@ per response as integer micro-USD and exposed by `reported_cost_usd_micros`;
 no cost, the sum is partial and the run's cost is `None` as well.
 [src: file: backend/src/agents/chat_codec.rs:160#cost_usd_micros]
 [src: file: backend/src/agents/runner.rs:1984-1989#cost_incomplete]
-[src: file: backend/src/api/audit/full.rs:1903#reported_cost_usd_micros]
-[src: file: backend/src/api/audit/drift.rs:1070#reported_cost_usd_micros]
+[src: file: backend/src/api/audit/full.rs:1959#reported_cost_usd_micros]
+[src: file: backend/src/api/audit/drift.rs:1088#reported_cost_usd_micros]
 
 Audit executors have a separate bounded policy: 64 calls per file mutation tool
 (`write_file`, `edit_file`, `edit_lines`, `insert_after_line`), 48 for
@@ -84,7 +84,7 @@ paths and ranges still block validation. Retry usage is included in the step
 total (KT-952).
 [src: file: backend/src/api/audit/document_repair.rs:114-183#split_verified_citations]
 [src: file: backend/src/core/audit_state.rs:12#CITATION_ORIGINALS_DIR]
-[src: file: backend/src/api/audit/full.rs:2106-2127#check_attempt]
+[src: file: backend/src/api/audit/full.rs:2175-2196#check_attempt]
 
 An incomplete dimension-coverage matrix also receives targeted feedback in a
 Full audit after the agent exits successfully. This shares the same three-attempt
@@ -93,12 +93,12 @@ recomputes the matrix failure from the current index before its first attempt.
 Invalid tables remain blocking, provider errors do not trigger this correction,
 and existing TD files and human sections remain protected (KT-956).
 [src: file: backend/src/api/audit/validation.rs:95-107#coverage_repair_feedback]
-[src: file: backend/src/api/audit/full.rs:2035-2050#coverage_repair_feedback]
+[src: file: backend/src/api/audit/full.rs:2091-2106#coverage_repair_feedback]
 
 A failed provider launch finalizes the step with its error and elapsed time.
 If a corrective attempt had already consumed tokens, that usage remains in the
 persisted step and its terminal SSE event; an unmeasured launch stays unknown.
-[src: file: backend/src/api/audit/full.rs:2384-2405#previous_attempt_usage]
+[src: file: backend/src/api/audit/full.rs:2440-2461#previous_attempt_usage]
 
 A provider error during a step also survives in its persisted warning and SSE
 recap. HTTP status 429 is identified as a rate limit or exhausted quota, not as
@@ -116,7 +116,7 @@ actual files, including runs made before this fix. Auxiliary documents with no
 durable writer attribution are explicitly assigned to the founding step's
 repair prompt. A corrected reference establishes existence, not factual truth.
 [src: file: backend/src/api/audit/document_repair.rs:26-34#recovery_plan]
-[src: file: backend/src/db/audit_runs.rs:1085-1093#invalidate_documentary_steps]
+[src: file: backend/src/db/audit_runs.rs:1156-1164#invalidate_documentary_steps]
 
 A `TypedSchema` step sends its envelope schema as `response_format` with
 `strict: false` on the OpenAI wire: the envelope does not satisfy OpenAI's
@@ -235,7 +235,7 @@ Ollama `/api/show` and LiteLLM `/model/info` may confirm vision for the exact
 model. A missing declaration never causes an image to be sent speculatively.
 [src: file: backend/src/agents/vision.rs:495-525#attach_to_chat_body]
 [src: file: backend/src/agents/vision.rs:145-175#ollama_show_vision]
-[src: file: backend/src/api/discussions/streaming.rs:2422-2453#http_context_images]
+[src: file: backend/src/api/discussions/streaming.rs:2727-2758#http_context_images]
 
 Every withheld image is named in the model's context with an explicit instruction
 not to describe its contents, and a way for the user to supply the information.

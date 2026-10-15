@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use super::deserialize_optional_field;
+use super::{AgentType, MessageTargetKind, ModelTier, TaskExecutionStatus};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, Default)]
 #[serde(rename_all = "snake_case")]
@@ -167,6 +168,113 @@ pub struct PlanningActor {
     pub source_message_id: Option<String>,
 }
 
+/// KT-154 — what an assignee does on the task. Optional on a manual assignment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum PlanningAssigneeRole {
+    Owner,
+    Reviewer,
+}
+
+impl PlanningAssigneeRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Owner => "owner",
+            Self::Reviewer => "reviewer",
+        }
+    }
+}
+
+impl std::str::FromStr for PlanningAssigneeRole {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "owner" => Ok(Self::Owner),
+            "reviewer" => Ok(Self::Reviewer),
+            _ => anyhow::bail!("Unknown planning assignee role: {value}"),
+        }
+    }
+}
+
+/// KT-154 — where an assignee row comes from. `Manual` rows are stored and can
+/// be removed; `Execution` rows are the worker of a live TaskExecution, derived
+/// at read time and never stored (so they cannot outlive the execution).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum PlanningAssigneeSource {
+    Manual,
+    Execution,
+}
+
+/// KT-154 — one agent on a task, identified with the typed KT-116 regime
+/// (`kind` + `agent_type` + exact `cli_session_id`), never by provider alone.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PlanningAssignee {
+    pub kind: MessageTargetKind,
+    pub agent_type: AgentType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
+    /// Exact joined CLI session (`discussion_sessions.id`) for a `cli` assignee.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_session_id: Option<i64>,
+    /// Stable room ordinal of that session (`@codex-cli-2` → 2), so two CLIs of
+    /// one provider read differently in the plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_ordinal: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<PlanningAssigneeRole>,
+    pub source: PlanningAssigneeSource,
+    /// Model tier of an execution worker. Always `None` for a manual assignee.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<ModelTier>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_status: Option<TaskExecutionStatus>,
+}
+
+/// KT-154 — the identity a caller assigns or removes. Same shape as the
+/// persisted assignee minus the derived fields.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PlanningAssigneeInput {
+    pub kind: MessageTargetKind,
+    pub agent_type: AgentType,
+    #[serde(default)]
+    pub connection_id: Option<String>,
+    #[serde(default)]
+    pub cli_session_id: Option<i64>,
+    #[serde(default)]
+    pub role: Option<PlanningAssigneeRole>,
+}
+
+/// KT-154 — `assignee: None` means "the acting agent itself": the server
+/// resolves the actor's exact joined CLI session and refuses when it cannot.
+/// `role` applies to that self-assignment (default `owner`).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AssignPlanningTaskRequest {
+    #[serde(default)]
+    pub assignee: Option<PlanningAssigneeInput>,
+    #[serde(default)]
+    pub role: Option<PlanningAssigneeRole>,
+    #[serde(default)]
+    pub actor: PlanningActor,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UnassignPlanningTaskRequest {
+    #[serde(default)]
+    pub assignee: Option<PlanningAssigneeInput>,
+    #[serde(default)]
+    pub actor: PlanningActor,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct PlanningTaskSummary {
@@ -185,6 +293,10 @@ pub struct PlanningTaskSummary {
     pub discussion_ids: Vec<String>,
     pub tags: Vec<String>,
     pub blocker_count: u32,
+    /// KT-154 — manual assignees first (assignment order), then the worker of a
+    /// live TaskExecution when it is not already assigned by hand.
+    #[serde(default)]
+    pub assignees: Vec<PlanningAssignee>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

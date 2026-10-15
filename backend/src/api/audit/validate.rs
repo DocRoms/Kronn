@@ -39,8 +39,10 @@ pub(crate) fn validation_discussion_finished(discussion: &Discussion) -> bool {
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
 pub enum ValidationBlock {
-    /// This instance never ran the audit (a P2P peer, another clone): it is
-    /// read-only and cannot validate.
+    /// This instance never ran the audit (a P2P peer, another clone) and the
+    /// repository carries no run state either: read-only unless the
+    /// repository carries a committed, Completed run state that passes the
+    /// gates (KT-1199) — then it validates from that state.
     NoLocalRun,
     AuditRunning,
     RunNotCompleted,
@@ -48,12 +50,18 @@ pub enum ValidationBlock {
     DiscussionMissing,
     ForeignDiscussion,
     NotFinished,
+    /// The run state of the repository is not committed (KT-1199).
+    RepoRunNotCommitted,
+    /// A finished step's file changed since the repository's run (KT-1199).
+    RepoStepsToRecheck,
+    /// Critical or High tech-debt sheets are still open (KT-1199).
+    RepoTdOpen,
 }
 
 impl ValidationBlock {
     pub(crate) fn message(self, run_status: Option<&str>) -> String {
         match self {
-            Self::NoLocalRun => "No audit run recorded for this project on this instance — run the audit first; a peer without the run is read-only and validates on the instance that ran it.".into(),
+            Self::NoLocalRun => "No audit run recorded for this project on this instance and no audit run state in the repository — read-only until the repository carries a committed, Completed run state that passes the gates (run the audit here, or fetch the commit of the colleague who ran it).".into(),
             Self::AuditRunning => "An audit is currently running on this project — validate once it has finished.".into(),
             Self::RunNotCompleted => format!(
                 "The latest audit run is {} — only a Completed run can be validated (resume or re-run it first).",
@@ -62,9 +70,23 @@ impl ValidationBlock {
             Self::NoLinkedDiscussion => "The latest completed run carries no linked validation discussion — only the discussion the audit itself created (and linked in the same transaction) can validate it, unless every Critical and High tech-debt sheet is settled.".into(),
             Self::DiscussionMissing => "The linked validation discussion no longer exists — re-run the audit.".into(),
             Self::ForeignDiscussion => "The linked validation discussion belongs to another project — refusing.".into(),
+            Self::RepoRunNotCommitted => super::run_state::RepoRefusal::NotCommitted.message(),
+            Self::RepoStepsToRecheck => "Some steps of the audit run in the repository are « à revérifier »: their files changed since the run — resume the audit to re-verify them before validating.".into(),
+            Self::RepoTdOpen => super::run_state::RepoRefusal::TdOpen.message(),
             Self::NotFinished => "The validation discussion has not finished — the agent must end on KRONN:VALIDATION_COMPLETE, or every Critical and High tech-debt sheet must be settled, before the project can be marked validated.".into(),
         }
     }
+}
+
+/// Where a validation state comes from (KT-1199): the run this instance
+/// recorded, or the committed run state of the repository (a colleague's run
+/// after a fetch or a rebase).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum ValidationSource {
+    Local,
+    Repo,
 }
 
 /// The validation of a project's latest audit run, and what can be done.
@@ -85,6 +107,7 @@ pub struct ValidationState {
     pub started_by: Option<String>,
     pub validated_by: Option<String>,
     pub validated_at: Option<String>,
+    pub source: ValidationSource,
     /// The server accepts a validation now (the tech-debt sheet path, which
     /// reads the filesystem, is decided by the POST itself).
     pub can_validate: bool,
@@ -105,6 +128,7 @@ impl ValidationState {
             started_by: None,
             validated_by: None,
             validated_at: None,
+            source: ValidationSource::Local,
             can_validate: false,
             blocked: Some(blocked),
         }
@@ -197,20 +221,93 @@ pub(crate) async fn operator_pseudo(state: &AppState) -> String {
         .to_string()
 }
 
+/// The validation state the repository describes, when it is the project's
+/// state here: this instance has no run, or the committed one is newer
+/// (KT-1199). `None` when the local run stays authoritative.
+pub(crate) fn repo_validation_state(
+    project_path: &std::path::Path,
+    project_id: &str,
+    latest: Option<&AuditRun>,
+    audit_running: bool,
+) -> Option<ValidationState> {
+    use super::run_state::{repo_is_newer, repo_validation, RepoRefusal};
+    let crate::core::audit_run_state::RepoProbe::Found { state, .. } =
+        crate::core::audit_run_state::probe(project_path)
+    else {
+        return None;
+    };
+    if !repo_is_newer(&state, latest) {
+        return None;
+    }
+    let kronn = kronn_state::read(project_path);
+    let mut found = ValidationState::empty(project_id, ValidationBlock::NoLocalRun);
+    found.source = ValidationSource::Repo;
+    found.run_id = Some(state.run_id.clone());
+    found.run_status = Some(state.status.clone());
+    found.started_by = Some(state.started_by.clone());
+    found.completed_at = state.ended_at.clone();
+    found.validated_by = kronn.as_ref().and_then(|k| k.validated_by.clone());
+    found.validated_at = kronn.as_ref().and_then(|k| k.validated_at.clone());
+    found.blocked = if audit_running {
+        Some(ValidationBlock::AuditRunning)
+    } else {
+        match repo_validation(project_path) {
+            Ok(_) => None,
+            Err(RepoRefusal::NoRun) => Some(ValidationBlock::NoLocalRun),
+            Err(RepoRefusal::NotCommitted) => Some(ValidationBlock::RepoRunNotCommitted),
+            Err(RepoRefusal::NotCompleted(_)) => Some(ValidationBlock::RunNotCompleted),
+            Err(RepoRefusal::StepsToRecheck(_)) => Some(ValidationBlock::RepoStepsToRecheck),
+            Err(RepoRefusal::TdOpen) => Some(ValidationBlock::RepoTdOpen),
+        }
+    };
+    found.can_validate = found.blocked.is_none();
+    Some(found)
+}
+
 /// GET /api/projects/{id}/validation-state
 pub async fn get_validation_state(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<ValidationState>> {
     let running = audit_running(&state, &id);
-    match state
+    let local = {
+        let id = id.clone();
+        state
+            .db
+            .with_read_conn(move |conn| {
+                let found = validation_state(conn, &id, running)?;
+                let latest = crate::db::audit_runs::list_recent(conn, &id, 1)?
+                    .into_iter()
+                    .next();
+                Ok((found, latest))
+            })
+            .await
+    };
+    let (local, latest) = match local {
+        Ok(found) => found,
+        Err(e) => return Json(ApiResponse::err(format!("db: {e}"))),
+    };
+    // The repository may describe a newer (or the only) run of the project.
+    let project = state
         .db
-        .with_read_conn(move |conn| validation_state(conn, &id, running))
+        .with_conn({
+            let id = id.clone();
+            move |conn| crate::db::projects::get_project(conn, &id)
+        })
         .await
-    {
-        Ok(found) => Json(ApiResponse::ok(found)),
-        Err(e) => Json(ApiResponse::err(format!("db: {e}"))),
-    }
+        .ok()
+        .flatten();
+    let Some(project) = project else {
+        return Json(ApiResponse::ok(local));
+    };
+    let path = scanner::resolve_host_path(&project.path);
+    let repo = tokio::task::spawn_blocking(move || {
+        repo_validation_state(&path, &id, latest.as_ref(), running)
+    })
+    .await
+    .ok()
+    .flatten();
+    Json(ApiResponse::ok(repo.unwrap_or(local)))
 }
 
 /// POST /api/projects/:id/validate-audit
@@ -273,6 +370,50 @@ pub async fn validate_audit(
     if let Some(refusal) = open_disputes_refusal(&td_items, &pending) {
         return Json(ApiResponse::err(refusal));
     }
+
+    // KT-1199 — the committed run state of the repository stands in for the
+    // run this instance does not have (or has older): same gates — the run
+    // Completed, every step's file as it was produced, every Critical and High
+    // sheet settled, then the docs gates below.
+    let repo_run: Option<crate::core::audit_run_state::RunState> = {
+        let pid = project.id.clone();
+        let latest = state
+            .db
+            .with_read_conn(move |conn| {
+                Ok(crate::db::audit_runs::list_recent(conn, &pid, 1)?
+                    .into_iter()
+                    .next())
+            })
+            .await
+            .unwrap_or(None);
+        let path = scanner::resolve_host_path(&project.path);
+        let candidate =
+            tokio::task::spawn_blocking(move || match crate::core::audit_run_state::probe(&path) {
+                crate::core::audit_run_state::RepoProbe::Found { state, .. }
+                    if super::run_state::repo_is_newer(&state, latest.as_ref()) =>
+                {
+                    Some(path)
+                }
+                _ => None,
+            })
+            .await
+            .ok()
+            .flatten();
+        match candidate {
+            None => None,
+            Some(path) => {
+                let verdict =
+                    tokio::task::spawn_blocking(move || super::run_state::repo_validation(&path))
+                        .await;
+                match verdict {
+                    Ok(Ok(validation)) => Some(validation.state),
+                    Ok(Err(refusal)) => return Json(ApiResponse::err(refusal.message())),
+                    Err(e) => return Json(ApiResponse::err(format!("Task failed: {e}"))),
+                }
+            }
+        }
+    };
+    let from_repo = repo_run.is_some();
 
     let pid = project.id.clone();
     let cancel_registry = state.cancel_registry.clone();
@@ -362,10 +503,14 @@ pub async fn validate_audit(
         })
         .await;
     let (optimize_documents, documents, run_id) = match gate {
+        _ if from_repo => {
+            let run = repo_run.as_ref().expect("repo run when from_repo");
+            (run.kind == "Full", None, run.run_id.clone())
+        }
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
         Ok((latest, linked_disc, validation_agent_active, documents, finished)) => {
-            // An instance without the run (P2P peer, another clone) is
-            // read-only: it has nothing to validate.
+            // No local run and no usable repository state (`from_repo` is
+            // handled above): read-only, there is nothing to validate.
             let Some(run) = latest else {
                 return Json(ApiResponse::err(ValidationBlock::NoLocalRun.message(None)));
             };
@@ -412,14 +557,41 @@ pub async fn validate_audit(
     // Who opened this validation and who validates it (KT-1122): recorded on
     // the run and in `docs/.kronn.json`, so a clone shows who signed off.
     let by = operator_pseudo(&state).await;
-    let started_by = {
+    let started_by = match repo_run.as_ref() {
+        Some(run) => Some(run.started_by.clone()),
+        None => {
+            let run_id = run_id.clone();
+            state
+                .db
+                .with_read_conn(move |conn| record::record(conn, &run_id))
+                .await
+                .ok()
+                .and_then(|stored| stored.started_by)
+        }
+    };
+    let validated_run_id = run_id.clone();
+    // The rows this instance holds of the run it validates: the source the
+    // run's digests are rebuilt from afterwards (the repository's own run is
+    // rebuilt from its committed copy).
+    let local_rows = if from_repo {
+        None
+    } else {
         let run_id = run_id.clone();
         state
             .db
-            .with_read_conn(move |conn| record::record(conn, &run_id))
+            .with_read_conn(move |conn| {
+                let Some(run) = crate::db::audit_runs::get_by_id(conn, &run_id)? else {
+                    return Ok(None);
+                };
+                Ok(Some(super::run_state::LocalRunRows {
+                    steps: crate::db::audit_runs::list_audit_steps(conn, &run_id)?,
+                    baseline: crate::db::audit_runs::adr_baseline(conn, &run_id)?,
+                    run,
+                }))
+            })
             .await
             .ok()
-            .and_then(|stored| stored.started_by)
+            .flatten()
     };
 
     let by_for_file = by.clone();
@@ -460,7 +632,11 @@ pub async fn validate_audit(
             ));
         }
 
-        crate::core::audit_documents::verify(&project_path, documents.as_deref())?;
+        // From the repository there is no per-run fingerprint set: every
+        // step's file was verified against its committed digest instead.
+        if !from_repo {
+            crate::core::audit_documents::verify(&project_path, documents.as_deref())?;
+        }
         crate::core::citation_drift::record_all(&project_path)?;
         // A failed record never refuses the validation: the docs simply read
         // as not yet human-validated.
@@ -470,7 +646,10 @@ pub async fn validate_audit(
         ) {
             tracing::warn!("Human-validation provenance not recorded: {e}");
         }
-        kronn_state::mark_validated_by(&project_path, &by_for_file, started_by.as_deref())
+        kronn_state::mark_validated_by(&project_path, &by_for_file, started_by.as_deref())?;
+        // The run's digests follow the documents the human just validated.
+        super::run_state::refresh_validated_digests(&project_path, &validated_run_id, local_rows);
+        Ok(())
     })
     .await
     .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
@@ -1269,9 +1448,10 @@ mod validate_gate_tests {
         assert_eq!(verdict.blocked, Some(ValidationBlock::NotFinished));
     }
 
-    // KT-1122 rule: an instance without the run (P2P peer, another clone) is
-    // read-only — it states why and never validates, not even a project whose
-    // docs are shared.
+    // KT-1122 rule, as KT-1199 amends it: an instance without the run (P2P
+    // peer, another clone) is read-only unless the repository carries a
+    // committed, Completed run state that passes the gates. Without one it
+    // states why and never validates, not even a project whose docs are shared.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_instance_without_the_run_is_read_only_and_says_why() {
         let tmp = tempfile::TempDir::new().unwrap();

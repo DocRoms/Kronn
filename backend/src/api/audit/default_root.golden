@@ -26,6 +26,7 @@ volatile  .vibe/config.toml
 b6714c74ccfedc1bd3d63e7e688dec6685200089759fb3be6c8e717e846bb204  AGENTS.md
 2d595c6065d1ba60e348743c8af993d331950ea07f399378472b7c5a0d563a18  CLAUDE.md
 7e98df7437f1b50bc0ea2ba7180f28bdb7a043cd2c6045e1783124cdba2fdcc5  README.md
+volatile  docs/.kronn-audit-run.json
 volatile  docs/.kronn.json
 bb714804bca4c4df7df342deea218ca0f22ba451634a8c459f8a364b71220de7  docs/AGENTS.md
 b5e84dee3bcdb87c24478516bb0cedb1609489df2f71b00ff48c573a02695049  docs/architecture/overview.md

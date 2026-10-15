@@ -81,6 +81,14 @@ async fn upload(app: Router, id: &str, bytes: &[u8]) -> Value {
 
 #[tokio::test]
 async fn upload_utf16_and_binary_keeps_original_bytes_and_safe_durable_previews() {
+    // `data_dir()` sets `KRONN_DATA_DIR` once; a sibling test's own value
+    // would send the upload elsewhere and fail the `starts_with` below.
+    if crate::own_process::delegated(
+        module_path!(),
+        "upload_utf16_and_binary_keeps_original_bytes_and_safe_durable_previews",
+    ) {
+        return;
+    }
     let (state, app, id) = fixture().await;
     let text = "{\"hello\":\"été 中文 😀\"}";
     let mut little = vec![0xff, 0xfe];
@@ -130,6 +138,12 @@ async fn upload_utf16_and_binary_keeps_original_bytes_and_safe_durable_previews(
 
 #[tokio::test]
 async fn imported_legacy_preview_and_history_are_safe_without_rewriting_the_archive() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "imported_legacy_preview_and_history_are_safe_without_rewriting_the_archive",
+    ) {
+        return;
+    }
     let (state, app, id) = fixture().await;
     let raw = b"{\0\"\0x\0";
     let uploaded = upload(app.clone(), &id, raw).await;

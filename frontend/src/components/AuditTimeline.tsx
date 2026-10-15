@@ -11,6 +11,7 @@ import {
 import { useT } from '../lib/I18nContext';
 import { projects as projectsApi, externalApi, type ExternalApiConnectionView } from '../lib/api';
 import { AGENT_LABELS, MODEL_TIER_ICONS, isUsable } from '../lib/constants';
+import { stepRanges } from '../lib/stepRanges';
 import { canRunAudit } from '../lib/agentCapabilities';
 import { formatStepList } from '../lib/audit-resume';
 import { costReasonKey, formatUsd, summarizeAuditCost, tokenBreakdownTitle } from '../lib/audit-cost';
@@ -20,7 +21,7 @@ import { activityCategoryLabel } from '../lib/activity-category';
 import { DocStateSummary } from './DocStateSummary';
 import type { DocStateCounts } from './docState';
 import type {
-  AgentDetection, AgentType, AuditEntry, AuditRecentActivity, AuditTimelineValidation, AuditTokenBreakdown, ValidationBlock,
+  AgentDetection, AgentType, AuditEntry, AuditRecentActivity, AuditTimelineValidation, AuditTokenBreakdown, RepoAuditRun, ValidationBlock,
   LinkedRepo, ModelTier, ModelTiersConfig,
 } from '../types/generated';
 import './AuditTimeline.css';
@@ -93,7 +94,7 @@ export interface AuditTimelineProps {
   onCancel: () => void;
   /** The backend has not acknowledged the cancel yet: the audit may still run. */
   cancelPending?: boolean;
-  resumable: { id: string; steps_to_redo?: number[]; last_completed_step: number } | null;
+  resumable: { id: string; steps_to_redo?: number[]; last_completed_step: number; from_repository?: boolean } | null;
   /** Whether a run can be resumed is not known: launching waits for it (KT-1169). */
   resumableUnknown?: boolean;
   onReloadResumable?: () => void;
@@ -222,6 +223,10 @@ export function AuditTimeline(props: AuditTimelineProps) {
   const [validatedBy, setValidatedBy] = useState<string | null>(null);
   const [recordedStartedBy, setRecordedStartedBy] = useState<string | null>(null);
   const [recordedValidatedAt, setRecordedValidatedAt] = useState<string | null>(null);
+  // KT-1199 — the audit run the repository describes (a colleague's, after a
+  // fetch or a rebase) and whether the server would validate from it.
+  const [repoRun, setRepoRun] = useState<RepoAuditRun | null>(null);
+  const [repoCanValidate, setRepoCanValidate] = useState(false);
   const [marking, setMarking] = useState(false);
   const [leaseOrphaned, setLeaseOrphaned] = useState(false);
   const [releasing, setReleasing] = useState(false);
@@ -281,18 +286,21 @@ export function AuditTimeline(props: AuditTimelineProps) {
         validatedAt: data.recorded_validated_at ?? null,
         orphaned: data.lease_orphaned === true,
         latestStatus: latestRun?.status ?? null,
+        repo: data.repo ?? null,
+        repoCanValidate: data.repo_can_validate === true,
       };
     };
     load()
-      .then(({ id, rows, td, recorded: entries, validation, block, validatedBy: by, startedBy, validatedAt, orphaned, latestStatus }) => {
+      .then(({ id, rows, td, recorded: entries, validation, block, validatedBy: by, startedBy, validatedAt, orphaned, latestStatus, repo, repoCanValidate: canValidate }) => {
         if (alive) {
           setRunId(id); setSteps(rows); setTdTotal(td); setRecorded(entries);
           setLinkedValidation(validation); setLeaseOrphaned(orphaned); setStepsLoaded(true); setLatestRunStatus(latestStatus);
           setValidationBlock(block); setValidatedBy(by); setRecordedStartedBy(startedBy); setRecordedValidatedAt(validatedAt);
+          setRepoRun(repo); setRepoCanValidate(canValidate);
           setLoadFailed(false);
         }
       })
-      .catch(() => { if (alive) { setSteps([]); setRecorded([]); setLinkedValidation(null); setValidationBlock(null); setLatestRunStatus(null); setStepsLoaded(true); setLoadFailed(true); } });
+      .catch(() => { if (alive) { setSteps([]); setRecorded([]); setLinkedValidation(null); setValidationBlock(null); setLatestRunStatus(null); setRepoRun(null); setRepoCanValidate(false); setStepsLoaded(true); setLoadFailed(true); } });
     return () => { alive = false; };
   }, [projectId, resumable, refreshTrigger, auditActive, liveStep, reloadTick]);
 
@@ -412,7 +420,9 @@ export function AuditTimeline(props: AuditTimelineProps) {
         : t('audit.resumeFromStep', resumable.last_completed_step + 1))
     : audited ? t('audit.revalidate.button') : t('audit.startFullAudit');
   // Per-step actions exist only on the run a resume continues.
-  const stepActions = !auditActive && !!resumable && !leaseOrphaned;
+  // A run still in the repository has no local row to retry or accept a step
+  // on: the resume adopts it first.
+  const stepActions = !auditActive && !!resumable && !resumable.from_repository && !leaseOrphaned;
   // No launch while the state it must start from is unknown or locked.
   // KT-1192 — no audit starts without a briefing; the backend refuses it too.
   const launchBlocked = leaseOrphaned || !!props.resumableUnknown || !props.briefingDone;
@@ -864,6 +874,47 @@ export function AuditTimeline(props: AuditTimelineProps) {
             <p className="audit-tl-muted">{t('auditTimeline.validation.desc')}</p>
             {audited && tdTotal > 0 && (
               <p className="audit-tl-muted" data-testid="audit-timeline-td-count">{t('auditTimeline.validation.tdCount', tdTotal)}</p>
+            )}
+            {repoRun?.newer_than_local && !auditActive && (
+              <div className="audit-tl-validation-actions" data-testid="audit-timeline-repo-run">
+                <p className="audit-tl-muted" data-testid="audit-timeline-repo-run-summary">
+                  {t(
+                    'auditTimeline.repo.summary',
+                    repoRun.started_by,
+                    new Date(repoRun.started_at).toLocaleDateString(),
+                    stepRanges(repoRun.done_steps) || t('auditTimeline.repo.none'),
+                    stepRanges(repoRun.resume_steps) || t('auditTimeline.repo.none'),
+                    stepRanges(repoRun.recheck_steps) || t('auditTimeline.repo.none'),
+                  )}
+                </p>
+                <p className="audit-tl-muted" data-testid="audit-timeline-repo-run-td">
+                  {t('auditTimeline.repo.td', repoRun.td_total, repoRun.td_settled)}
+                </p>
+                {!repoRun.committed && (
+                  <p className="audit-tl-muted" data-testid="audit-timeline-repo-run-uncommitted">{t('auditTimeline.repo.uncommitted')}</p>
+                )}
+                {repoRun.resumable && resumable?.id === repoRun.run_id && (
+                  <p className="audit-tl-muted" data-testid="audit-timeline-repo-run-resumable">{t('auditTimeline.repo.resumable')}</p>
+                )}
+                {repoCanValidate && !repoRun.validated_at ? (
+                  <button
+                    type="button"
+                    className="audit-tl-btn audit-tl-btn-small"
+                    disabled={marking}
+                    data-testid="audit-timeline-repo-run-validate"
+                    onClick={() => {
+                      setMarking(true);
+                      void props.onMarkValid().finally(() => setMarking(false));
+                    }}
+                  >
+                    {marking ? <Loader2 size={12} className="spin" /> : <ShieldCheck size={12} />} {t('auditTimeline.repo.validate')}
+                  </button>
+                ) : validationBlock && repoRun.status === 'Completed' && !repoRun.validated_at ? (
+                  <p className="audit-tl-muted" data-testid="audit-timeline-repo-run-block">
+                    {t(`auditTimeline.validation.block.${validationBlock}`)}
+                  </p>
+                ) : null}
+              </div>
             )}
             {!validated && !auditActive && (runPending || (!audited && runId !== null)) ? (
               // The run is not finished: the action here is the audit's own.
