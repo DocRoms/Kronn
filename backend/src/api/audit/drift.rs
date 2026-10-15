@@ -894,6 +894,11 @@ pub(crate) async fn run_partial_pipeline(
                 }
                 content
             };
+            // What the agent is seen writing is kept durably: a crash settles
+            // the target only from content it can vouch for.
+            let mut target_watch = super::step_guard::TargetWatch::new(
+                &project_path, analysis_step.target_file, pre_content.as_deref(),
+            );
             let validated_docs_snapshot =
                 match super::helpers::capture_validated_docs(&project_path) {
                     Ok(snapshot) => snapshot,
@@ -1034,6 +1039,14 @@ pub(crate) async fn run_partial_pipeline(
                                         t.set_recent_activity(&project_id_for_progress, snapshot);
                                     }
                                     yield Event::default().event("activity").data(payload.to_string());
+                                }
+                                if let Some(seen) = target_watch.as_mut().and_then(|w| w.moved()) {
+                                    let (run_id, step_n) = (audit_run_id.clone(), step as u32);
+                                    if let Err(e) = state.db.with_conn(move |conn| {
+                                        crate::db::audit_runs::record_observed_output(conn, &run_id, step_n, &seen)
+                                    }).await {
+                                        tracing::warn!("Could not record what partial step {step} wrote: {e}");
+                                    }
                                 }
                                 let Some(watch) = activity.as_mut() else { continue };
                                 if let Some((tool, calls)) = watch.tool_moved() {
@@ -1203,11 +1216,16 @@ pub(crate) async fn run_partial_pipeline(
                         // half-written (marked partial when it cannot be put back).
                         let step_n = step as u32;
                         let outcome = super::step_guard::settle_killed(
-                            &project_path, analysis_step.target_file, pre_content.as_deref(), step_n,
+                            &project_path,
+                            analysis_step.target_file,
+                            pre_content.as_deref(),
+                            target_watch.as_ref().map(|w| w.last_seen()),
+                            super::step_guard::StopKind::Cancelled,
+                            step_n,
                         );
                         {
                             let run_id = audit_run_id.clone();
-                            let reason = super::step_guard::killed_reason(step_n, outcome);
+                            let reason = super::step_guard::killed_reason(step_n, &outcome);
                             let duration_ms = step_started_at.elapsed().as_millis() as u64;
                             let recorded_total = run_tokens.total();
                             let usage = step_usage;

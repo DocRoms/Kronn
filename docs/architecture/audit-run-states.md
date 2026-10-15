@@ -520,6 +520,29 @@ category.
   with no marker. A step that never ended and has no verdict is a blocker of
   its own (`NeverEnded`): accepting it needs the override too.
   [src: file: backend/src/api/audit/step_guard.rs:276] [src: file: backend/src/db/mod.rs:296]
+- **Settling never destroys what the agent did not write.** The audit
+  watches the target on the activity tick and keeps the fingerprint of what it
+  saw the agent write (`audit_step_snapshots.observed_hash`, migration 264).
+  A crash cannot tell a hand edit made before the next boot from the orphaned
+  agent's own late write, so boot restores only content that matches that
+  fingerprint (or is absent or blank). Anything else is left in place under a
+  partial marker (`ChangedSinceSeen`, `target_state = partial`) and its
+  snapshot is kept. A cancel is different: Kronn just killed the agent, so it
+  restores, but content it cannot vouch for is first copied to
+  `<target>.kronn-displaced-<UTC timestamp>` and the step's reason names the
+  path; if the copy cannot be made the target is not replaced.
+  [src: file: backend/src/api/audit/step_guard.rs:331]
+- **Settling never writes outside the project.** Every read, restore, marker
+  and displaced copy goes through the project-containment check (no symlink
+  on the path, no `..`), temp files are created exclusively
+  (`create_new`, `O_NOFOLLOW`) under a unique name, and no directory is created
+  with `create_dir_all` beyond the project. A project root that does not exist
+  (an unmounted volume) is never recreated: its steps stay open, snapshot
+  kept, and are settled by the next boot or launch that finds the root.
+  [src: file: backend/src/api/audit/step_guard.rs:58] [src: file: backend/src/api/audit/step_guard.rs:469]
+- **File work stays off the writer connection.** The launch-time net reads
+  the pending snapshots, settles the files, then records the verdicts, in three
+  separate steps (`pending_steps`, `settle_pending`, `record_settled`).
 - **A failed step marks what it left.** When a step fails after the agent
   wrote its target, Kronn keeps the text (a human may accept it) under a
   `<!-- kronn:partial-step -->` banner and records `target_state = partial`.

@@ -649,14 +649,33 @@ pub async fn full_audit(
         {
             let pid = project_id.clone();
             let root = project_path.clone();
-            let recovered = db.with_conn(move |conn| {
+            // Database reads and writes, with the file work between them
+            // outside the writer connection.
+            let pending = db.with_conn(move |conn| {
                 let Some(last) = crate::db::audit_runs::list_recent(conn, &pid, 1)?.into_iter().next() else {
-                    return Ok(Vec::new());
+                    return Ok(None);
                 };
-                // Boot settles these already; this is the net for a backend
-                // that did not go through boot (a run recorded since).
-                Ok(super::step_guard::settle_unfinished_steps(conn, &last.id, &root)?)
+                let pending = super::step_guard::pending_steps(conn, &last.id)?;
+                Ok(Some((last.id, pending)))
             }).await;
+            let recovered = match pending {
+                Ok(Some((last_id, pending))) if !pending.is_empty() => {
+                    // Boot settles these already; this is the net for a backend
+                    // that did not go through boot (a run recorded since).
+                    let settled = super::step_guard::settle_pending(&root, &pending);
+                    if settled.is_empty() {
+                        Ok(settled)
+                    } else {
+                        let to_record = settled.clone();
+                        db.with_conn(move |conn| {
+                            super::step_guard::record_settled(conn, &last_id, &to_record)?;
+                            Ok(settled)
+                        }).await
+                    }
+                }
+                Ok(_) => Ok(Vec::new()),
+                Err(e) => Err(e),
+            };
             match recovered {
                 Ok(settled) => for step in settled {
                     tracing::warn!(
@@ -1585,6 +1604,11 @@ pub async fn full_audit(
                 }
                 content
             };
+            // What the agent is seen writing is kept durably: a crash settles
+            // the target only from content it can vouch for.
+            let mut target_watch = super::step_guard::TargetWatch::new(
+                &project_path, analysis_step.target_file, pre_content.as_deref(),
+            );
 
             // KT-1183 — a finding step under the cross-agent option: Kronn
             // runs the agents, arbitrates and writes the step's documents.
@@ -1893,6 +1917,14 @@ pub async fn full_audit(
                                     }
                                     yield Event::default().event("activity").data(payload.to_string());
                                 }
+                                if let Some(seen) = target_watch.as_mut().and_then(|w| w.moved()) {
+                                    let (run_id, step_n) = (audit_run_id.clone(), step as u32);
+                                    if let Err(e) = db.with_conn(move |conn| {
+                                        crate::db::audit_runs::record_observed_output(conn, &run_id, step_n, &seen)
+                                    }).await {
+                                        tracing::warn!("Could not record what step {step} wrote: {e}");
+                                    }
+                                }
                                 let Some(watch) = activity.as_mut() else { continue };
                                 if let Some((tool, calls)) = watch.tool_moved() {
                                     if let Ok(mut t) = audit_tracker.lock() {
@@ -2152,11 +2184,16 @@ pub async fn full_audit(
                         // that could be neither restored nor marked stays an
                         // unsound step (no `restored` state), never a clean one.
                         let outcome = super::step_guard::settle_killed(
-                            &project_path, analysis_step.target_file, pre_content.as_deref(), step_n,
+                            &project_path,
+                            analysis_step.target_file,
+                            pre_content.as_deref(),
+                            target_watch.as_ref().map(|w| w.last_seen()),
+                            super::step_guard::StopKind::Cancelled,
+                            step_n,
                         );
                         {
                             let run_id = audit_run_id.clone();
-                            let reason = super::step_guard::killed_reason(step_n, outcome);
+                            let reason = super::step_guard::killed_reason(step_n, &outcome);
                             let killed_state = outcome.target_state();
                             let usage = crate::db::audit_runs::StepTokens::after_attempt(
                                 previous_attempt_usage,

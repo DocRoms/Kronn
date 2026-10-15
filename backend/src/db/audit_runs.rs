@@ -256,6 +256,10 @@ pub struct StepSnapshot {
     pub target_file: String,
     /// `None`: the file was absent.
     pub content: Option<String>,
+    /// Fingerprint of the last content Kronn saw the step's agent write to the
+    /// target (see `step_guard::TargetWatch`); `None` when it never saw it
+    /// move. A crash settles the target only if what is on disk is this.
+    pub observed_hash: Option<String>,
 }
 
 /// Largest target kept in a snapshot. An audit doc is a few KB; anything past
@@ -280,8 +284,8 @@ pub fn save_step_snapshot(
     }
     conn.execute(
         "INSERT OR REPLACE INTO audit_step_snapshots
-            (audit_run_id, step_index, target_file, existed, content)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+            (audit_run_id, step_index, target_file, existed, content, observed_hash)
+         VALUES (?1, ?2, ?3, ?4, ?5, NULL)",
         params![run_id, step_index as i64, target_file, content.is_some() as i32, content],
     )?;
     Ok(())
@@ -293,18 +297,36 @@ fn snapshot_of_row(row: &rusqlite::Row) -> rusqlite::Result<StepSnapshot> {
         step_index: row.get::<_, i64>(0)?.max(0) as u32,
         target_file: row.get(1)?,
         content: if existed != 0 { row.get(3)? } else { None },
+        observed_hash: row.get(4)?,
     })
 }
 
 pub fn step_snapshot(conn: &Connection, run_id: &str, step_index: u32) -> Result<Option<StepSnapshot>> {
     Ok(conn
         .query_row(
-            "SELECT step_index, target_file, existed, content FROM audit_step_snapshots
+            "SELECT step_index, target_file, existed, content, observed_hash FROM audit_step_snapshots
               WHERE audit_run_id = ?1 AND step_index = ?2",
             params![run_id, step_index as i64],
             snapshot_of_row,
         )
         .optional()?)
+}
+
+/// The agent of `step_index` was seen writing `observed_hash` to the target:
+/// that is the content a crash may put back from. No-op for a step with no
+/// snapshot.
+pub fn record_observed_output(
+    conn: &Connection,
+    run_id: &str,
+    step_index: u32,
+    observed_hash: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE audit_step_snapshots SET observed_hash = ?3
+          WHERE audit_run_id = ?1 AND step_index = ?2",
+        params![run_id, step_index as i64, observed_hash],
+    )?;
+    Ok(())
 }
 
 /// The step is done (or accepted): its snapshot has nothing left to protect.
@@ -319,7 +341,7 @@ pub fn delete_step_snapshot(conn: &Connection, run_id: &str, step_index: u32) ->
 /// Snapshots of the steps that never ended: an agent killed with its backend.
 pub fn unfinished_step_snapshots(conn: &Connection, run_id: &str) -> Result<Vec<StepSnapshot>> {
     let mut stmt = conn.prepare(
-        "SELECT p.step_index, p.target_file, p.existed, p.content
+        "SELECT p.step_index, p.target_file, p.existed, p.content, p.observed_hash
            FROM audit_step_snapshots p
            JOIN audit_run_steps s
              ON s.audit_run_id = p.audit_run_id AND s.step_index = p.step_index
@@ -1708,6 +1730,7 @@ mod tests {
                 target_file TEXT NOT NULL,
                 existed INTEGER NOT NULL,
                 content TEXT,
+                observed_hash TEXT,
                 PRIMARY KEY (audit_run_id, step_index)
             );
             CREATE TABLE audit_run_steps (
@@ -3382,6 +3405,29 @@ mod tests {
             step_snapshot(&conn, "r1", 2).unwrap().unwrap().content.map(|c| c.len()),
             Some(MAX_SNAPSHOT_BYTES)
         );
+    }
+
+    #[test]
+    fn the_observed_output_is_kept_with_the_snapshot_and_forgotten_when_it_is_retaken() {
+        let conn = fresh_conn();
+        insert_running(&conn, "r1", "p1", "Full", "ClaudeCode", Utc::now()).unwrap();
+        // No snapshot (a target past the cap): recording is a harmless no-op.
+        record_observed_output(&conn, "r1", 2, "abc").unwrap();
+        assert!(step_snapshot(&conn, "r1", 2).unwrap().is_none());
+
+        save_step_snapshot(&conn, "r1", 2, "docs/a.md", Some("before")).unwrap();
+        assert_eq!(step_snapshot(&conn, "r1", 2).unwrap().unwrap().observed_hash, None);
+        record_observed_output(&conn, "r1", 2, "abc").unwrap();
+        record_observed_output(&conn, "r1", 2, "def").unwrap();
+        assert_eq!(
+            step_snapshot(&conn, "r1", 2).unwrap().unwrap().observed_hash.as_deref(),
+            Some("def"),
+            "the latest sighting wins"
+        );
+        // A snapshot taken again (a new attempt) does not inherit a sighting
+        // of an earlier one.
+        save_step_snapshot(&conn, "r1", 2, "docs/a.md", Some("before")).unwrap();
+        assert_eq!(step_snapshot(&conn, "r1", 2).unwrap().unwrap().observed_hash, None);
     }
 
     #[test]
