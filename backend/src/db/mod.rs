@@ -287,7 +287,9 @@ impl Database {
         // it first (only a process whose start stamp still matches).
         match crate::core::agent_orphans::reap_recorded_agents(&conn) {
             Ok(0) => {}
-            Ok(n) => tracing::warn!("Killed {n} audit agent(s) left running by the previous backend"),
+            Ok(n) => {
+                tracing::warn!("Killed {n} audit agent(s) left running by the previous backend")
+            }
             Err(e) => tracing::warn!("Failed to reap orphaned audit agents: {e}"),
         }
         // KT-1211 — the step that agent was writing never ended: put its doc

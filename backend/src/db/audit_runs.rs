@@ -204,9 +204,11 @@ pub fn mark_cancelled_at_step(conn: &Connection, id: &str, step: u32) -> Result<
         return Ok(None);
     }
     Ok(conn
-        .query_row("SELECT status FROM audit_runs WHERE id = ?1", params![id], |row| {
-            row.get(0)
-        })
+        .query_row(
+            "SELECT status FROM audit_runs WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
         .optional()?)
 }
 
@@ -221,7 +223,12 @@ pub fn set_resume_drift(conn: &Connection, id: &str, message: &str) -> Result<()
 
 /// KT-1211 (M5) — the process group of the step's CLI agent, with the start
 /// stamp of its leader, persisted so a boot after a crash can kill it.
-pub fn set_agent_process(conn: &Connection, id: &str, pgid: i64, marker: Option<&str>) -> Result<()> {
+pub fn set_agent_process(
+    conn: &Connection,
+    id: &str,
+    pgid: i64,
+    marker: Option<&str>,
+) -> Result<()> {
     conn.execute(
         "UPDATE audit_runs SET agent_pgid = ?2, agent_started_marker = ?3 WHERE id = ?1",
         params![id, pgid, marker],
@@ -286,7 +293,13 @@ pub fn save_step_snapshot(
         "INSERT OR REPLACE INTO audit_step_snapshots
             (audit_run_id, step_index, target_file, existed, content, observed_hash)
          VALUES (?1, ?2, ?3, ?4, ?5, NULL)",
-        params![run_id, step_index as i64, target_file, content.is_some() as i32, content],
+        params![
+            run_id,
+            step_index as i64,
+            target_file,
+            content.is_some() as i32,
+            content
+        ],
     )?;
     Ok(())
 }
@@ -301,7 +314,11 @@ fn snapshot_of_row(row: &rusqlite::Row) -> rusqlite::Result<StepSnapshot> {
     })
 }
 
-pub fn step_snapshot(conn: &Connection, run_id: &str, step_index: u32) -> Result<Option<StepSnapshot>> {
+pub fn step_snapshot(
+    conn: &Connection,
+    run_id: &str,
+    step_index: u32,
+) -> Result<Option<StepSnapshot>> {
     Ok(conn
         .query_row(
             "SELECT step_index, target_file, existed, content, observed_hash FROM audit_step_snapshots
@@ -389,7 +406,13 @@ pub fn settle_killed_step(
         "UPDATE audit_run_steps SET ended_at = ?3, cli_success = 0, step_warning = ?4,
                 target_state = ?5
           WHERE audit_run_id = ?1 AND step_index = ?2 AND ended_at IS NULL",
-        params![run_id, step_index as i64, at.to_rfc3339(), reason, target_state],
+        params![
+            run_id,
+            step_index as i64,
+            at.to_rfc3339(),
+            reason,
+            target_state
+        ],
     )?;
     if !keep_snapshot {
         tx.execute(
@@ -3335,9 +3358,18 @@ mod tests {
 
         let row = get_by_id(&conn, "r1").unwrap().unwrap();
         assert_eq!(row.status, "Interrupted");
-        assert_eq!(row.cancelled_at_step, Some(12), "the cancel is flagged on the run");
-        assert_eq!(row.last_completed_step, 11, "the checkpoint survives the cancel");
-        let resumable = latest_resumable(&conn, "p1").unwrap().expect("resumable after a cancel");
+        assert_eq!(
+            row.cancelled_at_step,
+            Some(12),
+            "the cancel is flagged on the run"
+        );
+        assert_eq!(
+            row.last_completed_step, 11,
+            "the checkpoint survives the cancel"
+        );
+        let resumable = latest_resumable(&conn, "p1")
+            .unwrap()
+            .expect("resumable after a cancel");
         assert_eq!(resumable.id, "r1");
     }
 
@@ -3383,7 +3415,11 @@ mod tests {
         // The later snapshot of the same step replaces the earlier one.
         save_step_snapshot(&conn, "r1", 2, "docs/a.md", Some("again")).unwrap();
         assert_eq!(
-            step_snapshot(&conn, "r1", 2).unwrap().unwrap().content.as_deref(),
+            step_snapshot(&conn, "r1", 2)
+                .unwrap()
+                .unwrap()
+                .content
+                .as_deref(),
             Some("again")
         );
         delete_step_snapshot(&conn, "r1", 2).unwrap();
@@ -3402,7 +3438,11 @@ mod tests {
         let at_cap = "y".repeat(MAX_SNAPSHOT_BYTES);
         save_step_snapshot(&conn, "r1", 2, "docs/a.md", Some(&at_cap)).unwrap();
         assert_eq!(
-            step_snapshot(&conn, "r1", 2).unwrap().unwrap().content.map(|c| c.len()),
+            step_snapshot(&conn, "r1", 2)
+                .unwrap()
+                .unwrap()
+                .content
+                .map(|c| c.len()),
             Some(MAX_SNAPSHOT_BYTES)
         );
     }
@@ -3416,18 +3456,34 @@ mod tests {
         assert!(step_snapshot(&conn, "r1", 2).unwrap().is_none());
 
         save_step_snapshot(&conn, "r1", 2, "docs/a.md", Some("before")).unwrap();
-        assert_eq!(step_snapshot(&conn, "r1", 2).unwrap().unwrap().observed_hash, None);
+        assert_eq!(
+            step_snapshot(&conn, "r1", 2)
+                .unwrap()
+                .unwrap()
+                .observed_hash,
+            None
+        );
         record_observed_output(&conn, "r1", 2, "abc").unwrap();
         record_observed_output(&conn, "r1", 2, "def").unwrap();
         assert_eq!(
-            step_snapshot(&conn, "r1", 2).unwrap().unwrap().observed_hash.as_deref(),
+            step_snapshot(&conn, "r1", 2)
+                .unwrap()
+                .unwrap()
+                .observed_hash
+                .as_deref(),
             Some("def"),
             "the latest sighting wins"
         );
         // A snapshot taken again (a new attempt) does not inherit a sighting
         // of an earlier one.
         save_step_snapshot(&conn, "r1", 2, "docs/a.md", Some("before")).unwrap();
-        assert_eq!(step_snapshot(&conn, "r1", 2).unwrap().unwrap().observed_hash, None);
+        assert_eq!(
+            step_snapshot(&conn, "r1", 2)
+                .unwrap()
+                .unwrap()
+                .observed_hash,
+            None
+        );
     }
 
     #[test]
@@ -3435,13 +3491,27 @@ mod tests {
         let conn = fresh_conn();
         insert_running(&conn, "old", "p1", "Full", "ClaudeCode", Utc::now()).unwrap();
         save_step_snapshot(&conn, "old", 2, "docs/a.md", Some("a")).unwrap();
-        conn.execute("INSERT INTO projects (id, name, path) VALUES ('p2', 'Other', '/tmp/p2')", [])
-            .unwrap();
-        insert_running(&conn, "other-project", "p2", "Full", "ClaudeCode", Utc::now()).unwrap();
+        conn.execute(
+            "INSERT INTO projects (id, name, path) VALUES ('p2', 'Other', '/tmp/p2')",
+            [],
+        )
+        .unwrap();
+        insert_running(
+            &conn,
+            "other-project",
+            "p2",
+            "Full",
+            "ClaudeCode",
+            Utc::now(),
+        )
+        .unwrap();
         save_step_snapshot(&conn, "other-project", 2, "docs/a.md", Some("a")).unwrap();
 
         insert_running(&conn, "new", "p1", "Full", "ClaudeCode", Utc::now()).unwrap();
-        assert!(step_snapshot(&conn, "old", 2).unwrap().is_none(), "superseded");
+        assert!(
+            step_snapshot(&conn, "old", 2).unwrap().is_none(),
+            "superseded"
+        );
         assert!(
             step_snapshot(&conn, "other-project", 2).unwrap().is_some(),
             "another project's run is not superseded"
@@ -3463,7 +3533,8 @@ mod tests {
         insert_running(&conn, "r9", "p9", "Full", "ClaudeCode", Utc::now()).unwrap();
         save_step_snapshot(&conn, "r9", 1, "docs/a.md", Some("a")).unwrap();
         assert!(step_snapshot(&conn, "r9", 1).unwrap().is_some());
-        conn.execute("DELETE FROM audit_runs WHERE id = 'r9'", []).unwrap();
+        conn.execute("DELETE FROM audit_runs WHERE id = 'r9'", [])
+            .unwrap();
         assert!(step_snapshot(&conn, "r9", 1).unwrap().is_none());
     }
 
@@ -3473,7 +3544,16 @@ mod tests {
         insert_running(&conn, "r1", "p1", "Full", "ClaudeCode", Utc::now()).unwrap();
         insert_audit_step_start(&conn, "r1", 1, "docs/a.md", Utc::now()).unwrap();
         finalize_audit_step(
-            &conn, "r1", 1, Utc::now(), 5, &StepTokens::default(), None, true, None, false,
+            &conn,
+            "r1",
+            1,
+            Utc::now(),
+            5,
+            &StepTokens::default(),
+            None,
+            true,
+            None,
+            false,
         )
         .unwrap();
         insert_audit_step_start(&conn, "r1", 2, "docs/b.md", Utc::now()).unwrap();
@@ -3485,13 +3565,24 @@ mod tests {
         assert_eq!(unfinished.len(), 1);
         assert_eq!(unfinished[0].step_index, 2);
 
-        settle_killed_step(&conn, "r1", 2, "stopped during step 2", Some("restored"), false, Utc::now())
-            .unwrap();
+        settle_killed_step(
+            &conn,
+            "r1",
+            2,
+            "stopped during step 2",
+            Some("restored"),
+            false,
+            Utc::now(),
+        )
+        .unwrap();
         let steps = list_audit_steps(&conn, "r1").unwrap();
         let killed = steps.iter().find(|s| s.step_index == 2).unwrap();
         assert!(killed.ended_at.is_some());
         assert!(!killed.cli_success);
-        assert_eq!(killed.step_warning.as_deref(), Some("stopped during step 2"));
+        assert_eq!(
+            killed.step_warning.as_deref(),
+            Some("stopped during step 2")
+        );
         assert_eq!(killed.target_state.as_deref(), Some("restored"));
         assert!(step_snapshot(&conn, "r1", 2).unwrap().is_none());
         assert!(
@@ -3506,7 +3597,11 @@ mod tests {
         insert_running(&conn, "r1", "p1", "Full", "ClaudeCode", Utc::now()).unwrap();
         set_resume_drift(&conn, "r1", "sources changed since step 4").unwrap();
         assert_eq!(
-            get_by_id(&conn, "r1").unwrap().unwrap().resume_drift.as_deref(),
+            get_by_id(&conn, "r1")
+                .unwrap()
+                .unwrap()
+                .resume_drift
+                .as_deref(),
             Some("sources changed since step 4")
         );
 
@@ -3514,7 +3609,11 @@ mod tests {
         let recorded = recorded_agent_processes(&conn).unwrap();
         assert_eq!(
             recorded,
-            vec![("r1".to_string(), 4242, Some("Mon Oct 12 10:00:00 2026".to_string()))]
+            vec![(
+                "r1".to_string(),
+                4242,
+                Some("Mon Oct 12 10:00:00 2026".to_string())
+            )]
         );
         clear_agent_process(&conn, "r1").unwrap();
         assert!(recorded_agent_processes(&conn).unwrap().is_empty());

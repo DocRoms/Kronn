@@ -37,6 +37,7 @@ Kronn kept what the agent wrote: retry the step, or accept it as it stands.\n{PA
 }
 
 /// Whether `content` starts with a partial marker.
+#[cfg(test)]
 pub(crate) fn has_partial_marker(content: &str) -> bool {
     content.trim_start().starts_with(PARTIAL_OPEN)
 }
@@ -47,7 +48,9 @@ pub(crate) fn strip_partial_marker(content: &str) -> Option<String> {
     if !trimmed.starts_with(PARTIAL_OPEN) {
         return None;
     }
-    let after = trimmed.find(PARTIAL_CLOSE).map(|at| &trimmed[at + PARTIAL_CLOSE.len()..])?;
+    let after = trimmed
+        .find(PARTIAL_CLOSE)
+        .map(|at| &trimmed[at + PARTIAL_CLOSE.len()..])?;
     Some(after.trim_start_matches(['\n', '\r']).to_string())
 }
 
@@ -82,7 +85,10 @@ pub(crate) fn read_target(project_path: &Path, target: &str) -> Result<Option<St
 fn sibling(path: &Path, tag: &str) -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     path.with_file_name(format!(
         ".{name}.{tag}-{}-{}-{}",
         std::process::id(),
@@ -150,9 +156,16 @@ pub(crate) fn restore_target(
 fn save_aside(project_path: &Path, target: &str, content: &str) -> Result<String, String> {
     let path = contained_path(project_path, target)?;
     let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     for attempt in 0..100u32 {
-        let suffix = if attempt == 0 { String::new() } else { format!("-{attempt}") };
+        let suffix = if attempt == 0 {
+            String::new()
+        } else {
+            format!("-{attempt}")
+        };
         let aside = path.with_file_name(format!("{name}.kronn-displaced-{stamp}{suffix}"));
         match create_new_file(&aside, content) {
             Ok(()) => {
@@ -160,10 +173,16 @@ fn save_aside(project_path: &Path, target: &str, content: &str) -> Result<String
                 return Ok(shown.to_string_lossy().into_owned());
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(format!("could not keep the content of `{target}` aside: {e}")),
+            Err(e) => {
+                return Err(format!(
+                    "could not keep the content of `{target}` aside: {e}"
+                ))
+            }
         }
     }
-    Err(format!("could not find a free name to keep the content of `{target}` aside"))
+    Err(format!(
+        "could not find a free name to keep the content of `{target}` aside"
+    ))
 }
 
 /// Mark the kept target of a failed step as partial. Returns whether a
@@ -266,7 +285,10 @@ pub(crate) struct KilledSettlement {
 
 impl KilledSettlement {
     fn of(outcome: KilledOutcome) -> Self {
-        Self { outcome, displaced: None }
+        Self {
+            outcome,
+            displaced: None,
+        }
     }
 
     /// The `target_state` to record. `None` for [`KilledOutcome::Unsettled`]:
@@ -282,7 +304,10 @@ impl KilledSettlement {
 
     /// The target is whole: nothing a human has to look at.
     pub(crate) fn is_whole(&self) -> bool {
-        matches!(self.outcome, KilledOutcome::Restored | KilledOutcome::Untouched)
+        matches!(
+            self.outcome,
+            KilledOutcome::Restored | KilledOutcome::Untouched
+        )
     }
 
     /// A target left unsound keeps its snapshot for the acceptance diff.
@@ -343,7 +368,13 @@ pub(crate) fn settle_killed(
         Ok(now) => now,
         Err(e) => {
             tracing::error!("Audit step {step}: `{target}` could not be read: {e}");
-            return KilledSettlement::of(mark_instead(project_path, target, step, KilledOutcome::Partial, kind));
+            return KilledSettlement::of(mark_instead(
+                project_path,
+                target,
+                step,
+                KilledOutcome::Partial,
+                kind,
+            ));
         }
     };
     if now.as_deref() == pre_content {
@@ -361,7 +392,11 @@ pub(crate) fn settle_killed(
         match kind {
             StopKind::CutOff => {
                 return KilledSettlement::of(mark_instead(
-                    project_path, target, step, KilledOutcome::ChangedSinceSeen, kind,
+                    project_path,
+                    target,
+                    step,
+                    KilledOutcome::ChangedSinceSeen,
+                    kind,
                 ));
             }
             StopKind::Cancelled => match save_aside(project_path, target, content) {
@@ -370,14 +405,21 @@ pub(crate) fn settle_killed(
                     // Never replace what could not be kept.
                     tracing::error!("Audit step {step}: {e}");
                     return KilledSettlement::of(mark_instead(
-                        project_path, target, step, KilledOutcome::Partial, kind,
+                        project_path,
+                        target,
+                        step,
+                        KilledOutcome::Partial,
+                        kind,
                     ));
                 }
             },
         }
     }
     match restore_target(project_path, target, pre_content) {
-        Ok(_) => KilledSettlement { outcome: KilledOutcome::Restored, displaced },
+        Ok(_) => KilledSettlement {
+            outcome: KilledOutcome::Restored,
+            displaced,
+        },
         Err(e) => {
             tracing::error!("Audit step {step}: `{target}` could not be put back: {e}");
             KilledSettlement {
@@ -402,7 +444,11 @@ pub(crate) struct TargetWatch {
 
 impl TargetWatch {
     /// `None` for a step with no file target.
-    pub(crate) fn new(project_path: &Path, target: &str, pre_content: Option<&str>) -> Option<Self> {
+    pub(crate) fn new(
+        project_path: &Path,
+        target: &str,
+        pre_content: Option<&str>,
+    ) -> Option<Self> {
         if target == "REVIEW" || target.is_empty() {
             return None;
         }
@@ -556,7 +602,9 @@ pub(crate) fn settle_unfinished_at_boot(conn: &rusqlite::Connection) -> anyhow::
                 }
                 count += settled.len();
             }
-            Err(e) => tracing::warn!("Boot: could not settle the unfinished steps of run {run_id}: {e}"),
+            Err(e) => {
+                tracing::warn!("Boot: could not settle the unfinished steps of run {run_id}: {e}")
+            }
         }
     }
     Ok(count)
@@ -646,7 +694,10 @@ write): it was left in place under a partial marker, not overwritten"
 
 /// The text recorded on a step the user cancelled.
 pub(crate) fn killed_reason(step: u32, settlement: &KilledSettlement) -> String {
-    format!("Audit {KILLED_FRAGMENT} {step} by the user: {}.", outcome_text(settlement))
+    format!(
+        "Audit {KILLED_FRAGMENT} {step} by the user: {}.",
+        outcome_text(settlement)
+    )
 }
 
 /// The text recorded on a step whose agent died with the backend.
@@ -672,7 +723,13 @@ mod tests {
         let root = project();
         let file = root.path().join("docs/architecture.md");
         std::fs::write(&file, "# Architecture\n\nhalf a sentence").unwrap();
-        assert!(mark_partial(root.path(), "docs/architecture.md", 3, "output looks truncated").unwrap());
+        assert!(mark_partial(
+            root.path(),
+            "docs/architecture.md",
+            3,
+            "output looks truncated"
+        )
+        .unwrap());
         let marked = std::fs::read_to_string(&file).unwrap();
         assert!(has_partial_marker(&marked));
         assert!(marked.contains("step 3"), "{marked}");
@@ -694,13 +751,20 @@ mod tests {
         assert!(!mark_partial(root.path(), "docs/none.md", 1, "x").unwrap());
         std::fs::write(root.path().join("docs/empty.md"), " \n").unwrap();
         assert!(!mark_partial(root.path(), "docs/empty.md", 1, "x").unwrap());
-        assert_eq!(std::fs::read_to_string(root.path().join("docs/empty.md")).unwrap(), " \n");
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("docs/empty.md")).unwrap(),
+            " \n"
+        );
     }
 
     #[test]
     fn a_reason_cannot_close_the_marker_early() {
         let banner = partial_banner(2, "oops --> <script>");
-        assert_eq!(banner.matches("-->").count(), 2, "only the open and close markers: {banner}");
+        assert_eq!(
+            banner.matches("-->").count(),
+            2,
+            "only the open and close markers: {banner}"
+        );
     }
 
     #[test]
@@ -708,9 +772,16 @@ mod tests {
         let root = project();
         let file = root.path().join("docs/glossary.md");
         std::fs::write(&file, "half-writ").unwrap();
-        assert!(restore_target(root.path(), "docs/glossary.md", Some("# Glossary\nwhole\n")).unwrap());
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), "# Glossary\nwhole\n");
-        assert!(!restore_target(root.path(), "docs/glossary.md", Some("# Glossary\nwhole\n")).unwrap());
+        assert!(
+            restore_target(root.path(), "docs/glossary.md", Some("# Glossary\nwhole\n")).unwrap()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "# Glossary\nwhole\n"
+        );
+        assert!(
+            !restore_target(root.path(), "docs/glossary.md", Some("# Glossary\nwhole\n")).unwrap()
+        );
         assert!(restore_target(root.path(), "docs/glossary.md", None).unwrap());
         assert!(!file.exists());
         assert!(!restore_target(root.path(), "docs/glossary.md", None).unwrap());
@@ -727,7 +798,9 @@ mod tests {
             settle_failed_target(root.path(), "docs/stack.md", &pre, 4, "agent exited 1").unwrap(),
             None
         );
-        assert!(!has_partial_marker(&std::fs::read_to_string(&file).unwrap()));
+        assert!(!has_partial_marker(
+            &std::fs::read_to_string(&file).unwrap()
+        ));
         // Changed: kept and marked.
         std::fs::write(&file, "# Stack\nrust, and then the agent died mid-sen").unwrap();
         assert_eq!(
@@ -736,7 +809,10 @@ mod tests {
         );
         let content = std::fs::read_to_string(&file).unwrap();
         assert!(has_partial_marker(&content));
-        assert!(content.contains("mid-sen"), "the agent's text is kept: {content}");
+        assert!(
+            content.contains("mid-sen"),
+            "the agent's text is kept: {content}"
+        );
     }
 
     #[test]
@@ -746,14 +822,27 @@ mod tests {
         std::fs::write(&file, "half").unwrap();
         let seen = fingerprint(Some("half"));
         let settled = settle_killed(
-            root.path(), "docs/stack.md", Some("# Stack\nwhole\n"), Some(&seen), StopKind::Cancelled, 2,
+            root.path(),
+            "docs/stack.md",
+            Some("# Stack\nwhole\n"),
+            Some(&seen),
+            StopKind::Cancelled,
+            2,
         );
         assert_eq!(settled.outcome, KilledOutcome::Restored);
-        assert_eq!(settled.displaced, None, "the agent's own known output is not kept aside");
+        assert_eq!(
+            settled.displaced, None,
+            "the agent's own known output is not kept aside"
+        );
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "# Stack\nwhole\n");
         // Nothing written: nothing restored.
         let again = settle_killed(
-            root.path(), "docs/stack.md", Some("# Stack\nwhole\n"), None, StopKind::Cancelled, 2,
+            root.path(),
+            "docs/stack.md",
+            Some("# Stack\nwhole\n"),
+            None,
+            StopKind::Cancelled,
+            2,
         );
         assert_eq!(again.outcome, KilledOutcome::Untouched);
     }
@@ -812,10 +901,22 @@ mod tests {
 
     #[test]
     fn the_stopped_step_reasons_block_acceptance() {
-        let of = |outcome| KilledSettlement { outcome, displaced: None };
-        recognised(killed_reason(5, &of(KilledOutcome::Restored)), Some(AcceptBlocker::Killed));
-        recognised(killed_reason(5, &of(KilledOutcome::Unsettled)), Some(AcceptBlocker::Killed));
-        recognised(interrupted_reason(5, &of(KilledOutcome::Partial)), Some(AcceptBlocker::Killed));
+        let of = |outcome| KilledSettlement {
+            outcome,
+            displaced: None,
+        };
+        recognised(
+            killed_reason(5, &of(KilledOutcome::Restored)),
+            Some(AcceptBlocker::Killed),
+        );
+        recognised(
+            killed_reason(5, &of(KilledOutcome::Unsettled)),
+            Some(AcceptBlocker::Killed),
+        );
+        recognised(
+            interrupted_reason(5, &of(KilledOutcome::Partial)),
+            Some(AcceptBlocker::Killed),
+        );
         recognised(
             interrupted_reason(5, &of(KilledOutcome::ChangedSinceSeen)),
             Some(AcceptBlocker::Killed),
@@ -838,20 +939,35 @@ mod tests {
         // Nothing written: whole.
         std::fs::write(root.path().join("docs/a.md"), "whole").unwrap();
         let untouched = settle_killed(
-            root.path(), "docs/a.md", Some("whole"), None, StopKind::Cancelled, 2,
+            root.path(),
+            "docs/a.md",
+            Some("whole"),
+            None,
+            StopKind::Cancelled,
+            2,
         );
         assert_eq!(untouched.outcome, KilledOutcome::Untouched);
         // Written: put back.
         std::fs::write(root.path().join("docs/a.md"), "half").unwrap();
         let seen = fingerprint(Some("half"));
         let restored = settle_killed(
-            root.path(), "docs/a.md", Some("whole"), Some(&seen), StopKind::Cancelled, 2,
+            root.path(),
+            "docs/a.md",
+            Some("whole"),
+            Some(&seen),
+            StopKind::Cancelled,
+            2,
         );
         assert_eq!(restored.outcome, KilledOutcome::Restored);
         // The target is a directory: it can be neither read, restored nor marked.
         std::fs::create_dir_all(root.path().join("docs/dir.md")).unwrap();
         let stuck = settle_killed(
-            root.path(), "docs/dir.md", Some("whole"), None, StopKind::Cancelled, 2,
+            root.path(),
+            "docs/dir.md",
+            Some("whole"),
+            None,
+            StopKind::Cancelled,
+            2,
         );
         assert_eq!(stuck.outcome, KilledOutcome::Unsettled);
         assert_eq!(stuck.target_state(), None, "never recorded as restored");
@@ -864,20 +980,43 @@ mod tests {
         let root = project();
         let file = root.path().join("docs/stack.md");
         let conn = boot_conn(root.path());
-        crate::db::audit_runs::insert_audit_step_start(&conn, "r1", 2, "docs/stack.md", chrono::Utc::now())
-            .unwrap();
-        crate::db::audit_runs::save_step_snapshot(&conn, "r1", 2, "docs/stack.md", Some("# Stack\nwhole\n"))
-            .unwrap();
+        crate::db::audit_runs::insert_audit_step_start(
+            &conn,
+            "r1",
+            2,
+            "docs/stack.md",
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        crate::db::audit_runs::save_step_snapshot(
+            &conn,
+            "r1",
+            2,
+            "docs/stack.md",
+            Some("# Stack\nwhole\n"),
+        )
+        .unwrap();
         // The agent was seen writing its half; the backend died; the user then
         // edited the file by hand before the next boot.
-        crate::db::audit_runs::record_observed_output(&conn, "r1", 2, &fingerprint(Some("# Stack\nhalf-writ")))
-            .unwrap();
+        crate::db::audit_runs::record_observed_output(
+            &conn,
+            "r1",
+            2,
+            &fingerprint(Some("# Stack\nhalf-writ")),
+        )
+        .unwrap();
         std::fs::write(&file, "# Stack\nmy own careful edit\n").unwrap();
 
         assert_eq!(settle_unfinished_at_boot(&conn).unwrap(), 1);
         let after = std::fs::read_to_string(&file).unwrap();
-        assert!(after.contains("my own careful edit"), "the hand edit survives: {after}");
-        assert!(has_partial_marker(&after), "and the file is flagged: {after}");
+        assert!(
+            after.contains("my own careful edit"),
+            "the hand edit survives: {after}"
+        );
+        assert!(
+            has_partial_marker(&after),
+            "and the file is flagged: {after}"
+        );
         let steps = crate::db::audit_runs::list_audit_steps(&conn, "r1").unwrap();
         let step = steps.iter().find(|s| s.step_index == 2).unwrap();
         assert_eq!(step.target_state.as_deref(), Some(STATE_PARTIAL));
@@ -887,16 +1026,26 @@ mod tests {
             Some(AcceptBlocker::Killed)
         );
         assert!(
-            crate::db::audit_runs::step_snapshot(&conn, "r1", 2).unwrap().is_some(),
+            crate::db::audit_runs::step_snapshot(&conn, "r1", 2)
+                .unwrap()
+                .is_some(),
             "the snapshot is kept for the acceptance diff"
         );
         // The step created the file: a hand edit of it is just as safe.
-        crate::db::audit_runs::insert_audit_step_start(&conn, "r1", 3, "docs/new.md", chrono::Utc::now())
-            .unwrap();
+        crate::db::audit_runs::insert_audit_step_start(
+            &conn,
+            "r1",
+            3,
+            "docs/new.md",
+            chrono::Utc::now(),
+        )
+        .unwrap();
         crate::db::audit_runs::save_step_snapshot(&conn, "r1", 3, "docs/new.md", None).unwrap();
         std::fs::write(root.path().join("docs/new.md"), "written by hand").unwrap();
         assert_eq!(settle_unfinished_at_boot(&conn).unwrap(), 1);
-        assert!(std::fs::read_to_string(root.path().join("docs/new.md")).unwrap().contains("written by hand"));
+        assert!(std::fs::read_to_string(root.path().join("docs/new.md"))
+            .unwrap()
+            .contains("written by hand"));
     }
 
     #[test]
@@ -904,12 +1053,29 @@ mod tests {
         let root = project();
         let file = root.path().join("docs/stack.md");
         let conn = boot_conn(root.path());
-        crate::db::audit_runs::insert_audit_step_start(&conn, "r1", 2, "docs/stack.md", chrono::Utc::now())
-            .unwrap();
-        crate::db::audit_runs::save_step_snapshot(&conn, "r1", 2, "docs/stack.md", Some("# Stack\nwhole\n"))
-            .unwrap();
-        crate::db::audit_runs::record_observed_output(&conn, "r1", 2, &fingerprint(Some("# Stack\nhalf-writ")))
-            .unwrap();
+        crate::db::audit_runs::insert_audit_step_start(
+            &conn,
+            "r1",
+            2,
+            "docs/stack.md",
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        crate::db::audit_runs::save_step_snapshot(
+            &conn,
+            "r1",
+            2,
+            "docs/stack.md",
+            Some("# Stack\nwhole\n"),
+        )
+        .unwrap();
+        crate::db::audit_runs::record_observed_output(
+            &conn,
+            "r1",
+            2,
+            &fingerprint(Some("# Stack\nhalf-writ")),
+        )
+        .unwrap();
         std::fs::write(&file, "# Stack\nhalf-writ").unwrap();
         assert_eq!(settle_unfinished_at_boot(&conn).unwrap(), 1);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "# Stack\nwhole\n");
@@ -928,11 +1094,19 @@ mod tests {
         let file = root.path().join("docs/stack.md");
         std::fs::write(&file, "# Stack\nwritten after the last observation\n").unwrap();
         let settled = settle_killed(
-            root.path(), "docs/stack.md", Some("# Stack\nwhole\n"), None, StopKind::Cancelled, 4,
+            root.path(),
+            "docs/stack.md",
+            Some("# Stack\nwhole\n"),
+            None,
+            StopKind::Cancelled,
+            4,
         );
         assert_eq!(settled.outcome, KilledOutcome::Restored);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "# Stack\nwhole\n");
-        let kept = settled.displaced.clone().expect("the displaced content is kept");
+        let kept = settled
+            .displaced
+            .clone()
+            .expect("the displaced content is kept");
         assert!(kept.starts_with("docs/stack.md.kronn-displaced-"), "{kept}");
         assert_eq!(
             std::fs::read_to_string(root.path().join(&kept)).unwrap(),
@@ -954,13 +1128,28 @@ mod tests {
         // (a) The target itself became a symlink to a file outside.
         symlink(&victim, root.path().join("docs/stack.md")).unwrap();
         let a = settle_killed(
-            root.path(), "docs/stack.md", Some("# Stack\nwhole\n"), None, StopKind::Cancelled, 2,
+            root.path(),
+            "docs/stack.md",
+            Some("# Stack\nwhole\n"),
+            None,
+            StopKind::Cancelled,
+            2,
         );
-        assert_eq!(a.outcome, KilledOutcome::Unsettled, "a symlinked target is never written through");
-        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "outside the repository");
+        assert_eq!(
+            a.outcome,
+            KilledOutcome::Unsettled,
+            "a symlinked target is never written through"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "outside the repository"
+        );
         assert!(restore_target(root.path(), "docs/stack.md", Some("x")).is_err());
         assert!(mark_partial(root.path(), "docs/stack.md", 2, "r").is_err());
-        assert!(read_target(root.path(), "docs/stack.md").is_err(), "nor read through");
+        assert!(
+            read_target(root.path(), "docs/stack.md").is_err(),
+            "nor read through"
+        );
 
         // (b) A parent directory became a symlink to a directory outside.
         let elsewhere = outside.path().join("elsewhere");
@@ -969,15 +1158,24 @@ mod tests {
         symlink(&elsewhere, root.path().join("linked")).unwrap();
         assert!(restore_target(root.path(), "linked/glossary.md", Some("planted")).is_err());
         assert!(restore_target(root.path(), "linked/new/deep.md", Some("planted")).is_err());
-        assert_eq!(std::fs::read_to_string(elsewhere.join("glossary.md")).unwrap(), "outside");
-        assert!(!elsewhere.join("new").exists(), "no directory was created outside");
+        assert_eq!(
+            std::fs::read_to_string(elsewhere.join("glossary.md")).unwrap(),
+            "outside"
+        );
+        assert!(
+            !elsewhere.join("new").exists(),
+            "no directory was created outside"
+        );
 
         // (c) A symlink at the old fixed temp name does not redirect a restore.
         std::fs::remove_file(root.path().join("docs/stack.md")).unwrap();
         std::fs::write(root.path().join("docs/stack.md"), "half").unwrap();
         symlink(&victim, root.path().join("docs/stack.kronn-restore.tmp")).unwrap();
         assert!(restore_target(root.path(), "docs/stack.md", Some("# Stack\nwhole\n")).unwrap());
-        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "outside the repository");
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "outside the repository"
+        );
         assert_eq!(
             std::fs::read_to_string(root.path().join("docs/stack.md")).unwrap(),
             "# Stack\nwhole\n"
@@ -1003,10 +1201,22 @@ mod tests {
         let root = parent.path().join("mounted-volume").join("repo");
         std::fs::create_dir_all(root.join("docs")).unwrap();
         let conn = boot_conn(&root);
-        crate::db::audit_runs::insert_audit_step_start(&conn, "r1", 2, "docs/stack.md", chrono::Utc::now())
-            .unwrap();
-        crate::db::audit_runs::save_step_snapshot(&conn, "r1", 2, "docs/stack.md", Some("# Stack\nwhole\n"))
-            .unwrap();
+        crate::db::audit_runs::insert_audit_step_start(
+            &conn,
+            "r1",
+            2,
+            "docs/stack.md",
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        crate::db::audit_runs::save_step_snapshot(
+            &conn,
+            "r1",
+            2,
+            "docs/stack.md",
+            Some("# Stack\nwhole\n"),
+        )
+        .unwrap();
         // The volume is gone at boot.
         std::fs::remove_dir_all(parent.path().join("mounted-volume")).unwrap();
 
@@ -1015,10 +1225,15 @@ mod tests {
         assert!(!parent.path().join("mounted-volume").exists());
         let steps = crate::db::audit_runs::list_audit_steps(&conn, "r1").unwrap();
         let step = steps.iter().find(|s| s.step_index == 2).unwrap();
-        assert!(step.ended_at.is_none(), "no verdict is invented: the step stays open");
+        assert!(
+            step.ended_at.is_none(),
+            "no verdict is invented: the step stays open"
+        );
         assert!(step.target_state.is_none());
         assert!(
-            crate::db::audit_runs::step_snapshot(&conn, "r1", 2).unwrap().is_some(),
+            crate::db::audit_runs::step_snapshot(&conn, "r1", 2)
+                .unwrap()
+                .is_some(),
             "the snapshot waits for the volume"
         );
         // Accepting it still needs the override.
@@ -1032,7 +1247,12 @@ mod tests {
         // (unobserved content of a cut-off agent is left in place, marked)
         assert_eq!(settle_unfinished_at_boot(&conn).unwrap(), 1);
         let steps = crate::db::audit_runs::list_audit_steps(&conn, "r1").unwrap();
-        assert!(steps.iter().find(|s| s.step_index == 2).unwrap().ended_at.is_some());
+        assert!(steps
+            .iter()
+            .find(|s| s.step_index == 2)
+            .unwrap()
+            .ended_at
+            .is_some());
     }
 
     #[test]
@@ -1044,7 +1264,10 @@ mod tests {
         assert_eq!(watch.moved(), None, "unchanged since the step started");
         assert_eq!(watch.moved(), None);
         std::fs::write(&file, "the agent wrote this").unwrap();
-        assert_eq!(watch.moved(), Some(fingerprint(Some("the agent wrote this"))));
+        assert_eq!(
+            watch.moved(),
+            Some(fingerprint(Some("the agent wrote this")))
+        );
         assert_eq!(watch.moved(), None, "reported once");
         assert_eq!(watch.last_seen(), fingerprint(Some("the agent wrote this")));
         assert!(TargetWatch::new(root.path(), "REVIEW", None).is_none());
@@ -1059,8 +1282,15 @@ mod tests {
             rusqlite::params![root.to_str().unwrap(), now],
         )
         .unwrap();
-        crate::db::audit_runs::insert_running(&conn, "r1", "p1", "Full", "ClaudeCode", chrono::Utc::now())
-            .unwrap();
+        crate::db::audit_runs::insert_running(
+            &conn,
+            "r1",
+            "p1",
+            "Full",
+            "ClaudeCode",
+            chrono::Utc::now(),
+        )
+        .unwrap();
         conn
     }
 
@@ -1070,12 +1300,29 @@ mod tests {
         let file = root.path().join("docs/stack.md");
         let conn = boot_conn(root.path());
         // Step 1 done; step 2 was rewriting stack.md when the backend died.
-        crate::db::audit_runs::insert_audit_step_start(&conn, "r1", 2, "docs/stack.md", chrono::Utc::now())
-            .unwrap();
-        crate::db::audit_runs::save_step_snapshot(&conn, "r1", 2, "docs/stack.md", Some("# Stack\nwhole\n"))
-            .unwrap();
-        crate::db::audit_runs::record_observed_output(&conn, "r1", 2, &fingerprint(Some("# Stack\nhalf-writ")))
-            .unwrap();
+        crate::db::audit_runs::insert_audit_step_start(
+            &conn,
+            "r1",
+            2,
+            "docs/stack.md",
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        crate::db::audit_runs::save_step_snapshot(
+            &conn,
+            "r1",
+            2,
+            "docs/stack.md",
+            Some("# Stack\nwhole\n"),
+        )
+        .unwrap();
+        crate::db::audit_runs::record_observed_output(
+            &conn,
+            "r1",
+            2,
+            &fingerprint(Some("# Stack\nhalf-writ")),
+        )
+        .unwrap();
         std::fs::write(&file, "# Stack\nhalf-writ").unwrap();
 
         assert_eq!(settle_unfinished_at_boot(&conn).unwrap(), 1);
@@ -1089,7 +1336,9 @@ mod tests {
             AcceptBlocker::of_reason(step.step_warning.as_deref().unwrap()),
             Some(AcceptBlocker::Killed)
         );
-        assert!(crate::db::audit_runs::step_snapshot(&conn, "r1", 2).unwrap().is_none());
+        assert!(crate::db::audit_runs::step_snapshot(&conn, "r1", 2)
+            .unwrap()
+            .is_none());
         // Idempotent: nothing left to settle.
         assert_eq!(settle_unfinished_at_boot(&conn).unwrap(), 0);
     }
@@ -1099,15 +1348,29 @@ mod tests {
         let root = project();
         let conn = boot_conn(root.path());
         // Created by the step (absent before): removed.
-        crate::db::audit_runs::insert_audit_step_start(&conn, "r1", 1, "docs/new.md", chrono::Utc::now())
-            .unwrap();
+        crate::db::audit_runs::insert_audit_step_start(
+            &conn,
+            "r1",
+            1,
+            "docs/new.md",
+            chrono::Utc::now(),
+        )
+        .unwrap();
         crate::db::audit_runs::save_step_snapshot(&conn, "r1", 1, "docs/new.md", None).unwrap();
-        crate::db::audit_runs::record_observed_output(&conn, "r1", 1, &fingerprint(Some("half"))).unwrap();
+        crate::db::audit_runs::record_observed_output(&conn, "r1", 1, &fingerprint(Some("half")))
+            .unwrap();
         std::fs::write(root.path().join("docs/new.md"), "half").unwrap();
         // Unsettleable (a directory): marked neither restored nor partial.
-        crate::db::audit_runs::insert_audit_step_start(&conn, "r1", 2, "docs/dir.md", chrono::Utc::now())
+        crate::db::audit_runs::insert_audit_step_start(
+            &conn,
+            "r1",
+            2,
+            "docs/dir.md",
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        crate::db::audit_runs::save_step_snapshot(&conn, "r1", 2, "docs/dir.md", Some("whole"))
             .unwrap();
-        crate::db::audit_runs::save_step_snapshot(&conn, "r1", 2, "docs/dir.md", Some("whole")).unwrap();
         std::fs::create_dir_all(root.path().join("docs/dir.md")).unwrap();
 
         assert_eq!(settle_unfinished_at_boot(&conn).unwrap(), 2);
@@ -1117,7 +1380,9 @@ mod tests {
         assert_eq!(stuck.target_state, None);
         assert!(stuck.ended_at.is_some());
         assert!(
-            crate::db::audit_runs::step_snapshot(&conn, "r1", 2).unwrap().is_some(),
+            crate::db::audit_runs::step_snapshot(&conn, "r1", 2)
+                .unwrap()
+                .is_some(),
             "kept for the acceptance diff"
         );
         // Accepting it needs an override: it is not a restored step.
@@ -1130,8 +1395,14 @@ mod tests {
     #[test]
     fn accept_asks_for_an_override_on_a_step_that_never_ended() {
         let conn = boot_conn(Path::new("/tmp"));
-        crate::db::audit_runs::insert_audit_step_start(&conn, "r1", 3, "docs/x.md", chrono::Utc::now())
-            .unwrap();
+        crate::db::audit_runs::insert_audit_step_start(
+            &conn,
+            "r1",
+            3,
+            "docs/x.md",
+            chrono::Utc::now(),
+        )
+        .unwrap();
         let steps = crate::db::audit_runs::list_audit_steps(&conn, "r1").unwrap();
         let open = &steps[0];
         assert!(open.ended_at.is_none() && open.step_warning.is_none());
@@ -1141,8 +1412,16 @@ mod tests {
         );
         // A step that ended failed for an ordinary reason is not blocked.
         crate::db::audit_runs::finalize_audit_step(
-            &conn, "r1", 3, chrono::Utc::now(), 5, &crate::db::audit_runs::StepTokens::default(),
-            None, false, Some("agent exited with code 1"), false,
+            &conn,
+            "r1",
+            3,
+            chrono::Utc::now(),
+            5,
+            &crate::db::audit_runs::StepTokens::default(),
+            None,
+            false,
+            Some("agent exited with code 1"),
+            false,
         )
         .unwrap();
         let steps = crate::db::audit_runs::list_audit_steps(&conn, "r1").unwrap();

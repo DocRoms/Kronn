@@ -106,7 +106,8 @@ pub(crate) fn accept_blocker_of(
         .and_then(AcceptBlocker::of_reason)
         // A stopped step whose document was put back leaves it whole.
         .filter(|blocker| {
-            !(*blocker == AcceptBlocker::Killed && row.target_state.as_deref() == Some(STATE_RESTORED))
+            !(*blocker == AcceptBlocker::Killed
+                && row.target_state.as_deref() == Some(STATE_RESTORED))
         })
 }
 
@@ -228,7 +229,7 @@ pub async fn accept_audit_step(
     // KT-1211 (M4) — a step that failed for a reason that leaves its document
     // unsound is accepted only on an explicit override, with the diff shown.
     let step_row = steps.iter().find(|row| row.step_index == step);
-    let blocker = step_row.and_then(|row| accept_blocker_of(row));
+    let blocker = step_row.and_then(accept_blocker_of);
     let overridden = req.override_unsound.unwrap_or(false);
     if let Some(blocker) = blocker.filter(|_| !overridden) {
         let snapshot = {

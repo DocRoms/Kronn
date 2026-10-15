@@ -244,13 +244,15 @@ async fn a_room_step_is_principal_without_a_token_at_launch_and_after_resume() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    let bin = dir.path().join("bin");
+    for name in ["host", "data", "host-bin", "tmp"] {
+        std::fs::create_dir(dir.path().join(name)).unwrap();
+    }
+    // The fake CLI lives under the TMPDIR this test sets: the real-agent guard
+    // (KT-1189) trusts only binaries under the temporary directory.
+    let bin = dir.path().join("tmp").join("bin");
     let marks = dir.path().join("marks");
     for path in [&bin, &marks] {
         std::fs::create_dir(path).unwrap();
-    }
-    for name in ["host", "data", "host-bin", "tmp"] {
-        std::fs::create_dir(dir.path().join(name)).unwrap();
     }
     let mut env = Environment(Vec::new());
     env.set("PATH", format!("{}:/usr/bin:/bin", bin.display()));

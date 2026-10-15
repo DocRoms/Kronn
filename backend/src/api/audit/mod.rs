@@ -13,7 +13,6 @@ use axum::response::sse::Event;
 use futures::{Stream, StreamExt};
 
 pub mod accept;
-pub(crate) mod step_guard;
 mod agent_launch;
 pub mod anti_hallu_enforce;
 pub mod anti_hallu_step;
@@ -38,6 +37,7 @@ pub mod redact_artifacts;
 pub mod revalidate;
 pub mod run;
 pub(crate) mod run_state;
+pub(crate) mod step_guard;
 pub mod td_review;
 pub mod td_tasks;
 pub mod validate;

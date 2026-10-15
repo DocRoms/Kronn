@@ -394,7 +394,11 @@ pub fn check_detector_disposition(
 pub(crate) fn truncated_reason(target_file: &str, dst_size: u64, template_size: u64) -> String {
     format!(
         "step output {}: `{}` is {} B but template is {} B (< {}% threshold)",
-        super::step_guard::TRUNCATED_FRAGMENT, target_file, dst_size, template_size, MIN_DEST_RATIO_PCT
+        super::step_guard::TRUNCATED_FRAGMENT,
+        target_file,
+        dst_size,
+        template_size,
+        MIN_DEST_RATIO_PCT
     )
 }
 

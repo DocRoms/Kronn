@@ -430,7 +430,9 @@ async fn a_stop_mid_write_puts_the_target_back(pipeline: Pipeline) {
     let state = new_state();
     let project = tempfile::tempdir().unwrap();
     let target = match pipeline {
-        Pipeline::Full => crate::api::audit::assemble_chained_steps(AuditKind::Docker)[0].target_file,
+        Pipeline::Full => {
+            crate::api::audit::assemble_chained_steps(AuditKind::Docker)[0].target_file
+        }
         Pipeline::Partial => {
             let chain = crate::api::audit::assemble_chained_steps(AuditKind::Full);
             chain
@@ -488,9 +490,16 @@ async fn a_stop_mid_write_puts_the_target_back(pipeline: Pipeline) {
         .find(|row| row.target_state.is_some())
         .unwrap_or_else(|| panic!("{pipeline:?}: no step recorded what became of its target"));
     assert_eq!(stopped.target_state.as_deref(), Some("restored"));
-    assert!(stopped.ended_at.is_some(), "{pipeline:?}: the step is settled, not dangling");
     assert!(
-        stopped.step_warning.as_deref().unwrap_or("").contains("stopped during step"),
+        stopped.ended_at.is_some(),
+        "{pipeline:?}: the step is settled, not dangling"
+    );
+    assert!(
+        stopped
+            .step_warning
+            .as_deref()
+            .unwrap_or("")
+            .contains("stopped during step"),
         "{pipeline:?}: {:?}",
         stopped.step_warning
     );
@@ -522,7 +531,9 @@ impl Drop for Unlock {
 /// The chain target a pipeline's first step writes.
 fn first_target(pipeline: Pipeline) -> &'static str {
     match pipeline {
-        Pipeline::Full => crate::api::audit::assemble_chained_steps(AuditKind::Docker)[0].target_file,
+        Pipeline::Full => {
+            crate::api::audit::assemble_chained_steps(AuditKind::Docker)[0].target_file
+        }
         Pipeline::Partial => {
             let chain = crate::api::audit::assemble_chained_steps(AuditKind::Full);
             chain
@@ -549,7 +560,9 @@ async fn until_observed(state: &AppState, project: &str, step_index: u32, expect
             let run_id = run_id.clone();
             let seen = state
                 .db
-                .with_conn(move |conn| crate::db::audit_runs::step_snapshot(conn, &run_id, step_index))
+                .with_conn(move |conn| {
+                    crate::db::audit_runs::step_snapshot(conn, &run_id, step_index)
+                })
                 .await
                 .unwrap()
                 .and_then(|snapshot| snapshot.observed_hash);
@@ -601,7 +614,11 @@ async fn a_stop_that_cannot_settle_the_target_is_not_recorded_as_restored(pipeli
     assert!(response.0.success, "{pipeline:?}: {:?}", response.0.error);
 
     // Nothing could be put back: the half document is still there.
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Half writ", "{pipeline:?}");
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "# Half writ",
+        "{pipeline:?}"
+    );
     let (_, steps) = latest_run_steps(&state, "proj-stuck").await;
     let stuck = steps
         .iter()
@@ -616,7 +633,11 @@ async fn a_stop_that_cannot_settle_the_target_is_not_recorded_as_restored(pipeli
         "{pipeline:?}: a target that could be neither restored nor marked is not `restored`"
     );
     assert!(
-        stuck.step_warning.as_deref().unwrap().contains("neither be put back nor marked"),
+        stuck
+            .step_warning
+            .as_deref()
+            .unwrap()
+            .contains("neither be put back nor marked"),
         "{pipeline:?}: {:?}",
         stuck.step_warning
     );
@@ -634,7 +655,11 @@ async fn a_stop_that_cannot_settle_the_target_is_not_recorded_as_restored(pipeli
         .with_conn(move |conn| crate::db::audit_runs::step_snapshot(conn, &run_id, step_index))
         .await
         .unwrap();
-    assert_eq!(snapshot.and_then(|s| s.content).as_deref(), Some(BEFORE), "{pipeline:?}");
+    assert_eq!(
+        snapshot.and_then(|s| s.content).as_deref(),
+        Some(BEFORE),
+        "{pipeline:?}"
+    );
 }
 
 #[cfg(unix)]
@@ -688,10 +713,19 @@ async fn a_hand_edit_between_a_crash_and_boot_survives(pipeline: Pipeline) {
         .unwrap();
     assert_eq!(settled, 1, "{pipeline:?}");
     let after = std::fs::read_to_string(&path).unwrap();
-    assert!(after.contains("A careful hand edit made after the crash."), "{pipeline:?}: {after}");
-    assert!(crate::api::audit::step_guard::has_partial_marker(&after), "{pipeline:?}: {after}");
+    assert!(
+        after.contains("A careful hand edit made after the crash."),
+        "{pipeline:?}: {after}"
+    );
+    assert!(
+        crate::api::audit::step_guard::has_partial_marker(&after),
+        "{pipeline:?}: {after}"
+    );
     let (_, steps) = latest_run_steps(&state, "proj-hand").await;
-    let row = steps.iter().find(|row| row.step_index == step_index).unwrap();
+    let row = steps
+        .iter()
+        .find(|row| row.step_index == step_index)
+        .unwrap();
     assert_eq!(row.target_state.as_deref(), Some("partial"), "{pipeline:?}");
     let run_id = latest_run(&state, "proj-hand").await.id;
     let snapshot = state
@@ -699,7 +733,11 @@ async fn a_hand_edit_between_a_crash_and_boot_survives(pipeline: Pipeline) {
         .with_conn(move |conn| crate::db::audit_runs::step_snapshot(conn, &run_id, step_index))
         .await
         .unwrap();
-    assert_eq!(snapshot.and_then(|s| s.content).as_deref(), Some(BEFORE), "{pipeline:?}");
+    assert_eq!(
+        snapshot.and_then(|s| s.content).as_deref(),
+        Some(BEFORE),
+        "{pipeline:?}"
+    );
 
     let _ = crate::api::audit::full::cancel_audit(
         axum::extract::State(state.clone()),
@@ -727,7 +765,9 @@ async fn a_backend_crash_mid_step_is_settled_at_boot(pipeline: Pipeline) {
     let state = new_state();
     let project = tempfile::tempdir().unwrap();
     let target = match pipeline {
-        Pipeline::Full => crate::api::audit::assemble_chained_steps(AuditKind::Docker)[0].target_file,
+        Pipeline::Full => {
+            crate::api::audit::assemble_chained_steps(AuditKind::Docker)[0].target_file
+        }
         Pipeline::Partial => {
             let chain = crate::api::audit::assemble_chained_steps(AuditKind::Full);
             chain
@@ -758,7 +798,10 @@ async fn a_backend_crash_mid_step_is_settled_at_boot(pipeline: Pipeline) {
     .await;
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Half writ");
     let (_, open) = latest_run_steps(&state, "proj-crash").await;
-    let open = open.iter().find(|row| row.ended_at.is_none()).expect("the step in flight");
+    let open = open
+        .iter()
+        .find(|row| row.ended_at.is_none())
+        .expect("the step in flight");
     let step_index = open.step_index;
     // Boot puts back only what the audit saw the agent write.
     until_observed(&state, "proj-crash", step_index, "# Half writ").await;
@@ -791,11 +834,24 @@ async fn a_backend_crash_mid_step_is_settled_at_boot(pipeline: Pipeline) {
         "{pipeline:?}: the half-written doc is put back at boot"
     );
     let (_, steps) = latest_run_steps(&state, "proj-crash").await;
-    let row = steps.iter().find(|row| row.step_index == step_index).unwrap();
-    assert!(row.ended_at.is_some(), "{pipeline:?}: the step has a verdict");
-    assert_eq!(row.target_state.as_deref(), Some("restored"), "{pipeline:?}");
+    let row = steps
+        .iter()
+        .find(|row| row.step_index == step_index)
+        .unwrap();
     assert!(
-        row.step_warning.as_deref().unwrap_or("").contains("stopped during step"),
+        row.ended_at.is_some(),
+        "{pipeline:?}: the step has a verdict"
+    );
+    assert_eq!(
+        row.target_state.as_deref(),
+        Some("restored"),
+        "{pipeline:?}"
+    );
+    assert!(
+        row.step_warning
+            .as_deref()
+            .unwrap_or("")
+            .contains("stopped during step"),
         "{pipeline:?}: {:?}",
         row.step_warning
     );
@@ -871,7 +927,9 @@ async fn a_direct_cli_step_records_and_clears_its_process_group(pipeline: Pipeli
     let run = launch(&state, pipeline, "proj-pgid", AgentType::ClaudeCode);
 
     let recorded = || {
-        state.db.with_conn(|conn| crate::db::audit_runs::recorded_agent_processes(conn))
+        state
+            .db
+            .with_conn(|conn| crate::db::audit_runs::recorded_agent_processes(conn))
     };
     let mut found = Vec::new();
     for _ in 0..500 {
@@ -881,7 +939,11 @@ async fn a_direct_cli_step_records_and_clears_its_process_group(pipeline: Pipeli
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert_eq!(found.len(), 1, "{pipeline:?}: the agent's process group is recorded while it works");
+    assert_eq!(
+        found.len(),
+        1,
+        "{pipeline:?}: the agent's process group is recorded while it works"
+    );
     let (run_id, pgid, stamp) = found.remove(0);
     assert!(pgid > 1, "{pipeline:?}");
     assert!(
@@ -895,7 +957,9 @@ async fn a_direct_cli_step_records_and_clears_its_process_group(pipeline: Pipeli
         axum::extract::Path("proj-pgid".to_string()),
     )
     .await;
-    let _ = tokio::time::timeout(Duration::from_secs(15), run).await.expect("the audit ends");
+    let _ = tokio::time::timeout(Duration::from_secs(15), run)
+        .await
+        .expect("the audit ends");
     assert!(
         recorded().await.unwrap().is_empty(),
         "{pipeline:?}: a reaped agent leaves nothing for boot to kill"

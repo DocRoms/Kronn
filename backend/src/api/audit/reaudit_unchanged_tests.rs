@@ -781,13 +781,19 @@ async fn a_truncated_step_is_accepted_only_with_an_explicit_override() {
     let (_, steps, _) = persisted(&fx.state, &interrupted).await;
     let failed = steps.iter().find(|s| s.step_index == rules).unwrap();
     assert!(
-        failed.step_warning.as_deref().unwrap_or("").contains("truncated"),
+        failed
+            .step_warning
+            .as_deref()
+            .unwrap_or("")
+            .contains("truncated"),
         "{:?}",
         failed.step_warning
     );
 
     // Without the override: refused, nothing recorded, the diff is shown.
-    let refused = fx.accept(&interrupted, rules, Some("looks fine"), false).await;
+    let refused = fx
+        .accept(&interrupted, rules, Some("looks fine"), false)
+        .await;
     assert!(!refused.success);
     let error = refused.error.unwrap();
     assert!(
@@ -818,7 +824,10 @@ async fn a_truncated_step_is_accepted_only_with_an_explicit_override() {
     let row = steps.iter().find(|s| s.step_index == rules).unwrap();
     assert!(row.accepted_at.is_some());
     let reason = row.accepted_reason.as_deref().unwrap_or("");
-    assert!(reason.contains("override") && reason.contains("looks fine"), "{reason}");
+    assert!(
+        reason.contains("override") && reason.contains("looks fine"),
+        "{reason}"
+    );
 }
 
 /// KT-1211 — a step an agent never finished (its row has no `ended_at` and no
@@ -875,14 +884,23 @@ async fn a_step_that_never_ended_is_accepted_only_with_an_explicit_override() {
         .is_none());
 
     let accepted = fx
-        .accept_with(&interrupted, rules, Some("checked by hand"), false, Some(true))
+        .accept_with(
+            &interrupted,
+            rules,
+            Some("checked by hand"),
+            false,
+            Some(true),
+        )
         .await;
     assert!(accepted.success, "{:?}", accepted.error);
     let (_, steps, _) = persisted(&fx.state, &interrupted).await;
     let row = steps.iter().find(|s| s.step_index == rules).unwrap();
     assert!(row.accepted_at.is_some());
     assert!(
-        row.accepted_reason.as_deref().unwrap_or("").contains("override"),
+        row.accepted_reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("override"),
         "{:?}",
         row.accepted_reason
     );

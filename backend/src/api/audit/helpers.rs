@@ -333,7 +333,10 @@ pub(crate) fn resume_drift_block(drift: &str, language: &str) -> String {
             "Les documents des étapes héritées par ce run ont été écrits sur des sources antérieures. Vérifie-les contre l'arbre actuel avant de t'y fier et signale ceux qui ne correspondent plus :",
         ),
     };
-    format!("{title}\n{lead}\n> {}\n\n", drift.split_whitespace().collect::<Vec<_>>().join(" "))
+    format!(
+        "{title}\n{lead}\n> {}\n\n",
+        drift.split_whitespace().collect::<Vec<_>>().join(" ")
+    )
 }
 
 pub(crate) fn partial_run_block(

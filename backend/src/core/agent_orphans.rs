@@ -57,7 +57,10 @@ pub fn start_stamp(pid: u32) -> Option<String> {
             )
         };
         if written == size {
-            return Some(format!("bsd:{}.{}", info.pbi_start_tvsec, info.pbi_start_tvusec));
+            return Some(format!(
+                "bsd:{}.{}",
+                info.pbi_start_tvsec, info.pbi_start_tvusec
+            ));
         }
     }
     let out = crate::core::cmd::sync_tool_cmd("ps")
@@ -179,7 +182,10 @@ mod tests {
         let mut child = spawn_group_leader();
         let pid = child.id();
         let stamp = start_stamp(pid);
-        assert!(stamp.is_some(), "the platform must be able to stamp a process");
+        assert!(
+            stamp.is_some(),
+            "the platform must be able to stamp a process"
+        );
         let outcome = kill_recorded_group(pid as i64, stamp.as_deref(), start_stamp);
         assert_eq!(outcome, OrphanOutcome::Killed);
         let status = child.wait().unwrap();
@@ -189,8 +195,11 @@ mod tests {
     #[test]
     fn a_reused_pid_is_never_signalled() {
         let mut child = spawn_group_leader();
-        let outcome =
-            kill_recorded_group(child.id() as i64, Some("ps:a different process"), start_stamp);
+        let outcome = kill_recorded_group(
+            child.id() as i64,
+            Some("ps:a different process"),
+            start_stamp,
+        );
         assert_eq!(outcome, OrphanOutcome::NotOurs);
         assert!(child.try_wait().unwrap().is_none(), "still alive");
         // A record without a stamp cannot prove it either.
