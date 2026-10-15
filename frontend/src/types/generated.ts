@@ -2216,6 +2216,8 @@ cost_usd: number | null,
  */
 is_byok: boolean, };
 
+export type CorrectionKind = "recheck" | "replace_or_remove" | "remove_section";
+
 export type Correspondence = {
 /**
  * Repo-relative source path.
@@ -3959,6 +3961,8 @@ export type EvidenceCheck = { reference: string, status: string, fabricated: boo
  * A source inside the project docs: human-validated or AI-generated (KT-1079).
  */
 doc_provenance?: SourceProvenance, };
+
+export type EvidenceKind = "citation" | "path_reference";
 
 /**
  * What a run may be evidence for.
@@ -7030,6 +7034,12 @@ pending_proposal_count: number,
  */
 pending_item_count: number, };
 
+/**
+ * A correction Kronn proposes. Nothing is applied by itself: the agent pass
+ * the human launches carries it out, and the human validates the result.
+ */
+export type ProposedCorrection = { kind: CorrectionKind, reference: string, proposal: string, };
+
 export type ProposeResult = { accepted: boolean, reason: string | null, warnings: Array<string>, evidence_checks: Array<EvidenceCheck>, learning: Learning | null, };
 
 export type ProvenanceChange = {
@@ -7475,6 +7485,44 @@ human_validated: boolean, };
  */
 export type ReinstallKind = "damaged_or_template" | "filled";
 
+/**
+ * What is measured, over every section of every doc.
+ */
+export type RelevanceCounts = { sections: number, still_true: number, outdated: number, no_longer_relevant: number, unanchored: number,
+/**
+ * Outdated or no-longer-relevant sections nobody touched since the
+ * validation that recorded them.
+ */
+untouched_stale: number,
+/**
+ * Anchors (citations and prose paths) whose file is gone.
+ */
+missing_references: number,
+/**
+ * The part of `missing_references` that is prose only: no citation, so
+ * no fingerprint, broke: only this check sees it.
+ */
+prose_missing: number,
+/**
+ * `still_true` over the anchored sections; `None` when none is anchored.
+ */
+relevance_pct: number | null, };
+
+/**
+ * One anchor of a section that does not resolve any more.
+ */
+export type RelevanceEvidence = { kind: EvidenceKind,
+/**
+ * The citation label or path, as the doc writes it.
+ */
+reference: string, state: CitationState, };
+
+export type RelevanceReport = { counts: RelevanceCounts,
+/**
+ * Only the sections that need attention (`outdated`, `no_longer_relevant`).
+ */
+sections: Array<SectionRelevance>, };
+
 export type RemoteRepo = { name: string, full_name: string, clone_url: string, ssh_url: string, description: string | null, language: string | null, stargazers_count: number, updated_at: string, source: string, already_cloned: boolean, };
 
 export type RemovePlanningBlockerRequest = { actor?: PlanningActor, };
@@ -7790,7 +7838,12 @@ sections: Array<RevalidationSection>,
 /**
  * Full audit steps the bounded agent pass runs, in chain order.
  */
-agent_steps: number[], reanchor_count: number, human_count: number, };
+agent_steps: number[], reanchor_count: number, human_count: number,
+/**
+ * Sections per verdict over every doc, and how many of the stale ones
+ * nobody revised since validation (KT-1168).
+ */
+relevance: RelevanceCounts, };
 
 export type RevalidationSection = { doc: string,
 /**
@@ -7804,7 +7857,12 @@ reanchor: Array<CitationStatus>,
 /**
  * Broken citations outside human sections.
  */
-broken: Array<CitationStatus>, human: Array<HumanCitationTodo>, };
+broken: Array<CitationStatus>, human: Array<HumanCitationTodo>,
+/**
+ * The doc's sections that are outdated or no longer relevant to the
+ * code, with the evidence and the corrections Kronn proposes.
+ */
+relevance: Array<SectionRelevance>, };
 
 /**
  * Principal → backend review (ADR §5, KT-319). `comment` is schema-optional but
@@ -8203,6 +8261,23 @@ unrecorded: Array<string>, };
  * time.
  */
 export type SectionClass = "critical" | "universal" | "routed" | "historical" | "duplicated" | "possibly_obsolete";
+
+export type SectionRelevance = { doc: string,
+/**
+ * The Markdown heading; empty for the text before the first heading.
+ */
+heading: string, verdict: SectionVerdict,
+/**
+ * The anchors that no longer resolve.
+ */
+evidence: Array<RelevanceEvidence>, corrections: Array<ProposedCorrection>,
+/**
+ * The section's text is exactly what was recorded at validation: nobody
+ * revised it although the code it describes changed.
+ */
+untouched_since_code_changed: boolean, };
+
+export type SectionVerdict = "still_true" | "outdated" | "no_longer_relevant" | "unanchored";
 
 export type SendMessageRequest = { content: string,
 /**

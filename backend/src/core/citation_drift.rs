@@ -65,6 +65,14 @@ pub struct DocFingerprints {
     pub recorded_at: String,
     pub reason: RecordReason,
     pub citations: Vec<CitationFingerprint>,
+    /// Digest of each Markdown section when recorded (KT-1168): tells a
+    /// section nobody revised from one a person already touched.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sections: BTreeMap<String, String>,
+    /// Paths the prose names that were already gone when a human validated
+    /// or acknowledged the doc: a deliberate mention, not a stale claim.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub known_missing: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -309,6 +317,13 @@ fn fingerprint_doc(project_path: &Path, content: &str, reason: RecordReason) -> 
             .iter()
             .filter_map(|c| fingerprint(project_path, c))
             .collect(),
+        sections: crate::core::doc_relevance::section_digests(content),
+        known_missing: match reason {
+            RecordReason::Validation | RecordReason::Acknowledged => {
+                crate::core::doc_relevance::missing_prose_paths(project_path, content)
+            }
+            RecordReason::Audit | RecordReason::Revalidation => Vec::new(),
+        },
     }
 }
 
@@ -369,6 +384,11 @@ pub(crate) fn doc_files(project_path: &Path) -> Vec<String> {
     out.sort();
     out.truncate(MAX_DOCS);
     out
+}
+
+/// Whether a project-relative file (or folder) a doc names still exists.
+pub(crate) fn cited_file_exists(project_path: &Path, file: &str) -> bool {
+    resolve_cited(project_path, file).is_some_and(|path| path.exists())
 }
 
 fn read_doc(project_path: &Path, doc: &str) -> Option<String> {
@@ -614,6 +634,9 @@ pub fn record_reanchored(
     // An edit made by hand since the record stays visible as such.
     if entry.doc_sha256 == sha256_hex(before.as_bytes()) {
         entry.doc_sha256 = sha256_hex(after.as_bytes());
+        if !entry.sections.is_empty() {
+            entry.sections = crate::core::doc_relevance::section_digests(after);
+        }
     }
     write(project_path, &mut file)
 }

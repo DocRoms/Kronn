@@ -1889,6 +1889,10 @@ pub struct RevalidationSection {
     /// Broken citations outside human sections.
     pub broken: Vec<crate::core::citation_drift::CitationStatus>,
     pub human: Vec<HumanCitationTodo>,
+    /// The doc's sections that are outdated or no longer relevant to the
+    /// code, with the evidence and the corrections Kronn proposes.
+    #[serde(default)]
+    pub relevance: Vec<crate::core::doc_relevance::SectionRelevance>,
 }
 
 /// `GET /api/projects/:id/revalidation`: the deterministic part of
@@ -1906,6 +1910,10 @@ pub struct RevalidationPlan {
     pub reanchor_count: usize,
     #[ts(type = "number")]
     pub human_count: usize,
+    /// Sections per verdict over every doc, and how many of the stale ones
+    /// nobody revised since validation (KT-1168).
+    #[serde(default)]
+    pub relevance: crate::core::doc_relevance::RelevanceCounts,
 }
 
 /// What the conversion did with one tech-debt sheet (KT-1167).

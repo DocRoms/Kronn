@@ -21,6 +21,11 @@ the smallest possible edit.
 - **Kronn findings**: the citations whose cited lines changed (`changed`),
   fall past the end of the file (`removed`), or whose file is gone
   (`file missing`). They are facts, not guesses: start there.
+- **Relevance findings**: Kronn also judged each section of the file against
+  the current code: `outdated` (a cited line changed or vanished, or some of
+  the files it names are gone) or `no longer relevant` (everything it points
+  at is gone), each with a proposed correction. A section Kronn did not list
+  is not contradicted by anything it can check.
 - **Moved citations** were already re-anchored by Kronn (same content, new
   line). Do not touch them.
 - **Human-owned citations** sit in `owner="human"` sections: correct them
@@ -36,9 +41,14 @@ the smallest possible edit.
    - false or stale: correct the claim and cite the line that proves the
      correction;
    - the code it described is gone: remove the claim.
-3. Check the other facts and citations of the file the same way, without
+3. For each relevance finding, apply or refine the proposed correction:
+   - outdated: re-read the code, then correct the claim or cite what supports
+     it now;
+   - no longer relevant: remove the section, unless it still describes
+     something that exists (then cite where).
+4. Check the other facts and citations of the file the same way, without
    rewriting what is still true.
-4. Use the citation grammar `[src: file: <path>:<line>]` or
+5. Use the citation grammar `[src: file: <path>:<line>]` or
    `[src: file: <path>:<start>-<end>]`, one reference per marker. Never cite a
    line you did not open.
 

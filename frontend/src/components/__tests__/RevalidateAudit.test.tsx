@@ -36,7 +36,13 @@ const PROJECT: Project = {
   updated_at: '2026-01-01T00:00:00Z',
 };
 
+const NO_RELEVANCE = {
+  sections: 0, still_true: 0, outdated: 0, no_longer_relevant: 0, unanchored: 0,
+  untouched_stale: 0, missing_references: 0, prose_missing: 0, relevance_pct: null,
+};
+
 const PLAN: RevalidationPlan = {
+  relevance: NO_RELEVANCE,
   sources_state: 'needs_reverification',
   agent_steps: [4],
   reanchor_count: 1,
@@ -46,7 +52,7 @@ const PLAN: RevalidationPlan = {
       doc: 'docs/coding-rules.md', step: 4, action: 'agent', doc_missing: false,
       reanchor: [{ cite: 'src/a.rs:2', file: 'src/a.rs', line: 2, end_line: 2, state: 'moved', current_line: 5 }],
       broken: [{ cite: 'src/a.rs:9', file: 'src/a.rs', line: 9, end_line: 9, state: 'changed', current_line: null }],
-      human: [],
+      human: [], relevance: [],
     },
     {
       doc: 'docs/glossary.md', step: 2, action: 'human', doc_missing: false,
@@ -55,12 +61,14 @@ const PLAN: RevalidationPlan = {
         section: 'owner-notes',
         citation: { cite: 'src/old.rs:3', file: 'src/old.rs', line: 3, end_line: 3, state: 'file_missing', current_line: null },
       }],
+      relevance: [],
     },
   ],
 };
 
 const CLEAN: RevalidationPlan = {
   sources_state: 'clean', sections: [], agent_steps: [], reanchor_count: 0, human_count: 0,
+  relevance: NO_RELEVANCE,
 };
 
 type Handlers = Parameters<typeof projectsApi.revalidateAuditStream>[2];
@@ -449,15 +457,54 @@ describe('RevalidateAudit', () => {
     expect(within(panel).queryByTestId('revalidate-launch')).toBeNull();
   });
 
+  it('judges each section: verdict counts, evidence and the proposed correction', async () => {
+    vi.mocked(projectsApi.revalidationPlan).mockResolvedValue({
+      sources_state: 'needs_reverification',
+      agent_steps: [4],
+      reanchor_count: 0,
+      human_count: 0,
+      relevance: {
+        sections: 6, still_true: 3, outdated: 1, no_longer_relevant: 1, unanchored: 1,
+        untouched_stale: 2, missing_references: 2, prose_missing: 1, relevance_pct: 60,
+      },
+      sections: [{
+        doc: 'docs/coding-rules.md', step: 4, action: 'agent', doc_missing: false,
+        reanchor: [], broken: [], human: [],
+        relevance: [{
+          doc: 'docs/coding-rules.md', heading: 'Engine', verdict: 'no_longer_relevant',
+          evidence: [{ kind: 'path_reference', reference: 'src/engine.rs', state: 'file_missing' }],
+          corrections: [{
+            kind: 'remove_section', reference: '', proposal: 'Everything this section points at is gone.',
+          }],
+          untouched_since_code_changed: true,
+        }],
+      }],
+    });
+    setup();
+    const panel = await openPanel();
+
+    const counts = await within(panel).findByTestId('revalidate-relevance-counts');
+    expect(counts).toHaveTextContent('audit.revalidate.relevance 3 5 1 1 1 2');
+    const section = within(panel).getByTestId('revalidate-relevance-section');
+    expect(section).toHaveAttribute('data-verdict', 'no_longer_relevant');
+    expect(section).toHaveTextContent('Engine');
+    expect(section).toHaveTextContent('src/engine.rs');
+    expect(section).toHaveTextContent('Everything this section points at is gone.');
+    expect(within(section).getByTestId('revalidate-untouched')).toBeInTheDocument();
+    expect(within(panel).queryByTestId('revalidate-prose-changed')).toBeNull();
+    expect(within(panel).getByTestId('revalidate-launch')).toBeEnabled();
+  });
+
   it('allows a targeted prose check while citation fingerprints are unknown', async () => {
     vi.mocked(projectsApi.revalidationPlan).mockResolvedValue({
       sources_state: 'unknown',
       agent_steps: [4],
       reanchor_count: 0,
       human_count: 0,
+      relevance: NO_RELEVANCE,
       sections: [{
         doc: 'docs/coding-rules.md', step: 4, action: 'agent', doc_missing: false,
-        reanchor: [], broken: [], human: [],
+        reanchor: [], broken: [], human: [], relevance: [],
       }],
     });
     setup();

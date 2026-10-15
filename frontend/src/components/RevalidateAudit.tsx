@@ -243,8 +243,32 @@ export function RevalidateAudit({
         )}
       </div>
       {s.action === 'manual' && <p className="rv-hint">{t(s.doc_missing ? 'audit.revalidate.docMissing' : 'audit.revalidate.manualHint')}</p>}
-      {s.action === 'agent' && s.broken.length === 0 && s.reanchor.length === 0 && s.human.length === 0 && (
+      {s.action === 'agent' && s.broken.length === 0 && s.reanchor.length === 0 && s.human.length === 0
+        && (s.relevance ?? []).length === 0 && (
         <p className="rv-hint" data-testid="revalidate-prose-changed">{t('audit.revalidate.proseChanged')}</p>
+      )}
+      {(s.relevance ?? []).length > 0 && (
+        <ul className="rv-relevance" data-testid="revalidate-relevance-sections">
+          {(s.relevance ?? []).map(r => (
+            <li key={`${r.doc}:${r.heading}`} data-testid="revalidate-relevance-section" data-verdict={r.verdict}>
+              <strong>{r.heading || '—'}</strong>{' '}
+              <span className="rv-chip" data-verdict={r.verdict}>{t(`audit.revalidate.relevance.${r.verdict}`)}</span>
+              {r.untouched_since_code_changed && (
+                <span className="rv-hint" data-testid="revalidate-untouched"> {t('audit.revalidate.relevance.untouched')}</span>
+              )}
+              <ul>
+                {r.evidence.map(e => (
+                  <li key={e.reference}><code>{e.reference}</code> — {t(`audit.revalidate.state.${e.state}`)}</li>
+                ))}
+                {r.corrections.map(c => (
+                  <li key={`${c.kind}:${c.reference}`} className="rv-hint">
+                    {t('audit.revalidate.relevance.proposed')}: {c.proposal}
+                  </li>
+                ))}
+              </ul>
+            </li>
+          ))}
+        </ul>
       )}
       <ul className="rv-cites">
         {[...s.broken, ...s.reanchor].map(c => (
@@ -462,6 +486,15 @@ export function RevalidateAudit({
                 {plan.sources_state === 'unknown' && (
                   <p className="rv-hint" data-testid="revalidate-unknown">
                     {t(hasTargetedAgentWork ? 'audit.revalidate.unknownWithAgentWork' : 'audit.revalidate.unknown')}
+                  </p>
+                )}
+                {plan.relevance && plan.relevance.sections > 0 && (
+                  <p className="rv-hint" data-testid="revalidate-relevance-counts">
+                    {t('audit.revalidate.relevance',
+                      String(plan.relevance.still_true),
+                      String(plan.relevance.still_true + plan.relevance.outdated + plan.relevance.no_longer_relevant),
+                      String(plan.relevance.outdated), String(plan.relevance.no_longer_relevant),
+                      String(plan.relevance.unanchored), String(plan.relevance.untouched_stale))}
                   </p>
                 )}
                 {plan.sections.length === 0

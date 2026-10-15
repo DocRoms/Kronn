@@ -16,6 +16,7 @@ use axum::{
 };
 
 use crate::core::citation_drift::{self, CitationState, CitationStatus, Reanchor, SourcesState};
+use crate::core::doc_relevance::{self, SectionVerdict};
 use crate::core::scanner;
 use crate::models::*;
 use crate::AppState;
@@ -48,14 +49,30 @@ fn owning_step(
 /// What "Revalider l'audit" would do, computed without writing anything.
 pub fn plan(project_path: &FsPath) -> RevalidationPlan {
     let report = citation_drift::check(project_path);
+    // The deterministic fingerprints above are reused as they are; relevance
+    // adds the per-section verdict and the prose paths no fingerprint covers.
+    // A citation the git diff maps to a new line is re-anchored, not stale.
+    let mut moved: std::collections::BTreeMap<String, BTreeSet<String>> = Default::default();
+    for section in report.sections.iter().filter(|s| !s.citations.is_empty()) {
+        let content = std::fs::read_to_string(project_path.join(&section.doc)).unwrap_or_default();
+        let labels: BTreeSet<String> = reanchor_statuses(project_path, &content, section)
+            .into_iter()
+            .filter(|c| c.state == CitationState::Moved)
+            .map(|c| c.cite)
+            .collect();
+        moved.insert(section.doc.clone(), labels);
+    }
+    let relevance = doc_relevance::analyze_with_moves(project_path, &report, &moved);
     let docs_root = crate::core::docs_location::DocsRoot::of(project_path);
     let chain = super::steps_for(AuditKind::Full, &docs_root);
     let mut plan = RevalidationPlan {
-        sources_state: report.sources_state,
+        sources_state: relevance.escalate(report.sources_state),
+        relevance: relevance.counts.clone(),
         ..Default::default()
     };
     for section in &report.sections {
-        if section.citations.is_empty() && !section.doc_missing {
+        let stale_sections: Vec<_> = relevance.of_doc(&section.doc).cloned().collect();
+        if section.citations.is_empty() && stale_sections.is_empty() && !section.doc_missing {
             continue;
         }
         let content = std::fs::read_to_string(project_path.join(&section.doc)).unwrap_or_default();
@@ -68,6 +85,7 @@ pub fn plan(project_path: &FsPath) -> RevalidationPlan {
             reanchor: Vec::new(),
             broken: Vec::new(),
             human: Vec::new(),
+            relevance: stale_sections,
         };
         for citation in reanchor_statuses(project_path, &content, section) {
             for (name, labels) in &human_sections {
@@ -86,10 +104,12 @@ pub fn plan(project_path: &FsPath) -> RevalidationPlan {
                 entry.broken.push(citation.clone());
             }
         }
-        entry.action = if section.doc_missing || (!entry.broken.is_empty() && entry.step.is_none())
-        {
+        // Broken citations and sections the code outgrew both need a model
+        // to rewrite the prose; a moved line alone does not.
+        let needs_agent = !entry.broken.is_empty() || !entry.relevance.is_empty();
+        entry.action = if section.doc_missing || (needs_agent && entry.step.is_none()) {
             RevalidationAction::Manual
-        } else if !entry.broken.is_empty() {
+        } else if needs_agent {
             RevalidationAction::Agent
         } else if !entry.reanchor.is_empty() {
             RevalidationAction::Reanchor
@@ -104,6 +124,36 @@ pub fn plan(project_path: &FsPath) -> RevalidationPlan {
             }
         }
         plan.sections.push(entry);
+    }
+    // Docs the fingerprint store does not know (no record yet) but whose
+    // sections the code outgrew.
+    let known: BTreeSet<String> = plan.sections.iter().map(|s| s.doc.clone()).collect();
+    let mut unknown: Vec<String> = relevance
+        .sections
+        .iter()
+        .map(|s| s.doc.clone())
+        .filter(|doc| !known.contains(doc))
+        .collect();
+    unknown.dedup();
+    for doc in unknown {
+        let step = owning_step(&chain, &doc, &docs_root);
+        plan.sections.push(RevalidationSection {
+            action: if step.is_some() {
+                RevalidationAction::Agent
+            } else {
+                RevalidationAction::Manual
+            },
+            step,
+            doc_missing: false,
+            reanchor: Vec::new(),
+            broken: Vec::new(),
+            human: Vec::new(),
+            relevance: relevance.of_doc(&doc).cloned().collect(),
+            doc,
+        });
+        if let Some(step) = step {
+            plan.agent_steps.push(step);
+        }
     }
     plan.agent_steps.sort_unstable();
     plan.agent_steps.dedup();
@@ -158,6 +208,7 @@ fn plan_with_documents(
             reanchor: Vec::new(),
             broken: Vec::new(),
             human: Vec::new(),
+            relevance: Vec::new(),
         });
         if let Some(step) = step.filter(|_| !doc_missing) {
             planned.agent_steps.push(step);
@@ -312,7 +363,30 @@ pub(crate) fn prompt_blocks(plan: &RevalidationPlan) -> HashMap<usize, String> {
         for c in &section.broken {
             block.push_str(&finding_line(c));
         }
-        if section.broken.is_empty() && section.reanchor.is_empty() {
+        if !section.relevance.is_empty() {
+            block.push_str(
+                "Kronn judged these sections against the current code. Correct each one \
+                 (or remove it when the code it described is gone) and leave the other \
+                 sections byte-identical:\n",
+            );
+            for s in &section.relevance {
+                let verdict = match s.verdict {
+                    SectionVerdict::NoLongerRelevant => "no longer relevant to the code",
+                    _ => "outdated",
+                };
+                let heading = if s.heading.is_empty() {
+                    "(text before the first heading)"
+                } else {
+                    s.heading.as_str()
+                };
+                block.push_str(&format!("- section `{heading}` — {verdict}\n"));
+                for c in &s.corrections {
+                    block.push_str(&format!("  - proposed: {}\n", c.proposal));
+                }
+            }
+        }
+        if section.broken.is_empty() && section.reanchor.is_empty() && section.relevance.is_empty()
+        {
             block.push_str("The document's content changed since the completed audit or validation. Re-read this document and its actual sources, including uncited prose, and verify the changed claims. Keep accurate human wording; do not invent citations.\n");
         }
         if !section.reanchor.is_empty() {

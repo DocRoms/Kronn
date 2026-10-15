@@ -125,7 +125,7 @@ by a human (KT-1131). An accepted step keeps its failure on record:
 - Unknown resumable state, unreadable timeline. [src: file: frontend/src/components/AuditTimeline.tsx:723-734#resumableUnknown] [src: file: frontend/src/components/AuditTimeline.tsx:746-748#loadFailed]
 - Refused acceptance. [src: file: frontend/src/components/AuditTimeline.tsx:481-489#setAcceptError] [src: file: frontend/src/components/AuditTimeline.tsx:849-852#acceptError]
 - Validation prerequisites and linked actions. [src: file: frontend/src/components/AuditTimeline.tsx:983-1013#completedLocalRun]
-- Verify-docs actions and resumable priority. [src: file: frontend/src/components/RevalidateAudit.tsx:355-386#onUpdateStale] [src: file: frontend/src/components/ProjectCard.tsx:1430-1442#primaryAuditAction]
+- Verify-docs actions and resumable priority. [src: file: frontend/src/components/RevalidateAudit.tsx:381-412#onUpdateStale] [src: file: frontend/src/components/ProjectCard.tsx:1430-1442#primaryAuditAction]
 - Recap read error. [src: file: frontend/src/components/AuditRecapPanel.tsx:363-368#errorBlock]
 
 ## “Verify docs” escalation (KT-1168, KT-1206, KT-1218)
@@ -154,11 +154,11 @@ timeline and a stale document's viewer. It has no lifecycle of its own.
   unknown, but do not block targeted agent steps returned by the plan. A full
   audit remains folded under an explicit advanced option with the last
   measured cost and duration, or an honest “not measured”.
-  [src: file: frontend/src/components/RevalidateAudit.tsx:247-250#revalidate-prose-changed]
-  [src: file: frontend/src/components/RevalidateAudit.tsx:305-313#hasTargetedAgentWork]
-  [src: file: frontend/src/components/RevalidateAudit.tsx:314-324#staleSteps]
-  [src: file: frontend/src/components/RevalidateAudit.tsx:355-386#onUpdateStale]
-  [src: file: frontend/src/components/RevalidateAudit.tsx:499-506#onFullAudit]
+  [src: file: frontend/src/components/RevalidateAudit.tsx:246-251#revalidate-prose-changed]
+  [src: file: frontend/src/components/RevalidateAudit.tsx:331-339#hasTargetedAgentWork]
+  [src: file: frontend/src/components/RevalidateAudit.tsx:340-350#staleSteps]
+  [src: file: frontend/src/components/RevalidateAudit.tsx:381-412#onUpdateStale]
+  [src: file: frontend/src/components/RevalidateAudit.tsx:533-540#onFullAudit]
 - **Human text survives.** A partial update reuses the saved briefing. A Kronn
   write to human-validated text applies the correction and marks that text
   “to reconfirm”; it does not silently replace the human decision.
@@ -195,7 +195,7 @@ timeline and a stale document's viewer. It has no lifecycle of its own.
 
 Sources:
 
-- The plan and the re-anchoring. [src: file: backend/src/api/audit/revalidate.rs:49#plan] [src: file: backend/src/api/audit/revalidate.rs:181#apply_reanchors]
+- The plan and the re-anchoring. [src: file: backend/src/api/audit/revalidate.rs:50#plan] [src: file: backend/src/api/audit/revalidate.rs:232#apply_reanchors]
 - The partial pipeline the agent part reuses. [src: file: backend/src/api/audit/drift.rs:412#run_partial_pipeline]
 
 ## Refreshing stale sections (KT-1207)
@@ -307,7 +307,7 @@ Historical runs without fingerprints require a new audit before signoff.
 The explicit re-anchor action sends `deterministic_only: true`. It returns the
 remaining plan without launching an agent, even when other sections still need
 agent work; retry retains this mode. A later general fix is a separate choice.
-[src: file: backend/src/api/audit/revalidate.rs:466#deterministic_only]
+[src: file: backend/src/api/audit/revalidate.rs:540#deterministic_only]
 [src: file: frontend/src/components/RevalidateAudit.tsx:187-235#deterministicOnlyRef]
 
 Local TD decisions and deterministic citation repairs advance this proof only
@@ -319,7 +319,7 @@ work for changed prose; deleted or unowned documents require manual attention.
 [src: file: backend/src/db/audit_documents.rs:96#advance_local_changes]
 [src: file: backend/src/db/audit_documents.rs:64#confirm_paths]
 [src: file: backend/src/core/doc_provenance.rs:707-709#contains_placeholder]
-[src: file: backend/src/api/audit/revalidate.rs:115#plan_with_documents]
+[src: file: backend/src/api/audit/revalidate.rs:165#plan_with_documents]
 
 A no-change partial run restores validation only when every tracked validated
 document and every selected target remained byte-identical. The learning gate

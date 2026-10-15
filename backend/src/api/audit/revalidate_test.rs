@@ -478,3 +478,50 @@ fn a_label_cited_in_both_parts_is_re_anchored_in_both() {
     let provenance = crate::core::doc_provenance::report(dir, false).unwrap();
     assert_eq!(provenance.to_reconfirm, 1, "the human copy asks its owner");
 }
+
+// KT-1168 — relevance: a section the code outgrew is judged, proposed a
+// correction, handed to its audit step and weighed by the badge, though no
+// citation fingerprint broke.
+#[test]
+fn the_plan_judges_each_section_and_the_agent_block_carries_the_corrections() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::create_dir_all(dir.join("docs")).unwrap();
+    fs::write(
+        dir.join("src/lib.rs"),
+        "fn alpha() {\n    let retries = 3;\n}\n",
+    )
+    .unwrap();
+    fs::write(dir.join("src/engine.rs"), "pub fn run() {}\n").unwrap();
+    fs::write(
+        dir.join(RULES),
+        "# Rules\n## Retries\nRetries [src: file: src/lib.rs:2].\n## Engine\nHandled by `src/engine.rs`.\n",
+    )
+    .unwrap();
+    citation_drift::record_all(dir).unwrap();
+    assert_eq!(plan(dir).sources_state, SourcesState::Clean);
+    assert!(plan(dir).sections.is_empty());
+
+    fs::remove_file(dir.join("src/engine.rs")).unwrap();
+    assert_eq!(
+        citation_drift::check(dir).sources_state,
+        SourcesState::Clean,
+        "no cited line broke: only the relevance check sees it"
+    );
+
+    let planned = plan(dir);
+    assert_eq!(planned.sources_state, SourcesState::NeedsReverification);
+    assert_eq!(planned.relevance.no_longer_relevant, 1);
+    assert_eq!(planned.relevance.still_true, 1);
+    let rules = planned.sections.iter().find(|s| s.doc == RULES).unwrap();
+    assert_eq!(rules.action, RevalidationAction::Agent);
+    assert_eq!(rules.relevance.len(), 1);
+    assert_eq!(rules.relevance[0].heading, "Engine");
+    assert!(planned.agent_steps.contains(&rules_step()));
+
+    let block = &prompt_blocks(&planned)[&rules_step()];
+    assert!(block.contains("section `Engine` — no longer relevant to the code"));
+    assert!(block.contains("proposed:"));
+    assert!(block.contains("src/engine.rs"));
+}

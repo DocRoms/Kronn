@@ -776,6 +776,11 @@ pub fn acknowledge_sections(project_path: &Path, ai_files: &[String]) -> Result<
 /// Check whether any audited sources have drifted since the last checksums were recorded.
 pub fn check_drift(project_path: &Path) -> DriftResult {
     let citations = crate::core::citation_drift::check(project_path);
+    // KT-1168 — the badge also weighs the relevance of each section: prose
+    // naming a path that is gone needs a re-check though no citation broke.
+    let relevance = crate::core::doc_relevance::analyze(project_path, &citations);
+    let sources_state = relevance.escalate(citations.sources_state);
+    let broken_citations = citations.broken_count + relevance.counts.prose_missing;
     let checksums_file = match read_checksums_file(project_path) {
         Some(f) => f,
         None => {
@@ -784,8 +789,8 @@ pub fn check_drift(project_path: &Path) -> DriftResult {
                 stale_sections: Vec::new(),
                 fresh_sections: Vec::new(),
                 total_sections: 0,
-                sources_state: citations.sources_state,
-                broken_citations: citations.broken_count,
+                sources_state,
+                broken_citations,
             };
         }
     };
@@ -867,8 +872,8 @@ pub fn check_drift(project_path: &Path) -> DriftResult {
         stale_sections,
         fresh_sections,
         total_sections: total,
-        sources_state: citations.sources_state,
-        broken_citations: citations.broken_count,
+        sources_state,
+        broken_citations,
     }
 }
 
