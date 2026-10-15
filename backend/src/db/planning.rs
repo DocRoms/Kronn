@@ -2024,36 +2024,6 @@ pub fn mark_task_done_within_tx(
     Ok(true)
 }
 
-/// Return a task owned by a cancelled orchestration execution to the ready
-/// queue. The caller has already made that execution terminal in the same
-/// transaction; the anti-race predicate refuses while any other active
-/// execution still owns the task.
-pub fn restore_task_todo_after_cancellation(
-    tx: &Connection,
-    task_id: &str,
-    actor: &PlanningActor,
-) -> Result<bool> {
-    validate_actor(actor)?;
-    let changed = tx.execute(
-        "UPDATE planning_tasks SET status = 'todo', updated_at = ?2 \
-         WHERE id = ?1 AND status = 'in_progress' \
-           AND NOT EXISTS (SELECT 1 FROM task_executions e \
-                           WHERE e.task_id = planning_tasks.id \
-                             AND e.status NOT IN ('Done', 'Failed', 'Cancelled'))",
-        params![task_id, Utc::now().to_rfc3339()],
-    )?;
-    if changed > 0 {
-        insert_event(
-            tx,
-            task_id,
-            "status",
-            actor,
-            serde_json::json!({ "status": "todo", "via": "orchestration_cancel" }),
-        )?;
-    }
-    Ok(changed > 0)
-}
-
 /// KT-1254 — the principal declares, at review, that these unticked DoD items
 /// are live checks to make after integration. Idempotent; an item already
 /// ticked (a proof was recorded) is left alone.

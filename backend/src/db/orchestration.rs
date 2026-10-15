@@ -6627,7 +6627,8 @@ pub fn cancel_execution_tree(
             "UPDATE task_executions SET outcome_reason = ?2 WHERE id = ?1",
             params![exec_id, reason],
         )?;
-        crate::db::planning::restore_task_todo_after_cancellation(conn, &execution.task_id, actor)?;
+        // KT-1267 — the task status is deliberately left alone: the work may
+        // already be integrated by hand, so the principal decides (done / todo).
         record_reconciliation_event(
             conn,
             "execution",
