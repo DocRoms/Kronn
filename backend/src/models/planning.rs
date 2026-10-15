@@ -297,6 +297,10 @@ pub struct PlanningTaskSummary {
     /// live TaskExecution when it is not already assigned by hand.
     #[serde(default)]
     pub assignees: Vec<PlanningAssignee>,
+    /// KT-1254 — unticked post-integration DoD items: the principal's live
+    /// checks still owed on this task.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub live_checks: Vec<PlanningLiveCheck>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -308,6 +312,52 @@ pub struct PlanningDodItem {
     pub sentence: String,
     pub completed: bool,
     pub position: i64,
+    /// KT-1254 — who proves the item and when. `Worker` (default) is covered by
+    /// the delivery; `PostIntegration` is the principal's live check, made
+    /// after integration, and never blocks approve.
+    #[serde(default)]
+    pub verification: PlanningDodVerification,
+    /// Principal evidence recorded when a post-integration item is ticked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+}
+
+/// KT-1254 — how a DoD item is verified.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanningDodVerification {
+    /// Proved by the worker's delivery, before integration.
+    #[default]
+    Worker,
+    /// A principal live check after integration; approve integrates with it
+    /// pending and the task closes once it is ticked with evidence.
+    PostIntegration,
+}
+
+impl PlanningDodVerification {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Worker => "worker",
+            Self::PostIntegration => "post_integration",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Self {
+        if value == "post_integration" {
+            Self::PostIntegration
+        } else {
+            Self::Worker
+        }
+    }
+}
+
+/// KT-1254 — a pending principal live check, as the plan shows it.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PlanningLiveCheck {
+    pub dod_id: String,
+    pub sentence: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -446,6 +496,10 @@ pub struct CreatePlanningDodItem {
     pub sentence: String,
     #[serde(default)]
     pub completed: bool,
+    /// KT-1254 — `None` keeps an existing item's mode (`Worker` for a new one).
+    #[serde(default)]
+    #[ts(optional)]
+    pub verification: Option<PlanningDodVerification>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -556,6 +610,9 @@ pub struct RemovePlanningBlockerRequest {
 #[ts(export)]
 pub struct UpdatePlanningDodItemRequest {
     pub completed: bool,
+    /// Required to tick a post-integration item: the principal's live proof.
+    #[serde(default)]
+    pub evidence: Option<String>,
     #[serde(default)]
     pub actor: PlanningActor,
 }

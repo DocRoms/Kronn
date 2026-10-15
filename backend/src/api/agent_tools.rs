@@ -921,13 +921,14 @@ fn build_tool_catalogue() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "task_update_dod",
-                "description": "Check or uncheck one DoD item atomically, using ids returned by task_get.",
+                "description": "Check or uncheck one DoD item atomically, using ids returned by task_get. A post_integration item is the principal's live check: ticking it needs evidence.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "task_id": { "type": "string" },
                         "dod_id": { "type": "string" },
-                        "completed": { "type": "boolean" }
+                        "completed": { "type": "boolean" },
+                        "evidence": { "type": "string" }
                     },
                     "required": ["task_id", "dod_id", "completed"]
                 },
@@ -2182,6 +2183,7 @@ impl ToolExecutor for KronnToolExecutor {
                 let request = UpdatePlanningDodItemRequest {
                     completed,
                     actor: self.actor(),
+                    evidence: required_string(call, "evidence"),
                 };
                 let Json(res) = crate::api::planning::update_dod_item(
                     State(self.state.clone()),

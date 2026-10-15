@@ -36,9 +36,9 @@ use crate::models::{
     AgentType, ApiErrorCode, ApiResponse, BlockedReasonCode, DeliveryManifestV1, Discussion,
     DiscussionMessage, ExecutionRecoveryAction, FileChangeKind, ManifestFile, MessageChannel,
     MessageRole, MessageTarget, MessageTargetKind, ModelTier, OrchestrationActor, PlanningActor,
-    PlanningActorKind, PlanningDodItem, PlanningTaskStatus, ReviewDecisionV1, ReviewFinding,
-    ReviewVerdict, SagaResumeAction, SummaryStrategy, TaskExecution, TaskExecutionStatus,
-    TaskWorkerScope, DELIVERY_CONTRACT_VERSION,
+    PlanningActorKind, PlanningDodItem, PlanningDodVerification, PlanningTaskStatus,
+    ReviewDecisionV1, ReviewFinding, ReviewVerdict, SagaResumeAction, SummaryStrategy,
+    TaskExecution, TaskExecutionStatus, TaskWorkerScope, DELIVERY_CONTRACT_VERSION,
 };
 use crate::AppState;
 
@@ -5957,6 +5957,26 @@ async fn decide_authorized_review(
         if let Some(reason) = approve_guards(db, &exec, &decision, reviewer_is_principal).await? {
             return Ok(ReviewOutcome::ApproveBlocked { reason });
         }
+        // KT-1254 — persist the live checks this review declares, so integration
+        // (and the plan) see them pending. Guards ran: the reviewer is the
+        // principal, every id is a known DoD of this task.
+        let declared = decision
+            .dod_verifications
+            .iter()
+            .filter(|verification| {
+                verification.verification == Some(PlanningDodVerification::PostIntegration)
+            })
+            .map(|verification| verification.dod_id.clone())
+            .collect::<Vec<_>>();
+        if reviewer_is_principal && !declared.is_empty() {
+            let task_id = exec.task_id.clone();
+            let actor = agent_actor(alias, actor_session_id.as_deref());
+            db.with_conn(move |conn| {
+                crate::db::planning::mark_dod_post_integration(conn, &task_id, &declared, &actor)
+            })
+            .await
+            .map_err(|e| ProvisionError::Internal(e.to_string()))?;
+        }
     }
 
     // ── 6. Atomic review checkpoint (request_changes hands findings to the worker in the
@@ -6345,6 +6365,30 @@ async fn approve_guards(
             foreign.dod_id
         ))));
     }
+    // KT-1254 — items the principal checks live AFTER integration: declared on
+    // the task, or by this very review. They never block approve; the task
+    // stays open on them until they are ticked with evidence.
+    let declared_now = decision
+        .dod_verifications
+        .iter()
+        .filter(|verification| {
+            verification.verification == Some(PlanningDodVerification::PostIntegration)
+        })
+        .collect::<Vec<_>>();
+    if let Some(contradiction) = declared_now.iter().find(|verification| verification.met) {
+        return Ok(Some(ApproveBlockReason::ReviewEvidenceInvalid(format!(
+            "DoD `{}` is declared post_integration, so it cannot be met yet; \
+             tick it with evidence after integration",
+            contradiction.dod_id
+        ))));
+    }
+    let post_integration = task
+        .definition_of_done
+        .iter()
+        .filter(|item| item.verification == PlanningDodVerification::PostIntegration)
+        .map(|item| item.id.as_str())
+        .chain(declared_now.iter().map(|v| v.dod_id.as_str()))
+        .collect::<std::collections::HashSet<_>>();
     if reviewer_is_principal {
         let submitted = decision
             .dod_verifications
@@ -6354,7 +6398,10 @@ async fn approve_guards(
         let missing = task
             .definition_of_done
             .iter()
-            .filter(|item| !submitted.contains(item.id.as_str()))
+            .filter(|item| {
+                !submitted.contains(item.id.as_str())
+                    && !post_integration.contains(item.id.as_str())
+            })
             .map(|item| item.id.clone())
             .collect::<Vec<_>>();
         if !missing.is_empty() {
@@ -6366,7 +6413,9 @@ async fn approve_guards(
         let rejected = decision
             .dod_verifications
             .iter()
-            .filter(|verification| !verification.met)
+            .filter(|verification| {
+                !verification.met && !post_integration.contains(verification.dod_id.as_str())
+            })
             .map(|verification| verification.dod_id.clone())
             .collect::<Vec<_>>();
         if !rejected.is_empty() {
@@ -6386,7 +6435,11 @@ async fn approve_guards(
     let unmet = manifest
         .dod_status
         .iter()
-        .filter(|status| !status.met && !verified.contains(status.dod_id.as_str()))
+        .filter(|status| {
+            !status.met
+                && !verified.contains(status.dod_id.as_str())
+                && !post_integration.contains(status.dod_id.as_str())
+        })
         .map(|d| d.dod_id.clone())
         .collect::<Vec<_>>();
     if !unmet.is_empty() {
@@ -7329,15 +7382,25 @@ fn worker_brief_markdown(
     let dod = if dod.is_empty() {
         "_(aucune)_".to_string()
     } else {
+        // KT-1254 — a live check is made by the principal AFTER integration:
+        // the worker declares it unmet (`met: false`) with what it could not prove.
+        let live = |item: &PlanningDodItem| {
+            if item.verification == PlanningDodVerification::PostIntegration {
+                " _(vérification en direct par le principal APRÈS intégration : ne la \
+                 prouve pas, déclare `met: false` et dis ce qui reste à vérifier)_"
+            } else {
+                ""
+            }
+        };
         if native_delivery_projection {
             dod.iter()
                 .enumerate()
-                .map(|(index, item)| format!("{}. [ ] {}", index + 1, item.sentence))
+                .map(|(index, item)| format!("{}. [ ] {}{}", index + 1, item.sentence, live(item)))
                 .collect::<Vec<_>>()
                 .join("\n")
         } else {
             dod.iter()
-                .map(|item| format!("- [ ] `{}` — {}", item.id, item.sentence))
+                .map(|item| format!("- [ ] `{}` — {}{}", item.id, item.sentence, live(item)))
                 .collect::<Vec<_>>()
                 .join("\n")
         }
@@ -14627,6 +14690,8 @@ pub(crate) mod tests {
             sentence: "tests pass".into(),
             completed: false,
             position: 0,
+            verification: Default::default(),
+            evidence: None,
         }];
         let complete = parse_delivery_manifest(&manifest_json("abcdef1234567")).unwrap();
         assert!(validate_manifest_claims(&dod, &complete).is_ok());
@@ -14769,6 +14834,8 @@ pub(crate) mod tests {
                 sentence: "Faire X".into(),
                 completed: false,
                 position: 0,
+                verification: Default::default(),
+                evidence: None,
             }],
             "/wt/kt319",
             "kronn/task/KT-319",
@@ -14855,6 +14922,8 @@ pub(crate) mod tests {
                 sentence: "Faire X".into(),
                 completed: false,
                 position: 0,
+                verification: Default::default(),
+                evidence: None,
             }],
             "/wt/kt436",
             "kronn/task/KT-436",
@@ -15596,6 +15665,7 @@ pub(crate) mod tests {
                     id: None,
                     sentence: "Le module compile et les tests passent.".into(),
                     completed: false,
+                    verification: None,
                 }],
                 links: vec![],
                 actor: test_actor(),
@@ -19135,6 +19205,7 @@ pub(crate) mod tests {
                                 id: None,
                                 sentence: "Le module compile.".into(),
                                 completed: false,
+                                verification: None,
                             }],
                             links: vec![],
                             actor: test_actor(),
@@ -22523,6 +22594,7 @@ pub(crate) mod tests {
                             id: None,
                             sentence: "done".into(),
                             completed: false,
+                            verification: None,
                         }],
                         links: vec![],
                         actor: test_actor(),
@@ -28649,6 +28721,343 @@ pub(crate) mod tests {
         assert_eq!(
             exec_of(&db, &exec_id).await.status,
             TaskExecutionStatus::Done
+        );
+    }
+
+    async fn mark_dod_post_integration_in_db(db: &Database, exec_id: &str, dod_id: &str) {
+        let task_id = exec_of(db, exec_id).await.task_id;
+        let dod_id = dod_id.to_string();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE planning_task_dod_items SET verification = 'post_integration'
+                  WHERE task_id = ?1 AND id = ?2",
+                rusqlite::params![task_id, dod_id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    /// KT-1254 — a DoD declared a post-integration principal check integrates
+    /// with the item pending, leaves the task open, lists it as a live check and
+    /// closes only when it is ticked with evidence.
+    #[tokio::test]
+    async fn a_pending_post_integration_dod_integrates_but_keeps_the_task_open() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_parent, _child, exec_id, _head, _path) =
+            delivered_awaiting_review(&db, repo.path()).await;
+        let dod_id = dod_id_for_execution(&db, &exec_id).await;
+        mark_dod_post_integration_in_db(&db, &exec_id, &dod_id).await;
+        let task_id = exec_of(&db, &exec_id).await.task_id;
+
+        let path = managed_worktree_path(&db, &exec_id).await;
+        let decision = serde_json::json!({
+            "version": "1",
+            "task_ref": "KT-319",
+            "decision": "approve",
+            "reviewed_head_sha": git_rev(Path::new(&path), "HEAD"),
+            "dod_verifications": [],
+        })
+        .to_string();
+        let reviewed = decide_review(&db, &exec_id, &decision, "ClaudeCode", "sess-b")
+            .await
+            .unwrap();
+        let completed = continue_approved_review(&db, reviewed).await.unwrap();
+        match completed {
+            ReviewOutcome::Reviewed { execution, .. } => {
+                assert_eq!(execution.status, TaskExecutionStatus::Done);
+                assert!(execution.integrated_sha.is_some());
+            }
+            other => panic!("expected integrated review, got {other:?}"),
+        }
+
+        let open = {
+            let task_id = task_id.clone();
+            db.with_conn(move |conn| crate::db::planning::get_task(conn, &task_id))
+                .await
+                .unwrap()
+                .unwrap()
+        };
+        assert_eq!(open.summary.status, PlanningTaskStatus::InProgress);
+        assert_eq!(open.summary.live_checks.len(), 1);
+        assert_eq!(open.summary.live_checks[0].dod_id, dod_id);
+
+        let tick = |evidence: Option<&str>| {
+            let (task_id, dod_id) = (task_id.clone(), dod_id.clone());
+            let evidence = evidence.map(str::to_string);
+            let db = &db;
+            async move {
+                db.with_conn(move |conn| {
+                    crate::db::planning::update_dod_item(
+                        conn,
+                        &task_id,
+                        &dod_id,
+                        &crate::models::UpdatePlanningDodItemRequest {
+                            completed: true,
+                            evidence,
+                            actor: PlanningActor::default(),
+                        },
+                    )
+                })
+                .await
+            }
+        };
+        assert!(
+            tick(None).await.is_err(),
+            "a live check is never ticked bare"
+        );
+        let closed = tick(Some("replayed on a real framing after restart: ok"))
+            .await
+            .unwrap();
+        assert_eq!(closed.summary.status, PlanningTaskStatus::Done);
+        assert!(closed.summary.live_checks.is_empty());
+        assert_eq!(
+            closed.definition_of_done[0].evidence.as_deref(),
+            Some("replayed on a real framing after restart: ok")
+        );
+    }
+
+    /// KT-1254 — the worker's manifest may leave the post-integration item
+    /// unmet, and a principal approve needs neither a verification nor evidence
+    /// for it.
+    #[tokio::test]
+    async fn a_post_integration_dod_unmet_in_the_manifest_does_not_block_approval() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_task_ref, parent_id, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        let path = managed_worktree_path(&db, &exec_id).await;
+        let head = git_rev(Path::new(&path), "HEAD");
+        let dod_id = dod_id_for_execution(&db, &exec_id).await;
+        mark_dod_post_integration_in_db(&db, &exec_id, &dod_id).await;
+        deliver_worker_manifest(
+            &db,
+            &exec_id,
+            "ClaudeCode",
+            "sess-a",
+            &manifest_json_unmet(&db, &exec_id, &head).await,
+        )
+        .await
+        .unwrap();
+        seed_cli_session(&db, 102, &parent_id, "sess-b").await;
+
+        let decision = serde_json::json!({
+            "version": "1",
+            "task_ref": "KT-1",
+            "decision": "approve",
+            "reviewed_head_sha": head,
+            "dod_verifications": [],
+        })
+        .to_string();
+        match decide_review(&db, &exec_id, &decision, "ClaudeCode", "sess-b")
+            .await
+            .unwrap()
+        {
+            ReviewOutcome::Reviewed { verdict, execution } => {
+                assert_eq!(verdict, ReviewVerdict::Approve);
+                assert_eq!(execution.status, TaskExecutionStatus::Approved);
+            }
+            other => panic!("a post-integration DoD must not block approval, got {other:?}"),
+        }
+    }
+
+    /// KT-1254 — at review the principal may declare an unmet item a live check
+    /// (`verification: post_integration`, `met: false`); it is persisted on the
+    /// task and approval goes through.
+    #[tokio::test]
+    async fn a_review_can_declare_an_unmet_dod_a_post_integration_check() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_task_ref, parent_id, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        let path = managed_worktree_path(&db, &exec_id).await;
+        let head = git_rev(Path::new(&path), "HEAD");
+        let dod_id = dod_id_for_execution(&db, &exec_id).await;
+        deliver_worker_manifest(
+            &db,
+            &exec_id,
+            "ClaudeCode",
+            "sess-a",
+            &manifest_json_unmet(&db, &exec_id, &head).await,
+        )
+        .await
+        .unwrap();
+        seed_cli_session(&db, 102, &parent_id, "sess-b").await;
+
+        let decision = serde_json::json!({
+            "version": "1",
+            "task_ref": "KT-1",
+            "decision": "approve",
+            "reviewed_head_sha": head,
+            "dod_verifications": [{
+                "dod_id": dod_id,
+                "met": false,
+                "evidence": "needs a replay on a real framing once integrated",
+                "verification": "post_integration",
+            }],
+        })
+        .to_string();
+        match decide_review(&db, &exec_id, &decision, "ClaudeCode", "sess-b")
+            .await
+            .unwrap()
+        {
+            ReviewOutcome::Reviewed { execution, .. } => {
+                assert_eq!(execution.status, TaskExecutionStatus::Approved);
+            }
+            other => panic!("a declared live check must not block approval, got {other:?}"),
+        }
+        let task_id = exec_of(&db, &exec_id).await.task_id;
+        let task = db
+            .with_conn(move |conn| crate::db::planning::get_task(conn, &task_id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            task.definition_of_done[0].verification,
+            PlanningDodVerification::PostIntegration
+        );
+        assert_eq!(task.summary.live_checks.len(), 1);
+    }
+
+    /// KT-1254 round 2 — a live check is the principal's call: the worker's own
+    /// session, an HTTP agent and an anonymous agent are refused when they set,
+    /// remove or tick it; a live check is never ticked without evidence nor
+    /// downgraded and ticked in one write; the principal and a human may.
+    #[tokio::test]
+    async fn only_the_principal_or_a_human_may_set_remove_or_tick_a_live_check() {
+        use crate::models::{
+            CreatePlanningDodItem, UpdatePlanningDodItemRequest, UpdatePlanningTaskRequest,
+        };
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_task_ref, parent_id, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        seed_cli_session(&db, 102, &parent_id, "sess-b").await;
+        let task_id = exec_of(&db, &exec_id).await.task_id;
+        let dod_id = dod_id_for_execution(&db, &exec_id).await;
+        let agent = |id: &str, session: Option<&str>| PlanningActor {
+            kind: PlanningActorKind::Agent,
+            id: Some(id.to_string()),
+            session_id: session.map(str::to_string),
+            source_message_id: None,
+        };
+        let worker = agent("ClaudeCode", Some("sess-a"));
+        let principal = agent("ClaudeCode", Some("sess-b"));
+        let http_agent = agent("kronn-agent", Some("native:disc:msg"));
+        let anonymous = agent("ClaudeCode", None);
+
+        let db_ref = &db;
+        let replace =
+            |actor: PlanningActor, mode: Option<PlanningDodVerification>, completed: bool| {
+                let (task_id, dod_id) = (task_id.clone(), dod_id.clone());
+                async move {
+                    db_ref
+                        .with_conn(move |conn| {
+                            crate::db::planning::update_task(
+                                conn,
+                                &task_id,
+                                &UpdatePlanningTaskRequest {
+                                    title: None,
+                                    description: None,
+                                    status: None,
+                                    priority: None,
+                                    parent_id: None,
+                                    blocked_reason: None,
+                                    rank: None,
+                                    project_ids: None,
+                                    tags: None,
+                                    definition_of_done: Some(vec![CreatePlanningDodItem {
+                                        id: Some(dod_id),
+                                        sentence: "tests pass".into(),
+                                        completed,
+                                        verification: mode,
+                                    }]),
+                                    links: None,
+                                    actor,
+                                },
+                            )
+                        })
+                        .await
+                }
+            };
+        let tick = |actor: PlanningActor, evidence: Option<&str>| {
+            let (task_id, dod_id) = (task_id.clone(), dod_id.clone());
+            let evidence = evidence.map(str::to_string);
+            async move {
+                db_ref
+                    .with_conn(move |conn| {
+                        crate::db::planning::update_dod_item(
+                            conn,
+                            &task_id,
+                            &dod_id,
+                            &UpdatePlanningDodItemRequest {
+                                completed: true,
+                                evidence,
+                                actor,
+                            },
+                        )
+                    })
+                    .await
+            }
+        };
+        let mode_of = || {
+            let task_id = task_id.clone();
+            async move {
+                let task = db_ref
+                    .with_conn(move |conn| crate::db::planning::get_task(conn, &task_id))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                task.definition_of_done[0].verification
+            }
+        };
+        let live = Some(PlanningDodVerification::PostIntegration);
+
+        // Setting: the worker, an HTTP agent and an anonymous agent are refused.
+        for refused in [&worker, &http_agent, &anonymous] {
+            assert!(
+                replace(refused.clone(), live, false).await.is_err(),
+                "{refused:?} must not declare a live check"
+            );
+        }
+        assert_eq!(mode_of().await, PlanningDodVerification::Worker);
+        replace(principal.clone(), live, false).await.unwrap();
+        assert_eq!(mode_of().await, PlanningDodVerification::PostIntegration);
+
+        // Removing — downgrading it, or dropping the item — is refused alike.
+        let worker_mode = Some(PlanningDodVerification::Worker);
+        for refused in [&worker, &http_agent, &anonymous] {
+            assert!(replace(refused.clone(), worker_mode, false).await.is_err());
+        }
+        assert_eq!(mode_of().await, PlanningDodVerification::PostIntegration);
+
+        // Never ticked without evidence, by an array replace or a bare tick.
+        assert!(replace(principal.clone(), live, true).await.is_err());
+        assert!(tick(principal.clone(), None).await.is_err());
+        assert!(tick(PlanningActor::default(), Some("  ")).await.is_err());
+        // A worker cannot tick the principal's check, evidence or not.
+        assert!(tick(worker.clone(), Some("looks fine to me"))
+            .await
+            .is_err());
+        assert!(tick(http_agent.clone(), Some("looks fine to me"))
+            .await
+            .is_err());
+
+        // Downgrade + tick in ONE write is refused, even for the principal or a
+        // human; nothing changed.
+        assert!(replace(principal.clone(), worker_mode, true).await.is_err());
+        assert!(replace(PlanningActor::default(), worker_mode, true)
+            .await
+            .is_err());
+        assert_eq!(mode_of().await, PlanningDodVerification::PostIntegration);
+
+        // The principal ticks with evidence.
+        let ticked = tick(principal.clone(), Some("replayed live: ok"))
+            .await
+            .unwrap();
+        assert!(ticked.definition_of_done[0].completed);
+        assert_eq!(
+            ticked.definition_of_done[0].evidence.as_deref(),
+            Some("replayed live: ok")
         );
     }
 

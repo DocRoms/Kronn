@@ -482,6 +482,7 @@ fn portable_task_request(
                 id: None,
                 sentence: item.sentence.clone(),
                 completed: item.completed,
+                verification: Some(item.verification),
             })
             .collect(),
         links: task
@@ -1452,6 +1453,7 @@ mod tests {
                             id: None,
                             sentence: "Round-trip works".into(),
                             completed: true,
+                            verification: None,
                         }],
                         links: vec![CreatePlanningTaskLink {
                             label: "Spec".into(),

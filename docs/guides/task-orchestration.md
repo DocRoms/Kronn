@@ -196,6 +196,27 @@ principal approval without attempt-scoped evidence are all insufficient. This
 keeps local workers useful without asking the model that produced the change to
 be its own quality gate.
 
+### A DoD item the principal checks live, after integration
+
+Some items cannot be proven before the code is integrated and running (a replay
+on a real input after a restart). Such an item is `verification:
+"post_integration"` — set on the task's `definition_of_done` with `task_update`
+while the execution is live, or, at review, with a `dod_verifications` entry
+`{dod_id, met: false, evidence, verification: "post_integration"}`. Only the
+principal of the task's execution, or a human, may set or remove it, and tick
+it: a worker's own session, an HTTP agent and an anonymous agent are refused.
+`task_create` cannot declare one for an agent, since a new task has no execution.
+
+- The worker still lists the item in its manifest, honestly `met: false`; the
+  manifest validation and the approve guard accept it unmet and need no
+  principal evidence for it. Every other DoD item keeps the rules above.
+- Approve integrates normally. The execution ends `Done`, but the plan task
+  stays `in_progress` with the item listed as `live_checks` on its summary.
+- The principal runs the check, then ticks it with `task_update_dod`
+  (`completed: true` and non-empty `evidence`). A bare tick is refused, as is
+  ticking it through a `definition_of_done` replace, and downgrading it to a
+  worker check in the same write that ticks it. The task closes on the last pending live check of an integrated execution.
+
 ### What the accepted report says, and whose word it is
 
 The published report keeps two records apart, because they answer different
