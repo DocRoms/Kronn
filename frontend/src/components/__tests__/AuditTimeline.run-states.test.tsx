@@ -39,7 +39,7 @@ function props(over: Partial<AuditTimelineProps> = {}): AuditTimelineProps {
     briefingDone: true, onBriefingSaved: vi.fn(), auditActive: false, liveStep: 0, liveTotal: 0,
     liveFile: '', liveElapsed: null, liveTool: null, liveStartedAt: null, liveToolCalls: null, liveStepTokens: null,
     liveTotalTokens: null, onResumeBriefingDiscussion: null, onCancel: vi.fn(), resumable: null,
-    onLaunch: vi.fn(), validationInProgress: false, onValidate: vi.fn(),
+    onLaunch: vi.fn(), validationInProgress: false,
     onMarkValid: vi.fn().mockResolvedValue(undefined), onOpenValidation: vi.fn(), onViewTechDebts: vi.fn(),
     onRetryStep: vi.fn(), onAcceptStep: vi.fn().mockResolvedValue(undefined), onRelaunchFull: vi.fn(),
     onCleanupLease: vi.fn().mockResolvedValue(undefined),
@@ -167,15 +167,15 @@ describe('AuditTimeline — every run state offers an action', () => {
 
   it('an interrupted re-audit sends validation to the failed steps first, never to an unlinked discussion', async () => {
     mockTimeline('Interrupted', [step(1), step(2), failed(3)]);
-    const onValidate = vi.fn();
+    const onMarkValid = vi.fn();
     const onLaunch = vi.fn();
-    const { container } = wrap(<AuditTimeline {...props({ resumable: resumable([3]), onValidate, onLaunch })} />);
+    const { container } = wrap(<AuditTimeline {...props({ resumable: resumable([3]), onMarkValid, onLaunch })} />);
     const blocked = await screen.findByTestId('audit-timeline-validation-blocked');
     expect(blocked).toHaveTextContent(fr['auditTimeline.validation.afterRun']);
     expect(within(validationPhase(container)).queryByText(fr['audit.validate'])).toBeNull();
     fireEvent.click(screen.getByTestId('audit-timeline-validation-launch'));
     expect(onLaunch).toHaveBeenCalled();
-    expect(onValidate).not.toHaveBeenCalled();
+    expect(onMarkValid).not.toHaveBeenCalled();
   });
 
   it('relaunching the whole audit over an interrupted run asks first, offering retry or acceptance', async () => {
