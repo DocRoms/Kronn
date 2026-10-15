@@ -1333,6 +1333,52 @@ class TaskExecPrincipalSurfaceTests(unittest.TestCase):
             self.assertNotIn("source_agent", body)
             self.assertNotIn("source_session_id", body)
 
+    ROOM_AGENT_LIFECYCLE_CALLS = (
+        ("task_exec_status", {"task_execution_id": "exec-1"}),
+        ("task_exec_review", {
+            "task_execution_id": "exec-1",
+            "decision": {"version": 1, "task_ref": "KT-10", "decision": "approve"},
+        }),
+        ("task_exec_cancel", {"task_execution_id": "exec-1", "reason": "stuck"}),
+        ("task_exec_resume", {"task_execution_id": "exec-1"}),
+        ("task_exec_reassign", {
+            "task_execution_id": "exec-1", "reason": "retry", "validations": [],
+        }),
+    )
+
+    def test_a_refused_room_agent_lifecycle_call_surfaces_the_opaque_refusal(self):
+        # A room agent outside its own turn is refused by the backend. The bridge
+        # must surface that refusal as is, never retry with the CLI identity.
+        context = {
+            "discussion_id": "disc-other", "agent_type": "Codex",
+            "dispatch_job_id": "job-done", "source_message_id": "msg-3",
+        }
+        refusal = "execution not found or not addressed to this session"
+        identity = mock.MagicMock(side_effect=AssertionError("CLI identity must not be read"))
+        for tool, args in self.ROOM_AGENT_LIFECYCLE_CALLS:
+            http = mock.MagicMock(return_value={"success": False, "error": refusal})
+            with mock.patch.dict(os.environ, {"KRONN_ROOM_AGENT_CONTEXT": json.dumps(context)}), \
+                    mock.patch.object(self.mod, "_task_exec_identity", identity), \
+                    mock.patch.object(self.mod, "_http", http):
+                with self.assertRaises(RuntimeError) as refused:
+                    getattr(self.mod, f"call_{tool}")(args)
+            self.assertIn(refusal, str(refused.exception), tool)
+            self.assertEqual(http.call_count, 1, f"{tool}: no fallback retry")
+            body = http.call_args.args[2]
+            self.assertEqual(body["room_agent"], context, tool)
+            self.assertNotIn("source_agent", body, tool)
+            self.assertNotIn("source_session_id", body, tool)
+
+    def test_an_incomplete_room_agent_context_fails_closed_on_every_lifecycle_call(self):
+        for tool, args in self.ROOM_AGENT_LIFECYCLE_CALLS:
+            http = mock.MagicMock()
+            with mock.patch.dict(os.environ, {"KRONN_ROOM_AGENT_CONTEXT": json.dumps({"discussion_id": "disc-parent"})}), \
+                    mock.patch.object(self.mod, "_http", http):
+                with self.assertRaises(RuntimeError) as refused:
+                    getattr(self.mod, f"call_{tool}")(args)
+            self.assertIn("room agent context is incomplete", str(refused.exception), tool)
+            http.assert_not_called()
+
     def test_an_incomplete_room_agent_context_fails_closed_before_http(self):
         http = mock.MagicMock()
         with mock.patch.dict(os.environ, {"KRONN_ROOM_AGENT_CONTEXT": json.dumps({"discussion_id": "disc-parent"})}), \
