@@ -708,7 +708,7 @@ async fn a_hand_edit_between_a_crash_and_boot_survives(pipeline: Pipeline) {
 
     let settled = state
         .db
-        .with_conn(|conn| crate::api::audit::step_guard::settle_unfinished_at_boot(conn))
+        .with_conn(crate::api::audit::step_guard::settle_unfinished_at_boot)
         .await
         .unwrap();
     assert_eq!(settled, 1, "{pipeline:?}");

@@ -116,7 +116,7 @@ actual files, including runs made before this fix. Auxiliary documents with no
 durable writer attribution are explicitly assigned to the founding step's
 repair prompt. A corrected reference establishes existence, not factual truth.
 [src: file: backend/src/api/audit/document_repair.rs:26-34#recovery_plan]
-[src: file: backend/src/db/audit_runs.rs:1400-1408#invalidate_documentary_steps]
+[src: file: backend/src/db/audit_runs.rs:1423-1431#invalidate_documentary_steps]
 
 A `TypedSchema` step sends its envelope schema as `response_format` with
 `strict: false` on the OpenAI wire: the envelope does not satisfy OpenAI's

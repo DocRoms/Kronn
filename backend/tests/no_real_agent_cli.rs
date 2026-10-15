@@ -108,7 +108,7 @@ async fn a_stub_agent_still_starts_from_an_integration_test() {
 #[test]
 fn a_real_agent_started_in_a_detached_task_fails_the_run() {
     const CHILD: &str = "KT1189_DETACHED_CHILD";
-    if std::env::var_os(CHILD).is_some() {
+    if kronn::core::child_env::var_os(CHILD).is_some() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
             let _detached = tokio::spawn(async {
@@ -119,7 +119,7 @@ fn a_real_agent_started_in_a_detached_task_fails_the_run() {
         });
         return;
     }
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
+    let output = kronn::core::cmd::sync_cmd(std::env::current_exe().unwrap(), ChildRoute::Tool)
         .args([
             "--exact",
             "no_real_agent_cli::a_real_agent_started_in_a_detached_task_fails_the_run",

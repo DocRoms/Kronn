@@ -20,10 +20,10 @@ Sources:
 - The lease is the single gate of every launch. [src: file: backend/src/api/audit/full.rs:402-409#try_acquire_lease]
 - The row is inserted `Running`. [src: file: backend/src/db/audit_runs.rs:17-19#insert_running]
 - `Completed` or `Interrupted`, with the validation discussion, is one transaction. [src: file: backend/src/api/audit/full.rs:3846-3850#write_terminal_state]
-- `Interrupted` only moves a `Running` row. [src: file: backend/src/db/audit_runs.rs:802-809#mark_interrupted]
+- `Interrupted` only moves a `Running` row. [src: file: backend/src/db/audit_runs.rs:825-832#mark_interrupted]
 - The worker marks a cancel before it acknowledges it. [src: file: backend/src/api/audit/full.rs:1376#mark_cancelled_at_step] [src: file: backend/src/db/audit_runs.rs:190#mark_cancelled_at_step]
-- At boot, every `Running` row is a zombie and becomes `Interrupted`. [src: file: backend/src/db/mod.rs:283-303#reconcile_stale_runs] [src: file: backend/src/db/audit_runs.rs:836#reconcile_stale_runs]
-- A run is resumable when it is the project's latest, `Interrupted`, with at least one done step. [src: file: backend/src/db/audit_runs.rs:915-917#latest_resumable]
+- At boot, every `Running` row is a zombie and becomes `Interrupted`. [src: file: backend/src/db/mod.rs:283-303#reconcile_stale_runs] [src: file: backend/src/db/audit_runs.rs:859#reconcile_stale_runs]
+- A run is resumable when it is the project's latest, `Interrupted`, with at least one done step. [src: file: backend/src/db/audit_runs.rs:938-940#latest_resumable]
 
 ## What counts as a done step
 
@@ -42,7 +42,7 @@ by a human (KT-1131). An accepted step keeps its failure on record:
 - **Retry one step** (`retry_steps` with `resume_run_id`) replays only the
   named steps. The other failed steps are copied as they ended and are not
   run (`step_skipped`, reason `not_retried`).
-  [src: file: backend/src/api/audit/full.rs:3971-3994#retry_selection] [src: file: backend/src/api/audit/full.rs:1435-1448#not_retried] [src: file: backend/src/db/audit_runs.rs:994-1017#carry_over_failed_steps]
+  [src: file: backend/src/api/audit/full.rs:3971-3994#retry_selection] [src: file: backend/src/api/audit/full.rs:1435-1448#not_retried] [src: file: backend/src/db/audit_runs.rs:1017-1040#carry_over_failed_steps]
 - **Accept as it stands** is
   `POST /api/projects/{id}/audit-runs/{run_id}/steps/{step}/accept`. It is a
   human action only: the route is not on the bridge list, and the handler
@@ -65,7 +65,7 @@ by a human (KT-1131). An accepted step keeps its failure on record:
   `lease_orphaned`. The cleanup action (`POST /api/audit-runs/cleanup`) never
   touches a live audit. It settles the stale `Running` rows and releases the
   orphaned leases.
-  [src: file: backend/src/api/audit/full.rs:162#orphaned_leases] [src: file: backend/src/lib.rs:275#lease_orphaned] [src: file: backend/src/api/audit/run.rs:293#lease_orphaned] [src: file: backend/src/api/audit/run.rs:168#audit_runs_cleanup] [src: file: backend/src/db/audit_runs.rs:856-894#reconcile_running_except]
+  [src: file: backend/src/api/audit/full.rs:162#orphaned_leases] [src: file: backend/src/lib.rs:275#lease_orphaned] [src: file: backend/src/api/audit/run.rs:293#lease_orphaned] [src: file: backend/src/api/audit/run.rs:168#audit_runs_cleanup] [src: file: backend/src/db/audit_runs.rs:879-917#reconcile_running_except]
 - **Validation agents.** Before an audit touches `docs/`, it stops any agent
   still answering in a validation discussion linked to one of the project's
   runs. While an audit of the project shows progress, such an agent is not
@@ -325,7 +325,7 @@ A no-change partial run restores validation only when every tracked validated
 document and every selected target remained byte-identical. The learning gate
 does not treat a changed human-validated document, or one with broken citations,
 as human-validated evidence until its trust conditions hold again.
-[src: file: backend/src/api/audit/helpers.rs:953#validation_restore_snapshots]
+[src: file: backend/src/api/audit/helpers.rs:956#validation_restore_snapshots]
 [src: file: backend/src/core/doc_provenance.rs:772#source_provenance_with_citations]
 [src: file: backend/src/core/learning_gate.rs:66#source_provenance_with_citations]
 
