@@ -51,7 +51,8 @@ avec les navigateurs pré-installés (le tag doit matcher la version de
 e2e/
 ├── fixtures/
 │   ├── api-stubs.ts          # stubBootEndpoints() — bypass /api/setup/status hang
-│   └── kronn-fixture.ts      # `test` étendu : auto stubs + tour skip
+│   ├── kronn-fixture.ts      # `test` étendu : auto stubs + tour skip
+│   └── quick-prompt-seed.ts  # seedQuickPrompt()/deleteQuickPrompt() — un QP que la spec possède
 ├── pages/
 │   ├── DashboardPage.ts      # nav top
 │   ├── WorkflowsPage.ts      # tabs + headers Workflows / QP / QA
