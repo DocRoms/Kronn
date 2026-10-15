@@ -6683,6 +6683,11 @@ fn toolchain_brief_section(toolchain: &ToolchainCapabilities) -> String {
     format!(
         "## Capacités de test (vérifiées au lancement)\n\
          {rust}{frontend}{port}\
+         Serveurs : un backend Kronn ou un Vite que tu démarres écoute sur `$KRONN_PORT` / \
+         `$VITE_DEV_PORT` (déjà dans ton environnement ; Vite proxifie vers \
+         `$KRONN_BACKEND_URL`). Lance le binaire de ta lane (`$CARGO_TARGET_DIR/debug/kronn`). \
+         N'écoute jamais sur 3140 ni 5173 : c'est le Kronn de l'hôte, et tu détournerais l'UI \
+         et les autres workers.\n\
          Lance uniquement ce qui est ✅. Une validation ❌ ne s'affirme jamais : reporte-la \
          `skipped` avec la raison ci-dessus, le principal l'exécutera. `tests_executed` dit \
          explicitement si au moins un test a réellement tourné et lesquels.\n\n",
@@ -23175,6 +23180,10 @@ pub(crate) mod tests {
             "{brief}"
         );
         assert!(brief.contains("`tests_executed`"));
+        // Whatever the worker serves takes its lane ports, never the host Kronn's.
+        assert!(brief.contains("`$KRONN_PORT`"), "{brief}");
+        assert!(brief.contains("`$VITE_DEV_PORT`"), "{brief}");
+        assert!(brief.contains("jamais sur 3140 ni 5173"), "{brief}");
     }
 
     struct FixedRunner(bool);
