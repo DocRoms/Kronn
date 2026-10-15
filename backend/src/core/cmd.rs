@@ -75,15 +75,38 @@ fn raw_sync(program: &OsStr) -> std::process::Command {
 /// library's own test build — the integration crates in `backend/tests` link the
 /// library without `cfg(test)`. Set (to anything but `0`) by `tests/it.rs`
 /// before any test runs; never set by Kronn itself (KT-1189).
+///
+/// Only read when the `test-support` cargo feature is compiled in, which only
+/// the test build of the integration crates does: a shipped `kronn` ignores
+/// it (see [`ignored_test_flag`]).
 pub const NO_REAL_AGENTS_ENV: &str = "KRONN_TEST_NO_REAL_AGENTS";
 
+/// Whether `flag` (the value of [`NO_REAL_AGENTS_ENV`]) arms the guard, given
+/// whether the `test-support` feature is compiled in (`gate`). The gate is a
+/// parameter so a test can prove a build without it ignores a set flag.
+fn forbidden_by(flag: Option<&OsStr>, gate: bool) -> bool {
+    gate && flag.is_some_and(|value| !value.is_empty() && value != "0")
+}
+
 /// Whether a test is running that must not start a real agent CLI: the
-/// library's own test build, or a process carrying [`NO_REAL_AGENTS_ENV`].
-/// `false` in every production process.
+/// library's own test build, or an integration test binary (feature
+/// `test-support`) carrying [`NO_REAL_AGENTS_ENV`]. `false` in every
+/// production process, whatever its environment holds.
 pub fn real_agents_forbidden() -> bool {
     cfg!(test)
-        || crate::core::child_env::var_os(NO_REAL_AGENTS_ENV)
-            .is_some_and(|value| !value.is_empty() && value != "0")
+        || forbidden_by(
+            crate::core::child_env::var_os(NO_REAL_AGENTS_ENV).as_deref(),
+            cfg!(feature = "test-support"),
+        )
+}
+
+/// `true` when [`NO_REAL_AGENTS_ENV`] is set in a build that ignores it: the
+/// startup of the binary warns about it once, so a user who exported it learns
+/// it does nothing instead of wondering why.
+pub fn ignored_test_flag() -> bool {
+    !cfg!(feature = "test-support")
+        && !cfg!(test)
+        && crate::core::child_env::var_os(NO_REAL_AGENTS_ENV).is_some()
 }
 
 /// Whether `path` is a program a test controls: a stub written under the
@@ -344,6 +367,24 @@ mod tests {
         let cmd = tool_cmd("echo");
         // Just verify it doesn't panic — creation_flags is Windows-only
         drop(cmd);
+    }
+
+    /// KT-1189: `KRONN_TEST_NO_REAL_AGENTS` only arms the guard when the
+    /// `test-support` feature is compiled in. A build without it (every build a
+    /// user runs) ignores the variable, so a user who exported it keeps every
+    /// installed agent and no launch aborts the backend. Reverting the `gate &&`
+    /// in `forbidden_by` fails the first assertion.
+    #[test]
+    fn the_flag_is_ignored_by_a_build_without_the_test_support_feature() {
+        let set = Some(OsStr::new("1"));
+        // Production build: flag set, gate off.
+        assert!(!forbidden_by(set, false));
+        assert!(!forbidden_by(Some(OsStr::new("anything")), false));
+        // Test-support build: flag set arms it, unset / empty / "0" does not.
+        assert!(forbidden_by(set, true));
+        assert!(!forbidden_by(None, true));
+        assert!(!forbidden_by(Some(OsStr::new("")), true));
+        assert!(!forbidden_by(Some(OsStr::new("0")), true));
     }
 
     /// KT-1189: a program resolved outside the directories a test controls is

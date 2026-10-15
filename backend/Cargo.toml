@@ -20,6 +20,12 @@ path = "src/main.rs"
 name = "it"
 path = "tests/it.rs"
 
+[features]
+# Reads `KRONN_TEST_NO_REAL_AGENTS` (KT-1189). Off in every build a user runs:
+# only the dev-dependency on this package below turns it on, for the
+# integration test binary, so a release or debug `kronn` ignores the variable.
+test-support = []
+
 [dependencies]
 # Web framework
 axum = { version = "0.8", features = ["ws", "macros", "multipart"] }
@@ -126,6 +132,10 @@ html5ever = "0.40.1"
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation"] }
 
 [dev-dependencies]
+# This package, with its `test-support` feature: the one way the integration
+# crates (tests/*) arm the real-agent guard. Dev-dependencies never reach
+# `cargo build`, so the feature is off for the shipped binary (KT-1189).
+kronn = { path = ".", features = ["test-support"] }
 # `test-util` only: it lets a test reach a 30-minute agent deadline on a paused
 # clock instead of waiting for it (KT-80). Dev-only, no production feature change.
 tokio = { version = "1", features = ["test-util"] }

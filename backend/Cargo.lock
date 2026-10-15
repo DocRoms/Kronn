@@ -1568,6 +1568,7 @@ dependencies = [
  "iana-time-zone",
  "image",
  "keyring",
+ "kronn",
  "libc",
  "open",
  "pdf-extract",

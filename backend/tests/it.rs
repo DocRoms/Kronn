@@ -3,8 +3,10 @@
 //! per file. Add a new file to this list; Cargo does not discover it.
 
 /// No test of this binary may start an agent CLI installed on the machine
-/// (KT-1189). The library arms its guard from `KRONN_TEST_NO_REAL_AGENTS`; it
-/// is set here, before `main`, so every test of every module has it whatever
+/// (KT-1189). The library arms its guard from `KRONN_TEST_NO_REAL_AGENTS`, a
+/// variable it reads only in a build with the `test-support` feature (this
+/// package's own dev-dependency turns it on for this binary and no other
+/// build). It is set here, before `main`, so every test of every module has it whatever
 /// helper it builds its state with — a flag each module had to remember to set
 /// would be missing the day a module forgets it.
 #[used]
