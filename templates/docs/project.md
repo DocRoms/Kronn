@@ -3,6 +3,12 @@
 
 > **TEMPLATE FILE.** The audit fills this page from the briefing's closed answers and checks it read-only against the tracking connections configured in Kronn. Never write a secret value here.
 
+## External documentation
+
+| Tool | Address | Check |
+|------|---------|-------|
+| {{EXTERNAL_DOC_TOOL}} | {{EXTERNAL_DOC_URL}} | {{EXTERNAL_DOC_CHECK}} |
+
 ## Tracker
 
 | Field | Value | Check |

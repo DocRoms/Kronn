@@ -123,6 +123,41 @@ describe('BriefingForm project cards (KT-1173)', () => {
     });
   });
 
+  it('asks where the external documentation lives and sends its kind and address (KT-819)', async () => {
+    (projectsApi.saveBriefing as ReturnType<typeof vi.fn>).mockResolvedValueOnce(true);
+    wrap();
+    fillMandatory();
+
+    // Nothing answered yet: the card shows kinds, no address field.
+    expect(card('external_docs').querySelector('input:not([data-note])')).toBeNull();
+    const kinds = within(card('external_docs')).getAllByRole('checkbox');
+    expect(kinds).toHaveLength(4);
+    fireEvent.click(kinds[0]); // confluence
+    fireEvent.change(valueInput('external_docs'), {
+      target: { value: 'https://acme.atlassian.net/wiki/spaces/ENG' },
+    });
+    // A kind chosen and unchosen again leaves no trace.
+    fireEvent.click(kinds[1]); // notion
+    fireEvent.click(kinds[1]);
+
+    submit();
+    await waitFor(() => expect(projectsApi.saveBriefing).toHaveBeenCalledTimes(1));
+    const payload = (projectsApi.saveBriefing as ReturnType<typeof vi.fn>).mock.calls[0][1];
+    expect(payload.project.external_docs).toEqual([
+      { kind: 'confluence', url: 'https://acme.atlassian.net/wiki/spaces/ENG' },
+    ]);
+  });
+
+  it('an unanswered external documentation card sends no documentation', async () => {
+    (projectsApi.saveBriefing as ReturnType<typeof vi.fn>).mockResolvedValueOnce(true);
+    wrap();
+    fillMandatory();
+    submit();
+    await waitFor(() => expect(projectsApi.saveBriefing).toHaveBeenCalledTimes(1));
+    const payload = (projectsApi.saveBriefing as ReturnType<typeof vi.fn>).mock.calls[0][1];
+    expect(payload.project.external_docs ?? []).toEqual([]);
+  });
+
   it('drops a typed key once the tracker no longer takes one', async () => {
     (projectsApi.saveBriefing as ReturnType<typeof vi.fn>).mockResolvedValueOnce(true);
     wrap();

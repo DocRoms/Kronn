@@ -485,6 +485,76 @@ pub fn detect_docs_entry(project_path: &Path) -> PathBuf {
     }
 }
 
+const BOOTSTRAP_START: &str = "KRONN:BOOTSTRAP:START";
+const BOOTSTRAP_END: &str = "KRONN:BOOTSTRAP:END";
+
+/// A marker comment on its own line, outside fenced code.
+fn is_bootstrap_marker(line: &str, marker: &str, other: &str) -> bool {
+    let line = line.trim();
+    line.starts_with("<!--")
+        && line.ends_with("-->")
+        && line.contains(marker)
+        && !line.contains(other)
+}
+
+/// `content` without the first-run bootstrap block older Kronn versions wrote
+/// at the top of the entry file ("FIRST-RUN TASK — … You must analyze the
+/// repository and fill in all files"), or `None` when there is no complete
+/// START…END block. An unmatched START is left alone: cutting to the end of
+/// the file would delete what a person wrote below it.
+pub fn without_legacy_bootstrap_block(content: &str) -> Option<String> {
+    let mut in_fence = false;
+    let mut start = None;
+    let mut end = None;
+    for (index, line) in content.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        if start.is_none() {
+            if is_bootstrap_marker(line, BOOTSTRAP_START, BOOTSTRAP_END) {
+                start = Some(index);
+            }
+        } else if is_bootstrap_marker(line, BOOTSTRAP_END, BOOTSTRAP_START) {
+            end = Some(index);
+            break;
+        }
+    }
+    let (start, end) = (start?, end?);
+    let kept: Vec<&str> = content
+        .lines()
+        .enumerate()
+        .filter(|(index, _)| *index < start || *index > end)
+        .map(|(_, line)| line)
+        .collect();
+    let mut out = kept.join("\n");
+    if content.ends_with('\n') && !out.is_empty() {
+        out.push('\n');
+    }
+    Some(out.trim_start().to_string())
+}
+
+/// Removes the legacy bootstrap block from the project's docs entry file, so
+/// no agent that reads it is handed a "fill in all files" task, audited or not.
+/// `Ok(true)` when the file was rewritten. A symlinked path is refused.
+pub fn retire_legacy_bootstrap_block(project_path: &Path) -> Result<bool, String> {
+    let entry = detect_docs_entry(project_path);
+    let Ok(content) = std::fs::read_to_string(&entry) else {
+        return Ok(false);
+    };
+    let Some(cleaned) = without_legacy_bootstrap_block(&content) else {
+        return Ok(false);
+    };
+    crate::core::fs_guard::assert_contained_no_symlink(project_path, &entry)?;
+    std::fs::write(&entry, cleaned)
+        .map_err(|e| format!("Cannot rewrite {}: {e}", entry.display()))?;
+    Ok(true)
+}
+
 /// True when the project still has the legacy `ai/index.md` layout AND
 /// no migrated `docs/AGENTS.md` (or `doc/AGENTS.md`) has appeared yet.
 ///

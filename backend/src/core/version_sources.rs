@@ -362,6 +362,14 @@ fn source_statement(source: VersionSource, snapshot: Option<&DependencySnapshot>
     }
 }
 
+/// What the block is read for: the tech-debt and security passes judge a gap
+/// and write a TD; the project index fills the Stack table's currency cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VersionPurpose {
+    Judgement,
+    StackTable,
+}
+
 /// The prompt block for the steps that judge versions and standards.
 pub fn render_version_block(
     source: VersionSource,
@@ -369,12 +377,30 @@ pub fn render_version_block(
     runtimes: &[CiRuntime],
     today: &str,
 ) -> String {
+    render_version_block_for(VersionPurpose::Judgement, source, snapshot, runtimes, today)
+}
+
+/// [`render_version_block`] for one purpose: same dated rows, own instructions.
+pub fn render_version_block_for(
+    purpose: VersionPurpose,
+    source: VersionSource,
+    snapshot: Option<&DependencySnapshot>,
+    runtimes: &[CiRuntime],
+    today: &str,
+) -> String {
     let mut out = String::from("## Technologies and standards — dated version sources\n\n");
-    out.push_str(&format!(
-        "**Source used: {}.** Kronn chose it from this run's configuration; write this line, \
+    match purpose {
+        VersionPurpose::Judgement => out.push_str(&format!(
+            "**Source used: {}.** Kronn chose it from this run's configuration; write this line, \
 as `source used: …`, in the evidence cell of the `Dependencies` coverage row.\n\n",
-        source_statement(source, snapshot)
-    ));
+            source_statement(source, snapshot)
+        )),
+        VersionPurpose::StackTable => out.push_str(&format!(
+            "**Source used: {}.** Kronn chose it from this run's configuration; it feeds the \
+`Latest stable` and `Support end` cells of the Stack table.\n\n",
+            source_statement(source, snapshot)
+        )),
+    }
     match source {
         VersionSource::Context7 => out.push_str(
             "- The `context7` MCP is mounted for you: resolve the library id, then query its docs for the \
@@ -390,11 +416,18 @@ registry page, endoflife.date). Cite it as [src: url: <url>] and give the date y
 EOL or deprecated from memory. Only the dated rows below are evidence.\n",
         ),
     }
-    out.push_str(&format!(
-        "- Today is {today}. A version gap, an EOL runtime or a deprecated pattern becomes a TD carrying \
+    match purpose {
+        VersionPurpose::Judgement => out.push_str(&format!(
+            "- Today is {today}. A version gap, an EOL runtime or a deprecated pattern becomes a TD carrying \
 its proof (the manifest or CI `[src: file: …]` line) AND its dated source citation.\n\
 - Whatever no source above backs is written as `not verified: no source` — never asserted.\n\n"
-    ));
+        )),
+        VersionPurpose::StackTable => out.push_str(&format!(
+            "- Today is {today}. A Stack row's `Latest stable` and `Support end` cells each carry their \
+source citation AND its date; the `In place` cell keeps the lockfile or manifest `[src: file: …]` line.\n\
+- Whatever no source above backs is written as `not verified: no source` — never filled from memory.\n\n"
+        )),
+    }
 
     match snapshot {
         Some(snapshot) => {

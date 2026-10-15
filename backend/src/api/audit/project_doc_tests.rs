@@ -38,6 +38,7 @@ fn sample_answers() -> BriefingProjectAnswers {
             name: "Alice".into(),
             contact: "alice@example.com".into(),
         }],
+        external_docs: vec![],
         notes: Default::default(),
     }
 }
@@ -73,7 +74,7 @@ fn connections() -> Vec<(String, String)> {
 // ─── Template ───────────────────────────────────────────────────────────────
 
 #[test]
-fn template_v2_ships_project_md_with_its_five_parts_and_is_routed() {
+fn template_v2_ships_project_md_with_its_six_parts_and_is_routed() {
     let root = workspace_root();
     let body = std::fs::read_to_string(root.join("templates/docs/project.md"))
         .expect("templates/docs/project.md must exist");
@@ -82,6 +83,7 @@ fn template_v2_ships_project_md_with_its_five_parts_and_is_routed() {
         "the template must carry the generated marker so the audit fills it"
     );
     for heading in [
+        "## External documentation",
         "## Tracker",
         "## Forge",
         "## Environments",
@@ -453,7 +455,7 @@ fn project_md_is_never_written_through_a_symlink() {
 
 // ─── Fact notes (KT-1196) ───────────────────────────────────────────────────
 
-const ALL_FACTS: [BriefingFact; 12] = [
+const ALL_FACTS: [BriefingFact; 13] = [
     BriefingFact::Tracker,
     BriefingFact::TrackerKey,
     BriefingFact::Forge,
@@ -466,6 +468,7 @@ const ALL_FACTS: [BriefingFact; 12] = [
     BriefingFact::ReleaseCadence,
     BriefingFact::Environments,
     BriefingFact::People,
+    BriefingFact::ExternalDocs,
 ];
 
 fn answers_with_every_note() -> BriefingProjectAnswers {
@@ -558,6 +561,7 @@ fn every_fact_note_is_rendered_in_project_md() {
         forge_repo: CheckStatus::NotApplicable,
         default_branch: CheckStatus::NotApplicable,
         observed_default_branch: None,
+        external_docs: vec![],
     };
     let body = render_project_doc(&answers, false, &checks, "2026-10-11");
     for expected in [
@@ -571,6 +575,7 @@ fn every_fact_note_is_rendered_in_project_md() {
         "| Merge strategy | Squash — note: how-merge_strategy works | — |",
         "\nNote: how-environments works\n",
         "\nNote: how-people works\n",
+        "\nNote: how-external_docs works\n",
         "| Review | One approval — note: how-review works |",
         "| Release cadence | On demand — note: how-release_cadence works |",
     ] {
@@ -613,4 +618,184 @@ fn briefing_review_restores_options_even_without_form_facts() {
         assert!(restored.ends_with(options), "{restored}");
         assert_eq!(restored.matches("## Kronn options").count(), 1);
     }
+}
+
+// ─── External documentation (KT-819 DoD 6) ─────────────────────────────────
+
+fn docs_answers(docs: &[(BriefingExternalDocKind, &str)]) -> BriefingProjectAnswers {
+    BriefingProjectAnswers {
+        external_docs: docs
+            .iter()
+            .map(|(kind, url)| BriefingExternalDoc {
+                kind: *kind,
+                url: (*url).to_string(),
+            })
+            .collect(),
+        ..BriefingProjectAnswers::default()
+    }
+}
+
+const CONFLUENCE: &str = "https://acme.atlassian.net/wiki/spaces/ENG/overview";
+
+#[test]
+fn external_docs_are_validated_deduplicated_and_bounded() {
+    use BriefingExternalDocKind::{Confluence, Notion, Wiki};
+    let kept = normalize_answers(&docs_answers(&[
+        (
+            Confluence,
+            "  https://acme.atlassian.net/wiki/spaces/ENG/  ",
+        ),
+        (Confluence, "https://acme.atlassian.net/wiki/spaces/ENG"),
+        (Notion, ""),
+        (Wiki, "https://wiki.example.com/team"),
+    ]))
+    .unwrap();
+    // The trailing slash is trimmed, the duplicate and the empty entry dropped.
+    assert_eq!(
+        kept.external_docs
+            .iter()
+            .map(|d| (d.kind, d.url.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            (Confluence, "https://acme.atlassian.net/wiki/spaces/ENG"),
+            (Wiki, "https://wiki.example.com/team"),
+        ]
+    );
+    for bad in [
+        "http://acme.atlassian.net/wiki",
+        "ftp://acme.example.com",
+        "https://user:secret@acme.atlassian.net/wiki",
+        "https://",
+        "https://acme.example.com/a b",
+        "https://acme.example.com/<x>",
+    ] {
+        assert!(
+            normalize_answers(&docs_answers(&[(Wiki, bad)])).is_err(),
+            "{bad} must be refused"
+        );
+    }
+    let many: Vec<(BriefingExternalDocKind, String)> = (0..=MAX_EXTERNAL_DOCS)
+        .map(|i| (Wiki, format!("https://wiki.example.com/{i}")))
+        .collect();
+    let many: Vec<(BriefingExternalDocKind, &str)> =
+        many.iter().map(|(k, u)| (*k, u.as_str())).collect();
+    assert!(normalize_answers(&docs_answers(&many)).is_err());
+}
+
+#[test]
+fn a_confluence_space_key_comes_from_the_address() {
+    assert_eq!(confluence_space_key(CONFLUENCE).as_deref(), Some("ENG"));
+    assert_eq!(
+        confluence_space_key("https://a.atlassian.net/wiki/spaces/~jdoe?x=1").as_deref(),
+        Some("~jdoe")
+    );
+    assert_eq!(confluence_space_key("https://wiki.example.com/team"), None);
+    assert_eq!(confluence_space_key("https://a.net/wiki/spaces/"), None);
+}
+
+#[tokio::test]
+async fn a_confluence_space_is_read_back_with_one_get_and_other_tools_say_so() {
+    use BriefingExternalDocKind::{Confluence, Notion};
+    let answers = normalize_answers(&docs_answers(&[
+        (Confluence, CONFLUENCE),
+        (Notion, "https://www.notion.so/acme/Docs-123"),
+    ]))
+    .unwrap();
+    let mock = MockConnection::new(|_| ProbeResponse::Found(serde_json::json!({"key": "eng"})));
+    let checks = run_checks(&answers, &connections(), |r| mock.probe(r)).await;
+    assert!(matches!(
+        checks.external_docs[0],
+        CheckStatus::Verified { .. }
+    ));
+    assert!(matches!(
+        checks.external_docs[1],
+        CheckStatus::NotVerified { .. }
+    ));
+    let calls = mock.calls.borrow();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].plugin_id, "mcp-atlassian");
+    assert_eq!(calls[0].endpoint, "/wiki/rest/api/space/{key}");
+    assert_eq!(calls[0].path_params["key"], "ENG");
+}
+
+#[tokio::test]
+async fn a_space_the_connection_cannot_see_proves_nothing_but_another_key_is_a_mismatch() {
+    use BriefingExternalDocKind::Confluence;
+    let answers = normalize_answers(&docs_answers(&[(Confluence, CONFLUENCE)])).unwrap();
+
+    let mock = MockConnection::new(|_| ProbeResponse::NotFound);
+    let checks = run_checks(&answers, &connections(), |r| mock.probe(r)).await;
+    assert!(matches!(
+        checks.external_docs[0],
+        CheckStatus::NotVerified { .. }
+    ));
+    assert!(checks.mismatches().is_empty());
+
+    // Without an Atlassian connection nothing is called.
+    let mock = MockConnection::new(|_| panic!("no connection: no call"));
+    let checks = run_checks(&answers, &[], |r| mock.probe(r)).await;
+    assert!(matches!(
+        checks.external_docs[0],
+        CheckStatus::NotVerified { .. }
+    ));
+
+    // An address with no space key is not probed either.
+    let no_key = normalize_answers(&docs_answers(&[(
+        Confluence,
+        "https://acme.atlassian.net/wiki",
+    )]))
+    .unwrap();
+    let mock = MockConnection::new(|_| panic!("no key: no call"));
+    let checks = run_checks(&no_key, &connections(), |r| mock.probe(r)).await;
+    assert!(matches!(
+        checks.external_docs[0],
+        CheckStatus::NotVerified { .. }
+    ));
+
+    let mock = MockConnection::new(|_| ProbeResponse::Found(serde_json::json!({"key": "OPS"})));
+    let checks = run_checks(&answers, &connections(), |r| mock.probe(r)).await;
+    assert_eq!(checks.mismatches().len(), 1, "{:?}", checks.external_docs);
+}
+
+#[tokio::test]
+async fn project_md_lists_the_external_documentation_with_its_check() {
+    use BriefingExternalDocKind::Confluence;
+    let answers = normalize_answers(&docs_answers(&[(Confluence, CONFLUENCE)])).unwrap();
+    let mock = MockConnection::new(|_| ProbeResponse::Found(serde_json::json!({"key": "ENG"})));
+    let checks = run_checks(&answers, &connections(), |r| mock.probe(r)).await;
+    let body = render_project_doc(&answers, false, &checks, "2026-10-15");
+    assert!(
+        body.contains(&format!(
+            "| Confluence | {CONFLUENCE} | Verified read-only (Atlassian connection) |"
+        )),
+        "{body}"
+    );
+    assert_eq!(
+        crate::api::audit::validation::count_raw_placeholders(&body),
+        0
+    );
+    // It round-trips through the briefing, readable and machine copy.
+    let section = render_facts_section(&answers).unwrap();
+    assert!(
+        section.contains(&format!(
+            "- External documentation: Confluence ({CONFLUENCE})\n"
+        )),
+        "{section}"
+    );
+    assert_eq!(parse_answers(&section), Some(answers));
+
+    // Unanswered: said so, never guessed.
+    let empty = render_project_doc(
+        &BriefingProjectAnswers::default(),
+        false,
+        &ProjectChecks {
+            tracker_key: CheckStatus::NotApplicable,
+            forge_repo: CheckStatus::NotApplicable,
+            default_branch: CheckStatus::NotApplicable,
+            observed_default_branch: None,
+            external_docs: vec![],
+        },
+        "2026-10-15",
+    );
+    assert!(empty.contains("## External documentation\n\nNot provided — ask before assuming."));
 }
