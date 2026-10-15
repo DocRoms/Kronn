@@ -51,6 +51,16 @@ Release notes for 0.9.3 and earlier are available in the
   was still loading. Every Configuration anchor (`/config#<section>`) waits
   for the page to settle the same way, and the sections in Configuration's
   side menu are links: Ctrl/Cmd-click opens one in a new tab.
+- A release tag only checks the version, builds and verifies the installers
+  and creates the draft; it no longer reruns the CI suites the merged pull
+  request already passed.
+
+### Fixed
+
+- A workflow's file and line limits could miss a file rewritten at the same
+  size in the instant its git index was last written: on Linux the safety
+  snapshot copied the index with a new date, so git trusted stale file data.
+- `rustls` 0.23.46 fixes RUSTSEC-2026-0346 to 0349.
 
 ## [0.15.0] - 2026-10-10
 
