@@ -648,6 +648,35 @@ mod tests {
     }
 
     #[test]
+    fn a_same_size_rewrite_as_recent_as_the_index_is_a_change() {
+        let dir = repo();
+        // Only the racy-entry check can see this rewrite: same size, same mtime.
+        git_in(dir.path(), &["config", "core.trustctime", "false"]);
+        let file = dir.path().join("a.txt");
+        let stamp = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        let set_mtime = |path: &Path| {
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(stamp)
+                .unwrap();
+        };
+        // A clean, unsmudged entry stamped in the past, then an index file of
+        // that same instant: git must treat the entry as racy.
+        set_mtime(&file);
+        git_in(dir.path(), &["update-index", "-q", "--refresh"]);
+        set_mtime(&dir.path().join(".git/index"));
+        let baseline = capture_baseline(dir.path()).unwrap();
+        std::fs::write(&file, "uno\ndos\n").unwrap();
+        set_mtime(&file);
+        assert_eq!(
+            measure(dir.path(), &baseline).unwrap(),
+            ChangeStats { files: 1, lines: 4 }
+        );
+    }
+
+    #[test]
     fn each_setting_this_host_would_refuse_is_reported() {
         let mut all = safety(Some(1), None);
         all.sandbox = true;

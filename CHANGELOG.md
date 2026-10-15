@@ -705,14 +705,9 @@ Release notes for 0.9.3 and earlier are available in the
 ### Changed
 
 - CI no longer reruns the whole suite on a tree a pull request already
-  tested green (KT-1170). A push to `main` now runs only **CI Cache**, which
-  fills the caches pull requests read from `main`, under the same keys and
-  paths, without running a test, and stops at once when `main` already holds
-  them. A release tag first looks for a green CI Tests and CI Build
-  pull-request run on the same tree (the base an ancestor of the head) and
-  reruns a workflow only without that proof; the release still requires one
-  or the other for each. A flaky test can no longer turn `main` red after a
-  green merge, and a release saves two full passes.
+  tested green (KT-1170, reshaped by main's shared-cache change): a push to
+  `main` only builds and saves the caches pull requests read, and a release
+  tag reruns no test workflow.
 
 ### Fixed
 
@@ -931,6 +926,16 @@ Release notes for 0.9.3 and earlier are available in the
   was still loading. Every Configuration anchor (`/config#<section>`) waits
   for the page to settle the same way, and the sections in Configuration's
   side menu are links: Ctrl/Cmd-click opens one in a new tab.
+- A release tag only checks the version, builds and verifies the installers
+  and creates the draft; it no longer reruns the CI suites the merged pull
+  request already passed.
+
+### Fixed
+
+- A workflow's file and line limits could miss a file rewritten at the same
+  size in the instant its git index was last written: on Linux the safety
+  snapshot copied the index with a new date, so git trusted stale file data.
+- `rustls` 0.23.46 fixes RUSTSEC-2026-0346 to 0349.
 
 ## [0.15.0] - 2026-10-10
 

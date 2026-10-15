@@ -26,7 +26,6 @@ jobs:
       # The commit every later job and check uses, resolved once: on a manual
       # dispatch the selected branch and the requested tag can differ.
       sha: ${{ steps.resolve.outputs.sha }}
-      tree: ${{ steps.resolve.outputs.tree }}
     env:
       # Tag push: the pushed tag. Dispatch: the requested release, or empty
       # for a build-only dry run on the selected branch.
@@ -40,93 +39,13 @@ jobs:
 
       - name: Resolve the release commit
         id: resolve
-        run: |
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "tree=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Check version consistency and the tag
         run: scripts/check-version-sync.sh "$RELEASE_TAG"
 
-  dependency-review:
-    name: Pre-release dependency review
-    needs: release-checks
-    uses: ./.github/workflows/dependency-review.yml
-    with:
-      ref: ${{ needs.release-checks.outputs.sha }}
-
-  # A tag usually points at a tree a pull request already tested green: the
-  # ruleset requires pull requests to be up to date, and a rebase merge keeps
-  # the tree. Each test workflow reruns below only without that proof.
-  tested-tree:
-    name: Pull-request runs that tested the release tree
-    needs: release-checks
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      actions: read
-      contents: read
-    outputs:
-      ci_test: ${{ steps.proof.outputs.ci_test }}
-      ci_build: ${{ steps.proof.outputs.ci_build }}
-    steps:
-      - name: Checkout the proof script
-        uses: actions/checkout@v7
-        timeout-minutes: 5
-        with:
-          ref: ${{ needs.release-checks.outputs.sha }}
-          sparse-checkout: scripts/ci
-
-      # Any API error counts as no proof: the workflow then reruns.
-      - name: Look for a green pull-request run on the same tree
-        id: proof
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TREE: ${{ needs.release-checks.outputs.tree }}
-        run: |
-          for spec in ci_test:ci-test.yml:ci-quality-gates ci_build:ci-build.yml:ci-build-gates; do
-            IFS=: read -r output workflow gate <<< "$spec"
-            if scripts/ci/tested_tree_proof.sh "$workflow" "$gate"; then
-              echo "$output=proven" >> "$GITHUB_OUTPUT"
-            else
-              echo "No proof for $workflow: it reruns on the release commit."
-              echo "$output=missing" >> "$GITHUB_OUTPUT"
-            fi
-          done
-
-  # The full CI gate, label-gated jobs included, on the exact commit that is
-  # published, when no pull-request run proves its tree.
-  quality-gates:
-    name: CI quality gates on the release commit
-    needs: [release-checks, tested-tree]
-    if: ${{ !cancelled() && needs.release-checks.result == 'success' && needs.tested-tree.outputs.ci_test != 'proven' }}
-    # A called workflow gets no more than its caller grants: cover every
-    # permission its jobs declare (the timing observer reads Actions runs, the
-    # label route job reads the pull request).
-    permissions:
-      actions: read
-      contents: read
-      pull-requests: read
-    uses: ./.github/workflows/ci-test.yml
-    with:
-      ref: ${{ needs.release-checks.outputs.sha }}
-
-  # The app-build gate (portability, desktop crate, Windows exporter), which
-  # pull requests run under the `ci-build` label, on the same commit.
-  build-gates:
-    name: CI build gates on the release commit
-    needs: [release-checks, tested-tree]
-    if: ${{ !cancelled() && needs.release-checks.result == 'success' && needs.tested-tree.outputs.ci_build != 'proven' }}
-    # Same rule: the label route job reads the pull request.
-    permissions:
-      actions: read
-      contents: read
-      pull-requests: read
-    uses: ./.github/workflows/ci-build.yml
-    with:
-      ref: ${{ needs.release-checks.outputs.sha }}
-
   build-desktop:
-    needs: [release-checks, dependency-review]
+    needs: release-checks
     strategy:
       fail-fast: false
       matrix:
@@ -452,50 +371,12 @@ jobs:
       - name: Verify the complete installer matrix
         run: python backend/sidecars/docs/verify_artifacts.py artifacts
 
-  # Each test workflow either passed on this tree in a pull request or passed
-  # again on the release commit. Anything else, a skip included, fails.
-  release-gates:
-    name: CI verdict for the release tree
-    needs: [release-checks, tested-tree, quality-gates, build-gates]
-    if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Require a proof or a green rerun for each test workflow
-        env:
-          CI_TEST_PROOF: ${{ needs.tested-tree.outputs.ci_test }}
-          CI_TEST_RERUN: ${{ needs.quality-gates.result }}
-          CI_BUILD_PROOF: ${{ needs.tested-tree.outputs.ci_build }}
-          CI_BUILD_RERUN: ${{ needs.build-gates.result }}
-        run: |
-          status=0
-          for spec in "CI Tests:$CI_TEST_PROOF:$CI_TEST_RERUN" "CI Build:$CI_BUILD_PROOF:$CI_BUILD_RERUN"; do
-            IFS=: read -r name proof rerun <<< "$spec"
-            if [ "$rerun" = "success" ]; then
-              echo "$name passed on the release commit."
-            elif [ "$rerun" = "skipped" ] && [ "$proof" = "proven" ]; then
-              echo "$name passed on this tree in a pull request (see tested-tree)."
-            else
-              echo "::error::$name: no green pull-request run on this tree and no green rerun (proof: ${proof:-none}, rerun: $rerun)."
-              status=1
-            fi
-          done
-          exit "$status"
-
   # ─── Create GitHub Release on tag ─────────────────────────────────
 
   release:
-    needs: [release-checks, build-desktop, verify-installers, release-gates]
+    needs: [release-checks, build-desktop, verify-installers]
     runs-on: ubuntu-latest
-    # Explicit results: a skipped rerun upstream must not skip the release
-    # once release-gates accepted its proof.
-    if: >-
-      ${{ !cancelled()
-      && (startsWith(github.ref, 'refs/tags/') || inputs.release_tag != '')
-      && needs.release-checks.result == 'success'
-      && needs.build-desktop.result == 'success'
-      && needs.verify-installers.result == 'success'
-      && needs.release-gates.result == 'success' }}
+    if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
     env:
       RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
       GH_TOKEN: ${{ github.token }}

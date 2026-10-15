@@ -27828,13 +27828,20 @@ pub(crate) mod tests {
             .iter()
             .filter(|response| response.error_code.as_deref() == Some("conflict"))
             .count();
-        assert_eq!(accepted, 1, "exactly one approval must be accepted");
+        // Which answer the competing transport gets depends on when it reads
+        // the execution: before the first task's `Approved -> Integrating`
+        // claim it is an idempotent retry of the durable approval and succeeds
+        // (see `decide_authorized_review`); after it, it is a conflict. Both are
+        // correct. The invariant is durable, and asserted below: one review,
+        // one integration claim, one validation.
+        assert!(accepted >= 1, "the approval must be accepted");
         assert_eq!(
-            conflicts, 1,
-            "the competing retry must observe the durable claim"
+            accepted + conflicts,
+            2,
+            "the competing transport either retries the approval or meets the claim"
         );
 
-        // Both transports answered while the validation was held: the loser met the claim.
+        // Both transports answered while the validation was held.
         wait_for_file(&started).await;
         std::fs::write(&release, "go").unwrap();
         let terminal = wait_for_execution_status(&db, &exec_id, TaskExecutionStatus::Done).await;
