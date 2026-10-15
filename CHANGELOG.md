@@ -61,6 +61,12 @@ Release notes for 0.9.3 and earlier are available in the
   size in the instant its git index was last written: on Linux the safety
   snapshot copied the index with a new date, so git trusted stale file data.
 - `rustls` 0.23.46 fixes RUSTSEC-2026-0346 to 0349.
+- The dark-theme contrast scan no longer fails on `:root`, the name axe gives
+  a node it could not address once the page re-rendered it; the Settings route
+  left one such node behind on any dark theme, one run in two.
+- The boot screen's settle timer is dropped after each App test and tolerates
+  a torn-down document, so the frontend suite no longer ends on
+  `document is not defined` from a timer that outlived its test.
 
 ## [0.15.0] - 2026-10-10
 

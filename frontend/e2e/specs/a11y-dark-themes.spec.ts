@@ -133,10 +133,19 @@ async function contrastViolations(page: Page, label: string, exclude: string[] =
   const checked = results.passes.reduce((n, r) => n + r.nodes.length, 0);
   const reasons = new Map<string, number>();
   const undecided: string[] = [];
+  let detached = 0;
   for (const node of results.incomplete.flatMap(r => r.nodes)) {
     const key = String((node.any[0]?.data as { messageKey?: string } | undefined)?.messageKey ?? 'other');
     reasons.set(key, (reasons.get(key) ?? 0) + 1);
     const target = node.target.length === 1 ? String(node.target[0]) : null;
+    // axe names an element `:root` when it could not build a unique selector
+    // for it: a node re-rendered or detached between the analysis and the
+    // report. Re-measuring that selector reads <html>'s own colour against
+    // the page and fails on text nobody sees (Settings, every dark theme).
+    if (target === ':root') {
+      detached += 1;
+      continue;
+    }
     if (REMEASURED.has(key) && target) undecided.push(target);
   }
   const remeasured = await remeasure(page, undecided);
@@ -145,7 +154,8 @@ async function contrastViolations(page: Page, label: string, exclude: string[] =
     .filter(m => m.ratio < m.expected);
   // eslint-disable-next-line no-console
   console.log(`[contrast] ${label}: axe passed ${checked}, left ${[...reasons.values()].reduce((a, b) => a + b, 0)} `
-    + `undecided ${JSON.stringify(Object.fromEntries(reasons))}, re-measured ${remeasured.length}`);
+    + `undecided ${JSON.stringify(Object.fromEntries(reasons))}, re-measured ${remeasured.length}`
+    + (detached ? `, ${detached} detached` : ''));
   expect(checked, `${label}: axe checked no text at all`).toBeGreaterThan(0);
   const axeFailures = results.violations.flatMap(v => v.nodes.map(node => {
     const data = (node.any[0]?.data ?? {}) as {
