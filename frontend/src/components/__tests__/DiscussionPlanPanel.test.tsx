@@ -8,6 +8,9 @@ const mocks = vi.hoisted(() => ({
   linkDiscussion: vi.fn(),
   update: vi.fn(),
   updateDod: vi.fn(),
+  assign: vi.fn(),
+  unassign: vi.fn(),
+  participants: vi.fn(),
   get: vi.fn(),
   proposals: vi.fn(),
   decideProposalItem: vi.fn(),
@@ -31,6 +34,7 @@ vi.mock('../../lib/api', () => buildApiMock({
   discussions: {
     get: mocks.discussion,
     workspaces: mocks.workspaces,
+    participants: mocks.participants,
   },
   orchestration: {
     discussionCampaign: mocks.discussionCampaign,
@@ -80,6 +84,7 @@ function task(overrides: Partial<PlanningTaskSummary> = {}): PlanningTaskSummary
     discussion_ids: ['disc-1'],
     tags: [],
     blocker_count: 0,
+    assignees: [],
     created_at: '2026-07-25T00:00:00Z',
     updated_at: '2026-07-25T00:00:00Z',
     ...overrides,
@@ -149,6 +154,7 @@ describe('DiscussionPlanPanel', () => {
       language: 'fr', participants: [], messages: [], message_count: 0,
     });
     mocks.workspaces.mockResolvedValue([]);
+    mocks.participants.mockResolvedValue([]);
     mocks.discussionCampaign.mockResolvedValue(null);
     mocks.discussionLinks.mockResolvedValue([]);
     mocks.detectAgents.mockResolvedValue([]);
@@ -1170,5 +1176,130 @@ describe('DiscussionPlanPanel', () => {
         idempotency_key: expect.any(String),
       }),
     ));
+  });
+  it('shows who is on each task without opening it, and the execution worker too', async () => {
+    mocks.discussionPlan.mockResolvedValue(plan({
+      active: [relation({
+        assignees: [
+          {
+            kind: 'cli',
+            agent_type: 'Codex',
+            cli_session_id: 12,
+            cli_ordinal: 2,
+            role: 'owner',
+            source: 'manual',
+          },
+          {
+            kind: 'cli',
+            agent_type: 'ClaudeCode',
+            cli_session_id: 21,
+            cli_ordinal: 1,
+            role: 'owner',
+            source: 'execution',
+            tier: 'reasoning',
+            execution_id: 'exec-1',
+            execution_status: 'Working',
+          },
+        ],
+      })],
+    }));
+    const { container } = render(
+      <DiscussionPlanPanel discussionId="disc-1" onClose={vi.fn()} toast={vi.fn()} />,
+    );
+
+    await screen.findByText('planning.progress:0/1');
+    const chips = container.querySelectorAll('.plan-task [data-testid="task-assignees"] .task-assignee');
+    expect(chips).toHaveLength(2);
+    // Two CLIs of one provider stay readable as such: the room ordinal shows.
+    expect(chips[0].textContent).toContain('Codex planning.assignee.cliShort 2');
+    expect(chips[1].getAttribute('data-source')).toBe('execution');
+    expect(chips[1].getAttribute('aria-label')).toContain('planning.assignee.runningWorker');
+    expect(chips[1].getAttribute('aria-label')).toContain('disc.tier.reasoning');
+    expect(mocks.get).not.toHaveBeenCalled();
+  });
+
+  it('assigns a joined CLI from the plan quick menu and refreshes the plan', async () => {
+    mocks.participants.mockResolvedValue([{
+      id: 12,
+      disc_id: 'disc-1',
+      agent_type: 'Codex',
+      status: 'active',
+      cli_ordinal: 2,
+    }]);
+    mocks.assign.mockResolvedValue(detail());
+    const { container } = render(
+      <DiscussionPlanPanel discussionId="disc-1" onClose={vi.fn()} toast={vi.fn()} />,
+    );
+    await screen.findByText('planning.progress:0/1');
+    const plansBefore = mocks.discussionPlan.mock.calls.length;
+
+    fireEvent.click(container.querySelector('.task-assignee-trigger') as HTMLElement);
+    const reviewer = await screen.findByRole('button', {
+      name: 'planning.assignee.setRole:Codex planning.assignee.cli 2/planning.assignee.role.reviewer',
+    });
+    fireEvent.click(reviewer);
+
+    await waitFor(() => expect(mocks.assign).toHaveBeenCalledWith('task-1', {
+      assignee: {
+        kind: 'cli',
+        agent_type: 'Codex',
+        cli_session_id: 12,
+        connection_id: null,
+        role: 'reviewer',
+      },
+    }));
+    await waitFor(() => expect(mocks.discussionPlan.mock.calls.length).toBeGreaterThan(plansBefore));
+  });
+
+  it('unassigns by pressing the active role again, and never touches an execution worker', async () => {
+    mocks.participants.mockResolvedValue([{
+      id: 12,
+      disc_id: 'disc-1',
+      agent_type: 'Codex',
+      status: 'active',
+      cli_ordinal: 1,
+    }, {
+      id: 21,
+      disc_id: 'disc-1',
+      agent_type: 'ClaudeCode',
+      status: 'active',
+      cli_ordinal: 1,
+    }]);
+    mocks.unassign.mockResolvedValue(detail());
+    mocks.discussionPlan.mockResolvedValue(plan({
+      active: [relation({
+        assignees: [
+          { kind: 'cli', agent_type: 'Codex', cli_session_id: 12, cli_ordinal: 1, role: 'owner', source: 'manual' },
+          { kind: 'cli', agent_type: 'ClaudeCode', cli_session_id: 21, cli_ordinal: 1, role: 'owner', source: 'execution' },
+        ],
+      })],
+    }));
+    const { container } = render(
+      <DiscussionPlanPanel discussionId="disc-1" onClose={vi.fn()} toast={vi.fn()} />,
+    );
+    await screen.findByText('planning.progress:0/1');
+
+    fireEvent.click(container.querySelector('.task-assignee-trigger') as HTMLElement);
+    const worker = await screen.findByRole('button', {
+      name: 'planning.assignee.setRole:Claude Code planning.assignee.cli/planning.assignee.role.reviewer',
+    });
+    fireEvent.click(worker);
+    expect(mocks.assign).not.toHaveBeenCalled();
+    expect(mocks.unassign).not.toHaveBeenCalled();
+
+    const owner = screen.getByRole('button', {
+      name: 'planning.assignee.setRole:Codex planning.assignee.cli/planning.assignee.role.owner',
+    });
+    expect(owner.getAttribute('aria-pressed')).toBe('true');
+    fireEvent.click(owner);
+    await waitFor(() => expect(mocks.unassign).toHaveBeenCalledWith('task-1', {
+      assignee: {
+        kind: 'cli',
+        agent_type: 'Codex',
+        cli_session_id: 12,
+        connection_id: null,
+        role: null,
+      },
+    }));
   });
 });

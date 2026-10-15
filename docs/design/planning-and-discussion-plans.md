@@ -207,9 +207,29 @@ Runtime parity is capability-based:
 
 The first release is local-only. Actor/audit metadata must still distinguish
 the human from an agent and record which agent changed a task. Assignment fields
-may be reserved in storage but remain absent from the initial UI. A later
+may be reserved in storage but remain absent from the initial UI. *(0.15.1,
+KT-154: assignment shipped — see "Assignees" below.)* A later
 delegation flow can create a prefilled discussion from a structured task and
 offer both “Create only” and “Create and run”. `[src: user: 2026-07-24: local-first and delegation decisions]`
+
+## Assignees
+
+A task carries any number of assignees (an owner and a reviewer, for example)
+in `planning_task_assignees`. An assignee is the typed message-target identity
+(KT-116): `kind` (`discussion_agent` | `agent` | `cli`), `agent_type`, and for a
+CLI the exact `discussion_sessions` id, so two CLIs of the same provider are two
+assignees. The role is optional (`owner` | `reviewer`).
+
+- **Execution worker, derived.** The worker of the task's latest non-terminal
+  TaskExecution (agent type, tier, status) is projected at read time with
+  `source: "execution"`; it is never stored, so it disappears with the
+  execution. When the same identity is also assigned by hand the two fold into
+  one row.
+- **Writes.** `POST`/`DELETE /api/planning/tasks/{id}/assignees` (UI and MCP
+  `task_assign` / `task_unassign`). An agent moving a task to `in_progress` is
+  assigned as `owner` unless the task already has a non-reviewer assignee.
+- **Reads.** `PlanningTaskSummary.assignees` is part of every task projection
+  (plan, list, detail); the plan row shows the pastilles and a quick menu.
 
 ## Suggested implementation slices
 

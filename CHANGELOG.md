@@ -13,6 +13,17 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- Tasks show which agents are on them (KT-154). A task carries one or more
+  assignees, each an exact identity — the room's agent, a punctual agent or a
+  joined CLI session — with an optional owner / reviewer role, so two Codex
+  CLIs stay distinguishable. The discussion plan shows them as pastilles on
+  each row (Focus and All views) and the worker of a running task execution
+  appears there too, with its agent and tier, without any manual assignment.
+  Assign and unassign from the plan row's quick menu or from the task sheet;
+  agents use the new `task_assign` / `task_unassign` MCP tools, and moving a
+  task to in_progress assigns the calling CLI as its owner when nobody is on
+  it.
+
 - The briefing records the team's rules and bans (KT-1193). « Règles et
   interdits » holds up to 20 one-line entries of at most 200 characters,
   each a rule (always) or a ban (never). A ban may carry a pattern Kronn

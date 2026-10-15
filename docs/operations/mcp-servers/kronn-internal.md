@@ -89,7 +89,7 @@ routing and idempotency guarantees as an answered one — they cannot drift apar
 as a message that says it is not a decision, and the question stays pending.
 In the card, a checked option can be clicked again to take it back.
 Discussion list items expose `pending_question_count`, including pagination.
-`[src: file: backend/src/lib.rs:2752-2766#decline]`
+`[src: file: backend/src/lib.rs:2756-2770#decline]`
 `[src: file: backend/src/db/discussion_questions.rs:511#publish_human_resolution]`
 `[src: file: backend/src/db/discussion_questions.rs:168-189#pending_question_count]`
 `[src: file: backend/src/db/sql/168_discussion_questions.sql:1#discussion_questions]`
@@ -245,6 +245,19 @@ thread again: ask before renaming a room you did not open.
    change to the calling agent. Removal is a narrow, idempotent write: it
    removes only the selected edge and leaves task status and free-form blocked
    reason untouched.
+   `task_assign` / `task_unassign` (KT-154) put an agent on a task or take it
+   off, so the discussion plan shows who is on what. Without `assignee` the
+   call targets the caller itself, resolved server-side from its durable CLI
+   session to the exact `discussion_sessions` row (two Codex CLIs stay two
+   identities); an unresolvable caller is refused, never guessed from the
+   provider name. `assignee` names another agent with the typed identity
+   (`kind` = `cli` | `agent` | `discussion_agent`, `agent_type`, and the exact
+   `cli_session_id` for a CLI). `task_update` moving a task to `in_progress`
+   also assigns the calling joined CLI as `owner` when nobody is on the task.
+   The worker of a live task execution is shown from the execution itself and
+   is not removable here.
+   `[src: file: backend/scripts/disc-introspection-mcp.py:12041-12055#call_task_assign]`
+   `[src: file: backend/src/db/planning.rs:996-1034#actor_assignee]`
    `proposal_list` and `proposal_get` expose the human validation inbox as
    read-only context; no MCP tool can accept or reject a proposal.
    `[src: file: backend/scripts/disc-introspection-mcp.py:4692-4736#call_proposal_get]`

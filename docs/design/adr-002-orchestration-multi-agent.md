@@ -15,9 +15,9 @@
 - **Scope**: KT-315 (objective), KT-316 (this ADR). Downstream: KT-317…KT-326.
 - **Upstream context**: `planning-and-discussion-plans.md` slice 7 ("Deferred delegation —
   task-to-discussion briefing and agent launch only after the task workflow is proven
-  manually") `[src: file: docs/design/planning-and-discussion-plans.md:232-233#Deferred]` and the
+  manually") `[src: file: docs/design/planning-and-discussion-plans.md:252-253#Deferred]` and the
   "Create only / Create and run" delegation decision
-  `[src: file: docs/design/planning-and-discussion-plans.md:210-211#delegation]`. This ADR turns that
+  `[src: file: docs/design/planning-and-discussion-plans.md:211-212#delegation]`. This ADR turns that
   deferred flow into a durable, backend-owned lifecycle.
 
 ---

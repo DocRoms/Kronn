@@ -10243,6 +10243,7 @@ class PlanningToolTests(unittest.TestCase):
             "proposal_list", "proposal_get",
             "task_create", "task_update", "task_update_dod", "task_link_discussion",
             "task_add_blocker", "task_remove_blocker",
+            "task_assign", "task_unassign",
         }
         names = {tool["name"] for tool in self.mod.TOOLS}
         self.assertTrue(expected.issubset(names))
@@ -10462,6 +10463,59 @@ class PlanningToolTests(unittest.TestCase):
         )
         self.assertEqual(body["completed"], True)
         self.assertEqual(body["actor"]["id"], "Codex")
+
+    def test_task_assign_without_assignee_names_the_caller_session(self):
+        # KT-154 — "myself" is resolved server-side from the durable session, so
+        # the bridge never invents a provider-only identity.
+        with mock.patch.object(self.mod, "_http", self.fake_http), \
+             mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"), \
+             mock.patch.object(self.mod, "_durable_session_id", return_value="cli-session-a"):
+            self.mod.call_task_assign({"task_id": "KT/154", "role": "reviewer"})
+        method, path, body = self.fake_http.call_args.args
+        self.assertEqual((method, path), ("POST", "/api/planning/tasks/KT%2F154/assignees"))
+        self.assertNotIn("assignee", body)
+        self.assertEqual(body["role"], "reviewer")
+        self.assertEqual(body["actor"]["id"], "Codex")
+        self.assertEqual(body["actor"]["session_id"], "cli-session-a")
+
+    def test_task_assign_forwards_only_the_typed_identity_fields(self):
+        with mock.patch.object(self.mod, "_http", self.fake_http), \
+             mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"):
+            self.mod.call_task_assign({
+                "task_id": "KT-154",
+                "assignee": {
+                    "kind": "cli",
+                    "agent_type": "Codex",
+                    "cli_session_id": 12,
+                    "ignored": "x",
+                },
+            })
+        body = self.fake_http.call_args.args[2]
+        self.assertEqual(
+            body["assignee"],
+            {"kind": "cli", "agent_type": "Codex", "cli_session_id": 12},
+        )
+
+    def test_task_assign_rejects_a_provider_only_assignee(self):
+        with self.assertRaisesRegex(RuntimeError, "kind and agent_type"):
+            self.mod.call_task_assign({"task_id": "KT-154", "assignee": {"agent_type": "Codex"}})
+        with self.assertRaisesRegex(RuntimeError, "task_id is required"):
+            self.mod.call_task_unassign({})
+
+    def test_task_unassign_is_a_delete_on_the_assignees_collection(self):
+        with mock.patch.object(self.mod, "_http", self.fake_http), \
+             mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"):
+            self.mod.call_task_unassign({"task_id": "KT-154"})
+        method, path, body = self.fake_http.call_args.args
+        self.assertEqual((method, path), ("DELETE", "/api/planning/tasks/KT-154/assignees"))
+        self.assertNotIn("assignee", body)
+
+    def test_assignees_reach_the_write_receipt(self):
+        ack = self.mod._task_ack({
+            "id": "t", "reference": "KT-154", "title": "x", "status": "in_progress",
+            "assignees": [{"kind": "cli", "agent_type": "Codex", "cli_session_id": 12}],
+        })
+        self.assertEqual(ack["assignees"][0]["cli_session_id"], 12)
 
     def test_task_add_blocker_requires_both_references(self):
         with self.assertRaisesRegex(RuntimeError, "task_id and blocker_task_id"):
@@ -12736,7 +12790,7 @@ class TaskAckTests(unittest.TestCase):
         for name in (
             "call_task_create", "call_task_update", "call_task_update_dod",
             "call_task_add_blocker", "call_task_remove_blocker",
-            "call_task_link_discussion",
+            "call_task_link_discussion", "call_task_assign", "call_task_unassign",
         ):
             source = inspect.getsource(getattr(self.mod, name))
             self.assertIn("_task_ack", source, f"{name} still returns the whole task")

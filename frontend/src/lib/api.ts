@@ -245,6 +245,8 @@ import type {
   ProposalDecisionResponse,
   ProposalListResponse,
   RemovePlanningBlockerRequest,
+  AssignPlanningTaskRequest,
+  UnassignPlanningTaskRequest,
   UpdatePlanningDodItemRequest,
   UpdatePlanningTaskRequest,
   TelemetryCoverage,
@@ -2634,6 +2636,19 @@ export const planning = {
     `/planning/tasks/${encodeURIComponent(taskId)}/blockers/${encodeURIComponent(blockerTaskId)}`,
     request,
   ),
+  /** KT-154 — put an agent on a task (idempotent on its typed identity). */
+  assign: (taskId: string, request: AssignPlanningTaskRequest) =>
+    api<PlanningTaskDetail>(
+      'POST',
+      `/planning/tasks/${encodeURIComponent(taskId)}/assignees`,
+      request,
+    ),
+  unassign: (taskId: string, request: UnassignPlanningTaskRequest) =>
+    api<PlanningTaskDetail>(
+      'DELETE',
+      `/planning/tasks/${encodeURIComponent(taskId)}/assignees`,
+      request,
+    ),
   discussionPlan: (discussionId: string) =>
     api<DiscussionPlan>('GET', `/discussions/${encodeURIComponent(discussionId)}/plan`),
   proposals: (discussionId: string, pendingOnly = true) => {

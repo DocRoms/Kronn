@@ -5,10 +5,11 @@ use axum::{
 };
 
 use crate::models::{
-    AddPlanningBlockerRequest, ApiErrorCode, ApiResponse, CreatePlanningTaskRequest,
-    DiscussionPlan, LinkPlanningDiscussionRequest, PlanningTaskChange, PlanningTaskDetail,
-    PlanningTaskListQuery, PlanningTaskListResponse, RemovePlanningBlockerRequest,
-    UnlinkPlanningDiscussionRequest, UpdatePlanningDodItemRequest, UpdatePlanningTaskRequest,
+    AddPlanningBlockerRequest, ApiErrorCode, ApiResponse, AssignPlanningTaskRequest,
+    CreatePlanningTaskRequest, DiscussionPlan, LinkPlanningDiscussionRequest, PlanningTaskChange,
+    PlanningTaskDetail, PlanningTaskListQuery, PlanningTaskListResponse,
+    RemovePlanningBlockerRequest, UnassignPlanningTaskRequest, UnlinkPlanningDiscussionRequest,
+    UpdatePlanningDodItemRequest, UpdatePlanningTaskRequest,
 };
 use crate::AppState;
 
@@ -150,6 +151,39 @@ pub async fn unlink_discussion(
         .await
     {
         Ok(plan) => Json(ApiResponse::ok(plan)),
+        Err(error) => planning_error(error),
+    }
+}
+
+/// KT-154 — `POST /api/planning/tasks/{id}/assignees`: put one agent on a task.
+pub async fn assign_task(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<AssignPlanningTaskRequest>,
+) -> Json<ApiResponse<PlanningTaskDetail>> {
+    match state
+        .db
+        .with_conn(move |connection| crate::db::planning::assign_task(connection, &id, &request))
+        .await
+    {
+        Ok(task) => Json(ApiResponse::ok(task)),
+        Err(error) => planning_error(error),
+    }
+}
+
+/// KT-154 — `DELETE /api/planning/tasks/{id}/assignees`: take one agent off a
+/// task (identified by its typed identity, in the body like the discussion unlink).
+pub async fn unassign_task(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<UnassignPlanningTaskRequest>,
+) -> Json<ApiResponse<PlanningTaskDetail>> {
+    match state
+        .db
+        .with_conn(move |connection| crate::db::planning::unassign_task(connection, &id, &request))
+        .await
+    {
+        Ok(task) => Json(ApiResponse::ok(task)),
         Err(error) => planning_error(error),
     }
 }

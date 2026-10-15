@@ -4755,7 +4755,7 @@ def call_task_changes(args):
 # already knows the task; it needs proof the write landed and nothing else.
 _TASK_ACK_FIELDS = (
     "id", "reference", "title", "status", "priority",
-    "parent_reference", "blocker_count",
+    "parent_reference", "blocker_count", "assignees",
 )
 
 
@@ -11753,7 +11753,7 @@ def _handle(req):
                     "• **Working in a room:** " + ROOM_WORK_PROTOCOL + "\n"
                     '• Blocking human decisions MUST use a closed `kronn-question` JSON fence, never prose alone. `version` MUST be the JSON number 1, never the string "1". Read `disc_question_list` first; its tool_manual has a complete valid example. After publication, read back the exact key to verify recording; if absent, correct the payload and republish with the same key. Wait for a durable human answer before advancing the affected lot; independent work can continue. Agents cannot answer for humans.\n'
                     "• Rich room output: messages are Markdown. A `mermaid` fence renders a diagram; `kronn-doc-preview` renders sandboxed HTML with PDF/DOCX actions (a plain `html` fence is only code); `kronn-doc-data` exposes CSV/XLSX/PPTX export. Use visual output only when it materially helps.\n"
-                    "• Planning: a discussion may have a shared plan made of prioritized, editable tasks. The user may refer to it naturally as “the plan”, “the tasks”, “what remains”, “the priority”, and similar wording. Use `plan_get` (compact current objective/plan) · `task_list` (compact filtered backlog) · `task_get` (FULL task) · `task_changes` (deltas) · `proposal_list`/`proposal_get` (durable proposals, read-only) · narrow writes `task_create`/`task_update`/`task_update_dod`/`task_link_discussion`/`task_unlink_discussion`/`task_add_blocker`/`task_remove_blocker`. Read the relevant plan first. Immediately before any direct `task_create`, call `plan_get` again so a peer's recent write is visible. Apply unambiguous intent directly; otherwise propose a human-gated `kronn-plan-action` fence (`create`, `create_many`, `status`, `complete`, `unblock`, `open`). You may read and propose, but only a human accepts, rejects or decides a durable proposal. Never replace a requested plan update with a prose-only summary. Whenever tracked work starts or materially changes, keep its status, DoD and priority honest in the plan. Write only on a real change: never reload or rewrite an unchanged task merely to report progress. If the announced Planning tools are missing from your MCP surface, use the read-only `plan_snapshot` from `disc_join`, ask @user to reconnect the Kronn MCP, and never fabricate an update.\n"
+                    "• Planning: a discussion may have a shared plan made of prioritized, editable tasks. The user may refer to it naturally as “the plan”, “the tasks”, “what remains”, “the priority”, and similar wording. Use `plan_get` (compact current objective/plan) · `task_list` (compact filtered backlog) · `task_get` (FULL task) · `task_changes` (deltas) · `proposal_list`/`proposal_get` (durable proposals, read-only) · narrow writes `task_create`/`task_update`/`task_update_dod`/`task_link_discussion`/`task_unlink_discussion`/`task_add_blocker`/`task_remove_blocker`/`task_assign`/`task_unassign` (taking a task: `task_assign` yourself, or move it to in_progress). Read the relevant plan first. Immediately before any direct `task_create`, call `plan_get` again so a peer's recent write is visible. Apply unambiguous intent directly; otherwise propose a human-gated `kronn-plan-action` fence (`create`, `create_many`, `status`, `complete`, `unblock`, `open`). You may read and propose, but only a human accepts, rejects or decides a durable proposal. Never replace a requested plan update with a prose-only summary. Whenever tracked work starts or materially changes, keep its status, DoD and priority honest in the plan. Write only on a real change: never reload or rewrite an unchanged task merely to report progress. If the announced Planning tools are missing from your MCP surface, use the read-only `plan_snapshot` from `disc_join`, ask @user to reconnect the Kronn MCP, and never fabricate an update.\n"
                     "• Human-gated Automation proposals: after resolving a real QP/QA/QE/Workflow id and its declared variables through the catalogue/get tools, an agent may emit one `kronn-action` fence with `{\"kind\":\"quick_prompt|quick_api|quick_exec|workflow\",\"target_id\":\"<real id>\",\"project_id\":\"<optional id>\",\"values\":[{\"name\":\"<declared variable>\",\"value\":\"<editable suggestion>\",\"provenance\":\"agent_suggestion\",\"suggested_by\":\"<your alias>\"}]}`. This proposes only: Kronn validates and persists the card, and the human click launches it. Never invent ids/variables or include secret/resolved values.\n"
                     "• Workflows (multi-step pipelines): `workflow_list` (compact) · `workflow_get` (FULL, every step) · `workflow_step_schema` (CANONICAL step schema as an untruncatable result — the closed 12 `step_type`s, per-type fields, runtime contracts; call before authoring) · `workflow_create_draft` · `workflow_clone`/`workflow_update`/`workflow_set_enabled` · `workflow_trigger`/`workflow_run_status` · run history `workflow_runs`/`workflow_run_get` · `workflow_active_runs`/`workflow_cancel_run`. Agent-step bindings (full CRUD): `skills_list`/`profiles_list`/`directives_list` enumerate valid ids; `skill_get`/`profile_get`/`directive_get` read FULL bodies; `skill_create`/`skill_update`/`skill_delete` (+ `profile_*`/`directive_*`) author & edit custom ones.\n"
                     "• Quick Prompts (reusable prompt templates): `qp_list` (no body) · `qp_get` (FULL incl `prompt_template` — read this to know what a QP does, or to run it yourself) · `qp_create_draft`/`qp_update`/`qp_delete` · `qp_run`/`qp_batch_run`.\n"
@@ -11941,6 +11941,137 @@ def main():
             _send(resp)
         if _BRIDGE_RELOAD_STATE["status"] == "scheduled":
             _perform_scheduled_bridge_reload()
+
+
+# ─── KT-154 — who is on which task ──────────────────────────────────────────
+# Declared and dispatched here, after `main()`, on purpose: the docs cite the
+# code above by line number, and a mid-file insertion would move every one of
+# those citations.
+
+TOOLS.extend([
+    {
+        "name": "task_assign",
+        "description": (
+            "Put an agent on a task so the plan shows who is on what. Without "
+            "`assignee` it assigns YOU (your exact joined CLI session); `role` is "
+            "optional (`owner` = doing it, `reviewer` = reviewing it). To assign "
+            "another agent, pass `assignee` with the typed identity: `kind` "
+            "(`cli` needs its `cli_session_id`; `agent` = punctual agent; "
+            "`discussion_agent` = the room's configured agent) and `agent_type`. "
+            "Never name a provider alone for a CLI: two Codex CLIs are different "
+            "identities. Moving a task to in_progress via task_update already "
+            "assigns you as owner when nobody is on it. Safe to retry."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string"},
+                "role": {"type": "string", "enum": ["owner", "reviewer"]},
+                "assignee": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "enum": ["discussion_agent", "agent", "cli"],
+                        },
+                        "agent_type": {"type": "string"},
+                        "cli_session_id": {"type": "integer"},
+                        "connection_id": {"type": "string"},
+                        "role": {"type": "string", "enum": ["owner", "reviewer"]},
+                    },
+                    "required": ["kind", "agent_type"],
+                },
+                "source_message_id": {"type": "string"},
+            },
+            "required": ["task_id"],
+        },
+    },
+    {
+        "name": "task_unassign",
+        "description": (
+            "Take an agent off a task. Without `assignee` it removes YOU. Only "
+            "manual assignments can be removed: the worker of a running task "
+            "execution is shown from the execution itself."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string"},
+                "assignee": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "enum": ["discussion_agent", "agent", "cli"],
+                        },
+                        "agent_type": {"type": "string"},
+                        "cli_session_id": {"type": "integer"},
+                        "connection_id": {"type": "string"},
+                    },
+                    "required": ["kind", "agent_type"],
+                },
+                "source_message_id": {"type": "string"},
+            },
+            "required": ["task_id"],
+        },
+    },
+])
+
+
+def _assignee_arg(tool, args):
+    """The typed identity an agent names, or `None` for "myself".
+
+    The server resolves "myself" from the caller's durable CLI session, so
+    this side never guesses a session pk or a provider.
+    """
+    assignee = args.get("assignee")
+    if assignee is None:
+        return None
+    if not isinstance(assignee, dict):
+        raise RuntimeError(f"{tool}: assignee must be an object")
+    if not assignee.get("kind") or not assignee.get("agent_type"):
+        raise RuntimeError(f"{tool}: assignee needs kind and agent_type")
+    return {
+        key: assignee[key]
+        for key in ("kind", "agent_type", "cli_session_id", "connection_id", "role")
+        if assignee.get(key) is not None
+    }
+
+
+def call_task_assign(args):
+    task_id = (args.get("task_id") or "").strip()
+    if not task_id:
+        raise RuntimeError("task_assign: task_id is required")
+    body = {"actor": _planning_actor(args)}
+    assignee = _assignee_arg("task_assign", args)
+    if assignee is not None:
+        body["assignee"] = assignee
+    if args.get("role") is not None:
+        body["role"] = args["role"]
+    encoded = urllib.parse.quote(task_id, safe="")
+    return _task_ack(_unwrap(_http(
+        "POST", f"/api/planning/tasks/{encoded}/assignees", body
+    )))
+
+
+def call_task_unassign(args):
+    task_id = (args.get("task_id") or "").strip()
+    if not task_id:
+        raise RuntimeError("task_unassign: task_id is required")
+    body = {"actor": _planning_actor(args)}
+    assignee = _assignee_arg("task_unassign", args)
+    if assignee is not None:
+        body["assignee"] = assignee
+    encoded = urllib.parse.quote(task_id, safe="")
+    return _task_ack(_unwrap(_http(
+        "DELETE", f"/api/planning/tasks/{encoded}/assignees", body
+    )))
+
+
+DISPATCH.update({
+    "task_assign": call_task_assign,
+    "task_unassign": call_task_unassign,
+})
 
 
 if __name__ == "__main__":

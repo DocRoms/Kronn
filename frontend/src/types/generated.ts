@@ -800,6 +800,13 @@ path: string,
 format?: string | null, };
 
 /**
+ * KT-154 — `assignee: None` means "the acting agent itself": the server
+ * resolves the actor's exact joined CLI session and refuses when it cannot.
+ * `role` applies to that self-assignment (default `owner`).
+ */
+export type AssignPlanningTaskRequest = { assignee?: PlanningAssigneeInput | null, role?: PlanningAssigneeRole | null, actor?: PlanningActor, };
+
+/**
  * What a discussion is created for when it is an assistant conversation:
  * the link is written in the discussion's own transaction, and `secrets`
  * are masked out of its title and first message before anything is stored.
@@ -6229,6 +6236,43 @@ session_id: string | null, source_message_id: string | null, };
 export type PlanningActorKind = "human" | "agent" | "backend" | "system";
 
 /**
+ * KT-154 — one agent on a task, identified with the typed KT-116 regime
+ * (`kind` + `agent_type` + exact `cli_session_id`), never by provider alone.
+ */
+export type PlanningAssignee = { kind: MessageTargetKind, agent_type: AgentType, connection_id?: string | null,
+/**
+ * Exact joined CLI session (`discussion_sessions.id`) for a `cli` assignee.
+ */
+cli_session_id?: number | null,
+/**
+ * Stable room ordinal of that session (`@codex-cli-2` → 2), so two CLIs of
+ * one provider read differently in the plan.
+ */
+cli_ordinal?: number | null, role?: PlanningAssigneeRole | null, source: PlanningAssigneeSource,
+/**
+ * Model tier of an execution worker. Always `None` for a manual assignee.
+ */
+tier?: ModelTier | null, execution_id?: string | null, execution_status?: TaskExecutionStatus | null, };
+
+/**
+ * KT-154 — the identity a caller assigns or removes. Same shape as the
+ * persisted assignee minus the derived fields.
+ */
+export type PlanningAssigneeInput = { kind: MessageTargetKind, agent_type: AgentType, connection_id: string | null, cli_session_id: number | null, role: PlanningAssigneeRole | null, };
+
+/**
+ * KT-154 — what an assignee does on the task. Optional on a manual assignment.
+ */
+export type PlanningAssigneeRole = "owner" | "reviewer";
+
+/**
+ * KT-154 — where an assignee row comes from. `Manual` rows are stored and can
+ * be removed; `Execution` rows are the worker of a live TaskExecution, derived
+ * at read time and never stored (so they cannot outlive the execution).
+ */
+export type PlanningAssigneeSource = "manual" | "execution";
+
+/**
  * KT-30 — minimal, read-only dependency reference for the plan projection.
  * Just enough to render a blocked task's active blockers (and, later, the
  * dependency neighbourhood) WITHOUT loading each blocker's full detail. Never
@@ -6289,7 +6333,12 @@ result_task_id?: string, decided_at?: string, };
 
 export type PlanningTaskChange = { task_id: string, task_reference: string, task_title: string, id: string, action: string, actor_kind: PlanningActorKind, actor_id: string | null, actor_session_id: string | null, changes: JsonValue, source_message_id: string | null, created_at: string, };
 
-export type PlanningTaskDetail = { subtasks: Array<PlanningTaskSummary>, description: string, blocked_reason: string | null, definition_of_done: Array<PlanningDodItem>, links: Array<PlanningTaskLink>, blockers: Array<PlanningTaskSummary>, blocking: Array<PlanningTaskSummary>, workspaces?: Array<PlanningWorkspaceSummary>, events: Array<PlanningTaskEvent>, id: string, reference: string, parent_id: string | null, parent_reference: string | null, parent_title: string | null, title: string, status: PlanningTaskStatus, priority: PlanningTaskPriority, rank: number, completed_subtasks: number, total_subtasks: number, project_ids: Array<string>, discussion_ids: Array<string>, tags: Array<string>, blocker_count: number, created_at: string, updated_at: string, };
+export type PlanningTaskDetail = { subtasks: Array<PlanningTaskSummary>, description: string, blocked_reason: string | null, definition_of_done: Array<PlanningDodItem>, links: Array<PlanningTaskLink>, blockers: Array<PlanningTaskSummary>, blocking: Array<PlanningTaskSummary>, workspaces?: Array<PlanningWorkspaceSummary>, events: Array<PlanningTaskEvent>, id: string, reference: string, parent_id: string | null, parent_reference: string | null, parent_title: string | null, title: string, status: PlanningTaskStatus, priority: PlanningTaskPriority, rank: number, completed_subtasks: number, total_subtasks: number, project_ids: Array<string>, discussion_ids: Array<string>, tags: Array<string>, blocker_count: number,
+/**
+ * KT-154 — manual assignees first (assignment order), then the worker of a
+ * live TaskExecution when it is not already assigned by hand.
+ */
+assignees: Array<PlanningAssignee>, created_at: string, updated_at: string, };
 
 export type PlanningTaskEvent = { id: string, action: string, actor_kind: PlanningActorKind, actor_id: string | null, actor_session_id: string | null, changes: JsonValue, source_message_id: string | null, created_at: string, };
 
@@ -6301,7 +6350,12 @@ export type PlanningTaskPriority = "critical" | "high" | "normal" | "low";
 
 export type PlanningTaskStatus = "idea" | "todo" | "in_progress" | "blocked" | "done" | "archived";
 
-export type PlanningTaskSummary = { id: string, reference: string, parent_id: string | null, parent_reference: string | null, parent_title: string | null, title: string, status: PlanningTaskStatus, priority: PlanningTaskPriority, rank: number, completed_subtasks: number, total_subtasks: number, project_ids: Array<string>, discussion_ids: Array<string>, tags: Array<string>, blocker_count: number, created_at: string, updated_at: string, };
+export type PlanningTaskSummary = { id: string, reference: string, parent_id: string | null, parent_reference: string | null, parent_title: string | null, title: string, status: PlanningTaskStatus, priority: PlanningTaskPriority, rank: number, completed_subtasks: number, total_subtasks: number, project_ids: Array<string>, discussion_ids: Array<string>, tags: Array<string>, blocker_count: number,
+/**
+ * KT-154 — manual assignees first (assignment order), then the worker of a
+ * live TaskExecution when it is not already assigned by hand.
+ */
+assignees: Array<PlanningAssignee>, created_at: string, updated_at: string, };
 
 export type PlanningWorkspaceSummary = { id: string, disc_id: string, branch: string, state: string, ownership: string, session_agent_type: string | null, };
 
@@ -9816,6 +9870,8 @@ project_id?: string,
  * (KT-1025). Stored on the run; the workflow is never modified.
  */
 step_agents?: { [key in string]: StepAgentOverride }, };
+
+export type UnassignPlanningTaskRequest = { assignee?: PlanningAssigneeInput | null, actor?: PlanningActor, };
 
 export type UnlinkPlanningDiscussionRequest = { discussion_id: string, actor?: PlanningActor, };
 
