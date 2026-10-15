@@ -499,7 +499,7 @@ export function ProjectCard({
   // each audit completion/error so the "Lancer l'audit" button can
   // flip to the dynamic resume CTA when an Interrupted run is on file
   // for this project. `null` = no resumable run; otherwise the row.
-  const [resumableAudit, setResumableAudit] = useState<{ id: string; kind: AuditKind; last_completed_step: number; steps_to_redo?: number[]; started_at: string } | null>(null);
+  const [resumableAudit, setResumableAudit] = useState<{ id: string; kind: AuditKind; last_completed_step: number; steps_to_redo?: number[]; started_at: string; from_repository?: boolean } | null>(null);
   // Unknown is not "nothing to resume": launching waits until it is known (KT-1169).
   const [resumableUnknown, setResumableUnknown] = useState(false);
   const [resumableReload, setResumableReload] = useState(0);

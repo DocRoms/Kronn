@@ -12,6 +12,19 @@ use kronn::{
 // ─── Main ───────────────────────────────────────────────────────────────────
 
 fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match kronn::core::cli_args::cli_action(&args) {
+        kronn::core::cli_args::CliAction::Run => {}
+        kronn::core::cli_args::CliAction::PrintVersion => {
+            println!("kronn {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        kronn::core::cli_args::CliAction::PrintHelp => {
+            println!("{}", kronn::core::cli_args::HELP);
+            return Ok(());
+        }
+        kronn::core::cli_args::CliAction::Refuse(reason) => anyhow::bail!(reason),
+    }
     // An operator-set KRONN_AUTH_TOKEN enables auth through the config, then
     // leaves this process's environment before any thread exists (removing a
     // variable is not thread-safe): children never inherit the admin token.
@@ -101,7 +114,14 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
         .unwrap_or_else(|_| "<unknown>".into());
     tracing::info!("Config loaded from {}", config_source);
 
-    let port = app_config.server.port;
+    // `KRONN_PORT` (a worker lane's own port) overrides the saved port for this
+    // process only: `runtime_port` is never written back to config.toml.
+    if let Some(port) = kronn::core::listen_guard::port_override(
+        kronn::core::child_env::var("KRONN_PORT").ok().as_deref(),
+    ) {
+        app_config.server.runtime_port = Some(port);
+    }
+    let port = app_config.server.listening_port();
     // Host binding priority:
     //   1. `KRONN_HOST` env — explicit opt-in (e.g. `KRONN_HOST=0.0.0.0` to
     //      expose a NATIVE instance on the LAN for the contacts / P2P feature,
@@ -854,6 +874,10 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
         println!();
     }
 
+    if let Err(refusal) = kronn::core::listen_guard::refuse_if_port_served(&host, port) {
+        tracing::error!("{refusal}");
+        anyhow::bail!(refusal);
+    }
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     kronn::api::orchestration::spawn_deferred_boot_resumes(
         deferred_resume_state,

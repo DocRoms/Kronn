@@ -1527,18 +1527,124 @@ pub fn fast_forward_to(repo_path: &Path, candidate_sha: &str) -> Result<String, 
     git_head(repo_path)
 }
 
+/// How the integration target branch is held in the repository.
+///
+/// The saga used to require the checkout. A target checked out nowhere has no
+/// working tree or index to protect, so it can be advanced by a ref
+/// compare-and-swap; one checked out exactly once keeps today's guarded
+/// fast-forward inside that checkout (moving a ref under a checkout would leave
+/// its index and files stale). Several checkouts are still refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IntegrationTarget {
+    /// Checked out in exactly one worktree (validated by `integration_target_worktree`).
+    CheckedOut(PathBuf),
+    /// A local branch that no worktree has checked out.
+    NotCheckedOut { branch: String },
+}
+
+/// Resolve the shape of an integration target, refusing several checkouts.
+pub fn integration_target(repo_path: &Path, target: &str) -> Result<IntegrationTarget, String> {
+    let (branch, matches) = target_branch_checkouts(repo_path, target)?;
+    if matches.is_empty() {
+        return Ok(IntegrationTarget::NotCheckedOut { branch });
+    }
+    integration_target_worktree(repo_path, target).map(IntegrationTarget::CheckedOut)
+}
+
+/// The real tip of the target branch, read from its ref rather than from any
+/// checkout's HEAD (identical for a checked-out branch, and the only source
+/// when nothing has it checked out).
+pub fn integration_target_tip(repo_path: &Path, target: &str) -> Result<String, String> {
+    let branch = resolve_local_branch(repo_path, target)?;
+    resolve_commit(repo_path, &format!("refs/heads/{branch}"))
+}
+
+/// Uncommitted files that would be endangered by advancing the target. A target
+/// no worktree has checked out has none.
+pub fn integration_target_dirty_files(
+    target: &IntegrationTarget,
+) -> Result<Vec<DirtyFile>, String> {
+    match target {
+        IntegrationTarget::CheckedOut(path) => worktree_dirty_files(path),
+        IntegrationTarget::NotCheckedOut { .. } => Ok(Vec::new()),
+    }
+}
+
+/// Advance a target branch that no worktree has checked out onto `candidate_sha`.
+///
+/// `git update-ref <ref> <new> <old>` is the compare-and-swap: git refuses when
+/// the ref no longer holds `expected_tip`, so a branch that moved since the
+/// review is never overwritten. The candidate must descend from the expected
+/// tip, which keeps the move a fast-forward. No working tree or index is read
+/// or written.
+fn update_ref_target_to(
+    repo_path: &Path,
+    branch: &str,
+    expected_tip: &str,
+    candidate_sha: &str,
+) -> Result<String, String> {
+    reject_option_like_rev(expected_tip)?;
+    reject_option_like_rev(candidate_sha)?;
+    let full_ref = format!("refs/heads/{branch}");
+    let tip = resolve_commit(repo_path, &full_ref)?;
+    if tip != expected_tip {
+        return Err(format!(
+            "integration target '{branch}' is at {tip}, expected {expected_tip}"
+        ));
+    }
+    if !is_ancestor(repo_path, expected_tip, candidate_sha)? {
+        return Err(format!(
+            "candidate {candidate_sha} does not descend from {expected_tip}; refusing a non fast-forward"
+        ));
+    }
+    let reason = format!("kronn: integrate {candidate_sha} (fast-forward)");
+    let out = crate::core::cmd::git_cmd()
+        .args([
+            "update-ref",
+            "-m",
+            &reason,
+            &full_ref,
+            candidate_sha,
+            expected_tip,
+        ])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("git update-ref failed: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "cannot advance '{branch}' onto {candidate_sha}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let read_back = resolve_commit(repo_path, &full_ref)?;
+    if read_back != candidate_sha {
+        return Err(format!(
+            "integration target '{branch}' reads {read_back} after the update, expected {candidate_sha}"
+        ));
+    }
+    Ok(read_back)
+}
+
 pub fn fast_forward_target_to(
     repo_path: &Path,
     target: &str,
     expected_tip: &str,
     candidate_sha: &str,
 ) -> Result<String, String> {
-    let checkout = integration_target_worktree(repo_path, target)?;
-    verify_worktree_head(&checkout, expected_tip)?;
-    if !worktree_dirty_files(&checkout)?.is_empty() {
-        return Err("integration target worktree became dirty before fast-forward".into());
+    // The shape is read here, at the moment of the move: a target that became
+    // checked out since an earlier phase takes the checkout path below.
+    match integration_target(repo_path, target)? {
+        IntegrationTarget::NotCheckedOut { branch } => {
+            update_ref_target_to(repo_path, &branch, expected_tip, candidate_sha)
+        }
+        IntegrationTarget::CheckedOut(checkout) => {
+            verify_worktree_head(&checkout, expected_tip)?;
+            if !worktree_dirty_files(&checkout)?.is_empty() {
+                return Err("integration target worktree became dirty before fast-forward".into());
+            }
+            fast_forward_to(&checkout, candidate_sha)
+        }
     }
-    fast_forward_to(&checkout, candidate_sha)
 }
 
 /// Whether `ancestor` is reachable from `descendant` (`git merge-base --is-ancestor`).
@@ -3879,6 +3985,164 @@ mod tests {
             );
             assert!(!repo.path().join("worker.txt").exists());
         }
+    }
+
+    /// A candidate commit on a task branch, plus the repo's `main` tip it descends from.
+    fn candidate_on_task_branch(repo: &Path) -> (String, String) {
+        let original = git_head(repo).unwrap();
+        let task = create_task_worktree(repo, "KT-835", "deadbeef", &original).unwrap();
+        let sha = commit_file(
+            Path::new(&task.path),
+            "worker.txt",
+            "validated",
+            "candidate",
+        );
+        (original, sha)
+    }
+
+    fn make_branch(repo: &Path, name: &str) {
+        assert!(crate::core::cmd::git_cmd()
+            .args(["branch", name, "main"])
+            .current_dir(repo)
+            .status()
+            .unwrap()
+            .success());
+    }
+
+    fn branch_tip(repo: &Path, name: &str) -> String {
+        resolve_commit(repo, &format!("refs/heads/{name}")).unwrap()
+    }
+
+    #[test]
+    fn integration_target_distinguishes_unchecked_once_and_several_checkouts() {
+        let repo = make_test_repo("target-shape");
+        make_branch(repo.path(), "elsewhere");
+        assert_eq!(
+            integration_target(repo.path(), "elsewhere").unwrap(),
+            IntegrationTarget::NotCheckedOut {
+                branch: "elsewhere".into()
+            }
+        );
+        assert_eq!(
+            integration_target(repo.path(), "main").unwrap(),
+            IntegrationTarget::CheckedOut(repo.path().canonicalize().unwrap())
+        );
+        assert!(integration_target(repo.path(), "missing").is_err());
+        assert!(integration_target(repo.path(), "HEAD").is_err());
+        let extra = tempfile::tempdir().unwrap();
+        assert!(crate::core::cmd::git_cmd()
+            .args(["worktree", "add", "--force"])
+            .arg(extra.path().join("second"))
+            .arg("main")
+            .current_dir(repo.path())
+            .output()
+            .unwrap()
+            .status
+            .success());
+        assert!(integration_target(repo.path(), "main")
+            .unwrap_err()
+            .contains("exactly one"));
+        // A target no worktree holds has no uncommitted file to protect.
+        let unchecked = IntegrationTarget::NotCheckedOut {
+            branch: "elsewhere".into(),
+        };
+        assert!(integration_target_dirty_files(&unchecked)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn unchecked_out_target_advances_by_compare_and_swap_without_a_checkout() {
+        let repo = make_test_repo("target-update-ref");
+        make_branch(repo.path(), "elsewhere");
+        let (original, sha) = candidate_on_task_branch(repo.path());
+        fs::write(repo.path().join("user.txt"), "preserve exactly").unwrap();
+
+        let landed = fast_forward_target_to(repo.path(), "elsewhere", &original, &sha).unwrap();
+        assert_eq!(landed, sha);
+        assert_eq!(branch_tip(repo.path(), "elsewhere"), sha);
+        assert_eq!(
+            integration_target_tip(repo.path(), "elsewhere").unwrap(),
+            sha
+        );
+        assert_eq!(git_head(repo.path()).unwrap(), original, "main untouched");
+        assert_eq!(
+            fs::read_to_string(repo.path().join("user.txt")).unwrap(),
+            "preserve exactly"
+        );
+        assert!(!repo.path().join("worker.txt").exists());
+    }
+
+    #[test]
+    fn unchecked_out_target_that_moved_since_the_review_is_never_overwritten() {
+        let repo = make_test_repo("target-cas");
+        make_branch(repo.path(), "elsewhere");
+        let (original, sha) = candidate_on_task_branch(repo.path());
+        // The branch moves after the candidate was anchored on `original`.
+        let moved = commit_file(repo.path(), "other.txt", "other", "other work");
+        assert!(crate::core::cmd::git_cmd()
+            .args(["branch", "-f", "elsewhere", &moved])
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+        let error = fast_forward_target_to(repo.path(), "elsewhere", &original, &sha).unwrap_err();
+        assert!(error.contains(&moved), "{error}");
+        assert_eq!(branch_tip(repo.path(), "elsewhere"), moved);
+    }
+
+    #[test]
+    fn unchecked_out_target_refuses_a_candidate_that_is_not_a_fast_forward() {
+        let repo = make_test_repo("target-not-ff");
+        make_branch(repo.path(), "elsewhere");
+        let (original, _) = candidate_on_task_branch(repo.path());
+        // A root commit does not descend from the expected tip.
+        let tree = crate::core::cmd::git_cmd()
+            .args(["rev-parse", "HEAD^{tree}"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        let tree = String::from_utf8_lossy(&tree.stdout).trim().to_string();
+        let out = crate::core::cmd::git_cmd()
+            .args(["commit-tree", "-m", "orphan", &tree])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        let orphan = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let error =
+            fast_forward_target_to(repo.path(), "elsewhere", &original, &orphan).unwrap_err();
+        assert!(error.contains("fast-forward"), "{error}");
+        assert_eq!(branch_tip(repo.path(), "elsewhere"), original);
+    }
+
+    #[test]
+    fn target_checked_out_since_the_review_takes_the_checkout_guards() {
+        let repo = make_test_repo("target-became-checked-out");
+        make_branch(repo.path(), "elsewhere");
+        let (original, sha) = candidate_on_task_branch(repo.path());
+        let extra = tempfile::tempdir().unwrap();
+        let checkout = extra.path().join("elsewhere");
+        assert!(crate::core::cmd::git_cmd()
+            .args(["worktree", "add"])
+            .arg(&checkout)
+            .arg("elsewhere")
+            .current_dir(repo.path())
+            .output()
+            .unwrap()
+            .status
+            .success());
+        // The ref is never moved under a dirty checkout: its index would go stale.
+        fs::write(checkout.join("user.txt"), "preserve exactly").unwrap();
+        assert!(fast_forward_target_to(repo.path(), "elsewhere", &original, &sha).is_err());
+        assert_eq!(branch_tip(repo.path(), "elsewhere"), original);
+        // Clean again, it advances through the checkout's own fast-forward.
+        fs::remove_file(checkout.join("user.txt")).unwrap();
+        assert_eq!(
+            fast_forward_target_to(repo.path(), "elsewhere", &original, &sha).unwrap(),
+            sha
+        );
+        assert_eq!(git_head(&checkout).unwrap(), sha);
     }
 
     #[cfg(unix)]

@@ -192,6 +192,64 @@ fn a_provisioned_lane_exports_data_dir_target_offline_and_cargo_home() {
     assert!(lane.cargo_target_dir.is_dir());
 }
 
+/// A worker that starts a Kronn or a Vite gets its own ports: never the
+/// host's backend (3140) or UI (5173), and its Vite proxies to its own backend.
+#[test]
+fn a_lane_serves_on_its_own_ports_never_the_hosts() {
+    let fx = fixture();
+    let home = fake_cargo_home(true);
+    let lane = fx.lane();
+    let env = lane.env(&lane.provision(&caches_of(&home, &fx)));
+    let (backend, vite) = lane.ports();
+
+    assert_eq!(
+        env_value(&env, KRONN_PORT_ENV),
+        Some(OsString::from(backend.to_string()))
+    );
+    assert_eq!(
+        env_value(&env, VITE_BACKEND_URL_ENV),
+        Some(OsString::from(format!("http://127.0.0.1:{backend}")))
+    );
+    // The MCP bridge reaches the host Kronn through KRONN_BACKEND_URL: a lane
+    // that set it cut every worker off from task_exec_deliver.
+    assert_eq!(env_value(&env, "KRONN_BACKEND_URL"), None);
+    for (name, _) in &env {
+        assert!(
+            !crate::acp::bridge_env::PLAIN.contains(name)
+                && !crate::acp::bridge_env::SECRET.contains(name),
+            "the lane must never override the MCP bridge's {name}"
+        );
+    }
+    assert_eq!(
+        env_value(&env, VITE_DEV_PORT_ENV),
+        Some(OsString::from(vite.to_string()))
+    );
+    assert_ne!(backend, vite);
+    assert_eq!(lane.ports(), (backend, vite), "stable for a lane");
+    // Vite caches under the lane (node_modules is a read-only link) and the
+    // e2e Chromium runs in the mode the sandbox allows.
+    let cache = env_value(&env, VITE_CACHE_DIR_ENV).expect("a lane Vite cache");
+    assert!(std::path::Path::new(&cache).starts_with(&lane.data_dir));
+    assert_eq!(
+        env_value(&env, E2E_CHROMIUM_SINGLE_PROCESS_ENV),
+        Some(OsString::from("1"))
+    );
+
+    // Across many lanes: always in the lane range, and lanes rarely collide.
+    let mut seen = std::collections::HashSet::new();
+    for n in 0..200 {
+        let mut other = lane.clone();
+        other.name = format!("kt-{n}-abcdef12");
+        let (backend, vite) = other.ports();
+        for port in [backend, vite] {
+            assert!((20_000..50_000).contains(&port), "{port}");
+            assert!(port != 3140 && port != 5173);
+        }
+        seen.insert(backend);
+    }
+    assert!(seen.len() > 190, "lane ports spread: {}", seen.len());
+}
+
 #[test]
 fn without_a_registry_cache_cargo_home_is_left_to_the_host_default() {
     let fx = fixture();

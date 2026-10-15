@@ -811,6 +811,135 @@ async fn a_partial_refresh_after_a_stop_runs_to_its_end() {
     assert!(sse_events(&body, "done").is_empty(), "{body}");
 }
 
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn deterministic_revalidation_refuses_with_docs_busy_and_reanchors_nothing() {
+    let fx = Validated::new(|_| {}).await;
+    fx.edit_source(|lines| {
+        lines.insert(0, "// licence header".into());
+        lines.insert(0, "// generated banner".into());
+    });
+    let deterministic = || async {
+        sse_body(
+            crate::api::audit::revalidate_audit(
+                axum::extract::State(fx.h.state.clone()),
+                axum::extract::Path(PROJECT_ID.to_string()),
+                axum::Json(crate::models::RevalidateAuditRequest {
+                    deterministic_only: Some(true),
+                    agent: AgentType::ClaudeCode,
+                    connection_id: None,
+                    tier: None,
+                }),
+            )
+            .await
+            .into_response(),
+        )
+        .await
+    };
+    let docs_before = docs_snapshot(fx.project());
+    let documents_before =
+        fx.h.state
+            .db
+            .with_read_conn(|conn| crate::db::audit_documents::latest(conn, PROJECT_ID))
+            .await
+            .unwrap();
+    let runs = fx.run_count().await;
+
+    let lease = crate::api::audit::docs_write::DocsWriteLease::try_acquire(&fx.h.state, PROJECT_ID)
+        .unwrap();
+    let body = deterministic().await;
+    let errors = sse_events(&body, "error");
+    assert_eq!(errors.len(), 1, "{body}");
+    assert_eq!(
+        errors[0]["error"].as_str(),
+        Some(crate::api::audit::docs_write::DOCS_BUSY),
+        "{body}"
+    );
+    assert!(sse_events(&body, "done").is_empty(), "{body}");
+    assert!(sse_events(&body, "reanchored").is_empty(), "{body}");
+    assert_eq!(
+        docs_snapshot(fx.project()),
+        docs_before,
+        "a refused revalidation re-anchored citations"
+    );
+    let documents_after =
+        fx.h.state
+            .db
+            .with_read_conn(|conn| crate::db::audit_documents::latest(conn, PROJECT_ID))
+            .await
+            .unwrap();
+    assert_eq!(documents_after, documents_before);
+    assert_eq!(fx.run_count().await, runs);
+    assert!(fx.prompts().is_empty(), "{:?}", fx.prompts());
+    assert_eq!(fx.plan().await.reanchor_count, 2);
+
+    // Released, the very same request re-anchors: the lease alone refused it.
+    drop(lease);
+    let body = deterministic().await;
+    let done = sse_events(&body, "done").pop().expect("terminal done");
+    assert_eq!(done["status"], "clean", "{body}");
+    assert_eq!(done["reanchored"], 2, "{body}");
+    assert_ne!(docs_snapshot(fx.project()), docs_before);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn acknowledging_citations_refuses_with_docs_busy_and_records_nothing() {
+    let fx = Validated::new(|_| {}).await;
+    fx.edit_source(|lines| lines[1] = "fn config_loader_renamed() {}".into());
+    let acknowledge = || {
+        crate::api::audit::acknowledge_citations(
+            axum::extract::State(fx.h.state.clone()),
+            axum::extract::Path(PROJECT_ID.to_string()),
+            axum::Json(crate::models::AcknowledgeCitationsRequest { doc: RULES.into() }),
+        )
+    };
+    let docs_before = docs_snapshot(fx.project());
+    let documents_before =
+        fx.h.state
+            .db
+            .with_read_conn(|conn| crate::db::audit_documents::latest(conn, PROJECT_ID))
+            .await
+            .unwrap();
+    let record_before = fx.record_of(RULES).reason;
+    assert!(fx.plan().await.sections.iter().any(|s| s.doc == RULES));
+
+    let lease = crate::api::audit::docs_write::DocsWriteLease::try_acquire(&fx.h.state, PROJECT_ID)
+        .unwrap();
+    let refused = acknowledge().await.0;
+    assert!(!refused.success, "{refused:?}");
+    assert_eq!(
+        refused.error.as_deref(),
+        Some(crate::api::audit::docs_write::DOCS_BUSY)
+    );
+    assert_eq!(
+        docs_snapshot(fx.project()),
+        docs_before,
+        "a refused acknowledgement wrote docs"
+    );
+    assert_eq!(fx.record_of(RULES).reason, record_before);
+    let documents_after =
+        fx.h.state
+            .db
+            .with_read_conn(|conn| crate::db::audit_documents::latest(conn, PROJECT_ID))
+            .await
+            .unwrap();
+    assert_eq!(documents_after, documents_before);
+    assert!(fx.plan().await.sections.iter().any(|s| s.doc == RULES));
+
+    // Released, the very same request settles the section.
+    drop(lease);
+    let acknowledged = acknowledge().await.0;
+    assert!(acknowledged.success, "{:?}", acknowledged.error);
+    assert_eq!(
+        fx.record_of(RULES).reason,
+        crate::core::citation_drift::RecordReason::Acknowledged
+    );
+    assert!(fx.plan().await.sections.is_empty());
+}
+
 #[path = "partial_refresh_e2e_tests.rs"]
 mod partial_refresh_e2e_tests;
 

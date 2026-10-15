@@ -19,7 +19,7 @@ use tokio::time::{timeout, Duration};
 use crate::models::AgentType;
 
 mod adapter_process;
-mod bridge_env;
+pub(crate) mod bridge_env;
 mod claude_adapter;
 mod codex_adapter;
 mod permission_broker;
