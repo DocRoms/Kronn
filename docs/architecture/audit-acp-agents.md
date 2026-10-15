@@ -94,7 +94,7 @@ Now an ACP agent is stopped like an HTTP agent (KT-924), through a token:
 
 The partial audit now checks the stop between two steps and after each step's
 agent, finalises the run as `Cancelled` and releases the project lease, like the
-Full audit [src: file: backend/src/api/audit/drift.rs:780-800#mark_cancelled] [src: file: backend/src/api/audit/drift.rs:1154-1172#mark_cancelled]. A partial refresh that
+Full audit [src: file: backend/src/api/audit/drift.rs:780-800#mark_cancelled] [src: file: backend/src/api/audit/drift.rs:1209-1262#mark_cancelled]. A partial refresh that
 was cancelled does not refresh the baseline, so its sections stay reported as
 stale.
 
@@ -146,7 +146,7 @@ not before.
   The recorded cost is never recomputed from a rate table; a finished step
   whose agent reported none is priced on read by `core::pricing` for the served
   model and shown as an estimate, never as a reported cost
-  [src: file: backend/src/db/audit_runs.rs:1343-1346#price_steps].
+  [src: file: backend/src/db/audit_runs.rs:1588-1591#price_steps].
 - **Per step.** `audit_run_steps.cost_usd_micros` (integer micro-USD) sums the
   step's attempts. It stays `NULL` when any attempt that ran reported no cost:
   a sum over a silent attempt would be a floor shown as the whole. A reported
@@ -179,7 +179,7 @@ not before.
   tracker the progress poll reads. A provider that is only thinking moves
   nothing. The tick does not push back the Full audit's 60 s zombie deadline.
 - **Keep-alive.** A detached audit stream silent for 15 s sends an SSE comment
-  (`: keep-alive`) [src: file: backend/src/api/audit/mod.rs:55-73#SSE_KEEP_ALIVE]. A comment is not an
+  (`: keep-alive`) [src: file: backend/src/core/sse_limits.rs:50#HEARTBEAT_INTERVAL]. A comment is not an
   event: no client handler sees it, so it holds the connection without passing
   for model activity.
 
