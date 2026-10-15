@@ -32,7 +32,7 @@ export function validatePublicationSandbox({ backendUrl, devPort, config, receip
 export function assertPublicationSandbox(environment = process.env) {
   const directory = environment.KRONN_SANDBOX_DIR ?? '';
   if (!directory || !isAbsolute(directory)) throw new Error('an absolute KRONN_SANDBOX_DIR is required');
-  const backendUrl = environment.KRONN_BACKEND_URL ?? '';
+  const backendUrl = environment.KRONN_VITE_BACKEND_URL ?? environment.KRONN_BACKEND_URL ?? '';
   const port = new URL(backendUrl).port;
   const config = readFileSync(join(directory, 'config.toml'), 'utf8');
   const receipt = readFileSync(join(directory, 'sandbox-owner'), 'utf8');

@@ -121,7 +121,9 @@ after pushing), CI Verdict re-runs it once and repeats the new verdict; the
 real job results then replace the skipped ones on the same run. On a fork,
 whose token cannot re-run, a maintainer uses "Re-run all jobs" on that run.
 After a change of base, push a commit or close and reopen the pull request.
-Pushes to `main` and release tags run both test workflows.
+A push to `main` runs no test: it only builds and saves the shared Rust caches,
+and a release tag reruns no test workflow (the merged tree was tested on its
+pull request).
 
 Which checks matter: `ci-quality-gates` and `ci-build-gates`. They report on
 every pull-request event, from whichever workflow ran last, and are the

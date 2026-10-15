@@ -28,9 +28,10 @@
  * Zero $. No network and no LLM.
  */
 import { test, expect, type APIRequestContext } from '@playwright/test';
+import { E2E_BACKEND_URL } from '../fixtures/backend-url';
 
 let workflowId: string | null = null;
-const BACKEND_URL = process.env.KRONN_BACKEND_URL ?? 'http://localhost:3140';
+const BACKEND_URL = E2E_BACKEND_URL;
 
 interface RunStatus {
   status: string; // 'Running' | 'Success' | 'Failed' | …
