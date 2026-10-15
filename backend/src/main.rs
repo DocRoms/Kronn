@@ -426,6 +426,7 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     if orchestration_recovery.interrupted > 0
         || !orchestration_recovery.deferred_resumes.is_empty()
         || orchestration_recovery.orphan_workspaces_removed > 0
+        || orchestration_recovery.orphan_lane_targets_removed > 0
         || !orchestration_recovery.errors.is_empty()
     {
         tracing::warn!(
@@ -435,6 +436,9 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
             deferred = orchestration_recovery.deferred_resumes.len(),
             orphans_removed = orchestration_recovery.orphan_workspaces_removed,
             orphans_preserved = orchestration_recovery.orphan_workspaces_preserved,
+            lane_targets_removed = orchestration_recovery.orphan_lane_targets_removed,
+            lane_targets_preserved = orchestration_recovery.orphan_lane_targets_preserved,
+            lane_target_bytes = orchestration_recovery.orphan_lane_target_bytes,
             errors = ?orchestration_recovery.errors,
             "Task orchestration boot reconciliation completed"
         );

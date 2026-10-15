@@ -531,6 +531,98 @@ pub fn worktree_cleanup_liveness(
     Ok(ExecutionLiveness::Terminal)
 }
 
+/// Which lane targets (`target/wt-<lane>`) of a project a live execution still
+/// claims, by lane name, with the reason.
+///
+/// A lane is claimed by every workspace row of the project that still carries a
+/// checkout path and whose durable state is not [`ExecutionLiveness::Terminal`]
+/// (an unfinished execution, a live session, a held lease, an unmanaged row, or
+/// state that cannot answer: all fail closed). A lane no row names — rows of
+/// finished executions are retired with their path cleared — is an orphan.
+/// KT-1256.
+pub fn live_lane_claims(
+    conn: &Connection,
+    project_id: &str,
+) -> Result<std::collections::HashMap<String, String>> {
+    use crate::core::worktree::ExecutionLiveness;
+
+    let mut statement = conn.prepare(
+        "SELECT canonical_path FROM discussion_workspaces
+          WHERE project_id = ?1 AND canonical_path IS NOT NULL",
+    )?;
+    let paths = statement
+        .query_map(params![project_id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut claims = std::collections::HashMap::new();
+    for path in paths {
+        let Ok(lane) =
+            crate::core::task_worker_env::WorkerLane::for_worktree(std::path::Path::new(&path))
+        else {
+            continue;
+        };
+        match worktree_cleanup_liveness(conn, &path)? {
+            ExecutionLiveness::Terminal => {}
+            ExecutionLiveness::Active(reason) | ExecutionLiveness::Unknown(reason) => {
+                claims.insert(lane.name, reason);
+            }
+        }
+    }
+    Ok(claims)
+}
+
+/// Audit one lane target reclaim against the execution that owned `canonical_path`.
+/// The same shape as [`record_artifact_reclaim`], under its own actions so a
+/// worktree's `target/` and its lane target are told apart. KT-1256.
+pub fn record_lane_target_reclaim(
+    conn: &Connection,
+    canonical_path: &str,
+    lane_target: &str,
+    outcome: Result<(u64, bool), String>,
+) -> Result<()> {
+    let execution_id: Option<String> = conn
+        .query_row(
+            "SELECT task_execution_id FROM discussion_workspaces
+              WHERE canonical_path = ?1 AND task_execution_id IS NOT NULL
+              ORDER BY updated_at DESC
+              LIMIT 1",
+            params![canonical_path],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(execution_id) = execution_id else {
+        return Ok(());
+    };
+    let (action, changes) = match outcome {
+        Ok((bytes, partial)) => (
+            "lane_target_reclaimed",
+            serde_json::json!({
+                "target": lane_target,
+                "bytes_reclaimed": bytes,
+                "bytes_are_partial": partial,
+            }),
+        ),
+        Err(reason) => (
+            "lane_target_refused",
+            serde_json::json!({ "target": lane_target, "reason": reason }),
+        ),
+    };
+    record_execution_event(
+        conn,
+        &execution_id,
+        action,
+        None,
+        None,
+        &OrchestrationActor {
+            kind: PlanningActorKind::Backend,
+            id: Some("disk-maintenance".to_string()),
+            session_id: None,
+            source_message_id: None,
+        },
+        changes,
+    )
+}
+
 /// Is this discussion a worker's execution room?
 ///
 /// KT-398 — a worker gets the full native catalogue, planning-management tools

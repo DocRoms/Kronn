@@ -5,6 +5,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::core::task_worker_env::LANE_TARGET_PREFIX;
+
 // ── KT-373 — disk as a provisioning precondition ─────────────────────────────
 //
 // On 2026-08-21 the dev volume reached 100% with 753 MiB left: seven worktrees
@@ -383,6 +385,199 @@ pub fn clean_worktree_build_artifacts(
         bytes_reclaimed,
         bytes_are_partial,
     })
+}
+
+// ── KT-1256 — lane targets outlive their worktree ────────────────────────────
+//
+// A task worker builds in `<repo>/target/wt-<lane>`, outside its worktree, so
+// removing the worktree never took the lane target with it. Each one starts as
+// a copy-on-write clone of the main target and becomes real disk once the main
+// target is rebuilt or cleaned, plus several GB of its own artefacts.
+
+/// The lane target a managed task worktree builds into.
+///
+/// Only the lane name is taken from the worktree: the directory is always a
+/// direct child of the repository's own `target/`.
+pub fn lane_target_for_worktree(repo_path: &Path, worktree_path: &Path) -> Result<PathBuf, String> {
+    let lane = crate::core::task_worker_env::WorkerLane::for_worktree(worktree_path)?;
+    Ok(repo_path
+        .join("target")
+        .join(format!("{}{}", LANE_TARGET_PREFIX, lane.name)))
+}
+
+/// Direct child of `<repo>/target` named `wt-<something>`, with no symlink on
+/// the way. The deletion below is only ever offered such a path.
+fn assert_lane_target_path(repo_path: &Path, lane_target: &Path) -> Result<(), String> {
+    let target_root = repo_path.join("target");
+    let relative = lane_target.strip_prefix(&target_root).map_err(|_| {
+        format!(
+            "{} is outside {} — not a lane target",
+            lane_target.display(),
+            target_root.display()
+        )
+    })?;
+    let mut components = relative.components();
+    let name = match (components.next(), components.next()) {
+        (Some(std::path::Component::Normal(name)), None) => name.to_string_lossy().to_string(),
+        _ => {
+            return Err(format!(
+                "{} is not a direct child of {}",
+                lane_target.display(),
+                target_root.display()
+            ))
+        }
+    };
+    if name
+        .strip_prefix(LANE_TARGET_PREFIX)
+        .is_none_or(|lane| lane.is_empty())
+    {
+        return Err(format!(
+            "{} is not named {LANE_TARGET_PREFIX}<lane> — not a lane target",
+            lane_target.display()
+        ));
+    }
+    crate::core::fs_guard::assert_contained_no_symlink(repo_path, lane_target)
+}
+
+/// Delete one lane target. Ownership is the path shape alone; whether the lane
+/// is still in use is the caller's call and is never inferred here, except that
+/// a running Cargo (its build lock) always refuses.
+///
+/// Absent is a success with a zero figure; any other unreadable state is an
+/// error, never "nothing to do".
+pub fn remove_lane_target(repo_path: &Path, lane_target: &Path) -> Result<CleanupReport, String> {
+    assert_lane_target_path(repo_path, lane_target)?;
+    let meta = match std::fs::symlink_metadata(lane_target) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(CleanupReport {
+                target_path: lane_target.to_path_buf(),
+                bytes_reclaimed: 0,
+                bytes_are_partial: false,
+            })
+        }
+        Err(error) => {
+            return Err(format!(
+                "refusing to clean {}: cannot read it ({error}). Nothing was attempted.",
+                lane_target.display()
+            ))
+        }
+    };
+    if !meta.is_dir() {
+        return Err(format!(
+            "refusing to clean {}: expected a directory",
+            lane_target.display()
+        ));
+    }
+    assert_no_build_in_progress(lane_target)?;
+
+    let (bytes_reclaimed, bytes_are_partial) = measure_within_budget(lane_target);
+    std::fs::remove_dir_all(lane_target).map_err(|error| {
+        format!(
+            "failed to clean {}: {error}. The lane target is left as it stands.",
+            lane_target.display()
+        )
+    })?;
+    tracing::info!(
+        "Reclaimed lane target {} ({} bytes{})",
+        lane_target.display(),
+        bytes_reclaimed,
+        if bytes_are_partial { "+, floored" } else { "" }
+    );
+    Ok(CleanupReport {
+        target_path: lane_target.to_path_buf(),
+        bytes_reclaimed,
+        bytes_are_partial,
+    })
+}
+
+/// What one sweep of `<repo>/target/wt-*` did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LaneTargetSweep {
+    /// Lane targets no live execution claims, with what removing them freed.
+    /// In a dry run: what would be removed (bytes measured, nothing deleted).
+    pub removed: Vec<CleanupReport>,
+    /// Lane targets a live execution still claims, with the reason it is live.
+    pub claimed: Vec<(PathBuf, String)>,
+    /// Orphans that could not be removed (a running build, a symlink, an I/O
+    /// error), each with the reason.
+    pub kept: Vec<(PathBuf, String)>,
+}
+
+/// Remove every `<repo>/target/wt-*` directory that no live execution claims.
+///
+/// `live` maps a lane name to the reason its execution is still alive, as
+/// decided from durable state by the caller; a lane absent from it is an
+/// orphan. Entries that are not plain directories named `wt-<lane>` are
+/// reported and left alone. With `apply` false nothing is deleted: the report
+/// is the dry run a human can read first.
+pub fn sweep_orphan_lane_targets(
+    repo_path: &Path,
+    live: &std::collections::HashMap<String, String>,
+    apply: bool,
+) -> LaneTargetSweep {
+    let mut sweep = LaneTargetSweep::default();
+    let target_root = repo_path.join("target");
+    let Ok(entries) = std::fs::read_dir(&target_root) else {
+        // No target directory means no lane was ever built here.
+        return sweep;
+    };
+    let mut lane_dirs: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(LANE_TARGET_PREFIX)
+        })
+        .map(|entry| entry.path())
+        .collect();
+    // Deterministic, so a dry run matches what a later pass acts on.
+    lane_dirs.sort();
+
+    for path in lane_dirs {
+        let lane = path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .and_then(|name| {
+                name.strip_prefix(LANE_TARGET_PREFIX)
+                    .filter(|lane| !lane.is_empty())
+                    .map(str::to_string)
+            });
+        let Some(lane) = lane else {
+            continue;
+        };
+        if let Some(reason) = live.get(&lane) {
+            sweep.claimed.push((path, reason.clone()));
+            continue;
+        }
+        if let Err(reason) = assert_lane_target_path(repo_path, &path) {
+            sweep.kept.push((path, reason));
+            continue;
+        }
+        // A file or a link that merely looks like a lane is reported, never
+        // measured nor deleted by this walk.
+        if !std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_dir()) {
+            sweep
+                .kept
+                .push((path, "not a plain directory — left alone".to_string()));
+            continue;
+        }
+        if !apply {
+            let (bytes_reclaimed, bytes_are_partial) = measure_within_budget(&path);
+            sweep.removed.push(CleanupReport {
+                target_path: path,
+                bytes_reclaimed,
+                bytes_are_partial,
+            });
+            continue;
+        }
+        match remove_lane_target(repo_path, &path) {
+            Ok(report) => sweep.removed.push(report),
+            Err(reason) => sweep.kept.push((path, reason)),
+        }
+    }
+    sweep
 }
 
 /// Refuse when Cargo is mid-build in this target.
@@ -4570,6 +4765,143 @@ mod tests {
         assert!(resolve_local_branch(repo.path(), &sha).is_err());
         assert!(resolve_local_branch(repo.path(), "HEAD").is_err());
         assert!(resolve_local_branch(repo.path(), "no/such/branch").is_err());
+    }
+
+    /// KT-1256 — a lane target as a worker leaves it: artefacts under
+    /// `<repo>/target/wt-<lane>`.
+    fn seed_lane_target(repo: &Path, lane: &str) -> PathBuf {
+        let target = repo.join("target").join(format!("wt-{lane}"));
+        fs::create_dir_all(target.join("debug")).unwrap();
+        fs::write(target.join("debug/kronn"), vec![0u8; 4096]).unwrap();
+        target
+    }
+
+    #[test]
+    fn lane_target_follows_the_worktree_name() {
+        let repo = Path::new("/repo");
+        let worktree = repo.join(".kronn/worktrees/task-kt-9-abcd1234");
+        assert_eq!(
+            lane_target_for_worktree(repo, &worktree).unwrap(),
+            repo.join("target/wt-kt-9-abcd1234")
+        );
+    }
+
+    #[test]
+    fn remove_lane_target_deletes_the_lane_and_only_the_lane() {
+        let repo = make_test_repo("lane-rm");
+        let lane = seed_lane_target(repo.path(), "kt-1-aaaa");
+        let neighbour = seed_lane_target(repo.path(), "kt-2-bbbb");
+        fs::create_dir_all(repo.path().join("target/debug")).unwrap();
+
+        let report = remove_lane_target(repo.path(), &lane).unwrap();
+
+        assert!(!lane.exists(), "the lane target is gone");
+        assert!(report.bytes_reclaimed >= 4096, "{report:?}");
+        assert!(neighbour.exists(), "another lane is untouched");
+        assert!(
+            repo.path().join("target/debug").exists(),
+            "the main target is untouched"
+        );
+        // Idempotent: absent is success with a zero figure.
+        let again = remove_lane_target(repo.path(), &lane).unwrap();
+        assert_eq!(again.bytes_reclaimed, 0);
+    }
+
+    #[test]
+    fn remove_lane_target_refuses_what_is_not_a_lane_target() {
+        let repo = make_test_repo("lane-refuse");
+        let main_target = repo.path().join("target");
+        fs::create_dir_all(main_target.join("debug")).unwrap();
+        let nested = seed_lane_target(repo.path(), "kt-3-cccc").join("debug");
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("keep"), "x").unwrap();
+
+        for refused in [
+            main_target.clone(),
+            main_target.join("debug"),
+            nested,
+            main_target.join("wt-"),
+            outside.path().to_path_buf(),
+            main_target.join("wt-kt/../debug"),
+        ] {
+            let error = remove_lane_target(repo.path(), &refused).unwrap_err();
+            assert!(!error.is_empty());
+        }
+        assert!(main_target.join("debug").exists());
+        assert!(outside.path().join("keep").exists());
+
+        #[cfg(unix)]
+        {
+            let link = main_target.join("wt-linked");
+            std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+            let error = remove_lane_target(repo.path(), &link).unwrap_err();
+            assert!(error.contains("symlink"), "{error}");
+            assert!(outside.path().join("keep").exists(), "never followed");
+        }
+    }
+
+    #[test]
+    fn remove_lane_target_refuses_while_cargo_holds_its_lock() {
+        use fs2::FileExt;
+        let repo = make_test_repo("lane-lock");
+        let lane = seed_lane_target(repo.path(), "kt-4-dddd");
+        let lock = fs::File::create(lane.join("debug/.cargo-lock")).unwrap();
+        lock.lock_exclusive().unwrap();
+
+        let error = remove_lane_target(repo.path(), &lane).unwrap_err();
+        assert!(error.contains("build"), "{error}");
+        assert!(lane.exists(), "a running build keeps its target");
+
+        fs2::FileExt::unlock(&lock).unwrap();
+        remove_lane_target(repo.path(), &lane).unwrap();
+        assert!(!lane.exists());
+    }
+
+    #[test]
+    fn the_sweep_removes_orphans_and_reports_live_lanes() {
+        let repo = make_test_repo("lane-sweep");
+        let orphan = seed_lane_target(repo.path(), "kt-10-dead");
+        let live = seed_lane_target(repo.path(), "kt-11-live");
+        let stray_file = repo.path().join("target/wt-note.txt");
+        fs::write(&stray_file, "not a directory").unwrap();
+        let main_debug = repo.path().join("target/debug");
+        fs::create_dir_all(&main_debug).unwrap();
+        let claims = std::collections::HashMap::from([(
+            "kt-11-live".to_string(),
+            "execution is Working".to_string(),
+        )]);
+
+        // The dry run reports and deletes nothing.
+        let dry = sweep_orphan_lane_targets(repo.path(), &claims, false);
+        assert_eq!(dry.removed.len(), 1, "{dry:?}");
+        assert!(dry.removed.iter().any(|r| r.target_path == orphan));
+        assert!(orphan.exists(), "a dry run deletes nothing");
+
+        let sweep = sweep_orphan_lane_targets(repo.path(), &claims, true);
+        assert!(!orphan.exists(), "the orphan lane target is removed");
+        assert!(
+            sweep
+                .removed
+                .iter()
+                .any(|r| r.target_path == orphan && r.bytes_reclaimed >= 4096),
+            "{sweep:?}"
+        );
+        assert!(live.exists(), "a live lane is never removed");
+        assert_eq!(
+            sweep.claimed,
+            vec![(live.clone(), "execution is Working".to_string())]
+        );
+        assert!(main_debug.exists(), "the main target is untouched");
+        // Something that is not a lane directory is refused, with its reason.
+        assert!(stray_file.exists());
+        assert!(sweep.kept.iter().any(|(path, _)| path == &stray_file));
+    }
+
+    #[test]
+    fn the_sweep_of_a_repository_without_target_is_empty() {
+        let repo = make_test_repo("lane-none");
+        let sweep = sweep_orphan_lane_targets(repo.path(), &Default::default(), true);
+        assert_eq!(sweep, LaneTargetSweep::default());
     }
 
     #[test]

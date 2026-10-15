@@ -65,6 +65,11 @@ pub const TOOLCHAIN_EVENT_ACTION: &str = "toolchain_capabilities";
 /// (`<repo>/target/wt-<lane>`) are never untracked files of the checkout.
 const LANE_TARGET_EXCLUDE: &str = "/target/wt-*/";
 
+/// Prefix of a lane's directory under `<repo>/target`: the name the cleanup
+/// (KT-1256) recognises a lane target by, so it must stay in step with
+/// [`LANE_TARGET_EXCLUDE`].
+pub const LANE_TARGET_PREFIX: &str = "wt-";
+
 const FRONTEND_DEPS_EXCLUDE: &str = "/frontend/node_modules";
 
 /// Sub-directory of the worktree holding the frontend's `package.json`.
@@ -137,7 +142,9 @@ impl WorkerLane {
             .and_then(Path::parent)
             .map(Path::to_path_buf);
         let cargo_target_dir = match &main_checkout {
-            Some(root) => root.join("target").join(format!("wt-{name}")),
+            Some(root) => root
+                .join("target")
+                .join(format!("{LANE_TARGET_PREFIX}{name}")),
             None => worktree.join(".kronn").join("target"),
         };
         Ok(Self {

@@ -478,6 +478,15 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A task worker's lane target (`target/wt-<lane>`) is removed with its clean
+  worktree (KT-1256). It lives outside the worktree, so integration and
+  cancellation never took it, and each one is a copy-on-write clone of the main
+  target that turns into real disk once the main target is rebuilt. A boot
+  sweep also removes the `target/wt-*` directories no live execution claims
+  (an unfinished execution, a live session or a held lease keeps its lane; a
+  running Cargo build always refuses) and reports what it freed; each removal is
+  audited as `lane_target_reclaimed` / `lane_target_refused`.
+
 - The default-docs-root golden no longer depends on the day it runs: the
   compact date every step prompt opens with is masked like the dashed one.
 
