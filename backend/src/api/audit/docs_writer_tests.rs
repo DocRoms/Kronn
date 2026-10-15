@@ -575,7 +575,14 @@ async fn template_merge_discard_refuses_with_docs_busy_and_keeps_the_merge_workt
             .unwrap()
             .success()
     };
-    let discard = || send(state.clone(), "DELETE", "template-merge", serde_json::json!({}));
+    let discard = || {
+        send(
+            state.clone(),
+            "DELETE",
+            "template-merge",
+            serde_json::json!({}),
+        )
+    };
 
     let lease = crate::api::audit::docs_write::DocsWriteLease::try_acquire(&state, "p1").unwrap();
     let response = discard().await;
@@ -586,7 +593,10 @@ async fn template_merge_discard_refuses_with_docs_busy_and_keeps_the_merge_workt
         "{response}"
     );
     assert!(worktree.join("docs/pending.md").is_file());
-    assert!(branch_exists(), "a refused discard dropped the merge branch");
+    assert!(
+        branch_exists(),
+        "a refused discard dropped the merge branch"
+    );
     assert!(state.audit_tracker.lock().unwrap().leased.contains("p1"));
 
     // Released, the same request drops the worktree and its branch.

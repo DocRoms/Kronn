@@ -838,18 +838,16 @@ async fn deterministic_revalidation_refuses_with_docs_busy_and_reanchors_nothing
         .await
     };
     let docs_before = docs_snapshot(fx.project());
-    let documents_before = fx
-        .h
-        .state
-        .db
-        .with_read_conn(|conn| crate::db::audit_documents::latest(conn, PROJECT_ID))
-        .await
-        .unwrap();
+    let documents_before =
+        fx.h.state
+            .db
+            .with_read_conn(|conn| crate::db::audit_documents::latest(conn, PROJECT_ID))
+            .await
+            .unwrap();
     let runs = fx.run_count().await;
 
-    let lease =
-        crate::api::audit::docs_write::DocsWriteLease::try_acquire(&fx.h.state, PROJECT_ID)
-            .unwrap();
+    let lease = crate::api::audit::docs_write::DocsWriteLease::try_acquire(&fx.h.state, PROJECT_ID)
+        .unwrap();
     let body = deterministic().await;
     let errors = sse_events(&body, "error");
     assert_eq!(errors.len(), 1, "{body}");
@@ -865,13 +863,12 @@ async fn deterministic_revalidation_refuses_with_docs_busy_and_reanchors_nothing
         docs_before,
         "a refused revalidation re-anchored citations"
     );
-    let documents_after = fx
-        .h
-        .state
-        .db
-        .with_read_conn(|conn| crate::db::audit_documents::latest(conn, PROJECT_ID))
-        .await
-        .unwrap();
+    let documents_after =
+        fx.h.state
+            .db
+            .with_read_conn(|conn| crate::db::audit_documents::latest(conn, PROJECT_ID))
+            .await
+            .unwrap();
     assert_eq!(documents_after, documents_before);
     assert_eq!(fx.run_count().await, runs);
     assert!(fx.prompts().is_empty(), "{:?}", fx.prompts());
@@ -900,19 +897,17 @@ async fn acknowledging_citations_refuses_with_docs_busy_and_records_nothing() {
         )
     };
     let docs_before = docs_snapshot(fx.project());
-    let documents_before = fx
-        .h
-        .state
-        .db
-        .with_read_conn(|conn| crate::db::audit_documents::latest(conn, PROJECT_ID))
-        .await
-        .unwrap();
+    let documents_before =
+        fx.h.state
+            .db
+            .with_read_conn(|conn| crate::db::audit_documents::latest(conn, PROJECT_ID))
+            .await
+            .unwrap();
     let record_before = fx.record_of(RULES).reason;
     assert!(fx.plan().await.sections.iter().any(|s| s.doc == RULES));
 
-    let lease =
-        crate::api::audit::docs_write::DocsWriteLease::try_acquire(&fx.h.state, PROJECT_ID)
-            .unwrap();
+    let lease = crate::api::audit::docs_write::DocsWriteLease::try_acquire(&fx.h.state, PROJECT_ID)
+        .unwrap();
     let refused = acknowledge().await.0;
     assert!(!refused.success, "{refused:?}");
     assert_eq!(
@@ -925,13 +920,12 @@ async fn acknowledging_citations_refuses_with_docs_busy_and_records_nothing() {
         "a refused acknowledgement wrote docs"
     );
     assert_eq!(fx.record_of(RULES).reason, record_before);
-    let documents_after = fx
-        .h
-        .state
-        .db
-        .with_read_conn(|conn| crate::db::audit_documents::latest(conn, PROJECT_ID))
-        .await
-        .unwrap();
+    let documents_after =
+        fx.h.state
+            .db
+            .with_read_conn(|conn| crate::db::audit_documents::latest(conn, PROJECT_ID))
+            .await
+            .unwrap();
     assert_eq!(documents_after, documents_before);
     assert!(fx.plan().await.sections.iter().any(|s| s.doc == RULES));
 

@@ -307,7 +307,10 @@ async fn decide_tds_refuses_with_docs_busy_and_writes_nothing_while_the_lease_is
         Some(crate::api::audit::docs_write::DOCS_BUSY)
     );
     let sheets_after: Vec<String> = [A, B, C].iter().map(|id| read(&tmp, id)).collect();
-    assert_eq!(sheets_after, sheets_before, "a refused decision wrote a sheet");
+    assert_eq!(
+        sheets_after, sheets_before,
+        "a refused decision wrote a sheet"
+    );
     assert!(
         !tmp.path().join("docs/decisions.md").exists(),
         "a refused decision wrote the decision log"

@@ -1019,7 +1019,11 @@ async fn a_dispute_card_refuses_with_docs_busy_and_writes_nothing_while_the_leas
             Some(crate::api::audit::docs_write::DOCS_BUSY)
         );
     }
-    assert_eq!((sheet_of(&d), index_of(&d)), before, "a refused card wrote docs");
+    assert_eq!(
+        (sheet_of(&d), index_of(&d)),
+        before,
+        "a refused card wrote docs"
+    );
     assert_eq!(pending(&d).await.len(), 1);
     let decisions_after = d
         .state

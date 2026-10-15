@@ -7444,7 +7444,13 @@ async fn booting_the_backend_repairs_stale_validations_idempotently() {
             }
             let messages = [
                 ("l0", "linked", 0, "User", PROMPT),
-                ("l1", "linked", 1, "Agent", "Fin.\nKRONN:VALIDATION_COMPLETE"),
+                (
+                    "l1",
+                    "linked",
+                    1,
+                    "Agent",
+                    "Fin.\nKRONN:VALIDATION_COMPLETE",
+                ),
                 ("l2", "linked", 2, "Agent", "Commit pushed for PR #34"),
                 ("a0", "april", 0, "User", PROMPT),
             ];
@@ -7464,11 +7470,22 @@ async fn booting_the_backend_repairs_stale_validations_idempotently() {
                 )?;
             }
             let started = Utc.with_ymd_and_hms(2026, 8, 28, 19, 0, 0).unwrap();
-            crate::db::audit_runs::insert_running(
-                conn, "r1", "p1", "Full", "ClaudeCode", started,
-            )?;
+            crate::db::audit_runs::insert_running(conn, "r1", "p1", "Full", "ClaudeCode", started)?;
             crate::db::audit_runs::complete(
-                conn, "r1", started, "Completed", 0, 0, 0, 0, 0, 0, 0, 100, None, None,
+                conn,
+                "r1",
+                started,
+                "Completed",
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                100,
+                None,
+                None,
             )?;
             crate::db::audit_runs::set_validation_discussion(conn, "r1", "linked")?;
             Ok(())
@@ -7479,10 +7496,11 @@ async fn booting_the_backend_repairs_stale_validations_idempotently() {
     let untouched = before_boot
         .with_read_conn(|conn| {
             let record = crate::db::audit_validation::record(conn, "r1")?;
-            let april: bool =
-                conn.query_row("SELECT archived FROM discussions WHERE id='april'", [], |r| {
-                    r.get(0)
-                })?;
+            let april: bool = conn.query_row(
+                "SELECT archived FROM discussions WHERE id='april'",
+                [],
+                |r| r.get(0),
+            )?;
             Ok((record.completed_at, april))
         })
         .await
@@ -7515,7 +7533,10 @@ async fn booting_the_backend_repairs_stale_validations_idempotently() {
             Some("l1"),
             "boot {boot}: the earliest clean signal is the completion"
         );
-        assert!(april_archived, "boot {boot}: the stale validation is archived");
+        assert!(
+            april_archived,
+            "boot {boot}: the stale validation is archived"
+        );
         assert!(linked_archived, "boot {boot}: the linked one is untouched");
     }
 }

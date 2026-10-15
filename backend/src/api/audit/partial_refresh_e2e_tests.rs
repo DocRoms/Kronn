@@ -341,9 +341,8 @@ async fn acknowledging_drift_refuses_with_docs_busy_and_settles_nothing() {
     let fx = Validated::new(|_| {}).await;
     checksum_drift_on_agents(fx.project());
     let docs_before = docs_snapshot(fx.project());
-    let lease =
-        crate::api::audit::docs_write::DocsWriteLease::try_acquire(&fx.h.state, PROJECT_ID)
-            .unwrap();
+    let lease = crate::api::audit::docs_write::DocsWriteLease::try_acquire(&fx.h.state, PROJECT_ID)
+        .unwrap();
     let refused = acknowledge(&fx, &[AGENTS], false).await;
     assert!(!refused.success, "{refused:?}");
     assert_eq!(
@@ -361,6 +360,8 @@ async fn acknowledging_drift_refuses_with_docs_busy_and_settles_nothing() {
     let acknowledged = acknowledge(&fx, &[AGENTS], false).await;
     assert!(acknowledged.success, "{:?}", acknowledged.error);
     assert!(!stale(fx.project()).contains(&AGENTS.to_string()));
+}
+
 async fn operate_as(state: &AppState, pseudo: &str) {
     state.config.write().await.server.pseudo = Some(pseudo.to_string());
 }

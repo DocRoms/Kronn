@@ -338,9 +338,10 @@ mod tests {
     /// implementations, one list of cases.
     #[test]
     fn the_shared_signal_case_table_holds_for_the_backend_parser() {
-        let table: serde_json::Value =
-            serde_json::from_str(include_str!("../../tests/fixtures/validation_signal_cases.json"))
-                .unwrap();
+        let table: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/validation_signal_cases.json"
+        ))
+        .unwrap();
         assert_eq!(table["signal"], VALIDATION_SIGNAL);
         let cases = table["cases"].as_array().unwrap();
         assert!(cases.len() >= 10, "the table must keep its coverage");
