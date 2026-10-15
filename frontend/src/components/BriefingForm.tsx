@@ -28,6 +28,7 @@ import { ProjectLinkedRepos } from './ProjectLinkedRepos';
 import type { SavedDocs } from './briefingDocs';
 import {
   BRIEFING_ENVIRONMENTS,
+  BRIEFING_EXTERNAL_DOCS,
   BRIEFING_PROJECT_CARDS,
   BRIEFING_ROLES,
   FACT_NOTE_MAX,
@@ -248,6 +249,21 @@ export function BriefingForm({
     }));
   const setEnvUrl = (kind: string, url: string) =>
     setProject(p => ({ ...p, environments: p.environments.map(e => (e.kind === kind ? { ...e, url } : e)) }));
+  const toggleDoc = (kind: NonNullable<BriefingProjectAnswers['external_docs']>[number]['kind']) =>
+    setProject(p => {
+      const docs = p.external_docs ?? [];
+      return {
+        ...p,
+        external_docs: docs.some(d => d.kind === kind)
+          ? docs.filter(d => d.kind !== kind)
+          : [...docs, { kind, url: '' }],
+      };
+    });
+  const setDocUrl = (kind: string, url: string) =>
+    setProject(p => ({
+      ...p,
+      external_docs: (p.external_docs ?? []).map(d => (d.kind === kind ? { ...d, url } : d)),
+    }));
   const toggleRole = (role: BriefingProjectAnswers['people'][number]['role']) =>
     setProject(p => ({
       ...p,
@@ -574,6 +590,40 @@ export function BriefingForm({
             {noteInput(card.fact, t(card.questionKey))}
           </fieldset>
         ))}
+
+        <fieldset className="briefing-card" data-card="external_docs">
+          <legend className="briefing-form-q">{t('briefing.project.docsQ')}</legend>
+          <div className="briefing-card-options" role="group" aria-label={t('briefing.project.docsQ')}>
+            {BRIEFING_EXTERNAL_DOCS.map(doc => {
+              const selected = (project.external_docs ?? []).some(d => d.kind === doc.id);
+              return (
+                <button
+                  key={doc.id}
+                  type="button"
+                  role="checkbox"
+                  aria-checked={selected}
+                  className={`briefing-card-option${selected ? ' is-selected' : ''}`}
+                  onClick={() => toggleDoc(doc.id)}
+                >
+                  {t(doc.labelKey)}
+                </button>
+              );
+            })}
+          </div>
+          {(project.external_docs ?? []).map(doc => (
+            <input
+              key={doc.kind}
+              className="briefing-card-input"
+              type="url"
+              aria-label={`${t(BRIEFING_EXTERNAL_DOCS.find(d => d.id === doc.kind)?.labelKey ?? '')} — URL`}
+              placeholder={t('briefing.project.docsUrlPlaceholder')}
+              value={doc.url}
+              maxLength={200}
+              onChange={e => setDocUrl(doc.kind, e.target.value)}
+            />
+          ))}
+          {noteInput('external_docs', t('briefing.project.docsQ'))}
+        </fieldset>
 
         <fieldset className="briefing-card" data-card="environments">
           <legend className="briefing-form-q">{t('briefing.project.envQ')}</legend>

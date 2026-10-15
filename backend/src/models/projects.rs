@@ -2313,6 +2313,26 @@ pub struct BriefingEnvironment {
     pub url: String,
 }
 
+/// Where a project's documentation lives outside the repository.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum BriefingExternalDocKind {
+    Confluence,
+    Notion,
+    Wiki,
+    Other,
+}
+
+/// An external documentation space: its kind and its address, nothing else.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct BriefingExternalDoc {
+    pub kind: BriefingExternalDocKind,
+    #[serde(default)]
+    pub url: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "snake_case")]
@@ -2354,6 +2374,10 @@ pub struct BriefingProjectAnswers {
     pub release_cadence: BriefingReleaseCadence,
     pub environments: Vec<BriefingEnvironment>,
     pub people: Vec<BriefingPerson>,
+    /// External documentation (Confluence, Notion, a wiki). Omitted when empty
+    /// so machine copies written before it stay identical.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub external_docs: Vec<BriefingExternalDoc>,
     /// KT-1196 — optional free-text note per fact: the "how" a closed option
     /// cannot say. Omitted when empty so older machine copies stay identical.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -2377,6 +2401,7 @@ pub enum BriefingFact {
     ReleaseCadence,
     Environments,
     People,
+    ExternalDocs,
 }
 
 /// The saved briefing as the form's answers (KT-1196), read back from

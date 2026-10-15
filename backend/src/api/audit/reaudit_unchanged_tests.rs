@@ -1188,6 +1188,305 @@ async fn a_launch_that_would_ignore_a_resumable_run_is_refused_unless_fresh() {
     assert_ne!(done["audit_run_id"], json!(interrupted));
 }
 
+/// KT-819 DoD 1 — a Full audit of a blank repository, on the template the
+/// product ships, ends Completed with its validation discussion and its drift
+/// baseline. The documentary gate blocks a Completed run on any blocking
+/// diagnostic, so this fails if the skeleton or the checks drift apart again.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_first_full_audit_of_a_blank_repo_completes_with_a_discussion_and_a_baseline() {
+    let h = harness().await;
+    let (tools, state, project) = (h.tools.path(), &h.state, h.project.path());
+    let chain = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full);
+    let targets: Vec<&str> = chain.iter().map(|s| s.target_file).collect();
+    assert!(
+        !project.join("docs").exists(),
+        "a blank repository has no docs"
+    );
+    assert!(
+        crate::core::checksums::read_checksums_file_strict(project)
+            .unwrap()
+            .is_none(),
+        "no baseline before the audit"
+    );
+
+    arm(tools, "fill", &targets);
+    let body = run_full(state, None).await;
+    let done = sse_events(&body, "done").pop().expect("terminal done");
+    validation_settled(state, &done).await;
+    assert_eq!(done["status"], "complete", "{body}");
+    assert!(sse_events(&body, "step_warning").is_empty(), "{body}");
+    let optimization = sse_events(&body, "documentary_optimization")
+        .pop()
+        .expect("the documentary gate ran");
+    assert_eq!(optimization["blocking_count"], 0, "{optimization}");
+
+    // The validation discussion exists and is linked to the Completed run.
+    let run_id = done["audit_run_id"].as_str().unwrap().to_string();
+    let (run, _, prompt) = persisted(state, &run_id).await;
+    assert_eq!(run.status, "Completed");
+    assert!(run.validation_discussion_id.is_some(), "{run:?}");
+    assert!(prompt.is_some_and(|p| !p.is_empty()));
+
+    // The drift baseline is written, and maps every documentary step.
+    let baseline = crate::core::checksums::read_checksums_file_strict(project)
+        .unwrap()
+        .expect("the run wrote its drift baseline");
+    assert!(
+        baseline
+            .mappings
+            .iter()
+            .any(|m| m.ai_file == "docs/AGENTS.md"),
+        "{baseline:?}"
+    );
+    assert!(project.join("docs/checksums.json").is_file());
+}
+
+/// KT-819 DoD 11 — a briefed Full audit leaves `gotchas/`, `people/` and
+/// `conventions/` seeded from what the team stated, and still completes.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_briefed_full_audit_seeds_gotchas_people_and_conventions() {
+    let h = harness().await;
+    let (tools, state, project) = (h.tools.path(), &h.state, h.project.path());
+    // The scripted agent recognises step prompts by the marker in the briefing.
+    let notes = crate::api::audit::briefing_load::render_questions([
+        BRIEFING_MARKER,
+        "Two developers and a product owner.",
+        "In production",
+        "None.",
+        "The nightly import locks the orders table; never deploy at 02:00.",
+        "None.",
+    ]);
+    state
+        .db
+        .with_conn(move |conn| {
+            conn.execute(
+                "UPDATE projects SET briefing_notes = ?1 WHERE id = ?2",
+                rusqlite::params![notes, PROJECT_ID],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let chain = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full);
+    let targets: Vec<&str> = chain.iter().map(|s| s.target_file).collect();
+    arm(tools, "fill", &targets);
+    let body = run_full(state, None).await;
+    let done = sse_events(&body, "done").pop().expect("terminal done");
+    validation_settled(state, &done).await;
+    assert_eq!(done["status"], "complete", "{body}");
+
+    let seeded = sse_events(&body, "project_doc")
+        .pop()
+        .expect("the project page event");
+    let written: Vec<String> = seeded["operating_docs"]["written"]
+        .as_array()
+        .expect("the seeding is reported")
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        written.contains(&"gotchas/known-traps.md".to_string()),
+        "{seeded}"
+    );
+    assert!(written.contains(&"people/team.md".to_string()), "{seeded}");
+
+    let traps = std::fs::read_to_string(project.join("docs/gotchas/known-traps.md")).unwrap();
+    assert!(traps.contains("never deploy at 02:00"), "{traps}");
+    assert!(
+        std::fs::read_to_string(project.join("docs/gotchas/README.md"))
+            .unwrap()
+            .contains("- [known-traps](known-traps.md)")
+    );
+    let team = std::fs::read_to_string(project.join("docs/people/team.md")).unwrap();
+    assert!(
+        team.contains("Two developers and a product owner."),
+        "{team}"
+    );
+    let optimization = sse_events(&body, "documentary_optimization")
+        .pop()
+        .expect("the documentary gate ran");
+    assert_eq!(optimization["blocking_count"], 0, "{optimization}");
+}
+
+/// KT-819 DoD 3 — the run is carried by the server, not by the session that
+/// launched it: closing that session mid-run neither stops nor interrupts it.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_full_audit_goes_on_after_the_session_that_launched_it_is_closed() {
+    let h = harness().await;
+    let (tools, state) = (h.tools.path(), &h.state);
+    let chain = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full);
+    let targets: Vec<&str> = chain.iter().map(|s| s.target_file).collect();
+    arm(tools, "fill", &targets);
+    // The first step's agent waits, so the session closes while the run is live.
+    std::fs::write(tools.join("hold"), "").unwrap();
+
+    let response = crate::api::audit::full::full_audit(
+        axum::extract::State(state.clone()),
+        axum::extract::Path(PROJECT_ID.to_string()),
+        axum::Json(crate::models::LaunchAuditRequest {
+            agent: AgentType::ClaudeCode,
+            connection_id: None,
+            tier: None,
+            kind: None,
+            custom_prompt: None,
+            resume_run_id: None,
+            retry_steps: None,
+            redo_steps: None,
+            fresh: None,
+        }),
+    )
+    .await
+    .into_response();
+    for _ in 0..300 {
+        if tools.join("steps.log").is_file() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        tools.join("steps.log").is_file(),
+        "the first step's agent never started"
+    );
+    let running = state
+        .db
+        .with_conn(|conn| crate::db::audit_runs::list_recent(conn, PROJECT_ID, 1))
+        .await
+        .unwrap();
+    assert_eq!(running[0].status, "Running", "{:?}", running[0]);
+
+    // The session closes: no subscriber is left to read a single event.
+    drop(response);
+    std::fs::remove_file(tools.join("hold")).unwrap();
+
+    let mut last = String::new();
+    for _ in 0..1200 {
+        let runs = state
+            .db
+            .with_conn(|conn| crate::db::audit_runs::list_recent(conn, PROJECT_ID, 1))
+            .await
+            .unwrap();
+        last = runs[0].status.clone();
+        if last != "Running" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(last, "Completed", "the run did not outlive its session");
+    let runs = state
+        .db
+        .with_conn(|conn| crate::db::audit_runs::list_recent(conn, PROJECT_ID, 1))
+        .await
+        .unwrap();
+    assert_eq!(runs[0].last_completed_step as usize, targets.len());
+    let discussion = runs[0]
+        .validation_discussion_id
+        .clone()
+        .unwrap_or_else(|| panic!("{:?}", runs[0]));
+    validation_settled(state, &json!({ "discussion_id": discussion })).await;
+}
+
+/// KT-819 DoD 3, the restart half — a Kronn killed while an audit was running
+/// leaves it `Running`; the next boot (the real file-backed open) settles it
+/// as Interrupted with its finished steps kept, and the audit resumes on the
+/// steps that were left and ends Completed with its validation discussion.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn an_audit_killed_with_kronn_resumes_on_the_steps_left_after_the_restart() {
+    let h = harness().await;
+    let (tools, project) = (h.tools.path(), h.project.path());
+    let db_path = h.tools.path().join("kronn.db");
+    let boot = |path: &std::path::PathBuf| {
+        Arc::new(crate::db::Database::open_path_for_backend_boot(path).unwrap())
+    };
+    let state_of = |db: Arc<crate::db::Database>| {
+        AppState::new_defaults(
+            Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db,
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        )
+    };
+
+    // First life of Kronn: a Full audit runs; its fourth step is the one that
+    // is running when the process dies.
+    let first = state_of(boot(&db_path));
+    project_among_others(&first, project, false).await;
+    let chain = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full);
+    let targets: Vec<&str> = chain.iter().map(|s| s.target_file).collect();
+    let total = targets.len() as u32;
+    arm(tools, "fill", &targets);
+    let body = run_full(&first, None).await;
+    let done = sse_events(&body, "done").pop().expect("terminal done");
+    validation_settled(&first, &done).await;
+    assert_eq!(done["status"], "complete", "{body}");
+    let run_id = done["audit_run_id"].as_str().unwrap().to_string();
+    let killed_at = 4_i64;
+    {
+        let run_id = run_id.clone();
+        first
+            .db
+            .with_conn(move |conn| {
+                // What a SIGKILL leaves behind: the row still Running, the
+                // steps from the interrupted one on never recorded, no
+                // validation discussion yet.
+                conn.execute(
+                    "UPDATE audit_runs SET status = 'Running', ended_at = NULL, duration_ms = NULL,
+                            report_path = NULL, last_completed_step = ?2,
+                            validation_discussion_id = NULL, step_outcomes_json = NULL
+                     WHERE id = ?1",
+                    rusqlite::params![run_id, killed_at - 1],
+                )?;
+                conn.execute(
+                    "DELETE FROM audit_run_steps WHERE audit_run_id = ?1 AND step_index >= ?2",
+                    rusqlite::params![run_id, killed_at],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+    drop(first);
+
+    // Second life: opening the database the way the backend boots settles it.
+    let second = state_of(boot(&db_path));
+    let (run, steps, _) = persisted(&second, &run_id).await;
+    assert_eq!(run.status, "Interrupted", "{run:?}");
+    assert_eq!(run.last_completed_step as i64, killed_at - 1);
+    assert_eq!(steps.len() as i64, killed_at - 1, "finished steps are kept");
+    let resumable = second
+        .db
+        .with_conn(|conn| crate::db::audit_runs::latest_resumable(conn, PROJECT_ID))
+        .await
+        .unwrap()
+        .expect("the interrupted run is resumable after the restart");
+    assert_eq!(resumable.id, run_id);
+
+    // The user resumes it: only the steps that were left run, to Completed.
+    arm(tools, "fill", &targets[(killed_at as usize - 1)..]);
+    settle_on_validation(tools);
+    let resumed = run_full(&second, Some(run_id.clone())).await;
+    let done = sse_events(&resumed, "done").pop().expect("terminal done");
+    validation_settled(&second, &done).await;
+    assert_eq!(done["status"], "complete", "{resumed}");
+    assert_eq!(
+        started_steps(&resumed),
+        (killed_at as u64..=total as u64).collect::<Vec<_>>(),
+        "{resumed}"
+    );
+    let (run, _, prompt) = persisted(&second, done["audit_run_id"].as_str().unwrap()).await;
+    assert_eq!(run.status, "Completed");
+    assert_eq!(run.last_completed_step, total);
+    assert!(prompt.is_some(), "the validation discussion was created");
+}
+
 #[path = "revalidate_e2e_tests.rs"]
 mod revalidate_e2e_tests;
 

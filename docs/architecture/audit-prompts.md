@@ -13,7 +13,7 @@ The extraction preserves prompt bytes, including whitespace. Validation-card
 instructions and briefing prompts retain their three existing locales; Rust
 still substitutes the briefing values at the call site.
 [src: file: backend/src/api/audit/helpers.rs:684-686]
-[src: file: backend/src/api/audit/helpers.rs:1096-1116]
+[src: file: backend/src/api/audit/helpers.rs:1074-1094]
 
 The Drift prompt asks the agent to report checksum mismatches without rewriting
 documentation. Its title no longer describes an unfinished placeholder; this

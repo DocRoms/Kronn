@@ -5,8 +5,8 @@
 use std::path::Path;
 
 use crate::core::version_sources::{
-    ci_runtime_versions, render_version_block, select_version_source, DependencySnapshot,
-    VersionSource,
+    ci_runtime_versions, render_version_block_for, select_version_source, DependencySnapshot,
+    VersionPurpose, VersionSource,
 };
 use crate::models::AgentType;
 
@@ -14,6 +14,8 @@ pub(super) struct VersionContext {
     pub(super) snapshot: Option<DependencySnapshot>,
     pub(super) source: VersionSource,
     block: String,
+    /// The same rows, worded for the project index's Stack table (KT-819).
+    stack_block: String,
 }
 
 impl VersionContext {
@@ -53,18 +55,33 @@ impl VersionContext {
         );
         let source = select_version_source(inputs);
         let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-        let block = render_version_block(source, snapshot.as_ref(), &runtimes, &today);
+        let render = |purpose| {
+            render_version_block_for(purpose, source, snapshot.as_ref(), &runtimes, &today)
+        };
+        let block = render(VersionPurpose::Judgement);
+        let stack_block = render(VersionPurpose::StackTable);
         Self {
             snapshot,
             source,
             block,
+            stack_block,
         }
     }
 
-    /// The prompt block for `target_file`, if that step judges versions.
+    /// The prompt block for `target_file`, if that step judges versions or
+    /// fills the Stack table.
     pub(super) fn block_for(&self, target_file: &str) -> Option<String> {
+        if is_stack_table_step(target_file) {
+            return Some(format!("\n\n{}\n", self.stack_block));
+        }
         applies_to(target_file).then(|| format!("\n\n{}\n", self.block))
     }
+}
+
+/// The project index owns the Stack table: each row's latest stable version
+/// and support end come from the same dated sources (KT-819 DoD 8).
+pub(super) fn is_stack_table_step(target_file: &str) -> bool {
+    target_file.ends_with("AGENTS.md")
 }
 
 /// The tech-debt index (Dependencies dimension) and the security pass
@@ -90,5 +107,30 @@ mod tests {
         ] {
             assert!(!applies_to(other), "{other}");
         }
+    }
+
+    #[test]
+    fn the_project_index_gets_the_stack_wording_and_the_judging_steps_theirs() {
+        // KT-819 DoD 8 — step 1 fills the Stack table's currency cells from the
+        // dated rows; it must not be told to write a TD or a coverage row.
+        let context = VersionContext {
+            snapshot: None,
+            source: VersionSource::None,
+            block: "JUDGEMENT".into(),
+            stack_block: "STACK".into(),
+        };
+        assert!(context
+            .block_for("docs/AGENTS.md")
+            .unwrap()
+            .contains("STACK"));
+        assert!(context
+            .block_for(".ai/AGENTS.md")
+            .unwrap()
+            .contains("STACK"));
+        assert!(context
+            .block_for("docs/inconsistencies-tech-debt.md")
+            .unwrap()
+            .contains("JUDGEMENT"));
+        assert!(context.block_for("docs/glossary.md").is_none());
     }
 }
