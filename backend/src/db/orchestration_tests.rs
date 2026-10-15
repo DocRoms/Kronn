@@ -702,35 +702,6 @@ fn cancellation_cascades_dispatch_and_leaves_the_plan_task_status_to_the_princip
 }
 
 #[test]
-fn cancellation_never_resets_a_done_task_to_todo() {
-    let conn = setup();
-    seed_plan_task(&conn, "t-cancel-done", 1103, 0, "active");
-    let execution = launch_single_task(
-        &conn,
-        &LaunchSingleTaskInput::new("t-cancel-done", DISC),
-        &backend_actor(),
-    )
-    .unwrap()
-    .execution;
-    // Integrated by hand: the principal marked the task done while the
-    // execution was still live, then cancelled the execution.
-    conn.execute(
-        "UPDATE planning_tasks SET status = 'done' WHERE id = 't-cancel-done'",
-        [],
-    )
-    .unwrap();
-    cancel_execution_tree(&conn, &execution.id, "merged by hand", &backend_actor()).unwrap();
-    let task: String = conn
-        .query_row(
-            "SELECT status FROM planning_tasks WHERE id = 't-cancel-done'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(task, "done");
-}
-
-#[test]
 fn reassignment_preserves_git_and_records_provider_separately_from_identity() {
     let conn = setup();
     seed_task(&conn, "t-reassign", 1102);

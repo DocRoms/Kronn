@@ -112,7 +112,9 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # never an approve blocker; `task_create` cannot declare one, a new task has no
 # execution); paid for by dropping what `task_exec_review`'s `decision` schema
 # already said and tightening its identity sentence, ceiling lowered by 86 B.
-CATALOGUE_MAX_BYTES = 85_003
+# KT-1267: `task_exec_cancel` says the task status is left alone and how to
+# relaunch, inside the bytes of the text it replaces; ceiling lowered by 1 B.
+CATALOGUE_MAX_BYTES = 85_002
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is

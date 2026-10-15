@@ -260,7 +260,11 @@ The limits worth knowing:
 ## Stop or reassign
 
 **Stop** cancels live dispatch and preserves the child branch/worktree for
-inspection. It does not force-delete local work.
+inspection. It does not force-delete local work. It never changes the task's
+status (KT-1267): an `in_progress` or `done` task stays so, because the work may
+already be integrated by hand and the principal decides. To run the task again,
+set it back to `todo` first (`task_update status=todo`); the launch preflight
+refuses any other status.
 
 **Reassign** is available only in resumable worker states. Choose another
 allowed agent/model; Kronn keeps the task, child discussion and Git lineage so
@@ -280,7 +284,7 @@ durable child discussion that the runtime will actually execute.
 | Target checkout missing or ambiguous | Restore exactly one checkout of the pinned local target branch before retrying; Kronn does not choose or switch a branch for you. |
 | Missing workspace | Restore/register the project workspace; do not edit execution rows manually. |
 | Interrupted after restart | Read the persisted reason, verify the worker/worktree, then use the guarded resume/reassign action. |
-| Initial CLI offer never accepted | Resume/reassign do not apply to `Blocked` from `Provisioning`. The principal may cancel with workspace preservation, verify the old execution is terminal, then select the exact available CLI and prepare a new execution for the same task. Launch only after a fresh launchable preflight confirms no active duplicate. Do not silently substitute a different CLI identity. |
+| Initial CLI offer never accepted | Resume/reassign do not apply to `Blocked` from `Provisioning`. The principal may cancel with workspace preservation, verify the old execution is terminal, set the task back to `todo` (`task_update status=todo`; the cancel keeps its status, usually `in_progress`, and the launch preflight refuses any other status), then select the exact available CLI and prepare a new execution for the same task. Launch only after a fresh launchable preflight confirms no active duplicate. Do not silently substitute a different CLI identity. |
 | Review budget exhausted | Decide in the parent discussion whether to expand scope, create a follow-up task or stop. |
 
 Do not repair orchestration by manually changing SQLite rows. The status,

@@ -478,6 +478,15 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- Cancelling an execution no longer resets its task to `todo` (KT-1267). A
+  task whose work was integrated by hand (KT-1250's `3dcdbc892`) fell back to
+  `todo` the moment its execution was cancelled, so the roadmap counted it as
+  not started. The cancel now leaves the task status alone, whatever it is
+  (`in_progress`, `done`...): the principal decides. The cancel result and the
+  `task_exec_cancel` description say so, and that running the task again means
+  setting it back to `todo` first (`task_update status=todo`); the launch
+  preflight refuses any other status, so a cancelled `in_progress` task is no
+  longer put back in the ready queue automatically.
 - A task worker's lane target (`target/wt-<lane>`) is removed with its clean
   worktree (KT-1256). It lives outside the worktree, so integration and
   cancellation never took it, and each one is a copy-on-write clone of the main

@@ -1027,10 +1027,10 @@ TOOLS = [
     {
         "name": "task_exec_cancel",
         "description": (
-            "Cancel a non-terminal TaskExecution as its principal. Kronn cancels due/live "
-            "dispatches; completed commits and audit history are preserved. The worktree is "
-            "kept by default; `remove_if_clean` removes only a proven-clean owned worktree "
-            "and refuses dirty or unproven paths."
+            "Cancel a non-terminal TaskExecution as its principal. Dispatches stop, commits "
+            "stay, the task status is NOT changed (to relaunch: task_update status=todo). "
+            "Worktree kept by default; `remove_if_clean` removes only a proven-clean owned "
+            "one, refusing dirty/unproven paths."
         ),
         "inputSchema": {
             "type": "object",

@@ -1231,7 +1231,7 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
         ),
         tool(
             "task_exec_cancel",
-            "Cancel an execution as its parent-room principal. preserve is the safe default; remove_if_clean refuses dirty or unproven worktrees.",
+            "Cancel an execution as its parent-room principal. The task status is NOT changed (to relaunch: task_update status=todo). preserve is the safe default; remove_if_clean refuses dirty or unproven worktrees.",
             json!({
                 "task_execution_id": {"type": "string"},
                 "reason": {"type": "string"},
