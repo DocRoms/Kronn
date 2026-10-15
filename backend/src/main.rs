@@ -12,6 +12,19 @@ use kronn::{
 // ─── Main ───────────────────────────────────────────────────────────────────
 
 fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match kronn::core::cli_args::cli_action(&args) {
+        kronn::core::cli_args::CliAction::Run => {}
+        kronn::core::cli_args::CliAction::PrintVersion => {
+            println!("kronn {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        kronn::core::cli_args::CliAction::PrintHelp => {
+            println!("{}", kronn::core::cli_args::HELP);
+            return Ok(());
+        }
+        kronn::core::cli_args::CliAction::Refuse(reason) => anyhow::bail!(reason),
+    }
     // An operator-set KRONN_AUTH_TOKEN enables auth through the config, then
     // leaves this process's environment before any thread exists (removing a
     // variable is not thread-safe): children never inherit the admin token.
