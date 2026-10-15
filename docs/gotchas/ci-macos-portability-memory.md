@@ -73,6 +73,19 @@ helper fn) and keeps scanning the production code around it, instead of
 cutting the file at the first attribute.
 [src: file: backend/scripts/ci/lint_with_conn_unwrap.py:19-22]
 
+## Measured on the runner
+
+Same image (20260907, Rust 1.98.1), same restored cache, one crate compiled:
+
+| Run | First step | Whole job |
+|---|---|---|
+| before, [job 116332790208](https://github.com/DocRoms/Kronn/actions/runs/38707823085/job/116332790208) | 52 min 48 s | 55 min |
+| after, [run 38740423116](https://github.com/DocRoms/Kronn/actions/runs/38740423116) | 12 min 23 s | 14 min |
+| after, [run 38744187280](https://github.com/DocRoms/Kronn/actions/runs/38744187280) | 9 min 50 s | 11 min |
+
+The `Toolchain and machine` step confirmed 3 CPUs and 7.5 GB (`hw.memsize`
+7516192768). The Windows leg went from 13 to 7 minutes.
+
 ## What this does not fix
 
 The library alone still peaks near 9 GB locally; the gated build is lighter
