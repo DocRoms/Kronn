@@ -50,7 +50,7 @@ alone does not establish a user-visible duration.
    [src: file: frontend/src/pages/DiscussionsPage.tsx:4700-4720#transcriptElements]
    Each normal item creates a
    `MessageBubble`; tool groups create `ToolCallsGroup`.
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:4023-4081#ToolCallsGroup]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:4038-4095#MessageBubble]
 2. Before mapping rows, the page filters notes, projects messages into
    conversation order and builds lookup maps, memoized per transcript change;
    the memoized element list then makes several more passes to calculate

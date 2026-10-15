@@ -8,15 +8,15 @@ the durable source binding and live membership stay in the principal room. The
 child remains the task/evidence room, and acceptance returns the work instructions
 directly to the CLI. A bridge reload therefore resumes the principal room instead
 of the child.
-[src: file: backend/src/api/orchestration.rs:4439-4459#accept_worker_offer_and_attach]
-[src: file: backend/src/api/orchestration.rs:4577-4595#worker_cli_session_id]
-[src: file: backend/src/api/orchestration.rs:12423-12435#source_binding_session_id]
+[src: file: backend/src/api/orchestration.rs:4710-4730#accept_worker_offer_and_attach]
+[src: file: backend/src/api/orchestration.rs:4848-4866#worker_cli_session_id]
+[src: file: backend/src/api/orchestration.rs:12725-12737#source_binding_session_id]
 [src: file: backend/scripts/disc-introspection-mcp.py:6288-6323#call_task_exec_accept_worker_offer]
 
 The terminal return path remains compatibility code for offers accepted by older
 bridges. It emits return messages only when it actually moved legacy child-owned
 state; an execution-scoped worker already in its origin is a no-op.
-[src: file: backend/src/db/orchestration.rs:4590-4633#return_cli_worker_to_origin]
+[src: file: backend/src/db/orchestration.rs:4775-4818#return_cli_worker_to_origin]
 
 ## Historical pre-KT-837 recovery contract
 
