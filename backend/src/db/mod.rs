@@ -282,6 +282,14 @@ impl Database {
         // row is a zombie — and the flip is resume-safe because
         // last_completed_step survives (see
         // `reconcile_stale_runs_preserves_last_completed_step`).
+        // KT-1211 (M5) — an agent the previous backend left running would
+        // keep writing the docs the freed lease lets a resume rewrite: kill
+        // it first (only a process whose start stamp still matches).
+        match crate::core::agent_orphans::reap_recorded_agents(&conn) {
+            Ok(0) => {}
+            Ok(n) => tracing::warn!("Killed {n} audit agent(s) left running by the previous backend"),
+            Err(e) => tracing::warn!("Failed to reap orphaned audit agents: {e}"),
+        }
         match audit_runs::reconcile_stale_runs(&conn, 0) {
             Ok(0) => {}
             Ok(n) => tracing::info!("Reconciled {} zombie audit_runs left 'Running' by a previous process → Interrupted", n),

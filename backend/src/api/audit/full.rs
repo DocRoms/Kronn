@@ -388,6 +388,7 @@ pub async fn full_audit(
         }
     }
     let retry_steps_req = req.retry_steps.clone();
+    let redo_steps_req = req.redo_steps.clone();
     let fresh_req = req.fresh.unwrap_or(false);
     let requested_kind = req.kind;
     let db = state.db.clone();
@@ -560,6 +561,29 @@ pub async fn full_audit(
             }
         } else { Default::default() };
         for step in documentary_recovery.keys() { already_succeeded_steps.remove(step); }
+        // KT-1211 (M6) — steps the run inherited as done that the human asked
+        // to redo because the sources moved since they ran.
+        if let Some(redo) = redo_steps_req.as_deref().filter(|redo| !redo.is_empty()) {
+            let not_done: Vec<u32> = redo
+                .iter()
+                .filter(|step| !already_succeeded_steps.contains(step))
+                .copied()
+                .collect();
+            if resume_run_id_req.is_none() || !not_done.is_empty() {
+                yield Event::default().event("error").data(
+                    serde_json::json!({
+                        "error": format!(
+                            "redo_steps names step(s) {not_done:?} that are not done steps of the run being resumed: only an inherited, done step can be redone (a failed step is retried, not redone)"
+                        )
+                    }).to_string(),
+                );
+                return;
+            }
+            for step in redo {
+                already_succeeded_steps.remove(step);
+                already_unchanged_steps.remove(step);
+            }
+        }
         accepted_rows.retain(|row| already_succeeded_steps.contains(&row.step));
         let retry_only: Option<std::collections::BTreeSet<u32>> = match retry_steps_req.as_deref() {
             None => None,
@@ -593,6 +617,45 @@ pub async fn full_audit(
         // (drop-guard finalization, resume, cancel persistence) needs the
         // row — a failed insert refuses the launch instead of running
         // unaccounted. The guard releases the lease on the early return.
+        // KT-1211 — a step killed with its backend never ended: its target is
+        // half-written and nothing in memory remembers what it was. Put it
+        // back from the snapshot taken before that step, before this run
+        // takes its own snapshots of the targets.
+        {
+            let pid = project_id.clone();
+            let root = project_path.clone();
+            let recovered = db.with_conn(move |conn| {
+                let Some(last) = crate::db::audit_runs::list_recent(conn, &pid, 1)?.into_iter().next() else {
+                    return Ok(Vec::new());
+                };
+                let mut settled = Vec::new();
+                for snapshot in crate::db::audit_runs::unfinished_step_snapshots(conn, &last.id)? {
+                    match super::step_guard::settle_killed_target(&root, &snapshot.target_file, snapshot.content.as_deref()) {
+                        Ok(state) => {
+                            let reason = super::step_guard::interrupted_reason(snapshot.step_index, state.is_some());
+                            crate::db::audit_runs::settle_killed_step(
+                                conn, &last.id, snapshot.step_index, &reason, state, Utc::now(),
+                            )?;
+                            settled.push((snapshot.step_index, snapshot.target_file, state.is_some()));
+                        }
+                        Err(e) => tracing::error!(
+                            "Could not restore {} killed in step {} of run {}: {e}",
+                            snapshot.target_file, snapshot.step_index, last.id
+                        ),
+                    }
+                }
+                Ok(settled)
+            }).await;
+            match recovered {
+                Ok(settled) => for (step, target, restored) in settled {
+                    tracing::warn!(
+                        "Step {step} of the previous run was killed mid-write: {target} {}",
+                        if restored { "was put back as it was before the step" } else { "was not touched" }
+                    );
+                },
+                Err(e) => tracing::warn!("Could not check the previous run for killed steps: {e}"),
+            }
+        }
         let audit_run_id = Uuid::new_v4().to_string();
         let audit_started_at = Utc::now();
         let inserted = {
@@ -687,6 +750,14 @@ pub async fn full_audit(
                 Ok(Some(previous)) => {
                     if let Some(message) = resume_drift_message(&previous, head.as_deref(), fingerprint.as_deref()) {
                         tracing::warn!("{message}");
+                        // KT-1211 (M6) — saved on the run: the timeline and the
+                        // validation prompt say it after the toast is gone.
+                        let (run_id, saved) = (audit_run_id.clone(), message.clone());
+                        if let Err(e) = db.with_conn(move |conn| {
+                            crate::db::audit_runs::set_resume_drift(conn, &run_id, &saved)
+                        }).await {
+                            tracing::warn!("Could not record the resume's source drift: {e}");
+                        }
                         yield Event::default().event("warning").data(
                             serde_json::json!({ "message": message }).to_string(),
                         );
@@ -1239,12 +1310,16 @@ pub async fn full_audit(
                 // leave the row Running with no safety net. On failure the
                 // guard stays ARMED so its Drop stamps Interrupted (boot
                 // reconcile is the last resort).
+                // KT-1211 — a cancel between two steps wrote nothing: the step
+                // about to start is where it stopped (0 = before step 1). A run
+                // that completed a step settles Interrupted and stays resumable.
                 let run_id = audit_run_id.clone();
+                let stopped_at = if step_num == 0 { 0 } else { step_num as u32 + 1 };
                 let persisted = db.with_conn(move |conn| {
-                    crate::db::audit_runs::mark_cancelled(conn, &run_id)
+                    crate::db::audit_runs::mark_cancelled_at_step(conn, &run_id, stopped_at)
                 }).await;
                 match persisted {
-                    Ok(()) => drop_guard.disarm(),
+                    Ok(_) => drop_guard.disarm(),
                     Err(e) => tracing::error!(
                         "mark_cancelled failed for {audit_run_id}: {e} — leaving the drop-guard armed"
                     ),
@@ -1447,6 +1522,27 @@ pub async fn full_audit(
                         continue;
                     }
                 };
+
+            // KT-1211 — the target as it is before the agent runs, kept durably
+            // while the step is not done: a cancel (or a crash, found at the
+            // next launch) puts the doc back from it instead of leaving it
+            // half-written. Unreadable targets already failed above.
+            let pre_content: Option<String> = if analysis_step.target_file == "REVIEW" {
+                None
+            } else {
+                let content = super::step_guard::read_target(&project_path, analysis_step.target_file)
+                    .ok()
+                    .flatten();
+                let (run_id, target, saved) = (
+                    audit_run_id.clone(), analysis_step.target_file.to_string(), content.clone(),
+                );
+                if let Err(e) = db.with_conn(move |conn| {
+                    crate::db::audit_runs::save_step_snapshot(conn, &run_id, step as u32, &target, saved.as_deref())
+                }).await {
+                    tracing::warn!("Could not keep the pre-step snapshot of step {step}: {e}");
+                }
+                content
+            };
 
             // KT-1183 — a finding step under the cross-agent option: Kronn
             // runs the agents, arbitrates and writes the step's documents.
@@ -1653,6 +1749,18 @@ pub async fn full_audit(
                         if let Some(pid) = process.child.id() {
                             if let Ok(mut tracker) = audit_tracker.lock() {
                                 tracker.running_pids.insert(project_id.clone(), pid);
+                            }
+                            // KT-1211 (M5) — the group and the leader's start
+                            // stamp, so a boot after a crash kills an agent the
+                            // dead backend left writing the docs.
+                            let stamp = tokio::task::spawn_blocking(move || {
+                                crate::core::agent_orphans::start_stamp(pid)
+                            }).await.ok().flatten();
+                            let run_id = audit_run_id.clone();
+                            if let Err(e) = db.with_conn(move |conn| {
+                                crate::db::audit_runs::set_agent_process(conn, &run_id, pid as i64, stamp.as_deref())
+                            }).await {
+                                tracing::warn!("Could not record the agent's process group: {e}");
                             }
                         }
                     }
@@ -1909,6 +2017,15 @@ pub async fn full_audit(
                         tracker.running_pids.remove(&project_id);
                         tracker.agent_cancels.remove(&project_id);
                     }
+                    {
+                        // KT-1211 (M5) — the agent is reaped: nothing to kill at boot.
+                        let run_id = audit_run_id.clone();
+                        if let Err(e) = db.with_conn(move |conn| {
+                            crate::db::audit_runs::clear_agent_process(conn, &run_id)
+                        }).await {
+                            tracing::warn!("Could not clear the agent's process group: {e}");
+                        }
+                    }
 
                     // PER-ATTEMPT boundary: enforce mode can retry the same
                     // step immediately. Sweep the complete managed surface
@@ -1983,12 +2100,61 @@ pub async fn full_audit(
                         // Same contract as the pre-step branch: persist first
                         // (failure leaves the guard armed → Interrupted net),
                         // then acknowledge so the handler can clean up.
+                        //
+                        // KT-1211 — the agent was killed mid-write: its target
+                        // goes back as it was before the step, the step is
+                        // recorded as stopped (it is redone on resume), and the
+                        // run is settled resumable when it completed a step.
+                        let step_n = step as u32;
+                        let mut killed_state = match super::step_guard::settle_killed_target(
+                            &project_path, analysis_step.target_file, pre_content.as_deref(),
+                        ) {
+                            Ok(state) => state,
+                            Err(e) => {
+                                tracing::error!(
+                                    "Audit step {step} ({file_label}) cancelled but its target could not be restored: {e}"
+                                );
+                                super::step_guard::mark_partial(
+                                    &project_path, analysis_step.target_file, step_n,
+                                    &super::step_guard::killed_reason(step_n, false),
+                                ).ok().filter(|marked| *marked).map(|_| super::step_guard::STATE_PARTIAL)
+                            }
+                        };
+                        let restored = killed_state == Some(super::step_guard::STATE_RESTORED);
+                        // A step that had written nothing is "restored" too: the doc is whole.
+                        if killed_state.is_none() {
+                            killed_state = Some(super::step_guard::STATE_RESTORED);
+                        }
+                        {
+                            let run_id = audit_run_id.clone();
+                            let reason = super::step_guard::killed_reason(step_n, restored);
+                            let usage = crate::db::audit_runs::StepTokens::after_attempt(
+                                previous_attempt_usage,
+                                step_usage,
+                            );
+                            let recorded_total = run_tokens.total();
+                            let duration_ms = step_started_at.elapsed().as_millis() as u64;
+                            let keep_snapshot = killed_state == Some(super::step_guard::STATE_PARTIAL);
+                            if let Err(e) = db.with_conn(move |conn| {
+                                crate::db::audit_runs::finalize_audit_step(
+                                    conn, &run_id, step_n, Utc::now(), duration_ms, &usage,
+                                    recorded_total, false, Some(&reason), false,
+                                )?;
+                                crate::db::audit_runs::set_step_target_state(conn, &run_id, step_n, killed_state)?;
+                                if !keep_snapshot {
+                                    crate::db::audit_runs::delete_step_snapshot(conn, &run_id, step_n)?;
+                                }
+                                Ok(())
+                            }).await {
+                                tracing::error!("Failed to record the cancelled step {step} for run {audit_run_id}: {e}");
+                            }
+                        }
                         let run_id = audit_run_id.clone();
                         let persisted = db.with_conn(move |conn| {
-                            crate::db::audit_runs::mark_cancelled(conn, &run_id)
+                            crate::db::audit_runs::mark_cancelled_at_step(conn, &run_id, step_n)
                         }).await;
                         match persisted {
-                            Ok(()) => drop_guard.disarm(),
+                            Ok(_) => drop_guard.disarm(),
                             Err(e) => tracing::error!(
                                 "mark_cancelled failed for {audit_run_id}: {e} — leaving the drop-guard armed"
                             ),
@@ -2292,6 +2458,27 @@ pub async fn full_audit(
                         rewritten_docs.insert(analysis_step.target_file.to_string());
                     }
 
+                    // KT-1211 — a step that did not succeed never leaves an
+                    // unmarked half-written doc: what the agent wrote stays (a
+                    // human may accept it) under a visible partial marker. A
+                    // step that succeeded drops any marker an earlier failure
+                    // of the same target left.
+                    let mut target_state: Option<&'static str> = None;
+                    if success {
+                        if let Err(e) = super::step_guard::clear_partial_marker(&project_path, analysis_step.target_file) {
+                            tracing::warn!("Audit step {step} ({file_label}): {e}");
+                        }
+                    } else {
+                        let reason = warning.as_ref().map(|w| w.reason.as_str())
+                            .unwrap_or("the agent did not complete the step");
+                        match super::step_guard::settle_failed_target(
+                            &project_path, analysis_step.target_file, &pre_snapshot, step as u32, reason,
+                        ) {
+                            Ok(state) => target_state = state,
+                            Err(e) => tracing::warn!("Audit step {step} ({file_label}): {e}"),
+                        }
+                    }
+
                     let step_done = serde_json::json!({
                         "step": step,
                         "success": success,
@@ -2331,7 +2518,13 @@ pub async fn full_audit(
                                 warn_reason.as_deref(),
                                 repaired,
                                 step_unchanged,
-                            )
+                            )?;
+                            // KT-1211 — a done step has nothing left to restore;
+                            // a failed one keeps its snapshot (acceptance diff).
+                            if success {
+                                crate::db::audit_runs::delete_step_snapshot(conn, &run_id, step as u32)?;
+                            }
+                            crate::db::audit_runs::set_step_target_state(conn, &run_id, step as u32, target_state)
                         }).await {
                             tracing::error!("Failed to finalize audit step {step} for run {log_run_id}: {e}");
                         }
@@ -2394,6 +2587,14 @@ pub async fn full_audit(
                     let run_id = audit_run_id.clone();
                     let warning = reason.clone();
                     let recorded_total = run_tokens.total();
+                    // KT-1211 — a first attempt may already have written the
+                    // target before this corrective launch failed.
+                    let target_state = super::step_guard::settle_failed_target(
+                        &project_path, analysis_step.target_file, &pre_snapshot, step as u32, &warning,
+                    ).unwrap_or_else(|e| {
+                        tracing::warn!("Audit step {step} ({file_label}): {e}");
+                        None
+                    });
                     // A failed corrective launch must retain the completed
                     // attempts' usage and a durable cause after SSE disconnects.
                     if let Err(error) = db.with_conn(move |conn| {
@@ -2401,7 +2602,8 @@ pub async fn full_audit(
                             conn, &run_id, step as u32, Utc::now(), duration_ms,
                             &previous_attempt_usage.unwrap_or(crate::db::audit_runs::StepTokens::UNKNOWN), recorded_total, false,
                             Some(&warning), false,
-                        )
+                        )?;
+                        crate::db::audit_runs::set_step_target_state(conn, &run_id, step as u32, target_state)
                     }).await {
                         tracing::error!("Failed to finalize launch error for audit step {step}: {error}");
                     }
@@ -2958,6 +3160,24 @@ pub async fn full_audit(
                 prior_partial_validation_block(id, &language)
             ),
             None => validation_prompt,
+        };
+        // KT-1211 (M6) — what moved in the sources during this resume, saved on
+        // the run, is said to the validation agent.
+        let validation_prompt = {
+            let run_id = audit_run_id.clone();
+            let drift = db
+                .with_conn(move |conn| crate::db::audit_runs::get_by_id(conn, &run_id))
+                .await
+                .ok()
+                .flatten()
+                .and_then(|run| run.resume_drift);
+            match drift {
+                Some(drift) => format!(
+                    "{}{validation_prompt}",
+                    super::helpers::resume_drift_block(&drift, &language)
+                ),
+                None => validation_prompt,
+            }
         };
         let validation_prompt = if outcome == RunOutcome::Partial {
             let to_redo: Vec<(u32, String)> = steps_to_redo

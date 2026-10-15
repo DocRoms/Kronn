@@ -1032,8 +1032,9 @@ pub fn evaluate_enforce_gate(
         },
         GateDecision::Fail => EnforceGateOutcome::Fail {
             reason: format!(
-                "{} fabricated `[src:]` citation(s) still present after {} attempts (enforce mode)",
+                "{} {}(s) still present after {} attempts (enforce mode)",
                 verdict.count(),
+                super::step_guard::FABRICATED_FRAGMENT,
                 max_attempts
             ),
         },

@@ -48,6 +48,9 @@ struct ScriptedAgent {
     prompts: AtomicUsize,
     cancels: AtomicUsize,
     shutdowns: AtomicUsize,
+    /// A file the agent writes as soon as it is prompted (KT-1211: the write
+    /// a stopped step leaves behind).
+    writes: std::sync::Mutex<Option<(std::path::PathBuf, String)>>,
 }
 
 impl ScriptedAgent {
@@ -57,6 +60,7 @@ impl ScriptedAgent {
             prompts: AtomicUsize::new(0),
             cancels: AtomicUsize::new(0),
             shutdowns: AtomicUsize::new(0),
+            writes: std::sync::Mutex::new(None),
         })
     }
 }
@@ -97,6 +101,9 @@ impl AcpTransport for ScriptedAgent {
         _: &str,
         events: Sender<AcpSessionEvent>,
     ) -> Result<(), AcpError> {
+        if let Some((path, content)) = self.writes.lock().unwrap().clone() {
+            std::fs::write(path, content).unwrap();
+        }
         self.prompts.fetch_add(1, Ordering::SeqCst);
         match self.turn {
             Turn::Hang => std::future::pending().await,
@@ -266,6 +273,7 @@ fn launch(
                     custom_prompt: None,
                     resume_run_id: None,
                     retry_steps: None,
+                    redo_steps: None,
                     fresh: None,
                 }),
             )
@@ -404,6 +412,89 @@ async fn a_stop_ends_an_acp_step_in_seconds(pipeline: Pipeline) {
     );
     let (status, _) = latest_run_steps(&state, "proj-stop").await;
     assert_eq!(status, "Cancelled", "{pipeline:?}");
+}
+
+/// KT-1211 — a Stop in the middle of a step that has already written its
+/// target never leaves that document half-written: it is put back as it was
+/// before the step, and the step says so.
+async fn a_stop_mid_write_puts_the_target_back(pipeline: Pipeline) {
+    let state = new_state();
+    let project = tempfile::tempdir().unwrap();
+    let target = match pipeline {
+        Pipeline::Full => crate::api::audit::assemble_chained_steps(AuditKind::Docker)[0].target_file,
+        Pipeline::Partial => {
+            let chain = crate::api::audit::assemble_chained_steps(AuditKind::Full);
+            chain
+                .iter()
+                .find(|step| {
+                    crate::api::audit::partial_selectable(
+                        step,
+                        &crate::core::docs_location::DocsRoot::default(),
+                    )
+                })
+                .expect("a refreshable section")
+                .target_file
+        }
+    };
+    let path = project.path().join(target);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    const BEFORE: &str = "# The doc before the step\n\nOriginal, whole content.\n";
+    std::fs::write(&path, BEFORE).unwrap();
+
+    let agent = ScriptedAgent::new(Turn::Hang);
+    *agent.writes.lock().unwrap() = Some((path.clone(), "# Half writ".to_string()));
+    let _route = route(project.path(), &agent);
+    add_project(&state, "proj-half", project.path()).await;
+    let run = launch(&state, pipeline, "proj-half", AgentType::OpenCode);
+    until("the agent to be working on its step", || {
+        agent.prompts.load(Ordering::SeqCst) > 0
+    })
+    .await;
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "# Half writ",
+        "{pipeline:?}: the agent has written its half"
+    );
+
+    let response = crate::api::audit::full::cancel_audit(
+        axum::extract::State(state.clone()),
+        axum::extract::Path("proj-half".to_string()),
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(10), run)
+        .await
+        .unwrap_or_else(|_| panic!("{pipeline:?}: the stopped audit never ended"))
+        .unwrap();
+    assert!(response.0.success, "{pipeline:?}: {:?}", response.0.error);
+
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        BEFORE,
+        "{pipeline:?}: the killed step's write is undone"
+    );
+    let (status, steps) = latest_run_steps(&state, "proj-half").await;
+    assert_eq!(status, "Cancelled", "{pipeline:?}");
+    let stopped = steps
+        .iter()
+        .find(|row| row.target_state.is_some())
+        .unwrap_or_else(|| panic!("{pipeline:?}: no step recorded what became of its target"));
+    assert_eq!(stopped.target_state.as_deref(), Some("restored"));
+    assert!(stopped.ended_at.is_some(), "{pipeline:?}: the step is settled, not dangling");
+    assert!(
+        stopped.step_warning.as_deref().unwrap_or("").contains("stopped during step"),
+        "{pipeline:?}: {:?}",
+        stopped.step_warning
+    );
+}
+
+#[tokio::test]
+async fn a_stop_mid_write_of_a_full_audit_step_puts_its_target_back() {
+    a_stop_mid_write_puts_the_target_back(Pipeline::Full).await;
+}
+
+#[tokio::test]
+async fn a_stop_mid_write_of_a_partial_audit_step_puts_its_target_back() {
+    a_stop_mid_write_puts_the_target_back(Pipeline::Partial).await;
 }
 
 #[tokio::test]

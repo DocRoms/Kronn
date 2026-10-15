@@ -855,6 +855,15 @@ pub(crate) async fn run_partial_pipeline(
                     continue;
                 }
             };
+            // KT-1211 — the target's content before the agent runs: a stop puts
+            // it back, a failure marks what the agent left as partial.
+            let pre_content: Option<String> = if analysis_step.target_file == "REVIEW" {
+                None
+            } else {
+                super::step_guard::read_target(&project_path, analysis_step.target_file)
+                    .ok()
+                    .flatten()
+            };
             let validated_docs_snapshot =
                 match super::helpers::capture_validated_docs(&project_path) {
                     Ok(snapshot) => snapshot,
@@ -1138,9 +1147,45 @@ pub(crate) async fn run_partial_pipeline(
                     // marked; BEFORE any gate or retry, so a stopped step
                     // neither counts as a failure nor spawns another agent.
                     if audit_tracker.lock().map(|t| t.cancelled.contains(&project_id_for_progress)).unwrap_or(false) {
+                        // KT-1211 — the agent was killed mid-write: the target
+                        // goes back as it was before the step, never left
+                        // half-written (marked partial when it cannot be put back).
+                        let step_n = step as u32;
+                        let killed_state = match super::step_guard::settle_killed_target(
+                            &project_path, analysis_step.target_file, pre_content.as_deref(),
+                        ) {
+                            Ok(state) => state,
+                            Err(e) => {
+                                tracing::error!(
+                                    "Partial audit step {step} ({file_label}) cancelled but its target could not be restored: {e}"
+                                );
+                                super::step_guard::mark_partial(
+                                    &project_path, analysis_step.target_file, step_n,
+                                    &super::step_guard::killed_reason(step_n, false),
+                                ).ok().filter(|marked| *marked).map(|_| super::step_guard::STATE_PARTIAL)
+                            }
+                        };
+                        {
+                            let run_id = audit_run_id.clone();
+                            let restored = killed_state == Some(super::step_guard::STATE_RESTORED);
+                            let reason = super::step_guard::killed_reason(step_n, restored);
+                            let duration_ms = step_started_at.elapsed().as_millis() as u64;
+                            let recorded_total = run_tokens.total();
+                            let usage = step_usage;
+                            if let Err(e) = state.db.with_conn(move |conn| {
+                                crate::db::audit_runs::finalize_audit_step(
+                                    conn, &run_id, step_n, Utc::now(), duration_ms, &usage,
+                                    recorded_total, false, Some(&reason), false,
+                                )?;
+                                crate::db::audit_runs::set_step_target_state(conn, &run_id, step_n, killed_state)
+                            }).await {
+                                tracing::error!("Failed to record the cancelled partial step {step} for run {audit_run_id}: {e}");
+                            }
+                        }
                         let run_id = audit_run_id.clone();
                         let persisted = state.db.with_conn(move |conn| {
-                            crate::db::audit_runs::mark_cancelled(conn, &run_id)
+                            crate::db::audit_runs::mark_cancelled_at_step(conn, &run_id, step_n)
+                                .map(|_| ())
                         }).await;
                         match persisted {
                             Ok(()) => drop_guard.disarm(),
@@ -1341,6 +1386,23 @@ pub(crate) async fn run_partial_pipeline(
                     };
 
                     let step_succeeded = success && outcome == "succeeded";
+                    // KT-1211 — a step that failed never leaves an unmarked
+                    // half-written doc: what the agent wrote stays under a
+                    // visible partial marker; a success drops an earlier one.
+                    let mut target_state: Option<&'static str> = None;
+                    if step_succeeded {
+                        if let Err(e) = super::step_guard::clear_partial_marker(&project_path, analysis_step.target_file) {
+                            tracing::warn!("Partial audit step {step} ({file_label}): {e}");
+                        }
+                    } else if outcome == "failed" {
+                        match super::step_guard::settle_failed_target(
+                            &project_path, analysis_step.target_file, &pre_snapshot, step as u32,
+                            "the step did not pass its checks",
+                        ) {
+                            Ok(state) => target_state = state,
+                            Err(e) => tracing::warn!("Partial audit step {step} ({file_label}): {e}"),
+                        }
+                    }
                     let duration_ms = step_started_at.elapsed().as_millis() as u64;
                     if let (Some(step_tokens), Ok(mut t)) = (step_usage.total(), audit_tracker.lock()) {
                         t.update_chips(&project_id_for_progress, Some(step_tokens), run_tokens.total(), None);
@@ -1376,7 +1438,8 @@ pub(crate) async fn run_partial_pipeline(
                                 None,
                                 false,
                                 step_unchanged,
-                            )
+                            )?;
+                            crate::db::audit_runs::set_step_target_state(conn, &run_id, step as u32, target_state)
                         }).await {
                             tracing::error!("Failed to finalize partial audit step {step} for run {audit_run_id}: {e}");
                         }

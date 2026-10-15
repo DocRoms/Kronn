@@ -91,7 +91,7 @@ pub struct StepValidationWarning {
     pub repaired: bool,
 }
 
-const COVERAGE_WARNING_PREFIX: &str = "dimension coverage incomplete";
+const COVERAGE_WARNING_PREFIX: &str = super::step_guard::COVERAGE_FRAGMENT;
 
 /// Recompute the coverage failure from the current index, including on resume.
 /// This is feedback for the agent, never a relaxation or an in-place repair.
@@ -231,8 +231,8 @@ pub fn validate_step_output(
             )
         } else {
             format!(
-                "step output looks truncated: `{}` is {} B but template is {} B (< {}% threshold)",
-                target_file, dst_size, template_size, MIN_DEST_RATIO_PCT
+                "step output {}: `{}` is {} B but template is {} B (< {}% threshold)",
+                super::step_guard::TRUNCATED_FRAGMENT, target_file, dst_size, template_size, MIN_DEST_RATIO_PCT
             )
         };
         return (false, Some(StepValidationWarning { reason, repaired }));
@@ -392,8 +392,9 @@ pub fn check_detector_disposition(
         .join("; ");
     Some(StepValidationWarning {
         reason: format!(
-            "{} detector signal(s) injected but never addressed in the tech-debt output: {} — emit a TD, a baseline note, or a matrix citation for each (Step 8 will be re-run)",
+            "{} {} in the tech-debt output: {} — emit a TD, a baseline note, or a matrix citation for each (Step 8 will be re-run)",
             undisposed.len(),
+            super::step_guard::DETECTOR_FRAGMENT,
             list
         ),
         repaired: false,

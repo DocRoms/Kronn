@@ -713,6 +713,7 @@ async fn launch_route_fresh(h: &Harness, bridge: bool, fresh: Option<bool>) -> S
             custom_prompt: None,
             resume_run_id: None,
             retry_steps: None,
+            redo_steps: None,
             fresh,
         }),
     )

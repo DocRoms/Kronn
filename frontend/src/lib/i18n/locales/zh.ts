@@ -6526,6 +6526,20 @@ const zh: TranslationDict = {
   "auditTimeline.step.acceptFailed": "接受失败：{0}",
   "audit.retryNeedsRun": "此步骤已无法单独重试：没有可继续的审计。“继续”会重新读取审计状态。",
   "projects.docAi.auditRecap.retry": "重试",
+  "auditTimeline.cancelled.during": "审计已于 {0} 在第 {1} 步期间取消",
+  "auditTimeline.cancelled.before": "审计已于 {0} 取消，第一步尚未结束",
+  "auditTimeline.cancelled.resumable": "没有丢失任何内容：“恢复”将从第 {0} 步继续。",
+  "auditTimeline.cancelled.nextRelaunch": "下一步操作：“重新启动审计”。步骤将从第一步重新开始。",
+  "auditTimeline.cancelled.nextBriefing": "下一步操作：先完成简报，然后“重新启动审计”。",
+  "auditTimeline.cancelled.relaunch": "重新启动审计",
+  "auditTimeline.reason.cancelledHere": "在此步骤期间被取消：将重新运行。",
+  "auditTimeline.reason.stopped": "步骤在完成前被停止。",
+  "auditTimeline.reason.truncated": "文档似乎被截断。",
+  "auditTimeline.target.restored": "文档已恢复为此步骤之前的状态。",
+  "auditTimeline.target.partial": "文档可能只写了一半：带有部分标记。",
+  "auditTimeline.step.overrideTitle": "此步骤留下了不可靠的文档。它修改了：",
+  "auditTimeline.step.overrideConfirm": "仍然接受",
+  "auditTimeline.drift.redo": "重做 {0} 个继承的步骤",
 };
 
 export default zh;
