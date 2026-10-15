@@ -562,6 +562,17 @@ pub async fn run_confined(
     run_with(spec, artifact_dir, cancel, Some(confinement)).await
 }
 
+/// SIGKILL to the whole process group `leader` leads. Only for a child that
+/// was spawned as its own group's leader ([`Confinement::command`] puts it in a
+/// session of its own): the id of any other process may name an unrelated group.
+#[cfg(unix)]
+pub(crate) fn kill_process_group(leader: u32) {
+    // SAFETY: `killpg` takes a plain process-group id.
+    unsafe {
+        libc::killpg(leader as libc::pid_t, libc::SIGKILL);
+    }
+}
+
 async fn run_with(
     spec: &ValidatedSpec,
     artifact_dir: Option<&Path>,
@@ -630,11 +641,7 @@ async fn run_with(
         _ => {
             #[cfg(unix)]
             if let Some(group) = confined_group {
-                // SAFETY: `killpg` takes a plain process-group id; the child
-                // was spawned as the leader of this group.
-                unsafe {
-                    libc::killpg(group as libc::pid_t, libc::SIGKILL);
-                }
+                kill_process_group(group);
             }
             let _ = child.start_kill();
             child.wait().await.ok()

@@ -503,9 +503,10 @@ Release notes for 0.9.3 and earlier are available in the
   host's rights. They now use the lane's profile and launcher (own session, no
   terminal, lane environment, process group killed on timeout): no write
   outside the worker's roots and the lane's temp dir, no connection, loopback
-  included. A host with no sandbox refuses the validation with that reason —
-  recorded as a failed validation, sent back to the worker — and never runs it
-  unconfined. A validation that needs the network or a path outside the lane
+  included. A host with no usable sandbox — no mechanism, or a launcher such
+  as `bwrap` that is missing or cannot apply its sandbox (a container) —
+  refuses the validation naming that launcher, recorded as a failed validation
+  and sent back to the worker, and never runs it unconfined. A validation that needs the network or a path outside the lane
   (a `git` write, an explicit `--target-dir` elsewhere) now fails there.
 
 - A task worker's lane target (`target/wt-<lane>`) is removed with its clean

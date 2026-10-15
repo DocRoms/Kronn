@@ -4316,10 +4316,15 @@ impl ValidationLaunch {
     }
 }
 
-/// The confinement of the tree `cwd`, or why none exists on this host.
+/// The confinement of the tree `cwd` on this host, or why none exists: the
+/// shipped launch of a validation, `Confined` or a refusal, never anything else.
+fn host_validation_launch(cwd: &std::path::Path) -> Result<ValidationLaunch, String> {
+    crate::core::task_worker_sandbox::Confinement::for_worktree(cwd).map(ValidationLaunch::Confined)
+}
+
 #[cfg(not(test))]
 fn validation_launch(cwd: &std::path::Path) -> Result<ValidationLaunch, String> {
-    crate::core::task_worker_sandbox::Confinement::for_worktree(cwd).map(ValidationLaunch::Confined)
+    host_validation_launch(cwd)
 }
 
 /// Tests choose, per directory, the mechanism the host "has"
@@ -4384,14 +4389,15 @@ async fn validation_build_path(
             cwd.display()
         )
     })?;
-    let output = wait_for_metadata_output(&mut child, METADATA_TIMEOUT)
-        .await
-        .map_err(|reason| {
-            format!(
-                "cannot resolve Cargo target for validation in {}: {reason}",
-                cwd.display(),
-            )
-        })?;
+    let output =
+        wait_for_metadata_output(&mut child, METADATA_TIMEOUT, launch.confinement().is_some())
+            .await
+            .map_err(|reason| {
+                format!(
+                    "cannot resolve Cargo target for validation in {}: {reason}",
+                    cwd.display(),
+                )
+            })?;
     if !output.status.success() {
         return Err(format!(
             "cannot resolve Cargo target for validation in {}: {}",
@@ -4533,12 +4539,32 @@ fn validation_cargo_argv(command: &str) -> Result<Option<Vec<&str>>, String> {
     Ok(Some(cargo.to_vec()))
 }
 
+/// Collect the output of the metadata `child` within `timeout`.
+///
+/// `leads_group` says the child leads a process group of its own (a confined
+/// launch, `Confinement::command`): a timeout or a read error then takes the
+/// whole group down, as `quick_exec::run_confined` does, so a grandchild of
+/// the worker's `rustc` wrapper cannot outlive the resolution.
 async fn wait_for_metadata_output(
     child: &mut tokio::process::Child,
     timeout: std::time::Duration,
+    leads_group: bool,
 ) -> Result<std::process::Output, String> {
     use tokio::io::AsyncReadExt;
 
+    #[cfg(unix)]
+    let group = child.id().filter(|_| leads_group);
+    #[cfg(not(unix))]
+    let _ = leads_group;
+    let kill = |child: &mut tokio::process::Child| {
+        #[cfg(unix)]
+        if let Some(group) = group {
+            crate::core::quick_exec::kill_process_group(group);
+        }
+        // The leader is killed on its own as well: a child that leads no
+        // group, or a host without process groups.
+        child.start_kill()
+    };
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
     let captured = {
@@ -4570,13 +4596,15 @@ async fn wait_for_metadata_output(
     match captured {
         Ok(Ok(output)) => Ok(output),
         Ok(Err(error)) => {
-            let _ = child.kill().await;
+            let _ = kill(child);
+            let _ = child.wait().await;
             Err(error.to_string())
         }
         Err(_) => {
-            // `kill` waits for collection, so a timed-out metadata process
-            // cannot survive and contend with the following validation.
-            let _ = child.kill().await;
+            // Waiting for collection, so a timed-out metadata process cannot
+            // survive and contend with the following validation.
+            let _ = kill(child);
+            let _ = child.wait().await;
             Err(format!(
                 "Cargo target resolution timed out after {} seconds",
                 timeout.as_secs()
@@ -18960,7 +18988,7 @@ pub(crate) mod tests {
         // Child::wait closes any stdin handle it still owns. Hold the writer
         // separately so the fixture cannot race to EOF before the deadline.
         let _stdin_writer = child.stdin.take().unwrap();
-        let result = wait_for_metadata_output(&mut child, std::time::Duration::ZERO).await;
+        let result = wait_for_metadata_output(&mut child, std::time::Duration::ZERO, false).await;
 
         assert!(result.unwrap_err().contains("timed out"));
         assert!(
@@ -19163,6 +19191,98 @@ pub(crate) mod tests {
         assert!(ran_inside, "the build script ran in its lane: {summary}");
         assert!(!escaped, "the build script wrote outside the lane");
         assert!(!connected && !accepted, "the build script reached loopback");
+    }
+
+    /// KT-1268 review — the launch a shipped build uses (`validation_launch` is
+    /// the registry-driven one under `cfg(test)`): on this host it is the
+    /// confinement when the OS applies a sandbox from here, a refusal that
+    /// names why otherwise, and never a launch with the backend's rights.
+    #[test]
+    fn the_shipped_validation_launch_is_confined_or_refused_never_unconfined() {
+        let repo = tempfile::tempdir().unwrap();
+        let worktree = repo
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join(".kronn")
+            .join("worktrees")
+            .join("task-kt-1268-shipped");
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        let launch = host_validation_launch(&worktree);
+
+        match launch {
+            Ok(ValidationLaunch::Unconfined) => {
+                panic!("the shipped launch ran a worker's tree unconfined")
+            }
+            Ok(ValidationLaunch::Confined(_)) => {
+                assert!(
+                    host_sandbox_that_applies().is_some(),
+                    "confined on a host whose OS sandbox cannot be applied"
+                );
+            }
+            Err(reason) => {
+                assert!(
+                    host_sandbox_that_applies().is_none(),
+                    "refused on a host that applies its sandbox: {reason}"
+                );
+                assert!(reason.contains("never run unconfined"), "{reason}");
+            }
+        }
+    }
+
+    /// KT-1268 review — a timed-out metadata resolution takes the whole group
+    /// of the confined launch down, not only its leader: a grandchild of the
+    /// worker's `rustc` wrapper must not outlive the timeout.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn metadata_timeout_kills_the_grandchildren_of_a_group_leader() {
+        use std::process::Stdio;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ready = dir.path().join("grandchild-started");
+        let script = format!("(touch {ready:?}; sleep 30) & sleep 30");
+        let mut command = tokio::process::Command::new("sh");
+        command
+            .args(["-c", &script])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        // The launcher of a confined validation: a session, hence a group, of
+        // its own.
+        crate::core::task_worker_env::detach_from_terminal(command.as_std_mut());
+        let mut child = command.spawn().unwrap();
+        let leader = child.id().unwrap() as libc::pid_t;
+        // The grandchild exists before the timeout is armed.
+        for _ in 0..200 {
+            if ready.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(ready.exists(), "the grandchild never started");
+        let group_alive = || {
+            // SAFETY: signal 0 only probes whether the group has a member.
+            unsafe { libc::killpg(leader, 0) == 0 }
+        };
+        assert!(group_alive(), "the fixture's group is not running");
+
+        let result =
+            wait_for_metadata_output(&mut child, std::time::Duration::from_millis(200), true).await;
+
+        assert!(result.unwrap_err().contains("timed out"));
+        assert!(child.try_wait().unwrap().is_some(), "the leader is reaped");
+        // The grandchild is reparented and reaped by init: give it a moment.
+        for _ in 0..100 {
+            if !group_alive() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(
+            !group_alive(),
+            "a grandchild of the metadata process outlived the timeout"
+        );
     }
 
     #[tokio::test]

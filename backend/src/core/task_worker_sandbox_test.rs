@@ -918,6 +918,72 @@ fn a_host_without_a_sandbox_gets_no_confinement_and_provisions_nothing() {
     );
 }
 
+/// KT-1268 review: Linux names `bwrap` whether or not it is installed (the
+/// backend image does not ship it). A launcher that is missing must be refused
+/// for that reason, before anything is prepared or started, not surface as a
+/// `cargo could not be spawned` of the validation.
+#[test]
+fn a_sandbox_launcher_that_is_not_installed_is_refused_with_its_name_and_nothing_runs() {
+    for mechanism in [Mechanism::Bubblewrap, Mechanism::Seatbelt] {
+        let layout = layout();
+        let lane = WorkerLane::for_worktree(&layout.worktree).unwrap();
+        let missing = "/nonexistent/kronn-sandbox-launcher";
+
+        let refusal = Confinement::with_usable_mechanism(&layout.worktree, Some(mechanism), |m| {
+            m.check_launcher(missing)
+        })
+        .unwrap_err();
+
+        assert!(refusal.contains(missing), "{refusal}");
+        assert!(refusal.contains("not installed"), "{refusal}");
+        assert!(refusal.contains("never run unconfined"), "{refusal}");
+        assert!(
+            !refusal.contains("could not be spawned"),
+            "the refusal is not a cargo spawn error: {refusal}"
+        );
+        assert!(
+            !lane.cargo_target_dir.exists(),
+            "an unusable sandbox must not have a lane prepared for it"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_sandbox_launcher_that_cannot_apply_its_sandbox_is_refused_with_its_exit_status() {
+    let layout = layout();
+
+    let refusal =
+        Confinement::with_usable_mechanism(&layout.worktree, Some(Mechanism::Bubblewrap), |m| {
+            m.check_launcher("/usr/bin/false")
+        })
+        .unwrap_err();
+
+    assert!(refusal.contains("exited with"), "{refusal}");
+    assert!(refusal.contains("never run unconfined"), "{refusal}");
+}
+
+/// A launcher the host accepts yields the confinement; the check is the real
+/// profile, so it agrees with whether the OS applies a sandbox from here.
+#[test]
+fn the_host_mechanism_is_confined_when_the_os_applies_it_and_refused_otherwise() {
+    let layout = layout();
+    let Some(mechanism) = Mechanism::of_host() else {
+        return;
+    };
+    let outcome = Confinement::with_usable_mechanism(
+        &layout.worktree,
+        Some(mechanism),
+        Mechanism::check_usable,
+    );
+    if sandbox_can_be_applied(mechanism) {
+        assert!(outcome.is_ok(), "{:?}", outcome.err());
+    } else {
+        let refusal = outcome.unwrap_err();
+        assert!(refusal.contains("never run unconfined"), "{refusal}");
+    }
+}
+
 #[test]
 fn a_confinement_wraps_a_command_in_the_lane_profile_with_the_lane_environment() {
     let layout = layout();
