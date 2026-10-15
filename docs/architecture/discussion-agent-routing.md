@@ -200,7 +200,16 @@ An untargeted live peer append in a native discussion deliberately addresses
 the native principal: this is how an invited CLI hands work back to the
 discussion's normal agent. Peer-to-peer exchanges that must exclude that
 principal use a structured target; autonomous rooms use no-agent mode.
-[src: file: backend/src/api/discussions/routing.rs:42-63#route_joined_peer_turn]
+[src: file: backend/src/api/discussions/routing.rs:42-69#route_joined_peer_turn]
+
+A workflow Agent step joined by `room_id` is the exception (KT-1253): it
+reports to the room rather than handing it the turn, so its untargeted append
+reaches the joined peers and never wakes the native principal. Without this,
+every progress report of an orchestrator woke the room's agent for a reply
+nobody asked for. An explicit target (typed, legacy `target_agent`, connection
+mention, or the CLI author of a `reply_to`) keeps its route, and a failed
+lookup fails closed like the rest of the presence snapshot.
+[src: file: backend/src/api/disc_source.rs:773-779#session_identity]
 
 ## When a start is refused
 

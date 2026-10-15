@@ -740,38 +740,50 @@ pub async fn disc_append(
     // responders are worse than leaving the turn to peers that have the
     // message. This is deliberately asymmetric with the human HTTP path, where
     // no proven peer owner means falling back to the durable local runner.
-    let (no_agent_room, native_principal_is_eligible, legacy_target_is_eligible) =
-        if routing_candidate {
-            let did = req.disc_id.clone();
-            let native_agent = format!("{:?}", disc.agent);
-            let legacy_target = legacy_requested_target
-                .as_ref()
-                .map(|target| format!("{target:?}"));
-            state
-                .db
-                .with_conn(move |conn| {
-                    let no_agent = crate::db::discussions::disc_is_no_agent(conn, &did)?;
-                    let native_eligible =
+    let (
+        no_agent_room,
+        native_principal_is_eligible,
+        legacy_target_is_eligible,
+        author_is_workflow_step,
+    ) = if routing_candidate {
+        let did = req.disc_id.clone();
+        let native_agent = format!("{:?}", disc.agent);
+        let legacy_target = legacy_requested_target
+            .as_ref()
+            .map(|target| format!("{target:?}"));
+        let author = author_cli_session_id;
+        state
+            .db
+            .with_conn(move |conn| {
+                let no_agent = crate::db::discussions::disc_is_no_agent(conn, &did)?;
+                let native_eligible =
+                    crate::db::discussion_sessions::count_eligible_responders_for_agent(
+                        conn,
+                        &did,
+                        &native_agent,
+                    )? > 0;
+                let target_eligible = match legacy_target {
+                    Some(target) => {
                         crate::db::discussion_sessions::count_eligible_responders_for_agent(
-                            conn,
-                            &did,
-                            &native_agent,
-                        )? > 0;
-                    let target_eligible = match legacy_target {
-                        Some(target) => {
-                            crate::db::discussion_sessions::count_eligible_responders_for_agent(
-                                conn, &did, &target,
-                            )? > 0
-                        }
-                        None => false,
-                    };
-                    Ok((no_agent, native_eligible, target_eligible))
-                })
-                .await
-                .unwrap_or((true, false, true))
-        } else {
-            (true, false, false)
-        };
+                            conn, &did, &target,
+                        )? > 0
+                    }
+                    None => false,
+                };
+                let workflow_step = match author {
+                    Some(session_pk) => {
+                        crate::db::workflow_step_rooms::session_identity(conn, session_pk)?
+                            .is_some()
+                    }
+                    None => false,
+                };
+                Ok((no_agent, native_eligible, target_eligible, workflow_step))
+            })
+            .await
+            .unwrap_or((true, false, true, true))
+    } else {
+        (true, false, false, false)
+    };
     let dispatch_routes = if requested_targets.is_empty() {
         // A native runner also supplies its runtime session id to the MCP
         // bridge. Only a joined CLI author may implicitly hand the turn back
@@ -784,6 +796,7 @@ pub async fn disc_append(
             legacy_requested_target.as_ref(),
             legacy_target_is_eligible,
             native_principal_is_eligible,
+            author_is_workflow_step,
         )]
     } else {
         requested_targets
@@ -3482,6 +3495,101 @@ mod tests {
             targets,
             vec![MessageTarget::cli(AgentType::ClaudeCode, peer)],
             "a prose mention wakes the named joined peer, never the author itself"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_workflow_step_report_never_wakes_the_native_principal() {
+        // KT-1253: a Codex room with a Claude workflow step joined by room_id.
+        // No Codex session is present, so an ordinary joined CLI wakes Codex.
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        state
+            .db
+            .with_conn(|conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "UPDATE discussions SET agent = 'Codex', no_agent = 0 WHERE id = 'd-lint'",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO workflows (id, name, trigger_json, steps_json, created_at, updated_at)
+                     VALUES ('wf-1253', 'autoCode', '{}', '[]', ?1, ?1)",
+                    [&now],
+                )?;
+                conn.execute(
+                    "INSERT INTO workflow_runs (id, workflow_id, status, started_at)
+                     VALUES ('run-1253', 'wf-1253', 'Running', ?1)",
+                    [&now],
+                )?;
+                crate::db::workflow_step_rooms::begin_activity(
+                    conn,
+                    "run-1253",
+                    "orchestrateur",
+                    "orchestrateur",
+                    "d-lint",
+                    "ClaudeCode",
+                )?;
+                crate::db::workflow_step_rooms::join(
+                    conn,
+                    "run-1253",
+                    "orchestrateur",
+                    "d-lint",
+                    "ClaudeCode",
+                    "step-session",
+                )?;
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-lint",
+                    "ClaudeCode",
+                    Some("human-cli"),
+                    "peer",
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let jobs = |state: crate::AppState| async move {
+            state
+                .db
+                .with_read_conn(|conn| {
+                    Ok(conn.query_row(
+                        "SELECT COUNT(*) FROM agent_dispatch_jobs WHERE discussion_id = 'd-lint'",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )?)
+                })
+                .await
+                .unwrap()
+        };
+
+        let mut report = agent_msg("step-report", "Compte rendu : le plan est publié.");
+        report.agent_type = Some(AgentType::ClaudeCode);
+        append_as(&state, vec![report], Some("step-session")).await;
+        assert_eq!(
+            jobs(state.clone()).await,
+            0,
+            "an untargeted step report reaches the room without waking Codex"
+        );
+
+        let mut ask = agent_msg("step-asks-native", "Codex, relis ce plan.");
+        ask.agent_type = Some(AgentType::ClaudeCode);
+        ask.targets = vec![MessageTarget::discussion_agent(AgentType::Codex)];
+        append_as(&state, vec![ask], Some("step-session")).await;
+        assert_eq!(
+            jobs(state.clone()).await,
+            1,
+            "a step that targets the native principal still wakes it"
+        );
+
+        let mut handback = agent_msg("human-cli-handback", "À toi pour la suite.");
+        handback.agent_type = Some(AgentType::ClaudeCode);
+        append_as(&state, vec![handback], Some("human-cli")).await;
+        assert_eq!(
+            jobs(state.clone()).await,
+            2,
+            "an ordinary joined CLI still hands the turn back to the native principal"
         );
     }
 
