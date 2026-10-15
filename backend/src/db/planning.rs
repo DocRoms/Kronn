@@ -7,13 +7,16 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::models::{
-    AddPlanningBlockerRequest, CreatePlanningDodItem, CreatePlanningTaskLink,
-    CreatePlanningTaskRequest, DiscussionPlan, LinkPlanningDiscussionRequest, PlanningActor,
-    PlanningActorKind, PlanningDependencySummary, PlanningDiscussionRelation, PlanningDodItem,
-    PlanningPlacement, PlanningPlanStats, PlanningTaskChange, PlanningTaskDetail,
-    PlanningTaskEvent, PlanningTaskLink, PlanningTaskListQuery, PlanningTaskListResponse,
-    PlanningTaskPriority, PlanningTaskStatus, PlanningTaskSummary, PlanningWorkspaceSummary,
-    UnlinkPlanningDiscussionRequest, UpdatePlanningDodItemRequest, UpdatePlanningTaskRequest,
+    AddPlanningBlockerRequest, AgentType, AssignPlanningTaskRequest, CreatePlanningDodItem,
+    CreatePlanningTaskLink, CreatePlanningTaskRequest, DiscussionPlan,
+    LinkPlanningDiscussionRequest, MessageTargetKind, ModelTier, PlanningActor, PlanningActorKind,
+    PlanningAssignee, PlanningAssigneeInput, PlanningAssigneeRole, PlanningAssigneeSource,
+    PlanningDependencySummary, PlanningDiscussionRelation, PlanningDodItem, PlanningPlacement,
+    PlanningPlanStats, PlanningTaskChange, PlanningTaskDetail, PlanningTaskEvent, PlanningTaskLink,
+    PlanningTaskListQuery, PlanningTaskListResponse, PlanningTaskPriority, PlanningTaskStatus,
+    PlanningTaskSummary, PlanningWorkspaceSummary, TaskExecutionStatus,
+    UnassignPlanningTaskRequest, UnlinkPlanningDiscussionRequest, UpdatePlanningDodItemRequest,
+    UpdatePlanningTaskRequest,
 };
 
 fn parse_dt(value: String) -> DateTime<Utc> {
@@ -587,6 +590,449 @@ fn load_string_list(conn: &Connection, sql: &str, id: &str) -> Result<Vec<String
         .map_err(Into::into)
 }
 
+/// KT-154 — which tasks an assignee load covers: one task, or every task linked
+/// to a discussion plan (a fixed number of queries either way).
+#[derive(Clone, Copy)]
+enum AssigneeScope<'a> {
+    Task(&'a str),
+    Discussion(&'a str),
+}
+
+impl AssigneeScope<'_> {
+    fn value(&self) -> &str {
+        match self {
+            Self::Task(id) | Self::Discussion(id) => id,
+        }
+    }
+
+    /// SQL predicate on `<alias>.task_id`, bound to `?1`.
+    fn predicate(&self, alias: &str) -> String {
+        match self {
+            Self::Task(_) => format!("{alias}.task_id = ?1"),
+            Self::Discussion(_) => format!(
+                "{alias}.task_id IN (
+                     SELECT task_id FROM planning_task_discussions WHERE discussion_id = ?1)"
+            ),
+        }
+    }
+}
+
+fn assignee_kind_str(kind: MessageTargetKind) -> &'static str {
+    match kind {
+        MessageTargetKind::DiscussionAgent => "discussion_agent",
+        MessageTargetKind::Agent => "agent",
+        MessageTargetKind::Cli => "cli",
+    }
+}
+
+fn assignee_kind_from_str(value: &str) -> Result<MessageTargetKind> {
+    match value {
+        "discussion_agent" => Ok(MessageTargetKind::DiscussionAgent),
+        "agent" => Ok(MessageTargetKind::Agent),
+        "cli" => Ok(MessageTargetKind::Cli),
+        _ => bail!("Unknown planning assignee kind: {value}"),
+    }
+}
+
+fn same_assignee_identity(left: &PlanningAssignee, right: &PlanningAssignee) -> bool {
+    left.kind == right.kind
+        && left.agent_type == right.agent_type
+        && left.connection_id == right.connection_id
+        && left.cli_session_id == right.cli_session_id
+}
+
+/// KT-154 — the assignees of the tasks in `scope`, grouped by task id.
+///
+/// Manual rows come from `planning_task_assignees` in assignment order. The
+/// worker of the task's latest live TaskExecution (non-terminal, worker chosen)
+/// is derived from `task_executions` and appended — or, when the same identity
+/// was also assigned by hand, folded into that manual row — so the plan shows
+/// who is on a task without anyone having to assign it.
+fn load_assignees(
+    conn: &Connection,
+    scope: AssigneeScope<'_>,
+) -> Result<std::collections::HashMap<String, Vec<PlanningAssignee>>> {
+    // Same ordinal definition as `discussion_sessions::cli_session_ordinal`:
+    // the rank by id among the provider's sessions of the room, left rows kept.
+    const ORDINAL: &str = "(SELECT COUNT(*) FROM discussion_sessions o
+                            WHERE o.disc_id = s.disc_id AND o.agent_type = s.agent_type
+                              AND o.id <= s.id)";
+    let mut grouped: std::collections::HashMap<String, Vec<PlanningAssignee>> =
+        std::collections::HashMap::new();
+
+    let manual_sql = format!(
+        "SELECT a.task_id, a.target_kind, a.agent_type, a.connection_id,
+                a.cli_session_id, a.role, {ORDINAL}
+           FROM planning_task_assignees a
+           LEFT JOIN discussion_sessions s ON s.id = a.cli_session_id
+          WHERE {}
+          ORDER BY a.task_id, a.id",
+        scope.predicate("a")
+    );
+    let manual_rows = {
+        let mut statement = conn.prepare(&manual_sql)?;
+        let rows = statement
+            .query_map([scope.value()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, i64>(6)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    for (task_id, kind, agent_type, connection_id, cli_session_id, role, ordinal) in manual_rows {
+        grouped.entry(task_id).or_default().push(PlanningAssignee {
+            kind: assignee_kind_from_str(&kind)?,
+            agent_type: crate::db::discussions::parse_agent_type(&agent_type)?,
+            connection_id,
+            cli_session_id,
+            cli_ordinal: cli_session_id
+                .map(|_| ordinal)
+                .filter(|ordinal| *ordinal > 0),
+            role: role
+                .as_deref()
+                .map(PlanningAssigneeRole::from_str)
+                .transpose()?,
+            source: PlanningAssigneeSource::Manual,
+            tier: None,
+            execution_id: None,
+            execution_status: None,
+        });
+    }
+
+    let execution_sql = format!(
+        "SELECT e.task_id, e.id, e.status, e.worker_target_kind, e.worker_agent_type,
+                e.worker_connection_id, e.worker_cli_session_id, e.worker_model_tier,
+                {ORDINAL}
+           FROM task_executions e
+           LEFT JOIN discussion_sessions s ON s.id = e.worker_cli_session_id
+          WHERE e.worker_agent_type IS NOT NULL
+            AND e.status NOT IN ('Done', 'Failed', 'Cancelled')
+            AND {}
+          ORDER BY e.task_id, e.created_at DESC, e.id DESC",
+        scope.predicate("e")
+    );
+    let execution_rows = {
+        let mut statement = conn.prepare(&execution_sql)?;
+        let rows = statement
+            .query_map([scope.value()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<i64>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, i64>(8)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    let mut seen_executions = std::collections::HashSet::new();
+    for (
+        task_id,
+        execution_id,
+        status,
+        kind,
+        agent_type,
+        connection_id,
+        cli_session_id,
+        tier,
+        ordinal,
+    ) in execution_rows
+    {
+        // Rows are newest first: only the latest live execution of a task counts.
+        if !seen_executions.insert(task_id.clone()) {
+            continue;
+        }
+        // A persisted status or agent type this build cannot read is skipped, not
+        // fatal: the plan must keep rendering.
+        let Ok(execution_status) =
+            serde_json::from_value::<TaskExecutionStatus>(serde_json::Value::String(status))
+        else {
+            continue;
+        };
+        let Ok(agent_type) = crate::db::discussions::parse_agent_type(&agent_type) else {
+            continue;
+        };
+        let kind = match kind.as_deref() {
+            Some(kind) => match assignee_kind_from_str(kind) {
+                Ok(kind) => kind,
+                Err(_) => continue,
+            },
+            None => MessageTargetKind::Agent,
+        };
+        let worker = PlanningAssignee {
+            kind,
+            agent_type,
+            connection_id,
+            cli_session_id,
+            cli_ordinal: cli_session_id
+                .map(|_| ordinal)
+                .filter(|ordinal| *ordinal > 0),
+            role: Some(PlanningAssigneeRole::Owner),
+            source: PlanningAssigneeSource::Execution,
+            tier: match tier.as_deref() {
+                Some("economy") => Some(ModelTier::Economy),
+                Some("default") => Some(ModelTier::Default),
+                Some("reasoning") => Some(ModelTier::Reasoning),
+                _ => None,
+            },
+            execution_id: Some(execution_id),
+            execution_status: Some(execution_status),
+        };
+        let assignees = grouped.entry(task_id).or_default();
+        match assignees
+            .iter_mut()
+            .find(|manual| same_assignee_identity(manual, &worker))
+        {
+            Some(manual) => {
+                manual.tier = worker.tier;
+                manual.execution_id = worker.execution_id;
+                manual.execution_status = worker.execution_status;
+            }
+            None => assignees.push(worker),
+        }
+    }
+    Ok(grouped)
+}
+
+/// Validate an assignee identity against the KT-116 typed regime and resolve
+/// nothing implicitly: a `cli` identity must name the exact session, the two
+/// native kinds must not, and a `Custom` provider must pin its connection.
+fn validate_assignee_input(conn: &Connection, input: &PlanningAssigneeInput) -> Result<()> {
+    match input.kind {
+        MessageTargetKind::Cli => {
+            let Some(session_id) = input.cli_session_id else {
+                bail!("A cli assignee must name its exact session (cli_session_id)");
+            };
+            let found: Option<String> = conn
+                .query_row(
+                    "SELECT agent_type FROM discussion_sessions WHERE id = ?1",
+                    [session_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(found) = found else {
+                bail!("CLI session {session_id} not found");
+            };
+            if found != crate::db::discussions::format_agent_type(&input.agent_type) {
+                bail!("CLI session {session_id} is not a {} session", found);
+            }
+        }
+        MessageTargetKind::DiscussionAgent | MessageTargetKind::Agent => {
+            if input.cli_session_id.is_some() {
+                bail!("Only a cli assignee can carry a cli_session_id");
+            }
+        }
+    }
+    let has_connection = input
+        .connection_id
+        .as_deref()
+        .is_some_and(|id| !id.trim().is_empty());
+    if input.agent_type == AgentType::Custom && !has_connection {
+        bail!("A Custom assignee must name its connection (connection_id)");
+    }
+    if input.agent_type != AgentType::Custom && input.connection_id.is_some() {
+        bail!("Only a Custom assignee can carry a connection_id");
+    }
+    Ok(())
+}
+
+fn assignee_identity_params(input: &PlanningAssigneeInput) -> (&'static str, String, String, i64) {
+    (
+        assignee_kind_str(input.kind),
+        crate::db::discussions::format_agent_type(&input.agent_type),
+        input.connection_id.clone().unwrap_or_default(),
+        input.cli_session_id.unwrap_or(-1),
+    )
+}
+
+/// KT-154 — assign one agent to a task. Idempotent on the typed identity: the
+/// same identity again only updates its role (and is not journalled when
+/// nothing changed). Returns whether the stored assignment changed.
+fn assign_within(
+    conn: &Connection,
+    task_id: &str,
+    input: &PlanningAssigneeInput,
+    actor: &PlanningActor,
+    via: Option<&str>,
+) -> Result<bool> {
+    validate_assignee_input(conn, input)?;
+    let (kind, agent_type, connection_id, cli_session_id) = assignee_identity_params(input);
+    let existing: Option<(i64, Option<String>)> = conn
+        .query_row(
+            "SELECT id, role FROM planning_task_assignees
+              WHERE task_id = ?1 AND target_kind = ?2 AND agent_type = ?3
+                AND COALESCE(connection_id, '') = ?4 AND COALESCE(cli_session_id, -1) = ?5",
+            params![task_id, kind, agent_type, connection_id, cli_session_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let role = input.role.map(PlanningAssigneeRole::as_str);
+    let changed = match existing {
+        Some((_, current)) if current.as_deref() == role => false,
+        Some((id, _)) => {
+            conn.execute(
+                "UPDATE planning_task_assignees SET role = ?2 WHERE id = ?1",
+                params![id, role],
+            )?;
+            true
+        }
+        None => {
+            conn.execute(
+                "INSERT INTO planning_task_assignees
+                 (task_id, target_kind, agent_type, connection_id, cli_session_id, role, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    task_id,
+                    kind,
+                    agent_type,
+                    input.connection_id.as_deref().filter(|id| !id.is_empty()),
+                    input.cli_session_id,
+                    role,
+                    Utc::now().to_rfc3339(),
+                ],
+            )?;
+            true
+        }
+    };
+    if changed {
+        let mut changes = serde_json::to_value(input)?;
+        if let (Some(via), Some(object)) = (via, changes.as_object_mut()) {
+            object.insert("via".into(), serde_json::Value::String(via.into()));
+        }
+        insert_event(conn, task_id, "assigned", actor, changes)?;
+        conn.execute(
+            "UPDATE planning_tasks SET updated_at = ?2 WHERE id = ?1",
+            params![task_id, Utc::now().to_rfc3339()],
+        )?;
+    }
+    Ok(changed)
+}
+
+pub fn assign_task(
+    conn: &Connection,
+    task_reference: &str,
+    request: &AssignPlanningTaskRequest,
+) -> Result<PlanningTaskDetail> {
+    let task_id = resolve_task_id(conn, task_reference)?;
+    validate_actor(&request.actor)?;
+    let transaction = NestableTx::begin(conn)?;
+    let naming_itself = request.assignee.is_none();
+    let mut assignee = match request.assignee.clone() {
+        Some(assignee) => assignee,
+        None => actor_assignee(&transaction, &request.actor)?.context(
+            "The acting agent is not a joined CLI session, so it cannot assign itself; \
+             name the assignee (kind, agent_type, cli_session_id) instead",
+        )?,
+    };
+    if assignee.role.is_none() {
+        assignee.role = request.role;
+    }
+    // An agent putting itself on a task is, by default, the one doing it.
+    if naming_itself && assignee.role.is_none() {
+        assignee.role = Some(PlanningAssigneeRole::Owner);
+    }
+    assign_within(&transaction, &task_id, &assignee, &request.actor, None)?;
+    transaction.commit()?;
+    get_task(conn, &task_id)?.context("Assigned planning task disappeared")
+}
+
+pub fn unassign_task(
+    conn: &Connection,
+    task_reference: &str,
+    request: &UnassignPlanningTaskRequest,
+) -> Result<PlanningTaskDetail> {
+    let task_id = resolve_task_id(conn, task_reference)?;
+    validate_actor(&request.actor)?;
+    let transaction = NestableTx::begin(conn)?;
+    let assignee = match request.assignee.clone() {
+        Some(assignee) => assignee,
+        None => actor_assignee(&transaction, &request.actor)?.context(
+            "The acting agent is not a joined CLI session, so it cannot unassign itself; \
+             name the assignee (kind, agent_type, cli_session_id) instead",
+        )?,
+    };
+    let (kind, agent_type, connection_id, cli_session_id) = assignee_identity_params(&assignee);
+    let removed = transaction.execute(
+        "DELETE FROM planning_task_assignees
+          WHERE task_id = ?1 AND target_kind = ?2 AND agent_type = ?3
+            AND COALESCE(connection_id, '') = ?4 AND COALESCE(cli_session_id, -1) = ?5",
+        params![task_id, kind, agent_type, connection_id, cli_session_id],
+    )?;
+    if removed == 0 {
+        bail!("Planning assignee not found on this task");
+    }
+    insert_event(
+        &transaction,
+        &task_id,
+        "unassigned",
+        &request.actor,
+        serde_json::to_value(&assignee)?,
+    )?;
+    transaction.execute(
+        "UPDATE planning_tasks SET updated_at = ?2 WHERE id = ?1",
+        params![task_id, Utc::now().to_rfc3339()],
+    )?;
+    transaction.commit()?;
+    get_task(conn, &task_id)?.context("Unassigned planning task disappeared")
+}
+
+/// KT-154 — the agent behind an AGENT-kind actor, as the exact typed identity
+/// it can be assigned under. Only a joined CLI whose durable source session
+/// resolves to a live `discussion_sessions` row qualifies: a provider name
+/// alone would conflate two Codex CLIs, so an unresolvable actor is not
+/// auto-assigned (it can still assign itself explicitly).
+fn actor_assignee(
+    conn: &Connection,
+    actor: &PlanningActor,
+) -> Result<Option<PlanningAssigneeInput>> {
+    if actor.kind != PlanningActorKind::Agent {
+        return Ok(None);
+    }
+    let (Some(agent_id), Some(session_id)) = (actor.id.as_deref(), actor.session_id.as_deref())
+    else {
+        return Ok(None);
+    };
+    let row: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT id, agent_type FROM discussion_sessions
+              WHERE session_id = ?1 AND status != 'left'
+              ORDER BY id DESC LIMIT 1",
+            [session_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((cli_session_id, agent_type)) = row else {
+        return Ok(None);
+    };
+    let Ok(agent_type) = crate::db::discussions::parse_agent_type(&agent_type) else {
+        return Ok(None);
+    };
+    // The actor id is the provider the bridge reported; a mismatch means the
+    // session id does not belong to this actor — never guess.
+    if !agent_id.eq_ignore_ascii_case(&crate::db::discussions::format_agent_type(&agent_type)) {
+        return Ok(None);
+    }
+    Ok(Some(PlanningAssigneeInput {
+        kind: MessageTargetKind::Cli,
+        agent_type,
+        connection_id: None,
+        cli_session_id: Some(cli_session_id),
+        role: None,
+    }))
+}
+
 fn get_summary(conn: &Connection, task_id: &str) -> Result<Option<PlanningTaskSummary>> {
     let row = conn
         .query_row(
@@ -648,7 +1094,11 @@ fn get_summary(conn: &Connection, task_id: &str) -> Result<Option<PlanningTaskSu
         return Ok(None);
     };
 
+    let assignees = load_assignees(conn, AssigneeScope::Task(&id))?
+        .remove(&id)
+        .unwrap_or_default();
     Ok(Some(PlanningTaskSummary {
+        assignees,
         project_ids: load_string_list(
             conn,
             "SELECT project_id
@@ -1179,6 +1629,30 @@ pub fn update_task(
         &request.actor,
         compact_update_changes(request)?,
     )?;
+    // KT-154 — an agent that takes a task (→ in_progress) is its owner unless
+    // the task already has someone on it or the agent is already assigned.
+    if status == PlanningTaskStatus::InProgress
+        && existing.summary.status != PlanningTaskStatus::InProgress
+    {
+        if let Some(mut input) = actor_assignee(&transaction, &request.actor)? {
+            input.role = Some(PlanningAssigneeRole::Owner);
+            let taken = existing.summary.assignees.iter().any(|assignee| {
+                assignee.role != Some(PlanningAssigneeRole::Reviewer)
+                    || (assignee.kind == input.kind
+                        && assignee.agent_type == input.agent_type
+                        && assignee.cli_session_id == input.cli_session_id)
+            });
+            if !taken {
+                assign_within(
+                    &transaction,
+                    task_id,
+                    &input,
+                    &request.actor,
+                    Some("in_progress"),
+                )?;
+            }
+        }
+    }
     transaction.commit()?;
     get_task(conn, task_id)?.context("Updated planning task disappeared")
 }
@@ -1734,6 +2208,8 @@ fn load_summaries_for_discussion(
         discussion_id,
     )?;
 
+    let mut assignees = load_assignees(conn, AssigneeScope::Discussion(discussion_id))?;
+
     let mut stmt = conn.prepare(
         "SELECT t.id, t.task_number, t.parent_id, p.task_number, p.title,
                 t.title, t.status, t.priority, t.rank, t.created_at, t.updated_at,
@@ -1810,6 +2286,7 @@ fn load_summaries_for_discussion(
             blocker_count,
         ) = raw;
         let summary = PlanningTaskSummary {
+            assignees: assignees.remove(&id).unwrap_or_default(),
             project_ids: projects.get(&id).cloned().unwrap_or_default(),
             discussion_ids: discussions.get(&id).cloned().unwrap_or_default(),
             tags: tags.get(&id).cloned().unwrap_or_default(),
@@ -1967,6 +2444,10 @@ fn load_grouped_by_task<'a>(
     }
     Ok(grouped)
 }
+
+#[cfg(test)]
+#[path = "planning_assignees_tests.rs"]
+mod assignees_tests;
 
 #[cfg(test)]
 mod tests {

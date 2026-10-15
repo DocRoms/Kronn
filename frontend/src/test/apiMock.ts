@@ -516,6 +516,8 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
         stats: { ready: 0, blocked: 0, in_progress: 0, ideas: 0, done: 0, later: 0 },
       }),
       addBlocker: resolve({}),
+      assign: resolve({}),
+      unassign: resolve({}),
       discussionPlan: resolve({
         discussion_id: '',
         primary_objective: null,

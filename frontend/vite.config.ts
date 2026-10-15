@@ -5,12 +5,16 @@ import { framePolicyPlugin } from './vite-frame-policy.ts';
 import { Agent as HttpAgent } from 'node:http';
 import { Agent as HttpsAgent } from 'node:https';
 
-const backendTarget = process.env.KRONN_BACKEND_URL ?? 'http://localhost:3140';
+// KRONN_VITE_BACKEND_URL is a task worker lane's own backend; KRONN_BACKEND_URL
+// stays the MCP bridge's address of the host Kronn.
+const backendTarget = process.env.KRONN_VITE_BACKEND_URL ?? process.env.KRONN_BACKEND_URL ?? 'http://localhost:3140';
 const backendAgent = new URL(backendTarget).protocol === 'https:'
   ? new HttpsAgent({ keepAlive: true })
   : new HttpAgent({ keepAlive: true });
 
 export default defineConfig({
+  // A task worker's node_modules is a read-only link: its lane gives a writable cache.
+  ...(process.env.VITE_CACHE_DIR ? { cacheDir: process.env.VITE_CACHE_DIR } : {}),
   plugins: [react(), framePolicyPlugin(backendTarget)],
   worker: {
     format: 'es',

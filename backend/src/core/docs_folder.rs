@@ -122,7 +122,8 @@ pub fn folder_state_with_runs(root: &Path, rel: &str, recorded_run: bool) -> Doc
         // file are not their docs.
         if entry.depth() == 1
             && (entry.file_name() == "briefing.md"
-                || entry.file_name() == crate::core::kronn_state::KRONN_STATE_FILENAME)
+                || entry.file_name() == crate::core::kronn_state::KRONN_STATE_FILENAME
+                || entry.file_name() == crate::core::audit_run_state::RUN_STATE_FILENAME)
         {
             continue;
         }

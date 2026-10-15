@@ -37,5 +37,5 @@ shows `disc_append` accepting an explicit `disc_id` (defaulting to the
 runtime-bound one) while `disc_question_list` always resolves `_disc_id()` and
 ignores any id argument.
 [src: file: backend/scripts/disc-introspection-mcp.py:221-222#disc_question_list]
-[src: file: backend/scripts/disc-introspection-mcp.py:5318-5336#call_disc_append]
-[src: file: backend/scripts/disc-introspection-mcp.py:4544-4548#call_disc_question_list]
+[src: file: backend/scripts/disc-introspection-mcp.py:5377-5395#call_disc_append]
+[src: file: backend/scripts/disc-introspection-mcp.py:4564-4568#call_disc_question_list]

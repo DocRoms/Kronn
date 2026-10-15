@@ -1710,6 +1710,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             post(api::planning::link_discussion).delete(api::planning::unlink_discussion),
         )
         .route(
+            "/api/planning/tasks/{id}/assignees",
+            post(api::planning::assign_task).delete(api::planning::unassign_task),
+        )
+        .route(
             "/api/planning/tasks/{id}/blockers",
             post(api::planning::add_blocker),
         )
@@ -1905,6 +1909,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/projects/{id}/validation-state",
             get(api::audit::get_validation_state),
+        )
+        .route(
+            "/api/projects/{id}/audit-repo-state",
+            get(api::audit::run_state::get_repo_audit_state),
         )
         .route(
             "/api/projects/{id}/mark-bootstrapped",

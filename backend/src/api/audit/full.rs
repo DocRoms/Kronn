@@ -464,6 +464,31 @@ pub async fn full_audit(
             return;
         }
         let (kind, resume_from) = if let Some(run_id) = resume_run_id_req.clone() {
+            // KT-1199 — an audit a colleague committed and left unfinished:
+            // rebuilt here from the committed state (matching steps trusted,
+            // the others replayed), then resumed like any interrupted run.
+            let adopted = db.with_conn({
+                let run_id = run_id.clone();
+                let pid = project_id.clone();
+                let pp = project_path.clone();
+                move |conn| Ok(super::run_state::adopt_repo_run(conn, &pid, &pp, &run_id))
+            }).await;
+            let adoption_error = match adopted {
+                Ok(Ok(inherited)) => {
+                    if inherited > 0 {
+                        tracing::info!("Audit run {run_id} rebuilt from the repository: {inherited} step(s) inherited");
+                    }
+                    None
+                }
+                Ok(Err(msg)) => Some(msg),
+                Err(e) => Some(format!("resume_run_id lookup failed: {e}")),
+            };
+            if let Some(msg) = adoption_error {
+                yield Event::default().event("error").data(
+                    serde_json::json!({ "error": msg }).to_string(),
+                );
+                return;
+            }
             let fetched = db.with_conn({
                 let run_id = run_id.clone();
                 let pid = project_id.clone();
@@ -718,6 +743,28 @@ pub async fn full_audit(
                 }
             }
         };
+
+        // KT-1199 — the run, portable by the repository: its state file is
+        // rewritten from the run's rows at each step and at the end. The DB
+        // and these digests stay authoritative; the file is never read back.
+        let run_state_writer = std::sync::Arc::new(super::run_state::RunStateWriter::new(
+            project_path.clone(),
+            audit_run_id.clone(),
+            super::run_state::RunStateMeta::capture(
+                &project_path,
+                super::validate::operator_pseudo(&state_for_validation).await,
+                resume_run_id_req.clone(),
+            ),
+            steps
+                .iter()
+                .enumerate()
+                .map(|(index, step)| (index as u32 + 1, step_file_label(step).to_string()))
+                .collect(),
+        ));
+        {
+            let writer = run_state_writer.clone();
+            let _ = db.with_conn(move |conn| { writer.sync(conn, false); Ok(()) }).await;
+        }
 
         // CONTRACTUAL revocation (Codex A5): this run is about to mutate
         // docs/, so any prior "Validated" state is stale the moment we
@@ -1231,6 +1278,11 @@ pub async fn full_audit(
             == crate::core::anti_halluc::AntiHallucMode::Enforce;
 
         for (step_num, analysis_step) in steps.iter().enumerate() {
+            // KT-1199 — what the previous step left, before anything else runs.
+            {
+                let writer = run_state_writer.clone();
+                let _ = db.with_conn(move |conn| { writer.sync(conn, false); Ok(()) }).await;
+            }
             // Check for cancellation before each step
             if audit_tracker.lock().map(|t| t.cancelled.contains(&project_id)).unwrap_or(false) {
                 // Persist the terminal status BEFORE acknowledging: the ack
@@ -1248,6 +1300,10 @@ pub async fn full_audit(
                     Err(e) => tracing::error!(
                         "mark_cancelled failed for {audit_run_id}: {e} — leaving the drop-guard armed"
                     ),
+                }
+                {
+                    let writer = run_state_writer.clone();
+                    let _ = db.with_conn(move |conn| { writer.sync(conn, false); Ok(()) }).await;
                 }
                 // Acknowledge the cancel: clear progress AND remove the flag
                 // so the waiting handler knows the worker has stopped and it's
@@ -3188,6 +3244,12 @@ pub async fn full_audit(
             return;
         }
 
+        // KT-1199 — the terminal state, with the documents as they now stand.
+        {
+            let writer = run_state_writer.clone();
+            let _ = db.with_conn(move |conn| { writer.sync(conn, true); Ok(()) }).await;
+        }
+
         // KT-1122 — who opened this validation: the operator whose audit
         // just created and linked it. Best-effort, never fails the run.
         if pending_validation.is_some() {
@@ -3863,6 +3925,7 @@ pub fn classify_docs_dir_for_cancel(
                 let name = e.file_name();
                 let name_str = name.to_string_lossy();
                 name_str != crate::core::kronn_state::KRONN_STATE_FILENAME
+                    && name_str != crate::core::audit_run_state::RUN_STATE_FILENAME
             })
         })
         .unwrap_or(false);

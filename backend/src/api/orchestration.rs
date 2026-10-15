@@ -7000,7 +7000,7 @@ fn toolchain_brief_section(toolchain: &ToolchainCapabilities) -> String {
          {rust}{frontend}{port}\
          Serveurs : un backend Kronn ou un Vite que tu démarres écoute sur `$KRONN_PORT` / \
          `$VITE_DEV_PORT` (déjà dans ton environnement ; Vite proxifie vers \
-         `$KRONN_BACKEND_URL`). Lance le binaire de ta lane (`$CARGO_TARGET_DIR/debug/kronn`). \
+         `$KRONN_VITE_BACKEND_URL`). Lance le binaire de ta lane (`$CARGO_TARGET_DIR/debug/kronn`). \
          N'écoute jamais sur 3140 ni 5173 : c'est le Kronn de l'hôte, et tu détournerais l'UI \
          et les autres workers.\n\
          Lance uniquement ce qui est ✅. Une validation ❌ ne s'affirme jamais : reporte-la \
@@ -7296,9 +7296,9 @@ fn worker_brief_markdown(
            ne décide jamais à la place de l'humain.\n\n"
             .to_string()
     };
-    // `disc_append` accepts an explicit `disc_id` (backend/scripts/disc-introspection-mcp.py:5063),
+    // `disc_append` accepts an explicit `disc_id` (backend/scripts/disc-introspection-mcp.py:5122),
     // so a joined CLI can target the real parent via `task_exec_status`'s `parent_discussion_id`.
-    // `disc_question_list` truly is bound-only (backend/scripts/disc-introspection-mcp.py:4278-4289).
+    // `disc_question_list` truly is bound-only (backend/scripts/disc-introspection-mcp.py:4298-4309).
     // Native/HTTP workers declare neither tool.
     let parent_milestones = if has_room_publication {
         "## Jalons parent factuels\n\

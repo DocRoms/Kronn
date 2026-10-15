@@ -44,13 +44,16 @@ pub(crate) fn route_human_turn(
 /// Historical/bulk appends are rejected before this helper via
 /// `is_live_peer_turn`. A no-agent room never starts a native process, even
 /// for a target that is not currently joined: its contract is “joined peers
-/// only”.
+/// only”. A workflow step reports to the room rather than handing it the
+/// turn, so its untargeted append never wakes the native principal (KT-1253);
+/// an explicit target still does.
 pub(crate) fn route_joined_peer_turn(
     is_live_peer_turn: bool,
     no_agent_room: bool,
     requested_target: Option<&AgentType>,
     target_is_eligible: bool,
     native_principal_is_eligible: bool,
+    author_is_workflow_step: bool,
 ) -> DispatchRoute {
     if !is_live_peer_turn || no_agent_room {
         return DispatchRoute::NoNativeResponder;
@@ -58,7 +61,9 @@ pub(crate) fn route_joined_peer_turn(
     match requested_target {
         Some(_) if target_is_eligible => DispatchRoute::JoinedPeers,
         Some(agent) => DispatchRoute::TargetedNative(agent.clone()),
-        None if native_principal_is_eligible => DispatchRoute::JoinedPeers,
+        None if native_principal_is_eligible || author_is_workflow_step => {
+            DispatchRoute::JoinedPeers
+        }
         None => DispatchRoute::NativePrincipal,
     }
 }
@@ -129,6 +134,49 @@ mod tests {
                     target.as_ref(),
                     target_live,
                     native_live,
+                    false,
+                ),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn a_workflow_step_reports_without_waking_the_native_principal() {
+        use DispatchRoute::*;
+
+        // (live turn, no-agent room, target, target live, native live, expected)
+        let cases = [
+            (true, false, None, false, false, JoinedPeers),
+            (true, false, None, false, true, JoinedPeers),
+            (
+                true,
+                false,
+                Some(AgentType::Codex),
+                false,
+                false,
+                TargetedNative(AgentType::Codex),
+            ),
+            (
+                true,
+                false,
+                Some(AgentType::Codex),
+                true,
+                false,
+                JoinedPeers,
+            ),
+            (true, true, None, false, false, NoNativeResponder),
+            (false, false, None, false, false, NoNativeResponder),
+        ];
+        for (live_turn, no_agent, target, target_live, native_live, expected) in cases {
+            assert_eq!(
+                route_joined_peer_turn(
+                    live_turn,
+                    no_agent,
+                    target.as_ref(),
+                    target_live,
+                    native_live,
+                    true,
                 ),
                 expected
             );

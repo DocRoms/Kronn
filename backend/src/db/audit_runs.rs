@@ -848,6 +848,77 @@ pub fn accept_step(
     Ok(true)
 }
 
+/// A step a run rebuilt from the repository state inherits (KT-1199).
+pub struct AdoptedStep {
+    pub index: u32,
+    pub label: String,
+    pub unchanged: bool,
+    /// Who accepted the step as it stands, for an accepted failure.
+    pub accepted_by: Option<String>,
+}
+
+/// KT-1199 — rebuild, on a clone, the local row of a run another machine
+/// committed: an `Interrupted` run under the repository's run id, the steps
+/// whose produced file still matches (finished rows, no cost: this machine
+/// did not run them) and the KT-1174 baseline as that run recorded it.
+/// All-or-nothing; refuses an id already used.
+#[allow(clippy::too_many_arguments)]
+pub fn adopt_repo_run(
+    conn: &Connection,
+    id: &str,
+    project_id: &str,
+    kind: &str,
+    started_at: DateTime<Utc>,
+    ended_at: DateTime<Utc>,
+    reason: &str,
+    steps: &[AdoptedStep],
+    baseline: Option<&StartOfRun>,
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "INSERT INTO audit_runs (id, project_id, kind, agent_type, started_at, ended_at,
+                                 duration_ms, status, report_path, last_completed_step)
+         VALUES (?1, ?2, ?3, 'repository', ?4, ?5, ?6, 'Interrupted', ?7, ?8)",
+        params![
+            id,
+            project_id,
+            kind,
+            started_at.to_rfc3339(),
+            ended_at.to_rfc3339(),
+            (ended_at - started_at).num_milliseconds().max(0),
+            format!("interrupted: {reason}"),
+            steps.len() as i64,
+        ],
+    )?;
+    let at = ended_at.to_rfc3339();
+    for step in steps {
+        match &step.accepted_by {
+            Some(by) => tx.execute(
+                "INSERT INTO audit_run_steps
+                    (audit_run_id, step_index, file_label, started_at, ended_at, cli_success,
+                     accepted_at, accepted_by, carried_from_run_id)
+                 VALUES (?1, ?2, ?3, ?4, ?4, 0, ?4, ?5, ?1)",
+                params![id, step.index as i64, step.label, at, by],
+            )?,
+            None => tx.execute(
+                "INSERT INTO audit_run_steps
+                    (audit_run_id, step_index, file_label, started_at, ended_at, cli_success,
+                     unchanged, carried_from_run_id)
+                 VALUES (?1, ?2, ?3, ?4, ?4, 1, ?5, ?1)",
+                params![id, step.index as i64, step.label, at, step.unchanged as i32],
+            )?,
+        };
+    }
+    if let Some(baseline) = baseline {
+        tx.execute(
+            "UPDATE audit_runs SET adr_baseline = ?2, adr_record_baseline = ?3 WHERE id = ?1",
+            params![id, baseline.decisions, baseline.records],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 /// KT-1134 — the project's run still recorded `Running`, if any: the run a
 /// cancel targets.
 pub fn running_run_id(conn: &Connection, project_id: &str) -> Result<Option<String>> {

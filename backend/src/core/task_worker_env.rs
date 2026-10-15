@@ -43,10 +43,16 @@ pub const PRIVATE_CARGO_HOME_ENV: &str = "KRONN_WORKER_PRIVATE_CARGO_HOME";
 pub const CARGO_BUILD_JOBS_ENV: &str = "CARGO_BUILD_JOBS";
 /// The port a Kronn backend started by the worker listens on (never the host's).
 pub const KRONN_PORT_ENV: &str = "KRONN_PORT";
-/// Where the worker's Vite proxies `/api`: its own backend, never the host's.
-pub const KRONN_BACKEND_URL_ENV: &str = "KRONN_BACKEND_URL";
+/// Where the worker's Vite proxies `/api`: its own backend. Never
+/// `KRONN_BACKEND_URL`, which is the address the worker's MCP bridge uses to
+/// reach the host Kronn.
+pub const VITE_BACKEND_URL_ENV: &str = "KRONN_VITE_BACKEND_URL";
 /// The worker's Vite (and Playwright) port.
 pub const VITE_DEV_PORT_ENV: &str = "VITE_DEV_PORT";
+/// Vite's cache: the linked node_modules is read-only to the worker.
+pub const VITE_CACHE_DIR_ENV: &str = "VITE_CACHE_DIR";
+/// Playwright's Chromium runs single-process: the sandbox denies its rendezvous.
+pub const E2E_CHROMIUM_SINGLE_PROCESS_ENV: &str = "KRONN_E2E_CHROMIUM_SINGLE_PROCESS";
 /// Lane ports live in `[LANE_PORT_BASE, LANE_PORT_BASE + 2 * LANE_PORT_SLOTS)`,
 /// away from the host's Kronn (3140) and Vite (5173).
 const LANE_PORT_BASE: u16 = 20_000;
@@ -187,10 +193,15 @@ impl WorkerLane {
         let (backend, vite) = self.ports();
         env.push((KRONN_PORT_ENV, OsString::from(backend.to_string())));
         env.push((
-            KRONN_BACKEND_URL_ENV,
+            VITE_BACKEND_URL_ENV,
             OsString::from(format!("http://127.0.0.1:{backend}")),
         ));
         env.push((VITE_DEV_PORT_ENV, OsString::from(vite.to_string())));
+        env.push((
+            VITE_CACHE_DIR_ENV,
+            self.data_dir.join("vite-cache").into_os_string(),
+        ));
+        env.push((E2E_CHROMIUM_SINGLE_PROCESS_ENV, OsString::from("1")));
         if let Some(home) = self.effective_cargo_home(provisioned) {
             env.push((CARGO_HOME_ENV, home.into_os_string()));
         }

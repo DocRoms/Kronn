@@ -720,6 +720,24 @@ pub(crate) async fn run_partial_pipeline(
                 "message": "This refresh runs single-agent: the cross-agent audit option applies to Full audits only.",
             }).to_string());
         }
+        // KT-1199 — the refresh is a run too: its state travels with the repository.
+        let run_state_writer = std::sync::Arc::new(super::run_state::RunStateWriter::new(
+            project_path.clone(),
+            audit_run_id.clone(),
+            super::run_state::RunStateMeta::capture(
+                &project_path,
+                super::validate::operator_pseudo(&state).await,
+                None,
+            ),
+            requested_steps
+                .iter()
+                .map(|&n| (n as u32, super::full::step_file_label(&chain[n - 1]).to_string()))
+                .collect(),
+        ));
+        {
+            let writer = run_state_writer.clone();
+            let _ = state.db.with_conn(move |conn| { writer.sync(conn, false); Ok(()) }).await;
+        }
         let td_decisions_before = crate::core::td_decisions::snapshot(&docs_root.dir(&project_path));
 
         // Same-inputs parity with the Full pipeline (Codex lot-3 #4/#3):
@@ -1363,8 +1381,9 @@ pub(crate) async fn run_partial_pipeline(
                         let recorded_usage = step_usage;
                         let recorded_total = run_tokens.total();
                         let step_unchanged = outcome == "unchanged";
+                        let writer = run_state_writer.clone();
                         if let Err(e) = state.db.with_conn(move |conn| {
-                            crate::db::audit_runs::finalize_audit_step_with_outcome(
+                            let finalized = crate::db::audit_runs::finalize_audit_step_with_outcome(
                                 conn,
                                 &run_id,
                                 step as u32,
@@ -1376,7 +1395,9 @@ pub(crate) async fn run_partial_pipeline(
                                 None,
                                 false,
                                 step_unchanged,
-                            )
+                            );
+                            writer.sync(conn, false);
+                            finalized
                         }).await {
                             tracing::error!("Failed to finalize partial audit step {step} for run {audit_run_id}: {e}");
                         }
@@ -1404,8 +1425,9 @@ pub(crate) async fn run_partial_pipeline(
                         let run_id = audit_run_id.clone();
                         let duration_ms = step_started_at.elapsed().as_millis() as u64;
                         let recorded_total = run_tokens.total();
+                        let writer = run_state_writer.clone();
                         if let Err(e) = state.db.with_conn(move |conn| {
-                            crate::db::audit_runs::finalize_audit_step(
+                            let finalized = crate::db::audit_runs::finalize_audit_step(
                                 conn,
                                 &run_id,
                                 step as u32,
@@ -1416,7 +1438,9 @@ pub(crate) async fn run_partial_pipeline(
                                 false,
                                 None,
                                 false,
-                            )
+                            );
+                            writer.sync(conn, false);
+                            finalized
                         }).await {
                             tracing::error!("Failed to finalize partial audit step {step} for run {audit_run_id}: {e}");
                         }
@@ -1665,6 +1689,12 @@ pub(crate) async fn run_partial_pipeline(
                 }).to_string(),
             );
             return;
+        }
+
+        // KT-1199 — the terminal state, with the documents as they now stand.
+        {
+            let writer = run_state_writer.clone();
+            let _ = state.db.with_conn(move |conn| { writer.sync(conn, true); Ok(()) }).await;
         }
 
         // KT-1122 — who opened this partial run's validation. Best-effort:
