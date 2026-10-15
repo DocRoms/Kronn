@@ -115,6 +115,8 @@ export function finishBootScreen(): void {
   finished = true;
   if (settleTimer) clearTimeout(settleTimer);
   for (const listener of [...finishListeners]) listener();
+  // A settle timer can outlive its document (a torn-down test environment).
+  if (typeof document === 'undefined') return;
   const root = overlay();
   const html = document.documentElement;
   const cleanUp = () => {

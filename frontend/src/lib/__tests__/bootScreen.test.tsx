@@ -8,6 +8,7 @@ import {
   bootScreenActive,
   finishBootScreen,
   holdBootScreen,
+  onBootScreenFinished,
   resetBootScreenForTests,
   setBootPhase,
 } from '../bootScreen';
@@ -134,5 +135,18 @@ describe('BootHold', () => {
     act(() => settle());
     act(() => { vi.advanceTimersByTime(150); });
     expect(bootScreenActive()).toBe(false);
+  });
+
+  it('a settle timer that outlives its document finishes without throwing', () => {
+    const finished = vi.fn();
+    onBootScreenFinished(finished);
+    armBootScreen();
+    vi.stubGlobal('document', undefined);
+    try {
+      expect(() => vi.advanceTimersByTime(200)).not.toThrow();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(finished).toHaveBeenCalledOnce();
   });
 });
