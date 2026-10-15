@@ -216,6 +216,14 @@ fn a_lane_serves_on_its_own_ports_never_the_hosts() {
     );
     assert_ne!(backend, vite);
     assert_eq!(lane.ports(), (backend, vite), "stable for a lane");
+    // Vite caches under the lane (node_modules is a read-only link) and the
+    // e2e Chromium runs in the mode the sandbox allows.
+    let cache = env_value(&env, VITE_CACHE_DIR_ENV).expect("a lane Vite cache");
+    assert!(std::path::Path::new(&cache).starts_with(&lane.data_dir));
+    assert_eq!(
+        env_value(&env, E2E_CHROMIUM_SINGLE_PROCESS_ENV),
+        Some(OsString::from("1"))
+    );
 
     // Across many lanes: always in the lane range, and lanes rarely collide.
     let mut seen = std::collections::HashSet::new();
