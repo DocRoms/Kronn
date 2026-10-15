@@ -28,6 +28,20 @@ pub const CARGO_TARGET_DIR_ENV: &str = "CARGO_TARGET_DIR";
 pub const CARGO_NET_OFFLINE_ENV: &str = "CARGO_NET_OFFLINE";
 /// The lane's private Cargo home: lock files land there, the registry is linked.
 pub const CARGO_HOME_ENV: &str = "CARGO_HOME";
+/// The port a Kronn backend started by the worker listens on (never the host's).
+pub const KRONN_PORT_ENV: &str = "KRONN_PORT";
+/// Where the worker's Vite proxies `/api`: its own backend, never the host's.
+pub const KRONN_BACKEND_URL_ENV: &str = "KRONN_BACKEND_URL";
+/// The worker's Vite (and Playwright) port.
+pub const VITE_DEV_PORT_ENV: &str = "VITE_DEV_PORT";
+/// Vite's cache: the linked node_modules is read-only to the worker.
+pub const VITE_CACHE_DIR_ENV: &str = "VITE_CACHE_DIR";
+/// Playwright's Chromium runs single-process: the sandbox denies its rendezvous.
+pub const E2E_CHROMIUM_SINGLE_PROCESS_ENV: &str = "KRONN_E2E_CHROMIUM_SINGLE_PROCESS";
+/// Lane ports live in `[LANE_PORT_BASE, LANE_PORT_BASE + 2 * LANE_PORT_SLOTS)`,
+/// away from the host's Kronn (3140) and Vite (5173).
+const LANE_PORT_BASE: u16 = 20_000;
+const LANE_PORT_SLOTS: u16 = 15_000;
 
 /// `task_execution_events.action` under which the capability record is journalled.
 pub const TOOLCHAIN_EVENT_ACTION: &str = "toolchain_capabilities";
@@ -156,10 +170,37 @@ impl WorkerLane {
             ),
             (CARGO_NET_OFFLINE_ENV, OsString::from("true")),
         ];
+        let (backend, vite) = self.ports();
+        env.push((KRONN_PORT_ENV, OsString::from(backend.to_string())));
+        env.push((
+            KRONN_BACKEND_URL_ENV,
+            OsString::from(format!("http://127.0.0.1:{backend}")),
+        ));
+        env.push((VITE_DEV_PORT_ENV, OsString::from(vite.to_string())));
+        env.push((
+            VITE_CACHE_DIR_ENV,
+            self.data_dir.join("vite-cache").into_os_string(),
+        ));
+        env.push((E2E_CHROMIUM_SINGLE_PROCESS_ENV, OsString::from("1")));
         if provisioned.cargo_home_ready {
             env.push((CARGO_HOME_ENV, self.cargo_home.clone().into_os_string()));
         }
         env
+    }
+
+    /// The lane's own backend and Vite ports, stable for its name, so whatever
+    /// the worker serves never takes the host Kronn's port.
+    pub fn ports(&self) -> (u16, u16) {
+        // FNV-1a: stable across processes, unlike the std hasher.
+        let hash = self
+            .name
+            .bytes()
+            .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+                (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+            });
+        let slot = (hash % u64::from(LANE_PORT_SLOTS)) as u16;
+        let backend = LANE_PORT_BASE + 2 * slot;
+        (backend, backend + 1)
     }
 
     fn frontend_dir(&self) -> PathBuf {

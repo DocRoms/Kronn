@@ -76,7 +76,13 @@ export default defineConfig({
   projects: [
     {
       name: 'chromium',
-      use: { ...devices['Desktop Chrome'] },
+      use: {
+        ...devices['Desktop Chrome'],
+        // A task worker's sandbox denies Chromium's multi-process rendezvous.
+        ...(process.env.KRONN_E2E_CHROMIUM_SINGLE_PROCESS === '1'
+          ? { launchOptions: { args: ['--single-process', '--no-zygote'] } }
+          : {}),
+      },
     },
   ],
   // Auto-spawn Vite. Reuses an existing instance when the configured port is

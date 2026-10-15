@@ -11,6 +11,8 @@ const backendAgent = new URL(backendTarget).protocol === 'https:'
   : new HttpAgent({ keepAlive: true });
 
 export default defineConfig({
+  // A task worker's node_modules is a read-only link: its lane gives a writable cache.
+  ...(process.env.VITE_CACHE_DIR ? { cacheDir: process.env.VITE_CACHE_DIR } : {}),
   plugins: [react(), framePolicyPlugin(backendTarget)],
   worker: {
     format: 'es',

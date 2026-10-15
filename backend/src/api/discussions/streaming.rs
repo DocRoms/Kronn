@@ -915,6 +915,24 @@ pub(crate) fn broadcast_batch_progress(state: &AppState, disc_id: &str, updated_
     }
 }
 
+/// What one stream-json line says about the run's progress (the CLI
+/// transport's counterpart of the ACP host's events).
+fn stream_json_progress(
+    run_progress: &crate::agents::run_progress::RunProgress,
+    line: &str,
+    parsed: &runner::StreamJsonEvent,
+) {
+    match parsed {
+        runner::StreamJsonEvent::Text(_) => run_progress.text(),
+        runner::StreamJsonEvent::ToolStart(name) => run_progress.tool(
+            &crate::agents::activity::ToolActivityUpdate::named(None, name),
+        ),
+        runner::StreamJsonEvent::SessionId(_) => run_progress.phase(AgentRunPhase::WaitingModel),
+        _ if crate::agents::activity::is_reasoning_frame(line) => run_progress.thought(),
+        _ => run_progress.beat(),
+    }
+}
+
 /// KT-1108 — a run's live progress, published on the local WebSocket as
 /// coalesced frames until its stop, and readable meanwhile through the
 /// discussion's `run-progress` snapshot. Never relayed to a peer.
@@ -935,15 +953,302 @@ fn start_run_progress(
         started_at: Utc::now(),
     };
     let ws = state.ws_broadcast.clone();
+    let liveness = dispatch_id.map(|id| DispatchLiveness::new(state.db.clone(), id));
     tokio::spawn(crate::agents::run_progress::publish_registered(
         state.live_runs.clone(),
         identity,
         progress.clone(),
         move |frame| {
+            if let (Some(liveness), crate::models::WsMessage::AgentRunProgress { progress, .. }) =
+                (liveness.as_ref(), &frame)
+            {
+                liveness.record(progress.phase == crate::models::AgentRunPhase::Tool);
+            }
             let _ = ws.send(frame);
         },
     ));
     progress
+}
+
+/// KT-1247 — every transport's live progress (ACP, stream-json, HTTP) reaches
+/// the dispatch row, so a task worker busy in its own tools is never taken for
+/// silent. A phase change is written at once, a sign of life at most every
+/// [`DISPATCH_LIVENESS_GAP`].
+const DISPATCH_LIVENESS_GAP: std::time::Duration = std::time::Duration::from_secs(30);
+
+struct DispatchLiveness {
+    db: std::sync::Arc<crate::db::Database>,
+    dispatch_id: String,
+    last: std::sync::Mutex<Option<(std::time::Instant, bool)>>,
+}
+
+impl DispatchLiveness {
+    fn new(db: std::sync::Arc<crate::db::Database>, dispatch_id: &str) -> Self {
+        Self {
+            db,
+            dispatch_id: dispatch_id.to_owned(),
+            last: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn record(&self, in_tool: bool) {
+        let now = std::time::Instant::now();
+        let due = {
+            let Ok(mut last) = self.last.lock() else {
+                return;
+            };
+            let due = match *last {
+                Some((at, was_tool)) => was_tool != in_tool || now - at >= DISPATCH_LIVENESS_GAP,
+                None => true,
+            };
+            if due {
+                *last = Some((now, in_tool));
+            }
+            due
+        };
+        if !due {
+            return;
+        }
+        let (db, id) = (self.db.clone(), self.dispatch_id.clone());
+        tokio::spawn(async move {
+            let phase = if in_tool {
+                "tool_activity"
+            } else {
+                "upstream_wait"
+            };
+            if let Err(error) = db
+                .with_conn(move |conn| {
+                    crate::db::agent_dispatch::mark_progress(conn, &id, phase, Some("run_progress"))
+                        .map(|_| ())
+                })
+                .await
+            {
+                tracing::warn!("Unable to persist run liveness: {error}");
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+mod dispatch_liveness_tests {
+    use super::DispatchLiveness;
+
+    async fn seed(db: &crate::db::Database) {
+        db.with_conn(|conn| {
+            conn.execute_batch(
+                "INSERT INTO discussions (id, title, created_at, updated_at) \
+                     VALUES ('d-live', 'live', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+                 INSERT INTO messages (id, discussion_id, role, content, timestamp, sort_order) \
+                     VALUES ('m-live', 'd-live', 'User', 'go', '2026-01-01T00:00:00Z', 1);
+                 INSERT INTO agent_dispatch_jobs (id, discussion_id, trigger_message_id, \
+                     trigger_sort_order, dedupe_key, chain_prompt_ids_json, status, available_at, \
+                     created_at, updated_at) VALUES ('job-live', 'd-live', 'm-live', 1, \
+                     'live', '[]', 'Running', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', \
+                     '2026-01-01T00:00:00Z');",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    async fn progress(db: &crate::db::Database) -> (Option<String>, Option<String>) {
+        db.with_conn(|conn| {
+            Ok(conn.query_row(
+                "SELECT progress_phase, last_progress_at FROM agent_dispatch_jobs WHERE id = 'job-live'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?)
+        })
+        .await
+        .unwrap()
+    }
+
+    /// End to end: a task worker whose silent-worker deadline has passed, whose
+    /// transport reports a tool call only to the run's progress (as the Claude
+    /// ACP adapter does), is no longer due for interruption.
+    #[tokio::test]
+    async fn a_worker_tool_call_reported_only_to_run_progress_keeps_the_execution_alive() {
+        use crate::models::{
+            AgentType, ExecutionTimeoutKind, LaunchSingleTaskInput, MessageTargetKind,
+            OrchestrationActor, PlanningActorKind, TaskExecutionStatus,
+        };
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let config = std::sync::Arc::new(tokio::sync::RwLock::new(
+            crate::core::config::default_config(),
+        ));
+        let state =
+            crate::AppState::new_defaults(config, db.clone(), crate::DEFAULT_MAX_CONCURRENT_AGENTS);
+        let execution_id = db
+            .with_conn(|conn| {
+                let actor = OrchestrationActor {
+                    kind: PlanningActorKind::Backend,
+                    id: Some("liveness-test".into()),
+                    session_id: None,
+                    source_message_id: None,
+                };
+                let now = "2026-01-01T00:00:00Z";
+                conn.execute(
+                    "INSERT INTO discussions (id, title, created_at, updated_at) \
+                     VALUES ('d-parent', 'Parent', ?1, ?1), ('d-worker', 'Worker', ?1, ?1)",
+                    [now],
+                )?;
+                conn.execute(
+                    "INSERT INTO planning_tasks (id, task_number, title, created_at, updated_at) \
+                     VALUES ('t-live', 7, 'Live', ?1, ?1)",
+                    [now],
+                )?;
+                let mut input = LaunchSingleTaskInput::new("t-live", "d-parent");
+                input.worker_target_kind = Some(MessageTargetKind::Agent);
+                input.worker_agent_type = Some(crate::db::orchestration::agent_type_to_db(
+                    &AgentType::ClaudeCode,
+                ));
+                let execution =
+                    crate::db::orchestration::launch_single_task(conn, &input, &actor)?.execution;
+                for to in [TaskExecutionStatus::Provisioning, TaskExecutionStatus::Working] {
+                    crate::db::orchestration::transition_execution(
+                        conn,
+                        &execution.id,
+                        to,
+                        &actor,
+                        serde_json::json!({}),
+                    )?;
+                }
+                crate::db::orchestration::set_execution_sub_discussion(
+                    conn,
+                    &execution.id,
+                    "d-worker",
+                )?;
+                conn.execute(
+                    "INSERT INTO messages (id, discussion_id, role, content, timestamp, sort_order) \
+                     VALUES ('m-live', 'd-worker', 'User', 'work', ?1, 1)",
+                    [now],
+                )?;
+                conn.execute(
+                    "INSERT INTO agent_dispatch_jobs (id, discussion_id, trigger_message_id, \
+                         trigger_sort_order, dedupe_key, chain_prompt_ids_json, status, \
+                         available_at, created_at, updated_at) VALUES ('job-e2e', 'd-worker', \
+                         'm-live', 1, 'e2e', '[]', 'Running', ?1, ?1, ?1)",
+                    [now],
+                )?;
+                crate::db::orchestration::attach_execution_dispatch(conn, &execution.id, "job-e2e")?;
+                let past = (chrono::Utc::now() - chrono::Duration::minutes(30)).to_rfc3339();
+                conn.execute(
+                    "UPDATE task_execution_recovery SET activity_deadline_at = ?2 \
+                     WHERE task_execution_id = ?1",
+                    rusqlite::params![execution.id, past],
+                )?;
+                Ok(execution.id)
+            })
+            .await
+            .unwrap();
+        let due = || {
+            let db = db.clone();
+            let id = execution_id.clone();
+            async move {
+                db.with_conn(move |conn| {
+                    Ok(crate::db::orchestration::expired_execution_timeouts(
+                        conn,
+                        chrono::Utc::now(),
+                    )?
+                    .into_iter()
+                    .any(|(exec, kind)| exec == id && kind == ExecutionTimeoutKind::Activity))
+                })
+                .await
+                .unwrap()
+            }
+        };
+        assert!(
+            due().await,
+            "precondition: the worker is due for interruption"
+        );
+
+        let progress = super::start_run_progress(
+            &state,
+            "d-worker",
+            Some("job-e2e"),
+            Some("m-live"),
+            &AgentType::ClaudeCode,
+        );
+        progress.tool(&crate::agents::activity::ToolActivityUpdate::named(
+            Some("call-1".into()),
+            "Bash",
+        ));
+        let mut alive = false;
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if !due().await {
+                alive = true;
+                break;
+            }
+        }
+        progress.stop(crate::models::AgentRunStop::Finished);
+        assert!(
+            alive,
+            "a tool call seen by the run's progress must keep the worker alive"
+        );
+        assert_eq!(
+            progress_of(&db, "job-e2e").await.0.as_deref(),
+            Some("tool_activity")
+        );
+    }
+
+    /// The CLI stream-json transport reports a tool call to the run's progress,
+    /// so a Claude worker on that transport reaches the dispatch row too.
+    #[test]
+    fn a_stream_json_tool_use_line_puts_the_run_in_its_tool_phase() {
+        let progress = crate::agents::run_progress::RunProgress::new();
+        let line = r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}}}"#;
+        let parsed = crate::agents::runner::parse_claude_stream_line(line);
+        assert!(
+            matches!(parsed, crate::agents::runner::StreamJsonEvent::ToolStart(_)),
+            "fixture must be a tool start: {parsed:?}"
+        );
+        super::stream_json_progress(&progress, line, &parsed);
+        let snapshot = progress.snapshot();
+        assert_eq!(snapshot.phase, crate::models::AgentRunPhase::Tool);
+        assert_eq!(snapshot.tool_calls, 1);
+    }
+
+    async fn progress_of(db: &crate::db::Database, id: &str) -> (Option<String>, Option<String>) {
+        let id = id.to_owned();
+        db.with_conn(move |conn| {
+            Ok(conn.query_row(
+                "SELECT progress_phase, last_progress_at FROM agent_dispatch_jobs WHERE id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?)
+        })
+        .await
+        .unwrap()
+    }
+
+    /// A worker busy in its own tools (ACP reports them only to the run's
+    /// progress) still reaches the dispatch row the silent-worker clock reads.
+    #[tokio::test]
+    async fn run_progress_reaches_the_dispatch_row_throttled_but_never_late_on_a_phase_change() {
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+        seed(&db).await;
+        let liveness = DispatchLiveness::new(db.clone(), "job-live");
+
+        liveness.record(true);
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let (phase, first_at) = progress(&db).await;
+        assert_eq!(phase.as_deref(), Some("tool_activity"));
+        assert!(first_at.is_some());
+
+        // The same phase again within the gap writes nothing new.
+        liveness.record(true);
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(progress(&db).await.1, first_at);
+
+        // A phase change is written at once.
+        liveness.record(false);
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let (phase, at) = progress(&db).await;
+        assert_eq!(phase.as_deref(), Some("upstream_wait"));
+        assert_ne!(at, first_at);
+    }
 }
 
 /// Shared SSE stream builder.
@@ -4429,19 +4734,7 @@ pub(super) async fn make_agent_stream_inner(
                                 .map(|trace| trace.marker()),
                         );
                         let parsed = runner::parse_claude_stream_line(&line);
-                        match &parsed {
-                            runner::StreamJsonEvent::Text(_) => run_progress.text(),
-                            runner::StreamJsonEvent::ToolStart(name) => run_progress.tool(
-                                &crate::agents::activity::ToolActivityUpdate::named(None, name),
-                            ),
-                            runner::StreamJsonEvent::SessionId(_) => {
-                                run_progress.phase(AgentRunPhase::WaitingModel)
-                            }
-                            _ if crate::agents::activity::is_reasoning_frame(&line) => {
-                                run_progress.thought()
-                            }
-                            _ => run_progress.beat(),
-                        }
+                        stream_json_progress(&run_progress, &line, &parsed);
                         match parsed {
                             runner::StreamJsonEvent::Text(text) => {
                                 // Loop-repeat detection — see constants above.
