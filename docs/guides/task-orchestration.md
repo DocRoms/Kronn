@@ -216,6 +216,13 @@ it: a worker's own session, an HTTP agent and an anonymous agent are refused.
   (`completed: true` and non-empty `evidence`). A bare tick is refused, as is
   ticking it through a `definition_of_done` replace, and downgrading it to a
   worker check in the same write that ticks it. The task closes on the last pending live check of an integrated execution.
+- Unticking a live check (by `task_update_dod` or an array replace, principal or
+  human only) clears its evidence, and a `done` task goes back to `in_progress`:
+  the proof is owed again and the stale one cannot re-tick it.
+- A discussion export carries each item's `verification` and `evidence`; the
+  import restores them as they were, without a principal session (its own
+  trusted door, never reachable from HTTP or MCP). A ticked live check whose
+  evidence is missing or unusable comes back pending, with a warning.
 
 ### What the accepted report says, and whose word it is
 

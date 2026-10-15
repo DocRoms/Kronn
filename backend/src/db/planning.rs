@@ -542,11 +542,39 @@ fn ensure_live_check_principal(
     Ok(())
 }
 
+/// KT-1254 — a task that was closed while a live check was ticked is open again
+/// once that check is unticked: the proof is owed once more.
+fn reopen_for_unticked_live_check(
+    conn: &Connection,
+    task_id: &str,
+    actor: &PlanningActor,
+) -> Result<()> {
+    let reopened = conn.execute(
+        "UPDATE planning_tasks SET status = 'in_progress', updated_at = ?2
+          WHERE id = ?1 AND status = 'done'",
+        params![task_id, Utc::now().to_rfc3339()],
+    )?;
+    if reopened > 0 {
+        insert_event(
+            conn,
+            task_id,
+            "status",
+            actor,
+            serde_json::json!({ "status": "in_progress", "via": "live_check_unticked" }),
+        )?;
+    }
+    Ok(())
+}
+
+/// `import_evidence` is `Some` only for a trusted discussion import: the live
+/// checks are then restored as they were exported (declared, and ticked with
+/// their evidence at the same position), without a principal session.
 fn replace_dod(
     conn: &Connection,
     task_id: &str,
     items: &[CreatePlanningDodItem],
     actor: &PlanningActor,
+    import_evidence: Option<&[Option<String>]>,
 ) -> Result<()> {
     let existing_ids = load_string_list(
         conn,
@@ -583,6 +611,15 @@ fn replace_dod(
             if mode != stored_mode {
                 ensure_live_check_principal(conn, Some(task_id), actor, false)?;
             }
+            let unticked_live_check = stored_mode == PlanningDodVerification::PostIntegration
+                && mode == PlanningDodVerification::PostIntegration
+                && stored_completed
+                && !item.completed;
+            if unticked_live_check {
+                // Same gate as `update_dod_item`: dropping a proof is the
+                // principal's call, and the proof goes with it.
+                ensure_live_check_principal(conn, Some(task_id), actor, true)?;
+            }
             if mode == PlanningDodVerification::PostIntegration {
                 // Ticked only through `update_dod_item`, with evidence: an
                 // array replace may keep a tick that carries evidence, never
@@ -602,10 +639,16 @@ fn replace_dod(
                      and ticked in the same write"
                 );
             }
+            // Evidence lives only on a ticked live check: an untick or a
+            // downgrade drops it, so a stale proof can never re-tick the item.
+            let kept_evidence = (mode == PlanningDodVerification::PostIntegration
+                && item.completed)
+                .then_some(stored_evidence)
+                .flatten();
             conn.execute(
                 "UPDATE planning_task_dod_items
                  SET sentence = ?3, completed = ?4, position = ?5, updated_at = ?6,
-                     verification = ?7
+                     verification = ?7, evidence = ?8
                  WHERE id = ?1 AND task_id = ?2",
                 params![
                     existing_id,
@@ -615,20 +658,45 @@ fn replace_dod(
                     position as i64,
                     now,
                     mode.as_str(),
+                    kept_evidence,
                 ],
             )?;
+            if unticked_live_check {
+                reopen_for_unticked_live_check(conn, task_id, actor)?;
+            }
         } else {
             let mode = item.verification.unwrap_or_default();
+            let mut evidence: Option<String> = None;
             if mode == PlanningDodVerification::PostIntegration {
-                ensure_live_check_principal(conn, Some(task_id), actor, false)?;
-                if item.completed {
-                    bail!("A post-integration DoD item cannot be ticked without evidence");
+                match import_evidence {
+                    None => {
+                        ensure_live_check_principal(conn, Some(task_id), actor, false)?;
+                        if item.completed {
+                            bail!("A post-integration DoD item cannot be ticked without evidence");
+                        }
+                    }
+                    Some(imported) => {
+                        if item.completed {
+                            evidence = imported
+                                .get(position)
+                                .cloned()
+                                .flatten()
+                                .map(|evidence| evidence.trim().to_string())
+                                .filter(|evidence| !evidence.is_empty());
+                            if evidence.is_none() {
+                                bail!(
+                                    "A post-integration DoD item cannot be ticked without evidence"
+                                );
+                            }
+                        }
+                    }
                 }
             }
             conn.execute(
                 "INSERT INTO planning_task_dod_items
-                 (id, task_id, sentence, completed, position, created_at, updated_at, verification)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7)",
+                 (id, task_id, sentence, completed, position, created_at, updated_at,
+                  verification, evidence)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8)",
                 params![
                     Uuid::new_v4().to_string(),
                     task_id,
@@ -637,6 +705,7 @@ fn replace_dod(
                     position as i64,
                     now,
                     mode.as_str(),
+                    evidence,
                 ],
             )?;
         }
@@ -1284,13 +1353,34 @@ pub fn create_task(
     conn: &Connection,
     request: &CreatePlanningTaskRequest,
 ) -> Result<PlanningTaskDetail> {
+    create_task_inner(conn, request, None)
+}
+
+/// KT-1254 — the discussion import's own door: it restores live checks as they
+/// were exported, without a principal session. `evidence` is the exported
+/// evidence by DoD position. Only the import code calls this; HTTP and MCP go
+/// through `create_task`, which has no such parameter.
+pub fn import_task(
+    conn: &Connection,
+    request: &CreatePlanningTaskRequest,
+    evidence: &[Option<String>],
+) -> Result<PlanningTaskDetail> {
+    create_task_inner(conn, request, Some(evidence))
+}
+
+fn create_task_inner(
+    conn: &Connection,
+    request: &CreatePlanningTaskRequest,
+    import_evidence: Option<&[Option<String>]>,
+) -> Result<PlanningTaskDetail> {
     validate_title(request.title.trim())?;
     validate_actor(&request.actor)?;
     validate_dod(&request.definition_of_done)?;
-    if request
-        .definition_of_done
-        .iter()
-        .any(|item| item.verification == Some(PlanningDodVerification::PostIntegration))
+    if import_evidence.is_none()
+        && request
+            .definition_of_done
+            .iter()
+            .any(|item| item.verification == Some(PlanningDodVerification::PostIntegration))
     {
         // A task being created has no execution, so only a human may declare.
         ensure_live_check_principal(conn, None, &request.actor, false)?;
@@ -1386,6 +1476,7 @@ pub fn create_task(
         &id,
         &request.definition_of_done,
         &request.actor,
+        import_evidence,
     )?;
     replace_links(&transaction, &id, &request.links)?;
     insert_event(
@@ -1768,7 +1859,7 @@ pub fn update_task(
         replace_tags(&transaction, task_id, tags)?;
     }
     if let Some(items) = request.definition_of_done.as_ref() {
-        replace_dod(&transaction, task_id, items, &request.actor)?;
+        replace_dod(&transaction, task_id, items, &request.actor, None)?;
     }
     if let Some(links) = request.links.as_ref() {
         replace_links(&transaction, task_id, links)?;
@@ -2070,6 +2161,9 @@ pub fn update_dod_item(
             "evidence": stored_evidence,
         }),
     )?;
+    if live_check && !request.completed {
+        reopen_for_unticked_live_check(&transaction, &task_id, &request.actor)?;
+    }
     if live_check && request.completed {
         // The last pending live check of an INTEGRATED task closes it: the
         // execution already landed, only this proof was owed.
@@ -3656,6 +3750,70 @@ mod tests {
         drop_all.actor = PlanningActor::default();
         let emptied = update_task(&connection, &task.summary.id, &drop_all).unwrap();
         assert!(emptied.summary.live_checks.is_empty());
+    }
+
+    /// KT-1254 — unticking a live check through an array replace drops its
+    /// evidence and reopens a closed task; the stale proof cannot re-tick it.
+    #[test]
+    fn unticking_a_live_check_clears_its_evidence_and_reopens_the_task() {
+        let connection = connection();
+        let mut create = request("Untick");
+        create.status = PlanningTaskStatus::InProgress;
+        create.definition_of_done = vec![CreatePlanningDodItem {
+            id: None,
+            sentence: "Replayed on a real framing".into(),
+            completed: false,
+            verification: Some(PlanningDodVerification::PostIntegration),
+        }];
+        let task = create_task(&connection, &create).unwrap();
+        let live_id = task.definition_of_done[0].id.clone();
+        update_dod_item(
+            &connection,
+            &task.summary.id,
+            &live_id,
+            &UpdatePlanningDodItemRequest {
+                completed: true,
+                actor: PlanningActor::default(),
+                evidence: Some("replayed: ok".into()),
+            },
+        )
+        .unwrap();
+        let mut close = update_request();
+        close.status = Some(PlanningTaskStatus::Done);
+        let closed = update_task(&connection, &task.summary.id, &close).unwrap();
+        assert_eq!(closed.summary.status, PlanningTaskStatus::Done);
+
+        let replacement = |completed: bool| {
+            let mut replace = update_request();
+            replace.definition_of_done = Some(vec![CreatePlanningDodItem {
+                id: Some(live_id.clone()),
+                sentence: "Replayed on a real framing".into(),
+                completed,
+                verification: None,
+            }]);
+            replace
+        };
+        // An agent with no principal session cannot drop the proof.
+        let mut by_agent = replacement(false);
+        by_agent.actor = PlanningActor {
+            kind: PlanningActorKind::Agent,
+            id: Some("ClaudeCode".into()),
+            session_id: Some("sess-x".into()),
+            source_message_id: None,
+        };
+        assert!(update_task(&connection, &task.summary.id, &by_agent).is_err());
+        let untouched = get_task(&connection, &task.summary.id).unwrap().unwrap();
+        assert!(untouched.definition_of_done[0].completed);
+        assert_eq!(untouched.summary.status, PlanningTaskStatus::Done);
+
+        let unticked = update_task(&connection, &task.summary.id, &replacement(false)).unwrap();
+        assert!(!unticked.definition_of_done[0].completed);
+        assert_eq!(unticked.definition_of_done[0].evidence, None);
+        assert_eq!(unticked.summary.status, PlanningTaskStatus::InProgress);
+        assert_eq!(unticked.summary.live_checks.len(), 1);
+
+        // The proof went with the tick: re-ticking by array replace is refused.
+        assert!(update_task(&connection, &task.summary.id, &replacement(true)).is_err());
     }
 
     // ── KT-30A — compact bounded plan projection ────────────────────────────
