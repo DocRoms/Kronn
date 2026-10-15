@@ -675,9 +675,23 @@ jobs:
     # 0.6.0 "Create button silent", "JsonData ghost agent", "Quick APIs
     # tab buttons leak" were all UI-only bugs that pure-JS tests can't
     # see).
+    #
+    # The suite runs in three shards (KT-20). One job ran the 202 tests in
+    # 12 min 48 s on one worker (run 38747093853): `workers: 1` in
+    # frontend/playwright.config.ts is deliberate, three workers against the
+    # single-process backend hang it. Each shard is its own runner with its
+    # own backend, so the single-worker rule holds inside a shard while the
+    # shards run side by side. Playwright deals whole spec files to shards
+    # (file-level granularity), 68 / 68 / 66 tests at the time of writing.
+    # A push to main only builds the backend and saves the cache: one shard
+    # is enough for that.
     needs: require-ci-label
     if: needs.require-ci-label.outputs.run == 'true'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(github.event_name == 'push' && '[1]' || '[1, 2, 3]') }}
     # ── Playwright official container ─────────────────────────────────
     # Chromium + chromium_headless_shell + ffmpeg + all OS deps are BAKED
     # INTO this image. That eliminates the `pnpm exec playwright install`
@@ -695,8 +709,10 @@ jobs:
     container:
       image: mcr.microsoft.com/playwright:v1.62.1-noble
       options: --user root
-    # A cold release build took ~17 min and the suite ~8-12 min on the runner:
-    # 30 min cancelled a green suite partway through.
+    # A cold release build took ~17 min and the whole suite ~8-12 min on the
+    # runner: 30 min cancelled a green suite partway through. A shard runs a
+    # third of the suite after the same build, so 45 min keeps a cold build
+    # safe.
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -835,10 +851,17 @@ jobs:
         # runner `~/Repositories` is absent — point `KRONN_REPOS_DIR` at
         # a tmp path we create inline. `RUNNER_TEMP` is auto-cleaned by
         # the runner after the job, no manual cleanup needed.
+        #
+        # `pnpm test:e2e` is `ensure-browser.mjs && playwright test`; the
+        # guard exits at once under CI (browsers are baked in), so call the
+        # CLI directly rather than rely on pnpm forwarding `--shard`. The
+        # `github` reporter ends each shard's log with its own count: the
+        # three counts must add up to the whole suite (`playwright test
+        # --list` prints it).
         run: |
           mkdir -p "$RUNNER_TEMP/kronn-repos"
           export KRONN_REPOS_DIR="$RUNNER_TEMP/kronn-repos"
-          pnpm test:e2e
+          pnpm exec playwright test --shard=${{ matrix.shard }}/3
         env:
           CI: "true"
 
@@ -849,11 +872,13 @@ jobs:
             kill "$(cat /tmp/backend.pid)" 2>/dev/null || true
           fi
 
+      # Artifact names carry the shard number: upload-artifact@v4 refuses a
+      # second upload under a name that already exists in the run.
       - name: Upload Playwright report on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-report
+          name: playwright-report-${{ matrix.shard }}
           path: frontend/playwright-report/
           retention-days: 7
 
@@ -861,7 +886,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-test-results
+          name: playwright-test-results-${{ matrix.shard }}
           path: frontend/test-results/
           retention-days: 7
 
@@ -869,7 +894,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: backend-logs
+          name: backend-logs-${{ matrix.shard }}
           path: /tmp/backend.log
           retention-days: 7
 
