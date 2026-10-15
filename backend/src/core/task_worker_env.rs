@@ -40,6 +40,16 @@ pub const PRIVATE_CARGO_HOME_ENV: &str = "KRONN_WORKER_PRIVATE_CARGO_HOME";
 /// Caps one worker's compilation (KT-1250); the host-wide cap on concurrently
 /// compiling workers is `core::task_worker_lane_warm`.
 pub const CARGO_BUILD_JOBS_ENV: &str = "CARGO_BUILD_JOBS";
+/// The port a Kronn backend started by the worker listens on (never the host's).
+pub const KRONN_PORT_ENV: &str = "KRONN_PORT";
+/// Where the worker's Vite proxies `/api`: its own backend, never the host's.
+pub const KRONN_BACKEND_URL_ENV: &str = "KRONN_BACKEND_URL";
+/// The worker's Vite (and Playwright) port.
+pub const VITE_DEV_PORT_ENV: &str = "VITE_DEV_PORT";
+/// Lane ports live in `[LANE_PORT_BASE, LANE_PORT_BASE + 2 * LANE_PORT_SLOTS)`,
+/// away from the host's Kronn (3140) and Vite (5173).
+const LANE_PORT_BASE: u16 = 20_000;
+const LANE_PORT_SLOTS: u16 = 15_000;
 
 /// `task_execution_events.action` under which the capability record is journalled.
 pub const TOOLCHAIN_EVENT_ACTION: &str = "toolchain_capabilities";
@@ -173,6 +183,13 @@ impl WorkerLane {
                 OsString::from(crate::core::task_worker_lane_warm::worker_build_jobs().to_string()),
             ),
         ];
+        let (backend, vite) = self.ports();
+        env.push((KRONN_PORT_ENV, OsString::from(backend.to_string())));
+        env.push((
+            KRONN_BACKEND_URL_ENV,
+            OsString::from(format!("http://127.0.0.1:{backend}")),
+        ));
+        env.push((VITE_DEV_PORT_ENV, OsString::from(vite.to_string())));
         if let Some(home) = self.effective_cargo_home(provisioned) {
             env.push((CARGO_HOME_ENV, home.into_os_string()));
         }
@@ -192,6 +209,21 @@ impl WorkerLane {
                 .clone()
                 .unwrap_or_else(|| self.cargo_home.clone()),
         )
+    }
+
+    /// The lane's own backend and Vite ports, stable for its name, so whatever
+    /// the worker serves never takes the host Kronn's port.
+    pub fn ports(&self) -> (u16, u16) {
+        // FNV-1a: stable across processes, unlike the std hasher.
+        let hash = self
+            .name
+            .bytes()
+            .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+                (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+            });
+        let slot = (hash % u64::from(LANE_PORT_SLOTS)) as u16;
+        let backend = LANE_PORT_BASE + 2 * slot;
+        (backend, backend + 1)
     }
 
     fn frontend_dir(&self) -> PathBuf {

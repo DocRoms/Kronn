@@ -5380,6 +5380,27 @@ pub const DEFAULT_ACTIVITY_TIMEOUT_SECS: u32 = 20 * 60;
 /// How long a delivery may sit unreviewed before the principal is alerted.
 pub const DEFAULT_REVIEW_TIMEOUT_SECS: u32 = 4 * 60 * 60;
 const ACTIVITY_TIMEOUT_ENV: &str = "KRONN_TASK_ACTIVITY_TIMEOUT_SECS";
+/// How long a single tool call (a cold `cargo build`, a full test suite) may
+/// run before the worker counts as silent again.
+const TOOL_IN_FLIGHT_CAP_ENV: &str = "KRONN_TASK_TOOL_IN_FLIGHT_CAP_SECS";
+const DEFAULT_TOOL_IN_FLIGHT_CAP_SECS: u32 = 2 * 60 * 60;
+
+pub fn tool_in_flight_cap_secs() -> u32 {
+    crate::core::child_env::var(TOOL_IN_FLIGHT_CAP_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|seconds| *seconds > 0)
+        .unwrap_or(DEFAULT_TOOL_IN_FLIGHT_CAP_SECS)
+}
+
+/// A tool that started and has not finished is activity: a worker compiling
+/// for 25 minutes is busy, not silent. Past the cap it is treated as hung.
+fn tool_in_flight(phase: Option<&str>, started: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
+    phase == Some("tool_activity")
+        && started.is_some_and(|started| {
+            started + chrono::Duration::seconds(i64::from(tool_in_flight_cap_secs())) > now
+        })
+}
 const REVIEW_TIMEOUT_ENV: &str = "KRONN_TASK_REVIEW_TIMEOUT_SECS";
 
 fn timeout_secs_from_env(name: &str, fallback: u32) -> u32 {
@@ -5701,11 +5722,13 @@ pub fn expired_execution_timeouts(
     let mut stmt = conn.prepare(
         "SELECT r.task_execution_id, e.status, r.total_deadline_at, \
                 r.activity_deadline_at, r.review_deadline_at, r.human_wait_started_at, \
-                p.human_wait_timeout_secs \
+                p.human_wait_timeout_secs, d.progress_phase, d.last_progress_at \
          FROM task_execution_recovery r \
          JOIN task_executions e ON e.id = r.task_execution_id \
          LEFT JOIN orchestration_run_resilience_policy p \
            ON p.orchestration_run_id = e.orchestration_run_id \
+         LEFT JOIN agent_dispatch_jobs d \
+           ON d.id = e.dispatch_job_id AND d.status = 'Running' \
          WHERE e.status NOT IN ('Done', 'Failed', 'Cancelled')",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -5717,11 +5740,13 @@ pub fn expired_execution_timeouts(
             row.get::<_, Option<String>>(4)?,
             row.get::<_, Option<String>>(5)?,
             row.get::<_, Option<i64>>(6)?,
+            row.get::<_, Option<String>>(7)?,
+            row.get::<_, Option<String>>(8)?,
         ))
     })?;
     let mut expired = Vec::new();
     for row in rows {
-        let (id, status, total, activity, review, human_since, human_secs) = row?;
+        let (id, status, total, activity, review, human_since, human_secs, phase, phase_at) = row?;
         let parse = |value: Option<String>| value.map(parse_dt);
         if parse(total).is_some_and(|deadline| deadline <= now) {
             expired.push((id, ExecutionTimeoutKind::TotalDuration));
@@ -5735,6 +5760,7 @@ pub fn expired_execution_timeouts(
             }
         } else if status == TaskExecutionStatus::Working.as_str()
             && parse(activity).is_some_and(|deadline| deadline <= now)
+            && !tool_in_flight(phase.as_deref(), phase_at.map(parse_dt), now)
         {
             // Only a worker that owes work can be silent. A delivered attempt
             // (`AwaitingReview`) or a parked one is never an activity timeout.
