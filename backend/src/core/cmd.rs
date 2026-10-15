@@ -71,6 +71,126 @@ fn raw_sync(program: &OsStr) -> std::process::Command {
     cmd
 }
 
+/// Whether `path` is a program a test controls: a stub written under the
+/// temporary directory or a fixture of this crate. Anything else (a CLI the
+/// developer installed under `~/.local/bin`, Homebrew, npm…) is the machine's,
+/// not the test's. The detection consults it in test builds so a unit test
+/// sees the same agents on every machine (KT-1189).
+#[cfg(test)]
+pub(crate) fn is_test_controlled(path: &std::path::Path) -> bool {
+    let real = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let path = real(path);
+    [
+        std::env::temp_dir(),
+        std::path::PathBuf::from("/tmp"),
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+    ]
+    .iter()
+    .any(|root| path.starts_with(real(root)))
+}
+
+/// Test builds only: no unit or API test may start a real agent CLI (KT-1189).
+///
+/// A CLI installed on the developer's machine would make a test depend on that
+/// machine (green here, red on CI), start slowly, reach the network, and write
+/// into whatever `HOME` the process points at — the real one when a test does
+/// not redirect it. Every agent launch and probe goes through [`async_cmd`] /
+/// [`sync_cmd`], so this is the one place that sees them all.
+#[cfg(test)]
+pub(crate) mod real_agent_guard {
+    use super::{is_test_controlled, ChildRoute};
+    use crate::core::child_env::AgentFamily;
+    use std::ffi::{OsStr, OsString};
+    use std::path::{Path, PathBuf};
+
+    /// Programs refused although their name is not an agent family's.
+    const EXTRA_AGENT_BINARIES: &[&str] = &["litellm"];
+
+    /// Plain shells: with an explicit `-c` script they are the stand-in a test
+    /// gives an agent route (a loop that never exits, an `exit 3`), never an
+    /// agent CLI themselves.
+    const STAND_IN_SHELLS: &[&str] = &["sh", "bash", "zsh", "dash"];
+
+    /// Real executions refused in this process, for the guard's own test.
+    static REFUSED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+    pub(crate) fn refused() -> Vec<String> {
+        REFUSED.lock().map(|l| l.clone()).unwrap_or_default()
+    }
+
+    /// The file `program` would run as, when it exists: a path as is, a bare
+    /// name looked up on `search_path`.
+    fn resolve(program: &OsStr, search_path: Option<OsString>) -> Option<PathBuf> {
+        let as_path = Path::new(program);
+        if as_path.components().count() > 1 {
+            return as_path.is_file().then(|| as_path.to_path_buf());
+        }
+        let cwd = std::env::current_dir().ok()?;
+        which::which_in(program, search_path, cwd).ok()
+    }
+
+    /// Whether a program called `name` is an agent CLI.
+    pub(crate) fn is_agent_name(name: &str) -> bool {
+        let stem = Path::new(name)
+            .file_stem()
+            .and_then(OsStr::to_str)
+            .unwrap_or(name);
+        AgentFamily::from_launch(stem, None, "") != AgentFamily::Other
+            || EXTRA_AGENT_BINARIES.contains(&stem)
+    }
+
+    /// Whether `path`, found for `name`, is an agent CLI of the machine rather
+    /// than a stub the test put there: detection must not see it.
+    pub(crate) fn is_machine_agent(name: &str, path: &str) -> bool {
+        is_agent_name(name) && !is_test_controlled(Path::new(path))
+    }
+
+    /// The real binary `program` would start on `route`, if it is an agent
+    /// launch: an agent route (a probe through `npx`, a Vibe runner started as
+    /// `python3`) or a program named like an agent CLI. `None` when it is not
+    /// an agent, does not exist, or is a stub the test controls.
+    pub(crate) fn real_agent_binary(
+        program: &OsStr,
+        route: ChildRoute,
+        search_path: Option<OsString>,
+    ) -> Option<PathBuf> {
+        let name = Path::new(program)
+            .file_stem()
+            .and_then(OsStr::to_str)
+            .unwrap_or_default();
+        if STAND_IN_SHELLS.contains(&name) {
+            return None;
+        }
+        let named_like_agent = is_agent_name(name);
+        let agent_route =
+            matches!(route, ChildRoute::Agent(family) if family != AgentFamily::Other);
+        if !named_like_agent && !agent_route {
+            return None;
+        }
+        resolve(program, search_path).filter(|path| !is_test_controlled(path))
+    }
+
+    /// Panics when the launch would start a real agent binary.
+    pub(crate) fn refuse_real_agent(program: &OsStr, route: ChildRoute) {
+        let Some(real) = real_agent_binary(program, route, crate::core::child_env::var_os("PATH"))
+        else {
+            return;
+        };
+        let message = format!(
+            "a test started the real agent binary {} (program {:?}, route {:?}, thread {:?}): \
+             put a stub on PATH or inject the detection instead (KT-1189)",
+            real.display(),
+            program,
+            route,
+            std::thread::current().name(),
+        );
+        if let Ok(mut refused) = REFUSED.lock() {
+            refused.push(message.clone());
+        }
+        panic!("{message}");
+    }
+}
+
 /// A `tokio::process::Command` for `program` with the environment built for
 /// `route` (KT-1006): nothing of the backend's environment beyond the route's
 /// allow-list. Values the caller adds afterwards are its launch's own; a
@@ -78,6 +198,8 @@ fn raw_sync(program: &OsStr) -> std::process::Command {
 ///
 /// Accepts anything `Command::new` accepts (`&str`, `String`, `&Path`, …).
 pub fn async_cmd<S: AsRef<OsStr>>(program: S, route: ChildRoute) -> tokio::process::Command {
+    #[cfg(test)]
+    real_agent_guard::refuse_real_agent(program.as_ref(), route);
     let mut cmd = raw_async(program.as_ref());
     crate::core::child_env::isolate(cmd.as_std_mut(), route);
     cmd
@@ -85,6 +207,8 @@ pub fn async_cmd<S: AsRef<OsStr>>(program: S, route: ChildRoute) -> tokio::proce
 
 /// [`async_cmd`] for a `std::process::Command`.
 pub fn sync_cmd<S: AsRef<OsStr>>(program: S, route: ChildRoute) -> std::process::Command {
+    #[cfg(test)]
+    real_agent_guard::refuse_real_agent(program.as_ref(), route);
     let mut cmd = raw_sync(program.as_ref());
     crate::core::child_env::isolate(&mut cmd, route);
     cmd
@@ -194,6 +318,79 @@ mod tests {
         let cmd = tool_cmd("echo");
         // Just verify it doesn't panic — creation_flags is Windows-only
         drop(cmd);
+    }
+
+    /// KT-1189: a program resolved outside the directories a test controls is
+    /// the machine's. `/bin/ls` stands for "a CLI the developer installed":
+    /// present on every Unix host, never under the temporary directory.
+    #[cfg(unix)]
+    #[test]
+    fn a_machine_program_on_an_agent_route_is_a_real_agent() {
+        use crate::core::child_env::AgentFamily;
+        use real_agent_guard::{is_machine_agent, real_agent_binary};
+        let sh = std::ffi::OsStr::new("/bin/ls");
+        // A route that belongs to an agent makes any program an agent launch…
+        assert!(real_agent_binary(sh, ChildRoute::Agent(AgentFamily::Claude), None).is_some());
+        // …except a plain shell, the stand-in tests give an agent route…
+        let shell = std::ffi::OsStr::new("/bin/sh");
+        assert!(real_agent_binary(shell, ChildRoute::Agent(AgentFamily::Copilot), None).is_none());
+        // …a Tool or Git route does not…
+        assert!(real_agent_binary(sh, ChildRoute::Tool, None).is_none());
+        assert!(real_agent_binary(sh, ChildRoute::Git, None).is_none());
+        // …and neither does an agent route nothing is known about.
+        assert!(real_agent_binary(sh, ChildRoute::Agent(AgentFamily::Other), None).is_none());
+        // By name: a CLI of the machine is hidden from detection, a stub is not.
+        assert!(is_machine_agent("claude", "/bin/ls"));
+        assert!(is_machine_agent("vibe", "/bin/ls"));
+        assert!(!is_machine_agent("git", "/bin/ls"));
+        let dir = tempfile::tempdir().unwrap();
+        let stub = dir.path().join("claude");
+        std::fs::write(&stub, "#!/bin/sh\n").unwrap();
+        assert!(!is_machine_agent("claude", stub.to_str().unwrap()));
+    }
+
+    /// KT-1189: the guard itself. Launching a real agent binary from a test
+    /// panics with the offending path, whichever builder is used.
+    #[cfg(unix)]
+    #[test]
+    fn a_test_cannot_start_a_real_agent_binary() {
+        use crate::core::child_env::AgentFamily;
+        let before = real_agent_guard::refused().len();
+        let route = ChildRoute::Agent(AgentFamily::Copilot);
+        let refused_async = std::panic::catch_unwind(|| {
+            let _ = async_cmd("/bin/ls", route);
+        });
+        let refused_sync = std::panic::catch_unwind(|| {
+            let _ = sync_cmd("/bin/ls", route);
+        });
+        let refused_discovery = std::panic::catch_unwind(|| {
+            let _ = discovery_cmd("/bin/ls", AgentFamily::Vibe);
+        });
+        assert!(refused_async.is_err() && refused_sync.is_err() && refused_discovery.is_err());
+        let refused = real_agent_guard::refused();
+        assert!(refused.len() >= before + 3, "each refusal is recorded");
+        assert!(refused
+            .iter()
+            .any(|m| m.contains("/bin/ls") && m.contains("KT-1189")));
+    }
+
+    /// KT-1189: a stub the test wrote under the temporary directory is a
+    /// program the test controls: it starts, on an agent route too.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stub_agent_in_the_temporary_directory_starts() {
+        use crate::core::child_env::AgentFamily;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let stub = dir.path().join("claude");
+        std::fs::write(&stub, "#!/bin/sh\necho stub 1.0\n").unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let output = discovery_cmd(&stub, AgentFamily::Claude)
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "stub 1.0");
     }
 
     /// A repository hook runs inside git's process: it never sees a variable
@@ -796,9 +993,12 @@ mod tests {
         use crate::core::child_env::{with_parent_env, AgentFamily};
         let (claude, codex, other) = with_parent_env(UNLISTED_CREDENTIALS, || {
             (
-                discovery_cmd("claude", AgentFamily::Claude),
-                discovery_cmd("codex", AgentFamily::Codex),
-                discovery_cmd("npx", AgentFamily::Other),
+                // Only the built command is inspected, never run: programs
+                // that exist nowhere, so no real CLI of the machine is
+                // involved (KT-1189).
+                discovery_cmd("kronn-absent-claude", AgentFamily::Claude),
+                discovery_cmd("kronn-absent-codex", AgentFamily::Codex),
+                discovery_cmd("kronn-absent-npx", AgentFamily::Other),
             )
         });
         let allowed = |family: &str| -> Vec<&str> {
