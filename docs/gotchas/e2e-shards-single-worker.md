@@ -28,6 +28,17 @@ Check it without a backend:
 cd frontend && CI=true pnpm exec playwright test --list --shard=1/3
 ```
 
+**Specs own their fixtures.** The first sharded run counted 31 skipped tests
+against 29 in the single-job run: `qp-history-drawer` and
+`qp-launch-double-click` opened "the first QP card" and skipped on an empty
+list, and the card they used to find was a Quick Prompt that
+`live-page-inline-action-launch` created and never deleted, now in another
+shard. A spec seeds what it drives (`e2e/fixtures/quick-prompt-seed.ts`,
+`beforeAll` / `afterAll`) and asserts the card is listed rather than skip;
+a spec that creates data deletes it. A rise in the skipped count after a
+reshuffle is the signature of such a dependency.
+[src: file: frontend/e2e/fixtures/quick-prompt-seed.ts:1-30]
+
 **Check.** The three `Playwright Run Summary` counts in the shard logs must add
 up to the count of `playwright test --list` on the same commit. The
 `ci-quality-gates` job lists `test-e2e` once: a matrix job's `needs` result is
