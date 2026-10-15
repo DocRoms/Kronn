@@ -308,6 +308,10 @@ pub struct PlanningDodItem {
     pub sentence: String,
     pub completed: bool,
     pub position: i64,
+    /// KT-1262 — what the item was ticked on when an approve integrated.
+    /// `None` for an item ticked by hand or not ticked.
+    #[serde(default)]
+    pub evidence: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

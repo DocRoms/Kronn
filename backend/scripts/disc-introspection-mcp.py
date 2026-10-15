@@ -1107,11 +1107,10 @@ TOOLS = [
     {
         "name": "task_exec_deliver",
         "description": (
-            "Submit your DeliveryManifest v1 when the task's DoD is met. Identity is derived "
-            "from this bridge's durable session, and only the execution's EXACT worker is "
-            "accepted. On success the execution flips to AwaitingReview and the principal is "
-            "woken: call this BEFORE announcing 'ready for review'. A malformed manifest is "
-            "refused."
+            "Submit your DeliveryManifest v1 when the task's DoD is met; only the execution's "
+            "EXACT worker is accepted (identity comes from this bridge's session). On success "
+            "the execution flips to AwaitingReview and the principal is woken: call this "
+            "BEFORE announcing 'ready for review'. A malformed manifest is refused."
         ),
         "inputSchema": {
             "type": "object",
@@ -1123,9 +1122,10 @@ TOOLS = [
                 "manifest": {
                     "type": "object",
                     "description": (
-                        "The DeliveryManifest v1 object: version, task_ref, head_sha, "
+                        "DeliveryManifest v1: version \"1\" (string), task_ref, head_sha, "
                         "files_touched, tests, dod_status, docs, migrations, risks, "
-                        "limitations, summary (see the brief's delivery format)."
+                        "limitations, summary, tests_executed {executed: bool, which: "
+                        "[commands]} (required)."
                     ),
                 },
             },
@@ -1135,16 +1135,11 @@ TOOLS = [
     {
         "name": "task_exec_review",
         "description": (
-            "Decide a delivered task attempt as the principal. Pass the "
-            "`task_execution_id` and a ReviewDecision v1 `decision` object "
-            "(`decision`: 'approve' | 'request_changes'; `comment` is required for "
-            "request_changes; optional structured `findings`). The backend derives "
-            "your identity from this bridge's durable session and authorizes you as a "
-            "party to the execution — the parent-room principal, or the worker only if "
-            "the run explicitly enables self-review. approve is REFUSED if the manifest "
-            "is missing, the worktree HEAD drifted since delivery, or a DoD is unmet; "
-            "request_changes hands your findings to the worker in its sub-discussion "
-            "and keeps the worktree. A caller who is not a party gets one opaque refusal."
+            "Decide a delivered task attempt as the principal (identity comes from this "
+            "bridge's session; the worker only if the run enables self-review). approve "
+            "is REFUSED if the manifest is missing, the worktree HEAD drifted since "
+            "delivery, or a DoD is unmet; request_changes hands your findings to the "
+            "worker and keeps the worktree. A non-party gets one opaque refusal."
         ),
         "inputSchema": {
             "type": "object",
@@ -1156,9 +1151,11 @@ TOOLS = [
                 "decision": {
                     "type": "object",
                     "description": (
-                        "The ReviewDecision v1 object: version, task_ref, decision "
-                        "('approve' | 'request_changes'), comment (required for "
-                        "request_changes), optional findings [{path?, line?, issue}]."
+                        "ReviewDecision v1: version \"1\" (string), task_ref, decision "
+                        "('approve' | 'request_changes'), reviewed_head_sha (required for "
+                        "approve), dod_verifications [{dod_id, met, evidence}] (one per DoD "
+                        "item, required for approve), comment (required for "
+                        "request_changes), findings [{path?, line?, issue}]."
                     ),
                 },
             },
@@ -5890,7 +5887,7 @@ def _visible_tools():
         "additionalProperties": False,
         "required": [
             "tests", "dod_status", "docs", "migrations", "risks",
-            "limitations", "summary",
+            "limitations", "summary", "tests_executed",
         ],
         "properties": {
             "tests": {
@@ -5930,6 +5927,21 @@ def _visible_tools():
             "risks": {"type": "array", "items": {"type": "string"}},
             "limitations": {"type": "array", "items": {"type": "string"}},
             "summary": {"type": "string", "minLength": 1},
+            "tests_executed": {
+                "type": "object",
+                "description": (
+                    "Whether any test was actually executed in this run, and which "
+                    "commands. `executed: false` requires `which: []`; `executed: "
+                    "true` requires the commands that ran, matching at least one "
+                    "`tests` entry reported pass or fail."
+                ),
+                "additionalProperties": False,
+                "required": ["executed", "which"],
+                "properties": {
+                    "executed": {"type": "boolean"},
+                    "which": {"type": "array", "items": {"type": "string"}},
+                },
+            },
         },
     }
     status = next(item for item in TOOLS if item["name"] == "task_exec_status")

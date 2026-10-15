@@ -1970,6 +1970,57 @@ mod tests {
     use super::TaskExecutionStatus::{self, *};
     use super::TaskWorkerScope;
 
+    /// KT-1262 — the MCP tool descriptions name every field of these two
+    /// contracts (`test_disc_introspection_mcp.py` pins the same lists). A field
+    /// added here without being named there fails this test, not an agent's
+    /// approve.
+    #[test]
+    fn contract_fields_match_the_ones_the_mcp_descriptions_name() {
+        fn properties(schema: &serde_json::Value) -> std::collections::BTreeSet<String> {
+            schema["properties"]
+                .as_object()
+                .expect("schema properties")
+                .keys()
+                .cloned()
+                .collect()
+        }
+        let named = |fields: &[&str]| {
+            fields
+                .iter()
+                .map(|field| field.to_string())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        assert_eq!(
+            properties(&super::delivery_manifest_v1_schema()),
+            named(&[
+                "version",
+                "task_ref",
+                "head_sha",
+                "files_touched",
+                "tests",
+                "dod_status",
+                "docs",
+                "migrations",
+                "risks",
+                "limitations",
+                "summary",
+                "tests_executed",
+            ]),
+        );
+        assert_eq!(
+            properties(&super::review_decision_v1_schema()),
+            named(&[
+                "version",
+                "task_ref",
+                "decision",
+                "reviewed_head_sha",
+                "dod_verifications",
+                "comment",
+                "findings",
+            ]),
+        );
+    }
+
     /// KT-514 — a cancellation with no explicit policy must reclaim the clean
     /// checkout (branch preserved) rather than hoard it. This default is what
     /// stops a relaunched task from stacking one worktree per attempt.

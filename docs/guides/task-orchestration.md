@@ -229,6 +229,21 @@ The limits worth knowing:
 - Nothing in this section is inferred. No metric, timestamp or verdict is
   derived from the worker's own claims.
 
+### The Definition of Done after an integration
+
+An approve that integrates ticks the DoD items it verified, in the same
+transaction that marks the task `done`. An item the principal named in
+`dod_verifications` carries the principal's evidence; one it did not name (a
+human approve supplies none) carries the worker's own `dod_status` evidence.
+The evidence is stored on the item and shown with it.
+
+A task does not reach `done` with an unticked DoD item. The one exception is a
+post-integration check: an item whose sentence starts with `Post-integration`
+(optionally in brackets), such as a smoke test on the integrated branch. It is
+not asked of the approve, and it stays unticked until someone ticks it by hand.
+Only the integration path enforces this; a task a human sets to `done` in the
+Planning page is not checked.
+
 ## Stop or reassign
 
 **Stop** cancels live dispatch and preserves the child branch/worktree for

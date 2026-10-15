@@ -107,7 +107,11 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # qa_list, disc_link, disc_transfer_session, disc_find_by_session,
 # disc_workspace_set and task_exec_review descriptions; ceiling lowered by 6 B
 # (85_095 -> 85_089).
-CATALOGUE_MAX_BYTES = 85_089
+# KT-1262: `task_exec_deliver` and `task_exec_review` now name the fields the
+# backend requires (`tests_executed`, `reviewed_head_sha`, `dod_verifications`,
+# the string version "1"); their prose was tightened by more than that costs.
+# Ceiling lowered by 209 B (85_089 -> 84_880).
+CATALOGUE_MAX_BYTES = 84_880
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is

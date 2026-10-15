@@ -1221,10 +1221,10 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
         ),
         tool(
             "task_exec_review",
-            "As the parent-room principal, submit a ReviewDecision v1. Approval is guarded and must name the exact reviewed_head_sha. If an HTTP worker honestly left a DoD unmet because it lacks a shell, include attempt-scoped dod_verifications with non-empty evidence from your own validation; a mutable Planning checkbox is not review evidence. request_changes requires an actionable comment.",
+            "As the parent-room principal, submit a ReviewDecision v1. Approval is guarded and must name the exact reviewed_head_sha plus one dod_verifications entry per DoD item, each with non-empty evidence from your own validation; a mutable Planning checkbox is not review evidence. request_changes requires an actionable comment.",
             json!({
                 "task_execution_id": {"type": "string"},
-                "decision": {"type": "object", "description": "ReviewDecision v1: approve or request_changes, optional findings, reviewed_head_sha for approve, and principal dod_verifications when needed."}
+                "decision": {"type": "object", "description": "ReviewDecision v1: version \"1\" (string), task_ref, decision ('approve' | 'request_changes'), reviewed_head_sha (required for approve), dod_verifications [{dod_id, met, evidence}] (one per DoD item, required for approve), comment (required for request_changes), findings [{path?, line?, issue}]."}
             }),
             json!(["task_execution_id", "decision"]),
         ),
@@ -4918,6 +4918,30 @@ mod tests {
                 is_orchestration_tool(name),
                 "`{name}` is declared to agents but the router will not send it \
                  to the orchestration dispatcher",
+            );
+        }
+    }
+
+    /// KT-1262 — the review tool names what an approve is refused without.
+    #[test]
+    fn native_review_tool_names_the_fields_an_approve_requires() {
+        let review = orchestration_tool_catalogue()
+            .into_iter()
+            .find(|tool| tool["function"]["name"] == "task_exec_review")
+            .expect("review tool");
+        let decision = review["function"]["parameters"]["properties"]["decision"]["description"]
+            .as_str()
+            .expect("decision description");
+        for field in [
+            "version \"1\" (string)",
+            "reviewed_head_sha",
+            "dod_verifications [{dod_id, met, evidence}]",
+            "comment",
+            "findings",
+        ] {
+            assert!(
+                decision.contains(field),
+                "decision description lacks {field}"
             );
         }
     }

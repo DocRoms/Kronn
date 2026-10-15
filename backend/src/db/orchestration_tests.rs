@@ -4868,6 +4868,215 @@ fn integrated_checkpoint_rolls_back_when_plan_task_is_not_in_progress() {
     );
 }
 
+/// Drive a fresh execution to `Applying` with a candidate pinned and its task
+/// `InProgress`, carrying `dod` items (`(id, sentence, completed)`), so the next
+/// step is the `Integrated` checkpoint. Returns the execution id and its attempt.
+fn applying_with_dod(
+    conn: &Connection,
+    task_id: &str,
+    number: i64,
+    dod: &[(&str, &str, bool)],
+) -> (String, u32) {
+    let exec = launch_and_drive(
+        conn,
+        task_id,
+        number,
+        &[
+            TaskExecutionStatus::Provisioning,
+            TaskExecutionStatus::Working,
+            TaskExecutionStatus::AwaitingReview,
+            TaskExecutionStatus::Approved,
+            TaskExecutionStatus::Integrating,
+            TaskExecutionStatus::Validating,
+            TaskExecutionStatus::Applying,
+        ],
+    );
+    for (position, (id, sentence, completed)) in dod.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO planning_task_dod_items \
+             (id, task_id, sentence, completed, position, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            params![id, task_id, sentence, completed, position as i64],
+        )
+        .unwrap();
+    }
+    conn.execute(
+        "UPDATE task_executions SET candidate_merge_sha = ?2 WHERE id = ?1",
+        params![exec, INTEGRATED],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE planning_tasks SET status = 'in_progress' WHERE id = ?1",
+        [task_id],
+    )
+    .unwrap();
+    let attempt = get_task_execution(conn, &exec).unwrap().unwrap().attempt_no;
+    (exec, attempt)
+}
+
+const INTEGRATED: &str = "dddddddddddddddddddddddddddddddddddddddd";
+
+fn dod_state(conn: &Connection, task_id: &str) -> Vec<(String, bool, Option<String>)> {
+    let mut statement = conn
+        .prepare(
+            "SELECT id, completed, evidence FROM planning_task_dod_items \
+             WHERE task_id = ?1 ORDER BY position",
+        )
+        .unwrap();
+    statement
+        .query_map([task_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+}
+
+/// KT-1262: an approve that integrates ticks every DoD item the principal
+/// verified as met and stores the evidence on the item; an item the principal
+/// did not name falls back to the manifest's own met claim.
+#[test]
+fn an_integrating_approve_ticks_the_verified_dod_items_with_their_evidence() {
+    let conn = setup();
+    let (exec, attempt) = applying_with_dod(
+        &conn,
+        "t-dod-tick",
+        904,
+        &[("dod-a", "A holds", false), ("dod-b", "B holds", false)],
+    );
+    crate::db::worker_deliveries::upsert_delivery(
+        &conn,
+        &exec,
+        attempt,
+        "abcdef1234567",
+        &serde_json::json!({
+            "version": "1", "task_ref": "KT-904", "head_sha": "abcdef1234567",
+            "files_touched": [], "tests": [],
+            "dod_status": [
+                {"dod_id": "dod-a", "met": true, "evidence": "worker says A"},
+                {"dod_id": "dod-b", "met": true, "evidence": "worker says B"}
+            ],
+            "docs": [], "migrations": [], "risks": [], "limitations": [],
+            "summary": "s"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    crate::db::worker_reviews::upsert_review(
+        &conn,
+        &exec,
+        attempt,
+        "approve",
+        &serde_json::json!({
+            "version": "1", "task_ref": "KT-904", "decision": "approve",
+            "reviewed_head_sha": "abcdef1234567",
+            "dod_verifications": [
+                {"dod_id": "dod-a", "met": true, "evidence": "principal ran the test"}
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let outcome = commit_integration_checkpoint(
+        &conn,
+        &exec,
+        IntegrationStep::Integrated {
+            integrated_sha: INTEGRATED,
+        },
+        &backend_actor(),
+    )
+    .unwrap();
+    assert_eq!(
+        outcome,
+        IntegrationCheckpointOutcome::Committed {
+            status: TaskExecutionStatus::Done
+        }
+    );
+    assert_eq!(
+        dod_state(&conn, "t-dod-tick"),
+        vec![
+            (
+                "dod-a".to_string(),
+                true,
+                Some("principal ran the test".to_string())
+            ),
+            ("dod-b".to_string(), true, Some("worker says B".to_string())),
+        ]
+    );
+    let events: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM planning_task_events \
+             WHERE task_id = 't-dod-tick' AND action = 'dod_updated'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(events, 2, "each tick is journalled on the task");
+}
+
+/// KT-1262: a task never reaches `done` with an unticked DoD item, unless that
+/// item is a post-integration check.
+#[test]
+fn a_task_does_not_reach_done_with_an_unticked_dod_item_unless_it_is_post_integration() {
+    let conn = setup();
+    // No delivery, no review: nothing verified the item.
+    let (exec, _) = applying_with_dod(&conn, "t-dod-unticked", 905, &[("dod-x", "X holds", false)]);
+    let refused = commit_integration_checkpoint(
+        &conn,
+        &exec,
+        IntegrationStep::Integrated {
+            integrated_sha: INTEGRATED,
+        },
+        &backend_actor(),
+    )
+    .unwrap();
+    assert_eq!(refused, IntegrationCheckpointOutcome::TaskNotCompletable);
+    let task_status: String = conn
+        .query_row(
+            "SELECT status FROM planning_tasks WHERE id = 't-dod-unticked'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(task_status, "in_progress");
+    assert_eq!(
+        get_task_execution(&conn, &exec).unwrap().unwrap().status,
+        TaskExecutionStatus::Applying
+    );
+
+    // The same task shape, with the open item declared a post-integration check.
+    let (exec, _) = applying_with_dod(
+        &conn,
+        "t-dod-post",
+        906,
+        &[
+            ("dod-y", "Y holds", true),
+            ("dod-z", "Post-integration: smoke test on main", false),
+        ],
+    );
+    let landed = commit_integration_checkpoint(
+        &conn,
+        &exec,
+        IntegrationStep::Integrated {
+            integrated_sha: INTEGRATED,
+        },
+        &backend_actor(),
+    )
+    .unwrap();
+    assert_eq!(
+        landed,
+        IntegrationCheckpointOutcome::Committed {
+            status: TaskExecutionStatus::Done
+        }
+    );
+    assert_eq!(
+        dod_state(&conn, "t-dod-post"),
+        vec![
+            ("dod-y".to_string(), true, None),
+            ("dod-z".to_string(), false, None),
+        ]
+    );
+}
+
 #[test]
 fn done_requires_the_integrated_candidate_and_every_configured_validation() {
     const MERGE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";

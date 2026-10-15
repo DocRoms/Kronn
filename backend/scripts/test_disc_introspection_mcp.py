@@ -2089,6 +2089,23 @@ class TaskExecDeliverTests(unittest.TestCase):
         self.assertNotIn("cli_session_id", props)
         self.assertNotIn("source_agent", props)
 
+    def test_manifest_description_names_every_field_the_backend_requires(self):
+        """KT-1262 — `tests_executed` is required of a spawned worker since
+        KT-1246 and was missing from the field list. The fields below mirror
+        `delivery_manifest_v1_schema` (a Rust test pins that schema to the same
+        list), so a field the backend learns to require is named here too."""
+        tool = next(
+            item for item in self.mod.TOOLS if item["name"] == "task_exec_deliver"
+        )
+        text = tool["inputSchema"]["properties"]["manifest"]["description"]
+        for field in (
+            "version", "task_ref", "head_sha", "files_touched", "tests",
+            "dod_status", "docs", "migrations", "risks", "limitations",
+            "summary", "tests_executed",
+        ):
+            self.assertIn(field, text)
+        self.assertIn('"1" (string)', text)
+
     def test_deliver_derives_identity_and_posts_the_manifest(self):
         self.mod._set_current_disc_id("disc-parent")
         http = mock.MagicMock(return_value={
@@ -2161,8 +2178,12 @@ class TaskExecDeliverTests(unittest.TestCase):
             projected["required"],
             [
                 "tests", "dod_status", "docs", "migrations", "risks",
-                "limitations", "summary",
+                "limitations", "summary", "tests_executed",
             ],
+        )
+        self.assertEqual(
+            projected["properties"]["tests_executed"]["required"],
+            ["executed", "which"],
         )
         self.assertNotIn("head_sha", projected["properties"])
         self.assertNotIn("task_ref", projected["properties"])
@@ -2419,6 +2440,24 @@ class TaskExecReviewTests(unittest.TestCase):
         self.assertNotIn("source_session_id", props)
         self.assertNotIn("cli_session_id", props)
         self.assertNotIn("source_agent", props)
+
+    def test_decision_description_names_every_field_the_backend_requires(self):
+        """KT-1262 — an approve is refused without `reviewed_head_sha` and one
+        `dod_verifications` entry per DoD item, and `version` is the STRING "1".
+        The fields below mirror `review_decision_v1_schema` (a Rust test pins that
+        schema to the same list), so a field the backend learns to require is
+        named here before an agent has to find it by a refusal."""
+        tool = next(
+            item for item in self.mod.TOOLS if item["name"] == "task_exec_review"
+        )
+        text = tool["inputSchema"]["properties"]["decision"]["description"]
+        for field in (
+            "version", "task_ref", "decision", "reviewed_head_sha",
+            "dod_verifications", "comment", "findings",
+        ):
+            self.assertIn(field, text)
+        self.assertIn('"1" (string)', text)
+        self.assertIn("{dod_id, met, evidence}", text)
 
     def test_review_derives_identity_and_posts_the_decision(self):
         self.mod._set_current_disc_id("disc-parent")

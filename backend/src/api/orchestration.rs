@@ -6365,6 +6365,14 @@ async fn approve_guards(
             foreign.dod_id
         ))));
     }
+    // KT-1262 — a post-integration check cannot be verified before the work has
+    // landed: it is neither asked of the approve nor able to refuse it.
+    let post_integration = task
+        .definition_of_done
+        .iter()
+        .filter(|item| crate::db::planning::is_post_integration_check(&item.sentence))
+        .map(|item| item.id.as_str())
+        .collect::<std::collections::HashSet<_>>();
     if reviewer_is_principal {
         let submitted = decision
             .dod_verifications
@@ -6374,7 +6382,10 @@ async fn approve_guards(
         let missing = task
             .definition_of_done
             .iter()
-            .filter(|item| !submitted.contains(item.id.as_str()))
+            .filter(|item| {
+                !submitted.contains(item.id.as_str())
+                    && !post_integration.contains(item.id.as_str())
+            })
             .map(|item| item.id.clone())
             .collect::<Vec<_>>();
         if !missing.is_empty() {
@@ -6386,7 +6397,9 @@ async fn approve_guards(
         let rejected = decision
             .dod_verifications
             .iter()
-            .filter(|verification| !verification.met)
+            .filter(|verification| {
+                !verification.met && !post_integration.contains(verification.dod_id.as_str())
+            })
             .map(|verification| verification.dod_id.clone())
             .collect::<Vec<_>>();
         if !rejected.is_empty() {
@@ -6406,7 +6419,11 @@ async fn approve_guards(
     let unmet = manifest
         .dod_status
         .iter()
-        .filter(|status| !status.met && !verified.contains(status.dod_id.as_str()))
+        .filter(|status| {
+            !status.met
+                && !verified.contains(status.dod_id.as_str())
+                && !post_integration.contains(status.dod_id.as_str())
+        })
         .map(|d| d.dod_id.clone())
         .collect::<Vec<_>>();
     if !unmet.is_empty() {
@@ -14648,6 +14665,7 @@ pub(crate) mod tests {
             sentence: "tests pass".into(),
             completed: false,
             position: 0,
+            evidence: None,
         }];
         let complete = parse_delivery_manifest(&manifest_json("abcdef1234567")).unwrap();
         assert!(validate_manifest_claims(&dod, &complete).is_ok());
@@ -14790,6 +14808,7 @@ pub(crate) mod tests {
                 sentence: "Faire X".into(),
                 completed: false,
                 position: 0,
+                evidence: None,
             }],
             "/wt/kt319",
             "kronn/task/KT-319",
@@ -14876,6 +14895,7 @@ pub(crate) mod tests {
                 sentence: "Faire X".into(),
                 completed: false,
                 position: 0,
+                evidence: None,
             }],
             "/wt/kt436",
             "kronn/task/KT-436",
@@ -15616,7 +15636,11 @@ pub(crate) mod tests {
                 definition_of_done: vec![CreatePlanningDodItem {
                     id: None,
                     sentence: "Le module compile et les tests passent.".into(),
-                    completed: false,
+                    // KT-1262: fixtures reach `Approved` by direct transition, past
+                    // the approve guards that verify the DoD. The item stands for
+                    // one an approve already ticked; the checkpoint refuses a
+                    // task that would reach `done` with an unticked item.
+                    completed: true,
                 }],
                 links: vec![],
                 actor: test_actor(),
@@ -19155,7 +19179,7 @@ pub(crate) mod tests {
                             definition_of_done: vec![CreatePlanningDodItem {
                                 id: None,
                                 sentence: "Le module compile.".into(),
-                                completed: false,
+                                completed: true,
                             }],
                             links: vec![],
                             actor: test_actor(),

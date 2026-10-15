@@ -6369,7 +6369,12 @@ active_blockers: Array<PlanningDependencySummary>,
  */
 actionable: boolean, };
 
-export type PlanningDodItem = { id: string, sentence: string, completed: boolean, position: number, };
+export type PlanningDodItem = { id: string, sentence: string, completed: boolean, position: number,
+/**
+ * KT-1262 — what the item was ticked on when an approve integrated.
+ * `None` for an item ticked by hand or not ticked.
+ */
+evidence: string | null, };
 
 export type PlanningPlacement = "active" | "later";
 

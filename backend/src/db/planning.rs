@@ -523,7 +523,8 @@ fn replace_dod(conn: &Connection, task_id: &str, items: &[CreatePlanningDodItem]
             retained_ids.insert(existing_id.to_string());
             conn.execute(
                 "UPDATE planning_task_dod_items
-                 SET sentence = ?3, completed = ?4, position = ?5, updated_at = ?6
+                 SET sentence = ?3, completed = ?4, position = ?5, updated_at = ?6,
+                     evidence = CASE WHEN ?4 THEN evidence ELSE NULL END
                  WHERE id = ?1 AND task_id = ?2",
                 params![
                     existing_id,
@@ -1402,7 +1403,7 @@ pub fn get_task(conn: &Connection, task_id: &str) -> Result<Option<PlanningTaskD
 
     let definition_of_done = {
         let mut statement = conn.prepare(
-            "SELECT id, sentence, completed, position
+            "SELECT id, sentence, completed, position, evidence
              FROM planning_task_dod_items WHERE task_id = ?1 ORDER BY position",
         )?;
         let items = statement
@@ -1412,6 +1413,7 @@ pub fn get_task(conn: &Connection, task_id: &str) -> Result<Option<PlanningTaskD
                     sentence: row.get(1)?,
                     completed: row.get(2)?,
                     position: row.get(3)?,
+                    evidence: row.get(4)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1748,6 +1750,68 @@ pub fn mark_task_done_within_tx(
     Ok(true)
 }
 
+/// KT-1262 — a DoD item that can only be checked once the work has landed
+/// (a smoke test on the integrated target, a release check). It is declared by
+/// its sentence opening with `post-integration`, optionally bracketed. Such an
+/// item is not asked of the approve and may stay unticked when the task is done.
+pub fn is_post_integration_check(sentence: &str) -> bool {
+    sentence
+        .trim_start()
+        .trim_start_matches(['[', '('])
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("post-integration")
+}
+
+/// KT-1262 — tick the DoD items an approve verified as met and keep the evidence
+/// they were verified on. Runs in the transaction that completes the task, so a
+/// task never reads `done` while the evidence that exists is missing from its DoD.
+pub fn tick_verified_dod_within_tx(
+    tx: &Connection,
+    task_id: &str,
+    verified: &[(String, String)],
+    actor: &PlanningActor,
+) -> Result<()> {
+    validate_actor(actor)?;
+    let now = Utc::now().to_rfc3339();
+    for (dod_id, evidence) in verified {
+        let changed = tx.execute(
+            "UPDATE planning_task_dod_items
+                SET completed = 1, evidence = ?3, updated_at = ?4
+              WHERE id = ?1 AND task_id = ?2",
+            params![dod_id, task_id, evidence, now],
+        )?;
+        if changed == 0 {
+            continue;
+        }
+        insert_event(
+            tx,
+            task_id,
+            "dod_updated",
+            actor,
+            serde_json::json!({
+                "dod_id": dod_id,
+                "completed": true,
+                "evidence": evidence,
+                "via": "orchestration_integration",
+            }),
+        )?;
+    }
+    Ok(())
+}
+
+/// KT-1262 — the DoD items of a task that are still unticked, as `(id, sentence)`.
+pub fn unticked_dod_within_tx(tx: &Connection, task_id: &str) -> Result<Vec<(String, String)>> {
+    let mut statement = tx.prepare(
+        "SELECT id, sentence FROM planning_task_dod_items
+          WHERE task_id = ?1 AND completed = 0 ORDER BY position",
+    )?;
+    let items = statement
+        .query_map([task_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(items)
+}
+
 /// Return a task owned by a cancelled orchestration execution to the ready
 /// queue. The caller has already made that execution terminal in the same
 /// transaction; the anti-race predicate refuses while any other active
@@ -1789,7 +1853,8 @@ pub fn update_dod_item(
     let transaction = NestableTx::begin(conn)?;
     let changed = transaction.execute(
         "UPDATE planning_task_dod_items
-         SET completed = ?3, updated_at = ?4
+         SET completed = ?3, updated_at = ?4,
+             evidence = CASE WHEN ?3 THEN evidence ELSE NULL END
          WHERE id = ?1 AND task_id = ?2",
         params![dod_id, task_id, request.completed, Utc::now().to_rfc3339(),],
     )?;
