@@ -13,19 +13,28 @@
  *    manually release it — that's what gives us a window to fire the
  *    second click.
  * 2. Navigate to Workflows → Quick Prompts.
- * 3. If at least one QP exists, expand its launch form (or use the
- *    inline launch button), fire two synchronous interactions, and
- *    assert the create endpoint was called exactly once.
+ * 3. Expand the launch form of the first QP (or use the inline launch
+ *    button), fire two synchronous interactions, and assert the create
+ *    endpoint was called exactly once.
  *
- * If the user has no QPs in the dev DB the test skips — we don't seed
- * QPs from the spec to keep the smoke surface small.
+ * The spec seeds a variable-free Quick Prompt of its own: a fresh CI
+ * database has none, and another spec's leftovers are not a fixture.
  */
 
 import { test, expect } from '../fixtures/kronn-fixture';
 import { DashboardPage } from '../pages/DashboardPage';
 import { WorkflowsPage } from '../pages/WorkflowsPage';
+import { seedQuickPrompt, deleteQuickPrompt } from '../fixtures/quick-prompt-seed';
 
 test.describe('QP launch — double-click race', () => {
+  let qpId = '';
+  test.beforeAll(async ({ request }) => {
+    qpId = await seedQuickPrompt(request, `Double-click PW ${Date.now()}`);
+  });
+  test.afterAll(async ({ request }) => {
+    await deleteQuickPrompt(request, qpId);
+  });
+
   test('two synchronous Launch clicks on a no-variable QP create exactly one discussion', async ({ page }) => {
     // Hold POST /api/discussions open so we can fire a second click
     // before the first request finishes. We count the hits and respond
@@ -78,11 +87,9 @@ test.describe('QP launch — double-click race', () => {
 
     // Find a launchable QP card. The launch button has class
     // `qp-launch-btn` per WorkflowsPage.tsx; we click the first one we
-    // find. If there are no QPs, skip the test rather than fail —
-    // dev DBs vary.
+    // find — at least the seeded one is listed.
     const launchButtons = page.locator('button.qp-launch-btn');
-    const count = await launchButtons.count();
-    test.skip(count === 0, 'No Quick Prompts in dev DB — skipping double-click race E2E');
+    await expect(launchButtons.first(), 'the seeded Quick Prompt must list a launch button').toBeVisible();
 
     // Fire two synchronous click events on the first launch button via
     // page.evaluate. We can't use locator.click() twice because after the
