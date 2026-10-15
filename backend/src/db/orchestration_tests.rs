@@ -615,7 +615,7 @@ fn interrupted_integration_may_rebuild_after_validation_or_apply_drift() {
 }
 
 #[test]
-fn cancellation_cascades_dispatch_and_returns_plan_task_to_todo() {
+fn cancellation_cascades_dispatch_and_leaves_the_plan_task_status_to_the_principal() {
     let conn = setup();
     seed_plan_task(&conn, "t-cancel-tree", 1101, 0, "active");
     let execution = launch_single_task(
@@ -698,7 +698,7 @@ fn cancellation_cascades_dispatch_and_returns_plan_task_to_todo() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(task, "todo");
+    assert_eq!(task, "in_progress");
 }
 
 #[test]

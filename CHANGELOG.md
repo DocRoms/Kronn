@@ -492,6 +492,15 @@ Release notes for 0.9.3 and earlier are available in the
   the smoke check loads the config under the worker sandbox profile (it runs
   worker-written code), and the brief says how to recover.
 
+- Cancelling an execution no longer resets its task to `todo` (KT-1267). A
+  task whose work was integrated by hand (KT-1250's `3dcdbc892`) fell back to
+  `todo` the moment its execution was cancelled, so the roadmap counted it as
+  not started. The cancel now leaves the task status alone, whatever it is
+  (`in_progress`, `done`...): the principal decides. The cancel result and the
+  `task_exec_cancel` description say so, and that running the task again means
+  setting it back to `todo` first (`task_update status=todo`); the launch
+  preflight refuses any other status, so a cancelled `in_progress` task is no
+  longer put back in the ready queue automatically.
 - A task worker's lane build runs under the worker's sandbox profile
   (KT-1255). The first `cargo test --no-run` and the toolchain smoke check were
   started by Kronn as the host user, so a relaunch that rebuilt after the

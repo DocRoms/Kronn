@@ -120,7 +120,10 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # disc_transfer_session and disc_workspace_set descriptions were tightened to
 # pay for it. Pinned to the payload measured on the merged tree, 84_967 B
 # (85_003 -> 84_967).
-CATALOGUE_MAX_BYTES = 84_967
+# KT-1267: `task_exec_cancel` says the task status is left alone and how to
+# relaunch, inside the bytes of the text it replaces; ceiling lowered by 1 B
+# (84_967 -> 84_966).
+CATALOGUE_MAX_BYTES = 84_966
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is

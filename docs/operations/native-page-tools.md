@@ -9,7 +9,7 @@ exists on the MCP bridge only; native discussion agents do not get it. See
 objects, not an HTML preview.
 [src: file: backend/src/api/agent_tools.rs:1722-1724#execute_page_tool]
 [src: file: backend/src/api/agent_page_tools.rs:173-237#execute_page_tool]
-[src: file: backend/scripts/disc-introspection-mcp.py:7896-7898#call_page_delete_dataset]
+[src: file: backend/scripts/disc-introspection-mcp.py:7908-7910#call_page_delete_dataset]
 
 Native and bridge access are two policies, not one:
 
@@ -127,4 +127,4 @@ envelope), of which KT-1098's optional `slug` on `page_update_html` costs
 25 bytes. These are byte counts, not provider token measurements. The bridge
 declarations keep their own byte ceiling (84,967 bytes, `mcp_surface_budget.py`).
 [src: file: backend/src/api/agent_page_tests.rs:327-345#native_page_surface_has_a_bounded_measured_cost]
-[src: file: backend/scripts/ci/mcp_surface_budget.py:123#CATALOGUE_MAX_BYTES]
+[src: file: backend/scripts/ci/mcp_surface_budget.py:126#CATALOGUE_MAX_BYTES]

@@ -39,7 +39,7 @@ provider response contributes once, even when a stream repeats cumulative usage
 frames. Unreported usage stays unknown. Sums cover reported values only; they
 are not an independent billing reconciliation.
 [src: file: backend/src/agents/runner.rs:8444-8455#cached_prompt_tokens]
-[src: file: backend/src/agents/runner.rs:1991-1998#reported_usage_counters]
+[src: file: backend/src/agents/runner.rs:1991-1998#reported_usage_counters] [src: file: backend/src/agents/runner.rs:9781-9810#task_usage]
 A cost the provider reports itself (OpenRouter's `usage.cost`, requested with
 `usage.include` on OpenRouter only; Claude Code's `total_cost_usd`) is summed
 per response as integer micro-USD and exposed by `reported_cost_usd_micros`;

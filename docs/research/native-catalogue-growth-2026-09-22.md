@@ -33,7 +33,8 @@ the host replay; other host activity was not controlled. Child QP dispatchers
 and image generation workers remain unstarted: those cells verify job creation,
 not completed inference or generated media. The prior campaign's other scoring
 limits still apply.
-[src: file: backend/src/api/agent_quick_prompt_bench.rs:285-323]
+[src: file: backend/src/api/agent_quick_prompt_bench.rs:309-329#modes]
+[src: file: backend/src/api/agent_quick_prompt_bench.rs:139-163#campaign_state]
 [src: file: docs/research/native-tool-catalogue-2026-09-22.md:1]
 
 ## Observations
