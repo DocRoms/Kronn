@@ -52,7 +52,7 @@ jobs:
 
   test-desktop-compile:
     needs: require-ci-build-label
-    if: needs.require-ci-build-label.outputs.run == 'true'
+    if: needs.require-ci-build-label.outputs.run == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -102,7 +102,7 @@ jobs:
   # broken installer cannot remain hidden until the next version tag.
   test-docs-sidecar-windows:
     needs: require-ci-build-label
-    if: needs.require-ci-build-label.outputs.run == 'true'
+    if: needs.require-ci-build-label.outputs.run == 'true' && github.event_name != 'push'
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -188,8 +188,12 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
 
-      - name: Cache cargo registry and build
-        uses: actions/cache@v4
+      # Pull requests only restore (exact key, then the same-OS prefix); the
+      # push to main saves, so one shared cache per OS serves every branch
+      # instead of one private, never-shared copy per pull request.
+      - name: Restore cargo registry and build
+        id: cache-portability
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/registry
@@ -198,17 +202,37 @@ jobs:
           key: portability-${{ matrix.os }}-${{ hashFiles('backend/Cargo.lock') }}
           restore-keys: portability-${{ matrix.os }}-
 
+      # A push to main only refreshes the shared cache: compile the lib tests
+      # the suites below run, run none of them.
+      - name: Build the lib tests without running them (push to main)
+        if: github.event_name == 'push'
+        run: cargo test --lib --no-run --locked
+
       - name: Worktree lifecycle and disk guards
+        if: github.event_name != 'push'
         run: cargo test --lib core::worktree
 
       - name: Disk maintenance surface
+        if: github.event_name != 'push'
         run: cargo test --lib api::maintenance
 
       - name: Cleanup authorisation from durable state
+        if: github.event_name != 'push'
         run: cargo test --lib db::orchestration
 
       - name: Windows to WSL agent launches
+        if: github.event_name != 'push'
         run: cargo test --lib agents::wsl
+
+      - name: Save cargo registry and build (main)
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cache-portability.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cache-portability.outputs.cache-primary-key }}
 
   # The release profile the installers ship (thin LTO, one codegen unit). The
   # ci-test e2e job serves a cheaper build, so this is where every pull request
@@ -224,8 +248,9 @@ jobs:
           ref: ${{ inputs.ref }}
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-      - name: Cache cargo registry and release dependencies
-        uses: actions/cache@v4
+      - name: Restore cargo registry and release dependencies
+        id: cache-release
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/registry
@@ -234,9 +259,21 @@ jobs:
             target/release/build
             target/release/deps
           key: release-v1-${{ runner.os }}-${{ hashFiles('backend/Cargo.lock') }}
+          restore-keys: release-v1-${{ runner.os }}-
       - name: Build backend (release)
         working-directory: backend
         run: cargo build --release --locked --bin kronn
+      - name: Save cargo registry and release dependencies (main)
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cache-release.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release/.fingerprint
+            target/release/build
+            target/release/deps
+          key: ${{ steps.cache-release.outputs.cache-primary-key }}
 
   ci-build-gates:
     # The one check branch protection requires for this workflow. Red until
@@ -261,6 +298,9 @@ jobs:
         if: needs.require-ci-build-label.outputs.run == 'true'
         env:
           RESULTS: ${{ toJson(needs.*.result) }}
+          EVENT_NAME: ${{ github.event_name }}
+        # A push to main only refreshes caches: its skipped checks are by design.
         run: |
           echo "Gate results: $RESULTS"
-          echo "$RESULTS" | jq -e 'all(.[]; . == "success")'
+          echo "$RESULTS" | jq -e --arg event "$EVENT_NAME" \
+            'all(.[]; . == "success" or ($event == "push" and . == "skipped"))'
