@@ -100,6 +100,14 @@ test('orders the clips of a discussion, sets one aside and plays the others in t
   await panel.getByTestId('assets-tab-editor').click();
   await expect(film()).toHaveText(['plan-a.webm', 'plan-b.webm', 'hors-sujet.webm']);
 
+  // The browser reads each clip's length after the rows are drawn, and the
+  // totals change with it: nothing may move under a pointer that is about to
+  // grab a row (a slow runner drags while the lengths are still arriving).
+  const firstRow = panel.getByTestId('video-sequence-item').first();
+  const topBefore = (await firstRow.boundingBox())?.y;
+  await expect(panel.getByTestId('video-sequence-total-duration')).not.toContainText('inconnue');
+  expect((await firstRow.boundingBox())?.y).toBe(topBefore);
+
   // A real drag: before anything is dropped, a line shows where the clip
   // will land, and the clip being moved fades.
   const row = (name: string) => panel.getByTestId('video-sequence-item').filter({ hasText: name });

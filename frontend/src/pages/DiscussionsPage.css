@@ -8420,36 +8420,56 @@ button.disc-contact-open {
 
 .disc-sequence-head > p { flex-basis: 100%; margin: 0; color: var(--kr-text-secondary); font-size: 12px; }
 
-/* What the final cut adds up to, read before pressing play. */
+/* What the final cut adds up to, read before pressing play. The clips' lengths
+   are read by the browser after the rows are drawn, so the text here changes
+   under the pointer: one fixed line per figure, beside the play button, and
+   the head keeps its height whatever the text says. A figure that does not
+   fit is cut, never wrapped or pushed to another line. */
 .disc-sequence-summary {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 18px;
+  display: grid;
+  flex: 1 1 0;
+  min-width: 0;
+  gap: 2px;
   margin: 0;
 }
 
+.disc-sequence-summary > div {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
 .disc-sequence-summary dt {
+  flex: none;
   color: var(--kr-text-muted);
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
+  white-space: nowrap;
 }
 
 .disc-sequence-summary dd {
   display: flex;
+  flex: 1;
   align-items: baseline;
   gap: 6px;
+  min-width: 0;
   margin: 0;
   color: var(--kr-text-primary);
   font-size: 14px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .disc-sequence-summary small {
+  min-width: 0;
+  overflow: hidden;
   color: var(--kr-text-muted);
   font-size: 11px;
   font-weight: 400;
+  text-overflow: ellipsis;
 }
 
 .disc-sequence-meta {

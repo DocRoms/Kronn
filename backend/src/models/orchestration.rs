@@ -17,7 +17,7 @@ use ts_rs::TS;
 
 use super::{
     AgentType, MessageTarget, MessageTargetKind, ModelTier, PlanningActor, PlanningDodItem,
-    PlanningTaskSummary,
+    PlanningDodVerification, PlanningTaskSummary,
 };
 
 /// Versioned so downstream contract changes stay backward-compatible: new struct
@@ -1899,6 +1899,11 @@ pub struct ReviewDodVerification {
     pub dod_id: String,
     pub met: bool,
     pub evidence: String,
+    /// KT-1254 — `post_integration` (with `met: false`) declares the item a
+    /// principal live check made after integration: approve integrates with it
+    /// pending and the task closes once it is ticked with evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<PlanningDodVerification>,
 }
 
 /// Principal → backend review (ADR §5, KT-319). `comment` is schema-optional but
@@ -1944,7 +1949,8 @@ pub fn review_decision_v1_schema() -> serde_json::Value {
                     "properties": {
                         "dod_id": { "type": "string", "minLength": 1 },
                         "met": { "type": "boolean" },
-                        "evidence": { "type": "string", "minLength": 1 }
+                        "evidence": { "type": "string", "minLength": 1 },
+                        "verification": { "type": "string", "enum": ["post_integration"] }
                     }
                 }
             },
