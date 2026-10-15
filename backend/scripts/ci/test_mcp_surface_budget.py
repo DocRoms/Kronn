@@ -108,6 +108,32 @@ class McpSurfaceBudgetTests(unittest.TestCase):
 
         self.assertEqual(tools[0]["inputSchema"]["maxItems"], 8)
 
+    def test_a_tool_added_outside_the_literal_fails_the_gate(self):
+        # KT-154 appended two tools with TOOLS.extend after main(): tools/list
+        # grew by ~1.8 KB while the measured literal stayed green.
+        literal = "TOOLS = [{\"name\": \"a\", \"description\": \"x\", \"inputSchema\": {}}]\n"
+        for mutation in (
+            "def main():\n    pass\nTOOLS.extend([{'name': 'b'}])\n",
+            "TOOLS.append({'name': 'b'})\n",
+            "TOOLS.insert(0, {'name': 'b'})\n",
+            "TOOLS += [{'name': 'b'}]\n",
+            "TOOLS[0] = {'name': 'b'}\n",
+            "TOOLS = TOOLS + [{'name': 'b'}]\n",
+        ):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temp_dir:
+                root = pathlib.Path(temp_dir)
+                bridge = root / gate.BRIDGE
+                bridge.parent.mkdir(parents=True)
+                bridge.write_text(literal + mutation)
+                with self.assertRaises(SystemExit) as refused:
+                    gate.load_tools(root)
+                self.assertIn("TOOLS", str(refused.exception))
+
+    def test_the_real_bridge_declares_its_catalogue_in_one_literal(self):
+        gate.reject_catalogue_mutations(
+            gate.ast.parse((REPO_ROOT / gate.BRIDGE).read_text())
+        )
+
     def test_the_measurement_counts_the_escaping_the_wire_carries(self):
         # The bug this replaced: measuring with `ensure_ascii=False` under-reported
         # the catalogue by 792 B, because every accented character in a French
