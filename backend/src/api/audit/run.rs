@@ -86,6 +86,10 @@ pub struct AuditLatest {
     /// The lease is held by a run nobody can settle: every launch is refused
     /// until the cleanup action releases it (KT-1134).
     pub lease_orphaned: bool,
+    /// The audit run the repository describes (KT-1199): a colleague's run
+    /// after a fetch or a rebase. Shown as the project's state when
+    /// `newer_than_local`; `None` when the repository carries no run state.
+    pub repo: Option<super::run_state::RepoAuditRun>,
 }
 
 /// GET /api/projects/{id}/audit-latest
@@ -97,6 +101,7 @@ pub async fn audit_latest(
         Ok(t) => t.lease_orphaned(&id),
         Err(_) => return Json(ApiResponse::err("audit tracker lock poisoned")),
     };
+    let project_id = id.clone();
     let result = state
         .db
         .with_read_conn(move |conn| {
@@ -116,13 +121,36 @@ pub async fn audit_latest(
                 latest_completed,
                 steps_to_redo,
                 lease_orphaned,
+                repo: None,
             })
         })
         .await;
-    match result {
-        Ok(state) => Json(ApiResponse::ok(state)),
-        Err(e) => Json(ApiResponse::err(format!("db: {e}"))),
+    let mut found = match result {
+        Ok(found) => found,
+        Err(e) => return Json(ApiResponse::err(format!("db: {e}"))),
+    };
+    // The repository's run is read off the filesystem, at every call: a
+    // fetch, a rebase or a rescan shows up on the next refresh.
+    let project = state
+        .db
+        .with_conn({
+            let project_id = project_id.clone();
+            move |conn| crate::db::projects::get_project(conn, &project_id)
+        })
+        .await
+        .ok()
+        .flatten();
+    if let Some(project) = project {
+        let path = crate::core::scanner::resolve_host_path(&project.path);
+        let latest = found.latest.clone();
+        found.repo = tokio::task::spawn_blocking(move || {
+            super::run_state::repo_view(&path, latest.as_ref())
+        })
+        .await
+        .ok()
+        .flatten();
     }
+    Json(ApiResponse::ok(found))
 }
 
 /// 0.8.4 (#317 / B1) — admin cleanup: force-mark every `Running`
@@ -266,6 +294,12 @@ pub struct AuditTimelineData {
     /// Why the server would refuse a validation now (`None` = it accepts):
     /// the UI shows the reason instead of offering the action.
     pub validation_block: Option<super::validate::ValidationBlock>,
+    /// The audit run the repository describes (KT-1199): a colleague's run
+    /// after a fetch or a rebase, read off the working tree at every call.
+    pub repo: Option<super::run_state::RepoAuditRun>,
+    /// The repository's run is the project's state here and the server would
+    /// accept a validation from it: the timeline offers to validate.
+    pub repo_can_validate: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
@@ -345,13 +379,28 @@ pub async fn audit_timeline(
         Ok((None, _, _, _)) => return Json(ApiResponse::err("Project not found")),
         Err(e) => return Json(ApiResponse::err(format!("db: {e}"))),
     };
-    let recorded = tokio::task::spawn_blocking(move || {
-        let root = crate::core::scanner::resolve_host_path(&project.path);
-        crate::core::kronn_state::read(&root)
-    })
-    .await
-    .ok()
-    .flatten();
+    let latest_run = runs.first().cloned();
+    let project_id = project.id.clone();
+    let (recorded, repo, validation_block, repo_can_validate) =
+        tokio::task::spawn_blocking(move || {
+            let root = crate::core::scanner::resolve_host_path(&project.path);
+            let recorded = crate::core::kronn_state::read(&root);
+            let repo = super::run_state::repo_view(&root, latest_run.as_ref());
+            // The repository's run stands in for the local one when it is
+            // newer (or the only one): its gates decide, not the local row's.
+            let from_repo = super::validate::repo_validation_state(
+                &root,
+                &project_id,
+                latest_run.as_ref(),
+                audit_running,
+            );
+            match from_repo {
+                Some(found) => (recorded, repo, found.blocked, found.can_validate),
+                None => (recorded, repo, validation_block, false),
+            }
+        })
+        .await
+        .unwrap_or((None, None, None, false));
     let recorded = recorded.unwrap_or_default();
     let validated = recorded.validated_at.is_some();
     let recorded_validated_by = recorded.validated_by.filter(|_| validated);
@@ -366,6 +415,8 @@ pub async fn audit_timeline(
         latest_validation,
         lease_orphaned,
         validation_block,
+        repo,
+        repo_can_validate,
     }))
 }
 

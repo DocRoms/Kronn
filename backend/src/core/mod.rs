@@ -9,6 +9,7 @@ pub mod audit_detectors;
 pub mod audit_documents;
 pub mod audit_ecosystems;
 pub mod audit_mcp_filter;
+pub mod audit_run_state;
 pub mod audit_state;
 pub mod audit_validation;
 pub mod backup;

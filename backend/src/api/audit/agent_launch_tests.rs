@@ -288,7 +288,14 @@ fn assert_git_shows_only_docs(root: &Path) {
     let status = String::from_utf8_lossy(&out.stdout);
     for line in status.lines() {
         let path = &line[3..];
-        assert!(!path.contains(".kronn-"), "{status}");
+        // The run state is versioned on purpose (KT-1199): a colleague who
+        // fetches resumes or validates from it. Any other `.kronn-` file is
+        // leaked working state.
+        let versioned = path.ends_with(&format!(
+            "docs/{}",
+            crate::core::audit_run_state::RUN_STATE_FILENAME
+        ));
+        assert!(versioned || !path.contains(".kronn-"), "{status}");
         if line.starts_with("!! ") {
             // Template installation also excludes the documented scratch area.
             assert!(
