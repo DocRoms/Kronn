@@ -105,6 +105,15 @@ where
     let _ = url.set_username("");
     let _ = url.set_password(None);
     let host = url.host_str().unwrap_or_default().to_string();
+    // RFC 6761: a `.invalid` name never resolves, so no lookup is made.
+    if host
+        .trim_end_matches('.')
+        .rsplit('.')
+        .next()
+        .is_some_and(|label| label.eq_ignore_ascii_case("invalid"))
+    {
+        return unreachable(UnreachableReason::Dns);
+    }
     let port = url.port_or_known_default().unwrap_or(80);
     let https = url.scheme() == "https";
     let path = format!("{}/v1/models", url.path().trim_end_matches('/'));
@@ -270,6 +279,25 @@ mod tests {
                 http_status: None
             }
         );
+    }
+
+    #[tokio::test]
+    async fn an_invalid_name_is_a_dns_failure_without_any_network() {
+        // No budget at all: a lookup or a request would time out.
+        let none = ProbeBudget {
+            connect: Duration::ZERO,
+            total: Duration::ZERO,
+        };
+        for endpoint in ["http://kt697.invalid", "https://a.b.INVALID./v1"] {
+            assert_eq!(
+                probe_endpoint(endpoint, none).await,
+                ProbeOutcome::Unreachable {
+                    reason: UnreachableReason::Dns,
+                    http_status: None
+                },
+                "{endpoint}"
+            );
+        }
     }
 
     /// Accepts, holds the connection for `hold`, then closes it unanswered.

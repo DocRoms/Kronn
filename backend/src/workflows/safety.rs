@@ -249,6 +249,14 @@ fn snapshot_tree(work_dir: &Path, sparse: Option<&[String]>) -> Result<(String, 
     // A copy only reuses the file stat cache; `add -A` rewrites every entry.
     if real_index.exists() {
         std::fs::copy(&real_index, &private)?;
+        // Git re-reads an entry as recent as its index file. On Linux the copy
+        // gets a fresh mtime, so git would trust a same-size rewrite from that
+        // instant (macOS clones keep it, which hides this locally).
+        let modified = std::fs::metadata(&real_index)?.modified()?;
+        std::fs::File::options()
+            .write(true)
+            .open(&private)?
+            .set_modified(modified)?;
     }
     let written = clear_hidden_entries(work_dir, &private, sparse).and_then(|absent| {
         git_with_index(work_dir, &private, &["add", "-A"])?;
@@ -558,6 +566,35 @@ mod tests {
         assert_eq!(
             measure(dir.path(), &baseline).unwrap(),
             ChangeStats { files: 2, lines: 4 }
+        );
+    }
+
+    #[test]
+    fn a_same_size_rewrite_as_recent_as_the_index_is_a_change() {
+        let dir = repo();
+        // Only the racy-entry check can see this rewrite: same size, same mtime.
+        git_in(dir.path(), &["config", "core.trustctime", "false"]);
+        let file = dir.path().join("a.txt");
+        let stamp = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        let set_mtime = |path: &Path| {
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(stamp)
+                .unwrap();
+        };
+        // A clean, unsmudged entry stamped in the past, then an index file of
+        // that same instant: git must treat the entry as racy.
+        set_mtime(&file);
+        git_in(dir.path(), &["update-index", "-q", "--refresh"]);
+        set_mtime(&dir.path().join(".git/index"));
+        let baseline = capture_baseline(dir.path()).unwrap();
+        std::fs::write(&file, "uno\ndos\n").unwrap();
+        set_mtime(&file);
+        assert_eq!(
+            measure(dir.path(), &baseline).unwrap(),
+            ChangeStats { files: 1, lines: 4 }
         );
     }
 
