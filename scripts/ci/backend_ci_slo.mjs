@@ -3,10 +3,13 @@
 import assert from "node:assert/strict";
 
 export const BACKEND_JOB = "test-backend";
+// The sharded suite starts here; `test-backend` merges and reports last.
+export const BACKEND_BUILD_JOB = "test-backend-build";
 // The one backend test pass (nextest + coverage) on a hot cache.
 export const SLO_MS = 10 * 60 * 1000;
 export const HISTORY_LIMIT = 20;
 export const HOT_CACHE_HIT_STEP = "Record compiled cache hit";
+export const PARTIAL_CACHE_HIT_STEP = "Record compiled cache partial hit";
 export const GATE_JOB = "ci-quality-gates";
 
 function milliseconds(startedAt, completedAt) {
@@ -38,6 +41,24 @@ export function percentile(values, percentileValue) {
   assert(values.length > 0, "percentile requires at least one value");
   const sorted = [...values].sort((left, right) => left - right);
   return sorted[Math.ceil(sorted.length * percentileValue) - 1];
+}
+
+/**
+ * One run's backend critical path as a single job: from the build's start to
+ * the report's end, with both jobs' steps (the cache evidence lives in the
+ * build). Runs from before the split have no build job and pass through.
+ */
+export function collapseBackendJobs(jobs) {
+  const build = jobs.find((job) => job.name === BACKEND_BUILD_JOB);
+  if (!build) return jobs;
+  return jobs
+    .filter((job) => job.name !== BACKEND_BUILD_JOB)
+    .map((job) => job.name !== BACKEND_JOB ? job : {
+      ...job,
+      started_at: build.started_at,
+      status: build.status === "completed" ? job.status : build.status,
+      steps: [...(build.steps ?? []), ...(job.steps ?? [])],
+    });
 }
 
 export function summarizeBackendJobs(jobs) {
@@ -72,8 +93,13 @@ export function hasRestoredCompiledCache(job) {
   return job.steps?.some((step) => step.name === HOT_CACHE_HIT_STEP && step.conclusion === "success") ?? false;
 }
 
-export function effectiveMeasurementMode(requestedMode, compiledCacheHit) {
+export function hasPartiallyRestoredCompiledCache(job) {
+  return job.steps?.some((step) => step.name === PARTIAL_CACHE_HIT_STEP && step.conclusion === "success") ?? false;
+}
+
+export function effectiveMeasurementMode(requestedMode, compiledCacheHit, compiledCacheState = compiledCacheHit ? "hit" : "miss") {
   if (requestedMode === "cold") return "cold";
+  if (compiledCacheState === "partial") return "partial";
   return compiledCacheHit ? "hot" : "warmup/miss";
 }
 
@@ -100,7 +126,7 @@ export function requireCurrentBackendJob(jobs) {
 
 export function validateCompiledCacheState(requestedMode, state, compiledCacheHit) {
   if (requestedMode === "cold") return;
-  if (state !== "hit" && state !== "miss") {
+  if (state !== "hit" && state !== "partial" && state !== "miss") {
     throw new Error(`Compiled backend cache state is invalid or unavailable: ${state || "empty"}`);
   }
   if ((state === "hit") !== compiledCacheHit) {
@@ -124,13 +150,15 @@ async function jobsForRun(runId) {
   return payload.jobs ?? [];
 }
 
-export function markdown(summary, currentJob, mode, compiledCacheHit, runTotals = { fastLoopMs: null, runnerMs: null }) {
+export function markdown(summary, currentJob, mode, compiledCacheHit, runTotals = { fastLoopMs: null, runnerMs: null }, compiledCacheState = compiledCacheHit ? "hit" : "miss") {
   const currentDuration = currentJob?.durationMs ?? null;
   const status = timingStatus(currentDuration);
-  const cacheState = mode === "cold" ? "not applicable" : compiledCacheHit ? "hit" : "miss";
+  const cacheState = mode === "cold" ? "not applicable" : compiledCacheState;
   const stepRows = (currentJob?.steps ?? []).map((step) => `| ${step.name} | ${formatDuration(milliseconds(step.started_at, step.completed_at))} |`);
   const historyDescription = mode === "cold"
     ? "Current run only; cold measurements are intentionally excluded from historical hot-cache statistics."
+    : mode === "partial"
+      ? "Current run restored a fallback compiled cache through restore-keys; it is shown separately and excluded from exact hot-cache history."
     : "Successful pull-request runs from the same head branch whose compiled cache was restored; manual, failed, cancelled, cold, warmup/miss, and other-branch runs are excluded.";
   return ["## Backend CI timing", "", `Effective measurement mode: **${mode}**. Compiled cache: **${cacheState}**. The SLO is ${formatDuration(SLO_MS)} for \`${BACKEND_JOB}\`; this report never changes a functional gate.`, `Historical evidence: ${historyDescription}`, "", "| Metric | Value |", "| --- | --- |", `| Current backend critical path | ${formatDuration(currentDuration)} (${status}; ${mode}) |`, `| Trigger to ${GATE_JOB} | ${formatDuration(runTotals.fastLoopMs)} |`, `| Runner time, all jobs of this run | ${formatDuration(runTotals.runnerMs)} |`, `| Historical hot sample size | ${summary.samples.length} completed runs |`, `| Historical hot median | ${formatDuration(summary.medianMs)} |`, `| Historical hot P95 | ${formatDuration(summary.p95Ms)} |`, `| Historical hot consecutive SLO breaches | ${summary.consecutiveBreaches} |`, "", "### Current backend job steps", "", "| Step | Duration |", "| --- | --- |", ...stepRows, ""].join("\n");
 }
@@ -141,7 +169,7 @@ async function main() {
   const compiledCacheHit = process.env.CI_COMPILED_CACHE_HIT === "true";
   const compiledCacheState = process.env.CI_COMPILED_CACHE_STATE ?? "";
   validateCompiledCacheState(requestedMode, compiledCacheState, compiledCacheHit);
-  const mode = effectiveMeasurementMode(requestedMode, compiledCacheHit);
+  const mode = effectiveMeasurementMode(requestedMode, compiledCacheHit, compiledCacheState);
   if (!runId) throw new Error("GITHUB_RUN_ID is required");
   const [currentJobs, currentRun, history] = await Promise.all([
     jobsForRun(runId),
@@ -152,11 +180,11 @@ async function main() {
     ? comparableSuccessfulHotRuns(history.workflow_runs ?? [], currentRun)
     : [];
   const priorRunIds = comparableRuns.map((run) => String(run.id));
-  const priorJobs = await Promise.all(priorRunIds.map(jobsForRun));
-  const currentJob = requireCurrentBackendJob(currentJobs);
+  const priorJobs = (await Promise.all(priorRunIds.map(jobsForRun))).map(collapseBackendJobs);
+  const currentJob = requireCurrentBackendJob(collapseBackendJobs(currentJobs));
   const summary = summarizeBackendJobs(priorJobs.flat().filter(hasRestoredCompiledCache));
   const runTotals = { fastLoopMs: fastLoopDurationMs(currentRun, currentJobs), runnerMs: runnerMilliseconds(currentJobs) };
-  const report = markdown(summary, currentJob, mode, compiledCacheHit, runTotals);
+  const report = markdown(summary, currentJob, mode, compiledCacheHit, runTotals, compiledCacheState);
   process.stdout.write(`${report}\n`);
   if (process.env.GITHUB_STEP_SUMMARY) await (await import("node:fs/promises")).appendFile(process.env.GITHUB_STEP_SUMMARY, `${report}\n`);
   if (currentJob.durationMs > SLO_MS) console.log(`::warning title=Backend CI SLO exceeded::${BACKEND_JOB} took ${formatDuration(currentJob.durationMs)} (SLO ${formatDuration(SLO_MS)}); functional gates remain authoritative.`);

@@ -107,7 +107,8 @@ class E2eContainerWorkflowTests(unittest.TestCase):
     def test_ci_jobs_have_hard_bounded_timeouts(self):
         jobs = {
             CI_WORKFLOW: (
-                "require-ci-label", "test-backend", "test-backend-quality",
+                "require-ci-label", "test-backend-build", "test-backend-shard",
+                "test-backend", "test-backend-quality",
                 "duplication-check", "test-python", "test-frontend", "test-e2e",
                 "test-shell", "security-scan", "ci-quality-gates",
                 "backend-ci-performance",
@@ -129,7 +130,8 @@ class E2eContainerWorkflowTests(unittest.TestCase):
             section = match.group("section")
             # Cold compilation/coverage need bounded room before suites/cache save.
             expected_timeout = {
-                "test-backend": 40,
+                "test-backend-build": 40,
+                "test-backend": 20,
                 "test-e2e": 45,
                 "build-release": 45,
                 "test-backend-portability": "${{ matrix.os == 'macos-latest' && 75 || 30 }}",
@@ -160,12 +162,29 @@ class E2eContainerWorkflowTests(unittest.TestCase):
         self.assertIn("if: always()", aggregate)
         self.assertIn("      - require-ci-label", aggregate)
         self.assertIn("node scripts/ci/backend_ci_slo.mjs", workflow)
-        backend = re.search(
-            r"^  test-backend:\n(?P<section>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
-            workflow,
-            re.MULTILINE | re.DOTALL,
-        ).group("section")
-        self.assertIn("timeout-minutes: 40", backend)
+        def ci_job(name):
+            return re.search(
+                rf"^  {re.escape(name)}:\n(?P<section>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+                workflow,
+                re.MULTILINE | re.DOTALL,
+            ).group("section")
+
+        # The suite is one build, three shards and one merging report.
+        build_job = ci_job("test-backend-build")
+        shard_job = ci_job("test-backend-shard")
+        report_job = ci_job("test-backend")
+        backend = build_job + shard_job + report_job
+        self.assertIn("timeout-minutes: 40", build_job)
+        self.assertIn("cargo nextest archive --workspace --locked", build_job)
+        self.assertIn('eval "$(cargo llvm-cov show-env --sh)"', build_job)
+        self.assertIn("shard: [1, 2, 3]", shard_job)
+        self.assertIn("--partition slice:${{ matrix.shard }}/3", shard_job)
+        self.assertIn("KRONN_TEMPLATES_DIR: ${{ github.workspace }}/templates", shard_job)
+        self.assertIn("KRONN_TEMPLATES_DIR: ${{ github.workspace }}/templates", report_job)
+        self.assertIn("needs: [require-ci-label, test-backend-build, test-backend-shard]", report_job)
+        self.assertIn("pattern: backend-profraw-*", report_job)
+        self.assertIn("cargo llvm-cov report --summary-only", report_job)
+        self.assertIn("-E 'test(export_bindings)'", report_job)
         self.assertIn("target/llvm-cov-target/debug/.fingerprint", backend)
         self.assertIn("target/llvm-cov-target/debug/build", backend)
         self.assertIn("target/llvm-cov-target/debug/deps", backend)
@@ -179,15 +198,15 @@ class E2eContainerWorkflowTests(unittest.TestCase):
         cargo_config = (ROOT / ".cargo" / "config.toml").read_text()
         self.assertIn('target-dir = "target"', cargo_config)
         self.assertLess(
-            backend.index("cargo llvm-cov nextest — measured backend critical path"),
-            backend.index("Mark bounded compiled backend cache ready"),
+            build_job.index("Build the instrumented test archive"),
+            build_job.index("Mark bounded compiled backend cache ready"),
         )
-        # One test pass: the suite runs once, under nextest and coverage, with
-        # the same configuration as `make test-backend-cov`.
-        self.assertIn("cargo llvm-cov nextest --workspace", backend)
-        self.assertIn("NEXTEST_PROFILE: ci", backend)
+        # One test pass: every test runs once, in exactly one shard, under
+        # nextest's `ci` profile and coverage.
+        self.assertIn("NEXTEST_PROFILE: ci", shard_job)
         # Without a pool, one profraw per test process fills the runner disk.
-        self.assertIn("LLVM_PROFILE_FILE_NAME: kronn-%8m.profraw", backend)
+        self.assertIn("shard-${{ matrix.shard }}-%8m.profraw", shard_job)
+        self.assertNotIn("%p", shard_job)
         # The drift check and the raw-command lint reuse the suite's build.
         self.assertIn("assemble-generated-types.mjs", backend)
         self.assertIn("llvm-cov-target/debug/examples/lint-no-raw-command", backend)
@@ -216,7 +235,10 @@ class E2eContainerWorkflowTests(unittest.TestCase):
             backend,
             re.DOTALL,
         ).group("section")
-        self.assertIn("steps.verify-backend-cache.outputs.state == 'miss'", mark_section)
+        # Any complete non-hit tree (miss or partial restore) is marked so the
+        # push to main can save it, even when the suite itself failed.
+        self.assertIn("always()", mark_section)
+        self.assertIn("steps.verify-backend-cache.outputs.state != 'hit'", mark_section)
         self.assertNotIn("cp -a", backend)
         self.assertLess(verify_index, mark_index)
         quality = re.search(
@@ -236,10 +258,10 @@ class E2eContainerWorkflowTests(unittest.TestCase):
         # Clippy type-checks the crate; a check step compiled it twice.
         self.assertIn("cargo clippy --locked -- -D warnings", desktop)
         self.assertNotIn("cargo check", desktop)
-        self.assertIn("CI_COMPILED_CACHE_HIT: ${{ needs.test-backend.outputs.compiled_cache_hit }}", workflow)
-        self.assertIn("CI_COMPILED_CACHE_STATE: ${{ needs.test-backend.outputs.compiled_cache_state }}", workflow)
+        self.assertIn("CI_COMPILED_CACHE_HIT: ${{ needs.test-backend-build.outputs.compiled_cache_hit }}", workflow)
+        self.assertIn("CI_COMPILED_CACHE_STATE: ${{ needs.test-backend-build.outputs.compiled_cache_state }}", workflow)
         hot_cache = re.search(
-            r"Cache cargo registry and bounded backend build \(hot\)(?P<section>.*?)(?=^      - |\Z)",
+            r"Restore cargo registry and bounded backend build \(hot\)(?P<section>.*?)(?=^      - |\Z)",
             backend,
             re.DOTALL | re.MULTILINE,
         ).group("section")
@@ -250,7 +272,23 @@ class E2eContainerWorkflowTests(unittest.TestCase):
         self.assertNotIn("profraw", hot_cache)
         self.assertNotIn("nextest", hot_cache)
         self.assertIn("target/llvm-cov-target/debug/.fingerprint", hot_cache)
+        # cargo clean refuses a restored target directory without its tag.
+        self.assertIn("target/llvm-cov-target/CACHEDIR.TAG", hot_cache)
+        self.assertIn("Signature: 8a477f597d28d172789f06886806bc55", backend)
         self.assertIn("cargo-hot-v3-", hot_cache)
+        # Pull requests restore (exact key, then the same-OS prefix) and never
+        # save: an Actions cache saved by a pull request is private to it and
+        # only evicts the shared main cache from the 10 GB budget.
+        self.assertIn("uses: actions/cache/restore@v4", hot_cache)
+        self.assertIn("restore-keys: cargo-hot-v3-${{ runner.os }}-", hot_cache)
+        for workflow_text in (workflow, build):
+            saves = list(re.finditer(r"uses: actions/cache/save@v4", workflow_text))
+            self.assertTrue(saves)
+            for save in saves:
+                step = workflow_text.rfind("      - name:", 0, save.start())
+                condition = workflow_text[step:save.start()]
+                self.assertIn("github.event_name == 'push'", condition)
+                self.assertIn("github.ref == 'refs/heads/main'", condition)
         cold_cache = re.search(
             r"Cache cargo registry \(cold, isolated\)(?P<section>.*?)(?=^      - |\Z)",
             backend,
@@ -312,6 +350,59 @@ class E2eContainerWorkflowTests(unittest.TestCase):
             # Only the label guard is conditional; the verdict always runs.
             self.assertEqual(section.count("        if: "), 1, gate)
 
+    def test_a_push_to_main_only_builds_and_saves_the_rust_caches(self):
+        # The merged tree was tested on its pull request: a push to main
+        # compiles what the pull requests restore, saves it, and runs nothing.
+        no_push = "github.event_name != 'push'"
+        workflow = CI_WORKFLOW.read_text()
+        build = BUILD_WORKFLOW.read_text()
+        jobs = {**job_sections(workflow), **job_sections(build)}
+        for name in (
+            "duplication-check", "diff-hygiene", "test-python", "test-frontend",
+            "test-shell", "security-scan", "backend-ci-performance",
+            "test-desktop-compile", "test-docs-sidecar-windows",
+            "test-backend-shard", "test-backend",
+        ):
+            condition = re.search(r"^    if: (.*)$", jobs[name], re.MULTILINE).group(1)
+            self.assertIn(no_push, condition, name)
+
+        def step(job, name):
+            match = re.search(
+                rf"^      - name: {re.escape(name)}\n(?P<body>.*?)(?=^      - |\Z)",
+                jobs[job],
+                re.MULTILINE | re.DOTALL,
+            )
+            self.assertIsNotNone(match, f"{job}: {name}")
+            return match.group("body")
+
+        for job, name in (
+            ("test-backend-build", "cargo fmt"),
+            ("test-backend-build", "Lint — no raw Command::new in prod code"),
+            ("test-backend-build", "Upload the instrumented test archive"),
+            ("test-backend-quality", "cargo test --doc"),
+            ("test-e2e", "Run E2E tests"),
+            ("test-backend-portability", "Worktree lifecycle and disk guards"),
+            ("test-backend-portability", "Windows to WSL agent launches"),
+        ):
+            self.assertIn(f"if: {no_push}", step(job, name), f"{job}: {name}")
+        # The same archive build runs on a pull request and on a push: the
+        # cache main saves is exactly what a pull request compiles.
+        archive_build = step("test-backend-build", "Build the instrumented test archive")
+        self.assertNotIn("if:", archive_build)
+        self.assertIn("cargo nextest archive --workspace --locked", archive_build)
+        lib_build = step("test-backend-portability", "Build the lib tests without running them (push to main)")
+        self.assertIn("cargo test --lib --no-run --locked", lib_build)
+        # A failed build must never be saved under the exact key: the next
+        # run would see a hit and never replace it. The backend's own save is
+        # gated by its verified `ready` marker instead.
+        for text in (workflow, build):
+            for save in re.finditer(r"uses: actions/cache/save@v4", text):
+                start = text.rfind("      - name:", 0, save.start())
+                condition = text[start:save.start()]
+                if "steps.mark-backend-cache.outputs.ready == 'true'" in condition:
+                    continue
+                self.assertIn("if: success() &&", condition)
+
     def test_each_test_workflow_reads_its_label_live_and_aggregates_every_job(self):
         for path, label, route, gate in TEST_WORKFLOWS:
             workflow = path.read_text()
@@ -339,7 +430,11 @@ class E2eContainerWorkflowTests(unittest.TestCase):
             self.assertIn(f"        if: needs.{route}.outputs.run != 'true'\n", aggregate)
             self.assertIn(f"        if: {live}\n", aggregate)
             self.assertIn(IDENTITY_STEP, aggregate)
-            self.assertIn("jq -e 'all(.[]; . == \"success\")'", aggregate)
+            # Only a push to main may count a skipped job: it refreshes caches.
+            self.assertIn(
+                """'all(.[]; . == "success" or ($event == "push" and . == "skipped"))'""",
+                aggregate,
+            )
             for name, section in jobs.items():
                 if name in (route, gate):
                     continue

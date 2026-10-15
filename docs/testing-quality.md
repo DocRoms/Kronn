@@ -105,7 +105,7 @@ standalone Rust test files; a `#[cfg(test)]` on their parent module does not
 exclude their contents. Propagate fallible fixture setup inside the closure
 and assert its result after awaiting it.
 `[src: file: backend/scripts/ci/lint_with_conn_unwrap.py:79-115]`
-`[src: file: .github/workflows/ci-test.yml:449-454]`
+`[src: file: .github/workflows/ci-test.yml:480-484]`
 
 Supervisor cleanup must also reap live shell jobs whose PID was not yet recorded:
 a termination signal can arrive between the fork and that assignment, leaving
@@ -116,39 +116,98 @@ TERM at this boundary for both the backend and the watcher.
 
 ## Backend CI timing SLO
 
-`test-backend` is the measured backend critical-path job and the only backend
-test pass: formatting, then every library, binary and integration test once
-under cargo-nextest with coverage instrumentation
-(`NEXTEST_PROFILE=ci cargo llvm-cov nextest`), the 83 % floors and the
-key-management per-file floors on that same run, then the generated-type drift
-check and the raw-command lint on the build it already made. `make
-test-backend-cov` runs the same command locally. Before this layout the suite ran
+The backend suite is the measured critical path and runs once, split in
+three. `test-backend-build` checks formatting, compiles every library, binary
+and integration test with coverage instrumentation into a nextest archive
+(`cargo llvm-cov show-env` then `cargo nextest archive`), and runs the
+raw-command lint. Three `test-backend-shard` jobs each run a third of the tests
+from that archive (`--partition slice:N/3`, `NEXTEST_PROFILE=ci`), and
+`test-backend` merges their coverage profiles against the archived binaries,
+enforces the 83 % floors and the key-management per-file floors on the whole
+suite, then replays the ts-rs export tests for the generated-type drift check.
+An extracted test binary no longer sits under the checkout, so the shards and
+the replay set `KRONN_TEMPLATES_DIR` to the repository's `templates/`.
+Merging the profiles of separate archive extractions gives the same report as
+a single run (checked on 2026-10-14 with a 131-test subset: identical line,
+function and region totals). `make test-backend-cov` keeps the single-run
+command locally. The SLO observer measures from the start of
+`test-backend-build` to the end of `test-backend`, and reads the cache state
+from the build. Before this layout the suite ran
 twice, once in `test-backend` (`cargo test`) and once instrumented in
 `test-backend-coverage`; the history below measures that older layout.
 Clippy and the project-specific budget checks run in `test-backend-quality`,
 in parallel, and stay blocking through `ci-quality-gates`.
 Its hot cache targets the three reusable directories of the instrumented
-tree (`target/llvm-cov-target/debug/{.fingerprint,build,deps}`); a warmup only
-validates them and writes a versioned marker (`.kronn-backend-cache-v3`)
-before the cache action's post-job save. Profraw files, the nextest store and
-other transient trees are never archived.
-[src: file: .github/workflows/ci-test.yml:71-228]
+tree (`target/llvm-cov-target/debug/{.fingerprint,build,deps}`). Pull requests
+restore from the exact key or a same-OS fallback prefix; only `push` runs on
+`main` save the exact compiled cache. Before saving, the workflow validates the
+directories and writes a versioned marker (`.kronn-backend-cache-v3`) when a
+complete bounded cache exists. Profraw files, the nextest store and other
+transient trees are never archived.
+[src: file: .github/workflows/ci-test.yml:102-261]
+
+The clippy, e2e dev-profile, release and portability caches follow the same
+restore-on-pull-request, save-on-main model: Actions scopes a cache created by
+a pull request to that pull request alone, and the per-repository budget is
+10 GB, so private per-PR copies were evicting the one cache every branch can
+read. See [actions-cache-scope](gotchas/actions-cache-scope.md).
+
+A push to `main` only refreshes those caches. The merged tree was already
+tested on its pull request, so each Rust job compiles exactly what a pull
+request compiles and saves it, without running a test: the same instrumented
+archive build for the backend suite (no shard, report or timing job runs),
+`cargo clippy` for the clippy cache, the dev
+backend build for e2e, `cargo test --lib --no-run` for portability, and the
+release build. Jobs with no Rust cache are skipped on a push, and the
+aggregates accept those skips only for a push. A save runs only on
+`success()`: a half-built tree saved under the exact key would be restored
+as a hit, and never replaced, until the next `Cargo.lock` change. The
+backend save keeps its own verified `ready` marker instead.
+[src: file: .github/workflows/ci-test.yml:441-474] [src: file: .github/workflows/ci-test.yml:742-769]
+[src: file: .github/workflows/ci-build.yml:194-235] [src: file: .github/workflows/ci-build.yml:251-276]
 
 The backend performance observer publishes the duration for every eligible run
 and reports a warning rather than failing a green functional run when a hot
 run exceeds the 10-minute SLO. Cargo's repository-level `target-dir` means
 these artifacts live under the root `target/`, not `backend/target/`. A
 versioned sentinel and the three required artifact directories must be present
-before an Actions cache hit is accepted. A hot request that misses that cache
-is published as `warmup/miss` and excluded from historical hot statistics.
+before an exact Actions cache hit is accepted. A fallback restore is published
+as `partial`, useful for the current run but still excluded from exact hot
+statistics. A hot request that misses every compiled cache is published as
+`warmup/miss` and excluded from historical hot statistics.
 Cold measurements use a unique cache key per run attempt, restore no compiled
 artifacts, and are reported only for their current run. Historical hot
 statistics use only successful same-branch pull-request runs whose job records
 a verified restored compiled cache. The v3 key cannot restore the former
 debug layout, so the first run is an explicit warmup.
-[src: file: .cargo/config.toml:1-6] [src: file: scripts/ci/backend_ci_slo.mjs:1-153]
+[src: file: .cargo/config.toml:1-6] [src: file: scripts/ci/backend_ci_slo.mjs:1-176]
 The observer's Node unit test runs in the blocking `test-python` gate.
-[src: file: .github/workflows/ci-test.yml:299-324]
+[src: file: .github/workflows/ci-test.yml:576-597]
+
+Each shard fails its artifact step when nextest does not produce the expected
+JUnit report, then uploads it as `backend-junit-N` (N = 1 to 3). nextest writes its
+store under the workspace root, so the report is
+`backend/target/nextest/ci/junit.xml`, not under `target/llvm-cov-target`.
+[src: url: https://nexte.st/docs/configuration/reference/] To inspect the slowest
+Rust tests after a green run:
+
+```bash
+gh run download <run-id> -p 'backend-junit-*' -D /tmp/kronn-backend-junit
+python3 - <<'PY'
+from pathlib import Path
+import xml.etree.ElementTree as ET
+
+cases = []
+for report in Path("/tmp/kronn-backend-junit").glob("*/junit.xml"):
+  for case in ET.parse(report).iter("testcase"):
+    seconds = float(case.attrib.get("time", "0") or 0)
+    cases.append((seconds, case.attrib.get("classname", ""), case.attrib.get("name", "")))
+for seconds, classname, name in sorted(cases, reverse=True)[:10]:
+    print(f"{seconds:8.3f}s {classname}::{name}")
+PY
+```
+
+[src: file: .github/workflows/ci-test.yml:278-340]
 
 Run `CI Tests` manually with `cache_mode=hot` for a warmed compiled-artifact
 measurement or `cache_mode=cold` for a current-run-only cold measurement.
@@ -169,13 +228,13 @@ statistics or infer timings from a different runner class.
 | Review cold measurement | [GitHub Actions run 33416622439](https://github.com/DocRoms/Kronn/actions/runs/33416622439) | Green | `test-backend`: 16m54s; cleanup 1m16s, `cargo test` 15m22s; compiled artifacts intentionally neither restored nor saved | Unavailable (single sample) | Unavailable (single sample) | 0 (cold, excluded) |
 | Direct bounded v2 cache — first warmup | [GitHub Actions run 33434235499](https://github.com/DocRoms/Kronn/actions/runs/33434235499) | Timed out while uploading the bounded cache | `cargo test` passed in 27m55s and the marker was written; the post-cache upload was cancelled after 1m41s by the former 30-minute job ceiling, so no hot cache was seeded | Unavailable | Unavailable | 0 (warmup, excluded) |
 | Direct bounded v2 cache — successful warmup after seed-budget fix | [GitHub Actions run 33438929531](https://github.com/DocRoms/Kronn/actions/runs/33438929531) | Backend green; explicit warmup miss; bounded cache marker and post-job save completed (the aggregate failed only on the subsequently fixed frontend warning budget) | `test-backend`: **24m 25s total**; `cargo test` 21m 22s; bounded cache upload 2m 38s; no runner-toolchain cleanup and no debug-tree copy | Unavailable | Unavailable | 0 (warmup, excluded) |
-| Direct bounded v2 cache — verified hot hit | [GitHub Actions run 33441299481](https://github.com/DocRoms/Kronn/actions/runs/33441299481) | **Green**; explicit compiled-cache hit; every functional, quality, coverage, E2E and portability gate passed | `test-backend`: **13m 16s total**; cache restore 1m 16s; `cargo fmt` 6s; `cargo test` 11m 46s; post-cache step 1s — **1m 44s below the 15-minute SLO** | 13m 16s (1 sample) | 13m 16s (1 sample) | 0 |
-| Direct bounded v2 cache — second verified hot hit | [GitHub Actions run 33472489642](https://github.com/DocRoms/Kronn/actions/runs/33472489642) | **Green**; explicit compiled-cache hit; every functional, quality, coverage, E2E and portability gate passed | `test-backend`: **13m 33s total**; cache restore 1m 58s; `cargo fmt` 4s; `cargo test` 11m 21s; post-cache step under 1s — **1m 27s below the 15-minute SLO** | 13m 16s (2 samples) | 13m 33s (2 samples) | 0 |
-| Direct bounded v2 cache — third verified hot hit | [GitHub Actions run 33474123275](https://github.com/DocRoms/Kronn/actions/runs/33474123275) | **Green**; explicit compiled-cache hit; every functional, quality, coverage, E2E and portability gate passed | `test-backend`: **13m 12s total**; cache restore 1m 13s; `cargo fmt` 4s; `cargo test` 11m 45s; post-cache step under 1s — **1m 48s below the 15-minute SLO** | **13m 16s (3 samples)** | **13m 33s (3 samples)** | **0** |
+| Direct bounded v2 cache — verified hot hit | [GitHub Actions run 33441299481](https://github.com/DocRoms/Kronn/actions/runs/33441299481) | **Green**; explicit compiled-cache hit; every functional, quality, coverage, E2E and portability gate passed | `test-backend`: **13m 16s total**; cache restore 1m 16s; `cargo fmt` 6s; `cargo test` 11m 46s; post-cache step 1s — **1m 44s below the then-current 15-minute SLO** | 13m 16s (1 sample) | 13m 16s (1 sample) | 0 |
+| Direct bounded v2 cache — second verified hot hit | [GitHub Actions run 33472489642](https://github.com/DocRoms/Kronn/actions/runs/33472489642) | **Green**; explicit compiled-cache hit; every functional, quality, coverage, E2E and portability gate passed | `test-backend`: **13m 33s total**; cache restore 1m 58s; `cargo fmt` 4s; `cargo test` 11m 21s; post-cache step under 1s — **1m 27s below the then-current 15-minute SLO** | 13m 16s (2 samples) | 13m 33s (2 samples) | 0 |
+| Direct bounded v2 cache — third verified hot hit | [GitHub Actions run 33474123275](https://github.com/DocRoms/Kronn/actions/runs/33474123275) | **Green**; explicit compiled-cache hit; every functional, quality, coverage, E2E and portability gate passed | `test-backend`: **13m 12s total**; cache restore 1m 13s; `cargo fmt` 4s; `cargo test` 11m 45s; post-cache step under 1s — **1m 48s below the then-current 15-minute SLO** | **13m 16s (3 samples)** | **13m 33s (3 samples)** | **0** |
 
 The populated rows above are real Actions evidence from this task. The
 17m 32s hot cache-hit run with clippy already moved out still breached the
-15-minute SLO by 2m 32s, split between pre-test overhead (disk cleanup running
+then-current 15-minute SLO by 2m 32s, split between pre-test overhead (disk cleanup running
 unconditionally even though a cache hit needs less headroom) and post-test
 cache staging that re-copies artifacts `actions/cache` will not re-save on an
 exact-key hit. The subsequent review warmup then proved that both costs also
@@ -192,8 +251,9 @@ any blocking functional or quality gate.
 [src: commit: 87d41331]
 
 Ordinary jobs in the CI workflow have a 30-minute technical timeout.
-`test-backend` has 35 minutes to let a compiled-cache miss finish its post-job
-upload; verified hot runs stay subject to the independent 15-minute SLO.
+`test-backend` has 40 minutes to let a compiled-cache miss finish compiling and,
+on `main`, save its cache; verified hot runs stay subject to the independent
+10-minute SLO.
 Coverage and E2E have 45 minutes for their instrumented and release builds.
 The macOS portability job also has 45 minutes: its lib-test rebuild took
 29m13s in [run 36912793272](https://github.com/DocRoms/Kronn/actions/runs/36912793272/job/110539336655),
@@ -206,9 +266,7 @@ gate is skipped or fails. A timeout is a functional failure; the SLO observer
 does not retry, sleep, or mask it. An SLO breach is a warning, while missing,
 duplicate, incomplete, or contradictory measurement evidence fails the
 observer instead of publishing a misleading timing.
-[src: file: .github/workflows/ci-test.yml:37-59] [src: file: .github/workflows/ci-test.yml:750-778]
-
-[src: file: .github/workflows/ci-test.yml:719]
+[src: file: .github/workflows/ci-test.yml:8-14] [src: file: .github/workflows/ci-test.yml:951-987]
 
 ## Test placement
 

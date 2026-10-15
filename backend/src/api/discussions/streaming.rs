@@ -3250,7 +3250,7 @@ async fn make_agent_stream_inner(
     let disc_id = discussion_id.clone();
     let disc_project_id = disc.project_id.clone();
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentStreamEvent>(64);
+    let (tx, rx) = tokio::sync::mpsc::channel::<AgentStreamEvent>(64);
 
     // An agent run WILL start past this point (every preflight
     // early-return is above): mark the disc as owed a reply so a restart
@@ -5241,7 +5241,17 @@ async fn make_agent_stream_inner(
         }
     });
 
-    // Thin SSE reader — just maps channel events to SSE
+    agent_event_sse(rx, initial_event.take())
+}
+
+/// The SSE response of one agent turn: a thin reader mapping channel events to
+/// SSE, in the [`agent_run`](crate::core::sse_limits::agent_run) envelope.
+/// #234 — a cold local model is silent for minutes; the agent's own stall and
+/// global deadlines decide when it is dead, not the transport.
+fn agent_event_sse(
+    mut rx: tokio::sync::mpsc::Receiver<AgentStreamEvent>,
+    initial_event: Option<Event>,
+) -> Sse<SseStream> {
     let stream: SseStream = Box::pin(async_stream::try_stream! {
         while let Some(evt) = rx.recv().await {
             match evt {
@@ -5272,8 +5282,30 @@ async fn make_agent_stream_inner(
         }
     });
 
-    let stream = prepend_initial_event(stream, initial_event.take());
-    Sse::new(crate::core::sse_limits::bounded(stream))
+    let stream = prepend_initial_event(stream, initial_event);
+    Sse::new(crate::core::sse_limits::agent_run(stream))
+}
+
+#[cfg(test)]
+mod agent_event_sse_tests {
+    use super::*;
+
+    /// Regression for #234 at the discussion stream itself: a model silent
+    /// longer than the transport idle limit still reaches the client.
+    #[tokio::test(start_paused = true)]
+    async fn a_reply_after_a_long_silence_reaches_the_client() {
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        tokio::spawn(async move {
+            tx.send(AgentStreamEvent::Start).await.unwrap();
+            tokio::time::sleep(crate::core::sse_limits::IDLE_TIMEOUT * 2).await;
+            let data = serde_json::json!({ "text": "late answer" });
+            tx.send(AgentStreamEvent::Chunk { data }).await.unwrap();
+        });
+        let text = crate::core::sse_limits::sse_text(agent_event_sse(rx, None)).await;
+        assert!(text.contains("late answer"), "{text}");
+        assert!(!text.contains("event: error"), "{text}");
+        assert!(text.contains(": keepalive"), "{text}");
+    }
 }
 
 fn auth_required_system_message(
