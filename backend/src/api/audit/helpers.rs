@@ -315,6 +315,27 @@ pub(crate) fn prior_partial_validation_block(discussion_id: &str, language: &str
     format!("{title}\n{}\n\n", body.replace("{id}", discussion_id))
 }
 
+/// KT-1211 (M6) — the sources moved between the run this one resumed and the
+/// resume: the steps it inherited describe the earlier sources. Said in the
+/// validation prompt so the reviewer does not take them for current.
+pub(crate) fn resume_drift_block(drift: &str, language: &str) -> String {
+    let (title, lead) = match language {
+        "en" => (
+            "## SOURCE DRIFT DURING THE RESUME",
+            "The documents of the steps this run inherited were written against earlier sources. Check them against the current tree before trusting them, and report any that no longer match:",
+        ),
+        "es" => (
+            "## CAMBIO EN LAS FUENTES DURANTE LA REANUDACION",
+            "Los documentos de los pasos heredados por este run se escribieron sobre fuentes anteriores. Compruebalos con el arbol actual antes de fiarte y senala los que ya no coinciden:",
+        ),
+        _ => (
+            "## DÉRIVE DES SOURCES PENDANT LA REPRISE",
+            "Les documents des étapes héritées par ce run ont été écrits sur des sources antérieures. Vérifie-les contre l'arbre actuel avant de t'y fier et signale ceux qui ne correspondent plus :",
+        ),
+    };
+    format!("{title}\n{lead}\n> {}\n\n", drift.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
 pub(crate) fn partial_run_block(
     steps_to_redo: &[(u32, String)],
     total_steps: u32,

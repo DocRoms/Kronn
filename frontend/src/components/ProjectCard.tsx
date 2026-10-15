@@ -10,7 +10,7 @@ import { AiDocViewer } from './AiDocViewer';
 import { unseenBasis } from '../lib/discussionUiUtils';
 import { onActivationKey } from '../lib/keyboardActivation';
 import AuditRecapPanel from './AuditRecapPanel';
-import { AuditTimeline } from './AuditTimeline';
+import { AuditTimeline, OVERRIDE_REQUIRED_PREFIX } from './AuditTimeline';
 import { TemplateMergeOfferSlot } from './TemplateMergePanel';
 import { PlaceholderDocsBadge, TemplateReinstall } from './TemplateReinstall';
 import { TemplateUpdateBadge, TemplateUpdateNotice } from './TemplateUpdateNotice';
@@ -443,7 +443,7 @@ export function ProjectCard({
   // KT-1169 — the last launch that stopped on an error, and how to replay it.
   const [auditLaunchError, setAuditLaunchError] = useState<{ message: string; retry: () => void } | null>(null);
   // A "Reprendre" replays the launch with the state of the moment it is clicked.
-  const handleFullAuditRef = useRef<(options?: { retrySteps?: number[]; fresh?: boolean }) => Promise<void>>(async () => {});
+  const handleFullAuditRef = useRef<(options?: { retrySteps?: number[]; redoSteps?: number[]; fresh?: boolean }) => Promise<void>>(async () => {});
   const startPartialAuditRef = useRef<(steps: number[]) => Promise<void>>(async () => {});
   // Re-arms the status poll: an external launch, or a cancel left pending.
   const [externalAdoptTick, setExternalAdoptTick] = useState(0);
@@ -817,7 +817,7 @@ export function ProjectCard({
     onRefetchDiscussions();
   }, [auditAbortController, proj.id, toast, t, onRefetch, onRefetchDiscussions, stopAuditPolling]);
 
-  const handleFullAudit = useCallback(async (options: { retrySteps?: number[]; fresh?: boolean } = {}) => {
+  const handleFullAudit = useCallback(async (options: { retrySteps?: number[]; redoSteps?: number[]; fresh?: boolean } = {}) => {
     // Guard against double-click — `setAuditActive(true)` flips the UI to
     // the progress panel synchronously, but a fast double-click can call
     // this handler twice before React re-renders, spawning two concurrent
@@ -881,6 +881,8 @@ export function ProjectCard({
         resume_run_id: resumeRunId,
         // KT-1131 — retry only these failed steps of the resumed run.
         retry_steps: resumeRunId && options.retrySteps ? options.retrySteps : undefined,
+        // KT-1211 — also redo inherited steps the sources moved under.
+        redo_steps: resumeRunId && options.redoSteps ? options.redoSteps : undefined,
         // KT-1169 — the confirmed choice to replay the whole audit.
         fresh: options.fresh ? true : undefined,
         connection_id: auditConnectionId ?? undefined,
@@ -2709,15 +2711,24 @@ export function ProjectCard({
                     onDismissLaunchError={() => setAuditLaunchError(null)}
                     onLaunch={() => void templateMerge.gateLaunch(() => void handleFullAudit())}
                     onRetryStep={(step) => void templateMerge.gateLaunch(() => void handleFullAudit({ retrySteps: [step] }))}
+                    onRedoSteps={(steps) => void templateMerge.gateLaunch(() => void handleFullAudit({ redoSteps: steps }))}
                     onRelaunchFull={() => void templateMerge.gateLaunch(() => void handleFullAudit({ fresh: true }))}
-                    onAcceptStep={async (step, reason) => {
+                    onAcceptStep={async (step, reason, overrideUnsound) => {
                       if (!resumableAudit) return;
                       try {
-                        await projectsApi.acceptAuditStep(proj.id, resumableAudit.id, step, reason);
+                        if (overrideUnsound) {
+                          await projectsApi.acceptAuditStep(proj.id, resumableAudit.id, step, reason, true);
+                        } else {
+                          await projectsApi.acceptAuditStep(proj.id, resumableAudit.id, step, reason);
+                        }
                         toast(t('audit.stepAccepted', step), 'success');
                         setAuditCompletedTick(n => n + 1);
                       } catch (error) {
-                        toast(userError(error), 'error');
+                        // The override ask carries a diff the timeline shows
+                        // itself: no toast for it (KT-1211).
+                        if (!userError(error).includes(OVERRIDE_REQUIRED_PREFIX)) {
+                          toast(userError(error), 'error');
+                        }
                         // The form stays open on its error, with its reason.
                         throw error;
                       }

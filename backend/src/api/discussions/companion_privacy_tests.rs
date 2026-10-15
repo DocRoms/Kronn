@@ -160,6 +160,7 @@ async fn prompt_of(kind: Kind, linked: bool) -> (String, tempfile::TempDir) {
                     custom_prompt: None,
                     resume_run_id: None,
                     retry_steps: None,
+                    redo_steps: None,
                     fresh: None,
                 }),
             )

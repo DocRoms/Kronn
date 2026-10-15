@@ -11,8 +11,8 @@ reads "running" once the run has stopped.
 |---|---|---|
 | `Running` | A launch takes the project's audit lease, then inserts the row. | The terminal write, a cancel, the drop guard, the boot reconcile, the cleanup action. |
 | `Completed` | Every step succeeded, was `unchanged`, or was accepted, and the run wrote its drift baseline and validation discussion in the same transaction. | Terminal. A new run supersedes it. |
-| `Interrupted` | At least one step is left to redo, or the run stopped early (drop guard, restart, cleanup). | Resume (every failed step), single-step retry, or acceptance then finalization. Each one is a new run that carries the done steps. |
-| `Cancelled` | The worker acknowledged a cancel. | Terminal. A new run supersedes it. |
+| `Interrupted` | At least one step is left to redo, or the run stopped early (drop guard, restart, cleanup), or the user cancelled a run that had completed a step (KT-1211, `cancelled_at_step` set). | Resume (every failed step), single-step retry, or acceptance then finalization. Each one is a new run that carries the done steps. |
+| `Cancelled` | The worker acknowledged a cancel, and no step had completed yet (KT-1211). Carries `cancelled_at_step`. | Terminal. A new run supersedes it. The timeline says « Audit annulé le … pendant l'étape N » and offers « Relancer l'audit ». |
 | `Failed` | Catastrophic failure of every step. | Terminal. A new run supersedes it. |
 
 Sources:
@@ -491,3 +491,80 @@ category.
 [src: file: backend/src/api/projects/template.rs:137]
 [src: file: backend/src/api/projects/template_reinstall.rs:393]
 [src: file: backend/src/api/projects/template_reinstall.rs:505]
+
+## Cancel and failed steps keep the docs whole (KT-1211)
+
+- **A cancel after a completed step is resumable.** `mark_cancelled_at_step`
+  settles the run `Interrupted` when `last_completed_step >= 1`, `Cancelled`
+  otherwise, and records the step in flight in `audit_runs.cancelled_at_step`
+  (0 = before step 1). Cancelling at step 12 resumes at step 12, not step 1.
+  [src: file: backend/src/db/audit_runs.rs:182]
+- **A stopped step puts its target back.** Before each step the target's
+  content is kept in `audit_step_snapshots` (the `pre_snapshot` is only a
+  hash). A cancel restores it, or removes a file the step created, and
+  records `target_state = restored` with a `stopped during step N` reason.
+  The partial pipeline does the same, with the same durable snapshot and the
+  same process-group record. The outcome is never collapsed: `Restored`,
+  `Untouched` (wrote nothing), `Partial` (kept under the marker) and
+  `Unsettled` (could be neither restored nor marked: no `restored` state, so
+  accepting it needs the override, and its snapshot is kept for the diff).
+  A snapshot is capped at 4 MiB (a larger target is not snapshotted: boot
+  cannot restore it, but its step still never ended and so still needs the
+  override). A new run drops the snapshots of the project's earlier runs and
+  deleting a run cascades.
+  [src: file: backend/src/api/audit/step_guard.rs:72] [src: file: backend/src/api/audit/step_guard.rs:154] [src: file: backend/src/db/audit_runs.rs:255]
+- **A crash is settled at boot, not at the next launch.** Right after the
+  recorded agents are killed, every step that never ended and has a snapshot
+  is put back (or marked) and recorded failed with a `stopped during step N
+  (the backend stopped)` reason. Until then the doc would sit half-written
+  with no marker. A step that never ended and has no verdict is a blocker of
+  its own (`NeverEnded`): accepting it needs the override too.
+  [src: file: backend/src/api/audit/step_guard.rs:276] [src: file: backend/src/db/mod.rs:296]
+- **Settling never destroys what the agent did not write.** The audit
+  watches the target on the activity tick and keeps the fingerprint of what it
+  saw the agent write (`audit_step_snapshots.observed_hash`, migration 264).
+  A crash cannot tell a hand edit made before the next boot from the orphaned
+  agent's own late write, so boot restores only content that matches that
+  fingerprint (or is absent or blank). Anything else is left in place under a
+  partial marker (`ChangedSinceSeen`, `target_state = partial`) and its
+  snapshot is kept. A cancel is different: Kronn just killed the agent, so it
+  restores, but content it cannot vouch for is first copied to
+  `<target>.kronn-displaced-<UTC timestamp>` and the step's reason names the
+  path; if the copy cannot be made the target is not replaced.
+  [src: file: backend/src/api/audit/step_guard.rs:331]
+- **Settling never writes outside the project.** Every read, restore, marker
+  and displaced copy goes through the project-containment check (no symlink
+  on the path, no `..`), temp files are created exclusively
+  (`create_new`, `O_NOFOLLOW`) under a unique name, and no directory is created
+  with `create_dir_all` beyond the project. A project root that does not exist
+  (an unmounted volume) is never recreated: its steps stay open, snapshot
+  kept, and are settled by the next boot or launch that finds the root.
+  [src: file: backend/src/api/audit/step_guard.rs:58] [src: file: backend/src/api/audit/step_guard.rs:469]
+- **File work stays off the writer connection.** The launch-time net reads
+  the pending snapshots, settles the files, then records the verdicts, in three
+  separate steps (`pending_steps`, `settle_pending`, `record_settled`).
+- **A failed step marks what it left.** When a step fails after the agent
+  wrote its target, Kronn keeps the text (a human may accept it) under a
+  `<!-- kronn:partial-step -->` banner and records `target_state = partial`.
+  A later success, or an acceptance, removes the banner.
+  [src: file: backend/src/api/audit/step_guard.rs:99] [src: file: backend/src/api/audit/step_guard.rs:135]
+- **Accept refuses an unsound step.** A step that failed for truncation,
+  citations that do not resolve, an undisposed detector signal, incomplete
+  coverage, or a stop is accepted only with `override_unsound: true`. The
+  refusal starts with `override_required:` and carries a bounded diff against
+  the pre-step content. The override is recorded in the acceptance reason.
+  [src: file: backend/src/api/audit/step_guard.rs:168] [src: file: backend/src/api/audit/accept.rs:36]
+- **Boot kills an agent the previous backend left.** The run records the
+  agent's process group and the start stamp of its leader (`agent_pgid`,
+  `agent_started_marker`). At boot, before the lease is freed, the group is
+  killed only when the stamp still matches: a reused pid is never signalled.
+  M5 was real: the agent is its own group leader (`setpgid(0, 0)`) and
+  `kill_on_drop` is the only teardown, which cannot run when the backend is
+  killed with SIGKILL. The stamp is the kernel start time (macOS), or the
+  boot id plus the start tick (Linux: ticks restart at each boot).
+  [src: file: backend/src/agents/runner.rs:13715] [src: file: backend/src/agents/runner.rs:13725] [src: file: backend/src/core/agent_orphans.rs:119] [src: file: backend/src/db/mod.rs:288]
+- **Source drift on a resume is saved.** `audit_runs.resume_drift` keeps what
+  moved between the run a resume continues and the resume. The timeline shows
+  it, the validation prompt carries it, and `redo_steps` (with
+  `resume_run_id`) redoes the inherited steps it affects.
+  [src: file: backend/src/api/audit/full.rs:757]
