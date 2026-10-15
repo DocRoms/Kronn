@@ -69,12 +69,11 @@ pub(crate) use helpers::{
 
 pub(super) type SseStream = Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>;
 
-/// Silence after which an audit stream sends a keep-alive.
-pub(super) const SSE_KEEP_ALIVE: std::time::Duration = std::time::Duration::from_secs(15);
-
 /// Poll the producer independently so disconnecting a subscriber cannot stop an audit.
-/// A silent producer gets an SSE comment every `SSE_KEEP_ALIVE`: it holds the
-/// connection open and, not being an event, can never pass for model activity.
+/// A silent producer gets an SSE comment every
+/// [`HEARTBEAT_INTERVAL`](crate::core::sse_limits::HEARTBEAT_INTERVAL) from the
+/// shared [`with_heartbeat`](crate::core::sse_limits::with_heartbeat): it holds
+/// the connection open and, not being an event, can never pass for model activity.
 pub(super) fn detach_sse_stream(mut producer: SseStream) -> SseStream {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Result<Event, Infallible>>();
     tokio::spawn(async move {
@@ -82,12 +81,10 @@ pub(super) fn detach_sse_stream(mut producer: SseStream) -> SseStream {
             let _ = tx.send(item);
         }
     });
-    Box::pin(futures::stream::unfold(rx, |mut rx| async {
-        match tokio::time::timeout(SSE_KEEP_ALIVE, rx.recv()).await {
-            Ok(item) => item.map(|item| (item, rx)),
-            Err(_) => Some((Ok(Event::default().comment("keep-alive")), rx)),
-        }
-    }))
+    let received: SseStream = Box::pin(futures::stream::unfold(rx, |mut rx| async {
+        rx.recv().await.map(|item| (item, rx))
+    }));
+    crate::core::sse_limits::with_heartbeat(received, crate::core::sse_limits::HEARTBEAT_INTERVAL)
 }
 
 #[cfg(test)]
@@ -160,7 +157,7 @@ mod detach_sse_stream_tests {
             );
         }
         assert!(
-            started.elapsed() >= super::SSE_KEEP_ALIVE * 12,
+            started.elapsed() >= crate::core::sse_limits::HEARTBEAT_INTERVAL * 12,
             "three silent minutes"
         );
         release.send(()).unwrap();

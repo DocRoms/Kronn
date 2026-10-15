@@ -3,6 +3,8 @@
 import assert from "node:assert/strict";
 
 export const BACKEND_JOB = "test-backend";
+// The sharded suite starts here; `test-backend` merges and reports last.
+export const BACKEND_BUILD_JOB = "test-backend-build";
 // The one backend test pass (nextest + coverage) on a hot cache.
 export const SLO_MS = 10 * 60 * 1000;
 export const HISTORY_LIMIT = 20;
@@ -39,6 +41,24 @@ export function percentile(values, percentileValue) {
   assert(values.length > 0, "percentile requires at least one value");
   const sorted = [...values].sort((left, right) => left - right);
   return sorted[Math.ceil(sorted.length * percentileValue) - 1];
+}
+
+/**
+ * One run's backend critical path as a single job: from the build's start to
+ * the report's end, with both jobs' steps (the cache evidence lives in the
+ * build). Runs from before the split have no build job and pass through.
+ */
+export function collapseBackendJobs(jobs) {
+  const build = jobs.find((job) => job.name === BACKEND_BUILD_JOB);
+  if (!build) return jobs;
+  return jobs
+    .filter((job) => job.name !== BACKEND_BUILD_JOB)
+    .map((job) => job.name !== BACKEND_JOB ? job : {
+      ...job,
+      started_at: build.started_at,
+      status: build.status === "completed" ? job.status : build.status,
+      steps: [...(build.steps ?? []), ...(job.steps ?? [])],
+    });
 }
 
 export function summarizeBackendJobs(jobs) {
@@ -160,8 +180,8 @@ async function main() {
     ? comparableSuccessfulHotRuns(history.workflow_runs ?? [], currentRun)
     : [];
   const priorRunIds = comparableRuns.map((run) => String(run.id));
-  const priorJobs = await Promise.all(priorRunIds.map(jobsForRun));
-  const currentJob = requireCurrentBackendJob(currentJobs);
+  const priorJobs = (await Promise.all(priorRunIds.map(jobsForRun))).map(collapseBackendJobs);
+  const currentJob = requireCurrentBackendJob(collapseBackendJobs(currentJobs));
   const summary = summarizeBackendJobs(priorJobs.flat().filter(hasRestoredCompiledCache));
   const runTotals = { fastLoopMs: fastLoopDurationMs(currentRun, currentJobs), runnerMs: runnerMilliseconds(currentJobs) };
   const report = markdown(summary, currentJob, mode, compiledCacheHit, runTotals, compiledCacheState);

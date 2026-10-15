@@ -137,12 +137,13 @@ class ChangedPathsScript(unittest.TestCase):
 
 class Wiring(unittest.TestCase):
     def test_ci_tests_pass_the_scope_and_publish_the_report(self):
-        backend = job_section(CI_WORKFLOW.read_text(), "test-backend")
+        # The suite runs in the shards since main split test-backend (acc15a5ba).
+        backend = job_section(CI_WORKFLOW.read_text(), "test-backend-shard")
         self.assertIn("fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 1 }}", backend)
         scope = step(backend, "Doc citations — paths this pull request changes")
         self.assertIn("if: github.event_name == 'pull_request'", scope)
         self.assertIn('../scripts/ci/docs_citations_changed.sh "$RUNNER_TEMP/docs-citations-changed.txt"', scope)
-        suite = "cargo llvm-cov nextest — measured backend critical path and coverage floor"
+        suite = "Run test slice ${{ matrix.shard }}/3"
         self.assertLess(backend.index("Doc citations — paths this pull request changes"), backend.index(suite))
         report_dir = rust_const("REPORT_DIR_ENV")
         self.assertIn(f"{report_dir}: ${{{{ runner.temp }}}}/docs-citations", step(backend, suite))

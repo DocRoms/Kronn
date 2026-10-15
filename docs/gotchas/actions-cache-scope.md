@@ -27,8 +27,8 @@ save is gated by its verified `ready` marker). A push to `main` builds and
 saves only: its tests already ran on the pull request. The backend
 observer reports a fallback restore as `partial`, excluded from exact hot
 history, so the 10-minute SLO statistics stay honest.
-[src: file: .github/workflows/ci-test.yml:98-112]
-[src: file: .github/workflows/ci-test.yml:306-318]
+[src: file: .github/workflows/ci-test.yml:102-116]
+[src: file: .github/workflows/ci-test.yml:264-276]
 [src: file: scripts/ci/backend_ci_slo.mjs:1-20]
 
 **Check.** `gh cache list --json key,ref,sizeInBytes` must show the Rust
