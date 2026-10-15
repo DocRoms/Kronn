@@ -100,10 +100,12 @@ fn try_emit_run_event(events_tx: Option<&EventSender>, event: RunEvent) {
 
 /// Store each tool call a running Agent step reports on its in-flight result,
 /// until `stop` fires, the sink closes or the step is no longer in flight.
+/// `step_index` is `None` for a step with no in-flight result (a rollback
+/// step): nothing is stored then, only the room's live progress is fed.
 fn spawn_step_activity_publisher(
     db: std::sync::Arc<crate::db::Database>,
     run_id: String,
-    step_index: usize,
+    step_index: Option<usize>,
     step_name: String,
     mut activity: tokio::sync::watch::Receiver<Option<AgentActivity>>,
     stop: tokio_util::sync::CancellationToken,
@@ -140,6 +142,9 @@ fn spawn_step_activity_publisher(
                     ));
                 }
             }
+            let Some(step_index) = step_index else {
+                continue;
+            };
             let (run_id, step_name) = (run_id.clone(), step_name.clone());
             match db
                 .with_conn(move |conn| {
@@ -2576,7 +2581,7 @@ async fn execute_run_body(
                         let activity_publisher = spawn_step_activity_publisher(
                             state.db.clone(),
                             run.id.clone(),
-                            in_flight_result_index,
+                            Some(in_flight_result_index),
                             step.name.clone(),
                             activity_rx,
                             activity_stop.clone(),
@@ -3732,6 +3737,27 @@ async fn execute_run_body(
                                     run.id.clone(),
                                     rb_step.name.clone(),
                                 ));
+                                // KT-1252 — the room's bubble follows a rollback
+                                // step as it does a step of the main path. No
+                                // result is in flight for it, so the publisher
+                                // only feeds the room's progress.
+                                let room_progress =
+                                    step_room.as_ref().map(|room| room.progress().clone());
+                                if let Some(progress) = &room_progress {
+                                    progress.phase(AgentRunPhase::StartingCli);
+                                }
+                                let (activity_tx, activity_rx) = tokio::sync::watch::channel(None);
+                                let activity_stop = tokio_util::sync::CancellationToken::new();
+                                let activity_publisher = spawn_step_activity_publisher(
+                                    state.db.clone(),
+                                    run.id.clone(),
+                                    None,
+                                    rb_step.name.clone(),
+                                    activity_rx,
+                                    activity_stop.clone(),
+                                    room_progress,
+                                );
+                                let activity_stop = activity_stop.drop_guard();
                                 let outcome = execute_step(
                                     rb_step,
                                     &project_path,
@@ -3741,7 +3767,7 @@ async fn execute_run_body(
                                     full_access,
                                     &ctx,
                                     None,
-                                    None,
+                                    Some(&activity_tx),
                                     Some(&agents_config.model_tiers),
                                     Some(&crate::models::setup::HttpEndpoints::from_agents(
                                         agents_config,
@@ -3753,6 +3779,9 @@ async fn execute_run_body(
                                     Some(&run.id),
                                 )
                                 .await;
+                                drop(activity_tx);
+                                drop(activity_stop);
+                                let _ = activity_publisher.await;
                                 if let Some(room) = step_room {
                                     let stop = match outcome.result.status {
                                         RunStatus::Success => AgentRunStop::Finished,
@@ -7690,6 +7719,171 @@ mod tests {
             fixture::assert_no_unlinked_project(&prompts[0], "workflow Agent step");
             fixture::assert_no_candidate_pool(&prompts[0], "workflow Agent step");
         }
+    }
+
+    /// KT-1252 — the publisher hands the room's live progress each call the
+    /// step reports (a burst counts every call, capped), with nothing stored
+    /// for a step that has no in-flight result.
+    #[tokio::test]
+    async fn the_step_activity_publisher_feeds_the_rooms_progress() {
+        use crate::models::{ActivityCategory, AgentActivity};
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let progress = crate::agents::run_progress::RunProgress::new();
+        let (tx, rx) = tokio::sync::watch::channel(None);
+        let stop = tokio_util::sync::CancellationToken::new();
+        let publisher = spawn_step_activity_publisher(
+            db,
+            "run-publisher".into(),
+            None,
+            "analyse".into(),
+            rx,
+            stop.clone(),
+            Some(progress.clone()),
+        );
+        let reached = |calls: u32| {
+            let progress = progress.clone();
+            async move {
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    while progress.snapshot().tool_calls != calls {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "the room's progress counted {} calls, not {calls}",
+                        progress.snapshot().tool_calls
+                    )
+                });
+            }
+        };
+        let activity = |calls| {
+            Some(AgentActivity {
+                category: ActivityCategory::Execute,
+                at: Utc::now(),
+                calls,
+            })
+        };
+        tx.send(activity(3)).unwrap();
+        reached(3).await;
+        let snapshot = progress.snapshot();
+        assert_eq!(snapshot.phase, crate::models::AgentRunPhase::Tool);
+        assert_eq!(snapshot.activity.len(), 3);
+        assert!(snapshot
+            .activity
+            .iter()
+            .all(|entry| entry.category == ActivityCategory::Execute));
+
+        // A burst between two reads counts every call, up to the cap.
+        tx.send(activity(300)).unwrap();
+        reached(3 + 64).await;
+
+        stop.cancel();
+        publisher.await.unwrap();
+    }
+
+    /// KT-1252 — a rollback Agent step with a room publishes its tool
+    /// activity in that room's live progress, as a step of the main path does.
+    /// Run by the real `execute_run` on a scripted `claude` that makes one
+    /// tool call; the test reads the frames the room's socket receives.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_rollback_agent_step_feeds_its_rooms_live_progress() {
+        use crate::api::other_projects_fixture as fixture;
+        let tools = tempfile::tempdir().unwrap();
+        let program = crate::acp::test_support::write_fixture_script(
+            tools.path(),
+            crate::acp::test_support::CLAUDE_TURN_WITH_CACHE,
+        );
+        let (state, tokens, agents) = test_state_and_configs();
+        let repo = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+        fixture::project_among_others(&state, repo.path(), false).await;
+        let _route = fixture::route_claude(repo.path(), &program);
+        state
+            .db
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO discussions (id, title, created_at, updated_at)
+                     VALUES ('room-rollback', 'R', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let mut wf = make_workflow_with_artifacts(Default::default());
+        wf.id = "wf-rollback-room".into();
+        wf.project_id = Some(fixture::PROJECT_ID.into());
+        // No payload: the step fails, and the rollback runs.
+        let mut broken = fake_step("broken_emit");
+        broken.step_type = crate::models::StepType::JsonData;
+        broken.json_data_payload = None;
+        wf.steps = vec![broken];
+        let mut recover = fake_step("recover");
+        recover.prompt_template = "recover".into();
+        recover.room_id = Some("room-rollback".into());
+        wf.on_failure = vec![recover];
+        let mut run = pending_run("run-rollback-room", &wf.id);
+        insert_wf_and_run(&state, &wf, &run).await;
+        let mut events = state.ws_broadcast.subscribe();
+
+        execute_run(
+            state.clone(),
+            &wf,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("the run completes");
+        let steps: Vec<_> = run
+            .step_results
+            .iter()
+            .map(|step| {
+                (
+                    step.step_name.clone(),
+                    step.status.clone(),
+                    step.output.clone(),
+                )
+            })
+            .collect();
+
+        // The room's last frame is the one carrying the stop.
+        let calls = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let mut calls = 0;
+            loop {
+                match events.recv().await {
+                    Ok(crate::models::WsMessage::AgentRunProgress {
+                        discussion_id,
+                        progress,
+                        ..
+                    }) if discussion_id == "room-rollback" => {
+                        calls = calls.max(progress.tool_calls);
+                        if progress.stopped.is_some() {
+                            return calls;
+                        }
+                    }
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(error) => panic!("the socket closed: {error}"),
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("the rollback step never stopped its progress: {steps:?}"));
+        assert_eq!(
+            calls, 1,
+            "the rollback step's tool call reached the room: {steps:?}"
+        );
     }
 
     #[tokio::test]

@@ -125,6 +125,26 @@ impl WorkflowStepRooms {
         }
     }
 
+    /// Clear the room `run_id` is heading for, only while it is still the one
+    /// announced for `step_key`: a step finishing late (its `Drop` spawns the
+    /// write) must not erase what the run announced for a later step.
+    fn clear_target_of(&self, run_id: &str, step_key: &str) {
+        let removed = {
+            let mut targets = self.targets();
+            if targets
+                .get(run_id)
+                .is_some_and(|target| target.step_key == step_key)
+            {
+                targets.remove(run_id)
+            } else {
+                None
+            }
+        };
+        if let Some(old) = removed {
+            self.notify(&old.disc_id);
+        }
+    }
+
     /// `active` (the room's persisted steps) with each one's live-progress
     /// run, then the running runs that head for `disc_id` without an agent in
     /// it yet.
@@ -328,8 +348,9 @@ async fn finish_activity(
     // The run's agent has been in the room: what it executes next is not the
     // room's preparation (the next step announces itself when a later Agent
     // step still has one). Told even when the write failed: the room re-reads
-    // what is true.
-    rooms.set_target(&context.run_id, None);
+    // what is true. Only this step's own announcement goes: a later one, made
+    // while this write was pending, stays.
+    rooms.clear_target_of(&context.run_id, &context.step_key);
     rooms.notify(&context.discussion_id);
 }
 
@@ -1099,6 +1120,7 @@ mod tests {
         assert_eq!(shown[0].identity.step_name, "context");
 
         // Its agent enters: the persisted step replaces the preparation.
+        watch.announce(&db, None, &workflow, 2, &ctx).await;
         let step = workflow.steps[2].clone();
         let active = activate(&rooms, &db, "run-1", None, &step, &ctx)
             .await
@@ -1114,6 +1136,48 @@ mod tests {
         assert!(projected(&db, &rooms, "room-a").await.is_empty());
         watch.announce(&db, None, &workflow, 3, &ctx).await;
         assert!(projected(&db, &rooms, "room-a").await.is_empty());
+    }
+
+    /// KT-1252 — a step finishing late (its `Drop` spawns the write) leaves
+    /// alone what the run announced for a later step in the meantime.
+    #[tokio::test]
+    async fn a_step_finishing_late_keeps_the_announcement_made_after_it() {
+        let db = db_with_room().await;
+        let (rooms, mut events, _) = publishing_rooms();
+        let workflow = workflow_of(vec![
+            room_step("analyse", Some("{{room}}")),
+            room_step("review", Some("{{room}}")),
+        ]);
+        let watch = RoomTargetWatch::new(&rooms, "run-1");
+        let ctx = ctx_with_room("room-a");
+        watch.announce(&db, None, &workflow, 0, &ctx).await;
+        let active = activate(&rooms, &db, "run-1", None, &workflow.steps[0], &ctx)
+            .await
+            .unwrap()
+            .unwrap();
+        // The step is dropped, its write is spawned and has not run yet: the
+        // run announces the next step first.
+        drop(active);
+        rooms.set_target(
+            "run-1",
+            Some(RoomTarget {
+                disc_id: "room-a".into(),
+                workflow_id: workflow.id.clone(),
+                workflow_name: workflow.name.clone(),
+                step_key: "review".into(),
+                step_name: "review".into(),
+                agent_type: AgentType::ClaudeCode,
+                started_at: chrono::Utc::now().to_rfc3339(),
+            }),
+        );
+        while events.try_recv().is_ok() {}
+        // The spawned write ends by telling the room.
+        next_room_change(&mut events, "room-a").await;
+
+        let shown = projected(&db, &rooms, "room-a").await;
+        assert_eq!(shown.len(), 1);
+        assert!(shown[0].preparing);
+        assert_eq!(shown[0].identity.step_name, "review");
     }
 
     /// KT-1252 — a room not known yet, or a run that is over, is not claimed.

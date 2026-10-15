@@ -5462,7 +5462,7 @@ describe('KT-1252 — a workflow step working for the room', () => {
 });
 
 describe('DiscussionsPage — comparison address', () => {
-  const renderPage =(props: { compareRunId?: string | null; onCompareChange?: (runId: string | null) => void }) => render(
+  const renderPage = (props: { compareRunId?: string | null; onCompareChange?: (runId: string | null) => void }) => render(
     <I18nProvider>
       <DiscussionsPage
         projects={[]}
