@@ -957,6 +957,14 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "263_planning_task_assignees",
         include_str!("sql/263_planning_task_assignees.sql"),
     ),
+    (
+        "265_audit_cancel_and_integrity",
+        include_str!("sql/265_audit_cancel_and_integrity.sql"),
+    ),
+    (
+        "266_audit_step_observed_output",
+        include_str!("sql/266_audit_step_observed_output.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup` (owner-only) without the auth

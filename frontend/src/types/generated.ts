@@ -9,7 +9,14 @@ export type AcceptAuditStepRequest = {
 /**
  * Why the step is accepted; optional.
  */
-reason?: string, };
+reason?: string,
+/**
+ * KT-1211 — accept a step whose failure is known to leave an unsound
+ * document (truncated, citations that do not resolve, an undisposed
+ * detector signal, a stopped step) anyway. Without it the acceptance is
+ * refused and the answer carries the diff to look at.
+ */
+override_unsound?: boolean, };
 
 export type AcceptAuditStepResponse = { step: number, accepted_by: string, accepted_at: string,
 /**
@@ -1169,7 +1176,20 @@ model?: string | null,
  * Starter `kronn/project.toml` drafted for a repository without one
  * (KT-920); never written into the checkout.
  */
-project_profile_draft?: string | null, };
+project_profile_draft?: string | null,
+/**
+ * KT-1211 — the user cancelled this run while this step was in flight
+ * (0 = before step 1). `None` on a run nobody cancelled. A run cancelled
+ * after a completed step is `Interrupted` (resumable) and carries this
+ * flag; one cancelled before any step is `Cancelled`.
+ */
+cancelled_at_step?: number,
+/**
+ * KT-1211 — what moved in the sources between the run this one resumes
+ * and the resume itself; saved so the timeline and the validation prompt
+ * can say so after the one-off toast is gone.
+ */
+resume_drift?: string, };
 
 /**
  * An audit run's tokens and cost per phase and in total (KT-1084).
@@ -1228,6 +1248,13 @@ unchanged: boolean,
  * why. It counts as done; `cli_success` and `step_warning` keep the failure.
  */
 accepted_at?: string, accepted_by?: string, accepted_reason?: string,
+/**
+ * KT-1211 — what became of the step's target when the step did not
+ * succeed: `restored` (put back as it was before the step) or `partial`
+ * (kept, with a visible partial marker). `None` when the step wrote
+ * nothing wrong.
+ */
+target_state?: string,
 /**
  * The step's cost in millionths of a dollar, when its agent reported one.
  */
@@ -4670,6 +4697,11 @@ resume_run_id?: string | null,
  * The run's other failed steps stay failed, unrun. Absent = every one.
  */
 retry_steps?: Array<number>,
+/**
+ * KT-1211 (M6) — with `resume_run_id`: also redo these 1-based steps the
+ * run inherited as done, because the sources moved since they ran.
+ */
+redo_steps?: Array<number>,
 /**
  * KT-1169 — a launch without `resume_run_id` is refused while the
  * project's latest run can be resumed, unless this explicit choice says

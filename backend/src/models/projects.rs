@@ -1102,6 +1102,19 @@ pub struct AuditRun {
     /// (KT-920); never written into the checkout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_profile_draft: Option<String>,
+    /// KT-1211 — the user cancelled this run while this step was in flight
+    /// (0 = before step 1). `None` on a run nobody cancelled. A run cancelled
+    /// after a completed step is `Interrupted` (resumable) and carries this
+    /// flag; one cancelled before any step is `Cancelled`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cancelled_at_step: Option<u32>,
+    /// KT-1211 — what moved in the sources between the run this one resumes
+    /// and the resume itself; saved so the timeline and the validation prompt
+    /// can say so after the one-off toast is gone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub resume_drift: Option<String>,
 }
 
 /// 0.8.4 (#298) — Per-step metrics for the post-audit recap panel.
@@ -1165,6 +1178,13 @@ pub struct AuditRunStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub accepted_reason: Option<String>,
+    /// KT-1211 — what became of the step's target when the step did not
+    /// succeed: `restored` (put back as it was before the step) or `partial`
+    /// (kept, with a visible partial marker). `None` when the step wrote
+    /// nothing wrong.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub target_state: Option<String>,
     /// The step's cost in millionths of a dollar, when its agent reported one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd_micros: Option<u64>,
@@ -1603,6 +1623,11 @@ pub struct LaunchAuditRequest {
     #[serde(default)]
     #[ts(optional)]
     pub retry_steps: Option<Vec<u32>>,
+    /// KT-1211 (M6) — with `resume_run_id`: also redo these 1-based steps the
+    /// run inherited as done, because the sources moved since they ran.
+    #[serde(default)]
+    #[ts(optional)]
+    pub redo_steps: Option<Vec<u32>>,
     /// KT-1169 — a launch without `resume_run_id` is refused while the
     /// project's latest run can be resumed, unless this explicit choice says
     /// to run the whole audit again.

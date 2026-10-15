@@ -91,7 +91,7 @@ pub struct StepValidationWarning {
     pub repaired: bool,
 }
 
-const COVERAGE_WARNING_PREFIX: &str = "dimension coverage incomplete";
+const COVERAGE_WARNING_PREFIX: &str = super::step_guard::COVERAGE_FRAGMENT;
 
 /// Recompute the coverage failure from the current index, including on resume.
 /// This is feedback for the agent, never a relaxation or an in-place repair.
@@ -230,10 +230,7 @@ pub fn validate_step_output(
                 target_file
             )
         } else {
-            format!(
-                "step output looks truncated: `{}` is {} B but template is {} B (< {}% threshold)",
-                target_file, dst_size, template_size, MIN_DEST_RATIO_PCT
-            )
+            truncated_reason(target_file, dst_size, template_size)
         };
         return (false, Some(StepValidationWarning { reason, repaired }));
     }
@@ -312,10 +309,7 @@ pub fn validate_step_output(
                 return (
                     false,
                     Some(StepValidationWarning {
-                        reason: format!(
-                            "{COVERAGE_WARNING_PREFIX} in `{}`: {} (Step 8 will be re-run)",
-                            target_file, reason
-                        ),
+                        reason: coverage_reason(target_file, &reason),
                         repaired: false,
                     }),
                 );
@@ -391,13 +385,36 @@ pub fn check_detector_disposition(
         .collect::<Vec<_>>()
         .join("; ");
     Some(StepValidationWarning {
-        reason: format!(
-            "{} detector signal(s) injected but never addressed in the tech-debt output: {} — emit a TD, a baseline note, or a matrix citation for each (Step 8 will be re-run)",
-            undisposed.len(),
-            list
-        ),
+        reason: undisposed_reason(undisposed.len(), &list),
         repaired: false,
     })
+}
+
+/// The reason of a step whose output is cut short (size floor).
+pub(crate) fn truncated_reason(target_file: &str, dst_size: u64, template_size: u64) -> String {
+    format!(
+        "step output {}: `{}` is {} B but template is {} B (< {}% threshold)",
+        super::step_guard::TRUNCATED_FRAGMENT,
+        target_file,
+        dst_size,
+        template_size,
+        MIN_DEST_RATIO_PCT
+    )
+}
+
+/// The reason of a step whose dimension coverage matrix is incomplete.
+pub(crate) fn coverage_reason(target_file: &str, detail: &str) -> String {
+    format!("{COVERAGE_WARNING_PREFIX} in `{target_file}`: {detail} (Step 8 will be re-run)")
+}
+
+/// The reason of a step that left detector signals undisposed.
+pub(crate) fn undisposed_reason(count: usize, list: &str) -> String {
+    format!(
+        "{} {} in the tech-debt output: {} — emit a TD, a baseline note, or a matrix citation for each (Step 8 will be re-run)",
+        count,
+        super::step_guard::DETECTOR_FRAGMENT,
+        list
+    )
 }
 
 /// Count `{{IDENT}}` shaped placeholders in a markdown body. Conservative:

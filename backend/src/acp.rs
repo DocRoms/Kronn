@@ -1982,9 +1982,24 @@ mod tests {
     /// environment only, and persists what `session/new` declares. The bridge's
     /// plain values are declared inline; its secrets sit in an owner-only file
     /// the declaration names, removed with the transport.
+    /// An executable stub named like an agent CLI in `dir`: the command is
+    /// built from a path the test controls, never the machine's CLI (KT-1189).
+    fn agent_stub(dir: &std::path::Path, name: &str, body: &str) -> String {
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path.to_string_lossy().into_owned()
+    }
+
     #[test]
     fn vibe_declares_the_bridge_environment_without_its_secrets() {
         let project = tempfile::tempdir().unwrap();
+        let stubs = tempfile::tempdir().unwrap();
+        let vibe = agent_stub(stubs.path(), "vibe-acp", "exit 0");
         let launch = NativeLaunchEnv {
             discussion_id: Some("room-1082".into()),
             workflow_step: Some(crate::agents::runner::WorkflowStepBridgeContext {
@@ -1999,7 +2014,7 @@ mod tests {
         let command = crate::core::child_env::with_parent_env(&[("PATH", "/usr/bin")], || {
             native_command(
                 AcpAgent::Vibe,
-                "vibe-acp",
+                &vibe,
                 &[],
                 &project.path().to_string_lossy(),
                 &launch,
@@ -2064,6 +2079,8 @@ mod tests {
     /// declaration and gets no secrets file.
     #[test]
     fn an_inheriting_runtime_declares_no_bridge_environment() {
+        let stubs = tempfile::tempdir().unwrap();
+        let opencode = agent_stub(stubs.path(), "opencode", "exit 0");
         let project = tempfile::tempdir().unwrap();
         let launch = NativeLaunchEnv {
             discussion_id: Some("room-1082".into()),
@@ -2073,7 +2090,7 @@ mod tests {
         let command = crate::core::child_env::with_parent_env(&[("PATH", "/usr/bin")], || {
             native_command(
                 AcpAgent::OpenCode,
-                "opencode",
+                &opencode,
                 &["acp"],
                 &project.path().to_string_lossy(),
                 &launch,
@@ -2090,6 +2107,11 @@ mod tests {
     /// a project temp dir; never the admin token nor another agent's key.
     #[test]
     fn a_native_launch_receives_its_key_and_contexts_through_the_builder() {
+        let stubs = tempfile::tempdir().unwrap();
+        let copilot_stub = agent_stub(stubs.path(), "copilot", "exit 0");
+        let gemini_stub = agent_stub(stubs.path(), "gemini", "exit 0");
+        let kiro_cli_stub = agent_stub(stubs.path(), "kiro-cli", "exit 0");
+
         let project = tempfile::tempdir().unwrap();
         let launch = NativeLaunchEnv {
             discussion_id: Some("room-7".into()),
@@ -2116,7 +2138,7 @@ mod tests {
             || {
                 native_command(
                     AcpAgent::GeminiCli,
-                    "gemini",
+                    &gemini_stub,
                     &["--acp"],
                     &project.path().to_string_lossy(),
                     &launch,
@@ -2156,7 +2178,7 @@ mod tests {
         };
         let command = native_command(
             AcpAgent::Kiro,
-            "kiro-cli",
+            &kiro_cli_stub,
             &[],
             &project.path().to_string_lossy(),
             &step,
@@ -2174,7 +2196,7 @@ mod tests {
         };
         let command = native_command(
             AcpAgent::CopilotCli,
-            "copilot",
+            &copilot_stub,
             &[],
             &project.path().to_string_lossy(),
             &connected,
@@ -3506,6 +3528,10 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(acp_adapter_env_toggle)]
     async fn a_refused_read_does_not_end_the_turn_and_the_turn_reports_its_usage() {
+        // The fixture interpreter runs on OpenCode's agent route: a shim the
+        // test controls relays to the real python3.
+        let stubs = tempfile::tempdir().unwrap();
+        let python = agent_stub(stubs.path(), "python3", "exec python3 \"$@\"");
         let out = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
         crate::core::child_env::remove_var("OPENCODE_CONFIG_CONTENT");
@@ -3513,7 +3539,7 @@ mod tests {
         // gives OpenCode is built by the same function.
         let mut command = native_command(
             AcpAgent::OpenCode,
-            "python3",
+            &python,
             &["-c", test_support::OPENCODE_ACP_FIXTURE],
             &project.path().to_string_lossy(),
             &NativeLaunchEnv::default(),

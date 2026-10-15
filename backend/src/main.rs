@@ -102,6 +102,12 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     tracing::info!("tracing initialized — filter: {}", filter_src);
     tracing::info!("timezone: {}", kronn::core::timezone::current());
     kronn::core::config::warn_secrets_taken_from_env(env_token.is_some());
+    if kronn::core::cmd::ignored_test_flag() {
+        tracing::warn!(
+            "{} is set but only test builds read it: ignored, agent CLIs stay available",
+            kronn::core::cmd::NO_REAL_AGENTS_ENV
+        );
+    }
 
     tracing::info!("Kronn — Entering the grid...");
     if app_config.server.debug_mode {

@@ -1133,8 +1133,11 @@ export const projects = {
   markBootstrapped: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/mark-bootstrapped`),
   cancelAudit: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/cancel-audit`),
   /** KT-1131 — a human accepts a failed step of the latest interrupted run. */
-  acceptAuditStep: (id: string, runId: string, step: number, reason: string | null) =>
-    api<AcceptAuditStepResponse>('POST', `/projects/${id}/audit-runs/${runId}/steps/${step}/accept`, { reason }),
+  acceptAuditStep: (id: string, runId: string, step: number, reason: string | null, overrideUnsound?: boolean) =>
+    api<AcceptAuditStepResponse>('POST', `/projects/${id}/audit-runs/${runId}/steps/${step}/accept`, {
+      reason,
+      ...(overrideUnsound ? { override_unsound: true } : {}),
+    }),
   /** KT-1134 — settle runs no worker runs any more and release an orphaned lease. */
   auditRunsCleanup: () => api<number>('POST', '/audit-runs/cleanup'),
   /**

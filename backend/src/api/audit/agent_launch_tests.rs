@@ -426,6 +426,7 @@ async fn http_resume_repairs_an_auxiliary_document_from_a_previously_successful_
                 custom_prompt: None,
                 resume_run_id: Some("before-repair".into()),
                 retry_steps: None,
+                redo_steps: None,
                 fresh: None,
             }),
         )
@@ -645,6 +646,7 @@ async fn assert_http_failure_is_persisted(after_write: bool) {
             custom_prompt: None,
             resume_run_id: Some("before-unavailable".into()),
             retry_steps: None,
+            redo_steps: None,
             fresh: None,
         }),
     )
@@ -1241,6 +1243,7 @@ async fn step_prompts_of(pipeline: &str, linked: bool) -> Vec<String> {
                 custom_prompt: None,
                 resume_run_id: None,
                 retry_steps: None,
+                redo_steps: None,
                 fresh: None,
             }),
         )
@@ -1457,6 +1460,7 @@ async fn a_resume_reruns_only_the_failed_step_and_the_partial_run_is_still_valid
             custom_prompt: None,
             resume_run_id: Some("run-prev".into()),
             retry_steps: None,
+            redo_steps: None,
             fresh: None,
         }),
     )
@@ -1605,6 +1609,7 @@ async fn a_resume_that_loses_only_the_founding_step_gets_no_validation() {
             custom_prompt: None,
             resume_run_id: Some("run-prev".into()),
             retry_steps: None,
+            redo_steps: None,
             fresh: None,
         }),
     )
