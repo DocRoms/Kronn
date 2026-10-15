@@ -1,14 +1,14 @@
 # Provider quota re-arm
 
-Kronn blocks new delegations for a provider after a real quota-exhaustion recovery marker on an escalated execution. Escalations attached to Planning tasks in `done` or `archived` no longer count as active blockers. [src: file: backend/src/db/orchestration.rs:2047-2072#provider_has_open_quota_exhaustion]
+Kronn blocks new delegations for a provider after a real quota-exhaustion recovery marker on an escalated execution. Escalations attached to Planning tasks in `done` or `archived` no longer count as active blockers. [src: file: backend/src/db/orchestration.rs:2232-2257#provider_has_open_quota_exhaustion]
 
-A human confirmation in Config > Agents can acknowledge that one provider's quota is available again. The action records an idempotent provider-scoped audit event and watermark; it does not restart, cancel, or change any historical execution or recovery row. A later quota marker for that provider is newer than the watermark and blocks launches again. [src: file: backend/src/db/orchestration.rs:2115-2157#rearm_provider_quota]
+A human confirmation in Config > Agents can acknowledge that one provider's quota is available again. The action records an idempotent provider-scoped audit event and watermark; it does not restart, cancel, or change any historical execution or recovery row. A later quota marker for that provider is newer than the watermark and blocks launches again. [src: file: backend/src/db/orchestration.rs:2303-2345#rearm_provider_quota]
 
-The re-arm endpoint is a browser route and is not part of the task-worker MCP surface. [src: file: backend/src/lib.rs:3066-3069#rearm_provider_quota]
+The re-arm endpoint is a browser route and is not part of the task-worker MCP surface. [src: file: backend/src/lib.rs:3076-3079#rearm_provider_quota]
 
 ## Reassigning to the same provider is a re-arm (KT-838)
 
-One exhausted quota often stops several executions at once, each escalation taking the next quota generation of that provider. Reassigning an `Escalated` execution to the very provider whose quota stopped it (its recovery marker is `quota_exhausted:<provider>`) is the human's "the quota is back" signal for the whole outage: the reassignment re-arms the provider in its own transaction, so every earlier generation stops blocking, whichever execution is reassigned first. The audit event has `actor_kind = human` and `actor_id = reassign:<execution id>`. Reassigning to a different provider says nothing about the first one and re-arms nothing. A new real quota failure takes a newer generation and blocks the provider again. [src: file: backend/src/api/orchestration.rs:9958-9970#rearm_provider_quota]
+One exhausted quota often stops several executions at once, each escalation taking the next quota generation of that provider. Reassigning an `Escalated` execution to the very provider whose quota stopped it (its recovery marker is `quota_exhausted:<provider>`) is the human's "the quota is back" signal for the whole outage: the reassignment re-arms the provider in its own transaction, so every earlier generation stops blocking, whichever execution is reassigned first. The audit event has `actor_kind = human` and `actor_id = reassign:<execution id>`. Reassigning to a different provider says nothing about the first one and re-arms nothing. A new real quota failure takes a newer generation and blocks the provider again. [src: file: backend/src/api/orchestration.rs:10260-10272#rearm_provider_quota]
 
 ## Announced reset time
 

@@ -42,7 +42,7 @@ The discussion SSE path resolves this scope from the durable
 executor. If that lookup fails, the run is refused before provider inference;
 Kronn must never silently broaden a worker to the principal catalogue.
 `[src: file: backend/src/api/discussions/streaming.rs:99-125#native_http_tools_for_discussion]`
-`[src: file: backend/src/db/orchestration.rs:565-575#get_execution_for_sub_discussion]`
+`[src: file: backend/src/db/orchestration.rs:752-762#get_execution_for_sub_discussion]`
 
 ## Recommended subtask loop
 
@@ -211,8 +211,8 @@ range. When anything outside the range changed, the range was deleted
 entirely, or it grew past 200 lines, the rework is refused with
 `stale range: …; relaunch with a new worker_scope`, naming the launch range
 and the observed change.
-`[src: file: backend/src/api/orchestration.rs:2258-2326#reanchor_worker_scope]`
-`[src: file: backend/src/api/orchestration.rs:2356-2412#reanchor_execution_scope]`
+`[src: file: backend/src/api/orchestration.rs:2359-2427#reanchor_worker_scope]`
+`[src: file: backend/src/api/orchestration.rs:2457-2513#reanchor_execution_scope]`
 `task_exec_status` now exposes `usage.http` — cumulative HTTP traffic, context peak, and per-phase detail — without prompts or arguments.
 
 Native HTTP delivery — and delivery from a spawned host CLI worker that uses

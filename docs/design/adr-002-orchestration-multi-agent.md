@@ -331,7 +331,7 @@ Integration is only ever toward an **explicitly pinned** target. No implicit bra
      throwaway integration worktree/branch at `candidate_target_sha` (reusing the managed-worktree
      creator + teardown). Merge the child branch there (`--no-ff`). As implemented, no throwaway
      worktree is created: the pinned parent tip is merged into the child branch inside the child's own
-     worktree, and a conflicting merge is aborted `[src: file: backend/src/core/worktree.rs:1467-1507#build_candidate]`.
+     worktree, and a conflicting merge is aborted `[src: file: backend/src/core/worktree.rs:1900-1940#build_candidate]`.
      A conflict ends the phase → nothing is touched on the parent, the round is handed
      back to the worker with the conflict as feedback (matches "échec de merge → rien n'est clôturé,
      le worker est réactivé"). The successful merge commit is the **candidate** — pin its SHA as
@@ -341,9 +341,9 @@ Integration is only ever toward an **explicitly pinned** target. No implicit bra
   3. **Apply phase — guarded fast-forward.** No advisory history lease is taken (the original design
      planned one). The mandatory backup ref is written earlier: `write_backup_ref` writes and reads back
      `refs/kronn-backup/<task-id>-<exec-short>` at `candidate_target_sha` before the candidate is built
-     `[src: file: backend/src/core/worktree.rs:1436-1464#write_backup_ref]`. `fast_forward_target_to`
+     `[src: file: backend/src/core/worktree.rs:1869-1897#write_backup_ref]`. `fast_forward_target_to`
      verifies that the parent tip is **still exactly `candidate_target_sha`** (a compare-and-swap) and
-     that the parent worktree is **clean** `[src: file: backend/src/core/worktree.rs:1628-1648#fast_forward_target_to]`.
+     that the parent worktree is **clean** `[src: file: backend/src/core/worktree.rs:2061-2081#fast_forward_target_to]`.
   4. Advance the parent to `candidate_merge_sha` **fast-forward only** — a deterministic, short,
      verifiable mutation (the candidate already contains `candidate_target_sha` as an ancestor).
   5. **Never** `stash`, and **never** silently `update-ref` a checked-out branch. If the parent has
@@ -351,7 +351,7 @@ Integration is only ever toward an **explicitly pinned** target. No implicit bra
      rebuilt on the new tip (→ `Integrating`), never forced through.
 - **Cleanup** — on `Done`, the child worktree is torn down
   (`remove_integrated_task_worktree`, which ends in `remove_discussion_worktree`,
-  `[src: file: backend/src/core/worktree.rs:2224-2292#remove_integrated_task_worktree]`) and the sub-discussion
+  `[src: file: backend/src/core/worktree.rs:2657-2725#remove_integrated_task_worktree]`) and the sub-discussion
   archived. On `Cancelled`/`Failed`, the child branch is preserved for inspection and the worktree
   removed only if clean.
 
@@ -414,7 +414,7 @@ restart. Boot first quiesces due dispatches and moves non-terminal executions to
 same SQLite boundary, then classifies the checkpoint against discussions, worker availability,
 workspace ownership and the real Git refs. A pending decision survives a second crash and is consumed
 only by an explicit guarded resume `[src: file: backend/src/api/orchestration.rs:267-367#reconcile_at_boot]`
-`[src: file: backend/src/db/orchestration.rs:5521-5592#set_execution_recovery]`. The runtime watchdog uses four independent clocks — total
+`[src: file: backend/src/db/orchestration.rs:5785-5856#set_execution_recovery]`. The runtime watchdog uses four independent clocks — total
 duration, activity, review wait and human wait — so an acknowledged human gate is never mistaken for a
 dead worker `[src: file: backend/src/api/orchestration.rs:566-722#start_resilience_watchdog]`.
 
