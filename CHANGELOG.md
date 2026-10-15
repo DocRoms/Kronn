@@ -9,21 +9,9 @@ Release notes for 0.9.3 and earlier are available in the
 
 ---
 
-## [0.15.1] - 2026-10-22
 ## [Unreleased]
 
 ### Added
-
-- `kronn service update` moves the background service to the latest release
-  (or `--to <X.Y.Z>`): it fetches the service clone, builds and stages the new
-  release next to the running one, waits for running workflows and agents to
-  finish (`KRONN_SERVICE_DRAIN_TIMEOUT`, default 30 minutes; `--force` skips
-  it), switches `current`, restarts and checks health. A release that does not
-  come up healthy is rolled back automatically, restoring the pre-migration
-  database backup when the new version migrated it. `--check` only reports
-  (exit 10 when an update exists). `kronn service rollback` goes back to the
-  previous release by hand. Old releases are pruned, keeping the 3 most recent
-  plus the current and previous ones.
 
 - The backend can run as a background service. With `KRONN_SERVICE=1` it
   resolves the login-shell PATH at startup, before agent detection, and merges
@@ -43,18 +31,18 @@ Release notes for 0.9.3 and earlier are available in the
   `logs` and `status` follow the service, and `kronn start-dev`, `start` and
   `web` offer to stop it first (`start-dev` brings it back on exit). See
   [docs/operations/service.md](docs/operations/service.md).
+- `kronn service update` moves the background service to the latest release
+  (or `--to <X.Y.Z>`): it fetches the service clone, builds and stages the new
+  release next to the running one, waits for running workflows and agents to
+  finish (`KRONN_SERVICE_DRAIN_TIMEOUT`, default 30 minutes; `--force` skips
+  it), switches `current`, restarts and checks health. A release that does not
+  come up healthy is rolled back automatically, restoring the pre-migration
+  database backup when the new version migrated it. `--check` only reports
+  (exit 10 when an update exists). `kronn service rollback` goes back to the
+  previous release by hand. Old releases are pruned, keeping the 3 most recent
+  plus the current and previous ones.
 
-### Changed
-
-- The dark theme is now VS Code's Dark Modern palette: flat greys,
-  `#0078d4` filled controls and `#4daafc` accents, no glow, scanlines or
-  aurora. It applies to everyone on Dark or on System with a dark OS, with
-  no setting to change. It is held to the dark-theme contrast floors (4.5:1
-  for every text role) and covered by the dark-theme axe pass. The former
-  purple palette, with its neon effects, becomes the secret Arcade theme,
-  unlocked with a code in Settings like the other secret themes.
-
-## [0.15.1] - 2026-10-21
+## [0.15.1] - 2026-10-22
 
 ### Added
 
