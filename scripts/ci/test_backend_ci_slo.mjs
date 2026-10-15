@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { SLO_MS, comparableSuccessfulHotRuns, effectiveMeasurementMode, fastLoopDurationMs, formatDuration, runnerMilliseconds, hasRestoredCompiledCache, markdown, percentile, requireCurrentBackendJob, summarizeBackendJobs, timingStatus, validateCompiledCacheState } from "./backend_ci_slo.mjs";
+import { SLO_MS, comparableSuccessfulHotRuns, effectiveMeasurementMode, fastLoopDurationMs, formatDuration, runnerMilliseconds, hasPartiallyRestoredCompiledCache, hasRestoredCompiledCache, markdown, percentile, requireCurrentBackendJob, summarizeBackendJobs, timingStatus, validateCompiledCacheState } from "./backend_ci_slo.mjs";
 
 const at = (minutes) => `2026-08-31T00:${String(minutes).padStart(2, "0")}:00Z`;
 const job = (start, end) => ({ name: "test-backend", started_at: at(start), completed_at: at(end) });
@@ -15,12 +15,16 @@ assert.deepEqual(summarizeBackendJobs([]), { samples: [], medianMs: null, p95Ms:
 assert.equal(timingStatus(null), "unavailable");
 assert.equal(timingStatus(SLO_MS), "within SLO");
 assert.equal(timingStatus(SLO_MS + 1), "breach");
-assert.equal(effectiveMeasurementMode("hot", true), "hot");
-assert.equal(effectiveMeasurementMode("hot", false), "warmup/miss");
+assert.equal(effectiveMeasurementMode("hot", true, "hit"), "hot");
+assert.equal(effectiveMeasurementMode("hot", false, "partial"), "partial");
+assert.equal(effectiveMeasurementMode("hot", false, "miss"), "warmup/miss");
 assert.equal(effectiveMeasurementMode("cold", false), "cold");
 const warmupReport = markdown(summary, null, "warmup/miss", false);
 assert.match(warmupReport, /Compiled cache: \*\*miss\*\*/);
 assert.match(warmupReport, /unavailable \(unavailable; warmup\/miss\)/);
+const partialReport = markdown(summary, null, "partial", false, undefined, "partial");
+assert.match(partialReport, /Compiled cache: \*\*partial\*\*/);
+assert.match(partialReport, /excluded from exact hot-cache history/);
 
 const currentRun = { id: 5, event: "pull_request", conclusion: null, head_branch: "feature/ci" };
 const comparable = comparableSuccessfulHotRuns([
@@ -35,6 +39,8 @@ assert.deepEqual(comparable.map((run) => run.id), [1]);
 assert.equal(hasRestoredCompiledCache({ steps: [{ name: "Record compiled cache hit", conclusion: "success" }] }), true);
 assert.equal(hasRestoredCompiledCache({ steps: [{ name: "Record compiled cache warmup miss", conclusion: "success" }] }), false);
 assert.equal(hasRestoredCompiledCache({ steps: [{ name: "Record compiled cache hit", conclusion: "failure" }] }), false);
+assert.equal(hasPartiallyRestoredCompiledCache({ steps: [{ name: "Record compiled cache partial hit", conclusion: "success" }] }), true);
+assert.equal(hasPartiallyRestoredCompiledCache({ steps: [{ name: "Record compiled cache hit", conclusion: "success" }] }), false);
 
 const completedJob = { ...job(0, 14), status: "completed" };
 assert.equal(requireCurrentBackendJob([completedJob]).durationMs, 14 * 60 * 1000);
@@ -45,11 +51,13 @@ assert.throws(() => requireCurrentBackendJob([{ ...completedJob, completed_at: n
 
 validateCompiledCacheState("cold", "", false);
 validateCompiledCacheState("hot", "miss", false);
+validateCompiledCacheState("hot", "partial", false);
 validateCompiledCacheState("hot", "hit", true);
 assert.throws(() => validateCompiledCacheState("hot", "", false), /invalid or unavailable/);
 assert.throws(() => validateCompiledCacheState("hot", "invalid", false), /invalid or unavailable/);
 assert.throws(() => validateCompiledCacheState("hot", "hit", false), /outputs disagree/);
 assert.throws(() => validateCompiledCacheState("hot", "miss", true), /outputs disagree/);
+assert.throws(() => validateCompiledCacheState("hot", "partial", true), /outputs disagree/);
 
 const runJobs = [
   { name: "test-backend", started_at: at(1), completed_at: at(12) },
