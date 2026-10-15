@@ -11,7 +11,7 @@ of the child.
 [src: file: backend/src/api/orchestration.rs:4113-4133#accept_worker_offer_and_attach]
 [src: file: backend/src/api/orchestration.rs:4251-4269#worker_cli_session_id]
 [src: file: backend/src/api/orchestration.rs:11910-11922#source_binding_session_id]
-[src: file: backend/scripts/disc-introspection-mcp.py:6229-6264#call_task_exec_accept_worker_offer]
+[src: file: backend/scripts/disc-introspection-mcp.py:6288-6323#call_task_exec_accept_worker_offer]
 
 The terminal return path remains compatibility code for offers accepted by older
 bridges. It emits return messages only when it actually moved legacy child-owned

@@ -35,18 +35,24 @@ export interface AssigneeOption extends AssigneeIdentity {
  * The agents of a room that can be assigned: its configured discussion agent
  * and every joined CLI session — by session, never by provider, so two Codex
  * CLIs stay two options.
+ *
+ * A `Custom` discussion agent IS its connection: the backend refuses it without
+ * `connection_id` (and refuses a `connection_id` on any other provider), so it
+ * is offered with its connection, or not at all.
  */
 export function assigneeOptions(
   discussionAgent: AgentType | null | undefined,
   participants: ParticipantView[],
+  discussionConnectionId?: string | null,
 ): AssigneeOption[] {
   const options: AssigneeOption[] = [];
-  if (discussionAgent) {
+  const connectionId = discussionConnectionId?.trim() || null;
+  if (discussionAgent && (discussionAgent !== 'Custom' || connectionId)) {
     const identity: AssigneeIdentity = {
       kind: 'discussion_agent',
       agent_type: discussionAgent,
       cli_session_id: null,
-      connection_id: null,
+      connection_id: discussionAgent === 'Custom' ? connectionId : null,
     };
     options.push({ ...identity, key: assigneeKey(identity), cliOrdinal: null });
   }

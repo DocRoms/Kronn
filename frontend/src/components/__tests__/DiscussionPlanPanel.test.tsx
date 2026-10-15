@@ -1302,4 +1302,121 @@ describe('DiscussionPlanPanel', () => {
       },
     }));
   });
+
+  it('assigns and unassigns from the task sheet, which follows the answer', async () => {
+    // The sheet picker is the same component as the quick menu in another
+    // layout (variant="inline": open, no popover): it must write the same
+    // calls and refresh the sheet it sits in.
+    const codex = {
+      kind: 'cli' as const,
+      agent_type: 'Codex' as const,
+      cli_session_id: 12,
+      cli_ordinal: 1,
+      role: 'owner' as const,
+      source: 'manual' as const,
+    };
+    mocks.participants.mockResolvedValue([{
+      id: 12, disc_id: 'disc-1', agent_type: 'Codex', status: 'active', cli_ordinal: 1,
+    }]);
+    // The backend is the source of truth: after a write, a reload of the task
+    // (the plan refresh re-reads the open sheet) returns what the write did.
+    mocks.assign.mockImplementation(async () => {
+      mocks.get.mockResolvedValue(detail({ assignees: [codex] }));
+      return detail({ assignees: [codex] });
+    });
+    mocks.unassign.mockImplementation(async () => {
+      mocks.get.mockResolvedValue(detail({ assignees: [] }));
+      return detail({ assignees: [] });
+    });
+    const { container } = render(
+      <DiscussionPlanPanel discussionId="disc-1" initialTaskId="task-1" onClose={vi.fn()} toast={vi.fn()} />,
+    );
+    await waitFor(() => expect(container.querySelector('.plan-detail')).not.toBeNull());
+    const sheet = container.querySelector<HTMLElement>('.plan-detail')!;
+
+    // Inline: the choices are there without opening anything.
+    const ownerName = 'planning.assignee.setRole:Codex planning.assignee.cli/planning.assignee.role.owner';
+    const owner = await within(sheet).findByRole('button', { name: ownerName });
+    expect(sheet.querySelector('.task-assignee-popover')).toBeNull();
+    expect(sheet.querySelector('[data-testid="task-assignees"]')).toBeNull();
+    expect(owner.getAttribute('aria-pressed')).toBe('false');
+
+    fireEvent.click(owner);
+    await waitFor(() => expect(mocks.assign).toHaveBeenCalledWith('task-1', {
+      assignee: {
+        kind: 'cli',
+        agent_type: 'Codex',
+        cli_session_id: 12,
+        connection_id: null,
+        role: 'owner',
+      },
+    }));
+    // The sheet shows the assignee the backend returned, no reopen needed.
+    await waitFor(() => expect(
+      sheet.querySelectorAll('[data-testid="task-assignees"] .task-assignee'),
+    ).toHaveLength(1));
+    await waitFor(() => expect(
+      within(sheet).getByRole('button', { name: ownerName }).getAttribute('aria-pressed'),
+    ).toBe('true'));
+
+    fireEvent.click(within(sheet).getByRole('button', { name: ownerName }));
+    await waitFor(() => expect(mocks.unassign).toHaveBeenCalledWith('task-1', {
+      assignee: {
+        kind: 'cli',
+        agent_type: 'Codex',
+        cli_session_id: 12,
+        connection_id: null,
+        role: null,
+      },
+    }));
+    await waitFor(() => expect(
+      sheet.querySelector('[data-testid="task-assignees"]'),
+    ).toBeNull());
+    expect(mocks.assign).toHaveBeenCalledTimes(1);
+  });
+
+  it('offers a Custom discussion agent with its connection, so the backend accepts it', async () => {
+    mocks.discussion.mockResolvedValue({
+      id: 'disc-1', project_id: null, title: 'Test', agent: 'Custom', connection_id: 'conn-7',
+      language: 'fr', participants: [], messages: [], message_count: 0,
+    });
+    mocks.assign.mockResolvedValue(detail());
+    const { container } = render(
+      <DiscussionPlanPanel discussionId="disc-1" initialTaskId="task-1" onClose={vi.fn()} toast={vi.fn()} />,
+    );
+    await waitFor(() => expect(container.querySelector('.plan-detail')).not.toBeNull());
+    const sheet = container.querySelector<HTMLElement>('.plan-detail')!;
+
+    fireEvent.click(await within(sheet).findByRole('button', {
+      name: 'planning.assignee.setRole:Custom/planning.assignee.role.owner',
+    }));
+
+    await waitFor(() => expect(mocks.assign).toHaveBeenCalledWith('task-1', {
+      assignee: {
+        kind: 'discussion_agent',
+        agent_type: 'Custom',
+        cli_session_id: null,
+        connection_id: 'conn-7',
+        role: 'owner',
+      },
+    }));
+  });
+
+  it('does not offer a Custom discussion agent that has no connection', async () => {
+    // Offering it would be a button that can only answer with a 4xx.
+    mocks.discussion.mockResolvedValue({
+      id: 'disc-1', project_id: null, title: 'Test', agent: 'Custom', connection_id: null,
+      language: 'fr', participants: [], messages: [], message_count: 0,
+    });
+    const { container } = render(
+      <DiscussionPlanPanel discussionId="disc-1" initialTaskId="task-1" onClose={vi.fn()} toast={vi.fn()} />,
+    );
+    await waitFor(() => expect(container.querySelector('.plan-detail')).not.toBeNull());
+    const sheet = container.querySelector<HTMLElement>('.plan-detail')!;
+
+    expect(await within(sheet).findByText('planning.assignee.noCandidates')).toBeInTheDocument();
+    expect(within(sheet).queryByRole('button', {
+      name: /planning\.assignee\.setRole:Custom/,
+    })).toBeNull();
+  });
 });

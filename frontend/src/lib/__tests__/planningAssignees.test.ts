@@ -45,6 +45,30 @@ describe('planningAssignees', () => {
     expect(options.map(option => option.cli_session_id)).toEqual([4]);
   });
 
+  it('offers a Custom discussion agent with its connection, never without one', () => {
+    // The backend refuses a Custom assignee that names no connection, so the
+    // picker must not offer a button that can only fail.
+    const withConnection = assigneeOptions('Custom', [], 'conn-1');
+    expect(withConnection).toHaveLength(1);
+    expect(withConnection[0]).toMatchObject({
+      kind: 'discussion_agent',
+      agent_type: 'Custom',
+      connection_id: 'conn-1',
+    });
+    expect(assigneeOptions('Custom', [], null)).toEqual([]);
+    expect(assigneeOptions('Custom', [], '  ')).toEqual([]);
+    expect(assigneeOptions('Custom', [])).toEqual([]);
+    // Two custom connections are two identities.
+    expect(assigneeOptions('Custom', [], 'conn-2')[0].key).not.toBe(withConnection[0].key);
+  });
+
+  it('never sends a connection on a native provider, even a sticky one', () => {
+    // A discussion pinned to a LiteLLM/NVIDIA connection carries a
+    // `connection_id`; the backend refuses it on anything but Custom.
+    const [option] = assigneeOptions('LiteLlm', [], 'conn-1');
+    expect(option.connection_id).toBeNull();
+  });
+
   it('labels a CLI with its room ordinal so two of one provider differ', () => {
     expect(assigneeLabel({
       kind: 'cli', agent_type: 'Codex', cli_session_id: 1, connection_id: null, cli_ordinal: 1,

@@ -10243,11 +10243,16 @@ class PlanningToolTests(unittest.TestCase):
             "proposal_list", "proposal_get",
             "task_create", "task_update", "task_update_dod", "task_link_discussion",
             "task_add_blocker", "task_remove_blocker",
-            "task_assign", "task_unassign",
+            "task_assign",
         }
         names = {tool["name"] for tool in self.mod.TOOLS}
         self.assertTrue(expected.issubset(names))
         self.assertTrue(expected.issubset(self.mod.DISPATCH))
+        # KT-154 — one tool, declared in the TOOLS literal the byte gate parses;
+        # removing an assignment is `unassign: true`, not a second declaration.
+        self.assertNotIn("task_unassign", names)
+        self.assertNotIn("task_unassign", self.mod.DISPATCH)
+        self.assertIn("task_assign", self.mod.TOOL_MANUALS)
         self.assertFalse(
             {"proposal_accept", "proposal_reject", "proposal_decide"} & names,
             "proposal decisions must remain human-only",
@@ -10500,15 +10505,16 @@ class PlanningToolTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "kind and agent_type"):
             self.mod.call_task_assign({"task_id": "KT-154", "assignee": {"agent_type": "Codex"}})
         with self.assertRaisesRegex(RuntimeError, "task_id is required"):
-            self.mod.call_task_unassign({})
+            self.mod.call_task_assign({"unassign": True})
 
-    def test_task_unassign_is_a_delete_on_the_assignees_collection(self):
+    def test_task_assign_unassign_is_a_delete_on_the_assignees_collection(self):
         with mock.patch.object(self.mod, "_http", self.fake_http), \
              mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"):
-            self.mod.call_task_unassign({"task_id": "KT-154"})
+            self.mod.call_task_assign({"task_id": "KT-154", "unassign": True, "role": "owner"})
         method, path, body = self.fake_http.call_args.args
         self.assertEqual((method, path), ("DELETE", "/api/planning/tasks/KT-154/assignees"))
         self.assertNotIn("assignee", body)
+        self.assertNotIn("role", body, "a removal carries no role")
 
     def test_assignees_reach_the_write_receipt(self):
         ack = self.mod._task_ack({
@@ -12790,7 +12796,7 @@ class TaskAckTests(unittest.TestCase):
         for name in (
             "call_task_create", "call_task_update", "call_task_update_dod",
             "call_task_add_blocker", "call_task_remove_blocker",
-            "call_task_link_discussion", "call_task_assign", "call_task_unassign",
+            "call_task_link_discussion", "call_task_assign",
         ):
             source = inspect.getsource(getattr(self.mod, name))
             self.assertIn("_task_ack", source, f"{name} still returns the whole task")

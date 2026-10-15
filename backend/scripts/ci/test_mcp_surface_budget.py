@@ -159,6 +159,25 @@ class McpSurfaceBudgetTests(unittest.TestCase):
             f"{thin}. Say the blast radius — a caller cannot infer it from `delete`.",
         )
 
+    def test_no_tool_is_declared_outside_the_literal_the_gate_parses(self):
+        # KT-154: two tools were added with `TOOLS.extend([...])` after `main()`.
+        # `load_tools` reads only the `TOOLS = [...]` literal, so the real
+        # `tools/list` payload grew by ~1.8 KB while this gate stayed green.
+        import ast
+        tree = ast.parse((REPO_ROOT / gate.BRIDGE).read_text())
+        mutators = {"extend", "append", "insert", "__iadd__"}
+        offenders = []
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "TOOLS"
+                    and node.func.attr in mutators):
+                offenders.append(f"line {node.lineno}: TOOLS.{node.func.attr}(...)")
+            if (isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name)
+                    and node.target.id == "TOOLS"):
+                offenders.append(f"line {node.lineno}: TOOLS += ...")
+        self.assertEqual(offenders, [], "declare the tool inside the TOOLS literal")
+
     def test_every_tool_carries_a_description(self):
         # An undocumented tool is not a saving — it is a tool nobody can use
         # correctly, and the cheapest way to game a byte ceiling.

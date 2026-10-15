@@ -226,7 +226,7 @@ assignees. The role is optional (`owner` | `reviewer`).
   execution. When the same identity is also assigned by hand the two fold into
   one row.
 - **Writes.** `POST`/`DELETE /api/planning/tasks/{id}/assignees` (UI and MCP
-  `task_assign` / `task_unassign`). An agent moving a task to `in_progress` is
+  `task_assign`, with `unassign: true` to remove). An agent moving a task to `in_progress` is
   assigned as `owner` unless the task already has a non-reviewer assignee.
 - **Reads.** `PlanningTaskSummary.assignees` is part of every task projection
   (plan, list, detail); the plan row shows the pastilles and a quick menu.

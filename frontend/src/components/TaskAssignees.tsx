@@ -92,6 +92,8 @@ interface MenuProps {
   taskId: string;
   discussionId: string;
   discussionAgent: AgentType | null | undefined;
+  /** The room's pinned connection: required to assign a `Custom` discussion agent. */
+  discussionConnectionId?: string | null;
   assignees: PlanningAssignee[];
   /** Called with the refreshed task after every assign / unassign. */
   onChanged: (task: PlanningTaskDetail) => void;
@@ -110,6 +112,7 @@ export function TaskAssigneePicker({
   taskId,
   discussionId,
   discussionAgent,
+  discussionConnectionId,
   assignees = [],
   onChanged,
   toast,
@@ -156,8 +159,8 @@ export function TaskAssigneePicker({
   }, [open, variant]);
 
   const options = useMemo(
-    () => assigneeOptions(discussionAgent, participants),
-    [discussionAgent, participants],
+    () => assigneeOptions(discussionAgent, participants, discussionConnectionId),
+    [discussionAgent, participants, discussionConnectionId],
   );
 
   const toggle = async (option: AssigneeOption, clicked: PlanningAssigneeRole) => {

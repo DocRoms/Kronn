@@ -6896,9 +6896,9 @@ fn worker_brief_markdown(
            ne décide jamais à la place de l'humain.\n\n"
             .to_string()
     };
-    // `disc_append` accepts an explicit `disc_id` (backend/scripts/disc-introspection-mcp.py:5063),
+    // `disc_append` accepts an explicit `disc_id` (backend/scripts/disc-introspection-mcp.py:5122),
     // so a joined CLI can target the real parent via `task_exec_status`'s `parent_discussion_id`.
-    // `disc_question_list` truly is bound-only (backend/scripts/disc-introspection-mcp.py:4278-4289).
+    // `disc_question_list` truly is bound-only (backend/scripts/disc-introspection-mcp.py:4298-4309).
     // Native/HTTP workers declare neither tool.
     let parent_milestones = if has_room_publication {
         "## Jalons parent factuels\n\

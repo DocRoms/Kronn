@@ -20,7 +20,7 @@ Release notes for 0.9.3 and earlier are available in the
   each row (Focus and All views) and the worker of a running task execution
   appears there too, with its agent and tier, without any manual assignment.
   Assign and unassign from the plan row's quick menu or from the task sheet;
-  agents use the new `task_assign` / `task_unassign` MCP tools, and moving a
+  agents use the new `task_assign` MCP tool (`unassign: true` removes), and moving a
   task to in_progress assigns the calling CLI as its owner when nobody is on
   it.
 

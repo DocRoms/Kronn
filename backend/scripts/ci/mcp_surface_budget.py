@@ -102,7 +102,12 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # compact audit descriptions lower the catalogue by 165 B.
 # KT-1205 + KT-1218: preserve both template and Verify docs guidance, measured
 # after integration and shortening repeated descriptions.
-CATALOGUE_MAX_BYTES = 85_095
+# KT-154: `task_assign` (assign yourself or another agent, `unassign:true` to
+# remove; the contract lives in its tool_manual) was paid for by tightening the
+# qa_list, disc_link, disc_transfer_session, disc_find_by_session,
+# disc_workspace_set and task_exec_review descriptions; ceiling lowered by 6 B
+# (85_095 -> 85_089).
+CATALOGUE_MAX_BYTES = 85_089
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is

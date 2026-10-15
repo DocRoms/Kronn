@@ -355,6 +355,51 @@ fn an_agent_taking_a_task_is_owner_unless_someone_is_already_on_it() {
 }
 
 #[test]
+fn a_reviewer_alone_does_not_stop_the_agent_taking_the_task_from_becoming_owner() {
+    // A reviewer is not "someone on it": the task still has no executant. If a
+    // reviewer counted as taken, the agent doing the work would stay invisible
+    // in the plan, and the review would look like the whole job.
+    let conn = connection();
+    seed_disc(&conn, "d-reviewer");
+    seed_cli_session(&conn, 21, "d-reviewer", "Codex", "cli-worker");
+    seed_cli_session(&conn, 22, "d-reviewer", "ClaudeCode", "cli-reviewer");
+    let task = new_task(&conn, "Reviewed first", PlanningTaskStatus::Todo);
+    assign_task(
+        &conn,
+        &task,
+        &assign_request(cli_assignee(
+            22,
+            AgentType::ClaudeCode,
+            Some(PlanningAssigneeRole::Reviewer),
+        )),
+    )
+    .unwrap();
+
+    let detail = update_task(
+        &conn,
+        &task,
+        &status_update(
+            PlanningTaskStatus::InProgress,
+            agent_actor("Codex", "cli-worker"),
+        ),
+    )
+    .unwrap();
+
+    let assignees = detail.summary.assignees;
+    assert_eq!(assignees.len(), 2, "reviewer kept, worker added: {assignees:?}");
+    let owner = assignees
+        .iter()
+        .find(|a| a.role == Some(PlanningAssigneeRole::Owner))
+        .expect("the agent that took the task is its owner");
+    assert_eq!(owner.cli_session_id, Some(21));
+    let reviewer = assignees
+        .iter()
+        .find(|a| a.role == Some(PlanningAssigneeRole::Reviewer))
+        .expect("the reviewer is still there");
+    assert_eq!(reviewer.cli_session_id, Some(22));
+}
+
+#[test]
 fn a_live_execution_worker_is_shown_without_assignment_and_vanishes_with_it() {
     let conn = connection();
     seed_disc(&conn, "d-exec");

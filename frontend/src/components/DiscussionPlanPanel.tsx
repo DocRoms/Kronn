@@ -600,6 +600,7 @@ export function DiscussionPlanPanel({
               taskId={relation.task.id}
               discussionId={discussionId}
               discussionAgent={discussion?.agent}
+              discussionConnectionId={discussion?.connection_id}
               assignees={relation.task.assignees}
               onChanged={afterAssigneeChange}
               toast={toast}
@@ -1164,6 +1165,7 @@ export function DiscussionPlanPanel({
                 taskId={selectedTask.id}
                 discussionId={discussionId}
                 discussionAgent={discussion?.agent}
+                discussionConnectionId={discussion?.connection_id}
                 assignees={selectedTask.assignees}
                 onChanged={afterAssigneeChange}
                 toast={toast}

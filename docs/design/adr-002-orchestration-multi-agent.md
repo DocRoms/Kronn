@@ -64,7 +64,7 @@ composition and one genuinely new capability (protected merge), not reinvention.
 | Managed-worktree creator (branch-name based) | `core/worktree.rs:179-249` | Must accept `git worktree add -b <child> <path> <base_sha>` (SHA arg, not branch name). |
 | `head_sha` snapshot column (inert for lineage) | `db/sql/101_discussion_workspaces.sql:17` | Becomes the pinned base for a child. |
 | "Ahead of base" preservation check | `workflows/workspace.rs:118-163` | Becomes the merge-eligibility gate. |
-| `disc_create` / `disc_create_room` MCP tools | `disc-introspection-mcp.py:537-559,958-995` | Extend to accept `profile_ids/skill_ids/directive_ids/model` (already HTTP-side at `models/discussions.rs:355-366`) so a worker can be spawned bound. |
+| `disc_create` / `disc_create_room` MCP tools | `disc-introspection-mcp.py:537-559,983-1020` | Extend to accept `profile_ids/skill_ids/directive_ids/model` (already HTTP-side at `models/discussions.rs:355-366`) so a worker can be spawned bound. |
 | `actor_kind` CHECK (`human`,`agent` only) | `db/sql/081_planning_tasks.sql:92` | Add a `backend`/`system` actor so autonomous transitions are attributable. |
 | `triage_manifest_schema` + `AgentDecision` gate lifecycle | `workflows/triage.rs:47-119`, `models/agent_decisions.rs:53-77` | Generalize from run-scope to a discussion/task-scoped DeliveryManifest + review verdict. |
 | Batch completion hook (settles a workflow run) | `api/discussions/runtime.rs:76-105` | Add a branch that appends the deliverable into the **parent discussion** and wakes its agent. |
