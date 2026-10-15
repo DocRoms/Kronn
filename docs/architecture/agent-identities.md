@@ -110,7 +110,7 @@ joined CLI of its provider, whose turns its transcript labels with
 the CLI alias.
 [src: file: backend/src/db/discussions.rs:2071-2074#reply_author]
 [src: file: backend/src/api/disc_invite.rs:1972-1992#addressed_to_session]
-[src: file: backend/src/api/discussions/streaming.rs:2077-2125#punctual_identity_notice]
+[src: file: backend/src/api/discussions/streaming.rs:2382-2430#punctual_identity_notice]
 [src: file: backend/src/api/disc_prompts.rs:337-355#transcript_agent_label]
 [src: file: backend/src/api/disc_invite.rs:1615-1623#reply_target]
 

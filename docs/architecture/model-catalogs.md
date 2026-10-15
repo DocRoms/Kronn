@@ -135,8 +135,8 @@ this is permission to attempt execution, not proof of account access. Missing CL
 authentication failures and unavailable/unknown identities are not covered by
 that exception, and other runtimes keep their existing failure policy.
 [src: file: backend/src/core/model_catalog/mod.rs:1083-1098#retained_claude_model]
-[src: file: backend/src/api/discussions/streaming.rs:3845-3852#preflight_resolve]
-[src: file: backend/src/workflows/runner.rs:1840-1878#preflight_resolve]
+[src: file: backend/src/api/discussions/streaming.rs:4150-4157#preflight_resolve]
+[src: file: backend/src/workflows/runner.rs:1915-1953#preflight_resolve]
 [src: file: backend/src/workflows/steps.rs:1174-1213#preflight_workflow_launch]
 
 A comparison's TARGET decides which connection its run uses (KT-672). A row
@@ -213,7 +213,7 @@ durable catalog. Bootstrap failures are logged; an unavailable projection
 does not silently authorize an effort. Discussion preflight may refresh the
 catalog afterward, but the first scheduled workflow does not depend on opening
 Settings first.
-[src: file: backend/src/main.rs:257-261#migrate_hardcoded_catalog_once]
+[src: file: backend/src/main.rs:280-284#migrate_hardcoded_catalog_once]
 [src: file: desktop/src-tauri/src/main.rs:689-695#migrate_hardcoded_catalog_once]
 [src: file: backend/src/core/model_catalog/mod.rs:249-260#refresh_runtime_cache]
 
@@ -239,8 +239,8 @@ not a database error. This also applies to previously saved QPs whose effort
 was formerly inert; ignoring it silently would claim a setting was applied
 when it was not. QPs with no effort or only whitespace keep the old behavior.
 [src: file: backend/src/db/discussion_effort.rs:9-55#capture]
-[src: file: backend/src/api/discussions/crud.rs:723-730#UnresolvedQuickPromptEffort]
-[src: file: backend/src/api/discussions/streaming.rs:3758-3765#for_run]
+[src: file: backend/src/api/discussions/crud.rs:735-742#UnresolvedQuickPromptEffort]
+[src: file: backend/src/api/discussions/streaming.rs:4063-4070#for_run]
 
 These snapshots are local execution state, not a portable QP setting. Exporting
 or importing a QP preserves its editable `agent_settings`, while it does not

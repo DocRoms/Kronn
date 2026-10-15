@@ -89,7 +89,7 @@ routing and idempotency guarantees as an answered one — they cannot drift apar
 as a message that says it is not a decision, and the question stays pending.
 In the card, a checked option can be clicked again to take it back.
 Discussion list items expose `pending_question_count`, including pagination.
-`[src: file: backend/src/lib.rs:2756-2770#decline]`
+`[src: file: backend/src/lib.rs:2768-2782#decline]`
 `[src: file: backend/src/db/discussion_questions.rs:511#publish_human_resolution]`
 `[src: file: backend/src/db/discussion_questions.rs:168-189#pending_question_count]`
 `[src: file: backend/src/db/sql/168_discussion_questions.sql:1#discussion_questions]`
@@ -418,7 +418,7 @@ is pinned by `task_exec_launch` like any principal, so deliveries wake it, and
 a replayed step takes over the live executions its interrupted session steered.
 Its untargeted `disc_append` reports to the room without waking the room's
 native agent; target that agent explicitly to ask it something (KT-1253).
-`[src: file: backend/src/workflows/step_room.rs:39-53#authorize]`
+`[src: file: backend/src/workflows/step_room.rs:211-225#authorize]`
 `[src: file: backend/src/db/workflow_step_rooms.rs:178-294#revoke_all_after_restart]`
 The optional `validations` passed to `task_exec_launch` are principal-owned and
 persisted on the implicit single-task run. They use the same `ValidationSpec`
@@ -443,7 +443,7 @@ before anything is created, so a bad gate is no longer found at integration,
 after the worker delivered and the review passed. The contract is served by
 `tool_manual({tool: "task_exec_prepare"})`.
 `[src: file: backend/src/core/quick_exec.rs:50-64#ALLOWED_BINARIES]` `[src: file: backend/src/core/quick_exec.rs:300-345#check_command_line]`
-`[src: file: backend/src/api/orchestration.rs:7513-7523#validations_refusal]`
+`[src: file: backend/src/api/orchestration.rs:7529-7539#validations_refusal]`
 
 To correct the gates of an execution that already exists, the principal calls
 `task_exec_reassign({task_execution_id, validations, reason})` — `validations`
@@ -469,7 +469,7 @@ by Kronn at integration, and the worker commits and delivers in the same turn
 without ever waiting on a background command (its shell tool cuts a command at
 600 s, and a worker that hands the turn back to wait ends without delivering,
 `worker_completed_without_delivery`).
-`[src: file: backend/src/api/orchestration.rs:7002-7018#can_run_shell]`
+`[src: file: backend/src/api/orchestration.rs:7018-7034#can_run_shell]`
 
 `task_exec_status` returns `next_action.tool = task_exec_resume` only for an
 integration hold: an Applying-origin checkpoint, a pending integration recovery
@@ -479,7 +479,7 @@ the parent checkout and recorded SHAs, refuses dirty or unrelated states, and
 returns the existing terminal result when the same successful resume is
 retried. The tool cannot advance provisioning- or review-owned checkpoints.
 [src: file: backend/src/api/orchestration.rs:11252-11278#compact_next_action]
-[src: file: backend/src/api/orchestration.rs:8539-8552#resume_blocked_apply]
+[src: file: backend/src/api/orchestration.rs:8555-8568#resume_blocked_apply]
 [src: file: backend/src/api/orchestration.rs:11559-11602#task_exec_resume]
 [src: file: backend/scripts/disc-introspection-mcp.py:6154-6232#call_task_exec_resume]
 
@@ -497,7 +497,7 @@ candidate are not run again. The relaunched worker is stood down first, and the
 call is refused once the worker committed or left changes since the send-back,
 or delivered again (that delivery is reviewed instead). Attempts stay monotonic:
 the re-validation does not rewind the attempt the send-back opened.
-[src: file: backend/src/api/orchestration.rs:3460-3467#send_back] [src: file: backend/src/api/orchestration.rs:8652-8738#revalidate_sent_back_execution]
+[src: file: backend/src/api/orchestration.rs:3471-3478#send_back] [src: file: backend/src/api/orchestration.rs:8652-8738#revalidate_sent_back_execution]
 [src: file: backend/src/db/orchestration.rs:3826-3900#reopen_approval_after_rework]
 
 `task_exec_status({view: "compact"})` returns id, task, status, attempt,
@@ -558,7 +558,7 @@ human pasting a connection id. The two delegation tools keep that guard.
 alias or display name; a name two connections share is refused rather than
 guessed, and every refusal lists the connections that can generate the
 modality asked for, with their ids.
-[src: file: backend/src/api/orchestration.rs:10462-10507#MediaModality] [src: file: backend/src/api/media.rs:150-205#ConnectionReference]
+[src: file: backend/src/api/orchestration.rs:10478-10523#MediaModality] [src: file: backend/src/api/media.rs:150-205#ConnectionReference]
 [src: file: backend/src/db/external_api_connections.rs:131-160#resolve]
 
 The catalogue reports `configured` and `reachable`
@@ -577,7 +577,7 @@ probe answered, `unreachable` with an `unreachable_reason` (`dns`, `refused`,
 `reachable` is true only when verified. Named connections are probed with an
 unauthenticated `GET /v1/models` (3 s bound, in parallel, cached 30 s); one that
 is not verified stays listed with its media slots but is not `available`.
-[src: file: backend/src/core/endpoint_reachability.rs:17-74#UnreachableReason] [src: file: backend/src/core/endpoint_reachability.rs:285-289#MAX_OBSERVATION_AGE]
+[src: file: backend/src/core/endpoint_reachability.rs:17-74#UnreachableReason] [src: file: backend/src/core/endpoint_reachability.rs:298-302#MAX_OBSERVATION_AGE]
 
 The stdio bridge fingerprints the script contents it loaded. Every orchestration
 mutation, including principal review/cancel and worker commit/delivery, passes a
@@ -654,7 +654,7 @@ refusal. Planning event rows separately persist `actor_session_id`, so two
 concurrent sessions of the same provider remain distinguishable in the audit
 trail.
 `[src: file: backend/scripts/disc-introspection-mcp.py:5694-5709#_task_exec_identity]`
-`[src: file: backend/src/api/orchestration.rs:9878-9888#principal_cli_is_authorized]`
+`[src: file: backend/src/api/orchestration.rs:9894-9904#principal_cli_is_authorized]`
 `[src: file: backend/src/api/agent_tools.rs:3787-3823#native_execution_for_caller]`
 `[src: file: backend/src/db/sql/136_planning_actor_session.sql:1-5#actor_session_id]`
 
@@ -684,16 +684,16 @@ to the other executions it coordinates while it works on the accepted execution.
 Both identity values are derived by the trusted bridge and absent from the tool's
 input schema — the model supplies only `offer_id`; there is no fallback to
 agent-type/alias matching or any other permissive resolution if either is missing.
-[src: file: backend/src/api/orchestration.rs:4113-4133#accept_worker_offer_and_attach]
-[src: file: backend/src/api/orchestration.rs:4251-4269#worker_cli_session_id]
-[src: file: backend/src/api/orchestration.rs:11910-11922#source_binding_session_id]
+[src: file: backend/src/api/orchestration.rs:4124-4144#accept_worker_offer_and_attach]
+[src: file: backend/src/api/orchestration.rs:4262-4280#worker_cli_session_id]
+[src: file: backend/src/api/orchestration.rs:11926-11938#source_binding_session_id]
 [src: file: backend/scripts/disc-introspection-mcp.py:6288-6323#call_task_exec_accept_worker_offer]
 
 `task_exec_deliver` does not perform a room return: the execution transitions to
 `AwaitingReview` while the CLI is already in its principal room. The legacy
 terminal return remains only as compatibility for executions accepted by older
 bridges that physically moved a session into a child room.
-[src: file: backend/src/api/orchestration.rs:24162-24166#every_terminal_state_keeps_execution_scoped_cli_in_its_origin]
+[src: file: backend/src/api/orchestration.rs:24503-24507#every_terminal_state_keeps_execution_scoped_cli_in_its_origin]
 [src: file: backend/src/db/cli_worker_bindings.rs:78-165#return_to_origin]
 
 Collapsing the live and reload-stable identities, as an earlier revision did,
@@ -704,7 +704,7 @@ and fails the request explicitly (`source_agent, source_session_id, and
 source_binding_session_id are required`), not silently with a stale or wrong
 attach. If `task_exec_accept_worker_offer` refuses this way, reconnect the
 `kronn-internal` MCP server for that session before retrying.
-`[src: file: backend/src/api/orchestration.rs:11910-11922#source_binding_session_id]`
+`[src: file: backend/src/api/orchestration.rs:11926-11938#source_binding_session_id]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:6303-6328#source_binding_session_id]`
 
 `task_exec_reassign(reason)` persists the reason and includes it verbatim in

@@ -115,7 +115,7 @@ The bar re-fetches when the transcript's newest durable message id changes
 fetch per arrival, not one per render or per bubble, and never stuck on the
 first GET while a new card lands.
 [src: file: frontend/src/components/ImportantMessageCard.tsx:182-192#messageRevision]
-[src: file: frontend/src/pages/DiscussionsPage.tsx:4682-4686#ImportantMessagesBar]
+[src: file: frontend/src/pages/DiscussionsPage.tsx:4693-4697#ImportantMessagesBar]
 
 ## Human form (0.13.0, KT-643)
 

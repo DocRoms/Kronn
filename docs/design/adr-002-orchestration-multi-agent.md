@@ -343,7 +343,7 @@ Integration is only ever toward an **explicitly pinned** target. No implicit bra
      `refs/kronn-backup/<task-id>-<exec-short>` at `candidate_target_sha` before the candidate is built
      `[src: file: backend/src/core/worktree.rs:1436-1464#write_backup_ref]`. `fast_forward_target_to`
      verifies that the parent tip is **still exactly `candidate_target_sha`** (a compare-and-swap) and
-     that the parent worktree is **clean** `[src: file: backend/src/core/worktree.rs:1530-1542#fast_forward_target_to]`.
+     that the parent worktree is **clean** `[src: file: backend/src/core/worktree.rs:1628-1648#fast_forward_target_to]`.
   4. Advance the parent to `candidate_merge_sha` **fast-forward only** — a deterministic, short,
      verifiable mutation (the candidate already contains `candidate_target_sha` as an ancestor).
   5. **Never** `stash`, and **never** silently `update-ref` a checked-out branch. If the parent has
@@ -351,7 +351,7 @@ Integration is only ever toward an **explicitly pinned** target. No implicit bra
      rebuilt on the new tip (→ `Integrating`), never forced through.
 - **Cleanup** — on `Done`, the child worktree is torn down
   (`remove_integrated_task_worktree`, which ends in `remove_discussion_worktree`,
-  `[src: file: backend/src/core/worktree.rs:2118-2186#remove_integrated_task_worktree]`) and the sub-discussion
+  `[src: file: backend/src/core/worktree.rs:2224-2292#remove_integrated_task_worktree]`) and the sub-discussion
   archived. On `Cancelled`/`Failed`, the child branch is preserved for inspection and the worktree
   removed only if clean.
 

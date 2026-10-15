@@ -28,7 +28,7 @@ relay it toward the parent room — without promising automatic visibility,
 guaranteed delivery, or a publication tool the surface does not declare.
 [src: file: backend/src/api/orchestration.rs:6899-6928#parent_milestones]
 [src: file: backend/src/db/orchestration.rs:5189-5225#get_execution_lineage]
-[src: file: backend/src/api/orchestration.rs:14585-14589#worker_briefs_make_human_arbitration_and_parent_milestones_transport_aware]
+[src: file: backend/src/api/orchestration.rs:14601-14605#worker_briefs_make_human_arbitration_and_parent_milestones_transport_aware]
 [src: file: backend/src/models/orchestration.rs:1324-1337#TaskExecutionLineage]
 
 The bridge documents that `disc_question_list` reads durable question state and

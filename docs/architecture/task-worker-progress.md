@@ -4,8 +4,8 @@
 
 Queue state comes from the durable dispatch row. A claimed dispatch without `agent_started_at` remains `queued`; the post-semaphore boundary becomes `launching`, followed by `upstream_wait` immediately before the provider call. Queue position is currently always omitted: scheduler admission constraints prevent a reliable rank. Missing continuous telemetry is represented as `unavailable` or `boundary_only`, never inferred as a stall. [src: file: backend/src/api/orchestration.rs:8146-8225#execution_progress]
 
-Process liveness is attached by both execution-status surfaces only when the runtime registry has observed a successfully created provider runtime. Cancellation-token presence or absence is not treated as process evidence. [src: file: backend/src/api/orchestration.rs:8229-8250#attach_runtime_liveness] [src: file: backend/src/api/orchestration.rs:11529-11540#attach_runtime_liveness] [src: file: backend/src/lib.rs:481-484#agent_runtime_registry]
+Process liveness is attached by both execution-status surfaces only when the runtime registry has observed a successfully created provider runtime. Cancellation-token presence or absence is not treated as process evidence. [src: file: backend/src/api/orchestration.rs:8229-8250#attach_runtime_liveness] [src: file: backend/src/api/orchestration.rs:11545-11556#attach_runtime_liveness] [src: file: backend/src/lib.rs:481-484#agent_runtime_registry]
 
-Native Claude stream tool boundaries update durable progress: tool start records `tool_activity`, and tool completion returns the phase to `upstream_wait`. [src: file: backend/src/api/discussions/streaming.rs:4495-4574#mark_progress]
+Native Claude stream tool boundaries update durable progress: tool start records `tool_activity`, and tool completion returns the phase to `upstream_wait`. [src: file: backend/src/api/discussions/streaming.rs:4788-4867#mark_progress]
 
 The dispatcher persists provider launch and later progress boundaries in `agent_dispatch_jobs.last_progress_at`. [src: file: backend/src/db/agent_dispatch.rs:845-892#mark_progress]

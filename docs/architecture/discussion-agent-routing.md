@@ -152,8 +152,8 @@ on the root turn, or no marker), computed from `message_targets`.
 [src: file: backend/src/db/discussions.rs:1746-1789#native_agents_scheduled_for_root_turn]
 [src: file: backend/src/api/discussions/crud.rs:538-548#initial_participants]
 [src: file: backend/src/api/discussions/messaging.rs:115-158#enqueue_dispatches_for_trigger]
-[src: file: backend/src/api/discussions/crud.rs:886-890#attach_discussion_participants]
-[src: file: backend/src/api/discussions/streaming.rs:1930-1940#independent_sibling_notice]
+[src: file: backend/src/api/discussions/crud.rs:898-902#attach_discussion_participants]
+[src: file: backend/src/api/discussions/streaming.rs:2235-2245#independent_sibling_notice]
 [src: file: backend/src/db/discussions.rs:2016-2030#already_scheduled]
 
 ## Joined agent turn (MCP)
@@ -233,7 +233,7 @@ Two distinctions the reason must not blur, and does not:
   the untracked path alone changes nothing a room user sees — which is exactly how the
   second producer of the generic string survived the first fix. `strings` on the built
   binary, not a source grep, is what proved a second one existed.
-[src: file: backend/src/api/discussions/streaming.rs:964-1009#agent_start_failure_outcome] [src: file: backend/src/api/discussions/streaming.rs:1175-1189#finish_tracked_preflight]
+[src: file: backend/src/api/discussions/streaming.rs:1269-1314#agent_start_failure_outcome] [src: file: backend/src/api/discussions/streaming.rs:1480-1494#finish_tracked_preflight]
 
 ## Persistence and interruption
 
@@ -242,7 +242,7 @@ Two distinctions the reason must not blur, and does not:
   New-discussion `@alias` routing is persisted on the initial user message
   before its independent dispatches start, so every responder resolves its own tier;
   targets without an override inherit the discussion tier.
-  [src: file: backend/src/api/discussions/crud.rs:599-640#replace_message_targets]
+  [src: file: backend/src/api/discussions/crud.rs:611-652#replace_message_targets]
   [src: file: backend/src/api/discussions/runtime.rs:615-634#dispatch_target_tier]
 - `message_cli_authors` records the exact local CLI author for verified live MCP
   appends, enabling deterministic `reply_to` routing across same-provider peers.

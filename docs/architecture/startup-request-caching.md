@@ -8,4 +8,4 @@ Unsignalled GET requests share only in-flight work by default, so a real-time re
 
 Same-origin Live Page links to an address of the app (a legacy `#discussion-…` or `#page/…` hash included) are resolved to their canonical path and followed in the current tab, without reloading it; the router swaps to the standalone Page or lands on the discussion. See `docs/architecture/ui-structure.md` § Routing. [src: file: frontend/src/lib/live-page-sandbox.ts:560-584]
 
-The Vite development `/api` proxy uses a protocol-matched keep-alive agent. The production nginx gateway already proxies API requests upstream over HTTP/1.1. [src: file: frontend/vite.config.ts:8-11#backendAgent] [src: file: frontend/vite.config.ts:56-58#backendAgent] [src: file: .docker/nginx.conf:98-104#proxy_http_version]
+The Vite development `/api` proxy uses a protocol-matched keep-alive agent. The production nginx gateway already proxies API requests upstream over HTTP/1.1. [src: file: frontend/vite.config.ts:8-11#backendAgent] [src: file: frontend/vite.config.ts:60-62#backendAgent] [src: file: .docker/nginx.conf:98-104#proxy_http_version]
