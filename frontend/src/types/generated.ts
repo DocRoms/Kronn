@@ -1559,9 +1559,19 @@ export type BriefingEnvironment = { kind: BriefingEnvironmentKind, url: string, 
 export type BriefingEnvironmentKind = "local" | "dev" | "staging" | "preprod" | "production" | "preview";
 
 /**
+ * An external documentation space: its kind and its address, nothing else.
+ */
+export type BriefingExternalDoc = { kind: BriefingExternalDocKind, url: string, };
+
+/**
+ * Where a project's documentation lives outside the repository.
+ */
+export type BriefingExternalDocKind = "confluence" | "notion" | "wiki" | "other";
+
+/**
  * A project fact a briefing note can be attached to (KT-1196).
  */
-export type BriefingFact = "tracker" | "tracker_key" | "forge" | "forge_repo" | "default_branch" | "commit_convention" | "signoff" | "merge_strategy" | "review" | "release_cadence" | "environments" | "people";
+export type BriefingFact = "tracker" | "tracker_key" | "forge" | "forge_repo" | "default_branch" | "commit_convention" | "signoff" | "merge_strategy" | "review" | "release_cadence" | "environments" | "people" | "external_docs";
 
 export type BriefingForge = "unknown" | "github" | "gitlab" | "bitbucket" | "azure_devops" | "other";
 
@@ -1586,6 +1596,11 @@ tracker_key: string, forge: BriefingForge,
  * `owner/name`; inferred from the project's git remote when empty.
  */
 forge_repo: string, default_branch: BriefingDefaultBranch, commit_convention: BriefingCommitConvention, signoff_required: BriefingYesNo, merge_strategy: BriefingMergeStrategy, review_policy: BriefingReviewPolicy, release_cadence: BriefingReleaseCadence, environments: Array<BriefingEnvironment>, people: Array<BriefingPerson>,
+/**
+ * External documentation (Confluence, Notion, a wiki). Omitted when empty
+ * so machine copies written before it stay identical.
+ */
+external_docs?: Array<BriefingExternalDoc>,
 /**
  * KT-1196 — optional free-text note per fact: the "how" a closed option
  * cannot say. Omitted when empty so older machine copies stay identical.

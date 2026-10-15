@@ -5201,6 +5201,8 @@ struct DeliveryGitFacts {
     base_sha: String,
     head_sha: String,
     files_touched: Vec<ManifestFile>,
+    /// The integration target: commits already on it are not the worker's.
+    target_branch: Option<String>,
 }
 
 /// Expand a native HTTP worker's semantic assertions into the same durable
@@ -5386,12 +5388,24 @@ async fn delivery_git_facts(
         .base_sha
         .as_deref()
         .ok_or_else(|| "execution has no pinned base_sha".to_string())?;
-    delivery_git_facts_from_repo(repo, base_rev)
+    let target_branch = execution_target_branch(db, exec).await;
+    delivery_git_facts_from_repo(repo, base_rev, target_branch)
+}
+
+/// The run's integration target branch, when the run names one.
+async fn execution_target_branch(db: &Database, exec: &TaskExecution) -> Option<String> {
+    let run_id = exec.orchestration_run_id.clone();
+    db.with_conn(move |conn| crate::db::orchestration::get_orchestration_run(conn, &run_id))
+        .await
+        .ok()
+        .flatten()
+        .and_then(|run| run.target_branch)
 }
 
 fn delivery_git_facts_from_repo(
     repo: std::path::PathBuf,
     base_rev: &str,
+    target_branch: Option<String>,
 ) -> Result<DeliveryGitFacts, String> {
     let base = worktree::resolve_commit(&repo, base_rev)
         .map_err(|error| format!("cannot resolve execution base_sha: {error}"))?;
@@ -5418,6 +5432,7 @@ fn delivery_git_facts_from_repo(
         base_sha: base,
         head_sha: current,
         files_touched,
+        target_branch,
     })
 }
 
@@ -5440,8 +5455,13 @@ fn validate_delivery_git_facts(
 /// A CLI worker runs `git commit` itself, so nothing strips an identity
 /// trailer the model wrote; every one must name the repository's git identity.
 fn validate_delivery_identity_trailers(facts: &DeliveryGitFacts) -> Result<(), String> {
-    let commits = worktree::commit_messages(&facts.repo, &facts.base_sha, &facts.head_sha)
-        .map_err(|error| format!("cannot inspect the delivered commit messages: {error}"))?;
+    let commits = worktree::commit_messages_excluding(
+        &facts.repo,
+        &facts.base_sha,
+        &facts.head_sha,
+        facts.target_branch.as_deref(),
+    )
+    .map_err(|error| format!("cannot inspect the delivered commit messages: {error}"))?;
     let trailers = commits
         .iter()
         .flat_map(|(sha, message)| {
@@ -6502,7 +6522,8 @@ async fn approve_guards(
             "execution has no pinned base_sha".into(),
         )));
     };
-    let facts = match delivery_git_facts_from_repo(repo.to_path_buf(), base) {
+    let target_branch = execution_target_branch(db, exec).await;
+    let facts = match delivery_git_facts_from_repo(repo.to_path_buf(), base, target_branch) {
         Ok(facts) => facts,
         Err(error) => {
             return Ok(Some(ApproveBlockReason::WorktreeUnavailable(error)));

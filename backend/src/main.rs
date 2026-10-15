@@ -728,6 +728,43 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
         }
     }
 
+    // KT-819 A4 — a project installed before KT-841 still carries the "FIRST-RUN
+    // TASK" block in the docs entry file every agent reads, until an audit runs.
+    // At boot no audit holds a project's docs, so it is retired here.
+    // The project list is read first and the connection released: the file I/O
+    // below never holds the single DB connection.
+    {
+        let db = state.db.clone();
+        match db
+            .with_conn(|conn| kronn::db::projects::list_projects(conn))
+            .await
+        {
+            Ok(projects) => {
+                let cleanup = tokio::task::spawn_blocking(move || {
+                    for p in &projects {
+                        let resolved = kronn::core::scanner::resolve_host_path(&p.path);
+                        match kronn::core::scanner::retire_legacy_bootstrap_block(&resolved) {
+                            Ok(true) => tracing::info!(
+                                "Removed the legacy bootstrap instruction from the docs entry of {}",
+                                p.name
+                            ),
+                            Ok(false) => {}
+                            Err(e) => tracing::warn!(
+                                "Legacy bootstrap instruction kept in {}: {e}",
+                                p.name
+                            ),
+                        }
+                    }
+                })
+                .await;
+                if let Err(e) = cleanup {
+                    tracing::warn!("Legacy bootstrap cleanup failed: {}", e);
+                }
+            }
+            Err(e) => tracing::warn!("Legacy bootstrap cleanup failed: {}", e),
+        }
+    }
+
     // Keep .kronn/ out of git status in all projects (local exclude, never .gitignore)
     // (retroactive fix — also migrates old .kronn-tmp/ and .kronn-worktrees/ patterns)
     {

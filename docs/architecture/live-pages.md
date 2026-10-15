@@ -570,7 +570,7 @@ merely to guess whether a quota is available.
 [src: file: backend/src/models/orchestration.rs:1170-1193#TaskWorkerTier]
 [src: file: backend/src/api/orchestration.rs:10263-10306]
 [src: file: backend/src/api/orchestration.rs:11106-11148#bounded_provider_quota_details]
-[src: file: backend/src/api/orchestration.rs:11389-11418#task_exec_prepare]
+[src: file: backend/src/api/orchestration.rs:11410-11439#task_exec_prepare]
 
 A `user_input` value may also carry a `<page.…>` `source_ref`: when the card
 opens, `POST /api/live-page-actions/{id}/prefill` resolves it server-side for

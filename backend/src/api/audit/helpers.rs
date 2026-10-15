@@ -1024,38 +1024,21 @@ pub(crate) fn restore_step_briefing(
     )
 }
 
-/// Remove the KRONN:BOOTSTRAP block from docs/AGENTS.md
+/// Remove the legacy KRONN:BOOTSTRAP block from the docs entry file (the run
+/// start; `core::scanner::retire_legacy_bootstrap_block` does the same at boot).
 pub(super) fn remove_bootstrap_block(index_file: &std::path::Path) {
-    let content = match std::fs::read_to_string(index_file) {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-
-    if !content.contains("KRONN:BOOTSTRAP:START") {
+    let Ok(observed) = std::fs::read(index_file) else {
         return;
-    }
-
-    // Remove everything between START and END markers (inclusive)
-    let mut result = String::new();
-    let mut in_block = false;
-    for line in content.lines() {
-        if line.contains("KRONN:BOOTSTRAP:START") {
-            in_block = true;
-            continue;
-        }
-        if line.contains("KRONN:BOOTSTRAP:END") {
-            in_block = false;
-            continue;
-        }
-        if !in_block {
-            result.push_str(line);
-            result.push('\n');
-        }
-    }
-
-    // Trim leading whitespace from the cleaned content
-    let trimmed = result.trim_start().to_string();
-    if let Err(e) = std::fs::write(index_file, trimmed) {
+    };
+    let Ok(content) = std::str::from_utf8(&observed) else {
+        return;
+    };
+    let Some(cleaned) = crate::core::scanner::without_legacy_bootstrap_block(content) else {
+        return;
+    };
+    if let Err(e) = crate::core::mcp_scanner::atomic_write_if_unchanged_preserving_permissions(
+        index_file, &cleaned, &observed,
+    ) {
         tracing::warn!("Failed to remove bootstrap block: {}", e);
     }
 }
