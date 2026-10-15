@@ -153,8 +153,8 @@ test.describe('Routing — addresses', () => {
       context.waitForEvent('page'),
       current(page, 'nav-planning').click({ modifiers: ['ControlOrMeta'] }),
     ]);
-    await planningTab.waitForLoadState();
-    expect(new URL(planningTab.url()).pathname).toBe('/planning');
+    // A new tab starts on about:blank: wait for its address, not its first load.
+    await planningTab.waitForURL((url) => url.pathname === '/planning');
     await planningTab.close();
 
     // A sidebar row keeps its element; the app opens the new tab itself.
@@ -163,8 +163,7 @@ test.describe('Routing — addresses', () => {
       context.waitForEvent('page'),
       row.click({ modifiers: ['ControlOrMeta'] }),
     ]);
-    await discussionTab.waitForLoadState();
-    expect(new URL(discussionTab.url()).pathname).toBe(`/discussions/${discB.id}`);
+    await discussionTab.waitForURL((url) => url.pathname === `/discussions/${discB.id}`);
     await expect(discussionTab.locator('.disc-chat-header-title')).toContainText(discB.title);
     await discussionTab.close();
 
@@ -172,8 +171,7 @@ test.describe('Routing — addresses', () => {
       context.waitForEvent('page'),
       row.click({ button: 'middle' }),
     ]);
-    await middleTab.waitForLoadState();
-    expect(new URL(middleTab.url()).pathname).toBe(`/discussions/${discB.id}`);
+    await middleTab.waitForURL((url) => url.pathname === `/discussions/${discB.id}`);
     await middleTab.close();
 
     // This tab never moved.
@@ -189,8 +187,7 @@ test.describe('Routing — addresses', () => {
     const clicks: NonNullable<Parameters<Locator['click']>[0]>[] = [{ modifiers: ['ControlOrMeta'] }, { button: 'middle' }];
     for (const options of clicks) {
       const [tab] = await Promise.all([context.waitForEvent('page'), link.click(options)]);
-      await tab.waitForLoadState();
-      expect(new URL(tab.url()).pathname).toBe(`/discussions/${discB.id}`);
+      await tab.waitForURL((url) => url.pathname === `/discussions/${discB.id}`);
       await expect(tab.locator('.disc-chat-header-title')).toContainText(discB.title);
       await tab.close();
       // This tab never moved.
