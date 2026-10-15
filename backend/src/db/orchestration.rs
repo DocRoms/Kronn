@@ -4932,6 +4932,93 @@ pub fn latest_toolchain_capabilities(
         .transpose()
 }
 
+/// Journal how a lane started (KT-1250): where its target was seeded from and
+/// how long its first build took, so the gain of a warm start is measurable.
+/// A sibling of the capability record; readers take the latest.
+pub fn record_lane_warm_start(
+    conn: &Connection,
+    exec_id: &str,
+    record: &crate::core::task_worker_lane_warm::WarmStartRecord,
+    actor: &OrchestrationActor,
+) -> Result<()> {
+    record_execution_event(
+        conn,
+        exec_id,
+        crate::core::task_worker_lane_warm::WARM_START_EVENT_ACTION,
+        None,
+        None,
+        actor,
+        serde_json::to_value(record)?,
+    )
+}
+
+/// The most recent warm-start record of an execution, if any.
+pub fn latest_lane_warm_start(
+    conn: &Connection,
+    exec_id: &str,
+) -> Result<Option<crate::core::task_worker_lane_warm::WarmStartRecord>> {
+    let latest: Option<String> = conn
+        .query_row(
+            "SELECT changes_json FROM task_execution_events \
+             WHERE task_execution_id = ?1 AND action = ?2 \
+             ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            params![
+                exec_id,
+                crate::core::task_worker_lane_warm::WARM_START_EVENT_ACTION
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    latest
+        .map(|changes| serde_json::from_str(&changes).map_err(anyhow::Error::from))
+        .transpose()
+}
+
+/// Action of the event that says a lane is warming (KT-1250): its first build
+/// is queued or running and the worker is not dispatched yet.
+const LANE_WARMING_ACTION: &str = "lane_warming";
+
+/// Journal that the execution's lane started warming, with the longest the
+/// warm-up may take before the worker starts regardless.
+pub fn record_lane_warming(
+    conn: &Connection,
+    exec_id: &str,
+    bound_secs: u64,
+    actor: &OrchestrationActor,
+) -> Result<()> {
+    record_execution_event(
+        conn,
+        exec_id,
+        LANE_WARMING_ACTION,
+        None,
+        None,
+        actor,
+        serde_json::json!({ "bound_secs": bound_secs }),
+    )
+}
+
+/// Since when the execution's lane has been warming: the latest `lane_warming`
+/// event not yet followed by a `lane_warm_start` record. `None` once the
+/// warm-up has finished (or never started).
+pub fn lane_warming_since(conn: &Connection, exec_id: &str) -> Result<Option<DateTime<Utc>>> {
+    let since: Option<String> = conn
+        .query_row(
+            "SELECT created_at FROM task_execution_events \
+             WHERE task_execution_id = ?1 AND action = ?2 \
+               AND rowid > COALESCE((SELECT MAX(rowid) FROM task_execution_events \
+                                      WHERE task_execution_id = ?1 AND action = ?3), 0) \
+             ORDER BY rowid DESC LIMIT 1",
+            params![
+                exec_id,
+                LANE_WARMING_ACTION,
+                crate::core::task_worker_lane_warm::WARM_START_EVENT_ACTION
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(since.map(parse_dt))
+}
+
 const WORKER_SCOPE_REANCHORED: &str = "worker_scope_reanchored";
 
 /// The prelocalized scope the execution was launched with. Re-anchoring

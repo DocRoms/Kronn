@@ -169,7 +169,8 @@ fn a_provisioned_lane_exports_data_dir_target_offline_and_cargo_home() {
     let fx = fixture();
     let home = fake_cargo_home(true);
     let lane = fx.lane();
-    let provisioned = lane.provision(&caches_of(&home, &fx));
+    let caches = caches_of(&home, &fx);
+    let provisioned = lane.provision_with(&caches, false);
     let env = lane.env(&provisioned);
 
     assert_eq!(
@@ -184,12 +185,33 @@ fn a_provisioned_lane_exports_data_dir_target_offline_and_cargo_home() {
         env_value(&env, CARGO_NET_OFFLINE_ENV),
         Some(OsString::from("true"))
     );
+    // The host's own home: a warm target is only reusable under the registry
+    // paths it was built with (KT-1250), and the sandbox only reads it.
+    assert_eq!(
+        env_value(&env, CARGO_HOME_ENV),
+        caches.cargo_home.clone().map(PathBuf::into_os_string)
+    );
+    assert!(lane.data_dir.is_dir(), "the scratch data dir exists");
+    assert!(lane.cargo_target_dir.is_dir());
+}
+
+#[test]
+fn a_private_cargo_home_can_still_be_requested() {
+    let fx = fixture();
+    let home = fake_cargo_home(true);
+    let lane = fx.lane();
+    let caches = caches_of(&home, &fx);
+
+    let provisioned = lane.provision_with(&caches, true);
+    let env = lane.env(&provisioned);
+
+    assert!(provisioned.cargo_home_ready);
+    assert_eq!(provisioned.shared_cargo_home, None);
     assert_eq!(
         env_value(&env, CARGO_HOME_ENV),
         Some(lane.cargo_home.clone().into_os_string())
     );
-    assert!(lane.data_dir.is_dir(), "the scratch data dir exists");
-    assert!(lane.cargo_target_dir.is_dir());
+    assert!(lane.cargo_home.join("registry").exists());
 }
 
 /// A worker that starts a Kronn or a Vite gets its own ports: never the
