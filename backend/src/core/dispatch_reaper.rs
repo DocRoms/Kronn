@@ -10,9 +10,21 @@
 //! Every process of a worker's run inherits [`DISPATCH_ENV`] (the id of the
 //! dispatch job, set at launch by `core::child_env`), and so does everything
 //! it starts, wherever it moves in the process tree. When the dispatch ends
-//! the processes carrying that id — and whatever descends from them, in case
-//! one cleared its environment — are stopped. Only the id of the dispatch that
-//! ended is ever matched, so a worker of another lane is never touched.
+//! the processes carrying that id are stopped, and so is a descendant of one
+//! that cleared its environment — but only one still in the session of the
+//! tagged process it descends from. A daemon the worker happened to start
+//! first (a tmux server, `ollama serve`, a gradle daemon) carries the tag and
+//! adopts children that are not the worker's; those are born in sessions of
+//! their own and are left alone.
+//!
+//! A process is signalled only after its start time is compared with the one
+//! seen in the snapshot (a pid the system reused is never touched), and its
+//! tag or session is checked again right before each signal. A process that
+//! copies the variable into something it launches for the operator (a direnv
+//! `.envrc` that exports it, say) makes that thing the worker's: it is
+//! stopped with the dispatch.
+
+use crate::core::agent_orphans::start_stamp;
 
 /// The dispatch job a process was started under.
 pub const DISPATCH_ENV: &str = "KRONN_TASK_DISPATCH_ID";
@@ -31,27 +43,68 @@ pub struct ReapReport {
 struct ProcessRow {
     pid: u32,
     ppid: u32,
+    /// The process's session; `None` when it cannot be read.
+    sid: Option<u32>,
+    /// `agent_orphans::start_stamp` at the time of the snapshot.
+    stamp: Option<String>,
     /// The process's environment names `DISPATCH_ENV=<this dispatch>`.
     tagged: bool,
 }
 
-/// The processes of a dispatch's run, from a process table: those carrying its
-/// id and all their descendants, never `own_pid` nor pid 1.
-fn run_processes(rows: &[ProcessRow], own_pid: u32) -> Vec<u32> {
-    let mut found: Vec<u32> = rows
-        .iter()
-        .filter(|row| row.tagged && row.pid > 1 && row.pid != own_pid)
-        .map(|row| row.pid)
-        .collect();
+/// Why a process is taken as the run's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Claim {
+    /// Its environment carries the dispatch id.
+    Tagged,
+    /// It descends from a taken process and shares that process's session.
+    Session(u32),
+}
+
+/// A process chosen for the reap, with what identifies it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Target {
+    pid: u32,
+    stamp: String,
+    claim: Claim,
+}
+
+/// The processes of a dispatch's run, from a process table: every one carrying
+/// its id, and the untagged descendants that stayed in the session of the taken
+/// process they descend from. Never `own_pid` nor pid 1, nor a process whose
+/// identity could not be read (it could not be told from its successor).
+fn run_processes(rows: &[ProcessRow], own_pid: u32) -> Vec<Target> {
+    let eligible = |row: &ProcessRow| row.pid > 1 && row.pid != own_pid && row.stamp.is_some();
+    let mut found: Vec<Target> = Vec::new();
+    // The session each found process anchors its descendants to.
+    let mut anchors: Vec<Option<u32>> = Vec::new();
+    for row in rows.iter().filter(|row| row.tagged && eligible(row)) {
+        found.push(Target {
+            pid: row.pid,
+            stamp: row.stamp.clone().unwrap_or_default(),
+            claim: Claim::Tagged,
+        });
+        anchors.push(row.sid);
+    }
     let mut index = 0;
     while index < found.len() {
-        let parent = found[index];
+        let parent = found[index].pid;
+        let anchor = anchors[index];
         index += 1;
+        let Some(anchor) = anchor else { continue };
         for row in rows {
-            if row.ppid == parent && row.pid > 1 && row.pid != own_pid && !found.contains(&row.pid)
+            if row.ppid != parent
+                || !eligible(row)
+                || row.sid != Some(anchor)
+                || found.iter().any(|target| target.pid == row.pid)
             {
-                found.push(row.pid);
+                continue;
             }
+            found.push(Target {
+                pid: row.pid,
+                stamp: row.stamp.clone().unwrap_or_default(),
+                claim: Claim::Session(anchor),
+            });
+            anchors.push(Some(anchor));
         }
     }
     found
@@ -60,7 +113,7 @@ fn run_processes(rows: &[ProcessRow], own_pid: u32) -> Vec<u32> {
 /// Parse `ps axeww -o pid=,ppid=,command=` output (platforms without `/proc`
 /// nor libproc). The environment follows the command on the same line; the
 /// dispatch id is matched as a whole token so one id never matches another
-/// that it prefixes.
+/// that it prefixes. Session and start stamp are not in that output.
 ///
 /// An environment value may hold a newline (an exported shell function does):
 /// the lines that do not open with two numbers continue the previous process.
@@ -78,6 +131,8 @@ fn parse_process_table(output: &str, dispatch_job_id: &str) -> Vec<ProcessRow> {
             Some((pid, ppid)) => rows.push(ProcessRow {
                 pid,
                 ppid,
+                sid: None,
+                stamp: None,
                 tagged: carries_token(line, &needle),
             }),
             None => {
@@ -99,11 +154,48 @@ fn carries_token(line: &str, needle: &str) -> bool {
     })
 }
 
-/// The process table, each process with its parent and whether its
-/// environment carries this dispatch's id. `None` when it cannot be read.
+/// The session a process belongs to; `None` when it is gone or unreadable.
+#[cfg(unix)]
+fn session_of(pid: u32) -> Option<u32> {
+    // SAFETY: a plain query about another process; failure is `-1`.
+    let sid = unsafe { libc::getsid(pid as libc::pid_t) };
+    (sid > 0).then_some(sid as u32)
+}
+
+/// The process's environment names this dispatch, read now.
+#[cfg(target_os = "linux")]
+fn carries_tag(pid: u32, dispatch_job_id: &str) -> bool {
+    let needle = format!("{DISPATCH_ENV}={dispatch_job_id}");
+    std::fs::read(format!("/proc/{pid}/environ"))
+        .is_ok_and(|environ| environ.split(|b| *b == 0).any(|e| e == needle.as_bytes()))
+}
+
+#[cfg(target_os = "macos")]
+fn carries_tag(pid: u32, dispatch_job_id: &str) -> bool {
+    let needle = format!("{DISPATCH_ENV}={dispatch_job_id}");
+    macos_procargs(pid as libc::pid_t)
+        .is_some_and(|raw| procargs_environment(&raw).contains(&needle.as_bytes()))
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn carries_tag(pid: u32, dispatch_job_id: &str) -> bool {
+    crate::core::cmd::sync_tool_cmd("ps")
+        .args(["eww", "-p", &pid.to_string(), "-o", "pid=,ppid=,command="])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .is_ok_and(|output| {
+            output.status.success()
+                && parse_process_table(&String::from_utf8_lossy(&output.stdout), dispatch_job_id)
+                    .iter()
+                    .any(|row| row.tagged)
+        })
+}
+
+/// The process table, each process with its parent, session, start stamp and
+/// whether its environment carries this dispatch's id. `None` when it cannot
+/// be read.
 #[cfg(target_os = "linux")]
 fn process_table(dispatch_job_id: &str) -> Option<Vec<ProcessRow>> {
-    let needle = format!("{DISPATCH_ENV}={dispatch_job_id}");
     let mut rows = Vec::new();
     for entry in std::fs::read_dir("/proc").ok()?.flatten() {
         let Some(pid) = entry
@@ -123,9 +215,13 @@ fn process_table(dispatch_job_id: &str) -> Option<Vec<ProcessRow>> {
         else {
             continue;
         };
-        let tagged = std::fs::read(entry.path().join("environ"))
-            .is_ok_and(|environ| environ.split(|b| *b == 0).any(|e| e == needle.as_bytes()));
-        rows.push(ProcessRow { pid, ppid, tagged });
+        rows.push(ProcessRow {
+            pid,
+            ppid,
+            sid: session_of(pid),
+            stamp: start_stamp(pid),
+            tagged: carries_tag(pid, dispatch_job_id),
+        });
     }
     Some(rows)
 }
@@ -134,7 +230,6 @@ fn process_table(dispatch_job_id: &str) -> Option<Vec<ProcessRow>> {
 /// be executed (the same reasoning as `agent_orphans::start_stamp`).
 #[cfg(target_os = "macos")]
 fn process_table(dispatch_job_id: &str) -> Option<Vec<ProcessRow>> {
-    let needle = format!("{DISPATCH_ENV}={dispatch_job_id}");
     // SAFETY: a null buffer only asks for the number of pids.
     let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
     if count <= 0 {
@@ -165,12 +260,12 @@ fn process_table(dispatch_job_id: &str) -> Option<Vec<ProcessRow>> {
         if got != size {
             continue; // gone since the listing
         }
-        let tagged = macos_procargs(pid)
-            .is_some_and(|raw| procargs_environment(&raw).contains(&needle.as_bytes()));
         rows.push(ProcessRow {
             pid: pid as u32,
             ppid: info.pbi_ppid,
-            tagged,
+            sid: session_of(pid as u32),
+            stamp: start_stamp(pid as u32),
+            tagged: carries_tag(pid as u32, dispatch_job_id),
         });
     }
     Some(rows)
@@ -247,37 +342,96 @@ fn process_table(dispatch_job_id: &str) -> Option<Vec<ProcessRow>> {
         .stderr(std::process::Stdio::null())
         .output()
         .ok()?;
-    output
-        .status
-        .success()
-        .then(|| parse_process_table(&String::from_utf8_lossy(&output.stdout), dispatch_job_id))
+    if !output.status.success() {
+        return None;
+    }
+    let mut rows = parse_process_table(&String::from_utf8_lossy(&output.stdout), dispatch_job_id);
+    for row in &mut rows {
+        row.sid = session_of(row.pid);
+        row.stamp = start_stamp(row.pid);
+    }
+    Some(rows)
 }
 
 #[cfg(unix)]
 fn is_alive(pid: u32) -> bool {
     // SAFETY: signal 0 only checks that the process exists.
-    match unsafe { libc::kill(pid as libc::pid_t, 0) } {
+    let exists = match unsafe { libc::kill(pid as libc::pid_t, 0) } {
         0 => true,
         _ => std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM),
+    };
+    exists && !is_zombie(pid)
+}
+
+/// A process that has died and waits to be reaped by its parent is gone for
+/// our purpose (macOS already answers ESRCH to the stamp read for those).
+#[cfg(target_os = "linux")]
+fn is_zombie(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| {
+            stat.rsplit_once(')')?
+                .1
+                .split_whitespace()
+                .next()
+                .map(|state| state == "Z")
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn is_zombie(_pid: u32) -> bool {
+    false
+}
+
+/// The target is still the process that was seen: same start time, and still
+/// what made it the run's (the tag in its environment, or its session).
+#[cfg(unix)]
+fn is_still_ours(target: &Target, dispatch_job_id: &str) -> bool {
+    if start_stamp(target.pid).as_deref() != Some(target.stamp.as_str()) {
+        return false;
+    }
+    match target.claim {
+        Claim::Tagged => carries_tag(target.pid, dispatch_job_id),
+        Claim::Session(sid) => session_of(target.pid) == Some(sid),
     }
 }
 
+/// Signal what is still ours; the ones that were signalled.
 #[cfg(unix)]
-fn signal(pids: &[u32], signal: libc::c_int) {
-    for pid in pids {
-        // SAFETY: a plain signal to a process found carrying this dispatch's
-        // id; an already gone pid answers ESRCH, which is the normal case.
-        unsafe {
-            libc::kill(*pid as libc::pid_t, signal);
+fn signal_verified<'a>(
+    targets: &'a [Target],
+    dispatch_job_id: &str,
+    signal: libc::c_int,
+) -> Vec<&'a Target> {
+    let mut sent = Vec::new();
+    for target in targets {
+        if !is_still_ours(target, dispatch_job_id) {
+            continue;
         }
+        // SAFETY: a plain signal to a process just verified to be the one that
+        // carried this dispatch's id; an already gone pid answers ESRCH.
+        unsafe {
+            libc::kill(target.pid as libc::pid_t, signal);
+        }
+        sent.push(target);
     }
+    sent
 }
 
+/// The targets still alive (with the same start time) after `timeout`.
 #[cfg(unix)]
-fn wait_until_gone(pids: &[u32], timeout: std::time::Duration) -> Vec<u32> {
+fn wait_until_gone<'a>(targets: &[&'a Target], timeout: std::time::Duration) -> Vec<&'a Target> {
     let deadline = std::time::Instant::now() + timeout;
     loop {
-        let alive: Vec<u32> = pids.iter().copied().filter(|pid| is_alive(*pid)).collect();
+        let alive: Vec<&Target> = targets
+            .iter()
+            .copied()
+            .filter(|target| {
+                is_alive(target.pid)
+                    && start_stamp(target.pid).as_deref() == Some(target.stamp.as_str())
+            })
+            .collect();
         if alive.is_empty() || std::time::Instant::now() >= deadline {
             return alive;
         }
@@ -307,19 +461,27 @@ pub fn reap_dispatch(dispatch_job_id: &str) -> ReapReport {
             );
             return report;
         };
-        let pids = run_processes(&rows, own_pid);
-        if pids.is_empty() {
+        let targets = run_processes(&rows, own_pid);
+        if targets.is_empty() {
             report.survivors.clear();
             return report;
         }
-        report.signalled += pids.len();
-        signal(&pids, libc::SIGTERM);
-        let stubborn = wait_until_gone(&pids, TERM_GRACE);
+        let sent = signal_verified(&targets, dispatch_job_id, libc::SIGTERM);
+        if sent.is_empty() {
+            // Every one changed identity since the snapshot: nothing is ours.
+            return report;
+        }
+        report.signalled += sent.len();
+        let stubborn = wait_until_gone(&sent, TERM_GRACE);
         if stubborn.is_empty() {
             continue;
         }
-        signal(&stubborn, libc::SIGKILL);
-        report.survivors = wait_until_gone(&stubborn, KILL_GRACE);
+        let owned: Vec<Target> = stubborn.into_iter().cloned().collect();
+        let killed = signal_verified(&owned, dispatch_job_id, libc::SIGKILL);
+        report.survivors = wait_until_gone(&killed, KILL_GRACE)
+            .iter()
+            .map(|target| target.pid)
+            .collect();
     }
     report
 }

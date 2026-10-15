@@ -432,14 +432,19 @@ impl WorkerLane {
 fn link_entries(source: &Path, destination: &Path) -> Result<(), String> {
     let entries = std::fs::read_dir(source)
         .map_err(|error| format!("cannot read {}: {error}", source.display()))?;
+    // One entry that cannot be linked (a real directory the lane already has)
+    // must not leave the entries after it unlinked: go on, report the first.
+    let mut first_error = None;
     for entry in entries.flatten() {
         let name = entry.file_name();
         if NODE_MODULES_LANE_OWNED.iter().any(|owned| name == *owned) {
             continue;
         }
-        ensure_symlink(&entry.path(), &destination.join(&name))?;
+        if let Err(error) = ensure_symlink(&entry.path(), &destination.join(&name)) {
+            first_error.get_or_insert(error);
+        }
     }
-    Ok(())
+    first_error.map_or(Ok(()), Err)
 }
 
 /// How the worktree's frontend dependencies were made available.

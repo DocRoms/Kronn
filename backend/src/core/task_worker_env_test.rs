@@ -396,6 +396,34 @@ fn a_package_installed_in_the_main_checkout_since_is_linked_on_the_next_launch()
 }
 
 #[test]
+fn an_entry_the_lane_already_has_does_not_stop_the_entries_after_it() {
+    let fx = fixture();
+    let source = fx.with_main_node_modules();
+    for name in ["aaa", "mmm", "zzz"] {
+        std::fs::create_dir_all(source.join(name)).unwrap();
+    }
+    let destination = fx.worktree.join("frontend").join("node_modules");
+    // The lane already holds a real directory under one of the names.
+    std::fs::create_dir_all(destination.join("mmm")).unwrap();
+
+    let result = link_entries(&source, &destination);
+
+    assert!(result.is_err(), "the conflict is reported");
+    assert!(std::fs::symlink_metadata(destination.join("mmm"))
+        .unwrap()
+        .is_dir());
+    for name in ["aaa", "zzz", ".bin"] {
+        assert!(
+            std::fs::symlink_metadata(destination.join(name))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "{name} must be linked whatever the directory order"
+        );
+    }
+}
+
+#[test]
 fn provisioning_twice_is_idempotent() {
     let fx = fixture();
     fx.with_project_files();
