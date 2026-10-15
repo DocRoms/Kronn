@@ -333,6 +333,29 @@ mod tests {
         ));
     }
 
+    /// The table the frontend's `endsWithValidationSignal` test reads too
+    /// (`frontend/src/lib/__tests__/validationSignal.test.ts`): one rule, two
+    /// implementations, one list of cases.
+    #[test]
+    fn the_shared_signal_case_table_holds_for_the_backend_parser() {
+        let table: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/validation_signal_cases.json"))
+                .unwrap();
+        assert_eq!(table["signal"], VALIDATION_SIGNAL);
+        let cases = table["cases"].as_array().unwrap();
+        assert!(cases.len() >= 10, "the table must keep its coverage");
+        for case in cases {
+            let content = case["content"].as_str().unwrap();
+            let expected = case["ends_with_signal"].as_bool().unwrap();
+            assert_eq!(is_validation_signal(content), expected, "{content:?}");
+            assert_eq!(
+                crate::api::discussions::ends_with_terminal_signal(content, VALIDATION_SIGNAL),
+                expected,
+                "{content:?}"
+            );
+        }
+    }
+
     #[test]
     fn completion_is_set_once_and_survives_later_messages() {
         let conn = conn();

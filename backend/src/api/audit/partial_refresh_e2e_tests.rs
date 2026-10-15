@@ -361,4 +361,135 @@ async fn acknowledging_drift_refuses_with_docs_busy_and_settles_nothing() {
     let acknowledged = acknowledge(&fx, &[AGENTS], false).await;
     assert!(acknowledged.success, "{:?}", acknowledged.error);
     assert!(!stale(fx.project()).contains(&AGENTS.to_string()));
+async fn operate_as(state: &AppState, pseudo: &str) {
+    state.config.write().await.server.pseudo = Some(pseudo.to_string());
+}
+
+/// The opener recorded on the run `done` announces.
+async fn opener_of(state: &AppState, done: &Value) -> Option<String> {
+    let run_id = done["audit_run_id"].as_str().unwrap().to_string();
+    state
+        .db
+        .with_conn(move |conn| crate::db::audit_validation::record(conn, &run_id))
+        .await
+        .unwrap()
+        .started_by
+}
+
+async fn shown_validation(state: &AppState) -> crate::api::audit::run::AuditTimelineValidation {
+    crate::api::audit::run::audit_timeline(
+        axum::extract::State(state.clone()),
+        axum::extract::Path(PROJECT_ID.to_string()),
+    )
+    .await
+    .0
+    .data
+    .expect("timeline")
+    .latest_validation
+    .expect("a validation on the latest run")
+}
+
+async fn validate_as(state: &AppState, pseudo: &str) {
+    operate_as(state, pseudo).await;
+    let validated = crate::api::audit::validate_audit(
+        axum::extract::State(state.clone()),
+        axum::extract::Path(PROJECT_ID.to_string()),
+    )
+    .await
+    .0;
+    assert!(validated.success, "{:?}", validated.error);
+}
+
+/// KT-1122 — who opened a validation is recorded by the REAL launches, not by
+/// a direct write: a Full audit and a partial refresh, each launched under one
+/// operator pseudo and validated under another, leave that pair on the run, in
+/// the timeline and in `docs/.kronn.json`.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn full_and_partial_launches_record_who_opened_and_who_validated() {
+    let h = harness().await;
+    let (state, project) = (&h.state, h.project.path());
+    let chain: Vec<&'static str> =
+        crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full)
+            .iter()
+            .map(|s| s.target_file)
+            .collect();
+    settle_on_validation(h.tools.path());
+
+    // ── Full launch, by the first operator ──
+    operate_as(state, "Launcher-Full").await;
+    arm(h.tools.path(), "fill", &chain);
+    let body = run_full(state, None).await;
+    let done = sse_events(&body, "done").pop().expect("terminal done");
+    assert_eq!(done["status"], "complete", "{body}");
+    assert!(
+        done["discussion_id"].is_string(),
+        "a validation opens: {body}"
+    );
+    validation_settled(state, &done).await;
+    assert_eq!(
+        opener_of(state, &done).await.as_deref(),
+        Some("Launcher-Full"),
+        "{body}"
+    );
+    let shown = shown_validation(state).await;
+    assert_eq!(shown.started_by.as_deref(), Some("Launcher-Full"));
+    assert_eq!(shown.validated_by, None);
+
+    validate_as(state, "Validator-Full").await;
+    let file = crate::core::kronn_state::read(project).expect(".kronn.json written");
+    assert_eq!(file.validation_started_by.as_deref(), Some("Launcher-Full"));
+    assert_eq!(file.validated_by.as_deref(), Some("Validator-Full"));
+    let shown = shown_validation(state).await;
+    assert_eq!(shown.started_by.as_deref(), Some("Launcher-Full"));
+    assert_eq!(shown.validated_by.as_deref(), Some("Validator-Full"));
+
+    // ── Partial launch, by another operator, on a stale section ──
+    checksum_drift_on_agents(project);
+    operate_as(state, "Launcher-Partial").await;
+    arm(h.tools.path(), "fill", &[AGENTS]);
+    let step = chain.iter().position(|t| *t == AGENTS).unwrap() + 1;
+    let response = crate::api::audit::drift::partial_audit(
+        axum::extract::State(state.clone()),
+        axum::extract::Path(PROJECT_ID.to_string()),
+        axum::Json(crate::models::PartialAuditRequest {
+            agent: AgentType::ClaudeCode,
+            connection_id: None,
+            tier: None,
+            steps: vec![step],
+        }),
+    )
+    .await
+    .into_response();
+    let body = sse_body(response).await;
+    let done = sse_events(&body, "done").pop().expect("terminal done");
+    assert!(
+        done["discussion_id"].is_string(),
+        "a scoped validation: {body}"
+    );
+    validation_settled(state, &done).await;
+    assert_eq!(
+        opener_of(state, &done).await.as_deref(),
+        Some("Launcher-Partial"),
+        "{body}"
+    );
+    let shown = shown_validation(state).await;
+    assert_eq!(
+        Some(shown.discussion_id.as_str()),
+        done["discussion_id"].as_str()
+    );
+    assert_eq!(shown.started_by.as_deref(), Some("Launcher-Partial"));
+    assert_eq!(shown.validated_by, None, "the new run is not validated yet");
+
+    validate_as(state, "Validator-Partial").await;
+    let file = crate::core::kronn_state::read(project).expect(".kronn.json written");
+    assert_eq!(
+        file.validation_started_by.as_deref(),
+        Some("Launcher-Partial")
+    );
+    assert_eq!(file.validated_by.as_deref(), Some("Validator-Partial"));
+    let shown = shown_validation(state).await;
+    assert_eq!(shown.started_by.as_deref(), Some("Launcher-Partial"));
+    assert_eq!(shown.validated_by.as_deref(), Some("Validator-Partial"));
 }
