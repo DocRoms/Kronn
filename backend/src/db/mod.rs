@@ -290,6 +290,14 @@ impl Database {
             Ok(n) => tracing::warn!("Killed {n} audit agent(s) left running by the previous backend"),
             Err(e) => tracing::warn!("Failed to reap orphaned audit agents: {e}"),
         }
+        // KT-1211 — the step that agent was writing never ended: put its doc
+        // back from the pre-step snapshot (or mark it partial) now, so it is
+        // never left half-written and unmarked until the next launch.
+        match crate::api::audit::step_guard::settle_unfinished_at_boot(&conn) {
+            Ok(0) => {}
+            Ok(n) => tracing::warn!("Settled {n} audit step(s) cut off with the previous backend"),
+            Err(e) => tracing::warn!("Failed to settle audit steps cut off at boot: {e}"),
+        }
         match audit_runs::reconcile_stale_runs(&conn, 0) {
             Ok(0) => {}
             Ok(n) => tracing::info!("Reconciled {} zombie audit_runs left 'Running' by a previous process → Interrupted", n),

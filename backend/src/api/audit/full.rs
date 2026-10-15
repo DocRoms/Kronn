@@ -628,29 +628,15 @@ pub async fn full_audit(
                 let Some(last) = crate::db::audit_runs::list_recent(conn, &pid, 1)?.into_iter().next() else {
                     return Ok(Vec::new());
                 };
-                let mut settled = Vec::new();
-                for snapshot in crate::db::audit_runs::unfinished_step_snapshots(conn, &last.id)? {
-                    match super::step_guard::settle_killed_target(&root, &snapshot.target_file, snapshot.content.as_deref()) {
-                        Ok(state) => {
-                            let reason = super::step_guard::interrupted_reason(snapshot.step_index, state.is_some());
-                            crate::db::audit_runs::settle_killed_step(
-                                conn, &last.id, snapshot.step_index, &reason, state, Utc::now(),
-                            )?;
-                            settled.push((snapshot.step_index, snapshot.target_file, state.is_some()));
-                        }
-                        Err(e) => tracing::error!(
-                            "Could not restore {} killed in step {} of run {}: {e}",
-                            snapshot.target_file, snapshot.step_index, last.id
-                        ),
-                    }
-                }
-                Ok(settled)
+                // Boot settles these already; this is the net for a backend
+                // that did not go through boot (a run recorded since).
+                Ok(super::step_guard::settle_unfinished_steps(conn, &last.id, &root)?)
             }).await;
             match recovered {
-                Ok(settled) => for (step, target, restored) in settled {
+                Ok(settled) => for step in settled {
                     tracing::warn!(
-                        "Step {step} of the previous run was killed mid-write: {target} {}",
-                        if restored { "was put back as it was before the step" } else { "was not touched" }
+                        "Step {} of the previous run was killed mid-write: {} — {:?}",
+                        step.step_index, step.target_file, step.outcome
                     );
                 },
                 Err(e) => tracing::warn!("Could not check the previous run for killed steps: {e}"),
@@ -2106,35 +2092,23 @@ pub async fn full_audit(
                         // recorded as stopped (it is redone on resume), and the
                         // run is settled resumable when it completed a step.
                         let step_n = step as u32;
-                        let mut killed_state = match super::step_guard::settle_killed_target(
-                            &project_path, analysis_step.target_file, pre_content.as_deref(),
-                        ) {
-                            Ok(state) => state,
-                            Err(e) => {
-                                tracing::error!(
-                                    "Audit step {step} ({file_label}) cancelled but its target could not be restored: {e}"
-                                );
-                                super::step_guard::mark_partial(
-                                    &project_path, analysis_step.target_file, step_n,
-                                    &super::step_guard::killed_reason(step_n, false),
-                                ).ok().filter(|marked| *marked).map(|_| super::step_guard::STATE_PARTIAL)
-                            }
-                        };
-                        let restored = killed_state == Some(super::step_guard::STATE_RESTORED);
-                        // A step that had written nothing is "restored" too: the doc is whole.
-                        if killed_state.is_none() {
-                            killed_state = Some(super::step_guard::STATE_RESTORED);
-                        }
+                        // An error is told apart from "wrote nothing": a target
+                        // that could be neither restored nor marked stays an
+                        // unsound step (no `restored` state), never a clean one.
+                        let outcome = super::step_guard::settle_killed(
+                            &project_path, analysis_step.target_file, pre_content.as_deref(), step_n,
+                        );
                         {
                             let run_id = audit_run_id.clone();
-                            let reason = super::step_guard::killed_reason(step_n, restored);
+                            let reason = super::step_guard::killed_reason(step_n, outcome);
+                            let killed_state = outcome.target_state();
                             let usage = crate::db::audit_runs::StepTokens::after_attempt(
                                 previous_attempt_usage,
                                 step_usage,
                             );
                             let recorded_total = run_tokens.total();
                             let duration_ms = step_started_at.elapsed().as_millis() as u64;
-                            let keep_snapshot = killed_state == Some(super::step_guard::STATE_PARTIAL);
+                            let keep_snapshot = outcome.keeps_snapshot();
                             if let Err(e) = db.with_conn(move |conn| {
                                 crate::db::audit_runs::finalize_audit_step(
                                     conn, &run_id, step_n, Utc::now(), duration_ms, &usage,

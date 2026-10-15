@@ -162,6 +162,140 @@ pub(crate) fn settle_killed_target(
     Ok(restore_target(project_path, target, pre_content)?.then_some(STATE_RESTORED))
 }
 
+/// What became of the target of a step Kronn stopped (cancel, or an agent cut
+/// off with its backend). The four cases are told apart on purpose: "the step
+/// wrote nothing" must never absorb "the target could not be settled".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KilledOutcome {
+    /// The half-written target was put back as it was before the step.
+    Restored,
+    /// The step had written nothing: the target is whole as it stood.
+    Untouched,
+    /// It could not be put back; what the agent wrote is kept under a marker.
+    Partial,
+    /// It could neither be put back nor marked: the doc is in an unknown state.
+    Unsettled,
+}
+
+impl KilledOutcome {
+    /// The `target_state` to record. `None` for [`Self::Unsettled`]: the step
+    /// is then neither restored nor visibly partial, so acceptance asks for
+    /// an override.
+    pub(crate) fn target_state(self) -> Option<&'static str> {
+        match self {
+            Self::Restored | Self::Untouched => Some(STATE_RESTORED),
+            Self::Partial => Some(STATE_PARTIAL),
+            Self::Unsettled => None,
+        }
+    }
+
+    /// The target is whole: nothing a human has to look at.
+    pub(crate) fn is_whole(self) -> bool {
+        matches!(self, Self::Restored | Self::Untouched)
+    }
+
+    /// A target left unsound keeps its snapshot for the acceptance diff.
+    pub(crate) fn keeps_snapshot(self) -> bool {
+        !self.is_whole()
+    }
+}
+
+/// Put the target of a stopped step back, or mark it, or say it could do
+/// neither. Never silent: an error is [`KilledOutcome::Unsettled`], not
+/// "wrote nothing".
+pub(crate) fn settle_killed(
+    project_path: &Path,
+    target: &str,
+    pre_content: Option<&str>,
+    step: u32,
+) -> KilledOutcome {
+    match settle_killed_target(project_path, target, pre_content) {
+        Ok(Some(_)) => KilledOutcome::Restored,
+        Ok(None) => KilledOutcome::Untouched,
+        Err(e) => {
+            tracing::error!("Audit step {step}: `{target}` could not be put back: {e}");
+            let reason = killed_reason(step, KilledOutcome::Partial);
+            match mark_partial(project_path, target, step, &reason) {
+                Ok(true) => KilledOutcome::Partial,
+                Ok(false) => KilledOutcome::Unsettled,
+                Err(e) => {
+                    tracing::error!("Audit step {step}: `{target}` could not be marked partial: {e}");
+                    KilledOutcome::Unsettled
+                }
+            }
+        }
+    }
+}
+
+/// A step that never ended and has its pre-step snapshot, settled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SettledStep {
+    pub step_index: u32,
+    pub target_file: String,
+    pub outcome: KilledOutcome,
+}
+
+/// Settle the steps of `run_id` that never ended: their agent died with the
+/// backend, so the target is untrusted. Each is put back from its snapshot (or
+/// marked) and recorded failed with what became of it.
+pub(crate) fn settle_unfinished_steps(
+    conn: &rusqlite::Connection,
+    run_id: &str,
+    project_root: &Path,
+) -> anyhow::Result<Vec<SettledStep>> {
+    let mut settled = Vec::new();
+    for snapshot in crate::db::audit_runs::unfinished_step_snapshots(conn, run_id)? {
+        let outcome = settle_killed(
+            project_root,
+            &snapshot.target_file,
+            snapshot.content.as_deref(),
+            snapshot.step_index,
+        );
+        crate::db::audit_runs::settle_killed_step(
+            conn,
+            run_id,
+            snapshot.step_index,
+            &interrupted_reason(snapshot.step_index, outcome),
+            outcome.target_state(),
+            outcome.keeps_snapshot(),
+            chrono::Utc::now(),
+        )?;
+        settled.push(SettledStep {
+            step_index: snapshot.step_index,
+            target_file: snapshot.target_file,
+            outcome,
+        });
+    }
+    Ok(settled)
+}
+
+/// Boot, after the recorded agents were killed: no step of a previous process
+/// is still running, so every step that never ended is settled now — not at
+/// the next launch, which may be days away with the doc half-written and
+/// nothing marking it. Returns how many steps were settled.
+pub(crate) fn settle_unfinished_at_boot(conn: &rusqlite::Connection) -> anyhow::Result<usize> {
+    let mut count = 0;
+    for (run_id, project_id) in crate::db::audit_runs::runs_with_unfinished_steps(conn)? {
+        let Some(project) = crate::db::projects::get_project(conn, &project_id)? else {
+            continue;
+        };
+        let root = crate::core::scanner::resolve_host_path(&project.path);
+        match settle_unfinished_steps(conn, &run_id, &root) {
+            Ok(settled) => {
+                for step in &settled {
+                    tracing::warn!(
+                        "Boot: step {} of audit run {run_id} was cut off with the backend — `{}`: {:?}",
+                        step.step_index, step.target_file, step.outcome
+                    );
+                }
+                count += settled.len();
+            }
+            Err(e) => tracing::warn!("Boot: could not settle the unfinished steps of run {run_id}: {e}"),
+        }
+    }
+    Ok(count)
+}
+
 /// Why accepting a failed step as it stands is refused unless a human
 /// overrides it: the step's document is known to be unsound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,6 +311,9 @@ pub(crate) enum AcceptBlocker {
     IncompleteCoverage,
     /// The step was stopped halfway: what is on disk is not its output.
     Killed,
+    /// The step never ended (no verdict was ever recorded on it): whatever its
+    /// agent left on disk is unvetted, and no failure reason says why.
+    NeverEnded,
 }
 
 /// Fragments of the reasons the audit gates persist on a failed step. Each is
@@ -213,28 +350,35 @@ impl AcceptBlocker {
             Self::UndisposedSignal => "a detector signal is not disposed of",
             Self::IncompleteCoverage => "its dimension coverage is incomplete",
             Self::Killed => "the step was stopped before it finished",
+            Self::NeverEnded => "the step never ended, so nothing vouches for what it wrote",
+        }
+    }
+}
+
+fn outcome_text(outcome: KilledOutcome) -> &'static str {
+    match outcome {
+        KilledOutcome::Restored => "its document was put back as it was before the step",
+        KilledOutcome::Untouched => "it had written nothing",
+        KilledOutcome::Partial => {
+            "its document could not be put back: what the agent wrote is kept under a partial marker"
+        }
+        KilledOutcome::Unsettled => {
+            "its document could neither be put back nor marked: check it by hand"
         }
     }
 }
 
 /// The text recorded on a step the user cancelled.
-pub(crate) fn killed_reason(step: u32, restored: bool) -> String {
-    let outcome = if restored {
-        "its document was put back as it was before the step"
-    } else {
-        "it had written nothing"
-    };
-    format!("Audit {KILLED_FRAGMENT} {step} by the user: {outcome}.")
+pub(crate) fn killed_reason(step: u32, outcome: KilledOutcome) -> String {
+    format!("Audit {KILLED_FRAGMENT} {step} by the user: {}.", outcome_text(outcome))
 }
 
 /// The text recorded on a step whose agent died with the backend.
-pub(crate) fn interrupted_reason(step: u32, restored: bool) -> String {
-    let outcome = if restored {
-        "its document was put back as it was before the step"
-    } else {
-        "it had written nothing"
-    };
-    format!("Audit {KILLED_FRAGMENT} {step} (the backend stopped): {outcome}.")
+pub(crate) fn interrupted_reason(step: u32, outcome: KilledOutcome) -> String {
+    format!(
+        "Audit {KILLED_FRAGMENT} {step} (the backend stopped): {}.",
+        outcome_text(outcome)
+    )
 }
 
 #[cfg(test)]
@@ -336,33 +480,192 @@ mod tests {
         );
     }
 
+    // One test per gate, each on the reason the gate's own code builds, so a
+    // gate that stops being recognised fails exactly its own test.
+    fn recognised(reason: String, expected: Option<AcceptBlocker>) {
+        assert_eq!(AcceptBlocker::of_reason(&reason), expected, "{reason}");
+    }
+
     #[test]
-    fn blocker_of_reason_matches_the_real_gates() {
-        // The enforce gate's, the detector gate's and the coverage gate's.
-        assert_eq!(
-            AcceptBlocker::of_reason(
-                "3 fabricated `[src:]` citation(s) still present after 3 attempts (enforce mode)"
-            ),
-            Some(AcceptBlocker::FabricatedCitations)
+    fn the_size_floor_reason_blocks_acceptance() {
+        recognised(
+            super::super::validation::truncated_reason("docs/a.md", 40, 4000),
+            Some(AcceptBlocker::Truncated),
         );
-        assert_eq!(
-            AcceptBlocker::of_reason("## Documentary gate — targeted correction required\n\n- `docs/a.md`: x"),
-            Some(AcceptBlocker::FabricatedCitations)
+    }
+
+    #[test]
+    fn the_enforce_gate_reason_blocks_acceptance() {
+        recognised(
+            super::super::anti_hallu_enforce::enforce_failure_reason(3, 3),
+            Some(AcceptBlocker::FabricatedCitations),
         );
-        assert_eq!(
-            AcceptBlocker::of_reason(
-                "2 detector signal(s) injected but never addressed in the tech-debt output: a — emit a TD"
-            ),
-            Some(AcceptBlocker::UndisposedSignal)
+    }
+
+    #[test]
+    fn the_documentary_gate_reason_blocks_acceptance() {
+        let diagnostic = crate::core::document_optimization::Diagnostic {
+            code: "stale_citation".into(),
+            path: "docs/a.md".into(),
+            message: "x".into(),
+            blocking: true,
+        };
+        recognised(
+            super::super::document_repair::feedback(&[diagnostic]),
+            Some(AcceptBlocker::FabricatedCitations),
         );
-        assert_eq!(
-            AcceptBlocker::of_reason("dimension coverage incomplete in `docs/x.md`: 3 missing (Step 8 will be re-run)"),
-            Some(AcceptBlocker::IncompleteCoverage)
+    }
+
+    #[test]
+    fn the_detector_disposition_reason_blocks_acceptance() {
+        recognised(
+            super::super::validation::undisposed_reason(2, "a (`x`)"),
+            Some(AcceptBlocker::UndisposedSignal),
         );
+    }
+
+    #[test]
+    fn the_coverage_reason_blocks_acceptance() {
+        recognised(
+            super::super::validation::coverage_reason("docs/x.md", "3 missing"),
+            Some(AcceptBlocker::IncompleteCoverage),
+        );
+    }
+
+    #[test]
+    fn the_stopped_step_reasons_block_acceptance() {
+        recognised(killed_reason(5, KilledOutcome::Restored), Some(AcceptBlocker::Killed));
+        recognised(killed_reason(5, KilledOutcome::Unsettled), Some(AcceptBlocker::Killed));
+        recognised(interrupted_reason(5, KilledOutcome::Partial), Some(AcceptBlocker::Killed));
+    }
+
+    #[test]
+    fn an_ordinary_failure_is_not_a_blocker() {
+        // Not an unsound document: an agent that exited, an empty output.
+        recognised("agent exited with code 1".to_string(), None);
+        recognised(
+            "step produced no output: `docs/a.md` is empty (0 B) after CLI completed".to_string(),
+            None,
+        );
+    }
+
+    #[test]
+    fn a_target_that_cannot_be_settled_is_never_reported_as_wrote_nothing() {
+        let root = project();
+        // Nothing written: whole.
+        std::fs::write(root.path().join("docs/a.md"), "whole").unwrap();
         assert_eq!(
-            AcceptBlocker::of_reason(&killed_reason(5, true)),
+            settle_killed(root.path(), "docs/a.md", Some("whole"), 2),
+            KilledOutcome::Untouched
+        );
+        // Written: put back.
+        std::fs::write(root.path().join("docs/a.md"), "half").unwrap();
+        assert_eq!(
+            settle_killed(root.path(), "docs/a.md", Some("whole"), 2),
+            KilledOutcome::Restored
+        );
+        // The target is a directory: it can be neither read, restored nor marked.
+        std::fs::create_dir_all(root.path().join("docs/dir.md")).unwrap();
+        let stuck = settle_killed(root.path(), "docs/dir.md", Some("whole"), 2);
+        assert_eq!(stuck, KilledOutcome::Unsettled);
+        assert_eq!(stuck.target_state(), None, "never recorded as restored");
+        assert!(stuck.keeps_snapshot());
+        assert!(KilledOutcome::Untouched.target_state() == Some(STATE_RESTORED));
+    }
+
+    fn boot_conn(root: &Path) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO projects (id, name, path, created_at, updated_at) VALUES ('p1', 'P', ?1, ?2, ?2)",
+            rusqlite::params![root.to_str().unwrap(), now],
+        )
+        .unwrap();
+        crate::db::audit_runs::insert_running(&conn, "r1", "p1", "Full", "ClaudeCode", chrono::Utc::now())
+            .unwrap();
+        conn
+    }
+
+    #[test]
+    fn boot_puts_back_the_doc_of_a_step_that_never_ended() {
+        let root = project();
+        let file = root.path().join("docs/stack.md");
+        let conn = boot_conn(root.path());
+        // Step 1 done; step 2 was rewriting stack.md when the backend died.
+        crate::db::audit_runs::insert_audit_step_start(&conn, "r1", 2, "docs/stack.md", chrono::Utc::now())
+            .unwrap();
+        crate::db::audit_runs::save_step_snapshot(&conn, "r1", 2, "docs/stack.md", Some("# Stack\nwhole\n"))
+            .unwrap();
+        std::fs::write(&file, "# Stack\nhalf-writ").unwrap();
+
+        assert_eq!(settle_unfinished_at_boot(&conn).unwrap(), 1);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "# Stack\nwhole\n");
+        let steps = crate::db::audit_runs::list_audit_steps(&conn, "r1").unwrap();
+        let step = steps.iter().find(|s| s.step_index == 2).unwrap();
+        assert!(step.ended_at.is_some(), "the step now has a verdict");
+        assert!(!step.cli_success);
+        assert_eq!(step.target_state.as_deref(), Some(STATE_RESTORED));
+        assert_eq!(
+            AcceptBlocker::of_reason(step.step_warning.as_deref().unwrap()),
             Some(AcceptBlocker::Killed)
         );
-        assert_eq!(AcceptBlocker::of_reason("agent exited with code 1"), None);
+        assert!(crate::db::audit_runs::step_snapshot(&conn, "r1", 2).unwrap().is_none());
+        // Idempotent: nothing left to settle.
+        assert_eq!(settle_unfinished_at_boot(&conn).unwrap(), 0);
+    }
+
+    #[test]
+    fn boot_removes_a_doc_the_step_created_and_keeps_the_snapshot_of_an_unsettled_one() {
+        let root = project();
+        let conn = boot_conn(root.path());
+        // Created by the step (absent before): removed.
+        crate::db::audit_runs::insert_audit_step_start(&conn, "r1", 1, "docs/new.md", chrono::Utc::now())
+            .unwrap();
+        crate::db::audit_runs::save_step_snapshot(&conn, "r1", 1, "docs/new.md", None).unwrap();
+        std::fs::write(root.path().join("docs/new.md"), "half").unwrap();
+        // Unsettleable (a directory): marked neither restored nor partial.
+        crate::db::audit_runs::insert_audit_step_start(&conn, "r1", 2, "docs/dir.md", chrono::Utc::now())
+            .unwrap();
+        crate::db::audit_runs::save_step_snapshot(&conn, "r1", 2, "docs/dir.md", Some("whole")).unwrap();
+        std::fs::create_dir_all(root.path().join("docs/dir.md")).unwrap();
+
+        assert_eq!(settle_unfinished_at_boot(&conn).unwrap(), 2);
+        assert!(!root.path().join("docs/new.md").exists());
+        let steps = crate::db::audit_runs::list_audit_steps(&conn, "r1").unwrap();
+        let stuck = steps.iter().find(|s| s.step_index == 2).unwrap();
+        assert_eq!(stuck.target_state, None);
+        assert!(stuck.ended_at.is_some());
+        assert!(
+            crate::db::audit_runs::step_snapshot(&conn, "r1", 2).unwrap().is_some(),
+            "kept for the acceptance diff"
+        );
+        // Accepting it needs an override: it is not a restored step.
+        assert_eq!(
+            super::super::accept::accept_blocker_of(stuck),
+            Some(AcceptBlocker::Killed)
+        );
+    }
+
+    #[test]
+    fn accept_asks_for_an_override_on_a_step_that_never_ended() {
+        let conn = boot_conn(Path::new("/tmp"));
+        crate::db::audit_runs::insert_audit_step_start(&conn, "r1", 3, "docs/x.md", chrono::Utc::now())
+            .unwrap();
+        let steps = crate::db::audit_runs::list_audit_steps(&conn, "r1").unwrap();
+        let open = &steps[0];
+        assert!(open.ended_at.is_none() && open.step_warning.is_none());
+        assert_eq!(
+            super::super::accept::accept_blocker_of(open),
+            Some(AcceptBlocker::NeverEnded)
+        );
+        // A step that ended failed for an ordinary reason is not blocked.
+        crate::db::audit_runs::finalize_audit_step(
+            &conn, "r1", 3, chrono::Utc::now(), 5, &crate::db::audit_runs::StepTokens::default(),
+            None, false, Some("agent exited with code 1"), false,
+        )
+        .unwrap();
+        let steps = crate::db::audit_runs::list_audit_steps(&conn, "r1").unwrap();
+        assert_eq!(super::super::accept::accept_blocker_of(&steps[0]), None);
     }
 }

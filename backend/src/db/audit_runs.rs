@@ -29,6 +29,14 @@ pub fn insert_running(
          VALUES (?1, ?2, ?3, ?4, ?5, 'Running')",
         params![id, project_id, kind, agent_type, started_at.to_rfc3339()],
     )?;
+    // KT-1211 — only the latest run of a project can be accepted from, so the
+    // pre-step snapshots of the runs this one supersedes have nothing left to
+    // protect or to diff against.
+    conn.execute(
+        "DELETE FROM audit_step_snapshots WHERE audit_run_id IN
+            (SELECT id FROM audit_runs WHERE project_id = ?1 AND id <> ?2)",
+        params![project_id, id],
+    )?;
     Ok(())
 }
 
@@ -250,8 +258,13 @@ pub struct StepSnapshot {
     pub content: Option<String>,
 }
 
+/// Largest target kept in a snapshot. An audit doc is a few KB; anything past
+/// this is not a doc the agent should be rewriting, and keeping it would only
+/// grow the database.
+pub const MAX_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
+
 /// Keep the target as it was before `step_index`'s agent ran. Replaces an
-/// earlier snapshot of the same step.
+/// earlier snapshot of the same step. Refused past [`MAX_SNAPSHOT_BYTES`].
 pub fn save_step_snapshot(
     conn: &Connection,
     run_id: &str,
@@ -259,6 +272,12 @@ pub fn save_step_snapshot(
     target_file: &str,
     content: Option<&str>,
 ) -> Result<()> {
+    if let Some(content) = content.filter(|c| c.len() > MAX_SNAPSHOT_BYTES) {
+        anyhow::bail!(
+            "`{target_file}` is {} bytes: past the {MAX_SNAPSHOT_BYTES}-byte snapshot cap",
+            content.len()
+        );
+    }
     conn.execute(
         "INSERT OR REPLACE INTO audit_step_snapshots
             (audit_run_id, step_index, target_file, existed, content)
@@ -313,14 +332,34 @@ pub fn unfinished_step_snapshots(conn: &Connection, run_id: &str) -> Result<Vec<
     Ok(rows)
 }
 
+/// Runs holding a step that never ended and has a snapshot: an agent killed
+/// with its backend. `(run id, project id)`.
+pub fn runs_with_unfinished_steps(conn: &Connection) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT r.id, r.project_id
+           FROM audit_step_snapshots p
+           JOIN audit_run_steps s
+             ON s.audit_run_id = p.audit_run_id AND s.step_index = p.step_index
+           JOIN audit_runs r ON r.id = p.audit_run_id
+          WHERE s.ended_at IS NULL AND s.accepted_at IS NULL",
+    )?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 /// KT-1211 — a step that never ended (its agent died with the backend) is
-/// settled failed, with what became of its target, and its snapshot dropped.
+/// settled failed, with what became of its target. Its snapshot is dropped
+/// unless `keep_snapshot`: a target that could not be put back keeps it for
+/// the diff an acceptance shows.
 pub fn settle_killed_step(
     conn: &Connection,
     run_id: &str,
     step_index: u32,
     reason: &str,
     target_state: Option<&str>,
+    keep_snapshot: bool,
     at: DateTime<Utc>,
 ) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
@@ -330,10 +369,12 @@ pub fn settle_killed_step(
           WHERE audit_run_id = ?1 AND step_index = ?2 AND ended_at IS NULL",
         params![run_id, step_index as i64, at.to_rfc3339(), reason, target_state],
     )?;
-    tx.execute(
-        "DELETE FROM audit_step_snapshots WHERE audit_run_id = ?1 AND step_index = ?2",
-        params![run_id, step_index as i64],
-    )?;
+    if !keep_snapshot {
+        tx.execute(
+            "DELETE FROM audit_step_snapshots WHERE audit_run_id = ?1 AND step_index = ?2",
+            params![run_id, step_index as i64],
+        )?;
+    }
     tx.commit()?;
     Ok(())
 }
@@ -3256,6 +3297,60 @@ mod tests {
     }
 
     #[test]
+    fn a_target_past_the_snapshot_cap_is_refused_not_stored() {
+        let conn = fresh_conn();
+        insert_running(&conn, "r1", "p1", "Full", "ClaudeCode", Utc::now()).unwrap();
+        let huge = "x".repeat(MAX_SNAPSHOT_BYTES + 1);
+        let refused = save_step_snapshot(&conn, "r1", 2, "docs/a.md", Some(&huge)).unwrap_err();
+        assert!(refused.to_string().contains("snapshot cap"), "{refused}");
+        assert!(step_snapshot(&conn, "r1", 2).unwrap().is_none());
+        // The cap itself is still kept whole.
+        let at_cap = "y".repeat(MAX_SNAPSHOT_BYTES);
+        save_step_snapshot(&conn, "r1", 2, "docs/a.md", Some(&at_cap)).unwrap();
+        assert_eq!(
+            step_snapshot(&conn, "r1", 2).unwrap().unwrap().content.map(|c| c.len()),
+            Some(MAX_SNAPSHOT_BYTES)
+        );
+    }
+
+    #[test]
+    fn a_new_run_drops_the_snapshots_of_the_runs_it_supersedes() {
+        let conn = fresh_conn();
+        insert_running(&conn, "old", "p1", "Full", "ClaudeCode", Utc::now()).unwrap();
+        save_step_snapshot(&conn, "old", 2, "docs/a.md", Some("a")).unwrap();
+        conn.execute("INSERT INTO projects (id, name, path) VALUES ('p2', 'Other', '/tmp/p2')", [])
+            .unwrap();
+        insert_running(&conn, "other-project", "p2", "Full", "ClaudeCode", Utc::now()).unwrap();
+        save_step_snapshot(&conn, "other-project", 2, "docs/a.md", Some("a")).unwrap();
+
+        insert_running(&conn, "new", "p1", "Full", "ClaudeCode", Utc::now()).unwrap();
+        assert!(step_snapshot(&conn, "old", 2).unwrap().is_none(), "superseded");
+        assert!(
+            step_snapshot(&conn, "other-project", 2).unwrap().is_some(),
+            "another project's run is not superseded"
+        );
+    }
+
+    #[test]
+    fn deleting_a_run_deletes_its_snapshots() {
+        // The real schema: the cascade is the migration's, not the fixture's.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO projects (id, name, path, created_at, updated_at) VALUES ('p9', 'P', '/tmp/p9', ?1, ?1)",
+            params![now],
+        )
+        .unwrap();
+        insert_running(&conn, "r9", "p9", "Full", "ClaudeCode", Utc::now()).unwrap();
+        save_step_snapshot(&conn, "r9", 1, "docs/a.md", Some("a")).unwrap();
+        assert!(step_snapshot(&conn, "r9", 1).unwrap().is_some());
+        conn.execute("DELETE FROM audit_runs WHERE id = 'r9'", []).unwrap();
+        assert!(step_snapshot(&conn, "r9", 1).unwrap().is_none());
+    }
+
+    #[test]
     fn a_killed_step_is_settled_failed_with_its_target_state_and_loses_its_snapshot() {
         let conn = fresh_conn();
         insert_running(&conn, "r1", "p1", "Full", "ClaudeCode", Utc::now()).unwrap();
@@ -3273,7 +3368,7 @@ mod tests {
         assert_eq!(unfinished.len(), 1);
         assert_eq!(unfinished[0].step_index, 2);
 
-        settle_killed_step(&conn, "r1", 2, "stopped during step 2", Some("restored"), Utc::now())
+        settle_killed_step(&conn, "r1", 2, "stopped during step 2", Some("restored"), false, Utc::now())
             .unwrap();
         let steps = list_audit_steps(&conn, "r1").unwrap();
         let killed = steps.iter().find(|s| s.step_index == 2).unwrap();

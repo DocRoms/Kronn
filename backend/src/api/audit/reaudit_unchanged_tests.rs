@@ -821,6 +821,73 @@ async fn a_truncated_step_is_accepted_only_with_an_explicit_override() {
     assert!(reason.contains("override") && reason.contains("looks fine"), "{reason}");
 }
 
+/// KT-1211 — a step an agent never finished (its row has no `ended_at` and no
+/// failure reason: the backend died with it) is not accepted as it stands
+/// either: the document it left is unvetted, so it needs the override too.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_step_that_never_ended_is_accepted_only_with_an_explicit_override() {
+    let fx = Audited::new().await;
+    let rules = fx.step_of("docs/coding-rules.md");
+    std::fs::write(
+        fx.project.path().join("docs/coding-rules.md"),
+        "# Coding rules\n",
+    )
+    .unwrap();
+    arm(fx.tools.path(), "noop", &fx.targets);
+    let broken = run_full(&fx.state, None).await;
+    let done = sse_events(&broken, "done").pop().expect("terminal done");
+    validation_settled(&fx.state, &done).await;
+    let interrupted = done["audit_run_id"].as_str().unwrap().to_string();
+    // The state a crash leaves: started, never ended, no reason, no snapshot.
+    {
+        let run_id = interrupted.clone();
+        fx.state
+            .db
+            .with_conn(move |conn| {
+                conn.execute(
+                    "UPDATE audit_run_steps
+                        SET ended_at = NULL, step_warning = NULL, cli_success = 0
+                      WHERE audit_run_id = ?1 AND step_index = ?2",
+                    rusqlite::params![run_id, rules as i64],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    let refused = fx.accept(&interrupted, rules, None, false).await;
+    assert!(!refused.success);
+    let error = refused.error.unwrap();
+    assert!(
+        error.starts_with(crate::api::audit::OVERRIDE_REQUIRED_PREFIX),
+        "{error}"
+    );
+    assert!(error.contains("never ended"), "{error}");
+    let (_, steps, _) = persisted(&fx.state, &interrupted).await;
+    assert!(steps
+        .iter()
+        .find(|s| s.step_index == rules)
+        .unwrap()
+        .accepted_at
+        .is_none());
+
+    let accepted = fx
+        .accept_with(&interrupted, rules, Some("checked by hand"), false, Some(true))
+        .await;
+    assert!(accepted.success, "{:?}", accepted.error);
+    let (_, steps, _) = persisted(&fx.state, &interrupted).await;
+    let row = steps.iter().find(|s| s.step_index == rules).unwrap();
+    assert!(row.accepted_at.is_some());
+    assert!(
+        row.accepted_reason.as_deref().unwrap_or("").contains("override"),
+        "{:?}",
+        row.accepted_reason
+    );
+}
+
 #[tokio::test]
 #[serial_test::serial]
 #[serial_test::serial(kronn_templates_env)]

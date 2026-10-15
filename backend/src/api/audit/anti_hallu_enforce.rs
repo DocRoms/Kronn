@@ -1031,15 +1031,21 @@ pub fn evaluate_enforce_gate(
             fabricated: verdict.count(),
         },
         GateDecision::Fail => EnforceGateOutcome::Fail {
-            reason: format!(
-                "{} {}(s) still present after {} attempts (enforce mode)",
-                verdict.count(),
-                super::step_guard::FABRICATED_FRAGMENT,
-                max_attempts
-            ),
+            reason: enforce_failure_reason(verdict.count(), max_attempts),
         },
         GateDecision::Pass => EnforceGateOutcome::Pass { written },
     }
+}
+
+/// The reason of a step that still holds fabricated citations once its
+/// attempts are spent.
+pub(crate) fn enforce_failure_reason(count: usize, max_attempts: usize) -> String {
+    format!(
+        "{} {}(s) still present after {} attempts (enforce mode)",
+        count,
+        super::step_guard::FABRICATED_FRAGMENT,
+        max_attempts
+    )
 }
 
 #[cfg(test)]

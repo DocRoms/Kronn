@@ -497,6 +497,201 @@ async fn a_stop_mid_write_of_a_partial_audit_step_puts_its_target_back() {
     a_stop_mid_write_puts_the_target_back(Pipeline::Partial).await;
 }
 
+/// KT-1211 — the backend dies while a step is rewriting its target: nothing in
+/// memory survives, so what boot sees is exactly the database as it stands
+/// during the step. Boot puts the doc back and gives the step a verdict,
+/// without waiting for the next launch.
+async fn a_backend_crash_mid_step_is_settled_at_boot(pipeline: Pipeline) {
+    let state = new_state();
+    let project = tempfile::tempdir().unwrap();
+    let target = match pipeline {
+        Pipeline::Full => crate::api::audit::assemble_chained_steps(AuditKind::Docker)[0].target_file,
+        Pipeline::Partial => {
+            let chain = crate::api::audit::assemble_chained_steps(AuditKind::Full);
+            chain
+                .iter()
+                .find(|step| {
+                    crate::api::audit::partial_selectable(
+                        step,
+                        &crate::core::docs_location::DocsRoot::default(),
+                    )
+                })
+                .expect("a refreshable section")
+                .target_file
+        }
+    };
+    let path = project.path().join(target);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    const BEFORE: &str = "# The doc before the step\n\nOriginal, whole content.\n";
+    std::fs::write(&path, BEFORE).unwrap();
+
+    let agent = ScriptedAgent::new(Turn::Hang);
+    *agent.writes.lock().unwrap() = Some((path.clone(), "# Half writ".to_string()));
+    let _route = route(project.path(), &agent);
+    add_project(&state, "proj-crash", project.path()).await;
+    let run = launch(&state, pipeline, "proj-crash", AgentType::OpenCode);
+    until("the agent to be working on its step", || {
+        agent.prompts.load(Ordering::SeqCst) > 0
+    })
+    .await;
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Half writ");
+    let (_, open) = latest_run_steps(&state, "proj-crash").await;
+    let open = open.iter().find(|row| row.ended_at.is_none()).expect("the step in flight");
+    let step_index = open.step_index;
+    let run_id = latest_run(&state, "proj-crash").await.id;
+    // The pre-step content is durable: that is what survives the crash.
+    let snapshot = {
+        let run_id = run_id.clone();
+        state
+            .db
+            .with_conn(move |conn| crate::db::audit_runs::step_snapshot(conn, &run_id, step_index))
+            .await
+            .unwrap()
+    };
+    assert_eq!(
+        snapshot.and_then(|s| s.content).as_deref(),
+        Some(BEFORE),
+        "{pipeline:?}: the pre-step content is persisted, not only in memory"
+    );
+
+    // Boot.
+    let settled = state
+        .db
+        .with_conn(|conn| crate::api::audit::step_guard::settle_unfinished_at_boot(conn))
+        .await
+        .unwrap();
+    assert_eq!(settled, 1, "{pipeline:?}");
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        BEFORE,
+        "{pipeline:?}: the half-written doc is put back at boot"
+    );
+    let (_, steps) = latest_run_steps(&state, "proj-crash").await;
+    let row = steps.iter().find(|row| row.step_index == step_index).unwrap();
+    assert!(row.ended_at.is_some(), "{pipeline:?}: the step has a verdict");
+    assert_eq!(row.target_state.as_deref(), Some("restored"), "{pipeline:?}");
+    assert!(
+        row.step_warning.as_deref().unwrap_or("").contains("stopped during step"),
+        "{pipeline:?}: {:?}",
+        row.step_warning
+    );
+
+    let _ = crate::api::audit::full::cancel_audit(
+        axum::extract::State(state.clone()),
+        axum::extract::Path("proj-crash".to_string()),
+    )
+    .await;
+    let _ = tokio::time::timeout(Duration::from_secs(10), run).await;
+}
+
+#[tokio::test]
+async fn a_backend_crash_mid_step_of_a_full_audit_is_settled_at_boot() {
+    a_backend_crash_mid_step_is_settled_at_boot(Pipeline::Full).await;
+}
+
+#[tokio::test]
+async fn a_backend_crash_mid_step_of_a_partial_audit_is_settled_at_boot() {
+    a_backend_crash_mid_step_is_settled_at_boot(Pipeline::Partial).await;
+}
+
+/// Puts a scripted `claude` first on `PATH` and forces the direct-CLI route
+/// for one test, and restores the environment afterwards.
+#[cfg(unix)]
+struct ScriptedDirectClaude(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+#[cfg(unix)]
+impl ScriptedDirectClaude {
+    fn install(bin: &Path) -> Self {
+        let saved: Vec<_> = ["PATH", "KRONN_ACP_ADAPTER_CLAUDE"]
+            .into_iter()
+            .map(|name| (name, crate::core::child_env::var_os(name)))
+            .collect();
+        let path = std::env::join_paths(std::iter::once(bin.to_path_buf()).chain(
+            std::env::split_paths(&crate::core::child_env::var_os("PATH").unwrap_or_default()),
+        ))
+        .unwrap();
+        crate::core::child_env::set_var("PATH", path);
+        crate::core::child_env::set_var("KRONN_ACP_ADAPTER_CLAUDE", "0");
+        Self(saved)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ScriptedDirectClaude {
+    fn drop(&mut self) {
+        for (name, value) in &self.0 {
+            match value {
+                Some(value) => crate::core::child_env::set_var(name, value),
+                None => crate::core::child_env::remove_var(name),
+            }
+        }
+    }
+}
+
+/// KT-1211 (M5) — a step run by a direct CLI agent records the agent's process
+/// group and start stamp on the run while it works (so a boot after a crash can
+/// kill it), and clears them once it is reaped. Both pipelines.
+#[cfg(unix)]
+async fn a_direct_cli_step_records_and_clears_its_process_group(pipeline: Pipeline) {
+    let bin = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let script = bin.path().join("claude");
+    std::fs::write(&script, "#!/bin/sh\nexec sleep 60\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let _environment = ScriptedDirectClaude::install(bin.path());
+    let state = new_state();
+    add_project(&state, "proj-pgid", project.path()).await;
+    let run = launch(&state, pipeline, "proj-pgid", AgentType::ClaudeCode);
+
+    let recorded = || {
+        state.db.with_conn(|conn| crate::db::audit_runs::recorded_agent_processes(conn))
+    };
+    let mut found = Vec::new();
+    for _ in 0..500 {
+        found = recorded().await.unwrap();
+        if !found.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(found.len(), 1, "{pipeline:?}: the agent's process group is recorded while it works");
+    let (run_id, pgid, stamp) = found.remove(0);
+    assert!(pgid > 1, "{pipeline:?}");
+    assert!(
+        stamp.is_some() && stamp == crate::core::agent_orphans::start_stamp(pgid as u32),
+        "{pipeline:?}: the leader's start stamp is the live process's: {stamp:?}"
+    );
+    assert_eq!(run_id, latest_run(&state, "proj-pgid").await.id);
+
+    let _ = crate::api::audit::full::cancel_audit(
+        axum::extract::State(state.clone()),
+        axum::extract::Path("proj-pgid".to_string()),
+    )
+    .await;
+    let _ = tokio::time::timeout(Duration::from_secs(15), run).await.expect("the audit ends");
+    assert!(
+        recorded().await.unwrap().is_empty(),
+        "{pipeline:?}: a reaped agent leaves nothing for boot to kill"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial_test::serial(acp_adapter_env_toggle)]
+async fn a_direct_cli_step_of_a_full_audit_records_and_clears_its_process_group() {
+    a_direct_cli_step_records_and_clears_its_process_group(Pipeline::Full).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial_test::serial(acp_adapter_env_toggle)]
+async fn a_direct_cli_step_of_a_partial_audit_records_and_clears_its_process_group() {
+    a_direct_cli_step_records_and_clears_its_process_group(Pipeline::Partial).await;
+}
+
 #[tokio::test]
 async fn cancel_audit_stops_an_opencode_step_of_a_full_audit_in_seconds() {
     a_stop_ends_an_acp_step_in_seconds(Pipeline::Full).await;

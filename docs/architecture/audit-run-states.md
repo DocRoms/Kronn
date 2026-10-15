@@ -429,8 +429,23 @@ category.
   content is kept in `audit_step_snapshots` (the `pre_snapshot` is only a
   hash). A cancel restores it, or removes a file the step created, and
   records `target_state = restored` with a `stopped during step N` reason.
-  The partial pipeline does the same.
+  The partial pipeline does the same, with the same durable snapshot and the
+  same process-group record. The outcome is never collapsed: `Restored`,
+  `Untouched` (wrote nothing), `Partial` (kept under the marker) and
+  `Unsettled` (could be neither restored nor marked: no `restored` state, so
+  accepting it needs the override, and its snapshot is kept for the diff).
+  A snapshot is capped at 4 MiB (a larger target is not snapshotted: boot
+  cannot restore it, but its step still never ended and so still needs the
+  override). A new run drops the snapshots of the project's earlier runs and
+  deleting a run cascades.
   [src: file: backend/src/api/audit/step_guard.rs:72] [src: file: backend/src/api/audit/step_guard.rs:154] [src: file: backend/src/db/audit_runs.rs:255]
+- **A crash is settled at boot, not at the next launch.** Right after the
+  recorded agents are killed, every step that never ended and has a snapshot
+  is put back (or marked) and recorded failed with a `stopped during step N
+  (the backend stopped)` reason. Until then the doc would sit half-written
+  with no marker. A step that never ended and has no verdict is a blocker of
+  its own (`NeverEnded`): accepting it needs the override too.
+  [src: file: backend/src/api/audit/step_guard.rs:276] [src: file: backend/src/db/mod.rs:296]
 - **A failed step marks what it left.** When a step fails after the agent
   wrote its target, Kronn keeps the text (a human may accept it) under a
   `<!-- kronn:partial-step -->` banner and records `target_state = partial`.
@@ -448,7 +463,8 @@ category.
   killed only when the stamp still matches: a reused pid is never signalled.
   M5 was real: the agent is its own group leader (`setpgid(0, 0)`) and
   `kill_on_drop` is the only teardown, which cannot run when the backend is
-  killed with SIGKILL.
+  killed with SIGKILL. The stamp is the kernel start time (macOS), or the
+  boot id plus the start tick (Linux: ticks restart at each boot).
   [src: file: backend/src/agents/runner.rs:13715] [src: file: backend/src/agents/runner.rs:13725] [src: file: backend/src/core/agent_orphans.rs:119] [src: file: backend/src/db/mod.rs:288]
 - **Source drift on a resume is saved.** `audit_runs.resume_drift` keeps what
   moved between the run a resume continues and the resume. The timeline shows

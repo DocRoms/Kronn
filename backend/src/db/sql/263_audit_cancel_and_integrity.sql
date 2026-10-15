@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS audit_step_snapshots (
     target_file  TEXT NOT NULL,
     existed      INTEGER NOT NULL,
     content      TEXT,
-    PRIMARY KEY (audit_run_id, step_index)
+    PRIMARY KEY (audit_run_id, step_index),
+    FOREIGN KEY (audit_run_id) REFERENCES audit_runs(id) ON DELETE CASCADE
 );
 
 -- Runs cancelled before this migration: the step they were killed in is the

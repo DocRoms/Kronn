@@ -91,6 +91,25 @@ pub(crate) fn diff_excerpt(before: &str, after: &str) -> String {
     excerpt.join("\n")
 }
 
+/// What makes accepting `row` as it stands need an explicit override.
+pub(crate) fn accept_blocker_of(
+    row: &crate::models::AuditRunStep,
+) -> Option<super::step_guard::AcceptBlocker> {
+    use super::step_guard::{AcceptBlocker, STATE_RESTORED};
+    // A step that never ended has no verdict and, when its agent was cut off,
+    // no failure reason either: its target is unvetted, whatever it holds.
+    if row.ended_at.is_none() && row.accepted_at.is_none() {
+        return Some(AcceptBlocker::NeverEnded);
+    }
+    row.step_warning
+        .as_deref()
+        .and_then(AcceptBlocker::of_reason)
+        // A stopped step whose document was put back leaves it whole.
+        .filter(|blocker| {
+            !(*blocker == AcceptBlocker::Killed && row.target_state.as_deref() == Some(STATE_RESTORED))
+        })
+}
+
 /// A reason as stored: one line, trimmed, bounded; `None` when empty.
 fn normalized_reason(reason: Option<String>) -> Option<String> {
     let reason = reason?;
@@ -209,15 +228,7 @@ pub async fn accept_audit_step(
     // KT-1211 (M4) — a step that failed for a reason that leaves its document
     // unsound is accepted only on an explicit override, with the diff shown.
     let step_row = steps.iter().find(|row| row.step_index == step);
-    let blocker = step_row
-        .and_then(|row| row.step_warning.as_deref())
-        .and_then(super::step_guard::AcceptBlocker::of_reason)
-        .filter(|blocker| {
-            // A stopped step whose document was put back leaves it whole.
-            !(*blocker == super::step_guard::AcceptBlocker::Killed
-                && step_row.and_then(|row| row.target_state.as_deref())
-                    == Some(super::step_guard::STATE_RESTORED))
-        });
+    let blocker = step_row.and_then(|row| accept_blocker_of(row));
     let overridden = req.override_unsound.unwrap_or(false);
     if let Some(blocker) = blocker.filter(|_| !overridden) {
         let snapshot = {

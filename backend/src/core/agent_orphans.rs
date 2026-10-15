@@ -27,12 +27,17 @@ pub fn start_stamp(pid: u32) -> Option<String> {
     {
         // Field 22 of /proc/<pid>/stat is the start time in clock ticks since
         // boot; the command name (field 2) may hold spaces, so read after ')'.
+        // Ticks restart at every boot, so the boot id goes with them: the same
+        // pid and tick count after a reboot is another process.
         if let Ok(stat) = std::fs::read_to_string(format!("/proc/{}/stat", pid)) {
             let after = stat.rsplit_once(')')?.1;
-            return after
-                .split_whitespace()
-                .nth(19)
-                .map(|ticks| format!("proc:{}", ticks));
+            let ticks = after.split_whitespace().nth(19)?;
+            return Some(linux_stamp(
+                std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+                    .ok()
+                    .as_deref(),
+                ticks,
+            ));
         }
     }
     #[cfg(target_os = "macos")]
@@ -62,6 +67,15 @@ pub fn start_stamp(pid: u32) -> Option<String> {
         .ok()?;
     let stamp = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (out.status.success() && !stamp.is_empty()).then(|| format!("ps:{}", stamp))
+}
+
+/// `proc:<boot id>:<ticks>` (`proc:<ticks>` when the boot id is unreadable).
+#[cfg(any(target_os = "linux", test))]
+fn linux_stamp(boot_id: Option<&str>, ticks: &str) -> String {
+    match boot_id.map(str::trim).filter(|id| !id.is_empty()) {
+        Some(id) => format!("proc:{id}:{ticks}"),
+        None => format!("proc:{ticks}"),
+    }
 }
 
 /// Kill the group of a recorded agent when its leader is still the recorded
@@ -200,5 +214,21 @@ mod tests {
             kill_recorded_group(pid as i64, stamp.as_deref(), start_stamp),
             OrphanOutcome::Gone
         );
+    }
+
+    #[test]
+    fn a_linux_stamp_carries_the_boot_id_so_a_reboot_never_matches() {
+        let before = linux_stamp(Some("boot-a\n"), "4242");
+        assert_eq!(before, "proc:boot-a:4242");
+        // Same pid, same tick count, another boot: another process.
+        assert_ne!(before, linux_stamp(Some("boot-b"), "4242"));
+        assert_eq!(linux_stamp(None, "4242"), "proc:4242");
+        assert_eq!(linux_stamp(Some("  "), "4242"), "proc:4242");
+        // A recorded stamp from another boot is not ours.
+        let mut child = spawn_group_leader();
+        let outcome = kill_recorded_group(child.id() as i64, Some(&before), start_stamp);
+        assert_eq!(outcome, OrphanOutcome::NotOurs);
+        child.kill().unwrap();
+        child.wait().unwrap();
     }
 }
