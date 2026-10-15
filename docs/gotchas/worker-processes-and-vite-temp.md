@@ -23,9 +23,14 @@ What is taken, and what is not:
   stopped with the dispatch.
 - **An untagged descendant is taken only in the session of the taken process it
   descends from** (`getsid`). That still catches a server that cleared its
-  environment, but not what a shared daemon the worker happened to start first
-  (tmux, `ollama serve`, sccache, a gradle daemon) adopted later: those are born
-  in sessions of their own and survive.
+  environment. A daemon the worker started (tmux, `ollama serve`, sccache, a
+  gradle daemon) carries the tag, so it is stopped, and so are its children
+  that inherited its environment (tmux panes do). Only a child that is both
+  untagged and in a session of its own survives.
+- **Some processes escape the reap on macOS.** `KERN_PROCARGS2` shows no
+  environment for platform or hardened binaries, nor for a process that
+  rewrote its argument area. Such a process is found only as a same-session
+  descendant; once its tagged parent exits it belongs to launchd and is missed.
 - **A pid is never signalled on a stale snapshot.** The start stamp
   (`agent_orphans::start_stamp`) is compared at kill time, and the tag or the
   session is read again right before each signal (SIGTERM and SIGKILL).
