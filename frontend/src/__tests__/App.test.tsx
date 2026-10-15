@@ -118,6 +118,9 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  // App arms the boot screen's settle timer on mount; a timer left pending
+  // after the last test fires once the DOM environment is gone.
+  resetBootScreenForTests();
   router?.dispose();
   router = null;
   window.history.replaceState(null, '', '/');
