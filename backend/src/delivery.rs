@@ -80,6 +80,10 @@ pub struct DeliveryPrincipalVerification {
     /// `true` for every verification; the renderer nevertheless preserves the
     /// supplied value rather than inventing a verdict.
     pub met: bool,
+    /// KT-1254 — the principal declared this item a live check to make AFTER
+    /// integration: `met: false` is then "still to verify", not a failure.
+    #[serde(default)]
+    pub live_check: bool,
     /// The principal's own evidence. Never the worker's, never inferred.
     pub evidence: String,
 }
@@ -362,11 +366,14 @@ impl DeliverySummaryV1 {
         if !self.principal_verifications.is_empty() {
             out.push_str("### Verified by the principal at review\n");
             for verification in &self.principal_verifications {
+                let verdict = match (verification.live_check, verification.met) {
+                    (true, false) => "live check pending after integration",
+                    (_, true) => "met",
+                    (_, false) => "not met",
+                };
                 out.push_str(&format!(
                     "- `{}` → {} — {}\n",
-                    verification.dod_id,
-                    if verification.met { "met" } else { "not met" },
-                    verification.evidence
+                    verification.dod_id, verdict, verification.evidence
                 ));
             }
             out.push('\n');

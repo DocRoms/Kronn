@@ -1030,7 +1030,7 @@ same relation, and the UI preserves a pending reply target across a transient
 pre-receipt failure. Calls that use only `idx` remain backward compatible.
 [src: file: backend/src/api/disc_introspection.rs:470-586#disc_get_message]
 [src: file: backend/src/api/disc_prompts.rs:337-365#reply_context]
-[src: file: backend/src/api/disc_portability.rs:596-605#reply_to_message_id]
+[src: file: backend/src/api/disc_portability.rs:618-627#reply_to_message_id]
 [src: file: backend/src/api/federation.rs:51-68#reply_to_message_id]
 [src: file: frontend/src/lib/chat-reply-drafts.ts:14-79#saveReplyDraft]
 [src: file: backend/scripts/disc-introspection-mcp.py:4652-4669#call_disc_get_message]

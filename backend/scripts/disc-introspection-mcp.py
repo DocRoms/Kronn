@@ -571,10 +571,10 @@ TOOLS = [
     {
         "name": "task_update_dod",
         "description": (
-            "Check or uncheck one Definition of Done item atomically. Use the "
-            "DoD item id returned by task_get. Prefer this over replacing the "
-            "whole definition_of_done array when only completion changed: two "
-            "agents can update different items without overwriting each other."
+            "Check or uncheck one DoD item atomically, by the id task_get "
+            "returns; prefer it to replacing the whole array. A "
+            "post_integration item is the principal's live check: ticking it "
+            "needs `evidence`."
         ),
         "inputSchema": {
             "type": "object",
@@ -582,6 +582,7 @@ TOOLS = [
                 "task_id": {"type": "string"},
                 "dod_id": {"type": "string"},
                 "completed": {"type": "boolean"},
+                "evidence": {"type": "string"},
                 "source_message_id": {"type": "string"},
             },
             "required": ["task_id", "dod_id", "completed"],
@@ -1136,13 +1137,11 @@ TOOLS = [
         "name": "task_exec_review",
         "description": (
             "Decide a delivered task attempt as the principal. Pass the "
-            "`task_execution_id` and a ReviewDecision v1 `decision` object "
-            "(`decision`: 'approve' | 'request_changes'; `comment` is required for "
-            "request_changes; optional structured `findings`). The backend derives "
-            "your identity from this bridge's durable session and authorizes you as a "
-            "party to the execution — the parent-room principal, or the worker only if "
-            "the run explicitly enables self-review. approve is REFUSED if the manifest "
-            "is missing, the worktree HEAD drifted since delivery, or a DoD is unmet; "
+            "`task_execution_id` and a ReviewDecision v1 `decision` object. "
+            "Your identity comes from this bridge's durable session; you must be a party: the "
+            "parent-room principal, or the worker only if the run enables "
+            "self-review. approve is REFUSED if the manifest is missing, the "
+            "worktree HEAD drifted since delivery, or a DoD is unmet; "
             "request_changes hands your findings to the worker in its sub-discussion "
             "and keeps the worktree. A caller who is not a party gets one opaque refusal."
         ),
@@ -1158,7 +1157,9 @@ TOOLS = [
                     "description": (
                         "The ReviewDecision v1 object: version, task_ref, decision "
                         "('approve' | 'request_changes'), comment (required for "
-                        "request_changes), optional findings [{path?, line?, issue}]."
+                        "request_changes), optional findings [{path?, line?, issue}], "
+                        "dod_verifications [{dod_id, met, evidence, verification?}]; "
+                        "`post_integration` + met false = your live check, not a blocker."
                     ),
                 },
             },
@@ -4907,6 +4908,7 @@ def call_task_update_dod(args):
             f"/api/planning/tasks/{encoded_task}/dod/{encoded_dod}",
             {
                 "completed": args["completed"],
+                "evidence": args.get("evidence"),
                 "actor": _planning_actor(args),
             },
         )),
@@ -10010,6 +10012,18 @@ TOOL_MANUALS = {
         "Launch may persist principal-owned `validations: [{command, quick_exec_id?, "
         "timeout_secs?}]`; never copy gates from the worker manifest. Reuse one idempotency key "
         "if the launch response is lost.\n\n"
+        "**Live checks.** A DoD item that can only be proven once the code is integrated and "
+        "running (a replay on a real input) is a principal live check. Only the principal of the "
+        "task's execution, or a human, may declare or remove it: a worker, an HTTP agent or an "
+        "anonymous agent is refused. Declare it either with `task_update` while the execution is "
+        "live (`definition_of_done` item `{id, sentence, verification: \"post_integration\"}`) or "
+        "at review, with a `dod_verifications` entry `{dod_id, met: false, evidence, "
+        "verification: \"post_integration\"}`; `task_create` cannot, a new task has no execution. "
+        "The worker reports it `met: false` honestly; approve integrates with it pending, the task "
+        "stays open and the plan lists it as a live check. Run it yourself after integration, then "
+        "tick it with `task_update_dod({completed: true, evidence})`: evidence is mandatory, and "
+        "the task closes on the last tick. Downgrading it to a worker check and ticking it in "
+        "one write is refused.\n\n"
         "**Validations contract.** Kronn runs each `command` on the candidate at integration, "
         "after review — NOT through a shell. The command is split on whitespace into ONE binary "
         "and its literal arguments, then run like a Quick Exec:\n"

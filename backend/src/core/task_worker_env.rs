@@ -161,6 +161,13 @@ impl WorkerLane {
         roots
     }
 
+    /// The lane's own scratch directory (KT-1255): inside the Cargo target, so
+    /// inside a write root, and the `TMPDIR` of a sandboxed lane build, which
+    /// is thereby granted no global `/tmp`.
+    pub fn tmp_dir(&self) -> PathBuf {
+        self.cargo_target_dir.join(".kronn-tmp")
+    }
+
     /// Directories the worker reads but never writes: the host's dependency
     /// caches and the main checkout's installed frontend dependencies.
     pub fn read_roots(&self, caches: &SharedCaches) -> Vec<PathBuf> {

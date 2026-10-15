@@ -11,10 +11,12 @@
 //! [`SandboxedProbeRunner`] closes that: it wraps each probe in the host's OS
 //! sandbox, with the same filesystem policy as
 //! `agents::runner::claude_task_worker_settings` — write only the lane's
-//! [`WorkerLane::write_roots`] (plus the temp directories a toolchain needs),
-//! read as before, and network only on loopback. It fails closed: a host with
-//! no usable sandbox mechanism refuses the command and says why, it never
-//! falls back to running it unconfined.
+//! [`WorkerLane::write_roots`] and the lane's own temp dir (no global
+//! `/tmp`), read as before — and is stricter on the channels that settings
+//! file cannot express: no outbound connection at all, no Mach lookup beyond
+//! a short list, fresh PID/IPC namespaces on Linux. It fails closed: a host
+//! with no usable sandbox mechanism refuses the command and says why, it
+//! never falls back to running it unconfined.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -30,6 +32,24 @@ use crate::core::task_worker_env::{
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 /// Linux' unprivileged namespace sandbox.
 const BWRAP: &str = "bwrap";
+const TMPDIR_ENV: &str = "TMPDIR";
+
+/// Mach services a confined build may look up, and why. Anything else — in
+/// particular `launchd` (`launchctl submit`), Launch Services (`open`), XPC
+/// and `cfprefsd` — is refused: a lookup is how a process asks the host to
+/// start something outside the sandbox. A toolchain that needs one more fails
+/// closed (the build is recorded failed, the worker launches cold).
+pub const SEATBELT_MACH_SERVICES: &[&str] = &[
+    // Logging of every libSystem process.
+    "com.apple.logd",
+    // libnotify, initialised by libSystem.
+    "com.apple.system.notification_center",
+    // getpwuid / getgrgid, used for the home directory and the user name.
+    "com.apple.system.opendirectoryd.libinfo",
+    // confstr(_CS_DARWIN_USER_TEMP_DIR): the per-user temp path of a tool
+    // that ignores `TMPDIR`.
+    "com.apple.bsd.dirhelper",
+];
 
 /// The OS facility that confines a command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +75,9 @@ impl Mechanism {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxPolicy {
     pub write_roots: Vec<PathBuf>,
+    /// The lane's own scratch directory, inside a write root. The confined
+    /// command gets it as `TMPDIR`; no global temp directory is writable.
+    pub temp_dir: PathBuf,
 }
 
 impl SandboxPolicy {
@@ -63,6 +86,7 @@ impl SandboxPolicy {
     pub fn for_lane(lane: &WorkerLane) -> Self {
         Self {
             write_roots: lane.write_roots(),
+            temp_dir: lane.tmp_dir(),
         }
     }
 
@@ -78,37 +102,38 @@ impl SandboxPolicy {
         Ok(Self::for_lane(&WorkerLane::for_worktree(&worktree)?))
     }
 
-    /// The roots plus the scratch space every toolchain needs (linker and
-    /// compiler temporaries): the process temp dir and, on macOS, its sibling
-    /// per-user cache. Canonical, because Seatbelt matches real paths.
-    fn writable(&self, probe_env: &[(String, OsString)]) -> Vec<PathBuf> {
-        let mut roots: Vec<PathBuf> = self.write_roots.clone();
-        let mut temps: Vec<PathBuf> = vec![std::env::temp_dir()];
-        temps.extend(
-            probe_env
-                .iter()
-                .filter(|(name, _)| name == "TMPDIR")
-                .map(|(_, value)| PathBuf::from(value)),
-        );
-        for fixed in ["/tmp", "/var/tmp"] {
-            temps.push(PathBuf::from(fixed));
-        }
-        for temp in temps {
-            let Ok(real) = temp.canonicalize() else {
-                continue;
-            };
-            if real.file_name().is_some_and(|name| name == "T") {
-                if let Some(cache) = real.parent().map(|parent| parent.join("C")) {
-                    if cache.is_dir() {
-                        roots.push(cache);
-                    }
-                }
-            }
-            roots.push(real);
-        }
+    /// The directories the command may write: the lane's roots and its own
+    /// temp dir, nothing else (no `/tmp`, `/var/tmp` or per-user cache).
+    /// Resolved through symlinks, because Seatbelt matches real paths.
+    fn writable(&self) -> Vec<PathBuf> {
+        let mut roots: Vec<PathBuf> = self
+            .write_roots
+            .iter()
+            .chain(std::iter::once(&self.temp_dir))
+            .map(|root| real_path(root))
+            .collect();
         roots.sort();
         roots.dedup();
         roots
+    }
+}
+
+/// `path` with its longest existing ancestor canonicalized: a Cargo target that
+/// does not exist yet still resolves through `/tmp` → `/private/tmp`.
+fn real_path(path: &Path) -> PathBuf {
+    let mut missing: Vec<&std::ffi::OsStr> = Vec::new();
+    let mut current = path;
+    loop {
+        if let Ok(real) = current.canonicalize() {
+            return missing.iter().rev().fold(real, |acc, part| acc.join(part));
+        }
+        match (current.parent(), current.file_name()) {
+            (Some(parent), Some(name)) => {
+                missing.push(name);
+                current = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
     }
 }
 
@@ -118,12 +143,36 @@ fn seatbelt_literal(path: &Path) -> String {
     format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-/// The Seatbelt profile of `writable`: reads and process control as usual,
-/// writes only under the given roots (and the few device nodes a process
-/// needs), network only on loopback.
+/// The Seatbelt profile of `writable`: **deny by default**, then only what a
+/// toolchain needs.
+///
+/// - files: read anywhere (as the worker does), write only under `writable`
+///   and the few device nodes a process needs;
+/// - network: no outbound connection of any kind (loopback and Unix sockets
+///   included — the Kronn API, Ollama and a local database are all reachable
+///   that way); a loopback socket may be bound and accepted on;
+/// - IPC: Mach lookups only for [`SEATBELT_MACH_SERVICES`], no POSIX shared
+///   memory or semaphores, no IOKit;
+/// - processes: may exec and fork, may signal only its own sandbox.
 pub fn seatbelt_profile(writable: &[PathBuf]) -> String {
-    let mut profile = String::from("(version 1)\n(allow default)\n(deny file-write*)\n");
-    profile.push_str("(allow file-write*\n");
+    let mut profile = String::from(
+        "(version 1)\n\
+         (deny default)\n\
+         (allow process-exec)\n\
+         (allow process-fork)\n\
+         (allow process-info* (target same-sandbox))\n\
+         (allow signal (target same-sandbox))\n\
+         (allow sysctl-read)\n\
+         (allow file-read*)\n\
+         (allow file-map-executable)\n\
+         (allow file-ioctl)\n\
+         (allow pseudo-tty)\n",
+    );
+    profile.push_str("(allow mach-lookup\n");
+    for service in SEATBELT_MACH_SERVICES {
+        profile.push_str(&format!("  (global-name \"{service}\")\n"));
+    }
+    profile.push_str(")\n(allow file-write*\n");
     for root in writable {
         profile.push_str(&format!("  (subpath {})\n", seatbelt_literal(root)));
     }
@@ -132,37 +181,59 @@ pub fn seatbelt_profile(writable: &[PathBuf]) -> String {
          (literal \"/dev/dtracehelper\")\n  (regex #\"^/dev/tty\")\n  (regex #\"^/dev/fd/\"))\n",
     );
     profile.push_str(
-        "(deny network*)\n\
-         (allow network-outbound (remote ip \"localhost:*\"))\n\
-         (allow network-bind (local ip \"localhost:*\"))\n\
+        "(allow network-bind (local ip \"localhost:*\"))\n\
          (allow network-inbound (local ip \"localhost:*\"))\n",
     );
     profile
 }
 
-/// `bwrap` arguments of `writable`: the whole filesystem read-only, the roots
-/// writable, a private network namespace (loopback only), the process dies
-/// with its parent.
+/// `bwrap` arguments of `writable`: the filesystem read-only with only the
+/// roots writable, and fresh network, PID and IPC namespaces (no connection
+/// out, no host process visible or signalable, no shared SysV IPC). `/dev` is
+/// a private minimal one (its `/dev/shm` is not the host's), and `/run` and
+/// `/tmp` are emptied so the host's service sockets (the systemd user bus, the
+/// Docker socket, an SSH agent) cannot be reached by path.
 pub fn bubblewrap_args(writable: &[PathBuf]) -> Vec<String> {
-    let mut args: Vec<String> = ["--ro-bind", "/", "/", "--dev-bind", "/dev", "/dev"]
-        .into_iter()
-        .map(String::from)
-        .collect();
+    let mut args: Vec<String> = [
+        "--ro-bind",
+        "/",
+        "/",
+        "--dev",
+        "/dev",
+        "--proc",
+        "/proc",
+        "--tmpfs",
+        "/run",
+        "--tmpfs",
+        "/tmp",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    // After the tmpfs mounts: a root under `/tmp` is bound back on top.
     for root in writable {
         let root = root.to_string_lossy().into_owned();
         args.extend(["--bind".to_string(), root.clone(), root]);
     }
     args.extend(
-        ["--unshare-net", "--die-with-parent", "--new-session", "--"]
-            .into_iter()
-            .map(String::from),
+        [
+            "--unshare-net",
+            "--unshare-pid",
+            "--unshare-ipc",
+            "--die-with-parent",
+            "--new-session",
+            "--",
+        ]
+        .into_iter()
+        .map(String::from),
     );
     args
 }
 
-/// Wrap `probe` so the OS sandbox runs it. Pure: no process is started.
+/// Wrap `probe` so the OS sandbox runs it, with the lane's temp dir as its
+/// `TMPDIR`. Pure: no process is started.
 pub fn confine(mechanism: Mechanism, policy: &SandboxPolicy, probe: &ProbeCommand) -> ProbeCommand {
-    let writable = policy.writable(&probe.env);
+    let writable = policy.writable();
     let (program, mut args) = match mechanism {
         Mechanism::Seatbelt => (
             SANDBOX_EXEC.to_string(),
@@ -172,11 +243,21 @@ pub fn confine(mechanism: Mechanism, policy: &SandboxPolicy, probe: &ProbeComman
     };
     args.push(probe.program.clone());
     args.extend(probe.args.iter().cloned());
+    let mut env: Vec<(String, OsString)> = probe
+        .env
+        .iter()
+        .filter(|(name, _)| name != TMPDIR_ENV)
+        .cloned()
+        .collect();
+    env.push((
+        TMPDIR_ENV.to_string(),
+        real_path(&policy.temp_dir).into_os_string(),
+    ));
     ProbeCommand {
         program,
         args,
         cwd: probe.cwd.clone(),
-        env: probe.env.clone(),
+        env,
         timeout: probe.timeout,
     }
 }
@@ -241,6 +322,14 @@ impl ProbeRunner for SandboxedProbeRunner {
                     .to_string(),
             );
         };
+        // The command's only scratch space must exist before it starts: the
+        // sandbox grants no other.
+        if let Err(error) = std::fs::create_dir_all(real_path(&policy.temp_dir)) {
+            return Self::refuse(format!(
+                "cannot create the lane's temp dir {}: {error}",
+                policy.temp_dir.display()
+            ));
+        }
         self.inner
             .run_cancellable(&confine(mechanism, policy, probe), cancel)
     }

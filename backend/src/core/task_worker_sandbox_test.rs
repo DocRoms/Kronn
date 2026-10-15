@@ -83,31 +83,191 @@ fn the_policy_writes_only_the_workers_own_roots() {
     assert_eq!(policy.write_roots, lane.write_roots());
     assert!(policy.write_roots.contains(&layout.worktree));
     assert!(policy.write_roots.contains(&lane.cargo_target_dir));
+    // The only scratch space is the lane's own, inside a write root.
+    assert_eq!(policy.temp_dir, lane.tmp_dir());
+    assert!(
+        policy
+            .write_roots
+            .iter()
+            .any(|root| policy.temp_dir.starts_with(root)),
+        "{policy:?}"
+    );
 }
 
 #[test]
-fn the_seatbelt_profile_denies_every_write_but_the_roots_and_keeps_the_network_on_loopback() {
+fn the_writable_set_is_the_lanes_roots_and_its_temp_dir_and_no_global_temp() {
+    let layout = layout();
+    let policy = policy_of(&layout);
+    let writable = policy.writable();
+
+    for root in &policy.write_roots {
+        assert!(writable.contains(&real_path(root)), "{writable:?}");
+    }
+    assert!(writable.contains(&real_path(&policy.temp_dir)));
+    for path in &writable {
+        let text = path.to_string_lossy();
+        // The test's own layout lives under a temp dir, so only look for the
+        // global directories themselves, not for paths below them.
+        for global in ["/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp"] {
+            assert_ne!(text, global, "{writable:?}");
+        }
+        assert!(
+            !text.starts_with("/var/folders") || text.contains("task-kt-1255-sandbox"),
+            "no per-user cache or temp root: {writable:?}"
+        );
+    }
+    let profile = seatbelt_profile(&writable);
+    for global in [
+        "\"/tmp\"",
+        "\"/var/tmp\"",
+        "\"/private/tmp\"",
+        "\"/var/folders\"",
+    ] {
+        assert!(
+            !profile.contains(&format!("(subpath {global})")),
+            "{profile}"
+        );
+    }
+}
+
+/// The text of the `(allow <operation> …)` forms of `profile`.
+fn allow_forms<'a>(profile: &'a str, operation: &str) -> Vec<&'a str> {
+    let opener = format!("(allow {operation}");
+    profile
+        .match_indices(&opener)
+        .map(|(start, _)| {
+            let rest = &profile[start..];
+            let mut depth = 0usize;
+            for (offset, ch) in rest.char_indices() {
+                match ch {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return &rest[..=offset];
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            rest
+        })
+        .collect()
+}
+
+#[test]
+fn the_seatbelt_profile_denies_by_default_and_writes_only_the_roots() {
     let roots = vec![
         PathBuf::from("/lane/worktree"),
         PathBuf::from("/lane/target"),
     ];
     let profile = seatbelt_profile(&roots);
 
-    let deny = profile
-        .find("(deny file-write*)")
-        .expect("global write deny");
-    let allow = profile.find("(allow file-write*").expect("root allowance");
-    assert!(deny < allow, "the allowance follows the deny:\n{profile}");
-    assert!(profile.contains("(subpath \"/lane/worktree\")"));
-    assert!(profile.contains("(subpath \"/lane/target\")"));
+    assert!(
+        profile.lines().any(|line| line == "(deny default)"),
+        "deny by default:\n{profile}"
+    );
+    assert!(
+        !profile.contains("(allow default)"),
+        "never allow-by-default:\n{profile}"
+    );
+    let writes = allow_forms(&profile, "file-write*");
+    assert_eq!(writes.len(), 1, "{profile}");
+    assert!(writes[0].contains("(subpath \"/lane/worktree\")"));
+    assert!(writes[0].contains("(subpath \"/lane/target\")"));
     assert!(
         !profile.contains("(subpath \"/Users"),
         "no host path: {profile}"
     );
-    let deny_network = profile.find("(deny network*)").expect("network deny");
-    assert!(profile[deny_network..].contains("\"localhost:*\""));
-    // No blanket network allowance after the deny.
-    assert!(!profile[deny_network..].contains("(allow network*)"));
+    // Writes are never allowed by any other form (e.g. a bare file-write*).
+    assert_eq!(profile.matches("file-write").count(), 1, "{profile}");
+}
+
+#[test]
+fn the_seatbelt_profile_denies_every_outbound_connection_and_only_binds_locally() {
+    let profile = seatbelt_profile(&[PathBuf::from("/lane/worktree")]);
+
+    // Nothing may allow an outbound connection — loopback, any port, a Unix
+    // socket, or the whole network family.
+    assert!(!profile.contains("network-outbound"), "{profile}");
+    assert!(!profile.contains("(allow network*"), "{profile}");
+    assert!(!profile.contains("(allow network-bind)"), "{profile}");
+    assert!(!profile.contains("(remote "), "{profile}");
+    // Binding (and accepting on) loopback is the one network allowance.
+    let network: Vec<&str> = profile
+        .lines()
+        .filter(|line| line.starts_with("(allow network"))
+        .collect();
+    assert_eq!(
+        network,
+        [
+            "(allow network-bind (local ip \"localhost:*\"))",
+            "(allow network-inbound (local ip \"localhost:*\"))",
+        ],
+        "{profile}"
+    );
+}
+
+#[test]
+fn the_seatbelt_profile_denies_mach_lookup_but_the_listed_services() {
+    let profile = seatbelt_profile(&[PathBuf::from("/lane/worktree")]);
+
+    let lookups = allow_forms(&profile, "mach-lookup");
+    assert_eq!(lookups.len(), 1, "one lookup allowance:\n{profile}");
+    // Every entry is a named service of the list: no wildcard, no regex, no
+    // bare `(allow mach-lookup)`.
+    let listed: Vec<String> = SEATBELT_MACH_SERVICES
+        .iter()
+        .map(|service| format!("(global-name \"{service}\")"))
+        .collect();
+    let body = lookups[0].trim_start_matches("(allow mach-lookup");
+    let mut remaining = body.to_string();
+    for entry in &listed {
+        assert!(remaining.contains(entry.as_str()), "{entry} in {profile}");
+        remaining = remaining.replace(entry.as_str(), "");
+    }
+    assert_eq!(
+        remaining.trim().trim_end_matches(')').trim(),
+        "",
+        "only listed services:\n{profile}"
+    );
+    // The channels that start something outside the sandbox are not on it.
+    for service in SEATBELT_MACH_SERVICES {
+        for escape in ["launchd", "xpc", "launchservices", "lsd", "cfprefsd"] {
+            assert!(!service.contains(escape), "{service}");
+        }
+    }
+    // No other IPC family is opened.
+    for operation in ["ipc-posix", "ipc-sysv", "iokit", "mach-register", "mach*"] {
+        assert!(
+            !profile.contains(&format!("(allow {operation}")),
+            "{operation}:\n{profile}"
+        );
+    }
+    assert!(profile.contains("(allow signal (target same-sandbox))"));
+}
+
+#[test]
+fn the_seatbelt_profile_is_valid_sbpl() {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    let profile = seatbelt_profile(&[
+        PathBuf::from("/lane/worktree"),
+        PathBuf::from("/lane/target"),
+    ]);
+    let output = std::process::Command::new(SANDBOX_EXEC)
+        .args(["-p", &profile, "/usr/bin/true"])
+        .output()
+        .expect("sandbox-exec starts");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // A well-formed profile either runs, or is only refused at the very last
+    // step (`sandbox_apply`) when this process is itself sandboxed. A syntax
+    // error or an unknown operation fails earlier, with another message.
+    assert!(
+        output.status.success() || stderr.contains("sandbox_apply: Operation not permitted"),
+        "the profile does not parse: {stderr}\n{profile}"
+    );
 }
 
 #[test]
@@ -126,8 +286,39 @@ fn bubblewrap_binds_the_whole_filesystem_read_only_and_only_the_roots_writable()
         ["/lane/worktree", "/lane/worktree"]
     );
     assert_eq!(args.iter().filter(|arg| *arg == "--bind").count(), 1);
-    assert!(args.contains(&"--unshare-net".to_string()));
     assert_eq!(args.last().unwrap(), "--");
+}
+
+#[test]
+fn bubblewrap_unshares_net_pid_and_ipc_and_hides_the_hosts_service_sockets() {
+    let args = bubblewrap_args(&[PathBuf::from("/lane/worktree")]);
+    let has = |flag: &str| args.iter().any(|arg| arg == flag);
+    for flag in ["--unshare-net", "--unshare-pid", "--unshare-ipc"] {
+        assert!(has(flag), "{flag} in {args:?}");
+    }
+    assert!(has("--die-with-parent") && has("--new-session"));
+    // A private /dev, never the host's (its /dev/shm is host shared memory).
+    assert!(!has("--dev-bind"), "{args:?}");
+    let pair = |flag: &str, value: &str| {
+        args.windows(2)
+            .any(|window| window[0] == flag && window[1] == value)
+    };
+    assert!(pair("--dev", "/dev"), "{args:?}");
+    // A PID namespace needs its own /proc, or the host's pids stay visible.
+    assert!(pair("--proc", "/proc"), "{args:?}");
+    // /run (systemd user bus, docker.sock) and /tmp (ssh-agent, X11) are
+    // emptied before the roots are bound back on top.
+    let run = args.windows(2).position(|w| w == ["--tmpfs", "/run"]);
+    let tmp = args.windows(2).position(|w| w == ["--tmpfs", "/tmp"]);
+    let bind = args.iter().position(|arg| arg == "--bind").unwrap();
+    assert!(run.is_some() && tmp.is_some(), "{args:?}");
+    assert!(tmp.unwrap() < bind && run.unwrap() < bind, "{args:?}");
+    // Nothing global is bound writable.
+    for (index, arg) in args.iter().enumerate() {
+        if arg == "--bind" {
+            assert_eq!(args[index + 1], "/lane/worktree");
+        }
+    }
 }
 
 #[test]
@@ -139,7 +330,11 @@ fn confining_a_probe_keeps_its_command_cwd_env_and_timeout() {
         &["test", "--no-run"],
         &layout.worktree.join("backend"),
     );
-    original.env = vec![("CARGO_TARGET_DIR".into(), "/lane/target".into())];
+    original.env = vec![
+        ("CARGO_TARGET_DIR".into(), "/lane/target".into()),
+        ("TMPDIR".into(), "/var/tmp".into()),
+    ];
+    let lane_tmp = real_path(&policy.temp_dir).into_os_string();
 
     for mechanism in [Mechanism::Seatbelt, Mechanism::Bubblewrap] {
         let confined = confine(mechanism, &policy, &original);
@@ -149,7 +344,14 @@ fn confining_a_probe_keeps_its_command_cwd_env_and_timeout() {
             ["cargo", "test", "--no-run"]
         );
         assert_eq!(confined.cwd, original.cwd);
-        assert_eq!(confined.env, original.env);
+        // Same environment, but the scratch space is the lane's own.
+        assert_eq!(
+            confined.env,
+            vec![
+                ("CARGO_TARGET_DIR".into(), "/lane/target".into()),
+                ("TMPDIR".into(), lane_tmp.clone()),
+            ]
+        );
         assert_eq!(confined.timeout, original.timeout);
     }
     let seatbelt = confine(Mechanism::Seatbelt, &policy, &original);
@@ -262,7 +464,9 @@ fn a_relaunch_after_the_worker_changed_its_build_never_reaches_a_process_unconfi
             ["cargo", "test", "--no-run", "--locked", "--offline"],
             "{call:?}"
         );
-        assert!(call.args[1].contains("(deny file-write*)"));
+        assert!(call.args[1].contains("(deny default)"), "{call:?}");
+        assert!(!call.args[1].contains("(allow default)"), "{call:?}");
+        assert!(!call.args[1].contains("network-outbound"), "{call:?}");
     }
 }
 
@@ -282,25 +486,26 @@ fn sandbox_can_be_applied(mechanism: Mechanism) -> bool {
     ProcessProbeRunner.run(&command).success
 }
 
-#[test]
-fn a_build_script_writing_outside_the_lane_is_denied_by_the_os() {
-    let Some(mechanism) = Mechanism::of_host().filter(|m| sandbox_can_be_applied(*m)) else {
+/// The mechanism of this host when the OS sandbox can actually be applied
+/// from this process; `None` (the test self-skips) otherwise.
+fn live_mechanism() -> Option<Mechanism> {
+    let mechanism = Mechanism::of_host().filter(|m| sandbox_can_be_applied(*m));
+    if mechanism.is_none() {
         eprintln!("skipped: the OS sandbox cannot be applied from this process");
-        return;
-    };
-    let layout = layout();
-    // Outside every root: not under the lane, nor under a temp directory.
-    let outside_dir = tempfile::Builder::new()
-        .prefix(".kronn-sandbox-test-")
-        .tempdir_in(env!("CARGO_MANIFEST_DIR"))
-        .unwrap();
-    let outside = outside_dir
-        .path()
-        .canonicalize()
-        .unwrap()
-        .join("escaped.txt");
-    let inside = layout.worktree.join("inside.txt");
+    }
+    mechanism
+}
 
+/// Builds a lane whose build script is `build_rs` under the real OS sandbox.
+/// The script gets `KRONN_TEST_INSIDE` (a file inside the lane, which the
+/// scripts below write first: proof the sandbox lets an ordinary build
+/// through) and every `(name, value)` of `extra_env`.
+fn build_under_the_os_sandbox(
+    mechanism: Mechanism,
+    layout: &Layout,
+    build_rs: &str,
+    extra_env: Vec<(String, OsString)>,
+) -> (ProbeOutcome, PathBuf) {
     let backend = layout.worktree.join("backend");
     std::fs::create_dir_all(backend.join("src")).unwrap();
     std::fs::write(
@@ -309,17 +514,10 @@ fn a_build_script_writing_outside_the_lane_is_denied_by_the_os() {
     )
     .unwrap();
     std::fs::write(backend.join("src").join("lib.rs"), "").unwrap();
-    std::fs::write(
-        backend.join("build.rs"),
-        "fn main() {\n\
-         \x20   std::fs::write(std::env::var(\"KRONN_TEST_INSIDE\").unwrap(), \"x\").unwrap();\n\
-         \x20   std::fs::write(std::env::var(\"KRONN_TEST_OUTSIDE\").unwrap(), \"x\")\n\
-         \x20       .expect(\"write outside the lane\");\n\
-         }\n",
-    )
-    .unwrap();
+    std::fs::write(backend.join("build.rs"), build_rs).unwrap();
 
     let lane = WorkerLane::for_worktree(&layout.worktree).unwrap();
+    let inside = layout.worktree.join("inside.txt");
     let mut command = probe("cargo", &["build", "--offline"], &backend);
     command.env = vec![
         (
@@ -327,23 +525,156 @@ fn a_build_script_writing_outside_the_lane_is_denied_by_the_os() {
             lane.cargo_target_dir.clone().into_os_string(),
         ),
         ("KRONN_TEST_INSIDE".into(), inside.clone().into_os_string()),
-        (
-            "KRONN_TEST_OUTSIDE".into(),
-            outside.clone().into_os_string(),
-        ),
     ];
+    command.env.extend(extra_env);
     let runner = SandboxedProbeRunner::new(
         Ok(SandboxPolicy::for_lane(&lane)),
         Some(mechanism),
         Arc::new(ProcessProbeRunner),
     );
+    (runner.run(&command), inside)
+}
 
-    let outcome = runner.run(&command);
+/// A directory outside the lane and outside every temp directory.
+fn outside_dir() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(".kronn-sandbox-test-")
+        .tempdir_in(env!("CARGO_MANIFEST_DIR"))
+        .unwrap()
+}
+
+#[test]
+fn a_build_script_writing_outside_the_lane_is_denied_by_the_os() {
+    let Some(mechanism) = live_mechanism() else {
+        return;
+    };
+    let layout = layout();
+    let outside_dir = outside_dir();
+    let outside = outside_dir
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("escaped.txt");
+    // A global temp dir is not a lane root either.
+    let global_tmp =
+        PathBuf::from("/tmp").join(format!("kronn-sandbox-escape-{}", std::process::id()));
+
+    let (outcome, inside) = build_under_the_os_sandbox(
+        mechanism,
+        &layout,
+        r#"fn main() {
+    std::fs::write(std::env::var("KRONN_TEST_INSIDE").unwrap(), "x").unwrap();
+    let _ = std::fs::write(std::env::var("KRONN_TEST_GLOBAL_TMP").unwrap(), "x");
+    std::fs::write(std::env::var("KRONN_TEST_OUTSIDE").unwrap(), "x")
+        .expect("write outside the lane");
+}
+"#,
+        vec![
+            (
+                "KRONN_TEST_OUTSIDE".into(),
+                outside.clone().into_os_string(),
+            ),
+            (
+                "KRONN_TEST_GLOBAL_TMP".into(),
+                global_tmp.clone().into_os_string(),
+            ),
+        ],
+    );
+    let leaked_tmp = global_tmp.exists();
+    let _ = std::fs::remove_file(&global_tmp);
 
     assert!(
         !outcome.success,
         "the build script's write outside the lane must fail the build: {outcome:?}"
     );
     assert!(!outside.exists(), "the escape reached the host's disk");
+    assert!(!leaked_tmp, "the global /tmp was writable");
     assert!(inside.exists(), "a write inside the lane is still allowed");
+}
+
+#[test]
+fn a_build_script_connecting_to_a_loopback_port_is_denied_by_the_os() {
+    let Some(mechanism) = live_mechanism() else {
+        return;
+    };
+    // Stands for the Kronn API (3140), Ollama, a local database.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let layout = layout();
+
+    let (outcome, inside) = build_under_the_os_sandbox(
+        mechanism,
+        &layout,
+        r#"fn main() {
+    std::fs::write(std::env::var("KRONN_TEST_INSIDE").unwrap(), "x").unwrap();
+    let port = std::env::var("KRONN_TEST_PORT").unwrap();
+    std::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+        .expect("connect to a loopback port");
+}
+"#,
+        vec![("KRONN_TEST_PORT".into(), port.to_string().into())],
+    );
+
+    assert!(
+        !outcome.success,
+        "the build script's loopback connection must fail the build: {outcome:?}"
+    );
+    assert!(inside.exists(), "an ordinary build still ran");
+    assert!(
+        listener.accept().is_err(),
+        "the connection reached the local service"
+    );
+}
+
+/// macOS only: `launchctl submit` asks launchd — over a Mach service the
+/// profile does not list — to run a job outside the sandbox.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_build_script_asking_launchd_to_run_a_job_is_denied_by_the_os() {
+    let Some(mechanism) = live_mechanism() else {
+        return;
+    };
+    let layout = layout();
+    let outside_dir = outside_dir();
+    let marker = outside_dir.path().canonicalize().unwrap().join("job-ran");
+    let label = format!("kronn.kt1255.escape.{}", std::process::id());
+
+    let (outcome, inside) = build_under_the_os_sandbox(
+        mechanism,
+        &layout,
+        r#"fn main() {
+    std::fs::write(std::env::var("KRONN_TEST_INSIDE").unwrap(), "x").unwrap();
+    let status = std::process::Command::new("/bin/launchctl")
+        .args([
+            "submit",
+            "-l",
+            &std::env::var("KRONN_TEST_LABEL").unwrap(),
+            "--",
+            "/usr/bin/touch",
+            &std::env::var("KRONN_TEST_MARKER").unwrap(),
+        ])
+        .status()
+        .expect("launchctl starts");
+    assert!(status.success(), "launchctl submit refused");
+}
+"#,
+        vec![
+            ("KRONN_TEST_LABEL".into(), label.clone().into()),
+            ("KRONN_TEST_MARKER".into(), marker.clone().into_os_string()),
+        ],
+    );
+    std::thread::sleep(Duration::from_secs(2));
+    let ran = marker.exists();
+    // Best effort: never leave a job behind if the sandbox let it through.
+    let _ = std::process::Command::new("/bin/launchctl")
+        .args(["remove", &label])
+        .output();
+
+    assert!(
+        !outcome.success,
+        "the launchctl submit must fail the build: {outcome:?}"
+    );
+    assert!(!ran, "launchd ran a job outside the sandbox");
+    assert!(inside.exists(), "an ordinary build still ran");
 }

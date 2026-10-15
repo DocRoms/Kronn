@@ -483,9 +483,14 @@ Release notes for 0.9.3 and earlier are available in the
   started by Kronn as the host user, so a relaunch that rebuilt after the
   worker changed `Cargo.lock` or wrote a `build.rs` would have compiled
   worker-written code with the host's rights. They now run under macOS
-  Seatbelt (Linux: bubblewrap) with the worker's write roots, its lane and
-  temp directories only, and loopback-only network; a host with no usable
-  sandbox refuses the build and says so, it never runs it unconfined.
+  Seatbelt (Linux: bubblewrap), deny by default: writes only under the
+  worker's write roots and the lane's own temp dir (no global `/tmp`), no
+  outbound connection of any kind (loopback and Unix sockets included; only a
+  loopback bind), Mach lookups limited to four named services (so no
+  `launchctl submit`, `open` or XPC), and on Linux fresh network, PID and IPC
+  namespaces with `/run` and `/tmp` emptied. A host with no usable sandbox
+  refuses the build and says so, it never runs it unconfined: the first build
+  and the smoke check are then recorded as failed and the worker launches cold.
 
 - The default-docs-root golden no longer depends on the day it runs: the
   compact date every step prompt opens with is masked like the dashed one.

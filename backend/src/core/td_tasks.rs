@@ -397,6 +397,7 @@ pub fn convert(
                         id: None,
                         sentence: verification_of(source),
                         completed: false,
+                        verification: None,
                     }],
                     ..base_request(project_id, slug, actor)
                 },
