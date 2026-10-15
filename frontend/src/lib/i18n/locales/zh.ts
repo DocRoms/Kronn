@@ -2618,6 +2618,7 @@ const zh: TranslationDict = {
   "disc.thinking": "{0} 正在思考…",
   "disc.running": "代理运行中…",
   "disc.workflowStepRunning": "工作流步骤运行中…",
+  "disc.workflowStepPreparing": "工作流正在准备中 — 其代理尚未进入房间…",
   "disc.workflowRun": "运行 {0}",
   "disc.workflowStepAgent": "工作流代理",
   "disc.workflow": "工作流",

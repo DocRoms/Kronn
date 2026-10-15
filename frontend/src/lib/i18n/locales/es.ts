@@ -2641,6 +2641,7 @@ const es: TranslationDict = {
   'disc.thinking': '{0} está pensando...',
   'disc.running': 'Agente en ejecución...',
   'disc.workflowStepRunning': 'Paso del workflow en ejecución…',
+  'disc.workflowStepPreparing': 'El workflow se está preparando — su agente aún no ha entrado en la sala…',
   'disc.workflowRun': 'Ejecución {0}',
   'disc.workflowStepAgent': 'agente de workflow',
   'disc.workflow': 'Workflow',
