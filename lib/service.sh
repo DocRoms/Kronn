@@ -228,6 +228,54 @@ _service_valid_version() {
 
 # Build the release artifacts inside <src_dir>: the backend binary into
 # <src_dir>/target/release/kronn and the frontend into <src_dir>/frontend/dist.
+# Minimum Node version from `"engines": { "node": ">=X.Y.Z" }`, else 23.6.0.
+_service_frontend_min_node() {
+    local v
+    v="$(sed -n 's/.*"node"[[:space:]]*:[[:space:]]*">=[[:space:]]*\([0-9][0-9.]*\)".*/\1/p' "$1" 2>/dev/null | head -1)"
+    printf '%s\n' "${v:-23.6.0}"
+}
+
+# 0 when version $1 (e.g. v24.14.0 or 24.14.0) >= $2.
+_service_version_ge() {
+    local a="${1#v}" b="${2#v}" i x y
+    local IFS=.
+    # shellcheck disable=SC2206
+    local pa=($a) pb=($b)
+    for i in 0 1 2; do
+        x="${pa[$i]:-0}"; y="${pb[$i]:-0}"
+        x="${x%%[!0-9]*}"; y="${y%%[!0-9]*}"
+        (( 10#${x:-0} > 10#${y:-0} )) && return 0
+        (( 10#${x:-0} < 10#${y:-0} )) && return 1
+    done
+    return 0
+}
+
+# Directory of the first node >= $1: the PATH's, then nvm installs (newest
+# first), then Homebrew / /usr/local. KRONN_SERVICE_NODE_CANDIDATES (newline
+# separated node paths) replaces the search, for tests.
+_service_pick_node_dir() {
+    local min="$1" candidates c v
+    if [[ -n "${KRONN_SERVICE_NODE_CANDIDATES:-}" ]]; then
+        candidates="$KRONN_SERVICE_NODE_CANDIDATES"
+    else
+        candidates="$(command -v node 2>/dev/null || true)"
+        local nvm_dir="${NVM_DIR:-$HOME/.nvm}"
+        if [[ -d "$nvm_dir/versions/node" ]]; then
+            candidates+=$'\n'"$(ls -1d "$nvm_dir"/versions/node/v*/bin/node 2>/dev/null | sort -V -r)"
+        fi
+        candidates+=$'\n/opt/homebrew/bin/node\n/usr/local/bin/node'
+    fi
+    while IFS= read -r c; do
+        [[ -n "$c" && -x "$c" ]] || continue
+        v="$("$c" -v 2>/dev/null)" || continue
+        if _service_version_ge "$v" "$min"; then
+            dirname "$c"
+            return 0
+        fi
+    done <<< "$candidates"
+    return 1
+}
+
 service_build_from_source() {
     local src="${1:-}"
     if [[ -z "$src" || ! -f "$src/backend/Cargo.toml" ]]; then
@@ -239,8 +287,16 @@ service_build_from_source() {
         fail "Backend build failed."
         return 1
     }
-    info "Building the frontend (pnpm install --frozen-lockfile && pnpm build)..."
-    (cd "$src/frontend" && pnpm install --frozen-lockfile && pnpm build) || {
+    # The PATH's node is often an older nvm default; pick one the frontend's
+    # `engines.node` accepts and put it first for pnpm (a node script) too.
+    local min node_dir
+    min="$(_service_frontend_min_node "$src/frontend/package.json")"
+    node_dir="$(_service_pick_node_dir "$min")" || {
+        fail "No Node.js >= $min found (PATH, ~/.nvm, Homebrew). Install one, e.g. nvm install $min"
+        return 1
+    }
+    info "Building the frontend with Node $("$node_dir/node" -v) (pnpm install --frozen-lockfile && pnpm build)..."
+    (cd "$src/frontend" && PATH="$node_dir:$PATH" && export PATH && pnpm install --frozen-lockfile && pnpm build) || {
         fail "Frontend build failed."
         return 1
     }
