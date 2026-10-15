@@ -21,8 +21,8 @@ use the same guard. A card decision keeps its guard inside the database worker
 that applies the resulting filesystem changes.
 [src: file: backend/src/api/audit/briefing.rs:46-81#set_briefing]
 [src: file: backend/src/api/audit/briefing.rs:146-189#complete_reviewed_briefing]
-[src: file: backend/src/api/audit/briefing.rs:740-783#save_briefing_answers]
-[src: file: backend/src/api/discussion_questions.rs:14-64#dispute_lease]
+[src: file: backend/src/api/audit/briefing.rs:724-767#save_briefing_answers]
+[src: file: backend/src/api/discussion_questions.rs:18-68#dispute_lease]
 [src: file: backend/src/api/discussion_questions.rs:201-239#answer]
 
 Linked-repository updates hold the source project's lease and acquire each reverse
@@ -35,13 +35,13 @@ claimed validation job is returned to the queue without consuming an attempt.
 After preflight, cancellation-token registration and a second lease check share
 the tracker mutex, so a writer can either reject that admission or cancel its
 registered token. A dispatch already stopped by a writer cannot start afterward.
-[src: file: backend/src/api/discussions/runtime.rs:1163-1223#hold_validation_during_audit]
+[src: file: backend/src/api/discussions/runtime.rs:1188-1248#hold_validation_during_audit]
 [src: file: backend/src/api/audit/docs_write.rs:57-96#validation_cancel_guard]
 
 Human audit validation is deliberately different: it takes the lease first but
 checks its completion gates before stopping validation agents. An unfinished
 validator remains active and the validation request fails.
-[src: file: backend/src/api/audit/validate.rs:218-397#validate_audit]
+[src: file: backend/src/api/audit/validate.rs:315-494#validate_audit]
 
 Accepted template commits must be integrated into the current checkout before
 Full, Partial, or revalidation launches. The backend checks the merge branch
@@ -58,4 +58,4 @@ The regression suite exercises real HTTP refusals, cancellation before mutation,
 late validation admission, pending integration for all three launch routes, and a
 cancelled HTTP waiter whose blocking worker still owns the lease.
 [src: file: backend/src/api/audit/docs_writer_tests.rs:1-204]
-[src: file: backend/src/api/audit/docs_write.rs:99-151#docs_writer_lease_survives_http_cancellation_until_the_write_finishes]
+[src: file: backend/src/api/audit/docs_write.rs:103-151#docs_writer_lease_survives_http_cancellation_until_the_write_finishes]

@@ -48,11 +48,13 @@ pub struct DocCitationFailure {
     pub moved: Option<MovedAnchor>,
 }
 
-/// A `#symbol` that left its cited range but still occurs in the cited file.
+/// A `#symbol` that left its cited range, or whose definition no longer opens
+/// it, but still occurs in the cited file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MovedAnchor {
     pub span: (usize, usize),
-    /// Every line of the file holding the symbol; none is inside `span`.
+    /// The file's definitions of the symbol, else every line holding it. None
+    /// opens `span`; a definition may sit inside it.
     pub occurrences: Vec<usize>,
     /// Line count of the cited file.
     pub total: usize,
@@ -91,8 +93,9 @@ fn check_reference(
         Some(span) => match line_bounds_status(&found, Some(span)) {
             (SourceStatus::Verified, _) => {
                 let symbol = anchor?;
-                let elsewhere = anchor_miss(&found, span, symbol)?;
-                let detail = anchor_miss_detail(span, symbol, &elsewhere);
+                let miss = anchor_miss(&found, span, symbol)?;
+                let detail = anchor_miss_detail(span, symbol, &miss);
+                let elsewhere = miss.lines;
                 let total = std::fs::read_to_string(&found).map_or(0, |t| t.lines().count());
                 let reason = match elsewhere.as_slice() {
                     [] => format!("{detail} — rewrite the claim or cite where it lives"),
@@ -927,6 +930,42 @@ mod tests {
     }
 
     #[test]
+    fn a_definition_anchor_must_start_the_range_and_reanchor_proposes_that_range() {
+        let tmp = repo();
+        let root = tmp.path();
+        std::fs::write(
+            root.join("src/d.rs"),
+            "a\n/// Docs.\n#[inline]\nfn run() {\n    step();\n}\nfn step() {}\nz\n",
+        )
+        .unwrap();
+        // The doc comment and the attribute may open the range.
+        for ok in ["2-6", "3-6", "4", "4-6"] {
+            let doc = format!("[src: file: src/d.rs:{ok}#run]");
+            assert_eq!(check_doc(&doc, root), vec![], "{ok}");
+        }
+        // The definition sits inside the range, or the range only calls it.
+        assert_eq!(
+            reasons("[src: file: src/d.rs:1-6#run]", root),
+            ["symbol `run` is defined at line 4, not at the start of lines 1-6: a definition anchor must start the range — try `src/d.rs:4-8#run`"]
+        );
+        assert_eq!(
+            reasons("[src: file: src/d.rs:5#step]", root),
+            ["symbol `step` is defined at line 7, outside line 5 (it only references the symbol): a definition anchor must start the range — try `src/d.rs:7#step`"]
+        );
+        let (new, outcome) = reanchor(
+            root,
+            "docs/a.md",
+            "[src: file: src/d.rs:1-3#run] `[src: file: src/d.rs:5#step]`\n",
+        );
+        assert_eq!(
+            new,
+            "[src: file: src/d.rs:4-6#run] `[src: file: src/d.rs:7#step]`\n"
+        );
+        assert_eq!(outcome.rewritten.len(), 2);
+        assert!(check_corpus(root).is_empty());
+    }
+
+    #[test]
     fn a_vanished_anchor_fails_without_a_suggestion() {
         let tmp = repo();
         assert_eq!(
@@ -945,8 +984,10 @@ mod tests {
         std::fs::write(root.join("src/w.rs"), "a\nb\nfn edge() {}\nd\ne\n").unwrap();
         for (citation, holds) in [
             ("file: src/w.rs:3#edge", true),
-            ("file: src/w.rs:1-3#edge", true),
             ("file: src/w.rs:3-5#edge", true),
+            // A definition anchor starts the range: the symbol alone inside is not enough.
+            ("file: src/w.rs:1-3#edge", false),
+            ("file: src/w.rs:2-5#edge", false),
             ("file: src/w.rs:2#edge", false),
             ("file: src/w.rs:4-5#edge", false),
             ("file: src/w.rs:1-2#edge", false),
@@ -1120,13 +1161,13 @@ mod tests {
         assert_eq!(clean.annotations(), "");
     }
 
-    /// Code where `once` sits on line 6 only and `twice` on lines 2 and 9.
+    /// Code where `once` is defined on line 6 only and `twice` on lines 2 and 9.
     fn moved_repo() -> tempfile::TempDir {
         let tmp = repo();
         std::fs::create_dir_all(tmp.path().join("docs")).unwrap();
         std::fs::write(
             tmp.path().join("src/m.rs"),
-            "a\nfn twice() {}\nc\nd\ne\nfn once() {}\ng\nh\nlet t = twice();\n",
+            "a\nfn twice() {}\nc\nd\ne\nfn once() {}\ng\nh\nfn twice(x: u8) {}\n",
         )
         .unwrap();
         tmp

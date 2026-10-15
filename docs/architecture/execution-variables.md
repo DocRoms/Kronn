@@ -59,7 +59,7 @@ already affected run retains its original snapshot.
 
 [src: file: backend/src/core/execution_variables.rs:54-188#resolve]
 [src: file: backend/src/api/execution_variables.rs:23-101#preview]
-[src: file: frontend/src/components/workflows/ProvidedVariablesPreview.tsx:80-136#toggleReveal]
+[src: file: frontend/src/components/workflows/ProvidedVariablesPreview.tsx:90-146#toggleReveal]
 
 ## Snapshot and discussion trace
 
@@ -75,7 +75,7 @@ durable discussion/run and project scope. Reveals are audited without storing
 the returned value.
 
 [src: file: backend/src/db/execution_variable_snapshots.rs:151-222#insert_execution_context_message] [src: file: backend/src/db/execution_variable_snapshots.rs:33-41#has_live_owner]
-[src: file: frontend/src/components/MessageBubble.tsx:1047-1074#revealExecutionVariable]
+[src: file: frontend/src/components/MessageBubble.tsx:623-650#revealExecutionVariable]
 
 ## Retention
 
@@ -100,5 +100,5 @@ value-free errors.
 
 [src: file: backend/src/core/execution_variables.rs:326-1013#tests]
 [src: file: backend/src/db/execution_variable_snapshots.rs:319-597#tests]
-[src: file: backend/tests/api_tests.rs:11160-11370#execution_variable_preview_is_short_lived_masked_and_audited]
+[src: file: backend/tests/api_tests.rs:11299-11509#execution_variable_preview_is_short_lived_masked_and_audited]
 [src: file: frontend/src/components/workflows/__tests__/ProvidedVariablesPreview.test.tsx:71-120#ProvidedVariablesPreview]

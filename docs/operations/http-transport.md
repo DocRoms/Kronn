@@ -31,7 +31,7 @@ for repetition only; exhausted call budgets and open error circuits still
 apply, and effectful calls remain cached. Workers retain their separate bounded
 finalization policy. This prevents a post-edit verification from receiving the
 pre-edit file or a repetition refusal (KT-948).
-[src: file: backend/src/agents/runner.rs:11282-11310#observation_readers_to_restore]
+[src: file: backend/src/agents/runner.rs:791-819#observation_readers_to_restore]
 
 The HTTP runner also publishes structured input/output and reported cache-token
 counters through `AgentProcess`, which Full and partial audits consume. Each
@@ -57,9 +57,9 @@ timeouts, identical-call protection and error circuits remain active. When an
 artifact check fails after a ceiling, the step warning records the ceiling
 alongside the missing-output reason. Reaching a search ceiling alone does not
 fail an otherwise valid artifact (KT-951).
-[src: file: backend/src/agents/runner.rs:26-27#MAX_AUDIT_SEARCH_CALLS]
-[src: file: backend/src/agents/runner.rs:680-700#is_audit_deliverable_tool]
-[src: file: backend/src/api/audit/validation.rs:118-157#with_http_diagnostics]
+[src: file: backend/src/agents/runner.rs:27-28#MAX_AUDIT_SEARCH_CALLS]
+[src: file: backend/src/agents/runner.rs:695-715#is_audit_deliverable_tool]
+[src: file: backend/src/api/audit/validation.rs:121-160#with_http_diagnostics]
 
 Hosted OpenAI-wire models (LiteLLM, NVIDIA, Custom, OpenRouter) send no
 `num_ctx`, so their context pressure is measured on a bounded step budget:
@@ -82,7 +82,7 @@ Originals are saved by content hash under
 agent correction attempts, with existing human-section protection. Invalid
 paths and ranges still block validation. Retry usage is included in the step
 total (KT-952).
-[src: file: backend/src/api/audit/document_repair.rs:114-183#split_verified_citations]
+[src: file: backend/src/api/audit/document_repair.rs:121-190#split_verified_citations]
 [src: file: backend/src/core/audit_state.rs:12#CITATION_ORIGINALS_DIR]
 [src: file: backend/src/api/audit/full.rs:2352-2373#check_attempt]
 
@@ -92,7 +92,7 @@ budget as documentary correction; it does not add another retry budget. Resume
 recomputes the matrix failure from the current index before its first attempt.
 Invalid tables remain blocking, provider errors do not trigger this correction,
 and existing TD files and human sections remain protected (KT-956).
-[src: file: backend/src/api/audit/validation.rs:95-107#coverage_repair_feedback]
+[src: file: backend/src/api/audit/validation.rs:98-110#coverage_repair_feedback]
 [src: file: backend/src/api/audit/full.rs:2268-2283#coverage_repair_feedback]
 
 A failed provider launch finalizes the step with its error and elapsed time.
@@ -107,7 +107,7 @@ this diagnostic; provider response bodies and endpoint URLs are excluded.
 Partial files remain in place. This failure does not automatically retry the
 request after tool execution or replay that effect (KT-955).
 [src: file: backend/src/agents/http_diagnostics.rs:39-53#failure_summary]
-[src: file: backend/src/api/audit/validation.rs:118-157#with_http_diagnostics]
+[src: file: backend/src/api/audit/validation.rs:121-160#with_http_diagnostics]
 [src: file: backend/src/agents/runner.rs:8493-8497#HTTP_PROVIDER_MAX_ATTEMPTS]
 
 The final gate also invalidates the relevant step rows so Resume names earlier
@@ -178,9 +178,9 @@ under an unrelated agent.
   immediately before each launch. A future
   centralized guard can make this invariant structural once the agent runner
   is available for that refactor.
-  [src: file: backend/src/core/model_catalog/mod.rs:1272-1279#preflight_resolve]
+  [src: file: backend/src/core/model_catalog/mod.rs:1279-1286#preflight_resolve]
   [src: file: backend/src/api/discussions/orchestration.rs:66-131#checked_launch_connection]
-  [src: file: backend/src/api/discussions/orchestration.rs:809-815#checked_launch_connection]
+  [src: file: backend/src/api/discussions/orchestration.rs:66-72#checked_launch_connection]
   [src: file: backend/src/workflows/steps.rs:1132-1160#resolve_step_connection]
   [src: file: backend/src/workflows/steps.rs:1174-1210#preflight_workflow_launch]
 - **Mid-thread `@mention` autocomplete doesn't suggest connection aliases.**
@@ -215,7 +215,7 @@ under an unrelated agent.
   invocation. It stops the test immediately: later model errors cannot hide
   the billing failure. The form and saved connection card show a translated
   message; provider response bodies and credentials remain private.
-  [src: file: backend/src/api/external_api_connections.rs:740-750#ChatProbe]
+  [src: file: backend/src/api/external_api_connections.rs:566-576#ChatProbe]
   [src: file: frontend/src/components/settings/ExternalApiSection.tsx:365-366#billing_error]
   Xiaomi MiMo returns HTTP 402 (`insufficient_balance`) when generation lacks
   credit, even when the key can load `/v1/models`. Previously the generic
@@ -235,7 +235,7 @@ Ollama `/api/show` and LiteLLM `/model/info` may confirm vision for the exact
 model. A missing declaration never causes an image to be sent speculatively.
 [src: file: backend/src/agents/vision.rs:495-525#attach_to_chat_body]
 [src: file: backend/src/agents/vision.rs:145-175#ollama_show_vision]
-[src: file: backend/src/api/discussions/streaming.rs:2727-2758#http_context_images]
+[src: file: backend/src/api/discussions/streaming.rs:2743-2774#http_context_images]
 
 Every withheld image is named in the model's context with an explicit instruction
 not to describe its contents, and a way for the user to supply the information.
@@ -246,7 +246,7 @@ under allocation/dimension limits and downscaled to PNG, preserving the original
 file. Failed decoding or remaining limits produce the same explicit withholding
 notice. Transmission/downscaling counts are logged without the image payload.
 Prompt estimates count a bounded image allowance instead of base64 text bytes.
-[src: file: backend/src/agents/vision.rs:40-56#MAX_TOTAL_BYTES]
+[src: file: backend/src/agents/vision.rs:50-66#MAX_TOTAL_BYTES]
 [src: file: backend/src/agents/vision.rs:426-430#withheld_sentence]
 
 `read_file` accepts only file paths registered to the current discussion, even

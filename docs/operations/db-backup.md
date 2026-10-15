@@ -17,7 +17,7 @@ loss = **lost forever** without a copy.
 
 ## Built-in backups
 
-Kronn writes three kinds of copies. `[src: file: backend/src/core/backup.rs:316-330#BackupScheduler]`
+Kronn writes three kinds of copies. `[src: file: backend/src/core/backup.rs:310-324#BackupScheduler]`
 
 | Copy | When | Where |
 |------|------|-------|
@@ -41,7 +41,7 @@ The pre-migration copy is a file copy of the checkpointed database to
 `kronn.db.backup.tmp`, synced, then renamed over `kronn.db.backup`. If the
 disk lacks room or the copy fails, boot stops before any migration with a
 message saying so. `KRONN_MIGRATION_BACKUP=0` upgrades without a backup; use
-it only after taking a copy by hand. `[src: file: backend/src/db/migrations.rs:1197-1206#backup_before_migration]`
+it only after taking a copy by hand. `[src: file: backend/src/db/migrations.rs:1205-1214#backup_before_migration]`
 
 ## Run retention and compaction
 

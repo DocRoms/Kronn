@@ -23,7 +23,7 @@ The same word therefore names TWO different identities depending on the
 room: `@claude` is the discussion agent in a ClaudeCode-configured room
 and a punctual spawn everywhere else. This is intentional and the
 autocomplete must always show which one is being picked (KT-211).
-[src: file: frontend/src/lib/messageTargets.ts:54-68#isPrincipal]
+[src: file: frontend/src/lib/messageTargets.ts:56-70#isPrincipal]
 [src: file: backend/scripts/disc-introspection-mcp.py:5157-5165#principal]
 
 ## 2. Alias resolution, exactly
@@ -34,14 +34,14 @@ autocomplete must always show which one is being picked (KT-211).
   `-cli[-N]` ordinals. `targetsFromComposerText` matches triggers in
   prose only (fenced/inline code is documentation), keeps textual order,
   deduplicates identical targets.
-  [src: file: frontend/src/lib/messageTargets.ts:26-125#composerMentions] [src: file: frontend/src/lib/messageTargets.ts:177-208#targetsFromComposerText]
+  [src: file: frontend/src/lib/messageTargets.ts:26-125#composerMentions] [src: file: frontend/src/lib/messageTargets.ts:202-233#targetsFromComposerText]
 - **MCP append (agent)**: `_structured_message_targets` parses the same
   grammar from prose (code stripped first). `@x-cli-N` resolves against
   the live participants list and RAISES when the ordinal does not
   identify a joined CLI — an agent cannot invent a session. A short
   alias resolves to `discussion_agent` when principal, else `agent`.
   Multiple mentions fan out once per identity, in textual order.
-  [src: file: backend/scripts/disc-introspection-mcp.py:5070-5156#_structured_message_targets]
+  [src: file: backend/scripts/disc-introspection-mcp.py:5080-5166#_structured_message_targets]
 - **No presence-based substitution.** A short alias never silently
   reroutes to a joined CLI (and never refuses to spawn) just because a
   same-provider CLI is present: the punctual agent and the CLI are
@@ -54,7 +54,7 @@ autocomplete must always show which one is being picked (KT-211).
   Claude CLI unless Claude is the room's own agent. That CLI gets the
   wake and no punctual agent is spawned; with two candidate CLIs and no
   reply context nothing is guessed.
-  [src: file: backend/src/db/discussions.rs:4036-4062#agent_alias_cli_target]
+  [src: file: backend/src/db/discussions.rs:4055-4081#agent_alias_cli_target]
   [src: file: backend/src/db/discussions.rs:1965-1995#providers_resolved_to_cli]
   [src: file: backend/src/api/disc_source.rs:678-730#agent_alias_cli_target]
 
@@ -110,7 +110,7 @@ joined CLI of its provider, whose turns its transcript labels with
 the CLI alias.
 [src: file: backend/src/db/discussions.rs:2071-2074#reply_author]
 [src: file: backend/src/api/disc_invite.rs:1972-1992#addressed_to_session]
-[src: file: backend/src/api/discussions/streaming.rs:2382-2430#punctual_identity_notice]
+[src: file: backend/src/api/discussions/streaming.rs:2386-2434#punctual_identity_notice]
 [src: file: backend/src/api/disc_prompts.rs:337-355#transcript_agent_label]
 [src: file: backend/src/api/disc_invite.rs:1615-1623#reply_target]
 
@@ -129,7 +129,7 @@ the author or alias cannot be verified, with a refusal that never
 fabricates an ordinal. A deliberate fan-out that lists the exact replied
 CLI alongside its native identity passes untouched, and outside a reply
 context the short alias stays free (both identities may be wanted).
-[src: file: backend/scripts/disc-introspection-mcp.py:5246-5329#_reject_short_alias_reply_to_cli_author]
+[src: file: backend/scripts/disc-introspection-mcp.py:5256-5339#_reject_short_alias_reply_to_cli_author]
 
 ## 6. Presence, fallback, reload
 
@@ -138,7 +138,7 @@ context the short alias stays free (both identities may be wanted).
   `next_poll_at`. Eligibility = unexpired lease or next_poll grace. A
   session identified only by its session id (provider unknown) keeps
   full presence via the agent type stored on its row.
-  [src: file: backend/src/api/disc_invite.rs:1262-1275#ACTIVITY_WAITING_MARGIN_SECS] [src: file: backend/src/api/disc_invite.rs:1348-1350#presence_agent] [src: file: backend/src/db/discussion_sessions.rs:1245-1270#RESPONDER_ELIGIBLE_PREDICATE]
+  [src: file: backend/src/api/disc_invite.rs:1275-1288#ACTIVITY_WAITING_MARGIN_SECS] [src: file: backend/src/api/disc_invite.rs:1348-1350#presence_agent] [src: file: backend/src/db/discussion_sessions.rs:1245-1270#RESPONDER_ELIGIBLE_PREDICATE]
 - **Untargeted human turn**: in a room with a native agent it always
   belongs to the configured discussion agent, whatever the CLI presence
   (target identity, not presence, decides ownership); the turn reaches the
@@ -160,4 +160,4 @@ identities first (discussion agent, then joined CLIs, then punctual agents
 already in the room), and never present two identities under one
 undifferentiated label. The menu is a disambiguation device, not a shortcut:
 picking an entry always yields exactly the identity it names.
-[src: file: frontend/src/components/ChatInput.tsx:696-727#activeRank] [src: file: frontend/src/lib/messageTargets.ts:107-121#displayTrigger]
+[src: file: frontend/src/components/ChatInput.tsx:716-747#activeRank] [src: file: frontend/src/lib/messageTargets.ts:107-121#displayTrigger]
