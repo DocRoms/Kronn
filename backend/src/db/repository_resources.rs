@@ -151,7 +151,7 @@ pub fn is_approved(
         .is_some())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

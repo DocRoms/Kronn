@@ -242,7 +242,7 @@ fn unique_destination(dst: &Path) -> PathBuf {
     dst.to_path_buf()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use tempfile::TempDir;

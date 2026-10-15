@@ -1241,7 +1241,7 @@ pub async fn edit_last_user_message(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use std::sync::Arc;

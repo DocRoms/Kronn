@@ -37,7 +37,7 @@ pub async fn health() -> axum::Json<serde_json::Value> {
     axum::Json(body)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

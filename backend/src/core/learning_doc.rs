@@ -143,7 +143,7 @@ fn remove_section(content: &str) -> (String, LearningDocOutcome) {
     (new_content, LearningDocOutcome::Removed)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

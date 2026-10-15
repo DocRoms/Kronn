@@ -39,6 +39,82 @@ class LintWithConnUnwrap(unittest.TestCase):
         )
         self.assertEqual(_mod.find_violations(src, "clean.rs"), [])
 
+    def test_feature_gated_test_module_is_exempt_but_production_is_not(self):
+        # The `full-tests` feature gates most test modules behind
+        # `#[cfg(all(test, feature = "full-tests"))]`, with or without an
+        # extra predicate: still a test module, still exempt. The production
+        # unwrap placed BEFORE the attribute must still be the one violation,
+        # otherwise a widened pattern could exempt the whole file unnoticed.
+        for attr in (
+            "#[cfg(test)]",
+            '#[cfg(all(test, feature = "full-tests"))]',
+            '#[cfg(all(test, unix, feature = "full-tests"))]',
+            "#[cfg(all(test, unix))]",
+        ):
+            src = (
+                "fn f(db: &Db) {\n"
+                "    db.with_conn(|conn| Ok(conn.count().unwrap()));\n"
+                "}\n"
+                + attr + "\n"
+                "mod tests {\n"
+                "    fn t(db: &Db) { db.with_conn(|c| Ok(c.count().unwrap())); }\n"
+                "}\n"
+            )
+            self.assertEqual(_mod.find_violations(src, "gated.rs"), ["gated.rs:2"], attr)
+
+    def test_feature_alone_does_not_exempt(self):
+        # `#[cfg(feature = "full-tests")]` without `test` is not a test
+        # module: its unwrap is production code and must be flagged.
+        src = (
+            '#[cfg(feature = "full-tests")]\n'
+            "mod maybe {\n"
+            "    fn t(db: &Db) { db.with_conn(|c| Ok(c.count().unwrap())); }\n"
+            "}\n"
+        )
+        self.assertEqual(_mod.find_violations(src, "feature.rs"), ["feature.rs:3"])
+
+    def test_only_the_gated_item_is_exempt_not_the_rest_of_the_file(self):
+        # `api/discussions/mod.rs` declares a gated `mod x;` on line 19 and
+        # 200 lines of production code after it: the old "cut the file at
+        # the first attribute" rule stopped scanning there.
+        src = (
+            "pub mod ceilings;\n"
+            '#[cfg(all(test, unix, feature = "full-tests"))]\n'
+            "mod companion_privacy_tests;\n"
+            "pub mod context;\n"
+            "fn f(db: &Db) {\n"
+            "    db.with_conn(|conn| Ok(conn.count().unwrap()));\n"
+            "}\n"
+        )
+        self.assertEqual(_mod.find_violations(src, "after_line.rs"), ["after_line.rs:6"])
+        src = (
+            "#[cfg(test)]\n"
+            "#[allow(dead_code)]\n"
+            "mod tests {\n"
+            "    fn t(db: &Db) { db.with_conn(|c| Ok(c.count().unwrap())); }\n"
+            "}\n"
+            "fn f(db: &Db) {\n"
+            "    db.with_conn(|conn| Ok(conn.count().unwrap()));\n"
+            "}\n"
+        )
+        self.assertEqual(_mod.find_violations(src, "after_block.rs"), ["after_block.rs:7"])
+
+    def test_cfg_test_helper_items_are_exempt(self):
+        # A `#[cfg(test)]` fn, static or `use` is test support, not a module:
+        # exempt exactly like a test module, and only that item.
+        src = (
+            "#[cfg(test)]\n"
+            "fn seed(db: &Db) { db.with_conn(|c| Ok(c.count().unwrap())); }\n"
+            "#[cfg(test)]\n"
+            "static SEEDED: LazyLock<bool> = LazyLock::new(|| { true });\n"
+            "#[cfg(test)]\n"
+            "use std::collections::{HashMap, HashSet};\n"
+            "fn f(db: &Db) {\n"
+            "    db.with_conn(|conn| Ok(conn.count()?));\n"
+            "}\n"
+        )
+        self.assertEqual(_mod.find_violations(src, "helpers.rs"), [])
+
     def test_unwrap_outside_the_closure_is_not_flagged(self):
         src = (
             "fn f(db: &Db) {\n"

@@ -1960,7 +1960,7 @@ pub fn note_awareness_offer(conn: &Connection, session_pk: i64) -> Result<i64> {
     Ok(stalled)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::db::migrations;

@@ -403,7 +403,7 @@ impl WorkflowEngine {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;

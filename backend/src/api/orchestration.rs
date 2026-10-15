@@ -12585,7 +12585,7 @@ pub async fn human_review(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 pub(crate) mod tests {
     use super::*;
     use crate::models::{

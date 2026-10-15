@@ -1377,7 +1377,7 @@ fn normalize_batch_items(
         .collect()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

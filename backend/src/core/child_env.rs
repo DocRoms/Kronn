@@ -996,7 +996,7 @@ pub fn isolate(command: &mut std::process::Command, route: ChildRoute) {
 }
 
 /// Test helpers shared by the spawn sites' environment tests.
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 pub(crate) mod probe {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
@@ -1122,6 +1122,6 @@ pub(crate) mod probe {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "child_env_test.rs"]
 mod child_env_test;

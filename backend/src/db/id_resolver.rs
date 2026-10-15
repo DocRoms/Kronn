@@ -245,7 +245,7 @@ pub fn resolve_id(conn: &Connection, id: &str) -> Result<Option<ResolvedId>> {
     select_unique(matches)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::db::migrations;

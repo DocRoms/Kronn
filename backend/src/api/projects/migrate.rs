@@ -125,7 +125,7 @@ pub async fn migrate_docs(
     Json(ApiResponse::ok(response))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

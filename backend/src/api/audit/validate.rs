@@ -266,7 +266,7 @@ pub async fn mark_bootstrapped(
     Json(ApiResponse::ok(status))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod validate_gate_tests {
     use super::*;
     use axum::extract::{Path as AxPath, State};

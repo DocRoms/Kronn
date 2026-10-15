@@ -315,7 +315,7 @@ pub fn refused_outcome(step: &WorkflowStep, error: String, duration_ms: u64) -> 
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::models::StepType;

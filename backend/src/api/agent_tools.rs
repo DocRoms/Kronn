@@ -20,23 +20,23 @@ use crate::AppState;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "agent_audit_scope_tests.rs"]
 mod audit_scope_tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "agent_quick_prompt_tests.rs"]
 mod quick_prompt_tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "agent_attachment_tests.rs"]
 mod attachment_tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "agent_quick_prompt_bench.rs"]
 mod quick_prompt_bench;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "agent_signal_bench.rs"]
 mod signal_bench;
 
@@ -4553,7 +4553,7 @@ fn unwrap_api_compact_task(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

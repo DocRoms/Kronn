@@ -1809,7 +1809,7 @@ pub(crate) fn load_other_window(from: Option<u32>, to: Option<u32>, total: u32) 
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     //! Route-level unit tests live in `backend/tests/api_tests.rs` —
     //! the in-memory DB integration there is what exercises the full
@@ -4777,7 +4777,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod load_other_window_tests {
     //! KT-193 DoD 4 — retrieval must stay targeted.
     //!

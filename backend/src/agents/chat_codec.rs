@@ -232,7 +232,7 @@ pub(crate) fn with_prompt_cache_hints(body: &Value) -> Option<Value> {
     Some(hinted)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     #[test]
     fn openrouter_usage_cost_is_read_as_micro_usd() {

@@ -171,7 +171,7 @@ fn jpeg_size(bytes: &[u8]) -> Option<(u32, u32)> {
     None
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

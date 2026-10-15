@@ -746,7 +746,7 @@ fn resolve_host_path(path: &str) -> String {
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use std::path::PathBuf;

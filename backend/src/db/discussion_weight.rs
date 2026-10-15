@@ -103,7 +103,7 @@ pub fn one(conn: &Connection, discussion_id: &str) -> Result<DiscussionWeight> {
     Ok(weight)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::models::{WeightLevel, WeightThresholds};

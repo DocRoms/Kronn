@@ -578,7 +578,7 @@ fn rollup(conn: &Connection, sql: &str) -> Result<Vec<ObjectSpend>> {
     Ok(rows)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "cli_telemetry_test.rs"]
 mod cli_telemetry_test;
 

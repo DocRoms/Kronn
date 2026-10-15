@@ -132,7 +132,7 @@ pub fn get(
         .optional()?)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::db::Database;

@@ -1891,7 +1891,7 @@ pub fn finalize_lint_report(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

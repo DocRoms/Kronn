@@ -822,7 +822,7 @@ fn is_blocking_code(code: &str) -> bool {
     matches!(code, "broken_link" | "broken_citation")
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     fn write(path: &Path, body: &str) {

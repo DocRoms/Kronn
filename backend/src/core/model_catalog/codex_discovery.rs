@@ -268,7 +268,7 @@ async fn read_response<R: AsyncBufRead + Unpin>(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

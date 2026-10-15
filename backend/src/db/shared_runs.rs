@@ -432,7 +432,7 @@ pub fn sync_media(conn: &Connection, job: &crate::db::media_jobs::MediaJob) -> R
     upsert(conn, &media_run(job))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

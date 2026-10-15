@@ -490,7 +490,7 @@ pub async fn install_on_boot(database: &crate::db::Database, language: &str) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

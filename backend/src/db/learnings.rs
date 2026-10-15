@@ -310,7 +310,7 @@ pub fn rejection_count(conn: &Connection, claim_hash: &str) -> Result<i64> {
         .unwrap_or(0))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

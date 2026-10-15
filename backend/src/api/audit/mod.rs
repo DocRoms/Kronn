@@ -62,7 +62,7 @@ pub(super) fn detach_sse_stream(mut producer: SseStream) -> SseStream {
     crate::core::sse_limits::with_heartbeat(received, crate::core::sse_limits::HEARTBEAT_INTERVAL)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod detach_sse_stream_tests {
     use super::{detach_sse_stream, Event, SseStream};
     use futures::StreamExt;
@@ -1370,7 +1370,7 @@ pub(crate) fn kind_to_steps(kind: crate::models::AuditKind) -> &'static [Analysi
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod kind_dispatch_tests {
     use super::*;
     use crate::models::AuditKind;
@@ -1745,7 +1745,7 @@ mod kind_dispatch_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod prompt_tests {
     use super::helpers::{
         build_briefing_prompt, build_sub_audit_validation_prompt, build_validation_prompt,

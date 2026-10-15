@@ -1245,7 +1245,7 @@ fn orchestration_event_sse(
     Sse::new(crate::core::sse_limits::agent_run(stream))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 
@@ -1867,7 +1867,7 @@ const _: () = assert!(
     "debate context ceiling raised: this string is billed to a model"
 );
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod orchestrate_validation_tests {
     // The validation logic itself (matching usable agent types against the
     // requested list) is small and self-contained — we mirror it here as a
@@ -2582,7 +2582,7 @@ mod orchestrate_validation_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod error_hint_tests {
     use super::{
         announced_quota_reset, detect_agent_error_hint, is_hard_quota_exhausted,
@@ -3016,7 +3016,7 @@ mod error_hint_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod debate_context_tests {
     use super::*;
     use crate::models::{DiscussionMessage, MessageChannel, MessageRole};

@@ -306,6 +306,6 @@ pub fn prune_orphan_runs(conn: &Connection) -> Result<usize> {
     Ok(removed)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "quick_exec_runs_test.rs"]
 mod quick_exec_runs_test;

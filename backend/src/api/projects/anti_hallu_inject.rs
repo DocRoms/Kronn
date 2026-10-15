@@ -212,7 +212,7 @@ pub async fn sync_redirectors(
     }))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use crate::api::audit::anti_hallu_step::{self, AntiHalluApplyResult};
 

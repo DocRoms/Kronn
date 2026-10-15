@@ -458,7 +458,7 @@ pub(crate) fn apply_td_resolutions(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

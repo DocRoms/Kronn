@@ -559,7 +559,7 @@ fn accept_within_tx(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::db::orchestration::{launch_single_task, set_execution_sub_discussion};

@@ -346,6 +346,6 @@ pub fn price_reply(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "pricing_test.rs"]
 mod pricing_test;

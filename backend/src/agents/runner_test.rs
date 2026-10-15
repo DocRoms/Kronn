@@ -1,4 +1,4 @@
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use crate::acp::{
         AcpAgent, AcpCapability, AcpConfigOption, AcpError, AcpInitialize,
@@ -16159,7 +16159,7 @@ sleep 3600
 }
 
 // ─── #223: text blocks never share a line ──────────────────────────────────
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod text_block_tests {
     use crate::agents::runner::*;
 

@@ -1505,7 +1505,7 @@ pub async fn preflight_check(
     .map(|failure| *failure)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::db::model_catalog as db;

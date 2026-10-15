@@ -1067,7 +1067,7 @@ impl Workspace {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::{main_tree_wait_from, MainTreeGuard, MainTreeRefusal};
     use std::time::Duration;

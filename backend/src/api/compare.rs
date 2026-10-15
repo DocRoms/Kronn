@@ -829,7 +829,7 @@ pub async fn start_improvement(
     }))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

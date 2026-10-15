@@ -621,7 +621,7 @@ pub async fn cancel(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use rusqlite::Connection;

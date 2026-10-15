@@ -891,7 +891,7 @@ pub async fn estimate(
     }))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::db::Database;

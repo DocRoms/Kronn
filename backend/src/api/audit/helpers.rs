@@ -1129,7 +1129,7 @@ fn build_briefing_legacy_prompt(language: &str) -> String {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod compute_audit_info_tests {
     use super::*;
 

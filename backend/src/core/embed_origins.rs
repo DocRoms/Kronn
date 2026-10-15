@@ -327,7 +327,7 @@ pub fn inject_served_frame_src(html: &[u8], sources: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

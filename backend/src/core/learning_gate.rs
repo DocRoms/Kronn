@@ -141,7 +141,7 @@ pub fn claim_hash(kind: &str, scope: Option<&str>, claim: &str) -> String {
     format!("{:016x}", h.finish())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::models::learnings::Evidence;
