@@ -414,7 +414,7 @@ restart. Boot first quiesces due dispatches and moves non-terminal executions to
 same SQLite boundary, then classifies the checkpoint against discussions, worker availability,
 workspace ownership and the real Git refs. A pending decision survives a second crash and is consumed
 only by an explicit guarded resume `[src: file: backend/src/api/orchestration.rs:267-367#reconcile_at_boot]`
-`[src: file: backend/src/db/orchestration.rs:5413-5484#set_execution_recovery]`. The runtime watchdog uses four independent clocks — total
+`[src: file: backend/src/db/orchestration.rs:5521-5592#set_execution_recovery]`. The runtime watchdog uses four independent clocks — total
 duration, activity, review wait and human wait — so an acknowledged human gate is never mistaken for a
 dead worker `[src: file: backend/src/api/orchestration.rs:566-722#start_resilience_watchdog]`.
 

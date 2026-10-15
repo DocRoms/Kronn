@@ -162,7 +162,9 @@ pub fn file_digest(project: &Path, target: &str) -> Option<String> {
     if !resolved.starts_with(&root) {
         return None;
     }
-    std::fs::read(&resolved).ok().map(|bytes| sha256_hex(&bytes))
+    std::fs::read(&resolved)
+        .ok()
+        .map(|bytes| sha256_hex(&bytes))
 }
 
 impl RunState {

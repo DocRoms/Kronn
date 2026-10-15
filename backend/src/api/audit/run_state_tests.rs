@@ -215,9 +215,10 @@ async fn the_writer_projects_each_step_deterministically_without_costs() {
                 },
             )?;
             wr.sync(conn, false);
-            let first = std::fs::read_to_string(repo_state::state_path(&rr)).unwrap();
+            let first = std::fs::read_to_string(repo_state::state_path(&rr))?;
             // The run exists from its first second, every step pending.
-            let parsed = RunState::parse(&first).unwrap();
+            let parsed =
+                RunState::parse(&first).ok_or_else(|| anyhow::anyhow!("unparsable run state"))?;
             assert_eq!(parsed.status, "Running");
             assert!(parsed
                 .steps
@@ -229,12 +230,12 @@ async fn the_writer_projects_each_step_deterministically_without_costs() {
             finish_step(conn, "run-a", 1, true);
             finish_step(conn, "run-a", 2, false);
             wr.sync(conn, false);
-            let second = std::fs::read_to_string(repo_state::state_path(&rr)).unwrap();
+            let second = std::fs::read_to_string(repo_state::state_path(&rr))?;
             // No change, same bytes: git sees no diff.
             wr.sync(conn, false);
             assert_eq!(
                 second,
-                std::fs::read_to_string(repo_state::state_path(&rr)).unwrap()
+                std::fs::read_to_string(repo_state::state_path(&rr))?
             );
             Ok(())
         })
@@ -296,10 +297,11 @@ async fn an_agent_editing_the_state_file_mid_run_changes_nothing() {
             )?;
             finish_step(conn, "run-a", 1, true);
             wr.sync(conn, false);
-            let authoritative = std::fs::read_to_string(repo_state::state_path(&rr)).unwrap();
+            let authoritative = std::fs::read_to_string(repo_state::state_path(&rr))?;
 
             // The agent rewrites the file: forged baseline, steps marked done.
-            let mut forged = RunState::parse(&authoritative).unwrap();
+            let mut forged = RunState::parse(&authoritative)
+                .ok_or_else(|| anyhow::anyhow!("unparsable run state"))?;
             forged.baselines = Some(Baselines::from_text(
                 "# Decisions\nforged ADR accepted\n",
                 "",
@@ -308,32 +310,45 @@ async fn an_agent_editing_the_state_file_mid_run_changes_nothing() {
                 step.status = StepStatus::Done;
                 step.digest = Some("0".repeat(64));
             }
-            repo_state::write(&rr, &forged).unwrap();
+            repo_state::write(&rr, &forged).map_err(anyhow::Error::msg)?;
             // …and a previous step's document is edited behind Kronn's back.
-            std::fs::write(rr.join("docs/AGENTS.md"), "# Tampered\n").unwrap();
+            std::fs::write(rr.join("docs/AGENTS.md"), "# Tampered\n")?;
 
             finish_step(conn, "run-a", 2, true);
             wr.sync(conn, false);
-            let after =
-                RunState::parse(&std::fs::read_to_string(repo_state::state_path(&rr)).unwrap())
-                    .unwrap();
+            let after = RunState::parse(&std::fs::read_to_string(repo_state::state_path(&rr))?)
+                .ok_or_else(|| anyhow::anyhow!("unparsable run state"))?;
             // The DB baseline, not the file's, is what the file says again.
             assert_eq!(
-                after.baselines.as_ref().unwrap().decisions_text(),
+                after
+                    .baselines
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("absent"))?
+                    .decisions_text(),
                 "# Decisions\nreal baseline\n"
             );
-            assert_eq!(after.step(3).unwrap().status, StepStatus::Pending);
+            assert_eq!(
+                after
+                    .step(3)
+                    .ok_or_else(|| anyhow::anyhow!("absent"))?
+                    .status,
+                StepStatus::Pending
+            );
             assert_eq!(
                 RunState::parse(&authoritative)
-                    .unwrap()
+                    .ok_or_else(|| anyhow::anyhow!("unparsable run state"))?
                     .step(1)
-                    .unwrap()
+                    .ok_or_else(|| anyhow::anyhow!("absent"))?
                     .digest,
-                after.step(1).unwrap().digest,
+                after
+                    .step(1)
+                    .ok_or_else(|| anyhow::anyhow!("absent"))?
+                    .digest,
                 "the digest of step 1 is the one it had when it finished"
             );
             // The authoritative baseline is still the DB's.
-            let db_baseline = crate::db::audit_runs::adr_baseline(conn, "run-a")?.unwrap();
+            let db_baseline = crate::db::audit_runs::adr_baseline(conn, "run-a")?
+                .ok_or_else(|| anyhow::anyhow!("absent"))?;
             assert_eq!(db_baseline.decisions, "# Decisions\nreal baseline\n");
             Ok(())
         })
@@ -526,7 +541,8 @@ async fn a_colleague_resumes_trusting_matching_steps_and_replaying_the_others() 
         .db
         .with_conn(|conn| {
             Ok((
-                crate::db::audit_runs::get_by_id(conn, "run-alice")?.unwrap(),
+                crate::db::audit_runs::get_by_id(conn, "run-alice")?
+                    .ok_or_else(|| anyhow::anyhow!("absent"))?,
                 crate::db::audit_runs::list_audit_steps(conn, "run-alice")?,
                 crate::db::audit_runs::adr_baseline(conn, "run-alice")?,
             ))
@@ -896,7 +912,9 @@ async fn audit_resumable_offers_the_run_a_colleague_committed_and_the_launch_ado
     assert!(resumable(&state).await.is_none());
 
     commit_all(&root, "audit: steps 1-2");
-    let offered = resumable(&state).await.expect("the repository run is offered");
+    let offered = resumable(&state)
+        .await
+        .expect("the repository run is offered");
     assert_eq!(offered["id"], "run-alice");
     assert_eq!(offered["kind"], "Full");
     assert_eq!(offered["from_repository"], true);
@@ -1036,7 +1054,8 @@ async fn after_a_validation_the_digests_are_rebuilt_from_the_rows_not_from_the_f
         .db
         .with_conn(|conn| {
             Ok(LocalRunRows {
-                run: crate::db::audit_runs::get_by_id(conn, "run-local")?.unwrap(),
+                run: crate::db::audit_runs::get_by_id(conn, "run-local")?
+                    .ok_or_else(|| anyhow::anyhow!("absent"))?,
                 steps: crate::db::audit_runs::list_audit_steps(conn, "run-local")?,
                 baseline: crate::db::audit_runs::adr_baseline(conn, "run-local")?,
             })

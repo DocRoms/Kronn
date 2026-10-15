@@ -7469,7 +7469,10 @@ async fn booting_the_backend_repairs_stale_validations_idempotently() {
                     ],
                 )?;
             }
-            let started = Utc.with_ymd_and_hms(2026, 8, 28, 19, 0, 0).unwrap();
+            let started = Utc
+                .with_ymd_and_hms(2026, 8, 28, 19, 0, 0)
+                .single()
+                .ok_or_else(|| anyhow::anyhow!("date"))?;
             crate::db::audit_runs::insert_running(conn, "r1", "p1", "Full", "ClaudeCode", started)?;
             crate::db::audit_runs::complete(
                 conn,

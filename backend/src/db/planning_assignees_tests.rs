@@ -386,7 +386,11 @@ fn a_reviewer_alone_does_not_stop_the_agent_taking_the_task_from_becoming_owner(
     .unwrap();
 
     let assignees = detail.summary.assignees;
-    assert_eq!(assignees.len(), 2, "reviewer kept, worker added: {assignees:?}");
+    assert_eq!(
+        assignees.len(),
+        2,
+        "reviewer kept, worker added: {assignees:?}"
+    );
     let owner = assignees
         .iter()
         .find(|a| a.role == Some(PlanningAssigneeRole::Owner))

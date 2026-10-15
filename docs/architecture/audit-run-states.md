@@ -408,7 +408,7 @@ it ran the audit, from the committed copy otherwise.
 | A rescan, a resume, a validation | Only a file identical to `HEAD` (a human committed it). An uncommitted file is shown, flagged as not committed, and never used to resume or validate. |
 | A step | Trusted when its file still has the recorded digest. A changed or missing file is « à revérifier »: never trusted, replayed on resume, and it blocks a validation from the repository. |
 
-[src: file: backend/src/core/audit_run_state.rs:280#probe]
+[src: file: backend/src/core/audit_run_state.rs:282#probe]
 
 **What the UI shows.** `GET /api/projects/:id/audit-latest`,
 `audit-timeline` and `audit-repo-state` carry the repository's run, read off
