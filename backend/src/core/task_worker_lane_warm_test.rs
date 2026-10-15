@@ -275,9 +275,9 @@ fn the_first_build_runs_with_the_jobs_cap_and_the_lane_target() {
 // ── Seeding ──────────────────────────────────────────────────────────────
 
 #[test]
-fn a_new_lane_is_seeded_with_a_clone_of_the_warm_lane_for_the_same_lock() {
+fn a_new_lane_is_seeded_with_a_clone_of_the_main_checkout_target() {
     let fx = fixture();
-    let source = fx.warm_lane_target("kt-1200-old", LOCK_A);
+    let source = fx.main_target();
     let lane = fx.lane("kt-1250-new", LOCK_A);
     let clone = RecordingClone::new();
     let runner = ScriptedBuild::ok();
@@ -289,7 +289,7 @@ fn a_new_lane_is_seeded_with_a_clone_of_the_warm_lane_for_the_same_lock() {
             source: from, kind, ..
         } => {
             assert_eq!(from, &source);
-            assert_eq!(*kind, SeedSourceKind::Lane);
+            assert_eq!(*kind, SeedSourceKind::MainCheckout);
         }
         other => panic!("expected a clone, got {other:?}"),
     }
@@ -300,7 +300,7 @@ fn a_new_lane_is_seeded_with_a_clone_of_the_warm_lane_for_the_same_lock() {
     assert_eq!(calls[0].0, source.join(DEBUG_DIR));
     assert_eq!(
         std::fs::read_to_string(lane.cargo_target_dir.join("debug/deps/libdep.rlib")).unwrap(),
-        "kt-1200-old"
+        "main"
     );
     assert!(
         !lane.cargo_target_dir.join(WARM_MARKER).exists()
@@ -316,27 +316,83 @@ fn a_new_lane_is_seeded_with_a_clone_of_the_warm_lane_for_the_same_lock() {
 }
 
 #[test]
-fn the_most_recently_warmed_lane_is_the_source() {
+fn a_lane_target_is_never_a_seed_source() {
+    // Each worker may write its own lane target and the marker in it, and Kronn
+    // builds the seeded lane outside the worker sandbox: a lane target seeding
+    // another lane would run what the first worker planted as the host user.
     let fx = fixture();
-    let older = fx.warm_lane_target("kt-1100-older", LOCK_A);
-    let newer = fx.warm_lane_target("kt-1200-newer", LOCK_A);
-    let set_mtime = |target: &Path, seconds: u64| {
-        let marker = std::fs::File::options()
-            .write(true)
-            .open(target.join(WARM_MARKER))
-            .unwrap();
-        marker
-            .set_modified(UNIX_EPOCH + Duration::from_secs(seconds))
-            .unwrap();
-    };
-    set_mtime(&older, 1_000);
-    set_mtime(&newer, 2_000);
-    let lane = fx.lane("kt-1250-pick", LOCK_A);
+    // A well-formed, newest, same-lock, same-home lane target: everything the
+    // former lane-to-lane seeding looked for.
+    let lane_a = fx.warm_lane_target("kt-1200-worker-a", LOCK_A);
+    // And a forged one: a marker and a planted artifact written by a worker.
+    let forged = fx.target_root().join("wt-kt-1200-forged");
+    fx.write_build(&forged, "planted proc-macro");
+    std::fs::write(
+        forged.join(WARM_MARKER),
+        serde_json::to_vec(&WarmMarker {
+            lock_hash: hash_of(LOCK_A),
+            completed_unix: u64::MAX / 2,
+            cargo_home: None,
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let lane_b = fx.lane("kt-1250-worker-b", LOCK_A);
+
+    // No main checkout build: with no safe source the lane starts empty.
     let clone = RecordingClone::new();
+    let record = warm(&lane_b, &ScriptedBuild::ok(), &clone, &BuildGate::new());
+    assert!(
+        matches!(record.seed, SeedOutcome::NoSource { .. }),
+        "{:?}",
+        record.seed
+    );
+    assert!(clone.calls().is_empty(), "no lane target was cloned");
+    assert!(!lane_b.cargo_target_dir.join(DEBUG_DIR).exists());
 
-    warm(&lane, &ScriptedBuild::ok(), &clone, &BuildGate::new());
+    // With a main checkout build, that is the source, whatever the lanes hold.
+    let main = fx.main_target();
+    let lane_c = fx.lane("kt-1250-worker-c", LOCK_A);
+    let clone = RecordingClone::new();
+    let record = warm(&lane_c, &ScriptedBuild::ok(), &clone, &BuildGate::new());
+    match record.seed {
+        SeedOutcome::Cloned { source, kind, .. } => {
+            assert_eq!(source, main);
+            assert_eq!(kind, SeedSourceKind::MainCheckout);
+        }
+        other => panic!("expected a clone of the main target, got {other:?}"),
+    }
+    let calls = clone.calls();
+    assert_eq!(calls.len(), 1);
+    assert!(
+        calls[0].0 != lane_a.join(DEBUG_DIR) && calls[0].0 != forged.join(DEBUG_DIR),
+        "{calls:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(lane_c.cargo_target_dir.join("debug/deps/libdep.rlib")).unwrap(),
+        "main",
+        "nothing a lane holds reached the new lane"
+    );
+}
 
-    assert_eq!(clone.calls()[0].0, newer.join(DEBUG_DIR));
+#[test]
+fn the_seed_source_is_outside_every_path_the_worker_may_write() {
+    let fx = fixture();
+    let main = fx.main_target();
+    let lane = fx.lane("kt-1250-roots", LOCK_A);
+    let source = main.join(DEBUG_DIR);
+    assert!(
+        lane.write_roots()
+            .iter()
+            .all(|root| !source.starts_with(root)),
+        "{:?} vs {source:?}",
+        lane.write_roots()
+    );
+    let home = HomeKey::of(&lane, &provisioned());
+    let candidates = seed_candidates(&lane, &home);
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].target, main);
+    assert_eq!(candidates[0].kind, SeedSourceKind::MainCheckout);
 }
 
 #[test]
@@ -393,7 +449,7 @@ fn a_lane_target_without_a_finished_build_is_not_a_source() {
 #[test]
 fn a_target_being_written_is_never_a_source() {
     let fx = fixture();
-    let busy = fx.warm_lane_target("kt-1200-busy", LOCK_A);
+    let busy = fx.main_target();
     let lane = fx.lane("kt-1250-busy", LOCK_A);
     // Cargo holds its build lock exclusively for the whole build.
     let building = std::fs::File::create(busy.join(DEBUG_DIR).join(CARGO_BUILD_LOCK)).unwrap();
@@ -418,38 +474,16 @@ fn a_target_being_written_is_never_a_source() {
 }
 
 #[test]
-fn a_busy_lane_is_skipped_for_the_next_warm_source() {
-    let fx = fixture();
-    let busy = fx.warm_lane_target("kt-1200-busy", LOCK_A);
-    let main = fx.main_target();
-    let lane = fx.lane("kt-1250-next", LOCK_A);
-    let building = std::fs::File::create(busy.join(DEBUG_DIR).join(CARGO_BUILD_LOCK)).unwrap();
-    FileExt::lock_exclusive(&building).unwrap();
-    let clone = RecordingClone::new();
-
-    let record = warm(&lane, &ScriptedBuild::ok(), &clone, &BuildGate::new());
-
-    assert!(matches!(
-        record.seed,
-        SeedOutcome::Cloned {
-            kind: SeedSourceKind::MainCheckout,
-            ..
-        }
-    ));
-    assert_eq!(clone.calls()[0].0, main.join(DEBUG_DIR));
-}
-
-#[test]
 fn a_source_cannot_start_a_build_while_it_is_being_cloned() {
     let fx = fixture();
-    let source = fx.warm_lane_target("kt-1200-held", LOCK_A);
+    let source = fx.main_target();
     let lane = fx.lane("kt-1250-held", LOCK_A);
     let build_could_start = Arc::new(Mutex::new(None));
     let observed = build_could_start.clone();
     let lock_path = source.join(DEBUG_DIR).join(CARGO_BUILD_LOCK);
 
     let home = HomeKey::of(&lane, &provisioned());
-    let outcome = seed_lane(&lane, &hash_of(LOCK_A), &home, &|from, to| {
+    let outcome = seed_lane(&lane, &home, &|from, to| {
         let cargo = std::fs::File::open(&lock_path).unwrap();
         *observed.lock().unwrap() = Some(FileExt::try_lock_exclusive(&cargo).is_ok());
         copy_dir(from, to)
@@ -462,7 +496,7 @@ fn a_source_cannot_start_a_build_while_it_is_being_cloned() {
 #[test]
 fn an_unsupported_clone_leaves_the_target_empty_and_still_builds() {
     let fx = fixture();
-    fx.warm_lane_target("kt-1200-src", LOCK_A);
+    fx.main_target();
     let lane = fx.lane("kt-1250-nocow", LOCK_A);
     let runner = ScriptedBuild::ok();
 
@@ -500,7 +534,7 @@ fn an_unsupported_clone_leaves_the_target_empty_and_still_builds() {
 #[test]
 fn an_existing_debug_directory_is_never_overwritten() {
     let fx = fixture();
-    fx.warm_lane_target("kt-1200-src", LOCK_A);
+    fx.main_target();
     let lane = fx.lane("kt-1250-present", LOCK_A);
     std::fs::create_dir_all(lane.cargo_target_dir.join(DEBUG_DIR)).unwrap();
     let clone = RecordingClone::new();
@@ -661,8 +695,8 @@ fn the_warm_start_record_roundtrips_as_json() {
     let record = WarmStartRecord {
         lock_hash: Some("abc".into()),
         seed: SeedOutcome::Cloned {
-            source: PathBuf::from("/repo/target/wt-x"),
-            kind: SeedSourceKind::Lane,
+            source: PathBuf::from("/repo/target"),
+            kind: SeedSourceKind::MainCheckout,
             clone_ms: 12,
         },
         build_jobs: 4,
@@ -678,6 +712,27 @@ fn the_warm_start_record_roundtrips_as_json() {
         serde_json::from_value::<WarmStartRecord>(json).unwrap(),
         record
     );
+
+    let cancelled = serde_json::to_value(FirstBuild::Cancelled { duration_ms: 7 }).unwrap();
+    assert_eq!(cancelled["outcome"], "cancelled");
+}
+
+#[test]
+fn a_journal_row_from_the_lane_seeding_era_still_reads() {
+    let old: SeedOutcome = serde_json::from_value(serde_json::json!({
+        "outcome": "cloned",
+        "source": "/repo/target/wt-old",
+        "kind": "lane",
+        "clone_ms": 3
+    }))
+    .unwrap();
+    assert!(matches!(
+        old,
+        SeedOutcome::Cloned {
+            kind: SeedSourceKind::Retired,
+            ..
+        }
+    ));
 }
 
 // ── Host gate ────────────────────────────────────────────────────────────
@@ -868,7 +923,7 @@ fn a_lane_under_the_host_cargo_home_is_seeded_from_the_main_target() {
 }
 
 #[test]
-fn a_warm_lane_is_only_a_source_for_lanes_under_the_same_cargo_home() {
+fn a_warmed_lane_records_its_cargo_home_and_seeds_no_other_lane() {
     let fx = fixture();
     let host = Path::new("/host/.cargo");
     let ok = ScriptedBuild::ok();
@@ -891,24 +946,11 @@ fn a_warm_lane_is_only_a_source_for_lanes_under_the_same_cargo_home() {
         "the marker records the home the build ran under"
     );
 
+    // Even a lane that just finished a build under the very same home, for the
+    // very same lock, seeds nobody: lane targets are worker-writable.
     let same_home = fx.lane("kt-1250-b", LOCK_A);
-    let seeded = warm_under(
-        &same_home,
-        &provisioned_with_home(Some(host)),
-        &ok,
-        &RecordingClone::new(),
-    );
-    match seeded.seed {
-        SeedOutcome::Cloned { source, kind, .. } => {
-            assert_eq!(source, first.cargo_target_dir);
-            assert_eq!(kind, SeedSourceKind::Lane);
-        }
-        other => panic!("expected a clone of the warm lane, got {other:?}"),
-    }
-
-    let other_home = fx.lane("kt-1250-c", LOCK_A);
     let clone = RecordingClone::new();
-    let unseeded = warm_under(&other_home, &provisioned_with_home(None), &ok, &clone);
+    let unseeded = warm_under(&same_home, &provisioned_with_home(Some(host)), &ok, &clone);
     assert!(
         matches!(unseeded.seed, SeedOutcome::NoSource { .. }),
         "{:?}",
@@ -922,18 +964,191 @@ fn a_bounded_wait_gives_up_when_the_gate_never_drains_and_runs_when_it_does() {
     let gate = BuildGate::new();
     let held = gate.try_acquire(1).expect("the running build");
 
+    let never = CancellationToken::new();
     let mut announced = None;
-    let refused = gate.acquire_within(1, Duration::from_millis(50), |ahead| {
+    let refused = gate.acquire_within(1, Duration::from_millis(50), &never, |ahead| {
         announced = Some(ahead)
     });
-    assert!(refused.is_none(), "a full gate refuses after the bound");
+    assert!(
+        matches!(refused, GateWait::TimedOut),
+        "a full gate refuses after the bound"
+    );
     assert_eq!(announced, Some(1), "it still said it was queued");
     assert_eq!(gate.running(), 1, "a refused wait takes no slot");
 
     drop(held);
-    let granted = gate.acquire_within(1, Duration::from_millis(50), |_| {});
-    assert!(granted.is_some(), "a free gate grants at once");
+    let granted = gate.acquire_within(1, Duration::from_millis(50), &never, |_| {});
+    assert!(
+        matches!(granted, GateWait::Acquired(_)),
+        "a free gate grants at once"
+    );
     assert_eq!(gate.running(), 1);
+}
+
+#[test]
+fn cancelling_a_queued_first_build_leaves_the_gate_without_taking_a_slot() {
+    let fx = fixture();
+    let lane = fx.lane("kt-1250-cancel-queued", LOCK_A);
+    let gate = Arc::new(BuildGate::new());
+    let _held = gate.try_acquire(1).expect("the running build");
+    let runner = Arc::new(ScriptedBuild::ok());
+    let settings = WarmStartSettings::resolve(Some("2"), Some("1"), Some("600"), 8);
+    let cancel = CancellationToken::new();
+    let (queued_tx, queued_rx) = mpsc::channel();
+
+    let waiter = {
+        let (gate, runner, cancel) = (gate.clone(), runner.clone(), cancel.clone());
+        std::thread::spawn(move || {
+            warm_lane_cancellable(
+                &lane,
+                &provisioned(),
+                &settings,
+                &gate,
+                runner.as_ref(),
+                &|_, _| Err(io::Error::from(io::ErrorKind::Unsupported)),
+                &cancel,
+                |ahead| queued_tx.send(ahead).unwrap(),
+            )
+        })
+    };
+    queued_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the second build queued behind the running one");
+    let cancelled_at = Instant::now();
+    cancel.cancel();
+    let record = waiter.join().unwrap();
+
+    assert!(
+        cancelled_at.elapsed() < Duration::from_secs(5),
+        "the queue wait ended with the cancel, not with its 600s bound"
+    );
+    assert!(
+        matches!(record.first_build, FirstBuild::Cancelled { .. }),
+        "{record:?}"
+    );
+    assert!(runner.calls().is_empty(), "the queued build never started");
+    assert_eq!(gate.running(), 1, "only the running build holds a slot");
+}
+
+#[test]
+fn cancelling_a_running_first_build_stops_it_and_frees_its_slot() {
+    let fx = fixture();
+    let lane = fx.lane("kt-1250-cancel-running", LOCK_A);
+    let gate = Arc::new(BuildGate::new());
+    let settings = WarmStartSettings::resolve(Some("2"), Some("1"), Some("600"), 8);
+    let cancel = CancellationToken::new();
+
+    /// A build that runs until its cancellation fires.
+    struct UntilCancelled {
+        started: mpsc::Sender<()>,
+    }
+    impl ProbeRunner for UntilCancelled {
+        fn run(&self, _: &ProbeCommand) -> ProbeOutcome {
+            panic!("the first build must go through run_cancellable");
+        }
+
+        fn run_cancellable(&self, _: &ProbeCommand, cancel: &CancellationToken) -> ProbeOutcome {
+            self.started.send(()).unwrap();
+            while !cancel.is_cancelled() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            ProbeOutcome {
+                success: false,
+                detail: "cancelled".into(),
+            }
+        }
+    }
+    let (started_tx, started_rx) = mpsc::channel();
+    let runner = Arc::new(UntilCancelled {
+        started: started_tx,
+    });
+
+    let build = {
+        let (gate, runner, cancel, lane) =
+            (gate.clone(), runner.clone(), cancel.clone(), lane.clone());
+        std::thread::spawn(move || {
+            warm_lane_cancellable(
+                &lane,
+                &provisioned(),
+                &settings,
+                &gate,
+                runner.as_ref(),
+                &|_, _| Err(io::Error::from(io::ErrorKind::Unsupported)),
+                &cancel,
+                |_| {},
+            )
+        })
+    };
+    started_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the first build is running");
+    assert_eq!(gate.running(), 1);
+
+    cancel.cancel();
+    let record = build.join().unwrap();
+
+    assert!(
+        matches!(record.first_build, FirstBuild::Cancelled { .. }),
+        "{record:?}"
+    );
+    assert_eq!(gate.running(), 0, "the slot is free again");
+    assert!(
+        read_marker(&lane.cargo_target_dir).is_none(),
+        "a cancelled build is never marked warm"
+    );
+    // The freed slot is usable at once by the next worker.
+    assert!(gate.try_acquire(1).is_some());
+}
+
+#[cfg(unix)]
+#[test]
+fn the_process_runner_kills_a_cancelled_build_and_what_it_started() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("grandchild.pid");
+    // A shell (standing for cargo) that starts a long-lived child (rustc).
+    let script = format!("sleep 300 & echo $! > '{}'; wait", pid_file.display());
+    let probe = ProbeCommand {
+        program: "sh".into(),
+        args: vec!["-c".into(), script],
+        cwd: dir.path().to_path_buf(),
+        env: Vec::new(),
+        timeout: Duration::from_secs(120),
+    };
+    let cancel = CancellationToken::new();
+    let trigger = cancel.clone();
+    let watcher = {
+        let pid_file = pid_file.clone();
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !pid_file.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            trigger.cancel();
+        })
+    };
+
+    let started = Instant::now();
+    let outcome = crate::core::task_worker_env::ProcessProbeRunner.run_cancellable(&probe, &cancel);
+    watcher.join().unwrap();
+
+    assert!(!outcome.success);
+    assert_eq!(outcome.detail, "cancelled");
+    assert!(started.elapsed() < Duration::from_secs(30));
+    let grandchild: i32 = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let mut alive = true;
+    for _ in 0..100 {
+        // SAFETY: signal 0 only probes whether the pid exists.
+        alive = unsafe { libc::kill(grandchild, 0) } == 0;
+        if !alive {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!alive, "the build's own child was killed with it");
 }
 
 #[test]

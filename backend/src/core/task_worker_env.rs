@@ -18,6 +18,7 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 
 /// Where the worker's tests keep their Kronn state, so they never touch the
 /// operator's real data directory.
@@ -613,6 +614,14 @@ pub struct ProbeOutcome {
 /// How the smoke check runs a command; injectable so both outcomes are testable.
 pub trait ProbeRunner: Send + Sync {
     fn run(&self, probe: &ProbeCommand) -> ProbeOutcome;
+
+    /// [`ProbeRunner::run`] that stops the command when `cancel` fires,
+    /// reporting a failure. A runner that cannot interrupt a probe keeps this
+    /// default and simply runs it to its end.
+    fn run_cancellable(&self, probe: &ProbeCommand, cancel: &CancellationToken) -> ProbeOutcome {
+        let _ = cancel;
+        self.run(probe)
+    }
 }
 
 /// Runs probes as real child processes with the sealed Kronn environment plus
@@ -621,6 +630,10 @@ pub struct ProcessProbeRunner;
 
 impl ProbeRunner for ProcessProbeRunner {
     fn run(&self, probe: &ProbeCommand) -> ProbeOutcome {
+        self.run_cancellable(probe, &CancellationToken::new())
+    }
+
+    fn run_cancellable(&self, probe: &ProbeCommand, cancel: &CancellationToken) -> ProbeOutcome {
         let failure = |detail: String| ProbeOutcome {
             success: false,
             detail,
@@ -635,6 +648,10 @@ impl ProbeRunner for ProcessProbeRunner {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        // Its own process group, so a timeout or a cancel takes `cargo`'s
+        // `rustc` children with it instead of leaving them compiling.
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => return failure(format!("cannot start `{}`: {error}", probe.program)),
@@ -642,12 +659,17 @@ impl ProbeRunner for ProcessProbeRunner {
         let stdout = child.stdout.take().map(drain_tail);
         let stderr = child.stderr.take().map(drain_tail);
         let deadline = Instant::now() + probe.timeout;
+        let mut cancelled = false;
         let status = loop {
             match child.try_wait() {
                 Ok(Some(status)) => break Some(status),
+                Ok(None) if cancel.is_cancelled() => {
+                    kill_process_tree(&mut child);
+                    cancelled = true;
+                    break None;
+                }
                 Ok(None) if Instant::now() >= deadline => {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    kill_process_tree(&mut child);
                     break None;
                 }
                 Ok(None) => std::thread::sleep(Duration::from_millis(25)),
@@ -669,9 +691,25 @@ impl ProbeRunner for ProcessProbeRunner {
                 detail,
             },
             Some(status) => failure(format!("exited with {status}: {detail}")),
+            None if cancelled => failure("cancelled".to_string()),
             None => failure(format!("timed out after {}s", probe.timeout.as_secs())),
         }
     }
+}
+
+/// Kill the probe and everything it started (it leads its own process group),
+/// then reap it.
+fn kill_process_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        // SAFETY: `killpg` takes a plain process-group id; the child is the
+        // leader of the group it was spawned into.
+        unsafe {
+            libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Read a pipe to its end, keeping only the last [`PROBE_DETAIL_BYTES`].

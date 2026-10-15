@@ -4,10 +4,13 @@
 //! spent 38+ minutes compiling the dependency graph from cold, and four workers
 //! doing it at once pushed the host's load average to 44. Two things fix that:
 //!
-//! * the lane target is seeded with a **copy-on-write clone** of a warm target
-//!   (APFS `clonefile(2)`, a reflink elsewhere; where neither is supported the
-//!   target stays empty, as before) so the worker only recompiles what it
-//!   changes;
+//! * the lane target is seeded with a **copy-on-write clone** of the main
+//!   checkout's warm `target/debug` (APFS `clonefile(2)`, a reflink elsewhere;
+//!   where neither is supported the target stays empty, as before) so the
+//!   worker only recompiles what it changes. A *lane* target is never a seed
+//!   source: every worker may write its own lane target, and Kronn builds the
+//!   seeded lane outside the worker sandbox, so a planted artifact would run
+//!   as the host user (see [`seed_candidates`]);
 //! * compilation pressure is capped: `CARGO_BUILD_JOBS` is injected into the
 //!   lane environment, and the lane's first build — run by Kronn before the
 //!   worker starts — goes through a host-wide gate, extra lanes queueing.
@@ -24,6 +27,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tokio_util::sync::CancellationToken;
 
 use crate::core::task_worker_env::{
     prepare_launch, ProbeCommand, ProbeRunner, Provisioned, WorkerLane,
@@ -49,8 +53,9 @@ const DEBUG_DIR: &str = "debug";
 /// Cargo's own advisory lock on a profile directory, held for a build's whole
 /// duration (`<target>/debug/.cargo-lock`).
 const CARGO_BUILD_LOCK: &str = ".cargo-lock";
-const LANE_TARGET_PREFIX: &str = "wt-";
 const TIMED_OUT_DETAIL_PREFIX: &str = "timed out after";
+/// How often a queued first build looks at its cancellation.
+const GATE_POLL: Duration = Duration::from_millis(100);
 
 // ─── Settings ─────────────────────────────────────────────────────────────
 
@@ -191,31 +196,50 @@ impl BuildGate {
     }
 }
 
+/// How a bounded, cancellable wait for the gate ended.
+pub enum GateWait<'a> {
+    Acquired(BuildPermit<'a>),
+    /// No slot freed within the bound.
+    TimedOut,
+    /// The wait was cancelled (the execution was cancelled while it queued).
+    Cancelled,
+}
+
 impl BuildGate {
     /// [`BuildGate::acquire`] that gives up after `max_wait`, so a queue that
-    /// never drains cannot hold a worker in `Provisioning` forever.
+    /// never drains cannot hold a worker in `Provisioning` forever, and that
+    /// stops waiting as soon as `cancel` fires, taking no slot.
     pub fn acquire_within(
         &self,
         limit: usize,
         max_wait: Duration,
+        cancel: &CancellationToken,
         on_wait: impl FnOnce(usize),
-    ) -> Option<BuildPermit<'_>> {
+    ) -> GateWait<'_> {
         let limit = limit.max(1);
         let deadline = Instant::now() + max_wait;
         let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
+        if cancel.is_cancelled() {
+            return GateWait::Cancelled;
+        }
         if *running >= limit {
             on_wait(*running);
             while *running >= limit {
-                let remaining = deadline.checked_duration_since(Instant::now())?;
+                if cancel.is_cancelled() {
+                    return GateWait::Cancelled;
+                }
+                let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                    return GateWait::TimedOut;
+                };
                 running = self
                     .released
-                    .wait_timeout(running, remaining)
+                    .wait_timeout(running, remaining.min(GATE_POLL))
                     .unwrap_or_else(|e| e.into_inner())
                     .0;
             }
         }
         *running += 1;
-        Some(BuildPermit { gate: self })
+        GateWait::Acquired(BuildPermit { gate: self })
     }
 }
 
@@ -245,10 +269,13 @@ pub fn host_build_gate() -> &'static BuildGate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SeedSourceKind {
-    /// Another lane's target holding a build for the same `Cargo.lock`.
-    Lane,
-    /// The main checkout's `target/`.
+    /// The main checkout's `target/`: the only source, because no worker's
+    /// sandbox can write it.
     MainCheckout,
+    /// Journal rows written before lane-to-lane seeding was removed (a lane
+    /// target is writable by its worker). Never produced.
+    #[serde(other)]
+    Retired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -279,10 +306,24 @@ pub enum SeedOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum FirstBuild {
-    Succeeded { duration_ms: u64 },
-    Failed { duration_ms: u64, detail: String },
-    TimedOut { duration_ms: u64 },
-    Skipped { reason: String },
+    Succeeded {
+        duration_ms: u64,
+    },
+    Failed {
+        duration_ms: u64,
+        detail: String,
+    },
+    TimedOut {
+        duration_ms: u64,
+    },
+    /// The execution was cancelled while the build queued or ran: the process
+    /// was stopped and its gate slot freed.
+    Cancelled {
+        duration_ms: u64,
+    },
+    Skipped {
+        reason: String,
+    },
 }
 
 /// What starting a lane warm did, journalled on the execution.
@@ -428,17 +469,17 @@ fn read_marker(target: &Path) -> Option<WarmMarker> {
     serde_json::from_slice(&std::fs::read(target.join(WARM_MARKER)).ok()?).ok()
 }
 
-fn marker_mtime(target: &Path) -> SystemTime {
-    std::fs::metadata(target.join(WARM_MARKER))
-        .and_then(|meta| meta.modified())
-        .unwrap_or(UNIX_EPOCH)
-}
-
-/// Sources in preference order: the most recently warmed lane targets whose
-/// build is for the same `Cargo.lock`, then the main checkout's `target/`.
-/// The lane itself is never a source, and a lane target without a marker (never
-/// finished a first build) is not one either.
-fn seed_candidates(lane: &WorkerLane, lock_hash: &str, home: &HomeKey) -> Vec<SeedCandidate> {
+/// The sources a lane may be seeded from: the main checkout's `target/` when it
+/// holds a `debug/` built under a Cargo home this lane shares.
+///
+/// **Never another lane's target.** Each worker's sandbox may write its own
+/// lane target (and the marker in it); Kronn then builds the seeded lane
+/// OUTSIDE that sandbox. A worker that planted a proc-macro or a build artifact
+/// with a newer mtime in its `debug/` (Cargo trusts mtimes, not contents) would
+/// get it loaded by that build and run as the host user. The main checkout's
+/// `target/` is outside every worker's write roots (its worktree and its own
+/// lane target), so it is the one source a worker cannot have touched.
+fn seed_candidates(lane: &WorkerLane, home: &HomeKey) -> Vec<SeedCandidate> {
     let Some(target_root) = lane
         .main_checkout
         .as_ref()
@@ -446,40 +487,19 @@ fn seed_candidates(lane: &WorkerLane, lock_hash: &str, home: &HomeKey) -> Vec<Se
     else {
         return Vec::new();
     };
-    let mut lanes: Vec<(SystemTime, PathBuf)> = std::fs::read_dir(target_root)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_str()
-                .is_some_and(|name| name.starts_with(LANE_TARGET_PREFIX))
-        })
-        .map(|entry| entry.path())
-        .filter(|path| *path != lane.cargo_target_dir && path.join(DEBUG_DIR).is_dir())
-        .filter(|path| {
-            read_marker(path).is_some_and(|marker| {
-                marker.lock_hash == lock_hash && marker.cargo_home == home.cargo_home
-            })
-        })
-        .map(|path| (marker_mtime(&path), path))
-        .collect();
-    lanes.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    let mut candidates: Vec<SeedCandidate> = lanes
-        .into_iter()
-        .map(|(_, target)| SeedCandidate {
-            target,
-            kind: SeedSourceKind::Lane,
-        })
-        .collect();
-    if home.main_checkout_reusable && target_root.join(DEBUG_DIR).is_dir() {
-        candidates.push(SeedCandidate {
-            target: target_root.to_path_buf(),
-            kind: SeedSourceKind::MainCheckout,
-        });
+    let source = target_root.join(DEBUG_DIR);
+    // Belt and braces for the layout: whatever the worker may write is never a source.
+    let writable_by_the_worker = lane
+        .write_roots()
+        .iter()
+        .any(|root| source.starts_with(root));
+    if writable_by_the_worker || !home.main_checkout_reusable || !source.is_dir() {
+        return Vec::new();
     }
-    candidates
+    vec![SeedCandidate {
+        target: target_root.to_path_buf(),
+        kind: SeedSourceKind::MainCheckout,
+    }]
 }
 
 /// Hold Cargo's own build lock shared. It is refused while a build writes the
@@ -494,29 +514,21 @@ fn lock_source_shared(debug_dir: &Path) -> Result<std::fs::File, String> {
 
 /// Seed `lane`'s `debug/` from the best warm source. Never raises: the outcome
 /// says what happened and an unseedable lane just starts empty.
-fn seed_lane(
-    lane: &WorkerLane,
-    lock_hash: &str,
-    home: &HomeKey,
-    clone: CloneTree<'_>,
-) -> SeedOutcome {
+fn seed_lane(lane: &WorkerLane, home: &HomeKey, clone: CloneTree<'_>) -> SeedOutcome {
     let destination = lane.cargo_target_dir.join(DEBUG_DIR);
     if destination.exists() {
         return SeedOutcome::AlreadyPresent;
     }
-    let candidates = seed_candidates(lane, lock_hash, home);
+    let candidates = seed_candidates(lane, home);
     if candidates.is_empty() {
-        let main_note = if home.main_checkout_reusable {
-            "the main checkout has no target/debug"
+        let reason = if home.main_checkout_reusable {
+            "the main checkout has no target/debug (lane targets are never a seed source)"
         } else {
             "the main checkout's target was built under the host's CARGO_HOME, which this \
-             lane does not use"
+             lane does not use (lane targets are never a seed source)"
         };
         return SeedOutcome::NoSource {
-            reason: format!(
-                "no lane target holds a build for this Cargo.lock under this CARGO_HOME and \
-                 {main_note}"
-            ),
+            reason: reason.into(),
         };
     }
     let staging = lane
@@ -599,6 +611,32 @@ pub fn warm_lane(
     clone: CloneTree<'_>,
     on_wait: impl FnOnce(usize),
 ) -> WarmStartRecord {
+    warm_lane_cancellable(
+        lane,
+        provisioned,
+        settings,
+        gate,
+        runner,
+        clone,
+        &CancellationToken::new(),
+        on_wait,
+    )
+}
+
+/// [`warm_lane`] that stops when `cancel` fires: a queued first build leaves
+/// the gate without taking a slot, a running one is killed (the runner owns
+/// that) and its slot is freed. Nothing is marked warm.
+#[allow(clippy::too_many_arguments)]
+pub fn warm_lane_cancellable(
+    lane: &WorkerLane,
+    provisioned: &Provisioned,
+    settings: &WarmStartSettings,
+    gate: &BuildGate,
+    runner: &dyn ProbeRunner,
+    clone: CloneTree<'_>,
+    cancel: &CancellationToken,
+    on_wait: impl FnOnce(usize),
+) -> WarmStartRecord {
     let jobs = settings.build_jobs;
     let home = HomeKey::of(lane, provisioned);
     let Some((manifest_dir, lock_hash)) = manifest_and_lock_hash(lane) else {
@@ -616,8 +654,19 @@ pub fn warm_lane(
             jobs,
         );
     }
+    if cancel.is_cancelled() {
+        return WarmStartRecord {
+            lock_hash,
+            seed: SeedOutcome::NotApplicable {
+                reason: "cancelled before the lane was seeded".into(),
+            },
+            build_jobs: jobs,
+            first_build: FirstBuild::Cancelled { duration_ms: 0 },
+            queued_ms: 0,
+        };
+    }
     let seed = match &lock_hash {
-        Some(hash) => seed_lane(lane, hash, &home, clone),
+        Some(_) => seed_lane(lane, &home, clone),
         None => SeedOutcome::NoSource {
             reason: "the worktree has no Cargo.lock to match a warm target against".into(),
         },
@@ -657,28 +706,42 @@ pub fn warm_lane(
 
     let queued = Instant::now();
     let mut waited = false;
-    let Some(permit) = gate.acquire_within(
+    let permit = match gate.acquire_within(
         settings.max_concurrent_builds,
         settings.first_build_timeout,
+        cancel,
         |ahead| {
             waited = true;
             on_wait(ahead);
         },
-    ) else {
+    ) {
+        GateWait::Acquired(permit) => permit,
+        GateWait::Cancelled => {
+            return WarmStartRecord {
+                lock_hash,
+                seed,
+                build_jobs: jobs,
+                first_build: FirstBuild::Cancelled { duration_ms: 0 },
+                queued_ms: queued.elapsed().as_millis() as u64,
+            };
+        }
         // Never stall a worker behind a queue that does not drain: it starts
         // with the target it has, as before KT-1250.
-        return WarmStartRecord {
-            lock_hash,
-            seed,
-            build_jobs: jobs,
-            first_build: FirstBuild::Skipped {
-                reason: format!(
-                    "no build slot freed within {}s: the worker starts with the target it has",
-                    settings.first_build_timeout.as_secs()
-                ),
-            },
-            queued_ms: queued.elapsed().as_millis() as u64,
-        };
+        GateWait::TimedOut => {
+            return WarmStartRecord {
+                lock_hash,
+                seed,
+                build_jobs: jobs,
+                first_build: FirstBuild::Skipped {
+                    reason: format!(
+                        "no build slot freed within {}s: the worker starts with the target it \
+                         has",
+                        settings.first_build_timeout.as_secs()
+                    ),
+                },
+                queued_ms: queued.elapsed().as_millis() as u64,
+            };
+        }
     };
     let queued_ms = if waited {
         queued.elapsed().as_millis() as u64
@@ -692,20 +755,25 @@ pub fn warm_lane(
         .map(|(name, value)| (name.to_string(), value))
         .collect();
     let started = Instant::now();
-    let outcome = runner.run(&ProbeCommand {
-        program: "cargo".into(),
-        args: ["test", "--no-run", "--locked", "--offline"]
-            .into_iter()
-            .map(String::from)
-            .collect(),
-        cwd: manifest_dir,
-        env,
-        timeout: settings.first_build_timeout,
-    });
+    let outcome = runner.run_cancellable(
+        &ProbeCommand {
+            program: "cargo".into(),
+            args: ["test", "--no-run", "--locked", "--offline"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            cwd: manifest_dir,
+            env,
+            timeout: settings.first_build_timeout,
+        },
+        cancel,
+    );
     let duration_ms = started.elapsed().as_millis() as u64;
     drop(permit);
 
-    let first_build = if outcome.success {
+    let first_build = if !outcome.success && cancel.is_cancelled() {
+        FirstBuild::Cancelled { duration_ms }
+    } else if outcome.success {
         if let Some(hash) = &lock_hash {
             if let Err(error) = write_marker(lane, hash, &home) {
                 tracing::warn!(lane = %lane.name, "warm marker not written: {error}");
@@ -752,17 +820,19 @@ pub fn first_build_pending(work_dir: &Path) -> bool {
 pub fn warm_worktree(
     work_dir: &Path,
     runner: &dyn ProbeRunner,
+    cancel: &CancellationToken,
     on_wait: impl FnOnce(usize),
 ) -> WarmStartRecord {
     let settings = WarmStartSettings::from_host();
     match prepare_launch(work_dir) {
-        Ok((lane, provisioned)) => warm_lane(
+        Ok((lane, provisioned)) => warm_lane_cancellable(
             &lane,
             &provisioned,
             &settings,
             host_build_gate(),
             runner,
             &clone_tree,
+            cancel,
             on_wait,
         ),
         Err(error) => WarmStartRecord::not_applicable(

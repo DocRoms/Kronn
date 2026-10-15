@@ -34,11 +34,43 @@ Failure modes, all ending in a (cold) dispatch:
 
 ## Seeding rules
 
-The source is the most recently warmed `target/wt-*` holding a `debug/` for the
-same `Cargo.lock` hash **and** the same `CARGO_HOME`, else the main checkout's
-`target/` (when the lane uses the host's `CARGO_HOME`). A target is never a
-source while a build holds its Cargo lock. Where the file system cannot clone
-(`clonefile(2)` on APFS, a reflink elsewhere) the lane starts empty.
+The only source is the main checkout's `target/debug`, and only when the lane
+uses the host's `CARGO_HOME`. **A lane target (`target/wt-*`) is never a
+source.** Each worker's sandbox may write its own lane target (and the
+`.kronn-warm.json` marker in it), and Kronn runs the seeded lane's first build
+OUTSIDE the sandbox: a worker that planted a proc-macro `.dylib` with a newer
+mtime in its `debug/` (Cargo trusts mtimes, not contents) would have it loaded
+by the next lane's build and run as the host user. The main checkout's
+`target/` is outside every worker's write roots. The marker still exists, but
+only to skip the first build of a lane that is already built for its own
+`Cargo.lock`.
+
+A target is never a source while a build holds its Cargo lock (shared lock on
+`debug/.cargo-lock` for the duration of the clone). Where the file system cannot
+clone (`clonefile(2)` on APFS, a reflink elsewhere) the lane starts empty.
+
+Not done, on purpose: a Kronn-owned `target/warm-<lockhash>` refreshed from a
+trusted build, which would let a branch with another `Cargo.lock` than the main
+checkout's start warm. It needs a trusted build step Kronn does not have yet.
+
+## Cancelling during the warm-up
+
+Cancelling the execution (the endpoint, or any path that leaves it
+`Provisioning`, which the warm-up polls every 500 ms) stops its first build: a
+queued build leaves the gate taking no slot, a running one is killed with its
+whole process group (so `rustc` children do not keep compiling), the gate slot
+is freed, `lane_warm_start` records `first_build: cancelled`, and neither the
+smoke check nor the dispatch happens.
+
+## Known limits
+
+- The gate governs Kronn's first build only. Builds a worker later runs itself
+  are capped by `CARGO_BUILD_JOBS` alone, so several workers compiling at once
+  can still load the host.
+- Lane targets are never cleaned up; `target/wt-*` grows with every task.
+- The first build runs outside the sandbox on the worktree as it is at warm-up.
+  It is pristine on a first launch, but a relaunched lane whose `Cargo.lock`
+  changed is built from worker-modified sources (build scripts, proc macros).
 
 ## Measured on this host (15 Oct 2026, load average 9-30, `CARGO_BUILD_JOBS=4`)
 

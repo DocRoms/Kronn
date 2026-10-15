@@ -1797,6 +1797,7 @@ async fn provision_task_execution_inner(
         worktree_path,
         branch,
         base_sha,
+        warm_cancel: tokio_util::sync::CancellationToken::new(),
     };
 
     // KT-1250 — a lane that has a first build to run does not hold the caller
@@ -1821,6 +1822,9 @@ struct NativeLaunch {
     worktree_path: std::path::PathBuf,
     branch: String,
     base_sha: String,
+    /// Fired when the execution is cancelled while its lane warms: stops the
+    /// queued or running first build.
+    warm_cancel: tokio_util::sync::CancellationToken,
 }
 
 impl NativeLaunch {
@@ -1833,22 +1837,37 @@ impl NativeLaunch {
 /// or resume of the same execution while one is in flight must not warm (and
 /// dispatch) it twice; a process restart empties the set, which is exactly
 /// when the boot recovery resumes the execution.
-fn warming_executions() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
-    static WARMING: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
-        std::sync::OnceLock::new();
+///
+/// Each entry carries the warm-up's cancellation: firing it stops the queued or
+/// running first build and frees its gate slot.
+fn warming_executions(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, tokio_util::sync::CancellationToken>>
+{
+    static WARMING: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, tokio_util::sync::CancellationToken>>,
+    > = std::sync::OnceLock::new();
     WARMING.get_or_init(Default::default)
 }
 
-struct WarmingClaim(String);
+struct WarmingClaim {
+    exec_id: String,
+    cancel: tokio_util::sync::CancellationToken,
+}
 
 impl WarmingClaim {
     fn take(exec_id: &str) -> Option<Self> {
         let mut warming = warming_executions()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        warming
-            .insert(exec_id.to_string())
-            .then(|| Self(exec_id.to_string()))
+        if warming.contains_key(exec_id) {
+            return None;
+        }
+        let cancel = tokio_util::sync::CancellationToken::new();
+        warming.insert(exec_id.to_string(), cancel.clone());
+        Some(Self {
+            exec_id: exec_id.to_string(),
+            cancel,
+        })
     }
 }
 
@@ -1857,9 +1876,49 @@ impl Drop for WarmingClaim {
         warming_executions()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&self.0);
+            .remove(&self.exec_id);
     }
 }
+
+/// Stop the warm-up this process runs for `exec_id`, if any. `true` when one
+/// was signalled.
+fn signal_warm_up_cancel(exec_id: &str) -> bool {
+    let token = warming_executions()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(exec_id)
+        .cloned();
+    match token {
+        Some(token) => {
+            token.cancel();
+            true
+        }
+        None => false,
+    }
+}
+
+/// Wait until `exec_id`'s warm-up has let go of its claim (its first build is
+/// killed and its gate slot free), up to `timeout`.
+async fn wait_for_warm_up_to_settle(exec_id: &str, timeout: std::time::Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let warming = warming_executions()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key(exec_id);
+        if !warming {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
+/// How often the background warm-up checks the execution is still
+/// `Provisioning` (any cancel path — a run cancel, a reassignment — ends it).
+const WARM_UP_STATE_POLL: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// The probe runner of a task worker's launch: the real processes, except in
 /// tests, which register a runner per repository to control the first build.
@@ -1910,7 +1969,7 @@ fn test_probe_runners() -> &'static std::sync::Mutex<
 ///   never leaves it silently `Provisioning`.
 async fn defer_native_provisioning(
     db: &Database,
-    launch: NativeLaunch,
+    mut launch: NativeLaunch,
 ) -> Result<TaskExecution, ProvisionError> {
     let exec_id = launch.prepared.execution.id.clone();
     let Some(claim) = WarmingClaim::take(&exec_id) else {
@@ -1933,16 +1992,52 @@ async fn defer_native_provisioning(
     .await
     .map_err(|e| ProvisionError::Internal(e.to_string()))?;
 
+    launch.warm_cancel = claim.cancel.clone();
+
     let background = std::sync::Arc::new(db.share_handle());
     let task_db = background.clone();
     let id = exec_id.clone();
     tokio::spawn(async move {
         let _claim = claim;
+        // Any cancel path (the execution's own, its run's, a reassignment)
+        // ends with the execution no longer `Provisioning`: stop the build
+        // then, not only when this endpoint's token fires.
+        let watcher = tokio::spawn({
+            let db = task_db.clone();
+            let id = id.clone();
+            let cancel = launch.warm_cancel.clone();
+            async move {
+                loop {
+                    tokio::select! {
+                        _ = cancel.cancelled() => return,
+                        _ = tokio::time::sleep(WARM_UP_STATE_POLL) => {}
+                    }
+                    let probe_id = id.clone();
+                    let status = db
+                        .with_conn(move |conn| {
+                            Ok(
+                                crate::db::orchestration::get_task_execution(conn, &probe_id)?
+                                    .map(|execution| execution.status),
+                            )
+                        })
+                        .await;
+                    match status {
+                        Ok(Some(TaskExecutionStatus::Provisioning)) | Err(_) => {}
+                        Ok(_) => {
+                            cancel.cancel();
+                            return;
+                        }
+                    }
+                }
+            }
+        });
         let work = tokio::spawn({
             let db = task_db.clone();
             async move { finish_native_provisioning(&db, launch).await }
         });
-        let failure = match work.await {
+        let outcome = work.await;
+        watcher.abort();
+        let failure = match outcome {
             Ok(Ok(_)) => None,
             // Settled where it happened: the checkpoint refusal parked the
             // execution, a raced cancel/interrupt owns its own state.
@@ -1982,6 +2077,7 @@ async fn finish_native_provisioning(
         worktree_path,
         branch,
         base_sha,
+        warm_cancel,
     } = launch;
     let worktree_path_str = worktree_path.to_string_lossy().to_string();
 
@@ -1991,15 +2087,28 @@ async fn finish_native_provisioning(
     let toolchain = if prepared.execution.worker_agent_type.as_deref() == Some("ClaudeCode") {
         // KT-1250 — the lane target is seeded from a warm one and its first build
         // runs here, under the host's cap, so the worker starts warm.
-        record_lane_warm_start(
+        let warm = record_lane_warm_start(
             db,
             &prepared.execution.id,
             prepared.execution.attempt_no,
             &sub_disc_id,
             &worktree_path,
             worker_probe_runner(&prepared.repo_path),
+            warm_cancel,
         )
         .await;
+        // Cancelled while it warmed: nothing more to run for this execution (the
+        // cancel owns its state; the first build is already stopped).
+        if warm.as_ref().is_some_and(|record| {
+            matches!(
+                record.first_build,
+                crate::core::task_worker_lane_warm::FirstBuild::Cancelled { .. }
+            )
+        }) {
+            return Err(ProvisionError::CheckpointRefused(
+                "cancelled while the lane warmed".into(),
+            ));
+        }
         Some(
             record_toolchain_smoke_check(
                 db,
@@ -6924,13 +7033,19 @@ async fn record_lane_warm_start(
     room_id: &str,
     worktree: &std::path::Path,
     runner: std::sync::Arc<dyn crate::core::task_worker_env::ProbeRunner>,
+    cancel: tokio_util::sync::CancellationToken,
 ) -> Option<crate::core::task_worker_lane_warm::WarmStartRecord> {
     let (queued_tx, mut queued_rx) = tokio::sync::mpsc::unbounded_channel::<usize>();
     let path = worktree.to_path_buf();
     let warm = tokio::task::spawn_blocking(move || {
-        crate::core::task_worker_lane_warm::warm_worktree(&path, runner.as_ref(), |ahead| {
-            let _ = queued_tx.send(ahead);
-        })
+        crate::core::task_worker_lane_warm::warm_worktree(
+            &path,
+            runner.as_ref(),
+            &cancel,
+            |ahead| {
+                let _ = queued_tx.send(ahead);
+            },
+        )
     });
     let announce = async {
         while let Some(ahead) = queued_rx.recv().await {
@@ -9605,12 +9720,22 @@ pub async fn cancel_execution(
         exec_id_log,
         reason_log
     );
-    let termination_confirmed = wait_for_cancelled_dispatches_to_settle(
+    // KT-1250 — an execution whose lane is still warming has no dispatch yet,
+    // but it has a first build compiling (or queued): stop it and free its
+    // slot. Signalled once the cancel is durable, so a refused cancel never
+    // leaves a `Provisioning` execution with its build killed.
+    let warm_up_signalled = signal_warm_up_cancel(&exec_id);
+    let cancellation_signal_sent = cancellation_signal_sent || warm_up_signalled;
+    let dispatches_settled = wait_for_cancelled_dispatches_to_settle(
         &state.cancel_registry,
         &signalled_keys,
         CANCELLATION_TERMINATION_TIMEOUT,
     )
     .await;
+    let warm_up_settled = !warm_up_signalled
+        || wait_for_warm_up_to_settle(&exec_id, CANCELLATION_TERMINATION_TIMEOUT).await;
+    let termination_confirmed =
+        (dispatches_settled || (signalled_keys.is_empty() && warm_up_signalled)) && warm_up_settled;
     if termination_confirmed {
         tracing::info!(
             "Execution {} cancellation acknowledged: dispatch process terminated",
@@ -23630,6 +23755,7 @@ pub(crate) mod tests {
             "warm-room",
             &worktree,
             std::sync::Arc::new(FixedRunner(true)),
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .expect("the warm start completed");
@@ -23666,6 +23792,7 @@ pub(crate) mod tests {
     struct HeldFirstBuild {
         started: std::sync::atomic::AtomicUsize,
         finished: std::sync::atomic::AtomicUsize,
+        cancelled: std::sync::atomic::AtomicUsize,
         released: std::sync::atomic::AtomicBool,
         success: bool,
         detail: String,
@@ -23676,10 +23803,16 @@ pub(crate) mod tests {
             std::sync::Arc::new(Self {
                 started: Default::default(),
                 finished: Default::default(),
+                cancelled: Default::default(),
                 released: Default::default(),
                 success,
                 detail: detail.into(),
             })
+        }
+
+        /// Builds that were stopped by a cancellation instead of released.
+        fn cancelled(&self) -> usize {
+            self.cancelled.load(std::sync::atomic::Ordering::SeqCst)
         }
 
         fn succeeding() -> std::sync::Arc<Self> {
@@ -23705,6 +23838,14 @@ pub(crate) mod tests {
             &self,
             probe: &crate::core::task_worker_env::ProbeCommand,
         ) -> crate::core::task_worker_env::ProbeOutcome {
+            self.run_cancellable(probe, &tokio_util::sync::CancellationToken::new())
+        }
+
+        fn run_cancellable(
+            &self,
+            probe: &crate::core::task_worker_env::ProbeCommand,
+            cancel: &tokio_util::sync::CancellationToken,
+        ) -> crate::core::task_worker_env::ProbeOutcome {
             use std::sync::atomic::Ordering::SeqCst;
             if !probe.args.iter().any(|arg| arg == "--no-run") {
                 return crate::core::task_worker_env::ProbeOutcome {
@@ -23714,6 +23855,13 @@ pub(crate) mod tests {
             }
             self.started.fetch_add(1, SeqCst);
             while !self.released.load(SeqCst) {
+                if cancel.is_cancelled() {
+                    self.cancelled.fetch_add(1, SeqCst);
+                    return crate::core::task_worker_env::ProbeOutcome {
+                        success: false,
+                        detail: "cancelled".into(),
+                    };
+                }
                 std::thread::sleep(Duration::from_millis(5));
             }
             self.finished.fetch_add(1, SeqCst);
@@ -24045,6 +24193,140 @@ pub(crate) mod tests {
                 crate::core::task_worker_lane_warm::FirstBuild::TimedOut { .. }
             ),
             "{record:?}"
+        );
+    }
+
+    async fn warm_start_of(
+        db: &Database,
+        exec_id: &str,
+    ) -> Option<crate::core::task_worker_lane_warm::WarmStartRecord> {
+        let id = exec_id.to_string();
+        db.with_conn(move |conn| crate::db::orchestration::latest_lane_warm_start(conn, &id))
+            .await
+            .unwrap()
+    }
+
+    /// Cancelling through the endpoint during the warm-up stops the first
+    /// build (it is not released), frees its slot, and neither smoke-checks nor
+    /// dispatches the worker.
+    #[tokio::test]
+    async fn cancelling_an_execution_during_its_warm_up_stops_the_first_build_and_never_dispatches()
+    {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let runner = HeldFirstBuild::succeeding();
+        let _release = ReleaseOnDrop(runner.clone());
+        let launched =
+            launch_with_cargo_crate(&db, repo.path(), runner.clone(), "warm-cancel").await;
+        assert_eq!(launched.status, TaskExecutionStatus::Provisioning);
+        wait_until("the first build starts", || runner.started() == 1).await;
+
+        let response = cancel_execution(
+            State(recovery_test_state(&db)),
+            Path(launched.id.clone()),
+            Json(CancelExecutionRequest {
+                reason: "cancelled while the lane warms".into(),
+                cleanup_policy: Some(crate::models::CancellationCleanupPolicy::Preserve),
+            }),
+        )
+        .await
+        .0;
+
+        assert!(response.success, "{:?}", response.error);
+        let receipt = response.data.expect("cancellation receipt");
+        assert_eq!(receipt.execution.status, TaskExecutionStatus::Cancelled);
+        assert_eq!(
+            receipt.cancellation_signal_sent,
+            Some(true),
+            "the warm-up was signalled by the cancel itself"
+        );
+        assert_eq!(
+            receipt.termination_confirmed,
+            Some(true),
+            "the build is stopped and its claim released when the cancel answers"
+        );
+        // Stopped, not released: it never ran to its end.
+        assert_eq!(runner.cancelled(), 1);
+        assert_eq!(runner.finished(), 0);
+        assert!(
+            !warming_executions()
+                .lock()
+                .unwrap()
+                .contains_key(&launched.id),
+            "the warming claim is gone"
+        );
+        wait_until("the cancelled warm start is journalled", || {
+            futures::executor::block_on(event_count(&db, &launched.id, "lane_warm_start")) == 1
+        })
+        .await;
+        let record = warm_start_of(&db, &launched.id).await.expect("journalled");
+        assert!(
+            matches!(
+                record.first_build,
+                crate::core::task_worker_lane_warm::FirstBuild::Cancelled { .. }
+            ),
+            "{record:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Nothing came after: no smoke check, no dispatch, still Cancelled.
+        let id = launched.id.clone();
+        assert!(db
+            .with_conn(
+                move |conn| crate::db::orchestration::latest_toolchain_capabilities(conn, &id)
+            )
+            .await
+            .unwrap()
+            .is_none());
+        let sub = launched.sub_discussion_id.clone().expect("child room");
+        assert_eq!(dispatch_rows(&db, &sub).await, 0);
+        assert_eq!(
+            exec_of(&db, &launched.id).await.status,
+            TaskExecutionStatus::Cancelled
+        );
+    }
+
+    /// A cancel that never goes through the execution's endpoint (the run's, a
+    /// reassignment) is seen by the warm-up itself.
+    #[tokio::test]
+    async fn a_cancel_that_bypasses_the_endpoint_still_stops_the_warm_up_build() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let runner = HeldFirstBuild::succeeding();
+        let _release = ReleaseOnDrop(runner.clone());
+        let launched =
+            launch_with_cargo_crate(&db, repo.path(), runner.clone(), "warm-cancel-tree").await;
+        wait_until("the first build starts", || runner.started() == 1).await;
+
+        let id = launched.id.clone();
+        db.with_conn(move |conn| {
+            crate::db::orchestration::cancel_execution_tree(
+                conn,
+                &id,
+                "run cancelled",
+                &backend_actor(),
+            )
+        })
+        .await
+        .unwrap();
+
+        wait_until("the build is stopped by the warm-up's own watch", || {
+            runner.cancelled() == 1
+        })
+        .await;
+        assert_eq!(runner.finished(), 0);
+        wait_until("the warming claim is released", || {
+            !warming_executions()
+                .lock()
+                .unwrap()
+                .contains_key(&launched.id)
+        })
+        .await;
+        let sub = launched.sub_discussion_id.clone().expect("child room");
+        assert_eq!(dispatch_rows(&db, &sub).await, 0);
+        assert_eq!(
+            exec_of(&db, &launched.id).await.status,
+            TaskExecutionStatus::Cancelled
         );
     }
 
