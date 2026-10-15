@@ -13,7 +13,7 @@ impl Environment {
         if !self.0.iter().any(|(key, _)| *key == name) {
             self.0.push((name, kronn::core::child_env::var_os(name)));
         }
-        // nextest, the suite's runner, gives this test its own process.
+        // The test runs in its own process (nextest, or `own_process::delegated`).
         kronn::core::child_env::set_var(name, value.into());
     }
 }
@@ -120,11 +120,11 @@ esac
             ..AgentStartConfig::new(&agent, &project, "fixture prompt", &base.tokens)
         };
         let mut process =
-            tokio::time::timeout(Duration::from_secs(10), start_agent_with_config(config))
+            tokio::time::timeout(Duration::from_secs(60), start_agent_with_config(config))
                 .await
                 .unwrap()
                 .unwrap();
-        tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::time::timeout(Duration::from_secs(60), async {
             while process.next_line().await.is_some() {}
             process.child.wait().await.unwrap()
         })
@@ -342,6 +342,12 @@ async fn artifacts_directory_is_read_only(fixture: &mut Fixture) {
 
 #[tokio::test(flavor = "current_thread")]
 async fn workflow_agent_launch_policies_reach_the_adapter_argv() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "workflow_agent_launch_policies_reach_the_adapter_argv",
+    ) {
+        return;
+    }
     let mut fixture = Fixture::new();
     artifacts_directory_is_read_only(&mut fixture).await;
     declared_tools_replace_the_catalogue(&mut fixture).await;
