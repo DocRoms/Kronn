@@ -33,10 +33,11 @@ import { DashboardPage } from '../pages/DashboardPage';
 import { deleteQuickPrompt } from '../fixtures/quick-prompt-seed';
 
 test.describe('Live Page inline action — launch and secure discussion deep link', () => {
-  // The spec owns the Quick Prompt it creates: other specs seed their own.
-  let qpId = '';
+  // The spec owns the Quick Prompts it creates (one per attempt: a retry
+  // creates another): other specs seed their own.
+  const qpIds: string[] = [];
   test.afterAll(async ({ request }) => {
-    await deleteQuickPrompt(request, qpId);
+    for (const id of qpIds) await deleteQuickPrompt(request, id);
   });
 
   test('launches a Quick Prompt action from a real Live Page and opens its result discussion without an opener back-reference', async ({ page }) => {
@@ -50,7 +51,7 @@ test.describe('Live Page inline action — launch and secure discussion deep lin
     expect(qpResponse.ok()).toBe(true);
     const qp = (await qpResponse.json()) as { data: { id: string } };
     const targetId = qp.data.id;
-    qpId = targetId;
+    qpIds.push(targetId);
 
     const html = '<button data-kronn-action="frame">Frame</button>'
       + '<script type="application/kronn-action" data-action-id="frame">'
