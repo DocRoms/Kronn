@@ -12,13 +12,6 @@ on:
     types: [opened, reopened, synchronize]
   push:
     branches: [main]
-  # Called by Desktop Build with the release commit: every job then runs.
-  workflow_call:
-    inputs:
-      ref:
-        description: "Commit SHA to test"
-        required: true
-        type: string
   workflow_dispatch:
     inputs:
       ref:
@@ -184,9 +177,9 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    # The macOS lib-test rebuild alone took 29m13s in run 36912793272.
-    # Leave room for all three required suites and the post-job cache save.
-    timeout-minutes: ${{ matrix.os == 'macos-latest' && 45 || 30 }}
+    # A cold macOS lib-test build outlived 45 min (runs 38620268259, 38595597764);
+    # a cancelled job saves no cache, so every later run started cold again.
+    timeout-minutes: ${{ matrix.os == 'macos-latest' && 75 || 30 }}
     defaults:
       run:
         working-directory: backend

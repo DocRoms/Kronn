@@ -148,7 +148,7 @@ class NativeLibraryEnvironmentTests(unittest.TestCase):
         self.assertIn("verify_artifacts.py artifacts", workflow)
         self.assertIn("verify-installers:", workflow)
         self.assertIn(
-            "needs: [release-checks, build-desktop, verify-installers, quality-gates, build-gates]",
+            "needs: [release-checks, build-desktop, verify-installers]",
             workflow,
         )
 
@@ -194,62 +194,36 @@ class NativeLibraryEnvironmentTests(unittest.TestCase):
                 self.assertEqual(ref, "${{ inputs.release_tag || github.ref }}")
             else:
                 self.assertEqual(ref, resolved, job)
-        # The reusable workflows take the commit as an input and check it out.
+        # A manual dispatch of a CI workflow checks out the requested commit.
         for name in ("dependency-review.yml", "ci-test.yml", "ci-build.yml"):
             checkouts = self._checkout_refs(name)
             self.assertTrue(checkouts, name)
             for job, _step, ref in checkouts:
                 self.assertEqual(ref, "${{ inputs.ref }}", f"{name}:{job}")
 
-    def test_release_runs_the_reusable_checks_on_the_resolved_commit(self) -> None:
+    def test_a_tag_builds_the_draft_without_rerunning_ci(self) -> None:
         workflow = (
             Path(__file__).resolve().parents[3] / ".github" / "workflows" / "desktop-build.yml"
         ).read_text(encoding="utf-8")
         self.assertIn("sha: ${{ steps.resolve.outputs.sha }}", workflow)
-        # `with:` of the two reusable-workflow calls (job-level, 6 spaces).
-        self.assertEqual(
-            len(re.findall(
-                r"^      ref: \$\{\{ needs\.release-checks\.outputs\.sha \}\}$", workflow, re.M
-            )),
-            3,
-        )
-        self.assertIn("uses: ./.github/workflows/ci-test.yml", workflow)
-        self.assertIn("uses: ./.github/workflows/ci-build.yml", workflow)
-        self.assertIn("uses: ./.github/workflows/dependency-review.yml", workflow)
+        # The merged pull request was the gate: a tag reruns no workflow.
+        self.assertNotIn("uses: ./.github/workflows/", workflow)
         release_job = workflow[workflow.index("\n  release:\n"):]
-        self.assertIn("quality-gates", release_job.split("steps:")[0])
-        self.assertIn("build-gates", release_job.split("steps:")[0])
-        self.assertIn("release-checks", release_job.split("steps:")[0])
+        self.assertIn(
+            "needs: [release-checks, build-desktop, verify-installers]",
+            release_job.split("steps:")[0],
+        )
 
-    def test_reusable_workflow_callers_grant_every_permission_their_jobs_declare(self) -> None:
-        workflows = Path(__file__).resolve().parents[3] / ".github" / "workflows"
-        caller = (workflows / "desktop-build.yml").read_text(encoding="utf-8")
-
-        def declared(text: str) -> set[tuple[str, str]]:
-            grants: set[tuple[str, str]] = set()
-            for block in re.findall(r"^( +)permissions:\n((?:\1  [a-z-]+: [a-z]+\n)+)", text, re.M):
-                grants.update(re.findall(r"([a-z-]+): ([a-z]+)", block[1]))
-            return grants
-
-        for callee in ("ci-test.yml", "ci-build.yml", "dependency-review.yml"):
-            uses = caller.index(f"uses: ./.github/workflows/{callee}")
-            headers = [m.start() for m in re.finditer(r"^  [a-z0-9-]+:\n", caller[:uses], re.M)]
-            job = caller[headers[-1]:uses]
-            caller_grants = declared(job)
-            needed = declared((workflows / callee).read_text(encoding="utf-8"))
-            missing = {grant for grant in needed if grant not in caller_grants}
-            self.assertFalse(missing, f"desktop-build.yml must grant {sorted(missing)} to {callee}")
-
-    def test_ci_runs_every_gate_when_called_for_a_release(self) -> None:
+    def test_ci_runs_every_gate_on_a_manual_dispatch(self) -> None:
         workflows = Path(__file__).resolve().parents[3] / ".github" / "workflows"
         for name, route, label, minimum in (
             ("ci-test.yml", "require-ci-label", "ci-test", 8),
             ("ci-build.yml", "require-ci-build-label", "ci-build", 4),
         ):
             workflow = (workflows / name).read_text(encoding="utf-8")
-            self.assertIn("workflow_call:", workflow)
+            self.assertNotIn("workflow_call:", workflow)
             # Label-gated jobs follow the route job, which lets every event
-            # but a pull request through: a release call is a push or dispatch.
+            # but a pull request through: a manual dispatch runs them all.
             gated = re.findall(
                 rf"^    if: needs\.{route}\.outputs\.run == 'true'$", workflow, re.MULTILINE
             )

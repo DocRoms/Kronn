@@ -12,19 +12,6 @@ on:
     types: [opened, reopened, synchronize]
   push:
     branches: [main]
-  # Called by Desktop Build with the release commit: every job then runs, as on
-  # a manual dispatch, whatever event started the caller.
-  workflow_call:
-    inputs:
-      ref:
-        description: "Commit SHA to test"
-        required: true
-        type: string
-      cache_mode:
-        description: "Measurement mode (hot reuses the normal cache)"
-        required: false
-        default: hot
-        type: string
   workflow_dispatch:
     inputs:
       ref:

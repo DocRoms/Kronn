@@ -132,7 +132,7 @@ class E2eContainerWorkflowTests(unittest.TestCase):
                 "test-backend": 40,
                 "test-e2e": 45,
                 "build-release": 45,
-                "test-backend-portability": "${{ matrix.os == 'macos-latest' && 45 || 30 }}",
+                "test-backend-portability": "${{ matrix.os == 'macos-latest' && 75 || 30 }}",
             }.get(job, 60 if path == VERDICT_WORKFLOW else 30)
             self.assertIn(f"timeout-minutes: {expected_timeout}", section, job)
 
@@ -317,7 +317,8 @@ class E2eContainerWorkflowTests(unittest.TestCase):
             workflow = path.read_text()
             jobs = job_sections(workflow)
             self.assertIn("  push:\n    branches: [main]", workflow)
-            self.assertIn("workflow_call:", workflow)
+            # A tag reruns nothing: no workflow calls these.
+            self.assertNotIn("workflow_call:", workflow)
             self.assertNotIn("github.event.label", workflow)
             self.assertNotIn("github.event.action", workflow)
             self.assertNotIn("previous_gate_verdict", workflow)
@@ -351,10 +352,9 @@ class E2eContainerWorkflowTests(unittest.TestCase):
         # built here, for every pull request.
         self.assertIn("cargo build --release --locked --bin kronn", build)
         self.assertIn("      - build-release", build)
-        # Desktop Build calls both: the label job's permission must be granted.
         desktop = (WORKFLOWS / "desktop-build.yml").read_text()
         for name in ("ci-test.yml", "ci-build.yml"):
-            self.assertIn(f"      pull-requests: read\n    uses: ./.github/workflows/{name}", desktop)
+            self.assertNotIn(f"uses: ./.github/workflows/{name}", desktop)
 
     def test_e2e_serves_the_dev_build_and_ci_build_the_release(self):
         e2e = re.search(
