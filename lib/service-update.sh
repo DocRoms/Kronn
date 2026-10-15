@@ -29,9 +29,12 @@ _su_valid_semver() { [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
 _su_backend_version() { printf '%s\n' "${1%%-dev-*}"; }
 
 # Seconds since the epoch of a file's last modification; 0 when absent.
+# GNU first: on coreutils `-f` means "file system status", so `stat -f %m FILE`
+# prints the fs block and exits 1 instead of failing cleanly. BSD/macOS rejects
+# `-c` without printing anything, so this order is safe on both.
 _su_mtime() {
     [[ -e "$1" ]] || { echo 0; return 0; }
-    stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0
+    stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0
 }
 
 # Directory holding the database. Mirrors backend/src/core/config.rs
