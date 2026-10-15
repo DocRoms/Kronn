@@ -280,6 +280,55 @@ async fn decisions_wait_for_a_running_audit() {
 }
 
 #[tokio::test]
+async fn decide_tds_refuses_with_docs_busy_and_writes_nothing_while_the_lease_is_held() {
+    let (state, tmp) = fixture().await;
+    let sheets_before: Vec<String> = [A, B, C].iter().map(|id| read(&tmp, id)).collect();
+    let documents_before = state
+        .db
+        .with_read_conn(|conn| crate::db::audit_documents::latest(conn, "p1"))
+        .await
+        .unwrap();
+    let request = || {
+        vec![
+            decision(A, TdReviewDecision::Confirm, None),
+            decision(
+                B,
+                TdReviewDecision::AcceptDecision,
+                Some("Choix voulu : le cache est volontairement simple."),
+            ),
+            decision(C, TdReviewDecision::Reject, None),
+        ]
+    };
+    let lease = crate::api::audit::docs_write::DocsWriteLease::try_acquire(&state, "p1").unwrap();
+    let response = decide(&state, request()).await;
+    assert!(!response.success, "{response:?}");
+    assert_eq!(
+        response.error.as_deref(),
+        Some(crate::api::audit::docs_write::DOCS_BUSY)
+    );
+    let sheets_after: Vec<String> = [A, B, C].iter().map(|id| read(&tmp, id)).collect();
+    assert_eq!(sheets_after, sheets_before, "a refused decision wrote a sheet");
+    assert!(
+        !tmp.path().join("docs/decisions.md").exists(),
+        "a refused decision wrote the decision log"
+    );
+    let documents_after = state
+        .db
+        .with_read_conn(|conn| crate::db::audit_documents::latest(conn, "p1"))
+        .await
+        .unwrap();
+    assert_eq!(documents_after, documents_before);
+    assert!(state.audit_tracker.lock().unwrap().leased.contains("p1"));
+    // Released, the very same request goes through: the lease alone refused it.
+    drop(lease);
+    let response = decide(&state, request()).await;
+    assert!(response.success, "{:?}", response.error);
+    assert_ne!(read(&tmp, A), sheets_before[0]);
+    assert!(tmp.path().join("docs/decisions.md").exists());
+    assert!(!state.audit_tracker.lock().unwrap().leased.contains("p1"));
+}
+
+#[tokio::test]
 async fn a_td_decision_updates_its_proof_without_accepting_pulled_documents() {
     for external_doc in [
         None,

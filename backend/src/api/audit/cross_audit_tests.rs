@@ -966,6 +966,85 @@ async fn a_dispute_waits_for_a_running_audit_and_a_wrong_option_changes_nothing(
 }
 
 #[tokio::test]
+async fn a_dispute_card_refuses_with_docs_busy_and_writes_nothing_while_the_lease_is_held() {
+    let d = disputed_project().await;
+    let pid = crate::api::other_projects_fixture::PROJECT_ID;
+    let before = (sheet_of(&d), index_of(&d));
+    let decisions_before = d
+        .state
+        .db
+        .with_read_conn({
+            let (disc, question) = (d.disc_id.clone(), d.question_id.clone());
+            move |conn| {
+                Ok(crate::db::discussion_questions::list(conn, &disc)?
+                    .questions
+                    .into_iter()
+                    .find(|card| card.id == question)
+                    .map(|card| card.state))
+            }
+        })
+        .await
+        .unwrap();
+    let lease = crate::api::audit::docs_write::DocsWriteLease::try_acquire(&d.state, pid).unwrap();
+
+    let answered = crate::api::discussion_questions::answer(
+        axum::extract::State(d.state.clone()),
+        axum::extract::Path((d.disc_id.clone(), d.question_id.clone())),
+        axum::Json(
+            crate::db::discussion_questions::AnswerDiscussionQuestionRequest {
+                selected_option_ids: vec!["dismiss".to_string()],
+                item_answers: vec![],
+                text: None,
+                idempotency_key: "answer-busy".into(),
+            },
+        ),
+    )
+    .await;
+    let declined = crate::api::discussion_questions::decline(
+        axum::extract::State(d.state.clone()),
+        axum::extract::Path((d.disc_id.clone(), d.question_id.clone())),
+        axum::Json(
+            crate::db::discussion_questions::DeclineDiscussionQuestionRequest {
+                idempotency_key: "decline-busy".into(),
+                reason: None,
+            },
+        ),
+    )
+    .await;
+    assert_eq!(answered.0, axum::http::StatusCode::CONFLICT);
+    assert_eq!(declined.0, axum::http::StatusCode::CONFLICT);
+    for refusal in [answered.1 .0.error, declined.1 .0.error] {
+        assert_eq!(
+            refusal.as_deref(),
+            Some(crate::api::audit::docs_write::DOCS_BUSY)
+        );
+    }
+    assert_eq!((sheet_of(&d), index_of(&d)), before, "a refused card wrote docs");
+    assert_eq!(pending(&d).await.len(), 1);
+    let decisions_after = d
+        .state
+        .db
+        .with_read_conn({
+            let (disc, question) = (d.disc_id.clone(), d.question_id.clone());
+            move |conn| {
+                Ok(crate::db::discussion_questions::list(conn, &disc)?
+                    .questions
+                    .into_iter()
+                    .find(|card| card.id == question)
+                    .map(|card| card.state))
+            }
+        })
+        .await
+        .unwrap();
+    assert_eq!(decisions_after, decisions_before, "the card was resolved");
+
+    // Released, the same card is decided: the lease alone refused it.
+    drop(lease);
+    assert_eq!(answer_card(&d, "dismiss").await, axum::http::StatusCode::OK);
+    assert!(pending(&d).await.is_empty());
+}
+
+#[tokio::test]
 async fn declining_a_dispute_keeps_the_finding_and_ends_the_pending_label() {
     let d = disputed_project().await;
     let status = crate::api::discussion_questions::decline(

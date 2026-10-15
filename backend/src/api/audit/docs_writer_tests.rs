@@ -463,3 +463,197 @@ async fn accept_takes_the_lease_and_refuses_with_docs_busy_without_recording_the
     assert_eq!(recorded[0].step_index, 1);
     assert!(!state.audit_tracker.lock().unwrap().leased.contains("p1"));
 }
+
+async fn saved_docs_dir(state: &crate::AppState) -> Option<String> {
+    state
+        .db
+        .with_read_conn(|conn| crate::db::projects::project_docs_dir(conn, "p1"))
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn docs_location_set_refuses_with_docs_busy_and_records_no_override() {
+    let state = state();
+    let root = tempfile::tempdir().unwrap();
+    seed_project(&state, root.path()).await;
+    std::fs::create_dir_all(root.path().join("docs")).unwrap();
+    std::fs::write(root.path().join("docs/AGENTS.md"), "# Project\n").unwrap();
+    let path = root.path().to_string_lossy().into_owned();
+    let resolved_before = crate::core::docs_location::docs_dir(root.path());
+    assert_eq!(saved_docs_dir(&state).await, None);
+
+    let lease = crate::api::audit::docs_write::DocsWriteLease::try_acquire(&state, "p1").unwrap();
+    let relocate = || {
+        send(
+            state.clone(),
+            "PUT",
+            "docs-location",
+            serde_json::json!({"dir":"context"}),
+        )
+    };
+    let response = relocate().await;
+    assert_eq!(response["success"], false, "{response}");
+    assert_eq!(
+        response["error"].as_str(),
+        Some(crate::api::audit::docs_write::DOCS_BUSY),
+        "{response}"
+    );
+    assert_eq!(
+        saved_docs_dir(&state).await,
+        None,
+        "a refused relocation saved its override"
+    );
+    assert_eq!(
+        crate::core::docs_location::docs_dir(root.path()),
+        resolved_before,
+        "a refused relocation changed the resolved docs root"
+    );
+    assert!(!root.path().join("context").exists());
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("docs/AGENTS.md")).unwrap(),
+        "# Project\n"
+    );
+    assert!(state.audit_tracker.lock().unwrap().leased.contains("p1"));
+
+    // Released, the very same request is applied: the lease alone refused it.
+    drop(lease);
+    let response = relocate().await;
+    assert_eq!(response["success"], true, "{response}");
+    assert_eq!(saved_docs_dir(&state).await.as_deref(), Some("context"));
+    crate::core::docs_location::set_project_override(&path, None);
+    assert!(!state.audit_tracker.lock().unwrap().leased.contains("p1"));
+}
+
+#[tokio::test]
+async fn template_merge_discard_refuses_with_docs_busy_and_keeps_the_merge_worktree() {
+    let state = state();
+    let root = tempfile::tempdir().unwrap();
+    let merge = tempfile::tempdir().unwrap();
+    seed_project(&state, root.path()).await;
+    let git = |dir: &std::path::Path, args: &[&str]| {
+        let result = crate::core::cmd::git_cmd()
+            .args(["-c", "user.name=Test", "-c", "user.email=test@example.com"])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    };
+    git(root.path(), &["init", "-q", "-b", "main"]);
+    std::fs::create_dir_all(root.path().join("docs")).unwrap();
+    std::fs::write(root.path().join("docs/AGENTS.md"), "# Project\n").unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-q", "-m", "baseline"]);
+    let worktree = merge.path().join("template-merge");
+    git(
+        root.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            crate::core::docs_merge::MERGE_BRANCH,
+            &worktree.to_string_lossy(),
+        ],
+    );
+    std::fs::write(worktree.join("docs/pending.md"), "# Pending merge work\n").unwrap();
+    let branch_exists = || {
+        crate::core::cmd::git_cmd()
+            .args([
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{}", crate::core::docs_merge::MERGE_BRANCH),
+            ])
+            .current_dir(root.path())
+            .status()
+            .unwrap()
+            .success()
+    };
+    let discard = || send(state.clone(), "DELETE", "template-merge", serde_json::json!({}));
+
+    let lease = crate::api::audit::docs_write::DocsWriteLease::try_acquire(&state, "p1").unwrap();
+    let response = discard().await;
+    assert_eq!(response["success"], false, "{response}");
+    assert_eq!(
+        response["error"].as_str(),
+        Some(crate::api::audit::docs_write::DOCS_BUSY),
+        "{response}"
+    );
+    assert!(worktree.join("docs/pending.md").is_file());
+    assert!(branch_exists(), "a refused discard dropped the merge branch");
+    assert!(state.audit_tracker.lock().unwrap().leased.contains("p1"));
+
+    // Released, the same request drops the worktree and its branch.
+    drop(lease);
+    let response = discard().await;
+    assert_eq!(response["success"], true, "{response}");
+    assert!(!worktree.exists());
+    assert!(!branch_exists());
+    assert!(!state.audit_tracker.lock().unwrap().leased.contains("p1"));
+}
+
+#[tokio::test]
+async fn bootstrap_refuses_with_docs_busy_and_creates_no_directory_or_project() {
+    let state = state();
+    let root = tempfile::tempdir().unwrap();
+    seed_project(&state, root.path()).await;
+    let request = || crate::models::BootstrapProjectRequest {
+        name: "News Site".into(),
+        description: "A news site".into(),
+        agent: crate::models::AgentType::ClaudeCode,
+        mcp_config_ids: vec![],
+        skill_ids: vec![],
+    };
+    let created = root.path().join("news-site");
+    let project_count = || async {
+        state
+            .db
+            .with_read_conn(|conn| Ok(crate::db::projects::list_projects(conn)?.len()))
+            .await
+            .unwrap()
+    };
+    let lease =
+        crate::api::audit::docs_write::DocsWriteLease::try_acquire(&state, "boot-1").unwrap();
+    let response =
+        crate::api::projects::bootstrap::bootstrap_as(state.clone(), request(), "boot-1".into())
+            .await
+            .0;
+    assert!(!response.success, "{response:?}");
+    assert_eq!(
+        response.error.as_deref(),
+        Some(crate::api::audit::docs_write::DOCS_BUSY)
+    );
+    assert!(
+        !created.exists(),
+        "a refused bootstrap created its directory"
+    );
+    assert_eq!(project_count().await, 1);
+    assert!(state
+        .audit_tracker
+        .lock()
+        .unwrap()
+        .leased
+        .contains("boot-1"));
+
+    // Released, the very same request bootstraps the project.
+    drop(lease);
+    let response =
+        crate::api::projects::bootstrap::bootstrap_as(state.clone(), request(), "boot-1".into())
+            .await
+            .0;
+    assert!(response.success, "{response:?}");
+    assert!(created.join(".git").exists());
+    assert_eq!(project_count().await, 2);
+    assert!(!state
+        .audit_tracker
+        .lock()
+        .unwrap()
+        .leased
+        .contains("boot-1"));
+}

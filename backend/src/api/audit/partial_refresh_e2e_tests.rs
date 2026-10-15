@@ -333,3 +333,32 @@ async fn verified_unchanged_also_settles_a_section_judged_by_its_citations() {
         crate::core::citation_drift::RecordReason::Acknowledged
     );
 }
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn acknowledging_drift_refuses_with_docs_busy_and_settles_nothing() {
+    let fx = Validated::new(|_| {}).await;
+    checksum_drift_on_agents(fx.project());
+    let docs_before = docs_snapshot(fx.project());
+    let lease =
+        crate::api::audit::docs_write::DocsWriteLease::try_acquire(&fx.h.state, PROJECT_ID)
+            .unwrap();
+    let refused = acknowledge(&fx, &[AGENTS], false).await;
+    assert!(!refused.success, "{refused:?}");
+    assert_eq!(
+        refused.error.as_deref(),
+        Some(crate::api::audit::docs_write::DOCS_BUSY)
+    );
+    assert_eq!(
+        docs_snapshot(fx.project()),
+        docs_before,
+        "a refused acknowledgement wrote docs"
+    );
+    assert!(stale(fx.project()).contains(&AGENTS.to_string()));
+    // The refusal came from the lease alone: released, the same call settles it.
+    drop(lease);
+    let acknowledged = acknowledge(&fx, &[AGENTS], false).await;
+    assert!(acknowledged.success, "{:?}", acknowledged.error);
+    assert!(!stale(fx.project()).contains(&AGENTS.to_string()));
+}
