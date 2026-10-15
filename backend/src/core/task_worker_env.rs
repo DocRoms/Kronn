@@ -28,6 +28,9 @@ pub const CARGO_TARGET_DIR_ENV: &str = "CARGO_TARGET_DIR";
 pub const CARGO_NET_OFFLINE_ENV: &str = "CARGO_NET_OFFLINE";
 /// The lane's private Cargo home: lock files land there, the registry is linked.
 pub const CARGO_HOME_ENV: &str = "CARGO_HOME";
+/// Caps one worker's compilation (KT-1250); the host-wide cap on concurrently
+/// compiling workers is `core::task_worker_lane_warm`.
+pub const CARGO_BUILD_JOBS_ENV: &str = "CARGO_BUILD_JOBS";
 
 /// `task_execution_events.action` under which the capability record is journalled.
 pub const TOOLCHAIN_EVENT_ACTION: &str = "toolchain_capabilities";
@@ -155,6 +158,10 @@ impl WorkerLane {
                 self.cargo_target_dir.clone().into_os_string(),
             ),
             (CARGO_NET_OFFLINE_ENV, OsString::from("true")),
+            (
+                CARGO_BUILD_JOBS_ENV,
+                OsString::from(crate::core::task_worker_lane_warm::worker_build_jobs().to_string()),
+            ),
         ];
         if provisioned.cargo_home_ready {
             env.push((CARGO_HOME_ENV, self.cargo_home.clone().into_os_string()));

@@ -1792,6 +1792,17 @@ async fn provision_task_execution_inner(
     // is provisioned and smoke-checked here, before the brief is written, so the
     // brief states what the worker can really run. Other runtimes are unchanged.
     let toolchain = if prepared.execution.worker_agent_type.as_deref() == Some("ClaudeCode") {
+        // KT-1250 — the lane target is seeded from a warm one and its first build
+        // runs here, under the host's cap, so the worker starts warm.
+        record_lane_warm_start(
+            db,
+            &prepared.execution.id,
+            prepared.execution.attempt_no,
+            &sub_disc_id,
+            &worktree_path,
+            std::sync::Arc::new(crate::core::task_worker_env::ProcessProbeRunner),
+        )
+        .await;
         Some(
             record_toolchain_smoke_check(
                 db,
@@ -6688,6 +6699,74 @@ fn insert_toolchain_section(content: String, toolchain: &ToolchainCapabilities) 
         Some(at) => format!("{}{section}{}", &content[..at], &content[at..]),
         None => format!("{content}\n\n{section}"),
     }
+}
+
+/// Start a Claude task worker's lane warm (KT-1250): seed its Cargo target with
+/// a copy-on-write clone of a warm one, then run its first build under the
+/// host's concurrency cap, saying so in the worker's room when it has to queue.
+/// Journalled on the execution; never raised — a lane that stays cold only
+/// costs the worker its own compile time.
+async fn record_lane_warm_start(
+    db: &Database,
+    exec_id: &str,
+    attempt_no: u32,
+    room_id: &str,
+    worktree: &std::path::Path,
+    runner: std::sync::Arc<dyn crate::core::task_worker_env::ProbeRunner>,
+) -> Option<crate::core::task_worker_lane_warm::WarmStartRecord> {
+    let (queued_tx, mut queued_rx) = tokio::sync::mpsc::unbounded_channel::<usize>();
+    let path = worktree.to_path_buf();
+    let warm = tokio::task::spawn_blocking(move || {
+        crate::core::task_worker_lane_warm::warm_worktree(&path, runner.as_ref(), |ahead| {
+            let _ = queued_tx.send(ahead);
+        })
+    });
+    let announce = async {
+        while let Some(ahead) = queued_rx.recv().await {
+            let room = room_id.to_string();
+            let mut notice = orchestrator_message(
+                format!("orch-warmup-queued:{exec_id}:{attempt_no}"),
+                format!(
+                    "{ahead} task worker(s) are already compiling on this host. This worker's \
+                     first build is queued and starts as soon as one finishes; the worker \
+                     starts once it is done."
+                ),
+            );
+            notice.role = MessageRole::System;
+            if let Err(error) = db
+                .with_conn(move |conn| {
+                    crate::db::discussions::insert_message(conn, &room, &notice).map(|_| ())
+                })
+                .await
+            {
+                tracing::warn!("warm-start queue notice not posted: {error}");
+            }
+        }
+    };
+    let (record, ()) = tokio::join!(warm, announce);
+    let record = match record {
+        Ok(record) => record,
+        Err(error) => {
+            tracing::warn!("lane warm start did not complete: {error}");
+            return None;
+        }
+    };
+    let id = exec_id.to_string();
+    let journal = record.clone();
+    if let Err(error) = db
+        .with_conn(move |conn| {
+            crate::db::orchestration::record_lane_warm_start(
+                conn,
+                &id,
+                &journal,
+                &backend_actor(),
+            )
+        })
+        .await
+    {
+        tracing::warn!("lane warm-start record not persisted: {error}");
+    }
+    Some(record)
 }
 
 /// Provision a Claude task worker's lane and check, with the worker's own
@@ -22973,6 +23052,56 @@ pub(crate) mod tests {
         // One finding written by the launch saga itself (a Claude worker), then
         // the two explicit checks above: every attempt is journalled.
         assert_eq!(findings, 3, "every attempt is journalled");
+    }
+
+    #[tokio::test]
+    async fn the_warm_start_seed_and_first_build_duration_are_recorded_on_the_execution() {
+        use crate::core::task_worker_lane_warm::FirstBuild;
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (exec_id, worktree) = provisioned_lane_for_smoke_check(repo.path(), &db).await;
+        std::fs::write(worktree.join("backend").join("Cargo.lock"), "version = 4\n").unwrap();
+        let id = exec_id.clone();
+        let before = db
+            .with_conn(move |conn| crate::db::orchestration::latest_lane_warm_start(conn, &id))
+            .await
+            .unwrap();
+        // The launch saga itself warmed the lane: no Cargo.lock, so no build ran.
+        let launched = before.expect("the launch saga journals the warm start");
+        assert!(
+            matches!(launched.first_build, FirstBuild::Skipped { .. }),
+            "{launched:?}"
+        );
+
+        let record = record_lane_warm_start(
+            &db,
+            &exec_id,
+            1,
+            "warm-room",
+            &worktree,
+            std::sync::Arc::new(FixedRunner(true)),
+        )
+        .await
+        .expect("the warm start completed");
+
+        assert!(matches!(record.first_build, FirstBuild::Succeeded { .. }), "{record:?}");
+        assert!(record.lock_hash.is_some());
+        assert!(record.build_jobs >= 1);
+        let id = exec_id.clone();
+        let recorded = db
+            .with_conn(move |conn| crate::db::orchestration::latest_lane_warm_start(conn, &id))
+            .await
+            .unwrap();
+        assert_eq!(recorded, Some(record), "seed + first build are on the execution");
+        // A sibling event: the capability record keeps its own shape.
+        let id = exec_id.clone();
+        let capabilities = db
+            .with_conn(move |conn| {
+                crate::db::orchestration::latest_toolchain_capabilities(conn, &id)
+            })
+            .await
+            .unwrap();
+        assert!(capabilities.is_some());
     }
 
     #[tokio::test]
