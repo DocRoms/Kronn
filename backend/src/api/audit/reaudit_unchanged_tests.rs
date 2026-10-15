@@ -1228,6 +1228,102 @@ async fn a_full_audit_goes_on_after_the_session_that_launched_it_is_closed() {
     validation_settled(state, &json!({ "discussion_id": discussion })).await;
 }
 
+/// KT-819 DoD 3, the restart half — a Kronn killed while an audit was running
+/// leaves it `Running`; the next boot (the real file-backed open) settles it
+/// as Interrupted with its finished steps kept, and the audit resumes on the
+/// steps that were left and ends Completed with its validation discussion.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn an_audit_killed_with_kronn_resumes_on_the_steps_left_after_the_restart() {
+    let h = harness().await;
+    let (tools, project) = (h.tools.path(), h.project.path());
+    let db_path = h.tools.path().join("kronn.db");
+    let boot = |path: &std::path::PathBuf| {
+        Arc::new(crate::db::Database::open_path_for_backend_boot(path).unwrap())
+    };
+    let state_of = |db: Arc<crate::db::Database>| {
+        AppState::new_defaults(
+            Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db,
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        )
+    };
+
+    // First life of Kronn: a Full audit runs; its fourth step is the one that
+    // is running when the process dies.
+    let first = state_of(boot(&db_path));
+    project_among_others(&first, project, false).await;
+    let chain = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full);
+    let targets: Vec<&str> = chain.iter().map(|s| s.target_file).collect();
+    let total = targets.len() as u32;
+    arm(tools, "fill", &targets);
+    let body = run_full(&first, None).await;
+    let done = sse_events(&body, "done").pop().expect("terminal done");
+    validation_settled(&first, &done).await;
+    assert_eq!(done["status"], "complete", "{body}");
+    let run_id = done["audit_run_id"].as_str().unwrap().to_string();
+    let killed_at = 4_i64;
+    {
+        let run_id = run_id.clone();
+        first
+            .db
+            .with_conn(move |conn| {
+                // What a SIGKILL leaves behind: the row still Running, the
+                // steps from the interrupted one on never recorded, no
+                // validation discussion yet.
+                conn.execute(
+                    "UPDATE audit_runs SET status = 'Running', ended_at = NULL, duration_ms = NULL,
+                            report_path = NULL, last_completed_step = ?2,
+                            validation_discussion_id = NULL, step_outcomes_json = NULL
+                     WHERE id = ?1",
+                    rusqlite::params![run_id, killed_at - 1],
+                )?;
+                conn.execute(
+                    "DELETE FROM audit_run_steps WHERE audit_run_id = ?1 AND step_index >= ?2",
+                    rusqlite::params![run_id, killed_at],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+    drop(first);
+
+    // Second life: opening the database the way the backend boots settles it.
+    let second = state_of(boot(&db_path));
+    let (run, steps, _) = persisted(&second, &run_id).await;
+    assert_eq!(run.status, "Interrupted", "{run:?}");
+    assert_eq!(run.last_completed_step as i64, killed_at - 1);
+    assert_eq!(steps.len() as i64, killed_at - 1, "finished steps are kept");
+    let resumable = second
+        .db
+        .with_conn(|conn| crate::db::audit_runs::latest_resumable(conn, PROJECT_ID))
+        .await
+        .unwrap()
+        .expect("the interrupted run is resumable after the restart");
+    assert_eq!(resumable.id, run_id);
+
+    // The user resumes it: only the steps that were left run, to Completed.
+    arm(tools, "fill", &targets[(killed_at as usize - 1)..]);
+    settle_on_validation(tools);
+    let resumed = run_full(&second, Some(run_id.clone())).await;
+    let done = sse_events(&resumed, "done").pop().expect("terminal done");
+    validation_settled(&second, &done).await;
+    assert_eq!(done["status"], "complete", "{resumed}");
+    assert_eq!(
+        started_steps(&resumed),
+        (killed_at as u64..=total as u64).collect::<Vec<_>>(),
+        "{resumed}"
+    );
+    let (run, _, prompt) = persisted(&second, done["audit_run_id"].as_str().unwrap()).await;
+    assert_eq!(run.status, "Completed");
+    assert_eq!(run.last_completed_step, total);
+    assert!(prompt.is_some(), "the validation discussion was created");
+}
+
 #[path = "revalidate_e2e_tests.rs"]
 mod revalidate_e2e_tests;
 

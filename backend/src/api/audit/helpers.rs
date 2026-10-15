@@ -1003,13 +1003,18 @@ pub(crate) fn restore_step_briefing(
 /// Remove the legacy KRONN:BOOTSTRAP block from the docs entry file (the run
 /// start; `core::scanner::retire_legacy_bootstrap_block` does the same at boot).
 pub(super) fn remove_bootstrap_block(index_file: &std::path::Path) {
-    let Ok(content) = std::fs::read_to_string(index_file) else {
+    let Ok(observed) = std::fs::read(index_file) else {
         return;
     };
-    let Some(cleaned) = crate::core::scanner::without_legacy_bootstrap_block(&content) else {
+    let Ok(content) = std::str::from_utf8(&observed) else {
         return;
     };
-    if let Err(e) = std::fs::write(index_file, cleaned) {
+    let Some(cleaned) = crate::core::scanner::without_legacy_bootstrap_block(content) else {
+        return;
+    };
+    if let Err(e) = crate::core::mcp_scanner::atomic_write_if_unchanged_preserving_permissions(
+        index_file, &cleaned, &observed,
+    ) {
         tracing::warn!("Failed to remove bootstrap block: {}", e);
     }
 }

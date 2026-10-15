@@ -94,6 +94,56 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_crlf_entry_file_keeps_its_line_endings_outside_the_removed_block() {
+        let tmp = tempfile::tempdir().unwrap();
+        let docs = tmp.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        let block = LEGACY_BOOTSTRAP.replace('\n', "\r\n");
+        // Mixed endings on purpose: CRLF lines, one bare LF line, no final newline.
+        let body = "# Entry\r\n\r\nOur rules.\nSecond line\r\n  indented tail";
+        std::fs::write(docs.join("AGENTS.md"), format!("{block}{body}")).unwrap();
+
+        assert_eq!(retire_legacy_bootstrap_block(tmp.path()), Ok(true));
+        assert_eq!(
+            std::fs::read(docs.join("AGENTS.md")).unwrap(),
+            body.as_bytes()
+        );
+
+        // A block further down leaves everything around it untouched too: the
+        // blank line the block carried at its end stays, as written (CRLF).
+        let middle = format!("# Mine\r\n\r\n{block}after\r\n");
+        std::fs::write(docs.join("AGENTS.md"), &middle).unwrap();
+        assert_eq!(retire_legacy_bootstrap_block(tmp.path()), Ok(true));
+        assert_eq!(
+            std::fs::read(docs.join("AGENTS.md")).unwrap(),
+            b"# Mine\r\n\r\n\r\nafter\r\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_rewrite_keeps_the_file_permissions_and_leaves_no_temp_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let docs = tmp.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        let entry = docs.join("AGENTS.md");
+        std::fs::write(&entry, format!("{LEGACY_BOOTSTRAP}# Entry\n")).unwrap();
+        std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        assert_eq!(retire_legacy_bootstrap_block(tmp.path()), Ok(true));
+        let mode = std::fs::metadata(&entry).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644);
+        let leftovers: Vec<_> = std::fs::read_dir(&docs)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n != "AGENTS.md")
+            .collect();
+        assert!(leftovers.is_empty(), "stray files: {leftovers:?}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_symlinked_entry_file_is_not_rewritten() {

@@ -503,10 +503,14 @@ fn is_bootstrap_marker(line: &str, marker: &str, other: &str) -> bool {
 /// START…END block. An unmatched START is left alone: cutting to the end of
 /// the file would delete what a person wrote below it.
 pub fn without_legacy_bootstrap_block(content: &str) -> Option<String> {
+    // Segments keep their own terminator (`\n` or `\r\n`), so everything outside
+    // the block is written back byte for byte.
+    let segments: Vec<&str> = content.split_inclusive('\n').collect();
     let mut in_fence = false;
     let mut start = None;
     let mut end = None;
-    for (index, line) in content.lines().enumerate() {
+    for (index, segment) in segments.iter().enumerate() {
+        let line = segment.trim_end_matches(['\n', '\r']);
         let trimmed = line.trim_start();
         if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
             in_fence = !in_fence;
@@ -525,33 +529,40 @@ pub fn without_legacy_bootstrap_block(content: &str) -> Option<String> {
         }
     }
     let (start, end) = (start?, end?);
-    let kept: Vec<&str> = content
-        .lines()
-        .enumerate()
-        .filter(|(index, _)| *index < start || *index > end)
-        .map(|(_, line)| line)
-        .collect();
-    let mut out = kept.join("\n");
-    if content.ends_with('\n') && !out.is_empty() {
-        out.push('\n');
+    // A block at the very top leaves its padding behind: drop the blank lines
+    // around it, and only those. A block further down leaves its neighbours as is.
+    let at_top = segments[..start].iter().all(|s| s.trim().is_empty());
+    let mut resume = end + 1;
+    if at_top {
+        while resume < segments.len() && segments[resume].trim().is_empty() {
+            resume += 1;
+        }
     }
-    Some(out.trim_start().to_string())
+    let head = if at_top { &[][..] } else { &segments[..start] };
+    Some(head.iter().chain(&segments[resume..]).copied().collect())
 }
 
 /// Removes the legacy bootstrap block from the project's docs entry file, so
 /// no agent that reads it is handed a "fill in all files" task, audited or not.
-/// `Ok(true)` when the file was rewritten. A symlinked path is refused.
+/// `Ok(true)` when the file was rewritten. A symlinked path is refused. The
+/// rewrite is atomic (temp sibling + rename), keeps the file's permissions and
+/// is abandoned if the file changed since it was read.
 pub fn retire_legacy_bootstrap_block(project_path: &Path) -> Result<bool, String> {
     let entry = detect_docs_entry(project_path);
-    let Ok(content) = std::fs::read_to_string(&entry) else {
+    let Ok(observed) = std::fs::read(&entry) else {
         return Ok(false);
     };
-    let Some(cleaned) = without_legacy_bootstrap_block(&content) else {
+    let Ok(content) = std::str::from_utf8(&observed) else {
+        return Ok(false);
+    };
+    let Some(cleaned) = without_legacy_bootstrap_block(content) else {
         return Ok(false);
     };
     crate::core::fs_guard::assert_contained_no_symlink(project_path, &entry)?;
-    std::fs::write(&entry, cleaned)
-        .map_err(|e| format!("Cannot rewrite {}: {e}", entry.display()))?;
+    crate::core::mcp_scanner::atomic_write_if_unchanged_preserving_permissions(
+        &entry, &cleaned, &observed,
+    )
+    .map_err(|e| format!("Cannot rewrite {}: {e}", entry.display()))?;
     Ok(true)
 }
 
