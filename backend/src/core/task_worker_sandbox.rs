@@ -153,7 +153,14 @@ fn seatbelt_literal(path: &Path) -> String {
 ///   that way); a loopback socket may be bound and accepted on;
 /// - IPC: Mach lookups only for [`SEATBELT_MACH_SERVICES`], no POSIX shared
 ///   memory or semaphores, no IOKit;
-/// - processes: may exec and fork, may signal only its own sandbox.
+/// - processes: may exec and fork, may signal only its own sandbox;
+/// - terminals: no read, write or ioctl on any tty (`/dev/tty`, `ttysNNN`,
+///   `ptyXX`, `/dev/console`, `/dev/ptmx`) and no `pseudo-tty`: with the
+///   probe in its own session ([`crate::core::task_worker_env::detach_from_terminal`])
+///   there is no controlling terminal to inject keystrokes into, and this
+///   closes the path by name for a terminal it could still reach. `/dev/null`
+///   and `/dev/fd/N` (its own piped stdio, `/dev/stdout`) are what a build
+///   writes to; `file-ioctl` stays open for them and for plain files.
 pub fn seatbelt_profile(writable: &[PathBuf]) -> String {
     let mut profile = String::from(
         "(version 1)\n\
@@ -165,8 +172,7 @@ pub fn seatbelt_profile(writable: &[PathBuf]) -> String {
          (allow sysctl-read)\n\
          (allow file-read*)\n\
          (allow file-map-executable)\n\
-         (allow file-ioctl)\n\
-         (allow pseudo-tty)\n",
+         (allow file-ioctl)\n",
     );
     profile.push_str("(allow mach-lookup\n");
     for service in SEATBELT_MACH_SERVICES {
@@ -178,11 +184,20 @@ pub fn seatbelt_profile(writable: &[PathBuf]) -> String {
     }
     profile.push_str(
         "  (literal \"/dev/null\")\n  (literal \"/dev/zero\")\n  \
-         (literal \"/dev/dtracehelper\")\n  (regex #\"^/dev/tty\")\n  (regex #\"^/dev/fd/\"))\n",
+         (literal \"/dev/dtracehelper\")\n  (regex #\"^/dev/fd/\"))\n",
     );
     profile.push_str(
         "(allow network-bind (local ip \"localhost:*\"))\n\
          (allow network-inbound (local ip \"localhost:*\"))\n",
+    );
+    // Last rule wins, so this must stay the final rule: the terminals are out
+    // of reach whatever the allowances above say. A pty the build would start
+    // for itself is not reachable either — `pseudo-tty` is not granted, and a
+    // cargo compile has no use for one.
+    profile.push_str(
+        "(deny file-read-data file-write* file-ioctl\n  (vnode-type TTY)\n  \
+         (literal \"/dev/tty\")\n  (literal \"/dev/console\")\n  (literal \"/dev/ptmx\")\n  \
+         (regex #\"^/dev/tty\")\n  (regex #\"^/dev/pty\"))\n",
     );
     profile
 }

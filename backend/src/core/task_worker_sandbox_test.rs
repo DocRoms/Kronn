@@ -180,7 +180,7 @@ fn the_seatbelt_profile_denies_by_default_and_writes_only_the_roots() {
         "no host path: {profile}"
     );
     // Writes are never allowed by any other form (e.g. a bare file-write*).
-    assert_eq!(profile.matches("file-write").count(), 1, "{profile}");
+    assert_eq!(profile.matches("(allow file-write").count(), 1, "{profile}");
 }
 
 #[test]
@@ -245,6 +245,85 @@ fn the_seatbelt_profile_denies_mach_lookup_but_the_listed_services() {
         );
     }
     assert!(profile.contains("(allow signal (target same-sandbox))"));
+}
+
+/// The text of the `(deny …)` forms of `profile`.
+fn deny_forms(profile: &str) -> Vec<&str> {
+    profile
+        .match_indices("(deny ")
+        .map(|(start, _)| {
+            let rest = &profile[start..];
+            let mut depth = 0usize;
+            for (offset, ch) in rest.char_indices() {
+                match ch {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return &rest[..=offset];
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            rest
+        })
+        .collect()
+}
+
+/// KT-1255 review: the profile used to write `^/dev/tty`, grant `pseudo-tty`
+/// and allow any `file-ioctl` on a terminal, so a build script that kept the
+/// backend's controlling terminal could `TIOCSTI` keystrokes into the
+/// operator's shell.
+#[test]
+fn the_seatbelt_profile_cannot_write_or_ioctl_a_terminal() {
+    let profile = seatbelt_profile(&[PathBuf::from("/lane/worktree")]);
+
+    // No tty node on any write allowance, no pty grant.
+    let writes = allow_forms(&profile, "file-write*");
+    assert_eq!(writes.len(), 1, "{profile}");
+    assert!(!writes[0].contains("/dev/tty"), "{}", writes[0]);
+    assert!(!writes[0].contains("/dev/pty"), "{}", writes[0]);
+    assert!(!writes[0].contains("/dev/console"), "{}", writes[0]);
+    assert!(!profile.contains("pseudo-tty"), "{profile}");
+    // The device nodes a build writes to are the only ones allowed.
+    for node in ["/dev/null", "/dev/zero", "/dev/dtracehelper"] {
+        assert!(
+            writes[0].contains(&format!("(literal \"{node}\")")),
+            "{node}: {}",
+            writes[0]
+        );
+    }
+
+    // A closing deny, the last rule, covers read, write and ioctl on every
+    // terminal vnode and tty node by name.
+    let denies: Vec<&str> = deny_forms(&profile)
+        .into_iter()
+        .filter(|form| *form != "(deny default)")
+        .collect();
+    assert_eq!(denies.len(), 1, "{profile}");
+    let deny = denies[0];
+    for operation in ["file-read-data", "file-write*", "file-ioctl"] {
+        assert!(deny.contains(operation), "{operation} in {deny}");
+    }
+    for filter in [
+        "(vnode-type TTY)",
+        "(literal \"/dev/tty\")",
+        "(regex #\"^/dev/tty\")",
+        "(regex #\"^/dev/pty\")",
+        "(literal \"/dev/ptmx\")",
+        "(literal \"/dev/console\")",
+    ] {
+        assert!(deny.contains(filter), "{filter} in {deny}");
+    }
+    let last_rule = profile
+        .lines()
+        .rfind(|line| line.starts_with('('))
+        .expect("a last rule");
+    assert!(
+        last_rule.starts_with("(deny file-read-data"),
+        "the tty deny must be the final rule (the last match wins):\n{profile}"
+    );
 }
 
 #[test]
@@ -627,6 +706,91 @@ fn a_build_script_connecting_to_a_loopback_port_is_denied_by_the_os() {
     );
 }
 
+/// The deny-default profile must let an ordinary build through: otherwise
+/// every warm start would silently turn cold.
+#[test]
+fn an_ordinary_build_succeeds_under_the_os_sandbox() {
+    let Some(mechanism) = live_mechanism() else {
+        return;
+    };
+    let layout = layout();
+
+    let (outcome, inside) = build_under_the_os_sandbox(
+        mechanism,
+        &layout,
+        r#"fn main() {
+    std::fs::write(std::env::var("KRONN_TEST_INSIDE").unwrap(), "x").unwrap();
+    let out = std::env::var("OUT_DIR").unwrap();
+    std::fs::write(std::path::Path::new(&out).join("generated.rs"), "").unwrap();
+}
+"#,
+        Vec::new(),
+    );
+
+    assert!(
+        outcome.success,
+        "an ordinary build must succeed under the profile: {outcome:?}"
+    );
+    assert!(inside.exists(), "the build script ran inside the lane");
+    let lane = WorkerLane::for_worktree(&layout.worktree).unwrap();
+    assert!(
+        lane.cargo_target_dir.join("debug").exists(),
+        "the compiled artifacts landed in the lane's target"
+    );
+}
+
+/// A pty the test owns stands for the operator's terminal: the build script is
+/// handed its path and must neither open it for writing nor reach the master.
+#[cfg(unix)]
+#[test]
+fn a_build_script_writing_to_a_terminal_is_denied_by_the_os() {
+    let Some(mechanism) = live_mechanism() else {
+        return;
+    };
+    // SAFETY: plain libc pty calls on a descriptor this test owns.
+    let (master, slave_path) = unsafe {
+        let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+        assert!(master >= 0, "posix_openpt");
+        assert_eq!(libc::grantpt(master), 0);
+        assert_eq!(libc::unlockpt(master), 0);
+        let name = std::ffi::CStr::from_ptr(libc::ptsname(master));
+        (master, name.to_string_lossy().into_owned())
+    };
+    let layout = layout();
+
+    let (outcome, inside) = build_under_the_os_sandbox(
+        mechanism,
+        &layout,
+        r#"fn main() {
+    std::fs::write(std::env::var("KRONN_TEST_INSIDE").unwrap(), "x").unwrap();
+    let tty = std::env::var("KRONN_TEST_TTY").unwrap();
+    let mut slave = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&tty)
+        .expect("open the terminal");
+    std::io::Write::write_all(&mut slave, b"injected\n").expect("write the terminal");
+}
+"#,
+        vec![("KRONN_TEST_TTY".into(), slave_path.into())],
+    );
+    let mut received = [0u8; 64];
+    // SAFETY: nonblocking read of the master this test owns.
+    let read = unsafe {
+        let flags = libc::fcntl(master, libc::F_GETFL);
+        libc::fcntl(master, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        libc::read(master, received.as_mut_ptr().cast(), received.len())
+    };
+    // SAFETY: closes the descriptor opened above.
+    unsafe { libc::close(master) };
+
+    assert!(
+        !outcome.success,
+        "the build script's terminal write must fail the build: {outcome:?}"
+    );
+    assert!(inside.exists(), "an ordinary build still ran");
+    assert!(read <= 0, "bytes reached the terminal: {read}");
+}
+
 /// macOS only: `launchctl submit` asks launchd — over a Mach service the
 /// profile does not list — to run a job outside the sandbox.
 #[cfg(target_os = "macos")]
@@ -677,4 +841,62 @@ fn a_build_script_asking_launchd_to_run_a_job_is_denied_by_the_os() {
     );
     assert!(!ran, "launchd ran a job outside the sandbox");
     assert!(inside.exists(), "an ordinary build still ran");
+}
+
+// ── No controlling terminal ──────────────────────────────────────────────
+
+/// Helper of `a_probe_runs_in_a_session_of_its_own`, re-run by that test as a
+/// child process: it reports its own session and process ids.
+#[cfg(unix)]
+#[test]
+fn report_session_ids_for_the_session_test() {
+    if std::env::var_os("KRONN_REPORT_SESSION").is_none() {
+        return;
+    }
+    // SAFETY: `getsid(0)` and `getpid` take no pointer.
+    let (sid, pid) = unsafe { (libc::getsid(0), libc::getpid()) };
+    println!("reported sid={sid} pid={pid}");
+}
+
+/// KT-1255 review: a probe that only led its own process *group* kept the
+/// backend's session, hence its controlling terminal, and `TIOCSTI` could type
+/// into the operator's shell. `SandboxedProbeRunner` delegates to this runner,
+/// so every confined probe starts through `setsid`.
+#[cfg(unix)]
+#[test]
+fn a_probe_runs_in_a_session_of_its_own() {
+    let module = module_path!()
+        .split_once("::")
+        .map(|(_, path)| path)
+        .unwrap();
+    let test_name = format!("{module}::report_session_ids_for_the_session_test");
+    let exe = std::env::current_exe().unwrap();
+    let mut command = probe(
+        exe.to_str().unwrap(),
+        &["--exact", &test_name, "--nocapture", "--test-threads=1"],
+        &std::env::temp_dir(),
+    );
+    command.env = vec![("KRONN_REPORT_SESSION".into(), "1".into())];
+
+    let outcome = ProcessProbeRunner.run(&command);
+    assert!(outcome.success, "{outcome:?}");
+    let field = |name: &str| -> i64 {
+        let marker = format!("{name}=");
+        let start = outcome
+            .detail
+            .find(&marker)
+            .unwrap_or_else(|| panic!("no {name} in {:?}", outcome.detail))
+            + marker.len();
+        outcome.detail[start..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse()
+            .unwrap()
+    };
+    let (sid, pid) = (field("sid"), field("pid"));
+    // SAFETY: `getsid(0)` takes no pointer.
+    let our_sid = unsafe { libc::getsid(0) } as i64;
+    assert_eq!(sid, pid, "the probe leads its own session: {outcome:?}");
+    assert_ne!(sid, our_sid, "the probe left the backend's session");
 }

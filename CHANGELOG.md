@@ -491,6 +491,11 @@ Release notes for 0.9.3 and earlier are available in the
   namespaces with `/run` and `/tmp` emptied. A host with no usable sandbox
   refuses the build and says so, it never runs it unconfined: the first build
   and the smoke check are then recorded as failed and the worker launches cold.
+  The probe also starts in a session of its own (`setsid`), with no controlling
+  terminal, and the profile denies read, write and ioctl on every terminal
+  (`/dev/tty`, `ttysNNN`, ptys, `/dev/console`) and grants no `pseudo-tty`: a
+  `build.rs` cannot push keystrokes (`TIOCSTI`) into the operator's shell when
+  the backend runs in a terminal.
 
 - The default-docs-root golden no longer depends on the day it runs: the
   compact date every step prompt opens with is masked like the dashed one.
