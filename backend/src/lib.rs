@@ -3051,6 +3051,16 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/maintenance/build-artifacts/reclaim",
             post(api::maintenance::reclaim_build_artifacts),
         )
+        // KT-1256 — the same asymmetry for `target/wt-*`: a dry run that lists
+        // what is Kronn's and what is not, and a reclaim of named lanes only.
+        .route(
+            "/api/maintenance/lane-targets",
+            get(api::maintenance::list_lane_targets),
+        )
+        .route(
+            "/api/maintenance/lane-targets/reclaim",
+            post(api::maintenance::reclaim_lane_targets),
+        )
         // ── Orchestration (KT-328) — reachable launch + CLI-worker accept surface.
         // Without these the control offer names a tool that resolves to nothing.
         .route(

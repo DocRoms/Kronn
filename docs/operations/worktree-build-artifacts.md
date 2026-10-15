@@ -42,7 +42,7 @@ The recurrence also exposed that non-terminal old executions and unregistered
 manual worktrees do not become reclaimable merely because a planning task is
 done. KT-638 keeps prevention open: it does not lower disk thresholds, ignore
 tests, scan recursively on a failing request, or authorise deletion of active
-or unowned targets. [src: file: backend/src/core/worktree.rs:489-553#ensure_build_disk_headroom]
+or unowned targets. [src: file: backend/src/core/worktree.rs:887-986#ensure_build_disk_headroom]
 
 The retained maintenance record distinguishes each authorised batch. These are
 dated physical free-space observations, not quotas or reusable deletion grants:
@@ -168,13 +168,13 @@ created only at Cargo's exact target path when its immediate parent is already a
 real directory; an existing symlink, non-directory, or inspection failure is
 refused. Non-Cargo
 validations use their declared working directory. A critical-space refusal is
-stored as a refused validation rather than a pass. [src: file: backend/src/core/worktree.rs:489-553#ensure_build_disk_headroom]
-[src: file: backend/src/api/orchestration.rs:3945-4076#validation_build_path]
+stored as a refused validation rather than a pass. [src: file: backend/src/core/worktree.rs:887-986#ensure_build_disk_headroom]
+[src: file: backend/src/api/orchestration.rs:4251-4298#validation_build_path]
 
 There is intentionally no automatic lifecycle cleanup for the interactive
 target or unknown qualification caches. The only automatic reclamation remains
 the existing managed-worktree path: ownership, terminal execution state,
-attached sessions, and worker leases are all checked before deletion. [src: file: backend/src/core/worktree.rs:291-373#clean_worktree_build_artifacts]
+attached sessions, and worker leases are all checked before deletion. [src: file: backend/src/core/worktree.rs:304-388#clean_worktree_build_artifacts]
 [src: file: backend/src/db/orchestration.rs:439-531#worktree_cleanup_liveness]
 
 For an interactive or qualification cache outside that managed ownership path,
@@ -183,7 +183,7 @@ target and configured critical threshold, while the maintenance inventory lists
 managed candidates and their refusal reason. An operator may request a manual,
 path-specific reclaim only after the inventory's ownership and terminal-state
 checks; this document does not authorise a broad purge or deletion of unknown,
-active, or leased targets. [src: file: backend/src/core/worktree.rs:448-483#ensure_disk_headroom_for]
+active, or leased targets. [src: file: backend/src/core/worktree.rs:887-916#ensure_disk_headroom_for]
 [src: file: backend/src/api/maintenance.rs:77-142#list_build_artifacts]
 [src: file: backend/src/db/orchestration.rs:439-531#worktree_cleanup_liveness]
 
@@ -267,6 +267,35 @@ skip: the operator sees every target and why it was not reclaimed, so a
 Acts **only on the `target_paths` named by the caller**. There is no "clean
 everything" verb: the caller must enumerate the exact paths to reclaim, and
 each one is re-judged against the durable state at the moment of deletion.
+
+### Lane targets (`<repo>/target/wt-<lane>`) — KT-1256
+
+A Claude task worker builds in a lane target outside its worktree, so removing
+the worktree never removed it. Ownership is **not** the `wt-` name: humans and
+other tooling build in `target/wt-0151-*` too. Kronn writes
+`target/wt-<lane>/.kronn-lane.json` (lane, execution id, worktree) when it
+provisions a lane, and only a lane carrying that marker is ever deleted.
+
+| Lane | Outcome |
+|---|---|
+| No marker, malformed marker, marker whose lane differs from the directory | Reported as `unmarked`, never touched |
+| Marked, execution unfinished / unknown, session or lease held | Kept (`claimed`) |
+| Marked, execution finished, worktree present with uncommitted changes | Kept with the worktree |
+| Marked, execution finished, worktree gone | Removed at boot |
+| Marked, execution finished, worktree present and clean | Removed with the worktree, or by name through the reclaim route |
+
+A running Cargo build (its lock) always refuses. The worktree is looked up under
+the repository's own managed root from the marker's directory name, never at a
+path the marker spells.
+
+- `GET /api/maintenance/lane-targets?project_id=…` is the dry run: every
+  `target/wt-*` with its state, reason, execution and measured size.
+- `POST /api/maintenance/lane-targets/reclaim` takes `target_paths` and
+  re-judges each; there is no "everything" verb.
+- The boot report (`lane_target_report`, one line per lane target, plus the
+  `lane_targets_unmarked` count) says what was removed and what was left.
+- Each removal is audited on its execution as `lane_target_reclaimed` or
+  `lane_target_refused`.
 
 ### The dry-run does not authorise
 

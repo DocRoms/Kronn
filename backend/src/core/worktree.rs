@@ -439,9 +439,11 @@ fn assert_lane_target_path(repo_path: &Path, lane_target: &Path) -> Result<(), S
     crate::core::fs_guard::assert_contained_no_symlink(repo_path, lane_target)
 }
 
-/// Delete one lane target. Ownership is the path shape alone; whether the lane
-/// is still in use is the caller's call and is never inferred here, except that
-/// a running Cargo (its build lock) always refuses.
+/// Delete one lane target. Only the path shape is checked here: that Kronn
+/// owns the lane (the worktree it was just removed with, or its ownership
+/// marker, see [`sweep_lane_targets`]) and that it is no longer in use are the
+/// caller's to prove, except that a running Cargo (its build lock) always
+/// refuses.
 ///
 /// Absent is a success with a zero figure; any other unreadable state is an
 /// error, never "nothing to do".
@@ -491,90 +493,326 @@ pub fn remove_lane_target(repo_path: &Path, lane_target: &Path) -> Result<Cleanu
     })
 }
 
-/// What one sweep of `<repo>/target/wt-*` did.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct LaneTargetSweep {
-    /// Lane targets no live execution claims, with what removing them freed.
-    /// In a dry run: what would be removed (bytes measured, nothing deleted).
-    pub removed: Vec<CleanupReport>,
-    /// Lane targets a live execution still claims, with the reason it is live.
-    pub claimed: Vec<(PathBuf, String)>,
-    /// Orphans that could not be removed (a running build, a symlink, an I/O
-    /// error), each with the reason.
-    pub kept: Vec<(PathBuf, String)>,
+/// Name of the ownership marker inside a lane target.
+///
+/// A directory called `wt-*` proves nothing: humans and other tooling build in
+/// `target/wt-0151-mutants` and the like. Only a lane Kronn provisioned for an
+/// execution carries this file, and only such a lane is ever swept.
+pub const LANE_OWNER_MARKER: &str = ".kronn-lane.json";
+const LANE_OWNER_VERSION: u32 = 1;
+/// A marker is a few hundred bytes; anything larger is not ours to parse.
+const LANE_OWNER_MAX_BYTES: u64 = 4096;
+
+/// What the ownership marker records: which execution a lane was made for.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LaneOwner {
+    pub version: u32,
+    /// The lane name; must equal the directory's `wt-<lane>` suffix.
+    pub lane: String,
+    pub execution_id: String,
+    /// The task worktree the lane was provisioned for. Only its directory name
+    /// is used, re-rooted under the swept repository's managed root.
+    pub worktree: String,
 }
 
-/// Remove every `<repo>/target/wt-*` directory that no live execution claims.
+/// Record that Kronn provisioned `worktree_path`'s lane target for
+/// `execution_id`, creating the directory when it is not there yet.
 ///
-/// `live` maps a lane name to the reason its execution is still alive, as
-/// decided from durable state by the caller; a lane absent from it is an
-/// orphan. Entries that are not plain directories named `wt-<lane>` are
-/// reported and left alone. With `apply` false nothing is deleted: the report
-/// is the dry run a human can read first.
-pub fn sweep_orphan_lane_targets(
+/// Idempotent. Called once per launch, before anything is built in the lane.
+/// A lane that could not be marked is simply never swept.
+pub fn mark_lane_target(
     repo_path: &Path,
-    live: &std::collections::HashMap<String, String>,
-    apply: bool,
-) -> LaneTargetSweep {
-    let mut sweep = LaneTargetSweep::default();
-    let target_root = repo_path.join("target");
-    let Ok(entries) = std::fs::read_dir(&target_root) else {
-        // No target directory means no lane was ever built here.
-        return sweep;
+    worktree_path: &Path,
+    execution_id: &str,
+) -> Result<PathBuf, String> {
+    if execution_id.trim().is_empty() {
+        return Err("a lane target cannot be marked without an execution id".to_string());
+    }
+    let lane = crate::core::task_worker_env::WorkerLane::for_worktree(worktree_path)?;
+    let lane_target = lane_target_for_worktree(repo_path, worktree_path)?;
+    assert_lane_target_path(repo_path, &lane_target)?;
+    std::fs::create_dir_all(&lane_target)
+        .map_err(|error| format!("cannot create {}: {error}", lane_target.display()))?;
+    let owner = LaneOwner {
+        version: LANE_OWNER_VERSION,
+        lane: lane.name,
+        execution_id: execution_id.to_string(),
+        worktree: worktree_path.to_string_lossy().to_string(),
     };
-    let mut lane_dirs: Vec<PathBuf> = entries
+    let bytes = serde_json::to_vec(&owner).map_err(|error| error.to_string())?;
+    let staging = lane_target.join(format!("{LANE_OWNER_MARKER}.tmp"));
+    std::fs::write(&staging, bytes)
+        .and_then(|()| std::fs::rename(&staging, lane_target.join(LANE_OWNER_MARKER)))
+        .map_err(|error| {
+            format!(
+                "cannot write the lane marker in {}: {error}",
+                lane_target.display()
+            )
+        })?;
+    Ok(lane_target)
+}
+
+/// The marker of a lane target, when it is a plain, well-formed file whose
+/// lane agrees with the directory name. Anything else is "not marked".
+fn read_lane_owner(lane_target: &Path) -> Option<LaneOwner> {
+    let marker = lane_target.join(LANE_OWNER_MARKER);
+    let meta = std::fs::symlink_metadata(&marker).ok()?;
+    if !meta.is_file() || meta.len() > LANE_OWNER_MAX_BYTES {
+        return None;
+    }
+    let owner: LaneOwner = serde_json::from_slice(&std::fs::read(&marker).ok()?).ok()?;
+    let directory_lane = lane_target
+        .file_name()?
+        .to_string_lossy()
+        .strip_prefix(LANE_TARGET_PREFIX)?
+        .to_string();
+    (owner.version == LANE_OWNER_VERSION
+        && !owner.execution_id.trim().is_empty()
+        && owner.lane == directory_lane)
+        .then_some(owner)
+}
+
+/// Every `<repo>/target/wt-*` entry, sorted so a dry run matches the pass that
+/// acts on it.
+fn lane_target_dirs(repo_path: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(repo_path.join("target")) else {
+        // No target directory means no lane was ever built here.
+        return Vec::new();
+    };
+    let mut dirs: Vec<PathBuf> = entries
         .flatten()
         .filter(|entry| {
             entry
                 .file_name()
                 .to_string_lossy()
-                .starts_with(LANE_TARGET_PREFIX)
+                .strip_prefix(LANE_TARGET_PREFIX)
+                .is_some_and(|lane| !lane.is_empty())
         })
         .map(|entry| entry.path())
         .collect();
-    // Deterministic, so a dry run matches what a later pass acts on.
-    lane_dirs.sort();
+    dirs.sort();
+    dirs
+}
 
-    for path in lane_dirs {
-        let lane = path
-            .file_name()
-            .map(|name| name.to_string_lossy().to_string())
-            .and_then(|name| {
-                name.strip_prefix(LANE_TARGET_PREFIX)
-                    .filter(|lane| !lane.is_empty())
-                    .map(str::to_string)
-            });
-        let Some(lane) = lane else {
-            continue;
-        };
-        if let Some(reason) = live.get(&lane) {
-            sweep.claimed.push((path, reason.clone()));
-            continue;
+/// The owners of every marked lane target of a repository: what the caller
+/// needs to ask durable state about before a sweep.
+pub fn lane_target_owners(repo_path: &Path) -> Vec<LaneOwner> {
+    lane_target_dirs(repo_path)
+        .iter()
+        .filter(|path| std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir()))
+        .filter_map(|path| read_lane_owner(path))
+        .collect()
+}
+
+/// How far a sweep goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaneSweepScope {
+    /// Nothing is deleted: the report is the dry run.
+    ReportOnly,
+    /// Delete only the lanes whose worktree no longer exists.
+    WorktreeGone,
+    /// Also delete the lanes of a finished execution whose worktree is still
+    /// there but clean. A dirty worktree always keeps its lane.
+    WorktreeGoneOrClean,
+}
+
+/// What a lane target is, judged without touching it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LaneTargetState {
+    /// No ownership marker: Kronn cannot prove it created this directory, so
+    /// it is reported and never touched.
+    Unmarked,
+    /// Its execution is alive, or durable state could not say otherwise.
+    Claimed(LaneOwner, String),
+    /// Not to be removed: a dirty worktree kept on purpose, an unreadable one,
+    /// a path that is not a plain lane directory. The owner is known when the
+    /// marker was.
+    Kept(Option<LaneOwner>, String),
+    /// Kronn's, finished, and nothing needs it.
+    Reclaimable {
+        owner: LaneOwner,
+        worktree_present: bool,
+    },
+}
+
+/// What was done with one lane target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LaneTargetOutcome {
+    Removed(LaneOwner, CleanupReport),
+    /// Reclaimable but not removed (dry run, or outside the scope); the report
+    /// carries the measured size.
+    WouldRemove(LaneOwner, CleanupReport),
+    Claimed(LaneOwner, String),
+    Kept(Option<LaneOwner>, String),
+    Unmarked,
+}
+
+/// What one sweep of `<repo>/target/wt-*` did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LaneTargetSweep {
+    /// Marked lanes of finished executions that were deleted.
+    pub removed: Vec<(LaneOwner, CleanupReport)>,
+    /// Marked lanes that are reclaimable and were not deleted, with their size.
+    pub would_remove: Vec<(LaneOwner, CleanupReport)>,
+    /// Marked lanes a live execution still claims, with the reason.
+    pub claimed: Vec<(PathBuf, String)>,
+    /// Lanes kept on purpose or by a refusal, with the reason.
+    pub kept: Vec<(PathBuf, String)>,
+    /// `wt-*` directories Kronn did not create. Reported only.
+    pub unmarked: Vec<PathBuf>,
+}
+
+impl LaneTargetSweep {
+    /// Bytes the deleted lanes held, floored at the scan budget.
+    pub fn bytes_removed(&self) -> u64 {
+        self.removed
+            .iter()
+            .map(|(_, report)| report.bytes_reclaimed)
+            .sum()
+    }
+}
+
+/// Judge one `<repo>/target/wt-*` directory.
+///
+/// `judge` answers, from durable state, whether the marker's execution is
+/// finished (`Ok`) or why it is not (`Err(reason)`); a lane it has no answer
+/// for must come back `Err`. The worktree is looked up under the repository's
+/// own managed root, never at the path the marker spells.
+pub fn classify_lane_target(
+    repo_path: &Path,
+    lane_target: &Path,
+    judge: &dyn Fn(&LaneOwner) -> Result<(), String>,
+) -> LaneTargetState {
+    if let Err(reason) = assert_lane_target_path(repo_path, lane_target) {
+        return LaneTargetState::Kept(None, reason);
+    }
+    match std::fs::symlink_metadata(lane_target) {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => {
+            return LaneTargetState::Kept(None, "not a plain directory — left alone".to_string())
         }
-        if let Err(reason) = assert_lane_target_path(repo_path, &path) {
-            sweep.kept.push((path, reason));
-            continue;
+        Err(error) => {
+            return LaneTargetState::Kept(None, format!("cannot read it ({error})"));
         }
-        // A file or a link that merely looks like a lane is reported, never
-        // measured nor deleted by this walk.
-        if !std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_dir()) {
-            sweep
-                .kept
-                .push((path, "not a plain directory — left alone".to_string()));
-            continue;
+    }
+    let Some(owner) = read_lane_owner(lane_target) else {
+        return LaneTargetState::Unmarked;
+    };
+    if let Err(reason) = judge(&owner) {
+        return LaneTargetState::Claimed(owner, reason);
+    }
+    let Some(name) = Path::new(&owner.worktree).file_name() else {
+        return LaneTargetState::Kept(Some(owner), "the marker names no worktree".to_string());
+    };
+    let worktree = worktree_base_dir(repo_path).join(name);
+    match classify_lane_worktree(repo_path, &owner.lane, &worktree) {
+        Ok(worktree_present) => LaneTargetState::Reclaimable {
+            owner,
+            worktree_present,
+        },
+        Err(reason) => LaneTargetState::Kept(Some(owner), reason),
+    }
+}
+
+/// `Ok(present)` when the lane's worktree is gone (`false`) or clean (`true`);
+/// `Err` says why the lane has to stay.
+fn classify_lane_worktree(repo_path: &Path, lane: &str, worktree: &Path) -> Result<bool, String> {
+    // The managed name must derive this very lane, so a forged marker cannot
+    // point the check at another checkout.
+    let derived = crate::core::task_worker_env::WorkerLane::for_worktree(worktree)
+        .map(|derived| derived.name);
+    if derived.as_deref() != Ok(lane) {
+        return Err(format!(
+            "the marker's worktree does not derive lane {lane} — left alone"
+        ));
+    }
+    assert_managed_task_worktree_path(repo_path, worktree)?;
+    match std::fs::symlink_metadata(worktree) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!(
+            "cannot tell whether worktree {} exists ({error})",
+            worktree.display()
+        )),
+        Ok(_) => {
+            // A directory that is not a git worktree would answer for the
+            // enclosing repository: it is not evidence of anything.
+            if !worktree.join(".git").exists() {
+                return Err(format!(
+                    "{} is present and is not a git worktree",
+                    worktree.display()
+                ));
+            }
+            if worktree_dirty_files(worktree)?.is_empty() {
+                Ok(true)
+            } else {
+                Err(format!(
+                    "worktree {} is kept with uncommitted changes, so is its lane target",
+                    worktree.display()
+                ))
+            }
         }
-        if !apply {
-            let (bytes_reclaimed, bytes_are_partial) = measure_within_budget(&path);
-            sweep.removed.push(CleanupReport {
-                target_path: path,
-                bytes_reclaimed,
-                bytes_are_partial,
-            });
-            continue;
+    }
+}
+
+/// Judge one lane target and, when `scope` allows it, delete it.
+pub fn process_lane_target(
+    repo_path: &Path,
+    lane_target: &Path,
+    judge: &dyn Fn(&LaneOwner) -> Result<(), String>,
+    scope: LaneSweepScope,
+) -> LaneTargetOutcome {
+    match classify_lane_target(repo_path, lane_target, judge) {
+        LaneTargetState::Unmarked => LaneTargetOutcome::Unmarked,
+        LaneTargetState::Claimed(owner, reason) => LaneTargetOutcome::Claimed(owner, reason),
+        LaneTargetState::Kept(owner, reason) => LaneTargetOutcome::Kept(owner, reason),
+        LaneTargetState::Reclaimable {
+            owner,
+            worktree_present,
+        } => {
+            let allowed = match scope {
+                LaneSweepScope::ReportOnly => false,
+                LaneSweepScope::WorktreeGone => !worktree_present,
+                LaneSweepScope::WorktreeGoneOrClean => true,
+            };
+            if !allowed {
+                let (bytes_reclaimed, bytes_are_partial) = measure_within_budget(lane_target);
+                return LaneTargetOutcome::WouldRemove(
+                    owner,
+                    CleanupReport {
+                        target_path: lane_target.to_path_buf(),
+                        bytes_reclaimed,
+                        bytes_are_partial,
+                    },
+                );
+            }
+            match remove_lane_target(repo_path, lane_target) {
+                Ok(report) => LaneTargetOutcome::Removed(owner, report),
+                Err(reason) => LaneTargetOutcome::Kept(Some(owner), reason),
+            }
         }
-        match remove_lane_target(repo_path, &path) {
-            Ok(report) => sweep.removed.push(report),
-            Err(reason) => sweep.kept.push((path, reason)),
+    }
+}
+
+/// One pass over `<repo>/target/wt-*`.
+///
+/// Deletes only a lane Kronn marked, whose execution `judge` calls finished,
+/// whose worktree is gone (or, with the wider scope, clean). Every other
+/// directory is reported and left exactly as it was.
+pub fn sweep_lane_targets(
+    repo_path: &Path,
+    judge: &dyn Fn(&LaneOwner) -> Result<(), String>,
+    scope: LaneSweepScope,
+) -> LaneTargetSweep {
+    let mut sweep = LaneTargetSweep::default();
+    for path in lane_target_dirs(repo_path) {
+        match process_lane_target(repo_path, &path, judge, scope) {
+            LaneTargetOutcome::Removed(owner, report) => sweep.removed.push((owner, report)),
+            LaneTargetOutcome::WouldRemove(owner, report) => {
+                sweep.would_remove.push((owner, report))
+            }
+            LaneTargetOutcome::Claimed(_, reason) => sweep.claimed.push((path, reason)),
+            LaneTargetOutcome::Kept(_, reason) => sweep.kept.push((path, reason)),
+            LaneTargetOutcome::Unmarked => sweep.unmarked.push(path),
         }
     }
     sweep
@@ -4857,50 +5095,209 @@ mod tests {
         assert!(!lane.exists());
     }
 
+    /// A lane the way provisioning leaves it: a task worktree, a lane target
+    /// with artefacts, and the ownership marker for `exec`.
+    fn marked_lane(
+        repo: &Path,
+        ticket: &str,
+        suffix: &str,
+        exec: &str,
+    ) -> (PathBuf, PathBuf, String) {
+        let base = head_sha(repo);
+        let info = create_task_worktree(repo, ticket, suffix, &base).unwrap();
+        let worktree = PathBuf::from(&info.path);
+        let lane_target = mark_lane_target(repo, &worktree, exec).unwrap();
+        fs::create_dir_all(lane_target.join("debug")).unwrap();
+        fs::write(lane_target.join("debug/kronn"), vec![0u8; 4096]).unwrap();
+        (worktree, lane_target, info.branch)
+    }
+
+    fn finished(_: &LaneOwner) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn alive(_: &LaneOwner) -> Result<(), String> {
+        Err("execution is Working".to_string())
+    }
+
     #[test]
-    fn the_sweep_removes_orphans_and_reports_live_lanes() {
-        let repo = make_test_repo("lane-sweep");
-        let orphan = seed_lane_target(repo.path(), "kt-10-dead");
-        let live = seed_lane_target(repo.path(), "kt-11-live");
+    fn mark_lane_target_writes_the_marker_the_sweep_reads() {
+        let repo = make_test_repo("lane-mark");
+        let (worktree, lane_target, _) = marked_lane(repo.path(), "KT-20", "a1b2", "exec-20");
+
+        let owners = lane_target_owners(repo.path());
+        assert_eq!(owners.len(), 1, "{owners:?}");
+        assert_eq!(owners[0].execution_id, "exec-20");
+        assert_eq!(owners[0].worktree, worktree.to_string_lossy());
+        assert!(lane_target.join(LANE_OWNER_MARKER).is_file());
+        // Idempotent: a second launch of the same lane rewrites it, once.
+        mark_lane_target(repo.path(), &worktree, "exec-20").unwrap();
+        assert_eq!(lane_target_owners(repo.path()).len(), 1);
+        // Nothing can be marked without an execution.
+        assert!(mark_lane_target(repo.path(), &worktree, " ").is_err());
+    }
+
+    /// KT-1256 — the principal's review: `target/wt-*` is also where humans
+    /// and other tooling build (`wt-0151-integration`, `wt-0150-*`). Nothing
+    /// Kronn did not mark is touched, whatever the scope.
+    #[test]
+    fn an_unmarked_wt_directory_survives_every_sweep() {
+        let repo = make_test_repo("lane-unmarked");
+        let human = repo.path().join("target/wt-0151-integration");
+        fs::create_dir_all(human.join("debug")).unwrap();
+        fs::write(human.join("debug/kronn"), b"hand built").unwrap();
+        // A marker that does not belong: lane disagrees with the directory,
+        // a file that is not JSON, and a marker that is a link.
+        let mismatched = repo.path().join("target/wt-0150-a");
+        fs::create_dir_all(&mismatched).unwrap();
+        fs::write(
+            mismatched.join(LANE_OWNER_MARKER),
+            r#"{"version":1,"lane":"another","execution_id":"e","worktree":"/x"}"#,
+        )
+        .unwrap();
+        let garbage = repo.path().join("target/wt-0150-b");
+        fs::create_dir_all(&garbage).unwrap();
+        fs::write(garbage.join(LANE_OWNER_MARKER), "not json").unwrap();
         let stray_file = repo.path().join("target/wt-note.txt");
         fs::write(&stray_file, "not a directory").unwrap();
-        let main_debug = repo.path().join("target/debug");
-        fs::create_dir_all(&main_debug).unwrap();
-        let claims = std::collections::HashMap::from([(
-            "kt-11-live".to_string(),
-            "execution is Working".to_string(),
-        )]);
+        #[cfg(unix)]
+        {
+            let linked = repo.path().join("target/wt-0150-c");
+            fs::create_dir_all(&linked).unwrap();
+            let elsewhere = repo.path().join("elsewhere.json");
+            fs::write(
+                &elsewhere,
+                r#"{"version":1,"lane":"0150-c","execution_id":"e","worktree":"/x"}"#,
+            )
+            .unwrap();
+            std::os::unix::fs::symlink(&elsewhere, linked.join(LANE_OWNER_MARKER)).unwrap();
+        }
 
-        // The dry run reports and deletes nothing.
-        let dry = sweep_orphan_lane_targets(repo.path(), &claims, false);
-        assert_eq!(dry.removed.len(), 1, "{dry:?}");
-        assert!(dry.removed.iter().any(|r| r.target_path == orphan));
-        assert!(orphan.exists(), "a dry run deletes nothing");
+        for scope in [
+            LaneSweepScope::ReportOnly,
+            LaneSweepScope::WorktreeGone,
+            LaneSweepScope::WorktreeGoneOrClean,
+        ] {
+            let sweep = sweep_lane_targets(repo.path(), &finished, scope);
+            assert!(sweep.removed.is_empty(), "{scope:?}: {sweep:?}");
+            assert!(sweep.would_remove.is_empty(), "{scope:?}: {sweep:?}");
+            assert!(sweep.unmarked.contains(&human), "{scope:?}: {sweep:?}");
+            assert!(sweep.unmarked.contains(&mismatched));
+            assert!(sweep.unmarked.contains(&garbage));
+        }
+        assert!(human.join("debug/kronn").exists());
+        assert!(mismatched.exists() && garbage.exists());
+        assert!(stray_file.exists());
+        #[cfg(unix)]
+        assert!(repo.path().join("target/wt-0150-c").exists());
+    }
 
-        let sweep = sweep_orphan_lane_targets(repo.path(), &claims, true);
-        assert!(!orphan.exists(), "the orphan lane target is removed");
+    #[test]
+    fn a_marked_lane_of_a_live_execution_survives() {
+        let repo = make_test_repo("lane-live");
+        let (_, lane_target, _) = marked_lane(repo.path(), "KT-21", "c3d4", "exec-21");
+
+        let sweep = sweep_lane_targets(repo.path(), &alive, LaneSweepScope::WorktreeGoneOrClean);
+
+        assert!(lane_target.join("debug/kronn").exists());
         assert!(
-            sweep
-                .removed
-                .iter()
-                .any(|r| r.target_path == orphan && r.bytes_reclaimed >= 4096),
+            sweep.removed.is_empty() && sweep.would_remove.is_empty(),
             "{sweep:?}"
         );
-        assert!(live.exists(), "a live lane is never removed");
         assert_eq!(
             sweep.claimed,
-            vec![(live.clone(), "execution is Working".to_string())]
+            vec![(lane_target, "execution is Working".to_string())]
         );
+    }
+
+    #[test]
+    fn a_marked_lane_of_a_finished_execution_with_a_dirty_worktree_survives() {
+        let repo = make_test_repo("lane-dirty");
+        let (worktree, lane_target, _) = marked_lane(repo.path(), "KT-22", "e5f6", "exec-22");
+        fs::write(worktree.join("wip.rs"), "fn wip() {}\n").unwrap();
+
+        let sweep = sweep_lane_targets(repo.path(), &finished, LaneSweepScope::WorktreeGoneOrClean);
+
+        assert!(lane_target.join("debug/kronn").exists(), "{sweep:?}");
+        assert!(worktree.join("wip.rs").exists());
+        assert!(
+            sweep.removed.is_empty() && sweep.would_remove.is_empty(),
+            "{sweep:?}"
+        );
+        assert_eq!(sweep.kept.len(), 1, "{sweep:?}");
+        assert!(sweep.kept[0].1.contains("uncommitted"), "{sweep:?}");
+    }
+
+    #[test]
+    fn a_marked_lane_of_a_finished_execution_with_a_removed_worktree_is_removed() {
+        let repo = make_test_repo("lane-gone");
+        let base = head_sha(repo.path());
+        let (worktree, lane_target, branch) = marked_lane(repo.path(), "KT-23", "0a1b", "exec-23");
+        let neighbour = seed_lane_target(repo.path(), "0151-kt1122");
+        let main_debug = repo.path().join("target/debug");
+        fs::create_dir_all(&main_debug).unwrap();
+        remove_task_worktree(repo.path(), &worktree.to_string_lossy(), &branch, &base).unwrap();
+        assert!(!worktree.exists());
+
+        // The dry run measures and deletes nothing.
+        let dry = sweep_lane_targets(repo.path(), &finished, LaneSweepScope::ReportOnly);
+        assert_eq!(dry.would_remove.len(), 1, "{dry:?}");
+        assert_eq!(dry.would_remove[0].0.execution_id, "exec-23");
+        assert!(dry.would_remove[0].1.bytes_reclaimed >= 4096);
+        assert!(lane_target.exists(), "a dry run deletes nothing");
+
+        let sweep = sweep_lane_targets(repo.path(), &finished, LaneSweepScope::WorktreeGone);
+        assert!(!lane_target.exists(), "{sweep:?}");
+        assert_eq!(sweep.removed.len(), 1, "{sweep:?}");
+        assert!(sweep.bytes_removed() >= 4096);
+        assert!(neighbour.exists(), "a lane without a marker is not Kronn's");
+        assert_eq!(sweep.unmarked, vec![neighbour]);
         assert!(main_debug.exists(), "the main target is untouched");
-        // Something that is not a lane directory is refused, with its reason.
-        assert!(stray_file.exists());
-        assert!(sweep.kept.iter().any(|(path, _)| path == &stray_file));
+    }
+
+    #[test]
+    fn a_clean_worktree_keeps_its_lane_unless_the_wider_scope_is_asked() {
+        let repo = make_test_repo("lane-clean");
+        let (worktree, lane_target, _) = marked_lane(repo.path(), "KT-24", "2c3d", "exec-24");
+
+        let boot = sweep_lane_targets(repo.path(), &finished, LaneSweepScope::WorktreeGone);
+        assert!(
+            lane_target.exists(),
+            "boot scope never takes a present worktree's lane"
+        );
+        assert_eq!(boot.would_remove.len(), 1, "{boot:?}");
+
+        let wider = sweep_lane_targets(repo.path(), &finished, LaneSweepScope::WorktreeGoneOrClean);
+        assert!(!lane_target.exists(), "{wider:?}");
+        assert!(worktree.exists(), "the worktree itself is never touched");
+    }
+
+    #[test]
+    fn a_marker_cannot_aim_the_check_at_another_checkout() {
+        let repo = make_test_repo("lane-forged");
+        let lane_target = repo.path().join("target/wt-forged");
+        fs::create_dir_all(lane_target.join("debug")).unwrap();
+        // Names a worktree that derives another lane, outside the managed root.
+        fs::write(
+            lane_target.join(LANE_OWNER_MARKER),
+            format!(
+                r#"{{"version":1,"lane":"forged","execution_id":"e","worktree":"{}"}}"#,
+                repo.path().join(".kronn/worktrees/task-other").display()
+            ),
+        )
+        .unwrap();
+
+        let sweep = sweep_lane_targets(repo.path(), &finished, LaneSweepScope::WorktreeGoneOrClean);
+
+        assert!(lane_target.exists(), "{sweep:?}");
+        assert!(sweep.removed.is_empty(), "{sweep:?}");
+        assert!(sweep.kept[0].1.contains("does not derive"), "{sweep:?}");
     }
 
     #[test]
     fn the_sweep_of_a_repository_without_target_is_empty() {
         let repo = make_test_repo("lane-none");
-        let sweep = sweep_orphan_lane_targets(repo.path(), &Default::default(), true);
+        let sweep = sweep_lane_targets(repo.path(), &finished, LaneSweepScope::WorktreeGoneOrClean);
         assert_eq!(sweep, LaneTargetSweep::default());
     }
 

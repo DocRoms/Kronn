@@ -439,9 +439,15 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
             lane_targets_removed = orchestration_recovery.orphan_lane_targets_removed,
             lane_targets_preserved = orchestration_recovery.orphan_lane_targets_preserved,
             lane_target_bytes = orchestration_recovery.orphan_lane_target_bytes,
+            lane_targets_unmarked = orchestration_recovery.lane_targets_unmarked,
             errors = ?orchestration_recovery.errors,
             "Task orchestration boot reconciliation completed"
         );
+    }
+    // KT-1256 — the lane-target sweep's readable view: what boot removed, what
+    // it would remove, what it kept and which `target/wt-*` are not Kronn's.
+    for line in &orchestration_recovery.lane_target_report {
+        tracing::info!("lane targets: {line}");
     }
     kronn::api::orchestration::start_resilience_watchdog(state.clone());
 

@@ -80,7 +80,9 @@ test; `executed: false` needs `which: []` and no `pass`/`fail` test.
 
 ### Known limits
 
-- Lane targets under `<repo>/target/wt-*` are not removed with the worktree.
+- Lane targets under `<repo>/target/wt-*` are removed with a clean worktree and
+  swept at boot when stamped with `.kronn-lane.json` (see [worker lane warm
+  start](worker-lane-warm-start.md)); a dirty preserved worktree keeps its lane.
 - A worker needing a crate absent from the host cache cannot fetch it.
 - Vite's dev server may refuse files outside its root through the
   `node_modules` link; `vitest` runs are unaffected.

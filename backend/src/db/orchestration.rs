@@ -571,6 +571,88 @@ pub fn live_lane_claims(
     Ok(claims)
 }
 
+/// Which marked lane targets of a project must stay, by lane name, with why.
+///
+/// A lane is *not* in the result only when durable state proves it finished:
+/// its marker's execution exists and is terminal, no workspace row of that
+/// execution is still live (attached session, held lease, unmanaged), and no
+/// workspace row of the project claims the lane by path. A missing execution,
+/// an unreadable status or any state that cannot answer keeps the lane.
+/// KT-1256.
+pub fn lane_target_claims(
+    conn: &Connection,
+    project_id: &str,
+    owners: &[crate::core::worktree::LaneOwner],
+) -> Result<std::collections::HashMap<String, String>> {
+    use crate::core::worktree::ExecutionLiveness;
+
+    let mut claims = live_lane_claims(conn, project_id)?;
+    for owner in owners {
+        if claims.contains_key(&owner.lane) {
+            continue;
+        }
+        let status: Option<String> = conn
+            .query_row(
+                "SELECT status FROM task_executions WHERE id = ?1",
+                params![&owner.execution_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(status) = status else {
+            claims.insert(
+                owner.lane.clone(),
+                format!(
+                    "execution {} is not in the database, so nothing durable says it finished",
+                    owner.execution_id
+                ),
+            );
+            continue;
+        };
+        match TaskExecutionStatus::from_str(&status) {
+            Ok(parsed) if parsed.is_terminal() => {}
+            Ok(_) => {
+                claims.insert(
+                    owner.lane.clone(),
+                    format!(
+                        "execution {} is {status}, which is not a finished state",
+                        owner.execution_id
+                    ),
+                );
+                continue;
+            }
+            Err(error) => {
+                claims.insert(
+                    owner.lane.clone(),
+                    format!(
+                        "execution {} has an unreadable status: {error}",
+                        owner.execution_id
+                    ),
+                );
+                continue;
+            }
+        }
+        // A finished execution can still have a workspace row with a live
+        // session or an unreleased lease: the same verdict as for its worktree.
+        let mut statement = conn.prepare(
+            "SELECT canonical_path FROM discussion_workspaces
+              WHERE task_execution_id = ?1 AND canonical_path IS NOT NULL",
+        )?;
+        let paths = statement
+            .query_map(params![&owner.execution_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for path in paths {
+            match worktree_cleanup_liveness(conn, &path)? {
+                ExecutionLiveness::Terminal => {}
+                ExecutionLiveness::Active(reason) | ExecutionLiveness::Unknown(reason) => {
+                    claims.insert(owner.lane.clone(), reason);
+                    break;
+                }
+            }
+        }
+    }
+    Ok(claims)
+}
+
 /// Audit one lane target reclaim against the execution that owned `canonical_path`.
 /// The same shape as [`record_artifact_reclaim`], under its own actions so a
 /// worktree's `target/` and its lane target are told apart. KT-1256.
@@ -593,6 +675,17 @@ pub fn record_lane_target_reclaim(
     let Some(execution_id) = execution_id else {
         return Ok(());
     };
+    record_lane_target_reclaim_for_execution(conn, &execution_id, lane_target, outcome)
+}
+
+/// [`record_lane_target_reclaim`] for a lane whose execution is already known:
+/// the sweep reads it from the lane's ownership marker.
+pub fn record_lane_target_reclaim_for_execution(
+    conn: &Connection,
+    execution_id: &str,
+    lane_target: &str,
+    outcome: Result<(u64, bool), String>,
+) -> Result<()> {
     let (action, changes) = match outcome {
         Ok((bytes, partial)) => (
             "lane_target_reclaimed",
@@ -609,7 +702,7 @@ pub fn record_lane_target_reclaim(
     };
     record_execution_event(
         conn,
-        &execution_id,
+        execution_id,
         action,
         None,
         None,
