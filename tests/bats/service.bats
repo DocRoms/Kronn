@@ -429,6 +429,36 @@ fake_toolchain() {
     grep -q "bootstrap" "$CALLS"
 }
 
+@test "_service_version_ge compares semver with or without v" {
+    _service_version_ge v24.14.0 23.6.0
+    _service_version_ge 23.6.0 23.6.0
+    _service_version_ge v23.10.0 23.6.0
+    ! _service_version_ge v23.5.9 23.6.0
+    ! _service_version_ge v18.20.5 23.6.0
+}
+
+@test "_service_frontend_min_node reads engines.node, defaults to 23.6.0" {
+    printf '{\n  "engines": {\n    "node": ">=24.1.0"\n  }\n}\n' > "$TEST_TMPDIR/pkg.json"
+    [ "$(_service_frontend_min_node "$TEST_TMPDIR/pkg.json")" = "24.1.0" ]
+    printf '{}\n' > "$TEST_TMPDIR/empty.json"
+    [ "$(_service_frontend_min_node "$TEST_TMPDIR/empty.json")" = "23.6.0" ]
+}
+
+@test "_service_pick_node_dir skips a too-old node and fails when none fits" {
+    local v
+    for v in 18.20.5 24.14.0; do
+        mkdir -p "$TEST_TMPDIR/n$v"
+        printf '#!/bin/sh\necho v%s\n' "$v" > "$TEST_TMPDIR/n$v/node"
+        chmod +x "$TEST_TMPDIR/n$v/node"
+    done
+    export KRONN_SERVICE_NODE_CANDIDATES="$TEST_TMPDIR/n18.20.5/node
+$TEST_TMPDIR/n24.14.0/node"
+    [ "$(_service_pick_node_dir 23.6.0)" = "$TEST_TMPDIR/n24.14.0" ]
+    export KRONN_SERVICE_NODE_CANDIDATES="$TEST_TMPDIR/n18.20.5/node"
+    run _service_pick_node_dir 23.6.0
+    [ "$status" -ne 0 ]
+}
+
 @test "service_missing_tools lists what is absent" {
     printf '#!/bin/sh\n' > "$TEST_TMPDIR/bin/git"
     chmod +x "$TEST_TMPDIR/bin/git"
