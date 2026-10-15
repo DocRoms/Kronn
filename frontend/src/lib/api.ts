@@ -1169,6 +1169,9 @@ export const projects = {
        *  Absent from a backend that predates it. */
       steps_to_redo?: number[];
       started_at: string;
+      /** KT-1199 — the run is the one a colleague committed in the
+       *  repository, not a row of this instance: the launch adopts it. */
+      from_repository?: boolean;
     } | null>(
       'GET', `/projects/${id}/audit-resumable`,
     ),

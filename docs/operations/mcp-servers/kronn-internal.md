@@ -416,6 +416,8 @@ finished run, another run or a restarted backend holds nothing it accepts. The
 membership ends with the step and at backend boot. Being a joined CLI, the step
 is pinned by `task_exec_launch` like any principal, so deliveries wake it, and
 a replayed step takes over the live executions its interrupted session steered.
+Its untargeted `disc_append` reports to the room without waking the room's
+native agent; target that agent explicitly to ask it something (KT-1253).
 `[src: file: backend/src/workflows/step_room.rs:39-53#authorize]`
 `[src: file: backend/src/db/workflow_step_rooms.rs:178-294#revoke_all_after_restart]`
 The optional `validations` passed to `task_exec_launch` are principal-owned and

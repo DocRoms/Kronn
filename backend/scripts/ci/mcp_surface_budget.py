@@ -128,6 +128,52 @@ DECLARATION_WAIVERS: dict[str, str] = {}
 BYTES_PER_TOKEN = 3.7
 
 
+CATALOGUE_MUTATORS = {"append", "extend", "insert", "__iadd__"}
+
+
+def reject_catalogue_mutations(tree: ast.Module) -> None:
+    """The gate measures the TOOLS literal, so the literal must be the catalogue.
+
+    A tool appended anywhere else (`TOOLS.extend([...])` after `main()`) reaches
+    `tools/list` while the measured bytes stay green.
+    """
+    assignments = 0
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if isinstance(target, ast.Name) and target.id == "TOOLS":
+                    if isinstance(node, ast.AugAssign):
+                        raise SystemExit(
+                            f"TOOLS in {BRIDGE} is extended with `+=` at line {node.lineno}: "
+                            "declare every tool inside the TOOLS literal"
+                        )
+                    assignments += 1
+                elif (
+                    isinstance(target, ast.Subscript)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id == "TOOLS"
+                ):
+                    raise SystemExit(
+                        f"TOOLS in {BRIDGE} is modified by index at line {node.lineno}: "
+                        "declare every tool inside the TOOLS literal"
+                    )
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "TOOLS"
+            and node.func.attr in CATALOGUE_MUTATORS
+        ):
+            raise SystemExit(
+                f"TOOLS in {BRIDGE} is changed by `TOOLS.{node.func.attr}` at line "
+                f"{node.lineno}: declare every tool inside the TOOLS literal so the "
+                "budget measures what tools/list serves"
+            )
+    if assignments > 1:
+        raise SystemExit(f"TOOLS in {BRIDGE} is assigned {assignments} times: keep one literal")
+
+
 def load_tools(root: pathlib.Path) -> list[dict]:
     """Read TOOLS without importing the bridge.
 
@@ -138,6 +184,7 @@ def load_tools(root: pathlib.Path) -> list[dict]:
     """
     source = (root / BRIDGE).read_text()
     tree = ast.parse(source)
+    reject_catalogue_mutations(tree)
 
     class LiteralNameResolver(ast.NodeTransformer):
         def __init__(self, values: dict[str, object]) -> None:

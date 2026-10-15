@@ -925,7 +925,13 @@ steps_to_redo: Array<number>,
  * The lease is held by a run nobody can settle: every launch is refused
  * until the cleanup action releases it (KT-1134).
  */
-lease_orphaned: boolean, };
+lease_orphaned: boolean,
+/**
+ * The audit run the repository describes (KT-1199): a colleague's run
+ * after a fetch or a rebase. Shown as the project's state when
+ * `newer_than_local`; `None` when the repository carries no run state.
+ */
+repo: RepoAuditRun | null, };
 
 /**
  * What one phase of an audit (briefing, audit steps, validation discussion)
@@ -1277,7 +1283,17 @@ lease_orphaned: boolean,
  * Why the server would refuse a validation now (`None` = it accepts):
  * the UI shows the reason instead of offering the action.
  */
-validation_block: ValidationBlock | null, };
+validation_block: ValidationBlock | null,
+/**
+ * The audit run the repository describes (KT-1199): a colleague's run
+ * after a fetch or a rebase, read off the working tree at every call.
+ */
+repo: RepoAuditRun | null,
+/**
+ * The repository's run is the project's state here and the server would
+ * accept a validation from it: the timeline offers to validate.
+ */
+repo_can_validate: boolean, };
 
 export type AuditTimelineValidation = { discussion_id: string,
 /**
@@ -7376,6 +7392,40 @@ export type ReplacedFile = { path: string,
  */
 backup: string, };
 
+/**
+ * What the UI shows of an audit run that the repository describes.
+ */
+export type RepoAuditRun = { run_id: string, kind: string,
+/**
+ * The run's own status in the file: `Running` means an interruption or
+ * a run still going on another machine.
+ */
+status: string, started_by: string, started_at: string, ended_at: string | null, updated_at: string, total_steps: number,
+/**
+ * Finished steps whose produced file still matches.
+ */
+done_steps: Array<number>,
+/**
+ * Failed and pending steps: what a resume runs.
+ */
+resume_steps: Array<number>,
+/**
+ * Finished steps whose file changed since: « à revérifier », replayed.
+ */
+recheck_steps: Array<number>,
+/**
+ * The file is the committed one: a resume or a validation may rely on it.
+ */
+committed: boolean,
+/**
+ * This is the project's state: no local run, or the repository is newer.
+ */
+newer_than_local: boolean,
+/**
+ * A committed, unfinished run with steps left to run: can be resumed here.
+ */
+resumable: boolean, briefing_changed: boolean, td_total: number, td_settled: number, validated_at: string | null, validated_by: string | null, };
+
 export type ReportTelemetryRequest = {
 /**
  * The CLI's own durable session id, as sent at join. Resolved to the Kronn
@@ -10156,9 +10206,16 @@ export type UsageTotals = { input_tokens: number, output_tokens: number, cache_c
  * timeline and the discussion banners show this reason instead of offering
  * an action the server would refuse.
  */
-export type ValidationBlock = "no_local_run" | "audit_running" | "run_not_completed" | "no_linked_discussion" | "discussion_missing" | "foreign_discussion" | "not_finished";
+export type ValidationBlock = "no_local_run" | "audit_running" | "run_not_completed" | "no_linked_discussion" | "discussion_missing" | "foreign_discussion" | "not_finished" | "repo_run_not_committed" | "repo_steps_to_recheck" | "repo_td_open";
 
 export type ValidationReason = "audit_validation" | "validation_card" | "acknowledged" | "revalidation" | "confirmed" | "human_owned";
+
+/**
+ * Where a validation state comes from (KT-1199): the run this instance
+ * recorded, or the committed run state of the repository (a colleague's run
+ * after a fetch or a rebase).
+ */
+export type ValidationSource = "local" | "repo";
 
 /**
  * One validation to run on the candidate before the parent is advanced (§6).
@@ -10180,7 +10237,7 @@ finished: boolean, completed_at: string | null, completed_message_id: string | n
 /**
  * Pseudo of the operator whose audit opened the validation.
  */
-started_by: string | null, validated_by: string | null, validated_at: string | null,
+started_by: string | null, validated_by: string | null, validated_at: string | null, source: ValidationSource,
 /**
  * The server accepts a validation now (the tech-debt sheet path, which
  * reads the filesystem, is decided by the POST itself).

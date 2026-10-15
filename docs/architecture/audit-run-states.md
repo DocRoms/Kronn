@@ -353,9 +353,14 @@ as human-validated evidence until its trust conditions hold again.
   validation discussion that is not the latest run's is flagged as superseded.
   [src: file: backend/src/api/audit/validate.rs:41#ValidationBlock]
   [src: file: backend/src/api/audit/validate.rs:116#validation_state]
-- **Peers are read-only.** An instance without the run (a P2P peer, another
-  clone) has nothing to validate: `validate-audit` refuses with
-  `no_local_run`. Validation happens on the instance that ran the audit.
+- **Peers are read-only, unless the repository carries the run.** An instance
+  without the run (a P2P peer, another clone) is read-only: `validate-audit`
+  refuses with `no_local_run`. The exception (KT-1199): the repository carries
+  a committed, Completed run state that passes the gates — see
+  [The run, portable by the repository](#the-run-portable-by-the-repository).
+  Then the clone validates from that state, with the same gates as a local run.
+  [src: file: backend/src/api/audit/validate.rs:40#ValidationBlock]
+  [src: file: backend/src/api/audit/run_state.rs:322#repo_validation]
 - **Who.** The operator pseudo of the instance that ran the audit is recorded
   as `validation_started_by` when the validation is opened, and as
   `validated_by` when it is validated, on the run row and in
@@ -366,6 +371,75 @@ as human-validated evidence until its trust conditions hold again.
   when title and first message carry the generated provenance, they predate the
   latest linked run, and no agent is queued, running or awaited. Idempotent.
   [src: file: backend/src/db/audit_validation.rs:183#repair]
+
+## The run, portable by the repository
+
+KT-1199. The run, its steps and its resume point live in the local database;
+the file `<docs>/.kronn-audit-run.json` projects them into the repository so a
+colleague can see, resume and validate an audit that ran elsewhere. It sits
+next to the docs (not under `.kronn/`, which is excluded from Git) so it
+travels with them. [src: file: backend/src/core/audit_run_state.rs:27#RUN_STATE_FILENAME]
+
+**What it holds.** The run id, kind, status, start and end dates, who started
+it (the operator pseudo), the run it resumed, the template version and the
+digest of `briefing.md` at the start; one line per step (`001`, `002`, …) with
+its status (`done`, `unchanged`, `accepted`, `failed`, `pending`), its target
+and the SHA-256 of the file it produced; and the KT-1174 baselines
+(`decisions.md` and the `Decision record` lines at run start, redacted like
+every audit artefact). No cost, no token count, no secret, no Kronn version
+(it would change on every upgrade). Keys are sorted and the output is
+byte-identical for the same input, so a merge or a rebase conflicts on a step
+line at most.
+
+**When it is written.** By Kronn at run start, after each step (done, failed,
+cancelled) and at the end of the run (the end re-reads every produced file).
+A failure to write is logged and never fails the run. A first audit writes it
+once the docs folder exists. After a validation, the digests are rebuilt so
+they follow the documents the human accepted: from this instance's rows when
+it ran the audit, from the committed copy otherwise.
+[src: file: backend/src/api/audit/run_state.rs:56#RunStateWriter]
+[src: file: backend/src/api/audit/run_state.rs:391#refresh_validated_digests]
+
+**What is trusted.**
+
+| Reader | Trust |
+| --- | --- |
+| The run in progress | Kronn's memory and database. The writer never reads the file back: an agent editing it mid-run changes nothing, the next step rewrites it. |
+| A rescan, a resume, a validation | Only a file identical to `HEAD` (a human committed it). An uncommitted file is shown, flagged as not committed, and never used to resume or validate. |
+| A step | Trusted when its file still has the recorded digest. A changed or missing file is « à revérifier »: never trusted, replayed on resume, and it blocks a validation from the repository. |
+
+[src: file: backend/src/core/audit_run_state.rs:280#probe]
+
+**What the UI shows.** `GET /api/projects/:id/audit-latest`,
+`audit-timeline` and `audit-repo-state` carry the repository's run, read off
+the working tree at every call, so a fetch, a rebase or a rescan shows up on
+the next refresh: « audit lancé par X le JJ/MM : étapes 1-9 faites, 10-16 à
+reprendre », and the tech-debt count. The repository's run is the project's
+state when this instance has no run or the file is newer than its latest run
+(a run still `Running` here is never superseded).
+
+**Resuming.** A committed, unfinished run that is the project's state is
+returned by `GET /api/projects/:id/audit-resumable` (`from_repository: true`),
+so the usual « Reprendre » action sends its id as `resume_run_id`. The launch
+rebuilds a local `Interrupted` run from the file: the steps whose produced file
+still matches are inherited (no cost: this machine did not run them) and the
+baselines are the committed ones; the pending, failed and changed steps are
+replayed. The committed briefing is used.
+[src: file: backend/src/api/audit/run_state.rs:453#adopt_repo_run]
+
+**Validating.** With no local run (or a newer repository run), the validation
+gate accepts the repository when: the file is committed; its run is
+`Completed`; every step is trusted; every Critical and High tech-debt sheet is
+settled; and the same documentary gates as a local run hold (no placeholders,
+no blocking optimisation diagnostics). Whoever validates writes
+`validated_at` in `.kronn.json`; the others receive it with the commit.
+Otherwise the instance stays read-only and the reason is stated (`no_local_run`,
+`repo_run_not_committed`, `repo_steps_to_recheck`, `repo_td_open`).
+[src: file: backend/src/api/audit/validate.rs:227#repo_validation_state]
+
+**Conflicts.** Two people auditing at once is resolved by Git. Whatever the
+merged file says, a step whose digest no longer matches the merged document is
+« à revérifier » and replayed; nothing is trusted on the file's word alone.
 
 ## Template updates after an audit
 

@@ -44,4 +44,5 @@
   fall back to the checkout path (a ref moved under a checkout leaves that
   checkout's index and files stale). Every existing pinned-target test must
   still pass, plus one crash test per new branch.
-- **Next step**: create ticket.
+- **Status**: resolved by KT-835. See `docs/testing/pinned-target-worktree.md`
+  § Target checked out nowhere.

@@ -138,7 +138,7 @@ A native agent's `disc_append` can carry its runtime session id without having
 joined the room as a CLI peer. Such a post does not implicitly queue another
 answer from the discussion's principal. An actual joined CLI may still hand
 the turn back, and explicit recipients keep their existing routing.
-[src: file: backend/src/api/disc_source.rs:773-785#route_joined_peer_turn]
+[src: file: backend/src/api/disc_source.rs:788-800#route_joined_peer_turn]
 
 Claude's SDK model catalogue is discovered independently of these execution
 toggles. It uses an initialization-only, no-prompt CLI process, not the ACP
