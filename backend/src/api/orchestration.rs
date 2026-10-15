@@ -12881,6 +12881,95 @@ pub(crate) mod tests {
         );
     }
 
+    /// A parent room `d-parent` whose Codex turn `job-1` is running and launched
+    /// `t-1`'s execution (returned), plus every room-agent identity that must NOT
+    /// be its principal: a running turn of another room (`job-2`), finished and
+    /// cancelled turns of the parent room, and the dispatch of another
+    /// execution's worker in the parent room (`job-worker`, still pending).
+    async fn room_agent_lifecycle_fixture(db: &std::sync::Arc<Database>) -> String {
+        db.with_conn(|conn| {
+            let now = "2026-10-14T00:00:00Z";
+            conn.execute(
+                "INSERT INTO discussions (id, title, agent, created_at, updated_at)
+                 VALUES ('d-parent', 'Parent', 'Codex', ?1, ?1),
+                        ('d-other', 'Other', 'Codex', ?1, ?1)",
+                [now],
+            )?;
+            for (id, disc, job, status) in [
+                ("msg-1", "d-parent", "job-1", "Running"),
+                ("msg-2", "d-other", "job-2", "Running"),
+                ("msg-3", "d-parent", "job-done", "Completed"),
+                ("msg-4", "d-parent", "job-cancelled", "Cancelled"),
+                // A room runs one turn at a time: the worker's dispatch becomes
+                // `Running` only in the case that presents it.
+                ("msg-w", "d-parent", "job-worker", "Pending"),
+            ] {
+                conn.execute(
+                    "INSERT INTO messages (id, discussion_id, role, content, timestamp, sort_order)
+                     VALUES (?1, ?2, 'User', 'go', ?3, (SELECT COUNT(*) FROM messages))",
+                    rusqlite::params![id, disc, now],
+                )?;
+                crate::db::agent_dispatch::enqueue(
+                    conn,
+                    crate::db::agent_dispatch::NewAgentDispatchJob {
+                        id: job,
+                        discussion_id: disc,
+                        trigger_message_id: id,
+                        trigger_sort_order: 1,
+                        dedupe_key: job,
+                        agent_override: None,
+                        chain_prompt_ids: &[],
+                        batch_item: None,
+                        group_id: None,
+                        group_concurrency_limit: None,
+                    },
+                )?;
+                conn.execute(
+                    "UPDATE agent_dispatch_jobs SET status = ?1 WHERE id = ?2",
+                    rusqlite::params![status, job],
+                )?;
+            }
+            conn.execute(
+                "INSERT INTO planning_tasks (id, task_number, title, created_at, updated_at)
+                 VALUES ('t-1', 1, 'CI task', ?1, ?1), ('t-2', 2, 'Other task', ?1, ?1)",
+                [now],
+            )?;
+            let actor = crate::models::OrchestrationActor {
+                kind: crate::models::PlanningActorKind::Backend,
+                id: Some("room-agent-lifecycle-test".into()),
+                session_id: None,
+                source_message_id: None,
+            };
+            let launched = crate::db::orchestration::launch_single_task(
+                conn,
+                &crate::models::LaunchSingleTaskInput::new("t-1", "d-parent"),
+                &actor,
+            )?
+            .execution
+            .id;
+            let other = crate::db::orchestration::launch_single_task(
+                conn,
+                &crate::models::LaunchSingleTaskInput::new("t-2", "d-parent"),
+                &actor,
+            )?
+            .execution
+            .id;
+            crate::db::orchestration::attach_execution_dispatch(conn, &other, "job-worker")?;
+            Ok(launched)
+        })
+        .await
+        .unwrap()
+    }
+
+    fn lifecycle_room(disc: &str, job: &str, msg: &str) -> SpawnedAgentCaller {
+        SpawnedAgentCaller {
+            discussion_id: disc.into(),
+            agent_type: "Codex".into(),
+            dispatch_job_id: job.into(),
+            source_message_id: msg.into(),
+        }
+    }
+
     /// Regression: a room's native agent launched an execution as its principal,
     /// then every follow-up (status, review, cancel) was refused as "not
     /// addressed to this session" because those paths accepted only a CLI
@@ -12888,69 +12977,8 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_room_native_agent_can_review_and_stop_the_execution_it_launched() {
         let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
-        let execution_id = db
-            .with_conn(|conn| {
-                let now = "2026-10-14T00:00:00Z";
-                conn.execute(
-                    "INSERT INTO discussions (id, title, agent, created_at, updated_at)
-                     VALUES ('d-parent', 'Parent', 'Codex', ?1, ?1),
-                            ('d-other', 'Other', 'Codex', ?1, ?1)",
-                    [now],
-                )?;
-                for (id, disc, job, status) in [
-                    ("msg-1", "d-parent", "job-1", "Running"),
-                    ("msg-2", "d-other", "job-2", "Running"),
-                    ("msg-3", "d-parent", "job-done", "Completed"),
-                ] {
-                    conn.execute(
-                        "INSERT INTO messages (id, discussion_id, role, content, timestamp, sort_order)
-                         VALUES (?1, ?2, 'User', 'go', ?3, (SELECT COUNT(*) FROM messages))",
-                        rusqlite::params![id, disc, now],
-                    )?;
-                    crate::db::agent_dispatch::enqueue(
-                        conn,
-                        crate::db::agent_dispatch::NewAgentDispatchJob {
-                            id: job,
-                            discussion_id: disc,
-                            trigger_message_id: id,
-                            trigger_sort_order: 1,
-                            dedupe_key: job,
-                            agent_override: None,
-                            chain_prompt_ids: &[],
-                            batch_item: None,
-                            group_id: None,
-                            group_concurrency_limit: None,
-                        },
-                    )?;
-                    conn.execute(
-                        "UPDATE agent_dispatch_jobs SET status = ?1 WHERE id = ?2",
-                        rusqlite::params![status, job],
-                    )?;
-                }
-                conn.execute(
-                    "INSERT INTO planning_tasks (id, task_number, title, created_at, updated_at)
-                     VALUES ('t-1', 1, 'CI task', ?1, ?1)",
-                    [now],
-                )?;
-                let input = crate::models::LaunchSingleTaskInput::new("t-1", "d-parent");
-                let actor = crate::models::OrchestrationActor {
-                    kind: crate::models::PlanningActorKind::Backend,
-                    id: Some("room-agent-lifecycle-test".into()),
-                    session_id: None,
-                    source_message_id: None,
-                };
-                Ok(crate::db::orchestration::launch_single_task(conn, &input, &actor)?
-                    .execution
-                    .id)
-            })
-            .await
-            .unwrap();
-        let room = |disc: &str, job: &str, msg: &str| SpawnedAgentCaller {
-            discussion_id: disc.into(),
-            agent_type: "Codex".into(),
-            dispatch_job_id: job.into(),
-            source_message_id: msg.into(),
-        };
+        let execution_id = room_agent_lifecycle_fixture(&db).await;
+        let room = lifecycle_room;
 
         let own = PrincipalCaller::RoomAgent(room("d-parent", "job-1", "msg-1"));
         let found = authorize_execution_principal(&db, &execution_id, &own).await;
@@ -13002,6 +13030,232 @@ pub(crate) mod tests {
         assert!(
             matches!(outcome, ReviewOutcome::NotAddressed),
             "a stranger stays opaque"
+        );
+    }
+
+    /// `(endpoint, success, error, error_code)` of one principal lifecycle call.
+    type LifecycleAnswer = (&'static str, bool, Option<String>, Option<String>);
+
+    /// Call status, review, cancel, resume and reassign on `exec_id` with one
+    /// room-agent identity, optionally ALSO naming a CLI session (`mixed`).
+    async fn every_principal_call(
+        state: &AppState,
+        exec_id: &str,
+        room: SpawnedAgentCaller,
+        mixed: bool,
+    ) -> Vec<LifecycleAnswer> {
+        let (agent, session) = if mixed {
+            ("Codex".to_string(), "cli-session".to_string())
+        } else {
+            (String::new(), String::new())
+        };
+        let caller = || TaskExecCallerRequest {
+            source_agent: agent.clone(),
+            source_session_id: session.clone(),
+            spawned_agent: None,
+            room_agent: Some(room.clone()),
+        };
+        fn answer<T: Serialize>(name: &'static str, r: ApiResponse<T>) -> LifecycleAnswer {
+            (name, r.success, r.error, r.error_code)
+        }
+        let Json(status) = task_exec_status(
+            State(state.clone()),
+            Path(exec_id.to_string()),
+            Json(TaskExecStatusRequest {
+                caller: caller(),
+                ..Default::default()
+            }),
+        )
+        .await;
+        let Json(review) = review(
+            State(state.clone()),
+            Json(ReviewRequest {
+                task_execution_id: exec_id.to_string(),
+                decision: serde_json::json!({
+                    "version": 1, "task_ref": "KT-1", "decision": "approve"
+                }),
+                source_agent: mixed.then(|| agent.clone()),
+                source_session_id: mixed.then(|| session.clone()),
+                room_agent: Some(room.clone()),
+            }),
+        )
+        .await;
+        let Json(cancel) = task_exec_cancel(
+            State(state.clone()),
+            Path(exec_id.to_string()),
+            Json(TaskExecCancelRequest {
+                source_agent: agent.clone(),
+                source_session_id: session.clone(),
+                room_agent: Some(room.clone()),
+                reason: "stop".into(),
+                cleanup_policy: None,
+            }),
+        )
+        .await;
+        let Json(resume) = task_exec_resume(
+            State(state.clone()),
+            Path(exec_id.to_string()),
+            Json(caller()),
+        )
+        .await;
+        let Json(reassign) = task_exec_reassign(
+            State(state.clone()),
+            Path(exec_id.to_string()),
+            Json(TaskExecReassignRequest {
+                source_agent: agent.clone(),
+                source_session_id: session.clone(),
+                room_agent: Some(room.clone()),
+                worker: None,
+                validations: Some(Vec::new()),
+                reason: "retry".into(),
+            }),
+        )
+        .await;
+        vec![
+            answer("status", status),
+            answer("review", review),
+            answer("cancel", cancel),
+            answer("resume", resume),
+            answer("reassign", reassign),
+        ]
+    }
+
+    /// The execution row plus its event and review journals: a refused call
+    /// must leave all three exactly as they were.
+    async fn execution_state(db: &std::sync::Arc<Database>, exec_id: &str) -> serde_json::Value {
+        let id = exec_id.to_string();
+        db.with_conn(move |conn| {
+            let execution = crate::db::orchestration::get_task_execution(conn, &id)?;
+            let count = |table: &str| -> anyhow::Result<i64> {
+                Ok(conn.query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE task_execution_id = ?1"),
+                    [&id],
+                    |row| row.get(0),
+                )?)
+            };
+            Ok(serde_json::json!({
+                "execution": execution,
+                "events": count("task_execution_events")?,
+                "reviews": count("task_execution_reviews")?,
+            }))
+        })
+        .await
+        .unwrap()
+    }
+
+    /// Every room-agent identity that is not the launching turn is refused on
+    /// every principal call, with the SAME opaque answer as an unknown
+    /// execution (no existence oracle), and nothing changes state.
+    #[tokio::test]
+    async fn a_room_native_agent_outside_its_own_turn_is_refused_on_every_principal_call() {
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let execution_id = room_agent_lifecycle_fixture(&db).await;
+        let state = recovery_test_state(&db);
+        let before = execution_state(&db, &execution_id).await;
+
+        // The opaque refusal an unknown execution gets, per endpoint.
+        let unknown = every_principal_call(
+            &state,
+            "missing-exec",
+            lifecycle_room("d-parent", "job-1", "msg-1"),
+            false,
+        )
+        .await;
+        for (name, success, error, _) in &unknown {
+            assert!(!success, "{name}: an unknown execution is refused");
+            assert!(error.is_some(), "{name}: the refusal names a reason");
+        }
+
+        for (room, label) in [
+            (
+                lifecycle_room("d-other", "job-2", "msg-2"),
+                "native agent of another room",
+            ),
+            (
+                lifecycle_room("d-parent", "job-done", "msg-3"),
+                "finished turn",
+            ),
+            (
+                lifecycle_room("d-parent", "job-cancelled", "msg-4"),
+                "cancelled turn",
+            ),
+        ] {
+            let answers = every_principal_call(&state, &execution_id, room, false).await;
+            assert_eq!(
+                answers, unknown,
+                "{label}: same opaque refusal as an unknown execution"
+            );
+            assert_eq!(
+                execution_state(&db, &execution_id).await,
+                before,
+                "{label}: no state change"
+            );
+        }
+
+        // A worker's dispatch running in the parent room is never its principal,
+        // even while it is the room's only running turn.
+        db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE agent_dispatch_jobs SET status = 'Completed' WHERE id = 'job-1'",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE agent_dispatch_jobs SET status = 'Running' WHERE id = 'job-worker'",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let worker = every_principal_call(
+            &state,
+            &execution_id,
+            lifecycle_room("d-parent", "job-worker", "msg-w"),
+            false,
+        )
+        .await;
+        assert_eq!(
+            worker, unknown,
+            "a worker's dispatch presented as the room agent: same opaque refusal"
+        );
+        assert_eq!(
+            execution_state(&db, &execution_id).await,
+            before,
+            "worker dispatch: no state change"
+        );
+
+        // Both identity modes at once are refused before any lookup, even for the
+        // launching turn, so the answer cannot reveal the execution either.
+        let mixed = every_principal_call(
+            &state,
+            &execution_id,
+            lifecycle_room("d-parent", "job-1", "msg-1"),
+            true,
+        )
+        .await;
+        let mixed_unknown = every_principal_call(
+            &state,
+            "missing-exec",
+            lifecycle_room("d-parent", "job-1", "msg-1"),
+            true,
+        )
+        .await;
+        for (name, success, _, code) in &mixed {
+            assert!(!success, "{name}: room_agent with a CLI session is refused");
+            assert_eq!(
+                code.as_deref(),
+                Some("validation"),
+                "{name}: identity-mode refusal"
+            );
+        }
+        assert_eq!(
+            mixed, mixed_unknown,
+            "the mixed refusal is no existence oracle"
+        );
+        assert_eq!(
+            execution_state(&db, &execution_id).await,
+            before,
+            "mixed identity: no state change"
         );
     }
 
