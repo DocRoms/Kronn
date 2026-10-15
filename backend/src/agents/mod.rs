@@ -1063,15 +1063,16 @@ async fn probe_npx_invocation(
         args.get(1).map(String::as_str),
         "",
     );
-    // Test builds: the `npx` of the machine would download and start a real
-    // agent CLI. The injected answer is "no fallback runtime" (KT-1189).
-    #[cfg(test)]
-    if crate::core::cmd::real_agent_guard::real_agent_binary(
-        std::ffi::OsStr::new(&executable),
-        crate::core::child_env::ChildRoute::Agent(family),
-        crate::core::child_env::var_os("PATH"),
-    )
-    .is_some()
+    // A test that forbids real agents: the `npx` of the machine would download
+    // and start a real agent CLI. The injected answer is "no fallback runtime"
+    // (KT-1189).
+    if crate::core::cmd::real_agents_forbidden()
+        && crate::core::cmd::real_agent_guard::real_agent_binary(
+            std::ffi::OsStr::new(&executable),
+            crate::core::child_env::ChildRoute::Agent(family),
+            crate::core::child_env::var_os("PATH"),
+        )
+        .is_some()
     {
         return RuntimeProbe::default();
     }
@@ -1137,15 +1138,17 @@ pub struct BinaryLocation {
 /// rather than following the symlink.
 pub fn find_binary(name: &str) -> Option<BinaryLocation> {
     let found = find_binary_on_machine(name);
-    // Test builds: an agent CLI installed on the developer's machine is not
-    // one the test provided — it would make the result depend on the machine
-    // and start the real CLI at the version probe (KT-1189). Stubs the test
-    // wrote under the temporary directory are still found.
-    #[cfg(test)]
-    let found = found.filter(|location| {
+    // A test that forbids real agents: an agent CLI installed on the
+    // developer's machine is not one the test provided — it would make the
+    // result depend on the machine and start the real CLI at the version probe
+    // (KT-1189). Stubs the test wrote under the temporary directory are still
+    // found.
+    if !crate::core::cmd::real_agents_forbidden() {
+        return found;
+    }
+    found.filter(|location| {
         !crate::core::cmd::real_agent_guard::is_machine_agent(name, &location.path)
-    });
-    found
+    })
 }
 
 fn find_binary_on_machine(name: &str) -> Option<BinaryLocation> {

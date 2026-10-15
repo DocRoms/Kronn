@@ -71,12 +71,26 @@ fn raw_sync(program: &OsStr) -> std::process::Command {
     cmd
 }
 
+/// Environment flag that arms the real-agent guard in a build that is not the
+/// library's own test build — the integration crates in `backend/tests` link the
+/// library without `cfg(test)`. Set (to anything but `0`) by `tests/it.rs`
+/// before any test runs; never set by Kronn itself (KT-1189).
+pub const NO_REAL_AGENTS_ENV: &str = "KRONN_TEST_NO_REAL_AGENTS";
+
+/// Whether a test is running that must not start a real agent CLI: the
+/// library's own test build, or a process carrying [`NO_REAL_AGENTS_ENV`].
+/// `false` in every production process.
+pub fn real_agents_forbidden() -> bool {
+    cfg!(test)
+        || crate::core::child_env::var_os(NO_REAL_AGENTS_ENV)
+            .is_some_and(|value| !value.is_empty() && value != "0")
+}
+
 /// Whether `path` is a program a test controls: a stub written under the
 /// temporary directory or a fixture of this crate. Anything else (a CLI the
 /// developer installed under `~/.local/bin`, Homebrew, npm…) is the machine's,
-/// not the test's. The detection consults it in test builds so a unit test
-/// sees the same agents on every machine (KT-1189).
-#[cfg(test)]
+/// not the test's. The detection consults it when [`real_agents_forbidden`] so
+/// a test sees the same agents on every machine (KT-1189).
 pub(crate) fn is_test_controlled(path: &std::path::Path) -> bool {
     let real = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let path = real(path);
@@ -89,14 +103,14 @@ pub(crate) fn is_test_controlled(path: &std::path::Path) -> bool {
     .any(|root| path.starts_with(real(root)))
 }
 
-/// Test builds only: no unit or API test may start a real agent CLI (KT-1189).
+/// When [`real_agents_forbidden`]: no unit or API test may start a real agent
+/// CLI (KT-1189).
 ///
 /// A CLI installed on the developer's machine would make a test depend on that
 /// machine (green here, red on CI), start slowly, reach the network, and write
 /// into whatever `HOME` the process points at — the real one when a test does
 /// not redirect it. Every agent launch and probe goes through [`async_cmd`] /
 /// [`sync_cmd`], so this is the one place that sees them all.
-#[cfg(test)]
 pub(crate) mod real_agent_guard {
     use super::{is_test_controlled, ChildRoute};
     use crate::core::child_env::AgentFamily;
@@ -114,6 +128,7 @@ pub(crate) mod real_agent_guard {
     /// Real executions refused in this process, for the guard's own test.
     static REFUSED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
+    #[cfg(test)]
     pub(crate) fn refused() -> Vec<String> {
         REFUSED.lock().map(|l| l.clone()).unwrap_or_default()
     }
@@ -170,8 +185,17 @@ pub(crate) mod real_agent_guard {
         resolve(program, search_path).filter(|path| !is_test_controlled(path))
     }
 
-    /// Panics when the launch would start a real agent binary.
+    /// Panics when the launch would start a real agent binary. Does nothing
+    /// outside a test that forbids it ([`real_agents_forbidden`]).
+    ///
+    /// A panic inside a spawned tokio task is swallowed until the task is
+    /// joined, and a detached refresh is never joined, so there the process is
+    /// aborted instead: the test fails loudly rather than passing with a real
+    /// CLI started.
     pub(crate) fn refuse_real_agent(program: &OsStr, route: ChildRoute) {
+        if !super::real_agents_forbidden() {
+            return;
+        }
         let Some(real) = real_agent_binary(program, route, crate::core::child_env::var_os("PATH"))
         else {
             return;
@@ -187,6 +211,10 @@ pub(crate) mod real_agent_guard {
         if let Ok(mut refused) = REFUSED.lock() {
             refused.push(message.clone());
         }
+        if tokio::task::try_id().is_some() {
+            eprintln!("{message}");
+            std::process::abort();
+        }
         panic!("{message}");
     }
 }
@@ -198,7 +226,6 @@ pub(crate) mod real_agent_guard {
 ///
 /// Accepts anything `Command::new` accepts (`&str`, `String`, `&Path`, …).
 pub fn async_cmd<S: AsRef<OsStr>>(program: S, route: ChildRoute) -> tokio::process::Command {
-    #[cfg(test)]
     real_agent_guard::refuse_real_agent(program.as_ref(), route);
     let mut cmd = raw_async(program.as_ref());
     crate::core::child_env::isolate(cmd.as_std_mut(), route);
@@ -207,7 +234,6 @@ pub fn async_cmd<S: AsRef<OsStr>>(program: S, route: ChildRoute) -> tokio::proce
 
 /// [`async_cmd`] for a `std::process::Command`.
 pub fn sync_cmd<S: AsRef<OsStr>>(program: S, route: ChildRoute) -> std::process::Command {
-    #[cfg(test)]
     real_agent_guard::refuse_real_agent(program.as_ref(), route);
     let mut cmd = raw_sync(program.as_ref());
     crate::core::child_env::isolate(&mut cmd, route);
