@@ -63,6 +63,7 @@ pub mod learning_scope;
 pub mod learning_sweep;
 pub mod legacy_docs;
 pub mod linked_repo_docs;
+pub mod listen_guard;
 pub mod log_buffer;
 pub mod mcp_scanner;
 pub mod mcp_secret_refs;
