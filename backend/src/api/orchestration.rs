@@ -6685,7 +6685,7 @@ fn toolchain_brief_section(toolchain: &ToolchainCapabilities) -> String {
          {rust}{frontend}{port}\
          Serveurs : un backend Kronn ou un Vite que tu démarres écoute sur `$KRONN_PORT` / \
          `$VITE_DEV_PORT` (déjà dans ton environnement ; Vite proxifie vers \
-         `$KRONN_BACKEND_URL`). Lance le binaire de ta lane (`$CARGO_TARGET_DIR/debug/kronn`). \
+         `$KRONN_VITE_BACKEND_URL`). Lance le binaire de ta lane (`$CARGO_TARGET_DIR/debug/kronn`). \
          N'écoute jamais sur 3140 ni 5173 : c'est le Kronn de l'hôte, et tu détournerais l'UI \
          et les autres workers.\n\
          Lance uniquement ce qui est ✅. Une validation ❌ ne s'affirme jamais : reporte-la \

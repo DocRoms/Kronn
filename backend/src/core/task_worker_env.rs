@@ -30,8 +30,10 @@ pub const CARGO_NET_OFFLINE_ENV: &str = "CARGO_NET_OFFLINE";
 pub const CARGO_HOME_ENV: &str = "CARGO_HOME";
 /// The port a Kronn backend started by the worker listens on (never the host's).
 pub const KRONN_PORT_ENV: &str = "KRONN_PORT";
-/// Where the worker's Vite proxies `/api`: its own backend, never the host's.
-pub const KRONN_BACKEND_URL_ENV: &str = "KRONN_BACKEND_URL";
+/// Where the worker's Vite proxies `/api`: its own backend. Never
+/// `KRONN_BACKEND_URL`, which is the address the worker's MCP bridge uses to
+/// reach the host Kronn.
+pub const VITE_BACKEND_URL_ENV: &str = "KRONN_VITE_BACKEND_URL";
 /// The worker's Vite (and Playwright) port.
 pub const VITE_DEV_PORT_ENV: &str = "VITE_DEV_PORT";
 /// Vite's cache: the linked node_modules is read-only to the worker.
@@ -173,7 +175,7 @@ impl WorkerLane {
         let (backend, vite) = self.ports();
         env.push((KRONN_PORT_ENV, OsString::from(backend.to_string())));
         env.push((
-            KRONN_BACKEND_URL_ENV,
+            VITE_BACKEND_URL_ENV,
             OsString::from(format!("http://127.0.0.1:{backend}")),
         ));
         env.push((VITE_DEV_PORT_ENV, OsString::from(vite.to_string())));

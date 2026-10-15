@@ -207,9 +207,19 @@ fn a_lane_serves_on_its_own_ports_never_the_hosts() {
         Some(OsString::from(backend.to_string()))
     );
     assert_eq!(
-        env_value(&env, KRONN_BACKEND_URL_ENV),
+        env_value(&env, VITE_BACKEND_URL_ENV),
         Some(OsString::from(format!("http://127.0.0.1:{backend}")))
     );
+    // The MCP bridge reaches the host Kronn through KRONN_BACKEND_URL: a lane
+    // that set it cut every worker off from task_exec_deliver.
+    assert_eq!(env_value(&env, "KRONN_BACKEND_URL"), None);
+    for (name, _) in &env {
+        assert!(
+            !crate::acp::bridge_env::PLAIN.contains(name)
+                && !crate::acp::bridge_env::SECRET.contains(name),
+            "the lane must never override the MCP bridge's {name}"
+        );
+    }
     assert_eq!(
         env_value(&env, VITE_DEV_PORT_ENV),
         Some(OsString::from(vite.to_string()))
