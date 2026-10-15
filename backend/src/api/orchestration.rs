@@ -4269,7 +4269,13 @@ async fn run_one_validation(
     spec: &crate::models::ValidationSpec,
     cwd: &std::path::Path,
 ) -> (Option<i32>, i64, String) {
-    match validation_launch(cwd) {
+    // Probing the launcher and provisioning the lane start a process and touch
+    // the disk: off the async worker.
+    let launch_cwd = cwd.to_path_buf();
+    let launch = tokio::task::spawn_blocking(move || validation_launch(&launch_cwd))
+        .await
+        .unwrap_or_else(|error| Err(format!("the sandbox check did not complete: {error}")));
+    match launch {
         Ok(launch) => run_one_validation_with(spec, cwd, &launch).await,
         // Recorded like any failed validation: recovery cannot advance the
         // candidate as though the command had run.

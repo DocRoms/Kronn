@@ -474,6 +474,158 @@ fn an_underivable_policy_refuses_the_command() {
     assert!(inner.calls().is_empty());
 }
 
+/// A runner whose host mechanism is `mechanism` driven through `launcher`, the
+/// way the shipped runner drives the host's own through
+/// [`Mechanism::usable_on_host`].
+fn runner_with_launcher(
+    layout: &Layout,
+    mechanism: Mechanism,
+    launcher: &'static str,
+    inner: Arc<Recorder>,
+) -> SandboxedProbeRunner {
+    SandboxedProbeRunner::with_mechanism_check(
+        Ok(policy_of(layout)),
+        Arc::new(move || Mechanism::usable_from(Some(mechanism), |m| m.check_launcher(launcher))),
+        inner,
+    )
+}
+
+/// KT-1268 review: the lane's first build and its smoke check go through the
+/// same detection as a validation. A launcher that is not installed is refused
+/// by name, not reported as `cannot start bwrap`, and nothing is prepared or
+/// started.
+#[test]
+fn a_probe_on_a_host_whose_launcher_is_not_installed_is_refused_and_nothing_runs() {
+    for mechanism in [Mechanism::Bubblewrap, Mechanism::Seatbelt] {
+        let layout = layout();
+        let policy = policy_of(&layout);
+        let inner = Recorder::new();
+        let missing = "/nonexistent/kronn-sandbox-launcher";
+        let runner = runner_with_launcher(&layout, mechanism, missing, inner.clone());
+
+        let outcome = runner.run(&probe("cargo", &["test", "--no-run"], &layout.worktree));
+
+        assert!(!outcome.success, "{outcome:?}");
+        assert!(outcome.detail.starts_with("not run: "), "{outcome:?}");
+        assert!(outcome.detail.contains(missing), "{outcome:?}");
+        assert!(outcome.detail.contains("not installed"), "{outcome:?}");
+        assert!(
+            outcome.detail.contains("never run unconfined"),
+            "{outcome:?}"
+        );
+        assert!(!outcome.detail.contains("cannot start"), "{outcome:?}");
+        assert!(inner.calls().is_empty(), "nothing reached a process");
+        assert!(
+            !policy.temp_dir.exists(),
+            "the lane's temp dir is not created for a host that cannot confine"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_probe_on_a_host_whose_launcher_cannot_apply_its_sandbox_is_refused_not_failed() {
+    let layout = layout();
+    let inner = Recorder::new();
+    let runner = runner_with_launcher(
+        &layout,
+        Mechanism::Bubblewrap,
+        "/usr/bin/false",
+        inner.clone(),
+    );
+
+    let outcome = runner.run(&probe("cargo", &["test", "--no-run"], &layout.worktree));
+
+    assert!(!outcome.success);
+    assert!(outcome.detail.starts_with("not run: "), "{outcome:?}");
+    assert!(outcome.detail.contains("exited with"), "{outcome:?}");
+    assert!(inner.calls().is_empty());
+}
+
+/// The lane's first build (KT-1250) is the caller of the runner that the
+/// review named first.
+#[test]
+fn the_lane_first_build_on_a_host_whose_launcher_is_missing_is_refused_with_its_reason() {
+    let layout = layout();
+    let backend = layout.worktree.join("backend");
+    std::fs::write(
+        backend.join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(backend.join("Cargo.lock"), "version = 4\n").unwrap();
+    let lane = WorkerLane::for_worktree(&layout.worktree).unwrap();
+    let inner = Recorder::new();
+    let runner = runner_with_launcher(
+        &layout,
+        Mechanism::Bubblewrap,
+        "/nonexistent/kronn-sandbox-launcher",
+        inner.clone(),
+    );
+    let settings = WarmStartSettings::resolve(Some("1"), Some("1"), Some("60"), 4);
+
+    let record = warm_lane(
+        &lane,
+        &provisioned(),
+        &settings,
+        &BuildGate::new(),
+        &runner,
+        &|_, _| Ok(()),
+        |_| {},
+    );
+
+    assert!(
+        !matches!(record.first_build, FirstBuild::Succeeded { .. }),
+        "{record:?}"
+    );
+    let shown = format!("{record:?}");
+    assert!(shown.contains("not installed"), "{shown}");
+    assert!(shown.contains("never run unconfined"), "{shown}");
+    assert!(inner.calls().is_empty(), "no build reached a process");
+}
+
+/// The toolchain smoke check (KT-1246), the other caller of the runner.
+#[test]
+fn the_toolchain_smoke_check_on_a_host_whose_launcher_is_missing_names_the_sandbox() {
+    let layout = layout();
+    std::fs::write(
+        layout.worktree.join("backend").join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.0.0\"\n",
+    )
+    .unwrap();
+    let lane = WorkerLane::for_worktree(&layout.worktree).unwrap();
+    let inner = Recorder::new();
+    let runner = runner_with_launcher(
+        &layout,
+        Mechanism::Bubblewrap,
+        "/nonexistent/kronn-sandbox-launcher",
+        inner.clone(),
+    );
+
+    let capabilities =
+        crate::core::task_worker_env::smoke_check(&lane, &provisioned(), false, &runner);
+
+    assert!(!capabilities.rust_tests.available, "{capabilities:?}");
+    let reason = &capabilities.rust_tests.reason;
+    assert!(reason.contains("not installed"), "{reason}");
+    assert!(reason.contains("never run unconfined"), "{reason}");
+    assert!(!reason.contains("cannot start"), "{reason}");
+    assert!(inner.calls().is_empty(), "no probe reached a process");
+}
+
+#[test]
+fn a_host_without_any_mechanism_has_no_usable_one() {
+    let refusal = Mechanism::usable_from(None, |_| Ok(())).unwrap_err();
+    assert!(refusal.contains("no sandbox"), "{refusal}");
+    assert!(refusal.contains("never run unconfined"), "{refusal}");
+    // The check is never asked about a mechanism that does not exist, and a
+    // usable one is returned as is.
+    assert_eq!(
+        Mechanism::usable_from(Some(Mechanism::Seatbelt), |_| Ok(())),
+        Ok(Mechanism::Seatbelt)
+    );
+}
+
 #[test]
 fn the_production_runner_is_confined_and_the_plain_process_runner_is_not() {
     let layout = layout();

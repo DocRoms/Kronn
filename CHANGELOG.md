@@ -506,7 +506,10 @@ Release notes for 0.9.3 and earlier are available in the
   included. A host with no usable sandbox — no mechanism, or a launcher such
   as `bwrap` that is missing or cannot apply its sandbox (a container) —
   refuses the validation naming that launcher, recorded as a failed validation
-  and sent back to the worker, and never runs it unconfined. A validation that needs the network or a path outside the lane
+  and sent back to the worker, and never runs it unconfined. The lane's first
+  build and the toolchain smoke check (KT-1255) go through the same detection,
+  so on such a host they report that reason instead of `cannot start bwrap`.
+  A validation that needs the network or a path outside the lane
   (a `git` write, an explicit `--target-dir` elsewhere) now fails there.
 
 - A task worker's lane target (`target/wt-<lane>`) is removed with its clean

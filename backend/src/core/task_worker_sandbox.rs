@@ -27,7 +27,7 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use tokio_util::sync::CancellationToken;
 
@@ -84,6 +84,45 @@ impl Mechanism {
             Self::Seatbelt => SANDBOX_EXEC,
             Self::Bubblewrap => BWRAP,
         }
+    }
+
+    /// The mechanism of this host once it proved it can apply it, otherwise
+    /// why not (KT-1268): the one detection every confined launch goes
+    /// through — a validation of a worker's tree and the lane's first build and
+    /// toolchain smoke check alike — so none of them fails on a spawn error of
+    /// a launcher that is missing or cannot apply its sandbox. Only a success
+    /// is remembered: a host that gains `bwrap` is picked up without a restart.
+    pub fn usable_on_host() -> Result<Self, String> {
+        Self::usable_from(Self::of_host(), Self::check_usable_remembered)
+    }
+
+    /// [`Mechanism::usable_on_host`] with the host's mechanism and the check of
+    /// its launcher injected.
+    fn usable_from(
+        mechanism: Option<Self>,
+        check: impl FnOnce(Self) -> Result<(), String>,
+    ) -> Result<Self, String> {
+        let mechanism =
+            mechanism.ok_or_else(|| no_mechanism_reason("a command of a worker's tree"))?;
+        check(mechanism)?;
+        Ok(mechanism)
+    }
+
+    /// [`Mechanism::check_usable`], answered from memory once it succeeded: the
+    /// launcher is one `true` process per mechanism, not one per command.
+    fn check_usable_remembered(self) -> Result<(), String> {
+        static SEATBELT: OnceLock<()> = OnceLock::new();
+        static BUBBLEWRAP: OnceLock<()> = OnceLock::new();
+        let proven = match self {
+            Self::Seatbelt => &SEATBELT,
+            Self::Bubblewrap => &BUBBLEWRAP,
+        };
+        if proven.get().is_some() {
+            return Ok(());
+        }
+        self.check_usable()?;
+        let _ = proven.set(());
+        Ok(())
     }
 
     /// `Ok` when this host can apply the mechanism to a command, otherwise why
@@ -382,13 +421,14 @@ impl Confinement {
     /// The confinement of a task worktree on this host: its mechanism, once
     /// the host proved it can apply it ([`Mechanism::check_usable`]).
     pub fn for_worktree(work_dir: &Path) -> Result<Self, String> {
-        Self::with_usable_mechanism(work_dir, Mechanism::of_host(), Mechanism::check_usable)
+        Self::with_mechanism(work_dir, Some(Mechanism::usable_on_host()?))
     }
 
     /// [`Confinement::for_worktree`] with the host's mechanism and the check of
     /// its launcher injected. A mechanism that is not usable refuses before
     /// the lane is provisioned: nothing is prepared for a host that cannot
     /// confine.
+    #[cfg(test)]
     fn with_usable_mechanism(
         work_dir: &Path,
         mechanism: Option<Mechanism>,
@@ -474,17 +514,21 @@ impl Confinement {
 pub struct SandboxedProbeRunner {
     /// `Err` when the policy could not be derived: every probe is refused.
     policy: Result<SandboxPolicy, String>,
-    mechanism: Option<Mechanism>,
+    /// The host's usable mechanism, or why it has none. Asked when a probe
+    /// runs, not when the runner is built: the check starts a process, and a
+    /// runner is built on the async worker while a probe runs on a blocking one.
+    mechanism: Arc<dyn Fn() -> Result<Mechanism, String> + Send + Sync>,
     inner: Arc<dyn ProbeRunner>,
 }
 
 impl SandboxedProbeRunner {
-    /// The production runner of a task worktree: this host's mechanism, real
-    /// child processes.
+    /// The production runner of a task worktree: this host's mechanism, once
+    /// proven usable ([`Mechanism::usable_on_host`], the detection a
+    /// validation of a worker's tree goes through too), real child processes.
     pub fn for_worktree(work_dir: &Path) -> Self {
-        Self::new(
+        Self::with_mechanism_check(
             SandboxPolicy::for_worktree(work_dir),
-            Mechanism::of_host(),
+            Arc::new(Mechanism::usable_on_host),
             Arc::new(ProcessProbeRunner),
         )
     }
@@ -492,6 +536,20 @@ impl SandboxedProbeRunner {
     pub fn new(
         policy: Result<SandboxPolicy, String>,
         mechanism: Option<Mechanism>,
+        inner: Arc<dyn ProbeRunner>,
+    ) -> Self {
+        Self::with_mechanism_check(
+            policy,
+            Arc::new(move || mechanism.ok_or_else(|| no_mechanism_reason("a lane build"))),
+            inner,
+        )
+    }
+
+    /// [`SandboxedProbeRunner::new`] with the host's mechanism given as the
+    /// check that proves it usable.
+    pub fn with_mechanism_check(
+        policy: Result<SandboxPolicy, String>,
+        mechanism: Arc<dyn Fn() -> Result<Mechanism, String> + Send + Sync>,
         inner: Arc<dyn ProbeRunner>,
     ) -> Self {
         Self {
@@ -523,8 +581,9 @@ impl ProbeRunner for SandboxedProbeRunner {
                 ));
             }
         };
-        let Some(mechanism) = self.mechanism else {
-            return Self::refuse(no_mechanism_reason("a lane build"));
+        let mechanism = match (self.mechanism)() {
+            Ok(mechanism) => mechanism,
+            Err(reason) => return Self::refuse(reason),
         };
         if let Err(error) = create_temp_dir(policy) {
             return Self::refuse(error);
