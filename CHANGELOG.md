@@ -478,6 +478,15 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- What a task worker starts ends with its dispatch, and Vite runs in its lane
+  (KT-1266). A backend or a Vite started from the agent's shell tool ran in a
+  process group of its own and kept listening on the lane's ports after the
+  turn; the worker's processes now carry their dispatch id and every process
+  carrying it (and its descendants) is stopped when the dispatch completes,
+  fails, is cancelled or is found dead. `frontend/node_modules` of a lane is a
+  real directory of links, so Vite and vitest write their config bundle there
+  instead of failing with EPERM on `node_modules/.vite-temp`, with no flag;
+  the smoke check loads the config, and the brief says how to recover.
 - A task worker's lane target (`target/wt-<lane>`) is removed with its clean
   worktree (KT-1256). It lives outside the worktree, so integration and
   cancellation never took it, and each one is a copy-on-write clone of the main

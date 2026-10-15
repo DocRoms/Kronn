@@ -763,6 +763,9 @@ pub fn start_resilience_watchdog(state: AppState) {
                 if is_live || job.failure_kind.as_deref() == Some("quota_exhausted") {
                     continue;
                 }
+                // KT-1266 — the run is gone (a restarted backend, a lost
+                // stream): what the worker started under it is not.
+                crate::api::discussions::runtime::reap_task_worker_processes(&state, &job.id).await;
                 let job_id = job.id.clone();
                 let transition = state
                     .db
@@ -7316,7 +7319,12 @@ fn toolchain_brief_section(toolchain: &ToolchainCapabilities) -> String {
          `$VITE_DEV_PORT` (déjà dans ton environnement ; Vite proxifie vers \
          `$KRONN_VITE_BACKEND_URL`). Lance le binaire de ta lane (`$CARGO_TARGET_DIR/debug/kronn`). \
          N'écoute jamais sur 3140 ni 5173 : c'est le Kronn de l'hôte, et tu détournerais l'UI \
-         et les autres workers.\n\
+         et les autres workers. Ce que tu démarres s'arrête avec ton tour : Kronn termine tout \
+         processus lancé par ta session quand le dispatch finit.\n\
+         Vite et vitest se lancent tels quels (`vitest run`, `vite --port $VITE_DEV_PORT`) : le \
+         `node_modules` de ta lane est un dossier inscriptible, Vite y écrit son bundle de \
+         configuration. Si tu vois `EPERM` sur `node_modules/.vite-temp`, relance avec \
+         `--configLoader native`.\n\
          Lance uniquement ce qui est ✅. Une validation ❌ ne s'affirme jamais : reporte-la \
          `skipped` avec la raison ci-dessus, le principal l'exécutera. `tests_executed` dit \
          explicitement si au moins un test a réellement tourné et lesquels.\n\n",
@@ -23960,6 +23968,8 @@ pub(crate) mod tests {
         // Whatever the worker serves takes its lane ports, never the host Kronn's.
         assert!(brief.contains("`$KRONN_PORT`"), "{brief}");
         assert!(brief.contains("`$VITE_DEV_PORT`"), "{brief}");
+        assert!(brief.contains("--configLoader native"), "{brief}");
+        assert!(brief.contains("s'arrête avec ton tour"), "{brief}");
         assert!(brief.contains("jamais sur 3140 ni 5173"), "{brief}");
     }
 
