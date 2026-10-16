@@ -265,6 +265,14 @@ fn revalidation_uses_the_git_diff_to_disambiguate_a_repeated_anchor() {
     assert_eq!(rules.reanchor.len(), 1);
     assert_eq!(rules.reanchor[0].current_line, Some(64));
     assert!(rules.broken.is_empty());
+    // The diff moved it past the fingerprint window: Kronn re-anchors it, so
+    // the relevance check must not call the section outdated for it.
+    let fingerprints = citation_drift::check(dir);
+    assert!(fingerprints.sections[0].citations[0].state.is_broken());
+    assert_eq!(before.relevance.outdated, 0, "moved, not stale");
+    assert_eq!(before.relevance.anchors_intact, 1);
+    assert!(before.sections.iter().all(|s| s.relevance.is_empty()));
+    assert!(before.agent_steps.is_empty(), "no agent for a moved line");
 
     let done = apply_reanchors(dir).unwrap();
     assert_eq!(done.len(), 1);
@@ -478,4 +486,100 @@ fn a_label_cited_in_both_parts_is_re_anchored_in_both() {
     assert!(plan(dir).sections.iter().all(|s| s.doc != RULES));
     let provenance = crate::core::doc_provenance::report(dir, false).unwrap();
     assert_eq!(provenance.to_reconfirm, 1, "the human copy asks its owner");
+}
+
+// KT-1168 — relevance: a section the code outgrew is judged, proposed a
+// correction, handed to its audit step and weighed by the badge, though no
+// citation fingerprint broke.
+#[test]
+fn the_plan_judges_each_section_and_the_agent_block_carries_the_corrections() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::create_dir_all(dir.join("docs")).unwrap();
+    fs::write(
+        dir.join("src/lib.rs"),
+        "fn alpha() {\n    let retries = 3;\n}\n",
+    )
+    .unwrap();
+    fs::write(dir.join("src/engine.rs"), "pub fn run() {}\n").unwrap();
+    fs::write(
+        dir.join(RULES),
+        "# Rules\n## Retries\nRetries [src: file: src/lib.rs:2].\n## Engine\nHandled by `src/engine.rs`.\n## Notes\nPlain prose, nothing to anchor it.\n",
+    )
+    .unwrap();
+    citation_drift::record_all(dir).unwrap();
+    assert_eq!(plan(dir).sources_state, SourcesState::Clean);
+    assert!(plan(dir).sections.is_empty());
+
+    fs::remove_file(dir.join("src/engine.rs")).unwrap();
+    assert_eq!(
+        citation_drift::check(dir).sources_state,
+        SourcesState::Clean,
+        "no cited line broke: only the relevance check sees it"
+    );
+
+    let planned = plan(dir);
+    assert_eq!(planned.sources_state, SourcesState::NeedsReverification);
+    assert_eq!(planned.relevance.no_longer_relevant, 1);
+    assert_eq!(planned.relevance.anchors_intact, 1);
+    let rules = planned.sections.iter().find(|s| s.doc == RULES).unwrap();
+    assert_eq!(rules.action, RevalidationAction::Agent);
+    assert_eq!(rules.relevance.len(), 1);
+    assert_eq!(rules.relevance[0].heading, "Engine");
+    assert!(planned.agent_steps.contains(&rules_step()));
+
+    let block = &prompt_blocks(&planned)[&rules_step()];
+    assert!(block.contains("section `Engine` — no longer relevant to the code"));
+    assert!(block.contains("proposed:"));
+    assert!(block.contains("src/engine.rs"));
+
+    // The section nothing anchors is listed and handed over as unverifiable,
+    // so every section of the doc is confronted with the code.
+    assert_eq!(planned.relevance.unanchored, 1);
+    assert_eq!(planned.unanchored.len(), 1);
+    assert_eq!(planned.unanchored[0].heading, "Notes");
+    assert!(block.contains("section `Notes` — unverifiable: check or anchor"));
+}
+
+// KT-1168 — a doc whose every section is unanchored has no verdict to show.
+// It never starts a pass by itself: the agent leaves it unanchored, so it
+// would be queued again after every pass, and the plan would never be clean.
+// It stays listed, and its headings go into the block as soon as an edit since
+// the run (`plan_with_documents`) sends the doc to the agent.
+#[test]
+fn a_doc_with_only_unanchored_sections_is_listed_and_carried_when_sent() {
+    const GLOSSARY: &str = "docs/glossary.md";
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::create_dir_all(dir.join("docs")).unwrap();
+    fs::write(dir.join("src/lib.rs"), "fn alpha() {}\n").unwrap();
+    fs::write(
+        dir.join(GLOSSARY),
+        "# Glossary\nNothing here names a file or cites a line.\n## Terms\nPlain prose too.\n",
+    )
+    .unwrap();
+    citation_drift::record_all(dir).unwrap();
+
+    let mut planned = plan(dir);
+    assert!(planned.sections.is_empty() && planned.agent_steps.is_empty());
+    assert_eq!(planned.sources_state, SourcesState::Clean, "no badge raise");
+    assert!(planned.unanchored.iter().any(|s| s.doc == GLOSSARY));
+
+    // What `plan_with_documents` does for a doc edited since the run.
+    let step = rules_step();
+    planned.sections.push(RevalidationSection {
+        doc: GLOSSARY.to_string(),
+        step: Some(step),
+        action: RevalidationAction::Agent,
+        doc_missing: false,
+        reanchor: Vec::new(),
+        broken: Vec::new(),
+        human: Vec::new(),
+        relevance: Vec::new(),
+    });
+    let block = &prompt_blocks(&planned)[&step];
+    assert!(block.contains("section `Terms` — unverifiable: check or anchor"));
+    assert!(block.contains("section `Glossary` — unverifiable: check or anchor"));
 }

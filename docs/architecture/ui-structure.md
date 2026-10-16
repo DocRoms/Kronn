@@ -265,7 +265,7 @@ Project detail restores the last valid tab across project switches and falls bac
 when a stale value is found.
 `[src: file: frontend/src/components/ProjectCard.tsx:63-76#readProjectDetailView]`
 `[src: file: frontend/src/components/ProjectCard.tsx:174-179#selectDetailView]`
-`[src: file: frontend/src/components/ProjectCard.tsx:1554-1562#selectDetailView]`
+`[src: file: frontend/src/components/ProjectCard.tsx:1558-1566#selectDetailView]`
 
 The project Docker tab is intentionally Compose-only. It renders a useful empty
 state when no root Compose file exists and an actionable availability state when
