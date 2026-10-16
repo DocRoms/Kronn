@@ -220,6 +220,7 @@ const zh: TranslationDict = {
   "pages.runAllWorkflows": "运行所有工作流",
   "pages.runAllWorkflowsTitle": "运行全部 {0} 个已启用的关联工作流",
   "pages.runAllWorkflowsNone": "没有可运行的已启用工作流",
+  "pages.runAllWorkflowsBusy": "已有全部运行正在进行（可能在另一个页面）",
   "pages.runAllProgress": "已运行 {0} / {1}",
   "pages.workflowDisabled": "已停用",
   "pages.workflowSkipped": "已跳过（已停用）",

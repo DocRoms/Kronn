@@ -964,6 +964,29 @@ describe('PagesPage', () => {
     await waitFor(() => expect(screen.getByLabelText('pages.runLinkedWorkflow:Adobe cron')).toHaveAttribute('data-state', 'success'));
   });
 
+  it('disables "Run all" with a reason on another Page while a batch is still running', async () => {
+    const otherPage = { ...page, id: 'page-2', title: 'Other Page', slug: 'other-page' };
+    vi.mocked(pagesApi.list).mockResolvedValue([page, otherPage]);
+    vi.mocked(pagesApi.get).mockImplementation(async id => id === page.id ? detail : { ...detail, ...otherPage });
+    vi.mocked(pagesApi.workflows).mockImplementation(async id => id === page.id
+      ? [{ id: 'wf-1', name: 'Adobe cron', enabled: true, step_names: ['publish'] }, { id: 'wf-2', name: 'Jira cron', enabled: true, step_names: ['publish'] }]
+      : [{ id: 'wf-3', name: 'Other cron', enabled: true, step_names: ['publish'] }, { id: 'wf-4', name: 'Other digest', enabled: true, step_names: ['publish'] }]);
+    vi.mocked(workflowsApi.triggerStream).mockClear();
+    vi.mocked(workflowsApi.triggerStream).mockImplementation(() => new Promise<void>(() => {}));
+    render(<PagesPage />);
+    fireEvent.click(await screen.findByLabelText('pages.autoRefresh'));
+    fireEvent.click(await screen.findByRole('button', { name: 'pages.runAllWorkflows' }));
+    expect(workflowsApi.triggerStream).toHaveBeenCalledTimes(2);
+
+    fireEvent.click(getCanonicalPageRow('Other Page'));
+    await screen.findByLabelText('pages.runLinkedWorkflow:Other cron');
+    const runAll = screen.getByRole('button', { name: 'pages.runAllWorkflows' });
+    expect(runAll).toBeDisabled();
+    expect(runAll).toHaveAttribute('title', 'pages.runAllWorkflowsBusy');
+    fireEvent.click(runAll);
+    expect(workflowsApi.triggerStream).toHaveBeenCalledTimes(2);
+  });
+
   it('one Escape closes the Export popover first, the next one the Sync panel', async () => {
     render(<PagesPage />);
     await screen.findByTestId('live-page-frame');

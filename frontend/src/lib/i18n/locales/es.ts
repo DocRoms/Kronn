@@ -221,6 +221,7 @@ const es: TranslationDict = {
   'pages.runAllWorkflows': 'Ejecutar todos los workflows',
   'pages.runAllWorkflowsTitle': 'Ejecutar los {0} workflows vinculados activados',
   'pages.runAllWorkflowsNone': 'Ningún workflow activado que ejecutar',
+  'pages.runAllWorkflowsBusy': 'Ya hay una ejecución global en curso (quizá en otra Página)',
   'pages.runAllProgress': '{0} / {1} ejecutados',
   'pages.workflowDisabled': 'Desactivado',
   'pages.workflowSkipped': 'Omitido (desactivado)',

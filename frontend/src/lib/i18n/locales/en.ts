@@ -221,6 +221,7 @@ const en: TranslationDict = {
   'pages.runAllWorkflows': 'Run all workflows',
   'pages.runAllWorkflowsTitle': 'Run all {0} enabled linked workflows',
   'pages.runAllWorkflowsNone': 'No enabled workflow to run',
+  'pages.runAllWorkflowsBusy': 'A run-all is already in progress (possibly on another Page)',
   'pages.runAllProgress': '{0} / {1} run',
   'pages.workflowDisabled': 'Disabled',
   'pages.workflowSkipped': 'Skipped (disabled)',

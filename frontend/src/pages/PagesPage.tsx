@@ -466,6 +466,9 @@ export function PagesPage({
 
   const enabledWorkflows = useMemo(() => linkedWorkflows.filter(workflow => workflow.enabled), [linkedWorkflows]);
   const anyWorkflowRunning = linkedWorkflows.some(workflow => workflowRuns[workflow.id]?.state === 'running');
+  // A run-all batch is global (its guard survives a Page switch), so it blocks
+  // the button on every Page until it ends.
+  const runAllBusy = runAllProgress !== null;
 
   // Launches every enabled linked workflow that is not already running; the
   // disabled ones are left alone and flagged as skipped. Each workflow reports
@@ -1369,10 +1372,14 @@ export function PagesPage({
                   type="button"
                   className="live-pages-sync-run-all"
                   onClick={() => void runAllWorkflows()}
-                  disabled={enabledWorkflows.length === 0 || anyWorkflowRunning}
-                  title={enabledWorkflows.length === 0 ? t('pages.runAllWorkflowsNone') : t('pages.runAllWorkflowsTitle', enabledWorkflows.length)}
+                  disabled={enabledWorkflows.length === 0 || anyWorkflowRunning || runAllBusy}
+                  title={enabledWorkflows.length === 0
+                    ? t('pages.runAllWorkflowsNone')
+                    : runAllBusy
+                      ? t('pages.runAllWorkflowsBusy')
+                      : t('pages.runAllWorkflowsTitle', enabledWorkflows.length)}
                 >
-                  {anyWorkflowRunning ? <Loader2 size={12} className="spin" /> : <Play size={12} />}
+                  {anyWorkflowRunning || runAllBusy ? <Loader2 size={12} className="spin" /> : <Play size={12} />}
                   {runAllProgress && anyWorkflowRunning
                     ? t('pages.runAllProgress', runAllProgress.done, runAllProgress.total)
                     : t('pages.runAllWorkflows')}
