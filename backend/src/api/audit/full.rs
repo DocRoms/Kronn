@@ -328,7 +328,18 @@ pub async fn full_audit(
     // would be copied into a versioned `docs/AGENTS.md`.
     let linked_repos_block =
         crate::api::projects::format_linked_repos_for_prompt(&project.linked_repos);
-    let audit_tier = req.tier.unwrap_or(crate::models::ModelTier::Reasoning);
+    // KT-1320 — a resume or a step retry runs on the footing of the run it
+    // continues, unless the request names another tier or connection.
+    let resumed_run = match req.resume_run_id.clone() {
+        Some(run_id) => state
+            .db
+            .with_read_conn(move |conn| crate::db::audit_runs::get_by_id(conn, &run_id))
+            .await
+            .ok()
+            .flatten(),
+        None => None,
+    };
+    let (audit_tier, requested_connection_id) = launch_footing(&req, resumed_run.as_ref());
     let agent_type = req.agent;
     if !super::agent_can_audit(&agent_type) {
         return sse_error(super::audit_refusal_message(&agent_type));
@@ -339,7 +350,7 @@ pub async fn full_audit(
     let agent_launcher = match super::agent_launch::AuditAgentLauncher::for_request(
         &state,
         &agent_type,
-        req.connection_id.as_deref(),
+        requested_connection_id.as_deref(),
     )
     .await
     {
@@ -696,10 +707,12 @@ pub async fn full_audit(
             let run_id = audit_run_id.clone();
             let pid = project_id.clone();
             let agent_name = agent_label.clone();
+            let connection = audit_connection_id.clone();
             db.with_conn(move |conn| {
                 crate::db::audit_runs::insert_running(
                     conn, &run_id, &pid, kind_label, &agent_name, audit_started_at,
-                )
+                )?;
+                crate::db::audit_runs::set_run_launch(conn, &run_id, audit_tier, connection.as_deref())
             }).await
         };
         if let Err(e) = inserted {
@@ -4080,6 +4093,30 @@ pub(crate) fn rewrite_proof_verdict(
 /// missing / cross-project / non-Interrupted / unknown-kind row must never
 /// silently degrade to a fresh run (that would discard the work the user
 /// asked to resume). Returns `(kind, resume_from)` on success.
+/// The model tier and named connection a launch runs on: the request's own
+/// choice, else the run it resumes (KT-1320), else the historical audit default
+/// (Reasoning, no connection). A resume that names nothing keeps what the run
+/// had, so a retry of an economy audit never drifts to the costliest tier.
+pub(crate) fn launch_footing(
+    req: &crate::models::LaunchAuditRequest,
+    resumed: Option<&crate::models::AuditRun>,
+) -> (crate::models::ModelTier, Option<String>) {
+    let recorded_tier = resumed
+        .and_then(|run| run.tier.as_deref())
+        .and_then(crate::models::ModelTier::parse);
+    let tier = req
+        .tier
+        .or(recorded_tier)
+        .unwrap_or(crate::models::ModelTier::Reasoning);
+    // A connection belongs to its agent: another agent does not inherit it.
+    let connection = req.connection_id.clone().or_else(|| {
+        resumed
+            .filter(|run| run.agent_type == format!("{:?}", req.agent))
+            .and_then(|run| run.connection_id.clone())
+    });
+    (tier, connection)
+}
+
 pub(crate) fn resolve_resume_row(
     run_id: &str,
     row: Option<&crate::models::AuditRun>,
@@ -5105,6 +5142,69 @@ mod resume_resolution_tests {
             "status": status, "last_completed_step": step,
         }))
         .unwrap()
+    }
+
+    fn request(
+        agent: &str,
+        tier: Option<&str>,
+        connection: Option<&str>,
+    ) -> crate::models::LaunchAuditRequest {
+        serde_json::from_value(serde_json::json!({
+            "agent": agent, "tier": tier, "connection_id": connection,
+            "resume_run_id": "r1",
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_resume_without_a_tier_keeps_the_tier_of_the_run_it_continues() {
+        use crate::models::ModelTier;
+        let mut economy = run("Full", "Interrupted", "p1", 4);
+        economy.tier = Some("economy".into());
+        let req = request("ClaudeCode", None, None);
+        assert_eq!(
+            super::launch_footing(&req, Some(&economy)).0,
+            ModelTier::Economy
+        );
+        // The historical default only when nothing is recorded or there is no run.
+        let legacy = run("Full", "Interrupted", "p1", 4);
+        assert_eq!(
+            super::launch_footing(&req, Some(&legacy)).0,
+            ModelTier::Reasoning
+        );
+        assert_eq!(super::launch_footing(&req, None).0, ModelTier::Reasoning);
+    }
+
+    #[test]
+    fn a_tier_named_by_the_human_wins_over_the_run_s() {
+        use crate::models::ModelTier;
+        let mut economy = run("Full", "Interrupted", "p1", 4);
+        economy.tier = Some("economy".into());
+        let req = request("ClaudeCode", Some("reasoning"), None);
+        assert_eq!(
+            super::launch_footing(&req, Some(&economy)).0,
+            ModelTier::Reasoning
+        );
+    }
+
+    #[test]
+    fn a_resume_keeps_the_connection_of_its_agent_only() {
+        let mut http = run("Full", "Interrupted", "p1", 4);
+        http.agent_type = "LiteLlm".into();
+        http.connection_id = Some("conn-a".into());
+        let same = request("LiteLlm", None, None);
+        assert_eq!(
+            super::launch_footing(&same, Some(&http)).1.as_deref(),
+            Some("conn-a")
+        );
+        // Another agent, or another connection named by the human, is not overridden.
+        let other_agent = request("ClaudeCode", None, None);
+        assert_eq!(super::launch_footing(&other_agent, Some(&http)).1, None);
+        let other_conn = request("LiteLlm", None, Some("conn-b"));
+        assert_eq!(
+            super::launch_footing(&other_conn, Some(&http)).1.as_deref(),
+            Some("conn-b")
+        );
     }
 
     #[test]

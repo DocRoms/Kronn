@@ -75,6 +75,8 @@ export interface AuditTimelineProps {
   agents: AgentDetection[];
   selectedAgent: AgentType | null;
   selectedTier: ModelTier;
+  /** The shown choice is the one of the run being retried or resumed (KT-1320). */
+  selectionFromRun?: boolean;
   modelTiers: ModelTiersConfig | null | undefined;
   /** Named external API connection of the selected HTTP agent, if any. */
   selectedConnectionId: string | null;
@@ -1130,6 +1132,11 @@ export function AuditTimeline(props: AuditTimelineProps) {
                   `${MODEL_TIER_ICONS[selectedTier]} ${t(`disc.tier.${selectedTier}`)}`,
                   tierModel(selectedTier),
                 ].filter(Boolean).join(' · '))}
+              </p>
+            )}
+            {!locked && props.selectionFromRun && selected && selectedTier && (
+              <p className="audit-tl-note" data-testid="audit-timeline-selection-from-run">
+                {t('auditTimeline.agent.fromRun', `${MODEL_TIER_ICONS[selectedTier]} ${t(`disc.tier.${selectedTier}`)}`)}
               </p>
             )}
             {agentChoices.length === 0 && <p className="audit-tl-muted">{t('disc.noAgent')}</p>}

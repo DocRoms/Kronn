@@ -545,6 +545,23 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- Retrying a step, or resuming an audit, from the UI keeps the run's tier
+  (KT-1320). The card's picker defaulted to `reasoning`, so the retry of a
+  Haiku (economy) audit ran on Opus. The run now records its tier and
+  connection (migration 267, `audit_runs.tier` / `connection_id`); a retry or a
+  resume sends the run's agent, tier and connection, and the panel shows the
+  tier it will use, until the human picks another. A resume request that names
+  no tier takes the run's, not Reasoning.
+- A finding that a file exists or is tracked can be cited without a line
+  (KT-1320): `[src: file: .ssh/key:exists]` (or `:tracked`) passes the
+  documentary gate for a text file, so a tracked private key or a
+  `yarn-error.log` no longer has to be cited `:1`, which invited quoting a
+  secret. A bare path for a text file is still refused — a claim about its
+  content needs a line — and the refusal now names the presence form.
+- A bridge-token 403 for a discussion outside the agent's scope now says why
+  and what to do (KT-1320), instead of reaching a Vibe/ACP agent as a bare
+  "the MCP tool returned an error": ask the human to attach the discussion, or
+  use one of the project's discussions.
 - The default-root audit golden no longer depends on the day it is run
   (KT-1317). The name of a `validated-originals/<hash>.bak` file is the hash
   of bytes holding the audit date; the golden now names it by the hash of the

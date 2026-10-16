@@ -516,7 +516,8 @@ fn tracked_artifacts_from_listing(listing: &[u8], yarn_zero_install: bool) -> Ve
             title: format!("Tracked {kind} should stay outside source control"),
             // A bare path, never a synthetic line 0: the source verifier accepts
             // it as existence-only evidence, and the documentary gate accepts a
-            // bare `[src: file:]` marker only for a binary file.
+            // bare `[src: file:]` marker only for a binary file; a text file is
+            // cited `path:exists` there.
             evidence: path.to_string(),
         });
     }

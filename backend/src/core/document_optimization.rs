@@ -540,7 +540,9 @@ fn inspect_citations(project: &Path, rel: &str, content: &str, out: &mut Vec<Dia
                     Some(path) if crate::core::anti_halluc::is_binary_file(&path) => continue,
                     Some(_) => format!(
                         "malformed file citation `{raw}`: a text file is cited with the line \
-                         that supports the claim, [src: file: {raw}:<line>]"
+                         that supports the claim, [src: file: {raw}:<line>]; if the claim is \
+                         only that the file exists or is tracked, write [src: file: {raw}:exists] \
+                         and do not quote its content"
                     ),
                     None => format!(
                         "malformed file citation `{raw}`: expected [src: file: path:line], \
@@ -562,6 +564,11 @@ fn inspect_citations(project: &Path, rel: &str, content: &str, out: &mut Vec<Dia
             out.push(diag("broken_citation", rel, detail));
             continue;
         };
+        // A presence citation (`path:exists`) claims the file is there, not what
+        // it holds: no line to bound, and none to quote from a secret file.
+        if crate::core::anti_halluc::is_presence_marker(line_part) {
+            continue;
+        }
         if crate::core::anti_halluc::is_binary_file(&path) {
             out.push(diag(
                 "broken_citation",
@@ -1805,6 +1812,50 @@ mod tests {
             citation_messages(&project, "[src: file: notes.md:2] [src: file: fake.docx:1]")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn a_presence_citation_of_a_secret_file_needs_no_line() {
+        let tmp = document_project();
+        let project = tmp.path().join("proj");
+        fs::create_dir_all(project.join(".ssh")).unwrap();
+        write(
+            &project.join(".ssh/deploy-key"),
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nsecret\n-----END OPENSSH PRIVATE KEY-----\n",
+        );
+        write(&project.join("yarn-error.log"), "Error: boom\n");
+        let messages = citation_messages(
+            &project,
+            "key [src: file: .ssh/deploy-key:exists] log [src: file: yarn-error.log:tracked] \
+             and binary [src: file: brief.pdf:exists].",
+        );
+        assert!(messages.is_empty(), "{messages:#?}");
+    }
+
+    #[test]
+    fn a_content_claim_with_a_bare_path_is_still_refused_and_the_message_names_the_presence_form() {
+        let tmp = document_project();
+        let project = tmp.path().join("proj");
+        let messages = citation_messages(&project, "[src: file: notes.md]");
+        assert_eq!(messages.len(), 1, "{messages:#?}");
+        assert!(
+            messages[0].contains("[src: file: notes.md:<line>]")
+                && messages[0].contains("[src: file: notes.md:exists]"),
+            "{}",
+            messages[0]
+        );
+    }
+
+    #[test]
+    fn a_presence_citation_still_needs_the_file_to_exist_inside_the_project() {
+        let tmp = document_project();
+        let project = tmp.path().join("proj");
+        let messages = citation_messages(
+            &project,
+            "[src: file: missing.key:exists] [src: file: ../secret.bin:exists] \
+             [src: file: docs:exists]",
+        );
+        assert_eq!(messages.len(), 3, "{messages:#?}");
     }
 
     #[test]

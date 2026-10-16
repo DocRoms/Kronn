@@ -491,7 +491,7 @@ pub fn list_recent(conn: &Connection, project_id: &str, limit: u32) -> Result<Ve
                 health_score, report_path, recommendations_json, last_completed_step,
                 validation_discussion_id, step_outcomes_json,
                 head_sha, branch, source_fingerprint, model, project_profile_draft,
-                cancelled_at_step, resume_drift
+                cancelled_at_step, resume_drift, tier, connection_id
          FROM audit_runs
          WHERE project_id = ?1
          ORDER BY started_at DESC, rowid DESC
@@ -516,7 +516,7 @@ pub fn latest_completed(conn: &Connection, project_id: &str) -> Result<Option<Au
                 health_score, report_path, recommendations_json, last_completed_step,
                 validation_discussion_id, step_outcomes_json,
                 head_sha, branch, source_fingerprint, model, project_profile_draft,
-                cancelled_at_step, resume_drift
+                cancelled_at_step, resume_drift, tier, connection_id
          FROM audit_runs
          WHERE project_id = ?1 AND status = 'Completed'
          ORDER BY ended_at DESC
@@ -603,7 +603,7 @@ pub fn get_by_id(conn: &Connection, id: &str) -> Result<Option<AuditRun>> {
                 health_score, report_path, recommendations_json, last_completed_step,
                 validation_discussion_id, step_outcomes_json,
                 head_sha, branch, source_fingerprint, model, project_profile_draft,
-                cancelled_at_step, resume_drift
+                cancelled_at_step, resume_drift, tier, connection_id
          FROM audit_runs
          WHERE id = ?1
          LIMIT 1",
@@ -661,6 +661,8 @@ fn row_to_audit_run(row: &rusqlite::Row) -> rusqlite::Result<AuditRun> {
             .unwrap_or(None)
             .map(|step| step.max(0) as u32),
         resume_drift: row.get(28).unwrap_or(None),
+        tier: row.get(29).unwrap_or(None),
+        connection_id: row.get(30).unwrap_or(None),
     })
 }
 
@@ -728,6 +730,21 @@ pub fn adr_baseline(conn: &Connection, id: &str) -> Result<Option<StartOfRun>> {
         )
         .optional()?
         .flatten())
+}
+
+/// Record how the run was launched: its model tier and, for an HTTP agent, the
+/// named connection. A step retry or a resume reads them back (KT-1320).
+pub fn set_run_launch(
+    conn: &Connection,
+    id: &str,
+    tier: crate::models::ModelTier,
+    connection_id: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE audit_runs SET tier = ?2, connection_id = ?3 WHERE id = ?1",
+        params![id, tier.as_str(), connection_id],
+    )?;
+    Ok(())
 }
 
 /// Record the model the run's agent served, or the configured one labelled as
@@ -1706,6 +1723,28 @@ mod tests {
         assert_eq!(adr_baseline(&conn, "third").unwrap(), Some(after_step9));
     }
 
+    #[test]
+    fn the_launch_tier_and_connection_are_kept_on_the_run() {
+        let conn = fresh_conn();
+        insert_running(&conn, "r1", "p1", "Full", "LiteLlm", Utc::now()).unwrap();
+        let fresh = get_by_id(&conn, "r1").unwrap().unwrap();
+        assert!(fresh.tier.is_none() && fresh.connection_id.is_none());
+        set_run_launch(
+            &conn,
+            "r1",
+            crate::models::ModelTier::Economy,
+            Some("conn-a"),
+        )
+        .unwrap();
+        let run = get_by_id(&conn, "r1").unwrap().unwrap();
+        assert_eq!(run.tier.as_deref(), Some("economy"));
+        assert_eq!(run.connection_id.as_deref(), Some("conn-a"));
+        assert_eq!(
+            crate::models::ModelTier::parse(run.tier.as_deref().unwrap()),
+            Some(crate::models::ModelTier::Economy)
+        );
+    }
+
     fn fresh_conn() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         // Project FK is checked at row insert time, so spin up the bare
@@ -1744,6 +1783,8 @@ mod tests {
                 validation_completed_message_id TEXT,
                 cancelled_at_step INTEGER,
                 resume_drift TEXT,
+                tier TEXT,
+                connection_id TEXT,
                 agent_pgid INTEGER,
                 agent_started_marker TEXT
             );

@@ -1363,9 +1363,26 @@ fn split_path_and_lines(reference: &str) -> (&str, Option<(usize, usize)>) {
             if let Some((s, e)) = parse_line_spec(after) {
                 return (path, Some((s, e)));
             }
+            // A presence citation names the file, not a line of it.
+            if is_presence_marker(after) {
+                return (path, None);
+            }
         }
     }
     (reference, None)
+}
+
+/// Suffixes of a presence citation, `[src: file: <path>:exists]`: the claim is
+/// that the file is there (or tracked), so it needs no line and never invites
+/// quoting the content of a private key or a log.
+const PRESENCE_MARKERS: &[&str] = &["exists", "tracked"];
+
+/// Whether the text after the last `:` of a file citation is a presence marker.
+pub(crate) fn is_presence_marker(after: &str) -> bool {
+    let after = after.trim();
+    PRESENCE_MARKERS
+        .iter()
+        .any(|marker| after.eq_ignore_ascii_case(marker))
 }
 
 fn parse_line_spec(s: &str) -> Option<(usize, usize)> {
@@ -3535,6 +3552,19 @@ mod tests {
         assert_eq!(split_path_and_lines("weird:name"), ("weird:name", None));
         // Reversed range is rejected → treated as no line spec.
         assert_eq!(split_path_and_lines("foo.rs:20-10"), ("foo.rs:20-10", None));
+        // A presence marker names the file, not a line of it.
+        assert_eq!(split_path_and_lines("foo.rs:exists"), ("foo.rs", None));
+        assert_eq!(split_path_and_lines("foo.rs:Tracked"), ("foo.rs", None));
+    }
+
+    #[test]
+    fn a_presence_marker_verifies_the_file_exists_without_a_line() {
+        let root = temp_project();
+        let found = verify_source_marker("file: src/foo.rs:exists", Some(&root));
+        assert_eq!(found.status, SourceStatus::Verified, "{found:?}");
+        let missing = verify_source_marker("file: src/gone.rs:exists", Some(&root));
+        assert_eq!(missing.status, SourceStatus::NotFound, "{missing:?}");
+        std::fs::remove_dir_all(&root).ok();
     }
 
     // ── Niveau 1 — classification ─────────────────────────────────────

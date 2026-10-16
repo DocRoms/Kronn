@@ -12,7 +12,7 @@ Still yours to judge, when the file type exists:
 
 **Community standards**, gated on OSS intent: the `oss-community-standards` detector opens the gate (a root `LICENSE`, a public remote, or a README inviting contributions) and lists what is missing among `LICENSE` (recognized body), a README description, `.github/ISSUE_TEMPLATE`, `pull_request_template.md`, `CONTRIBUTING.md` and `CODE_OF_CONDUCT.md`; `SECURITY.md` comes from `missing-community-files`. Low or Medium: project health, not security. Private projects get no signal and no TD.
 
-**Repository hygiene**, always: the `tracked-repo-artifacts` detector reads `git ls-files --cached`, so only tracked/index content is judged, never harmless local/untracked developer files; it spares test fixtures and a documented Yarn zero-install/offline-mirror setup. Detector evidence is bounded to 15 paths per detector plus an explicit remainder count.
+**Repository hygiene**, always: the `tracked-repo-artifacts` detector reads `git ls-files --cached`, so only tracked/index content is judged, never harmless local/untracked developer files; it spares test fixtures and a documented Yarn zero-install/offline-mirror setup. Detector evidence is bounded to 15 paths per detector plus an explicit remainder count. A finding that a file merely exists or is tracked (a private key, a log) is cited `[src: file: <path>:exists]`, with no line and without quoting its content; a claim about what a text file contains still needs `[src: file: <path>:<line>]`.
 
 # B. Dimensional scan
 

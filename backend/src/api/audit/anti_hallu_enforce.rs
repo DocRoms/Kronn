@@ -125,7 +125,7 @@ path / out-of-bounds line / outside the project is treated as **fabricated** and
     }
     out.push_str(
         "\nFor EACH one: either correct it to a real `path:line` you have actually read (a binary \
-file: its bare path), OR \
+file: its bare path; a claim that a file merely exists or is tracked: `path:exists`), OR \
 remove the unverifiable claim entirely (do not weaken it into prose — drop it). \
 Do NOT invent a path just to pass the check. Re-write the file, then finish.\n",
     );

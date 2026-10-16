@@ -1172,6 +1172,11 @@ export const projects = {
        *  Absent from a backend that predates it. */
       steps_to_redo?: number[];
       started_at: string;
+      /** KT-1320 — how the run was launched: a retry or a resume runs on the
+       *  same agent, tier and connection unless the human picks another. */
+      agent_type?: string;
+      tier?: string;
+      connection_id?: string;
       /** KT-1199 — the run is the one a colleague committed in the
        *  repository, not a row of this instance: the launch adopts it. */
       from_repository?: boolean;
