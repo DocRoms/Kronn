@@ -596,19 +596,27 @@ check-diff:
 ## Re-points a doc citation whose #symbol left its range: unique symbol first,
 ## then a safe line map through `git diff -U0 BASE HEAD`. In a pull-request CI
 ## checkout BASE is its base parent; locally it defaults to the merge-base with
-## origin/HEAD (then origin/main or origin/master). DOCS="docs/a.md docs/b.md"
-## limits both the rewrite and the strict citation check to those docs.
+## origin/HEAD (then origin/main or origin/master, then a local main or master).
+## During an unfinished merge (`git merge --no-commit <target>`) both sides of
+## the merge are the evidence and no BASE is needed. With no base at all it still
+## re-points the unique-symbol citations instead of refusing to run (a worker
+## worktree has no origin refs to find one). DOCS="docs/a.md docs/b.md" limits
+## both the rewrite and the strict citation check to those docs.
 docs-reanchor:
 	@base="$(BASE)"; \
+	if [ -z "$$base" ] && git rev-parse --verify --quiet MERGE_HEAD >/dev/null; then \
+		base=merge; \
+	fi; \
 	if [ -z "$$base" ]; then \
 		if [ "$${GITHUB_EVENT_NAME:-}" = pull_request ] && git rev-parse --verify --quiet HEAD^2 >/dev/null; then \
 			base=HEAD^1; \
 		else \
 			target="$$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"; \
-			if [ -z "$$target" ] && git rev-parse --verify --quiet origin/main >/dev/null; then target=origin/main; fi; \
-			if [ -z "$$target" ] && git rev-parse --verify --quiet origin/master >/dev/null; then target=origin/master; fi; \
+			for candidate in origin/main origin/master main master; do \
+				if [ -z "$$target" ] && git rev-parse --verify --quiet "$$candidate" >/dev/null; then target="$$candidate"; fi; \
+			done; \
 			if [ -n "$$target" ]; then base="$$(git merge-base "$$target" HEAD 2>/dev/null || true)"; fi; \
 		fi; \
 	fi; \
-	if [ -z "$$base" ]; then echo "docs-reanchor: cannot resolve a target-branch merge-base; pass BASE=<rev>" >&2; exit 2; fi; \
+	if [ -z "$$base" ]; then echo "docs-reanchor: no target-branch merge-base found; re-anchoring unique #symbol moves only (pass BASE=<rev> for the Git line map)" >&2; fi; \
 	cd backend && KRONN_DOCS_REANCHOR="$(or $(DOCS),all)" KRONN_DOCS_REANCHOR_BASE="$$base" cargo test --lib core::docs_citations::tests::docs_citations_resolve_in_the_repo -- --nocapture
