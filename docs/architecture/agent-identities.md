@@ -55,7 +55,7 @@ autocomplete must always show which one is being picked (KT-211).
   wake and no punctual agent is spawned; with two candidate CLIs and no
   reply context nothing is guessed.
   [src: file: backend/src/db/discussions.rs:4050-4076#agent_alias_cli_target]
-  [src: file: backend/src/db/discussions.rs:1965-1995#providers_resolved_to_cli]
+  [src: file: backend/src/db/discussions.rs:1967-2010#providers_resolved_to_cli]
   [src: file: backend/src/api/disc_source.rs:678-730#agent_alias_cli_target]
 
 ## 3. Wake vs awareness (per identity, post-KT-189)
