@@ -5,8 +5,8 @@ Kronn exports one discussion as a self-contained JSON document with
 transcript, message authors and model metadata, attachment bytes when Kronn
 still has them (otherwise the extracted text), message-revision audit events,
 and the tasks directly attached to the discussion plan.
-[src: file: backend/src/api/disc_portability.rs:96-174#DiscussionExportEnvelope]
-[src: file: backend/src/api/disc_portability.rs:225-325#export_attachments]
+[src: file: backend/src/api/disc_portability.rs:36-114#DISCUSSION_EXPORT_KIND]
+[src: file: backend/src/api/disc_portability.rs:189-289#filename_for]
 
 ## Secret boundary
 
@@ -25,7 +25,7 @@ identities. Source message ids are retained as lineage, and references in
 attachments, revision events and task events are remapped to those fresh ids.
 Unknown projects and relationships outside the exported plan become explicit
 warnings instead of dangling foreign keys.
-[src: file: backend/src/api/disc_portability.rs:527-852#import_bundle]
+[src: file: backend/src/api/disc_portability.rs:527-791#import_bundle]
 
 The `discussion_imports` ledger stores the source discussion id, a semantic
 SHA-256 of the bundle and the created local discussion. Replaying the same

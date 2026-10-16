@@ -46,7 +46,7 @@ the same final route. [src: file: backend/src/api/external_api_connections.rs:24
    preset invalidates the prior result; previous mappings stay visible but
    cannot be changed until the new connection state succeeds.
    [src: file: frontend/src/components/settings/ExternalApiSection.tsx:228-228#modelsUnlocked]
-   [src: file: frontend/src/components/settings/ExternalApiSection.tsx:650-657#changeConnection]
+   [src: file: frontend/src/components/settings/ExternalApiSection.tsx:649-656#changeConnection]
 
 The model tiers remain optional: leaving one blank stores no per-connection
 override for that tier. The connection card shows the saved endpoint,
@@ -55,7 +55,7 @@ returning the stored key to the browser. Editing shows a masked key state; only
 an explicit click on the eye requests the stored value. **Replace** opens a
 blank editable field, while saving without replacement preserves the current
 credential. [src: file: backend/src/api/external_api_connections.rs:1736-1742#reveal_credential]
-[src: file: backend/src/api/external_api_connections.rs:1693-1694#set_credential]
+[src: file: backend/src/api/external_api_connections.rs:2010-2011#set_credential]
 [src: file: frontend/src/components/settings/ExternalApiSection.tsx:997-1006#has_credential]
 [src: file: frontend/src/components/settings/ExternalApiSection.tsx:321-335#SecretField]
 
@@ -92,14 +92,14 @@ ready. Testing selected tiers can make billed chat requests; the credential
 check and catalogue request do not select a paid model.
 [src: file: frontend/src/components/settings/ExternalApiSection.tsx:54-61#PRESET_ENDPOINTS]
 [src: file: backend/src/api/external_api_connections.rs:213-224#validate_credential_format]
-[src: file: backend/src/api/external_api_connections.rs:476-488#probe_openrouter_credential]
+[src: file: backend/src/api/external_api_connections.rs:470-482#probe_openrouter_credential]
 
 OpenRouter remains a named external connection internally. Agent selectors show
 its display name and current tier model, and Quick Prompt comparisons persist
 the stable connection identifier. Re-running a comparison keeps the provider
 and reasoning tier while resolving the model currently mapped to that tier, so
 an unavailable or deliberately replaced model is not forced back into a retry.
-[src: file: frontend/src/pages/WorkflowsPage.tsx:117-131#externalConnectionSwitchTarget]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:116-130#externalConnectionSwitchTarget]
 [src: file: backend/src/models/quick.rs:436-440#connection_id]
 [src: file: frontend/src/lib/compareTargets.ts:5-9#CompareTarget]
 
@@ -131,7 +131,7 @@ copy of the configuration and saves it. If that save fails, the failure is
 logged and the API returns an error saying the connection was removed but its
 key was not; the live configuration keeps the key, which must then be deleted
 from the API keys.
-[src: file: backend/src/api/external_api_connections.rs:2028-2052#delete]
+[src: file: backend/src/api/external_api_connections.rs:2045-2069#delete]
 
 ## Use in a discussion
 
@@ -145,9 +145,9 @@ The new-discussion form merges configured OpenRouter/Other aliases with native
 agent aliases. Each alias exposes its Economy, Default and Reasoning model in
 the shared selector, and creation persists the connection-qualified initial
 target rather than only the generic `Custom` wire type.
-[src: file: frontend/src/components/NewDiscussionForm.tsx:219-230#launchTargets]
+[src: file: frontend/src/components/NewDiscussionForm.tsx:216-227#launchTargets]
 [src: file: frontend/src/lib/externalAgentIdentity.ts:63-79#externalAgentTargets]
-[src: file: frontend/src/components/NewDiscussionForm.tsx:646-654#initialTargets]
+[src: file: frontend/src/components/NewDiscussionForm.tsx:643-651#initialTargets]
 
 Discussion headers, messages and comparison views recover the provider name
 from that durable `MessageTarget.connection_id`; editable titles are not the
@@ -155,7 +155,7 @@ identity source once the detailed discussion is loaded. OpenAI-compatible
 usage markers are also counted for `Custom`, so OpenRouter token totals follow
 the same per-turn aggregation as LiteLLM and NVIDIA.
 [src: file: frontend/src/lib/externalAgentIdentity.ts:81-107#discussionConnectionId]
-[src: file: backend/src/agents/runner.rs:14194-14258#parse_token_usage]
+[src: file: backend/src/agents/runner.rs:14254-14282#ollama_tokens]
 
 Aliases are unique without regard to case. If an alias is already owned by
 another connection, create or update fails instead of silently routing to the
@@ -194,7 +194,7 @@ At startup, Kronn backfills the former single LiteLLM and NVIDIA settings into
 stable named connections. The insertion is idempotent and preserves a
 connection already created or edited through the new workflow. The canonical
 NVIDIA legacy row also receives the hosted default endpoint when its former
-configuration did not contain one. [src: file: backend/src/lib.rs:183-203#bootstrap_external_api_connections]
+configuration did not contain one. [src: file: backend/src/lib.rs:180-203#bootstrap_external_api_connections]
 [src: file: backend/src/db/external_api_connections.rs:334-365#backfill_legacy_config]
 
 The canonical LiteLLM and NVIDIA named cards are now the source of truth for
@@ -245,11 +245,11 @@ the runtime-resolution guide.
   tried instead. The catalogue now answers in every discussion, and a
   generation accepts the connection's id, alias or display name; a refusal
   lists the connections that can generate the requested modality.
-  [src: file: backend/src/api/orchestration.rs:11785-11791#task_worker_catalogue]
-  [src: file: backend/scripts/disc-introspection-mcp.py:6061-6066#call_agent_list]
+  [src: file: backend/src/api/orchestration.rs:11779-11785#task_worker_catalogue]
+  [src: file: backend/scripts/disc-introspection-mcp.py:6059-6064#call_agent_list]
   [src: file: backend/src/db/external_api_connections.rs:144-162#resolve]
   [src: file: backend/src/api/media.rs:150-189#ConnectionReference]
   [src: file: backend/src/api/media.rs:385-414#usable_connections]
 - **Wrong model after an endpoint edit:** test again before selecting tiers;
   model choices are tied to the exact tested endpoint and credential state.
-  [src: file: frontend/src/components/settings/ExternalApiSection.tsx:650-657#changeConnection]
+  [src: file: frontend/src/components/settings/ExternalApiSection.tsx:649-656#changeConnection]

@@ -42,8 +42,8 @@ the with/without-values flag, but no value, passphrase or payload.
 
 The audit and import ledger are introduced by migration 094.
 
-[src: file: backend/src/api/plugin_portability.rs:396-532#build_export]
-[src: file: backend/src/api/plugin_portability.rs:663-799#resolve_import_server]
+[src: file: backend/src/api/plugin_portability.rs:369-505#record_event]
+[src: file: backend/src/api/plugin_portability.rs:582-718#current_registry_server]
 [src: file: backend/src/api/plugin_portability.rs:777-955#import_payload]
 [src: file: backend/src/db/sql/094_plugin_bundle_audit.sql:1-24#plugin_bundle_events]
 [src: file: frontend/src/components/PluginPortabilityModal.tsx:40-337#PluginPortabilityModal]

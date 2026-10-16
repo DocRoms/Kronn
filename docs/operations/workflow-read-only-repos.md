@@ -34,7 +34,7 @@ extending `:workspace`, with explicit `read` entries and approval policy `never`
 It keeps the standard broad filesystem read access; the declared directories
 are never added as writable roots, including when they live under a temporary
 directory. `--strict-config` rejects unsupported Codex settings.
-[src: file: backend/src/agents/read_only_repos.rs:134-200#args]
+[src: file: backend/src/agents/read_only_repos.rs:143-209#args]
 [Claude permission rules](https://code.claude.com/docs/en/permissions)
 [Claude sandbox](https://code.claude.com/docs/en/sandboxing)
 [Codex permissions](https://learn.chatgpt.com/docs/permissions)
@@ -57,7 +57,7 @@ applicable, its `KRONN_HOST_HOME` alias for `/host-home`. The same launcher
 handles direct CLI, adapter, worker and resumed turns. Path keys are serialized
 as TOML; identical aliases are deduplicated.
 [src: file: backend/src/agents/runner.rs:13572-13591#codex_project_trust_override]
-[src: file: backend/src/agents/runner.rs:13572-13585#codex_project_trust_override]
+[src: file: backend/src/agents/runner.rs:13572-13591#codex_project_trust_override]
 
 The principal's 2026-09-28 check found that Codex 0.156.1 rejects the previous
 dotted `projects."<path>".trust_level` override under `--strict-config`, even
@@ -145,7 +145,7 @@ runs with the copy as its working directory, so `node <declared path>` and a
 helper loaded through `process.cwd()` or the script's own directory come from
 the copy. The run's checkout is in `KRONN_WORKTREE`, the copy in
 `KRONN_APPROVED_SCRIPTS_DIR`. The setup command still runs in the checkout.
-[src: file: backend/src/workflows/exec_step.rs:86-107#approved_script_child]
+[src: file: backend/src/workflows/exec_step.rs:83-104#approved_script_child]
 
 Limits: only the declared files are verified. Absolute imports, paths built
 from `KRONN_WORKTREE` and interpreter search paths outside the copy are not

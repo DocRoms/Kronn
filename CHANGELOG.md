@@ -13,16 +13,19 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
-- A `#symbol` citation anchor on a definition must start the cited range
-  (KT-1074). When the cited file defines the symbol (`fn`, `def`, `class`,
-  `struct`, `enum`, `const`, `interface`, `function`, `type`), the range
-  starts at that definition, its doc comment or attributes allowed just above;
-  a range that only contains the definition, or only calls it, fails the docs
-  check and the runtime verifier with `a definition anchor must start the
-  range`, and `make docs-reanchor` proposes the definition range. A call
-  site stays a valid anchor only when the file never defines the symbol.
-  411 citations of `docs/` that merely contained their symbol were
-  re-anchored; the full check over every doc is green.
+- A `#symbol` citation anchor that names a definition the cited range
+  contains must open that range (KT-1074). When the range holds a definition
+  of the symbol (`fn`, `def`, `class`, `struct`, `enum`, `const`,
+  `interface`, `function`, `type`), that definition opens it: its doc comment
+  and attributes, then up to 5 sibling lines (a constant and its comment),
+  may sit above it. A range that holds no definition only has to name the
+  symbol, so a call site or a usage still backs a claim about wiring. A
+  range that starts a function early fails the docs check and the runtime
+  verifier with `a definition anchor must start the range`, and
+  `make docs-reanchor` proposes the range starting at the doc comment or
+  attributes of the definition. 208 citations of `docs/` were repaired by
+  reading their sentence (193 flagged by the rule, 15 moved by integrations);
+  the full check over every doc is green.
 - AI documentation template and audit v2 gap audit (KT-819). The project
   facts of the briefing gain « Documentation externe » (Confluence, Notion,
   wiki, other; https addresses only, no credentials, at most 6), rendered in

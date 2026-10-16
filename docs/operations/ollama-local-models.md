@@ -33,7 +33,7 @@ references for the lifecycle actions they steer. A worker is still offered
 so a local model never has to reconstruct an opaque UUID, and it answers only
 the execution's principal or its own native worker.
 `[src: file: backend/src/api/agent_tools.rs:1455-1462#task_exec_deliver]`
-`[src: file: backend/src/api/agent_tools.rs:3853-3881#native_worker_execution_for_trusted_dispatch]`
+`[src: file: backend/src/api/agent_tools.rs:2702-2730#native_worker_execution_for_trusted_dispatch]`
 `[src: file: backend/src/api/agent_tools.rs:2655-2663#task_reference]`
 `[src: file: backend/src/api/agent_tools.rs:3812-3839#native_execution_for_caller]`
 
@@ -160,14 +160,14 @@ inner lines may move. The diagnostic starts with `Structure validation refused`
 and, like a Rust parser error, puts the worker into its one strict correction
 of the same frozen range. The prelocalized brief carries no human-arbitration
 or parent-milestone section: a bounded edit has neither.
-`[src: file: backend/src/api/agent_workspace_structure.rs:10-19#STRUCTURE_REFUSAL_PREFIX]`
+`[src: file: backend/src/api/agent_workspace_structure.rs:1-10#Structural]`
 `[src: file: backend/src/api/agent_workspace_structure.rs:22-33#language]`
 `[src: file: backend/src/api/agent_workspace_structure.rs:234-252#validate_delimiters]`
 `[src: file: backend/src/api/agent_workspace_structure.rs:270-312#validate_range_indentation]`
 `[src: file: backend/src/api/agent_workspace_tools.rs:95-113#validate_proposed_source]`
 `[src: file: backend/src/api/agent_workspace_tools.rs:1693-1699#validate_range_indentation]`
 `[src: file: backend/src/agents/runner.rs:1392-1403#structural_refusal]`
-`[src: file: backend/src/agents/runner.rs:1407-1416#worker_repair_iteration_limit]`
+`[src: file: backend/src/agents/runner.rs:1405-1414#worker_repair_iteration_limit]`
 `[src: file: backend/src/api/orchestration.rs:7304-7353#worker_scope]`
 
 For a pure insertion, do not make the worker reproduce a paragraph inside a
@@ -211,8 +211,8 @@ range. When anything outside the range changed, the range was deleted
 entirely, or it grew past 200 lines, the rework is refused with
 `stale range: …; relaunch with a new worker_scope`, naming the launch range
 and the observed change.
-`[src: file: backend/src/api/orchestration.rs:2403-2471#reanchor_worker_scope]`
-`[src: file: backend/src/api/orchestration.rs:2501-2557#reanchor_execution_scope]`
+`[src: file: backend/src/api/orchestration.rs:2400-2468#reanchor_worker_scope]`
+`[src: file: backend/src/api/orchestration.rs:2498-2554#reanchor_execution_scope]`
 `task_exec_status` now exposes `usage.http` — cumulative HTTP traffic, context peak, and per-phase detail — without prompts or arguments.
 
 Native HTTP delivery — and delivery from a spawned host CLI worker that uses
@@ -284,7 +284,7 @@ preserved exactly.
 3. **Durable catalogue** → the available assigned tier projected at bootstrap
    or after catalogue writes. HTTP-chat agents may use their assigned Default
    if their selected tier has no assignment. No assignment means no model.
-[src: file: backend/src/agents/runner.rs:3442-3511#resolve_model_flag]
+[src: file: backend/src/agents/runner.rs:3390-3459#configured_model_flag]
 [src: file: backend/src/core/model_catalog/mod.rs:112-130#refresh_runtime_cache]
 
 An unresolved Ollama launch is refused before any provider request, with an
@@ -293,17 +293,17 @@ migration; no runner fallback revives them after deletion. Unit tests use the
 same resolver as production; the historical expectation helper itself is
 test-only and is not called by the resolver.
 [src: file: backend/src/agents/runner.rs:3659-3661#missing_ollama_model_error]
-[src: file: backend/src/agents/runner.rs:3659-3663#missing_ollama_model_error]
+[src: file: backend/src/agents/runner.rs:4199-4203#missing_ollama_model_error]
 [src: file: backend/src/core/model_catalog/mod.rs:143-150#migrate_hardcoded_catalog_once]
-[src: file: backend/src/core/model_catalog/mod.rs:108-112#migrated_default]
+[src: file: backend/src/core/model_catalog/mod.rs:106-110#migrated_default]
 
 Ollama is always routed through HTTP before the production command-builder
 call. Its command-builder branch is a non-inference `echo` sentinel,
 like the other HTTP families; it cannot choose or invoke an embedded model.
 This is based on the caller's control flow, not an assumption from its comment.
 [src: file: backend/src/agents/runner.rs:3348-3353#is_http_chat_agent]
-[src: file: backend/src/agents/runner.rs:8911-8936#start_ollama_http_with_idle]
-[src: file: backend/src/agents/runner.rs:12799-12806#agent_command_with_task_worker_policy]
+[src: file: backend/src/agents/runner.rs:4240-4265#start_ollama_http_with_idle]
+[src: file: backend/src/agents/runner.rs:4470-4477#agent_command_with_task_worker_policy]
 [src: file: backend/src/agents/runner.rs:13112-13121#Ollama]
 
 Preflight checks the exact durable target/tier assignment, including unavailable
@@ -313,7 +313,7 @@ another model or a CLI default. Explicit operator settings still take priority;
 failed assignment reads refuse launch. A target with no selected or assigned
 identity keeps the existing no-model preflight behavior; this change does not
 introduce new discovery for unconfigured runtimes.
-[src: file: backend/src/core/model_catalog/mod.rs:1032-1061#requested_model]
+[src: file: backend/src/core/model_catalog/mod.rs:1029-1058#requested_model]
 
 The production integration fixture links the library without `cfg(test)` and
 uses isolated SQLite plus explicit loopback endpoints. It actually creates,
@@ -323,7 +323,7 @@ Other cases cover empty/whitespace models and each HTTP family's own configured
 Default and exact override, unavailable tier versus available Default, exact
 connection namespace, and failed catalogue reads. No real provider inference
 is qualified.
-[src: file: backend/tests/http_model_resolution.rs:21-41#fixture]
+[src: file: backend/tests/http_model_resolution.rs:1-21#isolated]
 [src: file: backend/tests/http_model_resolution.rs:139-203#removing_a_persisted_model_does_not_revive_a_migration_seed]
 [src: file: backend/tests/http_model_resolution.rs:118-136#whitespace_tier_values_do_not_become_provider_model_ids]
 [src: file: backend/tests/http_model_resolution.rs:206-251#configured_http_default_tier_and_explicit_override_keep_exact_identity]
@@ -455,7 +455,7 @@ gets depends on who runs the model, not only on the machine:
 | Rule | Window | Where |
 |---|---|---|
 | Memory band for 64 GiB, weights and cache cost not known | 65,536 | `ram_derived_ceiling` [src: file: backend/src/agents/runner.rs:6238#ram_derived_ceiling] |
-| Trained window (262,144 in the test fixtures), held to the band | 65,536, origin `machine_ceiling` | `resolve_ctx_cap_within` [src: file: backend/src/agents/runner.rs:6403#resolve_ctx_cap_within] |
+| Trained window (262,144 in the test fixtures), held to the band | 65,536, origin `machine_ceiling` | `resolve_ctx_cap_within` [src: file: backend/src/agents/runner.rs:6398#resolve_ctx_cap_within] |
 | Same window, weights and attention shape known (KT-943) | 262,144, the whole window, origin `model_window` | `ceiling_for_model` [src: file: backend/src/agents/ollama_memory.rs:274#ceiling_for_model] |
 | Discussion principal (`ToolRunMode::General`) | the ceiling above — 262,144 once the model's shape is known, else 65,536 — requested up front because tools are declared | `worker_effective_ctx_cap` [src: file: backend/src/agents/runner.rs:227#worker_effective_ctx_cap] |
 | Task worker (`ToolRunMode::Worker`) on native MLX | 32,768 | `MLX_WORKER_EFFECTIVE_CTX_CAP` [src: file: backend/src/agents/runner.rs:104#MLX_WORKER_EFFECTIVE_CTX_CAP] |
@@ -473,7 +473,7 @@ the model has been loaded at two different windows, the cache cost measured on
 the server replaces the computed one in the formula of KT-943 (and, off Apple
 Silicon, the 70 %-of-memory rule: what is left of 70 % of memory after the
 weights, over that cost)
-[src: file: backend/src/agents/runner.rs:6500-6507#measured_kv_bytes_per_token] [src: file: backend/src/agents/runner.rs:6510-6524#RAM_SHARE_FOR_MODEL].
+[src: file: backend/src/agents/runner.rs:6500-6506#measured_kv_bytes_per_token] [src: file: backend/src/agents/runner.rs:6503-6517#RAM_SHARE_FOR_MODEL].
 
 So the 32K ceiling is a worker's and not a discussion's, and a discussion on this
 Mac is at the ceiling resolved above — the model's whole 262,144 when its
@@ -563,7 +563,7 @@ can select: a 198 KB answer, the full catalogue and a 32,768-token window ended 
    the initial brief plus tool catalogue and reply headroom do not honestly fit,
    Kronn refuses the run with an actionable error instead of silently trimming
    the task. GGUF and OpenAI-wire providers keep their existing context policy.
-   [src: file: backend/src/agents/runner.rs:99-104#MLX_WORKER_EFFECTIVE_CTX_CAP] [src: file: backend/src/agents/runner.rs:239-261#worker_oversized_prompt_remedy]
+   [src: file: backend/src/agents/runner.rs:99-104#MLX_WORKER_EFFECTIVE_CTX_CAP] [src: file: backend/src/agents/runner.rs:227-249#worker_effective_ctx_cap]
    Finalization instead uses a deterministic checkpoint after the already
    authorized boundary call has executed and its result has been recorded:
    immutable system/user policy plus the three most recent complete
@@ -582,7 +582,7 @@ can select: a 198 KB answer, the full catalogue and a 32,768-token window ended 
    another full model turn. Prefer a GGUF/non-MLX model for an unusually long
    repository investigation until the upstream prefix-cache and retained-memory
    defects are fixed.
-   [src: file: backend/src/agents/runner.rs:69-74#WORKER_FINALIZATION_CTX_TARGET] [src: file: backend/src/agents/runner.rs:587-661#checkpoint_worker_finalization_history]
+   [src: file: backend/src/agents/runner.rs:65-70#WORKER_FINALIZATION_CTX_TARGET] [src: file: backend/src/agents/runner.rs:587-661#checkpoint_worker_finalization_history]
    [src: url: https://github.com/ollama/ollama/issues/17829]
    [src: url: https://github.com/ollama/ollama/issues/17875]
 4. **Quoted scalar arguments** — local models sometimes serialize a numeric or
@@ -593,7 +593,7 @@ can select: a 198 KB answer, the full catalogue and a 32,768-token window ended 
    validation are unchanged.
    Missing required line fields are reported separately from present-but-invalid
    values so the model can correct the shape instead of guessing a new number.
-   [src: file: backend/src/api/agent_tools.rs:3883-3911#count_arg] [src: file: backend/src/api/agent_tools.rs:3597-3615#edit_lines]
+   [src: file: backend/src/api/agent_tools.rs:3874-3902#count_arg] [src: file: backend/src/api/agent_tools.rs:3597-3615#edit_lines]
 5. **Rust edits are structurally atomic** — `write_file`, `edit_file` and
    `edit_lines` parse a proposed `.rs` file in memory before the first durable
    byte. A refusal reports the exact parser position and leaves the prior bytes
@@ -609,7 +609,7 @@ can select: a 198 KB answer, the full catalogue and a 32,768-token window ended 
    tools such as `edit_lines`. This keeps an interrupted local-worker attempt
    auditable after its stream has ended. API calls remain route-only (never
    query/body/error data), and commit arguments remain hidden.
-   [src: file: backend/src/agents/tools.rs:342-432#trace_line]
+   [src: file: backend/src/agents/tools.rs:312-402#TRACE_ARGS_MAX]
 
 ## TypedSchema → constrained JSON + quality escalation
 
@@ -635,7 +635,7 @@ policy is unchanged: `Fail` rejects output that remains invalid, while
 `Continue` may keep invalid raw output. Prompt-based output is not a guarantee
 of schema compliance. Repeated launches, including a repair launch, negotiate
 the capability independently; no persistent capability cache is written.
-`[src: file: backend/src/agents/runner.rs:8622-8656#rejects_structured_output]`
+`[src: file: backend/src/agents/runner.rs:8615-8649#rejects_structured_output]`
 `[src: file: backend/src/agents/runner.rs:9371-9397#format_fallback_notice]`
 `[src: file: backend/src/workflows/steps.rs:1070-1093#ollama_envelope_format]`
 
@@ -756,7 +756,7 @@ not asked again on every visit, short enough that it never sticks). The only thi
 that leaves the machine is a library tag name, sent by the Kronn backend, not the
 browser. [src: file: backend/src/api/ollama.rs:334-360#registry]
 [src: file: backend/src/core/ollama_registry.rs:47#FETCH_TIMEOUT]
-[src: file: backend/src/core/ollama_registry.rs:79-91#MAX_CONCURRENT_LOOKUPS]
+[src: file: backend/src/core/ollama_registry.rs:78-90#MAX_CONCURRENT_LOOKUPS]
 
 The cache can be bypassed: `&fresh=true` asks the registry again and replaces what
 was cached. The card does it on the Refresh button and after an update finishes,
@@ -767,7 +767,7 @@ recheck, the model reads "not checked": a stale answer is not passed off as curr
 The card marks a recheck done only once its answer has landed, so a request that a
 newer render supersedes is followed by another fresh one, never by a cached one
 that raced it. [src: file: backend/src/core/ollama_registry.rs:55-62#recheck]
-[src: file: frontend/src/components/settings/OllamaCard.tsx:162#recheckedTick]
+[src: file: frontend/src/components/settings/OllamaCard.tsx:424#recheckedTick]
 
 To check one model by hand:
 
@@ -782,7 +782,7 @@ fixture is a hand-built manifest in the same shape (its fake blob digests aside)
 whose SHA-256 was computed independently with `shasum -a 256`. They cover identical
 and different digests, a dead registry, a model outside the library, a body that is
 not a manifest, the cache's expiry, the concurrency bound, the time budget and the
-size sum. [src: file: backend/src/core/ollama_registry.rs:469-479#FIXTURE_DIGEST]
+size sum. [src: file: backend/src/core/ollama_registry.rs:459-469#FIXTURE]
 
 ### Mac MLX builds
 

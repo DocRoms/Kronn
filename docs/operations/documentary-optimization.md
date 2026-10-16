@@ -17,7 +17,7 @@ Relaxing a default requires an `exception` object with non-empty
 safety ceilings still apply: 800 adapter words, 1,200 `docs/AGENTS.md` words,
 2,000 mandatory-path words, four initially routed documents, and a 2,000-word
 large-inventory threshold.
-[src: file: backend/src/core/document_optimization.rs:13-23#DocumentBudgets]
+[src: file: backend/src/core/document_optimization.rs:31-41#DocumentBudgets]
 [src: file: backend/src/core/document_optimization.rs:259-296#validate_budgets]
 
 The report includes bytes, words, estimated tokens, routed documents and the
@@ -31,4 +31,4 @@ row without its `Latest stable` or `Support end` source and date (or
 `not verified: no source`) raises the non-blocking `stack_currency` warning.
 [src: file: backend/src/core/document_optimization.rs:959#STACK_CURRENCY]
 [src: file: backend/src/core/document_optimization.rs:995#stack_currency_problems]
-[src: file: backend/src/core/document_optimization.rs:1081-1098#is_blocking_code]
+[src: file: backend/src/core/document_optimization.rs:1066-1083#diag]

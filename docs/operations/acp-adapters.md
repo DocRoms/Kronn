@@ -20,7 +20,7 @@ own documented, stable, non-interactive flags underneath — `claude --print
 **ACP adapters are the production default for both agents (KT-652).** Direct
 CLI remains an explicit, per-agent compatibility route. This changes transport
 selection, not the number of CLI processes: both still spawn once per turn.
-[src: file: backend/src/acp.rs:226-245#acp_adapter_enabled]
+[src: file: backend/src/acp.rs:213-232#env_flag_enabled]
 
 ## Explicit compatibility override
 
@@ -47,7 +47,7 @@ with a resume hint, and `full_access` cannot override their worker policy.
 The common process launcher supplies delivery context and worktree-local
 temporary files. It removes inherited worker context from ordinary turns and
 the permissive container marker from workers.
-[src: file: backend/src/agents/runner.rs:4833-4859#adapter_task_worker_args]
+[src: file: backend/src/agents/runner.rs:4830-4856#adapter_task_worker_args]
 [src: file: backend/tests/adapter_worker_policy.rs:40-41#default_adapters_and_explicit_fallback_keep_worker_spawn_boundaries]
 
 Each adapter permits one active prompt at a time; sequential turns still resume
@@ -56,8 +56,8 @@ process wait. Cancellation during startup remains effective when the child is
 registered; abandoning the prompt releases its owned process group. Explicit
 cancellation reaps the child. Cleanup failures are reported through the same
 redacted runner diagnostic as prompt failures, never as a clean success.
-[src: file: backend/src/acp/adapter_process.rs:174-236#AdapterTurn]
-[src: file: backend/src/agents/runner.rs:5804-5814#acp_failure_diagnostic]
+[src: file: backend/src/acp/adapter_process.rs:170-232#AdapterTurn]
+[src: file: backend/src/agents/runner.rs:5763-5773#acp_failure_diagnostic]
 
 ## Packaged desktop bridge
 
@@ -70,7 +70,7 @@ The desktop resolves it through Tauri's resource directory and sets
 configured but missing executable fails closed instead of using a developer's
 source checkout. Docker and source development keep the existing script route.
 [src: file: desktop/src-tauri/src/main.rs:1133-1147#KRONN_INTERNAL_MCP_EXECUTABLE]
-[src: file: backend/src/agents/runner.rs:6112-6130#resolve_internal_mcp_command]
+[src: file: backend/src/agents/runner.rs:6112-6131#resolve_internal_mcp_command]
 
 The embedded backend exports its actual loopback port as `KRONN_BACKEND_URL`
 before starting agent dispatch and MCP configuration sync. Generated desktop
@@ -84,7 +84,7 @@ with a specific diagnostic; this does not disable ordinary Claude discussions
 or relax worker isolation. Workers run through WSL instead; the boundary
 (`WSLENV`, translated paths, backend URL in NAT mode, native ACP refusal) is in
 [`windows-wsl-agents.md`](windows-wsl-agents.md).
-[src: file: backend/src/agents/runner.rs:12398-12407#claude_task_worker_platform_check]
+[src: file: backend/src/agents/runner.rs:12375-12384#claude_task_worker_platform_check]
 [Claude sandbox platform support](https://code.claude.com/docs/en/sandboxing)
 
 After replacing a frozen bridge, reconnect the MCP session. Frozen and Windows
@@ -120,8 +120,8 @@ when the runtime reports it; missing metadata remains `unknown` or
 are not copied into these records. Input masking covers sensitive JSON keys
 and the shared credential patterns before truncation; it is heuristic, not a
 guarantee that arbitrary user content is secret-free.
-[src: file: backend/src/agents/tool_trace.rs:10-24#ToolTraceUpdate]
-[src: file: backend/src/api/discussions/streaming.rs:810-857#lift_acp_tool_calls]
+[src: file: backend/src/agents/tool_trace.rs:1-15#MARKER]
+[src: file: backend/src/api/discussions/streaming.rs:805-852#lift_acp_tool_calls]
 
 Native ACP sessions receive Kronn's bridge even when no project is attached.
 The runtime reconstructs the reserved `kronn-internal` entry from its own
@@ -131,7 +131,7 @@ subject to that filter. A permission request for a runtime-registered Kronn
 tool may read or write with `full_access=false`, but must still identify the
 bound protocol session and an authorized server/tool. Missing or ambiguous
 identity remains refused; registration does not grant filesystem access.
-[src: file: backend/src/acp.rs:1538-1577#native_session_mcp_servers]
+[src: file: backend/src/acp.rs:1530-1569#native_session_mcp_servers]
 [src: file: backend/src/acp/permission_broker.rs:576-584#trusted_internal_call]
 
 A native agent's `disc_append` can carry its runtime session id without having
@@ -178,7 +178,7 @@ project path never reuses that identifier.
   Resumes and workers retain their separately scoped launch rules. This is an
   implementation limit, not a claim that no vendor interface supports callbacks.
   [src: file: backend/src/acp/permission_broker.rs:491-505#decide_tool_call_permission]
-  [src: file: backend/src/acp/permission_broker.rs:733-760#session_policy]
+  [src: file: backend/src/acp/permission_broker.rs:729-756#session_policy]
   [src: file: backend/src/acp/claude_adapter.rs:335-337#claude_skip_permissions]
   [src: file: backend/src/acp/codex_adapter.rs:502-513#codex_sandbox]
   A scoped live request must also match the bound ACP protocol session and
@@ -227,7 +227,7 @@ project path never reuses that identifier.
   just those two variables, and only from an owner-only regular file. The file
   stays as long as the session's transport, because Vibe restarts the bridge
   for each tool call, and is deleted when the transport is dropped.
-  [src: file: backend/src/acp/bridge_env.rs:19-31#PLAIN] [src: file: backend/src/acp/bridge_env.rs:40-73#SecretEnvFile] [src: file: backend/src/acp/bridge_env.rs:94-130#for_launch]
+  [src: file: backend/src/acp/bridge_env.rs:19-31#PLAIN] [src: file: backend/src/acp/bridge_env.rs:50-83#SecretEnvFile] [src: file: backend/src/acp/bridge_env.rs:94-130#for_launch]
 - **Vibe's tool identity (KT-1158):** Vibe's `session/request_permission`
   carries only `toolCallId`: no kind, server or arguments. The `tool_call`
   update it sends first names the tool it resolved in `_meta.tool_name`
@@ -251,7 +251,7 @@ project path never reuses that identifier.
 - **No live permission negotiation in the current adapters.** Kronn applies
   a static launch policy instead of consulting its broker for each tool call.
   The native ACP permission-request path remains separate.
-  [src: file: backend/src/acp/permission_broker.rs:733-760#session_policy]
+  [src: file: backend/src/acp/permission_broker.rs:729-756#session_policy]
 - **No automatic prompt replay.** Adapter failures do not retry the submitted
   prompt through the direct runner. Switching the compatibility override is
   an operator action, not an error-recovery guess.
@@ -278,7 +278,7 @@ project path never reuses that identifier.
 
 `agent_settings.tools` (`{cli: [...], kronn_internal: [...]}`) replaces what a
 workflow Agent step is launched with. Undeclared, the argv is unchanged.
-[src: file: backend/src/models/workflows.rs:1528-1547#StepTools]
+[src: file: backend/src/models/workflows.rs:1525-1536#StepTools]
 
 - Claude adapter: `--tools <cli list>` (empty string = no built-in tool),
   `--disable-slash-commands` (no skill listing), and an MCP config holding
@@ -291,7 +291,7 @@ workflow Agent step is launched with. Undeclared, the argv is unchanged.
   [src: file: backend/src/acp/codex_adapter.rs:139-168#codex_project_mcp_override]
   [src: file: backend/src/models/workflows.rs:1539-1560#validate]
 - Native ACP agents: `session/new` offers only the narrowed bridge, or no
-  server. [src: file: backend/src/agents/runner.rs:5864-5885#declared_mcp_servers]
+  server. [src: file: backend/src/agents/runner.rs:5857-5878#declared_mcp_servers]
 - The bridge, given `--step-tools=`, lists and dispatches only those tools
   and sends no catalogue instructions on `initialize`.
   [src: file: backend/scripts/disc-introspection-mcp.py:5846-5862#_declared_step_tools]

@@ -49,7 +49,7 @@ the call before anything is sent. A header of the same name given on the call
 itself (`api_headers`) wins, and a header the auth already sends is never
 replaced. Values are attached as sensitive headers.
 [src: file: backend/src/models/mcp.rs:82-86#default_headers]
-[src: file: backend/src/workflows/api_call_executor.rs:1206-1208#apply_default_headers]
+[src: file: backend/src/workflows/api_call_executor.rs:304-306#apply_default_headers]
 [src: file: backend/src/workflows/api_call_executor.rs:1203-1224#apply_default_headers]
 
 Custom API plugins edit them in **Headers sent on every call**, and the 🪄
@@ -136,7 +136,7 @@ used directly. Fetch the thumbnails through the broker and publish data URIs:
 The whole path, with a mock server that requires the credential, is covered by
 `batch_thumbnails_reach_a_page_dataset_as_data_uris_indexed_by_attachment`.
 [src: file: backend/src/workflows/api_call_binary.rs:663-666#batch_thumbnails_reach_a_page_dataset_as_data_uris_indexed_by_attachment]
-[src: file: frontend/src/lib/live-page-sandbox.ts:7-9#LIVE_PAGE_CSP]
+[src: file: frontend/src/lib/live-page-sandbox.ts:5-7#LIVE_PAGE_CSP]
 
 ## Status (2026-04-26)
 
@@ -275,14 +275,14 @@ in one database transaction. A referenced API is retained, with a `conflict`
 error naming each workflow and step to edit. This covers direct `quick_api_id`
 fields, `CollectApiData` sources and `on_failure` steps; several source aliases
 in one step count once in the deletion impact preview. No workflow is rewritten
-automatically. [src: file: backend/src/db/quick_apis.rs:257-302#workflow_step_references]
+automatically. [src: file: backend/src/db/quick_apis.rs:236-281#delete_quick_api]
 [src: file: backend/src/api/quick_apis.rs:258-273#QuickApiInUse]
 
 The workflow wizard flags references already missing from the saved catalogue,
 including old deletions or imported workflows. It waits for a successful
 catalogue read and clears the warning when the reference is replaced or removed.
 The warning identifies the step and missing id and remains visible across wizard
-stages. [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:1360-1372#missingQuickApis]
+stages. [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:1358-1370#missingQuickApis]
 [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:1435-1442#missingQuickApiReference]
 
 ## Run-anchored time templates

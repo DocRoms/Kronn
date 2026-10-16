@@ -66,7 +66,7 @@ spawns as a Windows program, and their ACP messages carry Windows paths
 (`cwd`, MCP servers). They are not routed through WSL. When one is found only
 inside WSL, the launch is refused with a message naming the binary: install it
 on Windows, or run Kronn inside WSL.
-[src: file: backend/src/acp.rs:800-810#native_acp_wsl_only_refusal]
+[src: file: backend/src/acp.rs:797-807#native_acp_wsl_only_refusal]
 
 ## Limits
 

@@ -14,13 +14,13 @@ responders may all be Codex without being interchangeable:
 `message_targets` preserves those identities in textual order.
 `messages.target_agent` and `target_agents` remain compatibility projections
 for older clients and peers.
-[src: file: backend/src/models/discussions.rs:687-713#MessageTarget]
+[src: file: backend/src/models/discussions.rs:676-702#MessageTargetKind]
 [src: file: backend/src/db/sql/099_typed_message_targets.sql:1-37#message_targets]
 
 The composer parses prose once and submits the typed target list. The backend
 validates that every CLI session belongs to the discussion before accepting
 the message; it never reparses Markdown to guess an owner.
-[src: file: frontend/src/lib/messageTargets.ts:202-234#targetsFromComposerText]
+[src: file: frontend/src/lib/messageTargets.ts:176-208#positionedTargetsFromComposerText]
 [src: file: backend/src/api/discussions/messaging.rs:191-333#canonical_targets]
 
 ## Human turn (UI): complete target matrix
@@ -35,7 +35,7 @@ the message; it never reparses Markdown to guess an owner.
 | `@all` | `target_all=true` | Expands to the active configured agent, previously addressed punctual agents, and every non-left joined CLI already visible in the discussion. A configured agent disabled by `no_agent` is excluded. It never means every installed agent. |
 | Same mention repeated | One target at its first text position | One reply obligation, never one per textual occurrence. |
 | Disabled/unavailable agent mentioned in the UI | Not offered by autocomplete | It remains prose and follows the zero-target route. A direct API client may still submit an explicit typed target. |
-[src: file: frontend/src/lib/messageTargets.ts:26-121#composerMentions]
+[src: file: frontend/src/lib/messageTargets.ts:25-120#composerMentions]
 
 Mentions inside inline code or fenced code are examples, not dispatch requests.
 This is the supported escape hatch when a human or agent needs to discuss the
@@ -53,14 +53,14 @@ and MCP bridge apply the same exemption before resolving targets.
 | Native disabled (`no_agent`) | Untargeted | No native process; joined CLIs retain the autonomous-room broadcast behaviour. |
 | Native disabled (`no_agent`) | Native identity | No local process starts. |
 [src: file: backend/src/api/discussions/routing.rs:20-40#route_human_turn]
-[src: file: backend/src/api/discussions/messaging.rs:78-126#native_dispatch_agents_for_targets]
+[src: file: backend/src/api/discussions/messaging.rs:65-113#NativeDispatchTarget]
 
 The room mode is an explicit persisted operator choice. Disabling the native
 discussion agent sets `discussions.no_agent` without pausing, removing, or
 hiding joined peers. The mode switch retires pending native dispatches in the
 same transaction, and the dispatcher's final claim also checks that native
 mode is still enabled.
-[src: file: backend/src/db/discussions.rs:939-958#set_disc_no_agent_within_tx]
+[src: file: backend/src/db/discussions.rs:937-956#set_disc_no_agent_within_tx]
 [src: file: backend/src/db/agent_dispatch.rs:838-856#mark_agent_started]
 
 Current bridges send their durable session id on every wait (resolved by
@@ -112,7 +112,7 @@ New and migrated sessions start both cursors at the room's current tip.
 | Successful edit/resend | Replaces the message's target list atomically with the content revision and creates at most one new durable job per absent listed target. |
 | Federation/catch-up | The ordered target list travels with live messages and revision events; older peers degrade to the first `target_agent`. |
 [src: file: frontend/src/hooks/useMessageQueue.ts:260-280#enqueue]
-[src: file: backend/src/db/discussions.rs:1296-1316#insert_user_message_with_dispatches]
+[src: file: backend/src/db/discussions.rs:1290-1310#insert_user_message_with_dispatches]
 [src: file: backend/src/db/agent_dispatch.rs:677-770#recover_after_restart]
 [src: file: backend/src/db/discussions.rs:3391-3397#DispatchInProgress]
 [src: file: backend/src/api/federation.rs:26-70#federate_message]
@@ -149,11 +149,11 @@ reach the others; "parallel" keeps the fan-out above. A native reply's prose
 mention that launched nobody is annotated with its reason (already scheduled
 on the root turn, or no marker), computed from `message_targets`.
 [src: file: frontend/src/lib/agentDelegation.ts:62-149#detectDelegation]
-[src: file: backend/src/db/discussions.rs:1754-1797#native_agents_scheduled_for_root_turn]
+[src: file: backend/src/db/discussions.rs:1746-1789#native_agents_scheduled_for_root_turn]
 [src: file: backend/src/api/discussions/crud.rs:538-548#initial_participants]
 [src: file: backend/src/api/discussions/messaging.rs:115-158#enqueue_dispatches_for_trigger]
 [src: file: backend/src/api/discussions/crud.rs:898-902#attach_discussion_participants]
-[src: file: backend/src/api/discussions/streaming.rs:2236-2246#independent_sibling_notice]
+[src: file: backend/src/api/discussions/streaming.rs:2235-2245#independent_sibling_notice]
 [src: file: backend/src/db/discussions.rs:2016-2030#already_scheduled]
 
 ## Joined agent turn (MCP)
@@ -172,7 +172,7 @@ transaction. Exact CLI identities create no local runner: the addressed session
 receives the Agent turn through its next poll, while every unrelated CLI skips
 it and advances its cursor. Bulk imports, historical appends, duplicates and
 appends without a live JOIN session never start a runner.
-[src: file: backend/src/db/discussions.rs:1535-1553#insert_message_with_targets_and_dispatches]
+[src: file: backend/src/db/discussions.rs:1529-1547#insert_message_with_targets_and_dispatches]
 [src: file: backend/src/api/disc_invite.rs:1691-1710#addressed_to_caller]
 
 Every verified live MCP append also records its exact author session in
@@ -233,7 +233,7 @@ Two distinctions the reason must not blur, and does not:
   the untracked path alone changes nothing a room user sees — which is exactly how the
   second producer of the generic string survived the first fix. `strings` on the built
   binary, not a source grep, is what proved a second one existed.
-[src: file: backend/src/api/discussions/streaming.rs:1277-1322#agent_start_failure_outcome] [src: file: backend/src/api/discussions/streaming.rs:1487-1501#finish_tracked_preflight]
+[src: file: backend/src/api/discussions/streaming.rs:1270-1315#AgentExecutionOutcome] [src: file: backend/src/api/discussions/streaming.rs:1480-1494#finish_tracked_preflight]
 
 ## Persistence and interruption
 
@@ -252,9 +252,9 @@ Two distinctions the reason must not blur, and does not:
 - A backend restart resets a claimed durable job to pending for the boot drain.
 - A watchdog timeout is a completed failed attempt, not a restart. Its message
   names the elapsed deadline and offers an explicit retry.
-[src: file: backend/src/db/discussions.rs:1493-1503#insert_message_with_targeted_dispatch]
+[src: file: backend/src/db/discussions.rs:1485-1495#insert_message_with_targeted_dispatch]
 [src: file: backend/src/db/agent_dispatch.rs:828-832#reset_running_after_restart]
-[src: file: backend/src/api/discussions/streaming.rs:658-674#timeout_notice]
+[src: file: backend/src/api/discussions/streaming.rs:657-673#timeout_notice]
 
 The pure zero/single-target decision table remains in
 `backend/src/api/discussions/routing.rs`. The HTTP adapter applies it once per

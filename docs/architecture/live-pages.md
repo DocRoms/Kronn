@@ -26,8 +26,8 @@ bundles exceeding 16 MiB or 512 resources fail explicitly; nothing is silently
 truncated. Historical HTML revisions, run/publication history and discussion
 links are not included.
 [src: file: backend/src/models/artifact_portability.rs:56-62#ArtifactBundle]
-[src: file: backend/src/api/artifact_portability.rs:23-26#MAX_BUNDLE_ITEMS]
-[src: file: backend/src/api/artifact_portability.rs:138-147#export_bundle]
+[src: file: backend/src/api/artifact_portability.rs:20-23#MAX_BUNDLE_ITEMS]
+[src: file: backend/src/api/artifact_portability.rs:287-296#export_bundle]
 
 Import is available in the library and in a workflow's publishing step before
 the library is activated. The user selects a project and reviews each planned
@@ -60,7 +60,7 @@ recipient's configured connection and reopen the Page before checking that
 default; do not infer the viewer from an imported identity snapshot.
 [src: file: backend/src/api/artifact_portability.rs:114-122]
 [src: file: backend/src/api/artifact_portability/import.rs:827-839]
-[src: file: frontend/src/lib/live-page-sandbox.ts:316-335#runtimeData]
+[src: file: frontend/src/lib/live-page-sandbox.ts:314-333#runtimeData]
 
 Configured connections, their stored credentials, agent-library entries and
 local files are not bundled. Definitions retain those references; preview lists missing known
@@ -240,17 +240,17 @@ block and the workflow definition), so approvals stay valid; deleting a dataset
 a button binds needs `force`, after which that button fails at launch.
 `[src: file: backend/src/api/live_pages.rs:563-573#delete_dataset]`
 `[src: file: backend/src/api/live_pages.rs:598-609#update_dataset]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:7910-7917#call_page_delete_dataset]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:7907-7914#call_page_delete_dataset]`
 
 CSV export normalizes that retained JSON into tabular rows: top-level arrays
 become rows, a single array inside an object envelope is expanded while scalar
 metadata is repeated, parallel nested arrays are zipped by index, and matrix
 arrays receive stable `column_N` headers. Time-series exports apply the same
 normalization per observation and retain `observed_at` plus
-`workflow_run_id`. `[src: file: frontend/src/lib/live-page-csv.ts:101-106#recordsToRows]` The
+`workflow_run_id`. `[src: file: frontend/src/lib/live-page-csv.ts:1-106#ExportCell]` The
 export uses a semicolon for French and Spanish UI locales so spreadsheet tools
 configured with those regional separators open columns directly; other locales
-keep the standard comma. `[src: file: frontend/src/pages/PagesPage.tsx:482-494#delimiter]`
+keep the standard comma. `[src: file: frontend/src/pages/PagesPage.tsx:475-487#exportDatasetCsv]`
 
 ## Theme and refresh behavior
 
@@ -260,7 +260,7 @@ do not reload the iframe. Pages can style explicit `light` and `dark` values
 on their root element. A `prefers-color-scheme` fallback should exclude an
 explicit light value, for example with `:root:not([data-theme="light"])`.
 Custom theme names can use the Page's own fallback rules.
-`[src: file: frontend/src/lib/live-page-sandbox.ts:233-250#postLivePageTheme]`
+`[src: file: frontend/src/lib/live-page-sandbox.ts:226-243#postLivePageTheme]`
 
 A publish that changes a Page (API `POST /api/pages/{id}/publish` or a
 `PublishPageData` step) broadcasts the local WebSocket event
@@ -334,7 +334,7 @@ value and the Page the frame shows; it stores it in the host's `localStorage`
 (`kronn:page-pref:<page id>:<key>`, errors swallowed) and never acts on it.
 `runtimeData` hands the stored flags back as `KronnPageData.prefs`.
 `[src: file: frontend/src/lib/live-page-sandbox.ts:579-582#KronnPagePref]`
-`[src: file: frontend/src/lib/live-page-sandbox.ts:55-61#LIVE_PAGE_PREF_KEYS]`
+`[src: file: frontend/src/lib/live-page-sandbox.ts:888-894#LIVE_PAGE_PREF_KEYS]`
 
 `TaskBoard` (zero tokens) reads or changes the planning tasks carrying the
 board tag; it refuses any task without it. The order of open cards lives in
@@ -359,7 +359,7 @@ at most 8, first occurrence wins; anything else is dropped. The embedded viewer
 and mosaic tiles have no URL of their own and send no `params` key. Parameters
 are hints for the Page's own rendering, never an authorization input.
 `[src: file: frontend/src/lib/live-page-navigation.ts:40-70#livePageViewParams]`
-`[src: file: frontend/src/lib/live-page-sandbox.ts:316-327#runtimeData]`
+`[src: file: frontend/src/lib/live-page-sandbox.ts:314-325#runtimeData]`
 
 The embedded viewer, standalone Page and mosaic skip automatic data
 publication when the Page id, slug, title, data revision and dataset count
@@ -428,7 +428,7 @@ Images load only from `data:` and `blob:` URIs. An image behind authentication,
 such as a Jira attachment thumbnail, is fetched by an `ApiCall` with
 `api_response: Binary` and published as a data URI; see
 [binary responses](../operations/deagent-apicall.md#binary-responses-images-and-other-files).
-[src: file: frontend/src/lib/live-page-sandbox.ts:7-9#LIVE_PAGE_CSP]
+[src: file: frontend/src/lib/live-page-sandbox.ts:5-7#LIVE_PAGE_CSP]
 
 PDF and DOCX export starts from the materialized iframe DOM, not from the stored
 HTML template. A request/response `postMessage` bridge keeps the opaque-origin
@@ -506,7 +506,7 @@ prunes terminal overflow in the same write transaction. Existing excess history
 is therefore cleaned on the next such write, not during a read or at startup.
 Reconciliation reads lifecycle metadata rather than result/step-output/stderr
 payloads. A cleanup failure rolls back the associated mutation.
-[src: file: backend/src/db/live_page_actions.rs:668-734#retain_launch_history]
+[src: file: backend/src/db/live_page_actions.rs:653-719#MAX_RETAINED_TERMINAL_LAUNCHES]
 [src: file: backend/src/db/live_page_action_retention_tests.rs:192-234#retention_and_completion_roll_back_together_and_compose_with_an_outer_transaction]
 
 Pruning removes the Page launch snapshot only: shared results, result discussions,
@@ -515,7 +515,7 @@ out no longer displays that historical result in the Page; retained runs and
 discussions remain accessible through their own history. An old pruned launch
 handle returns not-found and never falls back to a new launch. Only an explicit
 click on the still-current declaration can start another execution.
-[src: file: backend/src/db/live_page_actions.rs:655-663#MAX_RETAINED_TERMINAL_LAUNCHES]
+[src: file: backend/src/db/live_page_actions.rs:708-716#MAX_RETAINED_TERMINAL_LAUNCHES]
 [src: file: backend/src/db/live_page_action_retention_tests.rs:57-107#retention_is_per_block_across_bindings_and_a_pruned_handle_never_relaunches]
 
 The Page reads back how each row went. `GET /api/pages/{id}/action-launches`
@@ -534,13 +534,13 @@ previous launch one click away (a trusted action launches directly instead,
 see "Trusted actions" below); a Discussion card never relaunches, since a
 fence carries one intention.
 [src: file: backend/src/db/live_page_actions.rs:620-624#latest_launches_for_live_page]
-[src: file: frontend/src/lib/live-page-sandbox.ts:301-316#postLivePageActionStates]
-[src: file: frontend/src/lib/live-page-sandbox.ts:492-511#markActions]
+[src: file: frontend/src/lib/live-page-sandbox.ts:296-311#postLivePageActionStates]
+[src: file: frontend/src/lib/live-page-sandbox.ts:490-509#markActions]
 [src: file: frontend/src/lib/live-page-sandbox.ts:339-342#ACTION_STATE_STYLE]
 [src: file: frontend/src/hooks/useLivePageActions.ts:174-218#handleIntent]
 [src: file: frontend/src/hooks/useLivePageActions.ts:276-288#anyInFlight]
 [src: file: frontend/src/components/LivePageActionOverlay.tsx:40#Escape]
-[src: file: frontend/src/components/DiscussionActionCard.tsx:481-488#discussionActionOperations]
+[src: file: frontend/src/components/DiscussionActionCard.tsx:478-485#discussionActionOperations]
 
 When authoring a local row move after an action succeeds, preserve the row's
 detail fields and update any separate detail dataset and in-memory index before
@@ -549,7 +549,7 @@ components when moving a ticket between queues; missing cached details must not
 be treated as a confirmed absence of components. Action-state marking and
 dataset delivery are separate bridge operations, so an action's `succeeded`
 state alone does not refresh those details.
-[src: file: frontend/src/lib/live-page-sandbox.ts:492-511#markActions]
+[src: file: frontend/src/lib/live-page-sandbox.ts:490-509#markActions]
 [src: file: frontend/src/lib/live-page-sandbox.ts:725-728]
 
 Authoring guidance for shared automation reports: the next action must be
@@ -569,8 +569,8 @@ resource wait separately from a failed plan. Do not send a generation request
 merely to guess whether a quota is available.
 [src: file: backend/src/models/orchestration.rs:1170-1193#TaskWorkerTier]
 [src: file: backend/src/api/orchestration.rs:10263-10306]
-[src: file: backend/src/api/orchestration.rs:11553-11595#bounded_provider_quota_details]
-[src: file: backend/src/api/orchestration.rs:11822-11851#task_exec_prepare]
+[src: file: backend/src/api/orchestration.rs:11502-11544#bounded_provider_quota_details]
+[src: file: backend/src/api/orchestration.rs:11775-11804#task_exec_prepare]
 
 A `user_input` value may also carry a `<page.…>` `source_ref`: when the card
 opens, `POST /api/live-page-actions/{id}/prefill` resolves it server-side for
@@ -581,7 +581,7 @@ overwritten. The launch runs what the reader sends. `GET /api/pages/{id}/actions
 lists only the blocks of the current revision: a block removed from the
 published HTML keeps its row for the launches that reference it, but is no
 longer offered, and its old id refuses a launch.
-[src: file: backend/src/db/live_page_actions.rs:934-977#prefill_values]
+[src: file: backend/src/db/live_page_actions.rs:929-972#prefill_values]
 [src: file: backend/src/db/live_page_actions.rs:603-617#list_for_live_page]
 
 The periodic refresh of a Page (every 30 s, in the Pages view and in its own
@@ -591,8 +591,8 @@ rows, the bridge reopens the collapse under the row that now carries the same
 binding and the card follows it. A placeholder is shown as an example
 (`e.g. …`), since an empty field sends nothing, unless its author already
 phrased it as an example or an instruction.
-[src: file: frontend/src/lib/live-page-sandbox.ts:417-424#openSlot]
-[src: file: frontend/src/components/DiscussionActionCard.tsx:77-87#examplePlaceholder]
+[src: file: frontend/src/lib/live-page-sandbox.ts:510-517#openSlot]
+[src: file: frontend/src/components/DiscussionActionCard.tsx:73-83#examplePlaceholder]
 
 Once launched, a card tells what the run produced, the same way on a Page and
 in a Discussion. A workflow's steps are listed (name, type, status, duration)
@@ -844,8 +844,8 @@ own cap (8) is applied by the host after its check, so refused placeholders
 never crowd out allowed ones. A fresh port always receives the full list,
 even empty. The message needs no user activation: it only positions
 host-owned content.
-[src: file: frontend/src/lib/live-page-sandbox.ts:669-698#sendEmbeds]
-[src: file: frontend/src/lib/live-page-sandbox.ts:700-709#queueEmbeds]
+[src: file: frontend/src/lib/live-page-sandbox.ts:667-696#sendEmbeds]
+[src: file: frontend/src/lib/live-page-sandbox.ts:697-706#queueEmbeds]
 
 Host. The relay checks the list structurally (bounded, finite rectangles, key
 grammar, URL length; a malformed clip becomes an empty one, never none)
@@ -891,7 +891,7 @@ it was itself imported with. That last part is stored with the Page
 declaration through a chain of imports. It is information for the importer,
 never an authorization, and the creator's allowed sites are not exported.
 [src: file: backend/src/core/embed_origins.rs:154#declared_origins]
-[src: file: backend/src/api/artifact_portability.rs:53#export_embed_origins]
+[src: file: backend/src/api/artifact_portability.rs:126#export_embed_origins]
 The import preview lists one row per distinct origin (from the HTML and the
 declaration): already allowed ("in the Artifact and already in your
 configuration"), or Add / Refuse. Answers are not part of the reviewed digest

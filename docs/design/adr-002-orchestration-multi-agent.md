@@ -413,10 +413,10 @@ The implemented recovery layer makes that decision durable rather than recomputi
 restart. Boot first quiesces due dispatches and moves non-terminal executions to `Interrupted` in the
 same SQLite boundary, then classifies the checkpoint against discussions, worker availability,
 workspace ownership and the real Git refs. A pending decision survives a second crash and is consumed
-only by an explicit guarded resume `[src: file: backend/src/api/orchestration.rs:288-388#reconcile_at_boot]`
+only by an explicit guarded resume `[src: file: backend/src/api/orchestration.rs:283-383#reconcile_at_boot]`
 `[src: file: backend/src/db/orchestration.rs:5785-5856#set_execution_recovery]`. The runtime watchdog uses four independent clocks — total
 duration, activity, review wait and human wait — so an acknowledged human gate is never mistaken for a
-dead worker `[src: file: backend/src/api/orchestration.rs:658-814#start_resilience_watchdog]`.
+dead worker `[src: file: backend/src/api/orchestration.rs:654-825#start_resilience_watchdog]`.
 
 Cancellation and reassignment preserve the same lineage. Cancellation first cancels live processes and
 due dispatches, then applies the persisted cleanup policy; `remove_if_clean` removes only the proven

@@ -142,12 +142,12 @@ names, versions, behaviour). The grammar:
 - `[src: <path>:<line>]` — the `file:` type is the default.
 - `[src: file: backend/src/api/mod.rs:14-22#context_audit]` — line or range + **symbol anchor**.
   The anchor (an identifier; `.` and `-` allowed inside, e.g. `Type.method`, `check-version`)
-  must appear as a whole word inside the cited lines. When the cited file *defines* the symbol
-  (`fn`, `def`, `class`, `struct`, `enum`, `const`, `interface`, `function` or `type`, after any
-  visibility or `async` modifier), the range must start at that definition, a doc comment or
-  attributes allowed just above it: a range that only contains the definition, or only calls
-  it, fails. A call site is a valid anchor only when the file never defines the symbol. It is
-  only read after a line spec. Use it
+  must appear as a whole word inside the cited lines. When the range *contains* a definition
+  of the symbol (`fn`, `def`, `class`, `struct`, `enum`, `const`, `interface`, `function` or
+  `type`, after any visibility or `async` modifier), that definition must open the range: its
+  doc comment and attributes, then up to 5 sibling lines (a constant and its comment), may
+  sit above it. A range that holds no definition of the symbol only has to name it, so a call
+  site or a usage backs a claim about wiring. It is only read after a line spec. Use it
   to say *what* the lines hold: when code moves, a stale range fails instead of silently
   pointing beside the claim.
 - `[src: file: <path>.docx]` — file only. Required for a binary file (.docx,
@@ -163,17 +163,18 @@ fabricate a file or line that actually exists.
 
 An anchor absent from the cited lines makes the citation `out_of_bounds` (the range is wrong
 for what it names); the detail says where the symbol does appear, if anywhere. The same goes
-for a definition anchor whose range does not start at the definition (`a definition anchor must
-start the range`); `make docs-reanchor` then proposes the range that starts at it. The check is
+for a range that contains the definition without opening with it (`a definition anchor must
+start the range`); `make docs-reanchor` then proposes the range that starts at its doc comment
+or attributes. The check is
 textual and deterministic: no code is parsed.
 
 **One anchor rule, no tolerance window.** The runtime verifier, the `verified` badge it feeds
-and Kronn's docs check apply this same rule: the symbol is inside the cited lines, or the
-citation fails; one line past the range fails everywhere. A tool that re-anchors a moved
+and Kronn's docs check apply this same rule: the symbol is inside the cited lines (and opens them
+when they contain its definition), or the citation fails; one line past the range fails everywhere. A tool that re-anchors a moved
 citation first rewrites the range when the symbol occurs once in the cited file. If the symbol
 occurs several times, the tool may instead map the old range's endpoints through a zero-context
 Git diff from the chosen base to `HEAD`; a line inside a changed hunk has no mapping, and the
-rewrite is allowed only when the mapped range still contains the symbol as a whole word. The
+rewrite is allowed only when the mapped range still passes the anchor rule. The
 path and anchor stay unchanged, and a single-line citation stays single-line while a range stays
 a range. Anything still ambiguous is listed with its candidate lines for a human to choose; a
 missing file or line is never re-anchored.
@@ -216,7 +217,7 @@ mode (`Settings → Anti-hallucination`, or `config.toml anti_hallucination_mode
 **P2 lint, concretely** — what is mechanically checked on each agent reply:
 1. A prose heuristic flags confident technical claims left **unsourced** (one confidence tier).
 2. Every `[src: …]` marker present is **mechanically verified**: file exists, path is jailed to
-   the project root, line/range is in bounds, a `#symbol` anchor appears in the range (and opens it when the file defines the symbol). A citation pointing at a non-existent or
+   the project root, line/range is in bounds, a `#symbol` anchor appears in the range (and opens it when the range contains its definition). A citation pointing at a non-existent or
    out-of-project path is flagged **fabricated**; a `training-data` source is **rejected**.
 
 **Convention vs enforcement.** The markers and citation grammar above are a *writing

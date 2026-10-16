@@ -50,8 +50,8 @@ MCP bridge. HTTP agents have none of that: they are a request/response loop, and
 capability they appear to have is a **tool Kronn executes server-side on their behalf**.
 
 The MCP bridge is deliberately not one of those capabilities. The HTTP path returns before
-any MCP environment is built [src: file: backend/src/agents/runner.rs:8911-8931#start_ollama_http_with_idle], and
-`--mcp-config` is a CLI-only argument [src: file: backend/src/agents/runner.rs:12749-12760#insert_claude_mcp_config].
+any MCP environment is built [src: file: backend/src/agents/runner.rs:4244-4264#start_ollama_http_with_idle], and
+`--mcp-config` is a CLI-only argument [src: file: backend/src/agents/runner.rs:4495-4506#insert_claude_mcp_config].
 So "add a tool to the MCP server" never reaches an HTTP agent. Anything they must be able to
 do has to exist as a **native tool in Kronn's own catalogue**.
 
@@ -82,8 +82,8 @@ And, since 0.13.0, media generation: `media_generate` and `media_job_status`
 [src: file: backend/src/api/agent_tools.rs:1083-1177#orchestration_tool_catalogue]. These sit in the orchestration
 catalogue, so an HTTP agent replying in a discussion has them, and a bounded worker keeps
 them — they are deliberately absent from the principal-only list a worker room strips
-[src: file: backend/src/api/agent_tools.rs:1404-1455#NOT_FOR_A_WORKER]. A Workflow Agent step does not: only a
-discussion run adds the orchestration tools [src: file: backend/src/api/agent_tools.rs:1083-1101#orchestration_tool_catalogue].
+[src: file: backend/src/api/agent_tools.rs:1403-1454#NOT_FOR_A_WORKER]. A Workflow Agent step does not: only a
+discussion run adds the orchestration tools [src: file: backend/src/api/agent_tools.rs:1530-1548#orchestration_tool_catalogue].
 
 Until then only CLI agents could generate an image or a video, because the tools were
 declared in the MCP bridge and an HTTP agent structurally cannot reach it. The capability
@@ -123,7 +123,7 @@ implementation detail:
   `..` or by symlink. The root is the discussion's `managed` workspace row (else its first
   declared row) when it has one, otherwise the path of the project the discussion belongs
   to; a workflow step has no discussion and resolves straight to its project's path
-  [src: file: backend/src/api/agent_tools.rs:3145-3196#workspace_root]. The project fallback is the common
+  [src: file: backend/src/api/agent_tools.rs:3129-3196#workspace_root]. The project fallback is the common
   case, not the exception: a workspace row is only created by orchestration, so on
   2026-08-19 just 16 of 395 discussions had one. Requiring such a row before granting the
   file tools was the original bug — the path was reachable all along.
@@ -257,7 +257,7 @@ overrides are outside this single-launch snapshot change.
 [src: file: backend/src/api/agent_quick_prompt_tests.rs:550-603#quick_prompt_unsupported_saved_limit_refuses_without_a_child_or_dispatch_job]
 [src: file: backend/src/agents/generation_settings.rs:5-28#validate]
 [src: file: backend/src/workflows/steps.rs:1356-1360#reasoning_effort_override]
-[src: file: backend/src/agents/runner.rs:12258-12262#validate]
+[src: file: backend/src/agents/runner.rs:3790-3794#validate]
 
 The HTTP regression launches through the native QP tool and the discussion
 stream, edits the template while the job is queued, then inspects both requests
@@ -273,7 +273,7 @@ HTTP discussion agents receive the full native catalogue by default. Explicitly
 setting `KRONN_TIERED_TOOLS=1` starts with the core tools and an index of the
 `pages`, `media`, `delegation`, `edit` and `automations` families. `tools_load` adds a family
 for the remainder of the run. Bounded workers cannot expand their catalogue.
-[src: file: backend/src/api/agent_tools.rs:339-415#TOOL_FAMILIES]
+[src: file: backend/src/api/agent_tools.rs:329-405#TOOL_FAMILIES]
 [src: file: backend/src/api/agent_tools.rs:2323-2329#tools_load]
 
 The native dispatcher now routes `tools_load` correctly. Earlier benchmarks used
@@ -289,7 +289,7 @@ Tiering reduces the initial declaration text, not the context capacity required
 to reach every family. Window reservation counts the whole reachable catalogue,
 including JSON separators, before loading a family. A regression test checks
 exact byte counts and an unchanged window through every family load.
-[src: file: backend/src/agents/runner.rs:6825-6854#reachable_tools_bytes]
+[src: file: backend/src/agents/runner.rs:6818-6847#reachable_tools_bytes]
 [src: file: backend/src/agents/runner_test.rs:1586-1624#the_window_does_not_move_when_a_run_loads_a_tool_family]
 
 ## Audits (KT-924)
@@ -319,7 +319,7 @@ agent is spawned exactly as before. An HTTP agent gets a
 `KronnToolExecutor::audit_arc_for_step`, scoped to the project directory the pipeline
 already resolved (`resolve_host_path`, so it is right inside a container) rather
 than a workspace row or a project looked up by id
-[src: file: backend/src/api/agent_tools.rs:248-268#audit_arc_for_step]. The bounds are KT-338's, unchanged:
+[src: file: backend/src/api/agent_tools.rs:242-262#audit_arc_for_step]. The bounds are KT-338's, unchanged:
 every path is canonicalised against that root and refused when it leaves it, by
 `..`, by an absolute path or by a symlink; there is no shell; a truncated read
 says so.
@@ -327,12 +327,12 @@ says so.
 **What the audit's tools are.** Narrower than a workflow Agent step's:
 `read_file`, `list_files`, `find_files`, `search_text`, `git_status`, `git_diff`,
 `git_log` to read, and `write_file`, `edit_file`, `edit_lines`,
-`insert_after_line` to write [src: file: backend/src/api/agent_tools.rs:289-301#AUDIT_TOOLS].
+`insert_after_line` to write [src: file: backend/src/api/agent_tools.rs:283-295#AUDIT_TOOLS].
 No `web_fetch` (it would send the model off the project), no `git_commit` (the
 audit never commits), no plan, REST-plugin or discussion tools. A call to any
 other name is refused before a handler sees it, and so is a write to the
 target document of another step of the chain (the consolidation step excepted)
-[src: file: backend/src/api/agent_tools.rs:289-292#AUDIT_TOOLS]
+[src: file: backend/src/api/agent_tools.rs:1618-1621#AUDIT_TOOLS]
 [src: file: backend/src/api/agent_tools.rs:206-231#foreign_step_target_refusal].
 
 **What the audit prompt says about other repos (KT-926).** An audit's file tools
@@ -359,7 +359,7 @@ ends cleanly, so its exit code says "success"; the output validator and the
 rewrite proof are what record the step as failed when its target is missing,
 still the template, or byte-identical to before the agent ran
 [src: file: backend/src/api/audit/validation.rs:168-300#validate_step_output]
-[src: file: backend/src/api/audit/validation.rs:65-75#target_snapshot]. The final review step has no
+[src: file: backend/src/api/audit/validation.rs:60-70#target_snapshot]. The final review step has no
 target file and is judged on the exit code alone, for an HTTP agent as for a CLI
 one.
 
@@ -403,7 +403,7 @@ shipping it. Three things changed:
   example before anything is sent. The declaration says why: a large response is
   shortened and cannot be re-read whole
   [src: file: backend/src/api/agent_tools.rs:800-826#extract]
-  [src: file: backend/src/api/agent_tools.rs:4493-4515#api_call_extract].
+  [src: file: backend/src/api/agent_tools.rs:4468-4490#api_call_extract].
 - **A shortened API result says what it holds.** Its `shape` lists the response's
   keys (small flat objects such as `meta` and `links` by value, so the paging is
   visible), the path and length of the main list, and the keys of one element down
@@ -416,7 +416,7 @@ shipping it. Three things changed:
   which would not apply to the response the next `extract` runs on, and is told to
   select less. Other tools are shortened exactly as before
   [src: file: backend/src/agents/runner.rs:7078-7106#shape_of]
-  [src: file: backend/src/agents/runner.rs:7112-7137#working_extract_examples].
+  [src: file: backend/src/agents/runner.rs:7198-7223#working_extract_examples].
 - **A call that differs only by its `extract` or its query is not a repeat.** The
   duplicate guard compares the tool name and every argument, sorted by key, so an
   identical call is still replayed once and then refused, and a call with another
@@ -463,7 +463,7 @@ contract and can request one step type or shared section. This avoids paying
 the full schema on every turn while keeping both interfaces on the same source.
 The examples are deserialized as real `WorkflowStep` values in regression tests.
 [src: file: backend/src/api/workflow_step_schema.json:1-467#fields_by_type]
-[src: file: backend/scripts/disc-introspection-mcp.py:9449-9451#call_workflow_step_schema]
+[src: file: backend/scripts/disc-introspection-mcp.py:9447-9449#call_workflow_step_schema]
 [src: file: backend/src/api/agent_workflow_tests.rs:146-170#workflow_schema_sections_preserve_the_canonical_contract]
 
 Ollama tool-result clamping preserves this authoring contract as complete JSON

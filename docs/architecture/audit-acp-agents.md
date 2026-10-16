@@ -84,10 +84,10 @@ Now an ACP agent is stopped like an HTTP agent (KT-924), through a token:
 2. `cancel_audit` trips the token. The ACP session writes `session/cancel`
    (bounded to five seconds, so a wedged agent cannot hold the stop hostage),
    drops the turn, and shuts the agent's process down
-   [src: file: backend/src/agents/runner.rs:5248-5258#ACP_CANCEL_GRACE] [src: file: backend/src/acp.rs:1795-1827#shutdown].
+   [src: file: backend/src/agents/runner.rs:5704-5714#ACP_CANCEL_GRACE] [src: file: backend/src/agents/runner.rs:5702-5709#shutdown].
 3. The process is started as its own process group, and shutdown kills the
    group, so what the agent started — a shell command, an MCP server — stops
-   with it [src: file: backend/src/acp.rs:991-995#process_group] [src: file: backend/src/acp.rs:1795-1803#shutdown].
+   with it [src: file: backend/src/acp.rs:991-995#process_group] [src: file: backend/src/acp.rs:1795-1803#kill_process_group].
 4. The pipeline waits on the lifeline, which exits only after that shutdown, so
    the audit is finalised as `Cancelled` once the agent is really gone. This is
    also why the lifeline's PID is **not** killed: doing it ended the wait early.
