@@ -233,6 +233,23 @@ fn state_with(config: crate::models::AppConfig) -> AppState {
     )
 }
 
+/// The project's `docs/` as an earlier audit left it: recorded and marked, so
+/// the partial refresh is not held for the briefing's choice (KT-1299).
+fn kronn_docs(project: &Path) {
+    let docs = project.join("docs");
+    std::fs::create_dir_all(&docs).unwrap();
+    std::fs::write(
+        docs.join(".kronn.json"),
+        r#"{"audits":[{"date":"2026-05-01","kronn_version":"0.8.4","type":"full"}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        docs.join("audit-note.md"),
+        "<!-- kronn:generated=2026-05-01 -->\n",
+    )
+    .unwrap();
+}
+
 async fn add_project(state: &AppState, id: &str, path: &Path) {
     let row: crate::models::Project = serde_json::from_value(json!({
         "id": id, "name": id, "path": path.to_string_lossy(),
@@ -450,6 +467,7 @@ async fn a_stop_mid_write_puts_the_target_back(pipeline: Pipeline) {
     let path = project.path().join(target);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     const BEFORE: &str = "# The doc before the step\n\nOriginal, whole content.\n";
+    kronn_docs(project.path());
     std::fs::write(&path, BEFORE).unwrap();
 
     let agent = ScriptedAgent::new(Turn::Hang);
@@ -588,6 +606,7 @@ async fn a_stop_that_cannot_settle_the_target_is_not_recorded_as_restored(pipeli
     let dir = path.parent().unwrap().to_path_buf();
     std::fs::create_dir_all(&dir).unwrap();
     const BEFORE: &str = "# The doc before the step\n\nOriginal, whole content.\n";
+    kronn_docs(project.path());
     std::fs::write(&path, BEFORE).unwrap();
 
     let agent = ScriptedAgent::new(Turn::Hang);
@@ -683,6 +702,7 @@ async fn a_hand_edit_between_a_crash_and_boot_survives(pipeline: Pipeline) {
     let path = project.path().join(first_target(pipeline));
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     const BEFORE: &str = "# The doc before the step\n\nOriginal, whole content.\n";
+    kronn_docs(project.path());
     std::fs::write(&path, BEFORE).unwrap();
 
     let agent = ScriptedAgent::new(Turn::Hang);
@@ -785,6 +805,7 @@ async fn a_backend_crash_mid_step_is_settled_at_boot(pipeline: Pipeline) {
     let path = project.path().join(target);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     const BEFORE: &str = "# The doc before the step\n\nOriginal, whole content.\n";
+    kronn_docs(project.path());
     std::fs::write(&path, BEFORE).unwrap();
 
     let agent = ScriptedAgent::new(Turn::Hang);

@@ -19,6 +19,7 @@
 //     manually edits the JSON and drops it still gets the warning back.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::Path;
 use ts_rs::TS;
 
@@ -92,6 +93,14 @@ pub struct KronnState {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<crate::core::template_manifest::TemplateManifest>,
+
+    /// Files Kronn itself wrote into the docs folder (path relative to the
+    /// folder, hash of the bytes written). They are Kronn's whatever else the
+    /// folder holds: never counted as a human's docs, never moved to
+    /// `legacy/`. Only a folder that is Kronn's (`template_installed_at`)
+    /// lets them stand as proof that it is.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub kronn_written: BTreeMap<String, String>,
 }
 
 impl KronnState {
@@ -201,6 +210,55 @@ pub fn mark_template_installed(project_path: &Path) -> Result<(), String> {
     let mut state = load_for_mutation(project_path)?;
     if state.template_installed_at.is_none() {
         state.template_installed_at = Some(today_iso());
+    }
+    write(project_path, &mut state)
+}
+
+/// Record the files Kronn wrote into the docs folder (paths relative to it), so
+/// the folder gate and the move to `legacy/` tell them from a human's. The one
+/// place provenance of Kronn-written files is recorded: the template installer
+/// calls it, and so can any other writer (a template merge). A path that is
+/// not a regular file inside the folder is ignored.
+pub fn record_kronn_written(project_path: &Path, rel_paths: &[String]) -> Result<(), String> {
+    record_kronn_moves(project_path, &[], rel_paths)
+}
+
+/// `record_kronn_written` for files Kronn also moved: each `(from, to)` (paths
+/// relative to the folder) drops the entry of `from` and records `to`, so a
+/// renamed template file is Kronn's under its new path and the old entry does
+/// not linger.
+pub fn record_kronn_moves(
+    project_path: &Path,
+    moved: &[(String, String)],
+    rel_paths: &[String],
+) -> Result<(), String> {
+    if moved.is_empty() && rel_paths.is_empty() {
+        return Ok(());
+    }
+    let mut state = load_for_mutation(project_path)?;
+    let docs_dir = crate::core::scanner::detect_docs_dir(project_path);
+    for (from, _) in moved {
+        state.kronn_written.remove(&from.replace('\\', "/"));
+    }
+    let targets = moved.iter().map(|(_, to)| to).chain(rel_paths.iter());
+    for rel in targets {
+        let rel = rel.replace('\\', "/");
+        if rel.is_empty()
+            || rel.starts_with('/')
+            || rel.split('/').any(|part| part.is_empty() || part == "..")
+        {
+            continue;
+        }
+        let path = docs_dir.join(&rel);
+        if crate::core::fs_guard::assert_contained_no_symlink(&docs_dir, &path).is_err()
+            || !std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_file())
+        {
+            continue;
+        }
+        let bytes = std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        state
+            .kronn_written
+            .insert(rel, crate::core::docs_merge::sha256_hex(&bytes));
     }
     write(project_path, &mut state)
 }
