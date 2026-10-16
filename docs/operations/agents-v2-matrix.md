@@ -90,14 +90,14 @@ human-gated Automation proposals and the task-delegation lifecycle from the
 first turn; history-tool discovery remains deferred until the third user
 message. This instruction contract does not imply a live provider validation
 or change session-resume and pricing limitations.
-[src: file: backend/src/api/disc_prompts.rs:1122-1148#opencode_prompt_matches_its_injected_mcp_bridge_on_first_and_later_turns]
-[src: file: backend/src/acp.rs:1538-1560#native_session_mcp_servers]
+[src: file: backend/src/api/disc_prompts.rs:1123-1153#opencode_prompt_matches_its_injected_mcp_bridge_on_first_and_later_turns]
+[src: file: backend/src/acp.rs:1531-1570#native_session_mcp_servers]
 
 The orchestration database must also read back every native provider name it
 writes. OpenCode launch, reload and idempotent replay are covered as one native
 execution, with no fallback to Custom; unknown provider strings remain errors.
 [src: file: backend/src/db/orchestration.rs:244-258#agent_type_from_db]
-[src: file: backend/src/db/orchestration_tests.rs:4201-4218#opencode_worker_launch_reload_and_replay_keep_one_native_execution]
+[src: file: backend/src/db/orchestration_tests.rs:4200-4233#opencode_worker_launch_reload_and_replay_keep_one_native_execution]
 
 ## Known asymmetries
 
@@ -117,8 +117,8 @@ the same job.
   See [native ACP continuity](../gotchas/native-acp-resume-continuity.md) for the
   negotiated `session/resume` contract and exact proof boundaries.
   [src: file: backend/src/agents/runner.rs:2764-2824#load_completed_checkpoint]
-  [src: file: backend/src/api/discussions/streaming.rs:2593-2693#resume_with_delta_if_possible]
-  [src: file: backend/src/api/discussions/streaming.rs:8671-8679#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
+  [src: file: backend/src/api/discussions/streaming.rs:2593-2724#resume_with_delta_if_possible]
+  [src: file: backend/src/api/discussions/streaming.rs:8663-8984#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
 - **Kronn does not yet normalize ACP's optional session cost.** The current
   upstream v1 schema supports `usage_update.cost` as a cumulative amount with
   an explicit currency; this is not a per-turn USD price. Kronn's native ACP
@@ -136,7 +136,7 @@ the same job.
   correction does not add cumulative/multicurrency ACP accounting or OpenCode
   collection to the separate global spend report. See
   [cost provenance](../gotchas/stats-cost-usd-not-always-measured.md).
-  [src: file: backend/src/models/stats.rs:19-95#CostAggregate]
+  [src: file: backend/src/models/stats.rs:7-94#CostAggregate]
   [src: file: backend/src/api/stats.rs:282-291#unknown_cost_tokens]
 - **MCP servers holding a credential are dropped**, whole. A project mixing
   safe and credentialed entries loses the credentialed ones — silently from the
@@ -144,13 +144,14 @@ the same job.
 - **Task workers use the same default adapter route**, retaining the direct
   builder's restrictive worktree/settings/tool policy and a fresh session.
   An explicit false override selects direct compatibility for that agent.
-  [src: file: backend/tests/adapter_worker_policy.rs:41-112#default_adapters_and_explicit_fallback_keep_worker_spawn_boundaries]
+  [src: file: backend/tests/adapter_worker_policy.rs:184-192#adapted]
+  [src: file: backend/tests/adapter_worker_policy.rs:339-387#worker]
   Native ACP agents (OpenCode, Gemini, Copilot, Kiro, Vibe) cannot be
   launched as task workers: that route carries neither the delivery context
   nor the worker permission scope. `task_worker_route_policy` decides this for
   worker preparation and for every launch route; an exact joined CLI session
   of the same agent stays eligible.
-  [src: file: backend/src/agents/runner.rs:3743-3761#task_worker_route_policy]
+  [src: file: backend/src/agents/runner.rs:3740-3758#task_worker_route_policy]
   The direct Copilot worker preflight keeps a four-second deadline and awaits
   process collection on timeout. Its [timeout regression](../gotchas/copilot-preflight-timeout.md)
   uses controlled time and an owned child, not a startup PID-file race.
@@ -170,9 +171,9 @@ successful run. The runner tests exercise this path with a fake ACP transport
 for creation, resume and its existing fallback, streaming, usage, cancellation,
 and prompt/persistence failures. They do not invoke an agent CLI, and ACP token
 usage still has no implied price.
-[src: file: backend/src/agents/runner.rs:5804-5865#acp_failure_diagnostic]
-[src: file: backend/src/agents/runner.rs:15006-15086#run_acp_session_reports_redacted_prompt_and_persistence_failures]
-[src: file: backend/src/core/redact.rs:522-528#redact_for_audit_artifact]
+[src: file: backend/src/agents/runner.rs:5804-5814#acp_failure_diagnostic]
+[src: file: backend/src/agents/runner.rs:14804-15085#run_acp_session_streams_usage_through_agent_process]
+[src: file: backend/src/core/redact.rs:510-534#redact_for_audit_artifact]
 
 ## Settings catalogue correction (KT-531 / KT-597)
 
@@ -189,7 +190,7 @@ background, preserving visible options and configuration. Claude's
 initialization-only SDK catalogue is independent of the ACP execution toggle.
 See [Claude discovery and freshness](../gotchas/claude-catalogue-discovery.md).
 [src: file: frontend/src/components/settings/AgentsSection.tsx:197-198#useModelCatalogSnapshot]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:1292-1316#SearchableSelect]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:1306-1331#SearchableSelect]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:95-145#catalogModelOptions]
 [src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:32-74#useModelCatalogSnapshot]
 [src: file: backend/src/core/model_catalog/mod.rs:363-373#discover_inner]
@@ -226,6 +227,6 @@ only on an actual target/tier change, distinguishes an absent connection from
 explicit null, and preserves historical message models. Isolated API tests
 cover this path, not provider inference or a new browser qualification.
 [src: file: frontend/src/lib/agentSelection.ts:3-16#agentSettingsForSelection]
-[src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1361-1368#currentConnectionId]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:1169-1174#agentSettingsForSelection]
-[src: file: backend/tests/discussion_target_model.rs:99-211#changing_agent_clears_the_previous_explicit_model]
+[src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1363-1371#currentConnectionId]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1157-1174#agentSettingsForSelection]
+[src: file: backend/tests/discussion_target_model.rs:98-219#changing_agent_clears_the_previous_explicit_model]
