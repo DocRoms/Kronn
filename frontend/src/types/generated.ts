@@ -7929,7 +7929,14 @@ export type ReviewDodVerification = { dod_id: string, met: boolean, evidence: st
  * principal live check made after integration: approve integrates with it
  * pending and the task closes once it is ticked with evidence.
  */
-verification?: PlanningDodVerification | null, };
+verification?: PlanningDodVerification | null,
+/**
+ * KT-1291 — the task (`KT-1290`) that now holds this requirement, with
+ * `met: false`: approve integrates without the item, which is detached
+ * from this task and named in an event. Accepted only when that task
+ * exists, is open and holds the requirement.
+ */
+carried_to?: string | null, };
 
 /**
  * A structured review finding (ADR §5). `issue` is required; `path` / `line`

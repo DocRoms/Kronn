@@ -15,14 +15,16 @@ separate shell, preserving its production return value and formatting. Three
 harness regressions exercise incorrect success, failure, and output assertions;
 their final checks use shell status directly, so the same collision cannot hide
 those failures. All three failed before the helper correction.
-[src: file: tests/bats/ui.bats:10-26]
+[src: file: tests/bats/ui.bats:15-31]
 
 Do not use Bats' `output` variable to retain a fixture path across `run` calls:
 each call replaces it with captured stdout. Do not convert arbitrary command
 failure into an "unavailable dependency" skip; check the dependency explicitly,
 then require the command to succeed. The secret-substitution regressions retain
 literal HOME/PATH placeholders without changing those process variables.
-[src: file: tests/bats/bugfixes.bats:182-256]
+[src: file: tests/bats/ui.bats:112-120]
+[src: file: tests/bats/bugfixes.bats:157-203]
+[src: file: tests/bats/bugfixes.bats:205-258]
 
 The effective suite also exposed stale fixed-version input, an empty explicit
 OS argument falling back to the host, an omitted MCP-template status, and an
@@ -30,6 +32,6 @@ array join using only the first character of a multi-character IFS separator.
 The banner now gets a controlled VERSION fixture; the CLI corrections preserve
 omitted-argument host detection, configured MCP precedence, and the full middle
 dot separator. These are bounded corrections, not relaxed assertions.
-[src: file: tests/bats/ui.bats:107-115]
-[src: file: lib/ui.sh:326-328]
+[src: file: tests/bats/ui.bats:112-120]
+[src: file: lib/ui.sh:326-328#is_macos_host]
 [src: file: lib/repos.sh:53-71]

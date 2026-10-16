@@ -5934,6 +5934,7 @@ fn requested_changes_publish_a_steering_card_beside_the_findings() {
             escalation: None,
             reactivation: None,
             native_dispatch: None,
+            carried_dod: &[],
             actor: &backend_actor(),
         },
     )
@@ -5998,6 +5999,7 @@ fn requested_changes_publish_a_steering_card_beside_the_findings() {
             escalation: None,
             reactivation: None,
             native_dispatch: None,
+            carried_dod: &[],
             actor: &backend_actor(),
         },
     );

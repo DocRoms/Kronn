@@ -21,7 +21,7 @@ use the same guard. A card decision keeps its guard inside the database worker
 that applies the resulting filesystem changes.
 [src: file: backend/src/api/audit/briefing.rs:46-81#set_briefing]
 [src: file: backend/src/api/audit/briefing.rs:146-189#complete_reviewed_briefing]
-[src: file: backend/src/api/audit/briefing.rs:740-783#save_briefing_answers]
+[src: file: backend/src/api/audit/briefing.rs:723-770#save_briefing_answers]
 [src: file: backend/src/api/discussion_questions.rs:14-64#dispute_lease]
 [src: file: backend/src/api/discussion_questions.rs:201-239#answer]
 
@@ -41,7 +41,9 @@ registered token. A dispatch already stopped by a writer cannot start afterward.
 Human audit validation is deliberately different: it takes the lease first but
 checks its completion gates before stopping validation agents. An unfinished
 validator remains active and the validation request fails.
-[src: file: backend/src/api/audit/validate.rs:313-542#validate_audit]
+[src: file: backend/src/api/audit/validate.rs:313-348#validate_audit]
+[src: file: backend/src/api/audit/validate.rs:523-527#validation_agent_active]
+[src: file: backend/src/api/audit/validate.rs:597-598#stop_validation_agents]
 
 Accepted template commits must be integrated into the current checkout before
 Full, Partial, or revalidation launches. The backend checks the merge branch
@@ -49,13 +51,19 @@ before launch and again while holding the lease. The UI also holds launches for
 this state, including already audited projects; the optional-offer bypass cannot
 skip accepted commits pending integration.
 [src: file: backend/src/api/projects/template_merge.rs:324-330#audit_launch_refusal]
-[src: file: backend/src/api/audit/full.rs:299-432#audit_launch_refusal]
-[src: file: backend/src/api/audit/drift.rs:260-560#audit_launch_refusal]
-[src: file: backend/src/api/audit/revalidate.rs:513-593#audit_launch_refusal]
+[src: file: backend/src/api/audit/full.rs:299-301#audit_launch_refusal]
+[src: file: backend/src/api/audit/full.rs:409-430#audit_launch_refusal]
+[src: file: backend/src/api/audit/drift.rs:284-286#audit_launch_refusal]
+[src: file: backend/src/api/audit/drift.rs:523-549#audit_launch_refusal]
+[src: file: backend/src/api/audit/revalidate.rs:570-572#audit_launch_refusal]
+[src: file: backend/src/api/audit/revalidate.rs:627-637#audit_launch_refusal]
 [src: file: frontend/src/hooks/useTemplateMergeOffer.ts:28-93#useTemplateMergeOffer]
 
 The regression suite exercises real HTTP refusals, cancellation before mutation,
 late validation admission, pending integration for all three launch routes, and a
 cancelled HTTP waiter whose blocking worker still owns the lease.
-[src: file: backend/src/api/audit/docs_writer_tests.rs:1-204]
+[src: file: backend/src/api/audit/docs_writer_tests.rs:32-74#docs_writers_refuse_a_held_lease_without_changing_files_or_stopping_validation]
+[src: file: backend/src/api/audit/docs_writer_tests.rs:143-172#docs_writer_stops_validation_before_mutation_and_releases_its_lease]
+[src: file: backend/src/api/audit/docs_writer_tests.rs:174-215#docs_writer_late_validation_admission_checks_the_lease_and_cancelled_job]
+[src: file: backend/src/api/audit/docs_writer_tests.rs:76-141#docs_writer_pending_template_integration_refuses_all_audit_launches]
 [src: file: backend/src/api/audit/docs_write.rs:99-151#docs_writer_lease_survives_http_cancellation_until_the_write_finishes]

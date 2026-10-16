@@ -1570,7 +1570,11 @@ pub fn launch_single_task(
             None,
             Some(TaskExecutionStatus::Pending),
             actor,
-            serde_json::json!({ "task_id": input.task_id, "kind": "single_task" }),
+            serde_json::json!({
+                "task_id": input.task_id,
+                "kind": "single_task",
+                "worker_dod": launch_dod_snapshot(conn, input)?,
+            }),
         )?;
 
         let execution = get_task_execution(conn, &id)?
@@ -1581,6 +1585,67 @@ pub fn launch_single_task(
             deduplicated: false,
         })
     })
+}
+
+/// KT-1291 — the `{id, sentence}` of every DoD item the execution is launched
+/// against, recorded in its `created` event: the ids alone cannot say WHAT a
+/// requirement was once the principal removes it from the task.
+fn launch_dod_snapshot(
+    conn: &Connection,
+    input: &LaunchSingleTaskInput,
+) -> Result<serde_json::Value> {
+    let Some(ids) = input.worker_dod_ids.as_ref() else {
+        return Ok(serde_json::Value::Array(Vec::new()));
+    };
+    let mut statement = conn.prepare(
+        "SELECT id, sentence FROM planning_task_dod_items
+          WHERE task_id = ?1 ORDER BY position, id",
+    )?;
+    let rows = statement
+        .query_map(params![input.task_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(serde_json::Value::Array(
+        rows.into_iter()
+            .filter(|(id, _)| ids.contains(id))
+            .map(|(id, sentence)| serde_json::json!({ "id": id, "sentence": sentence }))
+            .collect(),
+    ))
+}
+
+/// KT-1291 — the sentence the execution was launched with for DoD item
+/// `dod_id`; `None` for an execution launched before the snapshot recorded
+/// sentences.
+pub fn execution_dod_sentence(
+    conn: &Connection,
+    exec_id: &str,
+    dod_id: &str,
+) -> Result<Option<String>> {
+    let payloads = conn
+        .prepare(
+            "SELECT changes_json FROM task_execution_events
+              WHERE task_execution_id = ?1 AND action = 'created'
+              ORDER BY created_at ASC, rowid ASC",
+        )?
+        .query_map(params![exec_id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for payload in payloads {
+        let Ok(changes) = serde_json::from_str::<serde_json::Value>(&payload) else {
+            continue;
+        };
+        let found = changes
+            .get("worker_dod")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .find(|item| item.get("id").and_then(serde_json::Value::as_str) == Some(dod_id))
+            .and_then(|item| item.get("sentence").and_then(serde_json::Value::as_str));
+        if let Some(sentence) = found {
+            return Ok(Some(sentence.to_string()));
+        }
+    }
+    Ok(None)
 }
 
 /// Atomically add one ordered, policy-compliant task to an existing campaign.
@@ -1699,6 +1764,7 @@ pub fn launch_task_in_run(
                 "kind": "campaign",
                 "worker_model": input.worker_model,
                 "worker_profile_id": input.worker_profile_id,
+                "worker_dod": launch_dod_snapshot(conn, input)?,
             }),
         )?;
         let execution = get_task_execution(conn, &id)?
@@ -3305,11 +3371,18 @@ pub struct ReviewCheckpoint<'a> {
     /// dispatch triggered by the findings message. Mutually exclusive with
     /// `reactivation` (which is the joined-CLI handshake).
     pub native_dispatch: Option<NativeReworkDispatch<'a>>,
+    /// approve only (KT-1291): `(dod_id, carried_to, evidence)` of the DoD items the
+    /// principal carries to another ticket. They are detached INSIDE the checkpoint
+    /// transaction, so a refused or failed checkpoint detaches nothing.
+    pub carried_dod: &'a [(String, String, String)],
     pub actor: &'a OrchestrationActor,
 }
 
 /// The verdict of the review checkpoint.
 pub enum ReviewCheckpointOutcome {
+    /// approve refused (KT-1291): a carrier of a carried DoD item no longer qualifies.
+    /// Nothing was persisted — no review, no detached item.
+    DodCarryRefused(String),
     /// approve committed: the ReviewDecision is persisted and the execution is `Approved`.
     Approved,
     /// request_changes committed: decision persisted, `review_rounds` bumped, findings posted
@@ -3493,6 +3566,25 @@ pub fn commit_review_checkpoint(
 
     match input.verdict {
         ReviewVerdict::Approve => {
+            // (1b) KT-1291 — carried DoD items leave the task in this same
+            // transaction: a refusal, a lost CAS or a failed write below rolls
+            // them back with the review row.
+            if !input.carried_dod.is_empty() {
+                let task_id: String = tx.query_row(
+                    "SELECT task_id FROM task_executions WHERE id = ?1",
+                    params![input.exec_id],
+                    |r| r.get(0),
+                )?;
+                if let Some(detail) = crate::db::planning::carry_dod_items(
+                    &tx,
+                    &task_id,
+                    input.exec_id,
+                    input.carried_dod,
+                    input.actor,
+                )? {
+                    return Ok(ReviewCheckpointOutcome::DodCarryRefused(detail));
+                }
+            }
             // (2) AwaitingReview → Approved (guarded CAS + journal; the CAS is the sole
             // anti-race authority). Approved is NOT terminal: KT-320 resumes it to
             // Integrating.

@@ -21,8 +21,10 @@ on the transport result without fabricating fields in the API's data. The normal
 extraction rules still apply if the author explicitly configured `api_extract`.
 A JSON body containing `null` remains an ordinary JSON response; whitespace or
 other nonempty invalid JSON still produces a parsing failure.
+[src: file: backend/src/workflows/api_call_executor.rs:467-479#summary]
 [src: file: backend/src/workflows/api_call_executor.rs:497-501#empty_http_signal]
-[src: file: backend/src/workflows/api_call_executor.rs:4698#empty_success_is_null_with_visible_http_status_and_one_request]
+[src: file: backend/src/workflows/api_call_executor.rs:4697-4752#empty_success_is_null_with_visible_http_status_and_one_request]
+[src: file: backend/src/workflows/api_call_executor.rs:4852-4883#nonempty_json_payloads_keep_their_original_meaning]
 
 An empty response ends pagination. If it is the first page, the result is null;
 if earlier pages returned data, those values are retained. Links on the empty
@@ -31,7 +33,8 @@ are not automatically resent. Tests assert the request count for writes,
 nonempty parse failures and pagination ending with an empty response.
 [src: file: backend/src/workflows/api_call_executor.rs:1974-1982#empty_status]
 [src: file: backend/src/workflows/api_call_executor.rs:2221-2225#max_retries]
-[src: file: backend/src/workflows/api_call_executor.rs:4755-4819#empty_page_ends_pagination_without_discarding_prior_data]
+[src: file: backend/src/workflows/api_call_executor.rs:4754-4816#empty_page_ends_pagination_without_discarding_prior_data]
+[src: file: backend/src/workflows/api_call_executor.rs:4818-4850#nonempty_invalid_json_still_fails_without_resending_a_write]
 
 ## Default headers declared on a plugin
 
@@ -60,8 +63,9 @@ unique name, never a header Kronn owns (`Authorization`, `Host`,
 `${ENV.KEY}` declared as a field, and no literal value for a name that looks
 like a credential, so a plugin export never carries a secret. Agents only see
 the header names in their API context, never the values.
-[src: file: backend/src/api/mcps.rs:1192-1250#validate_default_headers]
-[src: file: backend/src/core/mcp_scanner.rs:4123-4133#default_headers]
+[src: file: backend/src/api/mcps.rs:1096-1101#validate_custom_payload]
+[src: file: backend/src/api/mcps.rs:1192-1256#validate_default_headers]
+[src: file: backend/src/core/mcp_scanner.rs:4125-4136#default_headers]
 
 ## Test endpoint of a plugin
 
@@ -116,6 +120,7 @@ Omitting the field (or `{"type": "Json"}`) keeps the JSON behaviour unchanged.
 [src: file: backend/src/workflows/api_call_binary.rs:16-18#DEFAULT_BINARY_MAX_BYTES]
 [src: file: backend/src/workflows/api_call_binary.rs:51-97#resolve_binary_policy]
 [src: file: backend/src/workflows/api_call_binary.rs:101-150#read_binary_body]
+[src: file: backend/src/workflows/api_call_binary.rs:152-157#binary_summary]
 [src: file: backend/src/api/workflows.rs:1208-1209#resolve_binary_policy]
 
 `base64` and `data_uri` carry the same bytes. Use `api_extract` to keep the one
@@ -135,8 +140,8 @@ used directly. Fetch the thumbnails through the broker and publish data URIs:
 
 The whole path, with a mock server that requires the credential, is covered by
 `batch_thumbnails_reach_a_page_dataset_as_data_uris_indexed_by_attachment`.
-[src: file: backend/src/workflows/api_call_binary.rs:663-666#batch_thumbnails_reach_a_page_dataset_as_data_uris_indexed_by_attachment]
-[src: file: frontend/src/lib/live-page-sandbox.ts:5-7#LIVE_PAGE_CSP]
+[src: file: backend/src/workflows/api_call_binary.rs:663-761#batch_thumbnails_reach_a_page_dataset_as_data_uris_indexed_by_attachment]
+[src: file: frontend/src/lib/live-page-sandbox.ts:7-18#LIVE_PAGE_CSP]
 
 ## Status (2026-04-26)
 
@@ -275,15 +280,15 @@ in one database transaction. A referenced API is retained, with a `conflict`
 error naming each workflow and step to edit. This covers direct `quick_api_id`
 fields, `CollectApiData` sources and `on_failure` steps; several source aliases
 in one step count once in the deletion impact preview. No workflow is rewritten
-automatically. [src: file: backend/src/db/quick_apis.rs:236-281#delete_quick_api]
-[src: file: backend/src/api/quick_apis.rs:258-273#QuickApiInUse]
+automatically. [src: file: backend/src/db/quick_apis.rs:236-304#delete_quick_api]
+[src: file: backend/src/api/quick_apis.rs:257-274#QuickApiInUse]
 
 The workflow wizard flags references already missing from the saved catalogue,
 including old deletions or imported workflows. It waits for a successful
 catalogue read and clears the warning when the reference is replaced or removed.
 The warning identifies the step and missing id and remains visible across wizard
-stages. [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:1358-1370#missingQuickApis]
-[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:1435-1442#missingQuickApiReference]
+stages. [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:1358-1371#missingQuickApis]
+[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:1429-1440#missingQuickApis]
 
 ## Run-anchored time templates
 

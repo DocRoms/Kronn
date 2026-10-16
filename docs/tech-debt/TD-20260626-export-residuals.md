@@ -6,7 +6,8 @@
   workflows, MCP data, skills, directives, profiles, contacts, Quick
   Prompts/APIs/Execs, learnings, Quick Prompt versions and learning
   rejections, but no uploaded context files: their rows and on-disk blobs
-  are missing from the ZIP. `[src: file: backend/src/models/db.rs:84-128]`
+  are missing from the ZIP. `[src: file: backend/src/models/db.rs:84-138#DbExport]`
+  `[src: file: backend/src/api/setup.rs:2098-2133#build_export_zip]`
 - **Why we can't fix now (constraint)**: blobs can be large and live outside
   the database; the archive format and the import limits must account for
   them.
