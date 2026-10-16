@@ -4,11 +4,11 @@ Status: **implemented for 0.9.1** (2026-07-25).
 
 The domain schema, compact HTTP/MCP contract, discussion panel, global backlog,
 human-gated proposal cards and delta-only prompt notifications are implemented.
-`[src: file: backend/src/db/sql/081_planning_tasks.sql:1-99]`
-`[src: file: backend/src/api/planning.rs:1-156]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:169-365]`
-`[src: file: frontend/src/pages/PlanningPage.tsx:1-654]`
-`[src: file: frontend/src/components/DiscussionPlanPanel.tsx:1-304]`
+`[src: file: backend/src/db/sql/081_planning_tasks.sql:1-99#planning_tasks]`
+`[src: file: backend/src/api/planning.rs:223-264#get_discussion_plan]` `[src: file: backend/src/api/planning.rs:311-358#decide_proposal_item]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:326-650#plan_get]`
+`[src: file: frontend/src/pages/PlanningPage.tsx:175-195#withDiscussion]`
+`[src: file: frontend/src/components/DiscussionPlanPanel.tsx:786-998#plan-panel-list]` `[src: file: backend/src/api/discussions/streaming.rs:3710-3741#planning_change_count]`
 
 This document is the implementation brief for a future Planning workspace and
 the smaller discussion-plan panel that exposes the same task data inside a
@@ -115,9 +115,9 @@ The selected view is saved per discussion in session storage. A small spinner
 on in-progress rows reflects Planning status only, not a worker heartbeat; it
 stops animating when reduced motion is requested. Background plan refreshes
 update membership and indicators without resetting the selected view.
-`[src: file: frontend/src/components/DiscussionPlanPanel.tsx:383-423]`
-`[src: file: frontend/src/lib/orch-panel-state.ts:47-69]`
-`[src: file: frontend/src/components/DiscussionPlanPanel.css:163-182]`
+`[src: file: frontend/src/components/DiscussionPlanPanel.tsx:839-869#plan-view-switch]` `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:238-247#current]` `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:404-437#filteredAllRelations]`
+`[src: file: frontend/src/lib/orch-panel-state.ts:47-69#readPlanOrchestrationState]` `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:131-136#writePlanOrchestrationState]`
+`[src: file: frontend/src/components/DiscussionPlanPanel.tsx:547-551#renderProgress]` `[src: file: frontend/src/components/DiscussionPlanPanel.css:161-178#plan-task-progress]` `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:161-172#applyPlan]`
 
 Agents may instead emit structured proposals that the UI renders as existing
 action-like cards. Initial actions are:
@@ -170,8 +170,8 @@ the exact discussion id for MCP clients, so an explicit `plan_get` or
 Planning state changes, agents also receive a compact change notification and
 then pull only the required details. This prevents unrelated agents from paying
 for unused task content while ensuring “create the discussion plan” works on a
-new room. `[src: file: backend/src/api/disc_prompts.rs:471-492]`
-`[src: file: backend/src/api/discussions/streaming.rs:3311-3341]`
+new room. `[src: file: backend/src/api/disc_prompts.rs:491-538#planning_notice]`
+`[src: file: backend/src/api/discussions/streaming.rs:3710-3741#planning_change_count]`
 
 The intended read surface is:
 
@@ -184,10 +184,10 @@ Writes are separate tools with narrow schemas. Lists are compact by default and
 full content is returned only for an explicitly requested task.
 `task_update_dod(task_id, dod_id, completed)` is the preferred narrow write for
 checkbox progress. Delta timestamps are compared numerically as RFC3339
-instants, independent of `Z`/offset spelling and fractional precision. Agents are
+instants, independent of `Z`/offset spelling and fractional precision. `[src: file: backend/src/db/planning.rs:2422-2470#task_changes]` Agents are
 taught this contract in the same prompt/instruction layer that advertises the
 discussion-history tools `disc_meta`, `disc_get_message` and `disc_summarize`:
-the delayed history notice also lists the Planning reads and writes. `[src: file: backend/src/api/disc_prompts.rs:549-573#introspection_notice]`
+the delayed history notice also lists the Planning reads and says how to write (a direct `task_create`, or a `kronn-plan-action` proposal). `[src: file: backend/src/api/disc_prompts.rs:569-599#introspection_notice]`
 
 Runtime parity is capability-based:
 
@@ -201,9 +201,9 @@ Runtime parity is capability-based:
 - Vibe runs without MCP to avoid its stdio hang. It therefore emits a durable
   `kronn-plan-action` proposal for human validation instead of pretending that
   a direct task write succeeded.
-  `[src: file: backend/src/api/agent_tools.rs:2041-2121]`
-  `[src: file: backend/src/api/disc_prompts.rs:431-443]`
-  `[src: file: backend/src/api/disc_prompts.rs:282-287]`
+  `[src: file: backend/src/api/agent_tools.rs:2065-2272#plan_get]` `[src: file: backend/src/api/agent_tools.rs:2117-2148#task_create]` `[src: file: backend/src/api/agent_tools.rs:3746-3753#actor]`
+  `[src: file: backend/src/api/agent_tools.rs:4561-4588#unwrap_api_compact_task]`
+  `[src: file: backend/src/api/disc_prompts.rs:278-287#agent_has_native_planning]`
 
 The first release is local-only. Actor/audit metadata must still distinguish
 the human from an agent and record which agent changed a task. Assignment fields
@@ -247,8 +247,8 @@ assignees. The role is optional (`owner` | `reviewer`).
 6. **Project workspace — implemented** — project cards expose their linked
    tasks, quick creation/completion and direct navigation to each task's global
    Planning detail without duplicating task state.
-   `[src: file: frontend/src/components/ProjectTasksPanel.tsx:1-203]`
-   `[src: file: frontend/src/routes/ProjectsRoute.tsx:42-48]`
+   `[src: file: frontend/src/components/ProjectCard.tsx:2359-2370#ProjectTasksPanel]` `[src: file: frontend/src/components/ProjectTasksPanel.tsx:80-113#createTask]`
+   `[src: file: frontend/src/components/ProjectTasksPanel.tsx:152-161#onOpenPlanning]` `[src: file: frontend/src/routes/ProjectsRoute.tsx:51-58#toPlanningTask]`
 7. **Deferred delegation** — task-to-discussion briefing and agent launch only
    after the task workflow is proven manually.
 

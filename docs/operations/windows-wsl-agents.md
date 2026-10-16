@@ -4,7 +4,7 @@ Kronn running as a Windows program (desktop app or native backend) can start an
 agent CLI that exists only inside WSL. `find_binary` finds it through
 `wsl.exe` (`via_wsl`) and the launch becomes
 `wsl.exe --cd <linux dir> -e <agent> <args…>`.
-[src: file: backend/src/agents/mod.rs:1210-1232#via_wsl]
+[src: file: backend/src/agents/mod.rs:1224-1290#via_wsl]
 [src: file: backend/src/agents/wsl.rs:34-52#wrap_invocation]
 
 Kronn running *inside* WSL (Linux build) is not affected: nothing crosses the
@@ -67,6 +67,7 @@ spawns as a Windows program, and their ACP messages carry Windows paths
 inside WSL, the launch is refused with a message naming the binary: install it
 on Windows, or run Kronn inside WSL.
 [src: file: backend/src/acp.rs:797-807#native_acp_wsl_only_refusal]
+[src: file: backend/src/agents/wsl.rs:338-344#native_acp_wsl_refusal]
 
 ## Limits
 
