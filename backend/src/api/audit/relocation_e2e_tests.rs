@@ -1310,3 +1310,86 @@ async fn a_default_docs_root_audit_is_byte_identical_to_its_golden() {
         );
     }
 }
+
+/// Move every occurrence of `from` (both written forms) to `to` in the text
+/// files of `project`, as if the same audit had run on another day.
+fn on_another_day(text: &str, from: chrono::NaiveDate, to: chrono::NaiveDate) -> String {
+    text.replace(
+        &from.format("%Y-%m-%d").to_string(),
+        &to.format("%Y-%m-%d").to_string(),
+    )
+    .replace(
+        &from.format("%Y%m%d").to_string(),
+        &to.format("%Y%m%d").to_string(),
+    )
+}
+
+fn replay_on_another_day(project: &Path, from: chrono::NaiveDate, to: chrono::NaiveDate) {
+    for entry in walkdir::WalkDir::new(project)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_type().is_file() && !e.path().components().any(|c| c.as_os_str() == ".git")
+        })
+    {
+        if let Ok(text) = std::fs::read_to_string(entry.path()) {
+            let moved = on_another_day(&text, from, to);
+            if moved != text {
+                std::fs::write(entry.path(), moved).unwrap();
+            }
+        }
+    }
+}
+
+/// Raw sha256 of every validated original kept by the audit.
+fn validated_original_digests(project: &Path) -> BTreeSet<String> {
+    walkdir::WalkDir::new(project.join(".kronn/audit/validated-originals"))
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .map(|e| crate::core::docs_merge::sha256_hex(&std::fs::read(e.path()).unwrap()))
+        .collect()
+}
+
+/// The golden is the same whichever day the audit runs (KT-1317): the same
+/// run replayed 40 days earlier, across a month boundary, snapshots byte for
+/// byte alike, validated-original names included, while the raw bytes of
+/// those originals do change (so the check is not vacuous).
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn the_default_root_snapshot_does_not_depend_on_the_day_of_the_audit() {
+    let h = harness().await;
+    let mut prompts = audited(&h, &DocsRoot::default_root()).await;
+    let project = h.project.path();
+    let before = default_root_snapshot(project, &prompts);
+    let raw_before = validated_original_digests(project);
+    assert!(
+        !raw_before.is_empty(),
+        "the audit kept no validated original"
+    );
+
+    let today = chrono::Utc::now().date_naive();
+    let earlier = today - chrono::Duration::days(40);
+    replay_on_another_day(project, today, earlier);
+    for prompt in &mut prompts {
+        *prompt = on_another_day(prompt, today, earlier);
+    }
+    assert_ne!(
+        raw_before,
+        validated_original_digests(project),
+        "the replay must change the originals' bytes"
+    );
+
+    let after = default_root_snapshot(project, &prompts);
+    assert_eq!(
+        before, after,
+        "the snapshot depends on the day of the audit"
+    );
+    assert!(
+        after
+            .lines()
+            .any(|l| l.contains(".kronn/audit/validated-originals/")),
+        "{after}"
+    );
+}
