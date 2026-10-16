@@ -9,8 +9,8 @@ following that order could wait indefinitely before reaching the work clause.
 It also requested a substantive first reply before reading the shared plan.
 This is an instruction-order defect, not proof that a particular CLI host
 caused a reported stop or imposed a specific timeout.
-[src: file: backend/scripts/disc-introspection-mcp.py:7469-7477#call_disc_wait_for_peer]
-[src: file: backend/scripts/test_disc_introspection_mcp.py:12004-12023#test_default_wait_is_unbounded_and_does_not_return_on_inner_quiet_polls]
+[src: file: backend/scripts/disc-introspection-mcp.py:7477-7485#call_disc_wait_for_peer]
+[src: file: backend/scripts/test_disc_introspection_mcp.py:12084-12103#test_default_wait_is_unbounded_and_does_not_return_on_inner_quiet_polls]
 [src: file: backend/src/api/disc_invite.rs:7472-7481#join_protocol_reads_plan_before_substantive_first_reply]
 
 The join protocol now orders introduction, plan read, addressed initial turns,
@@ -23,7 +23,7 @@ routing, cancellation and durable-cursor functions are unchanged.
 [src: file: backend/src/api/disc_invite.rs:676-682#max_total_secs]
 [src: file: backend/src/api/disc_invite.rs:691-696#disc_wait_for_peer]
 [src: file: backend/src/api/disc_invite.rs:7483-7492#join_protocol_does_not_put_unbounded_wait_before_ready_work]
-[src: file: backend/scripts/disc-introspection-mcp.py:9877-9894#ROOM_WORK_PROTOCOL]
+[src: file: backend/scripts/disc-introspection-mcp.py:9916-9933#ROOM_WORK_PROTOCOL]
 
 Each bounded step has a room announcement and an evidence/limits update.
 Delegated milestones belong in the parent room too. An exact CLI target in
@@ -39,19 +39,19 @@ can interrupt the wait normally; handle the request and resume the work loop.
 Neither condition is a command to leave. Kronn does not guarantee that every
 host will follow instructions or hide all background notifications.
 [src: file: backend/src/api/disc_invite.rs:697-702#CAVEAT]
-[src: file: backend/scripts/disc-introspection-mcp.py:7469-7477#call_disc_wait_for_peer]
-[src: file: backend/scripts/test_disc_introspection_mcp.py:12025-12032#test_wait_description_prevents_stacked_host_background_tasks]
+[src: file: backend/scripts/disc-introspection-mcp.py:7477-7485#call_disc_wait_for_peer]
+[src: file: backend/scripts/test_disc_introspection_mcp.py:12105-12112#test_wait_description_prevents_stacked_host_background_tasks]
 
 The Python catalogue distinguishes active work from idle listening too. One
 shared `ROOM_WORK_PROTOCOL` supplies both join/wait manuals and the initialize
 orientation, including plan-first ordering, parent-room milestones and exact
 CLI routing. It no longer promises that cursor reads can never be replayed or
 that quiet returns cost nothing. The bridge's runtime functions did not change.
-[src: file: backend/scripts/disc-introspection-mcp.py:9877-9894#ROOM_WORK_PROTOCOL]
-[src: file: backend/scripts/disc-introspection-mcp.py:10163-10164#ROOM_WORK_PROTOCOL]
-[src: file: backend/scripts/disc-introspection-mcp.py:10479-10483#ROOM_WORK_PROTOCOL]
-[src: file: backend/scripts/disc-introspection-mcp.py:11853#ROOM_WORK_PROTOCOL]
-[src: file: backend/scripts/test_disc_introspection_mcp.py:11859-11909#JoinedRoomWorkProtocolTests]
+[src: file: backend/scripts/disc-introspection-mcp.py:9916-9933#ROOM_WORK_PROTOCOL]
+[src: file: backend/scripts/disc-introspection-mcp.py:10202-10203#ROOM_WORK_PROTOCOL]
+[src: file: backend/scripts/disc-introspection-mcp.py:10518-10522#ROOM_WORK_PROTOCOL]
+[src: file: backend/scripts/disc-introspection-mcp.py:11907#ROOM_WORK_PROTOCOL]
+[src: file: backend/scripts/test_disc_introspection_mcp.py:11939-11989#JoinedRoomWorkProtocolTests]
 
 ## Deaf windows in the bridge wait (KT-703)
 
@@ -65,7 +65,7 @@ the session as dormant but present. The bridge now chains polls without a pause,
 with a 1-second floor if the server answers early. The server's pacing values
 and the `next_poll_at` presence projection are unchanged.
 [src: file: backend/scripts/disc-introspection-mcp.py:7559-7580#_WAIT_MIN_QUIET_POLL_SECS]
-[src: file: backend/scripts/test_disc_introspection_mcp.py:12150-12164#test_quiet_polls_are_chained_without_a_listening_gap]
+[src: file: backend/scripts/test_disc_introspection_mcp.py:12230-12244#test_quiet_polls_are_chained_without_a_listening_gap]
 [src: file: backend/src/api/disc_introspection.rs:175-185]
 
 The `session_budget` block on a wake said "rotate this session" to any long
@@ -78,7 +78,7 @@ These fixes do not cover host behaviour. A host can still move a long wait to
 the background. Any other Kronn call ends the wait (`wait_preempted`), and an
 interactive turn that ends while the wait runs in the background is outside
 Kronn's control. A real Claude Code run is still needed to check that case.
-[src: file: backend/scripts/disc-introspection-mcp.py:12010-12018#_with_wait_preempted]
+[src: file: backend/scripts/disc-introspection-mcp.py:12064-12072#_with_wait_preempted]
 
 ## Qualification scope
 
@@ -91,7 +91,7 @@ at 05:53:21 UTC: KT-629 owns instruction text and its contract regressions;
 KT-619 owns credential/grant publication and preserves the isolated test-loader
 harness. These results do not qualify KT-619's authority changes.
 [src: file: backend/src/api/disc_invite.rs:7472-7515#join_protocol_reads_plan_before_substantive_first_reply]
-[src: file: backend/scripts/test_disc_introspection_mcp.py:11912-12040#WaitOutsideLlmLoopTests]
+[src: file: backend/scripts/test_disc_introspection_mcp.py:11992-12120#WaitOutsideLlmLoopTests]
 
 The unfiltered offline backend suite completed successfully (run 35315,
 exit 0). Its final captured output was truncated, so this checkpoint does not
@@ -109,7 +109,7 @@ results; library time was 386.62 seconds and cold API time 153.79 seconds.
 Strict all-target Clippy passed in 1.69 seconds. Backend tree:
 `6040c89897a4913b9fb91a6a90bc62cba0df706f`; frontend tree remains
 `f8a2df947aa4ba9d8899caf8e121c1ee49e106bc`, with no new frontend qualification.
-[src: file: backend/scripts/test_disc_introspection_mcp.py:11859-11909#JoinedRoomWorkProtocolTests]
+[src: file: backend/scripts/test_disc_introspection_mcp.py:11939-11989#JoinedRoomWorkProtocolTests]
 
 The MCP catalogue remains at 110 tools and shrinks to 86,824 bytes; its ceiling
 is ratcheted down from 86,900, without a waiver. Repository context remains

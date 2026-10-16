@@ -77,7 +77,7 @@ Kronn reads the free space of the volume holding the worktrees and `target/` (O(
    gave back, **before creating anything**. A worker launch parks its execution `Blocked` (resumable once
    space is free) and posts a system message in the **principal room**.
 
-[src: file: backend/src/api/disk.rs:764-830#ensure_launch_headroom]
+[src: file: backend/src/api/disk.rs:770-836#ensure_launch_headroom]
 [src: file: backend/src/api/orchestration.rs:7697-7720#post_disk_pressure_alert]
 
 Until a config is published at boot the guard is off (`0`), so a process that never loaded one — a unit
@@ -96,7 +96,7 @@ provisioning and builds; see [worktree-build-artifacts.md](worktree-build-artifa
   [src: file: backend/src/api/disk.rs:455-470#build_disk_report]
 - `POST /api/maintenance/disk/purge` — no `paths`: purge **orphans only**. With `paths`: delete exactly
   those entries, and only with `confirm: true`; each is re-judged at deletion time, so a report never
-  authorises a delete. [src: file: backend/src/api/disk.rs:891-903#run_purge]
+  authorises a delete. [src: file: backend/src/api/disk.rs:897-909#run_purge]
 - MCP tool **`disk_usage`** (`project_id`, `purge_orphans`) — the same report, bounded to the 25 largest
   entries; `purge_orphans: true` takes the default purge and nothing else. A named delete is deliberately
   a confirmed UI action. [src: file: backend/scripts/disc-introspection-mcp.py:7689-7720#call_disk_usage]
