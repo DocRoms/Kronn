@@ -79,6 +79,13 @@ pub struct AppConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(skip)]
     pub audit_reverify_cron: Option<String>,
+    /// KT-999 — give the audit steps that use it the briefing's « Existing
+    /// documentation » (reference docs are cited, obsolete ones become tech
+    /// debt). Off by default until a bench shows the gain; the env switch
+    /// `KRONN_EXP_BRIEFING_DOCS=1` turns it on for a run.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[ts(skip)]
+    pub audit_briefing_docs: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
