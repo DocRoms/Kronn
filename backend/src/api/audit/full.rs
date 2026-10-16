@@ -1628,7 +1628,9 @@ pub async fn full_audit(
                     };
                     let outcome = super::cross_audit::run_cross_step(
                         &runner, &project_path, agents,
-                        &super::finish_step_prompt(&full_prompt, None, step, analysis_step, &docs_root),
+                        // No step directive: it says "write the file", the opposite
+                        // of detection mode, which closes the prompt itself (KT-1278).
+                        &full_prompt,
                     ).await;
                     let briefing_warning = super::helpers::restore_step_briefing(&project_path, &validated_docs_snapshot).err();
                     let mut cross_unchanged = false;

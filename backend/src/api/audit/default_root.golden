@@ -18,7 +18,7 @@ f7922470284519c66aefd97b6719c34cc10bf31ddbe4e4be4ed3e61ffb44d31f  .claude/agents
 volatile  .gemini/settings.json
 volatile  .kiro/settings/mcp.json
 volatile  .kronn/audit/document-optimization.json
-volatile  .kronn/audit/validated-originals/e307d6d7528e5419051e685b2b9f9808ce9e59ddbaafa013aedb18423a7b37bd.bak
+volatile  .kronn/audit/validated-originals/ac2a7c5b22c111d5685e6973f695e9ca923e212b8edffde5828b0c874f3f723c.bak
 29e0381ab7727cabf4e2e376a13802181c29adbc2a9e24e369c486590545e4ee  .kronn/mcp-managed.json
 cc7671b8e29a1bc8b5075dfbdbc424054425a601849861698655aa49e36cea1e  .kronn/native-files.json
 volatile  .mcp.json
