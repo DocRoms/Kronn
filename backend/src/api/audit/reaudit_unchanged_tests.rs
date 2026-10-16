@@ -1493,6 +1493,9 @@ mod revalidate_e2e_tests;
 #[path = "relocation_e2e_tests.rs"]
 mod relocation_e2e_tests;
 
+#[path = "briefing_docs_e2e_tests.rs"]
+mod briefing_docs_e2e_tests;
+
 /// KT-1208 — a re-audit cannot undo a human TD decision, a sheet that leaves
 /// the active list closes its task, and a partial refresh says it is
 /// single-agent when the briefing asks for the cross-agent audit.

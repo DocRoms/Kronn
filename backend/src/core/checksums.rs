@@ -561,7 +561,7 @@ pub fn step_sources_fingerprint(project_path: &Path, patterns: &[&str]) -> Strin
         hasher.update(key.as_bytes());
         hasher.update([0]);
         hasher.update(hash.as_bytes());
-        hasher.update([b'\n']);
+        hasher.update(b"\n");
     }
     hasher
         .finalize()

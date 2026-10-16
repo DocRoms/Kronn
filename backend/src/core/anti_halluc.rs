@@ -1300,22 +1300,37 @@ pub(crate) fn file_citation_anchored(raw: &str) -> Option<FileCitation> {
 /// Path, line span and symbol anchor of a file citation.
 pub(crate) type FileCitation = (String, Option<(usize, usize)>, Option<String>);
 
-/// `(manager, package, checked date)` of a `deps:` marker. Package names may
-/// hold `/` and `@` (`@types/node`), so the manager ends at the first `/` and
-/// the date starts after the last `@`.
-pub(crate) fn dep_citation(raw: &str) -> Option<(String, String, String)> {
+/// `(manager/package, checked date)` of a `deps:` marker, the manager and the
+/// package left joined: the manager label may itself hold a `/` (`JS / TS`), so
+/// only the producer's snapshot can tell where one ends and the other starts.
+/// The date starts after the last `@`, since a package name may hold `@`
+/// (`@types/node`).
+pub(crate) fn dep_reference(raw: &str) -> Option<(String, String)> {
     let (kind, reference) = classify_source(raw);
     if kind != SourceKind::Deps {
         return None;
     }
     let reference = clean_reference(&reference);
     let (head, date) = reference.rsplit_once('@')?;
-    let (manager, package) = head.split_once('/')?;
-    let (manager, package, date) = (manager.trim(), package.trim(), date.trim());
-    if manager.is_empty() || package.is_empty() || date.is_empty() {
+    let (head, date) = (head.trim(), date.trim());
+    if head.is_empty() || date.is_empty() {
         return None;
     }
-    Some((manager.to_string(), package.to_string(), date.to_string()))
+    Some((head.to_string(), date.to_string()))
+}
+
+/// `(manager, package, checked date)` of a `deps:` marker, split at the first
+/// `/`. Right for a bare manager (`npm`, `cargo`) and enough to tell a
+/// well-formed marker from a partial one; a label holding a `/` is split
+/// wrongly, so a check against the watch uses [`dep_reference`].
+pub(crate) fn dep_citation(raw: &str) -> Option<(String, String, String)> {
+    let (head, date) = dep_reference(raw)?;
+    let (manager, package) = head.split_once('/')?;
+    let (manager, package) = (manager.trim(), package.trim());
+    if manager.is_empty() || package.is_empty() {
+        return None;
+    }
+    Some((manager.to_string(), package.to_string(), date))
 }
 
 /// If `s` starts (case-insensitively) with `keyword` AT A TOKEN BOUNDARY

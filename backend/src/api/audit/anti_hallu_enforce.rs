@@ -1118,6 +1118,41 @@ mod enforce_gate_tests {
         }
     }
 
+    /// KT-1295 — the bench row: the npm manager is labelled `JS / TS` by the
+    /// producer, and the citation it emits (a `/` in the label) passes the gate.
+    #[test]
+    fn deps_citations_with_the_real_js_ts_label_pass_the_gate() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let roots = [tmp.path()];
+        let mut snap = watch();
+        snap.checked_on = "2026-10-16".into();
+        snap.packages = ["argparse", "joi", "@types/node"]
+            .iter()
+            .map(|name| crate::core::version_sources::WatchedPackage {
+                manager: "JS / TS".into(),
+                manifest: "package.json".into(),
+                name: (*name).into(),
+                current: "1.0.0".into(),
+                latest: "2.0.0".into(),
+                major: true,
+                declared_only: false,
+            })
+            .collect();
+        let cited: String = snap
+            .packages
+            .iter()
+            .map(|p| format!("{} lags {}.\n", p.name, snap.citation(p)))
+            .collect();
+        assert!(cited.contains("[src: deps: JS / TS/argparse@2026-10-16]"));
+        assert!(lint_step_file_with_deps(&cited, &roots, Some(&snap)).is_clean());
+
+        let absent = "Vue lags [src: deps: JS / TS/vue@2026-10-16].";
+        assert_eq!(
+            lint_step_file_with_deps(absent, &roots, Some(&snap)).count(),
+            1
+        );
+    }
+
     /// KT-1000 — a `deps:` row the injected watch holds passes; one it does
     /// not hold (or with another date, or with no watch) fails the gate.
     #[test]

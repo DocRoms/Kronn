@@ -469,7 +469,7 @@ Branch `archive/feat-0.13.0-portable-prototype-20260830`.
   [src: file: frontend/src/lib/projectRepositoryResourcesTab.ts:17-23#rememberProjectRepositoryResourcesTab].
 - The Overview shows the linked MCP count and companion repositories, and owns
   the project deletion controls [src: file: frontend/src/components/ProjectCard.tsx:2204-2208#projMcps]
-  [src: file: frontend/src/components/ProjectCard.tsx:2252-2267#ProjectLinkedRepos]
+  [src: file: frontend/src/components/ProjectCard.tsx:2250-2265#ProjectLinkedRepos]
   [src: file: frontend/src/components/ProjectCard.tsx:2267-2315#handleDeleteProject].
 - **Automations and Artifacts pages**: grouped by project; everything not
   linked to a project goes into « Général ».

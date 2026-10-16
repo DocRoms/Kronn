@@ -113,19 +113,39 @@ pub(crate) const BRIEFING_PROMPT_MAX_CHARS: usize = 6_000;
 /// at [`BRIEFING_PROMPT_MAX_CHARS`] with an explicit truncation marker. The
 /// machine copy of the project answers is dropped: the readable facts above
 /// it say the same thing. The documentation section stays out (KT-999).
+#[cfg(test)]
 pub(crate) fn briefing_prompt_section(
     notes: &str,
     docs_root: &crate::core::docs_location::DocsRoot,
 ) -> String {
+    briefing_prompt_section_for(notes, docs_root, "", false)
+}
+
+/// [`briefing_prompt_section`] for one step: when `with_docs` is set and the
+/// step uses it, the documentation block follows the briefing, and the
+/// briefing text gives up the room it takes so the whole stays within
+/// [`BRIEFING_PROMPT_MAX_CHARS`].
+pub(crate) fn briefing_prompt_section_for(
+    notes: &str,
+    docs_root: &crate::core::docs_location::DocsRoot,
+    target_file: &str,
+    with_docs: bool,
+) -> String {
+    let docs_block = if with_docs {
+        super::briefing_docs::prompt_block(target_file, notes, docs_root)
+    } else {
+        String::new()
+    };
+    let budget = BRIEFING_PROMPT_MAX_CHARS.saturating_sub(docs_block.chars().count());
     let notes = super::briefing_docs::strip_section(notes);
     let notes = super::briefing_rules::strip_section(&notes);
     let notes = super::project_doc::strip_answers_line(&notes);
     let notes = notes.trim_end();
     let total = notes.chars().count();
-    let body = if total <= BRIEFING_PROMPT_MAX_CHARS {
+    let body = if total <= budget {
         notes.to_string()
     } else {
-        let mut cut: String = notes.chars().take(BRIEFING_PROMPT_MAX_CHARS).collect();
+        let mut cut: String = notes.chars().take(budget).collect();
         // End on a line break when one is close, so no line is cut mid-way.
         if let Some(i) = cut.rfind('\n') {
             if i >= cut.len() * 4 / 5 {
@@ -138,7 +158,7 @@ pub(crate) fn briefing_prompt_section(
             docs_root.path("briefing.md")
         )
     };
-    format!("\n\n## Project briefing (from the user)\n{body}\n")
+    format!("\n\n## Project briefing (from the user)\n{body}\n{docs_block}")
 }
 
 /// After `KRONN:BRIEFING_COMPLETE`: store the reviewed `docs/briefing.md`,

@@ -9,7 +9,9 @@
 
 use std::path::Path;
 
-use crate::core::anti_halluc::{dep_citation, verify_source_marker, SourceKind, SourceStatus};
+use crate::core::anti_halluc::{
+    dep_citation, dep_reference, verify_source_marker, SourceKind, SourceStatus,
+};
 use crate::models::{DependencyCheckStatus, DependencyUpdateSummary};
 
 /// Rows of the watch rendered into a prompt; the rest is counted.
@@ -99,10 +101,18 @@ impl DependencySnapshot {
         )
     }
 
-    fn holds(&self, manager: &str, package: &str) -> Option<&WatchedPackage> {
-        self.packages
-            .iter()
-            .find(|p| p.manager.eq_ignore_ascii_case(manager) && p.name == package)
+    /// The row a `<manager>/<package>` reference names. Matched against the
+    /// labels the watch holds rather than split at a `/`: the npm label is
+    /// `JS / TS`, and a scoped package (`@scope/pkg`) holds a `/` too.
+    fn holds(&self, reference: &str) -> Option<&WatchedPackage> {
+        self.packages.iter().find(|p| {
+            reference
+                .get(..p.manager.len())
+                .is_some_and(|m| m.eq_ignore_ascii_case(&p.manager))
+                && reference[p.manager.len()..]
+                    .strip_prefix('/')
+                    .is_some_and(|name| name.trim() == p.name)
+        })
     }
 }
 
@@ -116,7 +126,7 @@ pub fn verify_dep_marker(
     if verify_source_marker(raw, None).kind != SourceKind::Deps {
         return None;
     }
-    let Some((manager, package, date)) = dep_citation(raw) else {
+    let (Some(_), Some((reference, date))) = (dep_citation(raw), dep_reference(raw)) else {
         return Some((
             SourceStatus::EmptyRef,
             "dependency watch citation must read `deps: <manager>/<package>@<YYYY-MM-DD>`"
@@ -138,7 +148,7 @@ pub fn verify_dep_marker(
             ),
         ));
     }
-    match snapshot.holds(&manager, &package) {
+    match snapshot.holds(&reference) {
         Some(row) => Some((
             SourceStatus::Verified,
             if row.declared_only {
@@ -156,7 +166,7 @@ pub fn verify_dep_marker(
         None => Some((
             SourceStatus::NotFound,
             format!(
-                "`{manager}/{package}` is not in the dependency watch dated {}",
+                "`{reference}` is not in the dependency watch dated {}",
                 snapshot.checked_on
             ),
         )),
