@@ -107,10 +107,10 @@ _su_lock_release() {
 _su_with_lock() {
     local rc
     _su_lock_acquire || return 1
-    trap '_su_lock_release; exit 130' INT TERM
+    trap '_su_lock_release; exit 130' INT TERM HUP
     "$@"
     rc=$?
-    trap - INT TERM
+    trap - INT TERM HUP
     _su_lock_release
     return $rc
 }

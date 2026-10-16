@@ -345,6 +345,51 @@ EOF
     [[ "$(echo "$out" | tail -1)" == *bootstrap* ]]
 }
 
+@test "launchd: load waits for a slow bootout before bootstrapping" {
+    service_write_unit
+    touch "$STATE/loaded"
+    # bootout returns at once but the job lingers for 8 more prints, and
+    # bootstrap fails with launchd's error 5 while it is still there.
+    cat > "$TEST_TMPDIR/bin/fake-launchctl" <<'EOF'
+#!/usr/bin/env bash
+echo "launchctl $*" >> "$CALLS"
+case "$1" in
+    print)
+        if [[ -f "$STATE/dying" ]]; then
+            n=$(cat "$STATE/dying"); echo $((n - 1)) > "$STATE/dying"
+            (( n > 1 )) && exit 0
+            rm -f "$STATE/dying" "$STATE/loaded"
+        fi
+        [[ -f "$STATE/loaded" ]] && exit 0 || exit 113 ;;
+    bootout) echo 8 > "$STATE/dying" ;;
+    bootstrap)
+        [[ -f "$STATE/loaded" ]] && { echo "Bootstrap failed: 5: Input/output error" >&2; exit 5; }
+        touch "$STATE/loaded" ;;
+esac
+exit 0
+EOF
+    run service_load
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"Input/output error"* ]]
+    [ "$(grep -c "launchctl bootstrap" "$CALLS")" -eq 1 ]
+}
+
+@test "launchd: a bootstrap that keeps failing reports launchd's error once" {
+    service_write_unit
+    cat > "$TEST_TMPDIR/bin/fake-launchctl" <<'EOF'
+#!/usr/bin/env bash
+echo "launchctl $*" >> "$CALLS"
+case "$1" in
+    print) exit 113 ;;
+    bootstrap) echo "Bootstrap failed: 5: Input/output error" >&2; exit 5 ;;
+esac
+exit 0
+EOF
+    run service_load
+    [ "$status" -eq 1 ]
+    [ "$(grep -c "Input/output error" <<< "$output")" -eq 1 ]
+}
+
 @test "launchd: restart on an unloaded job loads it" {
     service_write_unit
     service_restart
