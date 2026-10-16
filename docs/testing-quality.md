@@ -129,8 +129,30 @@ The citation check (`cargo test docs_citations`) is scoped on a pull request:
 CI lists the paths the pull request changes and the check blocks only on the
 docs among them; a pull request that changes no doc gets the result as a counted
 warning. A pull request that changes `VERSION`, a push and a manual run stay
-strict over every doc [src: file: backend/src/core/docs_citations.rs:28-30#CHANGED_ENV].
+strict over every doc [src: file: backend/src/core/docs_citations.rs:31-33#CHANGED_ENV].
 `make docs-reanchor` repairs moved citations before a release.
+
+A merge no longer bounces on them (KT-1321). When Kronn merges the target into
+a task branch (the integration candidate, or the merge a worker finishes with
+`task_exec_commit`), it stops before the merge commit and settles the docs
+first, for any project that uses `[src: file: …]` citations (every tracked `.md`
+file, `docs/releases` aside):
+
+- a conflict whose two sides differ only by the line numbers of file citations
+  is resolved to the target's text; any other conflict still bounces;
+- every citation the merged tree leaves broken is re-anchored by mapping its
+  lines from the side it was written against (the branch, the target or the
+  merge base) to the merged file, the `#symbol` having to lie in the mapped
+  range. When a hunk changed the cited lines themselves, the occurrence of the
+  symbol nearest the mapped position wins, under the same check; with no side
+  the citation held against, it is left alone.
+
+Both land in the merge commit, which carries the sign-off of the configured git
+identity and a line counting what was settled. The same step runs inside the
+worker's `task_exec_commit` merge, so a worker needs no `make docs-reanchor` in
+its sandbox. The make target also works there: during an unfinished merge it
+maps from both sides of the merge and needs no base, and with no resolvable
+target-branch merge-base it re-points unique-symbol citations instead of exiting.
 
 ## Backend CI timing SLO
 

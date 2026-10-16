@@ -13,6 +13,17 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- A merge no longer bounces on doc citation line anchors (KT-1321). The
+  integration merge, and the merge a worker finishes through `task_exec_commit`,
+  stop before the merge commit: a doc conflict that differs only by the line
+  numbers of `[src: file: …]` markers is resolved to the target's text, then
+  every citation the merged tree left broken is re-anchored by mapping its
+  lines from the side it was written against to the merged file (the `#symbol`
+  must lie in the new range; the nearest occurrence to the mapped position
+  settles a changed range). Both land in the signed merge commit. Any other
+  conflict still bounces. `make docs-reanchor` also runs where no
+  target-branch merge-base exists (a worker worktree) and, during an unfinished
+  merge, maps from both sides of the merge without a `BASE`.
 - « Revalider l'audit » now re-reads the docs whose sections are all
   unanchored (no citation, no repository path), once per change (KT-1292).
   Such a doc has no verdict, so nothing ever sent it to an agent. A review
