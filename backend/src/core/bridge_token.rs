@@ -2340,6 +2340,10 @@ impl Scoper<'_> {
             let Some(kind) = kind_of_key(self.route, key) else {
                 continue;
             };
+            // A relation list is redacted by `redact_relation_lists`, not judged here.
+            if REDACTED_RELATION_LISTS.contains(&key.as_str()) && child.is_array() {
+                continue;
+            }
             let named: Vec<&str> = match child {
                 serde_json::Value::String(id) if !id.is_empty() => vec![id.as_str()],
                 serde_json::Value::Array(items) => {
@@ -2354,6 +2358,29 @@ impl Scoper<'_> {
         true
     }
 
+    /// Drop the ids the token cannot see from an otherwise visible object's
+    /// relation lists; `(list, left)` for each list that lost an entry.
+    fn redact_relation_lists(
+        &self,
+        fields: &mut serde_json::Map<String, serde_json::Value>,
+    ) -> Vec<(String, usize)> {
+        let mut redacted = Vec::new();
+        for key in REDACTED_RELATION_LISTS {
+            let Some(kind) = kind_of_key(self.route, key) else {
+                continue;
+            };
+            let Some(serde_json::Value::Array(items)) = fields.get_mut(*key) else {
+                continue;
+            };
+            let before = items.len();
+            items.retain(|item| item.as_str().is_none_or(|id| self.id_visible(kind, id)));
+            if items.len() != before {
+                redacted.push(((*key).to_owned(), items.len()));
+            }
+        }
+        redacted
+    }
+
     /// Whether `value` stays, filtering its lists in place. An object hidden
     /// anywhere through its object fields hides its parent; a hidden list
     /// entry is dropped, and the counts beside the list follow.
@@ -2363,7 +2390,7 @@ impl Scoper<'_> {
                 if !self.own_fields_visible(fields, typed) {
                     return false;
                 }
-                let mut filtered: Vec<(String, usize)> = Vec::new();
+                let mut filtered: Vec<(String, usize)> = self.redact_relation_lists(fields);
                 for (key, child) in fields.iter_mut() {
                     if child.is_array() {
                         if let Some(left) = self.filter_list(child, None) {
@@ -2396,6 +2423,11 @@ impl Scoper<'_> {
         (items.len() != before).then_some(items.len())
     }
 }
+
+/// Id lists that only relate an object to others: an id the token cannot see
+/// is dropped from them instead of hiding the object. No write route takes
+/// them back, so a redacted copy can never be written over the real links.
+const REDACTED_RELATION_LISTS: &[&str] = &["discussion_ids", "disc_ids"];
 
 /// Responses a token gets whole or not at all.
 pub fn scoped_whole_or_refused(route: &BridgeRoute) -> bool {
@@ -2485,7 +2517,7 @@ pub fn scope_response(
             if !scoper.own_fields_visible(fields, None) {
                 return hidden();
             }
-            let mut filtered = Vec::new();
+            let mut filtered = scoper.redact_relation_lists(fields);
             for (key, child) in fields.iter_mut() {
                 if child.is_array() {
                     if let Some(left) = scoper.filter_list(child, typed) {

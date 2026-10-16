@@ -3117,3 +3117,86 @@ async fn a_bridge_token_cannot_approve_the_security_pause() {
         .unwrap();
     assert_eq!(run.status, kronn::models::RunStatus::WaitingApproval);
 }
+
+/// Every `discussion_ids` list in a response, at any depth.
+fn discussion_id_lists(value: &Value, out: &mut Vec<Vec<String>>) {
+    match value {
+        Value::Object(fields) => {
+            for (key, child) in fields {
+                if key == "discussion_ids" {
+                    if let Some(items) = child.as_array() {
+                        out.push(
+                            items
+                                .iter()
+                                .filter_map(|id| id.as_str().map(str::to_owned))
+                                .collect(),
+                        );
+                    }
+                } else {
+                    discussion_id_lists(child, out);
+                }
+            }
+        }
+        Value::Array(items) => items
+            .iter()
+            .for_each(|item| discussion_id_lists(item, out)),
+        _ => {}
+    }
+}
+
+/// GitHub #248: one parent task shared by a room of each project stays
+/// visible from both rooms, each seeing only its own room among the links.
+#[tokio::test]
+async fn a_task_shared_by_rooms_of_two_projects_is_visible_from_each() {
+    let (app, _repos, db) = fixture_with_db().await;
+    db.with_conn(|conn| {
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO planning_tasks(id, task_number, title, created_at, updated_at) \
+             VALUES ('task-shared', 9010, 'task-shared', ?1, ?1)",
+            [&now],
+        )?;
+        for project in ["p1", "p2"] {
+            conn.execute(
+                "INSERT INTO planning_task_projects(task_id, project_id) VALUES ('task-shared', ?1)",
+                [project],
+            )?;
+        }
+        for room in ["room-a", "room-b"] {
+            conn.execute(
+                "INSERT INTO planning_task_discussions(task_id, discussion_id, placement, is_primary, created_at) \
+                 VALUES ('task-shared', ?1, 'active', 1, ?2)",
+                rusqlite::params![room, now],
+            )?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+    for (room, other) in [("room-a", "room-b"), ("room-b", "room-a")] {
+        let guard = bridge_for(room);
+        for path in [
+            "/api/planning/tasks/task-shared".to_owned(),
+            format!("/api/discussions/{room}/plan"),
+        ] {
+            let (status, response) = call(&app, "GET", &path, Some(guard.value()), None).await;
+            assert_eq!(status, 200, "{room} {path}: {response}");
+            let text = response.to_string();
+            assert!(text.contains("task-shared"), "{room} {path}: {text}");
+            assert!(
+                !text.contains(other),
+                "{room} {path} names the other project's room: {text}"
+            );
+            let mut lists = Vec::new();
+            discussion_id_lists(&response, &mut lists);
+            assert!(!lists.is_empty(), "{room} {path}: no discussion_ids in {text}");
+            for list in lists {
+                assert_eq!(list, vec![room.to_owned()], "{room} {path}: {text}");
+            }
+        }
+    }
+    // The operator still sees both links.
+    let (_, operator) = call(&app, "GET", "/api/planning/tasks/task-shared", None, None).await;
+    let text = operator.to_string();
+    assert!(text.contains("room-a") && text.contains("room-b"), "{text}");
+}
