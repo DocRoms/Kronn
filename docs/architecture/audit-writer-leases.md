@@ -20,8 +20,8 @@ Briefing saves, reviewed briefing completion, and briefing/dispute card answers
 use the same guard. A card decision keeps its guard inside the database worker
 that applies the resulting filesystem changes.
 [src: file: backend/src/api/audit/briefing.rs:46-81#set_briefing]
-[src: file: backend/src/api/audit/briefing.rs:146-189#complete_reviewed_briefing]
-[src: file: backend/src/api/audit/briefing.rs:723-770#save_briefing_answers]
+[src: file: backend/src/api/audit/briefing.rs:164-207#complete_reviewed_briefing]
+[src: file: backend/src/api/audit/briefing.rs:743-790#save_briefing_answers]
 [src: file: backend/src/api/discussion_questions.rs:14-64#dispute_lease]
 [src: file: backend/src/api/discussion_questions.rs:201-239#answer]
 
@@ -52,11 +52,11 @@ this state, including already audited projects; the optional-offer bypass cannot
 skip accepted commits pending integration.
 [src: file: backend/src/api/projects/template_merge.rs:324-330#audit_launch_refusal]
 [src: file: backend/src/api/audit/full.rs:299-301#audit_launch_refusal]
-[src: file: backend/src/api/audit/full.rs:409-430#audit_launch_refusal]
+[src: file: backend/src/api/audit/full.rs:413-434#audit_launch_refusal]
 [src: file: backend/src/api/audit/drift.rs:284-286#audit_launch_refusal]
 [src: file: backend/src/api/audit/drift.rs:523-549#audit_launch_refusal]
-[src: file: backend/src/api/audit/revalidate.rs:570-572#audit_launch_refusal]
-[src: file: backend/src/api/audit/revalidate.rs:627-637#audit_launch_refusal]
+[src: file: backend/src/api/audit/revalidate.rs:668-670#audit_launch_refusal]
+[src: file: backend/src/api/audit/revalidate.rs:731-734#audit_launch_refusal]
 [src: file: frontend/src/hooks/useTemplateMergeOffer.ts:28-93#useTemplateMergeOffer]
 
 The regression suite exercises real HTTP refusals, cancellation before mutation,

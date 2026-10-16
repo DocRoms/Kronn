@@ -107,6 +107,66 @@ fn a_dep_citation_is_verified_only_when_the_snapshot_holds_it() {
     assert!(detail.contains("no dependency watch"), "{detail}");
 }
 
+/// KT-1295 — the citation the snapshot emits must verify against that snapshot
+/// for every manager label the producer can carry, incl. `JS / TS` (a `/` in the
+/// label) and a scoped package (a `/` in the name).
+#[test]
+fn every_citation_the_snapshot_emits_verifies_against_it() {
+    let labels = crate::core::dependency_updates::manager_labels();
+    assert!(labels.contains(&"JS / TS"), "{labels:?}");
+    let packages = ["react", "argparse", "@types/node", "@scope/pkg"];
+    let snap = DependencySnapshot {
+        checked_on: "2026-10-16".into(),
+        packages: labels
+            .iter()
+            .flat_map(|label| {
+                packages.iter().map(move |name| WatchedPackage {
+                    manager: (*label).into(),
+                    manifest: "manifest".into(),
+                    name: (*name).into(),
+                    current: "1.0.0".into(),
+                    latest: "2.0.0".into(),
+                    major: true,
+                    declared_only: false,
+                })
+            })
+            .collect(),
+        unchecked: vec![],
+        up_to_date: vec![],
+    };
+    assert_eq!(snap.packages.len(), labels.len() * packages.len());
+    for package in &snap.packages {
+        let citation = snap.citation(package);
+        let marker = citation
+            .trim_start_matches("[src: ")
+            .trim_end_matches(']')
+            .to_string();
+        let (status, detail) = verify_dep_marker(&marker, Some(&snap)).unwrap();
+        assert_eq!(status, SourceStatus::Verified, "{citation}: {detail}");
+        // The manager label is case-insensitive (the package names here are lowercase).
+        let lowered = marker.to_lowercase();
+        let (status, detail) = verify_dep_marker(&lowered, Some(&snap)).unwrap();
+        assert_eq!(status, SourceStatus::Verified, "{lowered}: {detail}");
+    }
+
+    // A manager the watch does not hold, or a package under another manager's
+    // label, is still refused.
+    let verdict = |raw: &str| verify_dep_marker(raw, Some(&snap)).map(|(s, _)| s);
+    assert_eq!(
+        verdict("deps: JS / TS/vue@2026-10-16"),
+        Some(SourceStatus::NotFound)
+    );
+    assert_eq!(
+        verdict("deps: TS/react@2026-10-16"),
+        Some(SourceStatus::NotFound)
+    );
+    assert_eq!(
+        verdict("deps: JS / TS@2026-10-16"),
+        Some(SourceStatus::NotFound)
+    );
+    assert_eq!(verdict("deps: JS / TS/react"), Some(SourceStatus::EmptyRef));
+}
+
 #[test]
 fn ci_runtimes_are_read_from_pin_files_and_workflows_with_their_line() {
     let dir = tempfile::tempdir().unwrap();
@@ -427,7 +487,11 @@ fn a_multi_stage_dockerfile_keeps_a_row_per_stage_and_marks_the_runtime_one() {
 
     // A non-node final stage leaves every node stage a build stage.
     let mut out = Vec::new();
-    scan_dockerfile("FROM node:20 AS build\nFROM nginx:1.25\n", "Dockerfile", &mut out);
+    scan_dockerfile(
+        "FROM node:20 AS build\nFROM nginx:1.25\n",
+        "Dockerfile",
+        &mut out,
+    );
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].stage, Some(Stage::Build));
 
@@ -450,7 +514,10 @@ fn a_multi_stage_dockerfile_keeps_a_row_per_stage_and_marks_the_runtime_one() {
         &[],
         "2026-10-11",
     );
-    assert!(block.contains("| node (final stage: what runs) | 22 |"), "{block}");
+    assert!(
+        block.contains("| node (final stage: what runs) | 22 |"),
+        "{block}"
+    );
 }
 
 #[test]
@@ -478,7 +545,12 @@ fn a_declared_only_row_is_never_rendered_as_the_version_in_place() {
         next_check_at: None,
     };
     let snap = DependencySnapshot::from_summary(&summary);
-    let block = render_version_block(VersionSource::DependencyWatch, Some(&snap), &[], "2026-10-11");
+    let block = render_version_block(
+        VersionSource::DependencyWatch,
+        Some(&snap),
+        &[],
+        "2026-10-11",
+    );
     assert!(
         block.contains("| joi | not installed (declared range only; installed version unknown) | 18.0.0 | major |"),
         "{block}"

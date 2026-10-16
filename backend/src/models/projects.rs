@@ -1915,6 +1915,24 @@ pub struct RevalidationSection {
     /// code, with the evidence and the corrections Kronn proposes.
     #[serde(default)]
     pub relevance: Vec<crate::core::doc_relevance::SectionRelevance>,
+    /// Sent to the agent only to re-read prose no citation or path anchors
+    /// (KT-1292): never re-read, or edited / its step's sources changed since.
+    #[serde(default)]
+    #[ts(skip)]
+    pub reread: bool,
+}
+
+/// A doc whose every section is unanchored, and when an agent pass last
+/// re-read it (KT-1292).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UnanchoredDoc {
+    pub doc: String,
+    /// RFC 3339; `None` when no pass has re-read it since it last changed.
+    pub reviewed_at: Option<String>,
+    /// An audit step owns the doc, so a pass can re-read it; `false` when none
+    /// does (it is listed, never queued).
+    pub owned: bool,
 }
 
 /// `GET /api/projects/:id/revalidation`: the deterministic part of
@@ -1940,6 +1958,9 @@ pub struct RevalidationPlan {
     /// each is confronted with the code: by a person or by the agent pass.
     #[serde(default)]
     pub unanchored: Vec<crate::core::doc_relevance::SectionRelevance>,
+    /// The docs made only of such sections, with their last re-read date.
+    #[serde(default)]
+    pub unanchored_docs: Vec<UnanchoredDoc>,
 }
 
 /// What the conversion did with one tech-debt sheet (KT-1167).

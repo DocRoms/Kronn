@@ -13,6 +13,14 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- « Revalider l'audit » now re-reads the docs whose sections are all
+  unanchored (no citation, no repository path), once per change (KT-1292).
+  Such a doc has no verdict, so nothing ever sent it to an agent. A review
+  stamp in `citations.json` (the doc's hash and the digest of its owning
+  step's sources) queues it for that step when it has none, or when the doc
+  or the step's sources changed since. After the pass the doc is stamped
+  whether or not the agent added an anchor: the plan is clean again and the
+  pass does not come back. The panel shows « re-read on <date> » for each.
 - A principal can approve a delivery with a DoD item carried to another ticket
   (KT-1291): `dod_verifications: [{dod_id, met: false, carried_to: "KT-1290",
   evidence}]`. The approve integrates through the normal path; the item is
@@ -149,6 +157,21 @@ Release notes for 0.9.3 and earlier are available in the
 - Linked repos show which AI doc they really have (KT-999): « doc IA »
   (`docs/AGENTS.md` or the legacy `ai/index.md`), « README seulement » or
   « pas de doc IA ».
+- The audit can read the briefing's existing documentation (KT-999), off by
+  default: `audit_briefing_docs = true` in `config.toml`, or
+  `KRONN_EXP_BRIEFING_DOCS=1` for one run (bench). It reaches only the steps
+  that use it — step 1 (`AGENTS.md`), step 8 (tech debt) and the API design
+  audit — as a `## Existing documentation` block within the 6,000-character
+  briefing cap (the block takes at most 3,000 of them, the briefing text gives
+  way). A `reference` location is read, reused and cited; an `obsolete` one IS
+  tech debt: step 8 records a TD row and a detail file citing the location and
+  its last-commit date whatever the audit's scope, and no step copies a fact
+  from it nor calls it out of scope — and on a later audit step 8 never parks
+  it under `## Reconciliation candidates` as « out of scope this audit »;
+  `old`/`partial` (and a state not provided) are verified before reuse, a
+  `recent` one is spot-checked. The recorded locations are re-validated before
+  they reach a prompt (a hand-edited `briefing.md` cannot add lines to it).
+  Disabled, the prompts (and the audit golden) are unchanged.
 
 - Docs record what a human validated and ask for a reconfirmation when Kronn
   changes it, never blocking (KT-1079). A validation (`validate-audit`, a TD
@@ -539,6 +562,26 @@ Release notes for 0.9.3 and earlier are available in the
   (or a hand-crafted `.kronn.json` entry) is theirs again, counted by the gate
   and moved on the choice. The install refuses a corrupt `.kronn.json` before
   writing anything, and records a renamed template file under its new path.
+- The default-root audit golden no longer depends on the day it is run
+  (KT-1317). The name of a `validated-originals/<hash>.bak` file is the hash
+  of bytes holding the audit date; the golden now names it by the hash of the
+  date-masked bytes (KT-1278). A new test replays the same audit 40 days
+  earlier and requires a byte-identical snapshot, with no non-volatile entry
+  relaxed.
+- Audit step 8 accepts a Dependencies row that states its source in any
+  of its forms (KT-1295). The coverage check demanded the literal
+  `source used:`, so a row backed by `[src: deps: …]` citations, or written
+  `source: …`, was refused and failed the step after the retry. It now passes
+  with `source used: …` or `source: …` (any case), a well-formed
+  `[src: deps: <manager>/<package>@<date>]` citation (the citation gate still
+  checks it against the watch table), or `not verified: no source`; a row
+  with no source still fails, and the refusal names these forms. The
+  `scanned — nothing substantiable` outcome also takes an en-dash or `--`.
+  `resource used:` no longer passes for `source used:`. A `deps:` citation
+  whose manager label holds a `/` (the npm label is `JS / TS`) is now
+  verified against the watch table instead of being read as manager `JS`:
+  every citation the snapshot emits verifies against it.
+
 - A review-wait timeout no longer locks the principal out of the review
   (KT-1293). The watchdog used to move the unreviewed delivery to `Escalated`
   while its alert told the principal to call `task_exec_review`, which only

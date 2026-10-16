@@ -779,6 +779,7 @@ pub fn default_config() -> AppConfig {
         disabled_auto_skills: Vec::new(),
         embed_allowed_origins: Vec::new(),
         audit_reverify_cron: None,
+        audit_briefing_docs: false,
     }
 }
 

@@ -46,6 +46,36 @@ fn owning_step(
         .map(|i| i + 1)
 }
 
+/// The digest of what the step owning a doc reads, as a review stamp holds it.
+pub(crate) fn step_sources_fingerprint(
+    project_path: &FsPath,
+    chain: &[super::AnalysisStep],
+    step: usize,
+) -> String {
+    crate::core::checksums::step_sources_fingerprint(project_path, chain[step - 1].sources)
+}
+
+/// Stamp the docs a pass re-read, each with the sources digest of the step
+/// that owns it (computed once per step).
+pub(crate) fn stamp_rereads(
+    project_path: &FsPath,
+    chain: &[super::AnalysisStep],
+    rereads: &[(usize, String)],
+) -> Result<(), String> {
+    let mut digests: HashMap<usize, String> = HashMap::new();
+    let reviewed: Vec<(String, String)> = rereads
+        .iter()
+        .map(|(step, doc)| {
+            let sources = digests
+                .entry(*step)
+                .or_insert_with(|| step_sources_fingerprint(project_path, chain, *step))
+                .clone();
+            (doc.clone(), sources)
+        })
+        .collect();
+    citation_drift::record_reviews(project_path, &reviewed)
+}
+
 /// What "Revalider l'audit" would do, computed without writing anything.
 pub fn plan(project_path: &FsPath) -> RevalidationPlan {
     let report = citation_drift::check(project_path);
@@ -92,6 +122,7 @@ pub fn plan(project_path: &FsPath) -> RevalidationPlan {
             broken: Vec::new(),
             human: Vec::new(),
             relevance: stale_sections,
+            reread: false,
         };
         for citation in statuses.remove(&section.doc).unwrap_or_default() {
             for (name, labels) in &human_sections {
@@ -155,19 +186,61 @@ pub fn plan(project_path: &FsPath) -> RevalidationPlan {
             broken: Vec::new(),
             human: Vec::new(),
             relevance: relevance.of_doc(&doc).cloned().collect(),
+            reread: false,
             doc,
         });
         if let Some(step) = step {
             plan.agent_steps.push(step);
         }
     }
-    // A doc whose every section is unanchored has no verdict, and is NOT
-    // queued for the pass by itself: the agent leaves it unanchored, so it
-    // would be queued again after every pass, and a bounded pass over one
-    // doc would become a pass over every doc. It stays listed in `unanchored`
-    // for the panel, and joins the pass (its headings listed in the block)
-    // as soon as something else sends it: an edit since the run
-    // (`plan_with_documents`), a broken citation or a section judged.
+    // A doc whose every section is unanchored has no verdict, so nothing else
+    // would ever send it to be read (KT-1292). It is re-read once per change:
+    // queued for its owning step when it carries no review stamp, or when the
+    // stamp no longer holds (the doc was edited, or the step's sources changed
+    // since). The pass stamps every doc it was sent, anchored or not, so an
+    // unchanged repo plans clean and the pass does not come back.
+    let stamps = citation_drift::read_strict(project_path).ok().flatten();
+    let mut sources: HashMap<usize, String> = HashMap::new();
+    for doc in &relevance.unanchored_docs {
+        let Ok(content) = std::fs::read_to_string(project_path.join(doc)) else {
+            continue;
+        };
+        let step = owning_step(&chain, doc, &docs_root);
+        let reviewed = step.and_then(|step| {
+            citation_drift::current_review(stamps.as_ref(), doc, &content, || {
+                sources
+                    .entry(step)
+                    .or_insert_with(|| step_sources_fingerprint(project_path, &chain, step))
+                    .clone()
+            })
+        });
+        plan.unanchored_docs.push(UnanchoredDoc {
+            doc: doc.clone(),
+            reviewed_at: reviewed.map(|r| r.reviewed_at.clone()),
+            owned: step.is_some(),
+        });
+        let Some(step) = step.filter(|_| reviewed.is_none()) else {
+            continue;
+        };
+        match plan.sections.iter_mut().find(|s| &s.doc == doc) {
+            Some(section) => {
+                section.reread = true;
+                section.action = RevalidationAction::Agent;
+            }
+            None => plan.sections.push(RevalidationSection {
+                doc: doc.clone(),
+                step: Some(step),
+                action: RevalidationAction::Agent,
+                doc_missing: false,
+                reanchor: Vec::new(),
+                broken: Vec::new(),
+                human: Vec::new(),
+                relevance: Vec::new(),
+                reread: true,
+            }),
+        }
+        plan.agent_steps.push(step);
+    }
     plan.agent_steps.sort_unstable();
     plan.agent_steps.dedup();
     plan
@@ -191,6 +264,8 @@ fn plan_with_documents(
             .iter_mut()
             .find(|section| section.doc == doc)
         {
+            // An edit explains the visit better than a missing stamp does.
+            section.reread = false;
             // An ordinary move already has its deterministic action. An
             // additional prose edit is not certified by moving a citation:
             // advance_local_changes retains the old document proof for it.
@@ -222,6 +297,7 @@ fn plan_with_documents(
             broken: Vec::new(),
             human: Vec::new(),
             relevance: Vec::new(),
+            reread: false,
         });
         if let Some(step) = step.filter(|_| !doc_missing) {
             planned.agent_steps.push(step);
@@ -439,7 +515,11 @@ pub(crate) fn prompt_blocks(plan: &RevalidationPlan) -> HashMap<usize, String> {
         if !unanchored.is_empty() {
             block.push_str(&unanchored_block(&unanchored));
         }
-        if section.broken.is_empty() && section.reanchor.is_empty() && section.relevance.is_empty()
+        if section.reread {
+            block.push_str("Nothing in this document is anchored to the code, so Kronn cannot measure whether it is still true. Re-read it and its actual sources, and confront every claim with the code. Keep accurate human wording; do not invent citations.\n");
+        } else if section.broken.is_empty()
+            && section.reanchor.is_empty()
+            && section.relevance.is_empty()
         {
             block.push_str("The document's content changed since the completed audit or validation. Re-read this document and its actual sources, including uncited prose, and verify the changed claims. Keep accurate human wording; do not invent citations.\n");
         }
@@ -469,6 +549,24 @@ pub(crate) fn prompt_blocks(plan: &RevalidationPlan) -> HashMap<usize, String> {
 /// The agent pass's extras, handed to the partial-audit pipeline.
 pub(crate) struct RevalidationRun {
     pub blocks: HashMap<usize, String>,
+    /// `(step, doc)` of each doc sent only to be re-read: stamped once its
+    /// step has run, whether or not the agent added an anchor (KT-1292).
+    pub rereads: Vec<(usize, String)>,
+}
+
+impl RevalidationRun {
+    pub(crate) fn of(plan: &RevalidationPlan) -> Self {
+        Self {
+            blocks: prompt_blocks(plan),
+            rereads: plan
+                .sections
+                .iter()
+                .filter(|s| s.action == RevalidationAction::Agent)
+                .filter(|s| plan.unanchored_docs.iter().any(|u| u.doc == s.doc))
+                .filter_map(|s| Some((s.step?, s.doc.clone())))
+                .collect(),
+        }
+    }
 }
 
 /// After a partial run that rewrote nothing — every agent step unchanged,
@@ -609,9 +707,7 @@ pub async fn revalidate_audit(
         );
     }
     if !planned.agent_steps.is_empty() {
-        let run = RevalidationRun {
-            blocks: prompt_blocks(&planned),
-        };
+        let run = RevalidationRun::of(&planned);
         return super::drift::run_partial_pipeline(
             state,
             project,

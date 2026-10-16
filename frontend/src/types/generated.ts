@@ -2748,7 +2748,7 @@ export type DependencyCheckStatus = "UpToDate" | "UpdatesAvailable" | "Unsupport
 
 export type DependencyManagerUpdate = { manager: string, manifest: string, status: DependencyCheckStatus, outdated: number, major: number, packages?: Array<DependencyUpdatePackage>, };
 
-export type DependencyUpdatePackage = { name: string, current: string, latest: string, major: boolean, 
+export type DependencyUpdatePackage = { name: string, current: string, latest: string, major: boolean,
 /**
  * The package is declared but not installed (no `node_modules`): `current`
  * is empty because no installed version exists to report, and the row
@@ -7550,7 +7550,12 @@ sections: Array<SectionRelevance>,
  * The sections Kronn cannot measure (no citation, no path): handed to
  * the agent pass to check or anchor. They do not raise the badge.
  */
-unanchored: Array<SectionRelevance>, };
+unanchored: Array<SectionRelevance>,
+/**
+ * The docs where every judged section is unanchored: no verdict ever
+ * reads them, so a pass re-reads them once per change (KT-1292).
+ */
+unanchored_docs: Array<string>, };
 
 export type RemoteRepo = { name: string, full_name: string, clone_url: string, ssh_url: string, description: string | null, language: string | null, stargazers_count: number, updated_at: string, source: string, already_cloned: boolean, };
 
@@ -7877,7 +7882,11 @@ relevance: RelevanceCounts,
  * The sections Kronn cannot measure (no citation, no path), listed so
  * each is confronted with the code: by a person or by the agent pass.
  */
-unanchored: Array<SectionRelevance>, };
+unanchored: Array<SectionRelevance>,
+/**
+ * The docs made only of such sections, with their last re-read date.
+ */
+unanchored_docs: Array<UnanchoredDoc>, };
 
 export type RevalidationSection = { doc: string,
 /**
@@ -10144,6 +10153,21 @@ step_agents?: { [key in string]: StepAgentOverride }, };
 export type UnassignPlanningTaskRequest = { assignee?: PlanningAssigneeInput | null, actor?: PlanningActor, };
 
 export type UnlinkPlanningDiscussionRequest = { discussion_id: string, actor?: PlanningActor, };
+
+/**
+ * A doc whose every section is unanchored, and when an agent pass last
+ * re-read it (KT-1292).
+ */
+export type UnanchoredDoc = { doc: string,
+/**
+ * RFC 3339; `None` when no pass has re-read it since it last changed.
+ */
+reviewed_at: string | null,
+/**
+ * An audit step owns the doc, so a pass can re-read it; `false` when none
+ * does (it is listed, never queued).
+ */
+owned: boolean, };
 
 /**
  * An Exec command line that interpolates a template value into inline code

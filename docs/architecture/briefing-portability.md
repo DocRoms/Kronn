@@ -28,7 +28,7 @@ therefore carries its briefing and options without the original database.
 When closed project answers are absent or unreadable, the project-doc hook
 keeps an existing generated `project.md`; a newly installed template still
 gets its default fields filled. The report exposes `kept_without_answers`.
-[src: file: backend/src/api/audit/full.rs:965-970#sync_briefing_file]
+[src: file: backend/src/api/audit/full.rs:974-979#sync_briefing_file]
 [src: file: backend/src/api/audit/full.rs:1087-1099#fill_project_doc_for_audit]
 [src: file: backend/src/api/audit/project_doc.rs:1202-1211#ProjectDocReport]
 [src: file: backend/src/api/audit/project_doc.rs:1266-1284#fill_project_doc_for_audit]

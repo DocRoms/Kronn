@@ -237,7 +237,7 @@ describe('ProjectCard — partial refresh validation UX', () => {
 
   it('opens and loads reconfirmation details through ProjectCard → Verify docs → Reconfirm', async () => {
     vi.mocked(projectsApi.revalidationPlan).mockResolvedValue({
-      sources_state: 'clean', sections: [], agent_steps: [], reanchor_count: 0, human_count: 0, unanchored: [], relevance: { sections: 0, anchors_intact: 0, outdated: 0, no_longer_relevant: 0, unanchored: 0, untouched_stale: 0, missing_references: 0, prose_missing: 0, anchored_intact_pct: null },
+      sources_state: 'clean', sections: [], agent_steps: [], reanchor_count: 0, human_count: 0, unanchored: [], unanchored_docs: [], relevance: { sections: 0, anchors_intact: 0, outdated: 0, no_longer_relevant: 0, unanchored: 0, untouched_stale: 0, missing_references: 0, prose_missing: 0, anchored_intact_pct: null },
     });
     vi.mocked(projectsApi.docProvenance).mockImplementation(async (_id, detail = false) => ({
       to_reconfirm: 1,
