@@ -47,8 +47,8 @@ per response as integer micro-USD and exposed by `reported_cost_usd_micros`;
 no cost, the sum is partial and the run's cost is `None` as well.
 [src: file: backend/src/agents/chat_codec.rs:160#cost_usd_micros]
 [src: file: backend/src/agents/runner.rs:1984-1989#cost_incomplete]
-[src: file: backend/src/api/audit/full.rs:2085#reported_cost_usd_micros]
-[src: file: backend/src/api/audit/drift.rs:1138#reported_cost_usd_micros]
+[src: file: backend/src/api/audit/full.rs:2089#reported_cost_usd_micros]
+[src: file: backend/src/api/audit/drift.rs:1137#reported_cost_usd_micros]
 
 Audit executors have a separate bounded policy: 64 calls per file mutation tool
 (`write_file`, `edit_file`, `edit_lines`, `insert_after_line`), 48 for
@@ -93,7 +93,7 @@ recomputes the matrix failure from the current index before its first attempt.
 Invalid tables remain blocking, provider errors do not trigger this correction,
 and existing TD files and human sections remain protected (KT-956).
 [src: file: backend/src/api/audit/validation.rs:95-107#coverage_repair_feedback]
-[src: file: backend/src/api/audit/full.rs:2268-2283#coverage_repair_feedback]
+[src: file: backend/src/api/audit/full.rs:2272-2287#coverage_repair_feedback]
 
 A failed provider launch finalizes the step with its error and elapsed time.
 If a corrective attempt had already consumed tokens, that usage remains in the

@@ -57,6 +57,7 @@ fn assembled_with_every_block(
         version: "22".into(),
         file: ".nvmrc".into(),
         line: 1,
+        stage: None,
     }];
     let version_block = |purpose| {
         format!(
