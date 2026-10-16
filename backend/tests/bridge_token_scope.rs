@@ -628,9 +628,11 @@ async fn a_shared_workflow_triggered_from_a_room_runs_for_the_room_s_project() {
     );
 }
 
+/// The token of a room's own agent: the room's grants (KT-1270) reach it.
 fn bridge_for(room: &str) -> kronn::core::bridge_token::BridgeTokenGuard {
     mint(BridgeScope {
         discussion_ids: vec![room.into()],
+        room_grant_discussions: vec![room.into()],
         ..Default::default()
     })
     .unwrap()
@@ -3743,80 +3745,34 @@ async fn a_task_shared_with_another_project_needs_write_on_both() {
     assert_eq!(status, 200, "{body}");
 }
 
-/// KT-1270 — a run's step may post in a room of another project only when a
-/// human granted that room write on the run's project; the token stays the
-/// run's and reaches nothing of the room's own project beyond the room.
+/// KT-1270 review B2 — a workflow step posting in a room is not that room's
+/// agent: the room's grants never reach its token, so pointing a step's
+/// `room_id` at a granted room opens nothing.
 #[tokio::test]
-async fn a_run_s_step_uses_another_project_s_room_only_when_that_room_grants_it() {
+async fn a_step_posting_in_a_granted_room_gets_none_of_its_grants() {
     let (app, _repos) = fixture().await;
-    let step = || {
-        mint(BridgeScope {
-            discussion_ids: vec!["room-a".into()],
-            workflow_run_id: Some("run-b".into()),
-            ..Default::default()
-        })
-        .unwrap()
-    };
-    let refused = step();
-    let (status, body) = call(
-        &app,
-        "GET",
-        "/api/discussions/room-a/meta",
-        Some(refused.value()),
-        None,
-    )
-    .await;
-    assert_eq!(status, 401, "room of p1, run of p2, no grant: {body}");
-
-    grant_scope(
-        &app,
-        "room-a",
-        json!({"project_id": "p2", "access": "read"}),
-    )
-    .await;
-    let read_only = step();
-    let (status, _) = call(
-        &app,
-        "GET",
-        "/api/discussions/room-a/meta",
-        Some(read_only.value()),
-        None,
-    )
-    .await;
-    assert_eq!(
-        status, 401,
-        "a read grant does not host another project's run"
-    );
-
     grant_scope(
         &app,
         "room-a",
         json!({"project_id": "p2", "access": "write"}),
     )
     .await;
-    let hosted = step();
-    let token = hosted.value().to_owned();
+    let step = mint(BridgeScope {
+        discussion_ids: vec!["room-a".into()],
+        workflow_run_id: Some("run-a".into()),
+        ..Default::default()
+    })
+    .unwrap();
+    let token = step.value().to_owned();
     let (status, body) = call(
         &app,
         "POST",
         "/api/disc/append",
         Some(&token),
-        Some(append("room-a", "step-1")),
+        Some(append("room-a", "step-b2")),
     )
     .await;
-    assert_eq!(status, 200, "{body}");
-    let (status, body) = call(
-        &app,
-        "GET",
-        "/api/discussions/room-a/meta",
-        Some(&token),
-        None,
-    )
-    .await;
-    assert_eq!(
-        status, 200,
-        "the hosted step reads the room it posts in: {body}"
-    );
+    assert_eq!(status, 200, "the step still posts in its room: {body}");
     let (status, _) = call(
         &app,
         "GET",
@@ -3825,14 +3781,216 @@ async fn a_run_s_step_uses_another_project_s_room_only_when_that_room_grants_it(
         None,
     )
     .await;
-    assert_eq!(status, 200, "the run's own project");
+    assert_eq!(status, 403, "no read through the room's grant");
+    let (status, _) = call(
+        &app,
+        "PATCH",
+        "/api/planning/tasks/task-b",
+        Some(&token),
+        Some(json!({"title": "taken"})),
+    )
+    .await;
+    assert_eq!(status, 403, "no write through the room's grant");
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/api/planning/tasks",
+        Some(&token),
+        Some(json!({"title": "x", "project_ids": ["p2"]})),
+    )
+    .await;
+    assert_eq!(status, 403, "no creation through the room's grant");
+    // A task worker is not the room's agent either.
+    let worker = mint(BridgeScope {
+        discussion_ids: vec!["room-a".into()],
+        task_execution_id: Some("exec-a".into()),
+        ..Default::default()
+    })
+    .unwrap();
     let (status, _) = call(
         &app,
         "GET",
-        "/api/planning/tasks/task-a",
+        "/api/planning/tasks/task-b",
+        Some(worker.value()),
+        None,
+    )
+    .await;
+    assert_eq!(status, 403);
+    // The room's own agent does reach it.
+    let agent = bridge_for("room-a");
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/planning/tasks/task-b",
+        Some(agent.value()),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+}
+
+/// KT-1270 DoD — a workflow's scope, validated once by a human, reaches its
+/// runs' steps, and is suspended as soon as the workflow changes.
+#[tokio::test]
+async fn a_workflow_scope_reaches_its_runs_until_the_workflow_changes() {
+    let (app, _repos, db) = fixture_with_db().await;
+    let step = || {
+        mint(BridgeScope {
+            discussion_ids: vec!["room-a".into()],
+            workflow_run_id: Some("run-a".into()),
+            ..Default::default()
+        })
+        .unwrap()
+    };
+    let before = step();
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/planning/tasks/task-b",
+        Some(before.value()),
+        None,
+    )
+    .await;
+    assert_eq!(status, 403, "no scope yet");
+
+    // Only a human sets it.
+    let scope = json!({"entries": [{"project_id": "p2", "access": "write"}]});
+    let (status, body) = call(
+        &app,
+        "PUT",
+        "/api/workflows/wf-a/scope",
+        Some(before.value()),
+        Some(scope.clone()),
+    )
+    .await;
+    assert_eq!(
+        status, 403,
+        "a bridge token cannot set a workflow's scope: {body}"
+    );
+    let (status, body) = call(&app, "PUT", "/api/workflows/wf-a/scope", None, Some(scope)).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["data"]["valid"], true, "{body}");
+
+    let live = step();
+    let token = live.value().to_owned();
+    let (status, body) = call(
+        &app,
+        "PATCH",
+        "/api/planning/tasks/task-b",
+        Some(&token),
+        Some(json!({"title": "edited by the run"})),
+    )
+    .await;
+    assert_eq!(status, 200, "the run reaches its workflow's scope: {body}");
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/api/planning/tasks",
+        Some(&token),
+        Some(json!({"title": "api docs", "project_ids": ["p2"]})),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/api/agent-api/call",
+        Some(&token),
+        Some(json!({"api_plugin_slug": "synthetic-api", "api_config_id": "cfg-b", "endpoint_path": "/x"})),
+    )
+    .await;
+    assert_eq!(status, 403, "never another project's credentials");
+
+    // Any change to what the workflow does suspends the scope.
+    db.with_conn(|conn| {
+        conn.execute(
+            "UPDATE workflows SET steps_json = '[{\"name\":\"changed\"}]' WHERE id = 'wf-a'",
+            [],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/planning/tasks/task-b",
         Some(&token),
         None,
     )
     .await;
-    assert_eq!(status, 403, "the room's project is not the run's");
+    assert_eq!(status, 403, "suspended on the next call");
+    let (_, scope) = call(&app, "GET", "/api/workflows/wf-a/scope", None, None).await;
+    assert_eq!(scope["data"]["valid"], false, "{scope}");
+
+    // Another workflow's runs never reach it.
+    let other = mint(BridgeScope {
+        discussion_ids: vec!["room-b".into()],
+        workflow_run_id: Some("run-b".into()),
+        ..Default::default()
+    })
+    .unwrap();
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/planning/tasks/task-a",
+        Some(other.value()),
+        None,
+    )
+    .await;
+    assert_eq!(status, 403);
+}
+
+/// KT-1270 review — an agent's request never says whether a project exists.
+#[tokio::test]
+async fn an_agent_request_answers_the_same_for_an_unknown_project() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-a");
+    let token = guard.value().to_owned();
+    let ask = |project: &str| json!({"project": project, "access": "read", "reason": "look"});
+    let (status, known) = call(
+        &app,
+        "POST",
+        "/api/discussions/room-a/scope/requests",
+        Some(&token),
+        Some(ask("p2")),
+    )
+    .await;
+    assert_eq!(status, 200, "{known}");
+    let (status, unknown) = call(
+        &app,
+        "POST",
+        "/api/discussions/room-a/scope/requests",
+        Some(&token),
+        Some(ask("no-such-project")),
+    )
+    .await;
+    assert_eq!(status, 200, "{unknown}");
+    assert_eq!(known["data"]["status"], unknown["data"]["status"]);
+    let shape = |value: &Value| {
+        let mut keys: Vec<String> = value["data"].as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        keys
+    };
+    assert_eq!(shape(&known), shape(&unknown));
+}
+
+/// KT-1270 review — a project's token override never reaches a bridge token.
+#[tokio::test]
+async fn a_project_token_override_never_reaches_a_bridge_token() {
+    let (app, _repos, db) = fixture_with_db().await;
+    db.with_conn(|conn| {
+        conn.execute(
+            "UPDATE projects SET token_override_json = '{\"provider\":\"github\",\"token\":\"ghp-secret\"}' WHERE id = 'p1'",
+            [],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let guard = bridge_for("room-a");
+    let (status, body) = call(&app, "GET", "/api/projects/p1", Some(guard.value()), None).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(!body.to_string().contains("ghp-secret"), "{body}");
+    assert!(body["data"].get("token_override").is_none(), "{body}");
 }

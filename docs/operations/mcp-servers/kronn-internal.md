@@ -350,7 +350,9 @@ owning public object is the addressable boundary.
   `room_scope({project, access: "write", reason})` asks the human for it: the
   request grants nothing, a human approves it in the room, then `task_create`
   with `project_ids` naming that project succeeds. Grants never open another
-  project's credentials or workflows (`docs/design/discussion-project-scope.md`).
+  project's credentials or workflows, and reach only the room's own agents: a
+  workflow step reaches another project only through the scope a human
+  validated on its workflow (`docs/design/discussion-project-scope.md`).
 - Immediately before a direct `task_create`, call `plan_get` again so another
   agent's recent write is visible. Direct create links the task atomically to
   the MCP runtime's current discussion by default. Pass an explicit

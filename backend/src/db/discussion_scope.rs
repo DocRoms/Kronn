@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 
 use crate::models::discussion_scope::{
     DiscussionProjectGrant, DiscussionScope, DiscussionScopeRequest, ScopeAccess, ScopeGrantSource,
-    ScopeRequestStatus,
+    ScopeRequestStatus, WorkflowScope, WorkflowScopeEntry,
 };
 
 /// Pending requests a room may hold at once: an agent cannot flood the human.
@@ -23,6 +23,21 @@ pub struct GrantedProjects {
     pub read: HashSet<String>,
     pub write: HashSet<String>,
     pub all: Option<ScopeAccess>,
+}
+
+impl GrantedProjects {
+    /// Everything `other` opens, added to `self`.
+    pub fn merge(&mut self, other: GrantedProjects) {
+        self.read.extend(other.read);
+        self.write.extend(other.write);
+        self.all = match (self.all, other.all) {
+            (Some(ScopeAccess::Write), _) | (_, Some(ScopeAccess::Write)) => {
+                Some(ScopeAccess::Write)
+            }
+            (Some(_), _) | (_, Some(_)) => Some(ScopeAccess::Read),
+            (None, None) => None,
+        };
+    }
 }
 
 const GRANT_COLUMNS: &str = "g.id, g.discussion_id, g.project_id, p.name, g.access, g.source, \
@@ -55,7 +70,8 @@ fn grant_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DiscussionProject
 }
 
 const REQUEST_COLUMNS: &str = "r.id, r.discussion_id, r.project_id, p.name, r.access, r.reason, \
-     r.requested_by, r.status, r.decided_by, r.decided_at, r.granted_access, r.created_at";
+     r.requested_by, r.status, r.decided_by, r.decided_at, r.granted_access, r.created_at, \
+     r.requested_name";
 
 fn request_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DiscussionScopeRequest> {
     let parse = |index: usize, value: String| {
@@ -83,6 +99,7 @@ fn request_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DiscussionScope
             .map(|value| ScopeAccess::parse(&value).map_err(|_| parse(10, value.clone())))
             .transpose()?,
         created_at: row.get(11)?,
+        requested_name: row.get(12)?,
     })
 }
 
@@ -121,13 +138,6 @@ pub fn granted_projects(conn: &Connection, discussion_ids: &[String]) -> Result<
         }
     }
     Ok(granted)
-}
-
-/// Whether a human granted `discussion_id` write on `project_id` (or on every
-/// project): the room may then host that project's workflow steps.
-pub fn room_writes(conn: &Connection, discussion_id: &str, project_id: &str) -> Result<bool> {
-    let granted = granted_projects(conn, &[discussion_id.to_owned()])?;
-    Ok(granted.all == Some(ScopeAccess::Write) || granted.write.contains(project_id))
 }
 
 fn primary_project(conn: &Connection, discussion_id: &str) -> Result<Option<Option<String>>> {
@@ -477,44 +487,75 @@ fn request_by_id(conn: &Connection, request_id: &str) -> Result<Option<Discussio
         .optional()?)
 }
 
-/// An agent's request: only ever pending until a human decides.
+/// One line of agent text inside a System `[kronn-scope: …]` line: no line
+/// break or bracket that could close it and forge a decision, bounded.
+fn clean_line(text: &str, max: usize) -> String {
+    let flat: String = text
+        .chars()
+        .map(|c| match c {
+            '[' | ']' => ' ',
+            c if c.is_control() => ' ',
+            c => c,
+        })
+        .collect();
+    let words: Vec<&str> = flat.split_whitespace().collect();
+    let joined = words.join(" ");
+    if joined.chars().count() > max {
+        format!("{}…", joined.chars().take(max).collect::<String>())
+    } else {
+        joined
+    }
+}
+
+/// An agent's request: only ever pending until a human decides. `project_id`
+/// is the project `requested_name` names, or `None` when it names no single
+/// project: the request is recorded and shown the same way, so the reply
+/// never tells the agent whether a project it cannot read exists.
 pub fn file_request(
     conn: &Connection,
     discussion_id: &str,
-    project_id: &str,
+    project_id: Option<&str>,
+    requested_name: &str,
     access: ScopeAccess,
     reason: &str,
     requested_by: &str,
 ) -> Result<Filed> {
-    let reason = reason.trim();
+    let reason = clean_line(reason, 500);
     if reason.is_empty() {
         return invalid("say why the room needs this project");
     }
-    let reason: String = reason.chars().take(1000).collect();
+    let requested_name = clean_line(requested_name, 120);
+    if requested_name.is_empty() {
+        return invalid("name the project");
+    }
     let Some(primary) = primary_project(conn, discussion_id)? else {
         return Err(ScopeError::NotFound("discussion not found".into()).into());
     };
     let Some(primary) = primary else {
         return invalid("a discussion without a project cannot reach other projects");
     };
-    if primary == project_id {
-        return Ok(Filed::AlreadyGranted);
-    }
-    let granted = granted_projects(conn, &[discussion_id.to_owned()])?;
-    let reached = match access {
-        ScopeAccess::Read => granted.all.is_some() || granted.read.contains(project_id),
-        ScopeAccess::Write => {
-            granted.all == Some(ScopeAccess::Write) || granted.write.contains(project_id)
+    if let Some(project_id) = project_id {
+        if primary == project_id {
+            return Ok(Filed::AlreadyGranted);
         }
-    };
-    if reached {
-        return Ok(Filed::AlreadyGranted);
+        let granted = granted_projects(conn, &[discussion_id.to_owned()])?;
+        let reached = match access {
+            ScopeAccess::Read => granted.all.is_some() || granted.read.contains(project_id),
+            ScopeAccess::Write => {
+                granted.all == Some(ScopeAccess::Write) || granted.write.contains(project_id)
+            }
+        };
+        if reached {
+            return Ok(Filed::AlreadyGranted);
+        }
     }
     let pending: Option<String> = conn
         .query_row(
             "SELECT id FROM discussion_scope_requests \
-             WHERE discussion_id = ?1 AND project_id = ?2 AND status = 'pending'",
-            params![discussion_id, project_id],
+             WHERE discussion_id = ?1 AND status = 'pending' \
+               AND COALESCE(project_id, 'name:' || requested_name) \
+                 = COALESCE(?2, 'name:' || ?3)",
+            params![discussion_id, project_id, requested_name],
             |row| row.get(0),
         )
         .optional()?;
@@ -539,25 +580,29 @@ pub fn file_request(
     let tx = conn.unchecked_transaction()?;
     tx.execute(
         "INSERT INTO discussion_scope_requests \
-         (id, discussion_id, project_id, access, reason, requested_by, status, created_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7)",
+         (id, discussion_id, project_id, requested_name, access, reason, requested_by, status, \
+          created_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', ?8)",
         params![
             id,
             discussion_id,
             project_id,
+            requested_name,
             access.as_str(),
             reason,
             requested_by,
             Utc::now().to_rfc3339()
         ],
     )?;
-    let target = project_label(&tx, Some(project_id))?;
+    // The agent's own words, never the project's resolved name: the line is
+    // the same whether the project exists or not.
     receipt(
         &tx,
         discussion_id,
         format!("scope-request:{id}"),
         format!(
-            "{requested_by} asks for {} access to {target}: {reason} — waiting for a human",
+            "{} asks for {} access to \u{201c}{requested_name}\u{201d}: {reason} \u{2014} waiting for a human",
+            clean_line(requested_by, 60),
             access.as_str()
         ),
     )?;
@@ -593,10 +638,13 @@ pub fn decide(
         (access, _) => access,
     };
     if granted_access.is_some() {
+        let Some(project) = request.project_id.as_deref() else {
+            return invalid("this request names no known project: decline it");
+        };
         check_target(
             conn,
             discussion_id,
-            Some(&request.project_id),
+            Some(project),
             ScopeGrantSource::Request,
         )?;
     }
@@ -625,7 +673,7 @@ pub fn decide(
         Some(access) => Some(insert_grant(
             &tx,
             discussion_id,
-            Some(&request.project_id),
+            request.project_id.as_deref(),
             access,
             ScopeGrantSource::Request,
             Some(request_id),
@@ -637,18 +685,170 @@ pub fn decide(
     match &grant {
         Some(granted) => grant_receipt(&tx, granted)?,
         None => {
-            let target = project_label(&tx, Some(&request.project_id))?;
             receipt(
                 &tx,
                 discussion_id,
                 format!("scope-decline:{request_id}"),
-                format!("{decided_by} declined the access request to {target}"),
+                format!(
+                    "{decided_by} declined the access request to \u{201c}{}\u{201d}",
+                    request.requested_name
+                ),
             )?;
         }
     }
     tx.commit()?;
     let decided = request_by_id(conn, request_id)?.unwrap_or(request);
     Ok((decided, grant))
+}
+
+/// Digest of what a workflow does: what a human validated when setting its
+/// scope. Name, enablement, pinning and retention are left out; any change to
+/// its steps, trigger, project, variables or guards changes the digest.
+pub fn workflow_fingerprint(conn: &Connection, workflow_id: &str) -> Result<Option<String>> {
+    let row: Option<Vec<Option<String>>> = conn
+        .query_row(
+            "SELECT project_id, trigger_json, steps_json, actions_json, safety_json, \
+             workspace_config_json, guards, artifacts, on_failure, exec_allowlist, variables, \
+             project_scope_json FROM workflows WHERE id = ?1",
+            [workflow_id],
+            |row| {
+                (0..12)
+                    .map(|index| row.get::<_, Option<String>>(index))
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            },
+        )
+        .optional()?;
+    Ok(row.map(|fields| {
+        let joined = fields
+            .iter()
+            .map(|field| field.as_deref().unwrap_or("\u{0}"))
+            .collect::<Vec<_>>()
+            .join("\u{1f}");
+        Sha256::digest(joined.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }))
+}
+
+/// A workflow's scope and whether it still holds (the workflow unchanged since
+/// a human validated it); `None` when the workflow does not exist.
+pub fn workflow_scope(conn: &Connection, workflow_id: &str) -> Result<Option<WorkflowScope>> {
+    let Some(current) = workflow_fingerprint(conn, workflow_id)? else {
+        return Ok(None);
+    };
+    let mut statement = conn.prepare(
+        "SELECT s.project_id, p.name, s.access, s.workflow_fingerprint, s.set_by, s.set_at \
+         FROM workflow_scopes s LEFT JOIN projects p ON p.id = s.project_id \
+         WHERE s.workflow_id = ?1 ORDER BY p.name, s.project_id",
+    )?;
+    let rows = statement.query_map([workflow_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+        ))
+    })?;
+    let mut entries = Vec::new();
+    let mut valid = true;
+    let mut validated_by = None;
+    let mut validated_at = None;
+    for row in rows {
+        let (project_id, project_name, access, fingerprint, set_by, set_at) = row?;
+        valid &= fingerprint == current;
+        validated_by = Some(set_by);
+        validated_at = Some(set_at);
+        entries.push(WorkflowScopeEntry {
+            project_id,
+            project_name,
+            access: ScopeAccess::parse(&access)?,
+        });
+    }
+    Ok(Some(WorkflowScope {
+        workflow_id: workflow_id.to_owned(),
+        valid: valid && !entries.is_empty(),
+        entries,
+        validated_by,
+        validated_at,
+    }))
+}
+
+/// A human validates (or clears) a workflow's scope, pinned to the workflow
+/// as it is now.
+pub fn set_workflow_scope(
+    conn: &Connection,
+    workflow_id: &str,
+    entries: &[(String, ScopeAccess)],
+    set_by: &str,
+) -> Result<WorkflowScope> {
+    let Some(fingerprint) = workflow_fingerprint(conn, workflow_id)? else {
+        return Err(ScopeError::NotFound("workflow not found".into()).into());
+    };
+    let mut seen = HashSet::new();
+    for (project, _) in entries {
+        if !seen.insert(project.as_str()) {
+            return invalid("each project appears once");
+        }
+        if !project_exists(conn, project)? {
+            return Err(ScopeError::NotFound("project not found".into()).into());
+        }
+    }
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "DELETE FROM workflow_scopes WHERE workflow_id = ?1",
+        [workflow_id],
+    )?;
+    let now = Utc::now().to_rfc3339();
+    for (project, access) in entries {
+        tx.execute(
+            "INSERT INTO workflow_scopes \
+             (workflow_id, project_id, access, workflow_fingerprint, set_by, set_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                workflow_id,
+                project,
+                access.as_str(),
+                fingerprint,
+                set_by,
+                now
+            ],
+        )?;
+    }
+    tx.commit()?;
+    workflow_scope(conn, workflow_id)?
+        .ok_or_else(|| ScopeError::NotFound("workflow not found".into()).into())
+}
+
+/// What a workflow run's tokens reach through their workflow's scope: nothing
+/// once the workflow changed after the human validated it.
+pub fn run_granted_projects(conn: &Connection, run_id: &str) -> Result<GrantedProjects> {
+    let workflow_id: Option<String> = conn
+        .query_row(
+            "SELECT workflow_id FROM workflow_runs WHERE id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let mut granted = GrantedProjects::default();
+    let Some(workflow_id) = workflow_id else {
+        return Ok(granted);
+    };
+    let Some(scope) = workflow_scope(conn, &workflow_id)? else {
+        return Ok(granted);
+    };
+    if !scope.valid {
+        return Ok(granted);
+    }
+    for entry in scope.entries {
+        if entry.access == ScopeAccess::Write {
+            granted.write.insert(entry.project_id.clone());
+        }
+        granted.read.insert(entry.project_id);
+    }
+    Ok(granted)
 }
 
 #[cfg(test)]

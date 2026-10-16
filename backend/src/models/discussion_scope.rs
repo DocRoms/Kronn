@@ -110,7 +110,10 @@ impl ScopeRequestStatus {
 pub struct DiscussionScopeRequest {
     pub id: String,
     pub discussion_id: String,
-    pub project_id: String,
+    /// `None` when the agent named no single project.
+    pub project_id: Option<String>,
+    /// The project as the agent named it.
+    pub requested_name: String,
     pub project_name: Option<String>,
     pub access: ScopeAccess,
     pub reason: String,
@@ -150,8 +153,6 @@ pub struct GrantDiscussionProjectRequest {
     #[serde(default)]
     pub all: bool,
     pub access: ScopeAccess,
-    #[serde(default)]
-    pub granted_by: Option<String>,
     /// Required for every project in write: [`ALL_PROJECTS_WRITE_CONFIRMATION`].
     #[serde(default)]
     pub confirm: Option<String>,
@@ -164,8 +165,6 @@ pub struct GrantDiscussionProjectRequest {
 #[ts(export)]
 pub struct RevokeDiscussionProjectRequest {
     #[serde(default)]
-    pub revoked_by: Option<String>,
-    #[serde(default)]
     pub reason: Option<String>,
 }
 
@@ -175,8 +174,6 @@ pub struct DecideScopeRequest {
     /// Approve only: the access granted, at most the one asked for.
     #[serde(default)]
     pub access: Option<ScopeAccess>,
-    #[serde(default)]
-    pub decided_by: Option<String>,
 }
 
 /// An agent's request for another project.
@@ -187,6 +184,40 @@ pub struct FileScopeRequest {
     pub project: String,
     pub access: ScopeAccess,
     pub reason: String,
-    #[serde(default)]
-    pub requested_by: Option<String>,
+}
+
+/// One project a workflow's runs reach.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct WorkflowScopeEntry {
+    pub project_id: String,
+    pub project_name: Option<String>,
+    pub access: ScopeAccess,
+}
+
+/// The projects a workflow's runs reach (KT-1270 DoD: the scope a workflow
+/// declares at launch). `valid` is false once the workflow changed after a
+/// human validated it: its runs then reach nothing more than their project.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct WorkflowScope {
+    pub workflow_id: String,
+    pub entries: Vec<WorkflowScopeEntry>,
+    pub valid: bool,
+    pub validated_by: Option<String>,
+    pub validated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+pub struct WorkflowScopeItem {
+    pub project_id: String,
+    pub access: ScopeAccess,
+}
+
+/// Validate a workflow's scope as it is now; an empty list clears it.
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+pub struct SetWorkflowScopeRequest {
+    pub entries: Vec<WorkflowScopeItem>,
 }

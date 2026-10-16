@@ -367,23 +367,6 @@ async fn revoke(db: impl AsRef<Database>, sessions: Vec<i64>) {
     }
 }
 
-/// A room's own project, and whether a human granted it write on the run's
-/// project (KT-1270): such a room may host that run's steps. `None` = no room.
-fn room_and_grant(
-    conn: &rusqlite::Connection,
-    room: &str,
-    run_project: Option<&str>,
-) -> anyhow::Result<Option<(Option<String>, bool)>> {
-    let Some(discussion) = crate::db::discussions::get_discussion(conn, room)? else {
-        return Ok(None);
-    };
-    let hosts_run = match run_project {
-        Some(project) => crate::db::discussion_scope::room_writes(conn, room, project)?,
-        None => false,
-    };
-    Ok(Some((discussion.project_id, hosts_run)))
-}
-
 fn step_key(step: &WorkflowStep) -> String {
     step.id
         .as_deref()
@@ -428,21 +411,21 @@ pub async fn activate(
     }
     let found = {
         let room = room.clone();
-        let run_project = run_project.map(str::to_owned);
-        db.with_read_conn(move |conn| room_and_grant(conn, &room, run_project.as_deref()))
-            .await
-            .map_err(|error| format!("room_id: {error}"))?
+        db.with_read_conn(move |conn| {
+            Ok(crate::db::discussions::get_discussion(conn, &room)?
+                .map(|discussion| discussion.project_id))
+        })
+        .await
+        .map_err(|error| format!("room_id: {error}"))?
     };
-    let Some((room_project, hosts_run)) = found else {
+    let Some(room_project) = found else {
         return Err(format!("room_id: discussion `{room}` not found"));
     };
-    if !hosts_run
-        && !super::run_scope::target_allowed(
-            room_project.as_deref(),
-            run_project,
-            super::run_scope::is_literal(template),
-        )
-    {
+    if !super::run_scope::target_allowed(
+        room_project.as_deref(),
+        run_project,
+        super::run_scope::is_literal(template),
+    ) {
         return Err(format!(
             "room_id: discussion `{room}` is outside this run's project"
         ));
@@ -588,20 +571,20 @@ impl RoomTargetWatch {
             }
             let lookup = {
                 let room = room.clone();
-                let run_project = run_project.map(str::to_owned);
-                db.with_read_conn(move |conn| room_and_grant(conn, &room, run_project.as_deref()))
-                    .await
+                db.with_read_conn(move |conn| {
+                    Ok(crate::db::discussions::get_discussion(conn, &room)?
+                        .map(|discussion| discussion.project_id))
+                })
+                .await
             };
-            let Ok(Some((room_project, hosts_run))) = lookup else {
+            let Ok(Some(room_project)) = lookup else {
                 continue;
             };
-            if !hosts_run
-                && !super::run_scope::target_allowed(
-                    room_project.as_deref(),
-                    run_project,
-                    super::run_scope::is_literal(template),
-                )
-            {
+            if !super::run_scope::target_allowed(
+                room_project.as_deref(),
+                run_project,
+                super::run_scope::is_literal(template),
+            ) {
                 continue;
             }
             target = Some(RoomTarget {

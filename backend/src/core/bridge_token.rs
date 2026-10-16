@@ -45,6 +45,10 @@ pub struct BridgeScope {
     pub project_id: Option<String>,
     /// The agent and model Kronn launched, for API access policies (KT-1026).
     pub agent: Option<crate::core::api_access::AgentIdentity>,
+    /// The rooms this launch is the agent of (KT-1270): only their grants
+    /// widen the token. Empty for workflow steps and task workers, which post
+    /// in rooms without being their agent, and never the discussions it adopts.
+    pub room_grant_discussions: Vec<String>,
 }
 
 impl BridgeScope {
@@ -2033,29 +2037,6 @@ pub fn resolve_scope_project(
             },
         }
     }
-    let mut anchors: Vec<Option<String>> = Vec::new();
-    for (kind, id) in [
-        (Kind::Execution, scope.task_execution_id.as_deref()),
-        (Kind::Run, scope.workflow_run_id.as_deref()),
-    ] {
-        let Some(id) = id else { continue };
-        match residence(conn, kind, id)? {
-            Some(Residence::Projects(projects)) if projects.len() == 1 => {
-                anchors.push(projects.into_iter().next());
-            }
-            Some(_) => anchors.push(None),
-            None => return Ok(ScopeBinding::Dead),
-        }
-    }
-    // A run's step may post in a room of another project only when a human
-    // granted that room write on the run's project (KT-1270): the token then
-    // stays the run's.
-    let anchor = match anchors.as_slice() {
-        [Some(project), rest @ ..] if rest.iter().all(|other| other.as_ref() == Some(project)) => {
-            Some(project.clone())
-        }
-        _ => None,
-    };
     for discussion in scope.discussion_ids.iter().chain(adopted) {
         let found = conn
             .query_row(
@@ -2065,23 +2046,23 @@ pub fn resolve_scope_project(
             )
             .optional()?;
         match found {
-            Some(project) => match &anchor {
-                Some(run_project)
-                    if project.as_ref() != Some(run_project)
-                        && crate::db::discussion_scope::room_writes(
-                            conn,
-                            discussion,
-                            run_project,
-                        )? =>
-                {
-                    seen.push(Some(run_project.clone()));
-                }
-                _ => seen.push(project),
-            },
+            Some(project) => seen.push(project),
             None => return Ok(ScopeBinding::Dead),
         }
     }
-    seen.extend(anchors);
+    for (kind, id) in [
+        (Kind::Execution, scope.task_execution_id.as_deref()),
+        (Kind::Run, scope.workflow_run_id.as_deref()),
+    ] {
+        let Some(id) = id else { continue };
+        match residence(conn, kind, id)? {
+            Some(Residence::Projects(projects)) if projects.len() == 1 => {
+                seen.push(projects.into_iter().next());
+            }
+            Some(_) => seen.push(None),
+            None => return Ok(ScopeBinding::Dead),
+        }
+    }
     let Some(first) = seen.first().cloned() else {
         return Ok(ScopeBinding::Dead);
     };
@@ -2588,6 +2569,23 @@ impl Scoper<'_> {
     }
 }
 
+/// Fields holding a credential: never returned to a bridge token, whatever
+/// the route or project (a project's `token_override` carries a raw token).
+const CREDENTIAL_FIELDS: &[&str] = &["token_override"];
+
+fn strip_credentials(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            for key in CREDENTIAL_FIELDS {
+                fields.remove(*key);
+            }
+            fields.values_mut().for_each(strip_credentials);
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(strip_credentials),
+        _ => {}
+    }
+}
+
 /// Id lists that only relate an object to others: an id the token cannot see
 /// is dropped from them instead of hiding the object. No write route takes
 /// them back, so a redacted copy can never be written over the real links.
@@ -2654,6 +2652,7 @@ pub fn scope_response_in(
     reach: &Reach,
     residences: &Residences,
 ) -> Result<(), Refusal> {
+    strip_credentials(data);
     let scoper = Scoper {
         route,
         grant,

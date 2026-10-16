@@ -12,7 +12,7 @@ use crate::db::discussion_scope::{self, Filed, ScopeError};
 use crate::models::discussion_scope::{
     DecideScopeRequest, DiscussionProjectGrant, DiscussionScope, DiscussionScopeRequest,
     FileScopeRequest, GrantDiscussionProjectRequest, RevokeDiscussionProjectRequest, ScopeAccess,
-    ScopeGrantSource, ALL_PROJECTS_WRITE_CONFIRMATION,
+    ScopeGrantSource, SetWorkflowScopeRequest, WorkflowScope, ALL_PROJECTS_WRITE_CONFIRMATION,
 };
 use crate::models::{ApiErrorCode, ApiResponse};
 use crate::AppState;
@@ -42,9 +42,19 @@ fn refused<T: serde::Serialize>(message: &str) -> Reply<T> {
     )
 }
 
-fn human(name: Option<String>) -> String {
-    name.map(|name| name.trim().to_owned())
+/// Who decides, as this instance knows its human: never a name the request
+/// body supplies, which anything on loopback could forge.
+async fn human(state: &AppState) -> String {
+    state
+        .config
+        .read()
+        .await
+        .server
+        .pseudo
+        .as_deref()
+        .map(str::trim)
         .filter(|name| !name.is_empty())
+        .map(str::to_owned)
         .unwrap_or_else(|| "human".into())
 }
 
@@ -89,7 +99,7 @@ pub async fn grant(
             return refused("write access to every project needs the scope fingerprint you saw");
         }
     }
-    let granted_by = human(request.granted_by);
+    let granted_by = human(&state).await;
     let expected = request.expected_fingerprint;
     match state
         .db
@@ -127,7 +137,7 @@ pub async fn revoke(
     Path((discussion_id, grant_id)): Path<(String, String)>,
     Json(request): Json<RevokeDiscussionProjectRequest>,
 ) -> Reply<DiscussionScope> {
-    let revoked_by = human(request.revoked_by);
+    let revoked_by = human(&state).await;
     match state
         .db
         .with_conn(move |conn| {
@@ -153,9 +163,8 @@ async fn decide(
     discussion_id: String,
     request_id: String,
     approve: Option<ScopeAccess>,
-    decided_by: Option<String>,
 ) -> Reply<DiscussionScope> {
-    let decided_by = human(decided_by);
+    let decided_by = human(&state).await;
     match state
         .db
         .with_conn(move |conn| {
@@ -204,7 +213,6 @@ pub async fn approve(
         discussion_id,
         request_id,
         Some(request.access.unwrap_or(asked)),
-        request.decided_by,
     )
     .await
 }
@@ -215,17 +223,17 @@ pub async fn decline(
     Path((discussion_id, request_id)): Path<(String, String)>,
     Json(request): Json<DecideScopeRequest>,
 ) -> Reply<DiscussionScope> {
-    decide(state, discussion_id, request_id, None, request.decided_by).await
+    let _ = request;
+    decide(state, discussion_id, request_id, None).await
 }
 
 /// What an agent gets back from a request: never a grant, only where it
-/// stands. The project is named, not identified: the token cannot read it yet.
+/// stands, and nothing about whether the named project exists.
 #[derive(Debug, serde::Serialize)]
 pub struct FiledScopeRequest {
     /// `pending`, `already_pending` or `already_granted`.
     pub status: &'static str,
     pub request_ref: Option<String>,
-    pub project_name: Option<String>,
     pub access: Option<ScopeAccess>,
     pub next: &'static str,
 }
@@ -238,9 +246,6 @@ fn filed(
     FiledScopeRequest {
         status,
         request_ref: request.as_ref().map(|request| request.id.clone()),
-        project_name: request
-            .as_ref()
-            .and_then(|request| request.project_name.clone()),
         access: request.map(|request| request.access),
         next,
     }
@@ -258,25 +263,18 @@ pub async fn file_request(
         .as_ref()
         .and_then(|axum::Extension(caller)| caller.agent.as_ref())
         .map(|agent| format!("@{:?}", agent.agent_type))
-        .or(request.requested_by.clone())
-        .map(|name| name.trim().to_owned())
-        .filter(|name| !name.is_empty())
         .unwrap_or_else(|| "@agent".into());
     match state
         .db
         .with_conn(move |conn| {
-            let Some(project_id) = discussion_scope::resolve_project(conn, &request.project)?
-            else {
-                return Err(ScopeError::NotFound(format!(
-                    "no single project is named or identified by `{}`",
-                    request.project
-                ))
-                .into());
-            };
+            // An unknown name is filed like a known one: the reply never says
+            // whether a project the token cannot read exists.
+            let project_id = discussion_scope::resolve_project(conn, &request.project)?;
             discussion_scope::file_request(
                 conn,
                 &discussion_id,
-                &project_id,
+                project_id.as_deref(),
+                &request.project,
                 request.access,
                 &request.reason,
                 &requested_by,
@@ -304,6 +302,48 @@ pub async fn file_request(
             };
             (StatusCode::OK, Json(ApiResponse::ok(reply)))
         }
+        Err(error) => failure(error),
+    }
+}
+
+/// GET /api/workflows/{id}/scope — the projects this workflow's runs reach,
+/// and whether a human's validation still holds.
+pub async fn get_workflow_scope(
+    State(state): State<AppState>,
+    Path(workflow_id): Path<String>,
+) -> Reply<WorkflowScope> {
+    match state
+        .db
+        .with_read_conn(move |conn| discussion_scope::workflow_scope(conn, &workflow_id))
+        .await
+    {
+        Ok(Some(scope)) => (StatusCode::OK, Json(ApiResponse::ok(scope))),
+        Ok(None) => failure(ScopeError::NotFound("workflow not found".into()).into()),
+        Err(error) => failure(error),
+    }
+}
+
+/// PUT /api/workflows/{id}/scope — a human validates the scope against the
+/// workflow as it is now; any later change to the workflow suspends it.
+pub async fn set_workflow_scope(
+    State(state): State<AppState>,
+    Path(workflow_id): Path<String>,
+    Json(request): Json<SetWorkflowScopeRequest>,
+) -> Reply<WorkflowScope> {
+    let set_by = human(&state).await;
+    let entries: Vec<(String, ScopeAccess)> = request
+        .entries
+        .into_iter()
+        .map(|entry| (entry.project_id, entry.access))
+        .collect();
+    match state
+        .db
+        .with_conn(move |conn| {
+            discussion_scope::set_workflow_scope(conn, &workflow_id, &entries, &set_by)
+        })
+        .await
+    {
+        Ok(scope) => (StatusCode::OK, Json(ApiResponse::ok(scope))),
         Err(error) => failure(error),
     }
 }

@@ -1065,10 +1065,21 @@ async fn bridge_gate(
     // The room grants (KT-1270), re-read on every call: a revoke applies to
     // the next request, and a failed read refuses rather than guessing.
     let reach = if project.is_some() {
-        let owned = grant.own_discussions();
+        let owned = grant.scope.room_grant_discussions.clone();
+        let run = grant.scope.workflow_run_id.clone();
         match state
             .db
-            .with_read_conn(move |conn| crate::db::discussion_scope::granted_projects(conn, &owned))
+            .with_read_conn(move |conn| {
+                // A room's own agents reach its grants; a run's steps reach their
+                // workflow's validated scope; nothing else widens a token.
+                let mut granted = crate::db::discussion_scope::granted_projects(conn, &owned)?;
+                if let Some(run) = run {
+                    granted.merge(crate::db::discussion_scope::run_granted_projects(
+                        conn, &run,
+                    )?);
+                }
+                Ok(granted)
+            })
             .await
         {
             Ok(granted) => bridge_token::Reach {
@@ -2791,6 +2802,11 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/discussions/{id}/scope",
             get(api::discussion_scope::get_scope),
+        )
+        .route(
+            "/api/workflows/{id}/scope",
+            get(api::discussion_scope::get_workflow_scope)
+                .put(api::discussion_scope::set_workflow_scope),
         )
         .route(
             "/api/discussions/{id}/scope/grants",

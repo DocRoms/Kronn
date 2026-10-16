@@ -126,10 +126,13 @@ discussion (or one task execution, or one workflow run) and to its project.
   confirmation and the fingerprint of the scope the human saw. The token stays
   bound to its primary project; grants are re-read on every request, so a revoke
   applies on the next call. Grants never reach another project's credentials or
-  API configs, never run its workflows or other effects, and never pass to
-  worker rooms. Every grant route is human-only; an agent may only file a
-  request a human decides. Details and refused attacks:
-  `docs/design/discussion-project-scope.md`.
+  API configs, never run its workflows or other effects, and reach only the
+  room's own agents: never a workflow step or worker posting in the room. A
+  workflow's runs reach other projects only through a scope a human validated on
+  that workflow, suspended by any change to it. Every grant route is human-only
+  (no bridge token); an agent may only file a request a human decides. No bridge
+  response carries a credential field such as `token_override`. Details and
+  refused attacks: `docs/design/discussion-project-scope.md`.
 
 **Human proof per action.** Every secret-class route (section 3 rows 3 and 4,
 plus human-credential administration) requires a **proof bound to one action**:

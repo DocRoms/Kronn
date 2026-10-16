@@ -78,8 +78,10 @@ Release notes for 0.9.3 and earlier are available in the
   call, so a revoke applies at once; they never open another project's
   credentials, never run its workflows, never pass to worker rooms, and are
   kept as a journal with a `[kronn-scope: …]` line in the room for each change.
-  A room granting write on a project may also host that project's workflow
-  steps (`room_id`). Design and refused attacks:
+  Only the room's own agents reach its grants, never a workflow step or a
+  worker posting in it. A workflow's runs reach other projects through a scope a
+  human sets on the workflow page; any change to the workflow suspends it until
+  validated again, and the launch card shows it. Design and refused attacks:
   `docs/design/discussion-project-scope.md`.
 
 - AI documentation template and audit v2 gap audit (KT-819). The project
@@ -770,6 +772,10 @@ Release notes for 0.9.3 and earlier are available in the
   `reviewed_head_sha`, `dod_verifications`, the string version `"1"`), and a
   spawned worker's `tests_executed` schema is declared in the measured `TOOLS`
   literal.
+- A project's `token_override` (a raw token) is no longer returned to a
+  Kronn-launched agent: credential fields are stripped from every bridge-token
+  response.
+
 - A task linked to rooms of several projects is visible from each of them
   again (KT-1298, GitHub #248). One link to another project's room hid the
   whole task, so `plan_get` answered 403 in every room and agents duplicated
