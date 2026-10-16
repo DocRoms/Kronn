@@ -10,11 +10,14 @@
 ## Problem and intended product contract
 
 Kronn binds an execution to one `AgentType`. A workflow Agent step therefore
-keeps retrying the same provider and eventually fails when that provider is
-rate-limited, out of quota, unavailable, or unhealthy. The user then has to
+keeps retrying the same provider (15 s, 30 s, 45 s… backoff) and eventually
+fails when that provider is rate-limited, unavailable, or unhealthy. A quota or
+session-limit refusal is not retried: the run waits for the announced reset on
+the same provider (KT-811), or is parked for a human. The user then has to
 notice the failed run, edit Claude to Codex (for example), and replay it by hand.
-[src: file: backend/src/models/workflows.rs:264-308]
-[src: file: backend/src/workflows/steps.rs:213-246]
+[src: file: backend/src/models/workflows.rs:1617-1623#RetryConfig]
+[src: file: backend/src/workflows/steps.rs:461-477#RETRY_BACKOFF_UNIT]
+[src: file: backend/src/workflows/steps.rs:960-967#classify]
 [src: user: 2026-08-10: unattended workflow steps should continue on an
 explicit fallback and make the switch visible]
 
@@ -45,13 +48,13 @@ does not mean enabling the feature without consent on a fresh installation.
 An agent start contains the provider/transport, filesystem and MCP context,
 skills/directives/profiles, tool executor, tier, explicit model override, and
 discussion identity. Switching Claude to Codex or Ollama changes more than the
-`--model` flag. [src: file: backend/src/agents/runner.rs:410-458]
+`--model` flag. [src: file: backend/src/agents/runner.rs:2963-3118#AgentStartConfig]
 
 Kronn already has the useful abstraction needed for routing: `ModelTier` plus a
 per-agent `ModelTierConfig`. Concrete models are resolved independently for
 Claude, Codex, Gemini, Copilot, Ollama, and LiteLLM. An explicit per-step model
-currently wins over the tier. [src: file: backend/src/models/setup.rs:415-470]
-[src: file: backend/src/agents/runner.rs:539-650]
+currently wins over the tier. [src: file: backend/src/models/setup.rs:690-736#ModelTier]
+[src: file: backend/src/agents/runner.rs:3441-3475#resolve_model_flag]
 
 Consequently, a fallback target must be represented as:
 
@@ -66,8 +69,7 @@ FallbackTarget {
 “Installed” is not enough to select that target. Current detection separately
 tracks installed, enabled, runtime-available, authentication-ready, and runtime
 warning states. HTTP providers additionally need endpoint health, model
-availability, and model capability checks. [src: file:
-backend/src/models/setup.rs:495-548]
+availability, and model capability checks. [src: file: backend/src/models/setup.rs:823-898#AgentDetection]
 
 ## Policy and precedence
 
@@ -116,9 +118,9 @@ The execution boundary currently exposes strings for start failures and only
 three coarse discussion outcomes (`Finished { success }`, `PreflightFailed`,
 `RuntimeUnavailable`). The richer rate-limit/auth/server detection is a
 presentation helper that scans raw output after execution; it is not a routing
-contract. [src: file: backend/src/agents/runner.rs:653-669]
-[src: file: backend/src/api/discussions/streaming.rs:230-245]
-[src: file: backend/src/api/discussions/orchestration.rs:1226-1307]
+contract. [src: file: backend/src/agents/runner.rs:3761-3761#start_agent_with_config]
+[src: file: backend/src/api/discussions/streaming.rs:1270-1275#AgentExecutionOutcome]
+[src: file: backend/src/api/discussions/orchestration.rs:1664-1804#detect_agent_error_hint]
 
 Fallback first needs a runner-level, provider-normalized error such as:
 
@@ -161,17 +163,15 @@ must use the typed value. Unknown errors are not fallback-eligible.
 Kronn already has an Ollama `TypedSchema` quality escalation that retries on
 Claude after local validation and repair fail. That behavior is adjacent, but
 semantically different from availability fallback and should eventually use an
-explicit escalation policy rather than be folded into this router. [src: file:
-backend/src/workflows/steps.rs:253-385]
+explicit escalation policy rather than be folded into this router. [src: file: backend/src/workflows/steps.rs:656-745#escalation_step]
 
 ## Workflow replay and continuation safety
 
 This is the hardest part. An Agent step can modify the worktree or call tools
 before a provider error. The current executor streams output and tool markers,
 then only returns success or a string error; it does not produce a durable
-effect boundary suitable for safe cross-agent replay. [src: file:
-backend/src/workflows/steps.rs:727-793]
-[src: file: backend/src/workflows/steps.rs:822-903]
+effect boundary suitable for safe cross-agent replay. [src: file: backend/src/workflows/steps.rs:1539-1551#drive_agent_to_output]
+[src: file: backend/src/workflows/steps.rs:1266-1298#run_agent_with_timeout]
 
 The router must distinguish these cases:
 
@@ -189,8 +189,8 @@ refuses to replay an uncertain external effect without explicit confirmation;
 the fallback router should reuse the same principle. Agent and Batch Quick
 Prompt steps are currently outside that uncertain-effect journal, so they need
 an equivalent durable attempt intent before automatic fallback can be
-restart-safe. [src: file: backend/src/workflows/runner.rs:107-151]
-[src: file: backend/src/workflows/runner.rs:2689-2716]
+restart-safe. [src: file: backend/src/workflows/runner.rs:257-279#uncertain_side_effect_type]
+[src: file: backend/src/workflows/runner.rs:4642-4651#retry_uncertain_effect]
 
 Additional workflow invariants:
 
@@ -231,9 +231,9 @@ This matters today because HTTP agents have a different execution path: since
 project/run-scoped catalogue without Planning mutations, and no per-model
 capability gate checks that the model can call tools. A local Ollama
 model therefore cannot safely replace every CLI step merely because the model
-is pulled. [src: file: backend/src/agents/runner.rs:510-536]
-[src: file: backend/src/workflows/steps.rs:759-779]
-[src: file: docs/tech-debt/TD-20260808-http-agents-no-tool-calling.md:52-54]
+is pulled. [src: file: backend/src/api/agent_tools.rs:165-186#workflow_arc]
+[src: file: backend/src/workflows/runner.rs:2542-2547#workflow_arc]
+[src: file: docs/tech-debt/TD-20260808-http-agents-no-tool-calling.md:51-53#capability]
 
 No-capability declaration should mean “unknown/ineligible”, not “probably
 compatible”. This keeps `prefer_local_when_compatible` honest.
@@ -248,21 +248,20 @@ The current spawn audit found these distinct Kronn-owned paths:
 
 | Current spawn path | What it covers |
 |---|---|
-| Discussion streaming | Normal replies, manual/forced runs, durable dispatch, and Quick Prompt / Batch Quick Prompt child discussions. HTTP tools are attached only here. [src: file: backend/src/api/discussions/streaming.rs:1004-1028] |
-| Debate pre-summary | Compresses the shared context before debate. [src: file: backend/src/api/discussions/orchestration.rs:337-427] |
-| Debate participants | Starts every participant/round independently. [src: file: backend/src/api/discussions/orchestration.rs:432-580] |
-| Debate final synthesis | Starts the primary synthesis agent. [src: file: backend/src/api/discussions/orchestration.rs:592-660] |
-| Automatic discussion summary | Economy-tier background summarisation. [src: file: backend/src/api/discussions/orchestration.rs:916-960] |
-| Explicit discussion summary | User-triggered summary path. [src: file: backend/src/api/discussions/orchestration.rs:1107-1175] |
-| Workflow Agent helper | Normal attempts, retries, structured-output repair, current Ollama quality escalation, multi-agent review turns, and rollback Agent steps. [src: file: backend/src/workflows/steps.rs:213-408] [src: file: backend/src/workflows/steps.rs:727-794] [src: file: backend/src/workflows/runner.rs:2047-2134] |
-| Full audit | Reasoning-tier filesystem audit. [src: file: backend/src/api/audit/full.rs:1006-1031] |
-| Drift audit | Reasoning-tier partial audit. [src: file: backend/src/api/audit/drift.rs:476-493] |
+| Discussion streaming | Normal replies, manual/forced runs, durable dispatch, and Quick Prompt / Batch Quick Prompt child discussions. HTTP tools are attached here, on workflow Agent steps and on audit steps. [src: file: backend/src/api/discussions/streaming.rs:4457-4498#native_http_tools] |
+| Debate pre-summary | Compresses the shared context before debate. [src: file: backend/src/api/discussions/orchestration.rs:695-791#ToolFreeSummary] |
+| Debate participants | Starts every participant/round independently. [src: file: backend/src/api/discussions/orchestration.rs:803-1020#start_agent_with_config] |
+| Debate final synthesis | Starts the primary synthesis agent. [src: file: backend/src/api/discussions/orchestration.rs:1032-1189#synthesis_external_http] |
+| Automatic discussion summary | None any more: removed in 0.13.0, a summary only exists on demand. [src: file: backend/src/models/discussions.rs:490-514#SummaryStrategy] |
+| Explicit discussion summary | User-triggered summary path. [src: file: backend/src/api/discussions/orchestration.rs:1291-1490#generate_summary_on_demand] |
+| Workflow Agent helper | Normal attempts, retries, structured-output repair, current Ollama quality escalation, multi-agent review turns, and rollback Agent steps. [src: file: backend/src/workflows/steps.rs:461-745#run_agent_with_timeout] [src: file: backend/src/workflows/steps.rs:1798-2039#run_multi_agent_debate] [src: file: backend/src/workflows/runner.rs:3700-3780#execute_step] |
+| Full audit | Reasoning-tier filesystem audit. [src: file: backend/src/api/audit/full.rs:327-343#audit_tier] [src: file: backend/src/api/audit/full.rs:1796-1810#start] |
+| Drift audit | Reasoning-tier partial audit. [src: file: backend/src/api/audit/drift.rs:479-502#audit_tier] [src: file: backend/src/api/audit/drift.rs:975-985#start] |
 
 Audits still refuse Vibe, which has no file tools Kronn can scope to the
 project; every HTTP provider is admitted since KT-924 and KT-980, a `Custom`
 target only with a validated named connection. Eligibility is therefore a
-property of each surface, not of an agent being installed. [src: file:
-backend/src/api/audit/mod.rs:1222-1250]
+property of each surface, not of an agent being installed. [src: file: backend/src/api/audit/mod.rs:646-678#agent_can_audit]
 
 | Surface | Desired behavior | Initial rollout |
 |---|---|---:|
@@ -280,13 +279,19 @@ backend/src/api/audit/mod.rs:1222-1250]
 
 `DiscussionMessage` already persists the actual `agent_type`, `model_tier`, and
 concrete `model`. `StepResult` already has `step_agent` and `step_model`, and
-Run Detail renders them. [src: file: backend/src/models/workflows.rs:1115-1169]
-[src: file: frontend/src/components/workflows/RunDetail.tsx:1033-1048]
+Run Detail renders them. [src: file: backend/src/models/discussions.rs:324-372#DiscussionMessage]
+[src: file: backend/src/models/workflows.rs:2121-2134#step_agent]
+[src: file: frontend/src/components/workflows/RunDetail.tsx:1099-1106#StepModelBadge]
 
-That is not sufficient for fallback because failed attempts disappear and a
-workflow result currently stamps the agent/model from the configured step,
-not from an execution trace. [src: file:
-backend/src/workflows/runner.rs:2865-2899]
+Workflow Agent steps also keep a per-attempt trail (`StepResult.agent_provenance`:
+every retry, repair, escalation and review/author turn, with the requested and
+resolved model, success, duration and `cost_usd`), and `step_agent`/`step_model`
+are stamped from the selected attempt, else the last one. That trail has no
+fallback purpose, failure kind or effect state, so it is a foundation rather
+than enough for fallback, and discussions have no equivalent.
+[src: file: backend/src/models/workflows.rs:1933-2012#WorkflowAgentProvenance]
+[src: file: backend/src/workflows/steps.rs:1401-1425#WorkflowAgentAttempt]
+[src: file: backend/src/workflows/runner.rs:4854-4876#selected_attempt]
 
 Persist an `AgentAttempt` record (table or versioned run JSON) with:
 
@@ -319,20 +324,18 @@ Required UI:
 - discussion fallback is a System event plus a badge on the final answer, not
   an ephemeral toast.
 
-Workflow runs currently persist token totals but no first-class workflow cost
-field. Exact cross-provider cost display therefore needs additive persistence,
-not only a frontend estimate. [src: file:
-backend/src/models/workflows.rs:994-1003]
+Workflow runs persist token totals (`WorkflowRun.tokens_used`) and each Agent
+attempt carries its own `cost_usd`, but there is no run-level cost total. Exact
+cross-provider cost display therefore needs additive persistence of that total,
+not only a frontend estimate. [src: file: backend/src/models/workflows.rs:1729-1738#tokens_used] [src: file: backend/src/models/workflows.rs:2003-2011#cost_usd]
 
 The current workflow budget also increments once per logical Agent step, even
 though retry, repair, escalation, or debate can perform more model invocations.
-Fallback must fix this accounting at the physical-attempt boundary. [src: file:
-backend/src/workflows/runner.rs:1498-1531]
+Fallback must fix this accounting at the physical-attempt boundary. [src: file: backend/src/workflows/runner.rs:3034-3046#add_llm_calls]
 
 Do not reuse the existing `native_fallback` name: that field describes the
-separate discussion-routing case where Kronn's native agent answers an
-untargeted turn when no external CLI peer accepts it. [src: file:
-backend/src/db/sql/105_user_turn_catchup.sql:1-10]
+separate discussion-routing case where an untargeted user turn goes to the
+room's native agent and is withheld from the joined CLIs. [src: file: backend/src/db/sql/105_user_turn_catchup.sql:1-10#native_fallback]
 
 ## Delivery plan
 
