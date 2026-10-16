@@ -126,7 +126,7 @@ by a human (KT-1131). An accepted step keeps its failure on record:
 - Unknown resumable state, unreadable timeline. [src: file: frontend/src/components/AuditTimeline.tsx:733-745#resumableUnknown] [src: file: frontend/src/components/AuditTimeline.tsx:746-756#loadFailed]
 - Refused acceptance. [src: file: frontend/src/components/AuditTimeline.tsx:478-500#setAcceptError] [src: file: frontend/src/components/AuditTimeline.tsx:849-852#acceptError]
 - Validation prerequisites and linked actions. [src: file: frontend/src/components/AuditTimeline.tsx:1031-1093#completedLocalRun]
-- Verify-docs actions and resumable priority. [src: file: frontend/src/components/RevalidateAudit.tsx:379-410#onUpdateStale] [src: file: frontend/src/components/ProjectCard.tsx:1437-1449#primaryAuditAction]
+- Verify-docs actions and resumable priority. [src: file: frontend/src/components/RevalidateAudit.tsx:379-410#onUpdateStale] [src: file: frontend/src/components/ProjectCard.tsx:1443-1455#primaryAuditAction]
 - Recap read error. [src: file: frontend/src/components/AuditRecapPanel.tsx:363-368#errorBlock]
 
 ## “Verify docs” escalation (KT-1168, KT-1206, KT-1218)
@@ -238,7 +238,7 @@ sections.
 The compact header exposes only the honest status, its primary next action and
 the doc-state summary. One “Details” disclosure contains secondary metadata and
 actions. Three pre-audit cases override the legacy `TemplateInstalled` label:
-[src: file: frontend/src/components/ProjectCard.tsx:1397-1430#humanDocsDetected]
+[src: file: frontend/src/components/ProjectCard.tsx:1403-1436#humanDocsDetected]
 [src: file: frontend/src/components/ProjectCard.tsx:1610-1628#project-audit-details]
 
 - a human-owned docs folder asks the user to choose where Kronn writes;

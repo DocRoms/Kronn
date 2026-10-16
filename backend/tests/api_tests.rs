@@ -24123,6 +24123,97 @@ mod cold_api_handlers_tests {
         assert_eq!(after["data"]["counts"]["deferred"], 1);
     }
 
+    // KT-1309 — over HTTP: a sheet whose history uses another indentation stays
+    // valid YAML after a decision, the typed reason is kept, and the review lists
+    // the detail files the card counts (a High one gates the validation).
+    #[tokio::test]
+    async fn td_review_keeps_the_front_matter_strictly_valid_and_lists_what_the_card_counts() {
+        let (_dir, repo) = seed_repo("td-review-kt1309");
+        let td = repo.join("docs/tech-debt");
+        std::fs::create_dir_all(&td).unwrap();
+        // The existing entry sits at 2 spaces under a 4-space metadata block.
+        std::fs::write(
+            td.join("TD-20261016-ssh-key-tracked.md"),
+            "---\nname: td-ssh-key-tracked\nmetadata:\n    type: tech-debt\n    audit_history:\n      - date: 2026-10-16\n        status: Verified in source\n        reviewer: Full audit\n---\n\n# TD-20261016-ssh-key-tracked\n\n- **Area**: Infra\n- **Severity**: Critical\n- **Status**: Verified in source\n\n## Impact\n\n**Critical** — a key is public.\n\n- anyone can read it\n- rotate it\n",
+        )
+        .unwrap();
+        std::fs::write(
+            td.join("CQ-001.md"),
+            "# CQ-001: Oversized controller\n\n## Problem\n\nIt grew.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            td.join("PERF-20261016-deep-clone.md"),
+            "# Deep clone on the hot path\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("docs/inconsistencies-tech-debt.md"),
+            "# Index\n\n## Current list\n\n| ID | Problem | Area | Severity | Status |\n|----|---------|------|----------|--------|\n| CQ-001 | Oversized controller | Backend | High | Open |\n",
+        )
+        .unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let list_url = format!("/api/projects/{pid}/audit/tds");
+        let decide_url = format!("/api/projects/{pid}/audit/tds/decide");
+
+        let (_, listed) = get_json(build_router_with_auth(state.clone(), false), &list_url).await;
+        let items = listed["data"]["items"].as_array().unwrap();
+        assert_eq!(items.len(), 3, "{listed}");
+        assert_eq!(
+            kronn::core::scanner::count_tech_debt(repo.to_str().unwrap()) as usize,
+            items.len(),
+            "the card and the review count the same debts"
+        );
+        let cq = items.iter().find(|i| i["id"] == "CQ-001").unwrap();
+        assert_eq!(cq["severity"], "High");
+        assert_eq!(listed["data"]["gate"]["blocking_total"], 2);
+        assert_eq!(
+            items
+                .iter()
+                .find(|i| i["id"] == "TD-20261016-ssh-key-tracked")
+                .unwrap()["impact"],
+            "**Critical** — a key is public.\n\n- anyone can read it\n- rotate it"
+        );
+
+        let (_, decided) = post_json(
+            build_router_with_auth(state.clone(), false),
+            &decide_url,
+            serde_json::json!({ "items": [
+                { "td_id": "TD-20261016-ssh-key-tracked", "decision": "confirm", "reason": "Seen in the git history: \"id_rsa\"" },
+                { "td_id": "CQ-001", "decision": "defer", "reason": "after the split" }
+            ] }),
+        )
+        .await;
+        assert_eq!(decided["success"], true, "{decided}");
+        assert_eq!(
+            decided["data"]["gate"]["met"], false,
+            "a deferred High does not count"
+        );
+
+        for (file, note) in [
+            (
+                "TD-20261016-ssh-key-tracked",
+                "Seen in the git history: \"id_rsa\"",
+            ),
+            ("CQ-001", "after the split"),
+        ] {
+            let sheet = std::fs::read_to_string(td.join(format!("{file}.md"))).unwrap();
+            let front = sheet.strip_prefix("---\n").unwrap();
+            let front: serde_yaml::Value =
+                serde_yaml::from_str(&front[..front.find("\n---").unwrap()])
+                    .unwrap_or_else(|e| panic!("{file}: strict YAML parse failed: {e}\n{sheet}"));
+            let history = front["metadata"]["audit_history"].as_sequence().unwrap();
+            assert_eq!(history.last().unwrap()["note"].as_str(), Some(note));
+        }
+        let ssh = std::fs::read_to_string(td.join("TD-20261016-ssh-key-tracked.md")).unwrap();
+        assert_eq!(
+            ssh.matches("- date:").count(),
+            2,
+            "the entry joined the list: {ssh}"
+        );
+    }
+
     envelope_get!(audit_tds_unknown_project, "/api/projects/nope/audit/tds");
     envelope_post!(
         audit_tds_decide_unknown_project,

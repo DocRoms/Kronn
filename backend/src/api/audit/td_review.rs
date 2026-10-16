@@ -16,7 +16,7 @@ use crate::core::audit_validation::{
     apply_td_resolutions_at, TdDecisionOrigin, TdResolution, TdResolutionAction,
 };
 use crate::core::docs_location::DocsRoot;
-use crate::core::td_index::is_td_id;
+use crate::core::td_index::{is_sheet_id, is_td_id};
 use crate::core::{scanner, td_review, td_tasks};
 use crate::models::*;
 use crate::AppState;
@@ -462,7 +462,7 @@ pub async fn td_talk(
     State(state): State<AppState>,
     Path((id, td_id)): Path<(String, String)>,
 ) -> Json<ApiResponse<TdTalk>> {
-    if !is_td_id(&td_id) {
+    if !is_sheet_id(&td_id) {
         return Json(ApiResponse::err_coded(
             ApiErrorCode::Validation,
             "Invalid tech-debt id",
@@ -541,7 +541,7 @@ pub async fn start_td_talk(
     Path((id, td_id)): Path<(String, String)>,
     Json(req): Json<TdTalkRequest>,
 ) -> Json<ApiResponse<TdTalkStart>> {
-    if !is_td_id(&td_id) {
+    if !is_sheet_id(&td_id) {
         return Json(ApiResponse::err_coded(
             ApiErrorCode::Validation,
             "Invalid tech-debt id",

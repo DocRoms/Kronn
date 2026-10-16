@@ -530,6 +530,19 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- The tech-debt review keeps the sheet valid, keeps the "why" and counts the
+  debts the card counts (KT-1309). Saving a decision appends its
+  `audit_history` entry with the indentation of the list it joins, so a
+  standard YAML parser (Ruby, `serde_yaml`) still reads the header; the typed
+  reason is the entry's note for Confirm, Defer, Reject and Keep on purpose
+  (the fixed note only stands in for an empty one) and the field's label says
+  so. The review lists every sheet the card counts, including the `CQ-*` and
+  `PERF-*` detail files an audit wrote without front matter (severity and
+  status from their index row, else Unknown): a Critical or High one blocks
+  the validation gate until it is settled, and settling one gives it the
+  front matter and `Status` line it lacked. The generated tech-debt index
+  lists them too, so their severity survives a resync. The impact is rendered
+  as Markdown and a sheet with no verification criterion says so.
 - A review-wait timeout no longer locks the principal out of the review
   (KT-1293). The watchdog used to move the unreviewed delivery to `Escalated`
   while its alert told the principal to call `task_exec_review`, which only

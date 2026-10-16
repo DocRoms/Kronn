@@ -17,6 +17,7 @@ import type {
   AgentDetection, ModelTiersConfig, Project, TdDecisionItem, TdPointer, TdReviewDecision,
   TdReviewItem, TdReviewList,
 } from '../types/generated';
+import { TdMarkdown } from './TdMarkdown';
 import { TdProgressBar } from './TdProgressBar';
 import { TdTalkPanel } from './TdTalkPanel';
 import './TechDebt.css';
@@ -394,7 +395,7 @@ export function TechDebtReview({
                 {current.impact && (
                   <section className="td-detail-section">
                     <h4>{t('techDebt.detail.impact')}</h4>
-                    <p>{current.impact}</p>
+                    <TdMarkdown text={current.impact} />
                   </section>
                 )}
                 {current.pointers.length > 0 && (
@@ -415,12 +416,12 @@ export function TechDebtReview({
                     </div>
                   </section>
                 )}
-                {current.verification && (
-                  <section className="td-detail-section">
-                    <h4>{t('techDebt.detail.verification')}</h4>
-                    <p>{current.verification}</p>
-                  </section>
-                )}
+                <section className="td-detail-section" data-testid="td-verification">
+                  <h4>{t('techDebt.detail.verification')}</h4>
+                  {current.verification
+                    ? <p>{current.verification}</p>
+                    : <p className="td-missing" data-testid="td-no-verification">{t('techDebt.detail.noVerification')}</p>}
+                </section>
                 <p className="td-detail-source">{t('techDebt.detail.source', current.source_path)}</p>
 
                 <section className="td-detail-section">
@@ -464,7 +465,7 @@ export function TechDebtReview({
                     >
                       <ListChecks size={12} /> {t('techDebt.link.task', current.task.reference)}
                     </button>
-                  ) : (
+                  ) : current.id.startsWith('TD-') && (
                     <button
                       type="button"
                       className="td-link-btn"

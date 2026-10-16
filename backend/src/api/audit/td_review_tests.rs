@@ -500,3 +500,139 @@ fn the_first_target_leads_the_sheets_discussion() {
     assert!(request.initial_prompt.ends_with("Vrai problème ?"));
     assert!(talk_discussion_request("p1", &item, "x", &[], "fr".into()).is_none());
 }
+
+/// Detail files a dimension audit wrote without front matter (KT-1309): the
+/// project card counts them, so the review lists and settles them too.
+fn write_dimension_files(tmp: &tempfile::TempDir) {
+    let docs = tmp.path().join("docs");
+    // Severity only in the index row.
+    std::fs::write(
+        docs.join("tech-debt/CQ-001.md"),
+        "# CQ-001: Oversized controller\n\n## Problem\n\nThe controller grew.\n",
+    )
+    .unwrap();
+    // Severity in the file itself, and a Status line.
+    std::fs::write(
+        docs.join("tech-debt/CQ-002.md"),
+        "# CQ-002: Dead branch\n\n- **Severity**: Low\n- **Status**: Open\n",
+    )
+    .unwrap();
+    // Nothing anywhere: unknown.
+    std::fs::write(
+        docs.join("tech-debt/PERF-20261016-deep-clone.md"),
+        "# Deep clone on the hot path\n",
+    )
+    .unwrap();
+    std::fs::write(
+        docs.join("inconsistencies-tech-debt.md"),
+        "# Index\n\n## Current list\n\n| ID | Problem | Area | Severity | Status |\n|----|---------|------|----------|--------|\n| CQ-001 | Oversized controller | Backend | High | Open |\n",
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn the_review_lists_every_sheet_the_card_counts() {
+    let (state, tmp) = fixture().await;
+    write_dimension_files(&tmp);
+    let listed = list(&state).await;
+    let ids: Vec<&str> = listed.items.iter().map(|i| i.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        ["CQ-001", "CQ-002", "PERF-20261016-deep-clone", A, B, C]
+    );
+    let card = crate::core::scanner::count_tech_debt(tmp.path().to_str().unwrap());
+    assert_eq!(
+        listed.items.len() as u32,
+        card,
+        "card and review count the same debts"
+    );
+    let by_id = |id: &str| listed.items.iter().find(|i| i.id == id).unwrap();
+    // The index row says what the file does not.
+    assert_eq!(by_id("CQ-001").severity, "High");
+    assert_eq!(by_id("CQ-001").status, "Open");
+    assert_eq!(by_id("CQ-001").area, "Backend");
+    assert_eq!(by_id("CQ-002").severity, "Low");
+    assert_eq!(by_id("PERF-20261016-deep-clone").severity, "Unknown");
+    assert_eq!(listed.counts.pending, 6);
+    assert!(
+        listed
+            .by_severity
+            .iter()
+            .any(|row| row.severity == "Unknown" && row.total == 1),
+        "an unknown severity is shown, not dropped"
+    );
+    // A High file without front matter blocks the gate like any other.
+    assert_eq!(
+        (listed.gate.blocking_total, listed.gate.blocking_settled),
+        (3, 0)
+    );
+}
+
+#[tokio::test]
+async fn a_high_detail_file_without_front_matter_gates_the_validation_until_it_is_settled() {
+    let (state, tmp) = fixture().await;
+    write_dimension_files(&tmp);
+    let response = decide(
+        &state,
+        vec![
+            decision(A, TdReviewDecision::Confirm, None),
+            decision(B, TdReviewDecision::Reject, None),
+        ],
+    )
+    .await;
+    let outcome = response.data.expect("decided");
+    assert!(!outcome.gate.met, "CQ-001 is High and still pending");
+    assert_eq!(
+        (outcome.gate.blocking_total, outcome.gate.blocking_settled),
+        (3, 2)
+    );
+
+    let response = decide(
+        &state,
+        vec![decision(
+            "CQ-001",
+            TdReviewDecision::Confirm,
+            Some("Yes, split it before the next feature."),
+        )],
+    )
+    .await;
+    let outcome = response.data.expect("a detail file can be decided");
+    assert!(outcome.gate.met);
+    assert_eq!(outcome.results[0].state, TdReviewState::Confirmed);
+    let sheet = read(&tmp, "CQ-001");
+    assert!(sheet.starts_with("---\n"), "{sheet}");
+    assert!(sheet.contains("- **Status**: Confirmed by user"), "{sheet}");
+    assert!(
+        sheet.contains("## Problem\n\nThe controller grew."),
+        "{sheet}"
+    );
+    let front = sheet.strip_prefix("---\n").unwrap();
+    let front: serde_yaml::Value =
+        serde_yaml::from_str(&front[..front.find("\n---").unwrap()]).expect("strict YAML");
+    assert_eq!(
+        front["metadata"]["audit_history"][0]["note"].as_str(),
+        Some("Yes, split it before the next feature.")
+    );
+    let listed = list(&state).await;
+    assert_eq!(listed.counts.confirmed, 2);
+}
+
+#[tokio::test]
+async fn the_reason_typed_for_a_decision_is_what_the_sheet_keeps() {
+    let (state, tmp) = fixture().await;
+    for (id, kind, reason) in [
+        (A, TdReviewDecision::Confirm, "Real: seen in prod."),
+        (B, TdReviewDecision::Defer, "After the migration."),
+        (C, TdReviewDecision::Reject, "Not reachable."),
+    ] {
+        let response = decide(&state, vec![decision(id, kind, Some(reason))]).await;
+        assert!(response.success, "{:?}", response.error);
+        let sheet = read(&tmp, id);
+        assert!(sheet.contains(&format!("note: \"{reason}\"")), "{sheet}");
+        assert!(!sheet.contains("from the tech-debt review screen"));
+    }
+    // Without a reason the fixed note stays.
+    let (state, tmp) = fixture().await;
+    decide(&state, vec![decision(A, TdReviewDecision::Confirm, None)]).await;
+    assert!(read(&tmp, A).contains("Confirmed from the tech-debt review screen."));
+}

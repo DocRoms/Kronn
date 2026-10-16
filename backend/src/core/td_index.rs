@@ -59,7 +59,20 @@ pub struct ResyncOutcome {
 pub fn counted_sheet_stem(file_name: &str) -> Option<&str> {
     let stem = file_name.strip_suffix(".md")?;
     let scaffolding = matches!(file_name, "README.md" | "TEMPLATE.md");
-    (!stem.is_empty() && !file_name.starts_with('_') && !scaffolding).then_some(stem)
+    (is_sheet_id(stem) && !file_name.starts_with('_') && !scaffolding).then_some(stem)
+}
+
+/// Whether `value` can name a sheet file of `tech-debt/`: `TD-*` ids and the
+/// detail files a dimension audit writes under its own prefix (`CQ-001`,
+/// `PERF-2026…`). The review lists and settles every one the card counts
+/// (KT-1309); only the `TD-` ones also feed the generated index.
+pub fn is_sheet_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 100
+        && value.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 /// Whether a sheet's content is active debt, as the index and the counts read it.
@@ -102,6 +115,43 @@ pub fn read_sheets_in(td_dir: &Path) -> Vec<TdSheet> {
         .collect();
     sheets.sort_by(|a, b| a.id.cmp(&b.id));
     sheets
+}
+
+/// The counted sheets that are not `TD-*`: the `CQ-*` / `PERF-*` detail files
+/// of the dimension audits, parsed like any sheet. What a file leaves unsaid
+/// comes from its index row, so the generated table keeps the severity the
+/// dimension audit gave once it replaces that row (KT-1309).
+fn read_detail_sheets(docs_dir: &Path) -> Vec<TdSheet> {
+    let Ok(entries) = std::fs::read_dir(docs_dir.join("tech-debt")) else {
+        return Vec::new();
+    };
+    let rows = docs_index_rows(docs_dir);
+    entries
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .filter_map(|e| {
+            let name = e.file_name().to_str()?.to_string();
+            let id = counted_sheet_stem(&name).filter(|id| !is_td_id(id))?;
+            let content = std::fs::read_to_string(e.path()).ok()?;
+            let mut sheet = parse_sheet(id, &content);
+            if let Some(row) = rows.get(id) {
+                let unknown = |v: &str| v.eq_ignore_ascii_case(UNKNOWN);
+                if sheet.title == sheet.id {
+                    sheet.title = row.title.clone().unwrap_or(sheet.title);
+                }
+                if unknown(&sheet.area) {
+                    sheet.area = row.area.clone().unwrap_or(sheet.area);
+                }
+                if unknown(&sheet.severity) {
+                    sheet.severity = row.severity.clone().unwrap_or(sheet.severity);
+                }
+                if unknown(&sheet.status) {
+                    sheet.status = row.status.clone().unwrap_or(sheet.status);
+                }
+            }
+            Some(sheet)
+        })
+        .collect()
 }
 
 pub fn parse_sheet(id: &str, content: &str) -> TdSheet {
@@ -258,6 +308,103 @@ fn table_row(line: &str) -> Option<(String, Vec<String>)> {
         .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
         .collect();
     is_td_id(&id).then_some((id, cells))
+}
+
+/// What an index row says about a sheet that has no front matter to say it.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct IndexRow {
+    pub title: Option<String>,
+    pub area: Option<String>,
+    pub severity: Option<String>,
+    pub status: Option<String>,
+}
+
+fn column(header: &[String], names: &[&str]) -> Option<usize> {
+    header
+        .iter()
+        .position(|h| names.iter().any(|n| h.eq_ignore_ascii_case(n)))
+}
+
+/// The rows of an index file by sheet id (any `is_sheet_id` id, not only
+/// `TD-`), read through the header of their table. A table without a header
+/// row uses the central index layout: ID | Problem | Area | Severity | Status.
+pub fn index_rows(content: &str) -> BTreeMap<String, IndexRow> {
+    let mut out = BTreeMap::new();
+    let mut header: Vec<String> = Vec::new();
+    let mut fenced = false;
+    for line in content.lines() {
+        let t = line.trim();
+        if t.starts_with("```") {
+            fenced = !fenced;
+        }
+        if fenced || !t.starts_with('|') {
+            header.clear();
+            continue;
+        }
+        let cells: Vec<String> = t
+            .trim_matches('|')
+            .split('|')
+            .map(|c| clean(c.trim()))
+            .collect();
+        let first = cells
+            .first()
+            .map(|c| c.trim_start_matches(['[', '`']))
+            .unwrap_or("");
+        let id: String = first
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+            .collect();
+        if cells
+            .iter()
+            .all(|c| c.chars().all(|ch| ch == '-' || ch == ':'))
+        {
+            continue;
+        }
+        if !is_sheet_id(&id) || !id.contains(|c: char| c.is_ascii_digit()) {
+            if column(&cells, &["severity", "sévérité"]).is_some() {
+                header = cells.iter().map(|c| c.to_lowercase()).collect();
+            }
+            continue;
+        }
+        let pick = |names: &[&str], default: usize| {
+            let at = if header.is_empty() {
+                Some(default)
+            } else {
+                column(&header, names)
+            };
+            at.and_then(|i| cells.get(i))
+                .filter(|v| !v.is_empty() && v.as_str() != "—" && v.as_str() != "-")
+                .cloned()
+        };
+        out.entry(id).or_insert_with(|| IndexRow {
+            title: pick(&["problem", "title", "description", "issue", "finding"], 1),
+            area: pick(&["area", "zone"], 2),
+            severity: pick(&["severity", "sévérité"], 3),
+            status: pick(&["status", "statut"], 4),
+        });
+    }
+    out
+}
+
+/// [`index_rows`] of the central index, then of the dimension indexes: the
+/// first file that gives a field wins.
+pub fn docs_index_rows(docs_dir: &Path) -> BTreeMap<String, IndexRow> {
+    let mut files: Vec<String> = Vec::new();
+    if let Ok(central) = std::fs::read_to_string(docs_dir.join(CENTRAL_INDEX)) {
+        files.push(central);
+    }
+    files.extend(dimension_indexes(docs_dir).into_values());
+    let mut merged: BTreeMap<String, IndexRow> = BTreeMap::new();
+    for content in files {
+        for (id, row) in index_rows(&content) {
+            let slot = merged.entry(id).or_default();
+            slot.title = slot.title.take().or(row.title);
+            slot.area = slot.area.take().or(row.area);
+            slot.severity = slot.severity.take().or(row.severity);
+            slot.status = slot.status.take().or(row.status);
+        }
+    }
+    merged
 }
 
 /// Ids listed in the TD rows of an index file.
@@ -656,7 +803,9 @@ fn resync_index(docs_dir: &Path) -> Result<ResyncOutcome, String> {
     }
     let content =
         std::fs::read_to_string(&index).map_err(|e| format!("read {}: {e}", index.display()))?;
-    let sheets = read_sheets(docs_dir);
+    let mut sheets = read_sheets(docs_dir);
+    sheets.extend(read_detail_sheets(docs_dir));
+    sheets.sort_by(|a, b| a.id.cmp(&b.id));
     let has_block = content
         .lines()
         .any(|l| l.trim().starts_with(BLOCK_START_PREFIX));

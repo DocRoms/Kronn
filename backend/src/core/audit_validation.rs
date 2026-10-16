@@ -210,12 +210,10 @@ pub(crate) struct TdResolution {
     pub(crate) action: TdResolutionAction,
 }
 
+/// A sheet the review lists (`TD-*`, and the `CQ-*` / `PERF-*` detail files of
+/// the dimension audits): no path separator, no way out of `tech-debt/`.
 fn valid_td_id(value: &str) -> bool {
-    value.starts_with("TD-")
-        && value.len() <= 100
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    crate::core::td_index::is_sheet_id(value)
 }
 
 fn linked_project_path(conn: &Connection, discussion_id: &str) -> Result<PathBuf> {
@@ -327,17 +325,29 @@ pub(crate) fn replace_current_status(lines: &mut [String], status: &str) -> Resu
     Err(anyhow!("TD detail has no current Status field"))
 }
 
+/// The reason a person typed, trimmed; `None` when there is none.
+fn typed_reason(reason: Option<&str>) -> Option<&str> {
+    reason.map(str::trim).filter(|r| !r.is_empty())
+}
+
 fn append_audit_history(
     lines: &mut Vec<String>,
     action: TdResolutionAction,
     origin: TdDecisionOrigin,
+    reason: Option<&str>,
 ) -> Result<()> {
-    append_history_entry(
-        lines,
-        action.status(),
-        origin.reviewer(),
-        action.history_note(origin),
-    )
+    // The typed reason is the "why"; the fixed note only stands in for it.
+    let note = typed_reason(reason).unwrap_or_else(|| action.history_note(origin));
+    append_history_entry(lines, action.status(), origin.reviewer(), note)
+}
+
+fn indent_of(line: &str) -> usize {
+    line.len() - line.trim_start().len()
+}
+
+fn is_list_item(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed == "-" || trimmed.starts_with("- ")
 }
 
 /// Appends one `audit_history` entry, unless the same status by the same
@@ -370,38 +380,70 @@ pub(crate) fn append_history_entry(
         .skip(1)
         .find_map(|(index, line)| (line.trim() == "---").then_some(index))
         .ok_or_else(|| anyhow!("TD detail has unterminated YAML frontmatter"))?;
-    let entry = vec![
-        format!("    - date: {date}"),
-        format!("      status: {status}"),
-        format!("      {reviewer_line}"),
-        format!("      note: {}", serde_json::to_string(note)?),
-    ];
+    let note = serde_json::to_string(note)?;
+    // A flow-style empty list is not a block to append to.
+    if let Some(flow) = lines[..frontmatter_end]
+        .iter()
+        .position(|line| line.trim() == "audit_history: []")
+    {
+        lines[flow] = format!("{}audit_history:", " ".repeat(indent_of(&lines[flow])));
+    }
+    // An entry has the shape of the list it joins: standard YAML parsers reject
+    // a sequence whose items sit at two different indents (KT-1309).
+    let entry = |item_indent: usize, key_col: usize| {
+        vec![
+            format!("{}- date: {date}", " ".repeat(item_indent)),
+            format!("{}status: {status}", " ".repeat(key_col)),
+            format!("{}{reviewer_line}", " ".repeat(key_col)),
+            format!("{}note: {note}", " ".repeat(key_col)),
+        ]
+    };
 
     if let Some(history_index) = lines[..frontmatter_end]
         .iter()
         .position(|line| line.trim() == "audit_history:")
     {
-        let insert_at = lines
+        let key_indent = indent_of(&lines[history_index]);
+        let mut last = history_index;
+        let mut shape: Option<(usize, usize)> = None;
+        for (index, line) in lines
             .iter()
             .enumerate()
             .take(frontmatter_end)
             .skip(history_index + 1)
-            .find_map(|(index, line)| {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    return None;
-                }
-                let indent = line.len() - line.trim_start().len();
-                (indent <= 2).then_some(index)
-            })
-            .unwrap_or(frontmatter_end);
-        lines.splice(insert_at..insert_at, entry);
+        {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let indent = indent_of(line);
+            let item = is_list_item(line);
+            if indent < key_indent || (indent == key_indent && !item) {
+                break;
+            }
+            last = index;
+            if shape.is_none() && item {
+                let after_dash = &line.trim_start()[1..];
+                let gap = after_dash.len() - after_dash.trim_start().len();
+                shape = Some((indent, indent + 1 + gap.max(1)));
+            }
+        }
+        let (item_indent, key_col) = shape.unwrap_or((key_indent + 2, key_indent + 4));
+        lines.splice(last + 1..last + 1, entry(item_indent, key_col));
     } else if let Some(metadata_index) = lines[..frontmatter_end]
         .iter()
         .position(|line| line.trim() == "metadata:")
     {
-        let mut block = vec!["  audit_history:".to_string()];
-        block.extend(entry);
+        let metadata_indent = indent_of(&lines[metadata_index]);
+        let child_indent = lines
+            .iter()
+            .take(frontmatter_end)
+            .skip(metadata_index + 1)
+            .find(|line| !line.trim().is_empty())
+            .map(|line| indent_of(line))
+            .filter(|indent| *indent > metadata_indent)
+            .unwrap_or(metadata_indent + 2);
+        let mut block = vec![format!("{}audit_history:", " ".repeat(child_indent))];
+        block.extend(entry(child_indent + 2, child_indent + 4));
         lines.splice(metadata_index + 1..metadata_index + 1, block);
     } else {
         let mut block = vec![
@@ -409,21 +451,84 @@ pub(crate) fn append_history_entry(
             "  type: tech-debt".to_string(),
             "  audit_history:".to_string(),
         ];
-        block.extend(entry);
+        block.extend(entry(4, 6));
         lines.splice(frontmatter_end..frontmatter_end, block);
     }
     Ok(())
+}
+
+/// A sheet without a `Status` field gets one, under its title, so a decision
+/// has somewhere to land. `false` when the front matter never closes.
+fn insert_status(lines: &mut Vec<String>, status: &str) -> bool {
+    let body_start = if lines.first().is_some_and(|line| line.trim() == "---") {
+        match lines
+            .iter()
+            .enumerate()
+            .skip(1)
+            .find_map(|(index, line)| (line.trim() == "---").then_some(index + 1))
+        {
+            Some(start) => start,
+            None => return false,
+        }
+    } else {
+        0
+    };
+    let field = format!("- **Status**: {status}");
+    let mut in_fence = false;
+    let heading = lines
+        .iter()
+        .enumerate()
+        .skip(body_start)
+        .find_map(|(index, line)| {
+            if line.trim_start().starts_with("```") {
+                in_fence = !in_fence;
+            }
+            (!in_fence && line.starts_with("# ")).then_some(index)
+        });
+    match heading {
+        Some(index) => {
+            let next = lines.get(index + 1).map(String::as_str).unwrap_or("");
+            let block = if next.trim().is_empty() {
+                vec![String::new(), field]
+            } else if next.trim_start().starts_with("- **") {
+                vec![field]
+            } else {
+                vec![String::new(), field, String::new()]
+            };
+            lines.splice(index + 1..index + 1, block);
+        }
+        None => {
+            lines.splice(body_start..body_start, [field, String::new()]);
+        }
+    }
+    true
+}
+
+/// A sheet an audit wrote without front matter gets the minimal block that
+/// can carry its decision history.
+fn ensure_frontmatter(lines: &mut Vec<String>) {
+    if lines.first().is_some_and(|line| line.trim() == "---") {
+        return;
+    }
+    let block = ["---", "metadata:", "  type: tech-debt", "---", ""];
+    lines.splice(0..0, block.map(str::to_string));
 }
 
 fn update_td(
     content: &str,
     action: TdResolutionAction,
     origin: TdDecisionOrigin,
+    reason: Option<&str>,
 ) -> Result<String> {
     let trailing_newline = content.ends_with('\n');
     let mut lines = content.lines().map(str::to_string).collect::<Vec<_>>();
-    replace_current_status(&mut lines, action.status())?;
-    append_audit_history(&mut lines, action, origin)?;
+    if let Err(error) = replace_current_status(&mut lines, action.status()) {
+        if !insert_status(&mut lines, action.status()) {
+            return Err(error);
+        }
+    }
+    ensure_frontmatter(&mut lines);
+    append_audit_history(&mut lines, action, origin, reason)?;
     let mut updated = lines.join("\n");
     if trailing_newline {
         updated.push('\n');
@@ -533,7 +638,7 @@ pub(crate) fn apply_td_resolutions_at(
     let mut seen = std::collections::HashSet::new();
     let mut updates = Vec::with_capacity(resolutions.len());
     let mut titles = std::collections::HashMap::new();
-    for (resolution, _) in resolutions {
+    for (resolution, reason) in resolutions {
         if !valid_td_id(&resolution.td_id) || !seen.insert(resolution.td_id.as_str()) {
             return Err(anyhow!("Invalid or duplicate audit TD id"));
         }
@@ -542,9 +647,10 @@ pub(crate) fn apply_td_resolutions_at(
             .with_context(|| format!("cannot read {}", path.display()))?;
         let title = crate::core::td_index::parse_sheet(&resolution.td_id, &content).title;
         titles.insert(resolution.td_id.as_str(), title);
-        let mut updated = update_td(&content, resolution.action, origin)?;
-        // The note quotes the project's docs root (KT-1192).
-        if !docs_root.is_default() {
+        let mut updated = update_td(&content, resolution.action, origin, *reason)?;
+        // The fixed note quotes the project's docs root (KT-1192); a typed
+        // reason is kept as written.
+        if !docs_root.is_default() && typed_reason(*reason).is_none() {
             updated = updated.replacen(
                 "recorded in docs/decisions.md.",
                 &format!("recorded in {}.", docs_root.path("decisions.md")),
@@ -676,13 +782,20 @@ mod tests {
             &td("Verified in source"),
             TdResolutionAction::Defer,
             TdDecisionOrigin::Card,
+            None,
         )
         .unwrap();
         assert!(once.contains("- **Status**: Deferred"));
         assert!(once.contains("status: Deferred"));
         assert!(once.contains("reviewer: Kronn audit validation card"));
         assert_eq!(
-            update_td(&once, TdResolutionAction::Defer, TdDecisionOrigin::Card).unwrap(),
+            update_td(
+                &once,
+                TdResolutionAction::Defer,
+                TdDecisionOrigin::Card,
+                None
+            )
+            .unwrap(),
             once,
             "a retry must not append a second audit-history entry"
         );
@@ -742,8 +855,13 @@ mod tests {
             (TdResolutionAction::Defer, TdDecision::Deferred),
         ];
         for (action, decision) in cases {
-            let written =
-                update_td(&td("Verified in source"), action, TdDecisionOrigin::Card).unwrap();
+            let written = update_td(
+                &td("Verified in source"),
+                action,
+                TdDecisionOrigin::Card,
+                None,
+            )
+            .unwrap();
             assert_eq!(td_decision(&written), Some(decision), "{action:?}");
         }
         assert_eq!(td_decision(&td("Verified in source")), None);
@@ -768,7 +886,13 @@ mod tests {
     fn a_status_only_in_front_matter_is_read_and_written() {
         let sheet = "---\nname: td-x\nstatus: Open\nmetadata:\n  type: tech-debt\n---\n\n# TD-x — café ☕\n";
         assert_eq!(td_decision(sheet), None);
-        let written = update_td(sheet, TdResolutionAction::Reject, TdDecisionOrigin::Card).unwrap();
+        let written = update_td(
+            sheet,
+            TdResolutionAction::Reject,
+            TdDecisionOrigin::Card,
+            None,
+        )
+        .unwrap();
         assert!(written.contains("\nstatus: Rejected\n"));
         assert_eq!(td_decision(&written), Some(TdDecision::Rejected));
         // Only history: its last entry is the current status.
@@ -782,5 +906,243 @@ mod tests {
         assert!(valid_td_id("TD-20260928-safe-slug"));
         assert!(!valid_td_id("../decisions"));
         assert!(!valid_td_id("TD-safe/../../decisions"));
+        // The dimension audits' detail files are sheets too (KT-1309).
+        assert!(valid_td_id("CQ-001"));
+        assert!(valid_td_id("PERF-20261016-deep-clone-pattern"));
+        assert!(!valid_td_id(".hidden"));
+        assert!(!valid_td_id("CQ-001/../x"));
+    }
+
+    /// The front matter of a sheet, through a strict YAML parser: Kronn's own
+    /// reader is lenient, a standard parser (Ruby, serde_yaml) is not.
+    fn strict_front_matter(content: &str) -> serde_yaml::Value {
+        let rest = content
+            .strip_prefix("---\n")
+            .unwrap_or_else(|| panic!("no front matter:\n{content}"));
+        let end = rest
+            .find("\n---")
+            .unwrap_or_else(|| panic!("unterminated front matter:\n{content}"));
+        serde_yaml::from_str(&rest[..end])
+            .unwrap_or_else(|error| panic!("strict YAML parse failed: {error}\n{content}"))
+    }
+
+    /// `(status, note)` of each `audit_history` entry, in file order.
+    fn strict_history(content: &str) -> Vec<(String, String)> {
+        let front = strict_front_matter(content);
+        let entries = front
+            .get("audit_history")
+            .or_else(|| front.get("metadata").and_then(|m| m.get("audit_history")))
+            .and_then(serde_yaml::Value::as_sequence)
+            .unwrap_or_else(|| panic!("no audit_history list:\n{content}"));
+        entries
+            .iter()
+            .map(|entry| {
+                let text = |key: &str| {
+                    entry
+                        .get(key)
+                        .and_then(serde_yaml::Value::as_str)
+                        .unwrap_or_default()
+                        .to_string()
+                };
+                (text("status"), text("note"))
+            })
+            .collect()
+    }
+
+    /// Existing history shapes: key indent, item indent, key column.
+    fn sheet_with_history(key_indent: usize, item_indent: usize, key_col: usize) -> String {
+        let sp = |n: usize| " ".repeat(n);
+        let (meta, wrapper) = if key_indent == 0 {
+            (String::new(), String::new())
+        } else {
+            (
+                "metadata:\n".to_string(),
+                format!("{}type: tech-debt\n", sp(key_indent)),
+            )
+        };
+        format!(
+            "---\nname: td-test\n{meta}{wrapper}{k}audit_history:\n{i}- date: 2026-09-01\n{c}status: Verified in source\n{c}reviewer: Full audit\n{c}note: \"first\"\n{o}other: kept\n---\n\n# TD-test\n\n- **Severity**: High\n- **Status**: Verified in source\n",
+            k = sp(key_indent),
+            i = sp(item_indent),
+            c = sp(key_col),
+            o = sp(key_indent),
+        )
+    }
+
+    #[test]
+    fn a_saved_decision_keeps_the_front_matter_valid_whatever_the_indentation() {
+        // (key indent, item indent, key column): 2-space, 4-space, an
+        // indentless sequence, a top-level key, and a deep one.
+        let shapes = [
+            (2, 4, 6),
+            (4, 8, 10),
+            (4, 6, 8),
+            (2, 2, 4),
+            (0, 2, 4),
+            (0, 0, 2),
+            (6, 8, 10),
+        ];
+        for (key_indent, item_indent, key_col) in shapes {
+            let input = sheet_with_history(key_indent, item_indent, key_col);
+            strict_front_matter(&input);
+            for action in [
+                TdResolutionAction::Confirm,
+                TdResolutionAction::Defer,
+                TdResolutionAction::Reject,
+                TdResolutionAction::AcceptDecision,
+            ] {
+                let written =
+                    update_td(&input, action, TdDecisionOrigin::Review, Some("because")).unwrap();
+                let history = strict_history(&written);
+                assert_eq!(
+                    history.len(),
+                    2,
+                    "shape {key_indent}/{item_indent}/{key_col} {action:?}:\n{written}"
+                );
+                assert_eq!(history[0].1, "first");
+                assert_eq!(
+                    history[1],
+                    (action.status().to_string(), "because".to_string())
+                );
+                // The key after the list is still its sibling, not an entry field.
+                assert!(written.contains("other: kept"));
+            }
+        }
+    }
+
+    #[test]
+    fn a_second_decision_joins_the_list_the_first_one_wrote() {
+        let input = sheet_with_history(4, 8, 10);
+        let first = update_td(
+            &input,
+            TdResolutionAction::Defer,
+            TdDecisionOrigin::Review,
+            Some("later"),
+        )
+        .unwrap();
+        let second = update_td(
+            &first,
+            TdResolutionAction::Confirm,
+            TdDecisionOrigin::Review,
+            Some("real"),
+        )
+        .unwrap();
+        let history = strict_history(&second);
+        assert_eq!(history.len(), 3);
+        assert_eq!(history[2], ("Confirmed by user".into(), "real".into()));
+        assert_eq!(td_decision(&second), Some(TdDecision::Confirmed));
+    }
+
+    #[test]
+    fn front_matter_without_a_history_gets_one_that_parses() {
+        for front in [
+            "name: td-x\nmetadata:\n  type: tech-debt",
+            "name: td-x\nmetadata:\n    type: tech-debt",
+            "name: td-x",
+            "name: td-x\nmetadata:\n  type: tech-debt\n  audit_history: []",
+        ] {
+            let input = format!("---\n{front}\n---\n\n# TD-x\n\n- **Status**: Inferred\n");
+            let written = update_td(
+                &input,
+                TdResolutionAction::Reject,
+                TdDecisionOrigin::Card,
+                None,
+            )
+            .unwrap();
+            let history = strict_history(&written);
+            assert_eq!(history.len(), 1, "{front}\n{written}");
+            assert_eq!(history[0].0, "Rejected");
+        }
+    }
+
+    #[test]
+    fn every_decision_stores_the_reason_that_was_typed() {
+        let reason = "Intentional: \"legacy\" API\nsee RFC #12 \u{2014} caf\u{e9} \u{2615}";
+        let cases = [
+            TdResolutionAction::Confirm,
+            TdResolutionAction::Defer,
+            TdResolutionAction::Reject,
+            TdResolutionAction::AcceptDecision,
+        ];
+        for action in cases {
+            for origin in [TdDecisionOrigin::Card, TdDecisionOrigin::Review] {
+                let written = update_td(&td("Inferred"), action, origin, Some(reason)).unwrap();
+                let history = strict_history(&written);
+                assert_eq!(history.last().unwrap().1, reason, "{action:?} {origin:?}");
+                // Padding around the reason is not part of it.
+                let padded =
+                    update_td(&td("Inferred"), action, origin, Some("  why not \n")).unwrap();
+                assert_eq!(strict_history(&padded).last().unwrap().1, "why not");
+            }
+        }
+    }
+
+    #[test]
+    fn the_fixed_note_only_stands_in_for_an_empty_reason() {
+        for reason in [None, Some(""), Some("   \n\t")] {
+            let written = update_td(
+                &td("Inferred"),
+                TdResolutionAction::Defer,
+                TdDecisionOrigin::Review,
+                reason,
+            )
+            .unwrap();
+            assert_eq!(
+                strict_history(&written).last().unwrap().1,
+                "Deferred from the tech-debt review screen."
+            );
+        }
+    }
+
+    #[test]
+    fn a_sheet_without_front_matter_or_status_can_still_be_decided() {
+        // The shape the dimension audits write for CQ-* / PERF-* (KT-1309).
+        let bare = "# CQ-001: Oversized module\n\n- **Severity**: High\n- **Area**: src/app\n\n## Problem\n\nIt grew.\n";
+        let written = update_td(
+            bare,
+            TdResolutionAction::Confirm,
+            TdDecisionOrigin::Review,
+            Some("agreed"),
+        )
+        .unwrap();
+        assert_eq!(td_decision(&written), Some(TdDecision::Confirmed));
+        assert_eq!(
+            strict_history(&written),
+            vec![("Confirmed by user".to_string(), "agreed".to_string())]
+        );
+        assert!(written.contains("- **Severity**: High"), "{written}");
+        assert!(written.contains("## Problem\n\nIt grew."), "{written}");
+        // Deciding again changes the status and does not duplicate the field.
+        let rejected = update_td(
+            &written,
+            TdResolutionAction::Reject,
+            TdDecisionOrigin::Review,
+            None,
+        )
+        .unwrap();
+        assert_eq!(rejected.matches("**Status**").count(), 1, "{rejected}");
+        assert_eq!(td_decision(&rejected), Some(TdDecision::Rejected));
+        assert_eq!(strict_history(&rejected).len(), 2);
+    }
+
+    #[test]
+    fn a_sheet_without_a_title_gets_its_status_first() {
+        let written = update_td(
+            "just text\n",
+            TdResolutionAction::Defer,
+            TdDecisionOrigin::Card,
+            None,
+        )
+        .unwrap();
+        assert_eq!(td_decision(&written), Some(TdDecision::Deferred));
+        strict_history(&written);
+        // Front matter that never closes is refused, not rewritten.
+        assert!(update_td(
+            "---\nname: x\n",
+            TdResolutionAction::Defer,
+            TdDecisionOrigin::Card,
+            None
+        )
+        .is_err());
     }
 }

@@ -142,6 +142,9 @@ tokio = { version = "1", features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 serial_test = "3"
+# A strict YAML parser: it proves the front matter Kronn writes is valid YAML,
+# not just readable by Kronn's own lenient reader (KT-1309). Dev-only.
+serde_yaml = "0.9"
 tempfile = "3"
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 futures = "0.3"
