@@ -19,7 +19,7 @@ still substitutes the briefing values at the call site.
 The Drift prompt asks the agent to report checksum mismatches without rewriting
 documentation. Its title no longer describes an unfinished placeholder; this
 prompt is separate from the deterministic drift API.
-[src: file: backend/src/api/audit/prompts/drift.md:1-3]
+[src: file: backend/src/api/audit/prompts/drift.md:1-2]
 
 Prompt contract tests continue to exercise the embedded strings rather than
 separate copies of the Markdown content.
