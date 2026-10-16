@@ -1377,6 +1377,18 @@ async fn the_template_installed_beside_human_docs_does_not_make_them_kronns() {
     ));
     let state = crate::core::kronn_state::read(project).expect(".kronn.json");
     assert!(state.template_installed_at.is_none(), "{state:?}");
+    // The install recorded exactly what it wrote: every file but the human's
+    // two and Kronn's state file.
+    let human = ["install.md", "guide/usage.md"];
+    let template_files: BTreeSet<String> = files_under(&project.join("docs"))
+        .into_iter()
+        .filter(|f| !human.contains(&f.as_str()) && f != ".kronn.json" && !f.starts_with("var/"))
+        .collect();
+    assert!(template_files.contains("AGENTS.md"), "{template_files:?}");
+    assert_eq!(
+        state.kronn_written.keys().cloned().collect::<BTreeSet<_>>(),
+        template_files
+    );
     refused_on_both_routes(&h, "docs_folder_choice_required", "docs/legacy/").await;
 
     // The choice unblocks the launch although the entry file already carries
@@ -1392,6 +1404,19 @@ async fn the_template_installed_beside_human_docs_does_not_make_them_kronns() {
     assert!(project.join("docs/legacy/install.md").is_file());
     assert!(project.join("docs/legacy/guide/usage.md").is_file());
     assert!(!project.join("docs/install.md").exists());
+    // Only the human's files moved: every template file stays in its place.
+    for file in &template_files {
+        assert!(project.join("docs").join(file).is_file(), "{file} moved");
+        assert!(!project.join("docs/legacy").join(file).exists(), "{file}");
+    }
+    let moved: BTreeSet<String> = files_under(&project.join("docs/legacy"))
+        .into_iter()
+        .filter(|f| f != "README.md")
+        .collect();
+    assert_eq!(
+        moved,
+        human.iter().map(|f| f.to_string()).collect::<BTreeSet<_>>()
+    );
     for state_file in ["briefing.md", ".kronn.json"] {
         assert!(
             project.join("docs").join(state_file).is_file(),
@@ -1404,6 +1429,45 @@ async fn the_template_installed_beside_human_docs_does_not_make_them_kronns() {
         std::fs::read_to_string(project.join("docs/legacy/install.md")).unwrap(),
         "# Install guide\n"
     );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn installing_never_turns_a_human_folder_with_an_earlier_audit_into_kronns() {
+    let h = harness().await;
+    let project = h.project.path();
+    human_docs(project);
+    // An earlier audit is recorded, yet no file carries a Kronn marker.
+    crate::core::kronn_state::record_audit(project, "full").unwrap();
+    let is_human = |project: &Path| {
+        matches!(
+            crate::core::docs_folder::folder_state(project, "docs"),
+            crate::core::docs_folder::DocsFolderState::HumanDocs { .. }
+        )
+    };
+    assert!(is_human(project));
+
+    install_template_route(&h).await;
+    // Still the human's: the install's own marked files are no proof.
+    assert!(project.join("docs/AGENTS.md").is_file());
+    assert!(is_human(project));
+    let state = crate::core::kronn_state::read(project).expect(".kronn.json");
+    assert!(state.template_installed_at.is_none(), "{state:?}");
+    refused_on_both_routes(&h, "docs_folder_choice_required", "docs/legacy/").await;
+
+    // Once the human chose, the folder is Kronn's and the audit runs.
+    let _cleanup = Relocated(project.to_string_lossy().into_owned());
+    crate::api::audit::briefing::save_briefing_answers(
+        &h.state,
+        PROJECT_ID,
+        briefing("docs", true),
+    )
+    .await
+    .unwrap();
+    assert!(project.join("docs/legacy/install.md").is_file());
+    assert!(project.join("docs/AGENTS.md").is_file());
+    audited_via_route(&h, &DocsRoot::default_root(), false).await;
 }
 
 #[tokio::test]

@@ -5,6 +5,7 @@
 //! or a template install, or a Full run this instance recorded for the
 //! project) and a structural marker. Anything less is a human's docs.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use serde::Serialize;
@@ -75,16 +76,53 @@ fn is_marker_file(path: &Path) -> bool {
     text_like && std::fs::read_to_string(path).is_ok_and(|c| has_structural_marker(&c))
 }
 
-/// `.kronn.json` in `dir` records an audit or a bootstrap.
-fn has_kronn_state(dir: &Path) -> bool {
+/// The `.kronn.json` of `dir`, when it parses.
+fn read_state(dir: &Path) -> Option<crate::core::kronn_state::KronnState> {
     std::fs::read_to_string(dir.join(crate::core::kronn_state::KRONN_STATE_FILENAME))
         .ok()
-        .and_then(|raw| serde_json::from_str::<crate::core::kronn_state::KronnState>(&raw).ok())
-        .is_some_and(|state| {
-            state.has_any_audit()
-                || state.bootstrapped_at.is_some()
-                || state.template_installed_at.is_some()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+}
+
+/// `.kronn.json` records an audit, a bootstrap or a template install.
+fn has_kronn_state(state: Option<&crate::core::kronn_state::KronnState>) -> bool {
+    state.is_some_and(|state| {
+        state.has_any_audit()
+            || state.bootstrapped_at.is_some()
+            || state.template_installed_at.is_some()
+    })
+}
+
+/// The files Kronn recorded as its own in `dir` (paths relative to it).
+pub(crate) fn kronn_written(dir: &Path) -> BTreeSet<String> {
+    read_state(dir)
+        .map(|state| state.kronn_written.into_keys().collect())
+        .unwrap_or_default()
+}
+
+/// `path` relative to `dir`, `/`-separated: the key of `kronn_written`.
+pub(crate) fn rel_key(dir: &Path, path: &Path) -> String {
+    path.strip_prefix(dir)
+        .unwrap_or(path)
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Every regular file under `dir`, relative to it (`legacy/` and `var/` apart),
+/// to tell what a writer created from what was already there.
+pub fn list_files(dir: &Path) -> BTreeSet<String> {
+    walkdir::WalkDir::new(dir)
+        .follow_links(false)
+        .max_depth(16)
+        .into_iter()
+        .filter_entry(|e| {
+            !(e.depth() == 1 && (e.file_name() == "legacy" || e.file_name() == "var"))
         })
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .map(|e| rel_key(dir, e.path()))
+        .collect()
 }
 
 /// The briefing Kronn writes from the human's answers and its state files: not
@@ -110,8 +148,21 @@ pub fn folder_state_with_runs(root: &Path, rel: &str, recorded_run: bool) -> Doc
     if !meta.is_dir() {
         return DocsFolderState::Missing;
     }
-    let recorded = recorded_run || has_kronn_state(&dir);
+    let state = read_state(&dir);
+    let recorded = recorded_run || has_kronn_state(state.as_ref());
+    // What Kronn wrote is its own, never a human's. It stands as proof the
+    // folder is Kronn's only once an install made the folder Kronn's: written
+    // beside a human's docs, it must not turn them into Kronn's (KT-1299).
+    let written: BTreeSet<String> = state
+        .as_ref()
+        .map(|s| s.kronn_written.keys().cloned().collect())
+        .unwrap_or_default();
+    let owned = state
+        .as_ref()
+        .is_some_and(|s| s.template_installed_at.is_some());
     let mut files = 0u32;
+    let mut visited = 0usize;
+    let mut unproven_entry = false;
     let mut managed = false;
     let walker = walkdir::WalkDir::new(&dir)
         .follow_links(false)
@@ -131,12 +182,24 @@ pub fn folder_state_with_runs(root: &Path, rel: &str, recorded_run: bool) -> Doc
         if entry.depth() == 1 && is_kronn_state_file(&entry.file_name().to_string_lossy()) {
             continue;
         }
-        files += 1;
-        if recorded && !managed && (files as usize) <= MAX_SCANNED && is_marker_file(entry.path()) {
-            managed = true;
+        let kronns = written.contains(&rel_key(&dir, entry.path()));
+        if kronns && !owned {
+            unproven_entry |= entry.depth() == 1 && entry.file_name() == "AGENTS.md";
+        } else {
+            visited += 1;
+            if recorded && !managed && visited <= MAX_SCANNED && is_marker_file(entry.path()) {
+                managed = true;
+            }
+        }
+        if !kronns {
+            files += 1;
         }
     }
-    let signed = || files > 0 && crate::core::legacy_docs::is_kronn_managed_docs(&dir);
+    let signed = || {
+        (files > 0 || owned)
+            && !unproven_entry
+            && crate::core::legacy_docs::is_kronn_managed_docs(&dir)
+    };
     if recorded && (managed || signed()) {
         return DocsFolderState::KronnManaged;
     }
@@ -294,6 +357,69 @@ mod tests {
                 legacy_exists: false,
             }
         );
+    }
+
+    const KRONN_DOC: &str = "<!-- kronn:doc-version=\"1\" -->\n# AI agent context — Entry point\n";
+
+    #[test]
+    fn kronn_written_files_are_not_the_humans_and_prove_nothing_beside_theirs() {
+        let t = tempfile::tempdir().unwrap();
+        write(t.path(), "docs/install.md", "# Install\n");
+        write(t.path(), "docs/AGENTS.md", KRONN_DOC);
+        write(t.path(), "docs/guide/kronn.md", KRONN_DOC);
+        write(t.path(), "docs/.kronn.json", AUDITED);
+        crate::core::kronn_state::record_kronn_written(
+            t.path(),
+            &["AGENTS.md".to_string(), "guide/kronn.md".to_string()],
+        )
+        .unwrap();
+        let state = read_state(&t.path().join("docs")).unwrap();
+        assert_eq!(state.kronn_written.len(), 2);
+        // An earlier audit is recorded, but only the human's file is counted
+        // and Kronn's own marked files make nothing of the folder.
+        assert_eq!(
+            folder_state(t.path(), "docs"),
+            DocsFolderState::HumanDocs {
+                files: 1,
+                site_generator: None,
+                legacy_exists: false,
+            }
+        );
+        // Once an install made the folder Kronn's, they are proof again.
+        crate::core::kronn_state::mark_template_installed(t.path()).unwrap();
+        assert_eq!(
+            folder_state(t.path(), "docs"),
+            DocsFolderState::KronnManaged
+        );
+    }
+
+    #[test]
+    fn a_move_to_legacy_leaves_kronn_written_files_even_inside_a_shared_directory() {
+        let t = tempfile::tempdir().unwrap();
+        write(t.path(), "docs/install.md", "# Install\n");
+        write(t.path(), "docs/guide/usage.md", "# Usage\n");
+        write(t.path(), "docs/guide/kronn.md", KRONN_DOC);
+        write(t.path(), "docs/AGENTS.md", KRONN_DOC);
+        write(t.path(), "docs/ops/runbook.md", "# Runbook\n");
+        crate::core::kronn_state::record_kronn_written(
+            t.path(),
+            &["AGENTS.md".to_string(), "guide/kronn.md".to_string()],
+        )
+        .unwrap();
+        let docs = crate::core::docs_location::DocsRoot::default_root();
+        assert_eq!(move_to_legacy(t.path(), &docs).unwrap(), 3);
+        for kept in ["AGENTS.md", "guide/kronn.md"] {
+            assert!(t.path().join("docs").join(kept).is_file(), "{kept}");
+        }
+        for moved in ["install.md", "guide/usage.md", "ops/runbook.md"] {
+            assert!(
+                t.path().join("docs/legacy").join(moved).is_file(),
+                "{moved}"
+            );
+            assert!(!t.path().join("docs").join(moved).exists(), "{moved}");
+        }
+        assert!(!t.path().join("docs/legacy/AGENTS.md").exists());
+        assert!(!t.path().join("docs/legacy/guide/kronn.md").exists());
     }
 
     #[test]

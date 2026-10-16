@@ -118,6 +118,7 @@ pub async fn install_template(
                 crate::core::kronn_state::mark_template_installed(&project_path)?;
             }
             crate::core::template_manifest::apply_renames(&project_path, &docs_template)?;
+            let folder_before = crate::core::docs_folder::list_files(&docs_target);
             let mut created_files = Vec::new();
             if docs_template.is_dir() {
                 created_files.extend(copy_dir_nondestructive_in(
@@ -161,6 +162,14 @@ pub async fn install_template(
             .map_err(|e| {
                 format!("Template files installed, but provenance could not be recorded: {e}")
             })?;
+            // What this install wrote (the provenance file included) is Kronn's,
+            // whatever else the folder holds.
+            let written: Vec<String> = crate::core::docs_folder::list_files(&docs_target)
+                .difference(&folder_before)
+                .filter(|rel| !crate::core::docs_folder::is_kronn_state_file(rel))
+                .cloned()
+                .collect();
+            crate::core::kronn_state::record_kronn_written(&project_path, &written)?;
 
             // KT-841 — no more "FIRST-RUN TASK" prompt injected into
             // docs/AGENTS.md at install time: that block lived in the exact

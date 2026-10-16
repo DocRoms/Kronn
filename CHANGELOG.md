@@ -530,7 +530,11 @@ Release notes for 0.9.3 and earlier are available in the
   entry file carries Kronn's signature (it used to skip silently and leave the
   launch blocked), and keeps `briefing.md` and `.kronn.json` in place. The
   partial audit and the revalidation hold on a human's docs the same way the
-  full audit does (`docs_folder_choice_required`).
+  full audit does (`docs_folder_choice_required`). The install records every
+  file it wrote in `.kronn.json` (`kronn_written`, one reusable
+  `record_kronn_written`): beside a human's docs those files are never moved to
+  `legacy/` (only the human's are), and they never make the folder Kronn's —
+  not even next to an earlier recorded audit.
 - A review-wait timeout no longer locks the principal out of the review
   (KT-1293). The watchdog used to move the unreviewed delivery to `Escalated`
   while its alert told the principal to call `task_exec_review`, which only

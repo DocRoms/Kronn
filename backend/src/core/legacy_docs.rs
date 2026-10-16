@@ -163,23 +163,15 @@ pub fn move_user_docs_to_legacy_in(
     docs_dir: &Path,
     docs_root: &crate::core::docs_location::DocsRoot,
 ) -> std::io::Result<LegacyMigrationReport> {
-    // Gather candidate top-level entries to move. Anything NOT in
-    // `PROTECTED_TOP_LEVEL` is fair game — files AND directories.
-    // Reading the dir once into a Vec before any move so the iterator
-    // doesn't observe its own mutations (filesystem readdir semantics
-    // vary across platforms).
-    let mut to_move: Vec<PathBuf> = Vec::new();
-    for entry in fs::read_dir(docs_dir)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if PROTECTED_TOP_LEVEL.iter().any(|p| name_str == *p)
-            || crate::core::docs_folder::is_kronn_state_file(&name_str)
-        {
-            continue;
-        }
-        to_move.push(entry.path());
-    }
+    // Gather what to move: anything NOT in `PROTECTED_TOP_LEVEL` and not a
+    // file Kronn recorded writing (`kronn_written`, KT-1299) — files AND
+    // directories. A directory holding both is split: its foreign files move,
+    // Kronn's stay. Read once into a Vec before any move so the iterator
+    // doesn't observe its own mutations (filesystem readdir semantics vary
+    // across platforms).
+    let written = crate::core::docs_folder::kronn_written(docs_dir);
+    let mut to_move: Vec<(PathBuf, String)> = Vec::new();
+    collect_foreign(docs_dir, docs_dir, &written, &mut to_move)?;
 
     if to_move.is_empty() {
         return Ok(LegacyMigrationReport::skipped("nothing-to-migrate"));
@@ -189,18 +181,17 @@ pub fn move_user_docs_to_legacy_in(
     fs::create_dir_all(&legacy_dir)?;
 
     let mut moved_entries: Vec<String> = Vec::new();
-    for src in &to_move {
-        let file_name = match src.file_name() {
-            Some(n) => n.to_owned(),
-            None => continue,
-        };
-        let dst = legacy_dir.join(&file_name);
+    for (src, rel) in &to_move {
+        let dst = legacy_dir.join(rel);
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent)?;
+        }
         // If a destination already exists from a partial prior run,
         // append a numeric suffix so we don't clobber. Cheap, rare
         // case (truly partial migration after a crash).
         let dst_final = unique_destination(&dst);
         fs::rename(src, &dst_final)?;
-        moved_entries.push(file_name.to_string_lossy().to_string());
+        moved_entries.push(rel.clone());
     }
 
     // 0.8.3 (#273) — write a navigational README inside docs/legacy/
@@ -281,6 +272,41 @@ fn write_legacy_readme_if_absent(
 /// partial prior migration doesn't fail-or-clobber. Stops at -99 and
 /// returns the last attempt (lets the caller's `rename` fail loudly
 /// if we're somehow at 100 conflicts — a real-world impossibility).
+/// What a move to `legacy/` carries from `dir`, with each path relative to
+/// `docs_dir`: whole entries when nothing in them is Kronn's, else, for a
+/// directory, the foreign files inside it.
+fn collect_foreign(
+    docs_dir: &Path,
+    dir: &Path,
+    written: &std::collections::BTreeSet<String>,
+    out: &mut Vec<(PathBuf, String)>,
+) -> std::io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if dir == docs_dir
+            && (PROTECTED_TOP_LEVEL.iter().any(|p| name_str == *p)
+                || crate::core::docs_folder::is_kronn_state_file(&name_str))
+        {
+            continue;
+        }
+        let path = entry.path();
+        let rel = crate::core::docs_folder::rel_key(docs_dir, &path);
+        if entry.file_type()?.is_dir() {
+            let prefix = format!("{rel}/");
+            if written.iter().any(|w| w.starts_with(&prefix)) {
+                collect_foreign(docs_dir, &path, written, out)?;
+            } else {
+                out.push((path, rel));
+            }
+        } else if !written.contains(&rel) {
+            out.push((path, rel));
+        }
+    }
+    Ok(())
+}
+
 fn unique_destination(dst: &Path) -> PathBuf {
     if !dst.exists() {
         return dst.to_path_buf();
