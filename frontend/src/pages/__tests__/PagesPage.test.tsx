@@ -497,15 +497,14 @@ describe('PagesPage', () => {
     expect(standaloneLink).toHaveAttribute('target', '_blank');
     expect(standaloneLink).toHaveAttribute('rel', 'noopener noreferrer');
     expect(screen.getByText('data r3 · HTML r2')).toBeInTheDocument();
-    expect(screen.getAllByText('1.5 KB')).toHaveLength(2);
-    expect(screen.getByTitle('pages.datasetSizeTitle:summary,1.5 KB')).toBeInTheDocument();
-    const refreshMenu = screen.getByTestId('live-page-refresh-menu');
-    const refreshDetails = screen.getByTestId('live-page-recent-refreshes');
-    expect(refreshMenu).not.toHaveAttribute('open');
-    expect(refreshDetails).not.toBeVisible();
+    const refreshTrigger = screen.getByTestId('live-page-refresh-menu');
+    expect(refreshTrigger).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByTestId('live-page-recent-refreshes')).not.toBeInTheDocument();
     fireEvent.click(screen.getByLabelText('pages.autoRefresh'));
-    expect(refreshMenu).toHaveAttribute('open');
-    expect(refreshDetails).toBeVisible();
+    expect(refreshTrigger).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByTestId('live-page-recent-refreshes')).toBeVisible();
+    expect(screen.getAllByText('1.5 KB').length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByTitle('pages.datasetSizeTitle:summary,1.5 KB')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Adobe cron' })).toHaveAttribute('href', '/workflows/wf-1');
     expect(screen.getByText('#page-1')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('link', { name: 'Adobe cron' }));
@@ -516,9 +515,8 @@ describe('PagesPage', () => {
     const onNavigateWorkflow = vi.fn();
     render(<PagesPage onNavigateWorkflow={onNavigateWorkflow} />);
 
-    await screen.findByTestId('live-page-recent-refreshes');
+    fireEvent.click(await screen.findByLabelText('pages.autoRefresh'));
     expect(pagesApi.publications).toHaveBeenCalledWith(page.id);
-    fireEvent.click(screen.getByLabelText('pages.autoRefresh'));
     expect(screen.getAllByLabelText('pages.openRefreshRun:Adobe cron')).toHaveLength(3);
     expect(screen.getByText('data r3')).toBeInTheDocument();
     expect(screen.getByText('data r2')).toBeInTheDocument();
@@ -830,6 +828,65 @@ describe('PagesPage', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('Network unavailable');
   });
 
+  it('opens a vertical side panel with separate workflow, dataset and history zones', async () => {
+    const { container } = render(<PagesPage />);
+    fireEvent.click(await screen.findByLabelText('pages.autoRefresh'));
+
+    const panel = screen.getByTestId('live-page-recent-refreshes');
+    expect(panel.tagName).toBe('ASIDE');
+    expect(panel).toHaveClass('disc-tool-panel');
+    expect(container.querySelector('.live-pages-refresh-popover')).toBeNull();
+    const workflows = within(panel).getByTestId('live-page-sync-workflows');
+    const datasets = within(panel).getByTestId('live-page-sync-datasets');
+    const history = within(panel).getByTestId('live-page-sync-history');
+    expect(workflows.compareDocumentPosition(datasets) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(datasets.compareDocumentPosition(history) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(within(workflows).getAllByRole('listitem')).toHaveLength(1);
+    expect(within(datasets).getByText('summary')).toBeInTheDocument();
+    expect(within(history).getAllByLabelText('pages.openRefreshRun:Adobe cron')).toHaveLength(3);
+  });
+
+  it('"Run all workflows" launches every enabled linked workflow, skips the disabled ones and shows each state', async () => {
+    vi.mocked(workflowsApi.triggerStream).mockClear();
+    vi.mocked(pagesApi.workflows).mockResolvedValue([
+      { id: 'wf-1', name: 'Adobe cron', enabled: true, step_names: ['publish'] },
+      { id: 'wf-2', name: 'Weekly digest', enabled: true, step_names: ['publish'] },
+      { id: 'wf-3', name: 'Old import', enabled: false, step_names: ['publish'] },
+    ]);
+    vi.mocked(workflowsApi.triggerStream).mockImplementation(async (id, _onStart, _onStep, onDone, onError) => {
+      if (id === 'wf-1') onDone({ status: 'Success' });
+      else onError('Network unavailable');
+    });
+    render(<PagesPage />);
+    fireEvent.click(await screen.findByLabelText('pages.autoRefresh'));
+
+    fireEvent.click(screen.getByRole('button', { name: 'pages.runAllWorkflows' }));
+
+    await waitFor(() => expect(workflowsApi.triggerStream).toHaveBeenCalledTimes(2));
+    const launched = vi.mocked(workflowsApi.triggerStream).mock.calls.map(call => call[0]);
+    expect(launched).toEqual(['wf-1', 'wf-2']);
+    expect(screen.getByLabelText('pages.runLinkedWorkflow:Adobe cron')).toHaveAttribute('data-state', 'success');
+    expect(screen.getByLabelText('pages.runLinkedWorkflow:Weekly digest')).toHaveAttribute('data-state', 'error');
+    const disabled = screen.getByLabelText('pages.runDisabledWorkflow');
+    expect(disabled).toBeDisabled();
+    expect(disabled).toHaveAttribute('data-state', 'idle');
+    expect(screen.getByText('pages.workflowSkipped')).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('pages.workflowRunSuccess');
+    expect(screen.getByRole('alert')).toHaveTextContent('Network unavailable');
+  });
+
+  it('"Run all workflows" is unavailable when no linked workflow is enabled', async () => {
+    vi.mocked(workflowsApi.triggerStream).mockClear();
+    vi.mocked(pagesApi.workflows).mockResolvedValue([
+      { id: 'wf-3', name: 'Old import', enabled: false, step_names: ['publish'] },
+    ]);
+    render(<PagesPage />);
+    fireEvent.click(await screen.findByLabelText('pages.autoRefresh'));
+
+    expect(screen.getByRole('button', { name: 'pages.runAllWorkflows' })).toBeDisabled();
+    expect(workflowsApi.triggerStream).not.toHaveBeenCalled();
+  });
+
   it('orders recent shortcuts, excludes favorites, and keeps the complete canonical Page list', async () => {
     const favorite = {
       ...page,
@@ -1080,14 +1137,14 @@ describe('PagesPage — popover dismiss (KT-463)', () => {
     expect(screen.getByTestId('live-page-export-menu')).not.toHaveAttribute('open');
   });
 
-  it('clicking outside the Sync popover closes it', async () => {
+  it('clicking outside the Sync panel closes it', async () => {
     render(<PagesPage />);
     await screen.findByTestId('live-page-frame');
     fireEvent.click(screen.getByLabelText('pages.autoRefresh'));
-    expect(screen.getByTestId('live-page-refresh-menu')).toHaveAttribute('open');
+    expect(screen.getByTestId('live-page-recent-refreshes')).toBeInTheDocument();
 
     fireEvent.mouseDown(document.body);
-    expect(screen.getByTestId('live-page-refresh-menu')).not.toHaveAttribute('open');
+    expect(screen.queryByTestId('live-page-recent-refreshes')).not.toBeInTheDocument();
   });
 
   it('a click on a button inside the Export popover does not close it prematurely, and still exports', async () => {
@@ -1101,30 +1158,30 @@ describe('PagesPage — popover dismiss (KT-463)', () => {
     await waitFor(() => expect(docsApi.generatePdf).toHaveBeenCalled());
   });
 
-  it('a click on the linked-workflow button inside the Sync popover does not close it prematurely', async () => {
+  it('a click inside the Sync panel does not close it, and the workflow link still navigates', async () => {
     const onNavigateWorkflow = vi.fn();
     render(<PagesPage onNavigateWorkflow={onNavigateWorkflow} />);
     await screen.findByTestId('live-page-frame');
     fireEvent.click(screen.getByLabelText('pages.autoRefresh'));
 
     fireEvent.mouseDown(screen.getByRole('link', { name: 'Adobe cron' }));
-    expect(screen.getByTestId('live-page-refresh-menu')).toHaveAttribute('open');
+    expect(screen.getByTestId('live-page-recent-refreshes')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('link', { name: 'Adobe cron' }));
     expect(onNavigateWorkflow).toHaveBeenCalledWith('wf-1');
   });
 
-  it('clicking inside the open Export popover leaves it open even while the Sync popover is also open and gets closed', async () => {
+  it('clicking inside the open Export popover leaves it open while the Sync panel is also open and gets closed', async () => {
     render(<PagesPage />);
     await screen.findByTestId('live-page-frame');
     fireEvent.click(screen.getByText('pages.export'));
     fireEvent.click(screen.getByLabelText('pages.autoRefresh'));
     expect(screen.getByTestId('live-page-export-menu')).toHaveAttribute('open');
-    expect(screen.getByTestId('live-page-refresh-menu')).toHaveAttribute('open');
+    expect(screen.getByTestId('live-page-recent-refreshes')).toBeInTheDocument();
 
-    // Outside the Sync popover, but inside the Export popover.
+    // Outside the Sync panel, but inside the Export popover.
     fireEvent.mouseDown(screen.getByRole('button', { name: 'PDF' }));
     expect(screen.getByTestId('live-page-export-menu')).toHaveAttribute('open');
-    expect(screen.getByTestId('live-page-refresh-menu')).not.toHaveAttribute('open');
+    expect(screen.queryByTestId('live-page-recent-refreshes')).not.toBeInTheDocument();
   });
 
   it('Escape closes the Export popover and returns focus to its summary', async () => {
@@ -1139,16 +1196,30 @@ describe('PagesPage — popover dismiss (KT-463)', () => {
     expect(document.activeElement).toBe(summary);
   });
 
-  it('Escape closes the Sync popover and returns focus to its summary', async () => {
+  it('Escape closes the Sync panel and returns focus to its trigger', async () => {
     render(<PagesPage />);
     await screen.findByTestId('live-page-frame');
-    const summary = screen.getByLabelText('pages.autoRefresh');
-    fireEvent.click(summary);
-    expect(screen.getByTestId('live-page-refresh-menu')).toHaveAttribute('open');
+    const trigger = screen.getByLabelText('pages.autoRefresh');
+    fireEvent.click(trigger);
+    expect(screen.getByTestId('live-page-recent-refreshes')).toBeInTheDocument();
 
     fireEvent.keyDown(document, { key: 'Escape' });
-    expect(screen.getByTestId('live-page-refresh-menu')).not.toHaveAttribute('open');
-    expect(document.activeElement).toBe(summary);
+    expect(screen.queryByTestId('live-page-recent-refreshes')).not.toBeInTheDocument();
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it('the trigger and the close button also close the Sync panel', async () => {
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    const trigger = screen.getByLabelText('pages.autoRefresh');
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole('button', { name: 'pages.closeSyncPanel' }));
+    expect(screen.queryByTestId('live-page-recent-refreshes')).not.toBeInTheDocument();
+
+    fireEvent.click(trigger);
+    expect(screen.getByTestId('live-page-recent-refreshes')).toBeInTheDocument();
+    fireEvent.click(trigger);
+    expect(screen.queryByTestId('live-page-recent-refreshes')).not.toBeInTheDocument();
   });
 
   it('Escape and an outside click are no-ops when no popover is open', async () => {
@@ -1160,6 +1231,6 @@ describe('PagesPage — popover dismiss (KT-463)', () => {
       fireEvent.mouseDown(document.body);
     }).not.toThrow();
     expect(screen.getByTestId('live-page-export-menu')).not.toHaveAttribute('open');
-    expect(screen.getByTestId('live-page-refresh-menu')).not.toHaveAttribute('open');
+    expect(screen.queryByTestId('live-page-recent-refreshes')).not.toBeInTheDocument();
   });
 });
