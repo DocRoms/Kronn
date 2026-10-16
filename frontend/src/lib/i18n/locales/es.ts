@@ -1590,6 +1590,8 @@ const es: TranslationDict = {
   "audit.revalidate.relevance.proposed": "Corrección propuesta",
   "audit.revalidate.relevance.unanchored.title": "{0} sección(es) que Kronn no puede verificar (sin cita ni ruta)",
   "audit.revalidate.relevance.unanchored.hint": "No verificable: contrasta cada una con el código y ánclala con una cita [src: file: ruta:línea], o elimínala. El paso del agente las recibe como no verificables.",
+  "audit.revalidate.relevance.unanchored.reread": "releído el {0}",
+  "audit.revalidate.relevance.unanchored.pending": "no releído desde su último cambio",
   'audit.revalidate.state.changed': 'línea modificada',
   'audit.revalidate.state.removed': 'línea eliminada',
   'audit.revalidate.state.file_missing': 'archivo ausente',

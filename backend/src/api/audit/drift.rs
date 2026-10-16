@@ -1887,6 +1887,28 @@ pub(crate) async fn run_partial_pipeline(
             }
         }
 
+        // KT-1292 — a doc sent only to be re-read is stamped once its step ran,
+        // whether or not the agent anchored it: the plan does not queue it again
+        // until the doc or the step's sources change.
+        if let Some(run) = &revalidation {
+            let reread: Vec<(usize, String)> = run.rereads.iter()
+                .filter(|(step, _)| succeeded_steps.contains(step) || unchanged_steps.contains(step))
+                .cloned()
+                .collect();
+            if !reread.is_empty() {
+                let pp = project_path.clone();
+                let steps = chain.clone();
+                let stamped = tokio::task::spawn_blocking(move || {
+                    super::revalidate::stamp_rereads(&pp, &steps, &reread)
+                }).await.unwrap_or_else(|e| Err(format!("review task failed: {e}")));
+                if let Err(e) = stamped {
+                    yield Event::default().event("warning").data(
+                        serde_json::json!({ "message": format!("Re-read stamps not recorded: {e}") }).to_string(),
+                    );
+                }
+            }
+        }
+
         if let Some(event) = super::td_tasks::guard_decisions(&project_path, td_decisions_before).await {
             yield event;
         }

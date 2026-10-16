@@ -13,6 +13,14 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- « Revalider l'audit » now re-reads the docs whose sections are all
+  unanchored (no citation, no repository path), once per change (KT-1292).
+  Such a doc has no verdict, so nothing ever sent it to an agent. A review
+  stamp in `citations.json` (the doc's hash and the digest of its owning
+  step's sources) queues it for that step when it has none, or when the doc
+  or the step's sources changed since. After the pass the doc is stamped
+  whether or not the agent added an anchor: the plan is clean again and the
+  pass does not come back. The panel shows « re-read on <date> » for each.
 - A `#symbol` citation anchor that names a definition the cited range
   contains must open that range (KT-1074). When the range holds a definition
   of the symbol (`fn`, `def`, `class`, `struct`, `enum`, `const`,

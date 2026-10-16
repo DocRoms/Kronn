@@ -28,6 +28,17 @@ fn append(project: &Path, doc: &str, text: &str) {
     std::fs::write(&path, content).unwrap();
 }
 
+/// KT-1292 — the plain docs the template leaves anchor-free count as re-read
+/// by an earlier pass at the sources as they now stand: these scenarios are
+/// about citations, not about that rule.
+fn reread_plain_docs(project: &Path) {
+    let planned = crate::api::audit::revalidate::plan(project);
+    let docs_root = crate::core::docs_location::DocsRoot::of(project);
+    let steps = crate::api::audit::steps_for(crate::models::AuditKind::Full, &docs_root);
+    let rereads = crate::api::audit::revalidate::RevalidationRun::of(&planned).rereads;
+    crate::api::audit::revalidate::stamp_rereads(project, &steps, &rereads).unwrap();
+}
+
 /// A repository audited by the Full pipeline and validated by the human, its
 /// docs citing `src/kept.rs`: the fingerprints are recorded.
 struct Validated {
@@ -95,6 +106,7 @@ impl Validated {
             "{provenance:?}"
         );
         assert_eq!(provenance.to_reconfirm, 0, "{provenance:?}");
+        reread_plain_docs(project);
         std::fs::write(fx.h.tools.path().join("steps.log"), "").unwrap();
         fx
     }
@@ -115,6 +127,7 @@ impl Validated {
             .collect();
         edit(&mut lines);
         write_source(self.project(), &lines);
+        reread_plain_docs(self.project());
     }
 
     fn audit_status(&self) -> crate::models::AiAuditStatus {
@@ -677,6 +690,7 @@ async fn a_dead_citation_is_named_before_the_agent_and_never_ends_unchanged() {
     })
     .await;
     std::fs::remove_file(fx.project().join("src/legacy.rs")).unwrap();
+    reread_plain_docs(fx.project());
     let plan = fx.plan().await;
     let rules = section(&plan, RULES);
     assert_eq!(rules.action, crate::models::RevalidationAction::Agent);
@@ -996,6 +1010,72 @@ async fn prose_changed_after_validation_gets_a_bounded_reverification() {
             .unwrap();
     crate::core::audit_documents::verify(fx.project(), Some(&raw)).unwrap();
     assert!(fx.plan().await.agent_steps.is_empty());
+}
+
+// KT-1292 — the docs no citation anchors are re-read once per change of their
+// step's sources: the pass sends each to its owning step and stamps it, the
+// plan is then clean and the next revalidation has nothing to run.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn an_all_unanchored_doc_is_re_read_once_after_the_code_changes() {
+    let fx = Validated::new(|_| {}).await;
+    assert!(
+        fx.plan().await.agent_steps.is_empty(),
+        "stamped by the fixture"
+    );
+
+    // An uncited line appended: no citation moves, only the sources change.
+    let mut lines = source_lines();
+    lines.push("fn added_after_validation() {}".into());
+    write_source(fx.project(), &lines);
+    let plan = fx.plan().await;
+    assert!(plan.reanchor_count == 0 && plan.sections.iter().all(|s| s.reread));
+    assert!(!plan.agent_steps.is_empty(), "{plan:?}");
+    assert_eq!(
+        plan.sources_state,
+        crate::core::citation_drift::SourcesState::Clean
+    );
+    let queued: Vec<String> = plan.sections.iter().map(|s| s.doc.clone()).collect();
+    for u in plan
+        .unanchored_docs
+        .iter()
+        .filter(|u| queued.contains(&u.doc))
+    {
+        assert_eq!(u.reviewed_at, None, "{}: the stamp no longer holds", u.doc);
+    }
+    let steps: Vec<u64> = plan.agent_steps.iter().map(|s| *s as u64).collect();
+    let targets: Vec<&str> = queued.iter().map(String::as_str).collect();
+    arm(fx.h.tools.path(), "noop", &targets);
+
+    let body = fx.revalidate().await;
+    let done = sse_events(&body, "done").pop().expect("terminal done");
+    validation_settled(&fx.h.state, &done).await;
+    assert_eq!(started_steps(&body), steps, "each step once: {body}");
+
+    let after = fx.plan().await;
+    assert!(
+        after.sections.is_empty() && after.agent_steps.is_empty(),
+        "{after:?}"
+    );
+    assert_eq!(
+        after.sources_state,
+        crate::core::citation_drift::SourcesState::Clean
+    );
+    for doc in &queued {
+        let listed = after
+            .unanchored_docs
+            .iter()
+            .find(|u| &u.doc == doc)
+            .unwrap();
+        assert!(listed.reviewed_at.is_some(), "{doc} not stamped");
+    }
+
+    // Nothing changed since: a second revalidation starts no step.
+    fx.edit_source(|_| {});
+    std::fs::write(fx.h.tools.path().join("steps.log"), "").unwrap();
+    let again = fx.revalidate().await;
+    assert!(started_steps(&again).is_empty(), "{again}");
 }
 
 #[tokio::test]

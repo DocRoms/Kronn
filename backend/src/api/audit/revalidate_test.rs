@@ -543,13 +543,11 @@ fn the_plan_judges_each_section_and_the_agent_block_carries_the_corrections() {
 }
 
 // KT-1168 — a doc whose every section is unanchored has no verdict to show.
-// It never starts a pass by itself: the agent leaves it unanchored, so it
-// would be queued again after every pass, and the plan would never be clean.
-// It stays listed, and its headings go into the block as soon as an edit since
-// the run (`plan_with_documents`) sends the doc to the agent.
+// It stays listed, and its headings go into the block when the doc is sent to
+// the agent. A doc no step owns is never sent (KT-1292 queues by owning step).
 #[test]
 fn a_doc_with_only_unanchored_sections_is_listed_and_carried_when_sent() {
-    const GLOSSARY: &str = "docs/glossary.md";
+    const GLOSSARY: &str = "docs/notes.md";
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     fs::create_dir_all(dir.join("src")).unwrap();
@@ -578,8 +576,139 @@ fn a_doc_with_only_unanchored_sections_is_listed_and_carried_when_sent() {
         broken: Vec::new(),
         human: Vec::new(),
         relevance: Vec::new(),
+        reread: false,
     });
     let block = &prompt_blocks(&planned)[&step];
     assert!(block.contains("section `Terms` — unverifiable: check or anchor"));
     assert!(block.contains("section `Glossary` — unverifiable: check or anchor"));
+}
+
+const PLAIN: &str =
+    "# Rules\nPlain prose: nothing names a file or cites a line.\n## Style\nMore plain prose.\n";
+
+/// A documented repo whose coding-rules doc anchors nothing, validated once.
+fn unanchored_repo() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::create_dir_all(dir.join("docs")).unwrap();
+    fs::write(dir.join("src/lib.rs"), "fn alpha() {}\n").unwrap();
+    fs::write(dir.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+    fs::write(dir.join(RULES), PLAIN).unwrap();
+    citation_drift::record_all(dir).unwrap();
+    tmp
+}
+
+/// What the pipeline does once the agent steps it was sent ran.
+fn run_the_pass(dir: &FsPath, planned: &RevalidationPlan) {
+    let docs_root = crate::core::docs_location::DocsRoot::of(dir);
+    let chain = super::super::steps_for(AuditKind::Full, &docs_root);
+    let run = RevalidationRun::of(planned);
+    stamp_rereads(dir, &chain, &run.rereads).unwrap();
+}
+
+// KT-1292 — an all-unanchored doc is queued once for its owning step, the
+// pass stamps it whether or not it added an anchor, and only a change of the
+// doc or of the step's sources queues it again.
+#[test]
+fn an_all_unanchored_doc_is_re_read_once_per_change() {
+    let tmp = unanchored_repo();
+    let dir = tmp.path();
+    let step = rules_step();
+
+    // Fresh: queued for its owning step, nobody has read it.
+    let planned = plan_with_documents(dir, None).unwrap();
+    assert_eq!(planned.agent_steps, vec![step]);
+    let section = planned.sections.iter().find(|s| s.doc == RULES).unwrap();
+    assert_eq!(section.action, RevalidationAction::Agent);
+    assert!(section.reread);
+    assert_eq!(planned.unanchored_docs.len(), 1);
+    assert_eq!(planned.unanchored_docs[0].reviewed_at, None);
+    let block = &prompt_blocks(&planned)[&step];
+    assert!(block.contains("Nothing in this document is anchored"));
+    assert!(block.contains("section `Style` — unverifiable"));
+    assert!(!block.contains("content changed since"));
+    assert_eq!(
+        RevalidationRun::of(&planned).rereads,
+        vec![(step, RULES.to_string())]
+    );
+
+    // After the pass (the agent left the doc as it was): clean, badge calm.
+    run_the_pass(dir, &planned);
+    let after = plan_with_documents(dir, None).unwrap();
+    assert!(after.sections.is_empty() && after.agent_steps.is_empty());
+    assert_eq!(after.sources_state, SourcesState::Clean);
+    assert!(after.unanchored_docs[0].reviewed_at.is_some());
+    // Still clean on the next read: no loop.
+    let again = plan_with_documents(dir, None).unwrap();
+    assert!(again.sections.is_empty() && again.agent_steps.is_empty());
+
+    // A change in the sources of the owning step queues it again...
+    fs::write(dir.join("Cargo.toml"), "[package]\nname = \"y\"\n").unwrap();
+    let sources = plan_with_documents(dir, None).unwrap();
+    assert_eq!(sources.agent_steps, vec![step]);
+    assert_eq!(sources.unanchored_docs[0].reviewed_at, None);
+    run_the_pass(dir, &sources);
+    assert!(plan_with_documents(dir, None)
+        .unwrap()
+        .agent_steps
+        .is_empty());
+
+    // ...and so does an edit of the doc, though no citation was added.
+    fs::write(dir.join(RULES), format!("{PLAIN}One more plain line.\n")).unwrap();
+    let edited = plan_with_documents(dir, None).unwrap();
+    assert_eq!(edited.agent_steps, vec![step]);
+    run_the_pass(dir, &edited);
+    assert!(plan_with_documents(dir, None)
+        .unwrap()
+        .agent_steps
+        .is_empty());
+
+    // A change outside what the step reads leaves it alone.
+    fs::write(dir.join("src/lib.rs"), "fn beta() {}\n").unwrap();
+    assert!(plan_with_documents(dir, None)
+        .unwrap()
+        .agent_steps
+        .is_empty());
+}
+
+// KT-1292 — the stamp is kept by a validation and an audit rewrite.
+#[test]
+fn the_re_read_stamp_survives_a_validation() {
+    let tmp = unanchored_repo();
+    let dir = tmp.path();
+    run_the_pass(dir, &plan(dir));
+    citation_drift::record_all(dir).unwrap();
+    citation_drift::record_after_audit(dir, &[RULES.to_string()]).unwrap();
+    assert!(plan(dir).agent_steps.is_empty());
+}
+
+// KT-1292 — a doc no step owns cannot be queued: listed, never sent.
+#[test]
+fn an_unowned_unanchored_doc_is_listed_but_never_queued() {
+    let tmp = unanchored_repo();
+    let dir = tmp.path();
+    fs::write(dir.join("docs/notes.md"), "# Notes\nPlain words.\n").unwrap();
+    run_the_pass(dir, &plan(dir));
+    let planned = plan(dir);
+    assert!(planned.agent_steps.is_empty() && planned.sections.is_empty());
+    let glossary = planned
+        .unanchored_docs
+        .iter()
+        .find(|u| u.doc == "docs/notes.md")
+        .unwrap();
+    assert_eq!(glossary.reviewed_at, None);
+}
+
+// KT-1292 — a doc that gains an anchor leaves the all-unanchored list.
+#[test]
+fn an_anchored_doc_is_no_longer_re_read_for_lack_of_anchors() {
+    let tmp = unanchored_repo();
+    let dir = tmp.path();
+    fs::write(
+        dir.join(RULES),
+        format!("{PLAIN}Alpha [src: file: src/lib.rs:1].\n"),
+    )
+    .unwrap();
+    assert!(plan(dir).unanchored_docs.is_empty());
 }

@@ -9,10 +9,10 @@ verdict, deterministically and without a model.
 ## What the revalidation already did (reused, not rewritten)
 
 - Per-citation fingerprints, `changed` / `removed` / `file missing` / `moved`,
-  recorded at validation. [src: file: backend/src/core/citation_drift.rs:880#check]
+  recorded at validation. [src: file: backend/src/core/citation_drift.rs:939#check]
 - The plan that re-anchors moved lines for free and sends the owning audit
   steps only the sections that need a model.
-  [src: file: backend/src/api/audit/revalidate.rs:50#plan]
+  [src: file: backend/src/api/audit/revalidate.rs:80#plan]
 - The `audit-revalidation` skill the bounded agent pass receives.
 
 ## What relevance adds
@@ -21,7 +21,7 @@ Every section (heading to next heading, fenced code excluded, a heading with
 nothing under it skipped) is judged from its anchors: its `[src: file: …]`
 citations, read through the fingerprint report, and the repository paths its
 prose names in backticks.
-[src: file: backend/src/core/doc_relevance.rs:926#judge]
+[src: file: backend/src/core/doc_relevance.rs:929#judge]
 
 | Verdict | Meaning |
 |---|---|
@@ -37,12 +37,18 @@ was proven true: the agent pass settles substance. For that reason every
 `unanchored` section is listed in the panel (`RevalidationPlan.unanchored`)
 and handed to the agent pass as « unverifiable: check or anchor », so each
 section of a doc is confronted with the code by someone. They never raise
-the badge by themselves. A doc made only of unanchored sections is not
-queued for the agent pass on its own: the agent leaves it unanchored, so it
-would be queued again after every pass and a bounded pass over one doc would
-become a pass over every doc. It stays listed, and its headings go into the
-agent block as soon as something else sends the doc (an edit since the run, a
-broken citation, a judged section).
+the badge by themselves. A doc made only of unanchored sections has no verdict
+that could ever send it, so it is re-read once per change (KT-1292): `plan()`
+queues it for its owning step when `citations.json` holds no review stamp for
+it, or when the stamp no longer matches the doc's hash or the digest of that
+step's sources. After the pass, the doc is stamped whether or not the agent
+added an anchor, so an unchanged repo plans clean and there is no re-queue
+loop. The panel lists each such doc with « re-read on <date> » (`RevalidationPlan.unanchored_docs`).
+A doc no audit step owns is listed but never queued.
+
+[src: file: backend/src/core/citation_drift.rs:84#DocReview]
+[src: file: backend/src/core/citation_drift.rs:821#current_review]
+[src: file: backend/src/api/audit/revalidate.rs:60#stamp_rereads]
 
 ### When a prose path counts as gone
 
@@ -89,7 +95,7 @@ and only then. `citations.json` stores, per section key, the gone paths the
 human was shown (`known_missing`). A validation or a revalidation **carries
 over** what was accepted and never adds to it; a path accepted under one
 section is still flagged when another section names it.
-[src: file: backend/src/core/citation_drift.rs:316#accepted_missing]
+[src: file: backend/src/core/citation_drift.rs:331#accepted_missing]
 
 From the project card, the stale block lists each stale doc's gone prose paths
 with their section (`DriftSection.missing_paths`), and the acknowledgement
@@ -97,7 +103,7 @@ sends exactly those (`shown_paths`): a path that is not in the request is not
 accepted, whatever is gone at the click, and an older client that sends none
 accepts none. The per-doc panel, which lists every gone path of its doc, still
 accepts them all.
-[src: file: backend/src/core/citation_drift.rs:501#acknowledge_accepting]
+[src: file: backend/src/core/citation_drift.rs:521#acknowledge_accepting]
 
 ## The measure
 
@@ -121,8 +127,8 @@ accepts them all.
   when a section is outdated or gone. The paths no fingerprint covers are
   counted apart in `missing_paths`, so `broken_citations` stays a count of
   citations.
-  [src: file: backend/src/core/checksums.rs:827#check_drift]
-  [src: file: backend/src/core/doc_relevance.rs:169#escalate]
+  [src: file: backend/src/core/checksums.rs:844#check_drift]
+  [src: file: backend/src/core/doc_relevance.rs:172#escalate]
 - **Validation state**: a human-validated doc whose prose names a vanished path
   stops counting as human-validated for learning sources, like one with a
   broken citation, whether or not the caller passes a citation report.
@@ -130,8 +136,8 @@ accepts them all.
   proposals the human launches through « Revalider l'audit », then reviews
   and validates; « Vérifié, inchangé » acknowledges a doc, recorded or not,
   that was judged stale but is fine.
-  [src: file: backend/src/core/checksums.rs:796#acknowledge_stale]
+  [src: file: backend/src/core/checksums.rs:813#acknowledge_stale]
 
 A citation the git diff maps to a new line past the fingerprint window is
 treated as moved, exactly as the plan re-anchors it.
-[src: file: backend/src/core/doc_relevance.rs:1053#analyze_with_moves]
+[src: file: backend/src/core/doc_relevance.rs:1056#analyze_with_moves]

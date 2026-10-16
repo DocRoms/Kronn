@@ -553,6 +553,23 @@ fn compute_step_checksums_impl(
     map
 }
 
+/// One digest over everything an audit step reads: changes when any of its
+/// sources changes, appears or disappears (KT-1292).
+pub fn step_sources_fingerprint(project_path: &Path, patterns: &[&str]) -> String {
+    let mut hasher = Sha256::new();
+    for (key, hash) in compute_step_checksums(project_path, patterns) {
+        hasher.update(key.as_bytes());
+        hasher.update([0]);
+        hasher.update(hash.as_bytes());
+        hasher.update([b'\n']);
+    }
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 /// Write a `checksums.json` to the project's docs folder (post-pivot
 /// `docs/`, legacy `ai/`). Path-agnostic via `detect_docs_dir`.
 /// `rewritten_docs`: the docs a step of the run proved it rewrote.

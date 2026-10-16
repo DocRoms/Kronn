@@ -43,7 +43,7 @@ const NO_RELEVANCE = {
 
 const PLAN: RevalidationPlan = {
   relevance: NO_RELEVANCE,
-  unanchored: [],
+  unanchored: [], unanchored_docs: [],
   sources_state: 'needs_reverification',
   agent_steps: [4],
   reanchor_count: 1,
@@ -70,7 +70,7 @@ const PLAN: RevalidationPlan = {
 const CLEAN: RevalidationPlan = {
   sources_state: 'clean', sections: [], agent_steps: [], reanchor_count: 0, human_count: 0,
   relevance: NO_RELEVANCE,
-  unanchored: [],
+  unanchored: [], unanchored_docs: [],
 };
 
 type Handlers = Parameters<typeof projectsApi.revalidateAuditStream>[2];
@@ -478,6 +478,10 @@ describe('RevalidateAudit', () => {
         corrections: [{ kind: 'check_or_anchor', reference: '', proposal: 'Check it, then anchor it.' }],
         untouched_since_code_changed: false,
       }],
+      unanchored_docs: [
+        { doc: 'docs/glossary.md', reviewed_at: '2026-10-16T09:30:00+00:00' },
+        { doc: 'docs/notes.md', reviewed_at: null },
+      ],
       sections: [{
         doc: 'docs/coding-rules.md', step: 4, action: 'agent', doc_missing: false,
         reanchor: [], broken: [], human: [],
@@ -511,6 +515,15 @@ describe('RevalidateAudit', () => {
     const row = within(unanchored).getByTestId('revalidate-unanchored-section');
     expect(row).toHaveTextContent('docs/glossary.md');
     expect(row).toHaveTextContent('Intro');
+
+    // KT-1292 — each doc made only of such sections says when it was last re-read.
+    const [reread, pending] = within(unanchored).getAllByTestId('revalidate-unanchored-doc');
+    expect(reread).toHaveTextContent('docs/glossary.md');
+    expect(reread).toHaveTextContent(
+      `audit.revalidate.relevance.unanchored.reread ${new Date('2026-10-16T09:30:00+00:00').toLocaleDateString()}`,
+    );
+    expect(pending).toHaveTextContent('docs/notes.md');
+    expect(pending).toHaveTextContent('audit.revalidate.relevance.unanchored.pending');
   });
 
   it('allows a targeted prose check while citation fingerprints are unknown', async () => {
@@ -520,7 +533,7 @@ describe('RevalidateAudit', () => {
       reanchor_count: 0,
       human_count: 0,
       relevance: NO_RELEVANCE,
-      unanchored: [],
+      unanchored: [], unanchored_docs: [],
       sections: [{
         doc: 'docs/coding-rules.md', step: 4, action: 'agent', doc_missing: false,
         reanchor: [], broken: [], human: [], relevance: [],
