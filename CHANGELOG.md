@@ -534,13 +534,13 @@ Release notes for 0.9.3 and earlier are available in the
   (KT-1249). The base URL (`https://acme.atlassian.net`) was scrubbed as a
   secret since 0.14.3, so a Jira description reached the next steps with
   `***/browse/EW-1` links, and a PUT would have written them back broken. A
-  config key declared `public` in `api_spec.config_keys`, a credential-free
-  http(s) URL that is the plugin's base URL, and a `*_URL` key (not a webhook,
-  token or key name) with such a value are now left intact. Tokens,
-  passwords, auth headers, the decoded Basic pair and every other config value
-  stay masked in the data, summaries, errors and logs, and a URL carrying user
-  info, a query or a fragment is never public. Jira's `JIRA_URL` is declared
-  public.
+  config key declared `public` by a registry plugin (Jira's `JIRA_URL`) and a
+  plugin's base URL when it is a bare origin (scheme, host, optional port, no
+  path) are now left intact. Everything else stays masked, including any URL
+  with a path (webhook URLs hide their secret there), whatever its key name:
+  tokens, passwords, auth headers, the decoded Basic pair, every other config
+  value, in the data, summaries, errors and logs. An imported bundle or a
+  custom API cannot declare a value public.
 - A review-wait timeout no longer locks the principal out of the review
   (KT-1293). The watchdog used to move the unreviewed delivery to `Escalated`
   while its alert told the principal to call `task_exec_review`, which only

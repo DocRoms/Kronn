@@ -202,12 +202,13 @@ pub(crate) fn call_secrets(
     let Some(spec) = plugin.api_spec.as_ref() else {
         return set;
     };
+    let trusted = matches!(plugin.source, McpSource::Registry);
     for (key, value) in env {
         // `__token_error__` and friends carry a diagnostic, not a credential.
         if key.starts_with("__") && key.ends_with("_error__") {
             continue;
         }
-        if is_public_config(spec, key, value) {
+        if is_public_config(spec, trusted, key, value) {
             continue;
         }
         set.add(value);
@@ -227,53 +228,46 @@ pub(crate) fn call_secrets(
     set
 }
 
-/// Name fragments of a URL key that is likely to carry a secret in its path
-/// (an incoming-webhook URL): never public by name.
-const SECRET_URL_KEY_HINTS: &[&str] = &[
-    "HOOK",
-    "TOKEN",
-    "KEY",
-    "SECRET",
-    "PASSWORD",
-    "PASSWD",
-    "AUTH",
-    "SIGNATURE",
-];
-
-/// Whether an env value is public configuration rather than a credential:
-/// a key declared `public` in `api_spec.config_keys`, or a plain http(s) URL
-/// (no user info, query or fragment) that is the plugin's base URL
-/// (`{KEY}` in `base_url`) or sits under a `*_URL` key whose name does not
-/// hint at a secret. A URL that embeds credentials is never public, declared
-/// or not, and no auth key is.
-fn is_public_config(spec: &ApiSpec, key: &str, value: &str) -> bool {
+/// Whether an env value is public configuration rather than a credential.
+/// Everything is masked by default; a value is public only if
+///
+/// 1. it is declared `public` in `api_spec.config_keys` AND the server is a
+///    trusted registry one (`McpSource::Registry`): a bundle, a custom API or
+///    any other editable definition cannot grant it. A declared URL must
+///    still hold no user info, query, fragment, `;param` or encoded `?`/`#`; or
+/// 2. it is the plugin's base URL (`{KEY}` in `base_url`) and a bare origin:
+///    http(s) scheme + host[+port] with an empty or `/` path, no user info,
+///    query or fragment. A path may hold a secret (a webhook URL), so no name
+///    heuristic ever makes a URL public.
+///
+/// An auth key (including a `CliToken` fallback key) is never public.
+fn is_public_config(spec: &ApiSpec, trusted: bool, key: &str, value: &str) -> bool {
     if auth_env_keys(&spec.auth).contains(&key) {
         return false;
     }
-    let declared = spec
-        .config_keys
-        .iter()
-        .any(|config| config.env_key == key && config.public);
-    let upper = key.to_ascii_uppercase();
-    let url_key =
-        upper.ends_with("_URL") && !SECRET_URL_KEY_HINTS.iter().any(|hint| upper.contains(hint));
-    let base_url_key = spec.base_url.contains(&format!("{{{key}}}"));
+    let declared = trusted
+        && spec
+            .config_keys
+            .iter()
+            .any(|config| config.env_key == key && config.public);
     if declared {
-        // A declared-public value that is a URL still must not hold secrets;
-        // any other declared value (host, workspace id) is taken as is.
-        return !looks_like_url(value) || is_credential_free_url(value);
+        // A declared value that is a URL still must not hold secrets; any
+        // other declared value (host, workspace id) is taken as is.
+        return !value.contains("://") || is_credential_free_url(value, true);
     }
-    (url_key || base_url_key) && is_credential_free_url(value)
+    spec.base_url.contains(&format!("{{{key}}}")) && is_credential_free_url(value, false)
 }
 
-fn looks_like_url(value: &str) -> bool {
+/// An http(s) URL with a host and no user info, query, fragment, `;param` or
+/// percent-encoded `?`, `#`, `;`; with `allow_path` false, also an empty or
+/// `/` path (a bare origin).
+fn is_credential_free_url(value: &str, allow_path: bool) -> bool {
     let value = value.trim();
-    value.starts_with("http://") || value.starts_with("https://")
-}
-
-/// An http(s) URL with a host and no user info, query or fragment.
-fn is_credential_free_url(value: &str) -> bool {
-    let Ok(url) = Url::parse(value.trim()) else {
+    let lower = value.to_ascii_lowercase();
+    if value.contains(';') || ["%3f", "%23", "%3b"].iter().any(|m| lower.contains(m)) {
+        return false;
+    }
+    let Ok(url) = Url::parse(value) else {
         return false;
     };
     matches!(url.scheme(), "http" | "https")
@@ -282,6 +276,7 @@ fn is_credential_free_url(value: &str) -> bool {
         && url.password().is_none()
         && url.query().is_none()
         && url.fragment().is_none()
+        && (allow_path || matches!(url.path(), "" | "/"))
 }
 
 /// The env keys that hold the credential of this auth kind.
@@ -300,7 +295,13 @@ fn auth_env_keys(auth: &ApiAuthKind) -> Vec<&str> {
             client_secret_env,
             ..
         } => vec![client_id_env.as_str(), client_secret_env.as_str()],
-        _ => Vec::new(),
+        ApiAuthKind::TokenExchange { creds_env_keys, .. } => {
+            creds_env_keys.iter().map(String::as_str).collect()
+        }
+        ApiAuthKind::CliToken {
+            fallback_env_key, ..
+        } => fallback_env_key.as_deref().into_iter().collect(),
+        ApiAuthKind::None => Vec::new(),
     }
 }
 
@@ -5594,6 +5595,7 @@ mod tests {
             },
             vec![mk_endpoint("GET", "/rest/api/3/issue/EW-1")],
         );
+        plugin.source = McpSource::Registry;
         if let Some(spec) = plugin.api_spec.as_mut() {
             spec.config_keys = vec![ApiConfigKey {
                 public: true,
@@ -5711,6 +5713,16 @@ mod tests {
         );
     }
 
+    fn config_key(env_key: &str, public: bool) -> ApiConfigKey {
+        ApiConfigKey {
+            public,
+            env_key: env_key.into(),
+            label: env_key.into(),
+            placeholder: String::new(),
+            description: String::new(),
+        }
+    }
+
     #[test]
     fn is_public_config_rules() {
         let mut plugin = mk_plugin(
@@ -5721,57 +5733,248 @@ mod tests {
             vec![],
         );
         let spec = plugin.api_spec.as_mut().unwrap();
-        spec.config_keys.push(ApiConfigKey {
-            public: true,
-            env_key: "SITE".into(),
-            label: "Site".into(),
-            placeholder: String::new(),
-            description: String::new(),
-        });
+        spec.config_keys = vec![
+            config_key("SITE", true),
+            config_key("SERVICE_URL", true),
+            config_key("PLAIN", false),
+        ];
         let spec = plugin.api_spec.as_ref().unwrap();
-        // The base URL, a `*_URL` key and a declared key are public.
-        assert!(is_public_config(spec, "BASE", "https://acme.example"));
+
+        // The base URL is public only as a bare origin, trusted or not.
+        for trusted in [false, true] {
+            for origin in [
+                "https://acme.example",
+                "https://acme.example/",
+                "http://127.0.0.1:8080",
+            ] {
+                assert!(is_public_config(spec, trusted, "BASE", origin), "{origin}");
+            }
+            for secret in [
+                "https://acme.example/services/T0/B0/xyz",
+                "https://acme.example/bot123:ABC/",
+                "https://acme.example//",
+                "https://u:p@acme.example",
+                "https://u@acme.example",
+                "https://acme.example/?token=abc",
+                "https://acme.example?token=abc",
+                "https://acme.example#frag",
+                "https://acme.example/;key=abc",
+                "https://acme.example;key=abc",
+                "https://acme.example/%3Ftoken=abc",
+                "https://acme.example/%23x",
+                "acme.example",
+                "not a url",
+            ] {
+                assert!(!is_public_config(spec, trusted, "BASE", secret), "{secret}");
+            }
+        }
+
+        // No name makes a URL public: a path may hold the secret.
+        for key in [
+            "SLACK_URL",
+            "DISCORD_URL",
+            "TEAMS_URL",
+            "TELEGRAM_URL",
+            "CALLBACK_URL",
+            "NOTIFY_URL",
+            "S3_URL",
+            "GITLAB_URL",
+            "GITLAB_API_URL",
+        ] {
+            for trusted in [false, true] {
+                assert!(
+                    !is_public_config(spec, trusted, key, "https://acme.example"),
+                    "{key}"
+                );
+            }
+        }
+
+        // `public` is honoured for a trusted (registry) server only.
+        assert!(!is_public_config(spec, false, "SITE", "example.com"));
+        assert!(is_public_config(spec, true, "SITE", "example.com"));
         assert!(is_public_config(
             spec,
-            "GITLAB_API_URL",
-            "https://git.acme.io/api/v4"
-        ));
-        assert!(is_public_config(spec, "SITE", "example.com"));
-        // A URL carrying credentials, a query or a fragment is not.
-        assert!(!is_public_config(spec, "BASE", "https://u:p@acme.example"));
-        assert!(!is_public_config(
-            spec,
-            "BASE",
-            "https://acme.example/?token=abc"
-        ));
-        assert!(!is_public_config(
-            spec,
+            true,
             "SITE",
-            "https://acme.example/#frag"
+            "https://acme.example/jira"
         ));
+        for secret in [
+            "https://acme.example/#frag",
+            "https://u:p@acme.example",
+            "https://acme.example/x;key=abc",
+            "https://acme.example/%3Ftoken=abc",
+        ] {
+            assert!(!is_public_config(spec, true, "SITE", secret), "{secret}");
+        }
+
+        // An auth key is never public, declared or not; nor is a plain value.
+        for trusted in [false, true] {
+            assert!(!is_public_config(
+                spec,
+                trusted,
+                "SERVICE_URL",
+                "https://acme.example"
+            ));
+            assert!(!is_public_config(spec, trusted, "PLAIN", "acme"));
+            assert!(!is_public_config(spec, trusted, "TENANT", "acme"));
+        }
+    }
+
+    #[test]
+    fn a_webhook_base_url_stays_masked_whatever_its_name() {
+        let plugin = mk_plugin(
+            "{SLACK_WEBHOOK_URL}",
+            ApiAuthKind::None,
+            vec![mk_endpoint("GET", "/items")],
+        );
+        let env = HashMap::from([(
+            "SLACK_WEBHOOK_URL".to_string(),
+            "https://hooks.slack.com/services/T000/B000/XXXXSECRET".to_string(),
+        )]);
+        let set = call_secrets(&plugin, &env);
+        assert_eq!(
+            set.scrub("posted to https://hooks.slack.com/services/T000/B000/XXXXSECRET"),
+            "posted to ***"
+        );
+    }
+
+    #[test]
+    fn a_declared_public_key_of_an_untrusted_server_is_masked() {
+        // A custom or imported server cannot declare a secret public.
+        let mut plugin = mk_plugin(
+            "https://api.acme.example",
+            ApiAuthKind::ApiKeyHeader {
+                header_name: "X-Api-Key".into(),
+                env_key: "KEY".into(),
+            },
+            vec![],
+        );
+        plugin.api_spec.as_mut().unwrap().config_keys = vec![
+            config_key("X_API_SECRET", true),
+            config_key("PATH_TOKEN_URL", true),
+        ];
+        let env = HashMap::from([
+            ("KEY".to_string(), "key-value-1".to_string()),
+            ("X_API_SECRET".to_string(), "header-secret-2".to_string()),
+            (
+                "PATH_TOKEN_URL".to_string(),
+                "https://acme.example/t/pathsecret3".to_string(),
+            ),
+        ]);
+        let text = "key-value-1 header-secret-2 https://acme.example/t/pathsecret3";
+        assert_eq!(call_secrets(&plugin, &env).scrub(text), "*** *** ***");
+        // The same declaration on a registry server is honoured.
+        plugin.source = McpSource::Registry;
+        assert_eq!(
+            call_secrets(&plugin, &env).scrub(text),
+            "*** header-secret-2 https://acme.example/t/pathsecret3"
+        );
+    }
+
+    #[test]
+    fn a_cli_token_fallback_key_and_exchange_credentials_are_never_public() {
+        let mut plugin = mk_plugin(
+            "https://api.fastly.example",
+            ApiAuthKind::CliToken {
+                command: "fastly".into(),
+                args: vec!["auth".into(), "token".into()],
+                inject: TokenInjection::default(),
+                fallback_env_key: Some("FASTLY_API_TOKEN".into()),
+            },
+            vec![],
+        );
+        plugin.source = McpSource::Registry;
+        plugin.api_spec.as_mut().unwrap().config_keys = vec![config_key("FASTLY_API_TOKEN", true)];
+        let spec = plugin.api_spec.as_ref().unwrap();
         assert!(!is_public_config(
             spec,
-            "GITLAB_API_URL",
-            "https://u@git.acme.io"
+            true,
+            "FASTLY_API_TOKEN",
+            "tokenvalue"
         ));
-        // A webhook URL hides its secret in the path.
-        assert!(!is_public_config(
-            spec,
-            "SLACK_WEBHOOK_URL",
-            "https://hooks.example/T0/B0/xyz"
-        ));
-        // An auth key is never public, nor is an undeclared plain value.
-        assert!(!is_public_config(
-            spec,
-            "SERVICE_URL",
-            "https://acme.example"
-        ));
-        assert!(!is_public_config(spec, "TENANT", "acme"));
-        assert!(!is_public_config(
-            spec,
-            "OTHER_URL_TOKEN",
-            "https://acme.example"
-        ));
+        let env = HashMap::from([("FASTLY_API_TOKEN".to_string(), "fastly-tok-77".to_string())]);
+        assert_eq!(call_secrets(&plugin, &env).scrub("fastly-tok-77"), "***");
+
+        let mut exchange = mk_plugin(
+            "https://api.acme.example",
+            ApiAuthKind::TokenExchange {
+                endpoint: "/sessions".into(),
+                method: "POST".into(),
+                body_template: json!({}),
+                body_format: TokenExchangeBodyFormat::Json,
+                token_jsonpath: "$.access_token".into(),
+                ttl_seconds: 60,
+                inject: TokenInjection::default(),
+                creds_env_keys: vec!["API_SECRET".into()],
+            },
+            vec![],
+        );
+        exchange.source = McpSource::Registry;
+        exchange.api_spec.as_mut().unwrap().config_keys = vec![config_key("API_SECRET", true)];
+        let spec = exchange.api_spec.as_ref().unwrap();
+        assert!(!is_public_config(spec, true, "API_SECRET", "exchange-sec"));
+    }
+
+    /// KT-1249 — a secret in the path of a URL under an ordinary `*_URL`
+    /// name (Slack, Discord, Telegram…) is masked in the data, the summary,
+    /// the error and the call log.
+    #[tokio::test]
+    async fn a_path_secret_in_a_url_config_stays_masked_in_data_error_and_log() {
+        let cases = [
+            ("SLACK_URL", "/services/T000/B000/XXXXSECRET"),
+            ("DISCORD_URL", "/api/webhooks/123456/DiscordTokSecret9"),
+            (
+                "TEAMS_URL",
+                "/webhookb2/aaaa@bbbb/IncomingWebhook/TeamsSecret7",
+            ),
+            ("TELEGRAM_URL", "/bot123456:AbCdEfTelegramSecret/"),
+            ("CALLBACK_URL", "/cb/CallbackSecret55"),
+            ("S3_URL", "/bucket/S3PathSecret66"),
+        ];
+        for (key, tail) in cases {
+            let secret = tail
+                .trim_matches('/')
+                .rsplit('/')
+                .next()
+                .unwrap()
+                .to_string();
+            for status in [200u16, 500] {
+                let server = MockServer::start().await;
+                let value = format!("{}{tail}", server.uri());
+                Mock::given(method("GET"))
+                    .respond_with(
+                        ResponseTemplate::new(status).set_body_json(json!({"echo": value})),
+                    )
+                    .mount(&server)
+                    .await;
+                let plugin = mk_plugin(
+                    &format!("{{{key}}}"),
+                    ApiAuthKind::None,
+                    vec![mk_endpoint("GET", "/items")],
+                );
+                let env = HashMap::from([(key.to_string(), value.clone())]);
+                let step = mk_step("/items");
+                let out = execute_api_call_step_core(
+                    &step,
+                    &plugin,
+                    &env,
+                    &TemplateContext::new(),
+                    SecurityPolicy::allow_loopback_for_tests(),
+                )
+                .await;
+                assert!(
+                    !out.result.output.contains(&secret),
+                    "{key} {status}: {}",
+                    out.result.output
+                );
+                if status == 500 {
+                    assert_eq!(out.result.status, RunStatus::Failed);
+                    let state = test_app_state();
+                    let stored = logged_error(&state, &step, &out).await;
+                    assert!(!stored.contains(&secret), "{key}: {stored}");
+                }
+            }
+        }
     }
 
     /// KT-1047 — a JSON body past the cap fails the step explicitly.

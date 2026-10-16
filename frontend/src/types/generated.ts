@@ -609,8 +609,8 @@ export type ApiConfigKey = { env_key: string, label: string, placeholder: string
 /**
  * The value is not a credential (a base URL, a workspace id): the call
  * keeps it intact in the data it hands on instead of masking it as a
- * secret. Credential-free URL keys are public without this flag, see
- * `api_call_executor::call_secrets`.
+ * secret. Honoured for registry servers only: an imported or custom
+ * definition cannot declare it, see `api_call_executor::is_public_config`.
  */
 public?: boolean, };
 

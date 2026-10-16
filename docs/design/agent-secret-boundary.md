@@ -804,10 +804,8 @@ step or the webhook supplied (whatever its name, `User-Agent` included).
 What comes back is scrubbed by value (`core/secret_scrub.rs`, KT-1035): an
 API call builds one set from every value it takes from the env or the
 credential store, wherever it lands, except the public config values (KT-1249:
-a key declared `public` in `api_spec.config_keys`, or a credential-free
-http(s) URL that is the base URL or sits under a `*_URL` key; masking a base
-URL rewrote the links of the data handed to the next steps), the resolved
-auth (Basic decoded) and its default headers, and carries it through the success
+masking a base URL rewrote the links of the data handed to the next steps),
+the resolved auth (Basic decoded) and its default headers, and carries it through the success
 output, summaries, errors and the call log. Each value is masked raw,
 URL-encoded, hex, base64 and JSON-escaped, case-insensitively from 8
 characters, before truncation; shorter ones only as whole tokens. A
@@ -816,6 +814,30 @@ log, run detail and MCP `workflow_run_get`, MCP run status) gets URL
 query/userinfo stripping and the heuristics of `core/redact.rs` only;
 value-based scrubbing of legacy rows is impossible because their credential
 context is gone.
+
+A config value is public only under one of two rules; everything else stays
+masked, and no name heuristic ever makes a URL public (a path can hold the
+secret: Slack, Discord, Teams, Telegram webhook URLs):
+
+1. the key is declared `public` in `api_spec.config_keys` AND the server is a
+   registry one (`McpSource::Registry`). A bundle import clears the flag
+   (`plugin_portability::without_public_flags`) and a custom API never sets it,
+   so only registry code can grant it (today `JIRA_URL`). A declared value that
+   is a URL must still hold no user info, query, fragment, `;param` or
+   percent-encoded `?`, `#`, `;`;
+2. the value is the plugin's base URL (`{KEY}` in `base_url`) and a bare
+   origin: http(s) scheme, host and optional port, an empty or `/` path, none
+   of the credential markers above (`https://euronews.atlassian.net`). A
+   webhook base URL (`{SLACK_WEBHOOK_URL}`) has a path, so it is masked.
+
+An auth key is never public, declared or not: Basic user and password, API key,
+bearer, OAuth2 client id and secret, token-exchange credentials and a
+`CliToken` fallback key. Logs and summaries share the same set, so they show
+public config unmasked too.
+[src: file: backend/src/workflows/api_call_executor.rs:231-259#is_public_config]
+[src: file: backend/src/workflows/api_call_executor.rs:261-280#is_credential_free_url]
+[src: file: backend/src/workflows/api_call_executor.rs:282-306#auth_env_keys]
+[src: file: backend/src/api/plugin_portability.rs:663-672#without_public_flags]
 
 Every automatic disable is recorded on the workflow (reason, who, when, a
 short summary; migration 223) and listed on the Automations page for review;
