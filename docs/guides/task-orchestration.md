@@ -135,10 +135,10 @@ without that tool asks the principal to relay it. This follows the accepted
 KT-635 brief policy, not a guarantee that every external host CLI obeys it.
 An unreviewed delivery never appears as an accepted report. After approval,
 Kronn derives one fixed-layout report; replay does not produce another.
-[src: file: backend/src/api/orchestration.rs:7812-7816#has_room_publication]
-[src: file: backend/src/api/orchestration.rs:7846-7871#parent_milestones]
-[src: file: backend/src/api/orchestration.rs:6744-6769#publish_accepted_delivery_or_warn]
-[src: file: backend/src/api/orchestration.rs:29399-29500#approving_a_delivery_publishes_one_derived_report_in_the_parent]
+[src: file: backend/src/api/orchestration.rs:7905-7909#has_room_publication]
+[src: file: backend/src/api/orchestration.rs:7939-7964#parent_milestones]
+[src: file: backend/src/api/orchestration.rs:6777-6802#publish_accepted_delivery_or_warn]
+[src: file: backend/src/api/orchestration.rs:29520-29621#approving_a_delivery_publishes_one_derived_report_in_the_parent]
 
 Native conversational handoffs are a separate opt-in from launching a planning
 task. Their paid/unknown allowance is configurable and shared by the originating
@@ -266,6 +266,37 @@ The limits worth knowing:
   accepted, so a broken decision degrades the report instead of suppressing it.
 - Nothing in this section is inferred. No metric, timestamp or verdict is
   derived from the worker's own claims.
+
+### A DoD item carried to another ticket
+
+An item that cannot be proven within this task (it needs lots that belong to
+another ticket) is carried, not moved by hand. The principal approves with a
+`dod_verifications` entry `{dod_id, met: false, evidence, carried_to: "KT-1290"}`.
+The carry is accepted only when the carrier is another task that exists, is
+not `done` or `archived`, shares a project with this task, and holds the
+requirement as an unticked DoD item with the same sentence (case and spacing
+aside). The sentence compared is the one the worker was briefed with: the
+execution records the `{id, sentence}` of its DoD items in its `created`
+event, and a `task_update` that removes an item records it (id and sentence)
+in the `removed_dod` of its `updated` event. The approve then integrates
+normally (validations, evidence, auto-tick of the other items); the item is
+detached from this task and a `dod_carried` event on the task names the
+carrier, the item's sentence and the principal's evidence. The detach runs in
+the review checkpoint's transaction, so a refused or failed approve detaches
+nothing. A carry that claims `met: true`, names itself, a missing or a closed
+task, a task of another project, or a task that does not hold the requirement
+is refused with that cause.
+
+The delivered manifest is judged against the execution's launch-time DoD
+snapshot, not against the task's current items: an id the principal removed or
+moved since the delivery is a known id, never "unknown". An item the task no
+longer holds that the manifest reports unmet still needs the explicit carry
+above; omitting it refuses the approve with that id.
+
+When no record names the sentence (an execution launched before the snapshot
+kept sentences, whose item was removed without a trace), the carry is refused
+instead of matching any open task: state the requirement on the carrier and
+restore the item on this task before carrying it.
 
 ### The Definition of Done after an integration
 

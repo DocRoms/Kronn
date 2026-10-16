@@ -1904,6 +1904,12 @@ pub struct ReviewDodVerification {
     /// pending and the task closes once it is ticked with evidence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verification: Option<PlanningDodVerification>,
+    /// KT-1291 — the task (`KT-1290`) that now holds this requirement, with
+    /// `met: false`: approve integrates without the item, which is detached
+    /// from this task and named in an event. Accepted only when that task
+    /// exists, is open and holds the requirement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carried_to: Option<String>,
 }
 
 /// Principal → backend review (ADR §5, KT-319). `comment` is schema-optional but
@@ -1950,7 +1956,8 @@ pub fn review_decision_v1_schema() -> serde_json::Value {
                         "dod_id": { "type": "string", "minLength": 1 },
                         "met": { "type": "boolean" },
                         "evidence": { "type": "string", "minLength": 1 },
-                        "verification": { "type": "string", "enum": ["post_integration"] }
+                        "verification": { "type": "string", "enum": ["post_integration"] },
+                        "carried_to": { "type": "string", "minLength": 1 }
                     }
                 }
             },

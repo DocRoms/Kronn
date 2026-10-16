@@ -12,5 +12,5 @@ case. Do not remove the teardown assertion or accept that run as qualification.
 Keep each patcher and register only its own `stop` method with `addCleanup`.
 The grant fixture now additionally checks guard identity after its own cleanups.
 This is fixture ownership, not a change to the bridge's publication policy.
-[src: file: backend/scripts/test_disc_introspection_mcp.py:54]
-[src: file: backend/scripts/test_disc_introspection_mcp.py:417]
+[src: file: backend/scripts/test_disc_introspection_mcp.py:54-70#_AMBIENT_URLOPEN]
+[src: file: backend/scripts/test_disc_introspection_mcp.py:585-619#DiscAppendPublicationGrantTests]
