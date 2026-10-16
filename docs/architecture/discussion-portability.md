@@ -20,7 +20,6 @@ workflow-run linkage and partial execution state. This policy is written into
 every bundle as `secret_policy` so a receiver can inspect it before import.
 [src: file: backend/src/api/disc_portability.rs:38-39#SECRET_POLICY]
 [src: file: backend/src/api/disc_portability.rs:327-367#build_export_envelope]
-[src: file: backend/src/api/disc_portability.rs:1-7#session]
 
 ## Import and conflicts
 
