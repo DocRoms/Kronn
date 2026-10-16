@@ -530,6 +530,13 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- The audit's citation gate now says how to fix a citation (KT-1307). A path
+  that only resolves under the docs root or next to the citing doc gets
+  « paths are repository-root relative; did you mean `docs/AGENTS.md:94`? »,
+  and an out-of-range line reports the file's line count. Ranges accept the
+  en and em dash, and a non-numeric line says « not a line number ». A bare
+  path to a text file no longer tells the model to drop the claim: it proposes
+  the whole-file range `path:1-N` (N filled in) to cite an absence.
 - A review-wait timeout no longer locks the principal out of the review
   (KT-1293). The watchdog used to move the unreviewed delivery to `Escalated`
   while its alert told the principal to call `task_exec_review`, which only

@@ -538,13 +538,17 @@ fn inspect_citations(project: &Path, rel: &str, content: &str, out: &mut Vec<Dia
             } else {
                 match cited_file(project, raw) {
                     Some(path) if crate::core::anti_halluc::is_binary_file(&path) => continue,
-                    Some(_) => format!(
+                    Some(path) => format!(
                         "malformed file citation `{raw}`: a text file is cited with the line \
-                         that supports the claim, [src: file: {raw}:<line>]"
+                         that supports the claim, [src: file: {raw}:<line>]. To state that \
+                         something is absent from it, cite the whole file as \
+                         [src: file: {raw}:1-{}] and write the absence outside the brackets",
+                        line_count(&path)
                     ),
                     None => format!(
                         "malformed file citation `{raw}`: expected [src: file: path:line], \
-                         or a bare path for an existing binary file"
+                         or a bare path for an existing binary file{}",
+                        did_you_mean(project, rel, raw, None)
                     ),
                 }
             };
@@ -557,7 +561,10 @@ fn inspect_citations(project: &Path, rel: &str, content: &str, out: &mut Vec<Dia
             let detail = if is_project_dir(project, path_part) {
                 directory_citation_message(path_part)
             } else {
-                format!("citation path does not exist `{path_part}`")
+                format!(
+                    "citation path does not exist `{path_part}`{}",
+                    did_you_mean(project, rel, path_part, Some(line_part.trim()))
+                )
             };
             out.push(diag("broken_citation", rel, detail));
             continue;
@@ -573,27 +580,68 @@ fn inspect_citations(project: &Path, rel: &str, content: &str, out: &mut Vec<Dia
             ));
             continue;
         }
-        let max_line = read(&path).map(|s| s.lines().count()).unwrap_or(0);
-        let bounds: Vec<_> = line_part
-            .trim()
-            .split('-')
-            .map(str::parse::<usize>)
-            .collect();
-        let valid = match bounds.as_slice() {
-            [Ok(line)] => *line > 0 && *line <= max_line,
-            [Ok(start), Ok(end)] => *start > 0 && start <= end && *end <= max_line,
-            _ => false,
+        let max_line = line_count(&path);
+        let detail = match parse_line_range(line_part) {
+            Err(()) => Some(format!(
+                "citation line `{}` is not a line number: write a number (`{path_part}:12`) \
+                 or a range (`{path_part}:12-20`)",
+                line_part.trim()
+            )),
+            Ok((start, end)) if start > 0 && start <= end && end <= max_line => None,
+            Ok(_) => Some(format!(
+                "citation line `{}` is outside `{path_part}`, which has {max_line} line(s){}",
+                line_part.trim(),
+                did_you_mean(project, rel, path_part, Some(line_part.trim()))
+            )),
         };
-        if !valid {
-            out.push(diag(
-                "broken_citation",
-                rel,
-                format!(
-                    "citation line `{line_part}` is outside `{}`",
-                    path_part.trim()
-                ),
-            ));
+        if let Some(detail) = detail {
+            out.push(diag("broken_citation", rel, detail));
         }
+    }
+}
+
+fn line_count(path: &Path) -> usize {
+    read(path).map(|s| s.lines().count()).unwrap_or(0)
+}
+
+/// `12` or `12-20`; the en and em dash count as the hyphen they replace.
+fn parse_line_range(line_part: &str) -> Result<(usize, usize), ()> {
+    let normalized = line_part.trim().replace(['\u{2013}', '\u{2014}'], "-");
+    let bounds: Vec<_> = normalized
+        .split('-')
+        .map(|bound| bound.trim().parse::<usize>())
+        .collect();
+    match bounds.as_slice() {
+        [Ok(line)] => Ok((*line, *line)),
+        [Ok(start), Ok(end)] => Ok((*start, *end)),
+        _ => Err(()),
+    }
+}
+
+/// Citation paths resolve from the repository root. A model often writes the
+/// path relative to the docs root or to the citing document instead: name the
+/// root-relative form of that other file so the next attempt fixes the path.
+fn did_you_mean(project: &Path, citing: &str, cited: &str, line: Option<&str>) -> String {
+    let docs_dir = docs_root(project).path("");
+    let citing_dir = Path::new(citing)
+        .parent()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default();
+    let cited = cited.trim_start_matches("./");
+    let hint = [docs_dir.trim_end_matches('/').to_string(), citing_dir]
+        .into_iter()
+        .filter(|dir| !dir.is_empty())
+        .map(|dir| format!("{dir}/{cited}"))
+        .find(|candidate| {
+            let full = project.join(candidate);
+            full.is_file() && !outside_project(project, &full) && contained_path(project, &full)
+        });
+    match hint {
+        Some(path) => format!(
+            ". Paths are repository-root relative; did you mean `{path}{}`?",
+            line.map(|l| format!(":{l}")).unwrap_or_default()
+        ),
+        None => String::new(),
     }
 }
 
@@ -1805,6 +1853,98 @@ mod tests {
             citation_messages(&project, "[src: file: notes.md:2] [src: file: fake.docx:1]")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn a_doc_relative_citation_names_the_repo_root_path() {
+        // KT-1307: `AGENTS.md:94` meant `docs/AGENTS.md`; `repo-map.md:1` was
+        // relative to the citing document.
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path();
+        write(&project.join("AGENTS.md"), "pointer\n");
+        write(&project.join("docs/AGENTS.md"), &"line\n".repeat(100));
+        write(&project.join("docs/architecture/repo-map.md"), "a\nb\n");
+        let mut out = Vec::new();
+        inspect_citations(
+            project,
+            "docs/architecture/x.md",
+            "[src: file: AGENTS.md:94] [src: file: repo-map.md:1] [src: file: map.md:1] \
+             [src: file: repo-map.md]",
+            &mut out,
+        );
+        let messages: Vec<_> = out.iter().map(|d| d.message.as_str()).collect();
+        assert_eq!(messages.len(), 4, "{messages:#?}");
+        assert!(
+            messages[0].contains("which has 1 line(s)")
+                && messages[0].contains("did you mean `docs/AGENTS.md:94`?"),
+            "{}",
+            messages[0]
+        );
+        assert!(
+            messages[1].contains("does not exist")
+                && messages[1].contains("repository-root relative")
+                && messages[1].contains("did you mean `docs/architecture/repo-map.md:1`?"),
+            "{}",
+            messages[1]
+        );
+        assert!(!messages[2].contains("did you mean"), "{}", messages[2]);
+        assert!(
+            messages[3].contains("did you mean `docs/architecture/repo-map.md`?"),
+            "{}",
+            messages[3]
+        );
+    }
+
+    #[test]
+    fn a_hint_never_points_outside_the_project() {
+        let tmp = document_project();
+        let project = tmp.path().join("proj");
+        let messages = citation_messages(&project, "[src: file: ../secret.bin:1]");
+        assert_eq!(messages.len(), 1, "{messages:#?}");
+        assert!(!messages[0].contains("did you mean"), "{}", messages[0]);
+    }
+
+    #[test]
+    fn dash_ranges_accept_en_and_em_dash_and_non_numeric_says_so() {
+        let tmp = document_project();
+        let project = tmp.path().join("proj");
+        write(&project.join("long.md"), &"x\n".repeat(30));
+        assert!(citation_messages(
+            &project,
+            "[src: file: long.md:17\u{2013}23] [src: file: long.md:1\u{2014}30] [src: file: long.md:5-6]"
+        )
+        .is_empty());
+        let messages = citation_messages(
+            &project,
+            "[src: file: long.md:extends] [src: file: long.md:5-] [src: file: long.md:17\u{2013}31] \
+             [src: file: long.md:0] [src: file: long.md:9-3]",
+        );
+        assert_eq!(messages.len(), 5, "{messages:#?}");
+        assert!(messages[0].contains("not a line number"), "{}", messages[0]);
+        assert!(messages[1].contains("not a line number"), "{}", messages[1]);
+        for outside in &messages[2..] {
+            assert!(
+                outside.contains("is outside `long.md`, which has 30 line(s)"),
+                "{outside}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_absence_is_cited_as_the_whole_file_range() {
+        let tmp = document_project();
+        let project = tmp.path().join("proj");
+        let messages = citation_messages(&project, "[src: file: notes.md]");
+        assert_eq!(messages.len(), 1, "{messages:#?}");
+        assert!(
+            messages[0].contains("[src: file: notes.md:1-2]")
+                && messages[0].contains("absent")
+                && !messages[0].contains("remove"),
+            "{}",
+            messages[0]
+        );
+        // The proposed form is accepted by the gate.
+        assert!(citation_messages(&project, "no audit step [src: file: notes.md:1-2]").is_empty());
     }
 
     #[test]

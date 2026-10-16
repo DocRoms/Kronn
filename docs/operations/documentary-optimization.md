@@ -29,6 +29,6 @@ that are not search-first, and mutable citation line ranges; only broken links
 and broken citations are blocking, the others are warnings. A Stack table
 row without its `Latest stable` or `Support end` source and date (or
 `not verified: no source`) raises the non-blocking `stack_currency` warning.
-[src: file: backend/src/core/document_optimization.rs:958-973#inspect_stack_currency]
-[src: file: backend/src/core/document_optimization.rs:992-1064#stack_currency_problems]
-[src: file: backend/src/core/document_optimization.rs:1066-1083#diag]
+[src: file: backend/src/core/document_optimization.rs:1006-1021#inspect_stack_currency]
+[src: file: backend/src/core/document_optimization.rs:1040-1112#stack_currency_problems]
+[src: file: backend/src/core/document_optimization.rs:1114-1131#diag]
