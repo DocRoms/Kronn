@@ -485,9 +485,24 @@ pub fn record_after_audit(project_path: &Path, rewritten: &[String]) -> Result<(
     write(project_path, &mut file)
 }
 
+/// The gone prose paths a human was shown, per doc then per section key: what
+/// an acknowledgement from the card may accept.
+pub type ShownPaths = BTreeMap<String, BTreeMap<String, Vec<String>>>;
+
 /// "Verified, unchanged": refresh one section's fingerprints from the current
-/// code. Only `citations.json` is written, never the doc.
+/// code. Only `citations.json` is written, never the doc. Every gone prose
+/// path of the doc is accepted: the caller is a panel that lists them all.
 pub fn acknowledge(project_path: &Path, doc: &str) -> Result<SectionCitations, String> {
+    acknowledge_accepting(project_path, doc, None)
+}
+
+/// As `acknowledge`, accepting only the gone prose paths in `shown` (what the
+/// human was shown, not what is gone at the click). `None` accepts them all.
+pub fn acknowledge_accepting(
+    project_path: &Path,
+    doc: &str,
+    shown: Option<&BTreeMap<String, Vec<String>>>,
+) -> Result<SectionCitations, String> {
     let rel = Path::new(doc);
     let docs_dir = crate::core::scanner::detect_docs_dir(project_path);
     let inside_docs = project_path
@@ -499,26 +514,53 @@ pub fn acknowledge(project_path: &Path, doc: &str) -> Result<SectionCitations, S
     }
     let content = read_doc(project_path, doc).ok_or_else(|| format!("`{doc}` not found"))?;
     let mut file = read_strict(project_path)?.unwrap_or_default();
-    let entry = fingerprint_doc(
+    let previous = file.docs.get(doc).cloned();
+    let mut entry = fingerprint_doc(
         project_path,
         doc,
         &content,
         RecordReason::Acknowledged,
-        file.docs.get(doc),
+        previous.as_ref(),
     );
+    if let Some(shown) = shown {
+        // What was accepted before stays accepted; of the rest, only what the
+        // human saw. The record never grows past the gone paths named now.
+        let before = previous.as_ref().map(|p| &p.known_missing);
+        entry.known_missing = std::mem::take(&mut entry.known_missing)
+            .into_iter()
+            .filter_map(|(key, paths)| {
+                let kept: Vec<String> = paths
+                    .into_iter()
+                    .filter(|p| {
+                        shown.get(&key).is_some_and(|s| s.contains(p))
+                            || before
+                                .and_then(|b| b.get(&key))
+                                .is_some_and(|b| b.contains(p))
+                    })
+                    .collect();
+                (!kept.is_empty()).then_some((key, kept))
+            })
+            .collect();
+    }
     file.docs.insert(doc.to_string(), entry.clone());
     write(project_path, &mut file)?;
     Ok(evaluate_section(project_path, doc, &entry))
 }
 
-/// « Vérifié, inchangé » on several sections at once. Every one that is a doc
-/// of the project is acknowledged, recorded or not: the checks judge every
-/// doc, so one added since the validation must be clearable too. A section
-/// that is not a doc (an audit step's own name) is left to its other route.
-pub fn acknowledge_docs(project_path: &Path, sections: &[String]) -> Result<(), String> {
+/// « Vérifié, inchangé » on several sections at once, from the card. Every one
+/// that is a doc of the project is acknowledged, recorded or not: the checks
+/// judge every doc, so one added since the validation must be clearable too.
+/// A section that is not a doc (an audit step's own name) is left to its other
+/// route. Only the gone paths in `shown` are accepted.
+pub fn acknowledge_docs(
+    project_path: &Path,
+    sections: &[String],
+    shown: &ShownPaths,
+) -> Result<(), String> {
     let docs: BTreeSet<String> = doc_files(project_path).into_iter().collect();
+    let none = BTreeMap::new();
     for doc in sections.iter().filter(|s| docs.contains(*s)) {
-        acknowledge(project_path, doc)?;
+        acknowledge_accepting(project_path, doc, Some(shown.get(doc).unwrap_or(&none)))?;
     }
     Ok(())
 }

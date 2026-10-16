@@ -23,7 +23,7 @@ response-attested historical fact. Both panels now derive the displayed model
 only from `answer.model` (normalized, the response that actually produced the
 compared answer) or, failing that, the last message in history that recorded
 a concrete `model` — never from `discussion.model`.
-[src: file: frontend/src/types/generated.ts:1816-1821]
+[src: file: frontend/src/types/generated.ts:1822-1827]
 [src: file: frontend/src/components/BatchComparePanel.tsx:195-197]
 [src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:455-457]
 

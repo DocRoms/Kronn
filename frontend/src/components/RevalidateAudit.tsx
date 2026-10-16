@@ -430,6 +430,18 @@ export function RevalidateAudit({
                       <ul>
                         {section.changed_sources.map(source => <li key={source}><code>{source}</code></li>)}
                       </ul>
+                      {(section.missing_paths ?? []).length > 0 && (
+                        <div data-testid="revalidate-stale-missing-paths">
+                          <span>{t('docState.stale.missingPaths')}</span>
+                          <ul>
+                            {(section.missing_paths ?? []).map(m => m.paths.map(path => (
+                              <li key={`${m.section}:${path}`}>
+                                <code>{path}</code>{m.section ? <> — <em>{m.section}</em></> : null}
+                              </li>
+                            )))}
+                          </ul>
+                        </div>
+                      )}
                     </li>
                   ))}
                 </ul>

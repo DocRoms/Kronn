@@ -80,6 +80,7 @@ fn drift_response(
                 ai_file: s.ai_file,
                 audit_step: s.audit_step,
                 changed_sources: s.changed_sources,
+                missing_paths: s.missing_paths,
             })
             .collect(),
         fresh_sections: drift.fresh_sections,
@@ -117,7 +118,16 @@ pub async fn acknowledge_drift(
         };
     let result = lease
         .blocking(move || {
-            crate::core::checksums::acknowledge_stale(&project_path, &req.sections)?;
+            let mut shown = crate::core::citation_drift::ShownPaths::new();
+            for p in &req.shown_paths {
+                shown
+                    .entry(p.doc.clone())
+                    .or_default()
+                    .entry(p.section.clone())
+                    .or_default()
+                    .push(p.path.clone());
+            }
+            crate::core::checksums::acknowledge_stale(&project_path, &req.sections, &shown)?;
             if let Err(e) = crate::core::doc_provenance::record_validation(
                 &project_path,
                 &req.sections,

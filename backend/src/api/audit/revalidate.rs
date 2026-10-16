@@ -161,6 +161,13 @@ pub fn plan(project_path: &FsPath) -> RevalidationPlan {
             plan.agent_steps.push(step);
         }
     }
+    // A doc whose every section is unanchored has no verdict, and is NOT
+    // queued for the pass by itself: the agent leaves it unanchored, so it
+    // would be queued again after every pass, and a bounded pass over one
+    // doc would become a pass over every doc. It stays listed in `unanchored`
+    // for the panel, and joins the pass (its headings listed in the block)
+    // as soon as something else sends it: an edit since the run
+    // (`plan_with_documents`), a broken citation or a section judged.
     plan.agent_steps.sort_unstable();
     plan.agent_steps.dedup();
     plan

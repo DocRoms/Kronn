@@ -48,8 +48,8 @@ const AGENT: AgentDetection = {
 const DRIFT: DriftCheckResponse = {
   audit_date: '2026-10-12',
   stale_sections: [
-    { ai_file: 'docs/AGENTS.md', audit_step: 1, changed_sources: ['src/lib.rs', 'Cargo.toml'] },
-    { ai_file: 'docs/repo-map.md', audit_step: 3, changed_sources: ['src/main.rs'] },
+    { ai_file: 'docs/AGENTS.md', audit_step: 1, changed_sources: ['src/lib.rs', 'Cargo.toml'], missing_paths: [] },
+    { ai_file: 'docs/repo-map.md', audit_step: 3, changed_sources: ['src/main.rs'], missing_paths: [] },
   ],
   fresh_sections: [], total_sections: 2, sources_state: 'needs_reverification',
   broken_citations: 0, placeholder_docs: [],

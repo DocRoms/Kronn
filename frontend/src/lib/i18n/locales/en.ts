@@ -1643,6 +1643,7 @@ const en: TranslationDict = {
   'docState.stale.step': 'Step {0} — {1}',
   'docState.stale.sources': 'Changed source files:',
   'docState.stale.updateEffect': '“Update” reruns only these steps with the saved briefing. Human-validated text is kept and marked “to reconfirm” if Kronn has to change it.',
+  'docState.stale.missingPaths': 'Paths this doc names that no longer exist (accepted by “Verified, unchanged”):',
   'docState.stale.unchangedEffect': '“Verified, unchanged” records your check and refreshes the fingerprints without an agent or rewrite.',
   'docState.stale.update': 'Update affected steps ({0})',
   'docState.placeholders.explanation': 'Docs that still contain template placeholders can be filled by their steps only.',

@@ -26,8 +26,12 @@ Release notes for 0.9.3 and earlier are available in the
   receives them (unanchored sections as « check or anchor »), and the sources
   badge turns to « to re-verify » with the vanished paths counted apart from
   the broken citations. A vanished mention is accepted per section with
-  « Vérifié, inchangé » only; a validation or a revalidation carries that
-  acceptance over and never adds to it.
+  « Vérifié, inchangé » only, and from the project card only the paths its
+  stale block displayed; a validation or a revalidation carries that
+  acceptance over and never adds to it. The history and example rules apply to
+  the sentence holding the path, not to the whole line, and a proposal heading
+  must be a proposal phrase (« Ideas », « Future work »), not a word inside a
+  real title.
 - AI documentation template and audit v2 gap audit (KT-819). The project
   facts of the briefing gain « Documentation externe » (Confluence, Notion,
   wiki, other; https addresses only, no credentials, at most 6), rendered in

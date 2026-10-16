@@ -1630,6 +1630,7 @@ const zh: TranslationDict = {
   "docState.stale.step": "步骤 {0} — {1}",
   "docState.stale.sources": "已更改的源文件：",
   "docState.stale.updateEffect": "“更新”只会使用已保存的简报重新运行这些步骤。人工验证过的文本会保留；如果 Kronn 必须修改，会标记为“待重新确认”。",
+  "docState.stale.missingPaths": "此文档提到但已不存在的路径（“已核实，无变化”会接受它们）：",
   "docState.stale.unchangedEffect": "“已核实，无变化”会记录人工检查并更新指纹，不运行代理，也不重写文档。",
   "docState.stale.update": "更新受影响的步骤（{0}）",
   "docState.placeholders.explanation": "仍含模板占位符的文档可以只运行对应步骤来补全。",

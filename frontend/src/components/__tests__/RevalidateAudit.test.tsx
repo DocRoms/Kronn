@@ -193,6 +193,7 @@ describe('RevalidateAudit', () => {
           ai_file: 'docs/coding-rules.md',
           audit_step: 4,
           changed_sources: ['frontend/src/App.tsx', 'backend/src/main.rs'],
+          missing_paths: [{ section: 'Routing', paths: ['frontend/src/lib/gone.ts'] }],
         }],
         fresh_sections: [], total_sections: 1, sources_state: 'needs_reverification',
         broken_citations: 2, placeholder_docs: [],
@@ -212,6 +213,9 @@ describe('RevalidateAudit', () => {
     expect(stale).toHaveTextContent('docState.stale.step 4 docs/coding-rules.md');
     expect(stale).toHaveTextContent('frontend/src/App.tsx');
     expect(stale).toHaveTextContent('backend/src/main.rs');
+    // The gone prose paths are shown with their section before they can be accepted.
+    expect(within(stale).getByTestId('revalidate-stale-missing-paths')).toHaveTextContent('frontend/src/lib/gone.ts');
+    expect(within(stale).getByTestId('revalidate-stale-missing-paths')).toHaveTextContent('Routing');
     expect(stale).toHaveTextContent('docState.stale.updateEffect');
     expect(stale).toHaveTextContent('docState.stale.unchangedEffect');
 

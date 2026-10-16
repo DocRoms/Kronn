@@ -1835,6 +1835,20 @@ pub struct AcknowledgeCitationsRequest {
 #[ts(export)]
 pub struct AcknowledgeDriftRequest {
     pub sections: Vec<String>,
+    /// The gone prose paths the human was shown with those sections: only
+    /// these are accepted. Absent, none is (an older client accepts nothing
+    /// it never displayed).
+    #[serde(default)]
+    pub shown_paths: Vec<ShownPath>,
+}
+
+/// One gone path the stale block listed, in its doc's section.
+#[derive(Debug, Clone, Deserialize, Serialize, TS)]
+#[ts(export)]
+pub struct ShownPath {
+    pub doc: String,
+    pub section: String,
+    pub path: String,
 }
 
 /// `GET /api/projects/:id/citation-drift`: broken and moved citations per
@@ -1853,6 +1867,9 @@ pub struct DriftSection {
     pub ai_file: String,
     pub audit_step: usize,
     pub changed_sources: Vec<String>,
+    /// Gone paths the doc's prose names, none accepted yet (KT-1168).
+    #[serde(default)]
+    pub missing_paths: Vec<crate::core::doc_relevance::VanishedPaths>,
 }
 
 /// What "Revalider l'audit" does with one section (KT-1168).

@@ -197,12 +197,92 @@ fn a_doc_added_after_validation_is_cleared_by_the_acknowledgement() {
         SourcesState::NeedsReverification
     );
     // Not in the drift baseline, not in citations.json: still clearable.
-    crate::core::checksums::acknowledge_stale(dir, &["docs/added.md".to_string()]).unwrap();
+    let docs = ["docs/added.md".to_string()];
+    let none = citation_drift::ShownPaths::new();
+    // Shown nothing, accepts nothing: the badge stays raised.
+    crate::core::checksums::acknowledge_stale(dir, &docs, &none).unwrap();
+    assert_eq!(
+        crate::core::checksums::check_drift(dir).sources_state,
+        SourcesState::NeedsReverification
+    );
+    let shown = shown_of("docs/added.md", "Added", "src/vanished.rs");
+    crate::core::checksums::acknowledge_stale(dir, &docs, &shown).unwrap();
     assert_eq!(
         crate::core::checksums::check_drift(dir).sources_state,
         SourcesState::Clean
     );
-    assert!(crate::core::checksums::acknowledge_stale(dir, &[]).is_err());
+    assert!(crate::core::checksums::acknowledge_stale(dir, &[], &none).is_err());
+}
+
+fn shown_of(doc: &str, section: &str, path: &str) -> citation_drift::ShownPaths {
+    let mut shown = citation_drift::ShownPaths::new();
+    shown
+        .entry(doc.to_string())
+        .or_default()
+        .entry(section.to_string())
+        .or_default()
+        .push(path.to_string());
+    shown
+}
+
+#[test]
+fn the_card_acknowledgement_accepts_only_the_paths_it_displayed() {
+    let tmp = project();
+    let dir = tmp.path();
+    let doc = "docs/architecture.md";
+    // The doc is stale by a changed citation, and a section names a vanished
+    // path the stale block would list under it.
+    fs::write(
+        dir.join(doc),
+        format!("{DOC}\n## Parser\nThe parser is `src/parser_v1.rs`.\n"),
+    )
+    .unwrap();
+    citation_drift::record_all(dir).unwrap();
+    fs::write(
+        dir.join("src/lib.rs"),
+        "fn alpha() {\n    let retries = 4;\n}\n\nfn beta() {\n    let timeout_ms = 2500;\n}\n\nfn gamma() {\n    let feature_flag = true;\n}\n",
+    )
+    .unwrap();
+    let listed = vanished_paths(dir, doc);
+    assert_eq!(listed.len(), 1, "the stale block lists the gone path");
+    assert_eq!(listed[0].section, "Parser");
+    assert_eq!(listed[0].paths, ["src/parser_v1.rs"]);
+
+    // Acknowledged from the card with nothing shown: the path stays gone.
+    let docs = [doc.to_string()];
+    crate::core::checksums::acknowledge_stale(dir, &docs, &citation_drift::ShownPaths::new())
+        .unwrap();
+    let report = analyze(dir, &citation_drift::check(dir));
+    assert!(verdict_of(&report, "Parser").is_some());
+    assert_eq!(report.counts.prose_missing, 1);
+    assert!(citation_drift::read_strict(dir).unwrap().unwrap().docs[doc]
+        .known_missing
+        .is_empty());
+
+    // A path shown under another section is not accepted for this one.
+    let elsewhere = shown_of(doc, "Retries", "src/parser_v1.rs");
+    crate::core::checksums::acknowledge_stale(dir, &docs, &elsewhere).unwrap();
+    assert!(verdict_of(&analyze(dir, &citation_drift::check(dir)), "Parser").is_some());
+
+    // The path that was displayed is accepted, and only that one.
+    let mut with_other = format!("{DOC}\n## Parser\nThe parser is `src/parser_v1.rs`.\n");
+    with_other.push_str("\n## Later\nAlso `src/added_after.rs`.\n");
+    fs::write(dir.join(doc), with_other).unwrap();
+    let shown = shown_of(doc, "Parser", "src/parser_v1.rs");
+    crate::core::checksums::acknowledge_stale(dir, &docs, &shown).unwrap();
+    let report = analyze(dir, &citation_drift::check(dir));
+    assert!(verdict_of(&report, "Parser").is_none());
+    assert!(
+        verdict_of(&report, "Later").is_some(),
+        "a path named after the display is not accepted"
+    );
+    assert_eq!(
+        vanished_paths(dir, doc)
+            .iter()
+            .flat_map(|v| v.paths.clone())
+            .collect::<Vec<_>>(),
+        ["src/added_after.rs"]
+    );
 }
 
 #[test]
@@ -523,6 +603,93 @@ fn an_example_and_the_list_under_it_illustrate_a_format_not_the_repo() {
          After the blank line, `src/real_gone.rs` is a claim again.\n",
     );
     assert_eq!(flagged(&report), ["src/real_gone.rs"]);
+}
+
+#[test]
+fn a_history_word_hides_only_its_own_sentence_of_a_long_paragraph() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    fs::create_dir_all(dir.join("frontend/src/components")).unwrap();
+    // The two shapes Kronn's own docs have on one line: a removed phase, then
+    // a present-tense claim; legacy callers, then a scanner path.
+    let report = doc_with(
+        dir,
+        "docs/overview.md",
+        "# UI\n**Bubble** — Single-phase chat. Phase `picking-agent` removed; agent \
+         selection is a dropdown. CSS lives in `frontend/src/components/aiHelper.css` \
+         (extracted from `frontend/src/components/Old.css` so styles load).\n\
+         **8. Launch variables.** Legacy callers (no body) keep working — `Option<Json<..>>` \
+         is `None`. Frontend scanner (`frontend/src/lib/scanUndeclaredVars.ts`) runs live.\n\
+         The former `frontend/src/components/Gone.tsx` is a module now.\n",
+    );
+    assert_eq!(
+        flagged(&report),
+        [
+            "frontend/src/components/Old.css",
+            "frontend/src/components/aiHelper.css",
+            "frontend/src/lib/scanUndeclaredVars.ts",
+        ],
+        "the removed-phase and legacy-callers sentences hide nothing else"
+    );
+
+    // Splitting never cuts inside inline code, nor after `e.g.`.
+    assert_eq!(
+        clauses("Use `a.b.rs` e.g. `c/d.rs`. Then `e/f.rs`; done"),
+        ["Use `a.b.rs` e.g. `c/d.rs`.", " Then `e/f.rs`;", " done"]
+    );
+}
+
+#[test]
+fn a_path_to_create_is_a_claim_but_to_be_created_is_not() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    fs::create_dir_all(dir.join("src")).unwrap();
+    let report = doc_with(
+        dir,
+        "docs/notes.md",
+        "# Notes\nThe hook to create the session lives in `src/session_hook.rs`.\n\
+         `src/later.rs` is to be created.\n",
+    );
+    assert_eq!(flagged(&report), ["src/session_hook.rs"]);
+}
+
+#[test]
+fn only_a_proposal_phrase_makes_a_heading_a_proposal() {
+    for heading in [
+        "Suggested direction",
+        "Future work",
+        "Ideas",
+        "Proposals",
+        "TODO list",
+        "Roadmap",
+        "Todo",
+    ] {
+        assert!(is_proposal_heading(heading), "{heading} is a proposal");
+    }
+    for heading in [
+        "Ma Todo",
+        "Workflow suggestions",
+        "Smart suggestions chips",
+        "Future-proof storage",
+        "Idea board component",
+    ] {
+        assert!(!is_proposal_heading(heading), "{heading} is a real section");
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    fs::create_dir_all(dir.join("src")).unwrap();
+    let report = doc_with(
+        dir,
+        "docs/ui.md",
+        "# UI\n## Ma Todo\nRendered by `src/todo_gone.rs`.\n\
+         ## Workflow suggestions\nBuilt in `src/suggest_gone.rs`.\n\
+         ## Future work\nMaybe `src/maybe.rs`.\n",
+    );
+    assert_eq!(
+        flagged(&report),
+        ["src/todo_gone.rs", "src/suggest_gone.rs"]
+    );
 }
 
 /// Run on demand against the repository's own docs:

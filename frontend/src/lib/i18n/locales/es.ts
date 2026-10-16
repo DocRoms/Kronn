@@ -1643,6 +1643,7 @@ const es: TranslationDict = {
   'docState.stale.step': 'Paso {0} — {1}',
   'docState.stale.sources': 'Archivos fuente modificados:',
   'docState.stale.updateEffect': '«Actualizar» relanza solo estos pasos con el briefing guardado. El texto validado por una persona se conserva y se marca «por reconfirmar» si Kronn debe modificarlo.',
+  'docState.stale.missingPaths': 'Rutas que este documento nombra y ya no existen («Verificado, sin cambios» las acepta):',
   'docState.stale.unchangedEffect': '«Verificado, sin cambios» registra tu comprobación y actualiza las huellas sin agente ni reescritura.',
   'docState.stale.update': 'Actualizar los pasos afectados ({0})',
   'docState.placeholders.explanation': 'Los documentos que aún contienen marcadores de plantilla pueden rellenarse solo con sus pasos.',

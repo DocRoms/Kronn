@@ -1652,6 +1652,7 @@ const fr: TranslationDict = {
   'docState.stale.step': 'Étape {0} — {1}',
   'docState.stale.sources': 'Fichiers source modifiés :',
   'docState.stale.updateEffect': '« Mettre à jour » relance uniquement ces étapes avec le briefing enregistré. Le texte validé par un humain est conservé et marqué « à reconfirmer » si Kronn doit le modifier.',
+  'docState.stale.missingPaths': 'Chemins que ce document nomme et qui n’existent plus (acceptés par « Vérifié, inchangé ») :',
   'docState.stale.unchangedEffect': '« Vérifié, inchangé » enregistre votre contrôle et actualise les empreintes sans agent ni réécriture.',
   'docState.stale.update': 'Mettre à jour les étapes concernées ({0})',
   'docState.placeholders.explanation': 'Les documents encore au stade de gabarit peuvent être remplis par leurs seules étapes.',

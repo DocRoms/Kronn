@@ -9,7 +9,7 @@ verdict, deterministically and without a model.
 ## What the revalidation already did (reused, not rewritten)
 
 - Per-citation fingerprints, `changed` / `removed` / `file missing` / `moved`,
-  recorded at validation. [src: file: backend/src/core/citation_drift.rs:838#check]
+  recorded at validation. [src: file: backend/src/core/citation_drift.rs:880#check]
 - The plan that re-anchors moved lines for free and sends the owning audit
   steps only the sections that need a model.
   [src: file: backend/src/api/audit/revalidate.rs:50#plan]
@@ -21,7 +21,7 @@ Every section (heading to next heading, fenced code excluded, a heading with
 nothing under it skipped) is judged from its anchors: its `[src: file: …]`
 citations, read through the fingerprint report, and the repository paths its
 prose names in backticks.
-[src: file: backend/src/core/doc_relevance.rs:822#judge]
+[src: file: backend/src/core/doc_relevance.rs:926#judge]
 
 | Verdict | Meaning |
 |---|---|
@@ -37,7 +37,12 @@ was proven true: the agent pass settles substance. For that reason every
 `unanchored` section is listed in the panel (`RevalidationPlan.unanchored`)
 and handed to the agent pass as « unverifiable: check or anchor », so each
 section of a doc is confronted with the code by someone. They never raise
-the badge by themselves.
+the badge by themselves. A doc made only of unanchored sections is not
+queued for the agent pass on its own: the agent leaves it unanchored, so it
+would be queued again after every pass and a bounded pass over one doc would
+become a pass over every doc. It stays listed, and its headings go into the
+agent block as soon as something else sends the doc (an edit since the run, a
+broken citation, a judged section).
 
 ### When a prose path counts as gone
 
@@ -57,10 +62,17 @@ and it is called gone only when it resolves **nowhere**:
 It is not a claim at all when it sits in:
 
 - a fenced code block;
-- a line that tells history or absence (« the former `x.rs` », « no longer »,
-  « does not exist », « if we add »…), or an example line and the list right
-  under it (« Detail file example: »);
-- a section titled as a proposal (« Suggested direction », « Roadmap »);
+- a sentence that tells history or absence (« the former `x.rs` », « no
+  longer », « does not exist », « if we add », « to be created »…), or an
+  example sentence (« e.g. », « Detail file example: ») and, when it closes a
+  line, the list right under it. The rule is scoped to the sentence holding
+  the path, split on sentence punctuation outside inline code: Kronn's docs
+  write whole paragraphs on one line, and « Phase `x` removed; … lives in
+  `y.css` » still claims `y.css`;
+- a section whose heading is a proposal as a whole or by a proposal phrase
+  (« Ideas », « Roadmap », « Future work », « Suggested direction », « TODO
+  list »). A single word inside a real title (« Ma Todo », « Workflow
+  suggestions ») does not make one;
 - a naming pattern (`TD-YYYYMMDD-slug.md`);
 - a doc still holding the template's raw `{{PLACEHOLDER}}` slots;
 - a changelog, release-notes, history or archive doc, which relevance does not
@@ -78,6 +90,14 @@ human was shown (`known_missing`). A validation or a revalidation **carries
 over** what was accepted and never adds to it; a path accepted under one
 section is still flagged when another section names it.
 [src: file: backend/src/core/citation_drift.rs:316#accepted_missing]
+
+From the project card, the stale block lists each stale doc's gone prose paths
+with their section (`DriftSection.missing_paths`), and the acknowledgement
+sends exactly those (`shown_paths`): a path that is not in the request is not
+accepted, whatever is gone at the click, and an older client that sends none
+accepts none. The per-doc panel, which lists every gone path of its doc, still
+accepts them all.
+[src: file: backend/src/core/citation_drift.rs:501#acknowledge_accepting]
 
 ## The measure
 
@@ -101,7 +121,7 @@ section is still flagged when another section names it.
   when a section is outdated or gone. The paths no fingerprint covers are
   counted apart in `missing_paths`, so `broken_citations` stays a count of
   citations.
-  [src: file: backend/src/core/checksums.rs:813#check_drift]
+  [src: file: backend/src/core/checksums.rs:827#check_drift]
   [src: file: backend/src/core/doc_relevance.rs:169#escalate]
 - **Validation state**: a human-validated doc whose prose names a vanished path
   stops counting as human-validated for learning sources, like one with a
@@ -110,8 +130,8 @@ section is still flagged when another section names it.
   proposals the human launches through « Revalider l'audit », then reviews
   and validates; « Vérifié, inchangé » acknowledges a doc, recorded or not,
   that was judged stale but is fine.
-  [src: file: backend/src/core/checksums.rs:791#acknowledge_stale]
+  [src: file: backend/src/core/checksums.rs:796#acknowledge_stale]
 
 A citation the git diff maps to a new line past the fingerprint window is
 treated as moved, exactly as the plan re-anchors it.
-[src: file: backend/src/core/doc_relevance.rs:949#analyze_with_moves]
+[src: file: backend/src/core/doc_relevance.rs:1053#analyze_with_moves]

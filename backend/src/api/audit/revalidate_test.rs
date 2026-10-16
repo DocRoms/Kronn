@@ -540,3 +540,45 @@ fn the_plan_judges_each_section_and_the_agent_block_carries_the_corrections() {
     assert_eq!(planned.unanchored[0].heading, "Notes");
     assert!(block.contains("section `Notes` — unverifiable: check or anchor"));
 }
+
+// KT-1168 — a doc whose every section is unanchored has no verdict to show.
+// It never starts a pass by itself: the agent leaves it unanchored, so it
+// would be queued again after every pass, and the plan would never be clean.
+// It stays listed, and its headings go into the block as soon as an edit since
+// the run (`plan_with_documents`) sends the doc to the agent.
+#[test]
+fn a_doc_with_only_unanchored_sections_is_listed_and_carried_when_sent() {
+    const GLOSSARY: &str = "docs/glossary.md";
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::create_dir_all(dir.join("docs")).unwrap();
+    fs::write(dir.join("src/lib.rs"), "fn alpha() {}\n").unwrap();
+    fs::write(
+        dir.join(GLOSSARY),
+        "# Glossary\nNothing here names a file or cites a line.\n## Terms\nPlain prose too.\n",
+    )
+    .unwrap();
+    citation_drift::record_all(dir).unwrap();
+
+    let mut planned = plan(dir);
+    assert!(planned.sections.is_empty() && planned.agent_steps.is_empty());
+    assert_eq!(planned.sources_state, SourcesState::Clean, "no badge raise");
+    assert!(planned.unanchored.iter().any(|s| s.doc == GLOSSARY));
+
+    // What `plan_with_documents` does for a doc edited since the run.
+    let step = rules_step();
+    planned.sections.push(RevalidationSection {
+        doc: GLOSSARY.to_string(),
+        step: Some(step),
+        action: RevalidationAction::Agent,
+        doc_missing: false,
+        reanchor: Vec::new(),
+        broken: Vec::new(),
+        human: Vec::new(),
+        relevance: Vec::new(),
+    });
+    let block = &prompt_blocks(&planned)[&step];
+    assert!(block.contains("section `Terms` — unverifiable: check or anchor"));
+    assert!(block.contains("section `Glossary` — unverifiable: check or anchor"));
+}

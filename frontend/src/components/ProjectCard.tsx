@@ -1146,8 +1146,12 @@ export function ProjectCard({
     driftAckRef.current = true;
     setDriftAcking(true);
     const sections = [...new Set(drift.stale_sections.map(s => s.ai_file))];
+    // KT-1168 — only the gone paths the stale block displayed are accepted,
+    // as listed here, not as they are at the click.
+    const shownPaths = drift.stale_sections.flatMap(s =>
+      (s.missing_paths ?? []).flatMap(m => m.paths.map(path => ({ doc: s.ai_file, section: m.section, path }))));
     try {
-      await projectsApi.acknowledgeDrift(proj.id, sections);
+      await projectsApi.acknowledgeDrift(proj.id, sections, shownPaths);
       toast(t('audit.driftAckDone', String(sections.length)), 'success');
       onRefetchDrift(proj.id);
     } catch (e) {

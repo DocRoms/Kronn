@@ -35,7 +35,13 @@ export type AcknowledgeCitationsRequest = { doc: string, };
  * `POST /api/projects/:id/drift/acknowledge` body: the stale sections (their
  * `ai_file`) a human checked and found still true.
  */
-export type AcknowledgeDriftRequest = { sections: Array<string>, };
+export type AcknowledgeDriftRequest = { sections: Array<string>,
+/**
+ * The gone prose paths the human was shown with those sections: only
+ * these are accepted. Absent, none is (an older client accepts nothing
+ * it never displayed).
+ */
+shown_paths?: Array<ShownPath>, };
 
 export type ActiveAgentDispatch = { id: string, trigger_message_id: string, agent_type: AgentType, status: string,
 /**
@@ -3904,7 +3910,11 @@ missing_paths?: number,
  */
 placeholder_docs: Array<PlaceholderDoc>, };
 
-export type DriftSection = { ai_file: string, audit_step: number, changed_sources: Array<string>, };
+export type DriftSection = { ai_file: string, audit_step: number, changed_sources: Array<string>,
+/**
+ * Gone paths the doc's prose names, none accepted yet (KT-1168).
+ */
+missing_paths: Array<VanishedPaths>, };
 
 /**
  * `POST /api/config/embed-origins`: origins to allow and to revoke, applied
@@ -8756,6 +8766,11 @@ export type SharedRunKind = "quick_prompt" | "quick_api" | "quick_exec" | "workf
 
 export type SharedRunStatus = "preflight_failed" | "queued" | "running" | "success" | "failed" | "cancelled" | "timeout";
 
+/**
+ * One gone path the stale block listed, in its doc's section.
+ */
+export type ShownPath = { doc: string, section: string, path: string, };
+
 export type Skill = { id: string, name: string, description: string, icon: string, category: SkillCategory, content: string, is_builtin: boolean,
 /**
  * Estimated token cost when injected into an agent prompt (~4 chars = 1 token).
@@ -10439,6 +10454,15 @@ started_by: string | null, validated_by: string | null, validated_at: string | n
  * reads the filesystem, is decided by the POST itself).
  */
 can_validate: boolean, blocked: ValidationBlock | null, };
+
+/**
+ * The gone prose paths of one section that no acknowledgement accepted.
+ */
+export type VanishedPaths = {
+/**
+ * The section's key within its doc (its heading).
+ */
+section: string, paths: Array<string>, };
 
 export type VersionCheck = { current: string, latest: string | null, release_url: string | null, up_to_date: boolean, };
 

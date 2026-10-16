@@ -50,8 +50,8 @@ this state, including already audited projects; the optional-offer bypass cannot
 skip accepted commits pending integration.
 [src: file: backend/src/api/projects/template_merge.rs:324-330#audit_launch_refusal]
 [src: file: backend/src/api/audit/full.rs:299-432#audit_launch_refusal]
-[src: file: backend/src/api/audit/drift.rs:250-550#audit_launch_refusal]
-[src: file: backend/src/api/audit/revalidate.rs:506-586#audit_launch_refusal]
+[src: file: backend/src/api/audit/drift.rs:260-560#audit_launch_refusal]
+[src: file: backend/src/api/audit/revalidate.rs:513-593#audit_launch_refusal]
 [src: file: frontend/src/hooks/useTemplateMergeOffer.ts:28-93#useTemplateMergeOffer]
 
 The regression suite exercises real HTTP refusals, cancellation before mutation,

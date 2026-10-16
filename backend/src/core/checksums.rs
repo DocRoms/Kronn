@@ -37,6 +37,10 @@ pub struct StaleSection {
     pub ai_file: String,
     pub audit_step: usize,
     pub changed_sources: Vec<String>,
+    /// The gone paths the doc's prose names that no acknowledgement accepted
+    /// (KT-1168): shown with the stale block, and the only ones the
+    /// acknowledgement from the card accepts.
+    pub missing_paths: Vec<crate::core::doc_relevance::VanishedPaths>,
 }
 
 /// Compute the SHA-256 hex digest of a file. Returns None if the file cannot be read.
@@ -787,8 +791,13 @@ pub fn acknowledge_sections(project_path: &Path, ai_files: &[String]) -> Result<
 /// recorded or not: a doc added since the validation is acknowledged by its
 /// citations and prose paths alone, or it would stay "to re-verify" with no
 /// way to clear it. A section of the drift baseline also has its mappings
-/// recomputed.
-pub fn acknowledge_stale(project_path: &Path, sections: &[String]) -> Result<(), String> {
+/// recomputed. A gone path the prose names is accepted only when `shown` lists
+/// it for its section: the human accepts what was displayed, nothing else.
+pub fn acknowledge_stale(
+    project_path: &Path,
+    sections: &[String],
+    shown: &crate::core::citation_drift::ShownPaths,
+) -> Result<(), String> {
     let baseline = baseline_ai_files(project_path);
     let (known, added): (Vec<String>, Vec<String>) =
         sections.iter().cloned().partition(|s| baseline.contains(s));
@@ -797,10 +806,15 @@ pub fn acknowledge_stale(project_path: &Path, sections: &[String]) -> Result<(),
     }
     if !known.is_empty() {
         acknowledge_sections(project_path, &known)?;
-        crate::core::citation_drift::acknowledge_docs(project_path, &known)?;
+        crate::core::citation_drift::acknowledge_docs(project_path, &known, shown)?;
     }
+    let none = BTreeMap::new();
     for doc in &added {
-        crate::core::citation_drift::acknowledge(project_path, doc)?;
+        crate::core::citation_drift::acknowledge_accepting(
+            project_path,
+            doc,
+            Some(shown.get(doc).unwrap_or(&none)),
+        )?;
     }
     DRIFT_CACHE
         .lock()
@@ -856,6 +870,10 @@ pub fn check_drift(project_path: &Path) -> DriftResult {
                     ai_file: mapping.ai_file.clone(),
                     audit_step: mapping.audit_step,
                     changed_sources: crate::core::citation_drift::changed_sources(section),
+                    missing_paths: crate::core::doc_relevance::vanished_paths(
+                        project_path,
+                        &mapping.ai_file,
+                    ),
                 });
             } else {
                 fresh_sections.push(format!("{}#step{}", mapping.ai_file, mapping.audit_step));
@@ -898,6 +916,10 @@ pub fn check_drift(project_path: &Path) -> DriftResult {
             stale_sections.push(StaleSection {
                 ai_file: mapping.ai_file.clone(),
                 audit_step: mapping.audit_step,
+                missing_paths: crate::core::doc_relevance::vanished_paths(
+                    project_path,
+                    &mapping.ai_file,
+                ),
                 changed_sources,
             });
         }

@@ -163,7 +163,7 @@ describe('ProjectCard — header accessibility', () => {
       project: { audit_status: 'Audited' },
       driftStatus: {
         audit_date: '2026-10-12',
-        stale_sections: [{ ai_file: 'docs/AGENTS.md', audit_step: 1, changed_sources: ['src/lib.rs'] }],
+        stale_sections: [{ ai_file: 'docs/AGENTS.md', audit_step: 1, changed_sources: ['src/lib.rs'], missing_paths: [] }],
         fresh_sections: [], total_sections: 1, sources_state: 'needs_reverification',
         broken_citations: 1,
         placeholder_docs: [{ path: 'docs/glossary.md', step: 2 }],

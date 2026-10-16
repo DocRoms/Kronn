@@ -341,12 +341,11 @@ const ABSENCE_PHRASES: &[&str] = &[
     "if we add",
     "we could",
     "to be created",
-    "to create",
     "à créer",
 ];
 
-fn tells_history(line: &str) -> bool {
-    let outside_code = line.split('`').step_by(2).collect::<Vec<_>>().join(" ");
+fn tells_history(clause: &str) -> bool {
+    let outside_code = clause.split('`').step_by(2).collect::<Vec<_>>().join(" ");
     let lower = outside_code.to_lowercase();
     if ABSENCE_PHRASES.iter().any(|p| lower.contains(p)) {
         return true;
@@ -356,27 +355,87 @@ fn tells_history(line: &str) -> bool {
         .any(|word| HISTORY_WORDS.contains(&word))
 }
 
-/// A section titled as a proposal ("Suggested direction", "Roadmap") names
-/// files that are still to be made: not claims about the repository now.
+/// The sentences of a line, split on sentence punctuation outside inline
+/// code. Kronn's docs write whole paragraphs on one line: a history word in
+/// one sentence must not hide the present-tense claims of another.
+fn clauses(line: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut in_code = false;
+    let bytes = line.as_bytes();
+    for (i, c) in line.char_indices() {
+        match c {
+            '`' => in_code = !in_code,
+            '.' | ';' | '!' | '?' if !in_code => {
+                let ends = bytes.get(i + 1).is_none_or(|b| b.is_ascii_whitespace());
+                // "e.g. `x`" and "i.e. `x`" go on in the same sentence.
+                let lower = line[start..i].to_ascii_lowercase();
+                let abbreviation = c == '.' && (lower.ends_with("e.g") || lower.ends_with("i.e"));
+                if ends && !abbreviation {
+                    out.push(&line[start..=i]);
+                    start = i + 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    if start < line.len() {
+        out.push(&line[start..]);
+    }
+    out
+}
+
+/// Headings that, as a whole, are a proposal list ("Ideas", "Roadmap").
+const PROPOSAL_HEADINGS: &[&str] = &[
+    "idea",
+    "ideas",
+    "proposal",
+    "proposals",
+    "proposition",
+    "propositions",
+    "suggestion",
+    "suggestions",
+    "todo",
+    "todos",
+    "roadmap",
+    "future",
+    "backlog",
+    "pistes",
+    "idees",
+    "idées",
+];
+
+/// Phrases that make a heading a proposal wherever they sit in it.
+const PROPOSAL_PHRASES: &[&[&str]] = &[
+    &["future", "work"],
+    &["future", "ideas"],
+    &["future", "improvements"],
+    &["future", "enhancements"],
+    &["suggested"],
+    &["proposed"],
+    &["todo", "list"],
+    &["to", "do", "list"],
+    &["roadmap"],
+    &["travaux", "futurs"],
+    &["pistes", "d"],
+];
+
+/// A section titled as a proposal ("Suggested direction", "Future work",
+/// "Ideas") names files that are still to be made: not claims about the
+/// repository now. A single word inside a real title ("Ma Todo", "Workflow
+/// suggestions") does not make one.
 fn is_proposal_heading(heading: &str) -> bool {
     let lower = heading.to_lowercase();
-    lower.split(|c: char| !c.is_alphabetic()).any(|w| {
-        matches!(
-            w,
-            "suggested"
-                | "suggestion"
-                | "suggestions"
-                | "proposal"
-                | "proposals"
-                | "proposed"
-                | "future"
-                | "roadmap"
-                | "todo"
-                | "ideas"
-                | "proposition"
-                | "pistes"
-        )
-    })
+    let words: Vec<&str> = lower
+        .split(|c: char| !c.is_alphabetic())
+        .filter(|w| !w.is_empty())
+        .collect();
+    if words.len() == 1 && PROPOSAL_HEADINGS.contains(&words[0]) {
+        return true;
+    }
+    PROPOSAL_PHRASES
+        .iter()
+        .any(|phrase| words.windows(phrase.len()).any(|w| w == *phrase))
 }
 
 /// A token that is a naming pattern, not a path: `TD-YYYYMMDD-slug.md`,
@@ -431,7 +490,7 @@ pub(crate) fn is_historical_doc(doc: &str) -> bool {
 }
 
 /// The repository paths a text names in inline code, outside fences and
-/// outside lines that tell history. Only a path whose first folder exists at
+/// outside the sentences that tell history. Only a path whose first folder exists at
 /// the project root is taken: a bare example (`path/to/file.rs`) or another
 /// repo's path is not a claim.
 fn prose_paths(project: &Path, text: &str) -> Vec<String> {
@@ -448,23 +507,33 @@ fn prose_paths(project: &Path, text: &str) -> Vec<String> {
         if line.trim().is_empty() || heading_of(line).is_some() {
             example_block = false;
         }
-        let example = tells_example(line);
-        if example && !is_list_item(line) {
-            example_block = true;
-        }
-        if in_fence || example || example_block || tells_history(line) {
+        if in_fence {
             continue;
         }
-        for (i, piece) in line.split('`').enumerate() {
-            if i % 2 == 0 {
+        let parts = clauses(line);
+        // An example clause that closes a line covers the list right under
+        // it. An example in the middle of a paragraph covers its own clause.
+        if !is_list_item(line) && parts.last().is_some_and(|c| tells_example(c)) {
+            example_block = true;
+        }
+        if example_block {
+            continue;
+        }
+        for clause in parts {
+            if tells_example(clause) || tells_history(clause) {
                 continue;
             }
-            let Some(path) = path_token(piece) else {
-                continue;
-            };
-            let first = path.split('/').next().unwrap_or_default();
-            if project.join(first).is_dir() {
-                found.insert(path);
+            for (i, piece) in clause.split('`').enumerate() {
+                if i % 2 == 0 {
+                    continue;
+                }
+                let Some(path) = path_token(piece) else {
+                    continue;
+                };
+                let first = path.split('/').next().unwrap_or_default();
+                if project.join(first).is_dir() {
+                    found.insert(path);
+                }
             }
         }
     }
@@ -680,22 +749,57 @@ pub(crate) fn missing_by_section(
     out
 }
 
-/// Whether the prose of `doc` names a path that is gone and that no human
-/// acknowledgement accepted, section by section.
-pub(crate) fn has_stale_prose_paths(project: &Path, doc: &str, content: &str) -> bool {
-    let missing = missing_by_section(project, doc, content);
+/// Per section key, the gone prose paths of `doc` that no human
+/// acknowledgement accepted: what is still to be shown, and what keeps the
+/// doc "to re-verify".
+pub(crate) fn unaccepted_missing(
+    project: &Path,
+    doc: &str,
+    content: &str,
+) -> BTreeMap<String, Vec<String>> {
+    let mut missing = missing_by_section(project, doc, content);
     if missing.is_empty() {
-        return false;
+        return missing;
     }
     let accepted = citation_drift::read_strict(project)
         .ok()
         .flatten()
         .and_then(|f| f.docs.get(doc).map(|e| e.known_missing.clone()))
         .unwrap_or_default();
-    missing.iter().any(|(key, paths)| {
-        let seen = accepted.get(key);
-        paths.iter().any(|p| !seen.is_some_and(|s| s.contains(p)))
-    })
+    missing.retain(|key, paths| {
+        if let Some(seen) = accepted.get(key) {
+            paths.retain(|p| !seen.contains(p));
+        }
+        !paths.is_empty()
+    });
+    missing
+}
+
+/// The gone prose paths of one section that no acknowledgement accepted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct VanishedPaths {
+    /// The section's key within its doc (its heading).
+    pub section: String,
+    pub paths: Vec<String>,
+}
+
+/// What a doc's stale block must list, so « Vérifié, inchangé » accepts only
+/// what the human was shown. Empty for anything that is not a readable doc.
+pub fn vanished_paths(project: &Path, doc: &str) -> Vec<VanishedPaths> {
+    let Ok(content) = std::fs::read_to_string(project.join(doc)) else {
+        return Vec::new();
+    };
+    unaccepted_missing(project, doc, &content)
+        .into_iter()
+        .map(|(section, paths)| VanishedPaths { section, paths })
+        .collect()
+}
+
+/// Whether the prose of `doc` names a path that is gone and that no human
+/// acknowledgement accepted, section by section.
+pub(crate) fn has_stale_prose_paths(project: &Path, doc: &str, content: &str) -> bool {
+    !unaccepted_missing(project, doc, content).is_empty()
 }
 
 // ─── Verdicts ─────────────────────────────────────────────────────────────

@@ -87,7 +87,7 @@ by a human (KT-1131). An accepted step keeps its failure on record:
   refused in the same case: it would supersede the run. The refusal names the
   run, so a bridge agent knows what to resume. A partial run, which the Full
   launch cannot resume, never refuses a launch.
-  [src: file: backend/src/api/audit/full.rs:533-539#fresh_launch_refusal] [src: file: backend/src/api/audit/full.rs:3959-3972#fresh_launch_refusal] [src: file: backend/src/api/audit/drift.rs:556-563#fresh_launch_refusal]
+  [src: file: backend/src/api/audit/full.rs:533-539#fresh_launch_refusal] [src: file: backend/src/api/audit/full.rs:3959-3972#fresh_launch_refusal] [src: file: backend/src/api/audit/drift.rs:566-573#fresh_launch_refusal]
 - **The existing docs are never injected again.** The template is installed
   only into an empty AI doc folder, decided from its content rather than the
   displayed status; Kronn's own docs only get the template files they lack.
@@ -125,14 +125,14 @@ by a human (KT-1131). An accepted step keeps its failure on record:
 - Unknown resumable state, unreadable timeline. [src: file: frontend/src/components/AuditTimeline.tsx:723-734#resumableUnknown] [src: file: frontend/src/components/AuditTimeline.tsx:746-748#loadFailed]
 - Refused acceptance. [src: file: frontend/src/components/AuditTimeline.tsx:481-489#setAcceptError] [src: file: frontend/src/components/AuditTimeline.tsx:849-852#acceptError]
 - Validation prerequisites and linked actions. [src: file: frontend/src/components/AuditTimeline.tsx:983-1013#completedLocalRun]
-- Verify-docs actions and resumable priority. [src: file: frontend/src/components/RevalidateAudit.tsx:381-412#onUpdateStale] [src: file: frontend/src/components/ProjectCard.tsx:1430-1442#primaryAuditAction]
+- Verify-docs actions and resumable priority. [src: file: frontend/src/components/RevalidateAudit.tsx:381-412#onUpdateStale] [src: file: frontend/src/components/ProjectCard.tsx:1434-1446#primaryAuditAction]
 - Recap read error. [src: file: frontend/src/components/AuditRecapPanel.tsx:363-368#errorBlock]
 
 ## “Verify docs” escalation (KT-1168, KT-1206, KT-1218)
 
 “Verify docs” is the single entry point in the project header, the audit
 timeline and a stale document's viewer. It has no lifecycle of its own.
-[src: file: frontend/src/components/ProjectCard.tsx:1516-1530#project-audit-primary]
+[src: file: frontend/src/components/ProjectCard.tsx:1520-1534#project-audit-primary]
 [src: file: frontend/src/components/AuditTimeline.tsx:533-538#onVerifyDocs]
 [src: file: frontend/src/components/AiDocViewer.tsx:529-538#onOpenDocState]
 
@@ -141,7 +141,7 @@ timeline and a stale document's viewer. It has no lifecycle of its own.
   human-validated docs to reconfirm. Template placeholders keep their separate
   targeted fill action below the block. A missing drift, revalidation-plan or
   provenance response is shown as unknown, never clean or validated.
-  [src: file: frontend/src/components/ProjectCard.tsx:1366-1382#docStateUnknown]
+  [src: file: frontend/src/components/ProjectCard.tsx:1370-1386#docStateUnknown]
   [src: file: frontend/src/components/DocStateSummary.tsx:67-84#doc-state-counts]
 - **Deterministic first.** Opening the entry point computes the citation plan
   without an agent. Re-anchoring moved citations is also deterministic.
@@ -158,12 +158,12 @@ timeline and a stale document's viewer. It has no lifecycle of its own.
   [src: file: frontend/src/components/RevalidateAudit.tsx:331-339#hasTargetedAgentWork]
   [src: file: frontend/src/components/RevalidateAudit.tsx:340-350#staleSteps]
   [src: file: frontend/src/components/RevalidateAudit.tsx:381-412#onUpdateStale]
-  [src: file: frontend/src/components/RevalidateAudit.tsx:548-555#onFullAudit]
+  [src: file: frontend/src/components/RevalidateAudit.tsx:560-567#onFullAudit]
 - **Human text survives.** A partial update reuses the saved briefing. A Kronn
   write to human-validated text applies the correction and marks that text
   “to reconfirm”; it does not silently replace the human decision.
-  [src: file: backend/src/api/audit/drift.rs:437-464#briefing_notes]
-  [src: file: backend/src/api/audit/drift.rs:1186-1194#mark_validated_doc_writes]
+  [src: file: backend/src/api/audit/drift.rs:447-474#briefing_notes]
+  [src: file: backend/src/api/audit/drift.rs:1196-1204#mark_validated_doc_writes]
 - **One explanation, three doors.** The header summary and primary action, the
   timeline's doc-state block and launch entry, and the banner of a stale
   document all open the same dialog: why the sections are stale, each doc
@@ -195,8 +195,8 @@ timeline and a stale document's viewer. It has no lifecycle of its own.
 
 Sources:
 
-- The plan and the re-anchoring. [src: file: backend/src/api/audit/revalidate.rs:50#plan] [src: file: backend/src/api/audit/revalidate.rs:238#apply_reanchors]
-- The partial pipeline the agent part reuses. [src: file: backend/src/api/audit/drift.rs:421#run_partial_pipeline]
+- The plan and the re-anchoring. [src: file: backend/src/api/audit/revalidate.rs:50#plan] [src: file: backend/src/api/audit/revalidate.rs:245#apply_reanchors]
+- The partial pipeline the agent part reuses. [src: file: backend/src/api/audit/drift.rs:431#run_partial_pipeline]
 
 ## Refreshing stale sections (KT-1207)
 
@@ -207,38 +207,38 @@ sections.
   unchanged step re-verified its section. The drift baseline is merged for
   the done steps, whatever the run's status, after the terminal commit. A
   failed step's section stays stale.
-  [src: file: backend/src/api/audit/drift.rs:1626-1628#done_steps] [src: file: backend/src/api/audit/drift.rs:1935#compute_merged_baseline]
+  [src: file: backend/src/api/audit/drift.rs:1636-1638#done_steps] [src: file: backend/src/api/audit/drift.rs:1945#compute_merged_baseline]
 - **Status.** Without a failed step the run is `Completed`. The SSE `done`
   reads `complete` when a step rewrote its target, `no_change` when none did.
   With a failed step it is `Interrupted`.
-  [src: file: backend/src/api/audit/drift.rs:1986#partial_terminal]
+  [src: file: backend/src/api/audit/drift.rs:1996#partial_terminal]
 - **Validation.** The done steps get a validation discussion scoped to them,
   linked in the terminal transaction, on an `Interrupted` run too: the
   validate gate still refuses that run. A run that rewrote nothing, every
   step unchanged or stopped before its first write, restores the
   `validated_at` it revoked at launch, and then opens no discussion.
-  [src: file: backend/src/api/audit/drift.rs:1662-1663#restore_validation_if_untouched] [src: file: backend/src/api/audit/drift.rs:1705#pending_validation] [src: file: backend/src/api/audit/drift.rs:2046#Interrupted]
+  [src: file: backend/src/api/audit/drift.rs:1672-1673#restore_validation_if_untouched] [src: file: backend/src/api/audit/drift.rs:1715#pending_validation] [src: file: backend/src/api/audit/drift.rs:2056#Interrupted]
 - **Citations.** A section with recorded citations is judged by them. A
   normal refresh re-fingerprints both rewritten and re-verified unchanged
   sections after the terminal commit; failed sections keep their previous
   fingerprints. Revalidation retains its explicit human acknowledgement for
   unchanged citations.
-  [src: file: backend/src/api/audit/drift.rs:1859#citation_docs]
+  [src: file: backend/src/api/audit/drift.rs:1869#citation_docs]
 - **« Vérifié, inchangé ».**
   `POST /api/projects/{id}/drift/acknowledge` refreshes the named sections'
   baseline mappings, and their citation fingerprints when recorded. It runs
   no agent and writes no doc. It is a human action only: the route is not on
   the bridge list, and the handler refuses any bridge caller. It takes the
   audit lease.
-  [src: file: backend/src/lib.rs:1879-1880#acknowledge_drift] [src: file: backend/src/api/audit/drift.rs:103#bridge] [src: file: backend/src/api/audit/drift.rs:513#try_acquire_lease] [src: file: backend/src/core/checksums.rs:755#acknowledge_sections]
+  [src: file: backend/src/lib.rs:1879-1880#acknowledge_drift] [src: file: backend/src/api/audit/drift.rs:104#bridge] [src: file: backend/src/api/audit/drift.rs:523#try_acquire_lease] [src: file: backend/src/core/checksums.rs:759#acknowledge_sections]
 
 ## The action offered in each state
 
 The compact header exposes only the honest status, its primary next action and
 the doc-state summary. One “Details” disclosure contains secondary metadata and
 actions. Three pre-audit cases override the legacy `TemplateInstalled` label:
-[src: file: frontend/src/components/ProjectCard.tsx:1373-1416#auditHeaderStatus]
-[src: file: frontend/src/components/ProjectCard.tsx:1605-1623#project-audit-details]
+[src: file: frontend/src/components/ProjectCard.tsx:1377-1420#auditHeaderStatus]
+[src: file: frontend/src/components/ProjectCard.tsx:1609-1627#project-audit-details]
 
 - a human-owned docs folder asks the user to choose where Kronn writes;
 - a cancelled first run names its cancellation date and offers a relaunch;
@@ -307,7 +307,7 @@ Historical runs without fingerprints require a new audit before signoff.
 The explicit re-anchor action sends `deterministic_only: true`. It returns the
 remaining plan without launching an agent, even when other sections still need
 agent work; retry retains this mode. A later general fix is a separate choice.
-[src: file: backend/src/api/audit/revalidate.rs:615#deterministic_only]
+[src: file: backend/src/api/audit/revalidate.rs:622#deterministic_only]
 [src: file: frontend/src/components/RevalidateAudit.tsx:187-235#deterministicOnlyRef]
 
 Local TD decisions and deterministic citation repairs advance this proof only
@@ -319,7 +319,7 @@ work for changed prose; deleted or unowned documents require manual attention.
 [src: file: backend/src/db/audit_documents.rs:96#advance_local_changes]
 [src: file: backend/src/db/audit_documents.rs:64#confirm_paths]
 [src: file: backend/src/core/doc_provenance.rs:707-709#contains_placeholder]
-[src: file: backend/src/api/audit/revalidate.rs:171#plan_with_documents]
+[src: file: backend/src/api/audit/revalidate.rs:178#plan_with_documents]
 
 A no-change partial run restores validation only when every tracked validated
 document and every selected target remained byte-identical. The learning gate
