@@ -222,7 +222,10 @@ fn docs_step(target_file: &str) -> Option<DocsStep> {
 enum Group {
     Reference,
     Obsolete,
+    /// Old or partial: the team says it lags behind the code.
     Verify,
+    Recent,
+    Unknown,
 }
 
 impl Group {
@@ -230,7 +233,9 @@ impl Group {
         match state {
             BriefingDocState::Reference => Self::Reference,
             BriefingDocState::Obsolete => Self::Obsolete,
-            _ => Self::Verify,
+            BriefingDocState::Old | BriefingDocState::Partial => Self::Verify,
+            BriefingDocState::Recent => Self::Recent,
+            BriefingDocState::Unknown => Self::Unknown,
         }
     }
 
@@ -240,6 +245,8 @@ impl Group {
             Self::Obsolete => 0,
             Self::Reference => 1,
             Self::Verify => 2,
+            Self::Recent => 3,
+            Self::Unknown => 4,
         }
     }
 
@@ -255,18 +262,45 @@ Each one is tech debt, whatever the scope or the dimension of this audit. Record
 a row in the `Current list` table AND a detail file `{}` (Area `Docs`, Status `Inferred`) whose Problem names \
 the location and its last commit date as listed below, and whose Where points to the location. \
 Copy no fact from it. Never write that it is out of scope, not part of this audit or not tech debt, \
-and never skip it because another document is the source of truth.\n",
+and never skip it because another document is the source of truth. \
+On a later audit, never list it under `## Reconciliation candidates` as `out of scope this audit`: \
+re-emit it, reusing its TD ID.\n",
                 docs_root.path("tech-debt/TD-<date>-<slug>.md")
             ),
             (Self::Obsolete, _) => "### Obsolete — this IS tech debt\n\
 Copy no fact from it and cite it for nothing. It is tech debt: the tech-debt step records it. \
 Never call it out of scope.\n"
                 .to_string(),
-            (Self::Verify, _) => "### Old, partial or not confirmed\n\
+            (Self::Verify, _) => "### Old or partial\n\
 Verify each fact against the code before you reuse it.\n"
+                .to_string(),
+            (Self::Recent, _) => "### Recent\n\
+The team calls it up to date, but it is not a reference: check a fact against the code \
+before you rely on it for anything important.\n"
+                .to_string(),
+            (Self::Unknown, _) => "### State not provided\n\
+Nobody said how reliable it is: verify each fact against the code before you reuse it.\n"
                 .to_string(),
         }
     }
+}
+
+/// Whether a recorded location can go into a prompt line as it is: single-line
+/// text within the form's limits, a path that cannot close its code span, and a
+/// date shaped like `YYYY-MM-DD`.
+fn prompt_safe(l: &BriefingDocLocation) -> bool {
+    let date_ok = l.last_commit.as_deref().is_none_or(|d| {
+        d.len() == 10
+            && d.char_indices().all(|(i, c)| match i {
+                4 | 7 => c == '-',
+                _ => c.is_ascii_digit(),
+            })
+    });
+    !l.path.is_empty()
+        && !l.path.contains('`')
+        && check_text("path", &l.path, 300).is_ok()
+        && check_text("note", &l.note, NOTE_MAX_CHARS).is_ok()
+        && date_ok
 }
 
 /// The `## Existing documentation` block of a step prompt, from the answers
@@ -278,9 +312,14 @@ pub(crate) fn prompt_block(target_file: &str, notes: &str, docs_root: &DocsRoot)
     let Some(step) = docs_step(target_file) else {
         return String::new();
     };
-    let Some(answers) = parse(notes).filter(|a| !a.locations.is_empty()) else {
+    let Some(mut answers) = parse(notes) else {
         return String::new();
     };
+    // `briefing.md` can be hand-edited: what reaches a prompt is checked again.
+    answers.locations.retain(prompt_safe);
+    if answers.locations.is_empty() {
+        return String::new();
+    }
     let mut out = String::from(
         "\n\n## Existing documentation (from the briefing)\n\
 The team listed the documentation that already exists here. The state is the team's word; \

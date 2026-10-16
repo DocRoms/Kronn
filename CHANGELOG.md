@@ -158,8 +158,12 @@ Release notes for 0.9.3 and earlier are available in the
   way). A `reference` location is read, reused and cited; an `obsolete` one IS
   tech debt: step 8 records a TD row and a detail file citing the location and
   its last-commit date whatever the audit's scope, and no step copies a fact
-  from it nor calls it out of scope; `old`/`partial` are verified before
-  reuse. Disabled, the prompts (and the audit golden) are unchanged.
+  from it nor calls it out of scope — and on a later audit step 8 never parks
+  it under `## Reconciliation candidates` as « out of scope this audit »;
+  `old`/`partial` (and a state not provided) are verified before reuse, a
+  `recent` one is spot-checked. The recorded locations are re-validated before
+  they reach a prompt (a hand-edited `briefing.md` cannot add lines to it).
+  Disabled, the prompts (and the audit golden) are unchanged.
 
 - Docs record what a human validated and ask for a reconfirmation when Kronn
   changes it, never blocking (KT-1079). A validation (`validate-audit`, a TD
