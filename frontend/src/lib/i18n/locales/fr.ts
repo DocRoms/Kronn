@@ -1492,6 +1492,7 @@ const fr: TranslationDict = {
   "audit.tdTasks.done": "{0} tâche(s) créée(s), {1} déjà liée(s), {2} ignorée(s) (rejetées ou couvertes par une décision).",
   "audit.tdTasks.error": "Impossible de créer les tâches : {0}",
   "techDebt.title": "Dette technique",
+  "techDebt.active": "{0} actives",
   "techDebt.remaining": "{0} à trancher",
   "techDebt.legend.pending": "À trancher",
   "techDebt.legend.confirmed": "Confirmées",

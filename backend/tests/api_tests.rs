@@ -24212,6 +24212,31 @@ mod cold_api_handlers_tests {
             2,
             "the entry joined the list: {ssh}"
         );
+
+        // A rejected sheet stays listed (the decision is visible) but is no
+        // longer debt: the card and the review's active count drop together.
+        let (_, rejected) = post_json(
+            build_router_with_auth(state.clone(), false),
+            &decide_url,
+            serde_json::json!({ "items": [
+                { "td_id": "PERF-20261016-deep-clone", "decision": "reject", "reason": "Measured: negligible" }
+            ] }),
+        )
+        .await;
+        assert_eq!(rejected["success"], true, "{rejected}");
+        let (_, listed) = get_json(build_router_with_auth(state, false), &list_url).await;
+        let counts = &listed["data"]["counts"];
+        let active = counts["pending"].as_u64().unwrap()
+            + counts["confirmed"].as_u64().unwrap()
+            + counts["deferred"].as_u64().unwrap();
+        assert_eq!(listed["data"]["items"].as_array().unwrap().len(), 3);
+        assert_eq!(counts["rejected"], 1);
+        assert_eq!(
+            kronn::core::scanner::count_tech_debt(repo.to_str().unwrap()) as u64,
+            active,
+            "card and review count the same active debts"
+        );
+        assert_eq!(active, 2);
     }
 
     envelope_get!(audit_tds_unknown_project, "/api/projects/nope/audit/tds");

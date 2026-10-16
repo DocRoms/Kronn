@@ -177,6 +177,14 @@ describe('TechDebtReview', () => {
     expect(screen.getByTestId('td-detail')).toHaveTextContent('techDebt.detail.severity : Unknown');
   });
 
+  it('offers no task for a debt only the index lists, until a sheet exists', () => {
+    setup(tdList([
+      tdItem('TD-20261016-rowonly', 'High', 'pending', { source_path: 'docs/inconsistencies-tech-debt.md' }),
+    ]));
+    expect(screen.getByTestId('td-row-TD-20261016-rowonly')).toBeInTheDocument();
+    expect(screen.queryByTestId('td-task-create')).toBeNull();
+  });
+
   it('links an existing task, creates a missing one, and keeps trackers as placeholders', async () => {
     mocked(projectsApi.createTdTask).mockResolvedValueOnce({
       created: 1, already_linked: 0, skipped: 0, themes: [],

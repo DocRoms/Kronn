@@ -16,6 +16,10 @@
   color: var(--kr-text-primary);
 }
 .td-block-head svg { color: var(--kr-warning); }
+.td-block-active {
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-secondary);
+}
 .td-block-remaining {
   margin-left: auto;
   font-size: var(--kr-fs-xs);

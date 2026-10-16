@@ -138,6 +138,23 @@ impl TdDecision {
     }
 }
 
+/// The decision an index row's `Status` cell states, for a sheet that says
+/// nothing itself (no file, or a file without a status): the human statuses,
+/// and a debt the index marks resolved, which is no longer active.
+pub fn index_status_decision(value: &str) -> Option<TdDecision> {
+    TdDecision::from_status(value).or_else(|| {
+        let lower = value
+            .trim()
+            .trim_matches(|c| c == '"' || c == '\'' || c == '`' || c == '*')
+            .trim()
+            .to_lowercase();
+        ["resolved", "closed", "fixed", "done"]
+            .iter()
+            .any(|word| lower == *word || lower.starts_with(&format!("{word} ")))
+            .then_some(TdDecision::Rejected)
+    })
+}
+
 fn status_value(line: &str) -> Option<&str> {
     let trimmed = line.trim_start();
     let lower = trimmed.to_ascii_lowercase();
@@ -350,8 +367,62 @@ fn is_list_item(line: &str) -> bool {
     trimmed == "-" || trimmed.starts_with("- ")
 }
 
+/// The value of a `key:` line, without its trailing comment (`""` for a
+/// block key); `None` when the line is another key.
+fn key_value(line: &str, key: &str) -> Option<String> {
+    let rest = line.trim_start().strip_prefix(key)?.strip_prefix(':')?;
+    let value = match rest.find('#') {
+        Some(at) if rest[..at].is_empty() || rest[..at].ends_with(char::is_whitespace) => {
+            &rest[..at]
+        }
+        _ => rest,
+    };
+    Some(value.trim().to_string())
+}
+
+/// The trailing ` # comment` of a `key:` line, with its leading space; empty
+/// when there is none.
+fn comment_of(line: &str) -> String {
+    let at = line.find('#').filter(|at| {
+        line[..*at]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_whitespace)
+    });
+    at.map_or_else(String::new, |at| format!(" {}", &line[at..]))
+}
+
+/// Splits the inside of a flow mapping on its top-level commas.
+fn split_flow(inner: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let (mut depth, mut quote) = (0usize, None::<char>);
+    for c in inner.chars() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'') => quote = Some(c),
+            (None, '[' | '{') => depth += 1,
+            (None, ']' | '}') => depth = depth.saturating_sub(1),
+            (None, ',') if depth == 0 => {
+                parts.push(std::mem::take(&mut current));
+                continue;
+            }
+            _ => {}
+        }
+        current.push(c);
+    }
+    parts.push(current);
+    parts
+        .into_iter()
+        .map(|part| part.trim().to_string())
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
 /// Appends one `audit_history` entry, unless the same status by the same
-/// reviewer was already recorded today.
+/// reviewer with the same note was already recorded today. A new note on the
+/// same status is a new entry: the reason a person types is never dropped.
 pub(crate) fn append_history_entry(
     lines: &mut Vec<String>,
     status: &str,
@@ -361,12 +432,15 @@ pub(crate) fn append_history_entry(
     let date = Utc::now().date_naive().format("%Y-%m-%d").to_string();
     let signature = format!("status: {status}");
     let reviewer_line = format!("reviewer: {reviewer}");
+    let note = serde_json::to_string(note)?;
+    let note_line = format!("note: {note}");
     if lines.windows(4).any(|window| {
         window
             .iter()
             .any(|line| line.trim() == format!("- date: {date}"))
             && window.iter().any(|line| line.trim() == signature)
             && window.iter().any(|line| line.trim() == reviewer_line)
+            && window.iter().any(|line| line.trim() == note_line)
     }) {
         return Ok(());
     }
@@ -380,13 +454,25 @@ pub(crate) fn append_history_entry(
         .skip(1)
         .find_map(|(index, line)| (line.trim() == "---").then_some(index))
         .ok_or_else(|| anyhow!("TD detail has unterminated YAML frontmatter"))?;
-    let note = serde_json::to_string(note)?;
-    // A flow-style empty list is not a block to append to.
+    // A flow-style empty list is not a block to append to. Its trailing
+    // comment stays.
     if let Some(flow) = lines[..frontmatter_end]
         .iter()
-        .position(|line| line.trim() == "audit_history: []")
+        .position(|line| key_value(line, "audit_history") == Some("[]".to_string()))
     {
-        lines[flow] = format!("{}audit_history:", " ".repeat(indent_of(&lines[flow])));
+        let comment = comment_of(&lines[flow]);
+        lines[flow] = format!(
+            "{}audit_history:{comment}",
+            " ".repeat(indent_of(&lines[flow]))
+        );
+    }
+    if lines[..frontmatter_end]
+        .iter()
+        .any(|line| key_value(line, "audit_history").is_some_and(|value| !value.is_empty()))
+    {
+        return Err(anyhow!(
+            "TD detail has an audit_history that is not a block list"
+        ));
     }
     // An entry has the shape of the list it joins: standard YAML parsers reject
     // a sequence whose items sit at two different indents (KT-1309).
@@ -401,7 +487,7 @@ pub(crate) fn append_history_entry(
 
     if let Some(history_index) = lines[..frontmatter_end]
         .iter()
-        .position(|line| line.trim() == "audit_history:")
+        .position(|line| key_value(line, "audit_history").is_some())
     {
         let key_indent = indent_of(&lines[history_index]);
         let mut last = history_index;
@@ -412,7 +498,7 @@ pub(crate) fn append_history_entry(
             .take(frontmatter_end)
             .skip(history_index + 1)
         {
-            if line.trim().is_empty() {
+            if line.trim().is_empty() || line.trim_start().starts_with('#') {
                 continue;
             }
             let indent = indent_of(line);
@@ -431,14 +517,39 @@ pub(crate) fn append_history_entry(
         lines.splice(last + 1..last + 1, entry(item_indent, key_col));
     } else if let Some(metadata_index) = lines[..frontmatter_end]
         .iter()
-        .position(|line| line.trim() == "metadata:")
+        .position(|line| key_value(line, "metadata").is_some())
     {
         let metadata_indent = indent_of(&lines[metadata_index]);
+        let value = key_value(&lines[metadata_index], "metadata").unwrap_or_default();
+        if value.starts_with('{') {
+            // A flow mapping is rewritten as a block, its pairs kept as written,
+            // so the history key is added once, beside them.
+            let inner = value
+                .strip_prefix('{')
+                .and_then(|v| v.strip_suffix('}'))
+                .ok_or_else(|| anyhow!("TD detail has a metadata flow mapping on several lines"))?;
+            let child_indent = metadata_indent + 2;
+            let mut block = vec![format!(
+                "{}metadata:{}",
+                " ".repeat(metadata_indent),
+                comment_of(&lines[metadata_index])
+            )];
+            for pair in split_flow(inner) {
+                block.push(format!("{}{pair}", " ".repeat(child_indent)));
+            }
+            block.push(format!("{}audit_history:", " ".repeat(child_indent)));
+            block.extend(entry(child_indent + 2, child_indent + 4));
+            lines.splice(metadata_index..=metadata_index, block);
+            return Ok(());
+        }
+        if !value.is_empty() {
+            return Err(anyhow!("TD detail has a metadata that is not a mapping"));
+        }
         let child_indent = lines
             .iter()
             .take(frontmatter_end)
             .skip(metadata_index + 1)
-            .find(|line| !line.trim().is_empty())
+            .find(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
             .map(|line| indent_of(line))
             .filter(|indent| *indent > metadata_indent)
             .unwrap_or(metadata_indent + 2);
@@ -502,6 +613,23 @@ fn insert_status(lines: &mut Vec<String>, status: &str) -> bool {
         }
     }
     true
+}
+
+/// The sheet a decision writes for a debt only the index lists: its row's
+/// title, area and severity under a heading. `None` without a row.
+fn sheet_from_row(id: &str, row: Option<&crate::core::td_index::IndexRow>) -> Option<String> {
+    let row = row?;
+    let mut out = format!("# {id}: {}\n\n", row.title.as_deref().unwrap_or(id));
+    for (label, value) in [("Severity", &row.severity), ("Area", &row.area)] {
+        if let Some(value) = value {
+            out.push_str(&format!("- **{label}**: {value}\n"));
+        }
+    }
+    out.push_str(&format!(
+        "- **Status**: {}\n",
+        row.status.as_deref().unwrap_or("Open")
+    ));
+    Some(out)
 }
 
 /// A sheet an audit wrote without front matter gets the minimal block that
@@ -642,9 +770,19 @@ pub(crate) fn apply_td_resolutions_at(
         if !valid_td_id(&resolution.td_id) || !seen.insert(resolution.td_id.as_str()) {
             return Err(anyhow!("Invalid or duplicate audit TD id"));
         }
-        let path = canonical_child(&td_dir, &td_dir.join(format!("{}.md", resolution.td_id)))?;
-        let content = std::fs::read_to_string(&path)
-            .with_context(|| format!("cannot read {}", path.display()))?;
+        let candidate = td_dir.join(format!("{}.md", resolution.td_id));
+        // A debt only the index lists has no file yet: the decision writes it.
+        let (path, content, existing) = if candidate.symlink_metadata().is_err() {
+            let rows = crate::core::td_index::docs_index_rows(&docs_dir);
+            let content = sheet_from_row(&resolution.td_id, rows.get(&resolution.td_id))
+                .ok_or_else(|| anyhow!("{} has no sheet and no index row", resolution.td_id))?;
+            (candidate, content, false)
+        } else {
+            let path = canonical_child(&td_dir, &candidate)?;
+            let content = std::fs::read_to_string(&path)
+                .with_context(|| format!("cannot read {}", path.display()))?;
+            (path, content, true)
+        };
         let title = crate::core::td_index::parse_sheet(&resolution.td_id, &content).title;
         titles.insert(resolution.td_id.as_str(), title);
         let mut updated = update_td(&content, resolution.action, origin, *reason)?;
@@ -657,7 +795,7 @@ pub(crate) fn apply_td_resolutions_at(
                 1,
             );
         }
-        updates.push((path, content, updated));
+        updates.push((path, existing.then_some(content), updated));
     }
 
     let accepted = resolutions
@@ -723,7 +861,7 @@ pub(crate) fn apply_td_resolutions_at(
             outcome = Err(anyhow!(error));
             break;
         }
-        written.push((path.as_path(), Some(original.as_str())));
+        written.push((path.as_path(), original.as_deref()));
         if resolution.action != TdResolutionAction::Defer {
             if let Ok(rel) = path.strip_prefix(&root) {
                 decided.push(rel.to_string_lossy().replace('\\', "/"));
@@ -1053,6 +1191,105 @@ mod tests {
             assert_eq!(history.len(), 1, "{front}\n{written}");
             assert_eq!(history[0].0, "Rejected");
         }
+    }
+
+    #[test]
+    fn commented_keys_and_flow_mappings_get_no_duplicate_key() {
+        for front in [
+            // A trailing comment on the history key.
+            "name: td-x\nmetadata:\n  type: tech-debt\n  audit_history: # log\n    - date: 2026-09-01\n      status: Inferred\n      reviewer: Full audit\n      note: \"first\"",
+            "name: td-x\nmetadata: # meta\n  type: tech-debt\n  audit_history:   # log\n    - date: 2026-09-01\n      status: Inferred\n      reviewer: Full audit\n      note: \"first\"",
+            // A comment line inside the list.
+            "name: td-x\nmetadata:\n  type: tech-debt\n  audit_history:\n    # earlier\n    - date: 2026-09-01\n      status: Inferred\n      reviewer: Full audit\n      note: \"first\"\n    # trailing",
+            // A flow-style empty list with a comment.
+            "name: td-x\nmetadata:\n  type: tech-debt\n  audit_history: [] # none yet",
+            // Flow mappings.
+            "name: td-x\nmetadata: {type: tech-debt}",
+            "name: td-x\nmetadata: {type: tech-debt, owner: \"a, b\", tags: [x, y]} # inline",
+            "name: td-x\nmetadata: {}",
+            "name: td-x\nmetadata: # meta only",
+        ] {
+            let input = format!("---\n{front}\n---\n\n# TD-x\n\n- **Status**: Inferred\n");
+            strict_front_matter(&input);
+            let written = update_td(
+                &input,
+                TdResolutionAction::Confirm,
+                TdDecisionOrigin::Review,
+                Some("why"),
+            )
+            .unwrap();
+            // The strict parser rejects a duplicated key: parsing is the proof.
+            let history = strict_history(&written);
+            assert_eq!(history.last().unwrap(), &("Confirmed by user".into(), "why".into()));
+            assert_eq!(written.matches("audit_history:").count(), 1, "{written}");
+            assert_eq!(written.matches("\nmetadata:").count(), 1, "{written}");
+            assert!(!written.contains("metadata: {"), "{written}");
+            // A second decision joins the same list.
+            let again = update_td(
+                &written,
+                TdResolutionAction::Defer,
+                TdDecisionOrigin::Review,
+                Some("later"),
+            )
+            .unwrap();
+            assert_eq!(strict_history(&again).len(), history.len() + 1, "{again}");
+        }
+        // The pairs of a flow mapping are kept.
+        let input = "---\nname: td-x\nmetadata: {type: tech-debt, owner: \"a, b\"}\n---\n\n# TD-x\n\n- **Status**: Inferred\n";
+        let written = update_td(
+            input,
+            TdResolutionAction::Confirm,
+            TdDecisionOrigin::Review,
+            None,
+        )
+        .unwrap();
+        let front = strict_front_matter(&written);
+        assert_eq!(front["metadata"]["type"].as_str(), Some("tech-debt"));
+        assert_eq!(front["metadata"]["owner"].as_str(), Some("a, b"));
+    }
+
+    #[test]
+    fn a_history_that_is_not_a_block_list_is_refused_not_duplicated() {
+        let input = "---\nname: td-x\nmetadata:\n  audit_history: [{date: 2026-09-01}]\n---\n\n# TD-x\n\n- **Status**: Inferred\n";
+        assert!(update_td(
+            input,
+            TdResolutionAction::Confirm,
+            TdDecisionOrigin::Review,
+            None
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn a_new_reason_the_same_day_is_kept_and_a_retry_is_not_repeated() {
+        let first = update_td(
+            &td("Inferred"),
+            TdResolutionAction::Confirm,
+            TdDecisionOrigin::Review,
+            Some("first reason"),
+        )
+        .unwrap();
+        // Same status, same reviewer, same day, a new reason: not dropped.
+        let second = update_td(
+            &first,
+            TdResolutionAction::Confirm,
+            TdDecisionOrigin::Review,
+            Some("second reason"),
+        )
+        .unwrap();
+        let history = strict_history(&second);
+        assert_eq!(history.len(), 3, "{second}");
+        assert_eq!(history[1].1, "first reason");
+        assert_eq!(history[2].1, "second reason");
+        // The same reason again is a retry.
+        let retry = update_td(
+            &second,
+            TdResolutionAction::Confirm,
+            TdDecisionOrigin::Review,
+            Some("second reason"),
+        )
+        .unwrap();
+        assert_eq!(retry, second);
     }
 
     #[test]

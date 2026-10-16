@@ -636,3 +636,155 @@ async fn the_reason_typed_for_a_decision_is_what_the_sheet_keeps() {
     decide(&state, vec![decision(A, TdReviewDecision::Confirm, None)]).await;
     assert!(read(&tmp, A).contains("Confirmed from the tech-debt review screen."));
 }
+
+/// The card's active count and what the review shows as active: same set.
+fn review_active(listed: &TdReviewList) -> u32 {
+    listed.counts.pending + listed.counts.confirmed + listed.counts.deferred
+}
+
+fn index_with_rows(rows: &[&str]) -> String {
+    let mut out = String::from(
+        "# Index\n\n## Current list\n\n| ID | Problem | Area | Severity | Status |\n|----|---------|------|----------|--------|\n",
+    );
+    for row in rows {
+        out.push_str(row);
+        out.push('\n');
+    }
+    out
+}
+
+#[tokio::test]
+async fn card_and_review_count_the_same_debts_with_a_decided_sheet_and_a_sheetless_row() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let docs = tmp.path().join("docs");
+    std::fs::create_dir_all(docs.join("tech-debt")).unwrap();
+    std::fs::write(docs.join("AGENTS.md"), "# Projet\n").unwrap();
+    let path = tmp.path().to_str().unwrap();
+    // TD-a Open/High, TD-b Rejected, TD-c only in the index.
+    std::fs::write(
+        docs.join(format!("tech-debt/{A}.md")),
+        sheet(A, "High", "Open"),
+    )
+    .unwrap();
+    std::fs::write(
+        docs.join(format!("tech-debt/{B}.md")),
+        sheet(B, "Low", "Rejected"),
+    )
+    .unwrap();
+    let with_row = index_with_rows(&[&format!(
+        "| {C} | Only in the index | API | Critical | Open |"
+    )]);
+    std::fs::write(docs.join("inconsistencies-tech-debt.md"), &with_row).unwrap();
+
+    let items = crate::core::td_review::read_items(&docs);
+    let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
+    assert_eq!(ids, [A, B, C], "the sheetless row is listed, not hidden");
+    let card = crate::core::scanner::count_tech_debt(path);
+    let (counts, _) = crate::core::td_review::counts(&items);
+    assert_eq!(card, 2, "TD-a and TD-c are the active debts");
+    assert_eq!(
+        counts.pending + counts.confirmed + counts.deferred,
+        card,
+        "the review's active debts are the card's"
+    );
+    let row = items.iter().find(|i| i.id == C).unwrap();
+    assert_eq!(
+        (row.severity.as_str(), row.area.as_str()),
+        ("Critical", "API")
+    );
+    assert_eq!(row.state, TdReviewState::Pending);
+    assert!(
+        crate::core::td_review::gate(&items).blocking_total == 2,
+        "a Critical sheetless row gates the validation"
+    );
+
+    // Drop the row: 1 vs 1 (the rejected sheet is listed but is not debt).
+    std::fs::write(
+        docs.join("inconsistencies-tech-debt.md"),
+        index_with_rows(&[]),
+    )
+    .unwrap();
+    let items = crate::core::td_review::read_items(&docs);
+    let (counts, _) = crate::core::td_review::counts(&items);
+    assert_eq!(crate::core::scanner::count_tech_debt(path), 1);
+    assert_eq!(counts.pending + counts.confirmed + counts.deferred, 1);
+    assert_eq!(items.len(), 2);
+}
+
+#[tokio::test]
+async fn a_debt_only_the_index_lists_can_be_decided_and_gets_its_sheet() {
+    let (state, tmp) = fixture().await;
+    let docs = tmp.path().join("docs");
+    std::fs::write(
+        docs.join("inconsistencies-tech-debt.md"),
+        index_with_rows(&["| TD-20261016-rowonly | Row only | API | High | Open |"]),
+    )
+    .unwrap();
+    let before = list(&state).await;
+    assert_eq!(before.items.len(), 4);
+    assert_eq!(review_active(&before), 4);
+    assert!(before.items.iter().any(|i| i.id == "TD-20261016-rowonly"));
+
+    let response = decide(
+        &state,
+        vec![decision(
+            "TD-20261016-rowonly",
+            TdReviewDecision::Reject,
+            Some("Not a real problem."),
+        )],
+    )
+    .await;
+    let outcome = response.data.expect("a sheetless row can be decided");
+    assert_eq!(outcome.results[0].state, TdReviewState::Rejected);
+    let sheet = read(&tmp, "TD-20261016-rowonly");
+    assert!(sheet.contains("- **Severity**: High"), "{sheet}");
+    assert!(sheet.contains("- **Status**: Rejected"), "{sheet}");
+    let front = sheet.strip_prefix("---\n").unwrap();
+    let front: serde_yaml::Value =
+        serde_yaml::from_str(&front[..front.find("\n---").unwrap()]).expect("strict YAML");
+    assert_eq!(
+        front["metadata"]["audit_history"][0]["note"].as_str(),
+        Some("Not a real problem.")
+    );
+    let after = list(&state).await;
+    assert_eq!(after.counts.rejected, 1);
+    assert_eq!(
+        review_active(&after),
+        crate::core::scanner::count_tech_debt(tmp.path().to_str().unwrap())
+    );
+}
+
+#[tokio::test]
+async fn an_index_status_stands_in_for_a_sheet_that_states_none() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let docs = tmp.path().join("docs");
+    std::fs::create_dir_all(docs.join("tech-debt")).unwrap();
+    std::fs::write(
+        docs.join("tech-debt/CQ-001.md"),
+        "# CQ-001: Oversized controller\n\nNo status line.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        docs.join("tech-debt/CQ-002.md"),
+        "# CQ-002: Dead branch\n\n- **Status**: Open\n",
+    )
+    .unwrap();
+    std::fs::write(
+        docs.join("inconsistencies-tech-debt.md"),
+        index_with_rows(&[
+            "| CQ-001 | Oversized controller | Backend | High | Resolved |",
+            "| CQ-002 | Dead branch | Backend | Low | Resolved |",
+        ]),
+    )
+    .unwrap();
+    let items = crate::core::td_review::read_items(&docs);
+    let state_of = |id: &str| items.iter().find(|i| i.id == id).unwrap().state;
+    // The file says nothing: its index row's Resolved settles it.
+    assert_eq!(state_of("CQ-001"), TdReviewState::Rejected);
+    // The file says Open: the file decides.
+    assert_eq!(state_of("CQ-002"), TdReviewState::Pending);
+    assert_eq!(
+        crate::core::scanner::count_tech_debt(tmp.path().to_str().unwrap()),
+        1
+    );
+}

@@ -842,67 +842,21 @@ pub fn count_ai_todos(project_path: &str) -> u32 {
     count
 }
 
-/// Count the active tech-debt entries of a project, deduplicated by id:
-///   - sheets directly under `docs/tech-debt/` that are active debt
-///     (`TdSheet::is_active`: rejected and accepted sheets are settled);
-///     `_`-prefixed reports and scaffolding are never sheets;
-///   - rows of `docs/inconsistencies-tech-debt.md` starting with `| TD-`
-///     whose id has no sheet (a sheet, when present, decides).
-///
-/// The health score's severity tally applies the same sheet rule.
+/// Count the active tech debts of a project: the entries of
+/// `td_index::debt_entries` that are not settled (a rejected finding or an
+/// accepted trade-off is not debt). The tech-debt review lists the very same
+/// entries, so the card and the review cannot count different debts; the
+/// health score's severity tally applies the same sheet rule.
 pub fn count_tech_debt(project_path: &str) -> u32 {
     let path = resolve_host_path(project_path);
     let docs_dir = detect_docs_dir(&path);
     if !docs_dir.is_dir() {
         return 0;
     }
-
-    let mut active: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut with_sheet: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    if let Ok(entries) = std::fs::read_dir(docs_dir.join("tech-debt")) {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if !p.is_file() {
-                continue;
-            }
-            let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
-                continue;
-            };
-            let Some(id) = crate::core::td_index::counted_sheet_stem(name) else {
-                continue;
-            };
-            with_sheet.insert(id.to_string());
-            // An unreadable sheet still counts: the file is there.
-            let is_active = std::fs::read_to_string(&p).map_or(true, |content| {
-                crate::core::td_index::content_is_active(id, &content)
-            });
-            if is_active {
-                active.insert(id.to_string());
-            }
-        }
-    }
-
-    if let Ok(content) = std::fs::read_to_string(docs_dir.join("inconsistencies-tech-debt.md")) {
-        for line in content.lines() {
-            let Some(rest) = line.trim_start().strip_prefix('|') else {
-                continue;
-            };
-            let cell = rest.trim_start();
-            if !cell.starts_with("TD-") {
-                continue;
-            }
-            let id: String = cell
-                .chars()
-                .take_while(|c| !c.is_whitespace() && *c != '|')
-                .collect();
-            if !with_sheet.contains(&id) {
-                active.insert(id);
-            }
-        }
-    }
-
-    active.len() as u32
+    crate::core::td_index::debt_entries(&docs_dir)
+        .iter()
+        .filter(|entry| entry.is_active())
+        .count() as u32
 }
 
 /// Expand ~ in paths

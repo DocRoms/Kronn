@@ -542,7 +542,17 @@ Release notes for 0.9.3 and earlier are available in the
   the validation gate until it is settled, and settling one gives it the
   front matter and `Status` line it lacked. The generated tech-debt index
   lists them too, so their severity survives a resync. The impact is rendered
-  as Markdown and a sheet with no verification criterion says so.
+  as Markdown and a sheet with no verification criterion says so. Card and
+  review read one set of debts (`td_index::debt_entries`): settled ones
+  (rejected, kept on purpose, or marked resolved in the index of a sheet with
+  no status) drop out of the card's count and show as settled in the review,
+  the block header shows the same active count, and a `TD-*` row of the index
+  with no sheet file yet is listed and can be decided (the decision writes its
+  sheet from the row). The history writer also handles a trailing comment on
+  `audit_history:` / `metadata:` and a flow-style `metadata: {…}` without
+  duplicating the key, refuses an `audit_history` that is a non-empty flow list
+  rather than corrupting it, and keeps a new reason typed the same day for the
+  same status instead of dropping it.
 - A review-wait timeout no longer locks the principal out of the review
   (KT-1293). The watchdog used to move the unreviewed delivery to `Escalated`
   while its alert told the principal to call `task_exec_review`, which only

@@ -1470,6 +1470,7 @@ const zh: TranslationDict = {
   "audit.tdTasks.done": "已创建 {0} 个任务，{1} 个已关联，{2} 个已跳过（已拒绝或已由决策覆盖）。",
   "audit.tdTasks.error": "无法创建任务：{0}",
   "techDebt.title": "技术债务",
+  "techDebt.active": "{0} 项有效",
   "techDebt.remaining": "{0} 项待决定",
   "techDebt.legend.pending": "待决定",
   "techDebt.legend.confirmed": "已确认",

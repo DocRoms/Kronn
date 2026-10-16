@@ -1483,6 +1483,7 @@ const en: TranslationDict = {
   "audit.tdTasks.done": "{0} task(s) created, {1} already linked, {2} skipped (rejected or covered by a decision).",
   "audit.tdTasks.error": "Could not create the tasks: {0}",
   "techDebt.title": "Tech debt",
+  "techDebt.active": "{0} active",
   "techDebt.remaining": "{0} to settle",
   "techDebt.legend.pending": "To settle",
   "techDebt.legend.confirmed": "Confirmed",

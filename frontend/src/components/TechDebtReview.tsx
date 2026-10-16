@@ -465,7 +465,7 @@ export function TechDebtReview({
                     >
                       <ListChecks size={12} /> {t('techDebt.link.task', current.task.reference)}
                     </button>
-                  ) : current.id.startsWith('TD-') && (
+                  ) : current.id.startsWith('TD-') && current.source_path.includes('/tech-debt/') && (
                     <button
                       type="button"
                       className="td-link-btn"

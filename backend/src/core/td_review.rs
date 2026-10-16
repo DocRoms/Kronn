@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use crate::core::audit_validation::TdDecision;
-use crate::core::td_index::{counted_sheet_stem, docs_index_rows, is_sheet_id, is_td_id, IndexRow};
+use crate::core::td_index::{debt_entries, is_sheet_id, is_td_id, IndexRow, CENTRAL_INDEX};
 use crate::core::td_tasks::{body_lines, field_block, source_from, truncate};
 use crate::models::{
     TdPointer, TdReviewItem, TdReviewState, TdSeverityCount, TdStateCounts, TdValidationGate,
@@ -44,11 +44,13 @@ pub fn is_settled(state: TdReviewState) -> bool {
     !matches!(state, TdReviewState::Pending | TdReviewState::Deferred)
 }
 
-/// Every sheet the project card counts, directly under `<docs>/tech-debt/`,
-/// sorted by id, without the task and talk links (the caller adds them from
-/// the DB). That includes the `CQ-*` / `PERF-*` detail files of the dimension
-/// audits, which may carry no front matter: their severity and status come
-/// from the index row when the file does not say, else they stay `Unknown`.
+/// Every debt of the project, sorted by id, without the task and talk links
+/// (the caller adds them from the DB): the entries the project card counts
+/// from (`td_index::debt_entries`), settled ones included so a decision stays
+/// visible. That covers the `CQ-*` / `PERF-*` detail files of the dimension
+/// audits, which may carry no front matter, and the `TD-*` rows of the central
+/// index no file exists for yet: severity and status come from the index row
+/// when the file does not say, else they stay `Unknown`.
 pub fn read_items(docs_dir: &Path) -> Vec<TdReviewItem> {
     let docs_name = docs_dir
         .file_name()
@@ -61,26 +63,48 @@ pub fn read_items(docs_dir: &Path) -> Vec<TdReviewItem> {
 /// `read_items` with the sheets' paths under `docs_rel`, the docs root as the
 /// repository names it (`packages/x/docs`, KT-1192).
 pub fn read_items_rel(docs_dir: &Path, docs_name: &str) -> Vec<TdReviewItem> {
-    let Ok(entries) = std::fs::read_dir(docs_dir.join("tech-debt")) else {
-        return Vec::new();
-    };
-    let rows = docs_index_rows(docs_dir);
-    let mut items: Vec<TdReviewItem> = entries
-        .flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
-        .filter_map(|e| {
-            let name = e.file_name().to_str()?.to_string();
-            let id = counted_sheet_stem(&name)?;
-            let content = std::fs::read_to_string(e.path()).ok()?;
-            let mut item = item_from(id, &content, format!("{docs_name}/tech-debt/{name}"));
-            if let Some(row) = rows.get(id) {
+    debt_entries(docs_dir)
+        .into_iter()
+        .map(|entry| {
+            let mut item = match &entry.file_name {
+                Some(name) => item_from(
+                    &entry.id,
+                    entry.content.as_deref().unwrap_or_default(),
+                    format!("{docs_name}/tech-debt/{name}"),
+                ),
+                None => item_from_row(&entry.id, format!("{docs_name}/{CENTRAL_INDEX}")),
+            };
+            if let Some(row) = &entry.row {
                 fill_from_index(&mut item, row);
             }
-            Some(item)
+            // The state is the one the card counts from.
+            item.state = state_of(entry.decision);
+            item
         })
-        .collect();
-    items.sort_by(|a, b| a.id.cmp(&b.id));
-    items
+        .collect()
+}
+
+/// A debt only the central index lists: its row (filled in by the caller) is
+/// all there is until a decision writes its sheet.
+fn item_from_row(id: &str, source_path: String) -> TdReviewItem {
+    TdReviewItem {
+        id: id.to_string(),
+        title: id.to_string(),
+        area: "Unknown".to_string(),
+        severity: "Unknown".to_string(),
+        status: "Unknown".to_string(),
+        effort: None,
+        blast_radius: None,
+        state: TdReviewState::Pending,
+        problem: None,
+        impact: None,
+        verification: None,
+        pointers: Vec::new(),
+        source_path,
+        task: None,
+        talk_count: 0,
+        talk_discussion_id: None,
+    }
 }
 
 /// What the sheet does not say, its index row does.
