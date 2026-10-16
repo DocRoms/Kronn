@@ -185,10 +185,15 @@ as an example. Markers inside fenced code blocks are not read.
 
 **What the marker scanner reads.** A marker ends at its matching `]`. One that never closes
 (a half-typed citation, a banner cut mid-marker) ends at the next `[src:` or the next blank
-line, so the markers after it are still read. A `<kind>: <text>` marker whose kind Kronn does not
-know (`[src: command: git log --oneline]`) is *unverifiable*: it is never resolved as a path, so
-a section citing only such a marker is not reported as outdated. A bare path with no kind stays
-a file.
+line, so the markers after it are still read. A `<kind>: <text>` marker whose kind is on Kronn's
+closed list of non-file kinds (`command`, `shell`, `test-run`, `output`, `query`, `tool`, …;
+`[src: command: git log --oneline]`) is *unverifiable*: it is never resolved as a path, it counts
+in `unverified_count`, and a section citing only such a marker is not reported as outdated. Any
+other word is not trusted as a kind: if its text can be a path (it holds a `/`, a file extension, a
+`:line` spec, or is a single token) the marker is verified as a file and is **fabricated** when
+the file is missing, so a marker written with a mistyped kind (`fil:`, `path:`, `source:`) over a missing
+file is blocked by the enforce gate. Only prose after an unknown word (`[src: note: agreed in standup]`) is
+unverifiable. A bare path with no kind stays a file.
 
 **Only markers are maintained.** The re-anchor rewrites `[src: …]` markers. A line reference
 written in prose (`` `docker-compose.yml:2-25` ``) is not a citation and is left as written when

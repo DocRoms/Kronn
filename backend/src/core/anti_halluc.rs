@@ -1298,28 +1298,74 @@ fn classify_source(raw: &str) -> (SourceKind, String) {
     if let Some(r) = match_type_keyword(s, "file") {
         return (SourceKind::File, r);
     }
-    // `<word>: <text>` with an unknown word is a typed marker Kronn does not
-    // know (`command: git log`): never a path to resolve.
-    if is_unknown_typed(s) {
-        return (SourceKind::Other, s.to_string());
+    // `<word>: <text>`: only a CLOSED list of non-file kinds (`command: git log`)
+    // is never a path to resolve. Any other word is a typo or an invented kind
+    // (`fil:`, `path:`, `source:`): if its text can be a path it is verified as
+    // a file and fabricated when missing, so a mistyped kind is never a free
+    // pass through the enforce gate.
+    if let Some(kind_word) = typed_prefix(s) {
+        if NON_FILE_KINDS.contains(&kind_word.to_ascii_lowercase().as_str())
+            || !text_can_be_a_path(s)
+        {
+            return (SourceKind::Other, s.to_string());
+        }
     }
     (SourceKind::File, s.to_string())
 }
 
-/// `kind: reference` where `kind` is a bare identifier and the colon is
-/// followed by whitespace. A path (`a/b.rs:3`, `C:\x`, `a.rs: 3`) never has
-/// that shape: it carries a `/`, a `.` or has no space after its colon.
-fn is_unknown_typed(s: &str) -> bool {
-    let Some((head, rest)) = s.split_once(':') else {
-        return false;
-    };
-    rest.starts_with(char::is_whitespace)
+/// Kinds that cite something other than a file (a command, a test run…), so
+/// their text is never resolved as a path. Closed on purpose: a word outside
+/// this list whose text looks like a path is judged as a file.
+const NON_FILE_KINDS: &[&str] = &[
+    "command",
+    "cmd",
+    "shell",
+    "bash",
+    "cli",
+    "run",
+    "test",
+    "tests",
+    "test-run",
+    "output",
+    "log",
+    "query",
+    "sql",
+    "grep",
+    "tool",
+    "mcp",
+    "benchmark",
+    "measurement",
+];
+
+/// The `kind` of a `kind: text` marker: a bare identifier followed by a colon
+/// and whitespace. A path (`a/b.rs:3`, `C:\x`, `a.rs: 3`) never has that
+/// shape: it carries a `/`, a `.` or has no space after its colon.
+fn typed_prefix(s: &str) -> Option<&str> {
+    let (head, rest) = s.split_once(':')?;
+    (rest.starts_with(char::is_whitespace)
         && !rest.trim().is_empty()
         && head.starts_with(|c: char| c.is_ascii_alphabetic())
         && head.len() > 1
         && head
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+    .then_some(head)
+}
+
+/// Whether the text after an unknown `kind:` could name a file: it holds a
+/// path separator, a file extension or a `:line` spec, or it is a single
+/// whitespace-free token (`Makefile`). Prose with spaces is not a path.
+fn text_can_be_a_path(s: &str) -> bool {
+    let text = s.split_once(':').map_or(s, |(_, t)| t).trim();
+    let single_token = !text.contains(char::is_whitespace);
+    let (path, lines) = split_path_and_lines(text);
+    text.contains('/')
+        || text.contains('\\')
+        || single_token
+        || lines.is_some()
+        || std::path::Path::new(path)
+            .extension()
+            .is_some_and(|e| !e.is_empty())
 }
 
 /// The cited path and line span of a `file:` or `code-comment:` marker,
@@ -2603,6 +2649,10 @@ pub fn analyze_roots_lanes(text: &str, roots: &[&Path], lanes: &[LaneRoot]) -> L
         if check.status.is_fabricated() {
             fabricated += 1;
         }
+        // A kind Kronn cannot check is surfaced as unverifiable, never silent.
+        if check.kind == SourceKind::Other {
+            unverified += 1;
+        }
         // Dedup inline anchors against [src:] file refs by their bare PATH (no
         // line spec, no type prefix) — otherwise `[src: file: a.rs:2]` and an
         // inline `` `a.rs:5` `` would both count as verified and double the
@@ -3632,6 +3682,77 @@ mod tests {
         let check = verify_source_marker("command: git log --oneline", Some(Path::new("/tmp")));
         assert_eq!(check.kind, SourceKind::Other);
         assert_eq!(check.status, SourceStatus::Unchecked);
+    }
+
+    #[test]
+    fn a_mistyped_kind_is_verified_as_a_file_never_a_free_pass() {
+        // `fil:` / `path:` / `source:` … are not on the closed list: a path-like
+        // text is judged as a file and is fabricated when it is missing.
+        let root = temp_project();
+        for raw in [
+            "fil: src/ghost.rs:1",
+            "path: src/ghost.rs",
+            "source: src/ghost.rs:3",
+            "ref: src/ghost.rs",
+            "files: src/ghost.rs:1-2",
+            "src: src/ghost.rs:1",
+            "path: Ghostfile",
+            "path: ghost.rs:4",
+        ] {
+            assert_eq!(classify_source(raw).0, SourceKind::File, "{raw}");
+            let check = verify_source_marker(raw, Some(&root));
+            assert!(check.status.is_fabricated(), "{raw}: {check:?}");
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_mistyped_kind_is_fabricated_under_the_enforce_gate() {
+        let root = temp_project();
+        for raw in [
+            "fil: src/ghost.rs:1",
+            "path: src/ghost.rs",
+            "source: src/ghost.rs",
+        ] {
+            let text = format!("Claim [src: {raw}].");
+            let report = analyze(&text, Some(&root));
+            assert_eq!(report.fabricated_count, 1, "{raw}: {report:?}");
+            let verdict = crate::api::audit::anti_hallu_enforce::lint_step_file(&text, &[&root]);
+            assert_eq!(verdict.count(), 1, "{raw}");
+            assert_eq!(
+                crate::api::audit::anti_hallu_enforce::decide(&verdict, 1, 3),
+                crate::api::audit::anti_hallu_enforce::GateDecision::Retry,
+                "{raw}"
+            );
+            assert_eq!(
+                crate::api::audit::anti_hallu_enforce::decide(&verdict, 3, 3),
+                crate::api::audit::anti_hallu_enforce::GateDecision::Fail,
+                "{raw}"
+            );
+        }
+        // The text is judged as written, prefix included: even over a real file
+        // a mistyped kind is refused, so the retry feedback makes the agent fix it.
+        let real = analyze("See [src: path: src/foo.rs:2].", Some(&root));
+        assert_eq!(real.fabricated_count, 1, "{real:?}");
+        let fixed = analyze("See [src: file: src/foo.rs:2].", Some(&root));
+        assert_eq!(fixed.fabricated_count, 0, "{fixed:?}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_listed_non_file_kind_stays_other_and_is_counted_unverified() {
+        let root = temp_project();
+        let text = "Recent work [src: command: git log --oneline -5] and \
+                    [src: test-run: cargo test --lib].";
+        let r = analyze(text, Some(&root));
+        assert_eq!(r.fabricated_count, 0, "{r:?}");
+        assert_eq!(r.unverified_count, 2, "{r:?}");
+        assert!(r.sources.iter().all(|s| s.kind == SourceKind::Other));
+        // Unknown word + prose (no path in it) is unverifiable too, and counted.
+        let prose = analyze("[src: note: the team agreed in standup]", Some(&root));
+        assert_eq!(prose.fabricated_count, 0, "{prose:?}");
+        assert_eq!(prose.unverified_count, 1, "{prose:?}");
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
