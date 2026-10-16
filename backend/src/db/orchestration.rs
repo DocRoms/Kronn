@@ -6093,6 +6093,15 @@ fn notify_principal_of_timeout(
                     .unwrap_or_default()
             ),
         ),
+        ExecutionTimeoutKind::TotalDuration => (
+            "total_duration_timeout",
+            "La durée totale impartie au run est dépassée alors qu'une livraison attend ta \
+             revue. Rien n'a été approuvé, rejeté ni annulé : l'exécution reste en \
+             `AwaitingReview`, la livraison, le worktree et la branche sont intacts. Relis-la \
+             puis appelle `task_exec_review` (approuver ou demander des changements), ou \
+             `task_exec_reassign` / `task_exec_cancel` si le travail doit être repris."
+                .to_string(),
+        ),
         _ => return Ok(()),
     };
     let message = DiscussionMessage {
@@ -6226,14 +6235,19 @@ pub fn apply_execution_timeout(
             notify_principal_of_timeout(conn, exec_id, kind, timeout_secs)?;
             return Ok(true);
         }
-        if kind == ExecutionTimeoutKind::ReviewWait {
+        let delivered = execution.status == TaskExecutionStatus::AwaitingReview;
+        if kind == ExecutionTimeoutKind::ReviewWait
+            || (kind == ExecutionTimeoutKind::TotalDuration && delivered)
+        {
             // KT-1293 — the delivery is untouched and no review is written: the
             // principal is alerted, and only the principal decides. The row
             // therefore stays `AwaitingReview`, the one state `task_exec_review`
             // accepts, so the alert's own advice (approve / request changes) is
             // still honoured. Escalating here locked the principal out of the
-            // review. The clock only means something while a delivery waits.
-            if execution.status != TaskExecutionStatus::AwaitingReview {
+            // review. The total-duration clock takes the same road for a
+            // delivered attempt; the review clock only means something while a
+            // delivery waits.
+            if !delivered {
                 conn.execute(
                     "UPDATE task_execution_recovery SET review_deadline_at = NULL, \
                             updated_at = ?2 WHERE task_execution_id = ?1",
@@ -6258,15 +6272,15 @@ pub fn apply_execution_timeout(
                  WHERE task_execution_id = ?1",
                 params![exec_id, label, Utc::now().to_rfc3339()],
             )?;
-            let policy_secs = get_resilience_policy(conn, &execution.orchestration_run_id)?
-                .review_timeout_secs
-                .map(i64::from);
-            notify_principal_of_timeout(
-                conn,
-                exec_id,
-                kind,
-                Some(effective_review_secs(policy_secs)),
-            )?;
+            let waited_secs = if kind == ExecutionTimeoutKind::ReviewWait {
+                let policy_secs = get_resilience_policy(conn, &execution.orchestration_run_id)?
+                    .review_timeout_secs
+                    .map(i64::from);
+                Some(effective_review_secs(policy_secs))
+            } else {
+                None
+            };
+            notify_principal_of_timeout(conn, exec_id, kind, waited_secs)?;
             return Ok(true);
         }
         record_reconciliation_event(

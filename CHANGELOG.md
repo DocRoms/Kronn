@@ -518,7 +518,12 @@ Release notes for 0.9.3 and earlier are available in the
   (`recovery_reason` `review_wait_timeout`, the clock disarmed so the alert is
   posted once): the principal can still approve (integration runs normally) or
   request changes (the worker gets the comment) on the unchanged delivery, and
-  `task_exec_status` keeps naming `task_exec_review`.
+  `task_exec_status` keeps naming `task_exec_review`. A total-duration deadline
+  that expires on a delivered attempt takes the same road
+  (`total_duration_timeout`, one alert, provider run left alone) instead of the
+  silent `Escalated`. Because the row is no longer `Escalated`, an overdue
+  review no longer puts the campaign in `AwaitingHuman` nor blocks scheduling
+  (the escalated counts and `sync_campaign_human_gate` no longer see it).
 - An audit step run through the ACP route runs instead of asking the human
   what to do (KT-1278). An ACP session has no system channel, so the context
   and the step reach the model as one message, and a step prompt that ended on

@@ -683,7 +683,11 @@ pub fn start_resilience_watchdog(state: AppState) {
                             Ok(
                                 crate::db::orchestration::get_task_execution(conn, &id)?.map(
                                     |execution| {
-                                        (execution.dispatch_job_id, execution.sub_discussion_id)
+                                        (
+                                            execution.dispatch_job_id,
+                                            execution.sub_discussion_id,
+                                            execution.status,
+                                        )
                                     },
                                 ),
                             )
@@ -692,8 +696,14 @@ pub fn start_resilience_watchdog(state: AppState) {
                         .ok()
                         .flatten()
                 };
+                // KT-1293 — a delivered attempt waiting for its review keeps its
+                // worker reachable (a `request_changes` wakes it): the total
+                // deadline alerts the principal there, it never stops the run.
+                let awaiting_review = keys.as_ref().is_some_and(|(_, _, status)| {
+                    *status == crate::models::TaskExecutionStatus::AwaitingReview
+                });
                 let cancel_provider_run = || {
-                    if let (Some((dispatch, child)), Ok(registry)) =
+                    if let (Some((dispatch, child, _)), Ok(registry)) =
                         (keys.as_ref(), state.cancel_registry.lock())
                     {
                         for key in [dispatch.as_deref(), child.as_deref()]
@@ -712,7 +722,7 @@ pub fn start_resilience_watchdog(state: AppState) {
                 // run's own teardown finds the row already parked instead of
                 // racing the interruption. A worker that produced activity in
                 // the meantime is not applied, hence never stopped.
-                if kind == crate::models::ExecutionTimeoutKind::TotalDuration {
+                if kind == crate::models::ExecutionTimeoutKind::TotalDuration && !awaiting_review {
                     cancel_provider_run();
                 }
                 let id = execution_id.clone();
@@ -22889,10 +22899,11 @@ pub(crate) mod tests {
             })
             .await
             .unwrap();
-            // KT-1293 — a review-wait timeout keeps the delivery reviewable;
-            // reassigning it rejects that pending delivery (KT-791).
+            // KT-1293 — a review-wait or total-duration timeout keeps the
+            // delivery reviewable; reassigning it rejects that pending delivery
+            // (KT-791).
             let escalated = exec_of(&db, &exec_id).await;
-            let expected = if origin == "review_wait" {
+            let expected = if origin != "agent_unavailable" {
                 TaskExecutionStatus::AwaitingReview
             } else {
                 TaskExecutionStatus::Escalated
@@ -31405,20 +31416,142 @@ pub(crate) mod tests {
         );
     }
 
-    /// Runs the real watchdog entry point for an expired review clock.
-    async fn expire_review_wait(db: &Database, exec_id: &str) {
+    /// Runs the real watchdog entry point for an expired clock.
+    async fn expire_clock(db: &Database, exec_id: &str, kind: crate::models::ExecutionTimeoutKind) {
         let e = exec_id.to_string();
         let applied = db
             .with_conn(move |conn| {
-                crate::db::orchestration::apply_execution_timeout(
-                    conn,
-                    &e,
-                    crate::models::ExecutionTimeoutKind::ReviewWait,
-                )
+                crate::db::orchestration::apply_execution_timeout(conn, &e, kind)
             })
             .await
             .unwrap();
-        assert!(applied, "the review-wait timeout must apply");
+        assert!(applied, "the {kind:?} timeout must apply");
+    }
+
+    async fn expire_review_wait(db: &Database, exec_id: &str) {
+        expire_clock(db, exec_id, crate::models::ExecutionTimeoutKind::ReviewWait).await;
+    }
+
+    async fn expire_total_duration(db: &Database, exec_id: &str) {
+        expire_clock(
+            db,
+            exec_id,
+            crate::models::ExecutionTimeoutKind::TotalDuration,
+        )
+        .await;
+    }
+
+    /// KT-1293 — the total-duration deadline is armed on a delivered attempt
+    /// too; it takes the same road as the review clock: the principal is
+    /// alerted once and the execution stays reviewable.
+    #[tokio::test]
+    async fn a_total_duration_timeout_leaves_the_delivery_approvable() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (parent, _child, exec_id, _head, _path) =
+            delivered_awaiting_review(&db, repo.path()).await;
+
+        expire_total_duration(&db, &exec_id).await;
+
+        let parked = exec_of(&db, &exec_id).await;
+        assert_eq!(parked.status, TaskExecutionStatus::AwaitingReview);
+        let e = exec_id.clone();
+        let detail = db
+            .with_conn(move |conn| execution_detail(conn, &e))
+            .await
+            .unwrap();
+        let recovery = detail.recovery.as_ref().expect("recovery row");
+        assert_eq!(recovery.recovery_reason, "total_duration_timeout");
+        assert!(!recovery.pending);
+        assert!(recovery.review_deadline_at.is_none());
+        assert!(recovery.total_deadline_at.is_none(), "the alert fires once");
+        let next = compact_next_action(&detail).expect("a next action");
+        assert_eq!(next.tool, Some("task_exec_review"));
+
+        // The alert is posted once, names only tools the state accepts.
+        let e = exec_id.clone();
+        let alerts: Vec<String> = db
+            .with_conn(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT content FROM messages \
+                     WHERE discussion_id = ?1 AND id LIKE ?2",
+                )?;
+                let rows = stmt
+                    .query_map(
+                        rusqlite::params![parent, format!("orch-principal-timeout:{e}:%")],
+                        |r| r.get::<_, String>(0),
+                    )?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows)
+            })
+            .await
+            .unwrap();
+        assert_eq!(alerts.len(), 1, "{alerts:?}");
+        assert!(alerts[0].contains("`AwaitingReview`"), "{}", alerts[0]);
+        assert!(alerts[0].contains("task_exec_review"), "{}", alerts[0]);
+
+        let outcome = decide_review(
+            &db,
+            &exec_id,
+            &review_approve(&db, &exec_id).await,
+            "ClaudeCode",
+            "sess-b",
+        )
+        .await
+        .unwrap();
+        match outcome {
+            ReviewOutcome::Reviewed { verdict, execution } => {
+                assert_eq!(verdict, ReviewVerdict::Approve);
+                assert_eq!(execution.status, TaskExecutionStatus::Approved);
+            }
+            other => panic!("expected Reviewed/Approve after the timeout, got {other:?}"),
+        }
+    }
+
+    /// KT-1293 — same, for request_changes after the total-duration timeout.
+    #[tokio::test]
+    async fn a_total_duration_timeout_still_lets_the_principal_request_changes() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_parent, child_id, exec_id, _head, _path) =
+            delivered_awaiting_review(&db, repo.path()).await;
+
+        expire_total_duration(&db, &exec_id).await;
+
+        let outcome = decide_review(
+            &db,
+            &exec_id,
+            &review_request_changes("Corrige la garde manquante"),
+            "ClaudeCode",
+            "sess-b",
+        )
+        .await
+        .unwrap();
+        match outcome {
+            ReviewOutcome::Reviewed { verdict, execution } => {
+                assert_eq!(verdict, ReviewVerdict::RequestChanges);
+                assert_eq!(execution.status, TaskExecutionStatus::Blocked);
+            }
+            other => panic!("expected Reviewed/RequestChanges after the timeout, got {other:?}"),
+        }
+
+        let e = exec_id.clone();
+        let (disc, content, targets) = db
+            .with_conn(move |conn| {
+                let fid = format!("orch-review-findings:{e}:0");
+                let (disc, content): (String, String) = conn.query_row(
+                    "SELECT discussion_id, content FROM messages WHERE id = ?1",
+                    [&fid],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?;
+                let targets = crate::db::discussions::list_message_targets(conn, &fid)?;
+                Ok((disc, content, targets))
+            })
+            .await
+            .unwrap();
+        assert_eq!(disc, child_id, "the comment lands in the worker's room");
+        assert!(content.contains("Corrige la garde manquante"), "{content}");
+        assert_eq!(targets[0].cli_session_id, Some(101));
     }
 
     /// KT-1293 — the review-wait alert tells the principal to call
@@ -31443,7 +31576,10 @@ pub(crate) mod tests {
         let recovery = detail.recovery.as_ref().expect("recovery row");
         assert_eq!(recovery.recovery_reason, "review_wait_timeout");
         assert!(!recovery.pending);
-        assert!(recovery.review_deadline_at.is_none(), "the alert fires once");
+        assert!(
+            recovery.review_deadline_at.is_none(),
+            "the alert fires once"
+        );
         let next = compact_next_action(&detail).expect("a next action");
         assert_eq!(next.tool, Some("task_exec_review"));
 
