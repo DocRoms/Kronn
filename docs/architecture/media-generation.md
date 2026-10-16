@@ -160,7 +160,7 @@ without a reload.
 * Agents: `media_generate` and `media_job_status`, by two independent routes —
   CLI agents through the `kronn-internal` MCP bridge, HTTP agents through the
   native orchestration catalogue
-  [src: file: backend/src/api/agent_tools.rs:1131-1170#media_generate]. The bridge route came
+  [src: file: backend/src/api/agent_tools.rs:1138-1178#media_generate]. The bridge route came
   first; the native one closed the half of the fleet that could not reach it.
 * **The connection is optional (KT-686).** A generation names one, or names
   none and Kronn uses the only connection configured for that modality. When
@@ -195,8 +195,8 @@ a normal `no_agent` discussion at an explicit Generate click, then passes that
 room to the existing generation endpoint. A successfully created room is kept
 across a generation error, and the same idempotency key is retained for an
 explicit identical retry; the UI never automatically repeats an ambiguous
-billable request. `[src: file: frontend/src/components/NewDiscussionForm.tsx:397-415#createMediaDiscussion]`
-`[src: file: frontend/src/components/MediaGenerateForm.tsx:476-532#submit]`
+billable request. `[src: file: frontend/src/components/NewDiscussionForm.tsx:400-419#createMediaDiscussion]`
+`[src: file: frontend/src/components/MediaGenerateForm.tsx:477-532#submit]`
 `[src: file: frontend/src/pages/DiscussionsPage.tsx:2635-2654#handleCreateMediaDiscussion]`
 
 ## What a model accepts, read rather than assumed
@@ -397,4 +397,4 @@ make the film, in what order, and plays them through.
   fetching the following clip while the current one plays. A clip that cannot
   be loaded is announced with a button to skip it. No file is produced:
   cutting and exporting a single video are separate work.
-  [src: file: frontend/src/components/VideoSequenceEditor.tsx:458-479#SequencePlayer] [src: file: frontend/src/components/VideoSequenceEditor.tsx:517-531#clipUnavailable]
+  [src: file: frontend/src/components/VideoSequenceEditor.tsx:460-541#SequencePlayer] [src: file: frontend/src/components/VideoSequenceEditor.tsx:519-523#clipUnavailable]
