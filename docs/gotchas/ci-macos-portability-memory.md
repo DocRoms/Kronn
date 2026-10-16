@@ -56,8 +56,11 @@ under `cfg(test)` keep the plain attribute (`acp::test_support`,
 `agents::runner::test_acp_routes`, `api::workflows::before_write_hook`,
 `core::checksums` test file, `core::config::test_saved_access`,
 `core::rooted_io::tests`).
-Every other job keeps the default feature set, so Linux coverage, clippy and
-the Windows matrix leg are unchanged.
+Every other job keeps the default feature set, so Linux coverage and clippy
+are unchanged. Both portability legs, Windows included, skip the Windows- and
+macOS-only test code outside the four suites: no CI job compiles it any more.
+[src: file: backend/src/core/cmd.rs:870]
+[src: file: backend/src/core/power_guard.rs:255]
 [src: file: backend/Cargo.toml:23-31]
 
 Adding a test module: use the gated attribute unless production code under
