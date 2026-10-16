@@ -478,6 +478,17 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- An audit step run through the ACP route runs instead of asking the human
+  what to do (KT-1278). An ACP session has no system channel, so the context
+  and the step reach the model as one message, and a step prompt that ended on
+  a reference block (the runtime versions table, the briefing, the project
+  rules, the detector signals, the linked repositories) was read by a small
+  model such as Haiku as context to answer: it replied « What would you like
+  me to help with? » and wrote nothing. Every step of every audit kind, the
+  retries with citation feedback and the cross-agent passes now end on a
+  closing directive that names the step and its target file, says no human
+  answers in that turn, and stops once the file is written. A workflow step
+  that declares read-only repositories no longer ends on that list either.
 - What a task worker starts ends with its dispatch, and Vite runs in its lane
   (KT-1266). A backend or a Vite started from the agent's shell tool ran in a
   process group of its own and kept listening on the lane's ports after the
