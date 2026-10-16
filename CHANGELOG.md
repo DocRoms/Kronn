@@ -530,6 +530,18 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- Revalidation no longer reads a remediation proposal as a claim (KT-1313). A
+  TD sheet's `Remediation` / `Fix` / `Next steps` section, or a
+  `- **Remediation**:` / `- **Suggested fix**:` line (and the text under a
+  label that closes its line), names files still to be created: they are no
+  longer judged by whether they exist, so `helpers/lib/plugin-factory.js`
+  does not turn its sheet `no_longer_relevant`. A section left with nothing
+  else to verify says why in its proposed correction.
+- A stopped audit step keeps what it consumed (KT-1313). Its tokens join the
+  run's tally and its reported cost is recorded (both pipelines); a Claude
+  step's turns are summed as they arrive instead of keeping only the largest,
+  the final `result` line replacing the sum; and `total_tokens_so_far` never
+  goes down (it read 630, 877, then 346).
 - A review-wait timeout no longer locks the principal out of the review
   (KT-1293). The watchdog used to move the unreviewed delivery to `Escalated`
   while its alert told the principal to call `task_exec_review`, which only

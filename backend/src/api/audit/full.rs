@@ -1778,6 +1778,7 @@ pub async fn full_audit(
             }
             attempt += 1;
             let mut step_usage = crate::db::audit_runs::StepTokens::UNKNOWN;
+            let mut stream_turns = super::agent_launch::StreamTurns::default();
             let attempt_prompt = super::finish_step_prompt(
                 &full_prompt, citation_feedback.as_deref(), step, analysis_step, &docs_root,
             );
@@ -1989,14 +1990,19 @@ pub async fn full_audit(
                                     if let Some(cost) = cost_usd.and_then(crate::agents::chat_codec::usd_to_micros) {
                                         stream_cost = Some(cost);
                                     }
-                                    if step_usage.total().is_none_or(|seen| input_tokens + output_tokens >= seen) {
-                                        step_usage = crate::db::audit_runs::StepTokens {
-                                            input: Some(input_tokens),
-                                            output: Some(output_tokens),
-                                            cache_read: prompt_cache.cached_prompt_tokens,
-                                            cache_write: prompt_cache.cache_write_prompt_tokens,
-                                            accounting: Default::default(),
-                                        }.inclusive_for(&agent_type);
+                                    // KT-1313 — a turn adds to the step; only the final
+                                    // line states the whole run, so a stopped step keeps
+                                    // every turn it consumed.
+                                    let reading = crate::db::audit_runs::StepTokens {
+                                        input: Some(input_tokens),
+                                        output: Some(output_tokens),
+                                        cache_read: prompt_cache.cached_prompt_tokens,
+                                        cache_write: prompt_cache.cache_write_prompt_tokens,
+                                        accounting: Default::default(),
+                                    }.inclusive_for(&agent_type);
+                                    let folded = stream_turns.fold(step_usage, reading, runner::is_claude_result_line(&line));
+                                    if folded != step_usage {
+                                        step_usage = folded;
                                         usage_moved = true;
                                     }
                                 }
@@ -2184,6 +2190,10 @@ pub async fn full_audit(
                         // recorded as stopped (it is redone on resume), and the
                         // run is settled resumable when it completed a step.
                         let step_n = step as u32;
+                        // KT-1313 — what the stopped attempt consumed is the run's:
+                        // its tokens join the tally and its cost is recorded.
+                        run_tokens.add(step_usage.total());
+                        let killed_cost = step_cost.usd_micros();
                         // An error is told apart from "wrote nothing": a target
                         // that could be neither restored nor marked stays an
                         // unsound step (no `restored` state), never a clean one.
@@ -2211,6 +2221,9 @@ pub async fn full_audit(
                                     conn, &run_id, step_n, Utc::now(), duration_ms, &usage,
                                     recorded_total, false, Some(&reason), false,
                                 )?;
+                                if let Some(cost) = killed_cost {
+                                    crate::db::audit_runs::set_step_cost(conn, &run_id, step_n, cost)?;
+                                }
                                 crate::db::audit_runs::set_step_target_state(conn, &run_id, step_n, killed_state)?;
                                 if !keep_snapshot {
                                     crate::db::audit_runs::delete_step_snapshot(conn, &run_id, step_n)?;
