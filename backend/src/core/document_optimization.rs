@@ -1,5 +1,6 @@
 //! Deterministic post-audit documentation budgets and routing diagnostics.
 
+use crate::core::run_provenance::RunProvenance;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -94,6 +95,16 @@ fn under_root(project: &Path, default_path: &'static str) -> &'static str {
 }
 
 pub fn analyze(project: &Path) -> Result<DocumentaryOptimizationReport, String> {
+    analyze_with(project, None)
+}
+
+/// [`analyze`], with the `deps:` and `url:` citations also held against what
+/// the audit run read (KT-1308). Outside a run there is nothing to hold them
+/// against, and they stay honestly unchecked.
+pub fn analyze_with(
+    project: &Path,
+    run: Option<&RunProvenance>,
+) -> Result<DocumentaryOptimizationReport, String> {
     let budgets = load_budgets(project)?;
     let docs = markdown_files(&docs_root(project).dir(project))?;
     let adapters = root_adapters(project)?;
@@ -188,6 +199,9 @@ pub fn analyze(project: &Path) -> Result<DocumentaryOptimizationReport, String> 
 
     inspect_docs(project, &docs, &adapters, &budgets, &mut diagnostics);
     inspect_stack_currency(project, &mut diagnostics);
+    if let Some(run) = run {
+        inspect_run_provenance(project, &docs, &adapters, run, &mut diagnostics);
+    }
     for diagnostic in diagnostics.iter_mut().filter(|d| d.blocking) {
         if !kronn_owns(project, &diagnostic.path) {
             diagnostic.blocking = false;
@@ -496,6 +510,40 @@ fn demote_human_section(rel: &str, name: &str, found: Vec<Diagnostic>, out: &mut
 
 /// A dead link or citation inside a human-owned section: a to-do for a person.
 pub const HUMAN_SECTION_REFERENCE: &str = "human_section_reference";
+
+/// Diagnostic code of a `deps:` / `url:` citation the audit run cannot back.
+pub const UNBACKED_PROVENANCE: &str = "unbacked_provenance";
+
+/// KT-1308 — every document, holding its `deps:` and `url:` citations against
+/// what the run read. A human-owned section is reported, never blocking.
+fn inspect_run_provenance(
+    project: &Path,
+    docs: &[PathBuf],
+    adapters: &[PathBuf],
+    run: &RunProvenance,
+    out: &mut Vec<Diagnostic>,
+) {
+    let mut paths: Vec<&PathBuf> = docs.iter().chain(adapters).collect();
+    paths.sort();
+    paths.dedup();
+    for path in paths {
+        let Ok(content) = read(path) else { continue };
+        let rel = relative(project, path);
+        let (owned, human) =
+            crate::api::audit::anti_hallu_enforce::split_human_owned_sections(&content);
+        for problem in run.problems(&owned) {
+            out.push(diag(UNBACKED_PROVENANCE, &rel, problem));
+        }
+        for (name, text) in human {
+            let found: Vec<_> = run
+                .problems(&text)
+                .into_iter()
+                .map(|problem| diag(UNBACKED_PROVENANCE, &rel, problem))
+                .collect();
+            demote_human_section(&rel, &name, found, out);
+        }
+    }
+}
 
 fn inspect_citations(project: &Path, rel: &str, content: &str, out: &mut Vec<Diagnostic>) {
     let visible = visible_markdown(content);
@@ -1079,7 +1127,10 @@ fn diag(code: &str, path: &str, message: String) -> Diagnostic {
 /// validation-discussion creation and the drift baseline on
 /// `blocking_diagnostics()` being empty (KT-840).
 fn is_blocking_code(code: &str) -> bool {
-    matches!(code, "broken_link" | "broken_citation")
+    matches!(
+        code,
+        "broken_link" | "broken_citation" | UNBACKED_PROVENANCE
+    )
 }
 
 #[cfg(test)]

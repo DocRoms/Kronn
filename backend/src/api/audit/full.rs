@@ -1137,6 +1137,9 @@ pub async fn full_audit(
             &db, &project_id, &project_path, &project_path_str, &agent_launcher, &agent_type,
         ).await;
         tracing::info!("audit {}: version source {:?}", project_id, version_ctx.source);
+        // KT-1308 — the pages the run's agent fetched, held against the `url:`
+        // citations of what a step writes.
+        let mut fetch_tracker = crate::core::run_provenance::FetchTracker::default();
 
         if let Err(error) = crate::core::doc_provenance::note_snapshot_writes(
             &project_path, &run_docs_snapshot, crate::core::doc_provenance::DocWriter::FullAudit,
@@ -1845,6 +1848,9 @@ pub async fn full_audit(
                     }
 
                     let is_stream_json = process.output_mode == runner::OutputMode::StreamJson;
+                    if !is_stream_json && !agent_launcher.reports_tool_inputs() {
+                        fetch_tracker.mark_unobservable();
+                    }
                     // An agent without stream-json (HTTP, ACP) reports its tokens and
                     // tools on the run, not in its lines: looked at on every line and
                     // on every tick, so a tool chain without prose still shows progress.
@@ -1990,6 +1996,12 @@ pub async fn full_audit(
                         if is_stream_json {
                             let event = runner::parse_claude_stream_line(&line);
                             let _ = recent.on_stream_event(&event);
+                            match &event {
+                                runner::StreamJsonEvent::ToolStart(name) => fetch_tracker.tool_started(name),
+                                runner::StreamJsonEvent::ToolInputDelta(fragment) => fetch_tracker.tool_input(fragment),
+                                runner::StreamJsonEvent::ToolEnd => fetch_tracker.tool_ended(),
+                                _ => {}
+                            }
                             match event {
                                 // A reading that counts nothing is no reading.
                                 runner::StreamJsonEvent::Usage { input_tokens, output_tokens, prompt_cache, cost_usd }
@@ -2098,6 +2110,10 @@ pub async fn full_audit(
                     step_cost = step_cost.with_attempt(process.reported_cost_usd_micros().or(stream_cost));
                     let status = process.child.wait().await;
                     process.fix_ownership();
+                    if !is_stream_json {
+                        // An ACP-hosted agent's calls are in its process's traces.
+                        fetch_tracker.ingest_traces(&process.captured_stderr_flushed().await);
+                    }
 
                     // Unregister PID
                     if let Ok(mut tracker) = audit_tracker.lock() {
@@ -2362,7 +2378,13 @@ pub async fn full_audit(
                     let mut documentary_repair_proven = false;
                     if success {
                         if let Some(before) = &documentary_snapshot {
-                            let gate = super::document_repair::check_attempt(&project_path, before, &recovery_targets);
+                            // Whatever the anti-hallucination mode: a `deps:` row the
+                            // watch does not hold, or a `url:` page never fetched, blocks.
+                            let run_provenance = crate::core::run_provenance::RunProvenance {
+                                deps: version_ctx.snapshot.clone(),
+                                fetched: fetch_tracker.fetched(),
+                            };
+                            let gate = super::document_repair::check_attempt(&project_path, before, &recovery_targets, Some(&run_provenance));
                             let reason = match gate {
                                 Ok(blocking) if blocking.is_empty() => {
                                     documentary_repair_proven = super::document_repair::recovery_changed(

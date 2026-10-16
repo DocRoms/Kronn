@@ -2,7 +2,8 @@
 //! Only unambiguous comma-bundled references are normalized automatically.
 //! Real missing paths/invalid lines require an agent retry and remain blocking.
 
-use crate::core::document_optimization::{self, Diagnostic};
+use crate::core::document_optimization::{self, Diagnostic, UNBACKED_PROVENANCE};
+use crate::core::run_provenance::RunProvenance;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -74,6 +75,9 @@ pub(super) fn feedback(diagnostics: &[Diagnostic]) -> String {
         text.push_str(&format!("- `{}`: {}\n", d.path, d.message));
     }
     text.push_str("\nRead and correct EACH named document, including auxiliary findings. Use ONE `[src: file: path:line]` or `[src: file: path:start-end]` marker per reference; never bundle paths with commas. A binary file (.docx, .pdf, image) has no lines: cite it by bare path, `[src: file: path]`. Read the actual source before correcting a missing path or invalid line. If the evidence cannot be established, remove the unsupported claim entirely; do not invent a path or merely hide the citation. In a human-owned section, correct only what is wrong; Kronn asks its owner to reconfirm. A resolvable citation proves existence, not the truth of its claim.\n");
+    if diagnostics.iter().any(|d| d.code == UNBACKED_PROVENANCE) {
+        text.push_str("A `[src: deps: …]` row must be one the dependency watch holds, and a `[src: url: …]` page one you fetched in this run. For each one flagged above, fetch the page or keep the watch row; otherwise replace the value AND its citation with `not verified: no source`. Never write a version, date or support end from memory, and never attach a citation to it.\n");
+    }
     text
 }
 
@@ -199,6 +203,7 @@ pub(super) fn check_attempt(
     project: &Path,
     before: &Snapshot,
     recovery: &[Diagnostic],
+    run: Option<&RunProvenance>,
 ) -> Result<Vec<Diagnostic>, String> {
     let after = snapshot(project)?;
     let root = project.canonicalize().map_err(|e| e.to_string())?;
@@ -238,7 +243,7 @@ pub(super) fn check_attempt(
             }
         }
     }
-    let report = document_optimization::analyze(project)?;
+    let report = document_optimization::analyze_with(project, run)?;
     let blocking: Vec<_> = report
         .blocking_diagnostics()
         .filter(|d| targets.contains(&d.path))
@@ -264,7 +269,7 @@ mod tests {
         let before = snapshot(dir.path()).unwrap();
         let original = "# Facts\nÉvidence [src: file: code.rs:1, code.rs:2]\nMissing [src: file: invented.rs:1]\nInvalid [src: file: code.rs:9]\n";
         std::fs::write(dir.path().join("docs/a.md"), original).unwrap();
-        let blocking = check_attempt(dir.path(), &before, &[]).unwrap();
+        let blocking = check_attempt(dir.path(), &before, &[], None).unwrap();
         let repaired = std::fs::read_to_string(dir.path().join("docs/a.md")).unwrap();
         assert!(repaired.contains("[src: file: code.rs:1] [src: file: code.rs:2]"));
         assert_eq!(blocking.len(), 2);
@@ -283,13 +288,16 @@ mod tests {
         .path();
         assert_eq!(std::fs::read_to_string(backup).unwrap(), original);
         // An unchanged bad document stays a retry target.
-        assert_eq!(check_attempt(dir.path(), &before, &[]).unwrap().len(), 2);
+        assert_eq!(
+            check_attempt(dir.path(), &before, &[], None).unwrap().len(),
+            2
+        );
         std::fs::write(
             dir.path().join("docs/a.md"),
             "# Facts\nVerified [src: file: code.rs:1-2]\n",
         )
         .unwrap();
-        assert!(check_attempt(dir.path(), &before, &blocking)
+        assert!(check_attempt(dir.path(), &before, &blocking, None)
             .unwrap()
             .is_empty());
         assert!(!recovery_changed(
@@ -346,7 +354,7 @@ mod tests {
         let human = "# P\n<!-- kronn:section name=\"team\" owner=\"human\" -->\nRule [src: file: code.rs:1, code.rs:2]\n<!-- kronn:section:end -->\n";
         std::fs::write(root.join("docs/AGENTS.md"), human).unwrap();
 
-        check_attempt(root, &before, &[]).unwrap();
+        check_attempt(root, &before, &[], None).unwrap();
 
         let repaired = std::fs::read_to_string(root.join("docs/AGENTS.md")).unwrap();
         assert!(
@@ -377,7 +385,7 @@ mod tests {
         let report = document_optimization::analyze(root).unwrap();
         let steps = super::super::assemble_chained_steps(crate::models::AuditKind::Full);
         assert!(recovery_plan(&report.diagnostics, &steps).is_empty());
-        let blocking = check_attempt(root, &before, &report.diagnostics).unwrap();
+        let blocking = check_attempt(root, &before, &report.diagnostics, None).unwrap();
         assert!(blocking.is_empty());
         assert_eq!(
             std::fs::read_to_string(root.join("docs/legacy/guide.md")).unwrap(),

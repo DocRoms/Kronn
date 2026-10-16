@@ -1333,6 +1333,25 @@ pub(crate) fn dep_citation(raw: &str) -> Option<(String, String, String)> {
     Some((manager.to_string(), package.to_string(), date))
 }
 
+/// The address a `url:` marker (or a bare `https://…` one) cites, without the
+/// `url:` keyword or any trailing comment. `None` for any other kind, or an
+/// empty reference.
+pub(crate) fn url_reference(raw: &str) -> Option<String> {
+    let (kind, reference) = classify_source(raw);
+    if kind != SourceKind::Url {
+        return None;
+    }
+    let reference = clean_reference(&reference);
+    let lower = reference.to_ascii_lowercase();
+    let start = ["https://", "http://"]
+        .iter()
+        .filter_map(|scheme| lower.find(scheme))
+        .min()
+        .unwrap_or(0);
+    let url = clean_reference(reference[start..].split_whitespace().next()?);
+    (!url.is_empty()).then(|| url.to_string())
+}
+
 /// If `s` starts (case-insensitively) with `keyword` AT A TOKEN BOUNDARY
 /// (followed by end-of-string, `:`, or whitespace), return the trimmed
 /// remainder (after an optional `:`). Returns `None` when the keyword is just

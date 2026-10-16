@@ -545,6 +545,16 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- An audit no longer lets a fabricated `deps:` or `url:` provenance reach the
+  Stack table in the default (warn) mode (KT-1308). A `[src: deps: …]`
+  citation the injected dependency watch does not hold, and a
+  `[src: url: …]` citation of a page the run's agent never fetched (read from
+  its `WebFetch` calls: direct stream-json or the ACP traces), are now blocking
+  in the always-on documentary check, whatever the anti-hallucination mode. The
+  step is retried with feedback telling the model to write
+  `not verified: no source` instead of a « latest stable » it did not read; held
+  and fetched citations, and `not verified`, pass. An agent that reports no
+  tool inputs (an HTTP model) leaves its `url:` citations unchecked.
 - Audit step 8 accepts a Dependencies row that states its source in any
   of its forms (KT-1295). The coverage check demanded the literal
   `source used:`, so a row backed by `[src: deps: …]` citations, or written
