@@ -982,7 +982,7 @@ export const config = {
       'GET',
       `/discussion-weights?discussion_ids=${encodeURIComponent(discussionIds.join(','))}`,
     ),
-  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; agent_global_timeout_min?: number; local_agent_global_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; discussion_notes_enabled?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'OnDemand' | 'Off'; agent_handoffs_enabled?: boolean; agent_handoff_paid_limit?: number; agent_handoff_paid_unlimited?: boolean; agent_handoff_blocked_agents?: AgentType[]; discussion_weight?: DiscussionWeightConfig; execution_variable_retention_days?: number; run_payload_retention_days?: number; p2p_enabled?: boolean; frontend_origins?: string[]; timezone?: string }) => api<void>('POST', '/config/server', req),
+  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; agent_global_timeout_min?: number; local_agent_global_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; discussion_notes_enabled?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'OnDemand' | 'Off'; agent_handoffs_enabled?: boolean; agent_handoff_paid_limit?: number; agent_handoff_paid_unlimited?: boolean; agent_handoff_blocked_agents?: AgentType[]; discussion_weight?: DiscussionWeightConfig; execution_variable_retention_days?: number; run_payload_retention_days?: number; disk_launch_min_free_gib?: number; disk_sweep_idle_hours?: number; p2p_enabled?: boolean; frontend_origins?: string[]; timezone?: string }) => api<void>('POST', '/config/server', req),
   regenerateAuthToken: () => api<string>('POST', '/config/auth-token/regenerate'),
 };
 
@@ -3976,6 +3976,89 @@ export const runsApi = {
     if (filters.offset) query.set('offset', String(filters.offset));
     return api<SharedRun[]>('GET', `/runs${query.size ? `?${query}` : ''}`);
   },
+};
+
+// ─── Disk (KT-1318) ───────────────────────────────────────────────────────────
+export type DiskKind = 'worktree' | 'lane_build_dir' | 'cache';
+export type DiskState = 'orphan' | 'reclaimable' | 'active' | 'kept' | 'foreign';
+
+export interface DiskOwner {
+  task_ref: string | null;
+  execution_id: string;
+  status: string;
+}
+
+export interface DiskEntry {
+  project_id: string;
+  kind: DiskKind;
+  path: string;
+  name: string;
+  /** A floor when `bytes_are_partial`. */
+  bytes: number;
+  bytes_are_partial: boolean;
+  idle_seconds: number | null;
+  owner: DiskOwner | null;
+  state: DiskState;
+  reason: string | null;
+  /** A confirmed per-entry delete may take it. */
+  purgeable: boolean;
+}
+
+export interface DiskKindTotal {
+  kind: DiskKind;
+  entries: number;
+  bytes: number;
+  bytes_are_partial: boolean;
+  orphan_bytes: number;
+}
+
+export interface DiskPolicy {
+  launch_min_free_gib: number;
+  sweep_idle_hours: number;
+  warning_gib: number;
+  critical_gib: number;
+}
+
+export interface DiskReport {
+  available_bytes: number | null;
+  under_pressure: boolean;
+  policy: DiskPolicy;
+  volumes: { project_id: string; project_name: string; path: string; available_bytes: number | null; total_bytes: number | null }[];
+  totals: DiskKindTotal[];
+  orphan_bytes: number;
+  orphan_count: number;
+  entries: DiskEntry[];
+}
+
+export interface DiskPurgeItem {
+  path: string;
+  purged: boolean;
+  bytes: number;
+  bytes_are_partial: boolean;
+  reason: string | null;
+}
+
+export interface DiskPurgeResult {
+  mode: 'orphans' | 'entries';
+  items: DiskPurgeItem[];
+  freed_bytes: number;
+  kept: number;
+  available_bytes_after: number | null;
+}
+
+/** What Kronn keeps on the disk, and the purge. Without `paths` the purge takes
+ *  orphans only; named `paths` are deleted only with `confirm`. */
+export const diskApi = {
+  report: (projectId?: string) =>
+    api<DiskReport>('GET', `/maintenance/disk${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ''}`),
+  purgeOrphans: (projectId?: string) =>
+    api<DiskPurgeResult>('POST', '/maintenance/disk/purge', projectId ? { project_id: projectId } : {}),
+  purgeEntries: (paths: string[], projectId?: string) =>
+    api<DiskPurgeResult>('POST', '/maintenance/disk/purge', {
+      paths,
+      confirm: true,
+      ...(projectId ? { project_id: projectId } : {}),
+    }),
 };
 
 /** Shared catalog consumed by discussion, QP/compare and workflow pickers. */

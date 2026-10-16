@@ -99,6 +99,10 @@ pub enum ProvisionError {
     CheckpointRefused(String),
     /// An unexpected internal error.
     Internal(String),
+    /// KT-1318: the volume is below `server.disk_launch_min_free_gib` even after
+    /// the orphan sweep. The execution is left `Blocked` (resumable once space
+    /// is freed) and the principal room was told.
+    DiskPressure(String),
 }
 
 /// Validate principal-authored mechanical gates before they are persisted.
@@ -421,13 +425,21 @@ async fn reconcile_at_boot_with_agents(
         let repo = scanner::resolve_host_path(&project_path);
         let checkout = scanner::resolve_host_path(&path);
         let checkout_path = checkout.to_string_lossy().to_string();
-        let removed = if !checkout.exists() {
+        let had_checkout = checkout.exists();
+        let removed = if !had_checkout {
             Ok(())
         } else {
             worktree::remove_cancelled_task_worktree(&repo, &checkout_path, &orphan.branch)
         };
         match removed {
             Ok(()) => {
+                // KT-1318 — an orphaned checkout removed just now takes its lane
+                // build dir with it, like at every other end of life (Done,
+                // Cancelled). A checkout that was already gone leaves its lane
+                // to the idle-aware sweep below.
+                if had_checkout {
+                    reclaim_lane_target(&state.db, &repo, &checkout_path).await;
+                }
                 let workspace_id = orphan.id.clone();
                 let branch = orphan.branch.clone();
                 let cleanup = state
@@ -502,11 +514,12 @@ async fn reconcile_at_boot_with_agents(
         }
         // Boot deletes only what is provably Kronn's, finished and already
         // detached from its worktree; every other `wt-*` is reported.
-        match sweep_project_lane_targets(
+        match sweep_project_lane_targets_idle(
             &state.db,
             &project.id,
             &repo,
             worktree::LaneSweepScope::WorktreeGone,
+            crate::core::disk_usage::sweep_idle(),
         )
         .await
         {
@@ -1691,6 +1704,31 @@ async fn provision_task_execution_inner(
     }
 
     let repo_path = std::path::PathBuf::from(&prepared.repo_path);
+
+    // ── Phase A′ (KT-1318) — the disk must have room for the worker's lane.
+    // Below `server.disk_launch_min_free_gib` Kronn sweeps its orphaned lane
+    // build dirs first; still below, it refuses BEFORE creating anything, parks
+    // the execution `Blocked` (resumable) and tells the principal room — a
+    // worker that dies mid-build on "No space left on device" costs far more.
+    if let Err(pressure) =
+        crate::api::disk::ensure_launch_headroom(db, &prepared.project_id, &repo_path).await
+    {
+        let reason = pressure.reason("launch a task worker");
+        mark_blocked(
+            db,
+            &prepared.execution.id,
+            format!("disk pressure: {reason}"),
+        )
+        .await;
+        post_disk_pressure_alert(
+            db,
+            &input.parent_discussion_id,
+            &prepared.task_reference,
+            &reason,
+        )
+        .await;
+        return Err(ProvisionError::DiskPressure(reason));
+    }
 
     // ── Phase B — pin the base commit (git). Nothing external created yet, so a
     // failure only marks the execution resumable. ──
@@ -3721,7 +3759,7 @@ async fn reclaim_lane_target(db: &Database, repo_path: &std::path::Path, child_p
 
 /// What a lane-target sweep needs from durable state: for each marked lane,
 /// why it must stay (absent = its execution is provably finished).
-async fn lane_target_claims(
+pub(crate) async fn lane_target_claims(
     db: &Database,
     project_id: &str,
     repo_path: &std::path::Path,
@@ -3771,6 +3809,20 @@ pub async fn sweep_project_lane_targets(
     repo_path: &std::path::Path,
     scope: worktree::LaneSweepScope,
 ) -> Result<worktree::LaneTargetSweep, String> {
+    sweep_project_lane_targets_idle(db, project_id, repo_path, scope, std::time::Duration::ZERO)
+        .await
+}
+
+/// [`sweep_project_lane_targets`] that also leaves every lane written within
+/// `min_idle` (KT-1318): the boot, periodic and pressure sweeps all use the
+/// configured `server.disk_sweep_idle_hours`.
+pub async fn sweep_project_lane_targets_idle(
+    db: &Database,
+    project_id: &str,
+    repo_path: &std::path::Path,
+    scope: worktree::LaneSweepScope,
+    min_idle: std::time::Duration,
+) -> Result<worktree::LaneTargetSweep, String> {
     let claims = lane_target_claims(db, project_id, repo_path).await?;
     let repo = repo_path.to_path_buf();
     let sweep = tokio::task::spawn_blocking(move || {
@@ -3778,7 +3830,7 @@ pub async fn sweep_project_lane_targets(
             Some(reason) => Err(reason.clone()),
             None => Ok(()),
         };
-        worktree::sweep_lane_targets(&repo, &judge, scope)
+        worktree::sweep_lane_targets_idle(&repo, &judge, scope, min_idle)
     })
     .await
     .map_err(|error| format!("lane target sweep failed: {error}"))?;
@@ -7637,6 +7689,33 @@ fn insert_toolchain_section(content: String, toolchain: &ToolchainCapabilities) 
     match content.find("## Tests\n") {
         Some(at) => format!("{}{section}{}", &content[..at], &content[at..]),
         None => format!("{content}\n\n{section}"),
+    }
+}
+
+/// Tell the principal room a launch was refused for lack of disk (KT-1318).
+/// Never raised: the refusal itself is the error the caller gets.
+async fn post_disk_pressure_alert(
+    db: &Database,
+    room_id: &str,
+    task_reference: &str,
+    reason: &str,
+) {
+    let room = room_id.to_string();
+    let mut notice = orchestrator_message(
+        format!("orch-disk-pressure:{}", uuid::Uuid::new_v4()),
+        format!(
+            "⚠️ {task_reference} was not launched: the disk is too full for a worker. {reason} \
+             The execution is parked Blocked and resumes once space is free."
+        ),
+    );
+    notice.role = MessageRole::System;
+    if let Err(error) = db
+        .with_conn(move |conn| {
+            crate::db::discussions::insert_message(conn, &room, &notice).map(|_| ())
+        })
+        .await
+    {
+        tracing::warn!("disk pressure alert not posted: {error}");
     }
 }
 
@@ -12906,6 +12985,10 @@ pub(crate) fn provision_error_parts(error: &ProvisionError) -> (ApiErrorCode, St
             format!("checkpoint refused (resumable): {reason}"),
         ),
         ProvisionError::Internal(reason) => (ApiErrorCode::Internal, reason.clone()),
+        ProvisionError::DiskPressure(reason) => (
+            ApiErrorCode::Conflict,
+            format!("launch refused, disk pressure (resumable): {reason}"),
+        ),
     }
 }
 
@@ -31621,6 +31704,406 @@ pub(crate) mod tests {
         assert!(fx.human_target.exists());
         assert!(!fx.lane_target.exists());
         assert_eq!(lane_target_events(&fx.db, "lane_target_reclaimed").await, 1);
+    }
+
+    // ── KT-1318 — idle-aware sweeps, the disk view and the launch guard ──────
+
+    /// Back-date everything under `path` by `ago`, children first.
+    fn age_lane(path: &std::path::Path, ago: Duration) {
+        fn walk(path: &std::path::Path, when: std::time::SystemTime) {
+            if let Ok(entries) = std::fs::read_dir(path) {
+                for entry in entries.flatten() {
+                    let child = entry.path();
+                    if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                        walk(&child, when);
+                    } else {
+                        std::fs::File::open(&child)
+                            .unwrap()
+                            .set_modified(when)
+                            .unwrap();
+                    }
+                }
+            }
+            std::fs::File::open(path)
+                .unwrap()
+                .set_modified(when)
+                .unwrap();
+        }
+        walk(path, std::time::SystemTime::now() - ago);
+    }
+
+    const LANE_IDLE: Duration = Duration::from_secs(6 * 3600);
+
+    impl LaneFixture {
+        /// The execution is cancelled and its worktree is gone: what an
+        /// orphaned lane looks like.
+        async fn orphan_the_lane(&self, idle_for: Duration) {
+            self.cancel().await;
+            std::fs::remove_dir_all(&self.path).unwrap();
+            age_lane(&self.lane_target, idle_for);
+        }
+
+        async fn idle_sweep(&self) -> worktree::LaneTargetSweep {
+            sweep_project_lane_targets_idle(
+                &self.db,
+                &self.project_id,
+                self.repo.path(),
+                worktree::LaneSweepScope::WorktreeGone,
+                LANE_IDLE,
+            )
+            .await
+            .unwrap()
+        }
+    }
+
+    /// Restores the published disk policy even when an assertion panics.
+    struct DiskPolicyGuard((u64, u64));
+
+    impl DiskPolicyGuard {
+        fn set(launch_min_free_gib: u64, sweep_idle_hours: u64) -> Self {
+            let before = crate::core::disk_usage::disk_policy();
+            crate::core::disk_usage::set_disk_policy(launch_min_free_gib, sweep_idle_hours);
+            Self(before)
+        }
+    }
+
+    impl Drop for DiskPolicyGuard {
+        fn drop(&mut self) {
+            crate::core::disk_usage::set_disk_policy(self.0 .0, self.0 .1);
+        }
+    }
+
+    /// KT-1318 — DoD 1, the orphan sweeper: a finished execution's lane with no
+    /// worktree goes only once idle past the threshold; the human's `wt-*` and
+    /// the main target never.
+    #[tokio::test]
+    async fn the_idle_sweep_removes_an_aged_orphan_lane_and_never_a_fresh_or_foreign_one() {
+        let fx = lane_fixture().await;
+        let main_debug = fx.repo.path().join("target/debug");
+        std::fs::create_dir_all(&main_debug).unwrap();
+        std::fs::write(main_debug.join("kronn"), b"the developer's own build").unwrap();
+        fx.orphan_the_lane(Duration::ZERO).await;
+
+        let fresh = fx.idle_sweep().await;
+        assert!(fresh.removed.is_empty(), "{fresh:?}");
+        assert!(fx.lane_target.join("debug/kronn").exists());
+        assert!(
+            fresh
+                .kept
+                .iter()
+                .any(|(path, why)| path == &fx.lane_target && why.contains("idle threshold")),
+            "{fresh:?}"
+        );
+
+        age_lane(&fx.lane_target, LANE_IDLE + Duration::from_secs(60));
+        let aged = fx.idle_sweep().await;
+        assert_eq!(aged.removed.len(), 1, "{aged:?}");
+        assert!(!fx.lane_target.exists(), "the orphan is gone");
+        assert!(fx.human_target.join("debug/kronn").exists());
+        assert!(
+            main_debug.join("kronn").exists(),
+            "the main target is never Kronn's"
+        );
+        assert_eq!(lane_target_events(&fx.db, "lane_target_reclaimed").await, 1);
+    }
+
+    /// KT-1318 — DoD 1: an active lane survives every purge, however old.
+    #[tokio::test]
+    async fn an_aged_lane_of_a_live_execution_survives_the_sweep_and_every_purge() {
+        let fx = lane_fixture().await;
+        age_lane(&fx.lane_target, LANE_IDLE * 50);
+        assert!(!exec_of(&fx.db, &fx.exec_id).await.status.is_terminal());
+
+        let sweep = fx.idle_sweep().await;
+        assert!(
+            sweep.removed.is_empty() && sweep.claimed.len() == 1,
+            "{sweep:?}"
+        );
+
+        let _policy = DiskPolicyGuard::set(0, 0);
+        let orphans = crate::api::disk::purge_orphans(&fx.db, Some(&fx.project_id))
+            .await
+            .unwrap();
+        assert_eq!(orphans.freed_bytes, 0, "{orphans:?}");
+        let named = crate::api::disk::run_purge(
+            &fx.db,
+            crate::api::disk::PurgeRequest {
+                project_id: Some(fx.project_id.clone()),
+                paths: vec![
+                    fx.lane_target.to_string_lossy().to_string(),
+                    fx.human_target.to_string_lossy().to_string(),
+                ],
+                confirm: true,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(named.items.iter().all(|item| !item.purged), "{named:?}");
+        assert!(fx.lane_target.join("debug/kronn").exists());
+        assert!(fx.human_target.join("debug/kronn").exists());
+    }
+
+    /// KT-1318 — DoD 3: the report names free space, groups Kronn's usage by
+    /// kind, gives each entry its task, status, age and verdict; the default
+    /// purge then takes the orphan and only the orphan.
+    #[tokio::test]
+    async fn the_disk_report_groups_by_kind_and_task_and_the_default_purge_takes_orphans_only() {
+        use crate::core::disk_usage::{DiskKind, DiskState};
+        let fx = lane_fixture().await;
+        let _policy = DiskPolicyGuard::set(0, 6);
+
+        let live = crate::api::disk::build_disk_report(&fx.db, Some(&fx.project_id))
+            .await
+            .unwrap();
+        assert!(live.available_bytes.is_some());
+        assert!(!live.under_pressure, "the guard is off");
+        let lane = live
+            .entries
+            .iter()
+            .find(|e| e.path == fx.lane_target.to_string_lossy())
+            .expect("the lane is listed");
+        assert_eq!(
+            (lane.kind, lane.state),
+            (DiskKind::LaneBuildDir, DiskState::Active)
+        );
+        let owner = lane.owner.as_ref().expect("owner");
+        assert_eq!(owner.execution_id, fx.exec_id);
+        assert!(
+            owner
+                .task_ref
+                .as_deref()
+                .is_some_and(|r| r.starts_with("KT-")),
+            "{owner:?}"
+        );
+        assert!(!lane.purgeable && lane.bytes > 0 && lane.idle_seconds.is_some());
+        let checkout = live
+            .entries
+            .iter()
+            .find(|e| e.kind == DiskKind::Worktree)
+            .expect("the worktree is listed");
+        assert_eq!(checkout.state, DiskState::Active);
+        assert_eq!(checkout.owner.as_ref().unwrap().execution_id, fx.exec_id);
+        let foreign = live
+            .entries
+            .iter()
+            .find(|e| e.path == fx.human_target.to_string_lossy())
+            .expect("the human's wt-* is listed");
+        assert_eq!(
+            (foreign.state, foreign.purgeable),
+            (DiskState::Foreign, false)
+        );
+        assert_eq!(live.orphan_count, 0);
+        assert_eq!(live.totals.len(), 3);
+
+        fx.orphan_the_lane(LANE_IDLE + Duration::from_secs(60))
+            .await;
+        let report = crate::api::disk::build_disk_report(&fx.db, Some(&fx.project_id))
+            .await
+            .unwrap();
+        let orphan = report
+            .entries
+            .iter()
+            .find(|e| e.path == fx.lane_target.to_string_lossy())
+            .unwrap();
+        assert_eq!((orphan.state, orphan.purgeable), (DiskState::Orphan, true));
+        assert_eq!(report.orphan_count, 1);
+        assert_eq!(report.orphan_bytes, orphan.bytes);
+        let lanes = report
+            .totals
+            .iter()
+            .find(|t| t.kind == DiskKind::LaneBuildDir)
+            .unwrap();
+        assert_eq!(lanes.orphan_bytes, orphan.bytes);
+
+        let purged = crate::api::disk::purge_orphans(&fx.db, Some(&fx.project_id))
+            .await
+            .unwrap();
+        assert_eq!(purged.mode, "orphans");
+        assert_eq!(purged.items.len(), 1, "{purged:?}");
+        assert!(purged.freed_bytes > 0 && purged.available_bytes_after.is_some());
+        assert!(!fx.lane_target.exists());
+        assert!(
+            fx.human_target.join("debug/kronn").exists(),
+            "foreign stays"
+        );
+    }
+
+    /// KT-1318 — a confirmed per-entry delete takes a finished lane that is not
+    /// an orphan yet (recent), and still refuses a foreign directory and a path
+    /// that is not a lane.
+    #[tokio::test]
+    async fn a_confirmed_entry_delete_takes_a_recent_finished_lane_and_nothing_foreign() {
+        let fx = lane_fixture().await;
+        let _policy = DiskPolicyGuard::set(0, 6);
+        fx.orphan_the_lane(Duration::ZERO).await;
+        assert!(
+            crate::api::disk::purge_orphans(&fx.db, Some(&fx.project_id))
+                .await
+                .unwrap()
+                .items
+                .is_empty(),
+            "a lane written just now is not an orphan"
+        );
+
+        let result = crate::api::disk::run_purge(
+            &fx.db,
+            crate::api::disk::PurgeRequest {
+                project_id: Some(fx.project_id.clone()),
+                paths: vec![
+                    fx.lane_target.to_string_lossy().to_string(),
+                    fx.human_target.to_string_lossy().to_string(),
+                    fx.repo
+                        .path()
+                        .join("README.md")
+                        .to_string_lossy()
+                        .to_string(),
+                ],
+                confirm: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.mode, "entries");
+        assert!(result.items[0].purged, "{result:?}");
+        assert!(
+            !result.items[1].purged && result.items[1].reason.as_ref().unwrap().contains("marker")
+        );
+        assert!(!result.items[2].purged);
+        assert!(!fx.lane_target.exists());
+        assert!(fx.human_target.join("debug/kronn").exists());
+        assert!(fx.repo.path().join("README.md").exists());
+    }
+
+    /// KT-1318 — DoD 2: under the threshold Kronn sweeps its orphans first and
+    /// the launch goes on when that was enough.
+    #[tokio::test]
+    async fn a_launch_under_pressure_sweeps_orphans_first_and_proceeds_when_that_frees_enough() {
+        let fx = lane_fixture().await;
+        let _policy = DiskPolicyGuard::set(0, 6);
+        fx.orphan_the_lane(LANE_IDLE + Duration::from_secs(60))
+            .await;
+        let lane = fx.lane_target.clone();
+        let gib = 1024 * 1024 * 1024u64;
+
+        let outcome =
+            crate::api::disk::ensure_launch_headroom_with(&fx.db, &fx.project_id, 30, &|| {
+                Some(if lane.exists() { 5 * gib } else { 80 * gib })
+            })
+            .await;
+
+        assert_eq!(outcome, Ok(()));
+        assert!(!fx.lane_target.exists(), "the sweep ran before the launch");
+        assert!(fx.human_target.join("debug/kronn").exists());
+    }
+
+    /// KT-1318 — DoD 2: still under the threshold after the sweep, the launch is
+    /// refused with the numbers; an active lane was not what made room.
+    #[tokio::test]
+    async fn a_launch_still_under_the_threshold_after_the_sweep_is_refused_and_keeps_active_lanes()
+    {
+        let fx = lane_fixture().await;
+        let _policy = DiskPolicyGuard::set(0, 6);
+        age_lane(&fx.lane_target, LANE_IDLE * 50);
+        let gib = 1024 * 1024 * 1024u64;
+
+        let refusal =
+            crate::api::disk::ensure_launch_headroom_with(&fx.db, &fx.project_id, 30, &|| {
+                Some(7 * gib)
+            })
+            .await
+            .unwrap_err();
+
+        assert_eq!((refusal.available_gib, refusal.min_gib), (7, 30));
+        assert_eq!(
+            refusal.swept_lanes, 0,
+            "the live execution's lane is not an orphan"
+        );
+        assert!(fx.lane_target.join("debug/kronn").exists());
+        // Guard off, or no reading: never a refusal.
+        assert!(crate::api::disk::ensure_launch_headroom_with(
+            &fx.db,
+            &fx.project_id,
+            0,
+            &|| Some(0)
+        )
+        .await
+        .is_ok());
+        assert!(
+            crate::api::disk::ensure_launch_headroom_with(&fx.db, &fx.project_id, 30, &|| None)
+                .await
+                .is_ok()
+        );
+    }
+
+    /// KT-1318 — DoD 2, end to end: a real launch on a disk below the threshold
+    /// creates nothing, parks the execution `Blocked` (resumable) and says so in
+    /// the principal room.
+    #[tokio::test]
+    async fn a_worker_launch_under_disk_pressure_is_refused_parked_and_announced_in_the_principal_room(
+    ) {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (task_ref, parent_id, _pid) = seed(&db, repo.path()).await;
+        // A petabyte: more than any test host has free, whatever its disk.
+        let _policy = DiskPolicyGuard::set(1_000_000, 6);
+
+        let error = provision_single_task_execution(
+            &db,
+            ProvisionInput {
+                task_reference: task_ref.clone(),
+                parent_discussion_id: parent_id.clone(),
+                worker: native_worker(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some("disk-pressure".into()),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        let ProvisionError::DiskPressure(reason) = &error else {
+            panic!("expected a disk pressure refusal, got {error:?}");
+        };
+        assert!(
+            reason.contains("server.disk_launch_min_free_gib"),
+            "{reason}"
+        );
+        let (code, message) = provision_error_parts(&error);
+        assert_eq!(code, ApiErrorCode::Conflict);
+        assert!(message.contains("resumable"), "{message}");
+        assert!(
+            !repo.path().join(".kronn/worktrees").exists(),
+            "nothing was provisioned"
+        );
+        let (status, blocked_by): (String, Option<String>) = db
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT status, blocked_reason FROM task_executions",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(status, TaskExecutionStatus::Blocked.as_str());
+        assert!(blocked_by.unwrap_or_default().contains("disk pressure"));
+        let alerts: Vec<String> = db
+            .with_conn(move |conn| {
+                let mut statement = conn.prepare(
+                    "SELECT content FROM messages WHERE discussion_id = ?1 AND role = 'System'",
+                )?;
+                let rows = statement
+                    .query_map([&parent_id], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows)
+            })
+            .await
+            .unwrap();
+        assert_eq!(alerts.len(), 1, "{alerts:?}");
+        assert!(
+            alerts[0].contains(&task_ref) && alerts[0].contains("was not launched"),
+            "{alerts:?}"
+        );
     }
 
     /// KT-1256 — provisioning stamps the lane it creates, so a later sweep can

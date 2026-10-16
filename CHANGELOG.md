@@ -13,6 +13,21 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- Kronn no longer fills the disk with per-lane build dirs (KT-1318). Every
+  parallel task lane builds in its own `target/wt-<lane>` (5-30 GB) and nothing
+  ever removed them: 195 of them took a 1.8 TB disk to 683 MB free. Now an
+  orphan sweeper (boot, then every 30 minutes) removes the build dirs Kronn
+  created, whose execution is finished, with no worktree, unwritten for
+  `server.disk_sweep_idle_hours` (default 6); a dir Kronn did not create
+  (no ownership marker) and an active lane are never touched. Below
+  `server.disk_launch_min_free_gib` (default 30) a worker launch or a full
+  audit sweeps first, then is refused with the reason, the execution parked
+  `Blocked` and an alert in the principal room. **Settings → Disk**, the
+  `GET /api/maintenance/disk` report and the `disk_usage` MCP tool show free
+  space and Kronn's usage by kind and by task, with a Purge action that takes
+  orphans only (a named entry needs a confirmation). See
+  `docs/operations/disk-usage.md`.
+
 - « Revalider l'audit » now re-reads the docs whose sections are all
   unanchored (no citation, no repository path), once per change (KT-1292).
   Such a doc has no verdict, so nothing ever sent it to an agent. A review

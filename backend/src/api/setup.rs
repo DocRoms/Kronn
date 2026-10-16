@@ -928,6 +928,8 @@ pub async fn get_server_config(
         discussion_weight: config.server.discussion_weight,
         execution_variable_retention_days: config.server.execution_variable_retention_days,
         run_payload_retention_days: config.server.run_payload_retention_days,
+        disk_launch_min_free_gib: config.server.disk_launch_min_free_gib,
+        disk_sweep_idle_hours: config.server.disk_sweep_idle_hours,
         p2p_enabled: config.server.p2p_enabled,
         frontend_origins: config.server.frontend_origins.clone(),
         timezone: config.server.timezone.clone(),
@@ -992,6 +994,13 @@ pub async fn set_server_config(
     }
     if let Some(days) = req.run_payload_retention_days {
         config.server.run_payload_retention_days = days;
+    }
+    // KT-1318 - saved with the config, which republishes the live policy.
+    if let Some(gib) = req.disk_launch_min_free_gib {
+        config.server.disk_launch_min_free_gib = gib.min(100_000);
+    }
+    if let Some(hours) = req.disk_sweep_idle_hours {
+        config.server.disk_sweep_idle_hours = hours.min(24 * 365);
     }
     if let Some(domain) = req.domain {
         config.server.domain = if domain.is_empty() {

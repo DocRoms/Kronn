@@ -34,6 +34,7 @@ pub mod discussion_questions;
 pub mod discussion_video_sequence;
 pub mod discussion_weight;
 pub mod discussions;
+pub mod disk;
 pub mod docs;
 pub mod execution_variables;
 pub mod external_api_connections;

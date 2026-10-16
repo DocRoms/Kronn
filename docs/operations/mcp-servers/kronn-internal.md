@@ -869,6 +869,16 @@ These reads reuse the existing list endpoints and do not mutate the library.
 [src: file: backend/scripts/disc-introspection-mcp.py:5589-5612#call_disc_link]
 [src: file: backend/scripts/disc-introspection-mcp.py:6524-6606#call_disc_find_by_session]
 
+## Disk usage
+
+`disk_usage` reports free disk and what Kronn itself keeps on it (worktrees,
+lane build dirs, caches) by kind and by task, the 25 largest entries first.
+`purge_orphans: true` takes the default purge — finished, idle, worktree-less,
+Kronn-marked lane build dirs — and nothing else: a named delete is a confirmed
+Settings action, and an active lane is never removed. Policy and rules:
+[`../disk-usage.md`](../disk-usage.md).
+[src: file: backend/scripts/disc-introspection-mcp.py:7689-7720#call_disk_usage]
+
 ## Workflow run detail
 
 `workflow_run_get` preserves the API's stored `agent_provenance` attempt history

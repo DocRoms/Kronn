@@ -3061,6 +3061,13 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/maintenance/lane-targets/reclaim",
             post(api::maintenance::reclaim_lane_targets),
         )
+        // KT-1318 — the disk view (free space, Kronn's usage by kind / task)
+        // and its purge (orphans by default; named entries need `confirm`).
+        .route("/api/maintenance/disk", get(api::disk::get_disk_report))
+        .route(
+            "/api/maintenance/disk/purge",
+            post(api::disk::post_disk_purge),
+        )
         // ── Orchestration (KT-328) — reachable launch + CLI-worker accept surface.
         // Without these the control offer names a tool that resolves to nothing.
         .route(

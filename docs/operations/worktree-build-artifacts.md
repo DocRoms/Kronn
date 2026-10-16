@@ -138,6 +138,11 @@ in the error so the operator knows which knob to turn. A warning configured
 below the critical mark is raised to it: a contradictory config must not read
 as "merely warn" on a disk that is in fact below the refusal line.
 
+Two further settings (KT-1318) make a launch sweep orphaned lane build dirs and
+then refuse below `server.disk_launch_min_free_gib` (default 30), and set how
+long such a dir must be idle (`server.disk_sweep_idle_hours`, default 6); see
+[disk-usage.md](disk-usage.md).
+
 ## Native development and qualification builds
 
 The native backend supervisor exports `CARGO_TARGET_DIR` as

@@ -229,7 +229,7 @@ pub fn scan_build_artifacts(repo_path: &Path) -> Vec<BuildArtifactTarget> {
 ///
 /// Returns `(bytes, partial)`. Symlinks are counted as entries but never
 /// followed, so a link into a huge tree cannot make this walk unbounded.
-fn measure_within_budget(root: &Path) -> (u64, bool) {
+pub(crate) fn measure_within_budget(root: &Path) -> (u64, bool) {
     let mut bytes = 0u64;
     let mut visited = 0usize;
     let mut stack = vec![root.to_path_buf()];
@@ -574,7 +574,7 @@ fn read_lane_owner(lane_target: &Path) -> Option<LaneOwner> {
 
 /// Every `<repo>/target/wt-*` entry, sorted so a dry run matches the pass that
 /// acts on it.
-fn lane_target_dirs(repo_path: &Path) -> Vec<PathBuf> {
+pub(crate) fn lane_target_dirs(repo_path: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(repo_path.join("target")) else {
         // No target directory means no lane was ever built here.
         return Vec::new();
@@ -761,6 +761,80 @@ pub fn process_lane_target(
     judge: &dyn Fn(&LaneOwner) -> Result<(), String>,
     scope: LaneSweepScope,
 ) -> LaneTargetOutcome {
+    process_lane_target_idle(
+        repo_path,
+        lane_target,
+        judge,
+        scope,
+        std::time::Duration::ZERO,
+    )
+}
+
+/// Most recent write inside a lane target, looked up without walking it: the
+/// directory itself, its entries and their direct children (`debug/`,
+/// `debug/.fingerprint`, `.cargo-lock`, the marker...). Cargo touches those at
+/// every build, so a build that ran a minute ago moves this forward.
+///
+/// `None` when nothing could be read: callers must then treat the lane as
+/// written just now, never as idle (KT-1318).
+pub fn lane_target_last_write(lane_target: &Path) -> Option<std::time::SystemTime> {
+    const ENTRY_BUDGET: usize = 4_000;
+    let modified = |path: &Path| std::fs::symlink_metadata(path).ok()?.modified().ok();
+    let mut newest = modified(lane_target)?;
+    let mut visited = 0usize;
+    let Ok(children) = std::fs::read_dir(lane_target) else {
+        return Some(newest);
+    };
+    for child in children.flatten() {
+        visited += 1;
+        if let Some(time) = child.metadata().ok().and_then(|meta| meta.modified().ok()) {
+            newest = newest.max(time);
+        }
+        let is_dir = child.file_type().is_ok_and(|kind| kind.is_dir());
+        if !is_dir {
+            continue;
+        }
+        let Ok(grandchildren) = std::fs::read_dir(child.path()) else {
+            continue;
+        };
+        for grandchild in grandchildren.flatten() {
+            visited += 1;
+            if visited > ENTRY_BUDGET {
+                return Some(newest);
+            }
+            if let Some(time) = grandchild
+                .metadata()
+                .ok()
+                .and_then(|meta| meta.modified().ok())
+            {
+                newest = newest.max(time);
+            }
+        }
+    }
+    Some(newest)
+}
+
+/// How long a lane target has gone without a write, or `None` when unknown.
+pub fn lane_target_idle_for(lane_target: &Path) -> Option<std::time::Duration> {
+    let written = lane_target_last_write(lane_target)?;
+    // A clock set back reads as "written just now", never as idle.
+    Some(
+        std::time::SystemTime::now()
+            .duration_since(written)
+            .unwrap_or_default(),
+    )
+}
+
+/// [`process_lane_target`] that also keeps a lane written less than `min_idle`
+/// ago (KT-1318): "no live worktree" is durable state, "not written for N
+/// hours" is the second, independent proof that nothing is still using it.
+pub fn process_lane_target_idle(
+    repo_path: &Path,
+    lane_target: &Path,
+    judge: &dyn Fn(&LaneOwner) -> Result<(), String>,
+    scope: LaneSweepScope,
+    min_idle: std::time::Duration,
+) -> LaneTargetOutcome {
     match classify_lane_target(repo_path, lane_target, judge) {
         LaneTargetState::Unmarked => LaneTargetOutcome::Unmarked,
         LaneTargetState::Claimed(owner, reason) => LaneTargetOutcome::Claimed(owner, reason),
@@ -774,6 +848,27 @@ pub fn process_lane_target(
                 LaneSweepScope::WorktreeGone => !worktree_present,
                 LaneSweepScope::WorktreeGoneOrClean => true,
             };
+            if allowed && !min_idle.is_zero() {
+                match lane_target_idle_for(lane_target) {
+                    Some(idle) if idle >= min_idle => {}
+                    Some(idle) => {
+                        return LaneTargetOutcome::Kept(
+                            Some(owner),
+                            format!(
+                                "written {} minute(s) ago, under the {}-hour idle threshold",
+                                idle.as_secs() / 60,
+                                min_idle.as_secs() / 3600
+                            ),
+                        )
+                    }
+                    None => {
+                        return LaneTargetOutcome::Kept(
+                            Some(owner),
+                            "its last write cannot be read, so it is not provably idle".to_string(),
+                        )
+                    }
+                }
+            }
             if !allowed {
                 let (bytes_reclaimed, bytes_are_partial) = measure_within_budget(lane_target);
                 return LaneTargetOutcome::WouldRemove(
@@ -803,9 +898,19 @@ pub fn sweep_lane_targets(
     judge: &dyn Fn(&LaneOwner) -> Result<(), String>,
     scope: LaneSweepScope,
 ) -> LaneTargetSweep {
+    sweep_lane_targets_idle(repo_path, judge, scope, std::time::Duration::ZERO)
+}
+
+/// [`sweep_lane_targets`] that leaves every lane written within `min_idle`.
+pub fn sweep_lane_targets_idle(
+    repo_path: &Path,
+    judge: &dyn Fn(&LaneOwner) -> Result<(), String>,
+    scope: LaneSweepScope,
+    min_idle: std::time::Duration,
+) -> LaneTargetSweep {
     let mut sweep = LaneTargetSweep::default();
     for path in lane_target_dirs(repo_path) {
-        match process_lane_target(repo_path, &path, judge, scope) {
+        match process_lane_target_idle(repo_path, &path, judge, scope, min_idle) {
             LaneTargetOutcome::Removed(owner, report) => sweep.removed.push((owner, report)),
             LaneTargetOutcome::WouldRemove(owner, report) => {
                 sweep.would_remove.push((owner, report))
@@ -871,7 +976,7 @@ pub fn set_disk_thresholds(warning_gib: u64, critical_gib: u64) {
     DISK_CRITICAL_GIB.store(critical_gib, std::sync::atomic::Ordering::Relaxed);
 }
 
-fn configured_disk_thresholds() -> (u64, u64) {
+pub fn configured_disk_thresholds() -> (u64, u64) {
     (
         DISK_WARNING_GIB.load(std::sync::atomic::Ordering::Relaxed),
         DISK_CRITICAL_GIB.load(std::sync::atomic::Ordering::Relaxed),
@@ -5118,6 +5223,109 @@ mod tests {
 
     fn alive(_: &LaneOwner) -> Result<(), String> {
         Err("execution is Working".to_string())
+    }
+
+    /// Back-date every entry under `path` (children first, so writing a
+    /// directory's mtime is not undone by its own children).
+    fn age_tree(path: &Path, ago: std::time::Duration) {
+        fn walk(path: &Path, when: std::time::SystemTime) {
+            if let Ok(entries) = fs::read_dir(path) {
+                for entry in entries.flatten() {
+                    let child = entry.path();
+                    if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                        walk(&child, when);
+                    } else {
+                        fs::File::open(&child).unwrap().set_modified(when).unwrap();
+                    }
+                }
+            }
+            fs::File::open(path).unwrap().set_modified(when).unwrap();
+        }
+        walk(path, std::time::SystemTime::now() - ago);
+    }
+
+    const SIX_HOURS: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
+
+    /// KT-1318 — "no live worktree" is not enough on its own: a lane written
+    /// within the idle threshold stays, an aged one goes.
+    #[test]
+    fn an_orphan_lane_is_swept_only_once_idle_past_the_threshold() {
+        let repo = make_test_repo("lane-idle");
+        let (worktree, lane_target, _) = marked_lane(repo.path(), "KT-30", "c3d4", "exec-30");
+        fs::remove_dir_all(&worktree).unwrap();
+
+        let fresh = sweep_lane_targets_idle(
+            repo.path(),
+            &finished,
+            LaneSweepScope::WorktreeGone,
+            SIX_HOURS,
+        );
+        assert!(fresh.removed.is_empty(), "{fresh:?}");
+        assert!(lane_target.join("debug/kronn").exists());
+        assert!(
+            fresh
+                .kept
+                .iter()
+                .any(|(path, why)| path == &lane_target && why.contains("idle threshold")),
+            "{fresh:?}"
+        );
+
+        age_tree(&lane_target, SIX_HOURS + std::time::Duration::from_secs(60));
+        let aged = sweep_lane_targets_idle(
+            repo.path(),
+            &finished,
+            LaneSweepScope::WorktreeGone,
+            SIX_HOURS,
+        );
+        assert_eq!(aged.removed.len(), 1, "{aged:?}");
+        assert!(!lane_target.exists());
+    }
+
+    /// KT-1318 — age never overrides liveness: an aged lane of a live
+    /// execution, or whose worktree still exists, is not an orphan.
+    #[test]
+    fn an_aged_lane_is_still_kept_when_its_execution_or_worktree_is_alive() {
+        let repo = make_test_repo("lane-idle-live");
+        let (worktree, lane_target, _) = marked_lane(repo.path(), "KT-31", "e5f6", "exec-31");
+        age_tree(&lane_target, SIX_HOURS * 4);
+
+        let live =
+            sweep_lane_targets_idle(repo.path(), &alive, LaneSweepScope::WorktreeGone, SIX_HOURS);
+        assert!(
+            live.removed.is_empty() && live.claimed.len() == 1,
+            "{live:?}"
+        );
+
+        // Finished, but its clean worktree is still there: not an orphan.
+        let attached = sweep_lane_targets_idle(
+            repo.path(),
+            &finished,
+            LaneSweepScope::WorktreeGone,
+            SIX_HOURS,
+        );
+        assert!(attached.removed.is_empty(), "{attached:?}");
+        assert!(worktree.exists() && lane_target.join("debug/kronn").exists());
+    }
+
+    /// KT-1318 — a build that just ran inside the lane moves its idle age
+    /// forward even though the lane directory itself did not change.
+    #[test]
+    fn a_write_below_the_lane_resets_its_idle_age() {
+        let repo = make_test_repo("lane-idle-age");
+        let (_, lane_target, _) = marked_lane(repo.path(), "KT-32", "a7b8", "exec-32");
+        age_tree(&lane_target, SIX_HOURS * 2);
+        assert!(
+            lane_target_idle_for(&lane_target).unwrap()
+                >= SIX_HOURS * 2 - std::time::Duration::from_secs(5)
+        );
+
+        fs::write(lane_target.join("debug/fresh.o"), b"x").unwrap();
+        assert!(
+            lane_target_idle_for(&lane_target).unwrap() < std::time::Duration::from_secs(120),
+            "a write under debug/ is activity"
+        );
+        // A lane that does not exist has no age: never "idle".
+        assert!(lane_target_idle_for(&repo.path().join("target/wt-none")).is_none());
     }
 
     #[test]
