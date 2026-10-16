@@ -500,7 +500,7 @@ values it ran against, so it stays true history and becomes explicitly stale
 when the Page moves on. The API keeps speaking one `LivePageAction`: the
 declaration before a click, the declaration joined to its launch afterwards,
 with `id` naming the launch so a card follows its own run.
-`[src: file: backend/src/db/live_page_actions.rs:23-31#live_page_action_launches] [src: file: backend/src/db/live_page_actions.rs:1089-1165#claim]`
+`[src: file: backend/src/db/live_page_actions.rs:23-31#live_page_action_launches] [src: file: backend/src/db/live_page_actions.rs:1089-1165#launch_id]`
 
 Action launch history retains at most 1,000 terminal rows per
 `(page_id, action_ref)`, shared across bindings and revisions. The launch involved
