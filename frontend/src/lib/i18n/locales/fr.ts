@@ -221,6 +221,7 @@ const fr: TranslationDict = {
   'pages.runAllWorkflows': 'Relancer tous les workflows',
   'pages.runAllWorkflowsTitle': 'Relancer les {0} workflows liés activés',
   'pages.runAllWorkflowsNone': 'Aucun workflow activé à relancer',
+  'pages.runAllProgress': '{0} / {1} relancés',
   'pages.workflowDisabled': 'Désactivé',
   'pages.workflowSkipped': 'Ignoré (désactivé)',
   'pages.workflowRunning': 'En cours…',

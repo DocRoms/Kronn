@@ -875,6 +875,110 @@ describe('PagesPage', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('Network unavailable');
   });
 
+  it('"Run all workflows" starts each workflow once when clicked twice synchronously', async () => {
+    vi.mocked(pagesApi.workflows).mockResolvedValue([
+      { id: 'wf-1', name: 'Adobe cron', enabled: true, step_names: ['publish'] },
+      { id: 'wf-2', name: 'Weekly digest', enabled: true, step_names: ['publish'] },
+    ]);
+    vi.mocked(workflowsApi.triggerStream).mockClear();
+    vi.mocked(workflowsApi.triggerStream).mockImplementation(() => new Promise<void>(() => {}));
+    render(<PagesPage />);
+    fireEvent.click(await screen.findByLabelText('pages.autoRefresh'));
+    const button = screen.getByRole('button', { name: 'pages.runAllWorkflows' });
+
+    act(() => { button.click(); button.click(); });
+
+    expect(workflowsApi.triggerStream).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole('button', { name: 'pages.runAllProgress:0,2' })).toBeDisabled();
+  });
+
+  it('a single run blocks "Run all" for the same workflow', async () => {
+    vi.mocked(pagesApi.workflows).mockResolvedValue([
+      { id: 'wf-1', name: 'Adobe cron', enabled: true, step_names: ['publish'] },
+      { id: 'wf-2', name: 'Weekly digest', enabled: true, step_names: ['publish'] },
+    ]);
+    vi.mocked(workflowsApi.triggerStream).mockClear();
+    vi.mocked(workflowsApi.triggerStream).mockImplementation(() => new Promise<void>(() => {}));
+    render(<PagesPage />);
+    fireEvent.click(await screen.findByLabelText('pages.autoRefresh'));
+    const single = screen.getByLabelText('pages.runLinkedWorkflow:Adobe cron');
+
+    act(() => { single.click(); single.click(); });
+    expect(workflowsApi.triggerStream).toHaveBeenCalledTimes(1);
+
+    const runAll = screen.getByRole('button', { name: 'pages.runAllWorkflows' });
+    expect(runAll).toBeDisabled();
+    act(() => { runAll.click(); });
+    expect(workflowsApi.triggerStream).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows the "n / N" progress of "Run all" and releases the locks when the runs end', async () => {
+    vi.mocked(pagesApi.workflows).mockResolvedValue([
+      { id: 'wf-1', name: 'Adobe cron', enabled: true, step_names: ['publish'] },
+      { id: 'wf-2', name: 'Weekly digest', enabled: true, step_names: ['publish'] },
+    ]);
+    const finish: Record<string, () => void> = {};
+    vi.mocked(workflowsApi.triggerStream).mockClear();
+    vi.mocked(workflowsApi.triggerStream).mockImplementation((id, _onStart, _onStep, onDone) => new Promise<void>(resolve => {
+      finish[id] = () => { onDone({ status: 'Success' }); resolve(); };
+    }));
+    render(<PagesPage />);
+    fireEvent.click(await screen.findByLabelText('pages.autoRefresh'));
+    fireEvent.click(screen.getByRole('button', { name: 'pages.runAllWorkflows' }));
+    expect(screen.getByRole('button', { name: 'pages.runAllProgress:0,2' })).toBeInTheDocument();
+
+    await act(async () => { finish['wf-1'](); });
+    expect(screen.getByRole('button', { name: 'pages.runAllProgress:1,2' })).toBeInTheDocument();
+    await act(async () => { finish['wf-2'](); });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'pages.runAllWorkflows' })).toBeEnabled());
+
+    fireEvent.click(screen.getByLabelText('pages.runLinkedWorkflow:Adobe cron'));
+    expect(workflowsApi.triggerStream).toHaveBeenCalledTimes(3);
+  });
+
+  it('keeps a running workflow locked and tracked when switching Page and coming back', async () => {
+    const otherPage = { ...page, id: 'page-2', title: 'Other Page', slug: 'other-page' };
+    vi.mocked(pagesApi.list).mockResolvedValue([page, otherPage]);
+    vi.mocked(pagesApi.get).mockImplementation(async id => id === page.id ? detail : { ...detail, ...otherPage });
+    vi.mocked(pagesApi.workflows).mockImplementation(async id => id === page.id
+      ? [{ id: 'wf-1', name: 'Adobe cron', enabled: true, step_names: ['publish'] }] : []);
+    let finish: () => void = () => undefined;
+    vi.mocked(workflowsApi.triggerStream).mockClear();
+    vi.mocked(workflowsApi.triggerStream).mockImplementation((_id, _onStart, _onStep, onDone) => new Promise<void>(resolve => {
+      finish = () => { onDone({ status: 'Success' }); resolve(); };
+    }));
+    render(<PagesPage />);
+    fireEvent.click(await screen.findByLabelText('pages.autoRefresh'));
+    fireEvent.click(await screen.findByLabelText('pages.runLinkedWorkflow:Adobe cron'));
+    expect(workflowsApi.triggerStream).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(getCanonicalPageRow('Other Page'));
+    await waitFor(() => expect(screen.queryByLabelText('pages.runLinkedWorkflow:Adobe cron')).not.toBeInTheDocument());
+    fireEvent.click(getCanonicalPageRow('Adobe Signals'));
+    const run = await screen.findByLabelText('pages.runLinkedWorkflow:Adobe cron');
+    expect(run).toHaveAttribute('data-state', 'running');
+    fireEvent.click(run);
+    expect(workflowsApi.triggerStream).toHaveBeenCalledTimes(1);
+
+    await act(async () => { finish(); });
+    await waitFor(() => expect(screen.getByLabelText('pages.runLinkedWorkflow:Adobe cron')).toHaveAttribute('data-state', 'success'));
+  });
+
+  it('one Escape closes the Export popover first, the next one the Sync panel', async () => {
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    fireEvent.click(screen.getByLabelText('pages.autoRefresh'));
+    const summary = screen.getByText('pages.export').closest('summary')!;
+    fireEvent.click(summary);
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.getByTestId('live-page-export-menu')).not.toHaveAttribute('open');
+    expect(screen.getByTestId('live-page-recent-refreshes')).toBeInTheDocument();
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.queryByTestId('live-page-recent-refreshes')).not.toBeInTheDocument();
+  });
+
   it('"Run all workflows" is unavailable when no linked workflow is enabled', async () => {
     vi.mocked(workflowsApi.triggerStream).mockClear();
     vi.mocked(pagesApi.workflows).mockResolvedValue([

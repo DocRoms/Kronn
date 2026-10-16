@@ -142,6 +142,8 @@ function useDismissibleDetails<T extends HTMLDetailsElement>() {
       const el = ref.current;
       if (el?.open && event.key === 'Escape') {
         close();
+        // One Escape closes one thing: the sync panel behind it stays open.
+        event.preventDefault();
         // Keyboard users lose their place once the popover's content
         // collapses out from under a focused element inside it.
         el.querySelector('summary')?.focus();
@@ -210,6 +212,12 @@ export function PagesPage({
   const [savingHtml, setSavingHtml] = useState(false);
   const [workflowRuns, setWorkflowRuns] = useState<Record<string, WorkflowRun>>({});
   const [skippedWorkflowIds, setSkippedWorkflowIds] = useState<Set<string>>(() => new Set());
+  const [runAllProgress, setRunAllProgress] = useState<{ done: number; total: number } | null>(null);
+  // Synchronous per-workflow launch lock, shared by the single and run-all
+  // launches. State is stale between two synchronous clicks; this is not. It
+  // is independent of the selected Page, so an in-flight run stays locked
+  // when the user switches Page and comes back.
+  const workflowLocksRef = useRef<Set<string>>(new Set());
   const [syncPanelOpen, setSyncPanelOpen] = useState(false);
   const syncPanelRef = useRef<HTMLElement>(null);
   const syncTriggerRef = useRef<HTMLButtonElement>(null);
@@ -257,6 +265,8 @@ export function PagesPage({
     reload: reloadPageActions,
   } = useLivePageActions(() => setError(t('disc.action.unavailablePageAction')));
   const [bridgeChannel] = useState(channelId);
+  const selectedIdRef = useRef(selectedId);
+  useEffect(() => { selectedIdRef.current = selectedId; }, [selectedId]);
   const requestedPageIdRef = useRef(selectedPageId ?? initialSelectedPageId);
   const selectionConsumedRef = useRef(onInitialSelectionConsumed);
 
@@ -378,7 +388,11 @@ export function PagesPage({
 
   const select = useCallback(async (page: LivePage) => {
     setSelectedId(page.id);
-    setWorkflowRuns({});
+    // Only the finished display state goes; a run still in flight keeps being
+    // tracked, or its lock and its updates would be lost.
+    setWorkflowRuns(current => Object.fromEntries(
+      Object.entries(current).filter(([, run]) => run.state === 'running'),
+    ));
     setSkippedWorkflowIds(new Set());
     setLoading(true);
     try {
@@ -400,8 +414,11 @@ export function PagesPage({
       : current);
   }, []);
 
-  const runLinkedWorkflow = useCallback(async (workflow: LivePageWorkflowLink) => {
-    if (!workflow.enabled || workflowRuns[workflow.id]?.state === 'running') return;
+  // Resolves once the run is over. The lock is taken before the first await
+  // and released in `finally`, so a second synchronous call is a no-op.
+  const runLinkedWorkflow = useCallback(async (workflow: LivePageWorkflowLink, pageId: string | null = selectedIdRef.current) => {
+    if (!workflow.enabled || workflowLocksRef.current.has(workflow.id)) return;
+    workflowLocksRef.current.add(workflow.id);
     setWorkflowRuns(current => ({
       ...current,
       [workflow.id]: {
@@ -409,45 +426,68 @@ export function PagesPage({
         card: { id: workflow.id, kind: 'workflow', status: 'queued', freshness: 'unavailable' },
       },
     }));
-    await workflowsApi.triggerStream(
-      workflow.id,
-      () => undefined,
-      () => undefined,
-      result => {
-        const success = result.status === 'Success';
-        patchWorkflowRun(workflow.id, run => ({
+    // The Page the run was launched from, only if it is still the open one.
+    const reloadLaunchPage = () => {
+      if (pageId && selectedIdRef.current === pageId) void loadDetail(pageId);
+    };
+    try {
+      await workflowsApi.triggerStream(
+        workflow.id,
+        () => undefined,
+        () => undefined,
+        result => {
+          const success = result.status === 'Success';
+          patchWorkflowRun(workflow.id, run => ({
+            ...run,
+            state: success ? 'success' : 'error',
+            message: success ? t('pages.workflowRunSuccess') : t('pages.workflowRunFailed', result.status),
+          }));
+          reloadLaunchPage();
+        },
+        message => {
+          patchWorkflowRun(workflow.id, run => ({
+            state: 'error',
+            message,
+            card: { ...run.card, status: 'failed', diagnostic: message },
+          }));
+        },
+        undefined,
+        undefined,
+        undefined,
+        runId => patchWorkflowRun(workflow.id, run => ({
           ...run,
-          state: success ? 'success' : 'error',
-          message: success ? t('pages.workflowRunSuccess') : t('pages.workflowRunFailed', result.status),
-        }));
-        if (selectedId) void loadDetail(selectedId);
-      },
-      message => {
-        patchWorkflowRun(workflow.id, run => ({
-          state: 'error',
-          message,
-          card: { ...run.card, status: 'failed', diagnostic: message },
-        }));
-      },
-      undefined,
-      undefined,
-      undefined,
-      runId => patchWorkflowRun(workflow.id, run => ({
-        ...run,
-        card: { ...run.card, id: runId, status: 'running', freshness: 'rehydrated' },
-      })),
-    );
-  }, [loadDetail, patchWorkflowRun, selectedId, t, workflowRuns]);
+          card: { ...run.card, id: runId, status: 'running', freshness: 'rehydrated' },
+        })),
+      );
+    } finally {
+      workflowLocksRef.current.delete(workflow.id);
+    }
+  }, [loadDetail, patchWorkflowRun, t]);
 
   const enabledWorkflows = useMemo(() => linkedWorkflows.filter(workflow => workflow.enabled), [linkedWorkflows]);
-  const anyWorkflowRunning = Object.values(workflowRuns).some(run => run.state === 'running');
+  const anyWorkflowRunning = linkedWorkflows.some(workflow => workflowRuns[workflow.id]?.state === 'running');
 
-  // Launches every enabled linked workflow; the disabled ones are left alone
-  // and flagged as skipped. Each workflow reports its own state.
-  const runAllWorkflows = useCallback(async () => {
+  // Launches every enabled linked workflow that is not already running; the
+  // disabled ones are left alone and flagged as skipped. Each workflow reports
+  // its own state, and the button shows how many have finished.
+  const runAllWorkflows = useAsyncGuard(async () => {
+    const queue = enabledWorkflows.filter(workflow => !workflowLocksRef.current.has(workflow.id));
+    if (queue.length === 0) return;
     setSkippedWorkflowIds(new Set(linkedWorkflows.filter(workflow => !workflow.enabled).map(workflow => workflow.id)));
-    await Promise.all(enabledWorkflows.map(workflow => runLinkedWorkflow(workflow)));
-  }, [enabledWorkflows, linkedWorkflows, runLinkedWorkflow]);
+    setRunAllProgress({ done: 0, total: queue.length });
+    const pageId = selectedIdRef.current;
+    try {
+      await Promise.all(queue.map(async workflow => {
+        try {
+          await runLinkedWorkflow(workflow, pageId);
+        } finally {
+          setRunAllProgress(progress => progress && { ...progress, done: progress.done + 1 });
+        }
+      }));
+    } finally {
+      setRunAllProgress(null);
+    }
+  });
 
   // `document` is the iframe markup in this component, hence window.document.
   // The side panel closes on Escape and on a click outside it (the trigger
@@ -460,7 +500,7 @@ export function PagesPage({
       setSyncPanelOpen(false);
     };
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') closeSyncPanel();
+      if (event.key === 'Escape' && !event.defaultPrevented) closeSyncPanel();
     };
     window.document.addEventListener('mousedown', onPointerDown);
     window.document.addEventListener('keydown', onKeyDown);
@@ -1333,7 +1373,9 @@ export function PagesPage({
                   title={enabledWorkflows.length === 0 ? t('pages.runAllWorkflowsNone') : t('pages.runAllWorkflowsTitle', enabledWorkflows.length)}
                 >
                   {anyWorkflowRunning ? <Loader2 size={12} className="spin" /> : <Play size={12} />}
-                  {t('pages.runAllWorkflows')}
+                  {runAllProgress && anyWorkflowRunning
+                    ? t('pages.runAllProgress', runAllProgress.done, runAllProgress.total)
+                    : t('pages.runAllWorkflows')}
                 </button>
               </header>
               {linkedWorkflows.length > 0 ? (
