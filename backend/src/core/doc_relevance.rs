@@ -156,6 +156,9 @@ pub struct RelevanceReport {
     /// The sections Kronn cannot measure (no citation, no path): handed to
     /// the agent pass to check or anchor. They do not raise the badge.
     pub unanchored: Vec<SectionRelevance>,
+    /// The docs where every judged section is unanchored: no verdict ever
+    /// reads them, so a pass re-reads them once per change (KT-1292).
+    pub unanchored_docs: Vec<String>,
 }
 
 impl RelevanceReport {
@@ -1078,6 +1081,7 @@ pub fn analyze_with_moves(
             known_missing: entry.map(|e| &e.known_missing),
             moved: moved.get(&doc),
         };
+        let before = (out.counts.sections, out.counts.unanchored);
         for section in split_sections(&content) {
             let Some(found) = judge(&ctx, &section, &mut out.counts) else {
                 continue;
@@ -1087,6 +1091,10 @@ pub fn analyze_with_moves(
                 SectionVerdict::Unanchored => out.unanchored.push(found),
                 _ => out.sections.push(found),
             }
+        }
+        let judged = out.counts.sections - before.0;
+        if judged > 0 && judged == out.counts.unanchored - before.1 {
+            out.unanchored_docs.push(doc);
         }
     }
     out.counts.finish();

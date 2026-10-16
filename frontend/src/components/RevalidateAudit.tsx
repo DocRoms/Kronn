@@ -520,6 +520,18 @@ export function RevalidateAudit({
                         </li>
                       ))}
                     </ul>
+                    <ul data-testid="revalidate-unanchored-docs">
+                      {(plan.unanchored_docs ?? []).map(u => (
+                        <li key={u.doc} data-testid="revalidate-unanchored-doc">
+                          <code>{u.doc}</code> — {u.reviewed_at
+                            ? t('audit.revalidate.relevance.unanchored.reread',
+                              new Date(u.reviewed_at).toLocaleDateString(locale))
+                            : t(u.owned
+                              ? 'audit.revalidate.relevance.unanchored.pending'
+                              : 'audit.revalidate.relevance.unanchored.unowned')}
+                        </li>
+                      ))}
+                    </ul>
                   </details>
                 )}
                 {plan.sections.length === 0

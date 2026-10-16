@@ -48,5 +48,16 @@ disarmed and nothing else happens.
 
 The principal is alerted in the parent room (`task_exec_review` / reassign /
 cancel are named). No review row is written and nothing is approved or
-rejected; the delivery, worktree and branch are intact. The execution keeps its
-existing human gate (`Escalated`, `await_human`) from `review_wait_timeout`.
+rejected; the delivery, worktree and branch are intact. The execution stays
+`AwaitingReview` (`recovery_action` `await_review`, `recovery_reason`
+`review_wait_timeout`, `pending = 0`) so `task_exec_review` still accepts an
+approval or a request for changes. The review and total-duration deadlines are
+disarmed: the alert is posted once. Because the row is not `Escalated`, an
+overdue review does not put the campaign in `AwaitingHuman` and does not block
+scheduling.
+
+A total-duration deadline that expires while the row is `AwaitingReview` takes
+the same road (`recovery_reason` `total_duration_timeout`): one alert, the
+execution stays `AwaitingReview`, and the provider run is not cancelled so a
+`request_changes` can still wake the worker. Any other state keeps the generic
+`Escalated` / `await_human` handling.

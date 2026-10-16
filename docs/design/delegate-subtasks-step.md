@@ -13,8 +13,9 @@ context alive while it waits. On EW-7633 that orchestrator cost 10.16 $ out of
 11.42 $, against 1.26 $ for the ten delegated subtasks (figures in KT-909). The
 only judgement in that loop is reading a delivery against its DoD.
 
-No workflow step can delegate: `StepType` has no variant that drives a task
-execution. `[src: file: backend/src/models/workflows.rs:890-963]`
+At 0.14.3 no workflow step could delegate: `StepType` had no variant that
+drives a task execution (0.15.0 adds `DelegateSubtasks`).
+`[src: file: backend/src/models/workflows.rs:1287-1290#DelegateSubtasks]`
 
 ## 2. What already exists (and is reused as is)
 
@@ -26,33 +27,35 @@ execution. `[src: file: backend/src/models/workflows.rs:890-963]`
   within the concurrency, budget and escalation limits, and, with
   `auto_continue`, launches the next launchable task after each integration
   under the idempotency key `campaign-auto:<run>:<task>`.
-  `[src: file: backend/src/db/orchestration.rs:979-1039]`
-  `[src: file: backend/src/api/orchestration.rs:2996-3060]`
+  `[src: file: backend/src/db/orchestration.rs:1160-1300#campaign_task_candidates]`
+  `[src: file: backend/src/api/orchestration.rs:3503-3605#advance_campaign_after_integration]`
 - **Worker resolution.** Explicit override, then the campaign default worker,
   then the principal discussion's identity.
-  `[src: file: backend/src/db/orchestration.rs:842-866]`
+  `[src: file: backend/src/db/orchestration.rs:1024-1052#resolve_campaign_worker]`
 - **Review contract.** `ReviewDecisionV1` with a verdict `approve |
   request_changes`, the reviewed HEAD, findings and DoD verifications.
   `decide_review` bumps the round on `request_changes`, sends the findings to
   the worker, and escalates (`Escalated`, principal solicited) when the budget
-  is spent. `[src: file: backend/src/models/orchestration.rs:1793-1845]`
-  `[src: file: backend/src/api/orchestration.rs:5255-5258]`
-  `[src: file: backend/src/api/orchestration.rs:5274-5282]`
-  `[src: file: backend/src/api/orchestration.rs:5580-5583]`
+  is spent. `[src: file: backend/src/models/orchestration.rs:1872-1878#ReviewVerdict]`
+  `[src: file: backend/src/models/orchestration.rs:1915-1938#ReviewDecisionV1]`
+  `[src: file: backend/src/api/orchestration.rs:6134-6141#decide_review]`
+  `[src: file: backend/src/db/orchestration.rs:3345-3354#ReviewCheckpoint]`
+  `[src: file: backend/src/db/orchestration.rs:3382-3394#ReviewCheckpointOutcome]`
 - **Reassignment** is its own operation (`reassign_execution`), and a human
-  decision has `human_review`. `[src: file: backend/src/api/orchestration.rs:9351]`
-  `[src: file: backend/src/api/orchestration.rs:12210]`
+  decision has `human_review`. `[src: file: backend/src/api/orchestration.rs:10651-10663#reassign_execution]`
+  `[src: file: backend/src/api/orchestration.rs:13818-13827#human_review]`
 - **Integration saga.** `run_integration` integrates an `Approved` execution
   into `run.target_branch`, through the single worktree where that branch is
-  checked out, refusing a dirty checkout, and sends a conflict back to the
-  worker. `[src: file: backend/src/api/orchestration.rs:2215-2420]`
-  `[src: file: backend/src/core/worktree.rs:1298-1318]`
+  checked out (or by moving the ref when no worktree has it), refusing a dirty
+  checkout, and sends a conflict back to the worker.
+  `[src: file: backend/src/api/orchestration.rs:2690-2948#run_integration]`
+  `[src: file: backend/src/core/worktree.rs:1963-1985#IntegrationTarget]`
 - **Workflow side.** `on_result` routes on a `[SIGNAL: X]` line among the last
   five of the step output; an Agent step can join a room through `room_id`
   (KT-793); `SubWorkflow` foreach records durable per-item markers.
-  `[src: file: backend/src/workflows/steps.rs:1882-1899]`
-  `[src: file: backend/src/models/workflows.rs:695]`
-  `[src: file: backend/src/workflows/sub_workflow_step.rs:631-648]`
+  `[src: file: backend/src/workflows/steps.rs:2044-2078#evaluate_conditions]`
+  `[src: file: backend/src/models/workflows.rs:957-961#room_id]`
+  `[src: file: backend/src/workflows/sub_workflow_step.rs:812-829#record_foreach_done]`
 
 So the step does not need a new orchestration engine: it needs a **mechanical
 principal** for a campaign, plus a **reviewer** that is not a long-lived room
@@ -66,20 +69,24 @@ branch. Checked against the code:
 
 - `OrchestrationRun.discussion_id` is mandatory; `target_workspace_id` is
   `Option` and `run_integration` never reads it.
-  `[src: file: backend/src/models/orchestration.rs:721-728]`
-- Integration targets `run.target_branch`, through the unique worktree that has
-  it checked out; the run needs a `project_id`.
-  `[src: file: backend/src/api/orchestration.rs:2281-2338]`
-- Every `task_exec_*` route requires the caller to be an active member of the
-  principal discussion (`principal_is_authorized`), and the review obligation
-  and the escalation are messages dispatched to the principal agent of that
-  discussion. `[src: file: backend/src/api/orchestration.rs:9753]`
-  `[src: file: backend/src/api/orchestration.rs:1404-1418]`
+  `[src: file: backend/src/models/orchestration.rs:721-728#OrchestrationRun]`
+- Integration targets `run.target_branch`: through the unique worktree that has
+  it checked out, or by moving the ref when no worktree has it; the run needs a
+  `project_id`. `[src: file: backend/src/api/orchestration.rs:2789-2845#integration_target]`
+- Every principal `task_exec_*` route requires the caller to be that
+  discussion's principal (`principal_is_authorized`): an active CLI session of
+  the discussion, or the room's native agent during its own running turn. The
+  review obligation and the escalation are messages posted to the principal of
+  that discussion.
+  `[src: file: backend/src/api/orchestration.rs:11053-11066#principal_is_authorized]`
+  `[src: file: backend/src/api/orchestration.rs:11068-11110#room_agent_is_authorized]`
+  `[src: file: backend/src/api/orchestration.rs:5254-5261#deliver_worker_manifest]`
+  `[src: file: backend/src/db/orchestration.rs:3297-3304#EscalationDelivery]`
 - A workflow run works in its own worktree on branch
-  `kronn/<workflow>/<run8>`. `[src: file: backend/src/workflows/workspace.rs:593-597]`
+  `kronn/<workflow>/<run8>`. `[src: file: backend/src/workflows/workspace.rs:730-733#build_branch_name]`
 
 So the real constraints are: a discussion that owns the campaign, a pinned
-target branch with exactly one clean checkout, and an authorized principal.
+target branch with at most one checkout, clean, and an authorized principal.
 The "target workspace" part of the finding is inaccurate today.
 
 **Proposal.**
@@ -129,10 +136,13 @@ Behaviour:
 2. Create (or, on resume, find) the campaign with `auto_continue: true`, then
    launch the launchable subtasks with an idempotency key
    `wf:<run>:<step>:<task>` and a per-task worker override.
-3. Wait for executions without an agent: event-driven on the execution state
-   (the same wait as `task_exec_status`'s `wait_for`, but in-process and
-   unbounded within `timeout_secs`).
-   `[src: file: backend/src/api/orchestration.rs:10690-10700]`
+3. Wait for executions without an agent: an SQL read of the execution state
+   every `IDLE_POLL` (2 s) when nothing moved, in-process and bounded by
+   `timeout_secs` (`task_exec_status`'s `wait_for` also re-reads the state, every
+   500 ms, capped at 170 s).
+   `[src: file: backend/src/workflows/delegate_subtasks_step.rs:42-45#IDLE_POLL]`
+   `[src: file: backend/src/workflows/delegate_subtasks_step.rs:279-289#idle]`
+   `[src: file: backend/src/api/orchestration.rs:12259-12297#wait_for_execution_status]`
 4. On each `AwaitingReview`: start **one fresh reviewer session** with a
    compact context (task title, DoD, delivered diff against `base_sha`, the
    worker's manifest and the validation results), no room history and no MCP
@@ -167,8 +177,8 @@ never cancelled implicitly. Structured data (`data.subtasks`):
 ```
 
 `cost_usd` and `tokens` sum the messages of the execution's sub-discussion and
-of its reviewer sessions (`Message.cost_usd`); `TaskExecution` has no cost
-field today. `[src: file: backend/src/models/discussions.rs:360]`
+of its reviewer sessions (`DiscussionMessage.cost_usd`); `TaskExecution` has no
+cost field today. `[src: file: backend/src/models/discussions.rs:369-371#cost_usd]`
 
 ## 6. Resume and cleanup
 

@@ -288,6 +288,13 @@ async fn a_revalidation_of_a_dot_ai_project_finds_and_fixes_its_citations_there(
     let mut moved = lines.clone();
     moved[2] = "fn renamed() {}".into();
     std::fs::write(project.join("src/kept.rs"), moved.join("\n") + "\n").unwrap();
+    // KT-1292 — the docs anchoring nothing count as re-read at the sources as
+    // they now stand: this scenario is about its citations.
+    let planned = crate::api::audit::revalidate::plan(project);
+    let steps =
+        crate::api::audit::steps_for(crate::models::AuditKind::Full, &DocsRoot::of(project));
+    let rereads = crate::api::audit::revalidate::RevalidationRun::of(&planned).rereads;
+    crate::api::audit::revalidate::stamp_rereads(project, &steps, &rereads).unwrap();
     let plan = crate::api::audit::revalidate::plan(project);
     let section = plan
         .sections

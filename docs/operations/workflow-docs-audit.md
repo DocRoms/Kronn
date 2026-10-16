@@ -52,4 +52,3 @@ editor local history, backups or Git objects. A previous staged version may
 have left a Git object; unstaged or untracked contents may have no Git copy.
 An unsuccessful object search does not prove that recovery is impossible.
 The new audit cannot reconstruct contents removed by an older release.
-

@@ -683,7 +683,11 @@ pub fn start_resilience_watchdog(state: AppState) {
                             Ok(
                                 crate::db::orchestration::get_task_execution(conn, &id)?.map(
                                     |execution| {
-                                        (execution.dispatch_job_id, execution.sub_discussion_id)
+                                        (
+                                            execution.dispatch_job_id,
+                                            execution.sub_discussion_id,
+                                            execution.status,
+                                        )
                                     },
                                 ),
                             )
@@ -692,8 +696,14 @@ pub fn start_resilience_watchdog(state: AppState) {
                         .ok()
                         .flatten()
                 };
+                // KT-1293 — a delivered attempt waiting for its review keeps its
+                // worker reachable (a `request_changes` wakes it): the total
+                // deadline alerts the principal there, it never stops the run.
+                let awaiting_review = keys.as_ref().is_some_and(|(_, _, status)| {
+                    *status == crate::models::TaskExecutionStatus::AwaitingReview
+                });
                 let cancel_provider_run = || {
-                    if let (Some((dispatch, child)), Ok(registry)) =
+                    if let (Some((dispatch, child, _)), Ok(registry)) =
                         (keys.as_ref(), state.cancel_registry.lock())
                     {
                         for key in [dispatch.as_deref(), child.as_deref()]
@@ -712,7 +722,7 @@ pub fn start_resilience_watchdog(state: AppState) {
                 // run's own teardown finds the row already parked instead of
                 // racing the interruption. A worker that produced activity in
                 // the meantime is not applied, hence never stopped.
-                if kind == crate::models::ExecutionTimeoutKind::TotalDuration {
+                if kind == crate::models::ExecutionTimeoutKind::TotalDuration && !awaiting_review {
                     cancel_provider_run();
                 }
                 let id = execution_id.clone();
@@ -5532,7 +5542,7 @@ async fn deliver_authorized_worker_manifest(
             manifest.task_ref, task.summary.reference
         )));
     }
-    if let Err(detail) = validate_manifest_claims(&task.definition_of_done, &manifest) {
+    if let Err(detail) = validate_manifest_claims(&task.definition_of_done, None, &manifest) {
         return Ok(DeliverOutcome::InvalidManifest(detail));
     }
     let git_validation = match git_facts.as_ref() {
@@ -5945,13 +5955,20 @@ fn same_git_identity(trailer: &str, identity: &str) -> bool {
     matches!((parts(trailer), parts(identity)), (Some(a), Some(b)) if a == b)
 }
 
+/// `worker_dod_ids` is the execution's launch-time DoD snapshot, passed when a
+/// delivered manifest is judged AFTER the task's DoD may have changed (KT-1291):
+/// the manifest pinned those ids, so one the principal since removed or carried
+/// to another task is a known id, not a foreign one. Coverage is still owed for
+/// every id the task holds NOW.
 fn validate_manifest_claims(
     task_dod: &[PlanningDodItem],
+    worker_dod_ids: Option<&[String]>,
     manifest: &DeliveryManifestV1,
 ) -> Result<(), String> {
     let expected = task_dod
         .iter()
         .map(|item| item.id.as_str())
+        .chain(worker_dod_ids.into_iter().flatten().map(String::as_str))
         .collect::<std::collections::HashSet<_>>();
     let mut seen = std::collections::HashSet::new();
     for status in &manifest.dod_status {
@@ -6436,6 +6453,28 @@ async fn decide_authorized_review(
         }
     }
 
+    // KT-1291 — items carried to another ticket leave this task INSIDE the review
+    // checkpoint transaction, with an event naming the carrier: a refused or failed
+    // checkpoint detaches nothing, and integration neither waits on them nor ticks
+    // them.
+    let carried_owned = if decision.decision == ReviewVerdict::Approve && reviewer_is_principal {
+        decision
+            .dod_verifications
+            .iter()
+            .filter_map(|verification| {
+                verification.carried_to.as_ref().map(|carrier| {
+                    (
+                        verification.dod_id.clone(),
+                        carrier.clone(),
+                        verification.evidence.clone(),
+                    )
+                })
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+
     // ── 6. Atomic review checkpoint (request_changes hands findings to the worker in the
     // child; approve touches neither child nor worktree). ──
     let outcome = {
@@ -6607,6 +6646,7 @@ async fn decide_authorized_review(
                     escalation,
                     reactivation,
                     native_dispatch,
+                    carried_dod: &carried_owned,
                     actor: &actor,
                 },
             )
@@ -6617,6 +6657,9 @@ async fn decide_authorized_review(
 
     use crate::db::orchestration::ReviewCheckpointOutcome;
     match outcome {
+        ReviewCheckpointOutcome::DodCarryRefused(detail) => Ok(ReviewOutcome::ApproveBlocked {
+            reason: ApproveBlockReason::ReviewEvidenceInvalid(detail),
+        }),
         ReviewCheckpointOutcome::Approved | ReviewCheckpointOutcome::ChangesRequested => {
             let eid = exec.id.clone();
             let execution = db
@@ -6799,7 +6842,13 @@ async fn approve_guards(
             "execution task no longer exists".into(),
         )));
     };
-    if let Err(detail) = validate_manifest_claims(&task.definition_of_done, &manifest) {
+    // KT-1291 — judged against the launch-time DoD snapshot: an item the
+    // principal removed or carried since the delivery is not a foreign id.
+    if let Err(detail) = validate_manifest_claims(
+        &task.definition_of_done,
+        exec.worker_dod_ids.as_deref(),
+        &manifest,
+    ) {
         return Ok(Some(ApproveBlockReason::ManifestClaimsInvalid(detail)));
     }
     if !reviewer_is_principal && !decision.dod_verifications.is_empty() {
@@ -6812,16 +6861,67 @@ async fn approve_guards(
         .iter()
         .map(|item| item.id.as_str())
         .collect::<std::collections::HashSet<_>>();
-    if let Some(foreign) = decision
-        .dod_verifications
+    // A carried item may already have left this task: its id is then the
+    // snapshot's.
+    let known_dod_ids = task_dod_ids
         .iter()
-        .find(|verification| !task_dod_ids.contains(verification.dod_id.as_str()))
-    {
+        .copied()
+        .chain(exec.worker_dod_ids.iter().flatten().map(String::as_str))
+        .collect::<std::collections::HashSet<_>>();
+    if let Some(foreign) = decision.dod_verifications.iter().find(|verification| {
+        let known = if verification.carried_to.is_some() {
+            &known_dod_ids
+        } else {
+            &task_dod_ids
+        };
+        !known.contains(verification.dod_id.as_str())
+    }) {
         return Ok(Some(ApproveBlockReason::ReviewEvidenceInvalid(format!(
             "review evidence references unknown DoD id `{}`",
             foreign.dod_id
         ))));
     }
+    // KT-1291 — an item carried to another ticket is explicit: unmet, not a
+    // live check, and its carrier exists, is open and holds the requirement.
+    let carried = decision
+        .dod_verifications
+        .iter()
+        .filter(|verification| verification.carried_to.is_some())
+        .collect::<Vec<_>>();
+    for verification in &carried {
+        let carrier = verification.carried_to.as_deref().unwrap_or_default();
+        if verification.met || verification.verification.is_some() {
+            return Ok(Some(ApproveBlockReason::ReviewEvidenceInvalid(format!(
+                "DoD `{}` carried to `{carrier}` must be `met: false` with no `verification`",
+                verification.dod_id
+            ))));
+        }
+        let (task_id, execution_id, dod_id, carrier_owned) = (
+            exec.task_id.clone(),
+            exec.id.clone(),
+            verification.dod_id.clone(),
+            carrier.to_string(),
+        );
+        let checked = db
+            .with_conn(move |conn| {
+                crate::db::planning::check_dod_carrier(
+                    conn,
+                    &task_id,
+                    &execution_id,
+                    &dod_id,
+                    &carrier_owned,
+                )
+            })
+            .await
+            .map_err(|e| ProvisionError::Internal(e.to_string()))?;
+        if let crate::db::planning::DodCarrierCheck::Refused(detail) = checked {
+            return Ok(Some(ApproveBlockReason::ReviewEvidenceInvalid(detail)));
+        }
+    }
+    let carried_ids = carried
+        .iter()
+        .map(|verification| verification.dod_id.as_str())
+        .collect::<std::collections::HashSet<_>>();
     // KT-1254 — items the principal checks live AFTER integration: declared on
     // the task, or by this very review. They never block approve; the task
     // stays open on them until they are ticked with evidence.
@@ -6871,7 +6971,9 @@ async fn approve_guards(
             .dod_verifications
             .iter()
             .filter(|verification| {
-                !verification.met && !post_integration.contains(verification.dod_id.as_str())
+                !verification.met
+                    && !post_integration.contains(verification.dod_id.as_str())
+                    && !carried_ids.contains(verification.dod_id.as_str())
             })
             .map(|verification| verification.dod_id.clone())
             .collect::<Vec<_>>();
@@ -6896,6 +6998,7 @@ async fn approve_guards(
             !status.met
                 && !verified.contains(status.dod_id.as_str())
                 && !post_integration.contains(status.dod_id.as_str())
+                && !carried_ids.contains(status.dod_id.as_str())
         })
         .map(|d| d.dod_id.clone())
         .collect::<Vec<_>>();
@@ -15211,29 +15314,50 @@ pub(crate) mod tests {
             evidence: None,
         }];
         let complete = parse_delivery_manifest(&manifest_json("abcdef1234567")).unwrap();
-        assert!(validate_manifest_claims(&dod, &complete).is_ok());
+        assert!(validate_manifest_claims(&dod, None, &complete).is_ok());
 
         let mut empty = complete.clone();
         empty.dod_status.clear();
-        assert!(validate_manifest_claims(&dod, &empty)
+        assert!(validate_manifest_claims(&dod, None, &empty)
             .unwrap_err()
             .contains("missing: d1"));
 
         let mut duplicate = complete.clone();
         duplicate.dod_status.push(duplicate.dod_status[0].clone());
-        assert!(validate_manifest_claims(&dod, &duplicate)
+        assert!(validate_manifest_claims(&dod, None, &duplicate)
             .unwrap_err()
             .contains("duplicate"));
 
         let mut unknown = complete.clone();
         unknown.dod_status[0].dod_id = "foreign".into();
-        assert!(validate_manifest_claims(&dod, &unknown)
+        assert!(validate_manifest_claims(&dod, None, &unknown)
+            .unwrap_err()
+            .contains("unknown DoD id `foreign`"));
+
+        // KT-1291 — an id the launch-time snapshot pinned and the task has
+        // since lost (removed, or carried to another ticket) is known; the
+        // snapshot never excuses an item the task holds now.
+        let mut carried = complete.clone();
+        let mut moved = carried.dod_status[0].clone();
+        moved.dod_id = "moved".into();
+        carried.dod_status.push(moved);
+        let snapshot = vec!["d1".to_string(), "moved".to_string()];
+        assert!(validate_manifest_claims(&dod, Some(&snapshot), &carried).is_ok());
+        assert!(validate_manifest_claims(&dod, None, &carried)
+            .unwrap_err()
+            .contains("unknown DoD id `moved`"));
+        let mut only_moved = carried.clone();
+        only_moved.dod_status.remove(0);
+        assert!(validate_manifest_claims(&dod, Some(&snapshot), &only_moved)
+            .unwrap_err()
+            .contains("missing: d1"));
+        assert!(validate_manifest_claims(&dod, Some(&snapshot), &unknown)
             .unwrap_err()
             .contains("unknown DoD id `foreign`"));
 
         let mut unproved = complete;
         unproved.dod_status[0].evidence = Some("  ".into());
-        assert!(validate_manifest_claims(&dod, &unproved)
+        assert!(validate_manifest_claims(&dod, None, &unproved)
             .unwrap_err()
             .contains("has no non-empty evidence"));
     }
@@ -22889,10 +23013,17 @@ pub(crate) mod tests {
             })
             .await
             .unwrap();
+            // KT-1293 — a review-wait or total-duration timeout keeps the
+            // delivery reviewable; reassigning it rejects that pending delivery
+            // (KT-791).
             let escalated = exec_of(&db, &exec_id).await;
+            let expected = if origin != "agent_unavailable" {
+                TaskExecutionStatus::AwaitingReview
+            } else {
+                TaskExecutionStatus::Escalated
+            };
             assert_eq!(
-                escalated.status,
-                TaskExecutionStatus::Escalated,
+                escalated.status, expected,
                 "{origin}: the execution must be parked before the reassignment"
             );
 
@@ -29755,6 +29886,594 @@ pub(crate) mod tests {
         assert_eq!(task.summary.live_checks.len(), 1);
     }
 
+    /// KT-1291 — the projects of the task an execution works on.
+    async fn projects_of(db: &Database, exec_id: &str) -> Vec<String> {
+        task_of(db, exec_id).await.summary.project_ids
+    }
+
+    /// KT-1291 — a task, in the same project as the execution's, to carry a DoD
+    /// item to; returns its `KT-n` reference.
+    async fn carrier_task(
+        db: &Database,
+        exec_id: &str,
+        status: PlanningTaskStatus,
+        sentence: &str,
+    ) -> String {
+        let projects = projects_of(db, exec_id).await;
+        carrier_task_in(db, projects, status, sentence).await
+    }
+
+    async fn carrier_task_in(
+        db: &Database,
+        project_ids: Vec<String>,
+        status: PlanningTaskStatus,
+        sentence: &str,
+    ) -> String {
+        let sentence = sentence.to_string();
+        db.with_conn(move |conn| {
+            Ok(crate::db::planning::create_task(
+                conn,
+                &CreatePlanningTaskRequest {
+                    title: "Carrier".into(),
+                    discussion_id: None,
+                    idempotency_key: None,
+                    description: String::new(),
+                    status,
+                    priority: Default::default(),
+                    parent_id: None,
+                    project_ids,
+                    tags: vec![],
+                    definition_of_done: vec![CreatePlanningDodItem {
+                        id: None,
+                        sentence,
+                        completed: false,
+                        verification: None,
+                    }],
+                    links: vec![],
+                    actor: test_actor(),
+                },
+            )?
+            .summary
+            .reference)
+        })
+        .await
+        .unwrap()
+    }
+
+    fn approve_carrying(head: &str, dod_id: &str, carried_to: &str) -> String {
+        serde_json::json!({
+            "version": "1",
+            "task_ref": "KT-1",
+            "decision": "approve",
+            "reviewed_head_sha": head,
+            "dod_verifications": [{
+                "dod_id": dod_id,
+                "met": false,
+                "evidence": "needs 10 more re-read lots, tracked on the carrier",
+                "carried_to": carried_to,
+            }],
+        })
+        .to_string()
+    }
+
+    async fn task_of(db: &Database, exec_id: &str) -> crate::models::PlanningTaskDetail {
+        let task_id = exec_of(db, exec_id).await.task_id;
+        db.with_conn(move |conn| crate::db::planning::get_task(conn, &task_id))
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    /// KT-1291 — the principal approves with an unmet item carried to an open
+    /// task that holds it: the delivery integrates, the item leaves this task
+    /// and an event names the carrier.
+    #[tokio::test]
+    async fn an_unmet_dod_carried_to_an_open_task_integrates_and_is_detached() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_task_ref, parent_id, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        unticked_dod(&db, &exec_id).await;
+        let path = managed_worktree_path(&db, &exec_id).await;
+        let head = git_rev(Path::new(&path), "HEAD");
+        let dod_id = dod_id_for_execution(&db, &exec_id).await;
+        deliver_worker_manifest(
+            &db,
+            &exec_id,
+            "ClaudeCode",
+            "sess-a",
+            &manifest_json_unmet(&db, &exec_id, &head).await,
+        )
+        .await
+        .unwrap();
+        seed_cli_session(&db, 102, &parent_id, "sess-b").await;
+        // Same requirement, stated on the carrier (extra spacing and case are
+        // not a different requirement).
+        let carrier = carrier_task(
+            &db,
+            &exec_id,
+            PlanningTaskStatus::Todo,
+            "le  module compile ET les tests passent.",
+        )
+        .await;
+
+        // Unmet without a carry: the guard still holds.
+        let plain = serde_json::json!({
+            "version": "1", "task_ref": "KT-1", "decision": "approve",
+            "reviewed_head_sha": head,
+            "dod_verifications": [{ "dod_id": dod_id, "met": false, "evidence": "not yet" }],
+        })
+        .to_string();
+        assert!(matches!(
+            decide_review(&db, &exec_id, &plain, "ClaudeCode", "sess-b")
+                .await
+                .unwrap(),
+            ReviewOutcome::ApproveBlocked {
+                reason: ApproveBlockReason::DodNotMet { .. }
+            }
+        ));
+
+        let decision = approve_carrying(&head, &dod_id, &carrier);
+        let reviewed = decide_review(&db, &exec_id, &decision, "ClaudeCode", "sess-b")
+            .await
+            .unwrap();
+        match continue_approved_review(&db, reviewed).await.unwrap() {
+            ReviewOutcome::Reviewed { execution, .. } => {
+                assert_eq!(execution.status, TaskExecutionStatus::Done);
+                assert!(execution.integrated_sha.is_some());
+            }
+            other => panic!("a carried item must not block the integration, got {other:?}"),
+        }
+
+        let task = task_of(&db, &exec_id).await;
+        assert!(task.definition_of_done.is_empty(), "the item left the task");
+        assert_eq!(task.summary.status, PlanningTaskStatus::Done);
+        let task_id = exec_of(&db, &exec_id).await.task_id;
+        let payload: String = db
+            .with_conn(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT changes_json FROM planning_task_events
+                      WHERE task_id = ?1 AND action = 'dod_carried'",
+                    [&task_id],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["carried_to"], carrier.as_str());
+        assert_eq!(payload["dod_id"], dod_id.as_str());
+        assert_eq!(
+            payload["sentence"],
+            "Le module compile et les tests passent."
+        );
+    }
+
+    /// KT-1291 — a carrier that is missing, closed, the task itself, in another
+    /// project or that does not hold the requirement refuses the approve and
+    /// detaches nothing; a carry that claims `met: true` is refused too.
+    #[tokio::test]
+    async fn a_dod_carried_to_a_missing_closed_or_unrelated_task_is_refused() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_task_ref, parent_id, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        unticked_dod(&db, &exec_id).await;
+        let path = managed_worktree_path(&db, &exec_id).await;
+        let head = git_rev(Path::new(&path), "HEAD");
+        let dod_id = dod_id_for_execution(&db, &exec_id).await;
+        deliver_worker_manifest(
+            &db,
+            &exec_id,
+            "ClaudeCode",
+            "sess-a",
+            &manifest_json_unmet(&db, &exec_id, &head).await,
+        )
+        .await
+        .unwrap();
+        seed_cli_session(&db, 102, &parent_id, "sess-b").await;
+        let own = task_of(&db, &exec_id).await.summary.reference;
+        let closed = carrier_task(
+            &db,
+            &exec_id,
+            PlanningTaskStatus::Done,
+            "Le module compile et les tests passent.",
+        )
+        .await;
+        let unrelated = carrier_task(
+            &db,
+            &exec_id,
+            PlanningTaskStatus::Todo,
+            "Something else entirely",
+        )
+        .await;
+        // Open and stating the very requirement, but in no project of this task.
+        let elsewhere = carrier_task_in(
+            &db,
+            vec![],
+            PlanningTaskStatus::Todo,
+            "Le module compile et les tests passent.",
+        )
+        .await;
+
+        for (carrier, expected) in [
+            ("KT-99999", "does not exist"),
+            (own.as_str(), "its own task"),
+            (closed.as_str(), "is closed"),
+            (elsewhere.as_str(), "shares no project"),
+            (unrelated.as_str(), "holds no unticked"),
+        ] {
+            let decision = approve_carrying(&head, &dod_id, carrier);
+            match decide_review(&db, &exec_id, &decision, "ClaudeCode", "sess-b")
+                .await
+                .unwrap()
+            {
+                ReviewOutcome::ApproveBlocked {
+                    reason: ApproveBlockReason::ReviewEvidenceInvalid(detail),
+                } => assert!(detail.contains(expected), "{carrier}: {detail}"),
+                other => panic!("carry to {carrier} must be refused, got {other:?}"),
+            }
+        }
+        let claims_met = serde_json::json!({
+            "version": "1", "task_ref": "KT-1", "decision": "approve",
+            "reviewed_head_sha": head,
+            "dod_verifications": [{
+                "dod_id": dod_id, "met": true, "evidence": "ran it", "carried_to": unrelated,
+            }],
+        })
+        .to_string();
+        assert!(matches!(
+            decide_review(&db, &exec_id, &claims_met, "ClaudeCode", "sess-b")
+                .await
+                .unwrap(),
+            ReviewOutcome::ApproveBlocked {
+                reason: ApproveBlockReason::ReviewEvidenceInvalid(_)
+            }
+        ));
+
+        let task = task_of(&db, &exec_id).await;
+        assert_eq!(task.definition_of_done.len(), 1, "nothing was detached");
+        assert_eq!(
+            exec_of(&db, &exec_id).await.status,
+            TaskExecutionStatus::AwaitingReview
+        );
+    }
+
+    /// A delivered, unmet execution awaiting the principal's review:
+    /// `(exec_id, head, dod_id)`.
+    async fn unmet_delivery(db: &Database, repo: &Path) -> (String, String, String) {
+        let (_task_ref, parent_id, _child, exec_id) = attached_cli_worker(db, repo).await;
+        unticked_dod(db, &exec_id).await;
+        let path = managed_worktree_path(db, &exec_id).await;
+        let head = git_rev(Path::new(&path), "HEAD");
+        let dod_id = dod_id_for_execution(db, &exec_id).await;
+        deliver_worker_manifest(
+            db,
+            &exec_id,
+            "ClaudeCode",
+            "sess-a",
+            &manifest_json_unmet(db, &exec_id, &head).await,
+        )
+        .await
+        .unwrap();
+        seed_cli_session(db, 102, &parent_id, "sess-b").await;
+        (exec_id, head, dod_id)
+    }
+
+    /// The principal removes every DoD item from the task through a normal
+    /// `task_update` (the KT-1074 move).
+    async fn remove_dod_by_update(db: &Database, exec_id: &str) {
+        let task_id = exec_of(db, exec_id).await.task_id;
+        db.with_conn(move |conn| {
+            crate::db::planning::update_task(
+                conn,
+                &task_id,
+                &crate::models::UpdatePlanningTaskRequest {
+                    title: None,
+                    description: None,
+                    status: None,
+                    priority: None,
+                    parent_id: None,
+                    blocked_reason: None,
+                    rank: None,
+                    project_ids: None,
+                    tags: None,
+                    definition_of_done: Some(vec![]),
+                    links: None,
+                    actor: test_actor(),
+                },
+            )
+        })
+        .await
+        .unwrap();
+    }
+
+    /// An execution launched before the snapshot recorded sentences.
+    async fn strip_launch_dod_snapshot(db: &Database, exec_id: &str) {
+        let exec_id = exec_id.to_string();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE task_execution_events
+                    SET changes_json = json_remove(changes_json, '$.worker_dod')
+                  WHERE task_execution_id = ?1 AND action = 'created'",
+                rusqlite::params![exec_id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    async fn task_event_payloads(
+        db: &Database,
+        exec_id: &str,
+        action: &str,
+    ) -> Vec<serde_json::Value> {
+        let (task_id, action) = (exec_of(db, exec_id).await.task_id, action.to_string());
+        db.with_conn(move |conn| {
+            let mut statement = conn.prepare(
+                "SELECT changes_json FROM planning_task_events
+                  WHERE task_id = ?1 AND action = ?2 ORDER BY rowid",
+            )?;
+            let rows = statement
+                .query_map(rusqlite::params![task_id, action], |row| {
+                    row.get::<_, String>(0)
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+        .await
+        .unwrap()
+        .iter()
+        .map(|payload| serde_json::from_str(payload).unwrap())
+        .collect()
+    }
+
+    /// KT-1291 — the principal moved the item to another ticket BEFORE approving
+    /// (the KT-1074 sequence): the manifest pins an id the task no longer holds.
+    /// It is judged against the execution's snapshot, not refused as unknown; an
+    /// unmet one still needs an explicit carry, and the carrier must state the
+    /// requirement the worker was briefed with — not just be an open task.
+    #[tokio::test]
+    async fn a_manifest_id_removed_after_the_delivery_is_judged_against_the_snapshot() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (exec_id, head, dod_id) = unmet_delivery(&db, repo.path()).await;
+        assert_eq!(
+            exec_of(&db, &exec_id).await.worker_dod_ids.as_deref(),
+            Some(&[dod_id.clone()][..]),
+            "the launch pinned the DoD snapshot"
+        );
+        let unrelated = carrier_task(
+            &db,
+            &exec_id,
+            PlanningTaskStatus::Todo,
+            "Fresh sample re-read",
+        )
+        .await;
+        let carrier = carrier_task(
+            &db,
+            &exec_id,
+            PlanningTaskStatus::Todo,
+            "Le module compile et les tests passent.",
+        )
+        .await;
+        remove_dod_by_update(&db, &exec_id).await;
+
+        // The manifest's unmet claim is for an id the task no longer holds: it
+        // is NOT "unknown DoD id", and it is not silently waved through either.
+        let bare = serde_json::json!({
+            "version": "1", "task_ref": "KT-1", "decision": "approve",
+            "reviewed_head_sha": head, "dod_verifications": [],
+        })
+        .to_string();
+        match decide_review(&db, &exec_id, &bare, "ClaudeCode", "sess-b")
+            .await
+            .unwrap()
+        {
+            ReviewOutcome::ApproveBlocked {
+                reason: ApproveBlockReason::DodNotMet { unmet },
+            } => assert_eq!(unmet, vec![dod_id.clone()]),
+            other => panic!("expected DodNotMet naming the removed item, got {other:?}"),
+        }
+
+        // An open task with an unticked item is not a carrier by itself.
+        match decide_review(
+            &db,
+            &exec_id,
+            &approve_carrying(&head, &dod_id, &unrelated),
+            "ClaudeCode",
+            "sess-b",
+        )
+        .await
+        .unwrap()
+        {
+            ReviewOutcome::ApproveBlocked {
+                reason: ApproveBlockReason::ReviewEvidenceInvalid(detail),
+            } => assert!(detail.contains("holds no unticked"), "{detail}"),
+            other => panic!("a carrier stating another requirement must be refused: {other:?}"),
+        }
+        assert!(task_event_payloads(&db, &exec_id, "dod_carried")
+            .await
+            .is_empty());
+
+        match decide_review(
+            &db,
+            &exec_id,
+            &approve_carrying(&head, &dod_id, &carrier),
+            "ClaudeCode",
+            "sess-b",
+        )
+        .await
+        .unwrap()
+        {
+            ReviewOutcome::Reviewed { execution, .. } => {
+                assert_eq!(execution.status, TaskExecutionStatus::Approved);
+            }
+            other => panic!("a carried, already-moved item must approve, got {other:?}"),
+        }
+        // The item already left the task, yet the event names the carrier.
+        let carried = task_event_payloads(&db, &exec_id, "dod_carried").await;
+        assert_eq!(carried.len(), 1);
+        assert_eq!(carried[0]["carried_to"], carrier.as_str());
+        assert_eq!(
+            carried[0]["sentence"],
+            "Le module compile et les tests passent."
+        );
+        // The update recorded what it removed.
+        let updated = task_event_payloads(&db, &exec_id, "updated").await;
+        assert_eq!(
+            updated.last().unwrap()["removed_dod"][0]["id"],
+            dod_id.as_str()
+        );
+    }
+
+    /// KT-1291 — an execution launched before the snapshot kept sentences still
+    /// recovers the requirement from the `updated` event that recorded the removed
+    /// item, and matches the carrier against it.
+    #[tokio::test]
+    async fn a_removed_dod_recorded_by_the_update_event_matches_the_carrier_sentence() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (exec_id, head, dod_id) = unmet_delivery(&db, repo.path()).await;
+        strip_launch_dod_snapshot(&db, &exec_id).await;
+        let unrelated =
+            carrier_task(&db, &exec_id, PlanningTaskStatus::Todo, "Anything else").await;
+        let carrier = carrier_task(
+            &db,
+            &exec_id,
+            PlanningTaskStatus::Todo,
+            "Le module compile et les tests passent.",
+        )
+        .await;
+        remove_dod_by_update(&db, &exec_id).await;
+
+        match decide_review(
+            &db,
+            &exec_id,
+            &approve_carrying(&head, &dod_id, &unrelated),
+            "ClaudeCode",
+            "sess-b",
+        )
+        .await
+        .unwrap()
+        {
+            ReviewOutcome::ApproveBlocked {
+                reason: ApproveBlockReason::ReviewEvidenceInvalid(detail),
+            } => assert!(detail.contains("holds no unticked"), "{detail}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert!(matches!(
+            decide_review(
+                &db,
+                &exec_id,
+                &approve_carrying(&head, &dod_id, &carrier),
+                "ClaudeCode",
+                "sess-b",
+            )
+            .await
+            .unwrap(),
+            ReviewOutcome::Reviewed { .. }
+        ));
+    }
+
+    /// KT-1291 — when no record names the requirement (removed behind the
+    /// events' back, from an execution without a sentence snapshot), the carry is
+    /// refused instead of matching any open task.
+    #[tokio::test]
+    async fn a_dod_carried_whose_sentence_cannot_be_recovered_is_refused() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (exec_id, head, dod_id) = unmet_delivery(&db, repo.path()).await;
+        strip_launch_dod_snapshot(&db, &exec_id).await;
+        let carrier = carrier_task(
+            &db,
+            &exec_id,
+            PlanningTaskStatus::Todo,
+            "Le module compile et les tests passent.",
+        )
+        .await;
+        let task_id = exec_of(&db, &exec_id).await.task_id;
+        db.with_conn(move |conn| {
+            conn.execute(
+                "DELETE FROM planning_task_dod_items WHERE task_id = ?1",
+                rusqlite::params![task_id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        match decide_review(
+            &db,
+            &exec_id,
+            &approve_carrying(&head, &dod_id, &carrier),
+            "ClaudeCode",
+            "sess-b",
+        )
+        .await
+        .unwrap()
+        {
+            ReviewOutcome::ApproveBlocked {
+                reason: ApproveBlockReason::ReviewEvidenceInvalid(detail),
+            } => assert!(detail.contains("cannot be recovered"), "{detail}"),
+            other => panic!("an unrecoverable sentence must refuse the carry, got {other:?}"),
+        }
+        assert_eq!(
+            exec_of(&db, &exec_id).await.status,
+            TaskExecutionStatus::AwaitingReview
+        );
+    }
+
+    /// KT-1291 — the carry rides the review checkpoint's transaction: when the
+    /// checkpoint fails after the guards passed, the item is still on the task,
+    /// no `dod_carried` event exists and no review row was persisted.
+    #[tokio::test]
+    async fn a_failed_review_checkpoint_detaches_no_carried_dod() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (exec_id, head, dod_id) = unmet_delivery(&db, repo.path()).await;
+        let carrier = carrier_task(
+            &db,
+            &exec_id,
+            PlanningTaskStatus::Todo,
+            "Le module compile et les tests passent.",
+        )
+        .await;
+        db.with_conn(|conn| {
+            conn.execute_batch(
+                "CREATE TRIGGER kt1291_checkpoint_fails
+                 BEFORE UPDATE OF status ON task_executions
+                 WHEN LOWER(NEW.status) = 'approved'
+                 BEGIN SELECT RAISE(ABORT, 'checkpoint failed'); END;",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let result = decide_review(
+            &db,
+            &exec_id,
+            &approve_carrying(&head, &dod_id, &carrier),
+            "ClaudeCode",
+            "sess-b",
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "the checkpoint must have failed: {result:?}"
+        );
+
+        assert_eq!(task_of(&db, &exec_id).await.definition_of_done.len(), 1);
+        assert!(task_event_payloads(&db, &exec_id, "dod_carried")
+            .await
+            .is_empty());
+        assert!(review_row(&db, &exec_id).await.is_none());
+        assert_eq!(
+            exec_of(&db, &exec_id).await.status,
+            TaskExecutionStatus::AwaitingReview
+        );
+    }
+
     /// KT-1254 round 2 — a live check is the principal's call: the worker's own
     /// session, an HTTP agent and an anonymous agent are refused when they set,
     /// remove or tick it; a live check is never ticked without evidence nor
@@ -31397,6 +32116,238 @@ pub(crate) mod tests {
             review_row(&db, &exec_id).await.unwrap().decision,
             "request_changes"
         );
+    }
+
+    /// Runs the real watchdog entry point for an expired clock.
+    async fn expire_clock(db: &Database, exec_id: &str, kind: crate::models::ExecutionTimeoutKind) {
+        let e = exec_id.to_string();
+        let applied = db
+            .with_conn(move |conn| {
+                crate::db::orchestration::apply_execution_timeout(conn, &e, kind)
+            })
+            .await
+            .unwrap();
+        assert!(applied, "the {kind:?} timeout must apply");
+    }
+
+    async fn expire_review_wait(db: &Database, exec_id: &str) {
+        expire_clock(db, exec_id, crate::models::ExecutionTimeoutKind::ReviewWait).await;
+    }
+
+    async fn expire_total_duration(db: &Database, exec_id: &str) {
+        expire_clock(
+            db,
+            exec_id,
+            crate::models::ExecutionTimeoutKind::TotalDuration,
+        )
+        .await;
+    }
+
+    /// KT-1293 — the total-duration deadline is armed on a delivered attempt
+    /// too; it takes the same road as the review clock: the principal is
+    /// alerted once and the execution stays reviewable.
+    #[tokio::test]
+    async fn a_total_duration_timeout_leaves_the_delivery_approvable() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (parent, _child, exec_id, _head, _path) =
+            delivered_awaiting_review(&db, repo.path()).await;
+
+        expire_total_duration(&db, &exec_id).await;
+
+        let parked = exec_of(&db, &exec_id).await;
+        assert_eq!(parked.status, TaskExecutionStatus::AwaitingReview);
+        let e = exec_id.clone();
+        let detail = db
+            .with_conn(move |conn| execution_detail(conn, &e))
+            .await
+            .unwrap();
+        let recovery = detail.recovery.as_ref().expect("recovery row");
+        assert_eq!(recovery.recovery_reason, "total_duration_timeout");
+        assert!(!recovery.pending);
+        assert!(recovery.review_deadline_at.is_none());
+        assert!(recovery.total_deadline_at.is_none(), "the alert fires once");
+        let next = compact_next_action(&detail).expect("a next action");
+        assert_eq!(next.tool, Some("task_exec_review"));
+
+        // The alert is posted once, names only tools the state accepts.
+        let e = exec_id.clone();
+        let alerts: Vec<String> = db
+            .with_conn(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT content FROM messages \
+                     WHERE discussion_id = ?1 AND id LIKE ?2",
+                )?;
+                let rows = stmt
+                    .query_map(
+                        rusqlite::params![parent, format!("orch-principal-timeout:{e}:%")],
+                        |r| r.get::<_, String>(0),
+                    )?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows)
+            })
+            .await
+            .unwrap();
+        assert_eq!(alerts.len(), 1, "{alerts:?}");
+        assert!(alerts[0].contains("`AwaitingReview`"), "{}", alerts[0]);
+        assert!(alerts[0].contains("task_exec_review"), "{}", alerts[0]);
+
+        let outcome = decide_review(
+            &db,
+            &exec_id,
+            &review_approve(&db, &exec_id).await,
+            "ClaudeCode",
+            "sess-b",
+        )
+        .await
+        .unwrap();
+        match outcome {
+            ReviewOutcome::Reviewed { verdict, execution } => {
+                assert_eq!(verdict, ReviewVerdict::Approve);
+                assert_eq!(execution.status, TaskExecutionStatus::Approved);
+            }
+            other => panic!("expected Reviewed/Approve after the timeout, got {other:?}"),
+        }
+    }
+
+    /// KT-1293 — same, for request_changes after the total-duration timeout.
+    #[tokio::test]
+    async fn a_total_duration_timeout_still_lets_the_principal_request_changes() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_parent, child_id, exec_id, _head, _path) =
+            delivered_awaiting_review(&db, repo.path()).await;
+
+        expire_total_duration(&db, &exec_id).await;
+
+        let outcome = decide_review(
+            &db,
+            &exec_id,
+            &review_request_changes("Corrige la garde manquante"),
+            "ClaudeCode",
+            "sess-b",
+        )
+        .await
+        .unwrap();
+        match outcome {
+            ReviewOutcome::Reviewed { verdict, execution } => {
+                assert_eq!(verdict, ReviewVerdict::RequestChanges);
+                assert_eq!(execution.status, TaskExecutionStatus::Blocked);
+            }
+            other => panic!("expected Reviewed/RequestChanges after the timeout, got {other:?}"),
+        }
+
+        let e = exec_id.clone();
+        let (disc, content, targets) = db
+            .with_conn(move |conn| {
+                let fid = format!("orch-review-findings:{e}:0");
+                let (disc, content): (String, String) = conn.query_row(
+                    "SELECT discussion_id, content FROM messages WHERE id = ?1",
+                    [&fid],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?;
+                let targets = crate::db::discussions::list_message_targets(conn, &fid)?;
+                Ok((disc, content, targets))
+            })
+            .await
+            .unwrap();
+        assert_eq!(disc, child_id, "the comment lands in the worker's room");
+        assert!(content.contains("Corrige la garde manquante"), "{content}");
+        assert_eq!(targets[0].cli_session_id, Some(101));
+    }
+
+    /// KT-1293 — the review-wait alert tells the principal to call
+    /// `task_exec_review`; the execution must therefore stay reviewable, and
+    /// `task_exec_status` must name the same tool.
+    #[tokio::test]
+    async fn a_review_wait_timeout_leaves_the_delivery_approvable() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_parent, _child, exec_id, _head, _path) =
+            delivered_awaiting_review(&db, repo.path()).await;
+
+        expire_review_wait(&db, &exec_id).await;
+
+        let parked = exec_of(&db, &exec_id).await;
+        assert_eq!(parked.status, TaskExecutionStatus::AwaitingReview);
+        let e = exec_id.clone();
+        let detail = db
+            .with_conn(move |conn| execution_detail(conn, &e))
+            .await
+            .unwrap();
+        let recovery = detail.recovery.as_ref().expect("recovery row");
+        assert_eq!(recovery.recovery_reason, "review_wait_timeout");
+        assert!(!recovery.pending);
+        assert!(
+            recovery.review_deadline_at.is_none(),
+            "the alert fires once"
+        );
+        let next = compact_next_action(&detail).expect("a next action");
+        assert_eq!(next.tool, Some("task_exec_review"));
+
+        let outcome = decide_review(
+            &db,
+            &exec_id,
+            &review_approve(&db, &exec_id).await,
+            "ClaudeCode",
+            "sess-b",
+        )
+        .await
+        .unwrap();
+        match outcome {
+            ReviewOutcome::Reviewed { verdict, execution } => {
+                assert_eq!(verdict, ReviewVerdict::Approve);
+                assert_eq!(execution.status, TaskExecutionStatus::Approved);
+            }
+            other => panic!("expected Reviewed/Approve after the timeout, got {other:?}"),
+        }
+        assert_eq!(review_row(&db, &exec_id).await.unwrap().decision, "approve");
+    }
+
+    /// KT-1293 — same, for the other door: the worker still gets the comment.
+    #[tokio::test]
+    async fn a_review_wait_timeout_still_lets_the_principal_request_changes() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_parent, child_id, exec_id, _head, _path) =
+            delivered_awaiting_review(&db, repo.path()).await;
+
+        expire_review_wait(&db, &exec_id).await;
+
+        let outcome = decide_review(
+            &db,
+            &exec_id,
+            &review_request_changes("Corrige la garde manquante"),
+            "ClaudeCode",
+            "sess-b",
+        )
+        .await
+        .unwrap();
+        match outcome {
+            ReviewOutcome::Reviewed { verdict, execution } => {
+                assert_eq!(verdict, ReviewVerdict::RequestChanges);
+                assert_eq!(execution.status, TaskExecutionStatus::Blocked);
+            }
+            other => panic!("expected Reviewed/RequestChanges after the timeout, got {other:?}"),
+        }
+
+        let e = exec_id.clone();
+        let (disc, content, targets) = db
+            .with_conn(move |conn| {
+                let fid = format!("orch-review-findings:{e}:0");
+                let (disc, content): (String, String) = conn.query_row(
+                    "SELECT discussion_id, content FROM messages WHERE id = ?1",
+                    [&fid],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?;
+                let targets = crate::db::discussions::list_message_targets(conn, &fid)?;
+                Ok((disc, content, targets))
+            })
+            .await
+            .unwrap();
+        assert_eq!(disc, child_id, "the comment lands in the worker's room");
+        assert!(content.contains("Corrige la garde manquante"), "{content}");
+        assert_eq!(targets[0].cli_session_id, Some(101));
     }
 
     /// KT-385: a native worker cannot be woken through wait_for_peer. Its rework

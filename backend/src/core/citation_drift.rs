@@ -77,6 +77,17 @@ pub struct DocFingerprints {
     pub known_missing: BTreeMap<String, Vec<String>>,
 }
 
+/// A doc no citation or path anchors was re-read by an agent pass (KT-1292):
+/// the doc as it stood, and the sources of the step that owns it. Either
+/// changing sends the doc back to its step.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocReview {
+    pub doc_sha256: String,
+    /// Digest of the owning step's sources when the doc was re-read.
+    pub sources_fingerprint: String,
+    pub reviewed_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct CitationsFile {
     #[serde(rename = "_readme", default)]
@@ -84,6 +95,10 @@ pub struct CitationsFile {
     /// Doc path relative to the project root (`docs/AGENTS.md`) → its citations.
     #[serde(default)]
     pub docs: BTreeMap<String, DocFingerprints>,
+    /// Doc path → when an agent pass last re-read it though nothing anchors
+    /// it. Only the docs sent for that reason have a stamp.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub reviews: BTreeMap<String, DocReview>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -440,7 +455,12 @@ pub fn record_all(project_path: &Path) -> Result<(), String> {
     // A previous record is read for what a human accepted, never rebuilt:
     // a validation does not accept a vanished path nobody was shown.
     let previous = read_strict(project_path).ok().flatten().unwrap_or_default();
-    let mut file = CitationsFile::default();
+    // A review stamp is no fingerprint of the code: a validation keeps it, and
+    // the doc hash and the sources digest decide later whether it still holds.
+    let mut file = CitationsFile {
+        reviews: previous.reviews.clone(),
+        ..Default::default()
+    };
     for doc in doc_files(project_path) {
         if let Some(content) = read_doc(project_path, &doc) {
             let entry = fingerprint_doc(
@@ -769,6 +789,45 @@ pub fn record_docs(
         }
     }
     write(project_path, &mut file)
+}
+
+/// Stamp each doc an agent pass re-read although nothing anchors it, whether
+/// or not the pass added anchors: `(doc, owning step's sources digest)`. The
+/// doc is hashed as it stands now, after the pass.
+pub fn record_reviews(project_path: &Path, reviewed: &[(String, String)]) -> Result<(), String> {
+    if reviewed.is_empty() {
+        return Ok(());
+    }
+    let mut file = read_strict(project_path)?.unwrap_or_default();
+    let now = chrono::Utc::now().to_rfc3339();
+    for (doc, sources_fingerprint) in reviewed {
+        if let Some(content) = read_doc(project_path, doc) {
+            file.reviews.insert(
+                doc.clone(),
+                DocReview {
+                    doc_sha256: sha256_hex(content.as_bytes()),
+                    sources_fingerprint: sources_fingerprint.clone(),
+                    reviewed_at: now.clone(),
+                },
+            );
+        }
+    }
+    write(project_path, &mut file)
+}
+
+/// The stamp of `doc` when it still holds for this content and these sources;
+/// `None` when never re-read, or edited / sources changed since. The sources
+/// digest is only computed once the doc itself matches.
+pub fn current_review<'a>(
+    file: Option<&'a CitationsFile>,
+    doc: &str,
+    content: &str,
+    sources_fingerprint: impl FnOnce() -> String,
+) -> Option<&'a DocReview> {
+    let stamp = file?.reviews.get(doc)?;
+    (stamp.doc_sha256 == sha256_hex(content.as_bytes())
+        && stamp.sources_fingerprint == sources_fingerprint())
+    .then_some(stamp)
 }
 
 // ─── Evaluation ───────────────────────────────────────────────────────────

@@ -20,7 +20,8 @@ This page is the operator workflow.
 3. Select a committed base SHA and preserve unrelated workspace changes. The
    child is pinned to that SHA; it never edits the parent checkout. Integration
    requires the selected target branch's checked-out worktree to be clean, not
-   every checkout of the project.
+   every checkout of the project; a target no worktree has checked out has
+   nothing to keep clean.
 4. Confirm that the chosen agent is installed and authenticated. HTTP agents
    such as Ollama, LiteLLM and NVIDIA can also be selected when configured.
 
@@ -134,9 +135,10 @@ without that tool asks the principal to relay it. This follows the accepted
 KT-635 brief policy, not a guarantee that every external host CLI obeys it.
 An unreviewed delivery never appears as an accepted report. After approval,
 Kronn derives one fixed-layout report; replay does not produce another.
-[src: file: backend/src/api/orchestration.rs:5494]
-[src: file: backend/src/api/orchestration.rs:15830]
-[src: file: backend/src/api/orchestration.rs:18430]
+[src: file: backend/src/api/orchestration.rs:7915-7919#has_room_publication]
+[src: file: backend/src/api/orchestration.rs:7939-7964#parent_milestones]
+[src: file: backend/src/api/orchestration.rs:6777-6802#publish_accepted_delivery_or_warn]
+[src: file: backend/src/api/orchestration.rs:29537-29638#approving_a_delivery_publishes_one_derived_report_in_the_parent]
 
 Native conversational handoffs are a separate opt-in from launching a planning
 task. Their paid/unknown allowance is configurable and shared by the originating
@@ -144,10 +146,11 @@ human turn. Removing that allowance explicitly does not remove structural
 guards: only attached, not-already-scheduled targets can run, delegation depth
 remains bounded and local handoffs retain a fixed ceiling. A typed wake to a
 joined CLI never silently substitutes a native responder.
-[src: file: backend/src/models/setup.rs:236]
-[src: file: backend/src/db/discussions.rs:1584]
-[src: file: backend/src/db/discussions.rs:1660]
-[src: file: backend/src/db/discussions.rs:1728]
+[src: file: backend/src/models/setup.rs:285-301#agent_handoff_paid_limit]
+[src: file: backend/src/db/discussions.rs:1672-1673#MAX_AGENT_HANDOFF_DEPTH]
+[src: file: backend/src/db/discussions.rs:1681-1716#agent_handoff_root]
+[src: file: backend/src/db/discussions.rs:1921-1961#cli_mention_targets]
+[src: file: backend/src/db/discussions.rs:2012-2055#already_scheduled]
 
 ### Highlight a message without changing the task
 
@@ -163,8 +166,9 @@ browser does not. If an outcome is uncertain, retry reconciles that exact
 attempt before another write. See [important messages](../architecture/important-messages.md#human-form-0130-kt-643)
 for the lifecycle and [publication authority](../architecture/important-message-publication-authority.md)
 for enrollment, recovery and security limits.
-[src: file: frontend/src/components/ImportantMessageForm.tsx:1]
-[src: file: frontend/src/lib/submitImportantMessage.ts:1]
+[src: file: frontend/src/components/ImportantMessageForm.tsx:87-110#onGrantChange]
+[src: file: frontend/src/lib/importantMessageDraft.ts:16-20#drafts]
+[src: file: frontend/src/lib/submitImportantMessage.ts:23-35#submitImportantMessage]
 
 ## Review and integrate
 
@@ -175,21 +179,27 @@ delivery manifest and diff, then choose one of:
   the delivered attempt and exact HEAD. Kronn then builds and validates that
   candidate in an ephemeral integration worktree. The selected target branch
   advances only by a guarded fast-forward after checking the expected target
-  SHA and clean worktree, with a backup ref. These checks followed by
-  `git merge --ff-only` are not an atomic compare-and-swap transaction.
-  [src: file: backend/src/core/worktree.rs:1419-1447]
+  SHA and clean worktree, with a backup ref. For a target checked out in a
+  worktree, these checks followed by `git merge --ff-only` are not an atomic
+  compare-and-swap transaction; a target no worktree has checked out advances
+  by a `git update-ref` compare-and-swap instead.
+  [src: file: backend/src/core/worktree.rs:1869-1897#write_backup_ref]
+  [src: file: backend/src/core/worktree.rs:2061-2081#fast_forward_target_to]
+  [src: file: backend/src/core/worktree.rs:2006-2058#update_ref_target_to]
 - **Request changes** — enter concrete feedback. The same worker, discussion,
   branch and worktree resume for the next bounded review round.
 
 Review-budget exhaustion escalates to the parent; it never converts a rejected
 candidate into an approval.
 
-Normal integration and restart recovery resolve the unique checked-out worktree
-of that pinned local target branch. A missing or ambiguous checkout, a changed
-target HEAD, or dirty target files stop the operation without switching or
-overwriting another checkout. Unrelated changes in the registered project's
+Normal integration and restart recovery resolve the shape of that pinned local
+target branch: checked out in exactly one worktree, or in none. Several
+checkouts, a target that is not a local branch, a changed target tip, or dirty
+files in the one checkout stop the operation without switching or overwriting
+another checkout. Unrelated changes in the registered project's
 main checkout do not block a clean target in another worktree. See
 [`pinned-target-worktree.md`](../testing/pinned-target-worktree.md).
+[src: file: backend/src/core/worktree.rs:1978-1985#integration_target]
 
 Worker-written DoD claims, a checked box in the live Planning task and a
 principal approval without attempt-scoped evidence are all insufficient. This
@@ -257,6 +267,37 @@ The limits worth knowing:
 - Nothing in this section is inferred. No metric, timestamp or verdict is
   derived from the worker's own claims.
 
+### A DoD item carried to another ticket
+
+An item that cannot be proven within this task (it needs lots that belong to
+another ticket) is carried, not moved by hand. The principal approves with a
+`dod_verifications` entry `{dod_id, met: false, evidence, carried_to: "KT-1290"}`.
+The carry is accepted only when the carrier is another task that exists, is
+not `done` or `archived`, shares a project with this task, and holds the
+requirement as an unticked DoD item with the same sentence (case and spacing
+aside). The sentence compared is the one the worker was briefed with: the
+execution records the `{id, sentence}` of its DoD items in its `created`
+event, and a `task_update` that removes an item records it (id and sentence)
+in the `removed_dod` of its `updated` event. The approve then integrates
+normally (validations, evidence, auto-tick of the other items); the item is
+detached from this task and a `dod_carried` event on the task names the
+carrier, the item's sentence and the principal's evidence. The detach runs in
+the review checkpoint's transaction, so a refused or failed approve detaches
+nothing. A carry that claims `met: true`, names itself, a missing or a closed
+task, a task of another project, or a task that does not hold the requirement
+is refused with that cause.
+
+The delivered manifest is judged against the execution's launch-time DoD
+snapshot, not against the task's current items: an id the principal removed or
+moved since the delivery is a known id, never "unknown". An item the task no
+longer holds that the manifest reports unmet still needs the explicit carry
+above; omitting it refuses the approve with that id.
+
+When no record names the sentence (an execution launched before the snapshot
+kept sentences, whose item was removed without a trace), the carry is refused
+instead of matching any open task: state the requirement on the carrier and
+restore the item on this task before carrying it.
+
 ### The Definition of Done after an integration
 
 An approve that integrates ticks the DoD items it verified, in the same
@@ -316,7 +357,7 @@ durable child discussion that the runtime will actually execute.
 | Validation failed | Open the child discussion, fix the reported command, deliver again. |
 | Target branch moved | Refresh/relaunch against the new target; Kronn will not overwrite it. |
 | Dirty target worktree | Intentionally preserve or commit changes in the selected target branch's checkout, then retry integration. Do not move unrelated files from another checkout. |
-| Target checkout missing or ambiguous | Restore exactly one checkout of the pinned local target branch before retrying; Kronn does not choose or switch a branch for you. |
+| Target checked out in several worktrees, or not a local branch | Leave at most one checkout of the pinned local target branch, and make sure the target is a branch, not a tag or SHA, before retrying; Kronn does not choose or switch a branch for you. |
 | Missing workspace | Restore/register the project workspace; do not edit execution rows manually. |
 | Interrupted after restart | Read the persisted reason, verify the worker/worktree, then use the guarded resume/reassign action. |
 | Initial CLI offer never accepted | Resume/reassign do not apply to `Blocked` from `Provisioning`. The principal may cancel with workspace preservation, verify the old execution is terminal, set the task back to `todo` (`task_update status=todo`; the cancel keeps its status, usually `in_progress`, and the launch preflight refuses any other status), then select the exact available CLI and prepare a new execution for the same task. Launch only after a fresh launchable preflight confirms no active duplicate. Do not silently substitute a different CLI identity. |

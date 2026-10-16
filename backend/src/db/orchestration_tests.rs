@@ -2207,21 +2207,26 @@ fn an_unreviewed_delivery_alerts_the_principal_without_deciding() {
         )
         .unwrap();
     assert_eq!(reviews, 0);
+    // KT-1293 — the alert names `task_exec_review`, which only accepts an
+    // `AwaitingReview` row: the timeout must not move the execution.
     let after = get_task_execution(&conn, &execution.id).unwrap().unwrap();
-    assert!(
-        !matches!(
-            after.status,
-            TaskExecutionStatus::Approved
-                | TaskExecutionStatus::Done
-                | TaskExecutionStatus::Cancelled
-                | TaskExecutionStatus::ChangesRequested
-        ),
-        "{:?}",
-        after.status
-    );
+    assert_eq!(after.status, TaskExecutionStatus::AwaitingReview);
+    let recovery = get_execution_recovery(&conn, &execution.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovery.recovery_reason, "review_wait_timeout");
+    assert!(!recovery.pending);
+    assert!(recovery.review_deadline_at.is_none());
     let alerts = parent_room_alerts(&conn);
     assert_eq!(alerts.len(), 1, "{alerts:?}");
     assert!(alerts[0].contains("task_exec_review"), "{}", alerts[0]);
+    assert!(alerts[0].contains("AwaitingReview"), "{}", alerts[0]);
+
+    // Notified once: the disarmed clock is never reported again.
+    assert!(expired_execution_timeouts(&conn, Utc::now())
+        .unwrap()
+        .is_empty());
+    assert_eq!(parent_room_alerts(&conn).len(), 1);
 }
 
 #[test]
@@ -5929,6 +5934,7 @@ fn requested_changes_publish_a_steering_card_beside_the_findings() {
             escalation: None,
             reactivation: None,
             native_dispatch: None,
+            carried_dod: &[],
             actor: &backend_actor(),
         },
     )
@@ -5993,6 +5999,7 @@ fn requested_changes_publish_a_steering_card_beside_the_findings() {
             escalation: None,
             reactivation: None,
             native_dispatch: None,
+            carried_dod: &[],
             actor: &backend_actor(),
         },
     );
