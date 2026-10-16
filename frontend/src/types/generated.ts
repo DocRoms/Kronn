@@ -2740,7 +2740,13 @@ export type DependencyCheckStatus = "UpToDate" | "UpdatesAvailable" | "Unsupport
 
 export type DependencyManagerUpdate = { manager: string, manifest: string, status: DependencyCheckStatus, outdated: number, major: number, packages?: Array<DependencyUpdatePackage>, };
 
-export type DependencyUpdatePackage = { name: string, current: string, latest: string, major: boolean, };
+export type DependencyUpdatePackage = { name: string, current: string, latest: string, major: boolean, 
+/**
+ * The package is declared but not installed (no `node_modules`): `current`
+ * is empty because no installed version exists to report, and the row
+ * only proves the declared range cannot reach `latest`.
+ */
+declared_only?: boolean, };
 
 export type DependencyUpdateSummary = { managers: Array<DependencyManagerUpdate>, total_outdated: number, total_major: number, checked_at: string, cached: boolean,
 /**

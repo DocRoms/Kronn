@@ -175,7 +175,11 @@ export function ProjectDependenciesBlock({ projectId, enabled }: { projectId: st
                           className={pkg.major ? 'project-overview-dependency-package-major' : undefined}
                         >
                           {index > 0 ? ' · ' : ''}
-                          {pkg.name} {pkg.current} → {pkg.latest}
+                          {pkg.name}{' '}
+                          {pkg.declared_only
+                            ? t('projects.master.overview.dependencyDeclaredOnly')
+                            : pkg.current}
+                          {' → '}{pkg.latest}
                         </span>
                       ))}
                       {manager.outdated > 3 && <span>{` · +${manager.outdated - 3}`}</span>}

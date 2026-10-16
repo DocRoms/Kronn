@@ -492,7 +492,13 @@ Release notes for 0.9.3 and earlier are available in the
   Jenkinsfile's `nodejs '…'` tool and node-versioned agent label, and a
   Dockerfile's `FROM node:<v>` / `ARG NODE_VERSION`; when nothing is parsed the
   audit block says « None parsed by Kronn » and lists the CI files present
-  instead of « None found ».
+  instead of « None found ». Review follow-up: a package npm lists without an
+  installed version is flagged `declared_only` and shown as « not installed »,
+  never as the version in place; a `node_modules` holding only `.cache` / `.bin`
+  is not an install; a Jenkins label needs `node` / `nodejs` directly followed
+  by a major (`build-node-1` is a host); a Dockerfile pin needs a leading digit
+  and a multi-stage file marks its last stage as the runtime one; Renovate
+  warnings no longer drop resolved updates.
 - What a task worker starts ends with its dispatch, and Vite runs in its lane
   (KT-1266). A backend or a Vite started from the agent's shell tool ran in a
   process group of its own and kept listening on the lane's ports after the

@@ -32,6 +32,8 @@ pub struct WatchedPackage {
     pub current: String,
     pub latest: String,
     pub major: bool,
+    /// Declared in the manifest, not installed: `current` is empty.
+    pub declared_only: bool,
 }
 
 /// A manifest the watch could not check: its packages have no dated source.
@@ -68,6 +70,7 @@ impl DependencySnapshot {
                         current: p.current.clone(),
                         latest: p.latest.clone(),
                         major: p.major,
+                        declared_only: p.declared_only,
                     }))
                 }
                 DependencyCheckStatus::UpToDate => {
@@ -138,10 +141,17 @@ pub fn verify_dep_marker(
     match snapshot.holds(&manager, &package) {
         Some(row) => Some((
             SourceStatus::Verified,
-            format!(
-                "dependency watch {}: {} {} → {}",
-                snapshot.checked_on, row.manifest, row.current, row.latest
-            ),
+            if row.declared_only {
+                format!(
+                    "dependency watch {}: {} declared, not installed → latest {}",
+                    snapshot.checked_on, row.manifest, row.latest
+                )
+            } else {
+                format!(
+                    "dependency watch {}: {} {} → {}",
+                    snapshot.checked_on, row.manifest, row.current, row.latest
+                )
+            },
         )),
         None => Some((
             SourceStatus::NotFound,
@@ -162,6 +172,17 @@ pub struct CiRuntime {
     pub file: String,
     /// 1-based line.
     pub line: usize,
+    /// Dockerfile multi-stage builds: which stage this `FROM` is.
+    pub stage: Option<Stage>,
+}
+
+/// A stage of a multi-stage Dockerfile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    /// An intermediate stage: the image it pins is not what ships.
+    Build,
+    /// The last stage: the image that runs.
+    Runtime,
 }
 
 fn read_pin_file(root: &Path, rel: &str) -> Option<String> {
@@ -195,6 +216,7 @@ fn push(out: &mut Vec<CiRuntime>, runtime: &str, version: &str, file: &str, line
         version: version.to_string(),
         file: file.to_string(),
         line,
+        stage: None,
     });
 }
 
@@ -312,17 +334,26 @@ fn quoted_after<'a>(line: &'a str, keyword: &str) -> Option<&'a str> {
     None
 }
 
-/// The Node version in an agent label: `slavenodejs18`, `node-20`, `nodejs_22.1`.
+/// The Node version in an agent label: `slavenodejs18`, `node22-arm`.
+/// `node` / `nodejs` must be directly followed by a plausible major (10 to 99,
+/// no leading zero): `build-node-1` or `docker-node-02` name a host, not Node.
 fn node_label_version(label: &str) -> Option<String> {
     let lower = label.to_ascii_lowercase();
-    let rest = &lower[lower.find("node")? + 4..];
-    let rest = rest.strip_prefix("js").unwrap_or(rest);
-    let rest = rest.trim_start_matches(['-', '_', ' ', 'v']);
-    if rest.starts_with(|c: char| c.is_ascii_digit()) {
-        first_version_number(rest)
-    } else {
-        None
+    let mut from = 0;
+    while let Some(found) = lower[from..].find("node") {
+        let mut rest = &lower[from + found + 4..];
+        from += found + 4;
+        rest = rest.strip_prefix("js").unwrap_or(rest);
+        let digits = rest.chars().take_while(char::is_ascii_digit).count();
+        if digits == 2 && !rest.starts_with('0') {
+            let follows = rest[2..].chars().next();
+            // `node22-arm`, `node18.4`; not `node2024` or `node22x1`.
+            if follows.is_none_or(|c| !c.is_ascii_alphanumeric()) {
+                return first_version_number(rest);
+            }
+        }
     }
+    None
 }
 
 /// Jenkins: `tools { nodejs '22' }` and node-versioned agent labels.
@@ -341,8 +372,23 @@ fn scan_jenkinsfile(text: &str, file: &str, out: &mut Vec<CiRuntime>) {
     }
 }
 
-/// Dockerfile: `FROM node:20-alpine` and `ARG NODE_VERSION=20`.
+/// A version string: a leading digit, so `lts-alpine`, `current` and an
+/// unresolved `$NODE_VERSION` are not versions.
+fn plausible_node_version(value: &str) -> Option<&str> {
+    let value = value.trim_start_matches('v');
+    value
+        .starts_with(|c: char| c.is_ascii_digit())
+        .then_some(value)
+}
+
+/// Dockerfile: `FROM node:20-alpine` and `ARG NODE_VERSION=20`. One row per
+/// `FROM node:…` stage with its line; in a multi-stage file the last `FROM`
+/// is the stage that runs, the earlier ones only build.
 fn scan_dockerfile(text: &str, file: &str, out: &mut Vec<CiRuntime>) {
+    let first_new = out.len();
+    let mut from_lines = 0;
+    let mut last_from_line = 0;
+    let mut node_stage_rows = Vec::new();
     for (i, raw) in text.lines().enumerate() {
         let mut words = raw.split_whitespace();
         let Some(instruction) = words.next() else {
@@ -352,10 +398,14 @@ fn scan_dockerfile(text: &str, file: &str, out: &mut Vec<CiRuntime>) {
             let declared = words.next().and_then(|word| word.split_once('='));
             if let Some((name, value)) = declared {
                 if runtime_of_version_key(name) == Some("node") {
-                    push(out, "node", unquote(value), file, i + 1);
+                    if let Some(version) = plausible_node_version(unquote(value)) {
+                        push(out, "node", version, file, i + 1);
+                    }
                 }
             }
         } else if instruction.eq_ignore_ascii_case("FROM") {
+            from_lines += 1;
+            last_from_line = i + 1;
             let Some(image) = words.find(|word| !word.starts_with("--")) else {
                 continue;
             };
@@ -365,9 +415,25 @@ fn scan_dockerfile(text: &str, file: &str, out: &mut Vec<CiRuntime>) {
                 continue;
             };
             let version = tag.split('-').next().unwrap_or(tag);
-            let version = version.trim_start_matches('v');
-            if name == "node" && !version.is_empty() && !version.contains('$') {
-                push(out, "node", version, file, i + 1);
+            if name == "node" {
+                if let Some(version) = plausible_node_version(version) {
+                    let before = out.len();
+                    push(out, "node", version, file, i + 1);
+                    if out.len() > before {
+                        node_stage_rows.push(before);
+                    }
+                }
+            }
+        }
+    }
+    if from_lines > 1 {
+        for index in node_stage_rows {
+            if let Some(row) = out.get_mut(index).filter(|_| index >= first_new) {
+                row.stage = Some(if row.line == last_from_line {
+                    Stage::Runtime
+                } else {
+                    Stage::Build
+                });
             }
         }
     }
@@ -662,7 +728,11 @@ source citation AND its date; the `In place` cell keeps the lockfile or manifest
                         p.manager,
                         p.manifest,
                         p.name,
-                        p.current,
+                        if p.declared_only {
+                            "not installed (declared range only; installed version unknown)"
+                        } else {
+                            p.current.as_str()
+                        },
                         p.latest,
                         if p.major { "major" } else { "minor/patch" },
                         snapshot.citation(p)
@@ -716,9 +786,14 @@ source citation AND its date; the `In place` cell keeps the lockfile or manifest
     } else {
         out.push_str("| Runtime | Version | Cite as |\n|---|---|---|\n");
         for r in runtimes {
+            let role = match r.stage {
+                Some(Stage::Runtime) => " (final stage: what runs)",
+                Some(Stage::Build) => " (build stage)",
+                None => "",
+            };
             out.push_str(&format!(
-                "| {} | {} | [src: file: {}:{}] |\n",
-                r.runtime, r.version, r.file, r.line
+                "| {}{} | {} | [src: file: {}:{}] |\n",
+                r.runtime, role, r.version, r.file, r.line
             ));
         }
     }

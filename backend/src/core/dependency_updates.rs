@@ -623,12 +623,15 @@ fn parse_renovate_updates(
                 };
                 // A skipped dependency, a failed lookup or a dependency that
                 // was never looked up (no `updates` array) is not a verdict.
+                // Warnings alone do not discard resolved updates: only a
+                // warned dependency with nothing resolved is unknown.
+                let updates = dependency.get("updates").and_then(Value::as_array);
+                let warned = dependency
+                    .get("warnings")
+                    .and_then(Value::as_array)
+                    .is_some_and(|warnings| !warnings.is_empty());
                 if dependency.get("skipReason").is_some()
-                    || !dependency.get("updates").is_some_and(Value::is_array)
-                    || dependency
-                        .get("warnings")
-                        .and_then(Value::as_array)
-                        .is_some_and(|warnings| !warnings.is_empty())
+                    || updates.is_none_or(|updates| warned && updates.is_empty())
                 {
                     continue;
                 }
@@ -808,10 +811,41 @@ fn npm_outdated_args(covers_nested: bool, installed: bool) -> Vec<&'static str> 
     args
 }
 
-/// Whether the manifest's directory holds an installed dependency tree.
+/// Whether `node_modules` holds a real install: an installer's state file or
+/// a package entry. A directory with only `.cache` or `.bin` is not one.
+fn node_modules_holds_packages(node_modules: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(node_modules) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        !name.starts_with('.')
+            || matches!(
+                name.as_ref(),
+                ".package-lock.json" | ".yarn-state.yml" | ".modules.yaml"
+            )
+    })
+}
+
+/// Whether npm will find installed packages for this manifest: its own
+/// `node_modules`, or, for a workspace member whose dependencies are hoisted,
+/// the install of an ancestor (inside the project) that declares `workspaces`:
+/// npm run from a member uses that root. An ancestor without `workspaces` is
+/// not used by npm, so its install says nothing about this manifest.
 fn js_dependencies_installed(manifest: &DetectedManifest) -> bool {
-    std::fs::read_dir(manifest.directory.join("node_modules"))
-        .is_ok_and(|mut entries| entries.next().is_some())
+    if node_modules_holds_packages(&manifest.directory.join("node_modules")) {
+        return true;
+    }
+    manifest
+        .directory
+        .ancestors()
+        .skip(1)
+        .take_while(|dir| dir.starts_with(&manifest.project_root))
+        .any(|dir| {
+            manifest_covers_nested(ManagerKind::JavaScript, &dir.join("package.json"))
+                && node_modules_holds_packages(&dir.join("node_modules"))
+        })
 }
 
 /// Whether a `package.json` has anything to install: dependencies of its own,
@@ -931,6 +965,7 @@ fn update_package(name: &str, current: &str, latest: &str) -> Option<DependencyU
             (Some(current), Some(latest)) => latest > current,
             _ => false,
         },
+        declared_only: false,
     })
 }
 
@@ -947,11 +982,20 @@ fn parse_npm_outdated(output: &str) -> Result<Vec<DependencyUpdatePackage>, ()> 
         .iter()
         .filter_map(|(name, entry)| {
             let latest = entry.get("latest")?.as_str()?;
-            let current = entry
-                .get("current")
-                .and_then(Value::as_str)
-                .or_else(|| entry.get("wanted").and_then(Value::as_str))?;
-            update_package(name, current, latest)
+            match entry.get("current").and_then(Value::as_str) {
+                Some(current) => update_package(name, current, latest),
+                // No installed version: `wanted` is only the highest registry
+                // version the declared range allows, neither the installed
+                // version nor the range floor. It still proves `latest` is out
+                // of range, but it must never be shown as what is in place.
+                None => {
+                    let wanted = entry.get("wanted").and_then(Value::as_str)?;
+                    let mut package = update_package(name, wanted, latest)?;
+                    package.current = String::new();
+                    package.declared_only = true;
+                    Some(package)
+                }
+            }
         })
         .collect())
 }
@@ -1426,6 +1470,7 @@ mod tests {
                 current: "1.0.0".into(),
                 latest: "1.1.0".into(),
                 major: false,
+                declared_only: false,
             })
             .collect();
         packages.push(DependencyUpdatePackage {
@@ -1433,6 +1478,7 @@ mod tests {
             current: "1.3.0".into(),
             latest: "2.0.1".into(),
             major: true,
+            declared_only: false,
         });
 
         let update = finalize_manager(&manifest, packages);
@@ -1590,6 +1636,99 @@ mod tests {
         );
         assert_eq!(update.status, DependencyCheckStatus::UpdatesAvailable);
         assert_eq!(update.major, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rows_without_an_installed_version_are_declared_only_with_no_current() {
+        let project = js_project(false, false);
+        let (update, _) = check_with_fake_npm(
+            project.path(),
+            false,
+            r#"{"joi":{"wanted":"17.13.0","latest":"18.0.0"},"qs":{"current":"6.14.0","wanted":"6.14.2","latest":"6.16.0"}}"#,
+        );
+        let joi = update.packages.iter().find(|p| p.name == "joi").unwrap();
+        assert!(joi.declared_only);
+        assert_eq!(joi.current, "");
+        assert!(joi.major);
+        let qs = update.packages.iter().find(|p| p.name == "qs").unwrap();
+        assert!(!qs.declared_only);
+        assert_eq!(qs.current, "6.14.0");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_node_modules_holding_only_dot_entries_is_not_an_install() {
+        let project = js_project(true, false);
+        std::fs::create_dir_all(project.path().join("node_modules/.cache")).unwrap();
+        std::fs::create_dir_all(project.path().join("node_modules/.bin")).unwrap();
+        let (update, argv) = check_with_fake_npm(project.path(), true, "{}");
+        assert_eq!(argv, vec!["outdated", "--json", "--long"]);
+        assert_eq!(update.status, DependencyCheckStatus::NotInstalled);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_installer_state_file_or_a_package_dir_is_an_install() {
+        for entry in [".package-lock.json", ".yarn-state.yml", ".modules.yaml"] {
+            let project = js_project(true, false);
+            std::fs::create_dir_all(project.path().join("node_modules")).unwrap();
+            std::fs::write(project.path().join("node_modules").join(entry), "").unwrap();
+            let (_, argv) = check_with_fake_npm(project.path(), true, "{}");
+            assert!(argv.contains(&"--workspaces".to_string()), "{entry}");
+        }
+        let project = js_project(true, false);
+        std::fs::create_dir_all(project.path().join("node_modules/@scope")).unwrap();
+        let (_, argv) = check_with_fake_npm(project.path(), true, "{}");
+        assert!(argv.contains(&"--workspaces".to_string()));
+    }
+
+    #[test]
+    fn a_hoisted_member_defers_to_the_workspace_roots_install() {
+        let root = tempfile::TempDir::new().unwrap();
+        let member = root.path().join("packages/a");
+        std::fs::create_dir_all(member.join("node_modules/.bin")).unwrap();
+        std::fs::write(
+            member.join("package.json"),
+            r#"{"dependencies":{"joi":"^17.0.0"}}"#,
+        )
+        .unwrap();
+        let manifest = DetectedManifest {
+            kind: ManagerKind::JavaScript,
+            project_root: root.path().to_path_buf(),
+            directory: member.clone(),
+            relative_path: "packages/a/package.json".into(),
+            covers_nested: false,
+        };
+
+        // A root without `workspaces` is not used by npm from the member.
+        std::fs::write(root.path().join("package.json"), r#"{"name":"r"}"#).unwrap();
+        std::fs::create_dir_all(root.path().join("node_modules/joi")).unwrap();
+        assert!(!js_dependencies_installed(&manifest));
+
+        // A workspace root with an install is.
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+        assert!(js_dependencies_installed(&manifest));
+
+        // A workspace root with an empty install is not.
+        std::fs::remove_dir_all(root.path().join("node_modules")).unwrap();
+        std::fs::create_dir_all(root.path().join("node_modules/.cache")).unwrap();
+        assert!(!js_dependencies_installed(&manifest));
+    }
+
+    #[test]
+    fn renovate_warnings_do_not_drop_resolved_updates() {
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(temp.path().join("package.json"), "{}").unwrap();
+        let manifests = detect_manifests(temp.path());
+        let output = r#"{"config":{"npm":[{"packageFile":"package.json","deps":[{"depName":"joi","currentValue":"17.0.0","warnings":[{"message":"w"}],"updates":[{"newVersion":"18.0.0"}]}]}]},"msg":"packageFiles with updates"}"#;
+        let parsed = parse_renovate_updates(output, &manifests).unwrap();
+        assert_eq!(parsed["package.json"].len(), 1);
+        assert_eq!(parsed["package.json"][0].latest, "18.0.0");
     }
 
     #[cfg(unix)]

@@ -17,12 +17,14 @@ fn summary() -> DependencyUpdateSummary {
                         current: "18.2.0".into(),
                         latest: "19.1.0".into(),
                         major: true,
+                        declared_only: false,
                     },
                     DependencyUpdatePackage {
                         name: "@types/node".into(),
                         current: "20.1.0".into(),
                         latest: "20.4.0".into(),
                         major: false,
+                        declared_only: false,
                     },
                 ],
             },
@@ -208,6 +210,7 @@ fn block_states_the_source_and_lists_citable_rows() {
         version: "18".into(),
         file: ".github/workflows/ci.yml".into(),
         line: 6,
+        stage: None,
     }];
     let block = render_version_block(
         VersionSource::DependencyWatch,
@@ -247,6 +250,7 @@ fn a_large_watch_is_capped_with_a_remainder_count() {
             current: "1.0.0".into(),
             latest: "2.0.0".into(),
             major: true,
+            declared_only: false,
         })
         .collect();
     let snap = DependencySnapshot::from_summary(&s);
@@ -348,12 +352,138 @@ fn a_node_version_input_is_matched_in_any_spelling_and_by_its_default() {
 fn jenkins_labels_and_tools_only_match_node_versions() {
     let mut out = Vec::new();
     scan_jenkinsfile(
-        "agent { label 'maven3' }\nagent { label \"node-20\" }\nnodejs(nodeJSInstallationName: 'Node 18')\n// nodejs '14'\nlabel 'nodeless'\n",
+        "agent { label 'maven3' }\nagent { label \"node20\" }\nnodejs(nodeJSInstallationName: 'Node 18')\n// nodejs '14'\nlabel 'nodeless'\n",
         "Jenkinsfile",
         &mut out,
     );
     let rows: Vec<_> = out.iter().map(|r| (r.version.as_str(), r.line)).collect();
     assert_eq!(rows, vec![("20", 2), ("18", 3)]);
+}
+
+#[test]
+fn a_node_agent_label_needs_node_directly_followed_by_a_major() {
+    for (label, expected) in [
+        ("slavenodejs18", Some("18")),
+        ("node22-arm", Some("22")),
+        ("nodejs20.4", Some("20.4")),
+        ("NodeJS16", Some("16")),
+        ("build-node-1", None),
+        ("docker-node-02", None),
+        ("k8s-node-3", None),
+        ("node3", None),
+        ("node-20", None),
+        ("node2024", None),
+        ("node22x", None),
+        ("nodejs-builder", None),
+        ("maven3", None),
+    ] {
+        assert_eq!(
+            node_label_version(label).as_deref(),
+            expected,
+            "label {label}"
+        );
+    }
+    let mut out = Vec::new();
+    scan_jenkinsfile(
+        "agent { label 'build-node-1' }\nagent { label 'k8s-node-3' }\nagent { label 'docker-node-02' }\n",
+        "Jenkinsfile",
+        &mut out,
+    );
+    assert!(out.is_empty(), "{out:?}");
+}
+
+#[test]
+fn a_dockerfile_only_pins_a_node_that_starts_with_a_digit() {
+    let mut out = Vec::new();
+    scan_dockerfile(
+        "FROM node:lts-alpine\nFROM node:alpine\nFROM node:current\nFROM node\nARG NODE_VERSION=$X\nARG NODE_VERSION=lts\nARG NODE_VERSION=\"22.1\"\nFROM node:22.1-slim\n",
+        "Dockerfile",
+        &mut out,
+    );
+    let rows: Vec<_> = out.iter().map(|r| (r.version.as_str(), r.line)).collect();
+    assert_eq!(rows, vec![("22.1", 7), ("22.1", 8)]);
+}
+
+#[test]
+fn a_multi_stage_dockerfile_keeps_a_row_per_stage_and_marks_the_runtime_one() {
+    let mut out = Vec::new();
+    scan_dockerfile(
+        "FROM node:18 AS deps\nFROM node:20-alpine AS build\nFROM node:22-slim\nCMD [\"node\"]\n",
+        "Dockerfile",
+        &mut out,
+    );
+    let rows: Vec<_> = out
+        .iter()
+        .map(|r| (r.version.as_str(), r.line, r.stage))
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            ("18", 1, Some(Stage::Build)),
+            ("20", 2, Some(Stage::Build)),
+            ("22", 3, Some(Stage::Runtime)),
+        ]
+    );
+
+    // A non-node final stage leaves every node stage a build stage.
+    let mut out = Vec::new();
+    scan_dockerfile("FROM node:20 AS build\nFROM nginx:1.25\n", "Dockerfile", &mut out);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].stage, Some(Stage::Build));
+
+    // A single stage is not annotated.
+    let mut out = Vec::new();
+    scan_dockerfile("FROM node:20\n", "Dockerfile", &mut out);
+    assert_eq!(out[0].stage, None);
+
+    let block = render_version_block_with_ci(
+        VersionPurpose::Judgement,
+        VersionSource::None,
+        None,
+        &[CiRuntime {
+            runtime: "node".into(),
+            version: "22".into(),
+            file: "Dockerfile".into(),
+            line: 3,
+            stage: Some(Stage::Runtime),
+        }],
+        &[],
+        "2026-10-11",
+    );
+    assert!(block.contains("| node (final stage: what runs) | 22 |"), "{block}");
+}
+
+#[test]
+fn a_declared_only_row_is_never_rendered_as_the_version_in_place() {
+    let summary = DependencyUpdateSummary {
+        managers: vec![DependencyManagerUpdate {
+            manager: "npm".into(),
+            manifest: "package.json".into(),
+            status: DependencyCheckStatus::UpdatesAvailable,
+            outdated: 1,
+            major: 1,
+            packages: vec![DependencyUpdatePackage {
+                name: "joi".into(),
+                current: String::new(),
+                latest: "18.0.0".into(),
+                major: true,
+                declared_only: true,
+            }],
+        }],
+        total_outdated: 1,
+        total_major: 1,
+        checked_at: chrono::Utc.with_ymd_and_hms(2026, 10, 4, 10, 0, 0).unwrap(),
+        cached: false,
+        monitoring_interval_days: None,
+        next_check_at: None,
+    };
+    let snap = DependencySnapshot::from_summary(&summary);
+    let block = render_version_block(VersionSource::DependencyWatch, Some(&snap), &[], "2026-10-11");
+    assert!(
+        block.contains("| joi | not installed (declared range only; installed version unknown) | 18.0.0 | major |"),
+        "{block}"
+    );
+    assert!(!block.contains("| joi |  |"), "{block}");
 }
 
 #[test]

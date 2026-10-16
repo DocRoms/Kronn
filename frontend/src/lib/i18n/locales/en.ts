@@ -915,6 +915,7 @@ const en: TranslationDict = {
   'projects.master.overview.dependencyToolUnavailable': 'Tool unavailable',
   'projects.master.overview.dependencyTimedOut': 'Timed out',
   'projects.master.overview.dependencyNotInstalled': 'Dependencies not installed',
+  'projects.master.overview.dependencyDeclaredOnly': 'not installed',
   'projects.master.overview.dependencyCheckFailed': 'Check failed',
   'projects.source.loading': 'Loading source code…',
   'projects.source.loadingTreeBackground': 'Loading the rest of the project in the background',
