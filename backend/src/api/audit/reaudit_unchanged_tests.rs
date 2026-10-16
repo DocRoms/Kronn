@@ -32,7 +32,11 @@ fn scripted_agent(tools: &Path, project: &Path) -> PathBuf {
     let project = project.display();
     let script = format!(
         r#"prompt=$(cat)
+agent=$(printf '%s' "$prompt" | grep -o 'You are agent `[A-Za-z]*`' | head -n 1 | sed 's/.*`\(.*\)`/\1/')
 case "$prompt" in
+  *"DETECTION MODE"*) cat '{state}/reply.det.'"$agent"; exit 0 ;;
+  *"RIGHT OF REPLY"*) cat '{state}/reply.rep.'"$agent"; exit 0 ;;
+  *"CROSS-CHECK. You are agent"*) cat '{state}/reply.chk.'"$agent"; exit 0 ;;
   *{BRIEFING_MARKER}*)
     n=$(( $(cat '{state}/counter' 2>/dev/null || echo 0) + 1 ))
     echo "$n" > '{state}/counter'
@@ -240,6 +244,7 @@ struct Harness {
     tools: tempfile::TempDir,
     state: AppState,
     project: tempfile::TempDir,
+    fixture: PathBuf,
     _route: crate::agents::runner::test_acp_routes::RouteGuard,
     _restore: TemplatesEnv,
 }
@@ -267,6 +272,7 @@ async fn harness() -> Harness {
         tools,
         state,
         project,
+        fixture,
         _route: route,
         _restore: restore,
     }
@@ -662,6 +668,7 @@ impl Audited {
             tools,
             state,
             project,
+            fixture: _,
             _route: route,
             _restore: restore,
         } = harness().await;
@@ -1777,4 +1784,111 @@ async fn a_step_is_not_blocked_by_a_blocker_that_pre_dates_it() {
     // (the entry point's step owns what no step wrote), but the toucher is not.
     assert_eq!(done["status"], "interrupted", "{second}");
     assert_eq!(done["steps_to_redo"], json!([founding]), "{second}");
+}
+
+/// KT-1306 — the cross-agent path writes a step's documents itself, before any
+/// agent prompt: what it writes is that step's, so a blocker in a sheet it
+/// wrote is charged to it, not to the founding step.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_blocker_written_by_the_cross_agent_path_is_charged_to_its_step() {
+    let h = harness().await;
+    let (tools, state, project) = (h.tools.path(), &h.state, h.project.path());
+    let notes = format!(
+        "{BRIEFING_MARKER}\n\n## Kronn options\n{}\n",
+        crate::core::cross_audit::briefing_option_line(&[AgentType::ClaudeCode, AgentType::Codex])
+    );
+    state
+        .db
+        .with_conn(move |conn| {
+            crate::db::projects::update_project_briefing_notes(conn, PROJECT_ID, Some(&notes))
+        })
+        .await
+        .unwrap();
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(
+        project.join("src/db.rs"),
+        "fn a() {}\nfn b() {}\nlet q = format!(\"SELECT * FROM t WHERE id = {}\", id);\nconn.execute(&q);\n",
+    )
+    .unwrap();
+    let project_path = project.to_string_lossy().into_owned();
+    let work_dir =
+        crate::agents::runner::resolve_agent_work_dir(Some(&project_path), &project_path).unwrap();
+    let _routes: Vec<_> = [AgentType::ClaudeCode, AgentType::Codex]
+        .iter()
+        .map(|agent| {
+            crate::agents::runner::test_acp_routes::route_agent(
+                &work_dir,
+                agent,
+                std::sync::Arc::new(crate::acp::ClaudeAcpAdapter::new_with_program(
+                    h.fixture.to_string_lossy(),
+                    None,
+                    false,
+                )),
+            )
+        })
+        .collect();
+
+    // Both agents find the same issue; its impact carries a link to nothing.
+    let stream = |text: &str| {
+        format!(
+            "{}\n{}\n",
+            json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":text}}}),
+            json!({"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":10,"output_tokens":5}})
+        )
+    };
+    let fenced = |fence: &str, body: Value| format!("Done.\n```{fence}\n{body}\n```\n");
+    let finding = json!({"title": "SQL query built with format", "category": "security",
+        "severity": "High", "file": "src/db.rs", "line": 3, "quote": "format!(\"SELECT * FROM t",
+        "impact": "Reads any row. See [missing guide](absent.md)", "remediation": "bind the parameter"});
+    for agent in ["ClaudeCode", "Codex"] {
+        let detection = fenced("kronn-findings", json!({"findings": [finding.clone()]}));
+        std::fs::write(tools.join(format!("reply.det.{agent}")), stream(&detection)).unwrap();
+        let verdicts = fenced("kronn-verdicts", json!({"verdicts": []}));
+        std::fs::write(tools.join(format!("reply.chk.{agent}")), stream(&verdicts)).unwrap();
+        let replies = fenced("kronn-replies", json!({"replies": []}));
+        std::fs::write(tools.join(format!("reply.rep.{agent}")), stream(&replies)).unwrap();
+    }
+
+    let chain = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full);
+    let cross_step = chain
+        .iter()
+        .position(|s| s.target_file == "docs/inconsistencies-security.md")
+        .unwrap() as u32
+        + 1;
+    let founding = crate::api::audit::full::founding_step_index(&chain).unwrap();
+    assert_ne!(cross_step, founding);
+    // The cross step takes no step prompt: the agent's script skips its line.
+    let targets: Vec<&str> = chain
+        .iter()
+        .map(|s| s.target_file)
+        .filter(|t| *t != "docs/inconsistencies-security.md")
+        .collect();
+    arm(tools, "fill", &targets);
+    let run = run_full(state, None).await;
+    let done = sse_events(&run, "done")
+        .pop()
+        .unwrap_or_else(|| panic!("{run}"));
+    validation_settled(state, &done).await;
+
+    let sheets: Vec<_> = std::fs::read_dir(project.join("docs/tech-debt"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().starts_with("TD-"))
+        .collect();
+    assert_eq!(sheets.len(), 1, "{run}");
+    assert!(
+        std::fs::read_to_string(sheets[0].path())
+            .unwrap()
+            .contains("[missing guide](absent.md)"),
+        "the cross path wrote the broken link"
+    );
+    assert_eq!(done["status"], "interrupted", "{run}");
+    assert_eq!(done["steps_to_redo"], json!([cross_step]), "{run}");
+    let ledger = std::fs::read_to_string(project.join(".kronn/audit/document-blame.json")).unwrap();
+    assert!(
+        ledger.contains(&format!("\"step\":{cross_step}")),
+        "{ledger}"
+    );
 }

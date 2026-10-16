@@ -48,7 +48,7 @@ no cost, the sum is partial and the run's cost is `None` as well.
 [src: file: backend/src/agents/chat_codec.rs:160#cost_usd_micros]
 [src: file: backend/src/agents/runner.rs:7941-7947#request_provider_cost]
 [src: file: backend/src/agents/runner.rs:1984-1989#cost_incomplete]
-[src: file: backend/src/api/audit/full.rs:2112#reported_cost_usd_micros]
+[src: file: backend/src/api/audit/full.rs:2115#reported_cost_usd_micros]
 [src: file: backend/src/api/audit/drift.rs:1137#reported_cost_usd_micros]
 
 Audit executors have a separate bounded policy: 64 calls per file mutation tool
@@ -124,7 +124,8 @@ repair prompt. A corrected reference establishes existence, not factual truth.
 A blocker is charged to the step that introduced it (blocking set diffed
 around each step, kept in `.kronn/audit/document-blame.json`), so a document no
 step targets is redone with the step that wrote it, not with the founding
-step; and a step is blocked only by diagnostics absent before it ran
+step (the baseline is taken before any write of the step, the cross-agent
+path's included); and a step is blocked only by diagnostics absent before it ran
 (`documentary_preexisting` reports the others) unless the recovery plan hands
 them to it (KT-1306).
 [src: file: backend/src/api/audit/document_repair.rs:140-172#recovery_plan]
