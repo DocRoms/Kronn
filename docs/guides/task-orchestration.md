@@ -257,6 +257,30 @@ The limits worth knowing:
 - Nothing in this section is inferred. No metric, timestamp or verdict is
   derived from the worker's own claims.
 
+### A DoD item carried to another ticket
+
+An item that cannot be proven within this task (it needs lots that belong to
+another ticket) is carried, not moved by hand. The principal approves with a
+`dod_verifications` entry `{dod_id, met: false, evidence, carried_to: "KT-1290"}`.
+The carry is accepted only when the carrier is another task that exists, is
+not `done` or `archived`, and holds the requirement as an unticked DoD item
+with the same sentence (case and spacing aside). The approve then integrates
+normally (validations, evidence, auto-tick of the other items), the item is
+detached from this task, and a `dod_carried` event on the task names the
+carrier, the item's sentence and the principal's evidence. A carry that claims
+`met: true`, names itself, a missing or a closed task, or a task that does not
+hold the requirement is refused with that cause and detaches nothing.
+
+The delivered manifest is judged against the execution's launch-time DoD
+snapshot, not against the task's current items: an id the principal removed or
+moved since the delivery is a known id, never "unknown". An item the task no
+longer holds that the manifest reports unmet still needs the explicit carry
+above; omitting it refuses the approve with that id.
+
+When the item had already left the task before the approve and its sentence
+cannot be read back from the task's events, the carrier cannot be compared by
+sentence: it must then hold at least one unticked item.
+
 ### The Definition of Done after an integration
 
 An approve that integrates ticks the DoD items it verified, in the same

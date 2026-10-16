@@ -13,6 +13,14 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- A principal can approve a delivery with a DoD item carried to another ticket
+  (KT-1291): `dod_verifications: [{dod_id, met: false, carried_to: "KT-1290",
+  evidence}]`. The approve integrates through the normal path; the item is
+  detached from the task and a `dod_carried` event names the carrier. The
+  carrier must exist, be open and hold the requirement, or the approve is
+  refused with the cause. A manifest that references a DoD id removed or
+  carried after the delivery is judged against the execution's launch-time DoD
+  snapshot instead of being refused as an unknown id.
 - A `#symbol` citation anchor that names a definition the cited range
   contains must open that range (KT-1074). When the range holds a definition
   of the symbol (`fn`, `def`, `class`, `struct`, `enum`, `const`,
