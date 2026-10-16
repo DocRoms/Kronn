@@ -6,11 +6,18 @@
 //! (`claude`, `codex`, nvm, homebrew…) are invisible. Both entry points ask
 //! the user's login shell for its PATH and merge it into their own.
 
-/// Maximum time we wait for the user's login shell to print its PATH.
-/// 5 seconds is enough for normal zsh/bash startups but kills shells that
-/// hang on plugin downloads, broken `compinit`, or interactive prompts.
+/// Maximum time the desktop app waits for the user's login shell to print
+/// its PATH. 5 seconds is enough for normal zsh/bash startups but kills
+/// shells that hang on plugin downloads, broken `compinit`, or interactive
+/// prompts.
 #[cfg(unix)]
 const SHELL_PATH_TIMEOUT_SECS: u64 = 5;
+
+/// The service waits longer: it starts at login or during an update, when
+/// the machine is busy and a healthy zsh can take more than 5 s. Missing the
+/// PATH there hides every agent CLI until the next restart.
+#[cfg(unix)]
+const SERVICE_SHELL_PATH_TIMEOUT_SECS: u64 = 20;
 
 /// Messages emitted before the tracing subscriber exists, logged once it does.
 pub type StartupLog = Vec<(tracing::Level, String)>;
@@ -28,6 +35,11 @@ pub type StartupLog = Vec<(tracing::Level, String)>;
 /// pushed to `log` for the caller to emit.
 #[cfg(unix)]
 pub fn shell_path_from_user_shell(log: &mut StartupLog) -> Option<String> {
+    shell_path_within(SHELL_PATH_TIMEOUT_SECS, log)
+}
+
+#[cfg(unix)]
+fn shell_path_within(timeout_secs: u64, log: &mut StartupLog) -> Option<String> {
     let shell = crate::core::child_env::var("SHELL")
         .ok()
         .filter(|s| !s.is_empty() && s != "/bin/false" && std::path::Path::new(s).exists())
@@ -54,8 +66,7 @@ pub fn shell_path_from_user_shell(log: &mut StartupLog) -> Option<String> {
         }
     };
 
-    let deadline =
-        std::time::Instant::now() + std::time::Duration::from_secs(SHELL_PATH_TIMEOUT_SECS);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -88,7 +99,7 @@ pub fn shell_path_from_user_shell(log: &mut StartupLog) -> Option<String> {
                     log.push((
                         tracing::Level::WARN,
                         format!(
-                            "Shell {shell} did not return PATH within {SHELL_PATH_TIMEOUT_SECS}s — killing and falling back to defaults"
+                            "Shell {shell} did not return PATH within {timeout_secs}s — killing and falling back to defaults"
                         ),
                     ));
                     let _ = child.kill();
@@ -114,6 +125,49 @@ pub fn shell_path_from_user_shell(_log: &mut StartupLog) -> Option<String> {
     None
 }
 
+/// Per-user and package-manager bin directories where agent CLIs usually
+/// live, for when the login shell gives no PATH. Only existing directories
+/// are returned; for nvm, the newest installed Node.
+pub fn fallback_bin_dirs(home: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut dirs: Vec<std::path::PathBuf> = [
+        ".local/bin",
+        ".cargo/bin",
+        ".npm-global/bin",
+        ".bun/bin",
+        ".volta/bin",
+    ]
+    .iter()
+    .map(|d| home.join(d))
+    .collect();
+    if let Some(node) = newest_nvm_node(&home.join(".nvm/versions/node")) {
+        dirs.push(node.join("bin"));
+    }
+    for d in ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin"] {
+        dirs.push(std::path::PathBuf::from(d));
+    }
+    dirs.retain(|d| d.is_dir());
+    dirs
+}
+
+/// The `vX.Y.Z` directory with the highest version under nvm's node dir.
+fn newest_nvm_node(root: &std::path::Path) -> Option<std::path::PathBuf> {
+    let parse = |name: &str| -> Option<Vec<u64>> {
+        name.strip_prefix('v')?
+            .split('.')
+            .map(|p| p.parse().ok())
+            .collect()
+    };
+    std::fs::read_dir(root)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let version = parse(e.file_name().to_str()?)?;
+            Some((version, e.path()))
+        })
+        .max_by(|a, b| a.0.cmp(&b.0))
+        .map(|(_, path)| path)
+}
+
 /// Append to `current` the entries of `extra` it does not already contain.
 /// Existing entries keep their order (and so their precedence); empty
 /// entries are dropped from `extra`.
@@ -133,15 +187,37 @@ pub fn merge_path(current: &str, extra: &str, separator: char) -> String {
 pub fn enrich_path_for_service() -> StartupLog {
     let mut log = StartupLog::new();
     let separator = if cfg!(windows) { ';' } else { ':' };
-    if let Some(shell_path) = shell_path_from_user_shell(&mut log) {
-        let current = crate::core::child_env::var("PATH").unwrap_or_default();
-        let merged = merge_path(&current, &shell_path, separator);
-        crate::core::child_env::set_var("PATH", &merged);
-        log.push((
-            tracing::Level::INFO,
-            "Service mode: loaded PATH from user shell".into(),
-        ));
-    }
+    #[cfg(unix)]
+    let shell_path = shell_path_within(SERVICE_SHELL_PATH_TIMEOUT_SECS, &mut log);
+    #[cfg(not(unix))]
+    let shell_path = shell_path_from_user_shell(&mut log);
+    let current = crate::core::child_env::var("PATH").unwrap_or_default();
+    let extra = match shell_path {
+        Some(path) => {
+            log.push((
+                tracing::Level::INFO,
+                "Service mode: loaded PATH from user shell".into(),
+            ));
+            path
+        }
+        None => {
+            let home = crate::core::child_env::var("HOME").unwrap_or_default();
+            let dirs = fallback_bin_dirs(std::path::Path::new(&home));
+            let joined = dirs
+                .iter()
+                .map(|d| d.display().to_string())
+                .collect::<Vec<_>>()
+                .join(&separator.to_string());
+            log.push((
+                tracing::Level::WARN,
+                format!(
+                    "Service mode: no PATH from the user shell; added known bin dirs: {joined}"
+                ),
+            ));
+            joined
+        }
+    };
+    crate::core::child_env::set_var("PATH", merge_path(&current, &extra, separator));
     log
 }
 
@@ -166,6 +242,28 @@ mod tests {
         assert_eq!(merge_path("/a", "", ':'), "/a");
         assert_eq!(merge_path("/a", "/b::/c", ':'), "/a:/b:/c");
         assert_eq!(merge_path("/a", "/a", ';'), "/a");
+    }
+
+    #[test]
+    fn fallback_keeps_existing_dirs_and_the_newest_nvm_node() {
+        let home = std::env::temp_dir().join(format!("kronn-fallback-{}", std::process::id()));
+        for d in [
+            ".local/bin",
+            ".nvm/versions/node/v9.11.2/bin",
+            ".nvm/versions/node/v24.14.0/bin",
+            ".nvm/versions/node/v18.20.4/bin",
+        ] {
+            std::fs::create_dir_all(home.join(d)).unwrap();
+        }
+        let dirs = fallback_bin_dirs(&home);
+        let _ = std::fs::remove_dir_all(&home);
+        assert!(dirs.contains(&home.join(".local/bin")));
+        assert!(dirs.contains(&home.join(".nvm/versions/node/v24.14.0/bin")));
+        assert!(!dirs.contains(&home.join(".nvm/versions/node/v9.11.2/bin")));
+        assert!(
+            !dirs.contains(&home.join(".cargo/bin")),
+            "absent dirs are dropped"
+        );
     }
 
     /// A failing login shell returns no PATH and leaves a message for the
