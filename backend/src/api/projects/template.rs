@@ -102,6 +102,9 @@ pub async fn install_template(
             let docs_target = existing_docs;
             let provenance_before = crate::core::doc_provenance::snapshot_tracked(&project_path)?;
             let docs_root = crate::core::docs_location::DocsRoot::for_project(&project_path)?;
+            // A state file that cannot be rewritten stops the install before it
+            // writes anything: no Kronn file is ever left unrecorded (KT-1299).
+            crate::core::kronn_state::load_for_mutation(&project_path)?;
             // A folder that is not a human's becomes Kronn's by this install:
             // recorded first, so the files written below are never counted as
             // docs Kronn did not write (KT-1299). A human's docs stay theirs
@@ -117,7 +120,8 @@ pub async fn install_template(
             if !human_folder {
                 crate::core::kronn_state::mark_template_installed(&project_path)?;
             }
-            crate::core::template_manifest::apply_renames(&project_path, &docs_template)?;
+            let renamed =
+                crate::core::template_manifest::apply_renames(&project_path, &docs_template)?;
             let folder_before = crate::core::docs_folder::list_files(&docs_target);
             let mut created_files = Vec::new();
             if docs_template.is_dir() {
@@ -169,7 +173,18 @@ pub async fn install_template(
                 .filter(|rel| !crate::core::docs_folder::is_kronn_state_file(rel))
                 .cloned()
                 .collect();
-            crate::core::kronn_state::record_kronn_written(&project_path, &written)?;
+            // A renamed template file is Kronn's under its new path.
+            let docs_prefix = format!("{}/", docs_root.rel());
+            let moved: Vec<(String, String)> = renamed
+                .iter()
+                .filter_map(|r| {
+                    Some((
+                        r.from.strip_prefix(&docs_prefix)?.to_string(),
+                        r.to.strip_prefix(&docs_prefix)?.to_string(),
+                    ))
+                })
+                .collect();
+            crate::core::kronn_state::record_kronn_moves(&project_path, &moved, &written)?;
 
             // KT-841 — no more "FIRST-RUN TASK" prompt injected into
             // docs/AGENTS.md at install time: that block lived in the exact

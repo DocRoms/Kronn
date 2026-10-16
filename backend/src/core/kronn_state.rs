@@ -220,12 +220,28 @@ pub fn mark_template_installed(project_path: &Path) -> Result<(), String> {
 /// calls it, and so can any other writer (a template merge). A path that is
 /// not a regular file inside the folder is ignored.
 pub fn record_kronn_written(project_path: &Path, rel_paths: &[String]) -> Result<(), String> {
-    if rel_paths.is_empty() {
+    record_kronn_moves(project_path, &[], rel_paths)
+}
+
+/// `record_kronn_written` for files Kronn also moved: each `(from, to)` (paths
+/// relative to the folder) drops the entry of `from` and records `to`, so a
+/// renamed template file is Kronn's under its new path and the old entry does
+/// not linger.
+pub fn record_kronn_moves(
+    project_path: &Path,
+    moved: &[(String, String)],
+    rel_paths: &[String],
+) -> Result<(), String> {
+    if moved.is_empty() && rel_paths.is_empty() {
         return Ok(());
     }
     let mut state = load_for_mutation(project_path)?;
     let docs_dir = crate::core::scanner::detect_docs_dir(project_path);
-    for rel in rel_paths {
+    for (from, _) in moved {
+        state.kronn_written.remove(&from.replace('\\', "/"));
+    }
+    let targets = moved.iter().map(|(_, to)| to).chain(rel_paths.iter());
+    for rel in targets {
         let rel = rel.replace('\\', "/");
         if rel.is_empty()
             || rel.starts_with('/')

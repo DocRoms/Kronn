@@ -92,11 +92,35 @@ fn has_kronn_state(state: Option<&crate::core::kronn_state::KronnState>) -> bool
     })
 }
 
-/// The files Kronn recorded as its own in `dir` (paths relative to it).
+/// The recorded files of `state` that are still what Kronn wrote: a recorded
+/// entry stands only while the file's current sha256 equals the recorded one.
+/// A file the human rewrote since (or a hand-crafted record naming a file Kronn
+/// never wrote) is the human's again: counted, moved on their choice, restored
+/// by the template steps.
+fn intact_written(
+    dir: &Path,
+    state: Option<&crate::core::kronn_state::KronnState>,
+) -> BTreeSet<String> {
+    let Some(state) = state else {
+        return BTreeSet::new();
+    };
+    state
+        .kronn_written
+        .iter()
+        .filter(|(rel, hash)| {
+            let path = dir.join(rel.as_str());
+            std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_file())
+                && std::fs::read(&path)
+                    .is_ok_and(|bytes| &crate::core::docs_merge::sha256_hex(&bytes) == *hash)
+        })
+        .map(|(rel, _)| rel.clone())
+        .collect()
+}
+
+/// The files Kronn recorded as its own in `dir` (paths relative to it) and that
+/// still hold the bytes it wrote.
 pub(crate) fn kronn_written(dir: &Path) -> BTreeSet<String> {
-    read_state(dir)
-        .map(|state| state.kronn_written.into_keys().collect())
-        .unwrap_or_default()
+    intact_written(dir, read_state(dir).as_ref())
 }
 
 /// `path` relative to `dir`, `/`-separated: the key of `kronn_written`.
@@ -153,10 +177,7 @@ pub fn folder_state_with_runs(root: &Path, rel: &str, recorded_run: bool) -> Doc
     // What Kronn wrote is its own, never a human's. It stands as proof the
     // folder is Kronn's only once an install made the folder Kronn's: written
     // beside a human's docs, it must not turn them into Kronn's (KT-1299).
-    let written: BTreeSet<String> = state
-        .as_ref()
-        .map(|s| s.kronn_written.keys().cloned().collect())
-        .unwrap_or_default();
+    let written = intact_written(&dir, state.as_ref());
     let owned = state
         .as_ref()
         .is_some_and(|s| s.template_installed_at.is_some());
@@ -420,6 +441,106 @@ mod tests {
         }
         assert!(!t.path().join("docs/legacy/AGENTS.md").exists());
         assert!(!t.path().join("docs/legacy/guide/kronn.md").exists());
+    }
+
+    const ENTRY: &str = "# AI agent context — Entry point\n\nWritten by Kronn.\n";
+
+    fn human_count(state: &DocsFolderState) -> Option<u32> {
+        match state {
+            DocsFolderState::HumanDocs { files, .. } => Some(*files),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_recorded_file_the_human_rewrote_is_theirs_again() {
+        // An installed, audited Kronn folder whose entry file is Kronn's.
+        let t = tempfile::tempdir().unwrap();
+        write(t.path(), "docs/AGENTS.md", ENTRY);
+        write(t.path(), "docs/glossary.md", "# Glossary\n");
+        write(t.path(), "docs/repo-map.md", "# Repo map\n");
+        write(t.path(), "docs/.kronn.json", AUDITED);
+        crate::core::kronn_state::mark_template_installed(t.path()).unwrap();
+        crate::core::kronn_state::record_kronn_written(
+            t.path(),
+            &[
+                "AGENTS.md".to_string(),
+                "glossary.md".to_string(),
+                "repo-map.md".to_string(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            folder_state(t.path(), "docs"),
+            DocsFolderState::KronnManaged
+        );
+
+        // The human overwrites two of them with their own text: they are
+        // counted, the entry is no longer Kronn's, the choice is due.
+        write(t.path(), "docs/AGENTS.md", "# Our own entry point\n");
+        write(t.path(), "docs/glossary.md", "# Our own glossary\n");
+        let state = folder_state(t.path(), "docs");
+        assert_eq!(human_count(&state), Some(2), "{state:?}");
+
+        // Moving carries exactly those two; the untouched file stays.
+        let docs = crate::core::docs_location::DocsRoot::default_root();
+        assert_eq!(move_to_legacy(t.path(), &docs).unwrap(), 2);
+        for moved in ["AGENTS.md", "glossary.md"] {
+            assert!(
+                t.path().join("docs/legacy").join(moved).is_file(),
+                "{moved}"
+            );
+            assert!(!t.path().join("docs").join(moved).exists(), "{moved}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(t.path().join("docs/legacy/AGENTS.md")).unwrap(),
+            "# Our own entry point\n"
+        );
+        assert!(t.path().join("docs/repo-map.md").is_file());
+    }
+
+    #[test]
+    fn a_recorded_file_in_a_shared_directory_rewritten_by_the_human_moves() {
+        let t = tempfile::tempdir().unwrap();
+        write(t.path(), "docs/install.md", "# Install\n");
+        write(t.path(), "docs/guide/kronn.md", KRONN_DOC);
+        write(t.path(), "docs/guide/other.md", KRONN_DOC);
+        crate::core::kronn_state::record_kronn_written(
+            t.path(),
+            &["guide/kronn.md".to_string(), "guide/other.md".to_string()],
+        )
+        .unwrap();
+        write(t.path(), "docs/guide/kronn.md", "# My own guide\n");
+
+        let docs = crate::core::docs_location::DocsRoot::default_root();
+        assert_eq!(move_to_legacy(t.path(), &docs).unwrap(), 2);
+        assert_eq!(
+            std::fs::read_to_string(t.path().join("docs/legacy/guide/kronn.md")).unwrap(),
+            "# My own guide\n"
+        );
+        assert!(t.path().join("docs/legacy/install.md").is_file());
+        // The file Kronn wrote and nobody touched stays.
+        assert!(t.path().join("docs/guide/other.md").is_file());
+        assert!(!t.path().join("docs/guide/kronn.md").exists());
+    }
+
+    #[test]
+    fn a_hand_crafted_record_does_not_hide_a_human_file() {
+        let t = tempfile::tempdir().unwrap();
+        write(t.path(), "docs/install.md", "# Install\n");
+        write(t.path(), "docs/guide/usage.md", "# Usage\n");
+        write(
+            t.path(),
+            "docs/.kronn.json",
+            r#"{"kronn_written":{"install.md":"bogus","ghost.md":"bogus"}}"#,
+        );
+        let state = folder_state(t.path(), "docs");
+        assert_eq!(human_count(&state), Some(2), "{state:?}");
+
+        let docs = crate::core::docs_location::DocsRoot::default_root();
+        assert_eq!(move_to_legacy(t.path(), &docs).unwrap(), 2);
+        assert!(t.path().join("docs/legacy/install.md").is_file());
+        assert!(!t.path().join("docs/install.md").exists());
     }
 
     #[test]

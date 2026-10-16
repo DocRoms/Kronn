@@ -1390,6 +1390,15 @@ async fn the_template_installed_beside_human_docs_does_not_make_them_kronns() {
         template_files
     );
     refused_on_both_routes(&h, "docs_folder_choice_required", "docs/legacy/").await;
+    let template_bytes: std::collections::BTreeMap<String, Vec<u8>> = template_files
+        .iter()
+        .map(|f| {
+            (
+                f.clone(),
+                std::fs::read(project.join("docs").join(f)).unwrap(),
+            )
+        })
+        .collect();
 
     // The choice unblocks the launch although the entry file already carries
     // Kronn's signature, and moves the human's files.
@@ -1404,9 +1413,15 @@ async fn the_template_installed_beside_human_docs_does_not_make_them_kronns() {
     assert!(project.join("docs/legacy/install.md").is_file());
     assert!(project.join("docs/legacy/guide/usage.md").is_file());
     assert!(!project.join("docs/install.md").exists());
-    // Only the human's files moved: every template file stays in its place.
-    for file in &template_files {
-        assert!(project.join("docs").join(file).is_file(), "{file} moved");
+    // Only the human's files moved: every template file stays in its place,
+    // byte for byte.
+    for (file, bytes) in &template_bytes {
+        assert_eq!(
+            &std::fs::read(project.join("docs").join(file))
+                .unwrap_or_else(|_| panic!("{file} moved")),
+            bytes,
+            "{file} changed"
+        );
         assert!(!project.join("docs/legacy").join(file).exists(), "{file}");
     }
     let moved: BTreeSet<String> = files_under(&project.join("docs/legacy"))
@@ -1468,6 +1483,90 @@ async fn installing_never_turns_a_human_folder_with_an_earlier_audit_into_kronns
     assert!(project.join("docs/legacy/install.md").is_file());
     assert!(project.join("docs/AGENTS.md").is_file());
     audited_via_route(&h, &DocsRoot::default_root(), false).await;
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn template_files_the_human_overwrote_are_theirs_again_and_asked_about() {
+    let h = harness().await;
+    let project = h.project.path();
+    install_template_route(&h).await;
+    crate::core::kronn_state::record_audit(project, "full").unwrap();
+    assert_eq!(
+        crate::core::docs_folder::folder_state(project, "docs"),
+        crate::core::docs_folder::DocsFolderState::KronnManaged
+    );
+
+    // The human replaces every recorded file with their own text: the record
+    // names them, but they no longer hold the bytes Kronn wrote.
+    let recorded: BTreeSet<String> = crate::core::kronn_state::read(project)
+        .expect(".kronn.json")
+        .kronn_written
+        .into_keys()
+        .collect();
+    assert!(recorded.contains("AGENTS.md") && recorded.contains("glossary.md"));
+    for rel in &recorded {
+        std::fs::write(project.join("docs").join(rel), format!("# Mine: {rel}\n")).unwrap();
+    }
+    let state = crate::core::docs_folder::folder_state(project, "docs");
+    assert!(
+        matches!(
+            state,
+            crate::core::docs_folder::DocsFolderState::HumanDocs { files, .. }
+                if files as usize == recorded.len()
+        ),
+        "{state:?}"
+    );
+    refused_on_both_routes(&h, "docs_folder_choice_required", "docs/legacy/").await;
+
+    // On the choice exactly those files move, with the human's text; the audit
+    // restores the template in their place.
+    let _cleanup = Relocated(project.to_string_lossy().into_owned());
+    crate::api::audit::briefing::save_briefing_answers(
+        &h.state,
+        PROJECT_ID,
+        briefing("docs", true),
+    )
+    .await
+    .unwrap();
+    let moved: BTreeSet<String> = files_under(&project.join("docs/legacy"))
+        .into_iter()
+        .filter(|f| f != "README.md")
+        .collect();
+    assert_eq!(moved, recorded);
+    for rel in &recorded {
+        assert_eq!(
+            std::fs::read_to_string(project.join("docs/legacy").join(rel)).unwrap(),
+            format!("# Mine: {rel}\n")
+        );
+    }
+    audited_via_route(&h, &DocsRoot::default_root(), false).await;
+    assert!(project.join("docs/AGENTS.md").is_file());
+    assert_ne!(
+        std::fs::read_to_string(project.join("docs/AGENTS.md")).unwrap(),
+        "# Mine: AGENTS.md\n"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn an_install_over_a_corrupt_state_file_writes_nothing_unrecorded() {
+    let h = harness().await;
+    let project = h.project.path();
+    std::fs::create_dir_all(project.join("docs")).unwrap();
+    std::fs::write(project.join("docs/.kronn.json"), "{ torn").unwrap();
+    human_docs(project);
+    let before = snapshot(project);
+    let response = crate::api::projects::install_template(
+        axum::extract::State(h.state.clone()),
+        axum::extract::Path(PROJECT_ID.to_string()),
+    )
+    .await
+    .0;
+    assert!(!response.success);
+    assert_eq!(snapshot(project), before);
 }
 
 #[tokio::test]

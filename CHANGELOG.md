@@ -534,7 +534,11 @@ Release notes for 0.9.3 and earlier are available in the
   file it wrote in `.kronn.json` (`kronn_written`, one reusable
   `record_kronn_written`): beside a human's docs those files are never moved to
   `legacy/` (only the human's are), and they never make the folder Kronn's —
-  not even next to an earlier recorded audit.
+  not even next to an earlier recorded audit. A recorded file counts as Kronn's
+  only while its sha256 still equals the recorded one: a file the human rewrote
+  (or a hand-crafted `.kronn.json` entry) is theirs again, counted by the gate
+  and moved on the choice. The install refuses a corrupt `.kronn.json` before
+  writing anything, and records a renamed template file under its new path.
 - A review-wait timeout no longer locks the principal out of the review
   (KT-1293). The watchdog used to move the unreviewed delivery to `Escalated`
   while its alert told the principal to call `task_exec_review`, which only
