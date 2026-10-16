@@ -31,7 +31,7 @@ for repetition only; exhausted call budgets and open error circuits still
 apply, and effectful calls remain cached. Workers retain their separate bounded
 finalization policy. This prevents a post-edit verification from receiving the
 pre-edit file or a repetition refusal (KT-948).
-[src: file: backend/src/agents/runner.rs:11282-11310#observation_readers_to_restore]
+[src: file: backend/src/agents/runner.rs:11270-11313#observation_readers_to_restore]
 
 The HTTP runner also publishes structured input/output and reported cache-token
 counters through `AgentProcess`, which Full and partial audits consume. Each
@@ -46,6 +46,7 @@ per response as integer micro-USD and exposed by `reported_cost_usd_micros`;
 `None` means unknown, never zero (KT-997). If any response of the run reported
 no cost, the sum is partial and the run's cost is `None` as well.
 [src: file: backend/src/agents/chat_codec.rs:160#cost_usd_micros]
+[src: file: backend/src/agents/runner.rs:7941-7947#request_provider_cost]
 [src: file: backend/src/agents/runner.rs:1984-1989#cost_incomplete]
 [src: file: backend/src/api/audit/full.rs:2089#reported_cost_usd_micros]
 [src: file: backend/src/api/audit/drift.rs:1137#reported_cost_usd_micros]
@@ -59,32 +60,37 @@ alongside the missing-output reason. Reaching a search ceiling alone does not
 fail an otherwise valid artifact (KT-951).
 [src: file: backend/src/agents/runner.rs:26-27#MAX_AUDIT_SEARCH_CALLS]
 [src: file: backend/src/agents/runner.rs:675-700#max_calls_for_tool]
-[src: file: backend/src/api/audit/validation.rs:118-157#with_http_diagnostics]
+[src: file: backend/src/api/audit/validation.rs:119-159#with_http_diagnostics]
 
 Hosted OpenAI-wire models (LiteLLM, NVIDIA, Custom, OpenRouter) send no
 `num_ctx`, so their context pressure is measured on a bounded step budget:
 the smaller of the advertised window and 128 000 tokens
 (`KRONN_HTTP_STEP_CTX_BUDGET`). Workers finalize and audits open their write
-window at 75 % of it. An audit step also opens its write window once it has
+window at 75 % of it [src: file: backend/src/agents/runner.rs:97-98#WORKER_CONTEXT_PRESSURE_PERCENT]. An audit step also opens its write window once it has
 spent 1 500 000 cumulative input tokens (`KRONN_HTTP_AUDIT_STEP_INPUT_BUDGET`;
 the estimated prompt counts when the provider reports no usage). Tool results
 are not clamped on this wire, and discussion round caps still follow the
 advertised window (KT-998).
-[src: file: backend/src/agents/runner.rs:7955-7961#HOSTED_AUDIT_STEP_INPUT_BUDGET]
-[src: file: backend/src/agents/runner.rs:11880-11891#audit_budget_spent]
+[src: file: backend/src/agents/runner.rs:7949-7951#HOSTED_STEP_CTX_BUDGET]
+[src: file: backend/src/agents/runner.rs:7953-7955#HOSTED_AUDIT_STEP_INPUT_BUDGET]
+[src: file: backend/src/agents/runner.rs:11884-11899#audit_budget_spent]
 
 Full audits check changed documents against the final documentary gate during
 each step. Comma-bundled file references (including a repeated `file:` prefix)
-are split only when every individual path and line resolves; documents containing
-human-owned sections and fenced examples are excluded from this automatic edit.
-Originals are saved by content hash under
+are split only when every individual path and line resolves; fenced examples are
+never touched, a human-owned section is normalized like the rest and its owner is
+asked to reconfirm it, and a document Kronn does not own is reported, never
+rewritten. Originals are saved by content hash under
 `.kronn/audit/citation-originals/*.bak`, outside the audited `docs/`. Remaining blockers receive at most two
 agent correction attempts, with existing human-section protection. Invalid
 paths and ranges still block validation. Retry usage is included in the step
 total (KT-952).
-[src: file: backend/src/api/audit/document_repair.rs:114-183#split_verified_citations]
+[src: file: backend/src/api/audit/document_repair.rs:119-193#split_verified_citations]
 [src: file: backend/src/core/audit_state.rs:12#CITATION_ORIGINALS_DIR]
-[src: file: backend/src/api/audit/full.rs:2352-2373#check_attempt]
+[src: file: backend/src/api/audit/full.rs:2350-2380#check_attempt]
+[src: file: backend/src/api/audit/full.rs:1760-1764#max_attempts]
+[src: file: backend/src/api/audit/anti_hallu_enforce.rs:24#MAX_ATTEMPTS]
+[src: file: backend/src/api/audit/document_repair.rs:71-78#feedback]
 
 An incomplete dimension-coverage matrix also receives targeted feedback in a
 Full audit after the agent exits successfully. This shares the same three-attempt
@@ -92,13 +98,13 @@ budget as documentary correction; it does not add another retry budget. Resume
 recomputes the matrix failure from the current index before its first attempt.
 Invalid tables remain blocking, provider errors do not trigger this correction,
 and existing TD files and human sections remain protected (KT-956).
-[src: file: backend/src/api/audit/validation.rs:95-107#coverage_repair_feedback]
-[src: file: backend/src/api/audit/full.rs:2272-2287#coverage_repair_feedback]
+[src: file: backend/src/api/audit/validation.rs:96-117#coverage_repair_feedback]
+[src: file: backend/src/api/audit/full.rs:2279-2294#coverage_repair_feedback]
 
 A failed provider launch finalizes the step with its error and elapsed time.
 If a corrective attempt had already consumed tokens, that usage remains in the
 persisted step and its terminal SSE event; an unmeasured launch stays unknown.
-[src: file: backend/src/api/audit/full.rs:2644-2674#previous_attempt_usage]
+[src: file: backend/src/api/audit/full.rs:2646-2693#previous_attempt_usage]
 
 A provider error during a step also survives in its persisted warning and SSE
 recap. HTTP status 429 is identified as a rate limit or exhausted quota, not as
@@ -107,16 +113,16 @@ this diagnostic; provider response bodies and endpoint URLs are excluded.
 Partial files remain in place. This failure does not automatically retry the
 request after tool execution or replay that effect (KT-955).
 [src: file: backend/src/agents/http_diagnostics.rs:39-53#failure_summary]
-[src: file: backend/src/api/audit/validation.rs:118-157#with_http_diagnostics]
-[src: file: backend/src/agents/runner.rs:8493-8497#HTTP_PROVIDER_MAX_ATTEMPTS]
+[src: file: backend/src/api/audit/validation.rs:119-159#with_http_diagnostics]
+[src: file: backend/src/agents/runner.rs:8489-8493#HTTP_PROVIDER_MAX_ATTEMPTS]
 
 The final gate also invalidates the relevant step rows so Resume names earlier
 documents that failed after their agent returned success. Recovery rechecks the
 actual files, including runs made before this fix. Auxiliary documents with no
 durable writer attribution are explicitly assigned to the founding step's
 repair prompt. A corrected reference establishes existence, not factual truth.
-[src: file: backend/src/api/audit/document_repair.rs:26-34#recovery_plan]
-[src: file: backend/src/db/audit_runs.rs:1423-1431#invalidate_documentary_steps]
+[src: file: backend/src/api/audit/document_repair.rs:26-52#recovery_plan]
+[src: file: backend/src/db/audit_runs.rs:1423-1441#invalidate_documentary_steps]
 
 A `TypedSchema` step sends its envelope schema as `response_format` with
 `strict: false` on the OpenAI wire: the envelope does not satisfy OpenAI's
@@ -142,7 +148,7 @@ The shared gate does not imply an identical UI card on every surface.
 ## The discussion's sticky connection
 
 Every discussion whose primary agent is a named connection persists that
-connection on the `discussions.connection_id` column (migration 165), set at
+connection on the `discussions.connection_id` column (migration 166), set at
 creation and updated whenever the discussion's agent is switched via the
 ChatHeader picker. This is what an *ordinary reply with no explicit
 `@mention`* resolves through — before this column existed, only the very
@@ -179,24 +185,30 @@ under an unrelated agent.
   centralized guard can make this invariant structural once the agent runner
   is available for that refactor.
   [src: file: backend/src/core/model_catalog/mod.rs:1272-1279#preflight_resolve]
-  [src: file: backend/src/api/discussions/orchestration.rs:66-131#checked_launch_connection]
-  [src: file: backend/src/api/discussions/orchestration.rs:809-815#checked_launch_connection]
-  [src: file: backend/src/workflows/steps.rs:1132-1160#resolve_step_connection]
-  [src: file: backend/src/workflows/steps.rs:1174-1210#preflight_workflow_launch]
+  [src: file: backend/src/api/discussions/orchestration.rs:66-132#checked_launch_connection]
+  [src: file: backend/src/api/discussions/orchestration.rs:814-822#checked_launch_connection]
+  [src: file: backend/src/api/discussions/orchestration.rs:710-718#checked_launch_connection]
+  [src: file: backend/src/api/discussions/orchestration.rs:1049-1057#checked_launch_connection]
+  [src: file: backend/src/workflows/steps.rs:1132-1172#resolve_step_connection]
+  [src: file: backend/src/workflows/steps.rs:1174-1227#preflight_workflow_launch]
 - **Mid-thread `@mention` autocomplete doesn't suggest connection aliases.**
   The composer's autocomplete only lists built-in agents; typing a
   connection's exact alias (e.g. `@groq`) still dispatches correctly — the
   backend resolves it independently of what the UI suggested — but nothing
   prompts the user to type it.
-- **Stored provider API keys are not AES-encrypted.** Several docstrings
-  (including on `ExternalApiConnection` itself) describe the credential as
-  living in "Kronn's encrypted credential store." In the current
-  implementation a connection's `credential_slug` looks up a plaintext
-  `ApiKey.value` in `TokensConfig.keys`, serialized as-is into
-  `~/.config/kronn/config.toml` and protected only by file permissions
-  (`0600`) — not by the AES-256-GCM `core::crypto` module MCP secrets use.
-  This predates KT-545 and is not changed by it; see
-  `docs/inconsistencies-tech-debt.md`.
+- **Stored provider API keys are encrypted since 0.14.3, with residuals.**
+  A connection's `credential_slug` resolves an `ApiKey` of the live
+  configuration; `config::save` stores those keys encrypted with the instance
+  key in the `stored_credentials` table and writes `config.toml` without them
+  (KT-1007). What stays open: on a host with no keychain and no verified
+  recovery passphrase, the key sits in `config.toml` next to the data it
+  decrypts; a locked or missing key at boot leaves pre-migration plaintext in
+  `config.toml` until restored; a set-aside `config.toml.corrupt.<timestamp>`
+  may hold credentials in clear. See
+  [key-management.md](key-management.md) and
+  `docs/inconsistencies-tech-debt.md` (TD-20260901).
+  [src: file: backend/src/core/credential_store.rs:137-154#encrypt_rows]
+  [src: file: backend/src/core/credential_store.rs:346-349#sync_for_save]
 
 ## Troubleshooting
 
@@ -215,8 +227,13 @@ under an unrelated agent.
   invocation. It stops the test immediately: later model errors cannot hide
   the billing failure. The form and saved connection card show a translated
   message; provider response bodies and credentials remain private.
-  [src: file: backend/src/api/external_api_connections.rs:740-750#ChatProbe]
+  [src: file: backend/src/api/external_api_connections.rs:1218-1224#PAYMENT_REQUIRED]
+  [src: file: backend/src/api/external_api_connections.rs:485-491#PAYMENT_REQUIRED]
+  [src: file: backend/src/api/external_api_connections.rs:607-609#ChatProbe]
+  [src: file: backend/src/api/external_api_connections.rs:625-645#failure_response]
+  [src: file: backend/src/api/external_api_connections.rs:740-751#assemble_tier_report]
   [src: file: frontend/src/components/settings/ExternalApiSection.tsx:365-366#billing_error]
+  [src: file: frontend/src/components/settings/ExternalApiSection.tsx:1054#billing_error]
   Xiaomi MiMo returns HTTP 402 (`insufficient_balance`) when generation lacks
   credit, even when the key can load `/v1/models`. Previously the generic
   fallback could hide this behind a later HTTP 400 from a TTS model.
@@ -233,9 +250,9 @@ Ollama `images` base64 values. Settings → model catalogue exposes **Vision
 image-input declarations also populate it; without a catalogue declaration,
 Ollama `/api/show` and LiteLLM `/model/info` may confirm vision for the exact
 model. A missing declaration never causes an image to be sent speculatively.
-[src: file: backend/src/agents/vision.rs:495-525#attach_to_chat_body]
-[src: file: backend/src/agents/vision.rs:145-175#ollama_show_vision]
-[src: file: backend/src/api/discussions/streaming.rs:2739-2770#http_context_images]
+[src: file: backend/src/agents/vision.rs:495-526#attach_to_chat_body]
+[src: file: backend/src/agents/vision.rs:145-169#ollama_show_vision]
+[src: file: backend/src/api/discussions/streaming.rs:2739-2780#http_context_images]
 
 Every withheld image is named in the model's context with an explicit instruction
 not to describe its contents, and a way for the user to supply the information.
@@ -247,15 +264,15 @@ file. Failed decoding or remaining limits produce the same explicit withholding
 notice. Transmission/downscaling counts are logged without the image payload.
 Prompt estimates count a bounded image allowance instead of base64 text bytes.
 [src: file: backend/src/agents/vision.rs:40-56#MAX_IMAGE_BYTES]
-[src: file: backend/src/agents/vision.rs:426-430#withheld_sentence]
+[src: file: backend/src/agents/vision.rs:426-486#withheld_sentence]
 
 `read_file` accepts only file paths registered to the current discussion, even
 without a project. This exception grants no directory listing or writing rights;
 `.kronn/context-files` remains read-only inside a project too. Symlink
 attachments are refused. Unrelated files outside the workspace keep the existing
 refusal. Images are never returned as lossy text by `read_file`.
-[src: file: backend/src/api/agent_tools.rs:3347-3371#match_attachment]
-[src: file: backend/src/api/agent_workspace_tools.rs:1297-1330#read_attachment_payload]
+[src: file: backend/src/api/agent_tools.rs:3330-3362#read_attached_file]
+[src: file: backend/src/api/agent_workspace_tools.rs:1297-1341#read_attachment_payload]
 
 CLI agents retain the existing attachment prompt: an image's path and an
 instruction to inspect it with their own image/file tools before describing it.

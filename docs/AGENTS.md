@@ -2,7 +2,7 @@
 
 **Project:** Kronn — Self-hosted CLI + web UI for managing AI coding agents (Claude Code, Codex, Vibe, Gemini CLI, Kiro) across git repositories. Unified workflow engine for cron, multi-step pipelines, tracker-driven automation, source watches, and manual triggers.
 
-> **All files under `docs/` are in English by default.** Project documentation must be written in English.
+> **All files under `docs/` are in English by default.**
 > **ATTENTION — This is the reference file for all AI agents.**
 > Read this file first, then follow the context loading strategy below.
 > Do not read the other config files (.cursorrules, copilot-instructions, etc.) — they redirect here.
@@ -37,7 +37,7 @@ A human may also **decline**: settled, not pending. Never re-ask by republishing
 the key.
 See
 [`operations/mcp-servers/kronn-internal.md`](operations/mcp-servers/kronn-internal.md#human-arbitration-cards).
-`[src: file: backend/src/db/discussion_questions.rs:1]`
+`[src: file: backend/src/db/discussion_questions.rs:54-66#DiscussionQuestionState]`
 
 Use paths relative to the repo root.
 
@@ -143,7 +143,7 @@ Never load everything "just in case".
   then `make check-version` before tagging. The guard compares `VERSION`, app
   manifests and lockfiles, the first changelog release, both READMEs (including
   clone commands), and the FR/EN/ES public site; CI runs the same check.
-  `[src: file: Makefile:417-460]`
+  `[src: file: Makefile:541-589#bump]`
   `[src: file: scripts/check-version-sync.sh:1-106]`
 - **Type generation**: Rust models are the source of truth. TypeScript types are auto-generated via `ts-rs`.
 - If stdout/stderr is missing: ask the user to copy/paste the full output.
