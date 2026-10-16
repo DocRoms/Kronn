@@ -576,7 +576,11 @@ pub async fn full_audit(
         // before documentary failures were persisted on their owning steps.
         let documentary_recovery = if resume_run_id_req.is_some() && should_optimize_documents(kind) {
             match crate::core::document_optimization::analyze(&project_path) {
-                Ok(report) => super::document_repair::recovery_plan(&report.diagnostics, &steps),
+                Ok(report) => super::document_repair::recovery_plan(
+                    &report.diagnostics,
+                    &steps,
+                    &super::document_repair::Blame::load(&project_path),
+                ),
                 Err(error) => {
                     yield Event::default().event("error").data(serde_json::json!({
                         "error": format!("Cannot inspect documentary recovery targets: {error}")
@@ -1353,6 +1357,14 @@ pub async fn full_audit(
         let enforce_mode = crate::core::anti_halluc::current_mode()
             == crate::core::anti_halluc::AntiHallucMode::Enforce;
 
+        // KT-1306 — which step introduced each documentary blocker: the final
+        // gate charges (and a resume redoes) that step, not the target's owner.
+        let mut doc_blame = if resume_run_id_req.is_some() {
+            super::document_repair::Blame::load(&project_path)
+        } else {
+            super::document_repair::Blame::reset(&project_path)
+        };
+
         for (step_num, analysis_step) in steps.iter().enumerate() {
             // KT-1199 — what the previous step left, before anything else runs.
             {
@@ -1757,6 +1769,17 @@ pub async fn full_audit(
                     }
                 }
             } else { None };
+            // KT-1306 — the blockers already there before this step ran are not
+            // its doing: reported, never blocking it unless handed to it.
+            let documentary_baseline: Vec<crate::core::document_optimization::Diagnostic> = if documentary_snapshot.is_some() {
+                match crate::core::document_optimization::analyze(&project_path) {
+                    Ok(report) => report.blocking_diagnostics().cloned().collect(),
+                    Err(e) => {
+                        tracing::warn!("Audit step {} ({}): pre-step documentary baseline unavailable: {}", step, file_label, e);
+                        Vec::new()
+                    }
+                }
+            } else { Vec::new() };
             let max_attempts = if enforce_mode || documentary_snapshot.is_some() {
                 super::anti_hallu_enforce::MAX_ATTEMPTS
             } else {
@@ -2353,8 +2376,19 @@ pub async fn full_audit(
                     let mut documentary_repair_proven = false;
                     if success {
                         if let Some(before) = &documentary_snapshot {
-                            let gate = super::document_repair::check_attempt(&project_path, before, &recovery_targets);
-                            let reason = match gate {
+                            let gate = super::document_repair::check_attempt(&project_path, before, &recovery_targets, &documentary_baseline);
+                            if let Ok(check) = &gate {
+                                if !check.preexisting.is_empty() && (check.blocking.is_empty() || attempt >= max_attempts) {
+                                    tracing::info!(
+                                        "Audit step {} ({}): {} documentary blocker(s) pre-date the step, reported without blocking it",
+                                        step, file_label, check.preexisting.len()
+                                    );
+                                    yield Event::default().event("documentary_preexisting").data(serde_json::json!({
+                                        "step":step,"file":file_label,"diagnostics":check.preexisting,
+                                    }).to_string());
+                                }
+                            }
+                            let reason = match gate.map(|check| check.blocking) {
                                 Ok(blocking) if blocking.is_empty() => {
                                     documentary_repair_proven = super::document_repair::recovery_changed(
                                         &project_path, before, &recovery_targets,
@@ -2768,6 +2802,16 @@ pub async fn full_audit(
                     "step": step, "file": file_label, "reason": reason, "repaired_from_template": false,
                 }).to_string());
             }
+            // KT-1306 — charge what this step brought, now that its files are final.
+            if documentary_snapshot.is_some() {
+                match crate::core::document_optimization::analyze(&project_path) {
+                    Ok(report) => {
+                        let after: Vec<_> = report.blocking_diagnostics().cloned().collect();
+                        doc_blame.record_step(&project_path, step as u32, &documentary_baseline, &after);
+                    }
+                    Err(e) => tracing::warn!("Audit step {step} ({file_label}): documentary blame not recorded: {e}"),
+                }
+            }
         }
 
         // ── Auto-detect project skills ──
@@ -2991,7 +3035,7 @@ pub async fn full_audit(
                     );
                     if !blocking.is_empty() {
                         docs_blocked = true;
-                        let recovery = super::document_repair::recovery_plan(&blocking, &steps);
+                        let recovery = super::document_repair::recovery_plan(&blocking, &steps, &doc_blame);
                         let mut warnings = Vec::new();
                         for (step, diagnostics) in recovery {
                             progress.invalidate_success(step);

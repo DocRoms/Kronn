@@ -87,6 +87,7 @@ case "$prompt" in
       fi
       mv "$f.next" "$f"
     fi
+    if [ -f '{state}/after' ]; then sh '{state}/after' "$target"; fi
     ;;
   *)
     while [ -f '{state}/validation-hold' ]; do sleep 0.1; done
@@ -1628,4 +1629,152 @@ async fn a_reaudit_keeps_human_td_decisions_and_a_refresh_says_it_is_single_agen
         .pop()
         .unwrap_or_else(|| panic!("{partial}"));
     assert_eq!(done["cross_agent_skipped"], true, "{partial}");
+}
+
+/// Run `hook` (shell `case` arms over `$1`, the step's target) after each step
+/// prompt of the scripted agent.
+fn after_each_step(tools: &Path, hook: &str) {
+    std::fs::write(
+        tools.join("after"),
+        format!("case \"$1\" in\n{hook}\nesac\n"),
+    )
+    .unwrap();
+}
+
+/// KT-1306 — the final documentary gate charges a blocker to the step that wrote
+/// the document, even one no step targets, and a resume redoes that step, never
+/// the founding one by default.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_final_blocker_is_charged_to_the_step_that_wrote_the_file() {
+    let h = harness().await;
+    let (tools, state, project) = (h.tools.path(), &h.state, h.project.path());
+    let chain = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full);
+    let step_of = |file: &str| chain.iter().position(|s| s.target_file == file).unwrap() as u32 + 1;
+    let (writer_a, writer_b) = (step_of("docs/coding-rules.md"), step_of("docs/glossary.md"));
+    let (first_writer, second_writer) = (writer_a.min(writer_b), writer_a.max(writer_b));
+    let founding = crate::api::audit::full::founding_step_index(&chain).unwrap();
+    assert!(![writer_a, writer_b].contains(&founding));
+
+    // Two steps each leave a document no step targets, citing a file that does
+    // not exist. A step that fails its gate retries: one scripted line per attempt.
+    let mut targets: Vec<&str> = Vec::new();
+    for (index, step) in chain.iter().enumerate() {
+        let attempts = if [writer_a, writer_b].contains(&(index as u32 + 1)) {
+            crate::api::audit::anti_hallu_enforce::MAX_ATTEMPTS
+        } else {
+            1
+        };
+        targets.extend(std::iter::repeat_n(step.target_file, attempts));
+    }
+    arm(tools, "fill", &targets);
+    let root = project.display();
+    after_each_step(
+        tools,
+        &format!(
+            "docs/coding-rules.md) printf '# A\\nGhost [src: file: ghost-a.rs:1]\\n' > '{root}/docs/extra-a.md' ;;\n\
+             docs/glossary.md) mkdir -p '{root}/docs/workflow'; printf '# B\\nGhost [src: file: ghost-b.rs:1]\\n' > '{root}/docs/workflow/extra-b.md' ;;"
+        ),
+    );
+    let run = run_full(state, None).await;
+    let done = sse_events(&run, "done").pop().expect("terminal done");
+    validation_settled(state, &done).await;
+    assert_eq!(done["status"], "interrupted", "{run}");
+    assert_eq!(
+        done["steps_to_redo"],
+        json!([first_writer, second_writer]),
+        "{run}"
+    );
+    let mut warned: Vec<u64> = sse_events(&run, "step_warning")
+        .iter()
+        .map(|e| e["step"].as_u64().unwrap())
+        .collect();
+    warned.sort_unstable();
+    warned.dedup();
+    assert_eq!(
+        warned,
+        vec![first_writer as u64, second_writer as u64],
+        "{run}"
+    );
+    let optimization = sse_events(&run, "documentary_optimization").pop().unwrap();
+    assert_eq!(optimization["blocking_count"], 2, "{optimization}");
+    let interrupted = done["audit_run_id"].as_str().unwrap().to_string();
+    let (row, _, _) = persisted(state, &interrupted).await;
+    assert_eq!(outcomes(&row)["failed"], done["steps_to_redo"], "{row:?}");
+
+    // The resume replays exactly those two steps; the founding one is not rerun.
+    std::fs::remove_file(tools.join("steps.log")).unwrap();
+    std::fs::remove_file(tools.join("after")).unwrap();
+    std::fs::remove_file(project.join("docs/extra-a.md")).unwrap();
+    std::fs::remove_file(project.join("docs/workflow/extra-b.md")).unwrap();
+    arm(tools, "noop", &["docs/coding-rules.md", "docs/glossary.md"]);
+    let resumed = run_full(state, Some(interrupted)).await;
+    let started: Vec<u64> = sse_events(&resumed, "step_start")
+        .iter()
+        .map(|e| e["step"].as_u64().unwrap())
+        .collect();
+    assert_eq!(
+        started,
+        vec![first_writer as u64, second_writer as u64],
+        "{resumed}"
+    );
+}
+
+/// KT-1306 — a blocker that was in a document before a step ran is reported,
+/// not charged to that step when it touches the document.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_step_is_not_blocked_by_a_blocker_that_pre_dates_it() {
+    let h = harness().await;
+    let (tools, state, project) = (h.tools.path(), &h.state, h.project.path());
+    let chain = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full);
+    let targets: Vec<&str> = chain.iter().map(|s| s.target_file).collect();
+    let touching = chain
+        .iter()
+        .position(|s| s.target_file == "docs/glossary.md")
+        .unwrap() as u32
+        + 1;
+    let founding = crate::api::audit::full::founding_step_index(&chain).unwrap();
+
+    arm(tools, "fill", &targets);
+    let first = run_full(state, None).await;
+    let done = sse_events(&first, "done").pop().expect("terminal done");
+    validation_settled(state, &done).await;
+    assert_eq!(done["status"], "complete", "{first}");
+
+    // A document already carries a dead citation when the next audit starts;
+    // one step then touches that document without being asked to fix it.
+    let notes = project.join("docs/notes.md");
+    std::fs::write(&notes, "# Notes\nGhost [src: file: ghost.rs:1]\n").unwrap();
+    arm(tools, "noop", &targets);
+    after_each_step(
+        tools,
+        &format!(
+            "docs/glossary.md) printf 'Another note.\\n' >> '{}' ;;",
+            notes.display()
+        ),
+    );
+    let second = run_full(state, None).await;
+    let done = sse_events(&second, "done").pop().expect("terminal done");
+    validation_settled(state, &done).await;
+
+    let reported = sse_events(&second, "documentary_preexisting");
+    assert_eq!(reported.len(), 1, "{second}");
+    assert_eq!(reported[0]["step"], touching, "{second}");
+    assert_eq!(
+        reported[0]["diagnostics"][0]["path"], "docs/notes.md",
+        "{second}"
+    );
+    assert!(sse_events(&second, "step_retry").is_empty(), "{second}");
+    let step_done = sse_events(&second, "step_done")
+        .into_iter()
+        .find(|e| e["step"] == touching)
+        .unwrap();
+    assert_eq!(step_done["success"], true, "{step_done}");
+    // Nobody introduced it during this run: the run is still blocked on it
+    // (the entry point's step owns what no step wrote), but the toucher is not.
+    assert_eq!(done["status"], "interrupted", "{second}");
+    assert_eq!(done["steps_to_redo"], json!([founding]), "{second}");
 }
