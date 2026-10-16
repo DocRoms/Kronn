@@ -23,8 +23,9 @@ Release notes for 0.9.3 and earlier are available in the
   range that starts a function early fails the docs check and the runtime
   verifier with `a definition anchor must start the range`, and
   `make docs-reanchor` proposes the range starting at the doc comment or
-  attributes of the definition. 208 citations of `docs/` were repaired by
-  reading their sentence (193 flagged by the rule, 15 moved by integrations);
+  attributes of the definition. 213 citations of `docs/` were repaired by
+  reading their sentence (193 flagged by the rule, 15 moved by integrations, 5 more found by
+  the review sample);
   the full check over every doc is green.
 - AI documentation template and audit v2 gap audit (KT-819). The project
   facts of the briefing gain « Documentation externe » (Confluence, Notion,

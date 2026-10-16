@@ -461,7 +461,7 @@ because that tool is already the principal's amendment of a live execution:
 principal-only, reason-journaled, room and evidence kept. `task_exec_review` would
 have let a self-reviewing worker weaken its own gates and ties the swap to the
 persisted `ReviewDecision v1`; `task_exec_prepare` is documented as mutation-free.
-`[src: file: backend/src/api/orchestration.rs:10662-10690#execution_amendment]`
+`[src: file: backend/src/api/orchestration.rs:10688-10699#ExecutionAmendment]`
 
 The worker brief of a worker with a shell says who runs which gates: the worker
 runs the TARGETED tests, the long validations the principal persisted are played
@@ -818,7 +818,7 @@ The MCP `initialize` instructions expose this contract before any room tool is
 called, and `disc_join` repeats it in the room protocol. The full document and
 diagram examples remain on demand in the Kronn Docs skill so the permanent MCP
 catalogue does not pay for a long manual.
-`[src: file: frontend/src/components/MessageBubble.tsx:2049-2060#DocPreview]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:11844-11855#first_contact]`
 `[src: file: frontend/src/components/MermaidDiagram.tsx:111-119#validRoots]`
 `[src: file: backend/src/api/disc_prompts.rs:463-473#rich_output_notice]`
 `[src: file: backend/src/api/disc_invite.rs:583-632#join_next_steps]`

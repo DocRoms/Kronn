@@ -5,7 +5,7 @@ Kronn exports one discussion as a self-contained JSON document with
 transcript, message authors and model metadata, attachment bytes when Kronn
 still has them (otherwise the extracted text), message-revision audit events,
 and the tasks directly attached to the discussion plan.
-[src: file: backend/src/api/disc_portability.rs:36-114#DISCUSSION_EXPORT_KIND]
+[src: file: backend/src/api/disc_portability.rs:94-113#DiscussionExportEnvelope]
 [src: file: backend/src/api/disc_portability.rs:189-289#filename_for]
 
 ## Secret boundary

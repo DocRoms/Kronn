@@ -83,7 +83,7 @@ Three Docker services behind nginx gateway:
   execution/session state are excluded. Imports are atomic and tracked by
   source discussion id + semantic content hash, so an exact replay is a no-op
   and changed content is an explicit conflict.
-  [src: file: backend/src/api/disc_portability.rs:36-39#DISCUSSION_EXPORT_KIND]
+  [src: file: backend/src/api/disc_portability.rs:94-113#DiscussionExportEnvelope]
   [src: file: backend/src/api/disc_portability.rs:327-369#build_export_envelope]
   [src: file: backend/src/api/disc_portability.rs:527-791#import_bundle]
   [src: file: backend/src/db/sql/093_discussion_imports.sql:1-15#discussion_imports]
@@ -250,7 +250,7 @@ hands the clock back to the model — a fresh window, not the time already spent
 — the instant a terminal update closes the call. A tool call that never closes
 is still cut, by its own (wider) bound, with a reason naming the tool instead
 of accusing the model of a silence it never had.
-[src: file: backend/src/agents/idle_watchdog.rs:43-58#DEFAULT_IDLE_TIMEOUT] [src: file: backend/src/agents/idle_watchdog.rs:131-170#begin_tool]
+[src: file: backend/src/agents/idle_watchdog.rs:45-58#TOOL_TIMEOUT_MULTIPLIER] [src: file: backend/src/agents/idle_watchdog.rs:131-170#begin_tool]
 [src: file: backend/src/agents/runner.rs:5521-5529#IdleWatchdog] [src: file: backend/src/agents/runner.rs:5627-5642#begin_tool]
 [src: file: backend/src/agents/runner_idle_test.rs:1823-1946#a_long_silent_acp_tool_call_is_not_mistaken_for_a_dead_model]
 [src: file: backend/src/acp.rs:1477-1491#ToolCallEnded] [src: file: backend/src/acp.rs:520-527#Activity]

@@ -126,7 +126,7 @@ complete or otherwise modify a task. The card's task link resolves a fresh plan
 and opens that exact task; a removed link or unavailable plan is explained
 instead of selecting an unrelated task.
 [src: file: frontend/src/components/ImportantMessageForm.tsx:19#ImportantMessageForm]
-[src: file: frontend/src/pages/DiscussionsPage.tsx:1503-1530#openPlan]
+[src: file: frontend/src/pages/DiscussionsPage.tsx:1469-1499#openPlan]
 [src: file: frontend/src/components/DiscussionPlanPanel.tsx:87-90#initialTaskId]
 
 The publication-key field appears only inside the open form. It uses the

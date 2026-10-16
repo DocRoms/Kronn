@@ -725,7 +725,7 @@ on its origin (scheme, host and port, compared exactly, so
 `https://player.example.com` does not cover `https://cdn.player.example.com`
 nor `:8443`). URLs with credentials or another scheme are ignored. Adding a new
 service is a configuration change plus HTML, never an engine change.
-[src: file: frontend/src/lib/live-page-embeds.ts:35-37#embedUrlOrigin]
+[src: file: frontend/src/lib/live-page-embeds.ts:20-37#parseWebUrl]
 A third-party site can still refuse to be framed (`X-Frame-Options` or a CSP
 `frame-ancestors`); allowing it in Kronn does not override that, and the
 player then shows the site's own error.

@@ -253,7 +253,7 @@ categories only temporarily.
 `[src: file: frontend/src/lib/automationNavigation.ts:35-41#writeAutomationLastVisit]`
 `[src: file: frontend/src/pages/WorkflowsPage.tsx:257-267#readCollapsedAutomationSections]`
 `[src: file: frontend/src/pages/WorkflowsPage.tsx:552-587#AUTOMATION_COLLAPSED_STORAGE_KEY]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:2563-2565#isGroupCollapsed]`
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:2552-2557#isGroupCollapsed]`
 Pages follows the same contract for its active Page and sidebar categories, including a safe
 fallback when a saved Page was removed.
 `[src: file: frontend/src/pages/PagesPage.tsx:68-69#PAGE_NAVIGATION_STORAGE_KEY]`

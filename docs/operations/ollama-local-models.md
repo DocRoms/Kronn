@@ -160,7 +160,7 @@ inner lines may move. The diagnostic starts with `Structure validation refused`
 and, like a Rust parser error, puts the worker into its one strict correction
 of the same frozen range. The prelocalized brief carries no human-arbitration
 or parent-milestone section: a bounded edit has neither.
-`[src: file: backend/src/api/agent_workspace_structure.rs:1-10#Structural]`
+`[src: file: backend/src/api/agent_workspace_structure.rs:9-10#STRUCTURE_REFUSAL_PREFIX]`
 `[src: file: backend/src/api/agent_workspace_structure.rs:22-33#language]`
 `[src: file: backend/src/api/agent_workspace_structure.rs:234-252#validate_delimiters]`
 `[src: file: backend/src/api/agent_workspace_structure.rs:270-312#validate_range_indentation]`
