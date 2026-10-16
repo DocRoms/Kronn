@@ -169,12 +169,8 @@ fn split_verified_citations(project: &Path, content: &str) -> Option<String> {
                 let Ok(source) = std::fs::read_to_string(resolved) else {
                     return false;
                 };
-                let bounds: Vec<_> = range.split('-').map(str::parse::<usize>).collect();
-                match bounds.as_slice() {
-                    [Ok(n)] => *n > 0 && *n <= source.lines().count(),
-                    [Ok(a), Ok(b)] => *a > 0 && a <= b && *b <= source.lines().count(),
-                    _ => false,
-                }
+                crate::core::anti_halluc::parse_line_bounds(range)
+                    .is_some_and(|(a, b)| a > 0 && a <= b && b <= source.lines().count())
             });
             if parts.len() > 1
                 && strict

@@ -536,7 +536,12 @@ Release notes for 0.9.3 and earlier are available in the
   and an out-of-range line reports the file's line count. Ranges accept the
   en and em dash, and a non-numeric line says « not a line number ». A bare
   path to a text file no longer tells the model to drop the claim: it proposes
-  the whole-file range `path:1-N` (N filled in) to cite an absence.
+  the whole-file range `path:1-N` (N filled in) to cite an absence. The dash
+  normalisation lives in one place shared by the verifier, citation drift and
+  the documentary gate, so `path:17–23` is no longer fabricated under enforce.
+  Hint paths are canonical and only name a file that holds the cited lines; a
+  `#symbol` anchor is accepted after a range; a whole-file range backing a
+  claim that is not an absence raises a non-blocking `whole_file_citation`.
 - A review-wait timeout no longer locks the principal out of the review
   (KT-1293). The watchdog used to move the unreviewed delivery to `Escalated`
   while its alert told the principal to call `task_exec_review`, which only

@@ -5,6 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+use crate::core::anti_halluc::parse_line_bounds;
+
 const CONFIG_FILE: &str = "docs/.kronn-document-budgets.json";
 pub use crate::core::audit_state::REPORT_FILE;
 
@@ -499,7 +501,8 @@ pub const HUMAN_SECTION_REFERENCE: &str = "human_section_reference";
 
 fn inspect_citations(project: &Path, rel: &str, content: &str, out: &mut Vec<Diagnostic>) {
     let visible = visible_markdown(content);
-    for tail in visible.split("[src: file:").skip(1) {
+    for (at, marker) in visible.match_indices("[src: file:") {
+        let tail = &visible[at + marker.len()..];
         let Some(raw) = tail.split(']').next() else {
             continue;
         };
@@ -543,7 +546,7 @@ fn inspect_citations(project: &Path, rel: &str, content: &str, out: &mut Vec<Dia
                          that supports the claim, [src: file: {raw}:<line>]. To state that \
                          something is absent from it, cite the whole file as \
                          [src: file: {raw}:1-{}] and write the absence outside the brackets",
-                        line_count(&path)
+                        line_count(&path).max(1)
                     ),
                     None => format!(
                         "malformed file citation `{raw}`: expected [src: file: path:line], \
@@ -581,14 +584,36 @@ fn inspect_citations(project: &Path, rel: &str, content: &str, out: &mut Vec<Dia
             continue;
         }
         let max_line = line_count(&path);
-        let detail = match parse_line_range(line_part) {
-            Err(()) => Some(format!(
+        let line_spec = without_anchor(line_part);
+        let detail = match parse_line_bounds(line_spec) {
+            None => Some(format!(
                 "citation line `{}` is not a line number: write a number (`{path_part}:12`) \
                  or a range (`{path_part}:12-20`)",
                 line_part.trim()
             )),
-            Ok((start, end)) if start > 0 && start <= end && end <= max_line => None,
-            Ok(_) => Some(format!(
+            Some((start, end)) if start > 0 && start <= end && end <= max_line => {
+                if start == 1 && end == max_line && max_line >= WHOLE_FILE_WARN_LINES {
+                    let claim = visible[..at].rfind('\n').map_or(0, |i| i + 1);
+                    let claim_end = visible[at..].find('\n').map_or(visible.len(), |i| at + i);
+                    if !reads_as_absence(&visible[claim..claim_end]) {
+                        let warning = diag(
+                            WHOLE_FILE_CITATION,
+                            rel,
+                            format!(
+                                "`{path_part}:{}` cites all {max_line} lines of the file, which \
+                                 only supports a claim that something is absent from it; for a \
+                                 claim that something exists, cite the line that shows it",
+                                line_part.trim()
+                            ),
+                        );
+                        if !out.contains(&warning) {
+                            out.push(warning);
+                        }
+                    }
+                }
+                None
+            }
+            Some(_) => Some(format!(
                 "citation line `{}` is outside `{path_part}`, which has {max_line} line(s){}",
                 line_part.trim(),
                 did_you_mean(project, rel, path_part, Some(line_part.trim()))
@@ -600,49 +625,104 @@ fn inspect_citations(project: &Path, rel: &str, content: &str, out: &mut Vec<Dia
     }
 }
 
+/// A whole-file range this long is rarely the line that proves a claim.
+const WHOLE_FILE_WARN_LINES: usize = 30;
+
+/// A citation spanning a whole long file backs a claim that is not an absence.
+pub const WHOLE_FILE_CITATION: &str = "whole_file_citation";
+
+/// The claim around a whole-file citation says something is missing or absent.
+fn reads_as_absence(claim: &str) -> bool {
+    const MARKERS: [&str; 15] = [
+        "no ", "not ", "n't", "never", "none", "nothing", "absent", "absence", "missing",
+        "without", "lack", "aucun", "pas de", "pas d'", "sans ",
+    ];
+    let claim = format!(" {} ", claim.to_lowercase());
+    MARKERS.iter().any(|marker| claim.contains(marker))
+}
+
+/// `12-20` of a `12-20#symbol` line spec: the anchor is checked by the
+/// anti-hallucination gate, which owns the symbol search.
+fn without_anchor(line_part: &str) -> &str {
+    match line_part.rsplit_once('#') {
+        Some((head, symbol))
+            if crate::core::anti_halluc::is_anchor_symbol(symbol.trim())
+                && crate::core::anti_halluc::parse_line_bounds(head).is_some() =>
+        {
+            head.trim_end()
+        }
+        _ => line_part,
+    }
+}
+
 fn line_count(path: &Path) -> usize {
     read(path).map(|s| s.lines().count()).unwrap_or(0)
 }
 
-/// `12` or `12-20`; the en and em dash count as the hyphen they replace.
-fn parse_line_range(line_part: &str) -> Result<(usize, usize), ()> {
-    let normalized = line_part.trim().replace(['\u{2013}', '\u{2014}'], "-");
-    let bounds: Vec<_> = normalized
-        .split('-')
-        .map(|bound| bound.trim().parse::<usize>())
-        .collect();
-    match bounds.as_slice() {
-        [Ok(line)] => Ok((*line, *line)),
-        [Ok(start), Ok(end)] => Ok((*start, *end)),
-        _ => Err(()),
-    }
-}
-
 /// Citation paths resolve from the repository root. A model often writes the
 /// path relative to the docs root or to the citing document instead: name the
-/// root-relative form of that other file so the next attempt fixes the path.
+/// root-relative form of that other file so the next attempt fixes the path. A
+/// candidate is proposed only if it holds the cited lines.
 fn did_you_mean(project: &Path, citing: &str, cited: &str, line: Option<&str>) -> String {
+    if Path::new(cited).is_absolute() {
+        return String::new();
+    }
     let docs_dir = docs_root(project).path("");
     let citing_dir = Path::new(citing)
         .parent()
         .map(|p| p.to_string_lossy().replace('\\', "/"))
         .unwrap_or_default();
-    let cited = cited.trim_start_matches("./");
+    let spec = line.map(|l| parse_line_bounds(without_anchor(l)));
+    let own = repo_relative(cited);
     let hint = [docs_dir.trim_end_matches('/').to_string(), citing_dir]
         .into_iter()
         .filter(|dir| !dir.is_empty())
-        .map(|dir| format!("{dir}/{cited}"))
+        .filter_map(|dir| repo_relative(&format!("{dir}/{cited}")))
+        .filter(|candidate| own.as_ref() != Some(candidate))
         .find(|candidate| {
             let full = project.join(candidate);
-            full.is_file() && !outside_project(project, &full) && contained_path(project, &full)
+            full.is_file()
+                && !outside_project(project, &full)
+                && contained_path(project, &full)
+                && match spec {
+                    Some(Some((start, end))) => {
+                        !crate::core::anti_halluc::is_binary_file(&full)
+                            && start > 0
+                            && start <= end
+                            && end <= line_count(&full)
+                    }
+                    _ => true,
+                }
         });
-    match hint {
-        Some(path) => format!(
-            ". Paths are repository-root relative; did you mean `{path}{}`?",
-            line.map(|l| format!(":{l}")).unwrap_or_default()
-        ),
-        None => String::new(),
+    match (hint, spec, line) {
+        (Some(path), Some(Some(_)), Some(line)) => {
+            format!(". Paths are repository-root relative; did you mean `{path}:{line}`?")
+        }
+        (Some(path), Some(None), _) => {
+            format!(". Paths are repository-root relative; did you mean `{path}:<line>`?")
+        }
+        (Some(path), _, _) => {
+            format!(". Paths are repository-root relative; did you mean `{path}`?")
+        }
+        (None, _, _) => String::new(),
     }
+}
+
+/// `docs//AGENTS.md` and `docs/../AGENTS.md` as the canonical `AGENTS.md`;
+/// `None` when the path climbs out of the repository.
+fn repo_relative(path: &str) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    for component in Path::new(path).components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                parts.pop()?;
+            }
+            Component::Normal(part) => parts.push(part.to_string_lossy().into_owned()),
+            Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
 }
 
 fn root_adapters(project: &Path) -> Result<Vec<PathBuf>, String> {
@@ -955,6 +1035,7 @@ fn visible_markdown(s: &str) -> String {
     crate::core::anti_halluc::strip_inline_code(&crate::core::anti_halluc::strip_fenced_code(s))
 }
 fn mutable_line_reference(s: &str) -> bool {
+    let s = crate::core::anti_halluc::normalize_range_dashes(s);
     s.contains("[src: file:")
         && s.contains('-')
         && s.split("[src: file:").skip(1).any(|p| {
@@ -1911,7 +1992,8 @@ mod tests {
         write(&project.join("long.md"), &"x\n".repeat(30));
         assert!(citation_messages(
             &project,
-            "[src: file: long.md:17\u{2013}23] [src: file: long.md:1\u{2014}30] [src: file: long.md:5-6]"
+            "None of it is stale: [src: file: long.md:17\u{2013}23] [src: file: long.md:1\u{2014}30] \
+             [src: file: long.md:5-6]"
         )
         .is_empty());
         let messages = citation_messages(
@@ -1928,6 +2010,104 @@ mod tests {
                 "{outside}"
             );
         }
+    }
+
+    #[test]
+    fn a_hint_is_a_canonical_path_that_holds_the_cited_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path();
+        write(&project.join("AGENTS.md"), "pointer\n");
+        write(&project.join("docs/AGENTS.md"), &"line\n".repeat(100));
+        write(&project.join("docs/architecture/repo-map.md"), "a\nb\n");
+        let hint = |cited: &str| {
+            let mut out = Vec::new();
+            inspect_citations(
+                project,
+                "docs/architecture/x.md",
+                &format!("[src: file: {cited}]"),
+                &mut out,
+            );
+            out.remove(0).message
+        };
+        // `docs/../AGENTS.md` is the 1-line root pointer: it does not hold
+        // line 90, so the hint skips it for the file that does.
+        let climbing = hint("../AGENTS.md:90");
+        assert!(
+            climbing.contains("did you mean `docs/AGENTS.md:90`?"),
+            "{climbing}"
+        );
+        let doubled = hint("architecture//repo-map.md:1");
+        assert!(
+            doubled.contains("did you mean `docs/architecture/repo-map.md:1`?"),
+            "{doubled}"
+        );
+        // A line past the end of the only candidate: no hint.
+        assert!(!hint("repo-map.md:7").contains("did you mean"));
+        // A non-numeric line still names the file, never the bad line.
+        assert!(hint("repo-map.md:extends")
+            .contains("did you mean `docs/architecture/repo-map.md:<line>`?"));
+        // The hint is never a path that climbs out of the repository.
+        assert!(!hint("../../../etc/hosts:1").contains("did you mean"));
+    }
+
+    #[test]
+    fn a_symbol_anchor_follows_the_line_spec_like_in_the_verifier() {
+        let tmp = document_project();
+        let project = tmp.path().join("proj");
+        write(&project.join("long.md"), &"x\n".repeat(30));
+        assert!(citation_messages(
+            &project,
+            "[src: file: long.md:5-6#retry_once] [src: file: long.md:7#Type.method] \
+             [src: file: long.md:5\u{2013}6#retry_once]"
+        )
+        .is_empty());
+        let messages = citation_messages(
+            &project,
+            "[src: file: long.md:31#retry_once] [src: file: long.md:#retry_once]",
+        );
+        assert_eq!(messages.len(), 2, "{messages:#?}");
+        assert!(
+            messages[0].contains("is outside `long.md`"),
+            "{}",
+            messages[0]
+        );
+        assert!(messages[1].contains("not a line number"), "{}", messages[1]);
+    }
+
+    #[test]
+    fn a_whole_file_range_backing_a_positive_claim_warns_without_blocking() {
+        let tmp = document_project();
+        let project = tmp.path().join("proj");
+        write(&project.join("long.md"), &"x\n".repeat(60));
+        write(&project.join("short.md"), "a\nb\n");
+        let run = |text: &str| {
+            let mut out = Vec::new();
+            inspect_citations(&project, "docs/AGENTS.md", text, &mut out);
+            out
+        };
+        let warned = run("The cache is shared [src: file: long.md:1-60]");
+        assert_eq!(warned.len(), 1, "{warned:?}");
+        assert_eq!(warned[0].code, WHOLE_FILE_CITATION);
+        assert!(!warned[0].blocking);
+        assert!(
+            warned[0].message.contains("all 60 lines"),
+            "{}",
+            warned[0].message
+        );
+        // An absence is what a whole-file range is for.
+        assert!(run("No audit step exists in it [src: file: long.md:1\u{2013}60]").is_empty());
+        assert!(run("The workflow never audits [src: file: long.md:1-60]").is_empty());
+        // A short file, or a real range, is an ordinary citation.
+        assert!(run("Two lines [src: file: short.md:1-2]").is_empty());
+        assert!(run("The cache is shared [src: file: long.md:10-20]").is_empty());
+    }
+
+    #[test]
+    fn a_dash_range_is_a_mutable_line_reference() {
+        assert!(mutable_line_reference("see [src: file: a.rs:2-4]"));
+        assert!(mutable_line_reference("see [src: file: a.rs:2\u{2013}4]"));
+        assert!(mutable_line_reference("see [src: file: a.rs:2\u{2014}4]"));
+        assert!(!mutable_line_reference("see [src: file: a.rs:2]"));
     }
 
     #[test]
