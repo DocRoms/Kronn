@@ -183,6 +183,17 @@ A marker quoted in inline backticks is verified too: it is `verified` when it re
 failure there counts as *unverified*, not fabricated, because backticks also quote the grammar
 as an example. Markers inside fenced code blocks are not read.
 
+**What the marker scanner reads.** A marker ends at its matching `]`. One that never closes
+(a half-typed citation, a banner cut mid-marker) ends at the next `[src:` or the next blank
+line, so the markers after it are still read. A `<kind>: <text>` marker whose kind Kronn does not
+know (`[src: command: git log --oneline]`) is *unverifiable*: it is never resolved as a path, so
+a section citing only such a marker is not reported as outdated. A bare path with no kind stays
+a file.
+
+**Only markers are maintained.** The re-anchor rewrites `[src: …]` markers. A line reference
+written in prose (`` `docker-compose.yml:2-25` ``) is not a citation and is left as written when
+the marker beside it moves: write the line in the marker, not in the sentence.
+
 > **What verification proves — and what it does not.** A `verified` status means the cited
 > source *exists and is in bounds*. It does **not** prove the source *supports the claim*.
 > Never assume `verified` == `true` — that is the job of human review (and a future LLM-judge).

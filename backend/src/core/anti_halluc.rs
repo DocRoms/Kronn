@@ -1189,12 +1189,21 @@ pub(crate) fn markers_at(prose: &str) -> Vec<(usize, String)> {
     let mut i = 0usize;
     while i + needle.len() <= chars.len() {
         if lower[i..i + needle.len()] == needle[..] {
-            // Read until the matching ']' (balance nested '[').
+            // Read until the matching ']' (balance nested '['). A marker never
+            // swallows the next `[src:` nor a paragraph break: an unclosed one
+            // (a truncated banner, a half-typed citation) ends there, so the
+            // markers after it are still read.
             let mut depth = 1i32;
             let mut j = i + needle.len();
             let mut buf = String::new();
             let mut closed = false;
             while j < chars.len() {
+                if j + needle.len() <= chars.len() && lower[j..j + needle.len()] == needle[..] {
+                    break;
+                }
+                if chars[j] == '\n' && blank_line_at(&chars, j) {
+                    break;
+                }
                 match chars[j] {
                     '[' => {
                         depth += 1;
@@ -1220,13 +1229,26 @@ pub(crate) fn markers_at(prose: &str) -> Vec<(usize, String)> {
                 if !inner.is_empty() {
                     out.push((i, inner.to_string()));
                 }
+                i = j + 1;
+            } else {
+                // Resync right after the opening: whatever stopped the scan
+                // (next marker, blank line, end of text) is read normally.
+                i += needle.len();
             }
-            i = j + 1;
         } else {
             i += 1;
         }
     }
     out
+}
+
+/// Whether the newline at `at` is followed by a blank line (`\n` + optional
+/// spaces + `\n`).
+fn blank_line_at(chars: &[char], at: usize) -> bool {
+    chars[at + 1..]
+        .iter()
+        .find(|c| **c == '\n' || !c.is_whitespace())
+        == Some(&'\n')
 }
 
 /// Classify a marker's inner content into a kind + the bare reference, stripping
@@ -1276,7 +1298,28 @@ fn classify_source(raw: &str) -> (SourceKind, String) {
     if let Some(r) = match_type_keyword(s, "file") {
         return (SourceKind::File, r);
     }
+    // `<word>: <text>` with an unknown word is a typed marker Kronn does not
+    // know (`command: git log`): never a path to resolve.
+    if is_unknown_typed(s) {
+        return (SourceKind::Other, s.to_string());
+    }
     (SourceKind::File, s.to_string())
+}
+
+/// `kind: reference` where `kind` is a bare identifier and the colon is
+/// followed by whitespace. A path (`a/b.rs:3`, `C:\x`, `a.rs: 3`) never has
+/// that shape: it carries a `/`, a `.` or has no space after its colon.
+fn is_unknown_typed(s: &str) -> bool {
+    let Some((head, rest)) = s.split_once(':') else {
+        return false;
+    };
+    rest.starts_with(char::is_whitespace)
+        && !rest.trim().is_empty()
+        && head.starts_with(|c: char| c.is_ascii_alphabetic())
+        && head.len() > 1
+        && head
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// The cited path and line span of a `file:` or `code-comment:` marker,
@@ -3374,6 +3417,41 @@ mod tests {
         assert_eq!(m, vec!["arr[0].field"]);
     }
 
+    // KT-1311 — an unclosed marker (a banner cut at 240 chars) must not blind
+    // the markers after it.
+    #[test]
+    fn an_unclosed_marker_does_not_swallow_the_markers_after_it() {
+        let txt = "banner (… [src: file: .github/wor).\n\n- a [src: file: a.rs:1]\n- b [src: file: b.rs:2]\n";
+        assert_eq!(
+            extract_source_markers(txt),
+            vec!["file: a.rs:1", "file: b.rs:2"]
+        );
+    }
+
+    #[test]
+    fn an_unclosed_marker_ends_at_the_next_marker_on_the_same_line() {
+        let txt = "cut [src: file: .gi then [src: file: a.rs:1] and [src: file: b.rs:2]";
+        assert_eq!(
+            extract_source_markers(txt),
+            vec!["file: a.rs:1", "file: b.rs:2"]
+        );
+    }
+
+    #[test]
+    fn an_unclosed_marker_stops_at_a_paragraph_break_not_at_a_stray_bracket() {
+        let txt = "cut [src: file: .gi\n\nlater stray ] bracket [src: file: a.rs:1]";
+        assert_eq!(extract_source_markers(txt), vec!["file: a.rs:1"]);
+        assert!(extract_source_markers("tail [src: file: a.rs:1").is_empty());
+    }
+
+    #[test]
+    fn a_marker_wrapped_over_two_lines_is_still_read() {
+        assert_eq!(
+            extract_source_markers("see [src:\nfile: a.rs:7] ok"),
+            vec!["file: a.rs:7"]
+        );
+    }
+
     #[test]
     fn extract_empty_when_none() {
         assert!(extract_source_markers("no markers here at all").is_empty());
@@ -3538,6 +3616,35 @@ mod tests {
         let (k, r) = classify_source("file: src/a.rs:1");
         assert_eq!(k, SourceKind::File);
         assert_eq!(r, "src/a.rs:1");
+    }
+
+    #[test]
+    fn an_unknown_typed_kind_is_other_never_a_file() {
+        for raw in [
+            "command: git log --oneline -5",
+            "Command: git log",
+            "shell: ls -la docs/",
+            "test-run: cargo test",
+        ] {
+            assert_eq!(classify_source(raw).0, SourceKind::Other, "{raw}");
+            assert_eq!(file_citation(raw), None, "{raw}");
+        }
+        let check = verify_source_marker("command: git log --oneline", Some(Path::new("/tmp")));
+        assert_eq!(check.kind, SourceKind::Other);
+        assert_eq!(check.status, SourceStatus::Unchecked);
+    }
+
+    #[test]
+    fn paths_and_known_kinds_are_not_swallowed_by_the_unknown_kind_rule() {
+        for raw in [
+            "src/a.rs:10",
+            "a.rs:10",
+            "Dockerfile",
+            "docker-compose.yml:2-25",
+            "file: src/a.rs:1",
+        ] {
+            assert_eq!(classify_source(raw).0, SourceKind::File, "{raw}");
+        }
     }
 
     #[test]

@@ -452,6 +452,48 @@ async fn a_moved_cited_line_is_re_anchored_without_an_agent() {
     assert!(fx.plan().await.sections.is_empty());
 }
 
+/// KT-1311 — a doc carrying a truncated marker (an old partial banner cut at
+/// 240 characters) still has every later citation fingerprinted, so a moved
+/// line is re-anchored instead of the doc being blind to the drift. The
+/// validation gate's own scanner rejects a cut inside `[src: file:`, so the
+/// cut here is earlier.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_doc_with_a_truncated_marker_is_still_fingerprinted_and_re_anchored() {
+    let fx = Validated::new(|project| {
+        let path = project.join(RULES);
+        let content = std::fs::read_to_string(&path).unwrap();
+        let cut = "\nGate said: not done (see [src: fi).\n\n## Verified facts";
+        assert!(content.contains("\n## Verified facts"));
+        std::fs::write(&path, content.replacen("\n## Verified facts", cut, 1)).unwrap();
+    })
+    .await;
+    let cites: Vec<String> = fx
+        .record_of(RULES)
+        .citations
+        .into_iter()
+        .map(|c| c.cite)
+        .collect();
+    assert!(cites.contains(&"src/kept.rs:2".to_string()), "{cites:?}");
+    assert!(cites.contains(&"src/kept.rs:3".to_string()), "{cites:?}");
+
+    fx.edit_source(|lines| {
+        lines.insert(0, "// licence header".into());
+        lines.insert(0, "// generated banner".into());
+    });
+    let plan = fx.plan().await;
+    assert_eq!(plan.reanchor_count, 2, "{plan:?}");
+    let body = fx.revalidate().await;
+    let done = sse_events(&body, "done").pop().expect("terminal done");
+    assert_eq!(done["status"], "clean", "{body}");
+    assert_eq!(done["reanchored"], 2, "{body}");
+    let after = std::fs::read_to_string(fx.project().join(RULES)).unwrap();
+    assert!(after.contains("[src: file: src/kept.rs:4]"), "{after}");
+    assert!(after.contains("[src: file: src/kept.rs:5]"), "{after}");
+    assert!(after.contains("(see [src: fi)."), "{after}");
+}
+
 #[tokio::test]
 #[serial_test::serial]
 #[serial_test::serial(kronn_templates_env)]

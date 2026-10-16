@@ -530,6 +530,17 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A doc's citations are no longer lost to a truncated marker, and a citation
+  of an unknown kind is no longer judged as a file (KT-1311). The partial
+  banner cut its reason at 240 characters, sometimes inside a quoted
+  `[src: …]`, and the scanner then read the rest of the doc as one marker:
+  no fingerprint was recorded, so drift went unseen. The banner now writes the
+  reason with round brackets, and the scanner closes an unclosed marker at the
+  next `[src:` or blank line and carries on. `[src: command: git log …]`
+  (any `kind: text` with an unknown kind) is unverifiable, not a missing file,
+  so relevance stops calling its section outdated. Line references written in
+  backticked prose are not re-anchored; only markers are (documented in
+  `docs/conventions/agents-md-format-v1.md`).
 - A review-wait timeout no longer locks the principal out of the review
   (KT-1293). The watchdog used to move the unreviewed delivery to `Escalated`
   while its alert told the principal to call `task_exec_review`, which only
