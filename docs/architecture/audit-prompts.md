@@ -23,4 +23,4 @@ prompt is separate from the deterministic drift API.
 
 Prompt contract tests continue to exercise the embedded strings rather than
 separate copies of the Markdown content.
-[src: file: backend/src/api/audit/mod.rs:1007-1019#drift_kind_consumes_checksums]
+[src: file: backend/src/api/audit/mod.rs:1041-1053#drift_kind_consumes_checksums]
