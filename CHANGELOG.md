@@ -520,6 +520,10 @@ Release notes for 0.9.3 and earlier are available in the
   checks it against the watch table), or `not verified: no source`; a row
   with no source still fails, and the refusal names these forms. The
   `scanned — nothing substantiable` outcome also takes an en-dash or `--`.
+  `resource used:` no longer passes for `source used:`. A `deps:` citation
+  whose manager label holds a `/` (the npm label is `JS / TS`) is now
+  verified against the watch table instead of being read as manager `JS`:
+  every citation the snapshot emits verifies against it.
 
 - An audit step run through the ACP route runs instead of asking the human
   what to do (KT-1278). An ACP session has no system channel, so the context

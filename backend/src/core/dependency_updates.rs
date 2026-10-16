@@ -45,6 +45,18 @@ enum ManagerKind {
 }
 
 impl ManagerKind {
+    #[cfg(test)]
+    const ALL: [Self; 8] = [
+        Self::JavaScript,
+        Self::Composer,
+        Self::Cargo,
+        Self::Go,
+        Self::Bundler,
+        Self::Gradle,
+        Self::DotNet,
+        Self::Poetry,
+    ];
+
     fn label(self) -> &'static str {
         match self {
             Self::JavaScript => "JS / TS",
@@ -57,6 +69,12 @@ impl ManagerKind {
             Self::Poetry => "Poetry",
         }
     }
+}
+
+/// Every manager label the watch can carry, for the tests that must cover them all.
+#[cfg(test)]
+pub(crate) fn manager_labels() -> Vec<&'static str> {
+    ManagerKind::ALL.iter().map(|kind| kind.label()).collect()
 }
 
 #[derive(Debug, Clone)]

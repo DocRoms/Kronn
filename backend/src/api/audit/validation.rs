@@ -651,8 +651,8 @@ citation from the dependency watch table, or `not verified: no source`";
 /// watch table and refuses a fabricated one.
 fn states_version_source(row: &str) -> bool {
     let row_lc = row.to_lowercase();
-    row_lc.contains("source used:")
-        || has_source_label(&row_lc)
+    has_source_label(&row_lc, "source used:")
+        || has_source_label(&row_lc, "source:")
         || row_lc.contains("not verified")
         || row_lc.contains("kronn resync:")
         || crate::core::anti_halluc::extract_source_markers(row)
@@ -660,13 +660,14 @@ fn states_version_source(row: &str) -> bool {
             .any(|marker| crate::core::anti_halluc::dep_citation(marker).is_some())
 }
 
-/// `source:` as a word of its own: `resource:` and `open-source:` are not a label.
-fn has_source_label(row_lc: &str) -> bool {
-    row_lc.match_indices("source:").any(|(at, _)| {
+/// `label` (`source:`, `source used:`) as a word of its own: `resource:`,
+/// `resource used:` and `open-source:` are not a label.
+fn has_source_label(row_lc: &str, label: &str) -> bool {
+    row_lc.match_indices(label).any(|(at, _)| {
         row_lc[..at]
             .chars()
             .next_back()
-            .map_or(true, |c| !(c.is_alphanumeric() || c == '-' || c == '_'))
+            .is_none_or(|c| !(c.is_alphanumeric() || c == '-' || c == '_'))
     })
 }
 
@@ -1055,6 +1056,8 @@ mod tests {
         for evidence in [
             "TD-x behind latest",
             "TD-x; resource: the lockfile; open-source: yes",
+            "TD-x; resource used: the lockfile",
+            "TD-x; open-source used: yes",
             "TD-x [src: file: package.json:12]",
             "TD-x [src: deps: npm/react]",
             "TD-x; no source available",
