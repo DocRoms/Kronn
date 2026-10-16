@@ -97,7 +97,7 @@ New and migrated sessions start both cursors at the room's current tip.
 [src: file: backend/src/db/sql/105_user_turn_catchup.sql:12-23#user_catchup_cursor]
 [src: file: backend/src/db/sql/106_awareness_offered_cursor.sql:1-11#awareness_offered_upto]
 [src: file: backend/src/api/disc_invite.rs:1362-1390#ack_awareness_upto]
-[src: file: backend/scripts/disc-introspection-mcp.py:3489-3496#_PENDING_AWARENESS_ACK_BY_DISC]
+[src: file: backend/scripts/disc-introspection-mcp.py:3497-3504#_PENDING_AWARENESS_ACK_BY_DISC]
 
 ## Queue, restart, and edit/resend
 

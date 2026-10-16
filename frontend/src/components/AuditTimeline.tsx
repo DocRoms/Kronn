@@ -126,7 +126,6 @@ export interface AuditTimelineProps {
   /** Settle what no worker runs any more and release an orphaned lease (KT-1134). */
   onCleanupLease?: () => Promise<void>;
   validationInProgress: boolean;
-  onValidate: () => void;
   /** Records the validation once the linked discussion has finished. */
   onMarkValid: () => Promise<void>;
   /** Opens a discussion, archived ones included. */

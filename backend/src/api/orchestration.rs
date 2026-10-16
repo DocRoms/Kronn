@@ -763,6 +763,9 @@ pub fn start_resilience_watchdog(state: AppState) {
                 if is_live || job.failure_kind.as_deref() == Some("quota_exhausted") {
                     continue;
                 }
+                // KT-1266 — the run is gone (a restarted backend, a lost
+                // stream): what the worker started under it is not.
+                crate::api::discussions::runtime::reap_task_worker_processes(&state, &job.id).await;
                 let job_id = job.id.clone();
                 let transition = state
                     .db
@@ -7510,7 +7513,12 @@ fn toolchain_brief_section(toolchain: &ToolchainCapabilities) -> String {
          `$VITE_DEV_PORT` (déjà dans ton environnement ; Vite proxifie vers \
          `$KRONN_VITE_BACKEND_URL`). Lance le binaire de ta lane (`$CARGO_TARGET_DIR/debug/kronn`). \
          N'écoute jamais sur 3140 ni 5173 : c'est le Kronn de l'hôte, et tu détournerais l'UI \
-         et les autres workers.\n\
+         et les autres workers. Ce que tu démarres s'arrête avec ton tour : Kronn termine tout \
+         processus lancé par ta session quand le dispatch finit.\n\
+         Vite et vitest se lancent tels quels (`vitest run`, `vite --port $VITE_DEV_PORT`) : le \
+         `node_modules` de ta lane est un dossier inscriptible, Vite y écrit son bundle de \
+         configuration. Si tu vois `EPERM` sur `node_modules/.vite-temp`, relance avec \
+         `--configLoader native`.\n\
          Lance uniquement ce qui est ✅. Une validation ❌ ne s'affirme jamais : reporte-la \
          `skipped` avec la raison ci-dessus, le principal l'exécutera. `tests_executed` dit \
          explicitement si au moins un test a réellement tourné et lesquels.\n\n",
@@ -10179,6 +10187,22 @@ async fn wait_for_cancelled_dispatches_to_settle(
     }
 }
 
+/// What a cancel tells the principal about the task it left alone (KT-1267).
+/// Cancelling never moves the task: the work may already be integrated by
+/// hand, so the status stays the principal's to set.
+fn cancelled_task_status_note(status: PlanningTaskStatus) -> String {
+    match status {
+        PlanningTaskStatus::Todo => {
+            "task status kept: todo; it can be prepared again directly".to_string()
+        }
+        other => format!(
+            "task status kept: {}; to run it again, set it back to todo (task_update \
+             status=todo) before task_exec_prepare, or leave it if the work is integrated",
+            other.as_str()
+        ),
+    }
+}
+
 pub async fn cancel_execution(
     State(state): State<AppState>,
     Path(exec_id): Path<String>,
@@ -10312,7 +10336,14 @@ pub async fn cancel_execution(
         .db
         .with_conn(move |conn| {
             let mut view = recovery_view(conn, &id)?;
-            view.outcome = Some(outcome);
+            // KT-1267 — the cancel leaves the task status alone; say what it
+            // is and how to relaunch, since the launch preflight wants `todo`.
+            let task_status = crate::db::planning::get_task(conn, &view.execution.task_id)?
+                .map(|task| task.summary.status);
+            view.outcome = Some(match task_status {
+                Some(status) => format!("{outcome}; {}", cancelled_task_status_note(status)),
+                None => outcome,
+            });
             view.cancellation_signal_sent = Some(cancellation_signal_sent);
             view.termination_confirmed = Some(termination_confirmed);
             Ok(view)
@@ -24433,6 +24464,8 @@ pub(crate) mod tests {
         // Whatever the worker serves takes its lane ports, never the host Kronn's.
         assert!(brief.contains("`$KRONN_PORT`"), "{brief}");
         assert!(brief.contains("`$VITE_DEV_PORT`"), "{brief}");
+        assert!(brief.contains("--configLoader native"), "{brief}");
+        assert!(brief.contains("s'arrête avec ton tour"), "{brief}");
         assert!(brief.contains("jamais sur 3140 ni 5173"), "{brief}");
     }
 
@@ -24505,14 +24538,17 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(recorded, Some(capabilities));
-        // The lane the brief promised exists: target + link are in place.
+        // The lane the brief promised exists: target + links are in place. The
+        // modules directory is the lane's own (KT-1266: Vite must be able to
+        // write its config bundle there); its entries are the links.
         assert!(repo.path().join("target").is_dir());
-        assert!(
-            std::fs::symlink_metadata(worktree.join("frontend").join("node_modules"))
-                .unwrap()
-                .file_type()
-                .is_symlink()
-        );
+        let modules = worktree.join("frontend").join("node_modules");
+        let metadata = std::fs::symlink_metadata(&modules).unwrap();
+        assert!(metadata.is_dir() && !metadata.file_type().is_symlink());
+        assert!(std::fs::symlink_metadata(modules.join(".bin"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     #[tokio::test]
@@ -30373,7 +30409,7 @@ pub(crate) mod tests {
         let execution = provision_single_task_execution(
             &db,
             ProvisionInput {
-                task_reference: task_ref,
+                task_reference: task_ref.clone(),
                 parent_discussion_id: parent_id,
                 worker: native_worker(),
                 base_rev: Some("main".into()),
@@ -30383,6 +30419,19 @@ pub(crate) mod tests {
         .await
         .unwrap();
         let worktree_path = managed_worktree_path(&db, &execution.id).await;
+        // KT-1267 — provisioning started the task; a cancel must not undo that.
+        let task_status_before = {
+            let task_ref = task_ref.clone();
+            db.with_conn(move |conn| {
+                Ok(crate::db::planning::get_task(conn, &task_ref)?
+                    .unwrap()
+                    .summary
+                    .status)
+            })
+            .await
+            .unwrap()
+        };
+        assert_ne!(task_status_before, PlanningTaskStatus::Todo);
         let dispatch_id = execution.dispatch_job_id.clone().unwrap();
         let state = AppState::new_defaults(
             std::sync::Arc::new(tokio::sync::RwLock::new(
@@ -30429,6 +30478,26 @@ pub(crate) mod tests {
             .outcome
             .as_deref()
             .is_some_and(|value| value.contains("policy=preserve")));
+        let task_status_after = db
+            .with_conn(move |conn| {
+                Ok(crate::db::planning::get_task(conn, &task_ref)?
+                    .unwrap()
+                    .summary
+                    .status)
+            })
+            .await
+            .unwrap();
+        assert_eq!(task_status_after, task_status_before);
+        let expected_note = format!("task status kept: {}", task_status_before.as_str());
+        assert!(
+            receipt
+                .outcome
+                .as_deref()
+                .is_some_and(|value| value.contains(&expected_note)
+                    && value.contains("task_update status=todo")),
+            "the receipt says the status is kept and how to relaunch: {:?}",
+            receipt.outcome
+        );
         assert!(worker_finished.load(std::sync::atomic::Ordering::SeqCst));
         assert!(!peer_token.is_cancelled(), "a sibling dispatch is isolated");
         assert!(

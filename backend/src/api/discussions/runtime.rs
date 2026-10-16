@@ -548,6 +548,9 @@ pub(crate) async fn stream_claimed_dispatch_job(
                 });
         // KT-1111 — this dispatch's reply is written: its turn values go.
         state.db.assistant_guard().end_turn(&job.id);
+        // KT-1266 — whatever a task worker started (a backend, a Vite) ends
+        // with its dispatch, however the dispatch ended.
+        reap_task_worker_processes(&state, &job.id).await;
         let status_id = job.id.clone();
         let cancelled = state
             .db
@@ -610,6 +613,24 @@ pub(crate) async fn stream_claimed_dispatch_job(
     });
     handoff_guard.disarm();
     Some(stream)
+}
+
+/// Stop the processes a task worker's dispatch left behind (KT-1266). Only a
+/// dispatch that is a worker's launch has any; an ordinary turn costs one read.
+pub(crate) async fn reap_task_worker_processes(state: &AppState, dispatch_job_id: &str) {
+    let lookup = dispatch_job_id.to_string();
+    let is_worker = state
+        .db
+        .with_read_conn(move |conn| {
+            crate::db::orchestration::get_execution_for_dispatch(conn, &lookup)
+        })
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+    if is_worker {
+        crate::core::dispatch_reaper::reap_dispatch_async(dispatch_job_id).await;
+    }
 }
 
 fn dispatch_target_tier(

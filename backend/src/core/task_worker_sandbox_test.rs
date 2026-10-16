@@ -1356,3 +1356,65 @@ fn a_confined_validation_that_times_out_is_reported_timed_out() {
     );
     assert!(started.elapsed() < Duration::from_secs(20), "{result:?}");
 }
+
+/// KT-1266: the frontend smoke check executes the worker-authored
+/// `vite.config.ts` (vitest loads it), so it runs through the sandboxed
+/// runner. Under the deny-default profile it must still be able to load that
+/// config — otherwise every lane's frontend would read as unavailable.
+#[cfg(unix)]
+#[test]
+fn vitest_loads_the_worker_config_under_the_os_sandbox() {
+    let Some(mechanism) = live_mechanism() else {
+        return;
+    };
+    let installed = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("frontend")
+        .join("node_modules");
+    if !installed.join(".bin").join("vitest").exists() {
+        eprintln!("skipped: no installed frontend/node_modules to run vitest from");
+        return;
+    }
+    let layout = layout();
+    // The main checkout the lane reuses dependencies from.
+    let repo = layout.worktree.ancestors().nth(3).unwrap().to_path_buf();
+    std::fs::create_dir_all(repo.join("frontend")).unwrap();
+    std::os::unix::fs::symlink(
+        installed.canonicalize().unwrap(),
+        repo.join("frontend").join("node_modules"),
+    )
+    .unwrap();
+    let frontend = layout.worktree.join("frontend");
+    std::fs::create_dir_all(&frontend).unwrap();
+    std::fs::write(frontend.join("package.json"), r#"{"type":"module"}"#).unwrap();
+    // What a worker may write: a config that imports and runs code.
+    std::fs::write(
+        frontend.join("vite.config.ts"),
+        "import { defineConfig } from 'vitest/config';\n\
+         const marker: string = 'loaded';\n\
+         export default defineConfig({ test: { name: marker } });\n",
+    )
+    .unwrap();
+
+    let (lane, provisioned) =
+        crate::core::task_worker_env::prepare_launch(&layout.worktree).unwrap();
+    let env: Vec<(String, OsString)> = lane
+        .env(&provisioned)
+        .into_iter()
+        .map(|(name, value)| (name.to_string(), value))
+        .collect();
+    let runner = SandboxedProbeRunner::new(
+        Ok(SandboxPolicy::for_lane(&lane)),
+        Some(mechanism),
+        Arc::new(ProcessProbeRunner),
+    );
+
+    let capability =
+        crate::core::task_worker_env::check_frontend(&lane, &provisioned, &env, &runner);
+
+    assert!(
+        capability.available,
+        "vitest must load its config under the profile: {}",
+        capability.reason
+    );
+}

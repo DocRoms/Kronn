@@ -34,6 +34,7 @@ pub mod default_todo;
 pub mod dependency_updates;
 pub mod desktop_port;
 pub mod directives;
+pub mod dispatch_reaper;
 pub mod doc_provenance;
 pub mod docs_citations;
 pub mod docs_folder;

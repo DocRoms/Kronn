@@ -54,7 +54,7 @@ function baseProps(over: Partial<AuditTimelineProps> = {}): AuditTimelineProps {
     liveTotalTokens: null, onResumeBriefingDiscussion: null, onCancel: vi.fn(), resumable: null,
     onLaunch: vi.fn(), onRetryStep: vi.fn(), onAcceptStep: vi.fn().mockResolvedValue(undefined),
     onRelaunchFull: vi.fn(), onCleanupLease: vi.fn().mockResolvedValue(undefined),
-    validationInProgress: false, onValidate: vi.fn(), onMarkValid: vi.fn().mockResolvedValue(undefined),
+    validationInProgress: false, onMarkValid: vi.fn().mockResolvedValue(undefined),
     onOpenValidation: vi.fn(), onViewTechDebts: vi.fn(), refreshTrigger: 0, toast: vi.fn(), ...over,
   };
 }

@@ -75,10 +75,19 @@ const FRONTEND_DEPS_EXCLUDE: &str = "/frontend/node_modules";
 /// Sub-directory of the worktree holding the frontend's `package.json`.
 const FRONTEND_DIR: &str = "frontend";
 const NODE_MODULES: &str = "node_modules";
+/// Written into a lane's layered `node_modules`, so a later launch knows the
+/// directory is Kronn's to keep in step rather than the worker's own.
+const LAYER_MARKER: &str = ".kronn-lane-layer";
+/// What a tool writes inside `node_modules` while it runs (Vite's config
+/// bundle and cache): never linked, so it lands in the lane.
+const NODE_MODULES_LANE_OWNED: [&str; 3] = [".vite-temp", ".vite", ".cache"];
 
 const NEXTEST_TIMEOUT: Duration = Duration::from_secs(20);
 const OFFLINE_FETCH_TIMEOUT: Duration = Duration::from_secs(90);
 const VITEST_TIMEOUT: Duration = Duration::from_secs(20);
+const VITEST_CONFIG_TIMEOUT: Duration = Duration::from_secs(60);
+/// A file filter no test file matches: the run loads the config, finds nothing.
+const VITEST_CONFIG_PROBE_FILTER: &str = "kronn-lane-config-probe-no-such-test";
 /// What a failed probe's reason keeps of the command's output.
 const PROBE_DETAIL_BYTES: usize = 300;
 
@@ -353,21 +362,96 @@ impl WorkerLane {
             return FrontendDeps::NotApplicable;
         }
         let destination = frontend.join(NODE_MODULES);
+        let source = self.frontend_deps_source().filter(|path| path.is_dir());
         match std::fs::symlink_metadata(&destination) {
-            // A real directory (or a link that still resolves) is left alone.
-            Ok(_) if destination.is_dir() => return FrontendDeps::AlreadyPresent,
-            Ok(_) => {} // dangling link: replaced below
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return FrontendDeps::Failed(error.to_string()),
-        }
-        let Some(source) = self.frontend_deps_source().filter(|path| path.is_dir()) else {
-            return FrontendDeps::SourceMissing;
-        };
-        match ensure_symlink(&source, &destination) {
-            Ok(_) => FrontendDeps::Linked(source),
-            Err(error) => FrontendDeps::Failed(error),
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                // KT-1246 linked the whole directory, so Vite's config loader
+                // (`node_modules/.vite-temp`) could not write (KT-1266). A link
+                // to the main checkout's directory is replaced by the layer
+                // below; any other link that resolves is the worker's own.
+                let ours = source.as_ref().is_some_and(|source| {
+                    std::fs::read_link(&destination).is_ok_and(|target| &target == source)
+                });
+                if destination.is_dir() && !ours {
+                    return FrontendDeps::AlreadyPresent;
+                }
+                self.layer_frontend_deps(&destination, source, true)
+            }
+            // A real directory is left alone; a layer of ours is kept in step
+            // with the main checkout's (a package installed since).
+            Ok(_) if destination.is_dir() => {
+                if let Some(source) = source.filter(|_| destination.join(LAYER_MARKER).is_file()) {
+                    let _ = link_entries(&source, &destination);
+                }
+                FrontendDeps::AlreadyPresent
+            }
+            Ok(_) => FrontendDeps::Failed(format!(
+                "{} exists and is not a directory",
+                destination.display()
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.layer_frontend_deps(&destination, source, false)
+            }
+            Err(error) => FrontendDeps::Failed(error.to_string()),
         }
     }
+
+    /// `frontend/node_modules` as a real, writable directory whose entries link
+    /// to the main checkout's: Vite bundles its config under
+    /// `node_modules/.vite-temp` and fails with EPERM when that is a read-only
+    /// link, whatever flag the worker passes or forgets (KT-1266). What the
+    /// entries resolve to is still outside every write root.
+    fn layer_frontend_deps(
+        &self,
+        destination: &Path,
+        source: Option<PathBuf>,
+        replace_link: bool,
+    ) -> FrontendDeps {
+        let Some(source) = source else {
+            return FrontendDeps::SourceMissing;
+        };
+        if replace_link {
+            if let Err(error) = std::fs::remove_file(destination) {
+                return FrontendDeps::Failed(format!(
+                    "cannot replace the link {}: {error}",
+                    destination.display()
+                ));
+            }
+        }
+        if let Err(error) = std::fs::create_dir_all(destination) {
+            return FrontendDeps::Failed(format!(
+                "cannot create {}: {error}",
+                destination.display()
+            ));
+        }
+        if let Err(error) = link_entries(&source, destination) {
+            return FrontendDeps::Failed(error);
+        }
+        if let Err(error) = std::fs::write(destination.join(LAYER_MARKER), b"") {
+            return FrontendDeps::Failed(format!("cannot mark {}: {error}", destination.display()));
+        }
+        FrontendDeps::Linked(source)
+    }
+}
+
+/// Link every entry of `source` into `destination`, except what a tool writes
+/// at run time (those stay the lane's own, in the real directory).
+fn link_entries(source: &Path, destination: &Path) -> Result<(), String> {
+    let entries = std::fs::read_dir(source)
+        .map_err(|error| format!("cannot read {}: {error}", source.display()))?;
+    // One entry that cannot be linked (a real directory the lane already has)
+    // must not leave the entries after it unlinked: go on, report the first.
+    let mut first_error = None;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if NODE_MODULES_LANE_OWNED.iter().any(|owned| name == *owned) {
+            continue;
+        }
+        if let Err(error) = ensure_symlink(&entry.path(), &destination.join(&name)) {
+            first_error.get_or_insert(error);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
 }
 
 /// How the worktree's frontend dependencies were made available.
@@ -898,7 +982,7 @@ fn check_rust(
     ))
 }
 
-fn check_frontend(
+pub(crate) fn check_frontend(
     lane: &WorkerLane,
     provisioned: &Provisioned,
     env: &[(String, OsString)],
@@ -928,13 +1012,33 @@ fn check_frontend(
                 env: env.to_vec(),
                 timeout: VITEST_TIMEOUT,
             });
-            if outcome.success {
+            if !outcome.success {
+                return Capability::no(format!("`vitest --version` failed: {}", outcome.detail));
+            }
+            let version = outcome.detail;
+            // `--version` never loads the config, which is where Vite writes
+            // (`node_modules/.vite-temp`) and where a lane failed with EPERM
+            // (KT-1266): a run that selects no test file loads it and exits.
+            let config = runner.run(&ProbeCommand {
+                program: vitest.to_string_lossy().into_owned(),
+                args: vec![
+                    "run".into(),
+                    "--passWithNoTests".into(),
+                    VITEST_CONFIG_PROBE_FILTER.into(),
+                ],
+                cwd: lane.frontend_dir(),
+                env: env.to_vec(),
+                timeout: VITEST_CONFIG_TIMEOUT,
+            });
+            if config.success {
                 Capability::yes(format!(
-                    "vitest {} runs from frontend/node_modules",
-                    outcome.detail
+                    "vitest {version} runs from frontend/node_modules and loads its config in the lane"
                 ))
             } else {
-                Capability::no(format!("`vitest --version` failed: {}", outcome.detail))
+                Capability::no(format!(
+                    "vitest cannot load its config in the lane (`vitest run --passWithNoTests`): {}",
+                    config.detail
+                ))
             }
         }
     }

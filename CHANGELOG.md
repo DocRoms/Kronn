@@ -478,6 +478,29 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- What a task worker starts ends with its dispatch, and Vite runs in its lane
+  (KT-1266). A backend or a Vite started from the agent's shell tool ran in a
+  process group of its own and kept listening on the lane's ports after the
+  turn; the worker's processes now carry their dispatch id and every process
+  carrying it is stopped when the dispatch completes, fails, is cancelled or is
+  found dead, with the descendants that stayed in its session (what a shared
+  daemon adopted in a session of its own is left alone). A pid is signalled
+  only after its start time and its tag or session are checked again, so a
+  reused pid is never touched. `frontend/node_modules` of a lane is a real
+  directory of links, so Vite and vitest write their config bundle there
+  instead of failing with EPERM on `node_modules/.vite-temp`, with no flag;
+  the smoke check loads the config under the worker sandbox profile (it runs
+  worker-written code), and the brief says how to recover.
+
+- Cancelling an execution no longer resets its task to `todo` (KT-1267). A
+  task whose work was integrated by hand (KT-1250's `3dcdbc892`) fell back to
+  `todo` the moment its execution was cancelled, so the roadmap counted it as
+  not started. The cancel now leaves the task status alone, whatever it is
+  (`in_progress`, `done`...): the principal decides. The cancel result and the
+  `task_exec_cancel` description say so, and that running the task again means
+  setting it back to `todo` first (`task_update status=todo`); the launch
+  preflight refuses any other status, so a cancelled `in_progress` task is no
+  longer put back in the ready queue automatically.
 - A task worker's lane build runs under the worker's sandbox profile
   (KT-1255). The first `cargo test --no-run` and the toolchain smoke check were
   started by Kronn as the host user, so a relaunch that rebuilt after the
