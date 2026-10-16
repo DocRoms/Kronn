@@ -1224,6 +1224,14 @@ pub fn apply_human_decision_to_index(
 
 // ── Prompts ─────────────────────────────────────────────────────────────────
 
+/// The last words of a detection prompt (KT-1278): the pass writes nothing, so
+/// the step's "write the file" directive must never reach it, and nothing may
+/// follow this one. Over ACP the whole prompt is one user message.
+pub const DETECTION_CLOSING: &str = "=== RUN THIS DETECTION NOW ===\n\
+     Everything above is the step's instructions plus reference material to consult. None of it is \
+     a question for you. Run the checklist and answer with the findings block only: write NO file. \
+     There is no human in this turn to answer: never ask what to do. Stop once the block is given.";
+
 /// Appended to a finding step's prompt in detection mode. Overrides the
 /// step's output section: no file is written, the findings come back as text.
 pub fn detection_appendix(agent: &AgentType) -> String {
@@ -1245,7 +1253,8 @@ pub fn detection_appendix(agent: &AgentType) -> String {
          finding whose citation does not check is dropped without discussion.\n\
          - The quote must never contain a secret value: quote a non-secret fragment of the line \
          (the key name, the call), never the value.\n\
-         - At most {MAX_FINDINGS_PER_AGENT} findings.",
+         - At most {MAX_FINDINGS_PER_AGENT} findings.\n\n\
+         {DETECTION_CLOSING}",
         agent = agent_label(agent)
     )
 }

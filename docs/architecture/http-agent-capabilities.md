@@ -305,11 +305,11 @@ that "succeed" without writing anything.
 
 **Who is accepted.** Every agent but Vibe: the CLI agents (Claude Code, Codex,
 OpenCode, Gemini CLI, Kiro, GitHub Copilot) and the HTTP agents Ollama, LiteLLM,
-NVIDIA and Custom [src: file: backend/src/api/audit/mod.rs:657-672#agent_can_audit].
+NVIDIA and Custom [src: file: backend/src/api/audit/mod.rs:712-727#agent_can_audit].
 Vibe is refused because it has no file tools. Both launch endpoints (Full and
 partial) share the gate and its refusal message, which lists the accepted agents
 and is pinned to the gate by a test
-[src: file: backend/src/api/audit/mod.rs:1422-1448#a_refused_agent_is_told_who_is_accepted_and_the_message_matches_the_gate].
+[src: file: backend/src/api/audit/mod.rs:1476-1502#a_refused_agent_is_told_who_is_accepted_and_the_message_matches_the_gate].
 A hosted HTTP agent (NVIDIA, a Custom endpoint) receives the repository content the
 audit reads, so choosing one is choosing what leaves the machine.
 
@@ -347,7 +347,7 @@ briefing are discussions). The only
 other repos a step names are those the user linked to the project
 (`Project.linked_repos`), a voluntary declaration that stays in every step
 [src: file: backend/src/api/audit/full.rs:326-327#format_linked_repos_for_prompt]
-[src: file: backend/src/api/audit/drift.rs:450-451#format_linked_repos_for_prompt]. What remains: the block for a
+[src: file: backend/src/api/audit/drift.rs:454-455#format_linked_repos_for_prompt]. What remains: the block for a
 linked repo still says to start with `<repo-path>/docs/AGENTS.md`, a path an HTTP
 agent's tools refuse because it is outside the project, so for that agent the
 block is information, not something it can follow. Making that block
@@ -366,8 +366,8 @@ one.
 **Stopping.** An HTTP agent's request and tool loop are a task, not a process:
 killing the lifeline PID does not stop it. A Full audit therefore registers a
 cancellation token per step, and `cancel_audit` trips it
-[src: file: backend/src/api/audit/full.rs:1786-1791#agent_cancels]
-[src: file: backend/src/api/audit/full.rs:4339-4343#agent_cancels]. Since KT-927 the partial audit does
+[src: file: backend/src/api/audit/full.rs:1790-1795#agent_cancels]
+[src: file: backend/src/api/audit/full.rs:4343-4347#agent_cancels]. Since KT-927 the partial audit does
 the same, and so does an ACP agent, whose PID is a lifeline too: see
 [auditing with an ACP agent](audit-acp-agents.md).
 

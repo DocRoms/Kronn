@@ -1275,8 +1275,8 @@ export const projects = {
     }>('GET', `/discussions/${id}/source`),
   checkDrift: (id: string) => api<DriftCheckResponse>('GET', `/projects/${id}/drift`),
   /** KT-1207 — « Vérifié, inchangé »: these stale sections still hold. */
-  acknowledgeDrift: (id: string, sections: string[]) =>
-    api<DriftCheckResponse>('POST', `/projects/${id}/drift/acknowledge`, { sections }),
+  acknowledgeDrift: (id: string, sections: string[], shownPaths: { doc: string; section: string; path: string }[] = []) =>
+    api<DriftCheckResponse>('POST', `/projects/${id}/drift/acknowledge`, { sections, shown_paths: shownPaths }),
   citationDrift: (id: string) => api<CitationDriftResponse>('GET', `/projects/${id}/citation-drift`),
   acknowledgeCitations: (id: string, doc: string) =>
     api<SectionCitations>('POST', `/projects/${id}/citation-drift/acknowledge`, { doc }),
