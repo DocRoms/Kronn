@@ -1333,6 +1333,67 @@ async fn an_audit_prompt_no_longer_reads_another_repos_docs_or_lists_the_machine
     }
 }
 
+/// KT-1278 — over ACP the context and the step are one user message; a step
+/// that ends on a reference block (versions, briefing, rules, linked repos) is
+/// answered as a question. Read on what the agent was ACTUALLY handed by the two
+/// real pipelines (retries included: the scripted agent writes nothing, so every
+/// step runs its gates' attempts): each turn ends on one step's own directive,
+/// and the step numbers it names are those of the chain.
+#[cfg(unix)]
+#[tokio::test]
+async fn every_step_prompt_the_full_and_partial_pipelines_hand_the_agent_ends_on_its_directive() {
+    let docs_root = crate::core::docs_location::DocsRoot::default_root();
+    let steps = crate::api::audit::steps_for(crate::models::AuditKind::Full, &docs_root);
+    let directives: Vec<String> = steps
+        .iter()
+        .enumerate()
+        .map(|(i, step)| crate::api::audit::step_closing_directive(i + 1, step, &docs_root))
+        .collect();
+    for pipeline in ["full", "partial"] {
+        for linked in [false, true] {
+            let prompts = step_prompts_of(pipeline, linked).await;
+            assert!(prompts.len() >= expected_step_count(pipeline), "{pipeline}");
+            let mut covered = std::collections::BTreeSet::new();
+            for turn in &prompts {
+                // The recorder logs the prompt, then the CLI arguments on ONE
+                // line: the prompt ends where that line starts, and nothing but
+                // the arguments may follow the directive.
+                let prompt = match turn.rfind("--print --output-format") {
+                    Some(at) => {
+                        assert!(!turn[at..].contains('\n'), "{pipeline}: one argument line");
+                        &turn[..at]
+                    }
+                    None => turn.as_str(),
+                };
+                let step = directives
+                    .iter()
+                    .position(|d| prompt.ends_with(d.as_str()))
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{pipeline} (linked={linked}): a step prompt does not end on its directive:\n…{}",
+                            &prompt[prompt.len().saturating_sub(500)..]
+                        )
+                    });
+                covered.insert(step);
+                assert_eq!(
+                    prompt.matches("=== RUN THIS STEP NOW ===").count(),
+                    1,
+                    "{pipeline}: exactly one directive"
+                );
+            }
+            let wanted: std::collections::BTreeSet<usize> = if pipeline == "full" {
+                (0..steps.len()).collect()
+            } else {
+                refreshable_steps().into_iter().map(|n| n - 1).collect()
+            };
+            assert_eq!(
+                covered, wanted,
+                "{pipeline}: every step was handed to the agent"
+            );
+        }
+    }
+}
+
 #[test]
 fn no_static_audit_prompt_carries_the_retired_companion_pool() {
     let mut prompts: Vec<String> = Vec::new();

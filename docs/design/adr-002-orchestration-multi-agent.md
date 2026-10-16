@@ -17,7 +17,7 @@
   task-to-discussion briefing and agent launch only after the task workflow is proven
   manually") `[src: file: docs/design/planning-and-discussion-plans.md:252-253#Deferred]` and the
   "Create only / Create and run" delegation decision
-  `[src: file: docs/design/planning-and-discussion-plans.md:211-212#delegation]`. This ADR turns that
+  `[src: file: docs/design/planning-and-discussion-plans.md:211-213#delegation]`. This ADR turns that
   deferred flow into a durable, backend-owned lifecycle.
 
 ---
@@ -75,16 +75,20 @@ composition and one genuinely new capability (protected merge), not reinvention.
    `workflow_runs` `[src: file: backend/src/db/sql/003_workflows.sql:25-35]`; planning tasks have **no runtime
    execution record** at all (only 9 plan-structure FKs + the optional
    `discussion_workspaces.task_id` `[src: file: backend/src/db/sql/101_discussion_workspaces.sql:26]`).
-2. **Parent-discussion → child-sub-discussion relation** — none exists; a discussion carries only
-   `workflow_run_id` and task links `[src: file: backend/src/models/discussions.rs:259-263]`.
+2. **Parent-discussion → child-sub-discussion relation** — none existed, and none lives on the
+   discussion row: `Discussion` carries only the batch `workflow_run_id`
+   `[src: file: backend/src/models/discussions.rs:270-274#workflow_run_id]` and its task links sit in
+   `planning_task_discussions` (§2). The edge is carried by the execution row
+   (`parent_discussion_id`, `sub_discussion_id`) `[src: file: backend/src/models/orchestration.rs:761-770#TaskExecution]`.
 3. **Cross-discussion wake** — deliver a child worker's result into the parent discussion and wake
    the parent agent. `notify_one` is process-global, not parent-scoped
    `[src: file: backend/src/api/discussions/runtime.rs:358]`; the only cross-object completion path today
    settles a workflow run, not a conversational agent.
-4. **Server-side Git integration** — no `merge`/`rebase`/`cherry-pick`/`format-patch`/`am`/`update-ref`
-   anywhere in `backend/src`; merge/rebase are explicitly denied
+4. **Server-side Git integration** — at audit time there was no `merge`/`rebase`/`cherry-pick`/`format-patch`/`am`/`update-ref`
+   anywhere in `backend/src`, and the git command runner still denies merge/rebase
    `[src: file: backend/src/api/git_ops.rs:1592-1601]`. Conflict detection + validation gate + cleanup for
-   merge-back must be built from scratch.
+   merge-back had to be built from scratch; the protected merge now lives in `core::worktree`
+   `[src: file: backend/src/core/worktree.rs:1900-1940#build_candidate]`.
 5. **Versioned Brief + DeliveryManifest + ReviewDecision contracts** — everything at the discussion
    layer is Markdown today; the only structured, persisted message payload is `kronn-plan-action`.
 6. **Child worktree pinned at a base SHA + lineage columns** — the schema has no parent/base-SHA/lineage
@@ -297,7 +301,7 @@ Every transition is journaled with an attributed actor (requires the new `backen
 Integration is only ever toward an **explicitly pinned** target. No implicit branch, ever.
 
 - **Workspace** — the parent discussion's declared workspace (`canonical_path` + `project`), validated
-  by the existing repo-scope/registration checks `[src: file: backend/src/api/disc_workspace.rs:104-232]`. The
+  by the existing repo-scope/registration checks `[src: file: backend/src/api/disc_workspace.rs:134-232#local_repo_roots]`. The
   parent workspace must be **registered** (a resolvable project repo) before a TaskExecution can start.
   Cleanliness is **not** a provisioning precondition for a native launch: the base SHA is pinned from a
   committed rev (next bullet) and the child runs in an isolated sibling worktree, fully decoupled from
@@ -307,11 +311,11 @@ Integration is only ever toward an **explicitly pinned** target. No implicit bra
   while the human has uncommitted edits in the main checkout.
 - **Base SHA** — the target rev resolved server-side at provisioning to a **committed** SHA
   (`resolve_commit`, default the parent workspace's target branch tip,
-  `[src: file: backend/src/core/worktree.rs:1302-1320]`) and **pinned** into `task_executions.base_sha`. The child is
+  `[src: file: backend/src/core/worktree.rs:1733-1754#resolve_commit]`) and **pinned** into `task_executions.base_sha`. The child is
   created from this exact SHA, not from a moving branch tip — and never from a dirty working tree,
   which is precisely why parent cleanliness is an apply-time concern, not a provisioning one. HEAD of
   the fresh child is verified to equal `base_sha` after creation
-  (`verify_worktree_head`, `[src: file: backend/src/core/worktree.rs:1563-1575]`).
+  (`verify_worktree_head`, `[src: file: backend/src/core/worktree.rs:2102-2115#verify_worktree_head]`).
 - **Child branch + worktree** — a managed worktree under `.kronn/worktrees/`, created with
   `git worktree add -b kronn/task/<KT-ref>-<exec-short> <path> <base_sha>` (the SHA-arg variant the
   managed creator must gain, §0-Adapt). The branch carries a short **execution** id, not a review
@@ -323,8 +327,8 @@ Integration is only ever toward an **explicitly pinned** target. No implicit bra
   The backend refuses to integrate into any branch other than that pinned target, and never into an
   implicit or inferred branch.
 - **Integration mechanism (locked — Codex 2026-08-16): two-phase, never a speculative merge into the
-  live parent, never merge-in-place.** Merge/rebase is a new server-side capability (currently denied,
-  `[src: file: backend/src/api/git_ops.rs:1592-1601]`). The final mutation of the parent is a **fast-forward only**
+  live parent, never merge-in-place.** Merge/rebase is a new server-side capability (the git command runner
+  still denies both, `[src: file: backend/src/api/git_ops.rs:1592-1601]`). The final mutation of the parent is a **fast-forward only**
   to an already-validated commit:
   1. **Build phase — ephemeral integration worktree.** Read the parent target tip server-side and pin
      it as `candidate_target_sha` (distinct from the child's `base_sha`, which may be older). Create a
@@ -343,7 +347,9 @@ Integration is only ever toward an **explicitly pinned** target. No implicit bra
      `refs/kronn-backup/<task-id>-<exec-short>` at `candidate_target_sha` before the candidate is built
      `[src: file: backend/src/core/worktree.rs:1869-1897#write_backup_ref]`. `fast_forward_target_to`
      verifies that the parent tip is **still exactly `candidate_target_sha`** (a compare-and-swap) and
-     that the parent worktree is **clean** `[src: file: backend/src/core/worktree.rs:2061-2081#fast_forward_target_to]`.
+     that the parent worktree is **clean** `[src: file: backend/src/core/worktree.rs:2061-2081#fast_forward_target_to]`
+     (a target no worktree has checked out has no tree to keep clean: it advances by a `git update-ref`
+     compare-and-swap `[src: file: backend/src/core/worktree.rs:2006-2058#update_ref_target_to]`).
   4. Advance the parent to `candidate_merge_sha` **fast-forward only** — a deterministic, short,
      verifiable mutation (the candidate already contains `candidate_target_sha` as an ancestor).
   5. **Never** `stash`, and **never** silently `update-ref` a checked-out branch. If the parent has
@@ -422,9 +428,9 @@ Cancellation and reassignment preserve the same lineage. Cancellation first canc
 due dispatches, then applies the persisted cleanup policy; `remove_if_clean` removes only the proven
 managed checkout and preserves its branch. Reassignment keeps the task, sub-discussion, worktree,
 manifests, findings and SHAs while recording the exact typed worker identity and assignment generation
-`[src: file: backend/src/api/orchestration.rs:9090-9226]` `[src: file: backend/src/api/orchestration.rs:9415-9590]` `[src: file: backend/src/db/orchestration.rs:5735-6027]`. Boot also
+`[src: file: backend/src/api/orchestration.rs:10206-10359#cancel_execution]` `[src: file: backend/src/db/orchestration.rs:6675-6721#cancel_execution_tree]` `[src: file: backend/src/api/orchestration.rs:10548-10723#reassign_execution]` `[src: file: backend/src/db/orchestration.rs:6381-6673#reassign_execution_worker]`. Boot also
 collects `managed` workspace rows orphaned by `ON DELETE SET NULL`; dirty or unverifiable worktrees are
-left visible for human action rather than silently deleted `[src: file: backend/src/api/orchestration.rs:369-466]`
+left visible for human action rather than silently deleted `[src: file: backend/src/api/orchestration.rs:385-482#list_orphaned_managed]`
 `[src: file: backend/src/db/discussion_workspaces.rs:439-464]`.
 
 ---
@@ -438,7 +444,7 @@ All three are versioned (`"version": "1"`) and validated with the existing `Type
 `AgentDecision.gate_status` `[src: file: backend/src/models/agent_decisions.rs:53-77]`.
 
 **Brief v1** (backend → worker, immutable per attempt, frozen into the sub-discussion's
-`pin_first_message` `[src: file: backend/src/models/discussions.rs:231-234]`):
+`pin_first_message` `[src: file: backend/src/models/discussions.rs:243-245#pin_first_message]`):
 ```json
 { "version":"1", "task_ref":"KT-142", "objective":"<task description>",
   "definition_of_done":[{"dod_id":"…","sentence":"…"}],
@@ -457,7 +463,7 @@ and/or a `kronn-delivery` fence):
 ```
 
 **ReviewDecision v1** (principal → backend, via a new `task_exec_review` MCP tool; reuses the
-`GateDecision` enum semantics `[src: file: backend/src/api/workflows.rs:5811-5839]`):
+`GateDecision` enum semantics `[src: file: backend/src/workflows/runner.rs:4084-4107#GateDecision]`):
 ```json
 { "version":"1", "task_ref":"KT-142", "decision":"approve|request_changes",
   "comment":"<required when request_changes>",
@@ -472,8 +478,9 @@ attributable handoff — "typed assignments and handoffs, never dependent on Mar
 
 ## 6. Authorization, review limits, budgets, concurrency, escalation (DoD-6)
 
-- **Authorization (action-level, not tool-allowlist)** — no per-agent tool-authorization model exists
-  today `[src: file: backend/src/core/audit_mcp_filter.rs:32-36]` and building one is out of scope. V1 enforces
+- **Authorization (action-level, not tool-allowlist)** — tool access is governed by static
+  allowlists (the audit's MCP allowlist is one, `[src: file: backend/src/core/audit_mcp_filter.rs:32-36]`),
+  not by a per-agent authorization model for task workers, and building one is out of scope. V1 enforces
   authorization at the **action** boundary. A joined CLI worker is identified by its exact durable
   session, while a native HTTP worker is identified by the trusted executor's child discussion plus
   exact typed provider; model arguments carry neither identity. Principal review/cancel/reassign are
@@ -493,16 +500,28 @@ attributable handoff — "typed assignments and handoffs, never dependent on Mar
   nothing is closed, the round is handed back to the worker. (The generic `owner_kind/owner_id` run
   table that would let QE and TaskExecution share one substrate is noted as a future consolidation,
   out of V1 scope.)
-- **Budget** — reuse `SharedBudget` (tree-wide LLM-call quota, `[src: file: backend/src/workflows/runner.rs:284-302]`) spanning
-  the TaskExecution and its worker; exhaustion → `Escalated`, not a silent stop.
+- **Budget** — as built, the run carries an optional `token_budget` (`NULL` = no ceiling) instead of
+  reusing `SharedBudget`, the workflow engine's tree-wide LLM-call quota
+  `[src: file: backend/src/workflows/runner.rs:307-325#SharedBudget]`. Once the tokens used by the run's
+  sub-discussions reach it, the campaign stops offering new tasks (`token_budget` candidate reason)
+  `[src: file: backend/src/db/orchestration.rs:1171-1176#token_exhausted]`; it does not escalate an
+  execution already running.
 - **Concurrency** — one active TaskExecution per task (a partial-unique index, like the one-primary and
-  one-live-session invariants). Across a parent discussion / OrchestrationRun, a configurable
-  `max_concurrent_executions`, enforced via the `agent_dispatch_jobs` `group_id` concurrency limit
-  `[src: file: backend/src/db/agent_dispatch.rs:611-620]`.
-- **Human escalation** — `Escalated` surfaces a Human Gate in the parent discussion (reuse the gate
-  decide endpoint `[src: file: backend/src/api/workflows.rs:5741-5928]`): the user force-approves (→ `Integrating`),
-  hands back with guidance (→ `Working`), or abandons (→ `Cancelled`). An optional
-  `escalation_notify_url` reuses the gate webhook `[src: file: backend/src/workflows/runner.rs:759-779]`.
+  one-live-session invariants) `[src: file: backend/src/db/sql/127_task_orchestration.sql:207-212#idx_task_executions_one_active_per_task]`.
+  Across a parent discussion / OrchestrationRun, a configurable `max_concurrent_executions`, enforced
+  when the campaign selects launchable tasks (`remaining_slots`, from the count of non-terminal
+  executions) `[src: file: backend/src/db/orchestration.rs:1123-1140#active_execution_counts]`. The
+  `agent_dispatch_jobs` `group_id` concurrency limit `[src: file: backend/src/db/agent_dispatch.rs:604-613#group_concurrency_limit]`
+  exists for batch fan-out; orchestration dispatches enqueue with `group_id: None`.
+- **Human escalation** — `Escalated` surfaces in the parent discussion, as the workflow Human Gate does
+  with its decide endpoint `[src: file: backend/src/api/workflows.rs:5713-5900#decide_run]`, but the
+  execution's own state machine carries the decision: the user force-approves (→ `Approved`), hands back
+  with guidance (→ `Working`) `[src: file: backend/src/models/orchestration.rs:309-309#Escalated]`, or abandons
+  (→ `Cancelled`, reachable from any non-terminal state) `[src: file: backend/src/models/orchestration.rs:274-283#can_transition_to]`.
+  An optional `escalation_notify_url` is stored on the run
+  `[src: file: backend/src/models/orchestration.rs:734-734#escalation_notify_url]`; nothing fires it yet.
+  The gate webhook it was meant to reuse is `fire_gate_webhook`
+  `[src: file: backend/src/workflows/runner.rs:781-802#fire_gate_webhook]`.
 
 ---
 
@@ -540,8 +559,10 @@ Explicitly deferred, to keep V1 = *one task → one worker → one sub-discussio
 - **Coordinator / ready-task selection / policies** (`OrchestrationRun`) → **KT-321**.
 - **Reconcile of the TaskExecution tree at boot (incl. the §4bis integration-saga reconciliation),
   explicit resume/cancel/reassign, independent timeout clocks and orphan-managed-workspace collection**
-  is implemented by **KT-322** `[src: file: backend/src/api/orchestration.rs:267-722]`
-  `[src: file: backend/src/api/orchestration.rs:8624-9590]`.
+  is implemented by **KT-322** `[src: file: backend/src/api/orchestration.rs:283-383#reconcile_at_boot]`
+  `[src: file: backend/src/api/orchestration.rs:654-825#start_resilience_watchdog]`
+  `[src: file: backend/src/api/orchestration.rs:10206-10359#cancel_execution]`
+  `[src: file: backend/src/api/orchestration.rs:10548-10723#reassign_execution]`.
 - **Actor-kind schema change** (`backend`/`system`) is a shared prerequisite, surfaced in KT-317.
 - The ADR began as a decision record; KT-317–KT-322 now implement its durable aggregate,
   provisioning, review, protected integration, coordination and recovery boundaries.

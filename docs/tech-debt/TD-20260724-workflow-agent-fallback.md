@@ -16,8 +16,8 @@ session-limit refusal is not retried: the run waits for the announced reset on
 the same provider (KT-811), or is parked for a human. The user then has to
 notice the failed run, edit Claude to Codex (for example), and replay it by hand.
 [src: file: backend/src/models/workflows.rs:1617-1623#RetryConfig]
-[src: file: backend/src/workflows/steps.rs:461-477#RETRY_BACKOFF_UNIT]
-[src: file: backend/src/workflows/steps.rs:960-967#classify]
+[src: file: backend/src/workflows/steps.rs:465-481#RETRY_BACKOFF_UNIT]
+[src: file: backend/src/workflows/steps.rs:964-971#classify]
 [src: user: 2026-08-10: unattended workflow steps should continue on an
 explicit fallback and make the switch visible]
 
@@ -163,15 +163,15 @@ must use the typed value. Unknown errors are not fallback-eligible.
 Kronn already has an Ollama `TypedSchema` quality escalation that retries on
 Claude after local validation and repair fail. That behavior is adjacent, but
 semantically different from availability fallback and should eventually use an
-explicit escalation policy rather than be folded into this router. [src: file: backend/src/workflows/steps.rs:656-745#escalation_step]
+explicit escalation policy rather than be folded into this router. [src: file: backend/src/workflows/steps.rs:660-749#escalation_step]
 
 ## Workflow replay and continuation safety
 
 This is the hardest part. An Agent step can modify the worktree or call tools
 before a provider error. The current executor streams output and tool markers,
 then only returns success or a string error; it does not produce a durable
-effect boundary suitable for safe cross-agent replay. [src: file: backend/src/workflows/steps.rs:1539-1551#drive_agent_to_output]
-[src: file: backend/src/workflows/steps.rs:1266-1298#run_agent_with_timeout]
+effect boundary suitable for safe cross-agent replay. [src: file: backend/src/workflows/steps.rs:1543-1555#drive_agent_to_output]
+[src: file: backend/src/workflows/steps.rs:1270-1302#run_agent_with_timeout]
 
 The router must distinguish these cases:
 
@@ -254,14 +254,14 @@ The current spawn audit found these distinct Kronn-owned paths:
 | Debate final synthesis | Starts the primary synthesis agent. [src: file: backend/src/api/discussions/orchestration.rs:1032-1189#synthesis_external_http] |
 | Automatic discussion summary | None any more: removed in 0.13.0, a summary only exists on demand. [src: file: backend/src/models/discussions.rs:490-514#SummaryStrategy] |
 | Explicit discussion summary | User-triggered summary path. [src: file: backend/src/api/discussions/orchestration.rs:1291-1490#generate_summary_on_demand] |
-| Workflow Agent helper | Normal attempts, retries, structured-output repair, current Ollama quality escalation, multi-agent review turns, and rollback Agent steps. [src: file: backend/src/workflows/steps.rs:461-745#run_agent_with_timeout] [src: file: backend/src/workflows/steps.rs:1798-2039#run_multi_agent_debate] [src: file: backend/src/workflows/runner.rs:3700-3780#execute_step] |
-| Full audit | Reasoning-tier filesystem audit. [src: file: backend/src/api/audit/full.rs:327-343#audit_tier] [src: file: backend/src/api/audit/full.rs:1796-1810#start] |
-| Drift audit | Reasoning-tier partial audit. [src: file: backend/src/api/audit/drift.rs:479-502#audit_tier] [src: file: backend/src/api/audit/drift.rs:975-985#start] |
+| Workflow Agent helper | Normal attempts, retries, structured-output repair, current Ollama quality escalation, multi-agent review turns, and rollback Agent steps. [src: file: backend/src/workflows/steps.rs:465-749#run_agent_with_timeout] [src: file: backend/src/workflows/steps.rs:1802-2043#run_multi_agent_debate] [src: file: backend/src/workflows/runner.rs:3700-3780#execute_step] |
+| Full audit | Reasoning-tier filesystem audit. [src: file: backend/src/api/audit/full.rs:327-343#audit_tier] [src: file: backend/src/api/audit/full.rs:1800-1814#start] |
+| Drift audit | Reasoning-tier partial audit. [src: file: backend/src/api/audit/drift.rs:483-506#audit_tier] [src: file: backend/src/api/audit/drift.rs:978-988#start] |
 
 Audits still refuse Vibe, which has no file tools Kronn can scope to the
 project; every HTTP provider is admitted since KT-924 and KT-980, a `Custom`
 target only with a validated named connection. Eligibility is therefore a
-property of each surface, not of an agent being installed. [src: file: backend/src/api/audit/mod.rs:646-678#agent_can_audit]
+property of each surface, not of an agent being installed. [src: file: backend/src/api/audit/mod.rs:700-731#agent_can_audit]
 
 | Surface | Desired behavior | Initial rollout |
 |---|---|---:|
@@ -290,7 +290,7 @@ are stamped from the selected attempt, else the last one. That trail has no
 fallback purpose, failure kind or effect state, so it is a foundation rather
 than enough for fallback, and discussions have no equivalent.
 [src: file: backend/src/models/workflows.rs:1933-2012#WorkflowAgentProvenance]
-[src: file: backend/src/workflows/steps.rs:1401-1425#WorkflowAgentAttempt]
+[src: file: backend/src/workflows/steps.rs:1405-1429#WorkflowAgentAttempt]
 [src: file: backend/src/workflows/runner.rs:4854-4876#selected_attempt]
 
 Persist an `AgentAttempt` record (table or versioned run JSON) with:

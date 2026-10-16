@@ -62,4 +62,4 @@ scripted Full audit that reads the briefing before its first step in both
 [src: file: backend/src/api/audit/briefing_residuals_tests.rs:99-118#briefing_residuals_removing_an_option_in_the_file_overrides_stale_db_notes]
 [src: file: backend/src/api/audit/briefing_residuals_tests.rs:120-169#briefing_residuals_fresh_clone_keeps_the_generated_project_doc_without_answers]
 [src: file: backend/src/api/audit/briefing_cards.rs:1049-1089#briefing_residuals_unattended_launch_requires_explicit_saved_defaults]
-[src: file: backend/src/api/audit/relocation_e2e_tests.rs:135-176#briefing_residuals_phase_one_materializes_notes_before_the_first_agent_step]
+[src: file: backend/src/api/audit/relocation_e2e_tests.rs:163-200#briefing_residuals_phase_one_materializes_notes_before_the_first_agent_step]

@@ -58,6 +58,33 @@ async fn audited(h: &Harness, docs_root: &DocsRoot) -> Vec<String> {
         .collect()
 }
 
+/// KT-1278 — each prompt the agent was handed ends on the directive of the
+/// step it runs (step n = n-th prompt: every step succeeds first time here).
+fn assert_every_step_ends_on_its_directive(prompts: &[String], docs_root: &DocsRoot) {
+    let steps = crate::api::audit::steps_for(crate::models::AuditKind::Full, docs_root);
+    assert_eq!(prompts.len(), steps.len());
+    for (index, (prompt, step)) in prompts.iter().zip(&steps).enumerate() {
+        let directive = crate::api::audit::step_closing_directive(index + 1, step, docs_root);
+        assert!(
+            prompt.ends_with(&directive),
+            "step {} must end on its directive:\n…{}",
+            index + 1,
+            &prompt[prompt.len().saturating_sub(500)..]
+        );
+        assert_eq!(prompt.matches("=== RUN THIS STEP NOW ===").count(), 1);
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn every_full_step_prompt_the_agent_receives_ends_on_its_directive() {
+    let h = harness().await;
+    let docs_root = DocsRoot::default_root();
+    let prompts = audited(&h, &docs_root).await;
+    assert_every_step_ends_on_its_directive(&prompts, &docs_root);
+}
+
 #[tokio::test]
 #[serial_test::serial]
 #[serial_test::serial(kronn_templates_env)]
@@ -82,6 +109,7 @@ async fn a_full_audit_of_a_dot_ai_project_writes_everything_there_and_nothing_in
     );
 
     let prompts = audited(&h, &ai).await;
+    assert_every_step_ends_on_its_directive(&prompts, &ai);
 
     assert!(!project.join("docs").exists(), "nothing may land in docs/");
     for artefact in [
@@ -212,6 +240,14 @@ async fn a_partial_refresh_of_a_dot_ai_project_rewrites_its_section_there() {
     let prompt = std::fs::read_to_string(h.tools.path().join("prompt.1")).unwrap();
     assert!(prompt.contains(glossary), "{prompt}");
     assert!(!prompt.contains("`docs/"), "{prompt}");
+    // KT-1278 — the partial run's prompt ends on its own step's directive.
+    let steps = crate::api::audit::steps_for(crate::models::AuditKind::Full, &ai);
+    let directive = crate::api::audit::step_closing_directive(step, &steps[step - 1], &ai);
+    assert!(
+        prompt.ends_with(&directive),
+        "…{}",
+        &prompt[prompt.len().saturating_sub(500)..]
+    );
 }
 
 #[tokio::test]
@@ -1177,6 +1213,19 @@ fn default_root_snapshot(project: &Path, prompts: &[String]) -> String {
             continue;
         }
         let bytes = std::fs::read(entry.path()).unwrap();
+        // A validated original is named by the sha256 of its bytes, which hold
+        // the audit date (`audit="YYYY-MM-DD"`): the golden would change every
+        // day. Name it by the sha of the masked bytes instead.
+        let rel = match rel.strip_prefix(".kronn/audit/validated-originals/") {
+            Some(_) => {
+                let masked = mask(&String::from_utf8_lossy(&bytes));
+                format!(
+                    ".kronn/audit/validated-originals/{}.bak",
+                    crate::core::docs_merge::sha256_hex(masked.as_bytes())
+                )
+            }
+            None => rel,
+        };
         let volatile = matches!(
             rel.as_str(),
             "docs/.kronn.json"
