@@ -17,9 +17,17 @@ export function SourcesBadge({ drift }: { drift: DriftCheckResponse | undefined 
       </span>
     );
   }
+  // KT-1168 — paths the prose names that are gone are counted apart from the
+  // cited lines that changed: the label says which is which.
+  const paths = drift.missing_paths ?? 0;
+  const label = paths === 0
+    ? t('audit.sourcesToReverify', String(drift.broken_citations))
+    : drift.broken_citations === 0
+      ? t('audit.sourcesToReverifyPathsOnly', String(paths))
+      : t('audit.sourcesToReverifyPaths', String(drift.broken_citations), String(paths));
   return (
     <span className="dash-badge-drift" data-testid="project-sources-state" data-state="needs_reverification" title={t('audit.sourcesToReverifyHint')}>
-      <AlertTriangle size={9} /> {t('audit.sourcesToReverify', String(drift.broken_citations))}
+      <AlertTriangle size={9} /> {label}
     </span>
   );
 }

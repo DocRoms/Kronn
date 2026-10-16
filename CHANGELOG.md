@@ -27,6 +27,25 @@ Release notes for 0.9.3 and earlier are available in the
   reading their sentence (193 flagged by the rule, 15 moved by integrations, 5 more found by
   the review sample);
   the full check over every doc is green.
+- Doc relevance in « Revalider l'audit » (KT-1168). Beyond citation
+  fingerprints, Kronn judges every section of the AI docs against the code as
+  it is now, deterministically and without a model: `anchors_intact`,
+  `outdated` (a cited line changed or vanished), `no_longer_relevant` (every
+  anchor is gone) or `unanchored` (no citation, no path: listed as
+  unverifiable, never called true). A backticked path counts as gone only
+  when it resolves nowhere (project root, the doc's folder, the tail of any
+  project file; not generated or git-ignored), and examples, history lines,
+  proposals, templates and changelog docs are not claims. The panel shows the
+  counts, the evidence and a proposed correction per section, the agent pass
+  receives them (unanchored sections as « check or anchor »), and the sources
+  badge turns to « to re-verify » with the vanished paths counted apart from
+  the broken citations. A vanished mention is accepted per section with
+  « Vérifié, inchangé » only, and from the project card only the paths its
+  stale block displayed; a validation or a revalidation carries that
+  acceptance over and never adds to it. The history and example rules apply to
+  the sentence holding the path, not to the whole line, and a proposal heading
+  must be a proposal phrase (« Ideas », « Future work »), not a word inside a
+  real title.
 - AI documentation template and audit v2 gap audit (KT-819). The project
   facts of the briefing gain « Documentation externe » (Confluence, Notion,
   wiki, other; https addresses only, no credentials, at most 6), rendered in
@@ -492,6 +511,40 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- An audit step run through the ACP route runs instead of asking the human
+  what to do (KT-1278). An ACP session has no system channel, so the context
+  and the step reach the model as one message, and a step prompt that ended on
+  a reference block (the runtime versions table, the briefing, the project
+  rules, the detector signals, the linked repositories) was read by a small
+  model such as Haiku as context to answer: it replied « What would you like
+  me to help with? » and wrote nothing. Every step of every audit kind, the
+  retries with citation feedback now end on a closing directive that names
+  the step and its target file, says no human answers in that turn, and stops
+  once the file is written. A cross-agent detection pass writes nothing, so it
+  gets its own closing (answer with the findings block, write no file) instead
+  of the step's « write the file ». A workflow step that declares read-only
+  repositories no longer ends on that list either.
+- The version watch no longer tells the audit a JS project is up to date when
+  it could not look (KT-1279). A `package.json` without `node_modules` got
+  `npm outdated --workspaces`, which prints `{}` and exits 0 without querying
+  the registry, and that read « up to date » so the Renovate fallback never
+  ran: the workspace flags are now passed only to an installed tree, and an
+  empty answer for a manifest that declares dependencies but has none
+  installed is the new `NotInstalled` status (incomplete, Renovate decides,
+  listed as unchecked in the audit block). A Renovate package file with no
+  resolved dependency (none listed, skipped, failed lookup) no longer
+  finalizes as up to date either. The runtime pins also read a reusable
+  workflow's `nodeversion` / `node_version` input (and its `default:`), a
+  Jenkinsfile's `nodejs '…'` tool and node-versioned agent label, and a
+  Dockerfile's `FROM node:<v>` / `ARG NODE_VERSION`; when nothing is parsed the
+  audit block says « None parsed by Kronn » and lists the CI files present
+  instead of « None found ». Review follow-up: a package npm lists without an
+  installed version is flagged `declared_only` and shown as « not installed »,
+  never as the version in place; a `node_modules` holding only `.cache` / `.bin`
+  is not an install; a Jenkins label needs `node` / `nodejs` directly followed
+  by a major (`build-node-1` is a host); a Dockerfile pin needs a leading digit
+  and a multi-stage file marks its last stage as the runtime one; Renovate
+  warnings no longer drop resolved updates.
 - What a task worker starts ends with its dispatch, and Vite runs in its lane
   (KT-1266). A backend or a Vite started from the agent's shell tool ran in a
   process group of its own and kept listening on the lane's ports after the

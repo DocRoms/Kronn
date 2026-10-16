@@ -307,6 +307,46 @@ fn learning_counts_a_source_by_its_doc_provenance() {
 }
 
 #[test]
+fn a_validated_doc_naming_a_vanished_path_is_no_longer_human_validated() {
+    let dir = project();
+    let root = dir.path();
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(root.join("src/engine.rs"), "pub fn run() {}\n").unwrap();
+    fs::write(
+        root.join("docs/repo-map.md"),
+        "# Map\nThe engine is `src/engine.rs`.\n",
+    )
+    .unwrap();
+    record_all(root, ValidationReason::AuditValidation).unwrap();
+    crate::core::citation_drift::record_all(root).unwrap();
+    assert_eq!(
+        source_provenance(root, "docs/repo-map.md:2"),
+        Some(SourceProvenance::HumanValidated)
+    );
+
+    // The code the validated prose describes is gone: nothing was edited, no
+    // citation broke, yet the human did not see this: AI-generated again.
+    // No citation report is passed: the answer must be the learning gate's.
+    fs::remove_file(root.join("src/engine.rs")).unwrap();
+    assert_eq!(
+        source_provenance(root, "docs/repo-map.md:2"),
+        Some(SourceProvenance::AiGenerated)
+    );
+    let report = crate::core::citation_drift::check(root);
+    assert_eq!(
+        source_provenance_with_citations(root, "docs/repo-map.md:2", Some(&report)),
+        Some(SourceProvenance::AiGenerated)
+    );
+
+    // The human acknowledges the mention: trusted as validated again.
+    crate::core::citation_drift::acknowledge(root, "docs/repo-map.md").unwrap();
+    assert_eq!(
+        source_provenance(root, "docs/repo-map.md:2"),
+        Some(SourceProvenance::HumanValidated)
+    );
+}
+
+#[test]
 fn learning_reads_owner_human_lines_as_human_until_kronn_changes_them() {
     let dir = project();
     let root = dir.path();

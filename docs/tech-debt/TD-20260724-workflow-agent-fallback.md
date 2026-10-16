@@ -256,7 +256,7 @@ The current spawn audit found these distinct Kronn-owned paths:
 | Explicit discussion summary | User-triggered summary path. [src: file: backend/src/api/discussions/orchestration.rs:1107-1175] |
 | Workflow Agent helper | Normal attempts, retries, structured-output repair, current Ollama quality escalation, multi-agent review turns, and rollback Agent steps. [src: file: backend/src/workflows/steps.rs:213-408] [src: file: backend/src/workflows/steps.rs:727-794] [src: file: backend/src/workflows/runner.rs:2047-2134] |
 | Full audit | Reasoning-tier filesystem audit. [src: file: backend/src/api/audit/full.rs:1006-1031] |
-| Drift audit | Reasoning-tier partial audit. [src: file: backend/src/api/audit/drift.rs:476-493] |
+| Drift audit | Reasoning-tier partial audit. [src: file: backend/src/api/audit/drift.rs:486-503] |
 
 Audits still refuse Vibe, which has no file tools Kronn can scope to the
 project; every HTTP provider is admitted since KT-924 and KT-980, a `Custom`

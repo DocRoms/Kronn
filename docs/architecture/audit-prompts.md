@@ -5,9 +5,9 @@ files embedded at compile time with `include_str!`. Rust still defines step
 ordering, target files, source patterns, and dynamic prompt assembly. The
 anti-hallucination section remains shared with the bootstrap template through
 the existing synchronization test.
-[src: file: backend/src/api/audit/mod.rs:185#PROMPT_PREAMBLE]
-[src: file: backend/src/api/audit/mod.rs:210#ANTI_HALLU_SECTION_BODY]
-[src: file: backend/src/api/audit/mod.rs:232#ANALYSIS_STEPS]
+[src: file: backend/src/api/audit/mod.rs:187#PROMPT_PREAMBLE]
+[src: file: backend/src/api/audit/mod.rs:212#ANTI_HALLU_SECTION_BODY]
+[src: file: backend/src/api/audit/mod.rs:234#ANALYSIS_STEPS]
 
 The extraction preserves prompt bytes, including whitespace. Validation-card
 instructions and briefing prompts retain their three existing locales; Rust
@@ -23,4 +23,4 @@ prompt is separate from the deterministic drift API.
 
 Prompt contract tests continue to exercise the embedded strings rather than
 separate copies of the Markdown content.
-[src: file: backend/src/api/audit/mod.rs:952-964#drift_kind_consumes_checksums]
+[src: file: backend/src/api/audit/mod.rs:1007-1019#drift_kind_consumes_checksums]

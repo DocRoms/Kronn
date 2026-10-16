@@ -35,7 +35,13 @@ export type AcknowledgeCitationsRequest = { doc: string, };
  * `POST /api/projects/:id/drift/acknowledge` body: the stale sections (their
  * `ai_file`) a human checked and found still true.
  */
-export type AcknowledgeDriftRequest = { sections: Array<string>, };
+export type AcknowledgeDriftRequest = { sections: Array<string>,
+/**
+ * The gone prose paths the human was shown with those sections: only
+ * these are accepted. Absent, none is (an older client accepts nothing
+ * it never displayed).
+ */
+shown_paths?: Array<ShownPath>, };
 
 export type ActiveAgentDispatch = { id: string, trigger_message_id: string, agent_type: AgentType, status: string,
 /**
@@ -2216,6 +2222,8 @@ cost_usd: number | null,
  */
 is_byok: boolean, };
 
+export type CorrectionKind = "recheck" | "replace_or_remove" | "remove_section" | "check_or_anchor";
+
 export type Correspondence = {
 /**
  * Repo-relative source path.
@@ -2736,11 +2744,17 @@ export type DeliveryManifestV1 = { version: string, task_ref: string, head_sha: 
  */
 tests_executed?: TestsExecuted | null, };
 
-export type DependencyCheckStatus = "UpToDate" | "UpdatesAvailable" | "Unsupported" | "Unavailable" | "Error" | "TimedOut";
+export type DependencyCheckStatus = "UpToDate" | "UpdatesAvailable" | "Unsupported" | "Unavailable" | "Error" | "TimedOut" | "NotInstalled";
 
 export type DependencyManagerUpdate = { manager: string, manifest: string, status: DependencyCheckStatus, outdated: number, major: number, packages?: Array<DependencyUpdatePackage>, };
 
-export type DependencyUpdatePackage = { name: string, current: string, latest: string, major: boolean, };
+export type DependencyUpdatePackage = { name: string, current: string, latest: string, major: boolean, 
+/**
+ * The package is declared but not installed (no `node_modules`): `current`
+ * is empty because no installed version exists to report, and the row
+ * only proves the declared range cannot reach `latest`.
+ */
+declared_only?: boolean, };
 
 export type DependencyUpdateSummary = { managers: Array<DependencyManagerUpdate>, total_outdated: number, total_major: number, checked_at: string, cached: boolean,
 /**
@@ -3893,11 +3907,20 @@ export type DriftCheckResponse = { template_update?: TemplateUpdate, audit_date:
  */
 sources_state: SourcesState, broken_citations: number,
 /**
+ * Paths the docs' prose names that are gone, which no citation covers
+ * (KT-1168). Counted apart from `broken_citations`.
+ */
+missing_paths?: number,
+/**
  * Template docs that still hold raw `{{PLACEHOLDERS}}` (KT-1203).
  */
 placeholder_docs: Array<PlaceholderDoc>, };
 
-export type DriftSection = { ai_file: string, audit_step: number, changed_sources: Array<string>, };
+export type DriftSection = { ai_file: string, audit_step: number, changed_sources: Array<string>,
+/**
+ * Gone paths the doc's prose names, none accepted yet (KT-1168).
+ */
+missing_paths: Array<VanishedPaths>, };
 
 /**
  * `POST /api/config/embed-origins`: origins to allow and to revoke, applied
@@ -3959,6 +3982,8 @@ export type EvidenceCheck = { reference: string, status: string, fabricated: boo
  * A source inside the project docs: human-validated or AI-generated (KT-1079).
  */
 doc_provenance?: SourceProvenance, };
+
+export type EvidenceKind = "citation" | "path_reference";
 
 /**
  * What a run may be evidence for.
@@ -7032,6 +7057,12 @@ pending_proposal_count: number,
  */
 pending_item_count: number, };
 
+/**
+ * A correction Kronn proposes. Nothing is applied by itself: the agent pass
+ * the human launches carries it out, and the human validates the result.
+ */
+export type ProposedCorrection = { kind: CorrectionKind, reference: string, proposal: string, };
+
 export type ProposeResult = { accepted: boolean, reason: string | null, warnings: Array<string>, evidence_checks: Array<EvidenceCheck>, learning: Learning | null, };
 
 export type ProvenanceChange = {
@@ -7477,6 +7508,50 @@ human_validated: boolean, };
  */
 export type ReinstallKind = "damaged_or_template" | "filled";
 
+/**
+ * What is measured, over every section of every doc.
+ */
+export type RelevanceCounts = { sections: number, anchors_intact: number, outdated: number, no_longer_relevant: number, unanchored: number,
+/**
+ * Outdated or no-longer-relevant sections nobody touched since the
+ * validation that recorded them.
+ */
+untouched_stale: number,
+/**
+ * Anchors (citations and prose paths) whose file is gone.
+ */
+missing_references: number,
+/**
+ * The part of `missing_references` that is prose only: no citation, so
+ * no fingerprint, broke: only this check sees it.
+ */
+prose_missing: number,
+/**
+ * `anchors_intact` over the anchored sections; `None` when none is
+ * anchored. Intact anchors are not proof the prose is true.
+ */
+anchored_intact_pct: number | null, };
+
+/**
+ * One anchor of a section that does not resolve any more.
+ */
+export type RelevanceEvidence = { kind: EvidenceKind,
+/**
+ * The citation label or path, as the doc writes it.
+ */
+reference: string, state: CitationState, };
+
+export type RelevanceReport = { counts: RelevanceCounts,
+/**
+ * Only the sections that need attention (`outdated`, `no_longer_relevant`).
+ */
+sections: Array<SectionRelevance>,
+/**
+ * The sections Kronn cannot measure (no citation, no path): handed to
+ * the agent pass to check or anchor. They do not raise the badge.
+ */
+unanchored: Array<SectionRelevance>, };
+
 export type RemoteRepo = { name: string, full_name: string, clone_url: string, ssh_url: string, description: string | null, language: string | null, stargazers_count: number, updated_at: string, source: string, already_cloned: boolean, };
 
 export type RemovePlanningBlockerRequest = { actor?: PlanningActor, };
@@ -7792,7 +7867,17 @@ sections: Array<RevalidationSection>,
 /**
  * Full audit steps the bounded agent pass runs, in chain order.
  */
-agent_steps: number[], reanchor_count: number, human_count: number, };
+agent_steps: number[], reanchor_count: number, human_count: number,
+/**
+ * Sections per verdict over every doc, and how many of the stale ones
+ * nobody revised since validation (KT-1168).
+ */
+relevance: RelevanceCounts,
+/**
+ * The sections Kronn cannot measure (no citation, no path), listed so
+ * each is confronted with the code: by a person or by the agent pass.
+ */
+unanchored: Array<SectionRelevance>, };
 
 export type RevalidationSection = { doc: string,
 /**
@@ -7806,7 +7891,12 @@ reanchor: Array<CitationStatus>,
 /**
  * Broken citations outside human sections.
  */
-broken: Array<CitationStatus>, human: Array<HumanCitationTodo>, };
+broken: Array<CitationStatus>, human: Array<HumanCitationTodo>,
+/**
+ * The doc's sections that are outdated or no longer relevant to the
+ * code, with the evidence and the corrections Kronn proposes.
+ */
+relevance: Array<SectionRelevance>, };
 
 /**
  * Principal → backend review (ADR §5, KT-319). `comment` is schema-optional but
@@ -8205,6 +8295,23 @@ unrecorded: Array<string>, };
  * time.
  */
 export type SectionClass = "critical" | "universal" | "routed" | "historical" | "duplicated" | "possibly_obsolete";
+
+export type SectionRelevance = { doc: string,
+/**
+ * The Markdown heading; empty for the text before the first heading.
+ */
+heading: string, verdict: SectionVerdict,
+/**
+ * The anchors that no longer resolve.
+ */
+evidence: Array<RelevanceEvidence>, corrections: Array<ProposedCorrection>,
+/**
+ * The section's text is exactly what was recorded at validation: nobody
+ * revised it although the code it describes changed.
+ */
+untouched_since_code_changed: boolean, };
+
+export type SectionVerdict = "anchors_intact" | "outdated" | "no_longer_relevant" | "unanchored";
 
 export type SendMessageRequest = { content: string,
 /**
@@ -8664,6 +8771,11 @@ export type SharedRun = { id: string, kind: SharedRunKind, source_id: string, pr
 export type SharedRunKind = "quick_prompt" | "quick_api" | "quick_exec" | "workflow" | "media";
 
 export type SharedRunStatus = "preflight_failed" | "queued" | "running" | "success" | "failed" | "cancelled" | "timeout";
+
+/**
+ * One gone path the stale block listed, in its doc's section.
+ */
+export type ShownPath = { doc: string, section: string, path: string, };
 
 export type Skill = { id: string, name: string, description: string, icon: string, category: SkillCategory, content: string, is_builtin: boolean,
 /**
@@ -10348,6 +10460,15 @@ started_by: string | null, validated_by: string | null, validated_at: string | n
  * reads the filesystem, is decided by the POST itself).
  */
 can_validate: boolean, blocked: ValidationBlock | null, };
+
+/**
+ * The gone prose paths of one section that no acknowledgement accepted.
+ */
+export type VanishedPaths = {
+/**
+ * The section's key within its doc (its heading).
+ */
+section: string, paths: Array<string>, };
 
 export type VersionCheck = { current: string, latest: string | null, release_url: string | null, up_to_date: boolean, };
 
