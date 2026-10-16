@@ -6084,9 +6084,10 @@ fn notify_principal_of_timeout(
             "review_wait_timeout",
             format!(
                 "Une livraison attend ta revue{} sans décision. Rien n'a été approuvé, rejeté \
-                 ni annulé : la livraison, le worktree et la branche sont intacts. Relis-la puis \
-                 appelle `task_exec_review` (approuver ou demander des changements), ou \
-                 `task_exec_reassign` / `task_exec_cancel` si le travail doit être repris.",
+                 ni annulé : l'exécution reste en `AwaitingReview`, la livraison, le worktree \
+                 et la branche sont intacts. Relis-la puis appelle `task_exec_review` \
+                 (approuver ou demander des changements), ou `task_exec_reassign` / \
+                 `task_exec_cancel` si le travail doit être repris.",
                 minutes
                     .map(|minutes| format!(" depuis {minutes} min"))
                     .unwrap_or_default()
@@ -6225,6 +6226,49 @@ pub fn apply_execution_timeout(
             notify_principal_of_timeout(conn, exec_id, kind, timeout_secs)?;
             return Ok(true);
         }
+        if kind == ExecutionTimeoutKind::ReviewWait {
+            // KT-1293 — the delivery is untouched and no review is written: the
+            // principal is alerted, and only the principal decides. The row
+            // therefore stays `AwaitingReview`, the one state `task_exec_review`
+            // accepts, so the alert's own advice (approve / request changes) is
+            // still honoured. Escalating here locked the principal out of the
+            // review. The clock only means something while a delivery waits.
+            if execution.status != TaskExecutionStatus::AwaitingReview {
+                conn.execute(
+                    "UPDATE task_execution_recovery SET review_deadline_at = NULL, \
+                            updated_at = ?2 WHERE task_execution_id = ?1",
+                    params![exec_id, Utc::now().to_rfc3339()],
+                )?;
+                return Ok(false);
+            }
+            record_reconciliation_event(
+                conn,
+                "execution",
+                exec_id,
+                label,
+                serde_json::json!({ "status": execution.status.as_str() }),
+            )?;
+            // Disarming the review deadline makes the alert fire once; the
+            // total-duration clock is dropped like on every human wait.
+            conn.execute(
+                "UPDATE task_execution_recovery SET activity_deadline_at = NULL, \
+                        review_deadline_at = NULL, total_deadline_at = NULL, \
+                        human_wait_started_at = NULL, recovery_action = 'await_review', \
+                        recovery_reason = ?2, pending = 0, updated_at = ?3 \
+                 WHERE task_execution_id = ?1",
+                params![exec_id, label, Utc::now().to_rfc3339()],
+            )?;
+            let policy_secs = get_resilience_policy(conn, &execution.orchestration_run_id)?
+                .review_timeout_secs
+                .map(i64::from);
+            notify_principal_of_timeout(
+                conn,
+                exec_id,
+                kind,
+                Some(effective_review_secs(policy_secs)),
+            )?;
+            return Ok(true);
+        }
         record_reconciliation_event(
             conn,
             "execution",
@@ -6254,21 +6298,6 @@ pub fn apply_execution_timeout(
              WHERE task_execution_id = ?1",
             params![exec_id, label, Utc::now().to_rfc3339()],
         )?;
-        if kind == ExecutionTimeoutKind::ReviewWait
-            && execution.status == TaskExecutionStatus::AwaitingReview
-        {
-            // KT-1247 — the delivery is untouched and no review is written: the
-            // principal is alerted, and only the principal decides.
-            let policy_secs = get_resilience_policy(conn, &execution.orchestration_run_id)?
-                .review_timeout_secs
-                .map(i64::from);
-            notify_principal_of_timeout(
-                conn,
-                exec_id,
-                kind,
-                Some(effective_review_secs(policy_secs)),
-            )?;
-        }
         Ok(true)
     })
 }

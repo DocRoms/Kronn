@@ -22889,10 +22889,16 @@ pub(crate) mod tests {
             })
             .await
             .unwrap();
+            // KT-1293 — a review-wait timeout keeps the delivery reviewable;
+            // reassigning it rejects that pending delivery (KT-791).
             let escalated = exec_of(&db, &exec_id).await;
+            let expected = if origin == "review_wait" {
+                TaskExecutionStatus::AwaitingReview
+            } else {
+                TaskExecutionStatus::Escalated
+            };
             assert_eq!(
-                escalated.status,
-                TaskExecutionStatus::Escalated,
+                escalated.status, expected,
                 "{origin}: the execution must be parked before the reassignment"
             );
 
@@ -31397,6 +31403,113 @@ pub(crate) mod tests {
             review_row(&db, &exec_id).await.unwrap().decision,
             "request_changes"
         );
+    }
+
+    /// Runs the real watchdog entry point for an expired review clock.
+    async fn expire_review_wait(db: &Database, exec_id: &str) {
+        let e = exec_id.to_string();
+        let applied = db
+            .with_conn(move |conn| {
+                crate::db::orchestration::apply_execution_timeout(
+                    conn,
+                    &e,
+                    crate::models::ExecutionTimeoutKind::ReviewWait,
+                )
+            })
+            .await
+            .unwrap();
+        assert!(applied, "the review-wait timeout must apply");
+    }
+
+    /// KT-1293 — the review-wait alert tells the principal to call
+    /// `task_exec_review`; the execution must therefore stay reviewable, and
+    /// `task_exec_status` must name the same tool.
+    #[tokio::test]
+    async fn a_review_wait_timeout_leaves_the_delivery_approvable() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_parent, _child, exec_id, _head, _path) =
+            delivered_awaiting_review(&db, repo.path()).await;
+
+        expire_review_wait(&db, &exec_id).await;
+
+        let parked = exec_of(&db, &exec_id).await;
+        assert_eq!(parked.status, TaskExecutionStatus::AwaitingReview);
+        let e = exec_id.clone();
+        let detail = db
+            .with_conn(move |conn| execution_detail(conn, &e))
+            .await
+            .unwrap();
+        let recovery = detail.recovery.as_ref().expect("recovery row");
+        assert_eq!(recovery.recovery_reason, "review_wait_timeout");
+        assert!(!recovery.pending);
+        assert!(recovery.review_deadline_at.is_none(), "the alert fires once");
+        let next = compact_next_action(&detail).expect("a next action");
+        assert_eq!(next.tool, Some("task_exec_review"));
+
+        let outcome = decide_review(
+            &db,
+            &exec_id,
+            &review_approve(&db, &exec_id).await,
+            "ClaudeCode",
+            "sess-b",
+        )
+        .await
+        .unwrap();
+        match outcome {
+            ReviewOutcome::Reviewed { verdict, execution } => {
+                assert_eq!(verdict, ReviewVerdict::Approve);
+                assert_eq!(execution.status, TaskExecutionStatus::Approved);
+            }
+            other => panic!("expected Reviewed/Approve after the timeout, got {other:?}"),
+        }
+        assert_eq!(review_row(&db, &exec_id).await.unwrap().decision, "approve");
+    }
+
+    /// KT-1293 — same, for the other door: the worker still gets the comment.
+    #[tokio::test]
+    async fn a_review_wait_timeout_still_lets_the_principal_request_changes() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_parent, child_id, exec_id, _head, _path) =
+            delivered_awaiting_review(&db, repo.path()).await;
+
+        expire_review_wait(&db, &exec_id).await;
+
+        let outcome = decide_review(
+            &db,
+            &exec_id,
+            &review_request_changes("Corrige la garde manquante"),
+            "ClaudeCode",
+            "sess-b",
+        )
+        .await
+        .unwrap();
+        match outcome {
+            ReviewOutcome::Reviewed { verdict, execution } => {
+                assert_eq!(verdict, ReviewVerdict::RequestChanges);
+                assert_eq!(execution.status, TaskExecutionStatus::Blocked);
+            }
+            other => panic!("expected Reviewed/RequestChanges after the timeout, got {other:?}"),
+        }
+
+        let e = exec_id.clone();
+        let (disc, content, targets) = db
+            .with_conn(move |conn| {
+                let fid = format!("orch-review-findings:{e}:0");
+                let (disc, content): (String, String) = conn.query_row(
+                    "SELECT discussion_id, content FROM messages WHERE id = ?1",
+                    [&fid],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?;
+                let targets = crate::db::discussions::list_message_targets(conn, &fid)?;
+                Ok((disc, content, targets))
+            })
+            .await
+            .unwrap();
+        assert_eq!(disc, child_id, "the comment lands in the worker's room");
+        assert!(content.contains("Corrige la garde manquante"), "{content}");
+        assert_eq!(targets[0].cli_session_id, Some(101));
     }
 
     /// KT-385: a native worker cannot be woken through wait_for_peer. Its rework

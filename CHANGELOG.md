@@ -511,6 +511,14 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A review-wait timeout no longer locks the principal out of the review
+  (KT-1293). The watchdog used to move the unreviewed delivery to `Escalated`
+  while its alert told the principal to call `task_exec_review`, which only
+  accepts `AwaitingReview`. The execution now stays `AwaitingReview`
+  (`recovery_reason` `review_wait_timeout`, the clock disarmed so the alert is
+  posted once): the principal can still approve (integration runs normally) or
+  request changes (the worker gets the comment) on the unchanged delivery, and
+  `task_exec_status` keeps naming `task_exec_review`.
 - An audit step run through the ACP route runs instead of asking the human
   what to do (KT-1278). An ACP session has no system channel, so the context
   and the step reach the model as one message, and a step prompt that ended on
