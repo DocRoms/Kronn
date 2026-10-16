@@ -6,18 +6,19 @@ The MCP create, update, delete, and agent-change handlers invoke
 `sync_affected_projects` or `sync_all_projects`; the former enumerates the
 Codex, Copilot, Claude, and Gemini host adapters. Any router fixture that
 exercises those MCP handlers therefore needs both owned configuration and host
-roots. [src: file: backend/src/api/mcps.rs:650-673]
-[src: file: backend/src/api/mcps.rs:1180-1192]
-[src: file: backend/src/api/mcps.rs:1244-1300]
-[src: file: backend/src/api/agents.rs:1-18]
-[src: file: backend/src/core/mcp_scanner.rs:2228-2259]
+roots. [src: file: backend/src/api/mcps.rs:945-953#sync_pids]
+[src: file: backend/src/api/mcps.rs:1636-1648#secrets_changed]
+[src: file: backend/src/api/mcps.rs:1705-1711#cfg]
+[src: file: backend/src/api/agents.rs:6-22#resync_mcp_configs_after_install]
+[src: file: backend/src/core/mcp_scanner.rs:2630-2633#registry]
+[src: file: backend/src/core/mcp_scanner.rs:3772-3782#sync_all_projects]
 
 `backend/tests/api_tests.rs` is a module of the single integration binary
 (`backend/tests/it.rs`), and nextest runs each of its tests in its own process. Its ordinary
 `test_state` calls a single `OnceLock<TempDir>` initializer which creates and
 installs both `KRONN_DATA_DIR` and `KRONN_HOST_HOME`; subsequent state builders
-do not mutate either process-global variable. [src: file: backend/tests/api_tests.rs:1645-1662]
-[src: file: backend/tests/api_tests.rs:2043-2056]
+do not mutate either process-global variable. [src: file: backend/tests/api_tests.rs:5131-5156#isolate_config_dir]
+[src: file: backend/tests/api_tests.rs:5532-5539#test_state]
 
 The library test module has a different constraint: its non-serial state
 constructors do not mutate the environment, while the pre-existing config-save
@@ -42,14 +43,16 @@ and `ollama_model_catalog` construct a router for external-model probe/catalog
 routes; their fixtures contain no MCP configuration route. `http_model_resolution`
 uses an isolated data root but no `AppState`; `model_catalog_migration` uses its
 own database; `real_agent_e2e` is ignored and has no backend state fixture.
-[src: file: backend/tests/http_probe_catalog.rs:1-78]
-[src: file: backend/tests/ollama_model_catalog.rs:55-75]
-[src: file: backend/tests/http_model_resolution.rs:1-58]
-[src: file: backend/tests/real_agent_e2e.rs:1-80]
+[src: file: backend/tests/http_probe_catalog.rs:17-65#fixture]
+[src: file: backend/tests/http_probe_catalog.rs:85-98#probe]
+[src: file: backend/tests/ollama_model_catalog.rs:60-70#app_with_db]
+[src: file: backend/tests/http_model_resolution.rs:1-28]
+[src: file: backend/tests/real_agent_e2e.rs:81-84#real_agent_emits_valid_bundle_ready_for_fetch_summarize_notify]
+[src: file: backend/tests/real_agent_e2e.rs:135-138#real_agent_produces_valid_triage_manifest_for_big_ticket]
 
 The explicit config-write guard removes only `KRONN_DATA_DIR` to assert a
 rejected configuration write; it does not build a router or invoke an MCP
-adapter. [src: file: backend/tests/config_write_guard.rs:1-11]
+adapter. [src: file: backend/tests/config_write_guard.rs:1-14#unisolated_config_write_is_refused]
 
 ## Unit-test audit
 
@@ -58,15 +61,17 @@ Direct host-sync planner tests use `#[serial]`, own a temporary host directory,
 and restore their prior host override. The receipt regression retains its
 Written, Unchanged, and ReadOnly assertions with RAII restoration of every
 override it changes. [src: file: backend/src/core/mcp_scanner_test.rs:43-55]
-[src: file: backend/src/core/mcp_scanner_test.rs:2948-3022]
-[src: file: backend/src/core/mcp_scanner_test.rs:3025-3103]
-[src: file: backend/src/core/mcp_scanner_test.rs:3105-3193]
-[src: file: backend/src/core/mcp_scanner.rs:5247-5306]
+[src: file: backend/src/core/mcp_scanner_test.rs:58-107#HOST_ENV]
+[src: file: backend/src/core/mcp_scanner_test.rs:3403-3482#unavailable_command_is_skipped_by_codex_and_copilot_writers]
+[src: file: backend/src/core/mcp_scanner_test.rs:3617-3650#copilot_global_sync_emits_kronn_internal_into_mcp_config_json]
+[src: file: backend/src/core/mcp_scanner.rs:5794-5841#host_mcp_sync_switch_leaves_every_host_cli_config_untouched]
+[src: file: backend/src/core/mcp_scanner.rs:5843-5902#project_sync_receipt_distinguishes_written_unchanged_and_read_only]
 
 Host-discovery and agent-auth unit tests that change `KRONN_HOST_HOME` are
 serial and restore the saved value; they exercise discovery/auth reads rather
-than the MCP host-sync adapters. [src: file: backend/src/core/host_mcp_discovery.rs:797-810]
-[src: file: backend/src/agents/mod.rs:1208-1236]
+than the MCP host-sync adapters. [src: file: backend/src/core/host_mcp_discovery.rs:799-810#resolve_home_prefers_kronn_host_home]
+[src: file: backend/src/agents/mod.rs:1617-1655#gemini_without_auth_reports_setup_requirement]
+[src: file: backend/src/agents/mod.rs:1679-1707#opencode_missing_auth_file_is_unknown_not_blocked]
 
 ## Synthetic router regression
 
@@ -76,16 +81,16 @@ normal state fixture and must modify a sentinel. The GREEN child relies only on
 ordinary `test_state` initialization, verifies every sentinel remains unchanged,
 and sends two ordinary concurrent create requests after initialization. The
 blocked child places a file inside the owned Codex fixture and verifies that a
-write failure leaves the outside sentinels unchanged. The parent uses the
-cross-platform command helper, has a deadline/kill path, and asserts that its
-own two overrides are unchanged after every child. [src: file: backend/tests/api_tests.rs:9933-10140]
+write failure leaves the outside sentinels unchanged. The parent re-executes its
+own test binary with `--exact`, has a 15-second deadline/kill path, and asserts
+that its own two overrides are unchanged after every child. [src: file: backend/tests/api_tests.rs:17691-17921#MCP_HOST_ISOLATION_CHILD]
 
 The parent initializes the ordinary `OnceLock` before taking those environment
 snapshots. Otherwise a parallel non-serial router test can perform the first
 initialization during a child run and make the parent falsely report an
 environment leak. Keep that initialization inside the parent branch: doing it
 in the child before its RED control would hide the confinement regression.
-[src: file: backend/tests/api_tests.rs:9974]
+[src: file: backend/tests/api_tests.rs:17742-17747#isolate_config_dir]
 
 The focused regression is not a replacement for the principal's combined-suite
 qualification; it is the source-level confinement audit and regression proof
