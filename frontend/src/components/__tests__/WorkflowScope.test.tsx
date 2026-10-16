@@ -17,7 +17,7 @@ const projects = [
 
 function scope(overrides: Partial<WorkflowScope> = {}): WorkflowScope {
   return {
-    workflow_id: 'wf', entries: [{ project_id: 'p2', project_name: 'api', access: 'write' }],
+    workflow_id: 'wf', supported: true, entries: [{ project_id: 'p2', project_name: 'api', access: 'write' }],
     valid: true, validated_by: 'romu', validated_at: '2026-10-16T10:00:00Z', ...overrides,
   };
 }

@@ -4087,3 +4087,35 @@ async fn a_project_token_override_never_reaches_a_bridge_token() {
     assert!(!body.to_string().contains("ghp-secret"), "{body}");
     assert!(body["data"].get("token_override").is_none(), "{body}");
 }
+
+/// KT-1270 review P2 — a global or multi-project workflow resolves another
+/// revision per launch project: it cannot carry a scope, and says so rather
+/// than showing a validation that would never apply.
+#[tokio::test]
+async fn a_global_or_multi_project_workflow_cannot_carry_a_scope() {
+    let (app, _repos) = fixture().await;
+    for workflow in ["wf-global", "wf-all"] {
+        let (status, body) = call(
+            &app,
+            "PUT",
+            &format!("/api/workflows/{workflow}/scope"),
+            None,
+            Some(json!({"entries": [{"project_id": "p2", "access": "write"}]})),
+        )
+        .await;
+        assert_eq!(status, 400, "{workflow}: {body}");
+        let (status, scope) = call(
+            &app,
+            "GET",
+            &format!("/api/workflows/{workflow}/scope"),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, 200, "{scope}");
+        assert_eq!(scope["data"]["supported"], false, "{workflow}: {scope}");
+        assert_eq!(scope["data"]["valid"], false, "{workflow}: {scope}");
+    }
+    let (_, scope) = call(&app, "GET", "/api/workflows/wf-a/scope", None, None).await;
+    assert_eq!(scope["data"]["supported"], true, "{scope}");
+}

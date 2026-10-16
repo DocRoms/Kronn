@@ -716,6 +716,13 @@ pub fn workflow_fingerprint(conn: &Connection, workflow_id: &str) -> Result<Opti
     )?))
 }
 
+/// Only a workflow of one project can carry a scope: its runs pin the
+/// revision a human validated. A global or multi-project workflow resolves its
+/// references per launch project, so its runs would pin another revision.
+pub fn scope_supported(workflow: &crate::models::workflows::Workflow) -> bool {
+    workflow.project_id.is_some() && workflow.project_scope.is_none()
+}
+
 /// A workflow's scope and whether it still holds (the workflow unchanged since
 /// a human validated it); `None` when the workflow does not exist.
 pub fn workflow_scope(conn: &Connection, workflow_id: &str) -> Result<Option<WorkflowScope>> {
@@ -752,9 +759,13 @@ pub fn workflow_scope(conn: &Connection, workflow_id: &str) -> Result<Option<Wor
             access: ScopeAccess::parse(&access)?,
         });
     }
+    let supported = crate::db::workflows::get_workflow(conn, workflow_id)?
+        .as_ref()
+        .is_some_and(scope_supported);
     Ok(Some(WorkflowScope {
         workflow_id: workflow_id.to_owned(),
-        valid: valid && !entries.is_empty(),
+        supported,
+        valid: supported && valid && !entries.is_empty(),
         entries,
         validated_by,
         validated_at,
@@ -769,6 +780,15 @@ pub fn set_workflow_scope(
     entries: &[(String, ScopeAccess)],
     set_by: &str,
 ) -> Result<WorkflowScope> {
+    let Some(workflow) = crate::db::workflows::get_workflow(conn, workflow_id)? else {
+        return Err(ScopeError::NotFound("workflow not found".into()).into());
+    };
+    if !scope_supported(&workflow) {
+        return invalid(
+            "a project scope needs a workflow of one project: a global or multi-project workflow \
+             resolves another revision for each project it runs in, so no validation could hold",
+        );
+    }
     let Some(fingerprint) = workflow_fingerprint(conn, workflow_id)? else {
         return Err(ScopeError::NotFound("workflow not found".into()).into());
     };

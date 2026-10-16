@@ -2343,6 +2343,7 @@ const zh: TranslationDict = {
   "wf.scopeSaved": "范围已验证",
   "wf.scopeValidatedBy": "由 {0} 验证，{1}",
   "wf.scopeRevalidate": "重新验证",
+  "wf.scopeUnsupported": "只有属于单个项目的工作流才能访问其他项目：全局或多项目工作流在每个项目中执行不同的修订版本。",
   "disc.scopeUnknownProject": "没有项目使用此名称：此请求只能被拒绝。",
   "disc.agentHandoffTitle": "智能体可以协同工作吗？",
   "disc.agentHandoffHint": "可以。当一个智能体明确向讨论中的另一个智能体求助时，Kronn 会启动它。由你的每条消息产生的调用链可启动的付费智能体上限：{0}。",

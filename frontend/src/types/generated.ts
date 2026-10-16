@@ -11222,7 +11222,11 @@ export type WorkflowSafety = { sandbox: boolean, max_files?: number | null, max_
  * declares at launch). `valid` is false once the workflow changed after a
  * human validated it: its runs then reach nothing more than their project.
  */
-export type WorkflowScope = { workflow_id: string, entries: Array<WorkflowScopeEntry>, valid: boolean, validated_by: string | null, validated_at: string | null, };
+export type WorkflowScope = { workflow_id: string,
+/**
+ * False for a global or multi-project workflow, which cannot carry one.
+ */
+supported: boolean, entries: Array<WorkflowScopeEntry>, valid: boolean, validated_by: string | null, validated_at: string | null, };
 
 /**
  * One project a workflow's runs reach.

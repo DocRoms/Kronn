@@ -69,6 +69,11 @@ request body.
   Changing a definition, launching, then restoring it never opens the run that
   pinned the change, and a dependency put back after a pin changes nothing for
   that run. A child run, which has no pin of its own, reaches no scope.
+- Only a workflow of one project can carry a scope. A global or multi-project
+  workflow resolves its references for each launch project, so its runs pin
+  another revision than the one validated: the API refuses a scope on it and
+  the workflow page says why, rather than showing a validation that would never
+  apply.
 - Nothing else gives a step another project.
 - Worker launches are unchanged: a task of another project is never executed
   from a token that only holds a grant on it. A worker runs with its task

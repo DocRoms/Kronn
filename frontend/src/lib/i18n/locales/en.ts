@@ -2361,6 +2361,7 @@ const en: TranslationDict = {
   'wf.scopeSaved': 'Scope validated',
   'wf.scopeValidatedBy': 'validated by {0}, {1}',
   'wf.scopeRevalidate': 'Validate again',
+  'wf.scopeUnsupported': 'Only a workflow of one project can reach other projects: a global or multi-project workflow runs another revision in each project.',
   'disc.scopeUnknownProject': 'No project has this name: this request can only be declined.',
   'disc.agentHandoffTitle': 'Can agents work together?',
   'disc.agentHandoffHint': 'Yes. When an agent clearly asks another attached agent for help, Kronn starts it. Paid-agent limit for each chain created by one of your messages: {0}.',

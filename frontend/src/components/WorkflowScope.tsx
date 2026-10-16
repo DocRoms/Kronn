@@ -75,6 +75,14 @@ export function WorkflowScopeEditor({
   const taken = new Set(current.map(entry => entry.project_id));
   const candidates = projects.filter(p => p.id !== ownProjectId && !taken.has(p.id));
 
+  if (scope && !scope.supported) {
+    return (
+      <div className="wf-info-row" data-testid="workflow-scope-editor">
+        <span className="wf-info-label">{t('wf.scopeTitle')}</span>
+        <p className="disc-scope-hint">{t('wf.scopeUnsupported')}</p>
+      </div>
+    );
+  }
   return (
     <div className="wf-info-row" data-testid="workflow-scope-editor">
       <span className="wf-info-label">{t('wf.scopeTitle')}</span>

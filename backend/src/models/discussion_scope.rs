@@ -202,6 +202,8 @@ pub struct WorkflowScopeEntry {
 #[ts(export)]
 pub struct WorkflowScope {
     pub workflow_id: String,
+    /// False for a global or multi-project workflow, which cannot carry one.
+    pub supported: bool,
     pub entries: Vec<WorkflowScopeEntry>,
     pub valid: bool,
     pub validated_by: Option<String>,
