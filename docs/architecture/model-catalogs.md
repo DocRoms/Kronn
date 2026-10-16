@@ -18,7 +18,7 @@ The canonical key is `(runtime_target_id, model_id)`:
 Consequently two HTTP connections may expose the same provider `model_id`
 while keeping independent freshness, capabilities and tier assignments.
 [src: file: backend/src/db/sql/162_model_catalog.sql:1-25#model_catalog_entries]
-[src: file: backend/src/db/model_catalog.rs:27-52#http_runtime_target_id]
+[src: file: backend/src/db/model_catalog.rs:27-52#canonical_id]
 
 ## Resolution and reconciliation
 
@@ -37,7 +37,7 @@ The former runtime literals are inserted once during startup and the runner's
 hot-path tier lookup is then projected from catalog rows. Editing the manual
 catalog refreshes that projection; removing a migrated/manual row therefore
 does not make a hidden hard-coded fallback reappear.
-[src: file: backend/src/core/model_catalog/mod.rs:112-146#migrate_hardcoded_catalog_once]
+[src: file: backend/src/core/model_catalog/mod.rs:112-146#refresh_runtime_cache]
 [src: file: backend/src/agents/runner.rs:3441-3460#resolve_model_flag]
 
 ## Discovery boundaries
@@ -98,7 +98,7 @@ the files are never opened; at most 16 projects). The results are merged:
 - a project whose discovery fails is left out and logged by reason only; it
   does not fail the refresh. A failure of the neutral discovery is returned as
   it is, whatever the projects answered.
-[src: file: backend/src/core/model_catalog/mod.rs:413-553#merge_project_scopes]
+[src: file: backend/src/core/model_catalog/mod.rs:413-553#OPENCODE_PROJECT_CONFIGS]
 
 Known gaps: a model seen only through `OPENCODE_CONFIG` set in a user's shell,
 or through an `opencode.json` above the project directory, is not found, since
@@ -195,7 +195,7 @@ candidate differs from an advertised mode only by case or whitespace, the
 refusal names that mode instead of the generic "catalogue does not list
 that combination" message, which otherwise reads as if the mode is entirely
 absent (KT-656).
-[src: file: backend/src/agents/runner.rs:3447-3589#resolve_reasoning_effort]
+[src: file: backend/src/agents/runner.rs:3479-3621#agent_supports_reasoning_effort]
 The direct Codex runner still starts a fresh execution on each turn; its ACP
 adapter supports thread resume. Claude supports resume on both routes. Effort
 is transmitted on every supported fresh/resumed invocation; this feature does
@@ -204,7 +204,7 @@ same route as ordinary turns, with their isolated worker arguments.
 [src: file: backend/src/agents/runner.rs:12902-12936#model_reasoning_effort]
 [src: file: backend/src/acp/claude_adapter.rs:311-324#reasoning_effort]
 [src: file: backend/src/acp/codex_adapter.rs:462-501#model_reasoning_effort]
-[src: file: backend/src/agents/runner.rs:4823-4849#adapter_task_worker_args]
+[src: file: backend/src/agents/runner.rs:4830-4856#adapter_task_worker_args]
 
 Both standalone and embedded-desktop startup await catalog bootstrap before
 starting workflows or serving requests. Even after the one-time migration is
@@ -238,14 +238,14 @@ with an actionable `validation` error (choose a model or clear the effort),
 not a database error. This also applies to previously saved QPs whose effort
 was formerly inert; ignoring it silently would claim a setting was applied
 when it was not. QPs with no effort or only whitespace keep the old behavior.
-[src: file: backend/src/db/discussion_effort.rs:9-55#capture]
+[src: file: backend/src/db/discussion_effort.rs:9-55#UnresolvedQuickPromptEffort]
 [src: file: backend/src/api/discussions/crud.rs:735-742#UnresolvedQuickPromptEffort]
 [src: file: backend/src/api/discussions/streaming.rs:4063-4070#for_run]
 
 These snapshots are local execution state, not a portable QP setting. Exporting
 or importing a QP preserves its editable `agent_settings`, while it does not
 reconstruct historic discussion launch overrides.
-[src: file: backend/src/db/discussion_effort.rs:1-15#capture]
+[src: file: backend/src/db/discussion_effort.rs:1-15#Immutable]
 
 Settings → Agents exposes an effort selector per tier for Claude and Codex.
 It derives choices from the selected model's catalog entry, retains an invalid saved value only as an
@@ -253,8 +253,8 @@ explained disabled option, and clears an incompatible effort in the same save
 that changes the model. Even without available modes, the control remains
 usable to clear an invalid saved effort. Other runtime cards state that effort
 is unsupported.
-[src: file: frontend/src/components/settings/AgentsSection.tsx:186-222#saveTierPreference]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:1319-1397#renderEffortSelect]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:200-236#saveTierPreference]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:1333-1411#renderEffortSelect]
 
 ## Migration and test invariants
 

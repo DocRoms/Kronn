@@ -4,11 +4,11 @@
 pull stream as server-sent events. Progress events expose the current status,
 digest, completed bytes and optional total bytes; terminal success and errors
 use separate event names. Connection/header, record-size, idle and event-count
-limits terminate with an actionable error payload. [src: file: backend/src/api/ollama.rs:525-582#pull_from]
+limits terminate with an actionable error payload. [src: file: backend/src/api/ollama.rs:525-582#pull]
 
 The Settings card holds one `AbortController` per active model. Cancelling a
 download aborts the browser request and removes that model's transient progress
-state, so the same download can be started again. [src: file: frontend/src/components/settings/OllamaCard.tsx:319-385#cancelPull]
+state, so the same download can be started again. [src: file: frontend/src/components/settings/OllamaCard.tsx:319-385#startPull]
 
 Updating an installed model uses the same endpoint and the same card state: the
 Update button pulls the model's exact tag again (KT-930), so its progress,

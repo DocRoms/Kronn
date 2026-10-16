@@ -24,7 +24,7 @@ alone does not establish a user-visible duration.
    [src: file: backend/src/db/discussions.rs:779-788#list_messages]
 3. `list_messages` selects the message content and other message fields for one
    discussion, ordered by `sort_order, timestamp`; it has no `LIMIT` or
-   pagination clause. [src: file: backend/src/db/discussions.rs:2556-2573#list_messages]
+   pagination clause. [src: file: backend/src/db/discussions.rs:2569-2636#list_messages]
    The `(discussion_id, sort_order)` unique index supports the first ordering
    key. [src: file: backend/src/db/sql/082_message_sequence.sql:14-15#idx_messages_discussion_sort_order_unique]
 4. The frontend polls `GET /api/discussions/{id}/poll` on active-discussion
@@ -34,10 +34,10 @@ alone does not establish a user-visible duration.
    The server builds the complete detail on every poll and omits it only when
    its revision matches the one the client holds; a changed response replaces
    that discussion's cached detail object.
-   [src: file: backend/src/api/discussions/crud.rs:185-215#poll]
+   [src: file: backend/src/api/discussions/crud.rs:196-227#poll]
 5. The detail response also queries all message targets belonging to the
    discussion and groups them in a map.
-   [src: file: backend/src/db/discussions.rs:3016-3057#list_discussion_message_targets]
+   [src: file: backend/src/db/discussions.rs:3026-3070#list_discussion_message_targets]
    This means the refresh payload and
    server-side deserialization can grow with both messages and addressed
    targets, independently of visible transcript rows.
@@ -55,8 +55,8 @@ alone does not establish a user-visible duration.
    conversation order and builds lookup maps, memoized per transcript change;
    the memoized element list then makes several more passes to calculate
    metadata and reply/turn anchors.
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:3332-3347#transcriptIndex]
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:3877-3945#transcriptElements]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:3333-3347#inertMentionsByMessage]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:3897-3965#transcriptElements]
 3. The conversation-order projection maps every message and sorts the resulting
    array; resolving a reply chain can walk up to 16 links for an eligible row.
    [src: file: frontend/src/lib/messageTargets.ts:319-367#messagesInConversationOrder]
@@ -66,11 +66,11 @@ alone does not establish a user-visible duration.
 4. A `MessageBubble` passes normal text through `MessageBody`, which splits
    injected context and sends the content to `ReactMarkdown` with
    `remark-gfm` and `remark-emoji`.
-   [src: file: frontend/src/components/MessageBubble.tsx:2230-2275#MessageBody]
+   [src: file: frontend/src/components/MessageBubble.tsx:2252-2300#MessageBody]
    [src: file: frontend/src/components/MessageBubble.tsx:2203-2216#ReactMarkdown]
    Each message first renders as plain text and upgrades to Markdown once it is
    near the viewport or the browser is idle, so every message is still parsed.
-   [src: file: frontend/src/components/MessageBubble.tsx:2129-2161#canDefer]
+   [src: file: frontend/src/components/MessageBubble.tsx:2153-2185#canDefer]
    There is a per-message
    200,000-character fallback that avoids this Markdown path for very large
    individual messages; it does not cap the count of ordinary messages.
@@ -92,7 +92,7 @@ alone does not establish a user-visible duration.
 1. On initial settling of a loaded discussion, `scrollToBottomSettled` writes
    `scrollTop = scrollHeight` on animation frames for up to 700 ms; the effect
    is reached after a non-empty message list loads.
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:2091-2118#scrollToBottomSettled]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:2100-2139#bottomSettleRafRef]
    [src: file: frontend/src/pages/DiscussionsPage.tsx:2182-2194#lastSettledDiscIdRef]
 2. For streaming content while stuck to the bottom, the page calls
    `scrollIntoView` no more often than once per 250 ms.

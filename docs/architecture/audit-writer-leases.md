@@ -35,13 +35,13 @@ claimed validation job is returned to the queue without consuming an attempt.
 After preflight, cancellation-token registration and a second lease check share
 the tracker mutex, so a writer can either reject that admission or cancel its
 registered token. A dispatch already stopped by a writer cannot start afterward.
-[src: file: backend/src/api/discussions/runtime.rs:1163-1223#hold_validation_during_audit]
+[src: file: backend/src/api/discussions/runtime.rs:1185-1244#hold_validation_during_audit]
 [src: file: backend/src/api/audit/docs_write.rs:57-96#validation_cancel_guard]
 
 Human audit validation is deliberately different: it takes the lease first but
 checks its completion gates before stopping validation agents. An unfinished
 validator remains active and the validation request fails.
-[src: file: backend/src/api/audit/validate.rs:218-397#validate_audit]
+[src: file: backend/src/api/audit/validate.rs:313-542#validate_audit]
 
 Accepted template commits must be integrated into the current checkout before
 Full, Partial, or revalidation launches. The backend checks the merge branch

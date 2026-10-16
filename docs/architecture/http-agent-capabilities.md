@@ -76,13 +76,13 @@ The workspace catalogue, thirteen tools [src: file: backend/src/api/agent_worksp
 | `git_commit` | Commit named files, only for the active native worker in its task worktree |
 
 Plus Kronn's internal catalogue — plan and task tools, `qa_list`/`qa_run`, and `api_call`
-against configured REST plugins [src: file: backend/src/api/agent_tools.rs:501-836#build_tool_catalogue].
+against configured REST plugins [src: file: backend/src/api/agent_tools.rs:507-842#build_tool_catalogue].
 
 And, since 0.13.0, media generation: `media_generate` and `media_job_status`
-[src: file: backend/src/api/agent_tools.rs:1076-1170#orchestration_tool_catalogue]. These sit in the orchestration
+[src: file: backend/src/api/agent_tools.rs:1083-1177#orchestration_tool_catalogue]. These sit in the orchestration
 catalogue, so an HTTP agent replying in a discussion has them, and a bounded worker keeps
 them — they are deliberately absent from the principal-only list a worker room strips
-[src: file: backend/src/api/agent_tools.rs:1396-1447#NOT_FOR_A_WORKER]. A Workflow Agent step does not: only a
+[src: file: backend/src/api/agent_tools.rs:1403-1454#NOT_FOR_A_WORKER]. A Workflow Agent step does not: only a
 discussion run adds the orchestration tools [src: file: backend/src/api/agent_tools.rs:1530-1548#orchestration_tool_catalogue].
 
 Until then only CLI agents could generate an image or a video, because the tools were
@@ -123,7 +123,7 @@ implementation detail:
   `..` or by symlink. The root is the discussion's `managed` workspace row (else its first
   declared row) when it has one, otherwise the path of the project the discussion belongs
   to; a workflow step has no discussion and resolves straight to its project's path
-  [src: file: backend/src/api/agent_tools.rs:3120-3171#workspace_root]. The project fallback is the common
+  [src: file: backend/src/api/agent_tools.rs:3129-3196#workspace_root]. The project fallback is the common
   case, not the exception: a workspace row is only created by orchestration, so on
   2026-08-19 just 16 of 395 discussions had one. Requiring such a row before granting the
   file tools was the original bug — the path was reachable all along.
@@ -415,7 +415,7 @@ shipping it. Three things changed:
   on a later turn keeps it. A result that was already an extract gets no paths,
   which would not apply to the response the next `extract` runs on, and is told to
   select less. Other tools are shortened exactly as before
-  [src: file: backend/src/agents/runner.rs:7071-7099#shape_of]
+  [src: file: backend/src/agents/runner.rs:7078-7106#shape_of]
   [src: file: backend/src/agents/runner.rs:7198-7223#working_extract_examples].
 - **A call that differs only by its `extract` or its query is not a repeat.** The
   duplicate guard compares the tool name and every argument, sorted by key, so an

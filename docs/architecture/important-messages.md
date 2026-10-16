@@ -7,7 +7,7 @@ mints a NEW message and its card row together, in one transaction; no service
 path attaches a card to a message that already exists, so a `delivery_summary`
 never becomes an important card retroactively.
 [src: file: backend/src/db/sql/172_discussion_important_messages.sql:14-52#discussion_important_messages]
-[src: file: backend/src/db/discussion_important.rs:260-334#is_newest_message]
+[src: file: backend/src/db/discussion_important.rs:260-334#publish]
 
 ## The template
 
@@ -126,7 +126,7 @@ complete or otherwise modify a task. The card's task link resolves a fresh plan
 and opens that exact task; a removed link or unavailable plan is explained
 instead of selecting an unrelated task.
 [src: file: frontend/src/components/ImportantMessageForm.tsx:19#ImportantMessageForm]
-[src: file: frontend/src/pages/DiscussionsPage.tsx:1456-1483#openPlan]
+[src: file: frontend/src/pages/DiscussionsPage.tsx:1469-1499#openPlan]
 [src: file: frontend/src/components/DiscussionPlanPanel.tsx:87-90#initialTaskId]
 
 The publication-key field appears only inside the open form. It uses the
@@ -134,7 +134,7 @@ existing enrolled credential and single-use proof; Settings remains the place
 to obtain that credential. No grant or proof enters browser storage, card text
 or the draft store. The normal composer keeps its own text and send lifecycle.
 [src: file: frontend/src/lib/submitImportantMessage.ts:36-43#preparePublication]
-[src: file: frontend/src/lib/importantMessageDraft.ts:5-18#drafts]
+[src: file: frontend/src/lib/importantMessageDraft.ts:5-18#Draft]
 
 Closing the form, switching discussion or visiting Settings preserves its text
 in memory, separately for each discussion. Reloading the browser discards this

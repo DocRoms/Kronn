@@ -57,7 +57,7 @@ You may NEVER state a non-trivial technical fact (file paths, function / API / c
 Attach a structured citation to every non-trivial assertion:
 
 - `[src: file: <path>:<line>]` — e.g. `[src: file: backend/src/lib.rs:440]`
-- `[src: file: <path>:<start-end>#<symbol>]` — range; anchor each doc citation on the symbol it names, found in the range
+- `[src: file: <path>:<start-end>#<symbol>]` — range; anchor on the symbol it names; a definition in the range must open it
 - `[src: url: <url>]` — external doc
 - `[src: user: <YYYY-MM-DD>: <ref>]` — human confirmation
 - `[src: commit: <sha>]` — git commit

@@ -275,14 +275,14 @@ in one database transaction. A referenced API is retained, with a `conflict`
 error naming each workflow and step to edit. This covers direct `quick_api_id`
 fields, `CollectApiData` sources and `on_failure` steps; several source aliases
 in one step count once in the deletion impact preview. No workflow is rewritten
-automatically. [src: file: backend/src/db/quick_apis.rs:236-281#workflow_step_references]
+automatically. [src: file: backend/src/db/quick_apis.rs:236-281#delete_quick_api]
 [src: file: backend/src/api/quick_apis.rs:258-273#QuickApiInUse]
 
 The workflow wizard flags references already missing from the saved catalogue,
 including old deletions or imported workflows. It waits for a successful
 catalogue read and clears the warning when the reference is replaced or removed.
 The warning identifies the step and missing id and remains visible across wizard
-stages. [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:1353-1365#missingQuickApis]
+stages. [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:1358-1370#missingQuickApis]
 [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:1435-1442#missingQuickApiReference]
 
 ## Run-anchored time templates

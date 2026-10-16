@@ -13,6 +13,20 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- A `#symbol` citation anchor that names a definition the cited range
+  contains must open that range (KT-1074). When the range holds a definition
+  of the symbol (`fn`, `def`, `class`, `struct`, `enum`, `const`,
+  `interface`, `function`, `type`), that definition opens it: its doc comment
+  and attributes, then up to 5 sibling lines (a constant and its comment),
+  may sit above it. A range that holds no definition only has to name the
+  symbol, so a call site or a usage still backs a claim about wiring. A
+  range that starts a function early fails the docs check and the runtime
+  verifier with `a definition anchor must start the range`, and
+  `make docs-reanchor` proposes the range starting at the doc comment or
+  attributes of the definition. 213 citations of `docs/` were repaired by
+  reading their sentence (193 flagged by the rule, 15 moved by integrations, 5 more found by
+  the review sample);
+  the full check over every doc is green.
 - AI documentation template and audit v2 gap audit (KT-819). The project
   facts of the briefing gain « Documentation externe » (Confluence, Notion,
   wiki, other; https addresses only, no credentials, at most 6), rendered in

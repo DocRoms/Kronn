@@ -197,7 +197,7 @@ across a generation error, and the same idempotency key is retained for an
 explicit identical retry; the UI never automatically repeats an ambiguous
 billable request. `[src: file: frontend/src/components/NewDiscussionForm.tsx:397-415#createMediaDiscussion]`
 `[src: file: frontend/src/components/MediaGenerateForm.tsx:476-532#submit]`
-`[src: file: frontend/src/pages/DiscussionsPage.tsx:2626-2645#handleCreateMediaDiscussion]`
+`[src: file: frontend/src/pages/DiscussionsPage.tsx:2635-2654#handleCreateMediaDiscussion]`
 
 ## What a model accepts, read rather than assumed
 
@@ -226,7 +226,7 @@ trimmed and case-insensitively, so a caller is never refused over `720P`.
 
 The same read serves both surfaces. `agent_list` sweeps every configured media
 slot concurrently, each under its own 8 s window, and attaches what came back
-[src: file: backend/src/api/orchestration.rs:11555-11600#bounded_media_capabilities]; the catalogue builder
+[src: file: backend/src/api/orchestration.rs:11595-11648#bounded_media_capabilities]; the catalogue builder
 itself stays pure and is handed the result, like the reachability and quota
 preflights beside it. An envelope is attached only when the model it was read
 for is still the configured one — a connection whose model changed between the
@@ -390,7 +390,7 @@ make the film, in what order, and plays them through.
   only the clips of the film. A clip with no declared price, an upload, or one
   billed on the user's own key is not added: the total says how many were left
   out rather than counting them as free.
-  [src: file: frontend/src/lib/videoSequence.ts:96-131#filmTotals]
+  [src: file: frontend/src/lib/videoSequence.ts:96-131#clipDurationMs]
 * **"Lire la version finale" plays, it does not render.** A full-screen player
   shows each clip of the film in order and starts the next one when the
   current one ends,

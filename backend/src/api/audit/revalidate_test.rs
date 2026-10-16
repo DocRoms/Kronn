@@ -113,6 +113,7 @@ fn repeated_anchor_repo(change_endpoint: bool) -> tempfile::TempDir {
 
 /// A repeated anchor sits on the old range's last line. The feature adds one
 /// block before that range and another inside it, so the mapped span grows.
+/// The range holds a call of `target`, not its definition (line 1).
 fn repeated_anchor_with_internal_insertion_repo() -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
@@ -120,7 +121,7 @@ fn repeated_anchor_with_internal_insertion_repo() -> tempfile::TempDir {
     fs::create_dir_all(dir.join("docs")).unwrap();
     fs::write(
         dir.join("src/lib.rs"),
-        "fn target() {}\n\nfn helper() {}\nfn scope() {\n    let first = 1;\n    let second = 2;\n    let third = 3;\n    fn target() {}\n}\n",
+        "fn target() {}\n\nfn helper() {}\nfn scope() {\n    let first = 1;\n    let second = 2;\n    let third = 3;\n    target();\n}\n",
     )
     .unwrap();
     fs::write(
@@ -138,7 +139,7 @@ fn repeated_anchor_with_internal_insertion_repo() -> tempfile::TempDir {
         moved.push_str(&format!("// before {index}\n"));
     }
     moved.push_str(
-        "fn scope() {\n    let first = 1;\n    // inside 0\n    // inside 1\n    let second = 2;\n    let third = 3;\n    fn target() {}\n}\n",
+        "fn scope() {\n    let first = 1;\n    // inside 0\n    // inside 1\n    let second = 2;\n    let third = 3;\n    target();\n}\n",
     );
     fs::write(dir.join("src/lib.rs"), moved).unwrap();
     commit(dir, "move and widen target range", &["src/lib.rs"]);

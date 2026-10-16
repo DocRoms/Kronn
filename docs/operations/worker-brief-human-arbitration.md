@@ -28,7 +28,7 @@ relay it toward the parent room — without promising automatic visibility,
 guaranteed delivery, or a publication tool the surface does not declare.
 [src: file: backend/src/api/orchestration.rs:7655-7684#parent_milestones]
 [src: file: backend/src/db/orchestration.rs:5540-5576#get_execution_lineage]
-[src: file: backend/src/api/orchestration.rs:15429-15433#worker_briefs_make_human_arbitration_and_parent_milestones_transport_aware]
+[src: file: backend/src/api/orchestration.rs:15437-15441#worker_briefs_make_human_arbitration_and_parent_milestones_transport_aware]
 [src: file: backend/src/models/orchestration.rs:1324-1337#TaskExecutionLineage]
 
 The bridge documents that `disc_question_list` reads durable question state and
@@ -37,5 +37,5 @@ shows `disc_append` accepting an explicit `disc_id` (defaulting to the
 runtime-bound one) while `disc_question_list` always resolves `_disc_id()` and
 ignores any id argument.
 [src: file: backend/scripts/disc-introspection-mcp.py:221-222#disc_question_list]
-[src: file: backend/scripts/disc-introspection-mcp.py:5377-5395#call_disc_append]
+[src: file: backend/scripts/disc-introspection-mcp.py:5387-5405#call_disc_append]
 [src: file: backend/scripts/disc-introspection-mcp.py:4572-4576#call_disc_question_list]

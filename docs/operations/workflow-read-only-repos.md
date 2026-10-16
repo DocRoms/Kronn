@@ -56,8 +56,8 @@ All Codex `exec` launches, with or without `--strict-config`, receive one
 applicable, its `KRONN_HOST_HOME` alias for `/host-home`. The same launcher
 handles direct CLI, adapter, worker and resumed turns. Path keys are serialized
 as TOML; identical aliases are deduplicated.
-[src: file: backend/src/agents/runner.rs:13565-13584#codex_project_trust_override]
-[src: file: backend/src/agents/runner.rs:13565-13578#codex_project_trust_override]
+[src: file: backend/src/agents/runner.rs:13572-13591#codex_project_trust_override]
+[src: file: backend/src/agents/runner.rs:13572-13591#codex_project_trust_override]
 
 The principal's 2026-09-28 check found that Codex 0.156.1 rejects the previous
 dotted `projects."<path>".trust_level` override under `--strict-config`, even

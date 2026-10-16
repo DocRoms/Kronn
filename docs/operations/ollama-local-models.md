@@ -35,7 +35,7 @@ the execution's principal or its own native worker.
 `[src: file: backend/src/api/agent_tools.rs:1455-1462#task_exec_deliver]`
 `[src: file: backend/src/api/agent_tools.rs:2702-2730#native_worker_execution_for_trusted_dispatch]`
 `[src: file: backend/src/api/agent_tools.rs:2655-2663#task_reference]`
-`[src: file: backend/src/api/agent_tools.rs:3787-3814#native_execution_for_caller]`
+`[src: file: backend/src/api/agent_tools.rs:3812-3839#native_execution_for_caller]`
 
 The discussion SSE path resolves this scope from the durable
 `task_executions.sub_discussion_id` lineage before it constructs the HTTP tool
@@ -160,7 +160,7 @@ inner lines may move. The diagnostic starts with `Structure validation refused`
 and, like a Rust parser error, puts the worker into its one strict correction
 of the same frozen range. The prelocalized brief carries no human-arbitration
 or parent-milestone section: a bounded edit has neither.
-`[src: file: backend/src/api/agent_workspace_structure.rs:1-10#STRUCTURE_REFUSAL_PREFIX]`
+`[src: file: backend/src/api/agent_workspace_structure.rs:9-10#STRUCTURE_REFUSAL_PREFIX]`
 `[src: file: backend/src/api/agent_workspace_structure.rs:22-33#language]`
 `[src: file: backend/src/api/agent_workspace_structure.rs:234-252#validate_delimiters]`
 `[src: file: backend/src/api/agent_workspace_structure.rs:270-312#validate_range_indentation]`
@@ -211,8 +211,8 @@ range. When anything outside the range changed, the range was deleted
 entirely, or it grew past 200 lines, the rework is refused with
 `stale range: …; relaunch with a new worker_scope`, naming the launch range
 and the observed change.
-`[src: file: backend/src/api/orchestration.rs:2359-2427#reanchor_worker_scope]`
-`[src: file: backend/src/api/orchestration.rs:2457-2513#reanchor_execution_scope]`
+`[src: file: backend/src/api/orchestration.rs:2400-2468#reanchor_worker_scope]`
+`[src: file: backend/src/api/orchestration.rs:2498-2554#reanchor_execution_scope]`
 `task_exec_status` now exposes `usage.http` — cumulative HTTP traffic, context peak, and per-phase detail — without prompts or arguments.
 
 Native HTTP delivery — and delivery from a spawned host CLI worker that uses
@@ -284,7 +284,7 @@ preserved exactly.
 3. **Durable catalogue** → the available assigned tier projected at bootstrap
    or after catalogue writes. HTTP-chat agents may use their assigned Default
    if their selected tier has no assignment. No assignment means no model.
-[src: file: backend/src/agents/runner.rs:3393-3462#resolve_model_flag]
+[src: file: backend/src/agents/runner.rs:3390-3459#configured_model_flag]
 [src: file: backend/src/core/model_catalog/mod.rs:112-130#refresh_runtime_cache]
 
 An unresolved Ollama launch is refused before any provider request, with an
@@ -323,7 +323,7 @@ Other cases cover empty/whitespace models and each HTTP family's own configured
 Default and exact override, unavailable tier versus available Default, exact
 connection namespace, and failed catalogue reads. No real provider inference
 is qualified.
-[src: file: backend/tests/http_model_resolution.rs:1-21#fixture]
+[src: file: backend/tests/http_model_resolution.rs:1-21#isolated]
 [src: file: backend/tests/http_model_resolution.rs:139-203#removing_a_persisted_model_does_not_revive_a_migration_seed]
 [src: file: backend/tests/http_model_resolution.rs:118-136#whitespace_tier_values_do_not_become_provider_model_ids]
 [src: file: backend/tests/http_model_resolution.rs:206-251#configured_http_default_tier_and_explicit_override_keep_exact_identity]
@@ -473,7 +473,7 @@ the model has been loaded at two different windows, the cache cost measured on
 the server replaces the computed one in the formula of KT-943 (and, off Apple
 Silicon, the 70 %-of-memory rule: what is left of 70 % of memory after the
 weights, over that cost)
-[src: file: backend/src/agents/runner.rs:6493-6500#measured_kv_bytes_per_token] [src: file: backend/src/agents/runner.rs:6503-6517#RAM_SHARE_FOR_MODEL].
+[src: file: backend/src/agents/runner.rs:6500-6506#measured_kv_bytes_per_token] [src: file: backend/src/agents/runner.rs:6503-6517#RAM_SHARE_FOR_MODEL].
 
 So the 32K ceiling is a worker's and not a discussion's, and a discussion on this
 Mac is at the ceiling resolved above — the model's whole 262,144 when its
@@ -563,7 +563,7 @@ can select: a 198 KB answer, the full catalogue and a 32,768-token window ended 
    the initial brief plus tool catalogue and reply headroom do not honestly fit,
    Kronn refuses the run with an actionable error instead of silently trimming
    the task. GGUF and OpenAI-wire providers keep their existing context policy.
-   [src: file: backend/src/agents/runner.rs:99-104#MLX_WORKER_EFFECTIVE_CTX_CAP] [src: file: backend/src/agents/runner.rs:227-249#worker_oversized_prompt_remedy]
+   [src: file: backend/src/agents/runner.rs:99-104#MLX_WORKER_EFFECTIVE_CTX_CAP] [src: file: backend/src/agents/runner.rs:227-249#worker_effective_ctx_cap]
    Finalization instead uses a deterministic checkpoint after the already
    authorized boundary call has executed and its result has been recorded:
    immutable system/user policy plus the three most recent complete
@@ -593,7 +593,7 @@ can select: a 198 KB answer, the full catalogue and a 32,768-token window ended 
    validation are unchanged.
    Missing required line fields are reported separately from present-but-invalid
    values so the model can correct the shape instead of guessing a new number.
-   [src: file: backend/src/api/agent_tools.rs:3866-3894#count_arg] [src: file: backend/src/api/agent_tools.rs:3597-3615#edit_lines]
+   [src: file: backend/src/api/agent_tools.rs:3874-3902#count_arg] [src: file: backend/src/api/agent_tools.rs:3597-3615#edit_lines]
 5. **Rust edits are structurally atomic** — `write_file`, `edit_file` and
    `edit_lines` parse a proposed `.rs` file in memory before the first durable
    byte. A refusal reports the exact parser position and leaves the prior bytes
@@ -609,7 +609,7 @@ can select: a 198 KB answer, the full catalogue and a 32,768-token window ended 
    tools such as `edit_lines`. This keeps an interrupted local-worker attempt
    auditable after its stream has ended. API calls remain route-only (never
    query/body/error data), and commit arguments remain hidden.
-   [src: file: backend/src/agents/tools.rs:312-402#trace_line]
+   [src: file: backend/src/agents/tools.rs:312-402#TRACE_ARGS_MAX]
 
 ## TypedSchema → constrained JSON + quality escalation
 
@@ -782,7 +782,7 @@ fixture is a hand-built manifest in the same shape (its fake blob digests aside)
 whose SHA-256 was computed independently with `shasum -a 256`. They cover identical
 and different digests, a dead registry, a model outside the library, a body that is
 not a manifest, the cache's expiry, the concurrency bound, the time budget and the
-size sum. [src: file: backend/src/core/ollama_registry.rs:459-469#FIXTURE_DIGEST]
+size sum. [src: file: backend/src/core/ollama_registry.rs:459-469#FIXTURE]
 
 ### Mac MLX builds
 

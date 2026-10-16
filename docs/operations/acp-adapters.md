@@ -20,7 +20,7 @@ own documented, stable, non-interactive flags underneath — `claude --print
 **ACP adapters are the production default for both agents (KT-652).** Direct
 CLI remains an explicit, per-agent compatibility route. This changes transport
 selection, not the number of CLI processes: both still spawn once per turn.
-[src: file: backend/src/acp.rs:213-232#acp_adapter_enabled]
+[src: file: backend/src/acp.rs:213-232#env_flag_enabled]
 
 ## Explicit compatibility override
 
@@ -47,7 +47,7 @@ with a resume hint, and `full_access` cannot override their worker policy.
 The common process launcher supplies delivery context and worktree-local
 temporary files. It removes inherited worker context from ordinary turns and
 the permissive container marker from workers.
-[src: file: backend/src/agents/runner.rs:4823-4849#adapter_task_worker_args]
+[src: file: backend/src/agents/runner.rs:4830-4856#adapter_task_worker_args]
 [src: file: backend/tests/adapter_worker_policy.rs:40-41#default_adapters_and_explicit_fallback_keep_worker_spawn_boundaries]
 
 Each adapter permits one active prompt at a time; sequential turns still resume
@@ -70,7 +70,7 @@ The desktop resolves it through Tauri's resource directory and sets
 configured but missing executable fails closed instead of using a developer's
 source checkout. Docker and source development keep the existing script route.
 [src: file: desktop/src-tauri/src/main.rs:1133-1147#KRONN_INTERNAL_MCP_EXECUTABLE]
-[src: file: backend/src/agents/runner.rs:6105-6123#resolve_internal_mcp_command]
+[src: file: backend/src/agents/runner.rs:6112-6131#resolve_internal_mcp_command]
 
 The embedded backend exports its actual loopback port as `KRONN_BACKEND_URL`
 before starting agent dispatch and MCP configuration sync. Generated desktop
@@ -90,7 +90,7 @@ or relax worker isolation. Workers run through WSL instead; the boundary
 After replacing a frozen bridge, reconnect the MCP session. Frozen and Windows
 runtimes report that a restart is required instead of attempting the Unix
 file-descriptor script reload used during source development.
-[src: file: backend/scripts/disc-introspection-mcp.py:11186-11196#_schedule_bridge_reload]
+[src: file: backend/scripts/disc-introspection-mcp.py:11192-11202#_schedule_bridge_reload]
 
 The desktop sidecar build runs an MCP smoke test from a relocated directory
 with spaces and non-ASCII characters, an empty PATH and an ephemeral HTTP
@@ -120,7 +120,7 @@ when the runtime reports it; missing metadata remains `unknown` or
 are not copied into these records. Input masking covers sensitive JSON keys
 and the shared credential patterns before truncation; it is heuristic, not a
 guarantee that arbitrary user content is secret-free.
-[src: file: backend/src/agents/tool_trace.rs:1-15#ToolTraceUpdate]
+[src: file: backend/src/agents/tool_trace.rs:1-15#MARKER]
 [src: file: backend/src/api/discussions/streaming.rs:805-852#lift_acp_tool_calls]
 
 Native ACP sessions receive Kronn's bridge even when no project is attached.
@@ -278,7 +278,7 @@ project path never reuses that identifier.
 
 `agent_settings.tools` (`{cli: [...], kronn_internal: [...]}`) replaces what a
 workflow Agent step is launched with. Undeclared, the argv is unchanged.
-[src: file: backend/src/models/workflows.rs:1517-1536#StepTools]
+[src: file: backend/src/models/workflows.rs:1525-1536#StepTools]
 
 - Claude adapter: `--tools <cli list>` (empty string = no built-in tool),
   `--disable-slash-commands` (no skill listing), and an MCP config holding
@@ -294,7 +294,7 @@ workflow Agent step is launched with. Undeclared, the argv is unchanged.
   server. [src: file: backend/src/agents/runner.rs:5857-5878#declared_mcp_servers]
 - The bridge, given `--step-tools=`, lists and dispatches only those tools
   and sends no catalogue instructions on `initialize`.
-  [src: file: backend/scripts/disc-introspection-mcp.py:5840-5856#_declared_step_tools]
+  [src: file: backend/scripts/disc-introspection-mcp.py:5846-5862#_declared_step_tools]
 - The direct CLI fallback (`KRONN_ACP_ADAPTER_*=0`) refuses a declared step
   rather than launch it with every tool.
 

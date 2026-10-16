@@ -247,10 +247,10 @@ become rows, a single array inside an object envelope is expanded while scalar
 metadata is repeated, parallel nested arrays are zipped by index, and matrix
 arrays receive stable `column_N` headers. Time-series exports apply the same
 normalization per observation and retain `observed_at` plus
-`workflow_run_id`. `[src: file: frontend/src/lib/live-page-csv.ts:1-106#recordsToRows]` The
+`workflow_run_id`. `[src: file: frontend/src/lib/live-page-csv.ts:1-106#ExportCell]` The
 export uses a semicolon for French and Spanish UI locales so spreadsheet tools
 configured with those regional separators open columns directly; other locales
-keep the standard comma. `[src: file: frontend/src/pages/PagesPage.tsx:475-487#delimiter]`
+keep the standard comma. `[src: file: frontend/src/pages/PagesPage.tsx:475-487#exportDatasetCsv]`
 
 ## Theme and refresh behavior
 
@@ -506,7 +506,7 @@ prunes terminal overflow in the same write transaction. Existing excess history
 is therefore cleaned on the next such write, not during a read or at startup.
 Reconciliation reads lifecycle metadata rather than result/step-output/stderr
 payloads. A cleanup failure rolls back the associated mutation.
-[src: file: backend/src/db/live_page_actions.rs:653-719#retain_launch_history]
+[src: file: backend/src/db/live_page_actions.rs:653-719#MAX_RETAINED_TERMINAL_LAUNCHES]
 [src: file: backend/src/db/live_page_action_retention_tests.rs:192-234#retention_and_completion_roll_back_together_and_compose_with_an_outer_transaction]
 
 Pruning removes the Page launch snapshot only: shared results, result discussions,
@@ -569,7 +569,7 @@ resource wait separately from a failed plan. Do not send a generation request
 merely to guess whether a quota is available.
 [src: file: backend/src/models/orchestration.rs:1170-1193#TaskWorkerTier]
 [src: file: backend/src/api/orchestration.rs:10263-10306]
-[src: file: backend/src/api/orchestration.rs:11494-11536#bounded_provider_quota_details]
+[src: file: backend/src/api/orchestration.rs:11502-11544#bounded_provider_quota_details]
 [src: file: backend/src/api/orchestration.rs:11775-11804#task_exec_prepare]
 
 A `user_input` value may also carry a `<page.…>` `source_ref`: when the card
@@ -725,7 +725,7 @@ on its origin (scheme, host and port, compared exactly, so
 `https://player.example.com` does not cover `https://cdn.player.example.com`
 nor `:8443`). URLs with credentials or another scheme are ignored. Adding a new
 service is a configuration change plus HTML, never an engine change.
-[src: file: frontend/src/lib/live-page-embeds.ts:35-37#embedUrlOrigin]
+[src: file: frontend/src/lib/live-page-embeds.ts:20-37#parseWebUrl]
 A third-party site can still refuse to be framed (`X-Frame-Options` or a CSP
 `frame-ancestors`); allowing it in Kronn does not override that, and the
 player then shows the site's own error.

@@ -42,7 +42,7 @@ The recurrence also exposed that non-terminal old executions and unregistered
 manual worktrees do not become reclaimable merely because a planning task is
 done. KT-638 keeps prevention open: it does not lower disk thresholds, ignore
 tests, scan recursively on a failing request, or authorise deletion of active
-or unowned targets. [src: file: backend/src/core/worktree.rs:887-986#ensure_build_disk_headroom]
+or unowned targets. [src: file: backend/src/core/worktree.rs:887-986#ensure_disk_headroom_for]
 
 The retained maintenance record distinguishes each authorised batch. These are
 dated physical free-space observations, not quotas or reusable deletion grants:
@@ -168,8 +168,8 @@ created only at Cargo's exact target path when its immediate parent is already a
 real directory; an existing symlink, non-directory, or inspection failure is
 refused. Non-Cargo
 validations use their declared working directory. A critical-space refusal is
-stored as a refused validation rather than a pass. [src: file: backend/src/core/worktree.rs:887-986#ensure_build_disk_headroom]
-[src: file: backend/src/api/orchestration.rs:4251-4298#validation_build_path]
+stored as a refused validation rather than a pass. [src: file: backend/src/core/worktree.rs:887-986#ensure_disk_headroom_for]
+[src: file: backend/src/api/orchestration.rs:4277-4332#validation_build_path]
 
 There is intentionally no automatic lifecycle cleanup for the interactive
 target or unknown qualification caches. The only automatic reclamation remains

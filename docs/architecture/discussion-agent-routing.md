@@ -14,13 +14,13 @@ responders may all be Codex without being interchangeable:
 `message_targets` preserves those identities in textual order.
 `messages.target_agent` and `target_agents` remain compatibility projections
 for older clients and peers.
-[src: file: backend/src/models/discussions.rs:673-699#MessageTarget]
+[src: file: backend/src/models/discussions.rs:676-702#MessageTargetKind]
 [src: file: backend/src/db/sql/099_typed_message_targets.sql:1-37#message_targets]
 
 The composer parses prose once and submits the typed target list. The backend
 validates that every CLI session belongs to the discussion before accepting
 the message; it never reparses Markdown to guess an owner.
-[src: file: frontend/src/lib/messageTargets.ts:176-208#targetsFromComposerText]
+[src: file: frontend/src/lib/messageTargets.ts:176-208#positionedTargetsFromComposerText]
 [src: file: backend/src/api/discussions/messaging.rs:191-333#canonical_targets]
 
 ## Human turn (UI): complete target matrix
@@ -42,7 +42,7 @@ This is the supported escape hatch when a human or agent needs to discuss the
 syntax itself (write `` `@codex` `` rather than a live mention). The UI composer
 and MCP bridge apply the same exemption before resolving targets.
 [src: file: frontend/src/lib/messageTargets.ts:131-147#proseOnly]
-[src: file: backend/scripts/disc-introspection-mcp.py:5070-5081#_structured_message_targets]
+[src: file: backend/scripts/disc-introspection-mcp.py:5080-5091#_structured_message_targets]
 
 | Room mode | Target state | Result |
 |---|---|---|
@@ -53,7 +53,7 @@ and MCP bridge apply the same exemption before resolving targets.
 | Native disabled (`no_agent`) | Untargeted | No native process; joined CLIs retain the autonomous-room broadcast behaviour. |
 | Native disabled (`no_agent`) | Native identity | No local process starts. |
 [src: file: backend/src/api/discussions/routing.rs:20-40#route_human_turn]
-[src: file: backend/src/api/discussions/messaging.rs:65-113#native_dispatch_agents_for_targets]
+[src: file: backend/src/api/discussions/messaging.rs:65-113#NativeDispatchTarget]
 
 The room mode is an explicit persisted operator choice. Disabling the native
 discussion agent sets `discussions.no_agent` without pausing, removing, or
@@ -164,7 +164,7 @@ from exact joined aliases (`@codex-cli`, `@codex-cli-2`, …) using the
 discussion's participant order. Several mentions fan out once per durable
 identity. The legacy single `target_agent` field remains accepted during
 rolling upgrades, with its historical provider-level semantics.
-[src: file: backend/scripts/disc-introspection-mcp.py:5070-5156#_structured_message_targets]
+[src: file: backend/scripts/disc-introspection-mcp.py:5080-5166#_structured_message_targets]
 [src: file: backend/src/api/disc_source.rs:434-454#legacy_requested_target]
 
 For each native identity, the message and its dispatch obligation commit in one
@@ -233,7 +233,7 @@ Two distinctions the reason must not blur, and does not:
   the untracked path alone changes nothing a room user sees — which is exactly how the
   second producer of the generic string survived the first fix. `strings` on the built
   binary, not a source grep, is what proved a second one existed.
-[src: file: backend/src/api/discussions/streaming.rs:1269-1314#agent_start_failure_outcome] [src: file: backend/src/api/discussions/streaming.rs:1480-1494#finish_tracked_preflight]
+[src: file: backend/src/api/discussions/streaming.rs:1270-1315#AgentExecutionOutcome] [src: file: backend/src/api/discussions/streaming.rs:1480-1494#finish_tracked_preflight]
 
 ## Persistence and interruption
 
@@ -243,7 +243,7 @@ Two distinctions the reason must not blur, and does not:
   before its independent dispatches start, so every responder resolves its own tier;
   targets without an override inherit the discussion tier.
   [src: file: backend/src/api/discussions/crud.rs:611-652#replace_message_targets]
-  [src: file: backend/src/api/discussions/runtime.rs:615-634#dispatch_target_tier]
+  [src: file: backend/src/api/discussions/runtime.rs:636-655#dispatch_target_tier]
 - `message_cli_authors` records the exact local CLI author for verified live MCP
   appends, enabling deterministic `reply_to` routing across same-provider peers.
 - `messages.target_agent` remains the first-target compatibility projection.

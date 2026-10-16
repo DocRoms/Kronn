@@ -1409,29 +1409,181 @@ fn contains_word(line: &str, symbol: &str) -> bool {
     })
 }
 
-/// 1-based lines of `path` holding `symbol` as a word; `None` when the file
-/// is unreadable or above the line-count cap.
-pub(crate) fn symbol_lines(path: &Path, symbol: &str) -> Option<Vec<usize>> {
+/// Why a `#symbol` anchor does not hold for its range.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AnchorMiss {
+    /// What the message reports: the definitions of the symbol inside the
+    /// range when one of them fails to open it, else every line holding the
+    /// symbol. Possibly none.
+    pub lines: Vec<usize>,
+    /// Where a corrected range would start for each of `lines`: the top of
+    /// the doc comment and attributes of a definition, the line itself for a
+    /// reference.
+    pub starts: Vec<usize>,
+    /// The range contains a definition of the symbol that does not open it.
+    pub definition: bool,
+}
+
+/// Sibling lines (a constant and its comment, say) a range may open with
+/// before the prelude of the definition it anchors on.
+const ANCHOR_SIBLING_LINES: usize = 5;
+
+/// How far above a definition its doc comment and attributes are searched.
+const PRELUDE_SEARCH_LINES: usize = 80;
+
+/// Words that open a definition: the name after one of them is defined there.
+const DEFINITION_KEYWORDS: &[&str] = &[
+    "fn",
+    "def",
+    "class",
+    "struct",
+    "enum",
+    "const",
+    "interface",
+    "function",
+    "type",
+];
+
+/// Tokens that may sit between the start of a line and its definition keyword.
+const DEFINITION_MODIFIERS: &[&str] = &[
+    "pub", "async", "unsafe", "extern", "export", "default", "declare", "abstract",
+];
+
+/// `line` defines `symbol`: a definition keyword, after any visibility or
+/// `async`-like modifier, then the symbol as the whole name. Comments and prose
+/// never match.
+fn defines_symbol(line: &str, symbol: &str) -> bool {
+    let mut tokens = line.split_whitespace().peekable();
+    while let Some(token) = tokens.next() {
+        // `pub(in crate::api)`: the space after `in` splits the path.
+        if token.starts_with("pub(") && !token.contains(')') {
+            for next in tokens.by_ref() {
+                if next.contains(')') {
+                    break;
+                }
+            }
+            continue;
+        }
+        let modifier = DEFINITION_MODIFIERS.contains(&token)
+            || token.starts_with("pub(")
+            || token.starts_with('"')
+            || (token == "const"
+                && tokens
+                    .peek()
+                    .is_some_and(|next| matches!(*next, "fn" | "async" | "unsafe" | "extern")));
+        if modifier {
+            continue;
+        }
+        // `function* run` (generator): the star may hug the keyword or the name.
+        if !DEFINITION_KEYWORDS.contains(&token.trim_end_matches('*')) {
+            return false;
+        }
+        let name = tokens.next().unwrap_or("").trim_start_matches('*');
+        let end = name.find(|c: char| !is_word_char(c)).unwrap_or(name.len());
+        return !symbol.is_empty() && &name[..end] == symbol;
+    }
+    false
+}
+
+/// Every line of `lines` is a doc comment or an attribute, so a definition
+/// right below them still opens the range. A multi-line attribute counts until
+/// its brackets close; brackets in a comment never count.
+fn is_definition_prelude(lines: &[&str]) -> bool {
+    let mut depth = 0i32;
+    let mut in_block_comment = false;
+    for line in lines {
+        let text = line.trim_start();
+        if in_block_comment {
+            in_block_comment = !text.contains("*/");
+            continue;
+        }
+        let attribute = text.starts_with("#[") || text.starts_with("#![") || text.starts_with('@');
+        if depth > 0 || attribute {
+            let opened = text.matches(['(', '[', '{']).count() as i32;
+            let closed = text.matches([')', ']', '}']).count() as i32;
+            depth = (depth + opened - closed).max(0);
+        } else if text.starts_with("/*") {
+            in_block_comment = !text.contains("*/");
+        } else if !(text.starts_with("//") || text.starts_with('*') || text.starts_with('#')) {
+            return false;
+        }
+    }
+    depth == 0 && !in_block_comment
+}
+
+/// The first line of the doc comment and attributes sitting right above the
+/// definition at `line` (1-based), else `line` itself.
+fn prelude_start(text: &[&str], line: usize) -> usize {
+    // A prelude is a handful of lines: stop looking well before the file start.
+    (line.saturating_sub(PRELUDE_SEARCH_LINES).max(1)..line)
+        .find(|&first| is_definition_prelude(&text[first - 1..line - 1]))
+        .unwrap_or(line)
+}
+
+/// `None` when the anchor holds (or cannot be checked), else why not.
+///
+/// A range that contains no definition of the symbol (see [`defines_symbol`])
+/// only has to hold the word: a call site, a field or a heading backs a claim
+/// about wiring. A range that contains a definition must open with it, a doc
+/// comment or attributes allowed above and up to [`ANCHOR_SIBLING_LINES`]
+/// sibling lines before them: a range that starts a whole function early
+/// drifts from the function it names.
+pub(crate) fn anchor_miss(path: &Path, span: (usize, usize), symbol: &str) -> Option<AnchorMiss> {
     if std::fs::metadata(path).ok()?.len() > LINE_COUNT_SIZE_CAP_BYTES {
         return None;
     }
     let content = std::fs::read_to_string(path).ok()?;
-    Some(
-        content
-            .lines()
-            .enumerate()
-            .filter(|(_, line)| contains_word(line, symbol))
-            .map(|(index, _)| index + 1)
-            .collect(),
-    )
-}
-
-/// `None` when `symbol` is inside `span` (or cannot be checked), else the
-/// lines of the file that do hold it, possibly none.
-pub(crate) fn anchor_miss(path: &Path, span: (usize, usize), symbol: &str) -> Option<Vec<usize>> {
-    let lines = symbol_lines(path, symbol)?;
+    let text: Vec<&str> = content.lines().collect();
     let (start, end) = span;
-    (!lines.iter().any(|l| (start..=end).contains(l))).then_some(lines)
+    let holding: Vec<usize> = text
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| contains_word(line, symbol))
+        .map(|(index, _)| index + 1)
+        .collect();
+    let in_range = |line: &usize| (start..=end).contains(line);
+    let is_defined = |line: &usize| defines_symbol(text[line - 1], symbol);
+    let defined_here: Vec<usize> = holding
+        .iter()
+        .copied()
+        .filter(|l| in_range(l) && is_defined(l))
+        .collect();
+    if defined_here.is_empty() {
+        if holding.iter().any(in_range) {
+            return None;
+        }
+        let starts = holding
+            .iter()
+            .map(|&l| {
+                if is_defined(&l) {
+                    prelude_start(&text, l)
+                } else {
+                    l
+                }
+            })
+            .collect();
+        return Some(AnchorMiss {
+            lines: holding,
+            starts,
+            definition: false,
+        });
+    }
+    let opens_range = defined_here.iter().any(|&line| {
+        (start.max(1)..=line.min(start + ANCHOR_SIBLING_LINES))
+            .any(|from| is_definition_prelude(&text[from - 1..line - 1]))
+    });
+    if opens_range {
+        return None;
+    }
+    let starts = defined_here
+        .iter()
+        .map(|&l| prelude_start(&text, l))
+        .collect();
+    Some(AnchorMiss {
+        lines: defined_here,
+        starts,
+        definition: true,
+    })
 }
 
 /// [`line_bounds_status`], then the anchor: a symbol absent from the cited
@@ -1447,35 +1599,36 @@ pub(crate) fn anchored_bounds_status(
     };
     match anchor_miss(candidate, span, symbol) {
         None => verdict,
-        Some(elsewhere) => (
+        Some(miss) => (
             SourceStatus::OutOfBounds,
-            anchor_miss_detail(span, symbol, &elsewhere),
+            anchor_miss_detail(span, symbol, &miss),
         ),
     }
 }
 
-pub(crate) fn anchor_miss_detail(
-    span: (usize, usize),
-    symbol: &str,
-    elsewhere: &[usize],
-) -> String {
+pub(crate) fn anchor_miss_detail(span: (usize, usize), symbol: &str, miss: &AnchorMiss) -> String {
     let (start, end) = span;
     let range = if start == end {
         format!("line {start}")
     } else {
         format!("lines {start}-{end}")
     };
-    match elsewhere {
-        [] => format!("symbol `{symbol}` not in {range}, nor anywhere in the file"),
-        lines => {
-            let shown: Vec<String> = lines.iter().take(5).map(usize::to_string).collect();
-            let noun = if lines.len() == 1 { "line" } else { "lines" };
-            format!(
-                "symbol `{symbol}` not in {range}; it appears at {noun} {}",
-                shown.join(", ")
-            )
-        }
+    let lines = &miss.lines;
+    if lines.is_empty() {
+        return format!("symbol `{symbol}` not in {range}, nor anywhere in the file");
     }
+    let shown: Vec<String> = lines.iter().take(5).map(usize::to_string).collect();
+    let noun = if lines.len() == 1 { "line" } else { "lines" };
+    if !miss.definition {
+        return format!(
+            "symbol `{symbol}` not in {range}; it appears at {noun} {}",
+            shown.join(", ")
+        );
+    }
+    format!(
+        "symbol `{symbol}` is defined at {noun} {}, not at the start of {range}: a definition anchor must start the range",
+        shown.join(", ")
+    )
 }
 
 /// Purely lexical path normalisation (resolves `.`/`..` without touching the
@@ -6376,5 +6529,137 @@ mod anchor_citations {
         assert!(!contains_word("pre_retry_once", "retry_once"));
         assert!(contains_word("make check-version:", "check-version"));
         assert!(contains_word("é retry_once é", "retry_once"));
+    }
+
+    fn miss(file: &str, span: (usize, usize), symbol: &str) -> Option<AnchorMiss> {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("f"), file).unwrap();
+        anchor_miss(&tmp.path().join("f"), span, symbol)
+    }
+
+    #[test]
+    fn a_range_containing_the_definition_must_start_at_it() {
+        let file = "use x;\n\nfn run() {\n    step();\n}\n";
+        assert_eq!(miss(file, (3, 5), "run"), None);
+        assert_eq!(miss(file, (3, 3), "run"), None);
+        // Two lines above are within the sibling allowance.
+        assert_eq!(miss(file, (1, 5), "run"), None);
+        // Past it, the definition is merely inside the range.
+        let mut long = String::from("a\n").repeat(8);
+        long.push_str(file);
+        let late = miss(&long, (1, 13), "run").unwrap();
+        assert_eq!(
+            (late.lines, late.starts, late.definition),
+            (vec![11], vec![11], true)
+        );
+    }
+
+    #[test]
+    fn a_definition_thirty_lines_in_fails() {
+        let mut file = String::new();
+        for index in 0..30 {
+            file.push_str(&format!("let v{index} = {index};\n"));
+        }
+        file.push_str("fn run() {\n    step();\n}\n");
+        let late = miss(&file, (1, 33), "run").unwrap();
+        assert_eq!((late.lines, late.definition), (vec![31], true));
+        // 5 siblings are forgiven, the 6th is not.
+        assert_eq!(miss(&file, (26, 33), "run"), None);
+        assert!(miss(&file, (25, 33), "run").is_some());
+    }
+
+    #[test]
+    fn a_call_site_of_a_function_the_file_defines_passes() {
+        let defined = "fn run() {\n    step();\n}\nfn step() {}\n";
+        // The range holds the call, not the definition: wiring is citable.
+        assert_eq!(miss(defined, (1, 3), "step"), None);
+        assert_eq!(miss(defined, (2, 2), "step"), None);
+        assert_eq!(miss(defined, (4, 4), "step"), None);
+        // A range holding neither is wrong, and the proposal opens at the doc comment.
+        let none = miss("fn run() {}\n\n/// Docs.\nfn step() {}\n", (1, 1), "step").unwrap();
+        assert_eq!(
+            (none.lines, none.starts, none.definition),
+            (vec![4], vec![3], false)
+        );
+    }
+
+    #[test]
+    fn a_reference_passes_when_the_file_has_no_definition() {
+        let calls = "fn run() {\n    step();\n}\n";
+        assert_eq!(miss(calls, (2, 2), "step"), None);
+        let gone = miss(calls, (3, 3), "step").unwrap();
+        assert_eq!((gone.lines, gone.starts), (vec![2], vec![2]));
+    }
+
+    #[test]
+    fn doc_comments_and_attributes_may_sit_above_the_definition() {
+        let file =
+            "x\n/// Docs.\n#[derive(\n    Debug,\n)]\n#[cfg(test)]\npub(crate) struct Run;\n";
+        assert_eq!(miss(file, (2, 7), "Run"), None);
+        assert_eq!(miss(file, (6, 7), "Run"), None);
+        let py = "x\n@cache\n# note\ndef load():\n    pass\n";
+        assert_eq!(miss(py, (2, 5), "load"), None);
+        let ts = "x\n/**\n * Docs.\n */\nexport default async function main() {}\n";
+        assert_eq!(miss(ts, (2, 5), "main"), None);
+    }
+
+    #[test]
+    fn a_constant_and_its_comment_above_the_definition_pass() {
+        let file = "a\nb\nc\nd\n/// How long.\nconst WAIT: u64 = 30;\n// Then run.\nfn run() {}\n";
+        // The constant and its comment sit right above `run`: siblings.
+        assert_eq!(miss(file, (5, 8), "run"), None);
+        assert_eq!(miss(file, (5, 8), "WAIT"), None);
+        assert_eq!(miss(file, (6, 8), "WAIT"), None);
+        // `d` sits above the doc comment of WAIT: one sibling line.
+        assert_eq!(miss(file, (4, 6), "WAIT"), None);
+    }
+
+    #[test]
+    fn an_unbalanced_bracket_in_a_comment_does_not_break_the_prelude() {
+        let file =
+            "x\n/// See the `foo(` call (and [this.\n// still prose )\n#[inline]\nfn run() {}\n";
+        assert_eq!(miss(file, (2, 5), "run"), None);
+        let lone = miss(file, (1, 1), "run").unwrap();
+        assert_eq!(lone.starts, vec![2]);
+        let block = "x\n/* open (\n  prose\n*/\nfn run() {}\n";
+        assert_eq!(miss(block, (2, 5), "run"), None);
+        let py = "x\n# note (see\n@cache\ndef load():\n    pass\n";
+        assert_eq!(miss(py, (2, 5), "load"), None);
+    }
+
+    #[test]
+    fn a_range_starting_at_the_prelude_is_what_a_miss_proposes() {
+        let file = "a\n\n\n\n\n\n\n\n/// Docs.\n#[test]\nfn run() {}\n";
+        // Too far above the definition, no definition inside: the proposal.
+        let m = miss(file, (1, 2), "run").unwrap();
+        assert_eq!((m.lines, m.starts), (vec![11], vec![9]));
+        assert_eq!(miss(file, (9, 11), "run"), None);
+    }
+
+    #[test]
+    fn definition_keywords_and_modifiers_are_recognised() {
+        for (line, symbol, defined) in [
+            ("pub async fn run() {}", "run", true),
+            ("pub(crate) const fn run() {}", "run", true),
+            ("pub(in crate::api) fn run() {}", "run", true),
+            ("pub(in crate :: api) async fn run() {}", "run", true),
+            ("pub(super) struct Run;", "Run", true),
+            ("pub const RUN: u8 = 1;", "RUN", true),
+            ("extern \"C\" fn run() {}", "run", true),
+            ("    struct Run<T>(T);", "Run", true),
+            ("enum Run {", "Run", true),
+            ("export interface Run {", "Run", true),
+            ("export function* run() {}", "run", true),
+            ("async def run():", "run", true),
+            ("class Run:", "Run", true),
+            ("type Run = u8;", "Run", true),
+            ("fn runner() {}", "run", false),
+            ("let run = 1;", "run", false),
+            ("// fn run() {}", "run", false),
+            ("run();", "run", false),
+            ("fn", "run", false),
+        ] {
+            assert_eq!(defines_symbol(line, symbol), defined, "{line}");
+        }
     }
 }

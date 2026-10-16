@@ -20,7 +20,7 @@ explicitly choose the form's default answers; that saves “Not provided”
 answers through the normal form endpoint. A workflow launch cannot make that
 choice automatically.
 [src: file: backend/src/api/audit/briefing_cards.rs:497-526#briefing_gate]
-[src: file: frontend/src/components/BriefingForm.tsx:269-291#saveDefaults]
+[src: file: frontend/src/components/BriefingForm.tsx:284-307#saveDefaults]
 
 Phase 1 copies the resolved briefing into the selected docs folder immediately
 after installing the templates, before the first agent step. A fresh clone

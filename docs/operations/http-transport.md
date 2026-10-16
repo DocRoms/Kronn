@@ -58,7 +58,7 @@ artifact check fails after a ceiling, the step warning records the ceiling
 alongside the missing-output reason. Reaching a search ceiling alone does not
 fail an otherwise valid artifact (KT-951).
 [src: file: backend/src/agents/runner.rs:26-27#MAX_AUDIT_SEARCH_CALLS]
-[src: file: backend/src/agents/runner.rs:680-700#is_audit_deliverable_tool]
+[src: file: backend/src/agents/runner.rs:675-700#max_calls_for_tool]
 [src: file: backend/src/api/audit/validation.rs:118-157#with_http_diagnostics]
 
 Hosted OpenAI-wire models (LiteLLM, NVIDIA, Custom, OpenRouter) send no
@@ -235,7 +235,7 @@ Ollama `/api/show` and LiteLLM `/model/info` may confirm vision for the exact
 model. A missing declaration never causes an image to be sent speculatively.
 [src: file: backend/src/agents/vision.rs:495-525#attach_to_chat_body]
 [src: file: backend/src/agents/vision.rs:145-175#ollama_show_vision]
-[src: file: backend/src/api/discussions/streaming.rs:2727-2758#http_context_images]
+[src: file: backend/src/api/discussions/streaming.rs:2739-2770#http_context_images]
 
 Every withheld image is named in the model's context with an explicit instruction
 not to describe its contents, and a way for the user to supply the information.
@@ -246,7 +246,7 @@ under allocation/dimension limits and downscaled to PNG, preserving the original
 file. Failed decoding or remaining limits produce the same explicit withholding
 notice. Transmission/downscaling counts are logged without the image payload.
 Prompt estimates count a bounded image allowance instead of base64 text bytes.
-[src: file: backend/src/agents/vision.rs:40-56#MAX_TOTAL_BYTES]
+[src: file: backend/src/agents/vision.rs:40-56#MAX_IMAGE_BYTES]
 [src: file: backend/src/agents/vision.rs:426-430#withheld_sentence]
 
 `read_file` accepts only file paths registered to the current discussion, even
