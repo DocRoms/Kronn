@@ -48,8 +48,8 @@ no cost, the sum is partial and the run's cost is `None` as well.
 [src: file: backend/src/agents/chat_codec.rs:160#cost_usd_micros]
 [src: file: backend/src/agents/runner.rs:7941-7947#request_provider_cost]
 [src: file: backend/src/agents/runner.rs:1984-1989#cost_incomplete]
-[src: file: backend/src/api/audit/full.rs:2089#reported_cost_usd_micros]
-[src: file: backend/src/api/audit/drift.rs:1137#reported_cost_usd_micros]
+[src: file: backend/src/api/audit/full.rs:2098#reported_cost_usd_micros]
+[src: file: backend/src/api/audit/drift.rs:1145#reported_cost_usd_micros]
 
 Audit executors have a separate bounded policy: 64 calls per file mutation tool
 (`write_file`, `edit_file`, `edit_lines`, `insert_after_line`), 48 for
@@ -88,7 +88,7 @@ total (KT-952).
 [src: file: backend/src/api/audit/document_repair.rs:119-193#split_verified_citations]
 [src: file: backend/src/core/audit_state.rs:12#CITATION_ORIGINALS_DIR]
 [src: file: backend/src/api/audit/full.rs:2350-2380#check_attempt]
-[src: file: backend/src/api/audit/full.rs:1760-1764#max_attempts]
+[src: file: backend/src/api/audit/full.rs:1769-1773#max_attempts]
 [src: file: backend/src/api/audit/anti_hallu_enforce.rs:24#MAX_ATTEMPTS]
 [src: file: backend/src/api/audit/document_repair.rs:71-78#feedback]
 
@@ -99,7 +99,7 @@ recomputes the matrix failure from the current index before its first attempt.
 Invalid tables remain blocking, provider errors do not trigger this correction,
 and existing TD files and human sections remain protected (KT-956).
 [src: file: backend/src/api/audit/validation.rs:96-117#coverage_repair_feedback]
-[src: file: backend/src/api/audit/full.rs:2279-2294#coverage_repair_feedback]
+[src: file: backend/src/api/audit/full.rs:2288-2303#coverage_repair_feedback]
 
 A failed provider launch finalizes the step with its error and elapsed time.
 If a corrective attempt had already consumed tokens, that usage remains in the
