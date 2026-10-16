@@ -88,7 +88,7 @@ total (KT-952).
 [src: file: backend/src/api/audit/document_repair.rs:119-193#split_verified_citations]
 [src: file: backend/src/core/audit_state.rs:12#CITATION_ORIGINALS_DIR]
 [src: file: backend/src/api/audit/full.rs:2350-2380#check_attempt]
-[src: file: backend/src/api/audit/full.rs:1755-1759#max_attempts]
+[src: file: backend/src/api/audit/full.rs:1760-1764#max_attempts]
 [src: file: backend/src/api/audit/anti_hallu_enforce.rs:24#MAX_ATTEMPTS]
 [src: file: backend/src/api/audit/document_repair.rs:71-78#feedback]
 
@@ -196,15 +196,19 @@ under an unrelated agent.
   connection's exact alias (e.g. `@groq`) still dispatches correctly — the
   backend resolves it independently of what the UI suggested — but nothing
   prompts the user to type it.
-- **Stored provider API keys are not AES-encrypted.** Several docstrings
-  (including on `ExternalApiConnection` itself) describe the credential as
-  living in "Kronn's encrypted credential store." In the current
-  implementation a connection's `credential_slug` looks up a plaintext
-  `ApiKey.value` in `TokensConfig.keys`, serialized as-is into
-  `~/.config/kronn/config.toml` and protected only by file permissions
-  (`0600`) — not by the AES-256-GCM `core::crypto` module MCP secrets use.
-  This predates KT-545 and is not changed by it; see
-  `docs/inconsistencies-tech-debt.md`.
+- **Stored provider API keys are encrypted since 0.14.3, with residuals.**
+  A connection's `credential_slug` resolves an `ApiKey` of the live
+  configuration; `config::save` stores those keys encrypted with the instance
+  key in the `stored_credentials` table and writes `config.toml` without them
+  (KT-1007). What stays open: on a host with no keychain and no verified
+  recovery passphrase, the key sits in `config.toml` next to the data it
+  decrypts; a locked or missing key at boot leaves pre-migration plaintext in
+  `config.toml` until restored; a set-aside `config.toml.corrupt.<timestamp>`
+  may hold credentials in clear. See
+  [key-management.md](key-management.md) and
+  `docs/inconsistencies-tech-debt.md` (TD-20260901).
+  [src: file: backend/src/core/credential_store.rs:137-154#encrypt_rows]
+  [src: file: backend/src/core/credential_store.rs:346-349#sync_for_save]
 
 ## Troubleshooting
 
