@@ -10155,7 +10155,12 @@ export type UnanchoredDoc = { doc: string,
 /**
  * RFC 3339; `None` when no pass has re-read it since it last changed.
  */
-reviewed_at: string | null, };
+reviewed_at: string | null,
+/**
+ * An audit step owns the doc, so a pass can re-read it; `false` when none
+ * does (it is listed, never queued).
+ */
+owned: boolean, };
 
 /**
  * An Exec command line that interpolates a template value into inline code

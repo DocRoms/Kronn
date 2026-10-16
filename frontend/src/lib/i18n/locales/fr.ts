@@ -1601,6 +1601,7 @@ const fr: TranslationDict = {
   "audit.revalidate.relevance.unanchored.hint": "Invérifiable : confrontez chacune au code et ancrez-la avec une citation [src: file: chemin:ligne], ou supprimez-la. La passe agent les reçoit comme invérifiables.",
   "audit.revalidate.relevance.unanchored.reread": "relu le {0}",
   "audit.revalidate.relevance.unanchored.pending": "pas relu depuis sa dernière modification",
+  "audit.revalidate.relevance.unanchored.unowned": "aucune étape d'audit ne relit ce document",
   'audit.revalidate.state.changed': 'ligne modifiée',
   'audit.revalidate.state.removed': 'ligne supprimée',
   'audit.revalidate.state.file_missing': 'fichier absent',

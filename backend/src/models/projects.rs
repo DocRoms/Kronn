@@ -1930,6 +1930,9 @@ pub struct UnanchoredDoc {
     pub doc: String,
     /// RFC 3339; `None` when no pass has re-read it since it last changed.
     pub reviewed_at: Option<String>,
+    /// An audit step owns the doc, so a pass can re-read it; `false` when none
+    /// does (it is listed, never queued).
+    pub owned: bool,
 }
 
 /// `GET /api/projects/:id/revalidation`: the deterministic part of

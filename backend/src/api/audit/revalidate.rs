@@ -217,6 +217,7 @@ pub fn plan(project_path: &FsPath) -> RevalidationPlan {
         plan.unanchored_docs.push(UnanchoredDoc {
             doc: doc.clone(),
             reviewed_at: reviewed.map(|r| r.reviewed_at.clone()),
+            owned: step.is_some(),
         });
         let Some(step) = step.filter(|_| reviewed.is_none()) else {
             continue;

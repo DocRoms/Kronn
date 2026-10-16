@@ -1579,6 +1579,7 @@ const zh: TranslationDict = {
   "audit.revalidate.relevance.unanchored.hint": "无法验证：请对照代码逐一检查，并用 [src: file: 路径:行] 引用加以锚定，或将其删除。代理阶段会将它们视为不可验证。",
   "audit.revalidate.relevance.unanchored.reread": "已于 {0} 重新阅读",
   "audit.revalidate.relevance.unanchored.pending": "自上次更改后尚未重新阅读",
+  "audit.revalidate.relevance.unanchored.unowned": "没有审计步骤会重新阅读此文档",
   "audit.revalidate.state.changed": "行已更改",
   "audit.revalidate.state.removed": "行已删除",
   "audit.revalidate.state.file_missing": "文件缺失",

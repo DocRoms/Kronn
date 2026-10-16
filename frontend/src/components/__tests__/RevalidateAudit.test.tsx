@@ -479,8 +479,9 @@ describe('RevalidateAudit', () => {
         untouched_since_code_changed: false,
       }],
       unanchored_docs: [
-        { doc: 'docs/glossary.md', reviewed_at: '2026-10-16T09:30:00+00:00' },
-        { doc: 'docs/notes.md', reviewed_at: null },
+        { doc: 'docs/glossary.md', reviewed_at: '2026-10-16T09:30:00+00:00', owned: true },
+        { doc: 'docs/notes.md', reviewed_at: null, owned: true },
+        { doc: 'docs/architecture/design.md', reviewed_at: null, owned: false },
       ],
       sections: [{
         doc: 'docs/coding-rules.md', step: 4, action: 'agent', doc_missing: false,
@@ -517,13 +518,17 @@ describe('RevalidateAudit', () => {
     expect(row).toHaveTextContent('Intro');
 
     // KT-1292 — each doc made only of such sections says when it was last re-read.
-    const [reread, pending] = within(unanchored).getAllByTestId('revalidate-unanchored-doc');
+    const [reread, pending, unowned] = within(unanchored).getAllByTestId('revalidate-unanchored-doc');
     expect(reread).toHaveTextContent('docs/glossary.md');
     expect(reread).toHaveTextContent(
       `audit.revalidate.relevance.unanchored.reread ${new Date('2026-10-16T09:30:00+00:00').toLocaleDateString()}`,
     );
     expect(pending).toHaveTextContent('docs/notes.md');
     expect(pending).toHaveTextContent('audit.revalidate.relevance.unanchored.pending');
+    // A doc no audit step owns is never queued: it is not called "pending".
+    expect(unowned).toHaveTextContent('docs/architecture/design.md');
+    expect(unowned).toHaveTextContent('audit.revalidate.relevance.unanchored.unowned');
+    expect(unowned).not.toHaveTextContent('unanchored.pending');
   });
 
   it('allows a targeted prose check while citation fingerprints are unknown', async () => {

@@ -624,6 +624,7 @@ fn an_all_unanchored_doc_is_re_read_once_per_change() {
     assert!(section.reread);
     assert_eq!(planned.unanchored_docs.len(), 1);
     assert_eq!(planned.unanchored_docs[0].reviewed_at, None);
+    assert!(planned.unanchored_docs[0].owned);
     let block = &prompt_blocks(&planned)[&step];
     assert!(block.contains("Nothing in this document is anchored"));
     assert!(block.contains("section `Style` — unverifiable"));
@@ -692,12 +693,19 @@ fn an_unowned_unanchored_doc_is_listed_but_never_queued() {
     run_the_pass(dir, &plan(dir));
     let planned = plan(dir);
     assert!(planned.agent_steps.is_empty() && planned.sections.is_empty());
-    let glossary = planned
+    let notes = planned
         .unanchored_docs
         .iter()
         .find(|u| u.doc == "docs/notes.md")
         .unwrap();
-    assert_eq!(glossary.reviewed_at, None);
+    assert_eq!(notes.reviewed_at, None);
+    assert!(!notes.owned, "no step owns it: not shown as pending");
+    let rules = planned
+        .unanchored_docs
+        .iter()
+        .find(|u| u.doc == RULES)
+        .unwrap();
+    assert!(rules.owned);
 }
 
 // KT-1292 — a doc that gains an anchor leaves the all-unanchored list.

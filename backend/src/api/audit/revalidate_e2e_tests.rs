@@ -1078,6 +1078,78 @@ async fn an_all_unanchored_doc_is_re_read_once_after_the_code_changes() {
     assert!(started_steps(&again).is_empty(), "{again}");
 }
 
+// KT-1292 — only a step that ran is stamped: when the agent's step fails, its
+// doc keeps no stamp, the plan queues it again, and the next pass stamps it.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_failed_step_leaves_its_unanchored_doc_unstamped_and_queued() {
+    let fx = Validated::new(|_| {}).await;
+    let mut lines = source_lines();
+    lines.push("fn added_after_validation() {}".into());
+    write_source(fx.project(), &lines);
+    let plan = fx.plan().await;
+    assert!(plan.agent_steps.len() >= 2, "{plan:?}");
+    // The scripted agent works on the n-th target at its n-th prompt: the
+    // steps run in chain order, so list the docs in that order.
+    let targets: Vec<String> = plan
+        .agent_steps
+        .iter()
+        .map(|step| {
+            plan.sections
+                .iter()
+                .find(|s| s.step == Some(*step))
+                .unwrap_or_else(|| panic!("no section for step {step}: {plan:?}"))
+                .doc
+                .clone()
+        })
+        .collect();
+    let refs: Vec<&str> = targets.iter().map(String::as_str).collect();
+    arm(fx.h.tools.path(), "noop", &refs);
+    fail_steps(fx.h.tools.path(), &[1]);
+
+    let body = fx.revalidate().await;
+    let done = sse_events(&body, "done").pop().expect("terminal done");
+    validation_settled(&fx.h.state, &done).await;
+    assert_eq!(
+        started_steps(&body).len(),
+        targets.len(),
+        "every step started: {body}"
+    );
+
+    let after = fx.plan().await;
+    let failed = &targets[0];
+    assert_eq!(
+        after
+            .sections
+            .iter()
+            .map(|s| s.doc.clone())
+            .collect::<Vec<_>>(),
+        vec![failed.clone()],
+        "only the failed step's doc is still queued: {after:?}"
+    );
+    assert!(after.sections[0].reread);
+    for u in after.unanchored_docs.iter().filter(|u| u.owned) {
+        assert_eq!(
+            u.reviewed_at.is_some(),
+            &u.doc != failed,
+            "{}: stamped only when its step ran",
+            u.doc
+        );
+    }
+
+    // The next pass, with nothing failing, stamps it: the plan is clean.
+    arm(fx.h.tools.path(), "noop", &[failed.as_str()]);
+    let retry = fx.revalidate().await;
+    let done = sse_events(&retry, "done").pop().expect("terminal done");
+    validation_settled(&fx.h.state, &done).await;
+    let clean = fx.plan().await;
+    assert!(
+        clean.sections.is_empty() && clean.agent_steps.is_empty(),
+        "{clean:?}"
+    );
+}
+
 #[tokio::test]
 #[serial_test::serial]
 #[serial_test::serial(kronn_templates_env)]

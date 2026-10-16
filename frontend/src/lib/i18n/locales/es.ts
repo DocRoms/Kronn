@@ -1592,6 +1592,7 @@ const es: TranslationDict = {
   "audit.revalidate.relevance.unanchored.hint": "No verificable: contrasta cada una con el código y ánclala con una cita [src: file: ruta:línea], o elimínala. El paso del agente las recibe como no verificables.",
   "audit.revalidate.relevance.unanchored.reread": "releído el {0}",
   "audit.revalidate.relevance.unanchored.pending": "no releído desde su último cambio",
+  "audit.revalidate.relevance.unanchored.unowned": "ningún paso de la auditoría relee este documento",
   'audit.revalidate.state.changed': 'línea modificada',
   'audit.revalidate.state.removed': 'línea eliminada',
   'audit.revalidate.state.file_missing': 'archivo ausente',

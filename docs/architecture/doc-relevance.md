@@ -44,7 +44,20 @@ it, or when the stamp no longer matches the doc's hash or the digest of that
 step's sources. After the pass, the doc is stamped whether or not the agent
 added an anchor, so an unchanged repo plans clean and there is no re-queue
 loop. The panel lists each such doc with « re-read on <date> » (`RevalidationPlan.unanchored_docs`).
-A doc no audit step owns is listed but never queued.
+A doc no audit step owns is listed but never queued; the panel says « no audit
+step re-reads this doc » for it (`UnanchoredDoc.owned`), not « not re-read ».
+
+The sources digest is the one of the **owning step**, so how often a doc comes
+back depends on that step (`AnalysisStep.sources`):
+
+- steps 3 (`repo-map`), 8 (tech debt) and 9 (`decisions`) read the whole source
+  tree (`__GIT_SOURCE_TREE__`): any code change queues their all-unanchored
+  doc again. The re-read is bounded (one step per doc) and leaves the badge
+  alone;
+- steps 4 to 7 read the files they name (manifests, `Makefile`, compose, …):
+  only a change there queues the doc;
+- step 2 (`glossary`) has no sources, so its digest never changes: only an edit
+  of the doc queues it again.
 
 [src: file: backend/src/core/citation_drift.rs:84#DocReview]
 [src: file: backend/src/core/citation_drift.rs:821#current_review]

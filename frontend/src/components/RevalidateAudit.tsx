@@ -526,7 +526,9 @@ export function RevalidateAudit({
                           <code>{u.doc}</code> — {u.reviewed_at
                             ? t('audit.revalidate.relevance.unanchored.reread',
                               new Date(u.reviewed_at).toLocaleDateString(locale))
-                            : t('audit.revalidate.relevance.unanchored.pending')}
+                            : t(u.owned
+                              ? 'audit.revalidate.relevance.unanchored.pending'
+                              : 'audit.revalidate.relevance.unanchored.unowned')}
                         </li>
                       ))}
                     </ul>
