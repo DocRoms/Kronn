@@ -908,6 +908,8 @@ const zh: TranslationDict = {
   "projects.master.overview.dependencyUnsupported": "分析不支持",
   "projects.master.overview.dependencyToolUnavailable": "工具不可用",
   "projects.master.overview.dependencyTimedOut": "超时",
+  "projects.master.overview.dependencyNotInstalled": "依赖未安装",
+  "projects.master.overview.dependencyDeclaredOnly": "未安装",
   "projects.master.overview.dependencyCheckFailed": "检查失败",
   "projects.source.loading": "加载源代码…",
   "projects.source.loadingTreeBackground": "在后台加载项目其余部分",

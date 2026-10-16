@@ -524,6 +524,27 @@ Release notes for 0.9.3 and earlier are available in the
   gets its own closing (answer with the findings block, write no file) instead
   of the step's « write the file ». A workflow step that declares read-only
   repositories no longer ends on that list either.
+- The version watch no longer tells the audit a JS project is up to date when
+  it could not look (KT-1279). A `package.json` without `node_modules` got
+  `npm outdated --workspaces`, which prints `{}` and exits 0 without querying
+  the registry, and that read « up to date » so the Renovate fallback never
+  ran: the workspace flags are now passed only to an installed tree, and an
+  empty answer for a manifest that declares dependencies but has none
+  installed is the new `NotInstalled` status (incomplete, Renovate decides,
+  listed as unchecked in the audit block). A Renovate package file with no
+  resolved dependency (none listed, skipped, failed lookup) no longer
+  finalizes as up to date either. The runtime pins also read a reusable
+  workflow's `nodeversion` / `node_version` input (and its `default:`), a
+  Jenkinsfile's `nodejs '…'` tool and node-versioned agent label, and a
+  Dockerfile's `FROM node:<v>` / `ARG NODE_VERSION`; when nothing is parsed the
+  audit block says « None parsed by Kronn » and lists the CI files present
+  instead of « None found ». Review follow-up: a package npm lists without an
+  installed version is flagged `declared_only` and shown as « not installed »,
+  never as the version in place; a `node_modules` holding only `.cache` / `.bin`
+  is not an install; a Jenkins label needs `node` / `nodejs` directly followed
+  by a major (`build-node-1` is a host); a Dockerfile pin needs a leading digit
+  and a multi-stage file marks its last stage as the runtime one; Renovate
+  warnings no longer drop resolved updates.
 - What a task worker starts ends with its dispatch, and Vite runs in its lane
   (KT-1266). A backend or a Vite started from the agent's shell tool ran in a
   process group of its own and kept listening on the lane's ports after the
