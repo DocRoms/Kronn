@@ -511,6 +511,16 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- Audit step 8 accepts a Dependencies row that states its source in any
+  of its forms (KT-1295). The coverage check demanded the literal
+  `source used:`, so a row backed by `[src: deps: …]` citations, or written
+  `source: …`, was refused and failed the step after the retry. It now passes
+  with `source used: …` or `source: …` (any case), a well-formed
+  `[src: deps: <manager>/<package>@<date>]` citation (the citation gate still
+  checks it against the watch table), or `not verified: no source`; a row
+  with no source still fails, and the refusal names these forms. The
+  `scanned — nothing substantiable` outcome also takes an en-dash or `--`.
+
 - An audit step run through the ACP route runs instead of asking the human
   what to do (KT-1278). An ACP session has no system channel, so the context
   and the step reach the model as one message, and a step prompt that ended on
