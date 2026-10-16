@@ -22,14 +22,18 @@ minutes, even when `backend/Cargo.lock` had not changed.
 
 **Rule.** Rust caches use `actions/cache/restore` on every run with a
 same-OS `restore-keys` prefix, and `actions/cache/save` only on
-`push` to `main` (`if: success()`, skipped on an exact hit; the backend
-save is gated by its verified `ready` marker). A push to `main` builds and
+`push` to `main` (`if: success()` for the clippy save, skipped on an exact hit;
+the backend save runs under `always()` but only with its verified `ready`
+marker, and is likewise skipped on an exact hit). A push to `main` builds and
 saves only: its tests already ran on the pull request. The backend
 observer reports a fallback restore as `partial`, excluded from exact hot
 history, so the 10-minute SLO statistics stay honest.
-[src: file: .github/workflows/ci-test.yml:102-116]
-[src: file: .github/workflows/ci-test.yml:264-276]
-[src: file: scripts/ci/backend_ci_slo.mjs:1-20]
+[src: file: .github/workflows/ci-test.yml:102-116#cache-backend-hot]
+[src: file: .github/workflows/ci-test.yml:243-262#mark-backend-cache]
+[src: file: .github/workflows/ci-test.yml:264-276#cache-backend-hot]
+[src: file: .github/workflows/ci-test.yml:458-491#cache-clippy]
+[src: file: scripts/ci/backend_ci_slo.mjs:96-104#effectiveMeasurementMode]
+[src: file: scripts/ci/backend_ci_slo.mjs:179-185#comparableRuns]
 
 **Check.** `gh cache list --json key,ref,sizeInBytes` must show the Rust
 caches under `refs/heads/main` and the total under the 10 GB budget. A pull
