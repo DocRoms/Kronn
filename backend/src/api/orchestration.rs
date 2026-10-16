@@ -15384,6 +15384,13 @@ pub(crate) mod tests {
             !brief.contains("résume les changements et signale"),
             "the old prose delivery instruction must be gone"
         );
+        // KT-1278 — over ACP the brief is the tail of a single message: it
+        // ends on its own start directive, never on a reference section.
+        let last_section = brief.rsplit("\n## ").next().unwrap();
+        assert!(
+            last_section.starts_with("Commence maintenant"),
+            "{last_section}"
+        );
         assert!(brief.contains("outils natifs de ton CLI"), "{brief}");
         assert!(!brief.contains("Premier appel : `search_text`"), "{brief}");
         // KT-788: a CLI worker commits itself, so the brief names the sign-off command.

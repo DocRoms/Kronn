@@ -961,10 +961,9 @@ pub(crate) async fn run_partial_pipeline(
             'attempts: loop {
             attempt += 1;
             let mut step_usage = crate::db::audit_runs::StepTokens::UNKNOWN;
-            let attempt_prompt = match &citation_feedback {
-                Some(fb) => format!("{full_prompt}\n\n{fb}"),
-                None => full_prompt.clone(),
-            };
+            let attempt_prompt = super::finish_step_prompt(
+                &full_prompt, citation_feedback.as_deref(), step, analysis_step, &docs_root,
+            );
             // Stop reaches an HTTP or ACP agent through this token and a direct
             // CLI agent through its PID — the same registration as the Full
             // pipeline, made BEFORE the start so a Stop during the handshake

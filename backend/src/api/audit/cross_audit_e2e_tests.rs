@@ -297,6 +297,23 @@ async fn a_cross_agent_security_step_runs_end_to_end() {
     let claude_prompt = std::fs::read_to_string(tools.join("det.ClaudeCode")).unwrap();
     let codex_prompt = std::fs::read_to_string(tools.join("det.Codex")).unwrap();
     assert!(!claude_prompt.contains(CORS) && !codex_prompt.contains(INVENTED));
+    // KT-1278 — the prompt the detection agent received ends on its own no-write
+    // closing, never on the step's "write the file" directive.
+    for prompt in [&claude_prompt, &codex_prompt] {
+        assert!(
+            prompt.ends_with(crate::core::cross_audit::DETECTION_CLOSING),
+            "…{}",
+            &prompt[prompt.len().saturating_sub(500)..]
+        );
+        assert!(
+            !prompt.contains("=== RUN THIS STEP NOW ==="),
+            "a detection pass must not be told to write the target: {prompt}"
+        );
+        assert!(
+            prompt.find("DETECTION MODE").unwrap()
+                < prompt.rfind("=== RUN THIS DETECTION NOW ===").unwrap()
+        );
+    }
     assert!(
         !tools.join("single.count").exists(),
         "the single-agent step never ran"
