@@ -427,7 +427,11 @@ fn a_multi_stage_dockerfile_keeps_a_row_per_stage_and_marks_the_runtime_one() {
 
     // A non-node final stage leaves every node stage a build stage.
     let mut out = Vec::new();
-    scan_dockerfile("FROM node:20 AS build\nFROM nginx:1.25\n", "Dockerfile", &mut out);
+    scan_dockerfile(
+        "FROM node:20 AS build\nFROM nginx:1.25\n",
+        "Dockerfile",
+        &mut out,
+    );
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].stage, Some(Stage::Build));
 
@@ -450,7 +454,10 @@ fn a_multi_stage_dockerfile_keeps_a_row_per_stage_and_marks_the_runtime_one() {
         &[],
         "2026-10-11",
     );
-    assert!(block.contains("| node (final stage: what runs) | 22 |"), "{block}");
+    assert!(
+        block.contains("| node (final stage: what runs) | 22 |"),
+        "{block}"
+    );
 }
 
 #[test]
@@ -478,7 +485,12 @@ fn a_declared_only_row_is_never_rendered_as_the_version_in_place() {
         next_check_at: None,
     };
     let snap = DependencySnapshot::from_summary(&summary);
-    let block = render_version_block(VersionSource::DependencyWatch, Some(&snap), &[], "2026-10-11");
+    let block = render_version_block(
+        VersionSource::DependencyWatch,
+        Some(&snap),
+        &[],
+        "2026-10-11",
+    );
     assert!(
         block.contains("| joi | not installed (declared range only; installed version unknown) | 18.0.0 | major |"),
         "{block}"

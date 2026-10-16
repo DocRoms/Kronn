@@ -401,7 +401,7 @@ close the task.
 Delivery refuses a commit whose `Signed-off-by`, `Co-Authored-By` or similar
 identity trailer names anyone but the repository's git identity; a CLI worker
 commits with `git commit -s` and never writes such a line by hand.
-`[src: file: backend/src/api/orchestration.rs:5892-5932#validate_delivery_identity_trailers]`
+`[src: file: backend/src/api/orchestration.rs:5902-5942#validate_delivery_identity_trailers]`
 The principal is either a CLI session joined to the room or the room's own
 native agent during its turn. For the latter Kronn injects
 `KRONN_ROOM_AGENT_CONTEXT` (room, provider, running dispatch, trigger message)
@@ -448,7 +448,7 @@ before anything is created, so a bad gate is no longer found at integration,
 after the worker delivered and the review passed. The contract is served by
 `tool_manual({tool: "task_exec_prepare"})`.
 `[src: file: backend/src/core/quick_exec.rs:50-66#ALLOWED_BINARIES]` `[src: file: backend/src/core/quick_exec.rs:302-349#check_command_line]`
-`[src: file: backend/src/api/orchestration.rs:8561-8571#validations_refusal]`
+`[src: file: backend/src/api/orchestration.rs:8571-8581#validations_refusal]`
 
 To correct the gates of an execution that already exists, the principal calls
 `task_exec_reassign({task_execution_id, validations, reason})` — `validations`
@@ -466,7 +466,7 @@ because that tool is already the principal's amendment of a live execution:
 principal-only, reason-journaled, room and evidence kept. `task_exec_review` would
 have let a self-reviewing worker weaken its own gates and ties the swap to the
 persisted `ReviewDecision v1`; `task_exec_prepare` is documented as mutation-free.
-`[src: file: backend/src/api/orchestration.rs:10944-10955#ExecutionAmendment]`
+`[src: file: backend/src/api/orchestration.rs:10954-10965#ExecutionAmendment]`
 
 The worker brief of a worker with a shell says who runs which gates: the worker
 runs the TARGETED tests, the long validations the principal persisted are played
@@ -483,9 +483,9 @@ decision, or an approved integration held on a coded cause. The principal may th
 the parent checkout and recorded SHAs, refuses dirty or unrelated states, and
 returns the existing terminal result when the same successful resume is
 retried. The tool cannot advance provisioning- or review-owned checkpoints.
-[src: file: backend/src/api/orchestration.rs:12354-12407#compact_next_action]
-[src: file: backend/src/api/orchestration.rs:9599-9707#resume_blocked_apply]
-[src: file: backend/src/api/orchestration.rs:12663-12707#task_exec_resume]
+[src: file: backend/src/api/orchestration.rs:12364-12417#compact_next_action]
+[src: file: backend/src/api/orchestration.rs:9609-9717#resume_blocked_apply]
+[src: file: backend/src/api/orchestration.rs:12673-12717#task_exec_resume]
 [src: file: backend/scripts/disc-introspection-mcp.py:6164-6242#call_task_exec_status]
 
 An approved delivery the integration sends back (a red validation, a merge
@@ -502,7 +502,7 @@ candidate are not run again. The relaunched worker is stood down first, and the
 call is refused once the worker committed or left changes since the send-back,
 or delivered again (that delivery is reviewed instead). Attempts stay monotonic:
 the re-validation does not rewind the attempt the send-back opened.
-[src: file: backend/src/api/orchestration.rs:4060-4193#send_back] [src: file: backend/src/api/orchestration.rs:9734-9811#revalidate_sent_back_execution]
+[src: file: backend/src/api/orchestration.rs:4070-4203#send_back] [src: file: backend/src/api/orchestration.rs:9744-9821#revalidate_sent_back_execution]
 [src: file: backend/src/db/orchestration.rs:4105-4178#reopen_approval_after_rework]
 
 `task_exec_status({view: "compact"})` returns id, task, status, attempt,
@@ -534,7 +534,7 @@ integration refusal, campaign pause, undelivered worker, terminal state)
 address the joined CLI that last launched, reviewed, resumed or reassigned it
 while that session remains in the room, so its `disc_wait_for_peer` wakes on
 them; without such a session they address the room's configured agent.
-`[src: file: backend/src/api/orchestration.rs:12235-12287#EXEC_WAIT_DEFAULT_SECS]`
+`[src: file: backend/src/api/orchestration.rs:12245-12297#EXEC_WAIT_DEFAULT_SECS]`
 `[src: file: backend/src/db/orchestration.rs:4720-4762#pin_principal_cli_session]`
 
 When the worker identity is not already known, call `agent_list()` first and
@@ -660,7 +660,7 @@ refusal. Planning event rows separately persist `actor_session_id`, so two
 concurrent sessions of the same provider remain distinguishable in the audit
 trail.
 `[src: file: backend/scripts/disc-introspection-mcp.py:5704-5719#_task_exec_identity]`
-`[src: file: backend/src/api/orchestration.rs:10982-10992#principal_cli_is_authorized]`
+`[src: file: backend/src/api/orchestration.rs:10992-11002#principal_cli_is_authorized]`
 `[src: file: backend/src/api/agent_tools.rs:3812-3848#native_execution_for_caller]`
 `[src: file: backend/src/db/sql/136_planning_actor_session.sql:1-5#actor_session_id]`
 
@@ -690,8 +690,8 @@ to the other executions it coordinates while it works on the accepted execution.
 Both identity values are derived by the trusted bridge and absent from the tool's
 input schema — the model supplies only `offer_id`; there is no fallback to
 agent-type/alias matching or any other permissive resolution if either is missing.
-[src: file: backend/src/api/orchestration.rs:4876-5218#accept_worker_offer_and_attach]
-[src: file: backend/src/api/orchestration.rs:5011-5029#worker_cli_session_id]
+[src: file: backend/src/api/orchestration.rs:4886-5228#accept_worker_offer_and_attach]
+[src: file: backend/src/api/orchestration.rs:5021-5039#worker_cli_session_id]
 [src: file: backend/src/api/orchestration.rs:12905-12957#source_binding_session_id]
 [src: file: backend/scripts/disc-introspection-mcp.py:6302-6348#call_task_exec_accept_worker_offer]
 
@@ -699,7 +699,7 @@ agent-type/alias matching or any other permissive resolution if either is missin
 `AwaitingReview` while the CLI is already in its principal room. The legacy
 terminal return remains only as compatibility for executions accepted by older
 bridges that physically moved a session into a child room.
-[src: file: backend/src/api/orchestration.rs:26516-26646#every_terminal_state_keeps_execution_scoped_cli_in_its_origin]
+[src: file: backend/src/api/orchestration.rs:26533-26663#every_terminal_state_keeps_execution_scoped_cli_in_its_origin]
 [src: file: backend/src/db/cli_worker_bindings.rs:75-188#return_to_origin]
 
 Collapsing the live and reload-stable identities, as an earlier revision did,
