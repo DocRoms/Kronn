@@ -12,8 +12,9 @@ the existing synchronization test.
 The extraction preserves prompt bytes, including whitespace. Validation-card
 instructions and briefing prompts retain their three existing locales; Rust
 still substitutes the briefing values at the call site.
-[src: file: backend/src/api/audit/helpers.rs:684-686]
-[src: file: backend/src/api/audit/helpers.rs:1074-1094]
+[src: file: backend/src/api/audit/helpers.rs:704-720#validation_card_protocol]
+[src: file: backend/src/api/audit/helpers.rs:1094-1114#build_briefing_review_prompt]
+[src: file: backend/src/api/audit/helpers.rs:1117-1125#build_briefing_legacy_prompt]
 
 The Drift prompt asks the agent to report checksum mismatches without rewriting
 documentation. Its title no longer describes an unfinished placeholder; this
@@ -22,4 +23,4 @@ prompt is separate from the deterministic drift API.
 
 Prompt contract tests continue to exercise the embedded strings rather than
 separate copies of the Markdown content.
-[src: file: backend/src/api/audit/mod.rs:953#drift_kind_consumes_checksums]
+[src: file: backend/src/api/audit/mod.rs:952-964#drift_kind_consumes_checksums]
