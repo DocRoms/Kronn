@@ -1,6 +1,10 @@
 import type { AcceptAuditStepResponse, ArtifactBundle, AuditLatest, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditRunCost, AuditStepInfo, AuditRecentActivity, AuditTokenBreakdown, EmbedOriginsChange } from '../types/generated';
 import type { BriefingDetectedDoc, BriefingDocsAnswers, BriefingProjectAnswers, BriefingProjectRules, CrossAuditEstimate, LinkedRepoDocStatus, SavedBriefing } from '../types/generated';
 import type { WorkerConnectivity } from '../types/generated';
+import type {
+  DecideScopeRequest, DiscussionProjectGrant, DiscussionScope, GrantDiscussionProjectRequest,
+  RevokeDiscussionProjectRequest,
+} from '../types/generated';
 import type { DocProvenanceReport } from '../types/generated';
 import type { TemplateReinstallRequest, TemplateReinstallPlan, TemplateReinstallReport, MergeBase, TemplateMergeAccepted, TemplateMergeAcceptRequest, TemplateMergeRequest, TemplateMergeView } from '../types/generated';
 import { readTextAttachmentPreview } from './textAttachmentPreview';
@@ -2340,6 +2344,40 @@ export const discussions = {
     'GET',
     `/discussions/${encodeURIComponent(id)}/important`
       + (category ? `?category=${encodeURIComponent(category)}` : ''),
+  ),
+
+  /** KT-1270 — the projects this room reaches besides its own, the pending
+   *  access requests of its agents, and the journal. */
+  scope: (id: string) => api<DiscussionScope>(
+    'GET',
+    `/discussions/${encodeURIComponent(id)}/scope`,
+  ),
+
+  /** Open a project (or every project) to the room. Every project in write
+   *  needs the typed confirmation and the fingerprint of the scope shown. */
+  grantScope: (id: string, request: GrantDiscussionProjectRequest) => api<DiscussionProjectGrant>(
+    'POST',
+    `/discussions/${encodeURIComponent(id)}/scope/grants`,
+    request,
+  ),
+
+  revokeScope: (id: string, grantId: string, request: RevokeDiscussionProjectRequest) => api<DiscussionScope>(
+    'POST',
+    `/discussions/${encodeURIComponent(id)}/scope/grants/${encodeURIComponent(grantId)}/revoke`,
+    request,
+  ),
+
+  /** Approve an agent's request, at most at the access it asked for. */
+  approveScopeRequest: (id: string, requestId: string, request: DecideScopeRequest) => api<DiscussionScope>(
+    'POST',
+    `/discussions/${encodeURIComponent(id)}/scope/requests/${encodeURIComponent(requestId)}/approve`,
+    request,
+  ),
+
+  declineScopeRequest: (id: string, requestId: string, request: DecideScopeRequest) => api<DiscussionScope>(
+    'POST',
+    `/discussions/${encodeURIComponent(id)}/scope/requests/${encodeURIComponent(requestId)}/decline`,
+    request,
   ),
 
   /** KT-595 — the arbitration questions of a discussion, pending and past.
