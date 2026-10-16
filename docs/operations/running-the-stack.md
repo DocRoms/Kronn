@@ -10,6 +10,9 @@ stack, not to start a task. Content verbatim.
 - **Windows**: WSL2 is mandatory — Kronn mounts host binaries, Unix sockets, and Linux paths. Docker Desktop is not required; Docker Engine inside WSL works. Install WSL: `wsl --install`.
 - Start: `./kronn start` or `make start` (builds and runs all services).
 - Start natively (no Docker): `./kronn start-dev` — one command, runs backend + Vite with hot-reload against the **host** CLIs (the macOS path, since Docker can't run Darwin binaries / read the Keychain). UI on **:5173** (the backend serves API-only on :3140 in native mode). Equivalent to `make dev-backend` + `make dev-frontend` in two terminals.
+- Backend as a background service (launchd / systemd, no Docker, no Vite): two env vars switch the native backend into service mode, both unset by default (behaviour unchanged).
+  - `KRONN_SERVICE=1` (also `true`/`yes`): at startup, before agent detection, the backend asks the user's login shell for its PATH and appends the missing entries to its own PATH (existing order kept). launchd and systemd start units with a minimal PATH, so agent CLIs (`claude`, `codex`…) would not be found otherwise. Same discovery as the desktop app (`core::shell_path`); a shell that fails or takes over 5 s is logged and skipped.
+  - `KRONN_UI_DIST=<dir>`: when `<dir>/index.html` exists, the backend serves the built frontend (`frontend/dist`) from `<dir>` on the API port, SPA style. `/api/*` routes keep precedence. A set but invalid directory logs a warning and the backend serves the API only.
 - Stop: `./kronn stop` or `make stop`.
 - Restart: `./kronn restart`.
 - Logs: `./kronn logs` or `make logs`.

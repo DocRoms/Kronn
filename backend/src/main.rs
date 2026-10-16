@@ -18,13 +18,31 @@ fn main() -> anyhow::Result<()> {
     let env_token = kronn::core::config::take_env_auth_token();
     // Same for the operator's raw key: kept in memory, never inherited.
     kronn::core::keyvault::take_env_kek();
+    // Service mode (launchd / systemd start with a minimal PATH): resolve the
+    // login-shell PATH here, still single-threaded, so agent detection and
+    // every child process see the user's tools. Logged once tracing exists.
+    let startup_log = if service_mode() {
+        kronn::core::shell_path::enrich_path_for_service()
+    } else {
+        Vec::new()
+    };
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(run(env_token))
+        .block_on(run(env_token, startup_log))
 }
 
-async fn run(env_token: Option<String>) -> anyhow::Result<()> {
+/// `KRONN_SERVICE=1`: the backend runs as a per-user background service.
+fn service_mode() -> bool {
+    kronn::core::child_env::var("KRONN_SERVICE")
+        .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
+async fn run(
+    env_token: Option<String>,
+    startup_log: kronn::core::shell_path::StartupLog,
+) -> anyhow::Result<()> {
     // Exactly ONE backend per data dir, taken before `config::load()` (which
     // may rewrite config.toml): a second process must not write anything.
     // Held for the whole process lifetime.
@@ -95,6 +113,14 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
         .init();
 
     tracing::info!("tracing initialized — filter: {}", filter_src);
+    for (level, message) in startup_log {
+        match level {
+            tracing::Level::ERROR => tracing::error!("{message}"),
+            tracing::Level::WARN => tracing::warn!("{message}"),
+            tracing::Level::INFO => tracing::info!("{message}"),
+            _ => tracing::debug!("{message}"),
+        }
+    }
     tracing::info!("timezone: {}", kronn::core::timezone::current());
     kronn::core::config::warn_secrets_taken_from_env(env_token.is_some());
 
@@ -826,7 +852,25 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
 
     // Build router
     let deferred_resume_state = state.clone();
-    let app = build_router(state);
+    let app = build_router(state.clone());
+    // KRONN_UI_DIST: serve the built frontend on the API port (service mode).
+    // The API routes keep precedence; unset or invalid -> API only.
+    let app = match kronn::core::child_env::var("KRONN_UI_DIST") {
+        Ok(dir) if !dir.trim().is_empty() => {
+            let dist = std::path::PathBuf::from(dir.trim());
+            if kronn::api::live_pages::valid_ui_dist(&dist) {
+                tracing::info!("Serving the web UI from {}", dist.display());
+                kronn::api::live_pages::with_ui_fallback(app, &dist, state)
+            } else {
+                tracing::warn!(
+                    "KRONN_UI_DIST={} has no index.html - not serving the web UI",
+                    dist.display()
+                );
+                app
+            }
+        }
+        _ => app,
+    };
 
     // Start server
     let addr = format!("{}:{}", host, port);
