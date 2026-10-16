@@ -765,3 +765,11 @@ fn recording_named_docs_leaves_the_others_as_validated() {
         stamp
     );
 }
+
+#[test]
+fn a_dash_range_is_tracked_under_its_hyphen_label() {
+    let labels =
+        cite_labels("Claim [src: file: src/a.rs:2\u{2013}4] and [src: file: src/b.rs:1\u{2014}3].");
+    assert!(labels.contains("src/a.rs:2-4"), "{labels:?}");
+    assert!(labels.contains("src/b.rs:1-3"), "{labels:?}");
+}

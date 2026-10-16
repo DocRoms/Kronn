@@ -545,6 +545,41 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- The audit's citation gate now says how to fix a citation (KT-1307). A path
+  that only resolves under the docs root or next to the citing doc gets
+  « paths are repository-root relative; did you mean `docs/AGENTS.md:94`? »,
+  and an out-of-range line reports the file's line count. Ranges accept the
+  en and em dash, and a non-numeric line says « not a line number ». A bare
+  path to a text file no longer tells the model to drop the claim: it proposes
+  the whole-file range `path:1-N` (N filled in) to cite an absence. The dash
+  normalisation lives in one place shared by the verifier, citation drift and
+  the documentary gate, so `path:17–23` is no longer fabricated under enforce.
+  Hint paths are canonical and only name a file that holds the cited lines; a
+  `#symbol` anchor is accepted after a range; a whole-file range backing a
+  claim that is not an absence raises a non-blocking `whole_file_citation`.
+- Installing the template, then launching the full audit, is no longer refused
+  as "files Kronn did not write" (KT-1299). `POST /install-template` now records
+  the folder as Kronn's (`template_installed_at`) unless it already held a
+  human's docs, so the template's own files are never counted as foreign. The
+  briefing's "move to legacy" choice now moves a human's docs even when their
+  entry file carries Kronn's signature (it used to skip silently and leave the
+  launch blocked), and keeps `briefing.md` and `.kronn.json` in place. The
+  partial audit and the revalidation hold on a human's docs the same way the
+  full audit does (`docs_folder_choice_required`). The install records every
+  file it wrote in `.kronn.json` (`kronn_written`, one reusable
+  `record_kronn_written`): beside a human's docs those files are never moved to
+  `legacy/` (only the human's are), and they never make the folder Kronn's —
+  not even next to an earlier recorded audit. A recorded file counts as Kronn's
+  only while its sha256 still equals the recorded one: a file the human rewrote
+  (or a hand-crafted `.kronn.json` entry) is theirs again, counted by the gate
+  and moved on the choice. The install refuses a corrupt `.kronn.json` before
+  writing anything, and records a renamed template file under its new path.
+- The default-root audit golden no longer depends on the day it is run
+  (KT-1317). The name of a `validated-originals/<hash>.bak` file is the hash
+  of bytes holding the audit date; the golden now names it by the hash of the
+  date-masked bytes (KT-1278). A new test replays the same audit 40 days
+  earlier and requires a byte-identical snapshot, with no non-volatile entry
+  relaxed.
 - Audit step 8 accepts a Dependencies row that states its source in any
   of its forms (KT-1295). The coverage check demanded the literal
   `source used:`, so a row backed by `[src: deps: …]` citations, or written

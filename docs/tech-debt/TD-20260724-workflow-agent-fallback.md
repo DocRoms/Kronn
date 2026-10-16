@@ -261,7 +261,7 @@ The current spawn audit found these distinct Kronn-owned paths:
 Audits still refuse Vibe, which has no file tools Kronn can scope to the
 project; every HTTP provider is admitted since KT-924 and KT-980, a `Custom`
 target only with a validated named connection. Eligibility is therefore a
-property of each surface, not of an agent being installed. [src: file: backend/src/api/audit/mod.rs:700-731#agent_can_audit]
+property of each surface, not of an agent being installed. [src: file: backend/src/api/audit/mod.rs:734-765#agent_can_audit]
 
 | Surface | Desired behavior | Initial rollout |
 |---|---|---:|

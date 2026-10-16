@@ -21,7 +21,7 @@ large-inventory threshold.
 [src: file: backend/src/core/document_optimization.rs:259-296#validate_budgets]
 
 The report includes bytes, words, estimated tokens, routed documents and the
-five largest contributors for each detected adapter. [src: file: backend/src/core/document_optimization.rs:52-61#AgentLoadPath] [src: file: backend/src/core/document_optimization.rs:175-186#top_contributors]
+five largest contributors for each detected adapter. [src: file: backend/src/core/document_optimization.rs:52-61#AgentLoadPath] [src: file: backend/src/core/document_optimization.rs:177-188#top_contributors]
 Diagnostics cover
 budget overruns, unresolved placeholders, broken local links and file
 citations, duplicate or obsolete guides, orphan documents, large inventories
@@ -29,6 +29,6 @@ that are not search-first, and mutable citation line ranges; only broken links
 and broken citations are blocking, the others are warnings. A Stack table
 row without its `Latest stable` or `Support end` source and date (or
 `not verified: no source`) raises the non-blocking `stack_currency` warning.
-[src: file: backend/src/core/document_optimization.rs:958-973#inspect_stack_currency]
-[src: file: backend/src/core/document_optimization.rs:992-1064#stack_currency_problems]
-[src: file: backend/src/core/document_optimization.rs:1066-1083#diag]
+[src: file: backend/src/core/document_optimization.rs:1087-1102#inspect_stack_currency]
+[src: file: backend/src/core/document_optimization.rs:1121-1193#stack_currency_problems]
+[src: file: backend/src/core/document_optimization.rs:1195-1212#diag]
