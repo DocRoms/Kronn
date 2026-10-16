@@ -701,34 +701,19 @@ pub fn decide(
     Ok((decided, grant))
 }
 
-/// Digest of what a workflow does: what a human validated when setting its
-/// scope. Name, enablement, pinning and retention are left out; any change to
-/// its steps, trigger, project, variables or guards changes the digest.
+/// The revision a human validates when setting a workflow's scope: the
+/// workflow and everything it executes (Quick Prompts, Quick APIs,
+/// sub-workflows, skills, directives, profiles), as a run pins them
+/// (`run_pins::revision_fingerprint`), repository profiles left out.
 pub fn workflow_fingerprint(conn: &Connection, workflow_id: &str) -> Result<Option<String>> {
-    let row: Option<Vec<Option<String>>> = conn
-        .query_row(
-            "SELECT project_id, trigger_json, steps_json, actions_json, safety_json, \
-             workspace_config_json, guards, artifacts, on_failure, exec_allowlist, variables, \
-             project_scope_json FROM workflows WHERE id = ?1",
-            [workflow_id],
-            |row| {
-                (0..12)
-                    .map(|index| row.get::<_, Option<String>>(index))
-                    .collect::<rusqlite::Result<Vec<_>>>()
-            },
-        )
-        .optional()?;
-    Ok(row.map(|fields| {
-        let joined = fields
-            .iter()
-            .map(|field| field.as_deref().unwrap_or("\u{0}"))
-            .collect::<Vec<_>>()
-            .join("\u{1f}");
-        Sha256::digest(joined.as_bytes())
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect()
-    }))
+    let Some(workflow) = crate::db::workflows::get_workflow(conn, workflow_id)? else {
+        return Ok(None);
+    };
+    Ok(Some(crate::workflows::run_pins::revision_fingerprint(
+        conn,
+        &workflow,
+        workflow.project_id.as_deref(),
+    )?))
 }
 
 /// A workflow's scope and whether it still holds (the workflow unchanged since
@@ -822,8 +807,11 @@ pub fn set_workflow_scope(
         .ok_or_else(|| ScopeError::NotFound("workflow not found".into()).into())
 }
 
-/// What a workflow run's tokens reach through their workflow's scope: nothing
-/// once the workflow changed after the human validated it.
+/// What a workflow run's tokens reach through their workflow's scope. The run
+/// is judged on what it pinned, never on the live workflow: a run that pinned
+/// anything else than the validated revision (a definition changed, then
+/// restored; a Quick Prompt edited) reaches nothing, and so does a run without
+/// its own pin (a child run).
 pub fn run_granted_projects(conn: &Connection, run_id: &str) -> Result<GrantedProjects> {
     let workflow_id: Option<String> = conn
         .query_row(
@@ -836,17 +824,24 @@ pub fn run_granted_projects(conn: &Connection, run_id: &str) -> Result<GrantedPr
     let Some(workflow_id) = workflow_id else {
         return Ok(granted);
     };
-    let Some(scope) = workflow_scope(conn, &workflow_id)? else {
+    let Some(pinned) = crate::workflows::run_pins::pinned_scope_revision(conn, run_id)? else {
         return Ok(granted);
     };
-    if !scope.valid {
-        return Ok(granted);
-    }
-    for entry in scope.entries {
-        if entry.access == ScopeAccess::Write {
-            granted.write.insert(entry.project_id.clone());
+    let validated: Vec<(String, String)> = conn
+        .prepare(
+            "SELECT project_id, access FROM workflow_scopes \
+             WHERE workflow_id = ?1 AND workflow_fingerprint = ?2",
+        )?
+        .query_map(params![workflow_id, pinned], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    for (project_id, access) in validated {
+        let access = ScopeAccess::parse(&access)?;
+        if access == ScopeAccess::Write {
+            granted.write.insert(project_id.clone());
         }
-        granted.read.insert(entry.project_id);
+        granted.read.insert(project_id);
     }
     Ok(granted)
 }

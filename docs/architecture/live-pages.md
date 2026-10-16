@@ -704,7 +704,7 @@ bridge-token list and the handlers refuse a bridge caller.
   and one action allows 30 per minute.
 - **Revocation.** Deletes the row; the next click opens the card.
 [src: file: backend/src/api/workflows.rs:4483-4493#create_manual_run_admitted]
-[src: file: backend/src/workflows/run_pins.rs:93-103#pin_within]
+[src: file: backend/src/workflows/run_pins.rs:99-109#pin_within]
 [src: file: backend/src/db/live_page_action_trusts.rs:31-35#ROW_MIN_INTERVAL_SECS]
 
 Embed permission (third-party embeds) is a separate mechanism and is not

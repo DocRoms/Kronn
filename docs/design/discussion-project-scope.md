@@ -57,13 +57,19 @@ request body.
   (planning only), in the workflow page (`workflow_scopes`,
   `PUT /api/workflows/{id}/scope`, not a bridge route). Saving is the
   validation.
-- The validation is pinned to the digest of what the workflow does (steps,
-  trigger, project, variables, guards, failure chain, allow-list): any later
-  change, by an agent through the bridge or by a human, suspends the scope until
-  a human validates again. A launch card shows the scope, or that it is
-  suspended.
-- Every token of a run of that workflow (its steps) reaches the validated
-  scope, on top of its own project. Nothing else gives a step another project.
+- The validation is pinned to the workflow's revision as a run pins it
+  (`run_pins::revision_fingerprint`, KT-1096): the workflow and everything it
+  executes (Quick Prompts, Quick APIs, sub-workflows, skills, directives,
+  profiles). Any later change to any of them, by an agent through the bridge or
+  by a human, suspends the scope until a human validates again. A launch card
+  shows the scope, or that it is suspended.
+- A run is judged on what it pinned, never on the live workflow: its tokens
+  reach the scope only when the revision the run pinned at start
+  (`pinned_scope_revision`, repository profiles left out) is the validated one.
+  Changing a definition, launching, then restoring it never opens the run that
+  pinned the change, and a dependency put back after a pin changes nothing for
+  that run. A child run, which has no pin of its own, reaches no scope.
+- Nothing else gives a step another project.
 - Worker launches are unchanged: a task of another project is never executed
   from a token that only holds a grant on it. A worker runs with its task
   project's credentials, which a planning grant must never hand out.
@@ -98,7 +104,9 @@ request body.
 |---|---|
 | The agent grants itself a project | Grant, revoke, approve, decline and workflow-scope routes are not bridge routes: a request carrying a bridge token is refused before the handler. "Human" means a loopback (or operator-authenticated) call without a bridge token, the same trust as the rest of the human UI until per-action human proof lands (Layer B, D1). |
 | A step takes a room's grants by pointing its `room_id` at the room (same project or not) | Steps are never the room's agent: `room_grant_discussions` is empty for workflow steps and task workers. |
-| An agent edits a workflow whose scope was validated, to use the scope | Any change to the workflow suspends its scope until a human validates again. |
+| An agent edits a workflow whose scope was validated, to use the scope | Any change to the workflow or to what it executes suspends the scope until a human validates again. |
+| An agent edits the workflow, launches, then restores it so the scope reads valid | A run reaches the scope only if the revision it pinned is the validated one. |
+| An agent edits a Quick Prompt the workflow runs, without touching the workflow | Dependencies are part of the validated revision; the run that pinned the edit reaches nothing, even once the prompt is put back. |
 | Write grant used on a project route (`install-template`) | Another project is accepted on a write route only as a planning reference. |
 | Learning whether a project exists by asking for it | Unknown names are filed and answered like known ones. |
 | Forging an approval line with the reason | Agent text loses line breaks and brackets in the `[kronn-scope: …]` line. |

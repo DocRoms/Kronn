@@ -3829,37 +3829,57 @@ async fn a_step_posting_in_a_granted_room_gets_none_of_its_grants() {
     assert_eq!(status, 200);
 }
 
-/// KT-1270 DoD — a workflow's scope, validated once by a human, reaches its
-/// runs' steps, and is suspended as soon as the workflow changes.
-#[tokio::test]
-async fn a_workflow_scope_reaches_its_runs_until_the_workflow_changes() {
-    let (app, _repos, db) = fixture_with_db().await;
-    let step = || {
-        mint(BridgeScope {
-            discussion_ids: vec!["room-a".into()],
-            workflow_run_id: Some("run-a".into()),
-            ..Default::default()
-        })
-        .unwrap()
-    };
-    let before = step();
-    let (status, _) = call(
-        &app,
-        "GET",
-        "/api/planning/tasks/task-b",
-        Some(before.value()),
-        None,
-    )
-    .await;
-    assert_eq!(status, 403, "no scope yet");
+/// Start `run_id` for `workflow_id` and pin it with the production pin, as a
+/// launch does: the definitions it pins are the ones it executes.
+async fn pinned_run(db: &Arc<kronn::db::Database>, workflow_id: &str, run_id: &str) {
+    let (workflow_id, run_id) = (workflow_id.to_owned(), run_id.to_owned());
+    db.with_conn(move |conn| {
+        conn.execute(
+            "INSERT INTO workflow_runs(id, workflow_id, project_id, started_at) VALUES (?1, ?2, 'p1', ?3)",
+            rusqlite::params![run_id, workflow_id, chrono::Utc::now().to_rfc3339()],
+        )?;
+        let workflow = kronn::db::workflows::get_workflow(conn, &workflow_id)?.unwrap();
+        let run = kronn::db::workflows::get_run(conn, &run_id)?.unwrap();
+        kronn::workflows::run_pins::pin_or_load(conn, &workflow, &run)?.expect("pin");
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
 
-    // Only a human sets it.
+fn step_of(run_id: &str) -> kronn::core::bridge_token::BridgeTokenGuard {
+    mint(BridgeScope {
+        discussion_ids: vec!["room-a".into()],
+        workflow_run_id: Some(run_id.into()),
+        ..Default::default()
+    })
+    .unwrap()
+}
+
+async fn edits_task_b(app: &Router, token: &str) -> u16 {
+    call(
+        app,
+        "PATCH",
+        "/api/planning/tasks/task-b",
+        Some(token),
+        Some(json!({"title": "edited by a run"})),
+    )
+    .await
+    .0
+}
+
+/// KT-1270 DoD — a workflow's scope, validated once by a human, reaches the
+/// runs that pinned the validated revision, and only them.
+#[tokio::test]
+async fn a_workflow_scope_reaches_only_runs_that_pinned_the_validated_revision() {
+    let (app, _repos, db) = fixture_with_db().await;
     let scope = json!({"entries": [{"project_id": "p2", "access": "write"}]});
+    let agent = bridge_for("room-a");
     let (status, body) = call(
         &app,
         "PUT",
         "/api/workflows/wf-a/scope",
-        Some(before.value()),
+        Some(agent.value()),
         Some(scope.clone()),
     )
     .await;
@@ -3871,22 +3891,18 @@ async fn a_workflow_scope_reaches_its_runs_until_the_workflow_changes() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["data"]["valid"], true, "{body}");
 
-    let live = step();
-    let token = live.value().to_owned();
-    let (status, body) = call(
-        &app,
-        "PATCH",
-        "/api/planning/tasks/task-b",
-        Some(&token),
-        Some(json!({"title": "edited by the run"})),
-    )
-    .await;
-    assert_eq!(status, 200, "the run reaches its workflow's scope: {body}");
+    pinned_run(&db, "wf-a", "run-validated").await;
+    let validated = step_of("run-validated");
+    assert_eq!(
+        edits_task_b(&app, validated.value()).await,
+        200,
+        "the validated revision reaches p2"
+    );
     let (status, body) = call(
         &app,
         "POST",
         "/api/planning/tasks",
-        Some(&token),
+        Some(validated.value()),
         Some(json!({"title": "api docs", "project_ids": ["p2"]})),
     )
     .await;
@@ -3895,33 +3911,55 @@ async fn a_workflow_scope_reaches_its_runs_until_the_workflow_changes() {
         &app,
         "POST",
         "/api/agent-api/call",
-        Some(&token),
+        Some(validated.value()),
         Some(json!({"api_plugin_slug": "synthetic-api", "api_config_id": "cfg-b", "endpoint_path": "/x"})),
     )
     .await;
     assert_eq!(status, 403, "never another project's credentials");
 
-    // Any change to what the workflow does suspends the scope.
-    db.with_conn(|conn| {
-        conn.execute(
-            "UPDATE workflows SET steps_json = '[{\"name\":\"changed\"}]' WHERE id = 'wf-a'",
-            [],
-        )?;
-        Ok(())
-    })
-    .await
-    .unwrap();
-    let (status, _) = call(
+    // An agent changes the workflow: the scope is suspended and a run that pins
+    // the change reaches nothing...
+    let changed = json!({"steps": [{"name": "changed", "step_type": {"type": "Agent"}, "prompt_template": "UNVALIDATED"}]});
+    let (status, body) = call(
         &app,
-        "GET",
-        "/api/planning/tasks/task-b",
-        Some(&token),
-        None,
+        "PUT",
+        "/api/workflows/wf-a",
+        Some(agent.value()),
+        Some(changed),
     )
     .await;
-    assert_eq!(status, 403, "suspended on the next call");
+    assert_eq!(status, 200, "{body}");
     let (_, scope) = call(&app, "GET", "/api/workflows/wf-a/scope", None, None).await;
     assert_eq!(scope["data"]["valid"], false, "{scope}");
+    pinned_run(&db, "wf-a", "run-changed").await;
+    let changed_run = step_of("run-changed");
+    assert_eq!(edits_task_b(&app, changed_run.value()).await, 403);
+    // ...and restoring the validated definition never re-opens it: the run is
+    // judged on what it pinned (review P1-A).
+    let (status, body) = call(
+        &app,
+        "PUT",
+        "/api/workflows/wf-a",
+        Some(agent.value()),
+        Some(json!({"steps": []})),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let (_, scope) = call(&app, "GET", "/api/workflows/wf-a/scope", None, None).await;
+    assert_eq!(
+        scope["data"]["valid"], true,
+        "the live definition is the validated one again: {scope}"
+    );
+    assert_eq!(
+        edits_task_b(&app, changed_run.value()).await,
+        403,
+        "the run that pinned the change stays closed"
+    );
+    assert_eq!(
+        edits_task_b(&app, validated.value()).await,
+        200,
+        "the run that pinned the validated revision keeps it"
+    );
 
     // Another workflow's runs never reach it.
     let other = mint(BridgeScope {
@@ -3939,6 +3977,61 @@ async fn a_workflow_scope_reaches_its_runs_until_the_workflow_changes() {
     )
     .await;
     assert_eq!(status, 403);
+}
+
+/// KT-1270 review P1-B — what a workflow executes is part of what a human
+/// validated: an edited Quick Prompt suspends the scope, and a run that pinned
+/// the edited prompt reaches nothing even after the prompt is put back.
+#[tokio::test]
+async fn an_edited_dependency_suspends_a_workflow_scope() {
+    let (app, _repos, db) = fixture_with_db().await;
+    let (status, body) = call(
+        &app,
+        "PUT",
+        "/api/workflows/wf-a",
+        None,
+        Some(json!({"steps": [{"name": "prompt-step", "step_type": {"type": "Agent"}, "quick_prompt_id": "qp-a"}]})),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = call(
+        &app,
+        "PUT",
+        "/api/workflows/wf-a/scope",
+        None,
+        Some(json!({"entries": [{"project_id": "p2", "access": "write"}]})),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let agent = bridge_for("room-a");
+    let (status, body) = call(
+        &app,
+        "PUT",
+        "/api/quick-prompts/qp-a",
+        Some(agent.value()),
+        Some(json!({"name": "qp-a", "prompt_template": "UNVALIDATED_DEPENDENCY"})),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let (_, scope) = call(&app, "GET", "/api/workflows/wf-a/scope", None, None).await;
+    assert_eq!(scope["data"]["valid"], false, "{scope}");
+    pinned_run(&db, "wf-a", "run-edited-prompt").await;
+    let edited = step_of("run-edited-prompt");
+    assert_eq!(edits_task_b(&app, edited.value()).await, 403);
+    let (status, body) = call(
+        &app,
+        "PUT",
+        "/api/quick-prompts/qp-a",
+        Some(agent.value()),
+        Some(json!({"name": "qp-a", "prompt_template": "x"})),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        edits_task_b(&app, edited.value()).await,
+        403,
+        "put back after the pin: still closed"
+    );
 }
 
 /// KT-1270 review — an agent's request never says whether a project exists.
