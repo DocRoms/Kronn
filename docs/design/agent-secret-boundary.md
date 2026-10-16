@@ -121,6 +121,15 @@ discussion (or one task execution, or one workflow run) and to its project.
   JSON is refused.
 - The agent can read this token. Its scope is by design what the agent may do
   through room tools.
+- **Room grants (KT-1270).** A human may open other projects to a room: read,
+  write (planning only) or every project, the last in write only behind a typed
+  confirmation and the fingerprint of the scope the human saw. The token stays
+  bound to its primary project; grants are re-read on every request, so a revoke
+  applies on the next call. Grants never reach another project's credentials or
+  API configs, never run its workflows or other effects, and never pass to
+  worker rooms. Every grant route is human-only; an agent may only file a
+  request a human decides. Details and refused attacks:
+  `docs/design/discussion-project-scope.md`.
 
 **Human proof per action.** Every secret-class route (section 3 rows 3 and 4,
 plus human-credential administration) requires a **proof bound to one action**:

@@ -345,6 +345,12 @@ owning public object is the addressable boundary.
 - Keep the plan honest when tracked work starts or materially changes (status,
   DoD, priority, blocker). Do not reload or rewrite an unchanged task merely
   to report progress.
+- A room plans in its own project. When a task belongs in another project
+  (one sub-task per repository), `room_scope()` shows what the room reaches and
+  `room_scope({project, access: "write", reason})` asks the human for it: the
+  request grants nothing, a human approves it in the room, then `task_create`
+  with `project_ids` naming that project succeeds. Grants never open another
+  project's credentials or workflows (`docs/design/discussion-project-scope.md`).
 - Immediately before a direct `task_create`, call `plan_get` again so another
   agent's recent write is visible. Direct create links the task atomically to
   the MCP runtime's current discussion by default. Pass an explicit

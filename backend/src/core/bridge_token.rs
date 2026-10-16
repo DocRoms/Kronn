@@ -396,6 +396,14 @@ pub const BRIDGE_ROUTES: &[BridgeRoute] = &[
     ),
     r("GET", "/api/discussions/{id}/questions", Read, &[("id", D)]),
     r("GET", "/api/discussions/{id}/plan", Read, &[("id", D)]),
+    // KT-1270: an agent sees its room's reach and may only ask for more.
+    r("GET", "/api/discussions/{id}/scope", Read, &[("id", D)]),
+    r(
+        "POST",
+        "/api/discussions/{id}/scope/requests",
+        Own,
+        &[("id", D)],
+    ),
     r(
         "GET",
         "/api/discussions/{id}/plan/changes",
@@ -742,6 +750,18 @@ pub fn prepare_body(
     bound: Option<&str>,
     body: Option<&serde_json::Value>,
 ) -> Result<Option<serde_json::Value>, Refusal> {
+    prepare_body_in(route, &Reach::bound_only(bound), body)
+}
+
+/// [`prepare_body`] with the room grants: a planning write may name a project
+/// the room holds a write grant on; a creation left unnamed still lands in the
+/// token's own project.
+pub fn prepare_body_in(
+    route: &BridgeRoute,
+    reach: &Reach,
+    body: Option<&serde_json::Value>,
+) -> Result<Option<serde_json::Value>, Refusal> {
+    let bound = reach.bound();
     if route.method == "GET" {
         return Ok(None);
     }
@@ -853,7 +873,10 @@ pub fn prepare_body(
                     "a bridge token cannot move a resource out of its project".into(),
                 ))
             }
-            Some(serde_json::Value::String(project)) if Some(project.as_str()) != bound => {
+            Some(serde_json::Value::String(project))
+                if Some(project.as_str()) != bound
+                    && !(route.pattern.starts_with("/api/planning/") && reach.writes(project)) =>
+            {
                 return Err(Refusal(
                     "the project named is outside this bridge token's project".into(),
                 ))
@@ -1449,6 +1472,62 @@ impl Residence {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Refusal(pub String);
 
+/// What a token reaches (KT-1270): its frozen project, plus the projects a
+/// human granted to its rooms. Grants never reach credentials, never run a
+/// shared resource elsewhere, and a project-less token reaches none of them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Reach {
+    pub bound: Option<String>,
+    pub granted: crate::db::discussion_scope::GrantedProjects,
+}
+
+impl Reach {
+    /// The frozen project alone: today's single-project token.
+    pub fn bound_only(bound: Option<&str>) -> Self {
+        Self {
+            bound: bound.map(str::to_owned),
+            granted: Default::default(),
+        }
+    }
+
+    pub fn bound(&self) -> Option<&str> {
+        self.bound.as_deref()
+    }
+
+    /// Whether the token may read `project`'s resources.
+    pub fn reads(&self, project: &str) -> bool {
+        match self.bound() {
+            None => false,
+            Some(bound) => {
+                bound == project
+                    || self.granted.all.is_some()
+                    || self.granted.read.contains(project)
+                    || self.granted.write.contains(project)
+            }
+        }
+    }
+
+    /// Whether the token may change `project`'s planning.
+    pub fn writes(&self, project: &str) -> bool {
+        use crate::models::discussion_scope::ScopeAccess;
+        match self.bound() {
+            None => false,
+            Some(bound) => {
+                bound == project
+                    || self.granted.all == Some(ScopeAccess::Write)
+                    || self.granted.write.contains(project)
+            }
+        }
+    }
+}
+
+/// Kinds a write grant opens on another project: planning only. Everything
+/// else (workflows, pages, quick resources) changes in its own project only,
+/// so an update can never pull it into the token's project.
+fn grant_writable(kind: Kind) -> bool {
+    kind == Kind::Task
+}
+
 fn owns(grant: &BridgeGrant, kind: Kind, id: &str) -> bool {
     match kind {
         Kind::Discussion => grant.owns_discussion(id),
@@ -1467,31 +1546,55 @@ pub fn visible_for_read(
     place: &Residence,
     bound: Option<&str>,
 ) -> bool {
+    visible_for_read_in(grant, kind, id, place, &Reach::bound_only(bound))
+}
+
+/// [`visible_for_read`] with the room grants: a granted project reads like
+/// the token's own, except its credentials, which stay its own project's.
+pub fn visible_for_read_in(
+    grant: &BridgeGrant,
+    kind: Kind,
+    id: &str,
+    place: &Residence,
+    reach: &Reach,
+) -> bool {
     if owns(grant, kind, id) {
         return true;
     }
+    let bound = reach.bound();
+    let reads = |projects: &HashSet<String>| projects.iter().any(|p| reach.reads(p));
     match (kind, place) {
-        (Kind::Project, _) => bound == Some(id),
+        (Kind::Project, _) => reach.reads(id),
+        (Kind::McpConfig, _) => mcp_config_visible(place, bound),
         // A discussion or a run without a project is private to its launch.
-        (Kind::Discussion | Kind::Run, Residence::Projects(_)) => {
-            bound.is_some_and(|p| place.holds(p))
-        }
+        (Kind::Discussion | Kind::Run, Residence::Projects(projects)) => reads(projects),
         (Kind::Discussion | Kind::Run, _) => false,
-        (_, Residence::Projects(_)) => bound.is_some_and(|p| place.holds(p)),
-        (_, Residence::ProjectsAndGeneral(_)) => bound.is_none_or(|p| place.holds(p)),
+        (_, Residence::Projects(projects)) => reads(projects),
+        (_, Residence::ProjectsAndGeneral(projects)) => bound.is_none() || reads(projects),
         (_, Residence::General) => bound.is_none(),
         (_, Residence::Global | Residence::AllProjects) => true,
     }
 }
 
-fn writable(
-    grant: &BridgeGrant,
-    kind: Kind,
-    id: &str,
-    place: &Residence,
-    bound: Option<&str>,
-) -> bool {
-    owns(grant, kind, id) || bound.is_some_and(|project| place.only(project))
+/// An MCP config is the token's own project's or shared: grants never widen it.
+fn mcp_config_visible(place: &Residence, bound: Option<&str>) -> bool {
+    match place {
+        Residence::Projects(_) => bound.is_some_and(|p| place.holds(p)),
+        Residence::ProjectsAndGeneral(_) => bound.is_none_or(|p| place.holds(p)),
+        Residence::General => bound.is_none(),
+        Residence::Global | Residence::AllProjects => true,
+    }
+}
+
+fn writable(grant: &BridgeGrant, kind: Kind, id: &str, place: &Residence, reach: &Reach) -> bool {
+    if owns(grant, kind, id) || reach.bound().is_some_and(|project| place.only(project)) {
+        return true;
+    }
+    // A granted project's planning: every project the task serves must be
+    // writable, so a write grant on one never edits a task shared with another.
+    grant_writable(kind)
+        && matches!(place, Residence::Projects(projects)
+            if !projects.is_empty() && projects.iter().all(|p| reach.writes(p)))
 }
 
 fn effect_allowed(
@@ -1536,8 +1639,20 @@ pub fn authorize(
     route: &BridgeRoute,
     bound: Option<&str>,
     ids: &[NamedId],
+    residence: impl FnMut(Kind, &str) -> Result<Option<Residence>, Refusal>,
+) -> Result<(), Refusal> {
+    authorize_in(grant, route, &Reach::bound_only(bound), ids, residence)
+}
+
+/// [`authorize`] with the room grants.
+pub fn authorize_in(
+    grant: &BridgeGrant,
+    route: &BridgeRoute,
+    reach: &Reach,
+    ids: &[NamedId],
     mut residence: impl FnMut(Kind, &str) -> Result<Option<Residence>, Refusal>,
 ) -> Result<(), Refusal> {
+    let bound = reach.bound();
     if route.rule == Rule::Denied {
         return Err(Refusal(
             "this route is not available to a Kronn-launched agent's bridge token".into(),
@@ -1549,9 +1664,21 @@ pub fn authorize(
             if bound == Some(id) {
                 continue;
             }
-            return Err(Refusal(
-                "a project the request names is outside this bridge token's project".into(),
-            ));
+            // Another project: read through a read grant, planning writes
+            // through a write grant, never an effect.
+            let granted = match route.rule {
+                Rule::Read => reach.reads(id),
+                Rule::Write | Rule::Own => reach.writes(id),
+                Rule::Effect | Rule::Denied => false,
+            };
+            if granted {
+                continue;
+            }
+            return Err(Refusal(if reach.reads(id) && route.rule != Rule::Effect {
+                "this room may read that project, not change it: ask for write access with scope_request".into()
+            } else {
+                "a project the request names is outside this bridge token's project: a human can grant it (scope_request)".into()
+            }));
         }
         if kind == Kind::Discussion && route.rule == Rule::Own && !grant.owns_discussion(id) {
             return Err(Refusal(
@@ -1571,8 +1698,8 @@ pub fn authorize(
         };
         let allowed = match (route.rule, named.role) {
             (Rule::Effect, _) => effect_allowed(grant, route, kind, id, &place, bound),
-            (Rule::Write | Rule::Own, Role::Target) => writable(grant, kind, id, &place, bound),
-            _ => visible_for_read(grant, kind, id, &place, bound),
+            (Rule::Write | Rule::Own, Role::Target) => writable(grant, kind, id, &place, reach),
+            _ => visible_for_read_in(grant, kind, id, &place, reach),
         };
         if !allowed {
             let why = if place.shared() && named.role == Role::Target {
@@ -2271,7 +2398,7 @@ pub fn resolve_residences(
 struct Scoper<'a> {
     route: &'a BridgeRoute,
     grant: &'a BridgeGrant,
-    bound: Option<&'a str>,
+    reach: &'a Reach,
     residences: &'a Residences,
 }
 
@@ -2279,7 +2406,7 @@ impl Scoper<'_> {
     fn id_visible(&self, kind: Kind, id: &str) -> bool {
         match self.residences.get(&(kind, id.to_owned())) {
             Some(Some((as_kind, as_id, place))) => {
-                visible_for_read(self.grant, *as_kind, as_id, place, self.bound)
+                visible_for_read_in(self.grant, *as_kind, as_id, place, self.reach)
             }
             // A response may name a message or job since deleted, or a key
             // shared with another table: it hides nothing it cannot place.
@@ -2295,7 +2422,8 @@ impl Scoper<'_> {
         fields: &serde_json::Map<String, serde_json::Value>,
         typed: Option<Kind>,
     ) -> bool {
-        let holds = |project: &str| self.bound == Some(project);
+        let holds = |project: &str| self.reach.reads(project);
+        let bound = self.reach.bound();
         if let Some(scope) = fields.get("project_scope").filter(|scope| !scope.is_null()) {
             let home = fields
                 .get("project_id")
@@ -2303,10 +2431,10 @@ impl Scoper<'_> {
                 .map(str::to_owned);
             let place = workflow_residence(home, Some(scope.to_string()));
             let visible = match place {
-                Residence::Projects(projects) => self.bound.is_some_and(|p| projects.contains(p)),
-                Residence::General => self.bound.is_none(),
+                Residence::Projects(projects) => projects.iter().any(|p| holds(p)),
+                Residence::General => bound.is_none(),
                 Residence::ProjectsAndGeneral(projects) => {
-                    self.bound.is_none_or(|p| projects.contains(p))
+                    bound.is_none() || projects.iter().any(|p| holds(p))
                 }
                 Residence::Global | Residence::AllProjects => true,
             };
@@ -2479,10 +2607,21 @@ pub fn scope_response(
     bound: Option<&str>,
     residences: &Residences,
 ) -> Result<(), Refusal> {
+    scope_response_in(route, data, grant, &Reach::bound_only(bound), residences)
+}
+
+/// [`scope_response`] with the room grants.
+pub fn scope_response_in(
+    route: &BridgeRoute,
+    data: &mut serde_json::Value,
+    grant: &BridgeGrant,
+    reach: &Reach,
+    residences: &Residences,
+) -> Result<(), Refusal> {
     let scoper = Scoper {
         route,
         grant,
-        bound,
+        reach,
         residences,
     };
     if route.pattern == "/api/resolve/{id}" {

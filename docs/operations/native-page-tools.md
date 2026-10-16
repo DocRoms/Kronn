@@ -131,6 +131,6 @@ envelope), of which KT-1098's optional `slug` on `page_update_html` costs
 Page family stays at or under 4,000 bytes; the absolute sizes move whenever any
 other declaration changes, the Page delta does not. These are byte counts, not
 provider token measurements. The bridge
-declarations keep their own byte ceiling (84,966 bytes, `mcp_surface_budget.py`).
+declarations keep their own byte ceiling (84,929 bytes, `mcp_surface_budget.py`).
 [src: file: backend/src/api/agent_page_tests.rs:326-351#native_page_surface_has_a_bounded_measured_cost]
 [src: file: backend/scripts/ci/mcp_surface_budget.py:126#CATALOGUE_MAX_BYTES]
