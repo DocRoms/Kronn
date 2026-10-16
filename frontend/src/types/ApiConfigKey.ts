@@ -6,4 +6,11 @@
  * these as plain inputs (no mask), and they're surfaced in the prompt
  * injection alongside the auth so the agent can build full URLs.
  */
-export type ApiConfigKey = { env_key: string, label: string, placeholder: string, description: string, };
+export type ApiConfigKey = { env_key: string, label: string, placeholder: string, description: string, 
+/**
+ * The value is not a credential (a base URL, a workspace id): the call
+ * keeps it intact in the data it hands on instead of masking it as a
+ * secret. Credential-free URL keys are public without this flag, see
+ * `api_call_executor::call_secrets`.
+ */
+public?: boolean, };

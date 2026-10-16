@@ -803,9 +803,11 @@ step or the webhook supplied (whatever its name, `User-Agent` included).
 
 What comes back is scrubbed by value (`core/secret_scrub.rs`, KT-1035): an
 API call builds one set from every value it takes from the env or the
-credential store, wherever it lands, base URL included (no plugin metadata
-marks a value public), the resolved auth (Basic
-decoded) and its default headers, and carries it through the success
+credential store, wherever it lands, except the public config values (KT-1249:
+a key declared `public` in `api_spec.config_keys`, or a credential-free
+http(s) URL that is the base URL or sits under a `*_URL` key; masking a base
+URL rewrote the links of the data handed to the next steps), the resolved
+auth (Basic decoded) and its default headers, and carries it through the success
 output, summaries, errors and the call log. Each value is masked raw,
 URL-encoded, hex, base64 and JSON-escaped, case-insensitively from 8
 characters, before truncation; shorter ones only as whole tokens. A

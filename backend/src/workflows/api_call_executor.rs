@@ -190,9 +190,10 @@ async fn execute_core_gated(
 }
 
 /// Every value this call takes from the env or the credential store is a
-/// secret wherever it lands, base URL included: no plugin metadata declares
-/// a config value public. The resolved auth adds its wire forms (Basic
-/// decoded to its password, bearer and header tokens).
+/// secret wherever it lands, except the config values that are public (see
+/// [`is_public_config`]): masking a base URL would rewrite the links of the
+/// data handed to the next steps (`***/browse/EW-1`). The resolved auth adds
+/// its wire forms (Basic decoded to its password, bearer and header tokens).
 pub(crate) fn call_secrets(
     plugin: &McpServer,
     env: &HashMap<String, String>,
@@ -204,6 +205,9 @@ pub(crate) fn call_secrets(
     for (key, value) in env {
         // `__token_error__` and friends carry a diagnostic, not a credential.
         if key.starts_with("__") && key.ends_with("_error__") {
+            continue;
+        }
+        if is_public_config(spec, key, value) {
             continue;
         }
         set.add(value);
@@ -221,6 +225,83 @@ pub(crate) fn call_secrets(
         add_resolved_auth(&mut set, &auth);
     }
     set
+}
+
+/// Name fragments of a URL key that is likely to carry a secret in its path
+/// (an incoming-webhook URL): never public by name.
+const SECRET_URL_KEY_HINTS: &[&str] = &[
+    "HOOK",
+    "TOKEN",
+    "KEY",
+    "SECRET",
+    "PASSWORD",
+    "PASSWD",
+    "AUTH",
+    "SIGNATURE",
+];
+
+/// Whether an env value is public configuration rather than a credential:
+/// a key declared `public` in `api_spec.config_keys`, or a plain http(s) URL
+/// (no user info, query or fragment) that is the plugin's base URL
+/// (`{KEY}` in `base_url`) or sits under a `*_URL` key whose name does not
+/// hint at a secret. A URL that embeds credentials is never public, declared
+/// or not, and no auth key is.
+fn is_public_config(spec: &ApiSpec, key: &str, value: &str) -> bool {
+    if auth_env_keys(&spec.auth).contains(&key) {
+        return false;
+    }
+    let declared = spec
+        .config_keys
+        .iter()
+        .any(|config| config.env_key == key && config.public);
+    let upper = key.to_ascii_uppercase();
+    let url_key =
+        upper.ends_with("_URL") && !SECRET_URL_KEY_HINTS.iter().any(|hint| upper.contains(hint));
+    let base_url_key = spec.base_url.contains(&format!("{{{key}}}"));
+    if declared {
+        // A declared-public value that is a URL still must not hold secrets;
+        // any other declared value (host, workspace id) is taken as is.
+        return !looks_like_url(value) || is_credential_free_url(value);
+    }
+    (url_key || base_url_key) && is_credential_free_url(value)
+}
+
+fn looks_like_url(value: &str) -> bool {
+    let value = value.trim();
+    value.starts_with("http://") || value.starts_with("https://")
+}
+
+/// An http(s) URL with a host and no user info, query or fragment.
+fn is_credential_free_url(value: &str) -> bool {
+    let Ok(url) = Url::parse(value.trim()) else {
+        return false;
+    };
+    matches!(url.scheme(), "http" | "https")
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+}
+
+/// The env keys that hold the credential of this auth kind.
+fn auth_env_keys(auth: &ApiAuthKind) -> Vec<&str> {
+    match auth {
+        ApiAuthKind::Basic {
+            user_env,
+            password_env,
+        } => vec![user_env.as_str(), password_env.as_str()],
+        ApiAuthKind::ApiKeyQuery { env_key, .. }
+        | ApiAuthKind::ApiKeyHeader { env_key, .. }
+        | ApiAuthKind::Bearer { env_key }
+        | ApiAuthKind::BasicApiKey { env_key } => vec![env_key.as_str()],
+        ApiAuthKind::OAuth2ClientCredentials {
+            client_id_env,
+            client_secret_env,
+            ..
+        } => vec![client_id_env.as_str(), client_secret_env.as_str()],
+        _ => Vec::new(),
+    }
 }
 
 fn add_resolved_auth(set: &mut crate::core::secret_scrub::SecretSet, auth: &ResolvedAuth) {
@@ -5501,6 +5582,196 @@ mod tests {
             "{}",
             out.result.output
         );
+    }
+
+    /// KT-1249 — a Jira-shaped plugin (`{JIRA_URL}` base URL, Basic auth).
+    fn jira_plugin() -> McpServer {
+        let mut plugin = mk_plugin(
+            "{JIRA_URL}",
+            ApiAuthKind::Basic {
+                user_env: "JIRA_USERNAME".into(),
+                password_env: "JIRA_API_TOKEN".into(),
+            },
+            vec![mk_endpoint("GET", "/rest/api/3/issue/EW-1")],
+        );
+        if let Some(spec) = plugin.api_spec.as_mut() {
+            spec.config_keys = vec![ApiConfigKey {
+                public: true,
+                env_key: "JIRA_URL".into(),
+                label: "Workspace URL".into(),
+                placeholder: String::new(),
+                description: String::new(),
+            }];
+        }
+        plugin
+    }
+
+    #[tokio::test]
+    async fn a_jira_call_keeps_its_base_url_links_and_masks_the_credentials() {
+        use base64::Engine as _;
+        let header =
+            base64::engine::general_purpose::STANDARD.encode("dev@acme.io:ATATT-Jr7Secret");
+        let server = MockServer::start().await;
+        let base = server.uri();
+        Mock::given(method("GET"))
+            .and(path("/rest/api/3/issue/EW-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "description": format!("[EW-7685|{base}/browse/EW-7685] and [EW-2|{base}/browse/EW-2]"),
+                "self": format!("{base}/rest/api/3/issue/1"),
+                "echo_token": "ATATT-Jr7Secret",
+                "echo_email": "dev@acme.io",
+                "echo_header": format!("Basic {header}"),
+            })))
+            .mount(&server)
+            .await;
+        let env = HashMap::from([
+            ("JIRA_URL".to_string(), base.clone()),
+            ("JIRA_USERNAME".to_string(), "dev@acme.io".to_string()),
+            ("JIRA_API_TOKEN".to_string(), "ATATT-Jr7Secret".to_string()),
+        ]);
+        let out = execute_api_call_step_core(
+            &mk_step("/rest/api/3/issue/EW-1"),
+            &jira_plugin(),
+            &env,
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
+        let output = &out.result.output;
+        assert_eq!(out.result.status, RunStatus::Success, "{output}");
+        assert!(
+            output.contains(&format!("{base}/browse/EW-7685")),
+            "{output}"
+        );
+        assert!(output.contains(&format!("{base}/browse/EW-2")), "{output}");
+        assert!(!output.contains("***/browse"), "{output}");
+        for leaked in ["ATATT-Jr7Secret", "dev@acme.io", header.as_str()] {
+            assert!(!output.contains(leaked), "{leaked}: {output}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_jira_error_keeps_the_base_url_and_masks_the_token() {
+        let server = MockServer::start().await;
+        let base = server.uri();
+        Mock::given(method("GET"))
+            .and(path("/rest/api/3/issue/EW-1"))
+            .respond_with(ResponseTemplate::new(500).set_body_string(format!(
+                "failed at {base}/browse/EW-1 for token ATATT-Jr7Secret"
+            )))
+            .mount(&server)
+            .await;
+        let env = HashMap::from([
+            ("JIRA_URL".to_string(), base.clone()),
+            ("JIRA_USERNAME".to_string(), "dev@acme.io".to_string()),
+            ("JIRA_API_TOKEN".to_string(), "ATATT-Jr7Secret".to_string()),
+        ]);
+        let out = execute_api_call_step_core(
+            &mk_step("/rest/api/3/issue/EW-1"),
+            &jira_plugin(),
+            &env,
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
+        assert_eq!(out.result.status, RunStatus::Failed);
+        assert!(
+            !out.result.output.contains("ATATT-Jr7Secret"),
+            "{}",
+            out.result.output
+        );
+    }
+
+    #[test]
+    fn call_secrets_keeps_public_config_out_and_credentials_in() {
+        let mut plugin = jira_plugin();
+        let spec = plugin.api_spec.as_mut().unwrap();
+        spec.config_keys.push(ApiConfigKey {
+            public: false,
+            env_key: "TENANT".into(),
+            label: "Tenant".into(),
+            placeholder: String::new(),
+            description: String::new(),
+        });
+        let env = HashMap::from([
+            (
+                "JIRA_URL".to_string(),
+                "https://acme.atlassian.net".to_string(),
+            ),
+            ("JIRA_USERNAME".to_string(), "dev@acme.io".to_string()),
+            ("JIRA_API_TOKEN".to_string(), "ATATT-Jr7Secret".to_string()),
+            ("TENANT".to_string(), "tenant-secret-9".to_string()),
+        ]);
+        let set = call_secrets(&plugin, &env);
+        let text =
+            "https://acme.atlassian.net/browse/EW-1 ATATT-Jr7Secret dev@acme.io tenant-secret-9";
+        assert_eq!(
+            set.scrub(text),
+            "https://acme.atlassian.net/browse/EW-1 *** *** ***"
+        );
+    }
+
+    #[test]
+    fn is_public_config_rules() {
+        let mut plugin = mk_plugin(
+            "{BASE}/api",
+            ApiAuthKind::Bearer {
+                env_key: "SERVICE_URL".into(),
+            },
+            vec![],
+        );
+        let spec = plugin.api_spec.as_mut().unwrap();
+        spec.config_keys.push(ApiConfigKey {
+            public: true,
+            env_key: "SITE".into(),
+            label: "Site".into(),
+            placeholder: String::new(),
+            description: String::new(),
+        });
+        let spec = plugin.api_spec.as_ref().unwrap();
+        // The base URL, a `*_URL` key and a declared key are public.
+        assert!(is_public_config(spec, "BASE", "https://acme.example"));
+        assert!(is_public_config(
+            spec,
+            "GITLAB_API_URL",
+            "https://git.acme.io/api/v4"
+        ));
+        assert!(is_public_config(spec, "SITE", "example.com"));
+        // A URL carrying credentials, a query or a fragment is not.
+        assert!(!is_public_config(spec, "BASE", "https://u:p@acme.example"));
+        assert!(!is_public_config(
+            spec,
+            "BASE",
+            "https://acme.example/?token=abc"
+        ));
+        assert!(!is_public_config(
+            spec,
+            "SITE",
+            "https://acme.example/#frag"
+        ));
+        assert!(!is_public_config(
+            spec,
+            "GITLAB_API_URL",
+            "https://u@git.acme.io"
+        ));
+        // A webhook URL hides its secret in the path.
+        assert!(!is_public_config(
+            spec,
+            "SLACK_WEBHOOK_URL",
+            "https://hooks.example/T0/B0/xyz"
+        ));
+        // An auth key is never public, nor is an undeclared plain value.
+        assert!(!is_public_config(
+            spec,
+            "SERVICE_URL",
+            "https://acme.example"
+        ));
+        assert!(!is_public_config(spec, "TENANT", "acme"));
+        assert!(!is_public_config(
+            spec,
+            "OTHER_URL_TOKEN",
+            "https://acme.example"
+        ));
     }
 
     /// KT-1047 — a JSON body past the cap fails the step explicitly.

@@ -1388,6 +1388,7 @@ mod tests {
                 endpoints: Vec::new(),
                 docs_url: None,
                 config_keys: vec![ApiConfigKey {
+                    public: false,
                     env_key: "SITE_ID".into(),
                     label: "Site".into(),
                     placeholder: String::new(),
