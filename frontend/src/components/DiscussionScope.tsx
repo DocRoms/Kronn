@@ -138,18 +138,23 @@ function RequestRow({
   onDecide: (access: ScopeAccess | null) => void;
   t: T;
 }) {
+  // A name that matches no project is shown as the agent wrote it: only a decline is possible.
+  const known = request.project_id !== null;
   return (
     <li className="disc-scope-row" data-pending="true">
       <span className="disc-scope-row-main">
         <strong>{request.requested_by}</strong>
-        <span>{t('disc.scopeAsks', accessLabel(t, request.access), projectName(projects, request.project_id, request.project_name))}</span>
+        <span>{t('disc.scopeAsks', accessLabel(t, request.access), known
+          ? projectName(projects, request.project_id, request.project_name)
+          : `« ${request.requested_name} »`)}</span>
       </span>
       <span className="disc-scope-reason">{request.reason}</span>
+      {!known && <span className="disc-scope-reason">{t('disc.scopeUnknownProject')}</span>}
       <span className="disc-scope-actions">
-        <button type="button" className="disc-scope-btn" data-primary="true" onClick={() => onDecide(request.access)}>
+        {known && <button type="button" className="disc-scope-btn" data-primary="true" onClick={() => onDecide(request.access)}>
           {request.access === 'write' ? t('disc.scopeApproveWrite') : t('disc.scopeApproveRead')}
-        </button>
-        {request.access === 'write' && (
+        </button>}
+        {known && request.access === 'write' && (
           <button type="button" className="disc-scope-btn" onClick={() => onDecide('read')}>
             {t('disc.scopeApproveRead')}
           </button>
@@ -218,8 +223,8 @@ export function DiscussionScopeSection({
               t={t}
               onDecide={decision => void run(
                 () => decision
-                  ? discussionsApi.approveScopeRequest(discussionId, request.id, { access: decision, decided_by: null })
-                  : discussionsApi.declineScopeRequest(discussionId, request.id, { access: null, decided_by: null }),
+                  ? discussionsApi.approveScopeRequest(discussionId, request.id, { access: decision })
+                  : discussionsApi.declineScopeRequest(discussionId, request.id, { access: null }),
                 decision ? t('disc.scopeGranted') : t('disc.scopeDeclined'),
               )}
             />
@@ -236,7 +241,7 @@ export function DiscussionScopeSection({
               projects={projects}
               t={t}
               onRevoke={() => void run(
-                () => discussionsApi.revokeScope(discussionId, grant.id, { revoked_by: null, reason: null }),
+                () => discussionsApi.revokeScope(discussionId, grant.id, { reason: null }),
                 t('disc.scopeRevoked'),
               )}
             />
@@ -272,7 +277,7 @@ export function DiscussionScopeSection({
           disabled={!project || busy}
           onClick={() => void run(
             () => discussionsApi.grantScope(discussionId, {
-              project_id: project, all: false, access, granted_by: null, confirm: null, expected_fingerprint: null,
+              project_id: project, all: false, access, confirm: null, expected_fingerprint: null,
             }).then(() => setProject('')),
             t('disc.scopeGranted'),
           )}
@@ -290,7 +295,7 @@ export function DiscussionScopeSection({
             disabled={busy}
             onClick={() => void run(
               () => discussionsApi.grantScope(discussionId, {
-                project_id: null, all: true, access: 'read', granted_by: null, confirm: null, expected_fingerprint: null,
+                project_id: null, all: true, access: 'read', confirm: null, expected_fingerprint: null,
               }),
               t('disc.scopeGranted'),
             )}
@@ -330,7 +335,6 @@ export function DiscussionScopeSection({
                   project_id: null,
                   all: true,
                   access: 'write',
-                  granted_by: null,
                   confirm: typed,
                   expected_fingerprint: scope.fingerprint,
                 }).then(() => setConfirmingAllWrite(false)),

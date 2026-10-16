@@ -238,7 +238,7 @@ long-lived right pane so their internal scroll areas remain stable.
 Automation has no additional page-title band: the selected workflow, Quick
 Prompt, Quick API or Quick Exec header is the single visible content header.
 `[src: file: frontend/src/components/CollectionShell.css:2-5#collection-detail-header]`
-`[src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1844#collection-detail-header]`
+`[src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1845#collection-detail-header]`
 `[src: file: frontend/src/pages/WorkflowsPage.tsx:3191#selectedQuickPromptId]`
 `[src: file: frontend/src/pages/WorkflowsPage.tsx:3671#selectedQuickApiId]`
 `[src: file: frontend/src/pages/WorkflowsPage.tsx:4094#selectedQuickExecId]`

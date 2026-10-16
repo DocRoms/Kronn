@@ -4,7 +4,7 @@
 data` and names nothing. Four carriers produce that identical error — the
 program name, any argument, any environment entry, and the working directory —
 and Kronn's pre-spawn check examines all four.
-[src: file: backend/src/agents/runner.rs:13361-13409#nul_byte_offender]
+[src: file: backend/src/agents/runner.rs:13384-13432#nul_byte_offender]
 
 A `\0` is valid UTF-8, so `read_to_string` carries one out of a file without a
 word. Any value Kronn reads from disk or decrypts can therefore reach a command
@@ -19,7 +19,7 @@ into a C string, it substitutes the literal `<string-with-nul>`. Only
 
 A byte scan alone — the obvious implementation — therefore detects the
 environment case and stays blind to the other three, with nothing to signal it.
-Both checks are needed. [src: file: backend/src/agents/runner.rs:13337-13346#NUL_BEARING_PLACEHOLDER]
+Both checks are needed. [src: file: backend/src/agents/runner.rs:13360-13369#NUL_BEARING_PLACEHOLDER]
 
 A test pins that library behaviour, so a future Rust release that stops
 substituting the placeholder fails there instead of quietly blinding the

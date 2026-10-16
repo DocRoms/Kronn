@@ -3,6 +3,7 @@ import { newTabClickProps } from '../../lib/newTabNavigation';
 import { livePagePath, workflowPath } from '../../lib/routes';
 import { useT } from '../../lib/I18nContext';
 import { UnsafeStepsPanel } from './UnsafeStepsPanel';
+import { WorkflowScopeEditor } from '../WorkflowScope';
 import { SafetyWarnings } from './SafetyWarnings';
 import { workflows as workflowsApi, quickPrompts as quickPromptsApi, executionVariables as executionVariablesApi } from '../../lib/api';
 import type { BatchPreview, ExecutionVariableMetadata } from '../../lib/api';
@@ -1914,6 +1915,14 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
       {onApplyUnsafeFix && (
         <UnsafeStepsPanel workflow={workflow} onApply={onApplyUnsafeFix} onApprove={onApproveUnsafeStep} />
       )}
+
+      <WorkflowScopeEditor
+        workflowId={workflow.id}
+        ownProjectId={workflow.project_id ?? null}
+        projects={projects}
+        toast={(message, type) => toast?.(message, type === 'warning' ? 'info' : type)}
+        t={t}
+      />
 
       {/* Trigger info */}
       <div className="wf-info-row">

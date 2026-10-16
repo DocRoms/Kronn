@@ -3,7 +3,7 @@ import type { BriefingDetectedDoc, BriefingDocsAnswers, BriefingProjectAnswers, 
 import type { WorkerConnectivity } from '../types/generated';
 import type {
   DecideScopeRequest, DiscussionProjectGrant, DiscussionScope, GrantDiscussionProjectRequest,
-  RevokeDiscussionProjectRequest,
+  RevokeDiscussionProjectRequest, SetWorkflowScopeRequest, WorkflowScope,
 } from '../types/generated';
 import type { DocProvenanceReport } from '../types/generated';
 import type { TemplateReinstallRequest, TemplateReinstallPlan, TemplateReinstallReport, MergeBase, TemplateMergeAccepted, TemplateMergeAcceptRequest, TemplateMergeRequest, TemplateMergeView } from '../types/generated';
@@ -2735,6 +2735,11 @@ export const workflows = {
   unsafeSteps: (id: string) => api<UnsafeExecStep[]>('GET', `/workflows/${id}/unsafe-steps`),
   /** KT-1138 — whether the saved workflow, its sub-workflows and rollbacks can start. */
   readiness: (id: string) => api<WorkflowReadiness>('GET', `/workflows/${id}/readiness`),
+  /** KT-1270 — the projects this workflow's runs reach, and whether the human
+   *  validation still holds (any change to the workflow suspends it). */
+  scope: (id: string) => api<WorkflowScope>('GET', `/workflows/${encodeURIComponent(id)}/scope`),
+  setScope: (id: string, request: SetWorkflowScopeRequest) =>
+    api<WorkflowScope>('PUT', `/workflows/${encodeURIComponent(id)}/scope`, request),
   /** KT-1017 — whether a command line sends run values to an unmodelled program. */
   execLineCheck: (req: ExecLineCheckRequest) => api<ExecLineCheck>('POST', '/exec/line-check', req),
   /** KT-918 — where each declared script file stands against its approved hash. */

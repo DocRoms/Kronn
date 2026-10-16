@@ -84,7 +84,7 @@ definitions and import identities, and refuses stale decisions. All resources,
 datasets, points, origin mappings and the library activation commit in one
 SQLite transaction; an error rolls everything back. Origin mappings identify
 earlier imported copies without overwriting their source or local definitions.
-[src: file: backend/src/lib.rs:1436-1457#artifact_portability]
+[src: file: backend/src/lib.rs:1470-1491#artifact_portability]
 [src: file: backend/src/api/artifact_portability/import.rs:1029-1047#preview_digest]
 [src: file: backend/src/db/sql/188_artifact_import_origins.sql:4-9#artifact_import_origins]
 
@@ -545,7 +545,7 @@ fence carries one intention.
 [src: file: frontend/src/hooks/useLivePageActions.ts:174-218#handleIntent]
 [src: file: frontend/src/hooks/useLivePageActions.ts:276-288#anyInFlight]
 [src: file: frontend/src/components/LivePageActionOverlay.tsx:40#Escape]
-[src: file: frontend/src/components/DiscussionActionCard.tsx:32-34#relaunch]
+[src: file: frontend/src/components/DiscussionActionCard.tsx:33-35#relaunch]
 
 When authoring a local row move after an action succeeds, preserve the row's
 detail fields and update any separate detail dataset and in-memory index before

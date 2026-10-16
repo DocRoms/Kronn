@@ -54,7 +54,7 @@ describe('DiscussionScopeChip', () => {
     api.scope.mockResolvedValue(scope({
       grants: [grant({ project_id: null, project_name: null, source: 'all', access: 'write' })],
       requests: [{
-        id: 'r1', discussion_id: 'd1', project_id: 'p2', project_name: 'api', access: 'write', reason: 'docs',
+        id: 'r1', discussion_id: 'd1', project_id: 'p2', project_name: 'api', requested_name: 'api', access: 'write', reason: 'docs',
         requested_by: '@ClaudeCode', status: 'pending', decided_by: null, decided_at: null, granted_access: null,
         created_at: '2026-10-16T10:00:00Z',
       }],
@@ -93,7 +93,7 @@ describe('DiscussionScopeSection', () => {
   it('lets the human narrow a write request to read', async () => {
     api.scope.mockResolvedValue(scope({
       requests: [{
-        id: 'r1', discussion_id: 'd1', project_id: 'p2', project_name: 'api', access: 'write', reason: 'docs',
+        id: 'r1', discussion_id: 'd1', project_id: 'p2', project_name: 'api', requested_name: 'api', access: 'write', reason: 'docs',
         requested_by: '@ClaudeCode', status: 'pending', decided_by: null, decided_at: null, granted_access: null,
         created_at: '2026-10-16T10:00:00Z',
       }],

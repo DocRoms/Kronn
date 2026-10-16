@@ -2661,7 +2661,7 @@ export type DecideScopeRequest = {
 /**
  * Approve only: the access granted, at most the one asked for.
  */
-access?: ScopeAccess | null, decided_by?: string | null, };
+access?: ScopeAccess | null, };
 
 export type DeclineDiscussionQuestionRequest = { idempotency_key: string,
 /**
@@ -3707,7 +3707,15 @@ requests: Array<DiscussionScopeRequest>,
  */
 fingerprint: string, };
 
-export type DiscussionScopeRequest = { id: string, discussion_id: string, project_id: string, project_name?: string | null, access: ScopeAccess, reason: string, requested_by: string, status: ScopeRequestStatus, decided_by?: string | null, decided_at?: string | null, granted_access?: ScopeAccess | null, created_at: string, };
+export type DiscussionScopeRequest = { id: string, discussion_id: string,
+/**
+ * `None` when the agent named no single project.
+ */
+project_id?: string | null,
+/**
+ * The project as the agent named it.
+ */
+requested_name: string, project_name?: string | null, access: ScopeAccess, reason: string, requested_by: string, status: ScopeRequestStatus, decided_by?: string | null, decided_at?: string | null, granted_access?: ScopeAccess | null, created_at: string, };
 
 /**
  * A row of `discussion_sessions` — one live (or historical)
@@ -4183,7 +4191,7 @@ export type FileScopeRequest = {
 /**
  * The project's name or id.
  */
-project: string, access: ScopeAccess, reason: string, requested_by?: string | null, };
+project: string, access: ScopeAccess, reason: string, };
 
 /**
  * Where a finding stands. `Open` and `Unproven` are distinct on purpose: a
@@ -4428,7 +4436,7 @@ export type GrantDiscussionProjectRequest = {
 /**
  * The project to open; omitted with `all: true`.
  */
-project_id?: string | null, all?: boolean, access: ScopeAccess, granted_by?: string | null,
+project_id?: string | null, all?: boolean, access: ScopeAccess,
 /**
  * Required for every project in write: [`ALL_PROJECTS_WRITE_CONFIRMATION`].
  */
@@ -8077,7 +8085,7 @@ target_agents?: Array<AgentType>, };
  */
 export type ReviseNoteRequest = { content: string, };
 
-export type RevokeDiscussionProjectRequest = { revoked_by?: string | null, reason?: string | null, };
+export type RevokeDiscussionProjectRequest = { reason?: string | null, };
 
 export type RevokeRequest = { authority: string, credential_id: string, reason: string, };
 
@@ -8840,6 +8848,11 @@ scan_paths_explored: Array<string>,
 config_set_aside: string | null, };
 
 export type SetupStep = "Agents" | "ScanPaths" | "Detection" | "Complete";
+
+/**
+ * Validate a workflow's scope as it is now; an empty list clears it.
+ */
+export type SetWorkflowScopeRequest = { entries: Array<WorkflowScopeItem>, };
 
 /**
  * A copy of an agent CLI that PATH order hides behind the one Kronn runs.
@@ -10216,10 +10229,6 @@ project_id?: string,
  */
 step_agents?: { [key in string]: StepAgentOverride }, };
 
-export type UnassignPlanningTaskRequest = { assignee?: PlanningAssigneeInput | null, actor?: PlanningActor, };
-
-export type UnlinkPlanningDiscussionRequest = { discussion_id: string, actor?: PlanningActor, };
-
 /**
  * A doc whose every section is unanchored, and when an agent pass last
  * re-read it (KT-1292).
@@ -10234,6 +10243,10 @@ reviewed_at: string | null,
  * does (it is listed, never queued).
  */
 owned: boolean, };
+
+export type UnassignPlanningTaskRequest = { assignee?: PlanningAssigneeInput | null, actor?: PlanningActor, };
+
+export type UnlinkPlanningDiscussionRequest = { discussion_id: string, actor?: PlanningActor, };
 
 /**
  * An Exec command line that interpolates a template value into inline code
@@ -11203,6 +11216,20 @@ export type WorkflowRunOutcome = "no_op" | "changed";
 export type WorkflowRunSummary = { id: string, status: RunStatus, started_at: string, finished_at: string | null, tokens_used: number, };
 
 export type WorkflowSafety = { sandbox: boolean, max_files?: number | null, max_lines?: number | null, require_approval: boolean, };
+
+/**
+ * The projects a workflow's runs reach (KT-1270 DoD: the scope a workflow
+ * declares at launch). `valid` is false once the workflow changed after a
+ * human validated it: its runs then reach nothing more than their project.
+ */
+export type WorkflowScope = { workflow_id: string, entries: Array<WorkflowScopeEntry>, valid: boolean, validated_by: string | null, validated_at: string | null, };
+
+/**
+ * One project a workflow's runs reach.
+ */
+export type WorkflowScopeEntry = { project_id: string, project_name: string | null, access: ScopeAccess, };
+
+export type WorkflowScopeItem = { project_id: string, access: ScopeAccess, };
 
 export type WorkflowStep = {
 /**
