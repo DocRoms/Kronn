@@ -268,8 +268,8 @@ or `WorkTools`, which implement family loading themselves. They did not test
 the production dispatcher, where `tools_load` was unreachable. Their earlier
 6/6 and 25% saving claims cannot establish the shipped mechanism's benefit.
 `bench_quick_prompt_native_catalogue` now delegates to `KronnToolExecutor`
-against an ephemeral database; its report distinguishes actual queued work
-from completed child inference. [src: file: backend/src/api/agent_quick_prompt_bench.rs:1]
+against an in-memory database; its report separates a tool call that succeeded (`reached`) from the durable effect read back from that database (`persisted`, for the `run` scenario one queued `agent_dispatch_jobs` row); it counts that row and does not read a child inference's result.
+[src: file: backend/src/api/agent_quick_prompt_bench.rs:269-378#bench_quick_prompt_native_catalogue]
 
 Les autres bancs : `bench_tiered_catalogue_across_models` (catalogue par tiers),
 `bench_project_doc_inline_against_pointer` (doc projet),
