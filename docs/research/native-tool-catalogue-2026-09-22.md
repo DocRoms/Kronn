@@ -6,7 +6,7 @@ of six installed local models, it passed 35/42 cells; progressive loading passed
 on a failed action are not a performance improvement at comparable quality.
 `KRONN_TIERED_TOOLS=1` keeps progressive loading available as an opt-in experiment.
 [src: file: docs/research/native-tool-catalogue-2026-09-22.json:44-2756]
-[src: file: backend/src/api/agent_tools.rs:396-409]
+[src: file: backend/src/api/agent_tools.rs:403-411#tiered_tools_enabled]
 
 ## Protocol and reproducibility
 
@@ -32,7 +32,7 @@ bytes. List and resume checks prove the intended handler was reached, not the
 semantic completeness of the final prose. Create/update checks inspect persisted
 values, so a model claiming success after changing the wrong field fails.
 [src: file: backend/src/api/agent_quick_prompt_bench.rs:292#tempdir]
-[src: file: backend/src/api/agent_quick_prompt_bench.rs:139-148#campaign_state]
+[src: file: backend/src/api/agent_quick_prompt_bench.rs:139-164#campaign_state]
 [src: file: backend/src/api/agent_quick_prompt_bench.rs:329-358#KronnToolExecutor]
 
 Scenarios, in order: list accessible Quick Prompts and required variables; launch

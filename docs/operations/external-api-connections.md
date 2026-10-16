@@ -10,7 +10,7 @@ optional Economy, Default and Reasoning models. [src: file: frontend/src/compone
 The required HTTP surface is `GET /v1/models` plus
 `POST /v1/chat/completions`. Kronn stores a base URL without a trailing `/v1`
 and appends the route itself, so an endpoint copied with or without `/v1` reaches
-the same final route. [src: file: backend/src/api/external_api_connections.rs:245-263#normalize_endpoint]
+the same final route. [src: file: backend/src/api/external_api_connections.rs:245-264#normalize_endpoint]
 
 ## Add and test a connection
 
@@ -46,7 +46,7 @@ the same final route. [src: file: backend/src/api/external_api_connections.rs:24
    preset invalidates the prior result; previous mappings stay visible but
    cannot be changed until the new connection state succeeds.
    [src: file: frontend/src/components/settings/ExternalApiSection.tsx:228-228#modelsUnlocked]
-   [src: file: frontend/src/components/settings/ExternalApiSection.tsx:649-656#changeConnection]
+   [src: file: frontend/src/components/settings/ExternalApiSection.tsx:650-656#changeConnection]
 
 The model tiers remain optional: leaving one blank stores no per-connection
 override for that tier. The connection card shows the saved endpoint,
@@ -92,16 +92,17 @@ ready. Testing selected tiers can make billed chat requests; the credential
 check and catalogue request do not select a paid model.
 [src: file: frontend/src/components/settings/ExternalApiSection.tsx:54-61#PRESET_ENDPOINTS]
 [src: file: backend/src/api/external_api_connections.rs:213-224#validate_credential_format]
-[src: file: backend/src/api/external_api_connections.rs:470-482#probe_openrouter_credential]
+[src: file: backend/src/api/external_api_connections.rs:471-482#probe_openrouter_credential]
 
 OpenRouter remains a named external connection internally. Agent selectors show
 its display name and current tier model, and Quick Prompt comparisons persist
 the stable connection identifier. Re-running a comparison keeps the provider
 and reasoning tier while resolving the model currently mapped to that tier, so
 an unavailable or deliberately replaced model is not forced back into a retry.
-[src: file: frontend/src/pages/WorkflowsPage.tsx:116-130#externalConnectionSwitchTarget]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:117-130#externalConnectionSwitchTarget]
 [src: file: backend/src/models/quick.rs:436-440#connection_id]
 [src: file: frontend/src/lib/compareTargets.ts:5-9#CompareTarget]
+[src: file: backend/src/db/workflows.rs:955-1004#connection_tier_model]
 
 ## Credential handling
 
@@ -131,23 +132,23 @@ copy of the configuration and saves it. If that save fails, the failure is
 logged and the API returns an error saying the connection was removed but its
 key was not; the live configuration keeps the key, which must then be deleted
 from the API keys.
-[src: file: backend/src/api/external_api_connections.rs:2045-2069#delete]
+[src: file: backend/src/api/external_api_connections.rs:2048-2072#delete]
 
 ## Use in a discussion
 
 Mention the saved alias, such as `@nvidia` or `@company-proxy`, in the message.
 Kronn resolves named connection mentions before canonicalizing the requested
 agent targets, and carries the exact connection identifier in that target.
-[src: file: backend/src/db/external_api_connections.rs:201-237#target_for_connection]
-[src: file: backend/src/api/discussions/messaging.rs:531-555#resolve_connection_mentions]
+[src: file: backend/src/db/external_api_connections.rs:201-235#target_for_connection]
+[src: file: backend/src/api/discussions/messaging.rs:526-558#resolve_connection_mentions]
 
 The new-discussion form merges configured OpenRouter/Other aliases with native
 agent aliases. Each alias exposes its Economy, Default and Reasoning model in
 the shared selector, and creation persists the connection-qualified initial
 target rather than only the generic `Custom` wire type.
-[src: file: frontend/src/components/NewDiscussionForm.tsx:216-227#launchTargets]
+[src: file: frontend/src/components/NewDiscussionForm.tsx:219-230#launchTargets]
 [src: file: frontend/src/lib/externalAgentIdentity.ts:63-79#externalAgentTargets]
-[src: file: frontend/src/components/NewDiscussionForm.tsx:643-651#initialTargets]
+[src: file: frontend/src/components/NewDiscussionForm.tsx:646-653#initialTargets]
 
 Discussion headers, messages and comparison views recover the provider name
 from that durable `MessageTarget.connection_id`; editable titles are not the
@@ -203,8 +204,8 @@ immediately refreshes the global agent selectors, and startup projects any
 previously saved connection values into the compatibility configuration still
 read by the runner. This prevents selector tooltips and executions from keeping
 stale pre-migration model names. [src: file: backend/src/api/external_api_connections.rs:2009-2013#sync_runtime_config]
-[src: file: backend/src/db/external_api_connections.rs:21-47#sync_runtime_config]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:1795-1800#onModelTiersChanged]
+[src: file: backend/src/db/external_api_connections.rs:21-46#sync_runtime_config]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:1791-1796#onModelTiersChanged]
 
 After upgrading, verify both migrated cards, run their connection tests and
 confirm the intended models for all three tiers before using them.
@@ -222,21 +223,24 @@ the runtime-resolution guide.
 
 - **No models:** confirm that `GET <base>/v1/models` returns a JSON `data` array
   from the network namespace where the Kronn backend runs.
-  [src: file: backend/src/api/external_api_connections.rs:1212-1213#fetch_catalogue]
+  [src: file: backend/src/api/external_api_connections.rs:1212-1259#fetch_catalogue]
 - **Authentication error:** re-enter the key. Kronn intentionally refuses to
   reuse a stored credential when the preset or canonical endpoint no longer
-  matches the saved row. [src: file: backend/src/api/external_api_connections.rs:1487-1499#saved_connection]
+  matches the saved row. [src: file: backend/src/api/external_api_connections.rs:1488-1500#saved_connection]
 - **HTTP error during test:** the model catalogue may be public while chat is
   restricted. A connection is considered usable only when both the catalogue
-  and, when a key is supplied, the authenticated chat probe succeed.
+  and, when a key is supplied, the authenticated chat probe succeed. On a
+  LiteLLM proxy a refused tier model is reported per tier instead of failing the
+  connection.
   [src: file: backend/src/api/external_api_connections.rs:274-285#probe_models]
+  [src: file: backend/src/api/external_api_connections.rs:369-375#probe_tier_models]
 - **The test failed but the connection works:** fixed in 0.13.0. The probe used
   to send a model of its own choosing rather than one of the three the operator
   had configured, so a connection that only serves the models it was set up for
   failed a test it should have passed. The probe now chats with a configured
   model when one is set, and an HTTP failure is reported with a hint keyed to the status and the
   model actually tried — not a bare code.
-  [src: file: backend/src/api/external_api_connections.rs:1532-1549#requested_models]
+  [src: file: backend/src/api/external_api_connections.rs:1532-1550#requested_models]
   [src: file: backend/src/api/external_api_connections.rs:457-469#http_error_hint]
 - **An agent cannot find the connection to generate an image or a video:**
   fixed in 0.13.2. In a plain discussion, `agent_list`, the only place the
@@ -245,11 +249,11 @@ the runtime-resolution guide.
   tried instead. The catalogue now answers in every discussion, and a
   generation accepts the connection's id, alias or display name; a refusal
   lists the connections that can generate the requested modality.
-  [src: file: backend/src/api/orchestration.rs:11942-11948#task_worker_catalogue]
-  [src: file: backend/scripts/disc-introspection-mcp.py:6059-6064#call_agent_list]
+  [src: file: backend/src/api/orchestration.rs:12035-12041#task_worker_catalogue]
+  [src: file: backend/scripts/disc-introspection-mcp.py:6061-6076#call_agent_list]
   [src: file: backend/src/db/external_api_connections.rs:144-162#resolve]
-  [src: file: backend/src/api/media.rs:150-189#ConnectionReference]
+  [src: file: backend/src/api/media.rs:150-206#ConnectionReference]
   [src: file: backend/src/api/media.rs:385-414#usable_connections]
 - **Wrong model after an endpoint edit:** test again before selecting tiers;
   model choices are tied to the exact tested endpoint and credential state.
-  [src: file: frontend/src/components/settings/ExternalApiSection.tsx:649-656#changeConnection]
+  [src: file: frontend/src/components/settings/ExternalApiSection.tsx:650-656#changeConnection]

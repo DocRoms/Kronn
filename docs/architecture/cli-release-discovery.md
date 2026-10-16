@@ -9,6 +9,7 @@ refresh. No release number is a compiled-in authority.
 [src: file: backend/src/core/versions.rs:13-16#CACHE_TTL]
 [src: file: backend/src/core/versions.rs:210-234#refresh_if_stale]
 [src: file: backend/src/api/agents.rs:36-50#version_check]
+[src: file: backend/src/core/versions.rs:254-264#begin_refresh]
 
 The adapters query npm's `/{package}/latest` version document (not its unbounded
 all-versions document), PyPI JSON, or GitHub's latest-release endpoint. Each
@@ -18,7 +19,9 @@ Redirects are refused. Invalid numeric releases, prereleases and GitHub drafts
 are not accepted. A source failure keeps the last valid release and adds an
 explicit error; unknown is never presented as proof of being up to date.
 [src: file: backend/src/core/versions.rs:36-43#Source]
+[src: file: backend/src/core/versions.rs:14-16#REQUEST_TIMEOUT]
 [src: file: backend/src/core/versions.rs:293-426#refresh_all]
+[src: file: backend/src/core/versions.rs:266-282#apply_results]
 [src: url: https://github.com/npm/registry/blob/main/docs/REGISTRY-API.md]
 
 The shared refresh owns its lifetime independently of any HTTP caller.
@@ -29,6 +32,7 @@ verification: after an error it can accompany an older retained release.
 The cache is not durable across backend restarts.
 [src: file: backend/src/core/versions.rs:106-163#start]
 [src: file: backend/src/core/versions.rs:236-282#wait_for_refresh]
+[src: file: backend/src/core/versions.rs:165#CACHE]
 
 RTK and ccUsage use this same release snapshot. Their installed versions are
 separate read-only `--version` probes, each limited to three seconds and eight
@@ -54,12 +58,17 @@ failures do not erase the displayed snapshot. An upgrade command is only shown
 for the user to run explicitly.
 [src: file: frontend/src/components/settings/CompressionSection.tsx:89-121#versionRequestId]
 [src: file: frontend/src/components/settings/CompressionSection.tsx:268-287#config.releaseCheckFailed]
+[src: file: frontend/src/components/settings/CompressionSection.tsx:398-431#showUpdateModal]
 
 Regression coverage includes overlapping/cancelled callers, cache TTL and
 timeouts, runtime shutdown, local HTTP error/oversize/chunked fixtures, fake
 CLI arguments and bounded output, the real HTTP envelope, and Settings rechecks.
 The shared frontend API mock includes the generated RTK response shape because
 the version read is no longer conditional on an installed RTK binary.
-[src: file: backend/src/core/versions.rs:512-722#tests]
-[src: file: backend/tests/api_tests.rs:202-233#cli_release_recheck_returns_agent_metadata_and_distinct_rtk_ccusage_versions]
+[src: file: backend/src/core/versions.rs:533-565#installed_probe_only_requests_version_and_bounds_process_and_output]
+[src: file: backend/src/core/versions.rs:579-651#concurrent_callers_share_refresh_even_after_first_waiter_is_cancelled]
+[src: file: backend/src/core/versions.rs:653-721#http_responses_are_bounded_and_errors_remain_explicit]
+[src: file: backend/src/core/versions.rs:816-825#refresh_start_is_deduplicated_and_respects_ttl]
+[src: file: backend/tests/api_tests.rs:202-268#cli_release_recheck_returns_agent_metadata_and_distinct_rtk_ccusage_versions]
+[src: file: frontend/src/components/settings/__tests__/CompressionSection.test.tsx:261-278#versionCheckMock]
 [src: file: frontend/src/test/apiMock.ts:618-623#RtkVersionInfo]

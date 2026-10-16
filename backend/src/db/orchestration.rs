@@ -1570,7 +1570,11 @@ pub fn launch_single_task(
             None,
             Some(TaskExecutionStatus::Pending),
             actor,
-            serde_json::json!({ "task_id": input.task_id, "kind": "single_task" }),
+            serde_json::json!({
+                "task_id": input.task_id,
+                "kind": "single_task",
+                "worker_dod": launch_dod_snapshot(conn, input)?,
+            }),
         )?;
 
         let execution = get_task_execution(conn, &id)?
@@ -1581,6 +1585,67 @@ pub fn launch_single_task(
             deduplicated: false,
         })
     })
+}
+
+/// KT-1291 — the `{id, sentence}` of every DoD item the execution is launched
+/// against, recorded in its `created` event: the ids alone cannot say WHAT a
+/// requirement was once the principal removes it from the task.
+fn launch_dod_snapshot(
+    conn: &Connection,
+    input: &LaunchSingleTaskInput,
+) -> Result<serde_json::Value> {
+    let Some(ids) = input.worker_dod_ids.as_ref() else {
+        return Ok(serde_json::Value::Array(Vec::new()));
+    };
+    let mut statement = conn.prepare(
+        "SELECT id, sentence FROM planning_task_dod_items
+          WHERE task_id = ?1 ORDER BY position, id",
+    )?;
+    let rows = statement
+        .query_map(params![input.task_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(serde_json::Value::Array(
+        rows.into_iter()
+            .filter(|(id, _)| ids.contains(id))
+            .map(|(id, sentence)| serde_json::json!({ "id": id, "sentence": sentence }))
+            .collect(),
+    ))
+}
+
+/// KT-1291 — the sentence the execution was launched with for DoD item
+/// `dod_id`; `None` for an execution launched before the snapshot recorded
+/// sentences.
+pub fn execution_dod_sentence(
+    conn: &Connection,
+    exec_id: &str,
+    dod_id: &str,
+) -> Result<Option<String>> {
+    let payloads = conn
+        .prepare(
+            "SELECT changes_json FROM task_execution_events
+              WHERE task_execution_id = ?1 AND action = 'created'
+              ORDER BY created_at ASC, rowid ASC",
+        )?
+        .query_map(params![exec_id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for payload in payloads {
+        let Ok(changes) = serde_json::from_str::<serde_json::Value>(&payload) else {
+            continue;
+        };
+        let found = changes
+            .get("worker_dod")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .find(|item| item.get("id").and_then(serde_json::Value::as_str) == Some(dod_id))
+            .and_then(|item| item.get("sentence").and_then(serde_json::Value::as_str));
+        if let Some(sentence) = found {
+            return Ok(Some(sentence.to_string()));
+        }
+    }
+    Ok(None)
 }
 
 /// Atomically add one ordered, policy-compliant task to an existing campaign.
@@ -1699,6 +1764,7 @@ pub fn launch_task_in_run(
                 "kind": "campaign",
                 "worker_model": input.worker_model,
                 "worker_profile_id": input.worker_profile_id,
+                "worker_dod": launch_dod_snapshot(conn, input)?,
             }),
         )?;
         let execution = get_task_execution(conn, &id)?
@@ -3305,11 +3371,18 @@ pub struct ReviewCheckpoint<'a> {
     /// dispatch triggered by the findings message. Mutually exclusive with
     /// `reactivation` (which is the joined-CLI handshake).
     pub native_dispatch: Option<NativeReworkDispatch<'a>>,
+    /// approve only (KT-1291): `(dod_id, carried_to, evidence)` of the DoD items the
+    /// principal carries to another ticket. They are detached INSIDE the checkpoint
+    /// transaction, so a refused or failed checkpoint detaches nothing.
+    pub carried_dod: &'a [(String, String, String)],
     pub actor: &'a OrchestrationActor,
 }
 
 /// The verdict of the review checkpoint.
 pub enum ReviewCheckpointOutcome {
+    /// approve refused (KT-1291): a carrier of a carried DoD item no longer qualifies.
+    /// Nothing was persisted — no review, no detached item.
+    DodCarryRefused(String),
     /// approve committed: the ReviewDecision is persisted and the execution is `Approved`.
     Approved,
     /// request_changes committed: decision persisted, `review_rounds` bumped, findings posted
@@ -3493,6 +3566,25 @@ pub fn commit_review_checkpoint(
 
     match input.verdict {
         ReviewVerdict::Approve => {
+            // (1b) KT-1291 — carried DoD items leave the task in this same
+            // transaction: a refusal, a lost CAS or a failed write below rolls
+            // them back with the review row.
+            if !input.carried_dod.is_empty() {
+                let task_id: String = tx.query_row(
+                    "SELECT task_id FROM task_executions WHERE id = ?1",
+                    params![input.exec_id],
+                    |r| r.get(0),
+                )?;
+                if let Some(detail) = crate::db::planning::carry_dod_items(
+                    &tx,
+                    &task_id,
+                    input.exec_id,
+                    input.carried_dod,
+                    input.actor,
+                )? {
+                    return Ok(ReviewCheckpointOutcome::DodCarryRefused(detail));
+                }
+            }
             // (2) AwaitingReview → Approved (guarded CAS + journal; the CAS is the sole
             // anti-race authority). Approved is NOT terminal: KT-320 resumes it to
             // Integrating.
@@ -6084,13 +6176,23 @@ fn notify_principal_of_timeout(
             "review_wait_timeout",
             format!(
                 "Une livraison attend ta revue{} sans décision. Rien n'a été approuvé, rejeté \
-                 ni annulé : la livraison, le worktree et la branche sont intacts. Relis-la puis \
-                 appelle `task_exec_review` (approuver ou demander des changements), ou \
-                 `task_exec_reassign` / `task_exec_cancel` si le travail doit être repris.",
+                 ni annulé : l'exécution reste en `AwaitingReview`, la livraison, le worktree \
+                 et la branche sont intacts. Relis-la puis appelle `task_exec_review` \
+                 (approuver ou demander des changements), ou `task_exec_reassign` / \
+                 `task_exec_cancel` si le travail doit être repris.",
                 minutes
                     .map(|minutes| format!(" depuis {minutes} min"))
                     .unwrap_or_default()
             ),
+        ),
+        ExecutionTimeoutKind::TotalDuration => (
+            "total_duration_timeout",
+            "La durée totale impartie au run est dépassée alors qu'une livraison attend ta \
+             revue. Rien n'a été approuvé, rejeté ni annulé : l'exécution reste en \
+             `AwaitingReview`, la livraison, le worktree et la branche sont intacts. Relis-la \
+             puis appelle `task_exec_review` (approuver ou demander des changements), ou \
+             `task_exec_reassign` / `task_exec_cancel` si le travail doit être repris."
+                .to_string(),
         ),
         _ => return Ok(()),
     };
@@ -6225,6 +6327,54 @@ pub fn apply_execution_timeout(
             notify_principal_of_timeout(conn, exec_id, kind, timeout_secs)?;
             return Ok(true);
         }
+        let delivered = execution.status == TaskExecutionStatus::AwaitingReview;
+        if kind == ExecutionTimeoutKind::ReviewWait
+            || (kind == ExecutionTimeoutKind::TotalDuration && delivered)
+        {
+            // KT-1293 — the delivery is untouched and no review is written: the
+            // principal is alerted, and only the principal decides. The row
+            // therefore stays `AwaitingReview`, the one state `task_exec_review`
+            // accepts, so the alert's own advice (approve / request changes) is
+            // still honoured. Escalating here locked the principal out of the
+            // review. The total-duration clock takes the same road for a
+            // delivered attempt; the review clock only means something while a
+            // delivery waits.
+            if !delivered {
+                conn.execute(
+                    "UPDATE task_execution_recovery SET review_deadline_at = NULL, \
+                            updated_at = ?2 WHERE task_execution_id = ?1",
+                    params![exec_id, Utc::now().to_rfc3339()],
+                )?;
+                return Ok(false);
+            }
+            record_reconciliation_event(
+                conn,
+                "execution",
+                exec_id,
+                label,
+                serde_json::json!({ "status": execution.status.as_str() }),
+            )?;
+            // Disarming the review deadline makes the alert fire once; the
+            // total-duration clock is dropped like on every human wait.
+            conn.execute(
+                "UPDATE task_execution_recovery SET activity_deadline_at = NULL, \
+                        review_deadline_at = NULL, total_deadline_at = NULL, \
+                        human_wait_started_at = NULL, recovery_action = 'await_review', \
+                        recovery_reason = ?2, pending = 0, updated_at = ?3 \
+                 WHERE task_execution_id = ?1",
+                params![exec_id, label, Utc::now().to_rfc3339()],
+            )?;
+            let waited_secs = if kind == ExecutionTimeoutKind::ReviewWait {
+                let policy_secs = get_resilience_policy(conn, &execution.orchestration_run_id)?
+                    .review_timeout_secs
+                    .map(i64::from);
+                Some(effective_review_secs(policy_secs))
+            } else {
+                None
+            };
+            notify_principal_of_timeout(conn, exec_id, kind, waited_secs)?;
+            return Ok(true);
+        }
         record_reconciliation_event(
             conn,
             "execution",
@@ -6254,21 +6404,6 @@ pub fn apply_execution_timeout(
              WHERE task_execution_id = ?1",
             params![exec_id, label, Utc::now().to_rfc3339()],
         )?;
-        if kind == ExecutionTimeoutKind::ReviewWait
-            && execution.status == TaskExecutionStatus::AwaitingReview
-        {
-            // KT-1247 — the delivery is untouched and no review is written: the
-            // principal is alerted, and only the principal decides.
-            let policy_secs = get_resilience_policy(conn, &execution.orchestration_run_id)?
-                .review_timeout_secs
-                .map(i64::from);
-            notify_principal_of_timeout(
-                conn,
-                exec_id,
-                kind,
-                Some(effective_review_secs(policy_secs)),
-            )?;
-        }
         Ok(true)
     })
 }

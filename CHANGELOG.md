@@ -21,6 +21,17 @@ Release notes for 0.9.3 and earlier are available in the
   or the step's sources changed since. After the pass the doc is stamped
   whether or not the agent added an anchor: the plan is clean again and the
   pass does not come back. The panel shows « re-read on <date> » for each.
+- A principal can approve a delivery with a DoD item carried to another ticket
+  (KT-1291): `dod_verifications: [{dod_id, met: false, carried_to: "KT-1290",
+  evidence}]`. The approve integrates through the normal path; the item is
+  detached from the task and a `dod_carried` event names the carrier. The
+  carrier must exist, be open, share a project with the task and state the
+  requirement the worker was briefed with (the execution records its DoD
+  sentences at launch, and a `task_update` records the items it removes), or
+  the approve is refused with the cause; the detach runs in the review
+  checkpoint's transaction. A manifest that references a DoD id removed or
+  carried after the delivery is judged against the execution's launch-time DoD
+  snapshot instead of being refused as an unknown id.
 - A `#symbol` citation anchor that names a definition the cited range
   contains must open that range (KT-1074). When the range holds a definition
   of the symbol (`fn`, `def`, `class`, `struct`, `enum`, `const`,
@@ -519,6 +530,19 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A review-wait timeout no longer locks the principal out of the review
+  (KT-1293). The watchdog used to move the unreviewed delivery to `Escalated`
+  while its alert told the principal to call `task_exec_review`, which only
+  accepts `AwaitingReview`. The execution now stays `AwaitingReview`
+  (`recovery_reason` `review_wait_timeout`, the clock disarmed so the alert is
+  posted once): the principal can still approve (integration runs normally) or
+  request changes (the worker gets the comment) on the unchanged delivery, and
+  `task_exec_status` keeps naming `task_exec_review`. A total-duration deadline
+  that expires on a delivered attempt takes the same road
+  (`total_duration_timeout`, one alert, provider run left alone) instead of the
+  silent `Escalated`. Because the row is no longer `Escalated`, an overdue
+  review no longer puts the campaign in `AwaitingHuman` nor blocks scheduling
+  (the escalated counts and `sync_campaign_human_gate` no longer see it).
 - An audit step run through the ACP route runs instead of asking the human
   what to do (KT-1278). An ACP session has no system channel, so the context
   and the step reach the model as one message, and a step prompt that ended on

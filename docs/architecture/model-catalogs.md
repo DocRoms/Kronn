@@ -18,7 +18,8 @@ The canonical key is `(runtime_target_id, model_id)`:
 Consequently two HTTP connections may expose the same provider `model_id`
 while keeping independent freshness, capabilities and tier assignments.
 [src: file: backend/src/db/sql/162_model_catalog.sql:1-25#model_catalog_entries]
-[src: file: backend/src/db/model_catalog.rs:27-52#canonical_id]
+[src: file: backend/src/db/model_catalog.rs:27-30#canonical_id]
+[src: file: backend/src/db/model_catalog.rs:48-50#http_runtime_target_id]
 
 ## Resolution and reconciliation
 
@@ -30,14 +31,18 @@ updates technical capabilities from the live source, marks disappeared models
 Failed refreshes keep every last-known row intact, downgrade `live` provenance
 to visibly stale `cached`, and record a normalized target-level error. A
 provider failure does not claim that an individual model disappeared.
-[src: file: backend/src/db/model_catalog.rs:555-584#reconcile_live]
-[src: file: backend/src/db/model_catalog.rs:732-760#record_refresh_failure]
+[src: file: backend/src/models/model_catalog.rs:1-8#Resolution]
+[src: file: backend/src/db/model_catalog.rs:556-730#reconcile_live]
+[src: file: backend/src/db/model_catalog.rs:732-761#record_refresh_failure]
 
 The former runtime literals are inserted once during startup and the runner's
 hot-path tier lookup is then projected from catalog rows. Editing the manual
 catalog refreshes that projection; removing a migrated/manual row therefore
 does not make a hidden hard-coded fallback reappear.
-[src: file: backend/src/core/model_catalog/mod.rs:112-146#refresh_runtime_cache]
+[src: file: backend/src/core/model_catalog/mod.rs:112-138#refresh_runtime_cache]
+[src: file: backend/src/core/model_catalog/mod.rs:140-260#migrate_hardcoded_catalog_once]
+[src: file: backend/src/api/model_catalog.rs:242-273#update_manual]
+[src: file: backend/src/api/model_catalog.rs:275-301#delete_manual]
 [src: file: backend/src/agents/runner.rs:3441-3460#resolve_model_flag]
 
 ## Discovery boundaries
@@ -52,9 +57,15 @@ does not make a hidden hard-coded fallback reappear.
   `/v1/videos/models`); they are merged by exact model id and persisted under
   `http:<connection-id>`. NVIDIA capability metadata is read from its model
   records. A saved media slot never invents a capability.
-[src: file: backend/src/core/model_catalog/acp_discovery.rs:80-108#discover_with_transport]
-[src: file: backend/src/core/model_catalog/codex_discovery.rs:119-205#run_handshake_and_list]
-[src: file: backend/src/api/external_api_connections.rs:285-324#probe_models]
+[src: file: backend/src/core/model_catalog/acp_discovery.rs:80-109#discover_with_transport]
+[src: file: backend/src/core/model_catalog/codex_discovery.rs:95-121#discover]
+[src: file: backend/src/core/model_catalog/codex_discovery.rs:123-208#run_handshake_and_list]
+[src: file: backend/src/api/external_api_connections.rs:274-441#probe_models]
+[src: file: backend/src/api/external_api_connections.rs:1306-1336#fetch_capability_catalogue]
+[src: file: backend/src/api/external_api_connections.rs:1338-1350#catalog_declares_modality]
+[src: file: backend/src/api/external_api_connections.rs:1352-1405#catalog_models_from_body]
+[src: file: backend/src/api/external_api_connections.rs:1407-1422#merge_catalog]
+[src: file: backend/src/core/model_catalog/mod.rs:657-672#reconcile_http_catalog]
 
 ## Where OpenCode's models come from (KT-928)
 
@@ -70,8 +81,9 @@ costs no inference. The reader keeps only each value's id and display name;
 nothing else of the response, and no OpenCode config or credential file, is
 read into the catalogue. A select option may also group its values (ACP allows
 both shapes): groups are flattened, a value offered twice is kept once.
-[src: file: backend/src/core/model_catalog/acp_discovery.rs:121-158#models_from_config_options]
-[src: file: backend/src/acp.rs:439-446#collect_config_values]
+[src: file: backend/src/core/model_catalog/acp_discovery.rs:122-158#models_from_config_options]
+[src: file: backend/src/acp.rs:473-478#is_model_option_id]
+[src: file: backend/src/acp.rs:440-471#collect_config_values]
 
 **The list depends on the directory.** OpenCode loads its providers per working
 directory: the user-level config (`opencode.json[c]` in its config directory),
@@ -83,7 +95,7 @@ a project's own config — typically a local Ollama — was offered to every run
 that project and appeared in no selector. This, not a filter or a cache, is why
 models were missing: the Config UI applies no filter to what the catalogue
 holds (`catalogModelOptions`).
-[src: file: frontend/src/lib/modelCatalogSelection.ts:95-119#catalogModelOptions]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:95-146#catalogModelOptions]
 
 OpenCode discovery now runs in two kinds of directory at once, inside the
 single 20 s discovery bound: the neutral one, and every registered project that
@@ -116,8 +128,9 @@ that lists no models keeps its own default: there is nothing to match. A
 session that lists models without the chosen one used to be left on OpenCode's
 own default while every screen showed the chosen model; the launch is now
 refused, naming the model, before any prompt is sent.
-[src: file: backend/src/agents/runner.rs:5470-5504#offers_model_catalogue]
-[src: file: backend/src/acp.rs:1886-1916#select_model]
+[src: file: backend/src/agents/runner.rs:5445-5499#offers_model_catalogue]
+[src: file: backend/src/acp.rs:1875-1884#offers_model_catalogue]
+[src: file: backend/src/acp.rs:1886-1917#select_model]
 
 ## Launch safety and UI
 
@@ -134,10 +147,10 @@ model still recorded `Available`. The cached provenance and error remain visible
 this is permission to attempt execution, not proof of account access. Missing CLI,
 authentication failures and unavailable/unknown identities are not covered by
 that exception, and other runtimes keep their existing failure policy.
-[src: file: backend/src/core/model_catalog/mod.rs:1083-1098#retained_claude_model]
-[src: file: backend/src/api/discussions/streaming.rs:4150-4157#preflight_resolve]
-[src: file: backend/src/workflows/runner.rs:1915-1953#preflight_resolve]
-[src: file: backend/src/workflows/steps.rs:1174-1213#preflight_workflow_launch]
+[src: file: backend/src/core/model_catalog/mod.rs:1083-1114#retained_claude_model]
+[src: file: backend/src/api/discussions/streaming.rs:4150-4196#preflight_resolve]
+[src: file: backend/src/workflows/runner.rs:1884-1969#preflight_resolve]
+[src: file: backend/src/workflows/steps.rs:1174-1227#preflight_workflow_launch]
 
 A comparison's TARGET decides which connection its run uses (KT-672). A row
 that names a connection uses it; a row on another agent uses none, even when
@@ -157,9 +170,12 @@ workflow surfaces. It reads the shared snapshot, shows provenance, and leaves
 known unavailable choices visible but disabled. Settings exposes refresh plus
 manual create/update/delete, including chat/image/video capabilities and
 reasoning modes.
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:61-90#useModelCatalogSnapshot]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:363-382#unavailable]
-[src: file: frontend/src/components/settings/ModelCatalogSection.tsx:184-222#createManual]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:90#useModelCatalogSnapshot]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:363-405#unavailable]
+[src: file: frontend/src/components/settings/ModelCatalogSection.tsx:182-211#createManual]
+[src: file: frontend/src/components/settings/ModelCatalogSection.tsx:212-229#deleteManual]
+[src: file: frontend/src/components/settings/ModelCatalogSection.tsx:327-337#capability]
+[src: file: frontend/src/components/settings/ModelCatalogSection.tsx:366-375#refresh]
 
 ## Reasoning-effort presets and transmission (KT-646)
 
@@ -195,16 +211,17 @@ candidate differs from an advertised mode only by case or whitespace, the
 refusal names that mode instead of the generic "catalogue does not list
 that combination" message, which otherwise reads as if the mode is entirely
 absent (KT-656).
-[src: file: backend/src/agents/runner.rs:3479-3621#agent_supports_reasoning_effort]
+[src: file: backend/src/agents/runner.rs:3479-3657#agent_supports_reasoning_effort]
 The direct Codex runner still starts a fresh execution on each turn; its ACP
 adapter supports thread resume. Claude supports resume on both routes. Effort
 is transmitted on every supported fresh/resumed invocation; this feature does
 not add resume to the direct Codex runner. Delegated task workers take the
 same route as ordinary turns, with their isolated worker arguments.
-[src: file: backend/src/agents/runner.rs:12902-12936#model_reasoning_effort]
+[src: file: backend/src/agents/runner.rs:12832-12849#reasoning_effort]
+[src: file: backend/src/agents/runner.rs:12902-12933#model_reasoning_effort]
 [src: file: backend/src/acp/claude_adapter.rs:311-324#reasoning_effort]
 [src: file: backend/src/acp/codex_adapter.rs:462-501#model_reasoning_effort]
-[src: file: backend/src/agents/runner.rs:4830-4856#adapter_task_worker_args]
+[src: file: backend/src/agents/runner.rs:4830-4858#adapter_task_worker_args]
 
 Both standalone and embedded-desktop startup await catalog bootstrap before
 starting workflows or serving requests. Even after the one-time migration is
@@ -213,9 +230,9 @@ durable catalog. Bootstrap failures are logged; an unavailable projection
 does not silently authorize an effort. Discussion preflight may refresh the
 catalog afterward, but the first scheduled workflow does not depend on opening
 Settings first.
-[src: file: backend/src/main.rs:286-290#migrate_hardcoded_catalog_once]
-[src: file: desktop/src-tauri/src/main.rs:689-695#migrate_hardcoded_catalog_once]
-[src: file: backend/src/core/model_catalog/mod.rs:249-260#refresh_runtime_cache]
+[src: file: backend/src/main.rs:285-289#migrate_hardcoded_catalog_once]
+[src: file: desktop/src-tauri/src/main.rs:693-697#migrate_hardcoded_catalog_once]
+[src: file: backend/src/core/model_catalog/mod.rs:140-260#refresh_runtime_cache]
 
 A Quick Prompt's explicit `agent_settings.reasoning_effort` is copied onto a
 hydrated workflow step the same way its `agent_settings.model` already is
@@ -238,14 +255,19 @@ with an actionable `validation` error (choose a model or clear the effort),
 not a database error. This also applies to previously saved QPs whose effort
 was formerly inert; ignoring it silently would claim a setting was applied
 when it was not. QPs with no effort or only whitespace keep the old behavior.
-[src: file: backend/src/db/discussion_effort.rs:9-55#UnresolvedQuickPromptEffort]
-[src: file: backend/src/api/discussions/crud.rs:735-742#UnresolvedQuickPromptEffort]
-[src: file: backend/src/api/discussions/streaming.rs:4063-4070#for_run]
+[src: file: backend/src/db/discussion_effort.rs:9-54#UnresolvedQuickPromptEffort]
+[src: file: backend/src/db/sql/176_discussion_effort_snapshots.sql:1-8#discussion_effort_snapshots]
+[src: file: backend/src/api/discussions/crud.rs:609-631#capture]
+[src: file: backend/src/api/discussions/crud.rs:734-742#UnresolvedQuickPromptEffort]
+[src: file: backend/src/api/discussions/streaming.rs:4041-4094#for_run]
+[src: file: backend/src/db/discussion_effort.rs:56-76#for_run]
 
 These snapshots are local execution state, not a portable QP setting. Exporting
 or importing a QP preserves its editable `agent_settings`, while it does not
 reconstruct historic discussion launch overrides.
-[src: file: backend/src/db/discussion_effort.rs:1-15#Immutable]
+[src: file: backend/src/db/discussion_effort.rs:1#Immutable]
+[src: file: backend/src/models/quick.rs:794-804#QuickPromptExportEnvelope]
+[src: file: backend/src/api/quick_prompts.rs:359-430#export_qp]
 
 Settings → Agents exposes an effort selector per tier for Claude and Codex.
 It derives choices from the selected model's catalog entry, retains an invalid saved value only as an
@@ -253,8 +275,9 @@ explained disabled option, and clears an incompatible effort in the same save
 that changes the model. Even without available modes, the control remains
 usable to clear an invalid saved effort. Other runtime cards state that effort
 is unsupported.
-[src: file: frontend/src/components/settings/AgentsSection.tsx:200-236#saveTierPreference]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:1333-1411#renderEffortSelect]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:200-245#saveTierPreference]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:1333-1362#renderEffortSelect]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:1406-1411#supportsEffort]
 
 ## Migration and test invariants
 
@@ -264,9 +287,12 @@ preceding registered migration (161, the ACP session migration). Tests pin manua
 disappearance/reappearance, refresh errors, cache staleness, provider media
 capability isolation and same-model isolation across HTTP connections.
 Generated TypeScript remains owned by `make typegen`.
-[src: file: backend/src/db/migrations.rs:1929-1941#model_catalog_upgrades_from_its_immediate_predecessor]
-[src: file: backend/src/db/model_catalog.rs:1311-1340#disappearance_downgrades_to_cached_never_deletes]
-[src: file: backend/src/db/model_catalog.rs:1504-1505#identical_http_model_ids_are_isolated_by_connection]
+[src: file: backend/src/db/migrations.rs:1932-1966#model_catalog_upgrades_from_its_immediate_predecessor]
+[src: file: backend/src/db/sql/162_model_catalog.sql:32-42#model_catalog_refresh_log]
+[src: file: backend/src/db/model_catalog.rs:1088-1134#reconcile_live_promotes_manual_entry_preserving_overrides]
+[src: file: backend/src/db/model_catalog.rs:1136-1158#reconcile_live_is_idempotent]
+[src: file: backend/src/db/model_catalog.rs:1310-1398#disappearance_downgrades_to_cached_never_deletes]
+[src: file: backend/src/db/model_catalog.rs:1503-1522#identical_http_model_ids_are_isolated_by_connection]
 [src: file: docs/testing-quality.md:15-16#typegen]
 
 ## OpenCode Zen: cost hint and privacy note (KT-543)
@@ -286,9 +312,9 @@ operator-overridable through the same manual-entry path as
 `UpsertManualModelRequest` preserves the existing value (COALESCE) instead
 of clearing it, so an unrelated edit (e.g. a rename) cannot silently wipe an
 auto-detected or previously-confirmed assessment.
-[src: file: backend/src/db/model_catalog.rs:523-530#derive_opencode_zen_overlay]
-[src: file: backend/src/db/model_catalog.rs:375-410#update_manual]
+[src: file: backend/src/db/model_catalog.rs:512-543#derive_opencode_zen_overlay]
+[src: file: backend/src/db/model_catalog.rs:371-438#update_manual]
 [src: file: backend/src/db/sql/164_model_catalog_cost_privacy.sql:1-7#cost_hint]
-[src: file: backend/src/models/model_catalog.rs:202-226#UpsertManualModelRequest]
+[src: file: backend/src/models/model_catalog.rs:195-226#UpsertManualModelRequest]
 [src: url: https://opencode.ai/docs/zen/]
 [src: url: https://opencode.ai/zen/v1/models]

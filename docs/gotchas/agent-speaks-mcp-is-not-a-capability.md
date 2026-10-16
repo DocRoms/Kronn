@@ -1,21 +1,21 @@
 # `agent_speaks_mcp` says how tools are presented, not whether an agent has any
 
-`agent_speaks_mcp` lists only Claude Code, Codex, Gemini CLI, Kiro and Copilot.
+`agent_speaks_mcp` lists only Claude Code, Codex, OpenCode, Gemini CLI, Kiro and Copilot.
 Reading it as "these are the agents with tools" is wrong, and leads to
 conclusions that do not hold.
-[src: file: backend/src/api/disc_prompts.rs:391]
+[src: file: backend/src/api/disc_prompts.rs:455-462#agent_speaks_mcp]
 
 The flag decides whether the prompt DESCRIBES the MCP surface in prose. HTTP
 agents get their tools DECLARED on the request's `tools` field instead —
 deliberately, because describing them in prose taught the model to hallucinate
-calls it did not have. [src: file: backend/src/agents/runner.rs:2767]
+calls it did not have. [src: file: backend/src/agents/runner.rs:4058-4062#is_http_chat_agent]
 
 So an HTTP agent that the flag excludes still has a catalogue, `disc_read`
 included, and can read a discussion back on its own.
-[src: file: backend/src/api/agent_tools.rs:598]
+[src: file: backend/src/api/agent_tools.rs:1329-1348#disc_read]
 
 Vibe likewise has MCP: Kronn synchronises its servers into `.vibe/config.toml`.
-[src: file: backend/src/core/mcp_scanner.rs:1350]
+[src: file: backend/src/core/mcp_scanner.rs:1918-2038#sync_vibe_project_config]
 
 ## Why it matters
 
