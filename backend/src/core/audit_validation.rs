@@ -243,7 +243,7 @@ fn canonical_child(parent: &Path, child: &Path) -> Result<PathBuf> {
     Ok(child)
 }
 
-fn replace_current_status(lines: &mut [String], status: &str) -> Result<()> {
+fn replace_current_status(lines: &mut Vec<String>, status: &str) -> Result<()> {
     let body_start = if lines.first().is_some_and(|line| line.trim() == "---") {
         lines
             .iter()
@@ -278,7 +278,24 @@ fn replace_current_status(lines: &mut [String], status: &str) -> Result<()> {
             return Ok(());
         }
     }
-    Err(anyhow!("TD detail has no current Status field"))
+    // #258 — older audits kept the current status only in `audit_history`,
+    // which `td_decision` already reads. The sheet gets a body Status line
+    // instead of refusing the whole card.
+    let insert_at = lines[body_start..]
+        .iter()
+        .position(|line| {
+            line.trim_start()
+                .to_ascii_lowercase()
+                .starts_with("- **id**:")
+        })
+        .or_else(|| {
+            lines[body_start..]
+                .iter()
+                .position(|line| line.starts_with("# "))
+        })
+        .map_or(body_start, |offset| body_start + offset + 1);
+    lines.insert(insert_at, format!("- **Status**: {status}"));
+    Ok(())
 }
 
 fn append_audit_history(lines: &mut Vec<String>, action: TdResolutionAction) -> Result<()> {
@@ -399,6 +416,78 @@ fn append_decision(content: &str, td_id: &str, rationale: Option<&str>) -> Strin
     updated
 }
 
+fn table_cells(line: &str) -> Option<Vec<String>> {
+    let inner = line.trim().strip_prefix('|')?.strip_suffix('|')?;
+    Some(
+        inner
+            .split('|')
+            .map(|cell| cell.trim().to_string())
+            .collect(),
+    )
+}
+
+/// A minimal detail sheet for a TD the index lists but no file describes,
+/// built only from its index row: an audit card can then record the decision
+/// on it like on any other sheet. `None` when the index has no row for it.
+fn sheet_from_index_row(index: &str, td_id: &str) -> Option<String> {
+    let lines: Vec<&str> = index.lines().collect();
+    let row_index = lines.iter().position(|line| {
+        table_cells(line).is_some_and(|cells| cells.first().is_some_and(|cell| cell == td_id))
+    })?;
+    let cells = table_cells(lines[row_index])?;
+    // The header is the row just above the table's `|---|` separator.
+    let header = lines[..row_index]
+        .iter()
+        .rposition(|line| {
+            line.trim_start().starts_with("|-") || line.trim_start().starts_with("| -")
+        })
+        .and_then(|separator| separator.checked_sub(1))
+        .and_then(|header| table_cells(lines[header]))
+        .unwrap_or_default();
+    let column = |name: &str| {
+        header
+            .iter()
+            .position(|cell| cell.eq_ignore_ascii_case(name))
+            .and_then(|position| cells.get(position))
+            .map(|cell| cell.as_str())
+            .filter(|cell| !cell.is_empty() && *cell != "—" && *cell != "-")
+    };
+    let problem = column("Problem").or_else(|| cells.get(1).map(String::as_str))?;
+
+    let mut sheet = vec![
+        "---".to_string(),
+        format!("name: {}", td_id.to_ascii_lowercase()),
+        format!(
+            "description: {}",
+            serde_json::to_string(&problem.replace('`', "")).ok()?
+        ),
+        "metadata:".to_string(),
+        "  type: tech-debt".to_string(),
+        "---".to_string(),
+        String::new(),
+        format!("# {td_id}"),
+        String::new(),
+        format!("- **ID**: {td_id}"),
+    ];
+    if let Some(area) = column("Area") {
+        sheet.push(format!("- **Area**: {area}"));
+    }
+    if let Some(severity) = column("Severity") {
+        sheet.push(format!("- **Severity**: {severity}"));
+    }
+    sheet.push(format!(
+        "- **Status**: {}",
+        column("Status").unwrap_or("Open")
+    ));
+    sheet.push(format!("- **Problem (fact)**: {problem}"));
+    sheet.push(
+        "- **Source**: created during audit validation from its row in \
+         [`docs/inconsistencies-tech-debt.md`](../inconsistencies-tech-debt.md)."
+            .to_string(),
+    );
+    Some(sheet.join("\n") + "\n")
+}
+
 pub(crate) fn apply_td_resolutions(
     conn: &Connection,
     discussion_id: &str,
@@ -418,10 +507,27 @@ pub(crate) fn apply_td_resolutions(
         if !valid_td_id(&resolution.td_id) || !seen.insert(resolution.td_id.as_str()) {
             return Err(anyhow!("Invalid or duplicate audit TD id"));
         }
-        let path = canonical_child(&td_dir, &td_dir.join(format!("{}.md", resolution.td_id)))?;
-        let content = std::fs::read_to_string(&path)
-            .with_context(|| format!("cannot read {}", path.display()))?;
-        updates.push((path, update_td(&content, resolution.action)?));
+        let td_id = resolution.td_id.as_str();
+        let candidate = td_dir.join(format!("{td_id}.md"));
+        let (path, content) = if candidate.exists() {
+            let path = canonical_child(&td_dir, &candidate)?;
+            let content = std::fs::read_to_string(&path)
+                .with_context(|| format!("{td_id}: cannot read its detail sheet"))?;
+            (path, content)
+        } else {
+            // #258 — a legacy one-liner lives only in the index. `valid_td_id`
+            // already rules out any path component, so the new file stays in
+            // `td_dir`; only an id the index actually lists gets a sheet.
+            let index = std::fs::read_to_string(docs_dir.join("inconsistencies-tech-debt.md"))
+                .unwrap_or_default();
+            let content = sheet_from_index_row(&index, td_id).ok_or_else(|| {
+                anyhow!("{td_id}: no detail sheet and no row in docs/inconsistencies-tech-debt.md")
+            })?;
+            (td_dir.join(format!("{td_id}.md")), content)
+        };
+        let updated = update_td(&content, resolution.action)
+            .with_context(|| format!("{td_id}: cannot record the decision"))?;
+        updates.push((path, updated));
     }
 
     let accepted = resolutions

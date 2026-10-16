@@ -1118,7 +1118,7 @@ fn answer_inner(
             resolutions,
             text.as_deref(),
         )
-        .map_err(|error| AnswerError::Invalid(error.to_string()))?;
+        .map_err(|error| AnswerError::Invalid(format!("{error:#}")))?;
     }
     let ceiling =
         super::discussion_ceiling_requests::decide(conn, discussion_id, &question.key, &selected)?;
