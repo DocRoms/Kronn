@@ -270,6 +270,110 @@ fn audit_card_answers_update_td_files_and_record_accepted_decisions() {
 }
 
 #[test]
+fn audit_batch_resolves_history_only_and_index_only_tds() {
+    // #258 — sheets older audits wrote: the current status only in
+    // `audit_history`, or no sheet at all beside an index row. Either used to
+    // refuse the whole batch.
+    let (conn, project) = audit_database();
+    let td_dir = project.path().join("docs/tech-debt");
+    std::fs::write(
+        td_dir.join("TD-20260317-history-only.md"),
+        "---\nname: td-20260317-history-only\nmetadata:\n  type: tech-debt\n  audit_history:\n    - date: 2026-03-17\n      status: Verified in source\n      reviewer: Initial audit\n---\n\n> Banner.\n\n- **ID**: TD-20260317-history-only\n- **Area**: Security\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.path().join("docs/inconsistencies-tech-debt.md"),
+        "# Index\n\n| ID | Problem | Area | Severity | Status |\n|----|---------|------|----------|--------|\n| TD-20260317-index-only | No `lint` step in CI | CI | Low | Verified in source |\n",
+    )
+    .unwrap();
+    let options = serde_json::json!([
+        {"id":"confirm","label":"Confirm"},
+        {"id":"reject","label":"Reject"},
+        {"id":"accept_decision","label":"Accepted decision"},
+        {"id":"defer","label":"Defer"}
+    ]);
+    let batch = |key: &str, ids: &[&str]| {
+        serde_json::json!({
+            "version": 1,
+            "key": key,
+            "question": "TD outcomes?",
+            "items": ids.iter().map(|id| serde_json::json!({"id": id, "label": id})).collect::<Vec<_>>(),
+            "options": options.clone(),
+            "task_ref": "audit-td-batch"
+        })
+    };
+    insert(
+        &conn,
+        "legacy",
+        batch(
+            "audit-legacy",
+            &["TD-20260317-history-only", "TD-20260317-index-only"],
+        ),
+    );
+    insert(
+        &conn,
+        "unknown",
+        batch("audit-unknown", &["TD-20260317-nowhere"]),
+    );
+    let request = |ids: &[&str], key: &str| AnswerDiscussionQuestionRequest {
+        selected_option_ids: vec![],
+        item_answers: ids
+            .iter()
+            .map(|id| DiscussionQuestionItemAnswer {
+                item_id: (*id).into(),
+                selected_option_id: "confirm".into(),
+            })
+            .collect(),
+        text: None,
+        idempotency_key: key.into(),
+    };
+
+    answer(
+        &conn,
+        "d",
+        "question:legacy:0",
+        &request(
+            &["TD-20260317-history-only", "TD-20260317-index-only"],
+            "legacy-answer",
+        ),
+        "Human",
+        None,
+    )
+    .unwrap();
+    let history_only = std::fs::read_to_string(td_dir.join("TD-20260317-history-only.md")).unwrap();
+    assert!(
+        history_only
+            .contains("- **ID**: TD-20260317-history-only\n- **Status**: Confirmed by user\n"),
+        "{history_only}"
+    );
+    assert!(history_only.contains("reviewer: Kronn audit validation card"));
+    let index_only = std::fs::read_to_string(td_dir.join("TD-20260317-index-only.md")).unwrap();
+    assert!(
+        index_only.contains("- **Status**: Confirmed by user"),
+        "{index_only}"
+    );
+    assert!(index_only.contains("- **Severity**: Low"));
+    assert!(index_only.contains("- **Problem (fact)**: No `lint` step in CI"));
+    assert!(index_only.contains("reviewer: Kronn audit validation card"));
+
+    let refused = answer(
+        &conn,
+        "d",
+        "question:unknown:0",
+        &request(&["TD-20260317-nowhere"], "unknown-answer"),
+        "Human",
+        None,
+    );
+    match refused {
+        Err(AnswerError::Invalid(message)) => {
+            assert!(message.contains("TD-20260317-nowhere"), "{message}")
+        }
+        other => panic!("an unknown TD must be refused by name, got {other:?}"),
+    }
+    assert!(!td_dir.join("TD-20260317-nowhere.md").exists());
+}
+
+#[test]
 fn first_card_in_replacement_validation_relinks_archived_run_and_updates_td() {
     let (conn, project) = audit_database();
     let td_path = project.path().join("docs/tech-debt/TD-20260928-resumed.md");
