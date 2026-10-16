@@ -37,6 +37,8 @@ pub mod redact_artifacts;
 pub mod revalidate;
 pub mod run;
 pub(crate) mod run_state;
+#[cfg(test)]
+mod step_closing_tests;
 pub(crate) mod step_guard;
 pub mod td_review;
 pub mod td_tasks;
@@ -507,6 +509,59 @@ pub(crate) fn gate_for_step(step_1_based: usize, first_chained_step: usize) -> &
         CHAINED_STEP_GATE
     } else {
         ""
+    }
+}
+
+/// The last words of a step prompt (KT-1278). An ACP session has no system
+/// channel: the context and the step travel as ONE user message, and a prompt
+/// that ends on a reference block (versions table, briefing, rules, signals) is
+/// read by a small model as loaded context to answer, not as work to run. The
+/// directive names the step and its target, and says no human answers.
+pub(crate) fn step_closing_directive(
+    step_1_based: usize,
+    step: &AnalysisStep,
+    docs_root: &crate::core::docs_location::DocsRoot,
+) -> String {
+    let target = step.target_file;
+    let work = if target == "REVIEW" || target.is_empty() {
+        format!("Run step {step_1_based} now and answer with its result.")
+    } else {
+        let details = if docs_root
+            .strip(target)
+            .is_some_and(|rest| rest.starts_with("inconsistencies-"))
+        {
+            format!(
+                " and the detail files it lists under `{}`",
+                docs_root.path("tech-debt/")
+            )
+        } else {
+            String::new()
+        };
+        format!("Run step {step_1_based} now: write `{target}`{details}.")
+    };
+    format!(
+        "=== RUN THIS STEP NOW ===\n\
+         Everything above is the instructions of step {step_1_based} plus reference material to \
+         consult (versions, briefing, rules, signals). None of it is a question for you.\n\
+         {work} There is no human in this turn to answer: never ask what to do or what the \
+         priority is. Stop once the work is written."
+    )
+}
+
+/// The prompt one attempt sends: the step's reference blocks and instructions,
+/// then the retry feedback when there is one, then ALWAYS the closing directive
+/// — nothing may follow it (KT-1278).
+pub(crate) fn finish_step_prompt(
+    prompt: &str,
+    feedback: Option<&str>,
+    step_1_based: usize,
+    step: &AnalysisStep,
+    docs_root: &crate::core::docs_location::DocsRoot,
+) -> String {
+    let directive = step_closing_directive(step_1_based, step, docs_root);
+    match feedback {
+        Some(feedback) => format!("{prompt}\n\n{feedback}\n\n{directive}"),
+        None => format!("{prompt}\n\n{directive}"),
     }
 }
 

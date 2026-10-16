@@ -95,7 +95,7 @@ Now an ACP agent is stopped like an HTTP agent (KT-924), through a token:
 
 The partial audit now checks the stop between two steps and after each step's
 agent, finalises the run as `Cancelled` and releases the project lease, like the
-Full audit [src: file: backend/src/api/audit/drift.rs:780-808#mark_cancelled] [src: file: backend/src/api/audit/drift.rs:1208-1270#mark_cancelled_at_step]. A partial refresh that
+Full audit [src: file: backend/src/api/audit/drift.rs:785-812#mark_cancelled] [src: file: backend/src/api/audit/drift.rs:1211-1272#mark_cancelled_at_step]. A partial refresh that
 was cancelled does not refresh the baseline, so its sections stay reported as
 stale.
 
@@ -180,7 +180,7 @@ not before.
   tracker the progress poll reads. A provider that is only thinking moves
   nothing. The tick does not push back the Full audit's 60 s zombie deadline.
 - **Keep-alive.** A detached audit stream silent for 15 s sends an SSE comment
-  (`: keep-alive`) [src: file: backend/src/core/sse_limits.rs:50#HEARTBEAT_INTERVAL] [src: file: backend/src/api/audit/mod.rs:72-88#detach_sse_stream]. A comment is not an
+  (`: keep-alive`) [src: file: backend/src/core/sse_limits.rs:50#HEARTBEAT_INTERVAL] [src: file: backend/src/api/audit/mod.rs:74-90#detach_sse_stream]. A comment is not an
   event: no client handler sees it, so it holds the connection without passing
   for model activity.
 

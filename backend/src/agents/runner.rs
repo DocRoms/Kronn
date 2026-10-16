@@ -14619,6 +14619,62 @@ mod acp_resume_tests {
         output
     }
 
+    /// KT-1278 — over ACP the context and the task are ONE user message. An
+    /// audit step hands the session a prompt whose last words are its own
+    /// instruction, and the session puts that prompt last, after the context
+    /// (the workflow step and the task worker brief are pinned at their own
+    /// assembly: `build_step_prompt`, `worker_brief_markdown`).
+    #[tokio::test]
+    async fn an_acp_message_with_context_ends_with_the_tasks_own_instruction() {
+        let docs_root = crate::core::docs_location::DocsRoot::default_root();
+        let step = crate::api::audit::ANALYSIS_STEPS[7];
+        let prompt = crate::api::audit::finish_step_prompt(
+            "Step 8 instructions\n\n### Runtime versions pinned in the repository\n\nNone found.\n",
+            None,
+            8,
+            &step,
+            &docs_root,
+        );
+        let context = "=== ANTI-HALLUCINATION (pointer) ===\n\nCite your sources.\n\n=== AVAILABLE TOOLS ===\n\nA table of tools.";
+        let fixture = transport(ResumeOutcome::Ok, PromptOutcome::Complete);
+        let mut process = run_acp_session(
+            AcpSessionRequest {
+                step_tools: None,
+                agent_type: &AgentType::OpenCode,
+                work_dir: Path::new("."),
+                prompt: &prompt,
+                system_context: context,
+                project_path: "",
+                model_flag: None,
+                reasoning_effort: None,
+                parent_cancel: None,
+                discussion_id: None,
+                resume_id: None,
+                session_store: None,
+                fallback_prompt: None,
+                provenance: None,
+                activity: None,
+                idle_timeout: None,
+                run_progress: None,
+            },
+            fixture.clone(),
+        )
+        .await
+        .expect("run ACP fixture");
+        collect_output(&mut process).await;
+        let sent = fixture.prompts.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].starts_with(context), "context first");
+        assert!(sent[0].ends_with(&prompt), "the task's prompt comes last");
+        assert!(
+            sent[0]
+                .trim_end()
+                .ends_with("Stop once the work is written."),
+            "the message must end on the task's instruction, got …{}",
+            &sent[0][sent[0].len().saturating_sub(200)..]
+        );
+    }
+
     #[tokio::test]
     #[serial_test::serial(acp_adapter_env_toggle)]
     async fn adapted_acp_start_passes_the_full_prompt_to_safe_resume_fallback() {
