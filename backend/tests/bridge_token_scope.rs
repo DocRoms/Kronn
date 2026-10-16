@@ -3372,6 +3372,16 @@ async fn a_write_grant_opens_planning_only_and_never_credentials() {
     let (status, view) = call(&app, "GET", "/api/mcps", Some(&token), None).await;
     assert_eq!(status, 200);
     assert!(!view.to_string().contains("cfg-b"), "{view}");
+    // A route that changes the project itself is not planning.
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/api/projects/p2/install-template",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 403, "{body}");
     // Effects stay on the room's project.
     let (status, body) = call(
         &app,
@@ -3795,6 +3805,18 @@ async fn a_run_s_step_uses_another_project_s_room_only_when_that_room_grants_it(
     )
     .await;
     assert_eq!(status, 200, "{body}");
+    let (status, body) = call(
+        &app,
+        "GET",
+        "/api/discussions/room-a/meta",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "the hosted step reads the room it posts in: {body}"
+    );
     let (status, _) = call(
         &app,
         "GET",

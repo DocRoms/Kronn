@@ -1664,11 +1664,16 @@ pub fn authorize_in(
             if bound == Some(id) {
                 continue;
             }
-            // Another project: read through a read grant, planning writes
-            // through a write grant, never an effect.
+            // Another project: read through a read grant; through a write
+            // grant, only named by a planning write (a task's `project_ids`),
+            // never as what a route changes; never an effect.
             let granted = match route.rule {
                 Rule::Read => reach.reads(id),
-                Rule::Write | Rule::Own => reach.writes(id),
+                Rule::Write | Rule::Own => {
+                    route.pattern.starts_with("/api/planning/")
+                        && named.role != Role::Target
+                        && reach.writes(id)
+                }
                 Rule::Effect | Rule::Denied => false,
             };
             if granted {
@@ -2447,7 +2452,15 @@ impl Scoper<'_> {
     ) -> bool {
         let holds = |project: &str| self.reach.reads(project);
         let bound = self.reach.bound();
-        if let Some(scope) = fields.get("project_scope").filter(|scope| !scope.is_null()) {
+        // The token's own room or run reads whole: a step hosted in another
+        // project's room (KT-1270) still sees the room it posts in.
+        let owned = matches!(
+            (typed, fields.get("id").and_then(|id| id.as_str())),
+            (Some(kind), Some(id)) if owns(self.grant, kind, id)
+        );
+        if owned {
+            // Its own project fields say nothing about what else the token reaches.
+        } else if let Some(scope) = fields.get("project_scope").filter(|scope| !scope.is_null()) {
             let home = fields
                 .get("project_id")
                 .and_then(|v| v.as_str())
@@ -2475,7 +2488,7 @@ impl Scoper<'_> {
         }
         if let Some(listed) = fields.get("project_ids").and_then(|v| v.as_array()) {
             let ids: Vec<&str> = listed.iter().filter_map(|id| id.as_str()).collect();
-            if !ids.is_empty() && !ids.iter().any(|p| holds(p)) {
+            if !owned && !ids.is_empty() && !ids.iter().any(|p| holds(p)) {
                 return false;
             }
         }
