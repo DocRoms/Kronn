@@ -3732,3 +3732,85 @@ async fn a_task_shared_with_another_project_needs_write_on_both() {
     .await;
     assert_eq!(status, 200, "{body}");
 }
+
+/// KT-1270 — a run's step may post in a room of another project only when a
+/// human granted that room write on the run's project; the token stays the
+/// run's and reaches nothing of the room's own project beyond the room.
+#[tokio::test]
+async fn a_run_s_step_uses_another_project_s_room_only_when_that_room_grants_it() {
+    let (app, _repos) = fixture().await;
+    let step = || {
+        mint(BridgeScope {
+            discussion_ids: vec!["room-a".into()],
+            workflow_run_id: Some("run-b".into()),
+            ..Default::default()
+        })
+        .unwrap()
+    };
+    let refused = step();
+    let (status, body) = call(
+        &app,
+        "GET",
+        "/api/discussions/room-a/meta",
+        Some(refused.value()),
+        None,
+    )
+    .await;
+    assert_eq!(status, 401, "room of p1, run of p2, no grant: {body}");
+
+    grant_scope(
+        &app,
+        "room-a",
+        json!({"project_id": "p2", "access": "read"}),
+    )
+    .await;
+    let read_only = step();
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/discussions/room-a/meta",
+        Some(read_only.value()),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status, 401,
+        "a read grant does not host another project's run"
+    );
+
+    grant_scope(
+        &app,
+        "room-a",
+        json!({"project_id": "p2", "access": "write"}),
+    )
+    .await;
+    let hosted = step();
+    let token = hosted.value().to_owned();
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/api/disc/append",
+        Some(&token),
+        Some(append("room-a", "step-1")),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/planning/tasks/task-b",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "the run's own project");
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/planning/tasks/task-a",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 403, "the room's project is not the run's");
+}

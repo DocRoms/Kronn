@@ -123,6 +123,13 @@ pub fn granted_projects(conn: &Connection, discussion_ids: &[String]) -> Result<
     Ok(granted)
 }
 
+/// Whether a human granted `discussion_id` write on `project_id` (or on every
+/// project): the room may then host that project's workflow steps.
+pub fn room_writes(conn: &Connection, discussion_id: &str, project_id: &str) -> Result<bool> {
+    let granted = granted_projects(conn, &[discussion_id.to_owned()])?;
+    Ok(granted.all == Some(ScopeAccess::Write) || granted.write.contains(project_id))
+}
+
 fn primary_project(conn: &Connection, discussion_id: &str) -> Result<Option<Option<String>>> {
     Ok(conn
         .query_row(

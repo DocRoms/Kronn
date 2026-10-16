@@ -40,6 +40,17 @@ is the journal. Every grant, revoke, request and decline is also a System
 `[kronn-scope: …]` line in the room, so the agents and the human see the change
 where they work.
 
+## Workflow steps and workers
+
+- A step's `room_id` may name a room of another project when a human granted
+  that room write on the run's project. The step's token stays bound to the
+  run's project, with the run's credentials; the room is only where it posts.
+  A read grant is not enough.
+- Worker launches are unchanged: a task of another project is never executed
+  from a room that only holds a grant on it. A worker runs with its task
+  project's credentials, which a planning grant must never hand out; per-project
+  workflows execute their own project's tasks.
+
 ## Enforcement
 
 - The token's frozen project does not change (`freeze`). A token whose own

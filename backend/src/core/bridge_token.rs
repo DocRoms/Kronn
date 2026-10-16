@@ -2028,6 +2028,29 @@ pub fn resolve_scope_project(
             },
         }
     }
+    let mut anchors: Vec<Option<String>> = Vec::new();
+    for (kind, id) in [
+        (Kind::Execution, scope.task_execution_id.as_deref()),
+        (Kind::Run, scope.workflow_run_id.as_deref()),
+    ] {
+        let Some(id) = id else { continue };
+        match residence(conn, kind, id)? {
+            Some(Residence::Projects(projects)) if projects.len() == 1 => {
+                anchors.push(projects.into_iter().next());
+            }
+            Some(_) => anchors.push(None),
+            None => return Ok(ScopeBinding::Dead),
+        }
+    }
+    // A run's step may post in a room of another project only when a human
+    // granted that room write on the run's project (KT-1270): the token then
+    // stays the run's.
+    let anchor = match anchors.as_slice() {
+        [Some(project), rest @ ..] if rest.iter().all(|other| other.as_ref() == Some(project)) => {
+            Some(project.clone())
+        }
+        _ => None,
+    };
     for discussion in scope.discussion_ids.iter().chain(adopted) {
         let found = conn
             .query_row(
@@ -2037,23 +2060,23 @@ pub fn resolve_scope_project(
             )
             .optional()?;
         match found {
-            Some(project) => seen.push(project),
+            Some(project) => match &anchor {
+                Some(run_project)
+                    if project.as_ref() != Some(run_project)
+                        && crate::db::discussion_scope::room_writes(
+                            conn,
+                            discussion,
+                            run_project,
+                        )? =>
+                {
+                    seen.push(Some(run_project.clone()));
+                }
+                _ => seen.push(project),
+            },
             None => return Ok(ScopeBinding::Dead),
         }
     }
-    for (kind, id) in [
-        (Kind::Execution, scope.task_execution_id.as_deref()),
-        (Kind::Run, scope.workflow_run_id.as_deref()),
-    ] {
-        let Some(id) = id else { continue };
-        match residence(conn, kind, id)? {
-            Some(Residence::Projects(projects)) if projects.len() == 1 => {
-                seen.push(projects.into_iter().next());
-            }
-            Some(_) => seen.push(None),
-            None => return Ok(ScopeBinding::Dead),
-        }
-    }
+    seen.extend(anchors);
     let Some(first) = seen.first().cloned() else {
         return Ok(ScopeBinding::Dead);
     };

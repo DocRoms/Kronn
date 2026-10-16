@@ -250,7 +250,7 @@ the runtime-resolution guide.
   generation accepts the connection's id, alias or display name; a refusal
   lists the connections that can generate the requested modality.
   [src: file: backend/src/api/orchestration.rs:12045-12051#task_worker_catalogue]
-  [src: file: backend/scripts/disc-introspection-mcp.py:6061-6076#call_agent_list]
+  [src: file: backend/scripts/disc-introspection-mcp.py:6082-6097#call_agent_list]
   [src: file: backend/src/db/external_api_connections.rs:144-162#resolve]
   [src: file: backend/src/api/media.rs:150-206#ConnectionReference]
   [src: file: backend/src/api/media.rs:385-414#usable_connections]

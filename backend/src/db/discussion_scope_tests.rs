@@ -259,3 +259,40 @@ fn a_request_from_another_room_cannot_be_decided_here() {
     };
     assert!(decide(&conn, "room", &request.id, Some(ScopeAccess::Read), "romu").is_err());
 }
+
+#[test]
+fn only_a_write_grant_lets_a_room_host_another_project_s_run() {
+    let conn = connection();
+    assert!(!room_writes(&conn, "room", "p2").unwrap());
+    grant(
+        &conn,
+        "room",
+        Some("p2"),
+        ScopeAccess::Read,
+        ScopeGrantSource::Link,
+        "romu",
+    )
+    .unwrap();
+    assert!(!room_writes(&conn, "room", "p2").unwrap());
+    grant(
+        &conn,
+        "room",
+        Some("p2"),
+        ScopeAccess::Write,
+        ScopeGrantSource::Link,
+        "romu",
+    )
+    .unwrap();
+    assert!(room_writes(&conn, "room", "p2").unwrap());
+    assert!(!room_writes(&conn, "room", "p3").unwrap());
+    grant(
+        &conn,
+        "room",
+        None,
+        ScopeAccess::Write,
+        ScopeGrantSource::All,
+        "romu",
+    )
+    .unwrap();
+    assert!(room_writes(&conn, "room", "p3").unwrap());
+}
