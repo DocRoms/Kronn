@@ -23,8 +23,8 @@ response-attested historical fact. Both panels now derive the displayed model
 only from `answer.model` (normalized, the response that actually produced the
 compared answer) or, failing that, the last message in history that recorded
 a concrete `model` — never from `discussion.model`.
-[src: file: frontend/src/types/generated.ts:1816-1821]
-[src: file: frontend/src/components/BatchComparePanel.tsx:195-197]
+[src: file: frontend/src/types/generated.ts:3071-3076#model]
+[src: file: frontend/src/components/BatchComparePanel.tsx:194-198]
 [src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:455-457]
 
 Both ranking card and main column now badge the model to disclose its
@@ -66,13 +66,18 @@ Connection identity resolution itself (`compareAgentLabel` /
 `externalConnectionForDiscussion`) was already correct: it matches by the
 connection's durable `connection_id` from `message_targets`, never by
 `display_name`, so two connections sharing the same display name ("homonyms")
-still keep their own recorded model and label.
-[src: file: frontend/src/lib/externalAgentIdentity.ts:46-77]
+still keep their own recorded model and label. Only a comparison child created
+before that identity was persisted falls back to the connection name inside its
+generated title (`QP · connection · tier`), and only for the label.
+[src: file: frontend/src/lib/externalAgentIdentity.ts:81-117#discussionConnectionId]
+[src: file: frontend/src/components/BatchComparePanel.tsx:66-79#compareAgentLabel]
+[src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:68-77#compareAgentLabel]
 
 ## Launch-target suffix must reuse the shared picker resolution
 
-The Compare launch selector in `WorkflowsPage` (QP "compare" mode) used to
-pass its own manually computed `suffix` prop to `AgentSwitchPicker`:
+The Compare launch selector (`AgentCompareSelector`, rendered by
+`WorkflowsPage` in QP "compare" mode) used to pass its own manually computed
+`suffix` prop to `AgentSwitchPicker`:
 `selectedChoice?.modelTiers?.[tier] ?? modelForAgentTier(target.agent, tier,
 agentAccess?.model_tiers, defaultLabel)`. For a named HTTP connection with an
 unset tier, this discarded the connection's own known configuration (e.g. its
@@ -85,9 +90,12 @@ suffix bypassed entirely. The judge/improver pickers in
 The fix removes the manual `suffix` override so the Compare selector reuses
 the same catalogue+identity resolution as every other `AgentSwitchPicker`
 caller.
-[src: file: frontend/src/pages/WorkflowsPage.tsx:3222-3251]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:108-123]
-[src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:343-354]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:3518-3532#AgentCompareSelector]
+[src: file: frontend/src/components/AgentCompareSelector.tsx:85-111#AgentSwitchPicker]
+[src: file: frontend/src/components/AgentSwitchPicker.tsx:130-142#resolvedTier]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:13-26#resolveCatalogTier]
+[src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:343-359#AgentSwitchPicker]
+[src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:412-428#AgentSwitchPicker]
 
 Regressions: a config-drifted-after-the-run case (no answer, no historical
 model, current tier config now non-null), a no-response case, and a
@@ -107,8 +115,8 @@ The launch-target fix is covered by switching a named connection's compare
 target to a tier it never configured and asserting its own `default_model`
 surfaces instead of the generic label.
 [src: file: frontend/src/components/__tests__/BatchComparePanel.test.tsx:505-727]
-[src: file: frontend/src/components/__tests__/BatchCompareDetailsPanel.test.tsx:1-370]
-[src: file: frontend/src/pages/__tests__/WorkflowsPage.qp-launch.test.tsx:591-643]
+[src: file: frontend/src/components/__tests__/BatchCompareDetailsPanel.test.tsx:67-370]
+[src: file: frontend/src/pages/__tests__/WorkflowsPage.qp-launch.test.tsx:649-700]
 
 These are component-level regressions against mocked APIs; no backend, worker,
 or provider execution was exercised.
