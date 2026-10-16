@@ -32,9 +32,9 @@ autocomplete must always show which one is being picked (KT-211).
   `@all`, one option per installed provider (discussion agent when
   principal, punctual otherwise), one option per joined CLI session with
   `-cli[-N]` ordinals. `targetsFromComposerText` matches triggers in
-  prose only (fenced/inline code is documentation), keeps textual order,
-  deduplicates identical targets.
-  [src: file: frontend/src/lib/messageTargets.ts:26-125#composerMentions] [src: file: frontend/src/lib/messageTargets.ts:177-208#positionedTargetsFromComposerText]
+  prose only (code, quotations and blockquotes are documentation), keeps
+  textual order, deduplicates identical targets.
+  [src: file: frontend/src/lib/messageTargets.ts:26-125#composerMentions] [src: file: frontend/src/lib/messageTargets.ts:131-145#proseOnly] [src: file: frontend/src/lib/messageTargets.ts:177-208#positionedTargetsFromComposerText]
 - **MCP append (agent)**: `_structured_message_targets` parses the same
   grammar from prose (code stripped first). `@x-cli-N` resolves against
   the live participants list and RAISES when the ordinal does not
@@ -74,6 +74,7 @@ Awareness batches are bounded (20/wake), explicitly flagged
 never end a quiet wait. The bridge itself does not return merely because one
 server poll was quiet.
 [src: file: backend/src/api/disc_invite.rs:1064-1068#AWARENESS_MAX_MESSAGES] [src: file: backend/src/api/disc_invite.rs:1128-1135#awareness]
+[src: file: backend/src/api/disc_invite.rs:1716-1735#load_awareness_batch] [src: file: backend/scripts/disc-introspection-mcp.py:7190-7201#_WAIT_MIN_QUIET_POLL_SECS]
 [src: file: docs/architecture/discussion-agent-routing.md:87-99#awareness_offered_upto]
 
 ## 3 bis — Bridge guarantee vs host capability
@@ -110,6 +111,8 @@ joined CLI of its provider, whose turns its transcript labels with
 the CLI alias.
 [src: file: backend/src/db/discussions.rs:2071-2074#reply_author]
 [src: file: backend/src/api/disc_invite.rs:1972-1992#addressed_to_session]
+[src: file: backend/src/api/disc_invite.rs:1701-1711#addressed_to_caller]
+[src: file: backend/scripts/disc-introspection-mcp.py:10967-10977#attention_required]
 [src: file: backend/src/api/discussions/streaming.rs:2382-2430#punctual_identity_notice]
 [src: file: backend/src/api/disc_prompts.rs:337-355#transcript_agent_label]
 [src: file: backend/src/api/disc_invite.rs:1615-1623#reply_target]
@@ -143,7 +146,7 @@ context the short alias stays free (both identities may be wanted).
   belongs to the configured discussion agent, whatever the CLI presence
   (target identity, not presence, decides ownership); the turn reaches the
   joined CLIs as awareness and is marked for their one-shot catch-up.
-  [src: file: backend/src/api/discussions/routing.rs:20-40#route_human_turn] [src: file: backend/src/db/discussions.rs:2212-2223#native_fallback]
+  [src: file: backend/src/api/discussions/routing.rs:20-40#route_human_turn] [src: file: backend/src/db/discussions.rs:2204-2215#native_fallback_candidate]
 - **Reload**: a bridge reload re-attaches the durable session through
   the 0600 resume credential (`/peer-resume`, no token). A CLI whose
   native identity rotated (fresh session id) needs one `disc_join` with
