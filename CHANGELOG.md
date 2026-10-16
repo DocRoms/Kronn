@@ -545,6 +545,23 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- After an accepted template v2 merge, the audit starts and the merge offer
+  ends (KT-1310). Accepting files now records them as Kronn's in the folder's
+  `.kronn.json` (committed with them, with the template install), so once the
+  merge branch is integrated the audit gate no longer refuses the folder as
+  "files Kronn did not write"; the team's sources stay theirs. The leftover
+  merge worktree and branch are removed when the integration is noticed (on the
+  next merge start or full audit), and a worktree with nothing left to review
+  no longer reads as a merge in progress. `briefing.md`, `.kronn.json` and the
+  run state are not docs to commit nor sources; a resumed or later plan no
+  longer reads the files an accepted merge wrote as sources. A fresh clone of a
+  v1-documented repository (entry file opening on `kronn:doc-version` and
+  Kronn's heading, no `.kronn.json`) is Kronn's. Kronn's v1 template text
+  (`How to fill`, `Examples (good shape …)`, `{{PLACEHOLDER}}` rows, the v1
+  spec file) is left in place instead of copied as team content, copied
+  headings nest under the target's own, a plan on the remote base warns about
+  local docs it cannot contain, and the pending-integration refusal carries
+  `error_code: template_merge_pending_integration`.
 - Installing the template, then launching the full audit, is no longer refused
   as "files Kronn did not write" (KT-1299). `POST /install-template` now records
   the folder as Kronn's (`template_installed_at`) unless it already held a

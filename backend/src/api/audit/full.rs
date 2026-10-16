@@ -297,7 +297,7 @@ pub async fn full_audit(
     let project_path_str = project.path.clone();
     let project_path = scanner::resolve_host_path(&project.path);
     if let Some(error) = crate::api::projects::template_merge::audit_launch_refusal(&project_path) {
-        return sse_error(error);
+        return sse_refusal(error);
     }
     // Every artefact derives from this one root (KT-1192); a configured
     // folder failing containment refuses the run.
@@ -412,10 +412,10 @@ pub async fn full_audit(
         drop_guard.hold_lease();
         if let Some(error) = crate::api::projects::template_merge::audit_launch_refusal(&project_path) {
             drop_guard.disarm();
-            yield Event::default().event("error").data(serde_json::json!({"error":error}).to_string());
+            yield Event::default().event("error").data(error.to_string());
             return;
         }
-
+        crate::api::projects::template_merge::clean_integrated_merge(&project_path);
 
         // Clear any stale cancellation flag for this project.
         if let Ok(mut tracker) = audit_tracker.lock() {

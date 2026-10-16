@@ -9864,7 +9864,12 @@ export type TemplateMergeView = { docs_dir: string, base: MergeBase, base_ref: s
 /**
  * Docs that only exist untracked in the checkout: a worktree cannot see them.
  */
-untracked_in_checkout: Array<string>, table_markdown: string, merge: TemplateMergeState, };
+untracked_in_checkout: Array<string>,
+/**
+ * Things the reviewer must know before trusting the plan, e.g. local docs
+ * a remote base cannot contain.
+ */
+warnings: Array<string>, table_markdown: string, merge: TemplateMergeState, };
 
 export type TemplateReinstallPlan = { docs_dir: string, files: Array<ReinstallFile>,
 /**

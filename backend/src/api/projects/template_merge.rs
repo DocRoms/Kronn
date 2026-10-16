@@ -70,6 +70,9 @@ pub struct TemplateMergeView {
     pub existing_targets: Vec<String>,
     /// Docs that only exist untracked in the checkout: a worktree cannot see them.
     pub untracked_in_checkout: Vec<String>,
+    /// Things the reviewer must know before trusting the plan, e.g. local docs
+    /// a remote base cannot contain.
+    pub warnings: Vec<String>,
     pub table_markdown: String,
     pub merge: TemplateMergeState,
 }
@@ -188,7 +191,13 @@ fn plan_on(
         }
     }
     let docs_dir = docs_merge::choose_docs_dir(existing, configured.map(DocsRoot::rel));
-    docs_merge::plan_merge(root, existing, &template, &docs_dir)
+    // What an accepted merge wrote is Kronn's, never a source for the next plan.
+    let kronn_owned: BTreeSet<String> =
+        crate::core::docs_folder::kronn_written(&root.join(&docs_dir))
+            .into_iter()
+            .map(|rel| format!("{docs_dir}/{rel}"))
+            .collect();
+    docs_merge::plan_merge_excluding(root, existing, &template, &docs_dir, &kronn_owned)
 }
 
 fn view(
@@ -209,6 +218,7 @@ fn view(
         files,
         existing_targets: plan.existing_targets.clone(),
         untracked_in_checkout,
+        warnings: Vec::new(),
         table_markdown: docs_merge::render_correspondence_markdown(plan),
         merge: TemplateMergeState::default(),
     }
@@ -321,12 +331,46 @@ pub fn merge_state(repo: &Path) -> TemplateMergeState {
     state
 }
 
+/// `error_code` of the refusal below.
+pub(crate) const PENDING_INTEGRATION_CODE: &str = "template_merge_pending_integration";
+
 /// Refuse audits of a checkout that does not yet contain accepted template changes.
-pub(crate) fn audit_launch_refusal(repo: &Path) -> Option<String> {
-    (branch_exists(repo) && merge_branch_ahead(repo) > 0).then(|| format!(
-        "Template merge `{}` is pending integration — integrate its accepted commits into this checkout before launching an audit.",
-        docs_merge::MERGE_BRANCH,
-    ))
+pub(crate) fn audit_launch_refusal(repo: &Path) -> Option<serde_json::Value> {
+    (branch_exists(repo) && merge_branch_ahead(repo) > 0).then(|| serde_json::json!({
+        "error": format!(
+            "Template merge `{}` is pending integration — integrate its accepted commits into this checkout before launching an audit.",
+            docs_merge::MERGE_BRANCH,
+        ),
+        "error_code": PENDING_INTEGRATION_CODE,
+    }))
+}
+
+/// The merge was integrated into the checkout (or its remote): its worktree
+/// holds nothing to review and its branch nothing to integrate. Both go, so
+/// the offer and the pending state end with the integration. Nothing is lost:
+/// a worktree with proposed or uncommitted files, or a branch some commit of
+/// which neither the checkout nor the remote default branch contains, stays.
+pub(crate) fn clean_integrated_merge(repo: &Path) {
+    if !is_git_repo(repo) || !branch_exists(repo) || merge_branch_ahead(repo) > 0 {
+        return;
+    }
+    if let Some(worktree) = existing_merge_worktree(repo) {
+        let clean = git(&worktree, &["status", "--porcelain", "-uall"])
+            .is_ok_and(|out| out.trim().is_empty());
+        if !clean {
+            return;
+        }
+        if let Err(e) = crate::core::worktree::remove_discussion_worktree(
+            repo,
+            &worktree.to_string_lossy(),
+            true,
+        ) {
+            tracing::warn!("Integrated template merge worktree not removed: {e}");
+        }
+        return;
+    }
+    // `branch -d` refuses a branch HEAD does not contain: the safety net.
+    let _ = git(repo, &["branch", "-d", docs_merge::MERGE_BRANCH]);
 }
 
 fn existing_merge_worktree(repo: &Path) -> Option<PathBuf> {
@@ -410,6 +454,7 @@ pub fn run_merge_in_worktree(
             repo.display()
         ));
     }
+    clean_integrated_merge(repo);
     let untracked_in_checkout = untracked_docs(repo);
     let (worktree, base_ref, resumed) = match existing_merge_worktree(repo) {
         Some(path) => {
@@ -507,7 +552,52 @@ pub fn run_merge_in_worktree(
     out.branch = Some(docs_merge::MERGE_BRANCH.to_string());
     out.resumed = resumed;
     out.merge = merge_state(repo);
+    if base == MergeBase::Remote {
+        out.warnings = unpushed_docs_warnings(repo);
+    }
     Ok(out)
+}
+
+/// A remote base cannot contain what exists only here: docs committed but not
+/// pushed, or untracked. The merge would not map them, and they would later
+/// collide (add/add) with the v2 files it creates.
+fn unpushed_docs_warnings(repo: &Path) -> Vec<String> {
+    let mut local_only: BTreeSet<String> = BTreeSet::new();
+    if let Some(remote) = known_remote_default_ref(repo) {
+        let range = format!("{remote}...HEAD");
+        if let Ok(raw) = git(
+            repo,
+            &[
+                "-c",
+                "core.quotepath=off",
+                "diff",
+                "--name-only",
+                "-z",
+                &range,
+            ],
+        ) {
+            let changed: BTreeSet<String> = nul_list(&raw).into_iter().collect();
+            local_only.extend(docs_merge::source_paths(&changed));
+        }
+    }
+    local_only.extend(untracked_docs(repo));
+    if local_only.is_empty() {
+        return Vec::new();
+    }
+    let shown: Vec<&str> = local_only.iter().take(10).map(String::as_str).collect();
+    let more = local_only.len().saturating_sub(shown.len());
+    vec![format!(
+        "This plan reads the remote default branch, which does not contain {} local doc(s) \
+         (not pushed, or untracked): {}{}. They are not mapped here and may conflict (add/add) \
+         with the v2 files this merge creates. Push or commit them first, or merge from the local base.",
+        local_only.len(),
+        shown.join(", "),
+        if more > 0 {
+            format!(" and {more} more")
+        } else {
+            String::new()
+        },
+    )]
 }
 
 /// Commit the accepted files on the merge branch. Unaccepted files stay
@@ -533,8 +623,20 @@ pub fn accept_merge(repo: &Path, paths: &[String]) -> Result<TemplateMergeAccept
                 .join(", ")
         ));
     }
+    // The files this commit brings are Kronn's: recorded in the folder's state
+    // file, committed with them, so they stay Kronn's once integrated and the
+    // audit gate does not take them (nor the folder) for a human's (KT-1310).
+    let prefix = format!("{docs_dir}/");
+    let written: Vec<String> = paths
+        .iter()
+        .filter_map(|p| p.strip_prefix(&prefix).map(str::to_string))
+        .collect();
+    crate::core::kronn_state::record_template_merge(&worktree.join(&docs_dir), &written)?;
+    let state_file = format!("{prefix}{}", crate::core::kronn_state::KRONN_STATE_FILENAME);
+    let mut committed_paths: Vec<&str> = paths.iter().map(String::as_str).collect();
+    committed_paths.push(&state_file);
     let mut add = vec!["add", "--"];
-    add.extend(paths.iter().map(String::as_str));
+    add.extend(committed_paths.iter().copied());
     git(&worktree, &add)?;
     let mut commit = vec![
         "commit",
@@ -542,7 +644,7 @@ pub fn accept_merge(repo: &Path, paths: &[String]) -> Result<TemplateMergeAccept
         "docs: merge the Kronn AI-doc template v2",
         "--",
     ];
-    commit.extend(paths.iter().map(String::as_str));
+    commit.extend(committed_paths.iter().copied());
     git(&worktree, &commit)?;
     let sha = git(&worktree, &["rev-parse", "HEAD"])?;
     Ok(TemplateMergeAccepted {

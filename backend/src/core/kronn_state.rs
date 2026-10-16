@@ -241,7 +241,18 @@ pub fn record_kronn_moves(
         state.kronn_written.remove(&from.replace('\\', "/"));
     }
     let targets = moved.iter().map(|(_, to)| to).chain(rel_paths.iter());
-    for rel in targets {
+    insert_written(&mut state, &docs_dir, targets)?;
+    write(project_path, &mut state)
+}
+
+/// Hash `rels` (paths relative to `docs_dir`) into `state.kronn_written`. A path
+/// that escapes the folder, crosses a symlink or is not a regular file is ignored.
+fn insert_written<'a>(
+    state: &mut KronnState,
+    docs_dir: &Path,
+    rels: impl IntoIterator<Item = &'a String>,
+) -> Result<(), String> {
+    for rel in rels {
         let rel = rel.replace('\\', "/");
         if rel.is_empty()
             || rel.starts_with('/')
@@ -250,7 +261,7 @@ pub fn record_kronn_moves(
             continue;
         }
         let path = docs_dir.join(&rel);
-        if crate::core::fs_guard::assert_contained_no_symlink(&docs_dir, &path).is_err()
+        if crate::core::fs_guard::assert_contained_no_symlink(docs_dir, &path).is_err()
             || !std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_file())
         {
             continue;
@@ -260,7 +271,31 @@ pub fn record_kronn_moves(
             .kronn_written
             .insert(rel, crate::core::docs_merge::sha256_hex(&bytes));
     }
-    write(project_path, &mut state)
+    Ok(())
+}
+
+/// A template merge wrote `rel_paths` (relative to `docs_dir`, the merge
+/// worktree's folder): the folder becomes Kronn's (a template install) and the
+/// files are recorded as Kronn's, the human sources beside them staying the
+/// human's. It works on the folder itself, so the state file that travels with
+/// the accepted commit is the merge worktree's. An unreadable or corrupt state
+/// file refuses, as every other mutation does.
+pub fn record_template_merge(docs_dir: &Path, rel_paths: &[String]) -> Result<(), String> {
+    let path = docs_dir.join(KRONN_STATE_FILENAME);
+    let mut state: KronnState = match std::fs::read_to_string(&path) {
+        Ok(data) => serde_json::from_str(&data)
+            .map_err(|e| format!("{} exists but is not valid JSON: {e}", path.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => KronnState::default(),
+        Err(e) => return Err(format!("Cannot read {}: {e}", path.display())),
+    };
+    if state.template_installed_at.is_none() {
+        state.template_installed_at = Some(today_iso());
+    }
+    insert_written(&mut state, docs_dir, rel_paths)?;
+    state.touch_readme();
+    let json =
+        serde_json::to_string_pretty(&state).map_err(|e| format!("JSON serialize error: {e}"))?;
+    crate::core::mcp_scanner::atomic_write(&path, &json)
 }
 
 /// Record an explicit human attestation without pretending Kronn ran an audit.

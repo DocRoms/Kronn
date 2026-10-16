@@ -140,6 +140,19 @@ function UntrackedWarning({ paths, onRecheck }: { paths: string[]; onRecheck: ()
   );
 }
 
+/** What the plan itself warns about, e.g. local docs a remote base cannot contain. */
+function PlanWarnings({ warnings }: { warnings: string[] }) {
+  if (warnings.length === 0) return null;
+  return (
+    <div className="tm-warning" role="alert" data-testid="template-merge-warnings">
+      <AlertTriangle size={14} className="tm-warning-icon" />
+      <div>
+        {warnings.map(w => <p key={w}>{w}</p>)}
+      </div>
+    </div>
+  );
+}
+
 /** Abandon behind a confirmation; `warning` names what else would be lost. */
 function DiscardControl({ onDiscard, warning }: { onDiscard: () => void; warning?: string }) {
   const { t } = useLabels();
@@ -394,6 +407,7 @@ export function TemplateMergePanel({ projectId, gate = false, onLaunchAuditAnywa
             </div>
           )}
           <UntrackedWarning paths={phase.view.untracked_in_checkout} onRecheck={() => start(base)} />
+          <PlanWarnings warnings={phase.view.warnings} />
           <details className="tm-details">
             <summary>{t('templateMerge.result.table', phase.view.correspondence.length)}</summary>
             <CorrespondenceTable plan={phase.view} />

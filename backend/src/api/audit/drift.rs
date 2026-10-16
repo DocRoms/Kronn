@@ -282,7 +282,7 @@ pub async fn partial_audit(
     let project = project.expect("project is Some after early return");
     let project_path = scanner::resolve_host_path(&project.path);
     if let Some(error) = crate::api::projects::template_merge::audit_launch_refusal(&project_path) {
-        return super::full::sse_error(error);
+        return super::full::sse_refusal(error);
     }
     // One root for every artefact (KT-1192); a broken override refuses.
     let docs_root = match crate::core::docs_location::DocsRoot::for_project(&project_path) {
@@ -554,7 +554,7 @@ pub(crate) async fn run_partial_pipeline(
         drop_guard.hold_lease();
         if let Some(error) = crate::api::projects::template_merge::audit_launch_refusal(&project_path) {
             drop_guard.disarm();
-            yield Event::default().event("error").data(serde_json::json!({"error":error}).to_string());
+            yield Event::default().event("error").data(error.to_string());
             return;
         }
 
