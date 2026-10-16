@@ -442,6 +442,9 @@ pub(crate) async fn run_partial_pipeline(
     let project_path = scanner::resolve_host_path(&project.path);
     let briefing_notes =
         crate::api::projects::resolve_briefing_notes(&project_path, &project.briefing_notes);
+    // KT-999 — same documentation switch as the Full pipeline.
+    let briefing_docs_on =
+        super::briefing_docs::prompt_enabled(state.config.read().await.audit_briefing_docs);
     // KT-1193 — same rules inputs as the Full pipeline.
     let project_rules = briefing_notes
         .as_deref()
@@ -837,7 +840,12 @@ pub(crate) async fn run_partial_pipeline(
             let mut full_prompt = super::dated_step_prompt(gate, &super::step_prompt_body(analysis_step, reverify), Utc::now(), &docs_root);
 
             if let Some(ref notes) = briefing_notes {
-                full_prompt.push_str(&super::briefing::briefing_prompt_section(notes, &docs_root));
+                full_prompt.push_str(&super::briefing::briefing_prompt_section_for(
+                    notes,
+                    &docs_root,
+                    analysis_step.target_file,
+                    briefing_docs_on,
+                ));
             }
             if let Some(ref block) = linked_repos_block {
                 full_prompt.push_str(&format!("\n\n{}\n", block));

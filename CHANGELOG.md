@@ -149,6 +149,17 @@ Release notes for 0.9.3 and earlier are available in the
 - Linked repos show which AI doc they really have (KT-999): « doc IA »
   (`docs/AGENTS.md` or the legacy `ai/index.md`), « README seulement » or
   « pas de doc IA ».
+- The audit can read the briefing's existing documentation (KT-999), off by
+  default: `audit_briefing_docs = true` in `config.toml`, or
+  `KRONN_EXP_BRIEFING_DOCS=1` for one run (bench). It reaches only the steps
+  that use it — step 1 (`AGENTS.md`), step 8 (tech debt) and the API design
+  audit — as a `## Existing documentation` block within the 6,000-character
+  briefing cap (the block takes at most 3,000 of them, the briefing text gives
+  way). A `reference` location is read, reused and cited; an `obsolete` one IS
+  tech debt: step 8 records a TD row and a detail file citing the location and
+  its last-commit date whatever the audit's scope, and no step copies a fact
+  from it nor calls it out of scope; `old`/`partial` are verified before
+  reuse. Disabled, the prompts (and the audit golden) are unchanged.
 
 - Docs record what a human validated and ask for a reconfirmation when Kronn
   changes it, never blocking (KT-1079). A validation (`validate-audit`, a TD
