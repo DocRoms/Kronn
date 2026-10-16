@@ -82,6 +82,17 @@ _service_launchd_loaded() {
     _service_launchctl print "$(_service_target)" >/dev/null 2>&1
 }
 
+# launchd: wait until a booted-out job has left launchd. Bounded by
+# KRONN_SERVICE_BOOTOUT_TIMEOUT polls (launchd's own ExitTimeOut is 20 s).
+_service_launchd_wait_gone() {
+    local i
+    for ((i = 0; i < ${KRONN_SERVICE_BOOTOUT_TIMEOUT:-30}; i++)); do
+        _service_launchd_loaded || return 0
+        sleep "${KRONN_SERVICE_RETRY_DELAY:-1}"
+    done
+    return 1
+}
+
 service_is_running() {
     case "$(service_kind)" in
         launchd)
@@ -428,15 +439,19 @@ service_load() {
         launchd)
             local unit
             unit="$(service_unit_path)"
-            # Re-bootstrap so an edited plist is picked up; bootout is async,
-            # so a fresh bootstrap right after it is retried briefly.
+            # Re-bootstrap so an edited plist is picked up. bootout returns
+            # before the job is gone (Kronn may take seconds to shut down),
+            # and bootstrapping meanwhile fails with "5: Input/output error".
             if _service_launchd_loaded; then
                 _service_launchctl bootout "$(_service_target)" >/dev/null 2>&1 || true
             fi
+            _service_launchd_wait_gone
+            local err="" _
             for _ in 1 2 3 4 5; do
-                _service_launchctl bootstrap "$(_service_domain)" "$unit" && return 0
+                err="$(_service_launchctl bootstrap "$(_service_domain)" "$unit" 2>&1)" && return 0
                 sleep "${KRONN_SERVICE_RETRY_DELAY:-1}"
             done
+            [[ -n "$err" ]] && printf '%s\n' "$err" >&2
             return 1
             ;;
         systemd)
@@ -451,7 +466,8 @@ service_unload() {
     case "$(service_kind)" in
         launchd)
             _service_launchd_loaded || return 0
-            _service_launchctl bootout "$(_service_target)"
+            _service_launchctl bootout "$(_service_target)" || return 1
+            _service_launchd_wait_gone
             ;;
         systemd)
             _service_systemctl stop "$KRONN_SERVICE_UNIT_NAME"
