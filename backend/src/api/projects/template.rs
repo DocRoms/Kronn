@@ -36,6 +36,15 @@ pub async fn install_template(
             Err(error) => return Json(ApiResponse::err(error)),
         };
     let project_path_str = project.path.clone();
+    // A Full run this instance recorded stands for the record, as at launch.
+    let recorded_run = {
+        let id = project.id.clone();
+        state
+            .db
+            .with_read_conn(move |conn| crate::db::audit_runs::has_any_full(conn, &id))
+            .await
+            .unwrap_or(false)
+    };
 
     // Run filesystem I/O on blocking thread pool
     let install_result = lease
@@ -92,10 +101,25 @@ pub async fn install_template(
             // Unconfigured, a missing folder resolves to `docs/` (fresh project).
             let docs_target = existing_docs;
             let provenance_before = crate::core::doc_provenance::snapshot_tracked(&project_path)?;
+            let docs_root = crate::core::docs_location::DocsRoot::for_project(&project_path)?;
+            // A folder that is not a human's becomes Kronn's by this install:
+            // recorded first, so the files written below are never counted as
+            // docs Kronn did not write (KT-1299). A human's docs stay theirs
+            // until the briefing's choice.
+            let human_folder = matches!(
+                crate::core::docs_folder::folder_state_with_runs(
+                    &project_path,
+                    docs_root.rel(),
+                    recorded_run,
+                ),
+                crate::core::docs_folder::DocsFolderState::HumanDocs { .. }
+            );
+            if !human_folder {
+                crate::core::kronn_state::mark_template_installed(&project_path)?;
+            }
             crate::core::template_manifest::apply_renames(&project_path, &docs_template)?;
             let mut created_files = Vec::new();
             if docs_template.is_dir() {
-                let docs_root = crate::core::docs_location::DocsRoot::for_project(&project_path)?;
                 created_files.extend(copy_dir_nondestructive_in(
                     &docs_template,
                     &docs_target,

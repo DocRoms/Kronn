@@ -1303,3 +1303,178 @@ async fn a_default_docs_root_audit_is_byte_identical_to_its_golden() {
         );
     }
 }
+
+// ─── KT-1299 — Kronn's own template files are never "foreign" docs ─────────
+
+async fn install_template_route(h: &Harness) {
+    let response = crate::api::projects::install_template(
+        axum::extract::State(h.state.clone()),
+        axum::extract::Path(PROJECT_ID.to_string()),
+    )
+    .await
+    .0;
+    assert!(response.success, "{:?}", response.error);
+}
+
+fn assert_not_asked(body: &str) {
+    assert!(
+        sse_events(body, "error")
+            .iter()
+            .all(|e| e["error_code"] != "docs_folder_choice_required"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn installing_the_template_then_launching_the_full_audit_starts_on_both_routes() {
+    let h = harness().await;
+    let project = h.project.path();
+    assert!(!project.join("docs").exists());
+    install_template_route(&h).await;
+    assert!(project.join("docs/AGENTS.md").is_file());
+    // Everything the install wrote is Kronn's: the gate counts none of it.
+    assert_eq!(
+        crate::core::docs_folder::folder_state(project, "docs"),
+        crate::core::docs_folder::DocsFolderState::KronnManaged
+    );
+
+    // The briefing keeps the folder; ticking "move to legacy" moves nothing of it.
+    let _cleanup = Relocated(project.to_string_lossy().into_owned());
+    crate::api::audit::briefing::save_briefing_answers(
+        &h.state,
+        PROJECT_ID,
+        briefing("docs", true),
+    )
+    .await
+    .unwrap();
+    assert!(!project.join("docs/legacy").exists());
+    assert!(project.join("docs/AGENTS.md").is_file());
+
+    audited_via_route(&h, &DocsRoot::default_root(), false).await;
+    arm(
+        h.tools.path(),
+        "noop",
+        &targets_for(&DocsRoot::default_root()),
+    );
+    assert_not_asked(&launch_route(&h, true).await);
+    assert!(!project.join("docs/legacy").exists());
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn the_template_installed_beside_human_docs_does_not_make_them_kronns() {
+    let h = harness().await;
+    let project = h.project.path();
+    human_docs(project);
+    install_template_route(&h).await;
+    // The human's files keep the folder theirs: the choice is still due.
+    assert!(matches!(
+        crate::core::docs_folder::folder_state(project, "docs"),
+        crate::core::docs_folder::DocsFolderState::HumanDocs { .. }
+    ));
+    let state = crate::core::kronn_state::read(project).expect(".kronn.json");
+    assert!(state.template_installed_at.is_none(), "{state:?}");
+    refused_on_both_routes(&h, "docs_folder_choice_required", "docs/legacy/").await;
+
+    // The choice unblocks the launch although the entry file already carries
+    // Kronn's signature, and moves the human's files.
+    let _cleanup = Relocated(project.to_string_lossy().into_owned());
+    crate::api::audit::briefing::save_briefing_answers(
+        &h.state,
+        PROJECT_ID,
+        briefing("docs", true),
+    )
+    .await
+    .unwrap();
+    assert!(project.join("docs/legacy/install.md").is_file());
+    assert!(project.join("docs/legacy/guide/usage.md").is_file());
+    assert!(!project.join("docs/install.md").exists());
+    for state_file in ["briefing.md", ".kronn.json"] {
+        assert!(
+            project.join("docs").join(state_file).is_file(),
+            "{state_file}"
+        );
+        assert!(!project.join("docs/legacy").join(state_file).exists());
+    }
+    audited_via_route(&h, &DocsRoot::default_root(), false).await;
+    assert_eq!(
+        std::fs::read_to_string(project.join("docs/legacy/install.md")).unwrap(),
+        "# Install guide\n"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_kronn_signed_entry_without_a_record_still_moves_on_the_choice() {
+    let h = harness().await;
+    let project = h.project.path();
+    human_docs(project);
+    std::fs::write(
+        project.join("docs/AGENTS.md"),
+        "# AI agent context — Entry point\n\nWritten by an old Kronn, never recorded.\n",
+    )
+    .unwrap();
+    refused_on_both_routes(&h, "docs_folder_choice_required", "docs/legacy/").await;
+
+    let _cleanup = Relocated(project.to_string_lossy().into_owned());
+    crate::api::audit::briefing::save_briefing_answers(
+        &h.state,
+        PROJECT_ID,
+        briefing("docs", true),
+    )
+    .await
+    .unwrap();
+    for moved in ["install.md", "guide/usage.md", "AGENTS.md"] {
+        assert!(project.join("docs/legacy").join(moved).is_file(), "{moved}");
+    }
+    let body = launch_route(&h, false).await;
+    assert_not_asked(&body);
+    assert!(!sse_events(&body, "start").is_empty(), "{body}");
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn partial_and_revalidation_wait_for_the_choice_on_human_docs() {
+    let h = harness().await;
+    let project = h.project.path();
+    human_docs(project);
+    arm(h.tools.path(), "fill", &["docs/glossary.md"]);
+    let before = snapshot(project);
+
+    let partial = crate::api::audit::drift::partial_audit(
+        axum::extract::State(h.state.clone()),
+        axum::extract::Path(PROJECT_ID.to_string()),
+        axum::Json(crate::models::PartialAuditRequest {
+            agent: AgentType::ClaudeCode,
+            connection_id: None,
+            tier: None,
+            steps: vec![1],
+        }),
+    )
+    .await
+    .into_response();
+    let revalidation = crate::api::audit::revalidate_audit(
+        axum::extract::State(h.state.clone()),
+        axum::extract::Path(PROJECT_ID.to_string()),
+        axum::Json(crate::models::RevalidateAuditRequest {
+            deterministic_only: Some(true),
+            agent: AgentType::ClaudeCode,
+            connection_id: None,
+            tier: None,
+        }),
+    )
+    .await
+    .into_response();
+    for response in [partial, revalidation] {
+        let body = sse_body(response).await;
+        let error = sse_events(&body, "error").pop().expect("refused");
+        assert_eq!(error["error_code"], "docs_folder_choice_required", "{body}");
+        assert!(sse_events(&body, "start").is_empty(), "{body}");
+    }
+    assert_eq!(snapshot(project), before);
+}

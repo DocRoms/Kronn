@@ -461,6 +461,40 @@ pub(crate) fn legacy_layout_refusal(project: &std::path::Path) -> Option<serde_j
     })
 }
 
+/// A human's docs are never moved or written over without the briefing's
+/// explicit choice: every run that writes the folder (Full, partial,
+/// revalidation) refuses it the same way. `recorded_run`: a Full run this
+/// instance recorded stands for the record (see `DocsFolderState`).
+pub(crate) fn docs_folder_choice_refusal(
+    project: &std::path::Path,
+    docs_root: &crate::core::docs_location::DocsRoot,
+    recorded_run: bool,
+) -> Option<serde_json::Value> {
+    let crate::core::docs_folder::DocsFolderState::HumanDocs { files, .. } =
+        crate::core::docs_folder::folder_state_with_runs(project, docs_root.rel(), recorded_run)
+    else {
+        return None;
+    };
+    Some(serde_json::json!({
+        "error": format!(
+            "The folder {}/ used by Kronn already exists and holds {files} file(s) Kronn did not write. \
+             Open the briefing and choose: another folder, or move them to {}/legacy/.",
+            docs_root.rel(), docs_root.rel()
+        ),
+        "error_code": "docs_folder_choice_required",
+    }))
+}
+
+/// Whether this instance recorded a Full run for the project.
+pub(crate) async fn has_recorded_full_run(state: &crate::AppState, project_id: &str) -> bool {
+    let id = project_id.to_string();
+    state
+        .db
+        .with_read_conn(move |conn| crate::db::audit_runs::has_any_full(conn, &id))
+        .await
+        .unwrap_or(false)
+}
+
 /// Template steps reverify a filled target; finding and review steps always
 /// preserve existing text, including documents outside their nominal target.
 pub(crate) fn reverifies_target(

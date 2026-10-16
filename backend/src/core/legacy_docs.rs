@@ -152,7 +152,17 @@ pub fn migrate_user_docs_to_legacy_in(
     if is_kronn_managed_docs(docs_dir) {
         return Ok(LegacyMigrationReport::skipped("already-kronn-managed"));
     }
+    move_user_docs_to_legacy_in(docs_dir, docs_root)
+}
 
+/// Move everything but Kronn's own files into `legacy/`, without asking whether
+/// the folder looks Kronn-managed: the caller decided (the briefing's explicit
+/// choice on a folder `docs_folder` reads as a human's, even when its entry
+/// file carries Kronn's signature, KT-1299).
+pub fn move_user_docs_to_legacy_in(
+    docs_dir: &Path,
+    docs_root: &crate::core::docs_location::DocsRoot,
+) -> std::io::Result<LegacyMigrationReport> {
     // Gather candidate top-level entries to move. Anything NOT in
     // `PROTECTED_TOP_LEVEL` is fair game — files AND directories.
     // Reading the dir once into a Vec before any move so the iterator
@@ -163,7 +173,9 @@ pub fn migrate_user_docs_to_legacy_in(
         let entry = entry?;
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
-        if PROTECTED_TOP_LEVEL.iter().any(|p| name_str == *p) {
+        if PROTECTED_TOP_LEVEL.iter().any(|p| name_str == *p)
+            || crate::core::docs_folder::is_kronn_state_file(&name_str)
+        {
             continue;
         }
         to_move.push(entry.path());

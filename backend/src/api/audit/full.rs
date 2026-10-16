@@ -264,7 +264,7 @@ pub(super) fn sse_error(msg: impl Into<String>) -> Sse<SseStream> {
     sse_refusal(serde_json::json!({ "error": msg.into() }))
 }
 
-fn sse_refusal(payload: serde_json::Value) -> Sse<SseStream> {
+pub(super) fn sse_refusal(payload: serde_json::Value) -> Sse<SseStream> {
     let stream: SseStream = Box::pin(futures::stream::once(async move {
         Ok::<_, Infallible>(Event::default().event("error").data(payload.to_string()))
     }));
@@ -359,32 +359,14 @@ pub async fn full_audit(
     // explicit choice; refused before the run takes the project's lease. A
     // resume continues a run that already started on this folder.
     // Read before this run records itself: only an earlier run is a proof.
-    let recorded_run = {
-        let id = project_id.clone();
-        state
-            .db
-            .with_read_conn(move |conn| crate::db::audit_runs::has_any_full(conn, &id))
-            .await
-            .unwrap_or(false)
-    };
+    let recorded_run = super::has_recorded_full_run(&state, &project_id).await;
     if resume_run_id_req.is_none()
         && matches!(req.kind.unwrap_or_default(), crate::models::AuditKind::Full)
     {
-        if let crate::core::docs_folder::DocsFolderState::HumanDocs { files, .. } =
-            crate::core::docs_folder::folder_state_with_runs(
-                &project_path,
-                docs_root.rel(),
-                recorded_run,
-            )
+        if let Some(refusal) =
+            super::docs_folder_choice_refusal(&project_path, &docs_root, recorded_run)
         {
-            return sse_refusal(serde_json::json!({
-                "error": format!(
-                    "The folder {}/ used by Kronn already exists and holds {files} file(s) Kronn did not write. \
-                     Open the briefing and choose: another folder, or move them to {}/legacy/.",
-                    docs_root.rel(), docs_root.rel()
-                ),
-                "error_code": "docs_folder_choice_required",
-            }));
+            return sse_refusal(refusal);
         }
     }
     let retry_steps_req = req.retry_steps.clone();

@@ -522,6 +522,15 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- Installing the template, then launching the full audit, is no longer refused
+  as "files Kronn did not write" (KT-1299). `POST /install-template` now records
+  the folder as Kronn's (`template_installed_at`) unless it already held a
+  human's docs, so the template's own files are never counted as foreign. The
+  briefing's "move to legacy" choice now moves a human's docs even when their
+  entry file carries Kronn's signature (it used to skip silently and leave the
+  launch blocked), and keeps `briefing.md` and `.kronn.json` in place. The
+  partial audit and the revalidation hold on a human's docs the same way the
+  full audit does (`docs_folder_choice_required`).
 - A review-wait timeout no longer locks the principal out of the review
   (KT-1293). The watchdog used to move the unreviewed delivery to `Escalated`
   while its alert told the principal to call `task_exec_review`, which only

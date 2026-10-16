@@ -301,6 +301,13 @@ pub async fn partial_audit(
         }));
         return Sse::new(stream);
     }
+    // The folder's human docs wait for the briefing's choice, as for a Full run.
+    let recorded_run = super::has_recorded_full_run(&state, &project.id).await;
+    if let Some(refusal) =
+        super::docs_folder_choice_refusal(&project_path, &docs_root, recorded_run)
+    {
+        return super::full::sse_refusal(refusal);
+    }
 
     // Validate requested step numbers against the FULL chained pipeline
     // (foundation 1..9 + chained sub-audits 10..16), not just the 9

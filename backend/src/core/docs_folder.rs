@@ -87,6 +87,14 @@ fn has_kronn_state(dir: &Path) -> bool {
         })
 }
 
+/// The briefing Kronn writes from the human's answers and its state files: not
+/// the human's docs, counted by no gate and moved by no choice.
+pub(crate) fn is_kronn_state_file(name: &str) -> bool {
+    name == "briefing.md"
+        || name == crate::core::kronn_state::KRONN_STATE_FILENAME
+        || name == crate::core::audit_run_state::RUN_STATE_FILENAME
+}
+
 /// The state of `<root>/<rel>`. Never follows a symlink.
 pub fn folder_state(root: &Path, rel: &str) -> DocsFolderState {
     folder_state_with_runs(root, rel, false)
@@ -120,11 +128,7 @@ pub fn folder_state_with_runs(root: &Path, rel: &str, recorded_run: bool) -> Doc
         }
         // The briefing Kronn writes from the human's answers and its state
         // file are not their docs.
-        if entry.depth() == 1
-            && (entry.file_name() == "briefing.md"
-                || entry.file_name() == crate::core::kronn_state::KRONN_STATE_FILENAME
-                || entry.file_name() == crate::core::audit_run_state::RUN_STATE_FILENAME)
-        {
+        if entry.depth() == 1 && is_kronn_state_file(&entry.file_name().to_string_lossy()) {
             continue;
         }
         files += 1;
@@ -167,7 +171,7 @@ pub fn move_to_legacy(
         )),
         DocsFolderState::HumanDocs { files, .. } => {
             crate::core::fs_guard::assert_contained_no_symlink(root, &dir.join("legacy"))?;
-            crate::core::legacy_docs::migrate_user_docs_to_legacy_in(&dir, docs_root)
+            crate::core::legacy_docs::move_user_docs_to_legacy_in(&dir, docs_root)
                 .map_err(|e| format!("moving the docs to legacy/ failed: {e}"))?;
             Ok(files)
         }
