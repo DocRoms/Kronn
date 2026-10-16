@@ -270,9 +270,9 @@ specialized run. Discussion-title guesses never authorize Validate.
 [src: file: frontend/src/components/AuditTimeline.tsx:261-279#latestRun]
 [src: file: frontend/src/components/AuditTimeline.tsx:968-1064#linkedValidation]
 
-- Step status, accepted included. [src: file: frontend/src/components/AuditTimeline.tsx:178#stepStatus]
-- Launch label: resume, finalize, run again. [src: file: frontend/src/components/AuditTimeline.tsx:459-466#launchLabel]
-- Per-step actions only on the resumable run. [src: file: frontend/src/components/AuditTimeline.tsx:470#stepActions]
+- Step status, accepted included. [src: file: frontend/src/components/AuditTimeline.tsx:177#stepStatus]
+- Launch label: resume, finalize, run again. [src: file: frontend/src/components/AuditTimeline.tsx:458-465#launchLabel]
+- Per-step actions only on the resumable run. [src: file: frontend/src/components/AuditTimeline.tsx:469#stepActions]
 - Validation phase is not running during an audit. [src: file: frontend/src/components/AuditTimeline.tsx:475-476#validationRunning] [src: file: frontend/src/components/ProjectCard.tsx:625-629#validationInProgress]
 - Validation phase hands over to the run. [src: file: frontend/src/components/AuditTimeline.tsx:969-981#runPending]
 - Confirmation before a fresh full audit. [src: file: frontend/src/components/AuditTimeline.tsx:1225-1247#confirmRelaunch]
