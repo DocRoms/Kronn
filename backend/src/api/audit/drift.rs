@@ -86,6 +86,7 @@ fn drift_response(
         total_sections: drift.total_sections,
         sources_state: drift.sources_state,
         broken_citations: drift.broken_citations,
+        missing_paths: Some(drift.missing_paths),
         placeholder_docs,
     }
 }
@@ -116,14 +117,7 @@ pub async fn acknowledge_drift(
         };
     let result = lease
         .blocking(move || {
-            crate::core::checksums::acknowledge_sections(&project_path, &req.sections)?;
-            // A section with recorded citations is judged by them: acknowledge those too.
-            let recorded = crate::core::citation_drift::read_strict(&project_path)?
-                .map(|f| f.docs)
-                .unwrap_or_default();
-            for doc in req.sections.iter().filter(|d| recorded.contains_key(*d)) {
-                crate::core::citation_drift::acknowledge(&project_path, doc)?;
-            }
+            crate::core::checksums::acknowledge_stale(&project_path, &req.sections)?;
             if let Err(e) = crate::core::doc_provenance::record_validation(
                 &project_path,
                 &req.sections,

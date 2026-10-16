@@ -799,11 +799,14 @@ pub(crate) fn source_provenance_with_citations(
     // A validated doc that now points at code which is gone (a cited line
     // changed, or a path its prose names no longer exists) is not trusted
     // as the human last saw it (KT-1168).
-    let citations_clean = citations.is_none_or(|report| {
-        report.section(&doc).is_none_or(|section| {
-            !section.doc_missing && !section.citations.iter().any(|c| c.state.is_broken())
-        }) && !crate::core::doc_relevance::has_stale_prose_paths(project, &doc, &content)
-    });
+    // The prose check needs no citation report: a caller without one gets the
+    // same answer as the learning gate that shares it.
+    let citations_clean =
+        citations.is_none_or(|report| {
+            report.section(&doc).is_none_or(|section| {
+                !section.doc_missing && !section.citations.iter().any(|c| c.state.is_broken())
+            })
+        }) && !crate::core::doc_relevance::has_stale_prose_paths(project, &doc, &content);
     Some(if human && citations_clean {
         SourceProvenance::HumanValidated
     } else {

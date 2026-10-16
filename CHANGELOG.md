@@ -13,6 +13,21 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- Doc relevance in « Revalider l'audit » (KT-1168). Beyond citation
+  fingerprints, Kronn judges every section of the AI docs against the code as
+  it is now, deterministically and without a model: `anchors_intact`,
+  `outdated` (a cited line changed or vanished), `no_longer_relevant` (every
+  anchor is gone) or `unanchored` (no citation, no path: listed as
+  unverifiable, never called true). A backticked path counts as gone only
+  when it resolves nowhere (project root, the doc's folder, the tail of any
+  project file; not generated or git-ignored), and examples, history lines,
+  proposals, templates and changelog docs are not claims. The panel shows the
+  counts, the evidence and a proposed correction per section, the agent pass
+  receives them (unanchored sections as « check or anchor »), and the sources
+  badge turns to « to re-verify » with the vanished paths counted apart from
+  the broken citations. A vanished mention is accepted per section with
+  « Vérifié, inchangé » only; a validation or a revalidation carries that
+  acceptance over and never adds to it.
 - AI documentation template and audit v2 gap audit (KT-819). The project
   facts of the briefing gain « Documentation externe » (Confluence, Notion,
   wiki, other; https addresses only, no credentials, at most 6), rendered in

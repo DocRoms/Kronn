@@ -1800,6 +1800,11 @@ pub struct DriftCheckResponse {
     pub sources_state: crate::core::citation_drift::SourcesState,
     #[serde(default)]
     pub broken_citations: usize,
+    /// Paths the docs' prose names that are gone, which no citation covers
+    /// (KT-1168). Counted apart from `broken_citations`.
+    #[serde(default)]
+    #[ts(optional)]
+    pub missing_paths: Option<usize>,
     /// Template docs that still hold raw `{{PLACEHOLDERS}}` (KT-1203).
     #[serde(default)]
     pub placeholder_docs: Vec<PlaceholderDoc>,
@@ -1914,6 +1919,10 @@ pub struct RevalidationPlan {
     /// nobody revised since validation (KT-1168).
     #[serde(default)]
     pub relevance: crate::core::doc_relevance::RelevanceCounts,
+    /// The sections Kronn cannot measure (no citation, no path), listed so
+    /// each is confronted with the code: by a person or by the agent pass.
+    #[serde(default)]
+    pub unanchored: Vec<crate::core::doc_relevance::SectionRelevance>,
 }
 
 /// What the conversion did with one tech-debt sheet (KT-1167).

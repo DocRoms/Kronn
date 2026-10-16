@@ -264,6 +264,14 @@ fn revalidation_uses_the_git_diff_to_disambiguate_a_repeated_anchor() {
     assert_eq!(rules.reanchor.len(), 1);
     assert_eq!(rules.reanchor[0].current_line, Some(64));
     assert!(rules.broken.is_empty());
+    // The diff moved it past the fingerprint window: Kronn re-anchors it, so
+    // the relevance check must not call the section outdated for it.
+    let fingerprints = citation_drift::check(dir);
+    assert!(fingerprints.sections[0].citations[0].state.is_broken());
+    assert_eq!(before.relevance.outdated, 0, "moved, not stale");
+    assert_eq!(before.relevance.anchors_intact, 1);
+    assert!(before.sections.iter().all(|s| s.relevance.is_empty()));
+    assert!(before.agent_steps.is_empty(), "no agent for a moved line");
 
     let done = apply_reanchors(dir).unwrap();
     assert_eq!(done.len(), 1);
@@ -496,7 +504,7 @@ fn the_plan_judges_each_section_and_the_agent_block_carries_the_corrections() {
     fs::write(dir.join("src/engine.rs"), "pub fn run() {}\n").unwrap();
     fs::write(
         dir.join(RULES),
-        "# Rules\n## Retries\nRetries [src: file: src/lib.rs:2].\n## Engine\nHandled by `src/engine.rs`.\n",
+        "# Rules\n## Retries\nRetries [src: file: src/lib.rs:2].\n## Engine\nHandled by `src/engine.rs`.\n## Notes\nPlain prose, nothing to anchor it.\n",
     )
     .unwrap();
     citation_drift::record_all(dir).unwrap();
@@ -513,7 +521,7 @@ fn the_plan_judges_each_section_and_the_agent_block_carries_the_corrections() {
     let planned = plan(dir);
     assert_eq!(planned.sources_state, SourcesState::NeedsReverification);
     assert_eq!(planned.relevance.no_longer_relevant, 1);
-    assert_eq!(planned.relevance.still_true, 1);
+    assert_eq!(planned.relevance.anchors_intact, 1);
     let rules = planned.sections.iter().find(|s| s.doc == RULES).unwrap();
     assert_eq!(rules.action, RevalidationAction::Agent);
     assert_eq!(rules.relevance.len(), 1);
@@ -524,4 +532,11 @@ fn the_plan_judges_each_section_and_the_agent_block_carries_the_corrections() {
     assert!(block.contains("section `Engine` — no longer relevant to the code"));
     assert!(block.contains("proposed:"));
     assert!(block.contains("src/engine.rs"));
+
+    // The section nothing anchors is listed and handed over as unverifiable,
+    // so every section of the doc is confronted with the code.
+    assert_eq!(planned.relevance.unanchored, 1);
+    assert_eq!(planned.unanchored.len(), 1);
+    assert_eq!(planned.unanchored[0].heading, "Notes");
+    assert!(block.contains("section `Notes` — unverifiable: check or anchor"));
 }

@@ -243,7 +243,7 @@ Two distinctions the reason must not blur, and does not:
   before its independent dispatches start, so every responder resolves its own tier;
   targets without an override inherit the discussion tier.
   [src: file: backend/src/api/discussions/crud.rs:611-652#replace_message_targets]
-  [src: file: backend/src/api/discussions/runtime.rs:615-634#dispatch_target_tier]
+  [src: file: backend/src/api/discussions/runtime.rs:636-655#dispatch_target_tier]
 - `message_cli_authors` records the exact local CLI author for verified live MCP
   appends, enabling deterministic `reply_to` routing across same-provider peers.
 - `messages.target_agent` remains the first-target compatibility projection.

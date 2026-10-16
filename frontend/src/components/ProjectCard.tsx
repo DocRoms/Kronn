@@ -1382,7 +1382,7 @@ export function ProjectCard({
   const docStateCounts: DocStateCounts | null = docStateUnknown
     ? null
     : {
-      broken: driftStatus.broken_citations ?? 0,
+      broken: (driftStatus.broken_citations ?? 0) + (driftStatus.missing_paths ?? 0),
       reanchor: headerRevalidationPlan?.reanchor_count ?? 0,
       stale: (driftStatus.stale_sections ?? []).length,
       reconfirm: docProvenanceCount,
@@ -1391,6 +1391,7 @@ export function ProjectCard({
     && docStateNeedsAttention(docStateCounts)
     && ((driftStatus?.stale_sections.length ?? 0) > 0
       || (driftStatus?.broken_citations ?? 0) > 0
+      || (driftStatus?.missing_paths ?? 0) > 0
       || (headerRevalidationPlan?.reanchor_count ?? 0) > 0
       || (docProvenanceCount ?? 0) > 0
       || driftStatus?.sources_state === 'needs_reverification');

@@ -339,7 +339,7 @@ export function RevalidateAudit({
     || plan === null || plan.sources_state === 'unknown'
     ? null
     : {
-      broken: drift.broken_citations ?? 0,
+      broken: (drift.broken_citations ?? 0) + (drift.missing_paths ?? 0),
       reanchor: plan.reanchor_count,
       stale: (drift.stale_sections ?? []).length,
       reconfirm: reconfirmCount,
@@ -491,11 +491,24 @@ export function RevalidateAudit({
                 {plan.relevance && plan.relevance.sections > 0 && (
                   <p className="rv-hint" data-testid="revalidate-relevance-counts">
                     {t('audit.revalidate.relevance',
-                      String(plan.relevance.still_true),
-                      String(plan.relevance.still_true + plan.relevance.outdated + plan.relevance.no_longer_relevant),
+                      String(plan.relevance.anchors_intact),
+                      String(plan.relevance.anchors_intact + plan.relevance.outdated + plan.relevance.no_longer_relevant),
                       String(plan.relevance.outdated), String(plan.relevance.no_longer_relevant),
                       String(plan.relevance.unanchored), String(plan.relevance.untouched_stale))}
                   </p>
+                )}
+                {(plan.unanchored ?? []).length > 0 && (
+                  <details className="rv-unanchored" data-testid="revalidate-unanchored">
+                    <summary>{t('audit.revalidate.relevance.unanchored.title', String(plan.unanchored.length))}</summary>
+                    <p className="rv-hint">{t('audit.revalidate.relevance.unanchored.hint')}</p>
+                    <ul>
+                      {plan.unanchored.map(u => (
+                        <li key={`${u.doc}:${u.heading}`} data-testid="revalidate-unanchored-section" data-verdict={u.verdict}>
+                          <code>{u.doc}</code> › {u.heading || '—'}
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
                 )}
                 {plan.sections.length === 0
                   ? plan.sources_state !== 'unknown' && (

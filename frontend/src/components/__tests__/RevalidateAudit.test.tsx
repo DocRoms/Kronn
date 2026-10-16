@@ -37,12 +37,13 @@ const PROJECT: Project = {
 };
 
 const NO_RELEVANCE = {
-  sections: 0, still_true: 0, outdated: 0, no_longer_relevant: 0, unanchored: 0,
-  untouched_stale: 0, missing_references: 0, prose_missing: 0, relevance_pct: null,
+  sections: 0, anchors_intact: 0, outdated: 0, no_longer_relevant: 0, unanchored: 0,
+  untouched_stale: 0, missing_references: 0, prose_missing: 0, anchored_intact_pct: null,
 };
 
 const PLAN: RevalidationPlan = {
   relevance: NO_RELEVANCE,
+  unanchored: [],
   sources_state: 'needs_reverification',
   agent_steps: [4],
   reanchor_count: 1,
@@ -69,6 +70,7 @@ const PLAN: RevalidationPlan = {
 const CLEAN: RevalidationPlan = {
   sources_state: 'clean', sections: [], agent_steps: [], reanchor_count: 0, human_count: 0,
   relevance: NO_RELEVANCE,
+  unanchored: [],
 };
 
 type Handlers = Parameters<typeof projectsApi.revalidateAuditStream>[2];
@@ -464,9 +466,14 @@ describe('RevalidateAudit', () => {
       reanchor_count: 0,
       human_count: 0,
       relevance: {
-        sections: 6, still_true: 3, outdated: 1, no_longer_relevant: 1, unanchored: 1,
-        untouched_stale: 2, missing_references: 2, prose_missing: 1, relevance_pct: 60,
+        sections: 6, anchors_intact: 3, outdated: 1, no_longer_relevant: 1, unanchored: 1,
+        untouched_stale: 2, missing_references: 2, prose_missing: 1, anchored_intact_pct: 60,
       },
+      unanchored: [{
+        doc: 'docs/glossary.md', heading: 'Intro', verdict: 'unanchored', evidence: [],
+        corrections: [{ kind: 'check_or_anchor', reference: '', proposal: 'Check it, then anchor it.' }],
+        untouched_since_code_changed: false,
+      }],
       sections: [{
         doc: 'docs/coding-rules.md', step: 4, action: 'agent', doc_missing: false,
         reanchor: [], broken: [], human: [],
@@ -493,6 +500,13 @@ describe('RevalidateAudit', () => {
     expect(within(section).getByTestId('revalidate-untouched')).toBeInTheDocument();
     expect(within(panel).queryByTestId('revalidate-prose-changed')).toBeNull();
     expect(within(panel).getByTestId('revalidate-launch')).toBeEnabled();
+
+    // The sections no anchor measures are listed, never called true.
+    const unanchored = within(panel).getByTestId('revalidate-unanchored');
+    expect(unanchored).toHaveTextContent('audit.revalidate.relevance.unanchored.title 1');
+    const row = within(unanchored).getByTestId('revalidate-unanchored-section');
+    expect(row).toHaveTextContent('docs/glossary.md');
+    expect(row).toHaveTextContent('Intro');
   });
 
   it('allows a targeted prose check while citation fingerprints are unknown', async () => {
@@ -502,6 +516,7 @@ describe('RevalidateAudit', () => {
       reanchor_count: 0,
       human_count: 0,
       relevance: NO_RELEVANCE,
+      unanchored: [],
       sections: [{
         doc: 'docs/coding-rules.md', step: 4, action: 'agent', doc_missing: false,
         reanchor: [], broken: [], human: [], relevance: [],

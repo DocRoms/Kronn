@@ -69,10 +69,12 @@ pub struct DocFingerprints {
     /// section nobody revised from one a person already touched.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub sections: BTreeMap<String, String>,
-    /// Paths the prose names that were already gone when a human validated
-    /// or acknowledged the doc: a deliberate mention, not a stale claim.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub known_missing: Vec<String>,
+    /// Per section key, the gone paths its prose names that a human saw and
+    /// accepted with « Vérifié, inchangé »: a deliberate mention, not a stale
+    /// claim. Only an acknowledgement writes it; a validation or a
+    /// revalidation carries it over and never adds to it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub known_missing: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -308,7 +310,49 @@ fn fingerprint(project_path: &Path, citation: &DocCitation) -> Option<CitationFi
     Some(fp)
 }
 
-fn fingerprint_doc(project_path: &Path, content: &str, reason: RecordReason) -> DocFingerprints {
+/// The accepted gone paths a new record keeps. An acknowledgement accepts what
+/// the human was just shown; every other reason carries over what was accepted
+/// before, as long as that section still names the path.
+fn accepted_missing(
+    project_path: &Path,
+    doc: &str,
+    content: &str,
+    reason: RecordReason,
+    previous: Option<&DocFingerprints>,
+) -> BTreeMap<String, Vec<String>> {
+    let current = crate::core::doc_relevance::missing_by_section(project_path, doc, content);
+    if reason == RecordReason::Acknowledged {
+        return current;
+    }
+    let Some(previous) = previous else {
+        return BTreeMap::new();
+    };
+    current
+        .into_iter()
+        .filter_map(|(key, paths)| {
+            let kept: Vec<String> = previous
+                .known_missing
+                .get(&key)
+                .map(|accepted| {
+                    paths
+                        .iter()
+                        .filter(|p| accepted.contains(p))
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            (!kept.is_empty()).then_some((key, kept))
+        })
+        .collect()
+}
+
+fn fingerprint_doc(
+    project_path: &Path,
+    doc: &str,
+    content: &str,
+    reason: RecordReason,
+    previous: Option<&DocFingerprints>,
+) -> DocFingerprints {
     DocFingerprints {
         doc_sha256: sha256_hex(content.as_bytes()),
         recorded_at: chrono::Utc::now().to_rfc3339(),
@@ -318,12 +362,7 @@ fn fingerprint_doc(project_path: &Path, content: &str, reason: RecordReason) -> 
             .filter_map(|c| fingerprint(project_path, c))
             .collect(),
         sections: crate::core::doc_relevance::section_digests(content),
-        known_missing: match reason {
-            RecordReason::Validation | RecordReason::Acknowledged => {
-                crate::core::doc_relevance::missing_prose_paths(project_path, content)
-            }
-            RecordReason::Audit | RecordReason::Revalidation => Vec::new(),
-        },
+        known_missing: accepted_missing(project_path, doc, content, reason, previous),
     }
 }
 
@@ -398,13 +437,20 @@ fn read_doc(project_path: &Path, doc: &str) -> Option<String> {
 /// Validation: every doc's citations are re-fingerprinted from the code as it
 /// is now. The human has just checked the whole set.
 pub fn record_all(project_path: &Path) -> Result<(), String> {
+    // A previous record is read for what a human accepted, never rebuilt:
+    // a validation does not accept a vanished path nobody was shown.
+    let previous = read_strict(project_path).ok().flatten().unwrap_or_default();
     let mut file = CitationsFile::default();
     for doc in doc_files(project_path) {
         if let Some(content) = read_doc(project_path, &doc) {
-            file.docs.insert(
-                doc,
-                fingerprint_doc(project_path, &content, RecordReason::Validation),
+            let entry = fingerprint_doc(
+                project_path,
+                &doc,
+                &content,
+                RecordReason::Validation,
+                previous.docs.get(&doc),
             );
+            file.docs.insert(doc, entry);
         }
     }
     write(project_path, &mut file)
@@ -419,10 +465,14 @@ pub fn record_after_audit(project_path: &Path, rewritten: &[String]) -> Result<(
     let mut file = previous.clone().unwrap_or_default();
     for doc in rewritten.iter().filter(|d| docs.contains(*d)) {
         if let Some(content) = read_doc(project_path, doc) {
-            file.docs.insert(
-                doc.clone(),
-                fingerprint_doc(project_path, &content, RecordReason::Audit),
+            let entry = fingerprint_doc(
+                project_path,
+                doc,
+                &content,
+                RecordReason::Audit,
+                previous.as_ref().and_then(|p| p.docs.get(doc)),
             );
+            file.docs.insert(doc.clone(), entry);
         }
     }
     let unchanged = match &previous {
@@ -449,10 +499,28 @@ pub fn acknowledge(project_path: &Path, doc: &str) -> Result<SectionCitations, S
     }
     let content = read_doc(project_path, doc).ok_or_else(|| format!("`{doc}` not found"))?;
     let mut file = read_strict(project_path)?.unwrap_or_default();
-    let entry = fingerprint_doc(project_path, &content, RecordReason::Acknowledged);
+    let entry = fingerprint_doc(
+        project_path,
+        doc,
+        &content,
+        RecordReason::Acknowledged,
+        file.docs.get(doc),
+    );
     file.docs.insert(doc.to_string(), entry.clone());
     write(project_path, &mut file)?;
     Ok(evaluate_section(project_path, doc, &entry))
+}
+
+/// « Vérifié, inchangé » on several sections at once. Every one that is a doc
+/// of the project is acknowledged, recorded or not: the checks judge every
+/// doc, so one added since the validation must be clearable too. A section
+/// that is not a doc (an audit step's own name) is left to its other route.
+pub fn acknowledge_docs(project_path: &Path, sections: &[String]) -> Result<(), String> {
+    let docs: BTreeSet<String> = doc_files(project_path).into_iter().collect();
+    for doc in sections.iter().filter(|s| docs.contains(*s)) {
+        acknowledge(project_path, doc)?;
+    }
+    Ok(())
 }
 
 /// The distinct citation labels a text carries, as the store names them.
@@ -654,8 +722,8 @@ pub fn record_docs(
     let mut file = read_strict(project_path)?.unwrap_or_default();
     for doc in docs {
         if let Some(content) = read_doc(project_path, doc) {
-            file.docs
-                .insert(doc.clone(), fingerprint_doc(project_path, &content, reason));
+            let entry = fingerprint_doc(project_path, doc, &content, reason, file.docs.get(doc));
+            file.docs.insert(doc.clone(), entry);
         }
     }
     write(project_path, &mut file)

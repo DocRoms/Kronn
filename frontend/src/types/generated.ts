@@ -2216,7 +2216,7 @@ cost_usd: number | null,
  */
 is_byok: boolean, };
 
-export type CorrectionKind = "recheck" | "replace_or_remove" | "remove_section";
+export type CorrectionKind = "recheck" | "replace_or_remove" | "remove_section" | "check_or_anchor";
 
 export type Correspondence = {
 /**
@@ -3894,6 +3894,11 @@ export type DriftCheckResponse = { template_update?: TemplateUpdate, audit_date:
  * "Sources clean" badge, recomputed from the cited lines.
  */
 sources_state: SourcesState, broken_citations: number,
+/**
+ * Paths the docs' prose names that are gone, which no citation covers
+ * (KT-1168). Counted apart from `broken_citations`.
+ */
+missing_paths?: number,
 /**
  * Template docs that still hold raw `{{PLACEHOLDERS}}` (KT-1203).
  */
@@ -7490,7 +7495,7 @@ export type ReinstallKind = "damaged_or_template" | "filled";
 /**
  * What is measured, over every section of every doc.
  */
-export type RelevanceCounts = { sections: number, still_true: number, outdated: number, no_longer_relevant: number, unanchored: number,
+export type RelevanceCounts = { sections: number, anchors_intact: number, outdated: number, no_longer_relevant: number, unanchored: number,
 /**
  * Outdated or no-longer-relevant sections nobody touched since the
  * validation that recorded them.
@@ -7506,9 +7511,10 @@ missing_references: number,
  */
 prose_missing: number,
 /**
- * `still_true` over the anchored sections; `None` when none is anchored.
+ * `anchors_intact` over the anchored sections; `None` when none is
+ * anchored. Intact anchors are not proof the prose is true.
  */
-relevance_pct: number | null, };
+anchored_intact_pct: number | null, };
 
 /**
  * One anchor of a section that does not resolve any more.
@@ -7523,7 +7529,12 @@ export type RelevanceReport = { counts: RelevanceCounts,
 /**
  * Only the sections that need attention (`outdated`, `no_longer_relevant`).
  */
-sections: Array<SectionRelevance>, };
+sections: Array<SectionRelevance>,
+/**
+ * The sections Kronn cannot measure (no citation, no path): handed to
+ * the agent pass to check or anchor. They do not raise the badge.
+ */
+unanchored: Array<SectionRelevance>, };
 
 export type RemoteRepo = { name: string, full_name: string, clone_url: string, ssh_url: string, description: string | null, language: string | null, stargazers_count: number, updated_at: string, source: string, already_cloned: boolean, };
 
@@ -7845,7 +7856,12 @@ agent_steps: number[], reanchor_count: number, human_count: number,
  * Sections per verdict over every doc, and how many of the stale ones
  * nobody revised since validation (KT-1168).
  */
-relevance: RelevanceCounts, };
+relevance: RelevanceCounts,
+/**
+ * The sections Kronn cannot measure (no citation, no path), listed so
+ * each is confronted with the code: by a person or by the agent pass.
+ */
+unanchored: Array<SectionRelevance>, };
 
 export type RevalidationSection = { doc: string,
 /**
@@ -8279,7 +8295,7 @@ evidence: Array<RelevanceEvidence>, corrections: Array<ProposedCorrection>,
  */
 untouched_since_code_changed: boolean, };
 
-export type SectionVerdict = "still_true" | "outdated" | "no_longer_relevant" | "unanchored";
+export type SectionVerdict = "anchors_intact" | "outdated" | "no_longer_relevant" | "unanchored";
 
 export type SendMessageRequest = { content: string,
 /**

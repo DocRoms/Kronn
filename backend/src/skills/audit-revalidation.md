@@ -25,7 +25,11 @@ the smallest possible edit.
   the current code: `outdated` (a cited line changed or vanished, or some of
   the files it names are gone) or `no longer relevant` (everything it points
   at is gone), each with a proposed correction. A section Kronn did not list
-  is not contradicted by anything it can check.
+  as outdated is not contradicted by anything it can check: that does not
+  prove it true.
+- **Unverifiable sections**: sections with no citation and no repository
+  path. Kronn cannot measure them. Confront each with the code, then anchor
+  it with a citation, or remove what is no longer true.
 - **Moved citations** were already re-anchored by Kronn (same content, new
   line). Do not touch them.
 - **Human-owned citations** sit in `owner="human"` sections: correct them
@@ -46,6 +50,8 @@ the smallest possible edit.
      it now;
    - no longer relevant: remove the section, unless it still describes
      something that exists (then cite where).
+   - unverifiable: read the code the section talks about, correct or remove
+     what is false, and add the citation that supports what stays;
 4. Check the other facts and citations of the file the same way, without
    rewriting what is still true.
 5. Use the citation grammar `[src: file: <path>:<line>]` or

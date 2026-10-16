@@ -569,7 +569,7 @@ resource wait separately from a failed plan. Do not send a generation request
 merely to guess whether a quota is available.
 [src: file: backend/src/models/orchestration.rs:1170-1193#TaskWorkerTier]
 [src: file: backend/src/api/orchestration.rs:10263-10306]
-[src: file: backend/src/api/orchestration.rs:11494-11536#bounded_provider_quota_details]
+[src: file: backend/src/api/orchestration.rs:11502-11544#bounded_provider_quota_details]
 [src: file: backend/src/api/orchestration.rs:11775-11804#task_exec_prepare]
 
 A `user_input` value may also carry a `<page.…>` `source_ref`: when the card

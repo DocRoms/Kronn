@@ -443,7 +443,7 @@ before anything is created, so a bad gate is no longer found at integration,
 after the worker delivered and the review passed. The contract is served by
 `tool_manual({tool: "task_exec_prepare"})`.
 `[src: file: backend/src/core/quick_exec.rs:50-64#ALLOWED_BINARIES]` `[src: file: backend/src/core/quick_exec.rs:300-345#check_command_line]`
-`[src: file: backend/src/api/orchestration.rs:8295-8305#validations_refusal]`
+`[src: file: backend/src/api/orchestration.rs:8303-8313#validations_refusal]`
 
 To correct the gates of an execution that already exists, the principal calls
 `task_exec_reassign({task_execution_id, validations, reason})` — `validations`
@@ -469,7 +469,7 @@ by Kronn at integration, and the worker commits and delivers in the same turn
 without ever waiting on a background command (its shell tool cuts a command at
 600 s, and a worker that hands the turn back to wait ends without delivering,
 `worker_completed_without_delivery`).
-`[src: file: backend/src/api/orchestration.rs:7721-7737#can_run_shell]`
+`[src: file: backend/src/api/orchestration.rs:7729-7745#can_run_shell]`
 
 `task_exec_status` returns `next_action.tool = task_exec_resume` only for an
 integration hold: an Applying-origin checkpoint, a pending integration recovery
@@ -480,7 +480,7 @@ returns the existing terminal result when the same successful resume is
 retried. The tool cannot advance provisioning- or review-owned checkpoints.
 [src: file: backend/src/api/orchestration.rs:12074-12100#compact_next_action]
 [src: file: backend/src/api/orchestration.rs:9340-9353#resume_blocked_apply]
-[src: file: backend/src/api/orchestration.rs:12360-12403#task_exec_resume]
+[src: file: backend/src/api/orchestration.rs:12368-12411#task_exec_resume]
 [src: file: backend/scripts/disc-introspection-mcp.py:6166-6244#call_task_exec_resume]
 
 An approved delivery the integration sends back (a red validation, a merge
@@ -497,7 +497,7 @@ candidate are not run again. The relaunched worker is stood down first, and the
 call is refused once the worker committed or left changes since the send-back,
 or delivered again (that delivery is reviewed instead). Attempts stay monotonic:
 the re-validation does not rewind the attempt the send-back opened.
-[src: file: backend/src/api/orchestration.rs:4057-4064#send_back] [src: file: backend/src/api/orchestration.rs:9416-9502#revalidate_sent_back_execution]
+[src: file: backend/src/api/orchestration.rs:4060-4067#send_back] [src: file: backend/src/api/orchestration.rs:9416-9502#revalidate_sent_back_execution]
 [src: file: backend/src/db/orchestration.rs:4011-4085#reopen_approval_after_rework]
 
 `task_exec_status({view: "compact"})` returns id, task, status, attempt,
@@ -558,7 +558,7 @@ human pasting a connection id. The two delegation tools keep that guard.
 alias or display name; a name two connections share is refused rather than
 guessed, and every refusal lists the connections that can generate the
 modality asked for, with their ids.
-[src: file: backend/src/api/orchestration.rs:11300-11345#MediaModality] [src: file: backend/src/api/media.rs:150-205#ConnectionReference]
+[src: file: backend/src/api/orchestration.rs:11308-11353#MediaModality] [src: file: backend/src/api/media.rs:150-205#ConnectionReference]
 [src: file: backend/src/db/external_api_connections.rs:131-160#resolve]
 
 The catalogue reports `configured` and `reachable`
@@ -693,7 +693,7 @@ agent-type/alias matching or any other permissive resolution if either is missin
 `AwaitingReview` while the CLI is already in its principal room. The legacy
 terminal return remains only as compatibility for executions accepted by older
 bridges that physically moved a session into a child room.
-[src: file: backend/src/api/orchestration.rs:25956-25960#every_terminal_state_keeps_execution_scoped_cli_in_its_origin]
+[src: file: backend/src/api/orchestration.rs:25969-25973#every_terminal_state_keeps_execution_scoped_cli_in_its_origin]
 [src: file: backend/src/db/cli_worker_bindings.rs:78-165#return_to_origin]
 
 Collapsing the live and reload-stable identities, as an earlier revision did,

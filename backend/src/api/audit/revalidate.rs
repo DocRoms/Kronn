@@ -52,15 +52,20 @@ pub fn plan(project_path: &FsPath) -> RevalidationPlan {
     // The deterministic fingerprints above are reused as they are; relevance
     // adds the per-section verdict and the prose paths no fingerprint covers.
     // A citation the git diff maps to a new line is re-anchored, not stale.
+    // The diff mapping runs once per doc: its statuses serve both the relevance
+    // check below and the sorting of each citation further down.
     let mut moved: std::collections::BTreeMap<String, BTreeSet<String>> = Default::default();
+    let mut statuses: HashMap<String, Vec<CitationStatus>> = HashMap::new();
     for section in report.sections.iter().filter(|s| !s.citations.is_empty()) {
         let content = std::fs::read_to_string(project_path.join(&section.doc)).unwrap_or_default();
-        let labels: BTreeSet<String> = reanchor_statuses(project_path, &content, section)
-            .into_iter()
+        let found = reanchor_statuses(project_path, &content, section);
+        let labels: BTreeSet<String> = found
+            .iter()
             .filter(|c| c.state == CitationState::Moved)
-            .map(|c| c.cite)
+            .map(|c| c.cite.clone())
             .collect();
         moved.insert(section.doc.clone(), labels);
+        statuses.insert(section.doc.clone(), found);
     }
     let relevance = doc_relevance::analyze_with_moves(project_path, &report, &moved);
     let docs_root = crate::core::docs_location::DocsRoot::of(project_path);
@@ -68,6 +73,7 @@ pub fn plan(project_path: &FsPath) -> RevalidationPlan {
     let mut plan = RevalidationPlan {
         sources_state: relevance.escalate(report.sources_state),
         relevance: relevance.counts.clone(),
+        unanchored: relevance.unanchored.clone(),
         ..Default::default()
     };
     for section in &report.sections {
@@ -87,7 +93,7 @@ pub fn plan(project_path: &FsPath) -> RevalidationPlan {
             human: Vec::new(),
             relevance: stale_sections,
         };
-        for citation in reanchor_statuses(project_path, &content, section) {
+        for citation in statuses.remove(&section.doc).unwrap_or_default() {
             for (name, labels) in &human_sections {
                 if labels.contains(&citation.cite) {
                     entry.human.push(HumanCitationTodo {
@@ -273,6 +279,9 @@ fn reanchor_statuses(
     content: &str,
     section: &citation_drift::SectionCitations,
 ) -> Vec<CitationStatus> {
+    if section.citations.is_empty() {
+        return Vec::new();
+    }
     let moves = reanchor_suggestions(project_path, content, &section.doc);
     section
         .citations
@@ -340,6 +349,36 @@ fn finding_line(c: &CitationStatus) -> String {
     format!("- `[src: file: {}]` — {what}\n", c.cite)
 }
 
+/// How many unanchored headings one block lists before it counts the rest.
+const UNANCHORED_LISTED: usize = 30;
+
+/// Sections no citation and no path anchors: Kronn cannot measure them, so
+/// the agent is asked to confront each with the code (or anchor it).
+fn unanchored_block(sections: &[&doc_relevance::SectionRelevance]) -> String {
+    let mut out = String::from(
+        "Kronn cannot verify these sections (no citation, no repository path): \
+         unverifiable. Check each against the code and anchor it with a \
+         `[src: file: path:line]` citation, or remove what is no longer true:\n",
+    );
+    for s in sections.iter().take(UNANCHORED_LISTED) {
+        let heading = if s.heading.is_empty() {
+            "(text before the first heading)"
+        } else {
+            s.heading.as_str()
+        };
+        out.push_str(&format!(
+            "- section `{heading}` — unverifiable: check or anchor\n"
+        ));
+    }
+    if sections.len() > UNANCHORED_LISTED {
+        out.push_str(&format!(
+            "- and {} more unanchored section(s)\n",
+            sections.len() - UNANCHORED_LISTED
+        ));
+    }
+    out
+}
+
 /// The block an agent step receives: the skill, then Kronn's findings for
 /// that step's doc.
 pub(crate) fn prompt_blocks(plan: &RevalidationPlan) -> HashMap<usize, String> {
@@ -384,6 +423,14 @@ pub(crate) fn prompt_blocks(plan: &RevalidationPlan) -> HashMap<usize, String> {
                     block.push_str(&format!("  - proposed: {}\n", c.proposal));
                 }
             }
+        }
+        let unanchored: Vec<&doc_relevance::SectionRelevance> = plan
+            .unanchored
+            .iter()
+            .filter(|s| s.doc == section.doc)
+            .collect();
+        if !unanchored.is_empty() {
+            block.push_str(&unanchored_block(&unanchored));
         }
         if section.broken.is_empty() && section.reanchor.is_empty() && section.relevance.is_empty()
         {

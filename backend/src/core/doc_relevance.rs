@@ -10,25 +10,36 @@
 //!   (reused, not recomputed: `citation_drift::check` stays the one source of
 //!   truth for changed / moved / removed lines);
 //! * the repository paths its prose names in backticks (`backend/src/x.rs`),
-//!   which carry no fingerprint but can plainly stop existing.
+//!   which carry no fingerprint but can plainly stop existing. A path is only
+//!   called gone when it resolves nowhere: not from the project root, not
+//!   from the doc's own folder, not as the tail of any project file (docs
+//!   write `lib/routes.ts` for `frontend/src/lib/routes.ts`), and is not a
+//!   file Kronn generates or git ignores. A line that tells history ("the
+//!   former `x.rs`") or speaks of a file's absence, a section titled as a
+//!   proposal, a naming pattern (`TD-YYYYMMDD-slug.md`), an example (and the
+//!   list right under it), a doc still
+//!   holding the template's placeholders, and the changelog / release docs
+//!   are not claims.
 //!
 //! Verdicts, from the section's anchors only:
 //!
-//! * `still_true`: every anchor still resolves (a moved line counts: Kronn
-//!   re-anchors it). Kronn found no contradiction; whether a claim is true in
-//!   substance stays for the agent pass.
+//! * `anchors_intact`: every anchor still resolves (a moved line counts: Kronn
+//!   re-anchors it). Kronn found no contradiction; it did NOT prove the prose
+//!   true: that stays for the agent pass.
 //! * `outdated`: a cited line changed or fell past the end of its file, or
 //!   some (not all) of the files it points at are gone.
 //! * `no_longer_relevant`: every anchor points at a file that is gone: the
 //!   code the section describes no longer exists.
-//! * `unanchored`: no citation and no path: Kronn cannot measure it.
+//! * `unanchored`: no citation and no path: Kronn cannot measure it. These
+//!   are listed and handed to the agent pass as unverifiable (check or anchor).
 //!
 //! The signal is a count, so it can be tracked over time: sections per
-//! verdict, the share of anchored sections that are still true, and the
+//! verdict, the share of anchored sections whose anchors are intact, and the
 //! sections *untouched since the code they describe changed* (the section's
 //! own digest is the one recorded at validation while its anchors broke).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::cell::OnceCell;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -40,7 +51,7 @@ use crate::core::citation_drift::{self, CitationDriftReport, CitationState, Sect
 #[ts(export)]
 #[serde(rename_all = "snake_case")]
 pub enum SectionVerdict {
-    StillTrue,
+    AnchorsIntact,
     Outdated,
     NoLongerRelevant,
     Unanchored,
@@ -76,6 +87,8 @@ pub enum CorrectionKind {
     ReplaceOrRemove,
     /// Everything the section describes is gone: drop the section.
     RemoveSection,
+    /// Nothing anchors the section: check it against the code, then cite it.
+    CheckOrAnchor,
 }
 
 /// A correction Kronn proposes. Nothing is applied by itself: the agent pass
@@ -110,7 +123,7 @@ pub struct RelevanceCounts {
     #[ts(type = "number")]
     pub sections: usize,
     #[ts(type = "number")]
-    pub still_true: usize,
+    pub anchors_intact: usize,
     #[ts(type = "number")]
     pub outdated: usize,
     #[ts(type = "number")]
@@ -128,9 +141,10 @@ pub struct RelevanceCounts {
     /// no fingerprint, broke: only this check sees it.
     #[ts(type = "number")]
     pub prose_missing: usize,
-    /// `still_true` over the anchored sections; `None` when none is anchored.
+    /// `anchors_intact` over the anchored sections; `None` when none is
+    /// anchored. Intact anchors are not proof the prose is true.
     #[ts(type = "number | null")]
-    pub relevance_pct: Option<u32>,
+    pub anchored_intact_pct: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -139,6 +153,9 @@ pub struct RelevanceReport {
     pub counts: RelevanceCounts,
     /// Only the sections that need attention (`outdated`, `no_longer_relevant`).
     pub sections: Vec<SectionRelevance>,
+    /// The sections Kronn cannot measure (no citation, no path): handed to
+    /// the agent pass to check or anchor. They do not raise the badge.
+    pub unanchored: Vec<SectionRelevance>,
 }
 
 impl RelevanceReport {
@@ -285,18 +302,157 @@ fn path_token(raw: &str) -> Option<String> {
     plausible_ext.then(|| token.to_string())
 }
 
-/// The repository paths a text names in inline code, outside fences. Only a
-/// path whose first folder exists at the project root is taken: a bare
-/// example (`path/to/file.rs`) or another repo's path is not a claim.
+/// Words that make a line history ("the former `x.rs`"), not a claim about
+/// the code as it is now. Matched as whole words, outside inline code.
+const HISTORY_WORDS: &[&str] = &[
+    "former",
+    "formerly",
+    "previously",
+    "legacy",
+    "removed",
+    "deleted",
+    "deprecated",
+    "replaced",
+    "renamed",
+    "superseded",
+    "ancien",
+    "ancienne",
+    "anciens",
+    "anciennement",
+    "supprimé",
+    "supprimée",
+    "remplacé",
+    "remplacée",
+    "renommé",
+    "renommée",
+    "obsolète",
+];
+
+/// Phrases of a line that speaks of a path's absence or a file still to be
+/// made: it does not claim the path exists.
+const ABSENCE_PHRASES: &[&str] = &[
+    "no longer",
+    "used to ",
+    "n'existe plus",
+    "n'existe pas",
+    "does not exist",
+    "doesn't exist",
+    "resolved to nothing",
+    "if we add",
+    "we could",
+    "to be created",
+    "to create",
+    "à créer",
+];
+
+fn tells_history(line: &str) -> bool {
+    let outside_code = line.split('`').step_by(2).collect::<Vec<_>>().join(" ");
+    let lower = outside_code.to_lowercase();
+    if ABSENCE_PHRASES.iter().any(|p| lower.contains(p)) {
+        return true;
+    }
+    lower
+        .split(|c: char| !c.is_alphabetic())
+        .any(|word| HISTORY_WORDS.contains(&word))
+}
+
+/// A section titled as a proposal ("Suggested direction", "Roadmap") names
+/// files that are still to be made: not claims about the repository now.
+fn is_proposal_heading(heading: &str) -> bool {
+    let lower = heading.to_lowercase();
+    lower.split(|c: char| !c.is_alphabetic()).any(|w| {
+        matches!(
+            w,
+            "suggested"
+                | "suggestion"
+                | "suggestions"
+                | "proposal"
+                | "proposals"
+                | "proposed"
+                | "future"
+                | "roadmap"
+                | "todo"
+                | "ideas"
+                | "proposition"
+                | "pistes"
+        )
+    })
+}
+
+/// A token that is a naming pattern, not a path: `TD-YYYYMMDD-slug.md`,
+/// `NNNN-title.md`, `<name>.rs`.
+fn is_placeholder_pattern(path: &str) -> bool {
+    ["YYYY", "MMDD", "NNN", "XXX"]
+        .iter()
+        .any(|p| path.contains(p))
+}
+
+/// A line that presents an example ("Detail file example:", "e.g."): the
+/// paths it and the list under it carry illustrate a format, they are not
+/// claims about this repository.
+fn tells_example(line: &str) -> bool {
+    let outside_code = line.split('`').step_by(2).collect::<Vec<_>>().join(" ");
+    let lower = outside_code.to_lowercase();
+    lower.contains("e.g.")
+        || lower.split(|c: char| !c.is_alphabetic()).any(|w| {
+            matches!(
+                w,
+                "example" | "examples" | "exemple" | "exemples" | "sample"
+            )
+        })
+}
+
+fn is_list_item(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with("- ")
+        || t.starts_with("* ")
+        || t.starts_with("+ ")
+        || t.split_once(". ")
+            .is_some_and(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// The changelog, release notes and history / archive docs name files that
+/// are gone because that is their job: they are not claims about the code now.
+pub(crate) fn is_historical_doc(doc: &str) -> bool {
+    let lower = doc.to_lowercase();
+    let mut parts: Vec<&str> = lower.split('/').collect();
+    let name = parts.pop().unwrap_or_default();
+    let stem = name.strip_suffix(".md").unwrap_or(name);
+    parts.iter().any(|dir| {
+        matches!(
+            *dir,
+            "releases" | "changelog" | "history" | "archive" | "archives"
+        )
+    }) || stem.contains("changelog")
+        || stem.contains("release-notes")
+        || stem == "history"
+        || stem.ends_with("-history")
+        || stem.ends_with("-archive")
+}
+
+/// The repository paths a text names in inline code, outside fences and
+/// outside lines that tell history. Only a path whose first folder exists at
+/// the project root is taken: a bare example (`path/to/file.rs`) or another
+/// repo's path is not a claim.
 fn prose_paths(project: &Path, text: &str) -> Vec<String> {
     let mut found: BTreeSet<String> = BTreeSet::new();
     let mut in_fence = false;
+    // An example line covers the list right under it, up to the next blank
+    // line or heading.
+    let mut example_block = false;
     for line in text.split('\n') {
         if is_fence(line) {
             in_fence = !in_fence;
             continue;
         }
-        if in_fence {
+        if line.trim().is_empty() || heading_of(line).is_some() {
+            example_block = false;
+        }
+        let example = tells_example(line);
+        if example && !is_list_item(line) {
+            example_block = true;
+        }
+        if in_fence || example || example_block || tells_history(line) {
             continue;
         }
         for (i, piece) in line.split('`').enumerate() {
@@ -315,33 +471,231 @@ fn prose_paths(project: &Path, text: &str) -> Vec<String> {
     found.into_iter().collect()
 }
 
-/// Prose paths of a doc whose file is gone. Recorded at validation or
-/// acknowledgement: a human who signed the doc off accepted them as written
-/// (a historical mention), so they stop counting.
-pub(crate) fn missing_prose_paths(project: &Path, content: &str) -> Vec<String> {
-    prose_paths(project, content)
+// ─── Resolving a prose path ───────────────────────────────────────────────
+
+/// Every project file, as the tails a doc may write it with: `a/b/c.rs`,
+/// `b/c.rs`, `c.rs`.
+struct ProjectIndex {
+    tails: HashSet<String>,
+}
+
+const WALK_CAP: usize = 100_000;
+const WALK_SKIPPED_DIRS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    ".venv",
+    "__pycache__",
+    ".kronn",
+];
+
+/// `git ls-files` (tracked and untracked-not-ignored), `None` outside git.
+fn git_files(project: &Path) -> Option<Vec<String>> {
+    let out = crate::core::cmd::git_cmd()
+        .arg("-C")
+        .arg(project)
+        .args([
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&out.stdout)
+            .split('\0')
+            .filter(|f| !f.is_empty())
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+/// The fallback outside a git work tree: a bounded walk.
+fn walked_files(project: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack = vec![project.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if kind.is_dir() {
+                let skipped = entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|n| WALK_SKIPPED_DIRS.contains(&n));
+                if !skipped {
+                    stack.push(path);
+                }
+            } else if kind.is_file() {
+                if let Ok(rel) = path.strip_prefix(project) {
+                    out.push(rel.to_string_lossy().replace('\\', "/"));
+                }
+            }
+            if out.len() >= WALK_CAP {
+                return out;
+            }
+        }
+    }
+    out
+}
+
+impl ProjectIndex {
+    fn build(project: &Path) -> Self {
+        let files = git_files(project).unwrap_or_else(|| walked_files(project));
+        let mut tails = HashSet::new();
+        for file in &files {
+            let mut rest = file.as_str();
+            loop {
+                tails.insert(rest.to_string());
+                match rest.split_once('/') {
+                    Some((_, tail)) if !tail.is_empty() => rest = tail,
+                    _ => break,
+                }
+            }
+        }
+        Self { tails }
+    }
+}
+
+/// Kronn's own outputs next to the docs: regenerated or written on demand
+/// (`linked-repos.md` exists only once a repo is linked), never authored.
+fn is_generated_output(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    [
+        "briefing.md",
+        "linked-repos.md",
+        // Written when a project opts into document budgets.
+        ".kronn-document-budgets.json",
+        "checksums.json",
+        citation_drift::CITATIONS_FILENAME,
+        crate::core::doc_provenance::PROVENANCE_FILENAME,
+        crate::core::kronn_state::KRONN_STATE_FILENAME,
+        crate::core::audit_run_state::RUN_STATE_FILENAME,
+    ]
+    .contains(&name)
+}
+
+fn is_git_ignored(project: &Path, path: &str) -> bool {
+    crate::core::cmd::git_cmd()
+        .arg("-C")
+        .arg(project)
+        .args(["check-ignore", "-q", "--", path])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// Decides whether a path a doc names is really gone. The file index is built
+/// on the first miss only: a healthy doc set never pays for it.
+struct PathResolver<'a> {
+    project: &'a Path,
+    index: OnceCell<ProjectIndex>,
+}
+
+impl<'a> PathResolver<'a> {
+    fn new(project: &'a Path) -> Self {
+        Self {
+            project,
+            index: OnceCell::new(),
+        }
+    }
+
+    /// Gone: resolves from the project root nowhere, from the doc's folder
+    /// nowhere, as the tail of no project file, and is neither generated nor
+    /// git-ignored.
+    fn is_missing(&self, doc: &str, path: &str) -> bool {
+        if citation_drift::cited_file_exists(self.project, path) {
+            return false;
+        }
+        if let Some(folder) = Path::new(doc)
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+        {
+            let beside = folder.join(path).to_string_lossy().replace('\\', "/");
+            if citation_drift::cited_file_exists(self.project, &beside) {
+                return false;
+            }
+        }
+        let index = self.index.get_or_init(|| ProjectIndex::build(self.project));
+        if index.tails.contains(path) {
+            return false;
+        }
+        !(is_generated_output(path) || is_git_ignored(self.project, path))
+    }
+}
+
+/// A doc that still holds raw `{{PLACEHOLDER}}` slots is the Kronn template,
+/// not yet this project's: the example paths it carries are not claims.
+fn is_unfilled_template(content: &str) -> bool {
+    crate::api::audit::validation::count_raw_placeholders(content) > 0
+}
+
+/// The paths of one section's prose no citation of that section covers.
+fn section_prose_paths(project: &Path, section: &Section) -> Vec<String> {
+    if is_proposal_heading(&section.heading) {
+        return Vec::new();
+    }
+    let labels = citation_drift::cite_labels(&section.text);
+    let cited: BTreeSet<&str> = labels.iter().map(|l| file_of_label(l)).collect();
+    prose_paths(project, &section.text)
         .into_iter()
-        .filter(|p| !citation_drift::cited_file_exists(project, p))
+        .filter(|p| !cited.contains(p.as_str()) && !is_placeholder_pattern(p))
         .collect()
 }
 
+/// Per section key, the prose paths of a doc that are gone. Empty for a
+/// historical doc.
+pub(crate) fn missing_by_section(
+    project: &Path,
+    doc: &str,
+    content: &str,
+) -> BTreeMap<String, Vec<String>> {
+    let mut out = BTreeMap::new();
+    if is_historical_doc(doc) || is_unfilled_template(content) {
+        return out;
+    }
+    let resolver = PathResolver::new(project);
+    for section in split_sections(content) {
+        let missing: Vec<String> = section_prose_paths(project, &section)
+            .into_iter()
+            .filter(|p| resolver.is_missing(doc, p))
+            .collect();
+        if !missing.is_empty() {
+            out.insert(section.key, missing);
+        }
+    }
+    out
+}
+
 /// Whether the prose of `doc` names a path that is gone and that no human
-/// validation or acknowledgement accepted.
+/// acknowledgement accepted, section by section.
 pub(crate) fn has_stale_prose_paths(project: &Path, doc: &str, content: &str) -> bool {
-    let missing = missing_prose_paths(project, content);
+    let missing = missing_by_section(project, doc, content);
     if missing.is_empty() {
         return false;
     }
-    let accepted: BTreeSet<String> = citation_drift::read_strict(project)
+    let accepted = citation_drift::read_strict(project)
         .ok()
         .flatten()
-        .and_then(|f| {
-            f.docs
-                .get(doc)
-                .map(|e| e.known_missing.iter().cloned().collect())
-        })
+        .and_then(|f| f.docs.get(doc).map(|e| e.known_missing.clone()))
         .unwrap_or_default();
-    missing.iter().any(|p| !accepted.contains(p))
+    missing.iter().any(|(key, paths)| {
+        let seen = accepted.get(key);
+        paths.iter().any(|p| !seen.is_some_and(|s| s.contains(p)))
+    })
 }
 
 // ─── Verdicts ─────────────────────────────────────────────────────────────
@@ -431,23 +785,56 @@ fn corrections_for(
 struct DocContext<'a> {
     project: &'a Path,
     doc: &'a str,
+    resolver: &'a PathResolver<'a>,
+    /// What the prose names counts as claims: false for a doc still holding
+    /// the template's placeholders, whose example paths are not this project's.
+    prose_claims: bool,
     drift: Option<&'a SectionCitations>,
     recorded_digests: Option<&'a BTreeMap<String, String>>,
     /// The doc is byte-identical to its record.
     doc_untouched: bool,
-    known_missing: BTreeSet<&'a str>,
+    /// Per section key: the gone paths a human accepted as written.
+    known_missing: Option<&'a BTreeMap<String, Vec<String>>>,
     /// Labels of this doc a diff mapping re-anchors although the fingerprint
     /// window did not find them.
     moved: Option<&'a BTreeSet<String>>,
 }
 
+fn verdict_row(
+    ctx: &DocContext<'_>,
+    section: &Section,
+    verdict: SectionVerdict,
+    evidence: Vec<RelevanceEvidence>,
+    corrections: Vec<ProposedCorrection>,
+    untouched: bool,
+) -> SectionRelevance {
+    SectionRelevance {
+        doc: ctx.doc.to_string(),
+        heading: section.heading.clone(),
+        verdict,
+        evidence,
+        corrections,
+        untouched_since_code_changed: untouched,
+    }
+}
+
+/// The verdict of one section, `None` when it has no body to judge.
 fn judge(
     ctx: &DocContext<'_>,
     section: &Section,
     counts: &mut RelevanceCounts,
 ) -> Option<SectionRelevance> {
+    // A heading with nothing under it says nothing: not a section to judge.
+    let body_empty = section
+        .text
+        .lines()
+        .filter(|l| heading_of(l).is_none())
+        .all(|l| l.trim().is_empty());
+    if body_empty {
+        return None;
+    }
     let labels = citation_drift::cite_labels(&section.text);
-    let cited_files: BTreeSet<&str> = labels.iter().map(|l| file_of_label(l)).collect();
+    let accepted = ctx.known_missing.and_then(|m| m.get(&section.key));
     let mut anchors = 0usize;
     let mut evidence: Vec<RelevanceEvidence> = Vec::new();
     for label in &labels {
@@ -462,12 +849,19 @@ fn judge(
             }),
         }
     }
-    for path in prose_paths(ctx.project, &section.text) {
-        if cited_files.contains(path.as_str()) || ctx.known_missing.contains(path.as_str()) {
-            continue;
-        }
-        anchors += 1;
-        if !citation_drift::cited_file_exists(ctx.project, &path) {
+    // A path both cited and named in prose is the citation: counted once.
+    let prose = if ctx.prose_claims {
+        section_prose_paths(ctx.project, section)
+    } else {
+        Vec::new()
+    };
+    for path in prose {
+        if !ctx.resolver.is_missing(ctx.doc, &path) {
+            anchors += 1;
+        } else if accepted.is_some_and(|a| a.contains(&path)) {
+            // A person accepted this mention as written.
+        } else {
+            anchors += 1;
             evidence.push(RelevanceEvidence {
                 kind: EvidenceKind::PathReference,
                 reference: path,
@@ -478,7 +872,19 @@ fn judge(
     counts.sections += 1;
     if anchors == 0 {
         counts.unanchored += 1;
-        return None;
+        let correction = ProposedCorrection {
+            kind: CorrectionKind::CheckOrAnchor,
+            reference: String::new(),
+            proposal: "Kronn cannot verify this section: it has no citation and names no repository path. Check it against the code, then anchor it with a `[src: file: path:line]` citation, or remove it if it no longer applies.".into(),
+        };
+        return Some(verdict_row(
+            ctx,
+            section,
+            SectionVerdict::Unanchored,
+            Vec::new(),
+            vec![correction],
+            false,
+        ));
     }
     let gone = evidence
         .iter()
@@ -490,8 +896,15 @@ fn judge(
         .filter(|e| e.kind == EvidenceKind::PathReference)
         .count();
     let verdict = if evidence.is_empty() {
-        counts.still_true += 1;
-        return None;
+        counts.anchors_intact += 1;
+        return Some(verdict_row(
+            ctx,
+            section,
+            SectionVerdict::AnchorsIntact,
+            Vec::new(),
+            Vec::new(),
+            false,
+        ));
     } else if gone == anchors {
         counts.no_longer_relevant += 1;
         SectionVerdict::NoLongerRelevant
@@ -506,20 +919,22 @@ fn judge(
     if untouched {
         counts.untouched_stale += 1;
     }
-    Some(SectionRelevance {
-        doc: ctx.doc.to_string(),
-        heading: section.heading.clone(),
-        corrections: corrections_for(&evidence, verdict),
+    let corrections = corrections_for(&evidence, verdict);
+    Some(verdict_row(
+        ctx,
+        section,
         verdict,
         evidence,
-        untouched_since_code_changed: untouched,
-    })
+        corrections,
+        untouched,
+    ))
 }
 
 impl RelevanceCounts {
     fn finish(&mut self) {
-        let anchored = self.still_true + self.outdated + self.no_longer_relevant;
-        self.relevance_pct = (anchored > 0).then(|| (self.still_true * 100 / anchored) as u32);
+        let anchored = self.anchors_intact + self.outdated + self.no_longer_relevant;
+        self.anchored_intact_pct =
+            (anchored > 0).then(|| (self.anchors_intact * 100 / anchored) as u32);
     }
 }
 
@@ -537,8 +952,13 @@ pub fn analyze_with_moves(
     moved: &BTreeMap<String, BTreeSet<String>>,
 ) -> RelevanceReport {
     let recorded = citation_drift::read_strict(project).ok().flatten();
+    let resolver = PathResolver::new(project);
     let mut out = RelevanceReport::default();
     for doc in citation_drift::doc_files(project) {
+        // History is not a claim about the code as it is now.
+        if is_historical_doc(&doc) {
+            continue;
+        }
         let Ok(content) = std::fs::read_to_string(project.join(&doc)) else {
             continue;
         };
@@ -546,17 +966,22 @@ pub fn analyze_with_moves(
         let ctx = DocContext {
             project,
             doc: &doc,
+            resolver: &resolver,
+            prose_claims: !is_unfilled_template(&content),
             drift: report.section(&doc),
             recorded_digests: entry.map(|e| &e.sections).filter(|d| !d.is_empty()),
             doc_untouched: entry.is_some_and(|e| !report_doc_changed(report, &doc, &content, e)),
-            known_missing: entry
-                .map(|e| e.known_missing.iter().map(String::as_str).collect())
-                .unwrap_or_default(),
+            known_missing: entry.map(|e| &e.known_missing),
             moved: moved.get(&doc),
         };
         for section in split_sections(&content) {
-            if let Some(found) = judge(&ctx, &section, &mut out.counts) {
-                out.sections.push(found);
+            let Some(found) = judge(&ctx, &section, &mut out.counts) else {
+                continue;
+            };
+            match found.verdict {
+                SectionVerdict::AnchorsIntact => {}
+                SectionVerdict::Unanchored => out.unanchored.push(found),
+                _ => out.sections.push(found),
             }
         }
     }
