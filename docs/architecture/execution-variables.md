@@ -59,7 +59,7 @@ already affected run retains its original snapshot.
 
 [src: file: backend/src/core/execution_variables.rs:54-188#resolve]
 [src: file: backend/src/api/execution_variables.rs:23-101#preview]
-[src: file: frontend/src/components/workflows/ProvidedVariablesPreview.tsx:80-136#remask]
+[src: file: frontend/src/components/workflows/ProvidedVariablesPreview.tsx:75-136#revealTimers]
 
 ## Snapshot and discussion trace
 
