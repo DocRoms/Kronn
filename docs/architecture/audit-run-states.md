@@ -125,7 +125,7 @@ by a human (KT-1131). An accepted step keeps its failure on record:
 - Unknown resumable state, unreadable timeline. [src: file: frontend/src/components/AuditTimeline.tsx:723-734#resumableUnknown] [src: file: frontend/src/components/AuditTimeline.tsx:746-748#loadFailed]
 - Refused acceptance. [src: file: frontend/src/components/AuditTimeline.tsx:481-489#setAcceptError] [src: file: frontend/src/components/AuditTimeline.tsx:849-852#acceptError]
 - Validation prerequisites and linked actions. [src: file: frontend/src/components/AuditTimeline.tsx:983-1013#completedLocalRun]
-- Verify-docs actions and resumable priority. [src: file: frontend/src/components/RevalidateAudit.tsx:355-386#onUpdateStale] [src: file: frontend/src/components/ProjectCard.tsx:1437-1448#primaryAuditAction]
+- Verify-docs actions and resumable priority. [src: file: frontend/src/components/RevalidateAudit.tsx:379-410#onUpdateStale] [src: file: frontend/src/components/ProjectCard.tsx:1437-1448#primaryAuditAction]
 - Recap read error. [src: file: frontend/src/components/AuditRecapPanel.tsx:363-368#errorBlock]
 
 ## “Verify docs” escalation (KT-1168, KT-1206, KT-1218)
@@ -155,10 +155,10 @@ timeline and a stale document's viewer. It has no lifecycle of its own.
   audit remains folded under an explicit advanced option with the last
   measured cost and duration, or an honest “not measured”.
   [src: file: frontend/src/components/RevalidateAudit.tsx:247-250#revalidate-prose-changed]
-  [src: file: frontend/src/components/RevalidateAudit.tsx:305-313#hasTargetedAgentWork]
-  [src: file: frontend/src/components/RevalidateAudit.tsx:314-324#docStateCounts]
-  [src: file: frontend/src/components/RevalidateAudit.tsx:355-386#onUpdateStale]
-  [src: file: frontend/src/components/RevalidateAudit.tsx:499-506#onFullAudit]
+  [src: file: frontend/src/components/RevalidateAudit.tsx:329-337#hasTargetedAgentWork]
+  [src: file: frontend/src/components/RevalidateAudit.tsx:338-348#docStateCounts]
+  [src: file: frontend/src/components/RevalidateAudit.tsx:379-410#onUpdateStale]
+  [src: file: frontend/src/components/RevalidateAudit.tsx:557-564#onFullAudit]
 - **Human text survives.** A partial update reuses the saved briefing. A Kronn
   write to human-validated text applies the correction and marks that text
   “to reconfirm”; it does not silently replace the human decision.
@@ -238,7 +238,7 @@ The compact header exposes only the honest status, its primary next action and
 the doc-state summary. One “Details” disclosure contains secondary metadata and
 actions. Three pre-audit cases override the legacy `TemplateInstalled` label:
 [src: file: frontend/src/components/ProjectCard.tsx:1397-1430#humanDocsDetected]
-[src: file: frontend/src/components/ProjectCard.tsx:1605-1623#project-audit-details]
+[src: file: frontend/src/components/ProjectCard.tsx:1610-1628#project-audit-details]
 
 - a human-owned docs folder asks the user to choose where Kronn writes;
 - a cancelled first run names its cancellation date and offers a relaunch;
