@@ -300,6 +300,26 @@ async fn a_changed_cited_line_is_corrected_by_the_agent_and_the_badge_goes_back_
     let prompt = std::fs::read_to_string(fx.h.tools.path().join("prompt.1")).unwrap();
     assert!(prompt.contains("RE-VERIFICATION MODE"), "{prompt}");
     assert!(prompt.contains("# Audit revalidation"), "{prompt}");
+    // KT-1278 — the revalidation pass ends on its step's directive, after the
+    // findings block.
+    let docs_root = crate::core::docs_location::DocsRoot::default_root();
+    let steps = crate::api::audit::steps_for(crate::models::AuditKind::Full, &docs_root);
+    let directive = crate::api::audit::step_closing_directive(
+        rules_step as usize,
+        &steps[rules_step as usize - 1],
+        &docs_root,
+    );
+    assert!(
+        prompt.ends_with(&directive),
+        "…{}",
+        &prompt[prompt.len().saturating_sub(500)..]
+    );
+    assert!(
+        prompt
+            .rfind("- `[src: file: src/kept.rs:3]` — changed")
+            .unwrap()
+            < prompt.rfind("=== RUN THIS STEP NOW ===").unwrap()
+    );
     assert!(
         prompt.contains("- `[src: file: src/kept.rs:3]` — changed"),
         "{prompt}"

@@ -36,6 +36,7 @@ pub mod desktop_port;
 pub mod directives;
 pub mod dispatch_reaper;
 pub mod doc_provenance;
+pub mod doc_relevance;
 pub mod docs_citations;
 pub mod docs_folder;
 pub mod docs_location;

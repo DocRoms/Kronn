@@ -1095,6 +1095,7 @@ mod enforce_gate_tests {
                 current: "18.2.0".into(),
                 latest: "19.1.0".into(),
                 major: true,
+                declared_only: false,
             }],
             unchecked: vec![],
             up_to_date: vec![],

@@ -89,7 +89,8 @@ This folder is the project's living knowledge base, shared by humans and AI agen
 - Settings includes a local-icon Ko-fi link to support Kronn; the GitHub funding
   declaration is present in the repository, while GitHub-side button activation
   remains dependent on the default branch and Sponsorships configuration.
-  [src: file: frontend/src/pages/SettingsPage.tsx:82-112]
+  [src: file: frontend/src/pages/SettingsPage.tsx:91#KRONN_KOFI_URL]
+  [src: file: frontend/src/pages/SettingsPage.tsx:93-120#KronnVersionLinks]
   [src: file: .github/FUNDING.yml:1]
 - A configured external API connection is an agent everywhere, not only in the
   router: mentionable, coloured, listed in the worker catalogue with the media
@@ -103,7 +104,7 @@ This folder is the project's living knowledge base, shared by humans and AI agen
   one. See [discussion agent routing](architecture/discussion-agent-routing.md).
 - Multi-agent rooms survive a backend restart: a sibling's reply to the shared
   trigger no longer supersedes the siblings still waiting to run.
-  [src: file: backend/src/db/agent_dispatch.rs:762-797]
+  [src: file: backend/src/db/agent_dispatch.rs:755-796#superseded]
 - A human can decline an arbitration instead of answering it — a settled
   outcome that unblocks the lot without inventing a decision. See
   [`kronn-internal`](operations/mcp-servers/kronn-internal.md).

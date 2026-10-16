@@ -4,7 +4,7 @@ An audit step can run on OpenCode, Gemini CLI, GitHub Copilot CLI, Kiro — the
 native ACP agents — and on Claude Code and Codex through their adapters. All of
 them run inside Kronn's ACP host, and the audit pipelines (Full and partial)
 start them through one launcher
-[src: file: backend/src/api/audit/agent_launch.rs:84-91#AuditAgentLauncher]. Three things went wrong there
+[src: file: backend/src/api/audit/agent_launch.rs:84-104#AuditAgentLauncher]. Three things went wrong there
 on the first real bench (OpenCode on Ollama, `front_apollo`), and were one
 assumption each: that the process `start` returns is the agent, that a refused
 read is a failed tool, and that usage is something only Claude's stream-json
@@ -84,17 +84,18 @@ Now an ACP agent is stopped like an HTTP agent (KT-924), through a token:
 2. `cancel_audit` trips the token. The ACP session writes `session/cancel`
    (bounded to five seconds, so a wedged agent cannot hold the stop hostage),
    drops the turn, and shuts the agent's process down
-   [src: file: backend/src/agents/runner.rs:5704-5714#ACP_CANCEL_GRACE] [src: file: backend/src/agents/runner.rs:5702-5709#shutdown].
+   [src: file: backend/src/agents/runner.rs:5246-5248#ACP_CANCEL_GRACE] [src: file: backend/src/agents/runner.rs:5698-5717#task_cancel] [src: file: backend/src/agents/runner.rs:5772-5778#shutdown].
 3. The process is started as its own process group, and shutdown kills the
    group, so what the agent started — a shell command, an MCP server — stops
-   with it [src: file: backend/src/acp.rs:991-995#process_group] [src: file: backend/src/acp.rs:1795-1803#kill_process_group].
+   with it [src: file: backend/src/acp.rs:991-995#process_group] [src: file: backend/src/acp.rs:780-793#kill_process_group] [src: file: backend/src/acp.rs:1795-1803#shutdown].
 4. The pipeline waits on the lifeline, which exits only after that shutdown, so
    the audit is finalised as `Cancelled` once the agent is really gone. This is
-   also why the lifeline's PID is **not** killed: doing it ended the wait early.
+   also why the lifeline's PID is **not** killed: doing it ended the wait early
+   [src: file: backend/src/agents/runner.rs:5780-5783#lifeline_stdin].
 
 The partial audit now checks the stop between two steps and after each step's
 agent, finalises the run as `Cancelled` and releases the project lease, like the
-Full audit [src: file: backend/src/api/audit/drift.rs:780-800#mark_cancelled] [src: file: backend/src/api/audit/drift.rs:1209-1262#mark_cancelled]. A partial refresh that
+Full audit [src: file: backend/src/api/audit/drift.rs:785-812#mark_cancelled] [src: file: backend/src/api/audit/drift.rs:1211-1272#mark_cancelled_at_step]. A partial refresh that
 was cancelled does not refresh the baseline, so its sections stay reported as
 stale.
 
@@ -142,11 +143,11 @@ not before.
 - **Where the cost comes from.** Only what a runtime reports itself: Claude
   Code's `total_cost_usd` (its stream-json `result` line, or the adapter's
   `Cost` event) and OpenRouter's `usage.cost`, summed per response
-  [src: file: backend/src/agents/runner.rs:14025-14033#total_cost_usd] [src: file: backend/src/agents/runner.rs:5673-5675#usd_micros] [src: file: backend/src/agents/runner.rs:9804-9810#cost_usd_micros].
+  [src: file: backend/src/agents/chat_codec.rs:151-160#cost_usd_micros] [src: file: backend/src/agents/runner.rs:14031-14037#total_cost_usd] [src: file: backend/src/agents/runner.rs:5673-5675#usd_micros] [src: file: backend/src/agents/runner.rs:9804-9810#cost_usd_micros].
   The recorded cost is never recomputed from a rate table; a finished step
   whose agent reported none is priced on read by `core::pricing` for the served
   model and shown as an estimate, never as a reported cost
-  [src: file: backend/src/db/audit_runs.rs:1611-1614#price_steps].
+  [src: file: backend/src/db/audit_runs.rs:1611-1657#price_steps].
 - **Per step.** `audit_run_steps.cost_usd_micros` (integer micro-USD) sums the
   step's attempts. It stays `NULL` when any attempt that ran reported no cost:
   a sum over a silent attempt would be a floor shown as the whole. A reported
@@ -179,7 +180,7 @@ not before.
   tracker the progress poll reads. A provider that is only thinking moves
   nothing. The tick does not push back the Full audit's 60 s zombie deadline.
 - **Keep-alive.** A detached audit stream silent for 15 s sends an SSE comment
-  (`: keep-alive`) [src: file: backend/src/core/sse_limits.rs:50#HEARTBEAT_INTERVAL]. A comment is not an
+  (`: keep-alive`) [src: file: backend/src/core/sse_limits.rs:50#HEARTBEAT_INTERVAL] [src: file: backend/src/api/audit/mod.rs:74-90#detach_sse_stream]. A comment is not an
   event: no client handler sees it, so it holds the connection without passing
   for model activity.
 

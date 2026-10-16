@@ -1626,7 +1626,12 @@ pub async fn full_audit(
                         tokens: tokens.clone(),
                         step_target: analysis_step.target_file.to_string(),
                     };
-                    let outcome = super::cross_audit::run_cross_step(&runner, &project_path, agents, &full_prompt).await;
+                    let outcome = super::cross_audit::run_cross_step(
+                        &runner, &project_path, agents,
+                        // No step directive: it says "write the file", the opposite
+                        // of detection mode, which closes the prompt itself (KT-1278).
+                        &full_prompt,
+                    ).await;
                     let briefing_warning = super::helpers::restore_step_briefing(&project_path, &validated_docs_snapshot).err();
                     let mut cross_unchanged = false;
                     let (mut success, mut warning, report) = match outcome {
@@ -1773,10 +1778,9 @@ pub async fn full_audit(
             }
             attempt += 1;
             let mut step_usage = crate::db::audit_runs::StepTokens::UNKNOWN;
-            let attempt_prompt = match &citation_feedback {
-                Some(fb) => format!("{full_prompt}\n\n{fb}"),
-                None => full_prompt.clone(),
-            };
+            let attempt_prompt = super::finish_step_prompt(
+                &full_prompt, citation_feedback.as_deref(), step, analysis_step, &docs_root,
+            );
 
             // An HTTP agent's loop is a task and an ACP agent's work a session
             // in a process the ACP host owns: Stop reaches either through this

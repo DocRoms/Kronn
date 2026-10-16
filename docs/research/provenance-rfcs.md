@@ -60,7 +60,7 @@ An optional stable identifier for claims that need to be referenced, updated, or
 over time — the hook continual-learning needs to retire or supersede a specific learning.
 
 ```markdown
-- API base path is `/api` [src: file: backend/src/lib.rs:440][claim:api-base-path-v1]
+- API base path is `/api` [src: file: backend/src/lib.rs:1411][claim:api-base-path-v1]
 ```
 
 **Grammar.** `[claim:<slug>]` placed immediately after the `[src: …]` marker on the same line
@@ -85,12 +85,12 @@ promote to the core only if continual-learning proves the need at scale.
 
 ## RFC-3 — Source-map aliases
 
-`[src: file: backend/src/lib.rs:440]` repeated 100× is heavy in large docs. Aliases compress it:
+`[src: file: backend/src/lib.rs:1411]` repeated 100× is heavy in large docs. Aliases compress it:
 
 ```
 [source-map] api = backend/src/lib.rs
 ...
-[src: api:440]
+[src: api:1411]
 ```
 
 **Required invariants (without these it becomes a staleness nest, so it does NOT ship without
