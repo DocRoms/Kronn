@@ -18,10 +18,10 @@ component when that table changed. The arbitration card was below this
 component, so changing its identity remounted the form instead of updating props.
 The form's draft, selection and in-flight guard are local state/refs.
 [src: commit: 6503ecd14af145a5f668e1afd845b6f839abc7ef]
-`[src: file: frontend/src/pages/DiscussionsPage.tsx:929-930]`
-`[src: file: frontend/src/pages/DiscussionsPage.tsx:1128-1140]`
-`[src: file: frontend/src/components/MessageBubble.tsx:1055-1063]`
-`[src: file: frontend/src/components/DiscussionQuestionCard.tsx:100-117]`
+`[src: file: frontend/src/pages/DiscussionsPage.tsx:1235-1250#reloadDiscussion]`
+`[src: file: frontend/src/pages/DiscussionsPage.tsx:1017-1018#reconcileLoadedDiscussion]`
+`[src: file: frontend/src/components/MessageBubble.tsx:1174-1184#sources]`
+`[src: file: frontend/src/components/DiscussionQuestionCard.tsx:100-114]`
 
 ## Deterministic local evidence
 
@@ -51,9 +51,10 @@ stable, and supplies fresh values through a per-message React context. Polling
 is unchanged and citation verdicts still update. Question/planning-card keys
 include the discussion, message and fence identity, so changing the question
 does not transfer the previous draft.
-`[src: file: frontend/src/components/MessageBubble.tsx:1690-1728]`
-`[src: file: frontend/src/components/MessageBubble.tsx:1755-1797]`
-`[src: file: frontend/src/components/MessageBubble.tsx:1830-1851]`
+`[src: file: frontend/src/components/MessageBubble.tsx:2011-2027#MarkdownRenderContext]`
+`[src: file: frontend/src/components/MessageBubble.tsx:2037-2109#MarkdownPre]`
+`[src: file: frontend/src/components/MessageBubble.tsx:2111-2116#discussionMdComponents]`
+`[src: file: frontend/src/components/MessageBubble.tsx:2149-2151#renderContext]`
 
 Seven product regressions cover question-store refresh, same-reference and
 repeated equivalent sources, changing citation verdicts in paragraphs/lists,
@@ -62,7 +63,7 @@ question. Four failed before the renderer correction; all seven pass after it.
 The focused card/rendering/citation suite passed 123 tests. These are component
 tests against production rendering with mocked API I/O, not browser end-to-end
 evidence. KT-619's independent `MessageBubble` edits must retain this boundary.
-`[src: file: frontend/src/components/__tests__/MarkdownContent.questionRefresh.test.tsx:1-143]`
+`[src: file: frontend/src/components/__tests__/MarkdownContent.questionRefresh.test.tsx:1-145]`
 
 The full frontend suite passed 3,977 tests across 305 files (208.26 seconds,
 four workers). Both TypeScript checks, oxlint, i18n, CI ESLint (0 errors and
