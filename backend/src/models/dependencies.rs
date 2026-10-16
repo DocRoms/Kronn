@@ -11,6 +11,9 @@ pub enum DependencyCheckStatus {
     Unavailable,
     Error,
     TimedOut,
+    /// A JS manifest whose dependencies are not installed: npm cannot know
+    /// the installed versions, so "nothing outdated" would be a guess.
+    NotInstalled,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, TS, PartialEq, Eq)]
@@ -20,6 +23,11 @@ pub struct DependencyUpdatePackage {
     pub current: String,
     pub latest: String,
     pub major: bool,
+    /// The package is declared but not installed (no `node_modules`): `current`
+    /// is empty because no installed version exists to report, and the row
+    /// only proves the declared range cannot reach `latest`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub declared_only: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, TS, PartialEq, Eq)]

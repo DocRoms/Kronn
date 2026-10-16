@@ -158,6 +158,7 @@ describe('AiDocViewer — docs/ root folder + project README', () => {
             ai_file: 'docs/AGENTS.md',
             audit_step: 1,
             changed_sources: ['src/lib.rs', 'Cargo.toml'],
+            missing_paths: [],
           }]}
           onOpenDocState={onOpenDocState}
         />

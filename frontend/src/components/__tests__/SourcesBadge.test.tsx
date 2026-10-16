@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { cleanup, render, screen } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
 import { SourcesBadge } from '../SourcesBadge';
 import type { DriftCheckResponse } from '../../types/generated';
@@ -36,5 +36,13 @@ describe('SourcesBadge', () => {
     const badge = screen.getByTestId('project-sources-state');
     expect(badge).toHaveAttribute('data-state', 'needs_reverification');
     expect(badge).toHaveTextContent('3');
+  });
+
+  it('counts the paths the prose names that are gone apart from the citations', () => {
+    wrap(drift({ sources_state: 'needs_reverification', broken_citations: 0, missing_paths: 2 }));
+    expect(screen.getByTestId('project-sources-state')).toHaveTextContent('À revérifier (2 chemins disparus)');
+    cleanup();
+    wrap(drift({ sources_state: 'needs_reverification', broken_citations: 3, missing_paths: 2 }));
+    expect(screen.getByTestId('project-sources-state')).toHaveTextContent('À revérifier (3 citations, 2 chemins disparus)');
   });
 });

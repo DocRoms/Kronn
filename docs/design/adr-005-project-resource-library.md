@@ -29,21 +29,25 @@ by script.
 What the code does today:
 
 - Workflows, QP, QA, QE and pages are SQLite rows with instance UUIDs and one
-  optional `project_id` [src: file: backend/src/models/workflows.rs:19].
+  optional `project_id` [src: file: backend/src/models/workflows.rs:76-81#Workflow].
 - Skills, directives and profiles are Markdown files under the config
-  directory, with an id derived from the name (`custom-<slug>`). Updating one
-  deletes it and saves it again, so renaming changes its id and any run that
-  resolves it later drops it silently
-  [src: file: backend/src/api/skills.rs:50]
-  [src: file: backend/src/core/skills.rs:409-414].
+  directory, with an id derived from the name when they are created
+  (`custom-<slug>`). Updating one rewrites the same file in place and
+  atomically, so renaming keeps its id and a run that resolves it later still
+  finds it
+  [src: file: backend/src/api/skills.rs:67-98#update]
+  [src: file: backend/src/core/skills.rs:831-892#update_custom_skill]
+  [src: file: backend/src/core/directives.rs:345-380#update_custom_directive]
+  [src: file: backend/src/core/profiles.rs:521-547#update_custom_profile].
 - Exports exist per type (workflow bundle v3, `kronn.artifact`,
   `kronn.plugins`). Imports create new UUIDs on every run. Only the artifact
   import remembers `(kind, source_id) -> target_id`
-  [src: file: backend/src/db/sql/188_artifact_import_origins.sql:4].
+  [src: file: backend/src/db/sql/188_artifact_import_origins.sql:4-9#artifact_import_origins].
 - `.kronn/` is the runtime directory (worktrees, MCP backups, ownership
-  ledgers, temporary files), added to `.gitignore`
-  [src: file: backend/src/core/mcp_scanner.rs:361]
-  [src: file: backend/src/core/native_files.rs:20].
+  ledgers, temporary files), kept out of `git status` through the repository's
+  local `info/exclude`, never through its `.gitignore`
+  [src: file: backend/src/core/mcp_scanner.rs:3786-3793#ensure_local_exclude]
+  [src: file: backend/src/core/native_files.rs:17-20#LEDGER_PATH].
 - Secrets are masked on export by `core/export_secrets.rs`.
 
 ## Principles
@@ -146,13 +150,16 @@ isolates the run in that project's worktree (KT-851):
 - `project_scope` declares it: `{"type":"All"}` or
   `{"type":"Projects","project_ids":[…]}`; the home project (`project_id`)
   is always served. Without it, nothing changes
-  [src: file: backend/src/models/workflows.rs:92].
+  [src: file: backend/src/models/workflows.rs:217-238#WorkflowProjectScope].
 - Manual launch: the request's `project_id`, refused when not served; else
   the launching discussion's or page's project when served; else the home
   project. Cron: one run per served project. Tracker: the served project
   whose `repo_url` is the tracked GitHub repository (home project first when
   several are linked); none linked skips the poll with a warning
-  [src: file: backend/src/workflows/project_scope.rs:1].
+  [src: file: backend/src/workflows/project_scope.rs:15-60#resolve_run_project]
+  [src: file: backend/src/workflows/project_scope.rs:62-81#scheduled_projects]
+  [src: file: backend/src/workflows/project_scope.rs:83-128#tracker_project]
+  [src: file: backend/src/workflows/mod.rs:314-324#tracker_project].
 - The run records its project (`workflow_runs.project_id`, KT-1015) and runs
   in that project's checkout or worktree, with its environment. A
   multi-project sub-workflow follows its parent run's project when it serves
@@ -189,15 +196,23 @@ empty hash to the current content when a human saves; an agent's save (bridge
 token or Kronn agent tool) leaves it empty, and the step refuses to run. Before each execution the runner reads the
 home project's checkout (the stored definition's `project_id`, not the run's
 project), checks every hash, and writes the verified bytes to
-`{{run.artifacts_dir}}/approved-scripts/<step>/`; a mismatch fails the step
+`{{run.artifacts_dir}}/approved-scripts/<step key>/` (`<step key>` is a 16-character
+digest of the step name); a mismatch fails the step
 before anything runs, naming the file. The main command runs with that copy
 as its working directory and receives `KRONN_WORKTREE` (the run's checkout)
 and `KRONN_APPROVED_SCRIPTS_DIR` through the child environment builder.
 Paths built from the cwd resolve in the copy; absolute imports, paths built
 from `KRONN_WORKTREE` and interpreter search paths outside the copy (Node's
 parent `node_modules`, Python's site-packages) are not covered
-[src: file: backend/src/core/approved_scripts.rs:1]
-[src: file: backend/src/workflows/exec_step.rs:102].
+[src: file: backend/src/core/approved_scripts.rs:1-16]
+[src: file: backend/src/core/approved_scripts.rs:22-32#MAX_FILES]
+[src: file: backend/src/core/approved_scripts.rs:114-125#validate_and_pin]
+[src: file: backend/src/core/approved_scripts.rs:127-134#validate_files]
+[src: file: backend/src/core/approved_scripts.rs:173-179#copy_dir]
+[src: file: backend/src/core/approved_scripts.rs:181-231#prepare_copy]
+[src: file: backend/src/api/workflows.rs:1600-1672#pin_exec_script_files]
+[src: file: backend/src/workflows/runner.rs:1251-1288#carrying_repository]
+[src: file: backend/src/workflows/exec_step.rs:84-130#approved_script_child].
 
 **Implementation note (KT-920, 0.15.0).** Templated step fields read the
 target project's profile as `{{project.<path>}}` (`project.*` is reserved).
@@ -223,8 +238,13 @@ lacks the key; a workflow that reads none is unaffected. A completed Full
 audit drafts a starter profile and stores it with the audit run, shown
 read-only with a Copy button in the audit view; it never writes into the
 checkout, and only a human publishes it
-[src: file: backend/src/core/project_profile.rs:1]
-[src: file: docs/guides/project-profile.md:1].
+[src: file: backend/src/core/project_profile.rs:392-460#default_branch_ref]
+[src: file: backend/src/core/project_profile.rs:187-238#schema_error]
+[src: file: backend/src/workflows/run_pins.rs:33#PROJECT_PROFILE]
+[src: file: backend/src/workflows/run_pins.rs:255-275#record_project_profile]
+[src: file: backend/src/workflows/run_pins.rs:485-497#revision_fingerprint_with_profiles]
+[src: file: backend/src/core/project_profile.rs:711-730#draft_if_missing]
+[src: file: docs/guides/project-profile.md:166-177].
 
 ### Other resources
 
@@ -286,12 +306,15 @@ so run pins (KT-1096) and references treat it like any custom skill. It is
 offered only in its project, listed on its AI & automation tab as a project
 skill without being a default of its discussions, and refused by name when an
 agent launch of another project names it.
-`[src: file: backend/src/core/skills.rs:624]`
+`[src: file: backend/src/core/skills.rs:202#KRONN_PROJECT_KEY]`
+`[src: file: backend/src/core/skills.rs:632-655#refuse_foreign_project_skills]`
 A workflow Agent step also loads the project's repository skills: the run pin
 reads each one as committed on the default branch and pins it, so neither the
 checkout's branch nor the run's worktree changes it; one the pin lacks stops
 the step by name. A discussion still reads the checkout as it is.
-`[src: file: backend/src/api/projects/used_skills.rs:410]`
+`[src: file: backend/src/workflows/run_pins.rs:671-685#DefaultBranch]`
+`[src: file: backend/src/api/projects/used_skills.rs:506-539#default_branch_commit]`
+`[src: file: backend/src/api/projects/used_skills.rs:554-570#resolve_repository_skills]`
 
 ## Identity
 
@@ -308,28 +331,32 @@ the step by name. A discussion still reads the checkout as it is.
   `workflow:triage`, `skill:block-migration`, `plugin:github`.
 - Instance-bound references (API config, MCP config, connection, agent or
   model) are requirements resolved locally on import, as `rebind_api_configs`
-  already does for API configs [src: file: backend/src/api/workflows.rs:1977].
+  already does for API configs [src: file: backend/src/api/workflows.rs:3877-3910#rebind_api_configs].
 - Ids embedded in artifact HTML are rewritten on import, as `remap_html`
-  already does [src: file: backend/src/api/artifact_portability/import.rs:251].
+  already does [src: file: backend/src/api/artifact_portability/import.rs:325-364#remap_html].
 - Workflows (KT-917). One resolver serves every kind (`workflow`, `qe`, `qa`,
   `prompt`, `skill`, `plugin`, `artifact`): the run's project first, then the
   global scope; in each scope the identity table, then the slug publication
   would give the resource's name (a page's own slug). `skill:` also finds a
   `SKILL.md` in the project repository (`repository:<project>:<slug>`). Two
   matches in one scope are refused as ambiguous
-  [src: file: backend/src/db/resource_identities.rs:146].
+  [src: file: backend/src/db/resource_identities.rs:146-200#resolve_symbolic_reference]
+  [src: file: backend/src/db/resource_identities.rs:228-323#match_by_slug].
   - Templated step fields write `{{ref:<kind>:<slug>}}`. The run resolves
     every reference its steps, Quick Prompts and Quick APIs read before the
-    first step; an unknown one fails its step before launch, naming it.
+    first step; an unknown one fails its step before launch, naming it
+    [src: file: backend/src/core/resource_refs.rs:80-134#resolve_template_references].
   - Structured id fields (`sub_workflow_id`, `quick_prompt_id`,
     `quick_api_id`, batch and CollectApiData ids) are published as
     `ref:<kind>:<slug>` and stored as local ids at save and import, because
     graph validation needs literal ids. Importing a workflow whose target is
-    not imported yet is refused with the reference; import the target first.
+    not imported yet is refused with the reference; import the target first
+    [src: file: backend/src/core/resource_refs.rs:188-236#resolve_structured_references].
     A literal Page id is published as `{{ref:artifact:<slug>}}`.
   - Scripts resolve one reference with
     `GET /api/resources/resolve?ref=<kind>:<slug>&project=<id>`
-    [src: file: backend/src/core/resource_refs.rs:1].
+    [src: file: backend/src/api/resource_refs.rs:1-2]
+    [src: file: backend/src/api/resource_refs.rs:32-35#resolve].
 
 ## Secrets
 
@@ -437,10 +464,13 @@ Branch `archive/feat-0.13.0-portable-prototype-20260830`.
   repository/Kronn provenance. Automation groups workflows, Quick Prompts, QE
   and QA by type; Artifacts lists the project's pages. Existing portability
   levels, repository alignment states, selection and `kronn/` preview remain
-  visible [src: file: frontend/src/components/ProjectRepositoryResourcesPanel.tsx:124-155].
+  visible [src: file: frontend/src/components/ProjectRepositoryResourcesPanel.tsx:387-427#tabs]
+  [src: file: frontend/src/lib/projectRepositoryResourcesTab.ts:6-15#readProjectRepositoryResourcesTab]
+  [src: file: frontend/src/lib/projectRepositoryResourcesTab.ts:17-23#rememberProjectRepositoryResourcesTab].
 - The Overview shows the linked MCP count and companion repositories, and owns
-  the project deletion controls [src: file: frontend/src/components/ProjectCard.tsx:2400]
-  [src: file: frontend/src/components/ProjectCard.tsx:2416].
+  the project deletion controls [src: file: frontend/src/components/ProjectCard.tsx:2204-2208#projMcps]
+  [src: file: frontend/src/components/ProjectCard.tsx:2249-2264#ProjectLinkedRepos]
+  [src: file: frontend/src/components/ProjectCard.tsx:2267-2315#handleDeleteProject].
 - **Automations and Artifacts pages**: grouped by project; everything not
   linked to a project goes into « Général ».
 - Simple and fast first: the listing reads existing rows and a cheap hash

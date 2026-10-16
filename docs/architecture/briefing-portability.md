@@ -58,4 +58,4 @@ scripted Full audit that reads the briefing before its first step in both
 [src: file: backend/tests/api_tests.rs:7829-7880#briefing_file_drives_http_reads_and_audited_project_cards]
 [src: file: backend/src/api/audit/briefing_residuals_tests.rs:1]
 [src: file: backend/src/api/audit/briefing_cards.rs:1049-1089#briefing_residuals_unattended_launch_requires_explicit_saved_defaults]
-[src: file: backend/src/api/audit/relocation_e2e_tests.rs:138-176#briefing_residuals_phase_one_materializes_notes_before_the_first_agent_step]
+[src: file: backend/src/api/audit/relocation_e2e_tests.rs:163-201#briefing_residuals_phase_one_materializes_notes_before_the_first_agent_step]

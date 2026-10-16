@@ -157,13 +157,13 @@ describe('ProjectCard — header accessibility', () => {
     } as never);
     vi.mocked(projectsApi.docProvenance).mockResolvedValue({ to_reconfirm: 1 } as never);
     vi.mocked(projectsApi.revalidationPlan).mockResolvedValue({
-      sources_state: 'needs_reverification', sections: [], agent_steps: [], reanchor_count: 2, human_count: 0,
+      sources_state: 'needs_reverification', sections: [], agent_steps: [], reanchor_count: 2, human_count: 0, unanchored: [], relevance: { sections: 0, anchors_intact: 0, outdated: 0, no_longer_relevant: 0, unanchored: 0, untouched_stale: 0, missing_references: 0, prose_missing: 0, anchored_intact_pct: null },
     });
     renderCard({
       project: { audit_status: 'Audited' },
       driftStatus: {
         audit_date: '2026-10-12',
-        stale_sections: [{ ai_file: 'docs/AGENTS.md', audit_step: 1, changed_sources: ['src/lib.rs'] }],
+        stale_sections: [{ ai_file: 'docs/AGENTS.md', audit_step: 1, changed_sources: ['src/lib.rs'], missing_paths: [] }],
         fresh_sections: [], total_sections: 1, sources_state: 'needs_reverification',
         broken_citations: 1,
         placeholder_docs: [{ path: 'docs/glossary.md', step: 2 }],
@@ -191,7 +191,7 @@ describe('ProjectCard — header accessibility', () => {
     } as never);
     vi.mocked(projectsApi.docProvenance).mockResolvedValue({ docs: [], to_reconfirm: 0 });
     vi.mocked(projectsApi.revalidationPlan).mockResolvedValue({
-      sources_state: 'needs_reverification', sections: [], agent_steps: [], reanchor_count: 1, human_count: 0,
+      sources_state: 'needs_reverification', sections: [], agent_steps: [], reanchor_count: 1, human_count: 0, unanchored: [], relevance: { sections: 0, anchors_intact: 0, outdated: 0, no_longer_relevant: 0, unanchored: 0, untouched_stale: 0, missing_references: 0, prose_missing: 0, anchored_intact_pct: null },
     });
     renderCard({
       project: { audit_status: 'Validated' },
@@ -222,7 +222,7 @@ describe('ProjectCard — header accessibility', () => {
       } as never);
       vi.mocked(projectsApi.docProvenance).mockResolvedValue({ docs: [], to_reconfirm: 1 } as never);
       vi.mocked(projectsApi.revalidationPlan).mockResolvedValue({
-        sources_state: 'needs_reverification', sections: [], agent_steps: [], reanchor_count: 0, human_count: 0,
+        sources_state: 'needs_reverification', sections: [], agent_steps: [], reanchor_count: 0, human_count: 0, unanchored: [], relevance: { sections: 0, anchors_intact: 0, outdated: 0, no_longer_relevant: 0, unanchored: 0, untouched_stale: 0, missing_references: 0, prose_missing: 0, anchored_intact_pct: null },
       });
       renderCard({
         project: { audit_status: 'Validated' },
@@ -278,7 +278,7 @@ describe('ProjectCard — header accessibility', () => {
       } as never);
       vi.mocked(projectsApi.docProvenance).mockResolvedValue({ docs: [], to_reconfirm: 0 });
       vi.mocked(projectsApi.revalidationPlan).mockResolvedValue({
-        sources_state: 'clean', sections: [], agent_steps: [], reanchor_count: 0, human_count: 0,
+        sources_state: 'clean', sections: [], agent_steps: [], reanchor_count: 0, human_count: 0, unanchored: [], relevance: { sections: 0, anchors_intact: 0, outdated: 0, no_longer_relevant: 0, unanchored: 0, untouched_stale: 0, missing_references: 0, prose_missing: 0, anchored_intact_pct: null },
       });
       renderCard({
         project: { audit_status: 'Validated' },
