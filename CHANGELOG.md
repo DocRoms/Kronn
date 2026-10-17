@@ -624,6 +624,16 @@ Release notes for 0.9.3 and earlier are available in the
   verified against the watch table instead of being read as manager `JS`:
   every citation the snapshot emits verifies against it.
 
+- The Full audit's documentary gate blames the step that introduced a blocker
+  (KT-1306). A document no step targets (a tech-debt detail sheet, a workflow
+  page) used to be charged to the founding step, so a resume re-ran the most
+  expensive step for another step's file. Kronn now diffs the blocking
+  diagnostics around each step (`.kronn/audit/document-blame.json`) and the
+  final gate, and a resume, redo the introducing step; the baseline is taken
+  before any write of the step, the cross-agent path's included, so what that
+  path writes is charged to its step. A step is also blocked
+  only by diagnostics absent before it ran: those already there are reported in
+  a `documentary_preexisting` event instead of failing it.
 - A review-wait timeout no longer locks the principal out of the review
   (KT-1293). The watchdog used to move the unreviewed delivery to `Escalated`
   while its alert told the principal to call `task_exec_review`, which only
