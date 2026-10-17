@@ -258,7 +258,7 @@ pub fn resolve_contained_read(root: &Path, path: &Path) -> Result<PathBuf, Strin
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

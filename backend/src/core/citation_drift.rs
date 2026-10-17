@@ -249,7 +249,20 @@ enum FileLines {
     Missing,
     /// Present but not line-addressable here (too large, binary, unreadable).
     Opaque,
-    Lines(Vec<String>),
+    Lines {
+        lines: Vec<String>,
+        /// Last line a citation may end on: N, or N+1 for a newline-terminated
+        /// file (the empty line an editor or the Read tool shows after it).
+        citable: usize,
+    },
+}
+
+/// The lines a citation of `start..=end` covers, `None` when the range is not
+/// citable. A range ending on the empty line N+1 covers up to line N; one that
+/// starts there cites nothing.
+fn cited_block(lines: &[String], citable: usize, start: usize, end: usize) -> Option<&[String]> {
+    crate::core::anti_halluc::range_is_citable(lines.len(), citable, start, end)
+        .then(|| &lines[start - 1..end.min(lines.len())])
 }
 
 fn read_lines(path: &Path) -> FileLines {
@@ -260,7 +273,10 @@ fn read_lines(path: &Path) -> FileLines {
         return FileLines::Opaque;
     }
     match std::fs::read_to_string(path) {
-        Ok(text) => FileLines::Lines(text.lines().map(normalize_line).collect()),
+        Ok(text) => FileLines::Lines {
+            citable: crate::core::anti_halluc::last_citable_line(&text),
+            lines: text.lines().map(normalize_line).collect(),
+        },
         Err(_) => FileLines::Opaque,
     }
 }
@@ -317,9 +333,9 @@ fn fingerprint(project_path: &Path, citation: &DocCitation) -> Option<CitationFi
     };
     fp.line = Some(start);
     fp.end_line = Some(end);
-    if let FileLines::Lines(lines) = read_lines(&path) {
-        if end <= lines.len() {
-            fp.sha256 = Some(block_hash(&lines[start - 1..end]));
+    if let FileLines::Lines { lines, citable } = read_lines(&path) {
+        if let Some(block) = cited_block(&lines, citable, start, end) {
+            fp.sha256 = Some(block_hash(block));
         }
     }
     Some(fp)
@@ -443,6 +459,29 @@ pub(crate) fn doc_files(project_path: &Path) -> Vec<String> {
 /// Whether a project-relative file (or folder) a doc names still exists.
 pub(crate) fn cited_file_exists(project_path: &Path, file: &str) -> bool {
     resolve_cited(project_path, file).is_some_and(|path| path.exists())
+}
+
+/// KT-1312 — the docs a failed audit step left under its partial banner: kept
+/// for a human to retry or accept, and not trusted until one does.
+pub fn partial_docs(project_path: &Path) -> Vec<String> {
+    doc_files(project_path)
+        .into_iter()
+        .filter(|doc| {
+            read_doc(project_path, doc)
+                .is_some_and(|content| crate::api::audit::step_guard::has_partial_marker(&content))
+        })
+        .collect()
+}
+
+/// KT-1312 — the badge stays raised while a doc carries a partial banner,
+/// whatever its citations say. `Unknown` stays: nothing was validated yet.
+pub fn escalate_partial(project_path: &Path, state: SourcesState) -> SourcesState {
+    match state {
+        SourcesState::Clean if !partial_docs(project_path).is_empty() => {
+            SourcesState::NeedsReverification
+        }
+        other => other,
+    }
 }
 
 fn read_doc(project_path: &Path, doc: &str) -> Option<String> {
@@ -856,25 +895,25 @@ fn evaluate_citation(project_path: &Path, fp: &CitationFingerprint) -> CitationS
         status.state = CitationState::FileMissing;
         return status;
     };
-    let lines = match read_lines(&path) {
+    let (lines, citable) = match read_lines(&path) {
         FileLines::Missing => {
             status.state = CitationState::FileMissing;
             return status;
         }
         FileLines::Opaque => return status,
-        FileLines::Lines(lines) => lines,
+        FileLines::Lines { lines, citable } => (lines, citable),
     };
     let (Some(start), Some(end)) = (fp.line, fp.end_line) else {
         return status;
     };
     let Some(hash) = fp.sha256.as_deref() else {
         // Recorded past the end of the file: still past it, or now resolvable.
-        if end > lines.len() {
+        if end > citable {
             status.state = CitationState::Removed;
         }
         return status;
     };
-    if end <= lines.len() && block_hash(&lines[start - 1..end]) == hash {
+    if cited_block(&lines, citable, start, end).is_some_and(|block| block_hash(block) == hash) {
         return status;
     }
     let len = end - start + 1;
@@ -885,7 +924,7 @@ fn evaluate_citation(project_path: &Path, fp: &CitationFingerprint) -> CitationS
             return status;
         }
     }
-    status.state = if end > lines.len() {
+    status.state = if end > citable {
         CitationState::Removed
     } else {
         CitationState::Changed

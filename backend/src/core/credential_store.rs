@@ -821,6 +821,6 @@ pub(crate) fn scrub_one_backup(dir: &Path, path: &Path, key_hex: &str) -> Result
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "credential_store_tests.rs"]
 mod tests;

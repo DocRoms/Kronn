@@ -578,7 +578,7 @@ pub fn codec_for(preset: crate::models::ExternalApiConnectionPreset) -> Box<dyn 
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

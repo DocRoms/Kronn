@@ -95,7 +95,7 @@ fn apple_silicon_from(host_os: &str, arch: &str) -> bool {
     host_os == "macOS" && arch == "aarch64"
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use serial_test::serial;

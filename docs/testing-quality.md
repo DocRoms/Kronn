@@ -104,7 +104,7 @@ zero-warning Oxlint gate passes. The `with_conn` safety scanner also reads
 standalone Rust test files; a `#[cfg(test)]` on their parent module does not
 exclude their contents. Propagate fallible fixture setup inside the closure
 and assert its result after awaiting it.
-`[src: file: backend/scripts/ci/lint_with_conn_unwrap.py:88-127#find_violations]`
+`[src: file: backend/scripts/ci/lint_with_conn_unwrap.py:155-195#find_violations]`
 `[src: file: .github/workflows/ci-test.yml:497-501#with_conn]`
 
 Supervisor cleanup must also reap live shell jobs whose PID was not yet recorded:
@@ -129,8 +129,43 @@ The citation check (`cargo test docs_citations`) is scoped on a pull request:
 CI lists the paths the pull request changes and the check blocks only on the
 docs among them; a pull request that changes no doc gets the result as a counted
 warning. A pull request that changes `VERSION`, a push and a manual run stay
-strict over every doc [src: file: backend/src/core/docs_citations.rs:28-30#CHANGED_ENV].
+strict over every doc [src: file: backend/src/core/docs_citations.rs:31-33#CHANGED_ENV].
 `make docs-reanchor` repairs moved citations before a release.
+
+A merge no longer bounces on them (KT-1321). When Kronn merges the target into
+a task branch (the integration candidate, or the merge a worker finishes with
+`task_exec_commit`), it stops before the merge commit and settles the docs
+first, for any project that uses `[src: file: …]` citations. It touches only
+the citation corpus the gate reads (`docs/` and `backend/docs/`, `docs/releases`
+aside), never `CHANGELOG.md`, a README, templates, prompts or fixtures:
+
+- a conflict whose two sides differ only by the line numbers of file citations
+  is resolved to the target's text; any other conflict still bounces;
+- every citation to a file the merge changed that the merged tree leaves broken
+  is re-anchored by mapping its lines from the side it was written against (the
+  branch, the target or the merge base) to the merged file, the `#symbol` having
+  to lie in the mapped range. When a hunk changed the cited lines themselves,
+  the occurrence of the symbol nearest the mapped position wins, under the same
+  check, if it lies within `NEAREST_OCCURRENCE_LIMIT` (20) lines of it and no
+  other is as near. Past that the citation is not guessed and the merge
+  bounces on the doc (a worker's merge is refused, naming the citations). A
+  citation to a file the merge did not change, or that held against no side, is
+  left alone.
+
+Re-anchoring reads the merged index, never the working tree, and writes only
+docs the merge brought into question. When a doc it must rewrite, or a file
+that doc cites, carries unstaged changes, it writes nothing and refuses
+(integration: the candidate bounces; worker: `task_exec_commit` refuses and
+leaves the merge as it was) rather than sweep unnamed work in progress into the
+commit. A staged path that is neither the merge's nor named in `files` is
+refused before any doc is touched.
+
+Both land in the merge commit, which carries the sign-off of the configured git
+identity and a line counting what was settled. The same step runs inside the
+worker's `task_exec_commit` merge, so a worker needs no `make docs-reanchor` in
+its sandbox. The make target also works there: during an unfinished merge it
+maps from both sides of the merge and needs no base, and with no resolvable
+target-branch merge-base it re-points unique-symbol citations instead of exiting.
 
 ## Backend CI timing SLO
 
@@ -289,7 +324,7 @@ gate is skipped or fails. A timeout is a functional failure; the SLO observer
 does not retry, sleep, or mask it. An SLO breach is a warning, while missing,
 duplicate, incomplete, or contradictory measurement evidence fails the
 observer instead of publishing a misleading timing.
-[src: file: .github/workflows/ci-test.yml:85#timeout-minutes] [src: file: .github/workflows/ci-test.yml:363#timeout-minutes] [src: file: .github/workflows/ci-test.yml:717#timeout-minutes] [src: file: .github/workflows/ci-build.yml:180-182#timeout-minutes] [src: file: .github/workflows/ci-build.yml:244#timeout-minutes]
+[src: file: .github/workflows/ci-test.yml:85#timeout-minutes] [src: file: .github/workflows/ci-test.yml:363#timeout-minutes] [src: file: .github/workflows/ci-test.yml:717#timeout-minutes] [src: file: .github/workflows/ci-build.yml:180-182#timeout-minutes] [src: file: .github/workflows/ci-build.yml:259#timeout-minutes]
 [src: file: .github/workflows/ci-test.yml:968-1004#ci-quality-gates] [src: file: scripts/ci/backend_ci_slo.mjs:111-135#requireCurrentBackendJob]
 
 ## Test placement

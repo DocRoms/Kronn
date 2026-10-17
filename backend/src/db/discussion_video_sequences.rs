@@ -97,7 +97,7 @@ fn files_of(conn: &Connection, discussion_id: &str) -> Result<HashSet<String>> {
     Ok(ids)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

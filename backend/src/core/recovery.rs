@@ -295,7 +295,7 @@ pub fn is_configured(dir: &Path) -> bool {
     dir.join(RECOVERY_FILENAME).exists()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

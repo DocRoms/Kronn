@@ -891,11 +891,11 @@ pub async fn change_embed_origins(
     Json(ApiResponse::ok(next))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "live_page_dataset_api_tests.rs"]
 mod dataset_api_tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

@@ -459,6 +459,6 @@ pub async fn publish_registered(
     live.remove(&identity.run_id);
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "run_progress_tests.rs"]
 mod tests;

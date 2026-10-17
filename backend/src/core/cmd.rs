@@ -358,7 +358,7 @@ fn rebuild_for_tool(mut command: std::process::Command) -> std::process::Command
     command
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

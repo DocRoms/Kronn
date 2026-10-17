@@ -9,8 +9,8 @@ of the total that billed cache reads as fresh input). With no counters or no
 confirmed rate the cost is NULL (unknown), and `message_usage.cost_unknown_reason`
 says why. Rows written before KT-894 keep their old figure, and nothing marks
 which ones those are.
-[src: file: backend/src/core/pricing.rs:324-347#price_reply]
-[src: file: backend/src/api/discussions/streaming.rs:5376-5382#price_reply]
+[src: file: backend/src/core/pricing.rs:340-363#price_reply]
+[src: file: backend/src/api/discussions/streaming.rs:5384-5390#price_reply]
 [src: file: backend/src/db/message_usage.rs:17-24#MessageUsage]
 [src: file: backend/src/db/message_usage.rs:26-61#record]
 
@@ -18,7 +18,7 @@ which ones those are.
 `result` line, so only ClaudeCode messages can *possibly* carry a real
 measurement — but there is no column recording whether a given `ClaudeCode`
 row actually got one, or fell back to the same estimate as everyone else.
-[src: file: backend/src/agents/runner.rs:14030-14083#total_cost_usd]
+[src: file: backend/src/agents/runner.rs:14040-14093#total_cost_usd]
 [src: file: backend/src/api/discussions/streaming.rs:4799-4825#stream_json_cost]
 [src: file: backend/src/db/message_usage.rs:38-48#message_usage]
 

@@ -249,7 +249,7 @@ fn listed(servers: &[String]) -> String {
     names.join(", ")
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

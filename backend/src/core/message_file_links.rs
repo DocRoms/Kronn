@@ -275,7 +275,7 @@ fn is_sensitive(path: &Path) -> bool {
         )
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

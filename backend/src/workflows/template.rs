@@ -1611,7 +1611,7 @@ fn envelope_from_json(val: &serde_json::Value) -> Option<StepEnvelope> {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

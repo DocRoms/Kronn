@@ -125,7 +125,7 @@ pub(crate) async fn validate_connection_target(
     Ok(Some(connection_id.to_string()))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::models::{ModelAvailability, ModelProvenance};

@@ -532,7 +532,7 @@ Commence maintenant par l'étape 1. Pose-moi des questions si la description man
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod prompt_tests {
     use super::*;
     use crate::core::scanner;

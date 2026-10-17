@@ -68,7 +68,7 @@ impl LearningSweep {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::db::learnings as db_learnings;

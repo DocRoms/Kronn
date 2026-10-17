@@ -653,7 +653,7 @@ fn mark_bundle_lines(
     crate::api::workflows::clear_stale_approvals(steps);
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use serde_json::json;

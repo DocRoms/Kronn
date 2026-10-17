@@ -62,6 +62,13 @@ pub fn is_secret_file(path: &Path) -> bool {
         || name.ends_with(".key")
         || name.starts_with("id_rsa")
         || name.starts_with("id_ed25519")
+        || name.starts_with("id_ecdsa")
+        || name.starts_with("id_dsa")
+        || name.ends_with(".p12")
+        || name.ends_with(".pfx")
+        || name == ".netrc"
+        || name == ".npmrc"
+        || name == ".pgpass"
         || name == "credentials"
         || name == "credentials.json"
         || KRONN_SECRET_NAMES.contains(&name.as_str())
@@ -136,7 +143,7 @@ pub fn opencode_full_access_config(operator: Option<&str>) -> Option<String> {
     operator.is_none().then(opencode_config_content)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use serde_json::Value;
@@ -180,6 +187,14 @@ mod tests {
             "tls/private.key",
             "id_rsa",
             "id_ed25519.pub",
+            "id_ecdsa",
+            "id_ecdsa.pub",
+            "id_dsa",
+            "certs/client.p12",
+            "certs/CLIENT.PFX",
+            "home/.netrc",
+            "repo/.npmrc",
+            "home/.pgpass",
             "credentials.json",
             ".aws/config",
             "home/.ssh/known_hosts",

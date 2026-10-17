@@ -70,7 +70,7 @@ pub(crate) fn apply_http(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 
@@ -109,7 +109,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod wire_tests {
     use super::*;
     use crate::agents::runner::{start_agent_with_config, AgentStartConfig, ExternalHttpRuntime};

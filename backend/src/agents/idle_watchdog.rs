@@ -294,7 +294,7 @@ pub fn tool_stall_reason(agent: &str, tool: &str, limit: Duration) -> String {
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

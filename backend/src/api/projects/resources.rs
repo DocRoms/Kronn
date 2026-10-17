@@ -2668,7 +2668,7 @@ pub async fn copy_native_skill(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::super::skill_migration::{migrate_skills, skill_migration_plan};
     use super::*;

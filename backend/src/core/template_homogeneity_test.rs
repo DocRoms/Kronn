@@ -2,7 +2,7 @@
 //! remain structurally homogeneous. These tests must pass after every change
 //! to the templates/ directory.
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use std::path::PathBuf;
 

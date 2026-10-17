@@ -2072,7 +2072,7 @@ pub async fn delete(
     Json(ApiResponse::ok(()))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

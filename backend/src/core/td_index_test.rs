@@ -461,3 +461,48 @@ fn an_adr_accepted_during_the_run_leaves_its_finding_in_the_index_for_validation
     let decisions = fs::read_to_string(docs.join("decisions.md")).unwrap();
     assert!(decisions.contains("- **Status**: proposed"), "{decisions}");
 }
+
+#[test]
+fn index_rows_are_read_through_their_header_for_any_sheet_id() {
+    let content = "# Index\n\n| ID | Problem | Area | Severity | Status | Sheet |\n|----|---------|------|----------|--------|-------|\n| [CQ-001](tech-debt/CQ-001.md) | Oversized | Backend | **High** | Open | x |\n| `PERF-2026-a` | Slow | — | medium | — | |\n| Not an id | ignored | | | | |\n\n| Ref | Severity | Title |\n|-----|----------|-------|\n| CQ-009 | Critical | Reordered columns |\n\n| TD-1-x | Headerless | Area | Low |\n";
+    let rows = index_rows(content);
+    let cq = &rows["CQ-001"];
+    assert_eq!(
+        (
+            cq.severity.as_deref(),
+            cq.status.as_deref(),
+            cq.area.as_deref()
+        ),
+        (Some("High"), Some("Open"), Some("Backend"))
+    );
+    let perf = &rows["PERF-2026-a"];
+    assert_eq!(perf.severity.as_deref(), Some("medium"));
+    assert_eq!(perf.area, None, "an empty cell says nothing");
+    assert_eq!(rows["CQ-009"].severity.as_deref(), Some("Critical"));
+    // A table without a header uses the central index layout.
+    assert_eq!(rows["TD-1-x"].severity.as_deref(), Some("Low"));
+    assert!(!rows.contains_key("ID"));
+}
+
+#[test]
+fn a_resync_keeps_the_severity_of_a_detail_file_the_index_row_gave() {
+    let fx = fixture();
+    fs::write(
+        fx.docs.join("tech-debt/CQ-001.md"),
+        "# CQ-001: Oversized controller\n",
+    )
+    .unwrap();
+    let index = fx.docs.join(CENTRAL_INDEX);
+    let mut content = fs::read_to_string(&index).unwrap();
+    content = content.replace(
+        "| TD-20261001-phantom |",
+        "| CQ-001 | Oversized controller | Backend | High |\n| TD-20261001-phantom |",
+    );
+    fs::write(&index, content).unwrap();
+    resync(&fx.docs, NO_ADR).unwrap();
+    let after = fs::read_to_string(&index).unwrap();
+    let rows = index_rows(&after);
+    assert_eq!(rows["CQ-001"].severity.as_deref(), Some("High"), "{after}");
+    // A second pass changes nothing.
+    assert!(!resync(&fx.docs, NO_ADR).unwrap().changed);
+}

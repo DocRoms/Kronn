@@ -205,7 +205,7 @@ pub fn seed_on_upgrade(conn: &Connection) -> Result<usize> {
     Ok(seeded)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::db::Database;

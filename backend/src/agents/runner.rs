@@ -4785,8 +4785,31 @@ fn mint_launch_bridge_token(
             discussion_ids.push(id.to_owned());
         }
     }
+    // A step or a worker posts in a room without being its agent: a room's
+    // grants never reach it (KT-1270).
+    let room_grant_discussions =
+        if config.workflow_step_context.is_some() || config.task_worker_context.is_some() {
+            Vec::new()
+        } else {
+            let mut rooms: Vec<String> = Vec::new();
+            for id in [
+                config.discussion_id,
+                config
+                    .room_agent_context
+                    .map(|context| context.discussion_id.as_str()),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if !rooms.iter().any(|known| known == id) {
+                    rooms.push(id.to_owned());
+                }
+            }
+            rooms
+        };
     crate::core::bridge_token::mint(crate::core::bridge_token::BridgeScope {
         discussion_ids,
+        room_grant_discussions,
         task_execution_id: config
             .task_worker_context
             .map(|context| context.execution_id.clone()),
@@ -6073,34 +6096,54 @@ pub(crate) fn disc_introspection_mcp_path() -> Option<String> {
     if std::path::Path::new(docker_path).exists() {
         return Some(docker_path.to_string());
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let candidates = [
-                dir.join("scripts").join("disc-introspection-mcp.py"),
-                dir.join("..")
-                    .join("scripts")
-                    .join("disc-introspection-mcp.py"),
-                dir.join("..")
-                    .join("Resources")
-                    .join("scripts")
-                    .join("disc-introspection-mcp.py"),
-                dir.join("disc-introspection-mcp.py"),
-            ];
-            for c in &candidates {
-                if c.exists() {
-                    return Some(c.to_string_lossy().to_string());
-                }
-            }
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    let cwd = std::env::current_dir().ok();
+    disc_introspection_mcp_path_near(exe_dir.as_deref(), cwd.as_deref())
+}
+
+/// How far up from the binary or the working directory a source checkout's
+/// `scripts/` is looked for: deep enough for `<repo>/target/<lane>/debug/`.
+const BRIDGE_SOURCE_SEARCH_DEPTH: usize = 6;
+
+/// Find the bridge script from where the process actually runs: next to the
+/// installed binary, then in the source checkout it is run from (its working
+/// directory, then the checkout its binary sits in). Never from a path baked in
+/// at build time: a binary built in one checkout and run from another would
+/// launch the first checkout's script (KT-1316).
+fn disc_introspection_mcp_path_near(exe_dir: Option<&Path>, cwd: Option<&Path>) -> Option<String> {
+    const SCRIPT: &str = "disc-introspection-mcp.py";
+    let found = |candidate: PathBuf| {
+        candidate
+            .is_file()
+            .then(|| candidate.to_string_lossy().into_owned())
+    };
+    if let Some(dir) = exe_dir {
+        let installed = [
+            dir.join("scripts").join(SCRIPT),
+            dir.join("..").join("scripts").join(SCRIPT),
+            dir.join("..")
+                .join("Resources")
+                .join("scripts")
+                .join(SCRIPT),
+            dir.join(SCRIPT),
+        ];
+        if let Some(path) = installed.into_iter().find_map(found) {
+            return Some(path);
         }
     }
-    let dev_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/scripts/disc-introspection-mcp.py"
-    );
-    if std::path::Path::new(dev_path).exists() {
-        return Some(dev_path.to_string());
-    }
-    None
+    let in_source_tree = |start: &Path| {
+        start
+            .ancestors()
+            .take(BRIDGE_SOURCE_SEARCH_DEPTH)
+            .find_map(|dir| {
+                found(dir.join("backend").join("scripts").join(SCRIPT))
+                    .or_else(|| found(dir.join("scripts").join(SCRIPT)))
+            })
+    };
+    cwd.and_then(in_source_tree)
+        .or_else(|| exe_dir.and_then(in_source_tree))
 }
 
 pub(crate) struct InternalMcpCommand {
@@ -13857,6 +13900,16 @@ pub(crate) fn try_spawn(
     // keep their own sandbox's defaults.
     if task_worker_context.is_some() && is_claude_code_launch(binary, npx_package) {
         crate::core::task_worker_env::apply_launch_env(cmd.as_std_mut(), work_dir);
+        // KT-1318 - every launch of a task worker stamps the lane it builds in,
+        // resumes and reworks included, not only the first provisioning.
+        if let Some(context) = task_worker_context {
+            if let Err(reason) = crate::core::worktree::mark_lane_target_for_worktree(
+                work_dir,
+                &context.execution_id,
+            ) {
+                tracing::debug!(execution = %context.execution_id, "lane target not marked: {reason}");
+            }
+        }
     }
     // Hint shell-aware tools to use bash (dash does not support `-l`).
     // Only on Unix — Windows doesn't use SHELL env var.
@@ -14122,6 +14175,14 @@ pub fn parse_claude_stream_line(line: &str) -> StreamJsonEvent {
     }
 }
 
+/// Whether a Claude stream-json line is the final `result` line, whose usage is
+/// the whole run's, as opposed to one turn's.
+pub fn is_claude_result_line(line: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(line.trim())
+        .ok()
+        .is_some_and(|json| json.get("type").and_then(|v| v.as_str()) == Some("result"))
+}
+
 /// Remove literal `<thinking>` / `</thinking>` tags from a text delta.
 ///
 /// When Claude Opus runs with extended thinking enabled, the internal
@@ -14356,15 +14417,15 @@ fn codex_token_count(marker: &str, count: &str) -> Option<u64> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "runner_test.rs"]
 mod runner_test;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "runner_idle_test.rs"]
 mod runner_idle_test;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "runner_vision_test.rs"]
 mod runner_vision_test;
 
@@ -14436,7 +14497,7 @@ fn read_gemini_settings_api_key() -> Option<String> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod acp_resume_tests {
     use super::*;
     use crate::acp::{
@@ -15397,7 +15458,7 @@ mod acp_resume_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod argv_log_tests {
     use super::loggable_argv;
 

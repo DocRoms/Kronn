@@ -600,7 +600,7 @@ fn walk_worktree(dir: &Path, visited: &mut HashSet<std::path::PathBuf>, cb: &mut
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 
