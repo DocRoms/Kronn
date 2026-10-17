@@ -123,7 +123,10 @@ Codex exec items by `id`, and Claude stream snapshots by `tool_use_id`. Repeated
 calls with the same tool name remain separate. Completion is recorded only
 when the runtime reports it; missing metadata remains `unknown` or
 `arguments not reported`. Command output, MCP results and file patch bodies
-are not copied into these records. Input masking covers sensitive JSON keys
+are not copied into these records. The one thing read out of them is a list of
+URLs (KT-1308, at most 64 per call): the pages a call opened (read from its whole
+input, before the excerpt cuts it) and the pages a Context7 result named, which an
+audit holds its `url:` citations against. Input masking covers sensitive JSON keys
 and the shared credential patterns before truncation; it is heuristic, not a
 guarantee that arbitrary user content is secret-free.
 [src: file: backend/src/agents/tool_trace.rs:1-15#MARKER]

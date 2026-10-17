@@ -88,7 +88,7 @@ pub fn normalize_url(url: &str) -> String {
 /// Whether a tool, by the name its runtime reports, opens a page by the `url`
 /// it is given: Claude's `WebFetch`, Kronn's `web_fetch`, an MCP fetch tool, a
 /// browser's `browser_navigate` / `navigate_page` / `new_page`.
-fn opens_url(name: &str) -> bool {
+pub(crate) fn opens_url(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     [
         "fetch", "navigate", "new_page", "browse", "goto", "scrape", "crawl",
@@ -99,7 +99,7 @@ fn opens_url(name: &str) -> bool {
 
 /// Whether a tool is a documentation lookup whose RESULT names the pages it
 /// read (Context7): the agent then cites a URL it was handed, not one it sent.
-fn returns_urls(name: &str) -> bool {
+pub(crate) fn returns_urls(name: &str) -> bool {
     name.to_ascii_lowercase().contains("context7")
 }
 
@@ -122,7 +122,7 @@ fn url_pattern() -> &'static regex_lite::Regex {
 }
 
 /// Every normalized `http(s)` URL written in `text`.
-fn urls_in(text: &str) -> Vec<String> {
+pub(crate) fn urls_in(text: &str) -> Vec<String> {
     url_pattern()
         .find_iter(text)
         .map(|m| normalize_url(m.as_str().trim_end_matches(['.', ',', ':'])))
@@ -131,7 +131,7 @@ fn urls_in(text: &str) -> Vec<String> {
 }
 
 /// The text of a tool result: a string, or the `text` blocks of an array.
-fn result_text(content: &serde_json::Value) -> String {
+pub(crate) fn result_text(content: &serde_json::Value) -> String {
     match content {
         serde_json::Value::String(text) => text.clone(),
         serde_json::Value::Array(blocks) => blocks
@@ -139,39 +139,62 @@ fn result_text(content: &serde_json::Value) -> String {
             .filter_map(|block| block.get("text").and_then(|t| t.as_str()))
             .collect::<Vec<_>>()
             .join("\n"),
-        _ => String::new(),
+        serde_json::Value::Null => String::new(),
+        other => other.to_string(),
     }
 }
 
-/// The pages one tool call reads, from the input it was given: the `url` of a
-/// fetch or a browser navigation, the URLs of a `curl` / `wget` command.
-fn call_urls(name: &str, input: &str) -> Vec<String> {
-    let json = serde_json::from_str::<serde_json::Value>(input).ok();
+/// The pages one tool call reads, from its structured input: the `url` of a
+/// page opener (`opens`: a fetch or a browser navigation), the URLs of a
+/// `curl` / `wget` command. Read from the whole input, before any excerpt.
+pub(crate) fn input_urls(opens: bool, input: &serde_json::Value) -> Vec<String> {
     let mut urls = Vec::new();
-    if opens_url(name) {
-        let url = json
-            .as_ref()
-            .and_then(|json| json.get("url").and_then(|u| u.as_str()).map(str::to_owned))
-            // The excerpt is bounded: a cut input may still hold its url.
-            .or_else(|| {
-                let tail = input.split("\"url\":\"").nth(1)?;
-                Some(tail.split('"').next()?.to_owned())
-            });
-        urls.extend(url.map(|u| normalize_url(&u)).filter(|u| !u.is_empty()));
+    if opens {
+        let single = input.get("url").and_then(|u| u.as_str());
+        let many = input
+            .get("urls")
+            .and_then(|u| u.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|u| u.as_str());
+        urls.extend(
+            single
+                .into_iter()
+                .chain(many)
+                .map(normalize_url)
+                .filter(|u| !u.is_empty()),
+        );
     }
-    let command = match &json {
-        Some(json) => json.get("command").map(|command| match command {
-            serde_json::Value::Array(parts) => parts
-                .iter()
-                .filter_map(|part| part.as_str())
-                .collect::<Vec<_>>()
-                .join(" "),
-            other => other.as_str().unwrap_or_default().to_owned(),
-        }),
-        None => input.contains("\"command\"").then(|| input.to_owned()),
-    };
+    let command = input.get("command").map(|command| match command {
+        serde_json::Value::Array(parts) => parts
+            .iter()
+            .filter_map(|part| part.as_str())
+            .collect::<Vec<_>>()
+            .join(" "),
+        other => other.as_str().unwrap_or_default().to_owned(),
+    });
     if let Some(command) = command.filter(|c| downloads(c)) {
         urls.extend(urls_in(&command));
+    }
+    urls
+}
+
+/// The pages one tool call reads, from the input text it reported. A bounded
+/// excerpt may be cut: the `url` or the command it still holds is salvaged.
+fn call_urls(name: &str, input: &str) -> Vec<String> {
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(input) {
+        return input_urls(opens_url(name), &json);
+    }
+    let mut urls = Vec::new();
+    if opens_url(name) {
+        let url = input
+            .split("\"url\":\"")
+            .nth(1)
+            .and_then(|tail| tail.split('"').next());
+        urls.extend(url.map(normalize_url).filter(|u| !u.is_empty()));
+    }
+    if input.contains("\"command\"") && downloads(input) {
+        urls.extend(urls_in(input));
     }
     urls
 }
@@ -270,16 +293,20 @@ impl FetchTracker {
 
     /// The fetches an ACP-hosted agent (Claude and Codex through their adapters,
     /// the native ACP agents) reported in the tool traces its process captured.
-    /// A trace never carries a tool's output, so the pages a documentation tool
-    /// returned stay unknown: such a run's `url:` citations are left unchecked.
+    /// A trace carries the pages its call opened, and the pages a documentation
+    /// tool returned (read where the result is seen, never the result itself).
+    /// A documentation call whose result was not seen leaves the pages the
+    /// agent read unknown: the run's `url:` citations are then left unchecked.
     pub fn ingest_traces(&mut self, captured: &[String]) {
         for trace in crate::agents::tool_trace::collect(captured) {
             let Some(name) = trace.name.as_deref() else {
+                self.urls.extend(trace.urls);
                 continue;
             };
-            if returns_urls(name) {
+            if returns_urls(name) && trace.urls.is_empty() {
                 self.observable = false;
             }
+            self.urls.extend(trace.urls.iter().cloned());
             self.record(name, &trace.input.unwrap_or_default());
         }
     }
@@ -300,6 +327,7 @@ impl FetchTracker {
 mod tests {
     use super::*;
     use crate::core::version_sources::WatchedPackage;
+    use serde_json::json;
 
     fn watch() -> DependencySnapshot {
         DependencySnapshot {
@@ -415,6 +443,7 @@ mod tests {
                 name: Some(name.into()),
                 input: Some(input.into()),
                 status: Some("in_progress".into()),
+                urls: vec![],
             }
             .marker()
         };
@@ -615,6 +644,7 @@ mod tests {
                 name: Some(name.into()),
                 input: Some(input.into()),
                 status: Some("in_progress".into()),
+                urls: vec![],
             }
             .marker()
         };
@@ -646,5 +676,101 @@ mod tests {
         assert!(run_of(&tracker)
             .problems(&cites("https://jestjs.io"))
             .is_empty());
+    }
+
+    /// The traces the ACP adapter would capture for these Claude lines.
+    fn claude_traces(lines: &[String]) -> Vec<String> {
+        let mut reader = crate::agents::tool_trace::ClaudeTraceReader::default();
+        lines
+            .iter()
+            .flat_map(|line| reader.read(line))
+            .map(|trace| trace.marker())
+            .collect()
+    }
+
+    #[test]
+    fn a_context7_result_url_survives_the_acp_trace() {
+        let page = "https://nextjs.org/docs/app/routing";
+        let mut tracker = FetchTracker::default();
+        tracker.ingest_traces(&claude_traces(&[
+            assistant_call(
+                "t1",
+                "mcp__context7__query-docs",
+                r#"{"libraryId":"/vercel/next.js","query":"routing"}"#,
+            ),
+            user_result(
+                "t1",
+                &format!(r#"[{{"type":"text","text":"Source: {page}\nmore"}}]"#),
+            ),
+            // A result of another tool is not read for URLs.
+            assistant_call("t2", "Read", r#"{"file_path":"/a.md"}"#),
+            user_result("t2", r#""see https://seen-in-a-file.dev/a""#),
+        ]));
+        let run = run_of(&tracker);
+        assert!(run.fetched.is_some(), "the result was seen");
+        assert!(run.problems(&cites(page)).is_empty());
+        assert_eq!(
+            run.problems(&cites("https://seen-in-a-file.dev/a")).len(),
+            1
+        );
+        assert_eq!(run.problems(&cites("https://react.dev")).len(), 1);
+    }
+
+    #[test]
+    fn a_trace_keeps_the_url_of_an_input_the_excerpt_cut() {
+        let long = "x".repeat(5000);
+        let fetch = format!(r#"{{"url":"https://a.dev/page","prompt":"{long}"}}"#);
+        let shell = format!(r#"{{"command":"echo {long} && curl -s https://b.dev/api"}}"#);
+        let mut tracker = FetchTracker::default();
+        tracker.ingest_traces(&claude_traces(&[
+            assistant_call("f1", "WebFetch", &fetch),
+            assistant_call("f2", "Bash", &shell),
+        ]));
+        let run = run_of(&tracker);
+        assert!(run.problems(&cites("https://a.dev/page")).is_empty());
+        assert!(run.problems(&cites("https://b.dev/api")).is_empty());
+        assert_eq!(run.problems(&cites("https://c.dev")).len(), 1);
+    }
+
+    #[test]
+    fn a_native_acp_fetch_is_known_by_its_kind_even_retitled_to_its_url() {
+        use crate::agents::tool_trace::from_acp;
+        let frames = [
+            json!({"toolCallId":"n1","kind":"fetch","title":"Fetch","status":"pending",
+                   "rawInput":{"url":"https://www.x.dev/docs"}}),
+            // The runtime retitles the call to the page it opened.
+            json!({"toolCallId":"n1","title":"https://x.dev/docs","status":"completed"}),
+            json!({"toolCallId":"n2","kind":"fetch","title":"https://y.dev/a?b=1",
+                   "status":"in_progress"}),
+            json!({"toolCallId":"n3","kind":"read","title":"Read",
+                   "rawInput":{"url":"https://not-a-fetch.dev"}}),
+        ];
+        let captured: Vec<String> = frames
+            .iter()
+            .map(|frame| from_acp(frame).unwrap().marker())
+            .collect();
+        let mut tracker = FetchTracker::default();
+        tracker.ingest_traces(&captured);
+        let run = run_of(&tracker);
+        assert!(run.problems(&cites("https://x.dev/docs")).is_empty());
+        assert!(run.problems(&cites("https://y.dev/a?b=1")).is_empty());
+        assert_eq!(run.problems(&cites("https://not-a-fetch.dev")).len(), 1);
+    }
+
+    #[test]
+    fn a_codex_context7_result_url_survives_the_trace() {
+        let item = json!({"id":"c1","type":"mcp_tool_call","server":"context7",
+            "tool":"query-docs","arguments":{"query":"jest"},"status":"completed",
+            "result":{"content":[{"type":"text","text":"Docs: https://jestjs.io/docs/api\nend"}]}});
+        let mut tracker = FetchTracker::default();
+        tracker.ingest_traces(&[crate::agents::tool_trace::from_codex(&item)
+            .unwrap()
+            .marker()]);
+        let run = run_of(&tracker);
+        assert!(run.fetched.is_some());
+        assert!(run
+            .problems(&cites("https://jestjs.io/docs/api"))
+            .is_empty());
+        assert_eq!(run.problems(&cites("https://jestjs.io/blog")).len(), 1);
     }
 }

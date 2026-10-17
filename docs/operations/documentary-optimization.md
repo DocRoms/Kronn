@@ -47,11 +47,16 @@ tool (`WebFetch`, an MCP fetch), opened it in a browser (`browser_navigate`,
 `navigate_page`, `new_page`), downloaded it with `curl` / `wget`, or was handed it
 by a documentation tool (Context7: the URLs of the tool's result). Hosts compare
 without a leading `www.`. The calls are read from the agent's tool calls (direct
-stream-json, or the traces of an ACP-hosted agent). When the run used a channel
-Kronn cannot observe — an agent that reports no tool inputs (an HTTP model), a
-sub-agent (`Task`), or a Context7 result in an ACP trace, which never carries the
-tool's output — `url:` citations are left unchecked, never blocked. Outside a run
-(`analyze`) neither kind is checked. The pre-step baseline and the blame ledger
+stream-json, or the traces of an ACP-hosted agent, the default route). A trace
+carries the URLs its call opened, read from the whole input before the bounded
+excerpt cuts it, and the URLs a Context7 result named, read where the adapter
+sees the result (the output itself is never copied); a native ACP tool is a fetch
+by its `kind: "fetch"` as well as by its title. When the run used a channel Kronn
+cannot observe — an agent that reports no tool inputs (an HTTP model), a
+sub-agent (`Task`), or a documentation call whose result was not seen — `url:`
+citations are left unchecked, never blocked. Outside a run (`analyze`) neither
+kind is checked, and only the full audit pipeline builds the run's provenance:
+a partial audit checks neither. The pre-step baseline and the blame ledger
 are computed with the same run-aware analysis (`analyze_with`), so an unbacked
 citation that was already there does not block the step and one it wrote is
 charged to it.

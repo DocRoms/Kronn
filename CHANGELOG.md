@@ -613,10 +613,17 @@ Release notes for 0.9.3 and earlier are available in the
   the agent sent it to a fetch tool, opened it in a browser (`browser_navigate`,
   `navigate_page`), downloaded it with `curl` / `wget`, or was handed it by a
   documentation tool (the URLs a Context7 result names, so the citation the
-  Context7 prompt asks for is not refused); a leading `www.` is ignored. An
-  agent that reports no tool inputs (an HTTP model), a run that used a
-  sub-agent, or an ACP run that called Context7 (its trace carries no output)
-  leaves its `url:` citations unchecked.
+  Context7 prompt asks for is not refused); a leading `www.` is ignored. This
+  holds on the default ACP route too: the tool trace of a call now carries the
+  URLs it opened, read from the whole input before the 2000-character excerpt
+  cuts it (a long `WebFetch` prompt, a `curl` at the end of a long command), and
+  the URLs a Context7 result named (Claude and Codex adapters; a native ACP
+  agent when its update names the tool and carries its output). A native ACP
+  tool is a fetch by its `kind: "fetch"` too, even when the runtime retitles it
+  to its URL. A run whose agent reports no tool inputs (an HTTP model), that used
+  a sub-agent, or that called a documentation tool whose result Kronn never saw
+  leaves its `url:` citations unchecked, never blocked. Only the full audit
+  pipeline checks the run's provenance: a partial audit does not.
   The pre-step baseline and the blame ledger of the documentary gate (KT-1306)
   use the same run-aware analysis: an unbacked citation already there is in the
   baseline and does not block the step, one the step wrote blocks it and is

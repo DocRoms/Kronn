@@ -23,6 +23,21 @@ fn fetch_stream(url: &str) -> String {
     json!({"type": "assistant", "message": {"content": [call]}}).to_string() + "\n"
 }
 
+/// One stream-json line of an assistant message holding `call`.
+fn assistant_line(call: Value) -> String {
+    json!({"type": "assistant", "message": {"content": [call]}}).to_string() + "\n"
+}
+
+/// A Context7 lookup and the result it sent back, naming the page it read.
+fn context7_stream(result: &str) -> String {
+    let call = json!({"type": "tool_use", "id": "c7", "name": "mcp__context7__query-docs",
+        "input": {"libraryId": "/facebook/jest", "query": "latest version"}});
+    let result = json!({"type": "tool_result", "tool_use_id": "c7",
+        "content": [{"type": "text", "text": result}]});
+    assistant_line(call)
+        + &(json!({"type": "user", "message": {"content": [result]}}).to_string() + "\n")
+}
+
 /// The dependency watch the audit injects: `joi` and `jest` of the `JS / TS` manager.
 async fn watch_dependencies(state: &AppState) {
     let package = |name: &str| crate::models::DependencyUpdatePackage {
@@ -72,6 +87,16 @@ async fn index_step_with_table(
     fetched: Option<&str>,
     watch: bool,
 ) -> IndexStep {
+    index_step_with_stream(h, table, fetched.map(fetch_stream), watch).await
+}
+
+/// `stream`: the tool lines the scripted agent emits besides its writing.
+async fn index_step_with_stream(
+    h: &Harness,
+    table: String,
+    stream: Option<String>,
+    watch: bool,
+) -> IndexStep {
     let (tools, state) = (h.tools.path(), &h.state);
     assert_eq!(
         crate::core::anti_halluc::current_mode(),
@@ -82,8 +107,8 @@ async fn index_step_with_table(
         watch_dependencies(state).await;
     }
     std::fs::write(tools.join("stack-table"), table).unwrap();
-    if let Some(url) = fetched {
-        std::fs::write(tools.join("stream-extra"), fetch_stream(url)).unwrap();
+    if let Some(stream) = stream {
+        std::fs::write(tools.join("stream-extra"), stream).unwrap();
     }
     // Every prompt (the attempts of step 1, then the later steps) writes the index.
     arm(tools, "fill", &["docs/AGENTS.md"; 3]);
@@ -212,4 +237,71 @@ async fn an_unbacked_citation_is_charged_to_the_step_that_wrote_it() {
         ledger.contains("unbacked_provenance") && ledger.contains(&format!("\"step\":{writer}")),
         "{ledger}"
     );
+}
+
+/// The default route is the ACP adapter, which reports a call as a bounded trace:
+/// the page a Context7 result names reaches the check as a URL, not as output.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn warn_mode_accepts_a_page_a_context7_result_named_on_the_acp_route() {
+    let h = harness().await;
+    let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let page = "https://jestjs.io/docs/getting-started";
+    let table = stack_table(
+        &date,
+        "not verified: no source",
+        &format!("30.0.0 [src: url: {page}] (read {date})"),
+    );
+    let stream = context7_stream(&format!("### Getting started\nSource: {page}\n"));
+    let step = index_step_with_stream(&h, table, Some(stream), false).await;
+    assert!(step.retries.is_empty(), "{:?}", step.retries);
+    assert!(step.success, "{:?}", step.warnings);
+}
+
+/// A page the Context7 result did not name is still invented.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn warn_mode_refuses_a_page_no_context7_result_named() {
+    let h = harness().await;
+    let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let table = stack_table(
+        &date,
+        "not verified: no source",
+        &format!("30.0.0 [src: url: https://jestjs.io/blog] (read {date})"),
+    );
+    let stream = context7_stream("Source: https://jestjs.io/docs/getting-started");
+    let step = index_step_with_stream(&h, table, Some(stream), false).await;
+    assert!(!step.success, "{:?}", step.warnings);
+    assert!(step.retries[0]["diagnostics"]
+        .to_string()
+        .contains("never fetched"));
+}
+
+/// A trace input is cut at a bound: the page a call opened is read before it.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn warn_mode_accepts_a_fetch_whose_input_exceeds_the_trace_bound() {
+    let h = harness().await;
+    let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let (fetched, downloaded) = (
+        "https://nodejs.org/en/about/previous-releases",
+        "https://registry.npmjs.org/jest/latest",
+    );
+    let long = "x".repeat(4000);
+    let fetch = json!({"type": "tool_use", "id": "f1", "name": "WebFetch",
+        "input": {"url": fetched, "prompt": long}});
+    let shell = json!({"type": "tool_use", "id": "f2", "name": "Bash",
+        "input": {"command": format!("echo '{long}' && curl -s {downloaded}")}});
+    let stream = assistant_line(fetch) + &assistant_line(shell);
+    let table = stack_table(
+        &date,
+        &format!("22.11.0 [src: url: {fetched}] (read {date})"),
+        &format!("30.0.0 [src: url: {downloaded}] (read {date})"),
+    );
+    let step = index_step_with_stream(&h, table, Some(stream), false).await;
+    assert!(step.retries.is_empty(), "{:?}", step.retries);
+    assert!(step.success, "{:?}", step.warnings);
 }

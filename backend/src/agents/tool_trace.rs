@@ -1,10 +1,18 @@
-//! Bounded, redacted metadata for native tool calls. Tool output is never copied.
+//! Bounded, redacted metadata for native tool calls. Tool output is never copied:
+//! the only thing read out of it is the URLs a documentation tool (Context7)
+//! names, which a run's `url:` citations are held against (KT-1308).
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::core::run_provenance::{input_urls, opens_url, result_text, returns_urls, urls_in};
 
 pub const MARKER: &str = "[acp-tool-trace] ";
 const MAX_INPUT_CHARS: usize = 2000;
+/// URLs kept per call, and the longest one kept: a bound, not a cut: a URL cut
+/// short would name another page.
+const MAX_URLS: usize = 64;
+const MAX_URL_CHARS: usize = 1000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolTraceUpdate {
@@ -12,6 +20,20 @@ pub struct ToolTraceUpdate {
     pub name: Option<String>,
     pub input: Option<String>,
     pub status: Option<String>,
+    /// The pages the call opened or, for a documentation tool, returned, read
+    /// from the whole input or result before the bounded excerpt cuts it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub urls: Vec<String>,
+}
+
+fn bounded_urls(urls: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    urls.into_iter()
+        .filter(|url| url.chars().count() <= MAX_URL_CHARS)
+        .map(|url| crate::core::redact::redact_for_audit_artifact(&url).0)
+        .filter(|url| seen.insert(url.clone()))
+        .take(MAX_URLS)
+        .collect()
 }
 
 pub fn safe_excerpt(raw: &str, max_chars: usize) -> String {
@@ -102,7 +124,13 @@ impl ToolTraceUpdate {
                 .map(|name| safe_excerpt(name, 200)),
             input: input.map(input_excerpt),
             status: status(state),
+            urls: Vec::new(),
         }
+    }
+
+    fn with_urls(mut self, urls: Vec<String>) -> Self {
+        self.urls = bounded_urls(urls);
+        self
     }
 
     pub fn marker(&self) -> String {
@@ -117,12 +145,35 @@ impl ToolTraceUpdate {
 pub fn from_acp(update: &Value) -> Option<ToolTraceUpdate> {
     let call = update.get("toolCall").unwrap_or(update);
     let id = call.get("toolCallId")?.as_str()?;
-    Some(ToolTraceUpdate::new(
-        id,
-        call.get("title").and_then(Value::as_str),
-        call.get("rawInput"),
-        call.get("status").and_then(Value::as_str),
-    ))
+    let title = call.get("title").and_then(Value::as_str);
+    // A runtime may retitle a fetch to its URL, and keeps `kind` stable.
+    let fetches = call.get("kind").and_then(Value::as_str) == Some("fetch");
+    let opens = fetches || title.is_some_and(opens_url);
+    let mut urls = call
+        .get("rawInput")
+        .map(|input| input_urls(opens, input))
+        .unwrap_or_default();
+    if fetches {
+        urls.extend(title.map(urls_in).unwrap_or_default());
+    }
+    if title.is_some_and(returns_urls) {
+        for output in ["rawOutput", "content"] {
+            urls.extend(
+                call.get(output)
+                    .map(|v| urls_in(&v.to_string()))
+                    .unwrap_or_default(),
+            );
+        }
+    }
+    Some(
+        ToolTraceUpdate::new(
+            id,
+            title,
+            call.get("rawInput"),
+            call.get("status").and_then(Value::as_str),
+        )
+        .with_urls(urls),
+    )
 }
 
 /// Codex exec item metadata; omit command output, MCP results and patch bodies.
@@ -172,48 +223,94 @@ pub fn from_codex(item: &Value) -> Option<ToolTraceUpdate> {
     } else {
         item.get("status").and_then(Value::as_str)
     };
-    Some(ToolTraceUpdate::new(id, Some(&name), input.as_ref(), state))
+    let mut urls = input
+        .as_ref()
+        .map(|input| input_urls(opens_url(&name), input))
+        .unwrap_or_default();
+    if returns_urls(&name) {
+        urls.extend(
+            item.get("result")
+                .map(|result| urls_in(&result.to_string()))
+                .unwrap_or_default(),
+        );
+    }
+    Some(ToolTraceUpdate::new(id, Some(&name), input.as_ref(), state).with_urls(urls))
 }
 
 /// Claude snapshots provide the complete input, and user tool_result blocks
 /// correlate completion/error by tool_use_id. A snapshot alone proves no result.
 pub fn from_claude_line(line: &str) -> Vec<ToolTraceUpdate> {
-    let Ok(event) = serde_json::from_str::<Value>(line) else {
-        return Vec::new();
-    };
-    if !matches!(
-        event.get("type").and_then(Value::as_str),
-        Some("assistant" | "user")
-    ) {
-        return Vec::new();
+    ClaudeTraceReader::default().read(line)
+}
+
+/// Reads Claude's stream-json lines in order: a documentation call's result
+/// arrives on a later line than the call, and is told apart by its id.
+#[derive(Debug, Default)]
+pub struct ClaudeTraceReader {
+    docs_calls: BTreeSet<String>,
+}
+
+impl ClaudeTraceReader {
+    pub fn read(&mut self, line: &str) -> Vec<ToolTraceUpdate> {
+        let Ok(event) = serde_json::from_str::<Value>(line) else {
+            return Vec::new();
+        };
+        if !matches!(
+            event.get("type").and_then(Value::as_str),
+            Some("assistant" | "user")
+        ) {
+            return Vec::new();
+        }
+        event
+            .pointer("/message/content")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|block| match block.get("type").and_then(Value::as_str) {
+                Some("tool_use") => {
+                    let id = block.get("id")?.as_str()?;
+                    let name = block.get("name").and_then(Value::as_str);
+                    if name.is_some_and(returns_urls) {
+                        self.docs_calls.insert(id.to_owned());
+                    }
+                    let urls = block
+                        .get("input")
+                        .map(|input| input_urls(name.is_some_and(opens_url), input))
+                        .unwrap_or_default();
+                    Some(
+                        ToolTraceUpdate::new(id, name, block.get("input"), Some("in_progress"))
+                            .with_urls(urls),
+                    )
+                }
+                Some("tool_result") => {
+                    let id = block.get("tool_use_id")?.as_str()?;
+                    let urls = match self.docs_calls.contains(id) {
+                        true => block
+                            .get("content")
+                            .map(|content| urls_in(&result_text(content)))
+                            .unwrap_or_default(),
+                        false => Vec::new(),
+                    };
+                    Some(
+                        ToolTraceUpdate::new(
+                            id,
+                            None,
+                            None,
+                            Some(
+                                if block.get("is_error").and_then(Value::as_bool) == Some(true) {
+                                    "failed"
+                                } else {
+                                    "completed"
+                                },
+                            ),
+                        )
+                        .with_urls(urls),
+                    )
+                }
+                _ => None,
+            })
+            .collect()
     }
-    event
-        .pointer("/message/content")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|block| match block.get("type").and_then(Value::as_str) {
-            Some("tool_use") => Some(ToolTraceUpdate::new(
-                block.get("id")?.as_str()?,
-                block.get("name").and_then(Value::as_str),
-                block.get("input"),
-                Some("in_progress"),
-            )),
-            Some("tool_result") => Some(ToolTraceUpdate::new(
-                block.get("tool_use_id")?.as_str()?,
-                None,
-                None,
-                Some(
-                    if block.get("is_error").and_then(Value::as_bool) == Some(true) {
-                        "failed"
-                    } else {
-                        "completed"
-                    },
-                ),
-            )),
-            _ => None,
-        })
-        .collect()
 }
 
 /// Merge partial updates by call id, retaining first-observed order and input.
@@ -239,6 +336,7 @@ pub fn collect(lines: &[String]) -> Vec<ToolTraceUpdate> {
             if update.input.is_some() {
                 record.input = update.input;
             }
+            record.urls = bounded_urls(record.urls.drain(..).chain(update.urls));
             // A cumulative snapshot cannot reopen a terminal call.
             if !matches!(
                 record.status.as_deref(),
