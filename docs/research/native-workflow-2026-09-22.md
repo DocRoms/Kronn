@@ -88,7 +88,7 @@ replace that historical experiment.
 [src: file: docs/research/native-tool-catalogue-2026-09-22.md:134-141]
 
 When this report was written, the MCP declaration surface stayed at 111 tools
-and 86618 bytes; the budget script now pins 84,966 bytes. Moving the schema
+and 86618 bytes; the budget script now pins 84,929 bytes. Moving the schema
 implementation into the shared backend endpoint adds no declaration: the bridge
 tool only reads that endpoint. The 11 MCP budget tests and 637 bridge tests
 passed then (both test files hold more tests today). Backend checks included 113

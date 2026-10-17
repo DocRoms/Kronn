@@ -31,6 +31,7 @@ pub mod discover;
 pub mod discussion_actions;
 pub mod discussion_important;
 pub mod discussion_questions;
+pub mod discussion_scope;
 pub mod discussion_video_sequence;
 pub mod discussion_weight;
 pub mod discussions;

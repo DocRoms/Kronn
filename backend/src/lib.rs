@@ -1069,7 +1069,42 @@ async fn bridge_gate(
             "this launch has no discussion, run or project: its bridge token reads catalogues only",
         );
     }
-    let (body, json) = match bridge_token::prepare_body(route, project.as_deref(), json.as_ref()) {
+    // The room grants (KT-1270), re-read on every call: a revoke applies to
+    // the next request, and a failed read refuses rather than guessing.
+    let reach = if project.is_some() {
+        let owned = grant.scope.room_grant_discussions.clone();
+        let run = grant.scope.workflow_run_id.clone();
+        match state
+            .db
+            .with_read_conn(move |conn| {
+                // A room's own agents reach its grants; a run's steps reach their
+                // workflow's validated scope; nothing else widens a token.
+                let mut granted = crate::db::discussion_scope::granted_projects(conn, &owned)?;
+                if let Some(run) = run {
+                    granted.merge(crate::db::discussion_scope::run_granted_projects(
+                        conn, &run,
+                    )?);
+                }
+                Ok(granted)
+            })
+            .await
+        {
+            Ok(granted) => bridge_token::Reach {
+                bound: project.clone(),
+                granted,
+            },
+            Err(error) => {
+                tracing::warn!(target: "kronn::bridge_token", token = %grant.id, "grant lookup failed: {error}");
+                return bridge_refusal(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "bridge scope check failed",
+                );
+            }
+        }
+    } else {
+        bridge_token::Reach::bound_only(None)
+    };
+    let (body, json) = match bridge_token::prepare_body_in(route, &reach, json.as_ref()) {
         Ok(Some(prepared)) => match serde_json::to_vec(&prepared) {
             Ok(bytes) => (axum::body::Body::from(bytes), Some(prepared)),
             Err(_) => return bridge_refusal(StatusCode::BAD_REQUEST, "invalid JSON body"),
@@ -1087,7 +1122,7 @@ async fn bridge_gate(
         Err(refusal) => return bridge_refusal(StatusCode::FORBIDDEN, &refusal.0),
     };
     let checked = grant.clone();
-    let bound = project.clone();
+    let gate_reach = reach.clone();
     let gate_query = query.clone();
     let decision = state
         .db
@@ -1101,7 +1136,7 @@ async fn bridge_gate(
             )?);
             let ids = bridge_token::canonical_ids(conn, ids)?;
             Ok(
-                bridge_token::authorize(&checked, route, bound.as_deref(), &ids, |kind, id| {
+                bridge_token::authorize_in(&checked, route, &gate_reach, &ids, |kind, id| {
                     bridge_token::residence(conn, kind, id).map_err(|error| {
                         bridge_token::Refusal(format!("scope lookup failed: {error}"))
                     })
@@ -1138,7 +1173,7 @@ async fn bridge_gate(
         .run(axum::extract::Request::from_parts(parts, body))
         .await;
     if bridge_token::scopes_response(route) && response.status().is_success() {
-        return scope_bridge_response(state, route, grant, project, response).await;
+        return scope_bridge_response(state, route, grant, reach, response).await;
     }
     response
 }
@@ -1151,7 +1186,7 @@ async fn scope_bridge_response(
     state: &AppState,
     route: &'static crate::core::bridge_token::BridgeRoute,
     grant: std::sync::Arc<crate::core::bridge_token::BridgeGrant>,
-    project: Option<String>,
+    reach: crate::core::bridge_token::Reach,
     response: axum::response::Response,
 ) -> axum::response::Response {
     use crate::core::bridge_token;
@@ -1201,8 +1236,7 @@ async fn scope_bridge_response(
     // An export is a bundle: one dependency the token may not see refuses it
     // whole rather than leaving a bundle that imports half a workflow.
     let whole = bridge_token::scoped_whole_or_refused(route).then(|| data.clone());
-    if let Err(refusal) =
-        bridge_token::scope_response(route, data, &grant, project.as_deref(), &residences)
+    if let Err(refusal) = bridge_token::scope_response_in(route, data, &grant, &reach, &residences)
     {
         return bridge_refusal(StatusCode::FORBIDDEN, &refusal.0);
     }
@@ -2771,6 +2805,39 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/human-credentials/proof",
             post(api::human_credentials::issue_proof),
+        )
+        .route(
+            "/api/discussions/{id}/scope",
+            get(api::discussion_scope::get_scope),
+        )
+        .route(
+            "/api/workflows/{id}/scope",
+            get(api::discussion_scope::get_workflow_scope)
+                .put(api::discussion_scope::set_workflow_scope),
+        )
+        .route(
+            "/api/workflows/{id}/scope/revoke",
+            post(api::discussion_scope::revoke_workflow_scope),
+        )
+        .route(
+            "/api/discussions/{id}/scope/grants",
+            post(api::discussion_scope::grant),
+        )
+        .route(
+            "/api/discussions/{id}/scope/grants/{grant_id}/revoke",
+            post(api::discussion_scope::revoke),
+        )
+        .route(
+            "/api/discussions/{id}/scope/requests",
+            post(api::discussion_scope::file_request),
+        )
+        .route(
+            "/api/discussions/{id}/scope/requests/{request_id}/approve",
+            post(api::discussion_scope::approve),
+        )
+        .route(
+            "/api/discussions/{id}/scope/requests/{request_id}/decline",
+            post(api::discussion_scope::decline),
         )
         .route(
             "/api/discussions/{id}/questions",

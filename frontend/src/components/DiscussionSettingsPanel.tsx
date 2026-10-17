@@ -42,6 +42,7 @@ import type {
 } from '../types/generated';
 import { ProfileTooltip } from './ProfileTooltip';
 import { DiscussionSkillPicker } from './DiscussionSkillPicker';
+import { DiscussionScopeSection } from './DiscussionScope';
 import './DiscussionToolPanel.css';
 import './DiscussionSettingsPanel.css';
 
@@ -312,6 +313,17 @@ export function DiscussionSettingsPanel({
               ))}
             </select>
           </label>
+
+          <div className="disc-settings-field">
+            <span>{t('disc.scopeTitle')}</span>
+            <DiscussionScopeSection
+              discussionId={discussion.id}
+              primaryProjectId={discussion.project_id ?? null}
+              projects={projects.filter(project => !isHiddenPath(project.path))}
+              toast={toast}
+              t={t}
+            />
+          </div>
 
           {availableProfiles.length > 0 && (
             <ConfigAccordion

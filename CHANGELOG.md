@@ -65,6 +65,25 @@ Release notes for 0.9.3 and earlier are available in the
   the sentence holding the path, not to the whole line, and a proposal heading
   must be a proposal phrase (« Ideas », « Future work »), not a word inside a
   real title.
+- A room can reach other projects, decided by a human (KT-1270). A room keeps
+  its own project: its working directory, where what it creates lands, and the
+  only project whose credentials and API configs it may use. In the room
+  settings a human opens another project in read (its tasks, rooms, runs,
+  pages) or in write (planning only: create and edit its tasks), or every
+  project, the latter in write only after a typed confirmation sent with the
+  scope the screen showed. An agent asks with the MCP tool `room_scope`; the
+  request grants nothing until a human approves it, narrows it to read or
+  declines it. The header always shows what the room reaches (a red badge for
+  every project) and the requests waiting. Grants are re-read on every agent
+  call, so a revoke applies at once; they never open another project's
+  credentials, never run its workflows, never pass to worker rooms, and are
+  kept as a journal with a `[kronn-scope: …]` line in the room for each change.
+  Only the room's own agents reach its grants, never a workflow step or a
+  worker posting in it. A workflow's runs reach other projects through a scope a
+  human sets on the workflow page; any change to the workflow suspends it until
+  validated again, and the launch card shows it. Design and refused attacks:
+  `docs/design/discussion-project-scope.md`.
+
 - AI documentation template and audit v2 gap audit (KT-819). The project
   facts of the briefing gain « Documentation externe » (Confluence, Notion,
   wiki, other; https addresses only, no credentials, at most 6), rendered in
@@ -794,6 +813,15 @@ Release notes for 0.9.3 and earlier are available in the
   `reviewed_head_sha`, `dod_verifications`, the string version `"1"`), and a
   spawned worker's `tests_executed` schema is declared in the measured `TOOLS`
   literal.
+- A project's `token_override` (a raw token) is no longer returned to a
+  Kronn-launched agent: credential fields are stripped from every bridge-token
+  response.
+
+- A task linked to rooms of several projects is visible from each of them
+  again (KT-1298, GitHub #248). One link to another project's room hid the
+  whole task, so `plan_get` answered 403 in every room and agents duplicated
+  the shared parent task. The links an agent cannot see are now left out of the
+  task instead.
 
 - The default-docs-root golden no longer depends on the day it runs: the
   compact date every step prompt opens with is masked like the dashed one.
