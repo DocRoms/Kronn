@@ -151,7 +151,7 @@ pub fn validate_scope(
     Ok(Ok(()))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

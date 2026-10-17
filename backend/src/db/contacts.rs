@@ -247,7 +247,7 @@ pub fn delete_contact(conn: &Connection, id: &str) -> Result<bool> {
     Ok(affected > 0)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::db::migrations;

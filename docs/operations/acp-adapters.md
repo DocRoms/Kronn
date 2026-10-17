@@ -50,7 +50,7 @@ the permissive container marker from workers.
 [src: file: backend/src/agents/runner.rs:4830-4858#adapter_task_worker_args]
 [src: file: backend/src/agents/runner.rs:3740-3758#task_worker_route_policy]
 [src: file: backend/src/agents/runner.rs:4318-4318#acp_resume_id]
-[src: file: backend/src/agents/runner.rs:13815-13825#CLAUDE_CODE_BUBBLEWRAP]
+[src: file: backend/src/agents/runner.rs:13835-13845#CLAUDE_CODE_BUBBLEWRAP]
 [src: file: backend/tests/adapter_worker_policy.rs:335-446#worker]
 
 Each adapter permits one active prompt at a time; sequential turns still resume
@@ -76,7 +76,7 @@ The desktop resolves it through Tauri's resource directory and sets
 configured but missing executable fails closed instead of using a developer's
 source checkout. Docker and source development keep the existing script route.
 [src: file: desktop/src-tauri/src/main.rs:1131-1148#KRONN_INTERNAL_MCP_EXECUTABLE]
-[src: file: backend/src/agents/runner.rs:6112-6131#resolve_internal_mcp_command]
+[src: file: backend/src/agents/runner.rs:6132-6151#resolve_internal_mcp_command]
 
 The embedded backend exports its actual loopback port as `KRONN_BACKEND_URL`
 before starting agent dispatch and MCP configuration sync. Generated desktop

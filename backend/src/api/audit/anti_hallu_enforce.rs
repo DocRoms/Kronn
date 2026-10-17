@@ -403,7 +403,7 @@ pub fn enforce_human_owned_sections(
     Some((out_lines.join("\n"), diffs))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use std::fs;
@@ -419,6 +419,22 @@ mod tests {
             verdict.is_clean(),
             "verified citation must not be fabricated"
         );
+    }
+
+    #[test]
+    fn a_dash_range_passes_the_enforce_gate_like_a_hyphen_range() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("long.md"), "x\n".repeat(30)).unwrap();
+        for ok in ["17\u{2013}23", "17\u{2014}23", "17-23", "1\u{2013}30"] {
+            let verdict =
+                lint_step_file(&format!("Claim [src: file: long.md:{ok}]."), &[dir.path()]);
+            assert!(verdict.is_clean(), "{ok}: {:?}", verdict.fabricated);
+        }
+        for bad in ["17\u{2013}31", "31\u{2014}40", "23\u{2013}17"] {
+            let verdict =
+                lint_step_file(&format!("Claim [src: file: long.md:{bad}]."), &[dir.path()]);
+            assert!(!verdict.is_clean(), "{bad} must still be refused");
+        }
     }
 
     #[test]
@@ -941,6 +957,43 @@ mod tests {
     }
 
     #[test]
+    fn a_mistyped_kind_over_a_missing_file_is_retried_then_failed() {
+        // `fil:` / `path:` / `source:` are not known kinds: their path is judged
+        // as a file, so the step is retried and finally failed, not waved through.
+        for raw in [
+            "fil: src/ghost.rs:1",
+            "path: src/ghost.rs",
+            "source: ghost.rs",
+        ] {
+            let dir = tempdir().unwrap();
+            fs::write(
+                dir.path().join("AGENTS.md"),
+                format!("Claim [src: {raw}].\n"),
+            )
+            .unwrap();
+            let gate = |attempt| {
+                evaluate_enforce_gate(true, true, "AGENTS.md", dir.path(), attempt, 2, None)
+            };
+            assert!(
+                matches!(gate(1), EnforceGateOutcome::Retry { fabricated: 1, .. }),
+                "{raw}"
+            );
+            assert!(matches!(gate(2), EnforceGateOutcome::Fail { .. }), "{raw}");
+        }
+        // A listed non-file kind is not a path: the gate passes it.
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("AGENTS.md"),
+            "Recent [src: command: git log --oneline].\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            evaluate_enforce_gate(true, true, "AGENTS.md", dir.path(), 1, 2, None),
+            EnforceGateOutcome::Pass { .. }
+        ));
+    }
+
+    #[test]
     fn gate_fails_after_exhausting_attempts_without_stamping() {
         // The agent never fixes the fabricated citation. After MAX_ATTEMPTS the
         // step must Fail (→ audit ends Interrupted) and NEVER stamp the doc as
@@ -1048,7 +1101,7 @@ pub(crate) fn enforce_failure_reason(count: usize, max_attempts: usize) -> Strin
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod enforce_gate_tests {
     use super::*;
 

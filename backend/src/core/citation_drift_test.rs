@@ -120,6 +120,38 @@ fn recording_writes_paths_lines_and_digests_only() {
     assert_eq!(report.unchanged_count, 5);
 }
 
+// KT-1311 — a doc whose banner was cut inside a marker still records every
+// citation after it.
+#[test]
+fn a_banner_truncated_mid_marker_does_not_blind_the_doc() {
+    let tmp = fixture();
+    let dir = tmp.path();
+    let cut = "<!-- kronn:partial-step -->\n> Partial document (gate: [src: file: .github/wor).\n\
+               <!-- kronn:partial-step:end -->\n\n";
+    let body = fs::read_to_string(dir.join("docs/architecture.md")).unwrap();
+    fs::write(dir.join("docs/architecture.md"), format!("{cut}{body}")).unwrap();
+    record_all(dir).unwrap();
+    let file = read_strict(dir).unwrap().unwrap();
+    let cites: Vec<&str> = file.docs["docs/architecture.md"]
+        .citations
+        .iter()
+        .map(|c| c.cite.as_str())
+        .collect();
+    assert_eq!(
+        cites,
+        ["src/lib.rs:2", "src/lib.rs:6", "src/lib.rs:10", "README.md"]
+    );
+}
+
+// KT-1311 — a marker of a kind Kronn does not know is not a path.
+#[test]
+fn an_unknown_kind_marker_is_no_file_citation() {
+    let content = "Recent work [src: command: git log --oneline -5].\n\
+                   Real one [src: src/lib.rs:2].\n";
+    let labels: Vec<String> = cite_labels(content).into_iter().collect();
+    assert_eq!(labels, ["src/lib.rs:2"]);
+}
+
 #[test]
 fn commit_touching_no_cited_line_marks_nothing_stale() {
     let tmp = fixture();
@@ -764,4 +796,12 @@ fn recording_named_docs_leaves_the_others_as_validated() {
             .unwrap(),
         stamp
     );
+}
+
+#[test]
+fn a_dash_range_is_tracked_under_its_hyphen_label() {
+    let labels =
+        cite_labels("Claim [src: file: src/a.rs:2\u{2013}4] and [src: file: src/b.rs:1\u{2014}3].");
+    assert!(labels.contains("src/a.rs:2-4"), "{labels:?}");
+    assert!(labels.contains("src/b.rs:1-3"), "{labels:?}");
 }

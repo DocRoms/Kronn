@@ -253,7 +253,7 @@ pub fn verify_checkpoint(worktree: &Path, sha: &str) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use std::fs;

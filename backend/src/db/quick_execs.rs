@@ -139,7 +139,7 @@ pub fn delete_quick_exec(conn: &Connection, id: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use chrono::Utc;

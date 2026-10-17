@@ -26,6 +26,15 @@ pub struct RunProvenance {
 }
 
 impl RunProvenance {
+    /// What the run holds so far: its dependency watch and the pages its agent
+    /// fetched up to now.
+    pub fn of(deps: &Option<DependencySnapshot>, tracker: &FetchTracker) -> Self {
+        Self {
+            deps: deps.clone(),
+            fetched: tracker.fetched(),
+        }
+    }
+
     /// One message per `deps:` / `url:` citation of `content` the run cannot
     /// back. Quoted examples (fences, inline code) are not citations.
     pub fn problems(&self, content: &str) -> Vec<String> {

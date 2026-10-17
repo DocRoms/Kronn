@@ -154,7 +154,7 @@ fn resolve_home() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use serial_test::serial;

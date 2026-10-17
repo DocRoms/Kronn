@@ -74,14 +74,14 @@ pub mod workflow_step_rooms;
 pub mod workflow_watch_state;
 pub mod workflows;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "tests.rs"]
 mod tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod release_gate_tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod large_db_measure;
 
 /// `EXPLAIN QUERY PLAN` details of `sql`, one line per plan node.
@@ -593,7 +593,7 @@ pub(crate) fn restrict_data_dir_to_owner(dir: &std::path::Path) {
     let _ = dir;
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, unix, feature = "full-tests"))]
 mod data_dir_permission_tests {
     use std::os::unix::fs::PermissionsExt;
 

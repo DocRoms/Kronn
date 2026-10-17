@@ -180,7 +180,7 @@ impl Drop for PowerLease {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};

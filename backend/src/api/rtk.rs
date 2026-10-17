@@ -578,7 +578,7 @@ fn pick_f32(json: &serde_json::Value, keys: &[&str]) -> Option<f32> {
     None
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

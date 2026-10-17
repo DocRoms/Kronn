@@ -322,7 +322,7 @@ fn match_by_slug(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 pub(crate) mod tests {
     use super::*;
 

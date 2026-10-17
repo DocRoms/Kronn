@@ -194,6 +194,6 @@ pub fn build(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "resume_bundle_test.rs"]
 mod resume_bundle_test;

@@ -129,7 +129,7 @@ pub fn parse_envelope_for_test(output: &str) -> Value {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

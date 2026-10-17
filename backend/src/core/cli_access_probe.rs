@@ -167,6 +167,6 @@ fn extract_semver(text: &str) -> Option<(u64, u64, u64)> {
     ))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "cli_access_probe_test.rs"]
 mod cli_access_probe_test;

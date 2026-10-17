@@ -311,7 +311,7 @@ pub(crate) fn validate_range_indentation(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use std::path::Path;

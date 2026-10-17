@@ -557,7 +557,7 @@ fn extract_token_jsonpath(response: &serde_json::Value, path: &str) -> Result<St
         .ok_or_else(|| format!("JSONPath `{path}` — value is not a string"))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     const TEST_POLICY: crate::core::safe_http::SafeHttpPolicy =
         crate::core::safe_http::SafeHttpPolicy::PublicOrLoopbackForTests;

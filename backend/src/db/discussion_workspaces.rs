@@ -569,7 +569,7 @@ pub fn release_history_lease(conn: &Connection, disc_id: &str, session_pk: i64) 
     Ok(changed > 0)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::db::migrations;

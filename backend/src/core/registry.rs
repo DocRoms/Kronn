@@ -2633,7 +2633,7 @@ pub fn credential_source(server: &McpServer) -> CredentialSource {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

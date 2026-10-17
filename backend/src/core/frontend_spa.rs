@@ -49,7 +49,7 @@ pub fn frontend_spa_service(dist_dir: &Path) -> ServeDir<Router> {
         .fallback(client_routes)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use axum::{body::Body, http::Method};

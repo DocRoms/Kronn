@@ -555,6 +555,75 @@ Release notes for 0.9.3 and earlier are available in the
   `not verified: no source` instead of a « latest stable » it did not read; held
   and fetched citations, and `not verified`, pass. An agent that reports no
   tool inputs (an HTTP model) leaves its `url:` citations unchecked.
+  The pre-step baseline and the blame ledger of the documentary gate (KT-1306)
+  use the same run-aware analysis: an unbacked citation already there is in the
+  baseline and does not block the step, one the step wrote blocks it and is
+  charged to it.
+- The audit's citation gate now says how to fix a citation (KT-1307). A path
+  that only resolves under the docs root or next to the citing doc gets
+  « paths are repository-root relative; did you mean `docs/AGENTS.md:94`? »,
+  and an out-of-range line reports the file's line count. Ranges accept the
+  en and em dash, and a non-numeric line says « not a line number ». A bare
+  path to a text file no longer tells the model to drop the claim: it proposes
+  the whole-file range `path:1-N` (N filled in) to cite an absence. The dash
+  normalisation lives in one place shared by the verifier, citation drift and
+  the documentary gate, so `path:17–23` is no longer fabricated under enforce.
+  Hint paths are canonical and only name a file that holds the cited lines; a
+  `#symbol` anchor is accepted after a range; a whole-file range backing a
+  claim that is not an absence raises a non-blocking `whole_file_citation`.
+- Installing the template, then launching the full audit, is no longer refused
+  as "files Kronn did not write" (KT-1299). `POST /install-template` now records
+  the folder as Kronn's (`template_installed_at`) unless it already held a
+  human's docs, so the template's own files are never counted as foreign. The
+  briefing's "move to legacy" choice now moves a human's docs even when their
+  entry file carries Kronn's signature (it used to skip silently and leave the
+  launch blocked), and keeps `briefing.md` and `.kronn.json` in place. The
+  partial audit and the revalidation hold on a human's docs the same way the
+  full audit does (`docs_folder_choice_required`). The install records every
+  file it wrote in `.kronn.json` (`kronn_written`, one reusable
+  `record_kronn_written`): beside a human's docs those files are never moved to
+  `legacy/` (only the human's are), and they never make the folder Kronn's —
+  not even next to an earlier recorded audit. A recorded file counts as Kronn's
+  only while its sha256 still equals the recorded one: a file the human rewrote
+  (or a hand-crafted `.kronn.json` entry) is theirs again, counted by the gate
+  and moved on the choice. The install refuses a corrupt `.kronn.json` before
+  writing anything, and records a renamed template file under its new path.
+- Revalidation no longer reads a remediation proposal as a claim (KT-1313). A
+  TD sheet's `Remediation` / `Fix` / `Next steps` section, or a
+  `- **Remediation**:` / `- **Suggested fix**:` line (and the text under a
+  label that closes its line), names files still to be created: they are no
+  longer judged by whether they exist, so `helpers/lib/plugin-factory.js`
+  does not turn its sheet `no_longer_relevant`. A section left with nothing
+  else to verify says why in its proposed correction.
+- A stopped audit step keeps what it consumed (KT-1313). Its tokens join the
+  run's tally and its reported cost is recorded (both pipelines); a Claude
+  step's turns are summed as they arrive instead of keeping only the largest,
+  the final `result` line replacing the sum; and `total_tokens_so_far` never
+  goes down (it read 630, 877, then 346).
+- The default-root audit golden no longer depends on the day it is run
+  (KT-1317). The name of a `validated-originals/<hash>.bak` file is the hash
+  of bytes holding the audit date; the golden now names it by the hash of the
+  date-masked bytes (KT-1278). A new test replays the same audit 40 days
+  earlier and requires a byte-identical snapshot, with no non-volatile entry
+  relaxed.
+- Orchestration live-test findings (KT-1316). A worker's reply is priced with
+  the model that served it (`claude-haiku-4-5-20251001`), not the tier alias
+  the discussion stores (`haiku`), which names no rate: its cost is no longer
+  « unknown », and the delivery report shows the cost and tokens of the
+  worker's replies (nothing when one reply is unpriced, never a partial sum).
+  The « Delivery accepted » report is posted when the integration lands, not
+  at approval: a delivery bounced by a merge conflict or a red validation never
+  shows one. The orchestrator's room messages (worker brief, review request,
+  escalation, control offer, send-back, timeout alerts, hand-offs, campaign
+  gates) follow the principal discussion's language, English or French,
+  instead of always French; a few fix hints and a handful of rarely-seen
+  notices are still French. The Stop guide now says a clean worktree is
+  removed by default (`remove_if_clean`) and the branch is kept. The scanner no
+  longer logs a `resolve_host_path … contains '..'` warning per worktree: a
+  worktree registered with a relative path is resolved against its
+  registration. The MCP bridge script is looked up next to the running binary
+  and in the checkout it runs from, never at the path of the checkout it was
+  built in.
 - Audit step 8 accepts a Dependencies row that states its source in any
   of its forms (KT-1295). The coverage check demanded the literal
   `source used:`, so a row backed by `[src: deps: …]` citations, or written
@@ -569,6 +638,30 @@ Release notes for 0.9.3 and earlier are available in the
   verified against the watch table instead of being read as manager `JS`:
   every citation the snapshot emits verifies against it.
 
+- The Full audit's documentary gate blames the step that introduced a blocker
+  (KT-1306). A document no step targets (a tech-debt detail sheet, a workflow
+  page) used to be charged to the founding step, so a resume re-ran the most
+  expensive step for another step's file. Kronn now diffs the blocking
+  diagnostics around each step (`.kronn/audit/document-blame.json`) and the
+  final gate, and a resume, redo the introducing step; the baseline is taken
+  before any write of the step, the cross-agent path's included, so what that
+  path writes is charged to its step. A step is also blocked
+  only by diagnostics absent before it ran: those already there are reported in
+  a `documentary_preexisting` event instead of failing it.
+- A doc's citations are no longer lost to a truncated marker, and a citation
+  of an unknown kind is no longer judged as a file (KT-1311). The partial
+  banner cut its reason at 240 characters, sometimes inside a quoted
+  `[src: …]`, and the scanner then read the rest of the doc as one marker:
+  no fingerprint was recorded, so drift went unseen. The banner now writes the
+  reason with round brackets, and the scanner closes an unclosed marker at the
+  next `[src:` or blank line and carries on. `[src: command: git log …]`
+  (a kind on a closed list of non-file kinds: `command`, `shell`, `test-run`…)
+  is unverifiable and counted in `unverified_count`, not a missing file, so
+  relevance stops calling its section outdated. Any other word (`fil:`,
+  `path:`, `source:`) is not a free pass: a path-like text is still verified as
+  a file and is fabricated when missing, so the enforce gate keeps blocking it. Line references written in
+  backticked prose are not re-anchored; only markers are (documented in
+  `docs/conventions/agents-md-format-v1.md`).
 - A review-wait timeout no longer locks the principal out of the review
   (KT-1293). The watchdog used to move the unreviewed delivery to `Escalated`
   while its alert told the principal to call `task_exec_review`, which only
@@ -1129,6 +1222,18 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Changed
 
+- The macOS and Windows portability CI job compiles only the four suites it
+  runs. A new default Cargo feature, `full-tests`, gates every other
+  unit-test module; the job builds with `--no-default-features`. The full
+  lib-test binary (9 200 tests) made rustc peak above 13 GB while the
+  standard macOS runner has 7 GB, so the first step swapped for 45 to 55
+  minutes. The job also prints its rustc and machine facts, since two runner
+  images with different Rust releases rotate and invalidate the shared
+  cache. Every other job keeps the default feature set. The `with_conn`
+  unwrap lint exempts exactly the item carrying a `#[cfg(test)]` or
+  `#[cfg(all(test, …))]` attribute instead of cutting each file at its
+  first `#[cfg(test)]`, so production code after a `mod tests;` line is
+  scanned again. (KT-15)
 - Every view has its own address, and the browser's Back, Forward and reload
   follow it: the pages (`/projects`, `/discussions`, `/planning`,
   `/workflows`, `/pages`, `/plugins`, `/config`), what is open in them

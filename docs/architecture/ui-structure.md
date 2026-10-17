@@ -271,10 +271,10 @@ categories only temporarily.
 Pages follows the same contract for its active Page and sidebar categories, including a safe
 fallback when a saved Page was removed.
 `[src: file: frontend/src/pages/PagesPage.tsx:68-69#PAGE_NAVIGATION_STORAGE_KEY]`
-`[src: file: frontend/src/pages/PagesPage.tsx:77-96#readPageNavigation]`
-`[src: file: frontend/src/pages/PagesPage.tsx:262-268#PAGE_COLLAPSED_STORAGE_KEY]`
-`[src: file: frontend/src/pages/PagesPage.tsx:293-318#refresh]`
-`[src: file: frontend/src/pages/PagesPage.tsx:595-598#isSectionCollapsed]`
+`[src: file: frontend/src/pages/PagesPage.tsx:86-105#readPageNavigation]`
+`[src: file: frontend/src/pages/PagesPage.tsx:282-288#PAGE_COLLAPSED_STORAGE_KEY]`
+`[src: file: frontend/src/pages/PagesPage.tsx:313-338#refresh]`
+`[src: file: frontend/src/pages/PagesPage.tsx:687-690#isSectionCollapsed]`
 Project detail restores the last valid tab across project switches and falls back to Overview
 when a stale value is found.
 `[src: file: frontend/src/components/ProjectCard.tsx:63-76#readProjectDetailView]`
@@ -321,7 +321,7 @@ human user bubbles. Their card spans the full message column like a discussion
 note. The first meaningful line stays visible as a compact summary while the
 full operational payload is collapsed behind “Show details” by default; that
 toggle lives in the fixed card header so expanding it never moves the pointer
-target. `[src: file: backend/src/db/discussions.rs:3268-3344#tombstone_message]`
+target. `[src: file: backend/src/db/discussions.rs:3280-3356#tombstone_message]`
 `[src: file: frontend/src/components/MessageBubble.tsx:470-482#orchestratorPreview]`
 `[src: file: frontend/src/components/MessageBubble.tsx:961-973#disc-msg-orchestrator-toggle]`
 
@@ -391,7 +391,7 @@ Frontend modal includes **drag & drop file upload** for documents. Files uploade
 
 ### Pre-audit briefing (optional)
 
-`POST /api/projects/:id/start-briefing` — creates a briefing discussion where the AI asks 5 quick questions (project purpose, stack, team, conventions, watch points). The agent writes `docs/briefing.md` and emits `KRONN:BRIEFING_COMPLETE`. The briefing content is injected into each audit step via `PROMPT_PREAMBLE`. Vibe (API-only) is excluded from the briefing. The audit itself is open to the CLI agents (Claude Code, Codex, OpenCode, Gemini CLI, Kiro, GitHub Copilot) and to the HTTP agents (Ollama and LiteLLM since 0.14.2, NVIDIA, and Custom through a validated named connection), whose file tools Kronn runs scoped to the project — see [HTTP-agent capabilities](http-agent-capabilities.md#audits-kt-924). Only Vibe is refused, with a message naming who is accepted [src: file: backend/src/api/audit/mod.rs:701-731#agent_can_audit] [src: file: backend/src/api/audit/mod.rs:733-747#AUDIT_AGENTS] [src: file: backend/src/api/audit/mod.rs:749-761#audit_refusal_message].
+`POST /api/projects/:id/start-briefing` — creates a briefing discussion where the AI asks 5 quick questions (project purpose, stack, team, conventions, watch points). The agent writes `docs/briefing.md` and emits `KRONN:BRIEFING_COMPLETE`. The briefing content is injected into each audit step via `PROMPT_PREAMBLE`. Vibe (API-only) is excluded from the briefing. The audit itself is open to the CLI agents (Claude Code, Codex, OpenCode, Gemini CLI, Kiro, GitHub Copilot) and to the HTTP agents (Ollama and LiteLLM since 0.14.2, NVIDIA, and Custom through a validated named connection), whose file tools Kronn runs scoped to the project — see [HTTP-agent capabilities](http-agent-capabilities.md#audits-kt-924). Only Vibe is refused, with a message naming who is accepted [src: file: backend/src/api/audit/mod.rs:735-765#agent_can_audit] [src: file: backend/src/api/audit/mod.rs:767-781#AUDIT_AGENTS] [src: file: backend/src/api/audit/mod.rs:783-795#audit_refusal_message].
 
 ### CI pipeline
 

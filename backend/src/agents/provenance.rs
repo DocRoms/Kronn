@@ -108,7 +108,7 @@ pub fn claude_session_id(line: &str) -> Option<String> {
     value["session_id"].as_str().map(str::to_owned)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

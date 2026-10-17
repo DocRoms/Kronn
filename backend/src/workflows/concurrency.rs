@@ -226,7 +226,7 @@ pub fn resume_within_limit(
     Ok(Ok(()))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

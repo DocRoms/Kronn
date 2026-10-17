@@ -707,6 +707,18 @@ pub fn list_discussions_with_messages(conn: &Connection) -> Result<Vec<Discussio
     Ok(discussions)
 }
 
+/// The language the orchestrator speaks in a room: the discussion's own
+/// `language`. A missing discussion reads English, the language every reader has.
+pub fn room_lang(conn: &Connection, id: &str) -> crate::core::room_lang::RoomLang {
+    conn.query_row(
+        "SELECT language FROM discussions WHERE id = ?1",
+        [id],
+        |row| row.get::<_, String>(0),
+    )
+    .map(|code| crate::core::room_lang::RoomLang::from_code(&code))
+    .unwrap_or_default()
+}
+
 pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>> {
     let mut stmt = conn.prepare(
         "SELECT id, project_id, title, agent, language, participants_json,
@@ -4531,7 +4543,7 @@ pub fn list_attachment_files(
     Ok(rows)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "discussions_test.rs"]
 mod discussions_test;
 

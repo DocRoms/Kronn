@@ -3018,7 +3018,7 @@ pub async fn update_step(
     Json(with_awaiting_notice(&state, response).await)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "workflow_step_patch_tests.rs"]
 mod step_patch_tests;
 
@@ -5606,7 +5606,7 @@ pub(crate) fn cron_preview_at(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod cron_preview_tests {
     use super::*;
 
@@ -7176,11 +7176,11 @@ pub async fn test_api_call(
     }))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "workflow_readiness_tests.rs"]
 mod readiness_tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

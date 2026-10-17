@@ -24,29 +24,149 @@ pub(super) fn snapshot(project: &Path) -> Result<Snapshot, String> {
         .collect()
 }
 
-/// Exact target first; auxiliary findings belong to the founding/review step
-/// on recovery when no durable writer attribution exists (including old runs).
-/// The repair prompt explicitly lists those documents instead of silently
-/// skipping them because their original agent step had returned success.
+/// Which step introduced each blocking diagnostic (KT-1306). A diagnostic is
+/// charged to the step whose run made it appear, so a document no step targets
+/// (a tech-debt detail sheet, a workflow page) is blamed on the step that wrote
+/// it, never on the founding step by default. Persisted with the other audit
+/// state so a resume plans from the same attribution.
+#[derive(Debug, Default, Clone)]
+pub(super) struct Blame(Vec<(Diagnostic, u32)>);
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct BlameEntry {
+    code: String,
+    path: String,
+    message: String,
+    step: u32,
+}
+
+const BLAME_FILE: &str = "document-blame.json";
+
+impl Blame {
+    fn file(project: &Path) -> std::path::PathBuf {
+        project
+            .join(crate::core::audit_state::STATE_DIR)
+            .join(BLAME_FILE)
+    }
+
+    /// The attribution an earlier launch of the run left; none when absent or
+    /// unreadable (recovery then falls back to the target-file mapping).
+    pub(super) fn load(project: &Path) -> Self {
+        let Ok(raw) = std::fs::read_to_string(Self::file(project)) else {
+            return Self::default();
+        };
+        let entries: Vec<BlameEntry> = serde_json::from_str(&raw).unwrap_or_default();
+        Self(
+            entries
+                .into_iter()
+                .map(|e| {
+                    (
+                        Diagnostic {
+                            code: e.code,
+                            path: e.path,
+                            message: e.message,
+                            blocking: true,
+                        },
+                        e.step,
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    /// A fresh run starts without the attribution of an earlier one.
+    pub(super) fn reset(project: &Path) -> Self {
+        let blame = Self::default();
+        if Self::file(project).exists() {
+            blame.save(project);
+        }
+        blame
+    }
+
+    /// `before`/`after` are the blocking diagnostics around `step`. One present
+    /// after but not before is the step's; one already there keeps its earlier
+    /// attribution (or none); one that vanished is forgotten, so it is charged
+    /// again to whoever brings it back.
+    pub(super) fn record_step(
+        &mut self,
+        project: &Path,
+        step: u32,
+        before: &[Diagnostic],
+        after: &[Diagnostic],
+    ) {
+        let prior = std::mem::take(&mut self.0);
+        self.0 = after
+            .iter()
+            .filter(|d| d.blocking)
+            .filter_map(|d| {
+                if before.contains(d) {
+                    prior.iter().find(|(p, _)| p == d).cloned()
+                } else {
+                    Some((d.clone(), step))
+                }
+            })
+            .collect();
+        self.save(project);
+    }
+
+    pub(super) fn charge(&self, diagnostic: &Diagnostic) -> Option<u32> {
+        self.0
+            .iter()
+            .find(|(d, _)| d == diagnostic)
+            .map(|(_, step)| *step)
+    }
+
+    fn save(&self, project: &Path) {
+        let entries: Vec<_> = self
+            .0
+            .iter()
+            .map(|(d, step)| BlameEntry {
+                code: d.code.clone(),
+                path: d.path.clone(),
+                message: d.message.clone(),
+                step: *step,
+            })
+            .collect();
+        let written = crate::core::audit_state::state_dir(project).and_then(|dir| {
+            let text = serde_json::to_string(&entries).map_err(|e| e.to_string())?;
+            crate::core::mcp_scanner::atomic_write(&dir.join(BLAME_FILE), &text)
+                .map_err(|e| e.to_string())
+        });
+        if let Err(e) = written {
+            tracing::warn!("Documentary blame of the run not recorded: {e}");
+        }
+    }
+}
+
+/// The step that introduced the blocker; without a record (an old run, a
+/// blocker already there before the audit) the exact target, then the entry
+/// point of whatever root the chain was relocated to. The repair prompt
+/// explicitly lists auxiliary documents instead of silently skipping them
+/// because their original agent step had returned success.
 pub(super) fn recovery_plan(
     diagnostics: &[Diagnostic],
     steps: &[super::AnalysisStep],
+    blame: &Blame,
 ) -> BTreeMap<u32, Vec<Diagnostic>> {
     let mut plan = BTreeMap::<u32, Vec<Diagnostic>>::new();
     // Only blocking diagnostics, and `analyze` never marks a human-owned
     // document blocking: no step is asked to rewrite one.
     for diagnostic in diagnostics.iter().filter(|d| d.blocking) {
-        let owner = steps
-            .iter()
-            .position(|s| s.target_file == diagnostic.path)
-            .or_else(|| {
-                // The entry point of whatever root the chain was relocated to.
+        let owner = blame
+            .charge(diagnostic)
+            .filter(|step| (1..=steps.len() as u32).contains(step))
+            .unwrap_or_else(|| {
                 steps
                     .iter()
-                    .position(|s| s.target_file.rsplit('/').next() == Some("AGENTS.md"))
-            })
-            .unwrap_or(0) as u32
-            + 1;
+                    .position(|s| s.target_file == diagnostic.path)
+                    .or_else(|| {
+                        steps
+                            .iter()
+                            .position(|s| s.target_file.rsplit('/').next() == Some("AGENTS.md"))
+                    })
+                    .unwrap_or(0) as u32
+                    + 1
+            });
         plan.entry(owner).or_default().push(diagnostic.clone());
     }
     plan
@@ -173,12 +293,8 @@ fn split_verified_citations(project: &Path, content: &str) -> Option<String> {
                 let Ok(source) = std::fs::read_to_string(resolved) else {
                     return false;
                 };
-                let bounds: Vec<_> = range.split('-').map(str::parse::<usize>).collect();
-                match bounds.as_slice() {
-                    [Ok(n)] => *n > 0 && *n <= source.lines().count(),
-                    [Ok(a), Ok(b)] => *a > 0 && a <= b && *b <= source.lines().count(),
-                    _ => false,
-                }
+                crate::core::anti_halluc::parse_line_bounds(range)
+                    .is_some_and(|(a, b)| a > 0 && a <= b && b <= source.lines().count())
             });
             if parts.len() > 1
                 && strict
@@ -196,15 +312,27 @@ fn split_verified_citations(project: &Path, content: &str) -> Option<String> {
     changed.then_some(output)
 }
 
+/// What one attempt's documentary check found (KT-1306).
+pub(super) struct AttemptCheck {
+    /// Introduced by the step, or explicitly handed to it: blocks it.
+    pub blocking: Vec<Diagnostic>,
+    /// Already there before the step ran: reported, never blocking it.
+    pub preexisting: Vec<Diagnostic>,
+}
+
 /// Check changed documents plus explicit recovery targets. The original step
 /// snapshot stays fixed across retries so an unchanged bad file cannot vanish
-/// from the gate simply because the second attempt ignored it.
+/// from the gate simply because the second attempt ignored it. `baseline` is
+/// the blocking set before the step ran: a diagnostic in it blocks only when
+/// the step was explicitly asked to fix it (`recovery`). `run` is what the
+/// audit run read, against which `deps:` / `url:` citations are held (KT-1308).
 pub(super) fn check_attempt(
     project: &Path,
     before: &Snapshot,
     recovery: &[Diagnostic],
+    baseline: &[Diagnostic],
     run: Option<&RunProvenance>,
-) -> Result<Vec<Diagnostic>, String> {
+) -> Result<AttemptCheck, String> {
     let after = snapshot(project)?;
     let root = project.canonicalize().map_err(|e| e.to_string())?;
     let mut targets: BTreeSet<_> = after
@@ -244,20 +372,23 @@ pub(super) fn check_attempt(
         }
     }
     let report = document_optimization::analyze_with(project, run)?;
-    let blocking: Vec<_> = report
+    let (preexisting, blocking): (Vec<_>, Vec<_>) = report
         .blocking_diagnostics()
         .filter(|d| targets.contains(&d.path))
         .cloned()
-        .collect();
+        .partition(|d| baseline.contains(d) && !recovery.contains(d));
     for diagnostic in &blocking {
         if let Some(content) = after.get(&diagnostic.path) {
             preserve_original(project, content)?;
         }
     }
-    Ok(blocking)
+    Ok(AttemptCheck {
+        blocking,
+        preexisting,
+    })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 
@@ -269,7 +400,9 @@ mod tests {
         let before = snapshot(dir.path()).unwrap();
         let original = "# Facts\nÉvidence [src: file: code.rs:1, code.rs:2]\nMissing [src: file: invented.rs:1]\nInvalid [src: file: code.rs:9]\n";
         std::fs::write(dir.path().join("docs/a.md"), original).unwrap();
-        let blocking = check_attempt(dir.path(), &before, &[], None).unwrap();
+        let blocking = check_attempt(dir.path(), &before, &[], &[], None)
+            .unwrap()
+            .blocking;
         let repaired = std::fs::read_to_string(dir.path().join("docs/a.md")).unwrap();
         assert!(repaired.contains("[src: file: code.rs:1] [src: file: code.rs:2]"));
         assert_eq!(blocking.len(), 2);
@@ -289,7 +422,10 @@ mod tests {
         assert_eq!(std::fs::read_to_string(backup).unwrap(), original);
         // An unchanged bad document stays a retry target.
         assert_eq!(
-            check_attempt(dir.path(), &before, &[], None).unwrap().len(),
+            check_attempt(dir.path(), &before, &[], &[], None)
+                .unwrap()
+                .blocking
+                .len(),
             2
         );
         std::fs::write(
@@ -297,8 +433,9 @@ mod tests {
             "# Facts\nVerified [src: file: code.rs:1-2]\n",
         )
         .unwrap();
-        assert!(check_attempt(dir.path(), &before, &blocking, None)
+        assert!(check_attempt(dir.path(), &before, &blocking, &[], None)
             .unwrap()
+            .blocking
             .is_empty());
         assert!(!recovery_changed(
             dir.path(),
@@ -354,7 +491,7 @@ mod tests {
         let human = "# P\n<!-- kronn:section name=\"team\" owner=\"human\" -->\nRule [src: file: code.rs:1, code.rs:2]\n<!-- kronn:section:end -->\n";
         std::fs::write(root.join("docs/AGENTS.md"), human).unwrap();
 
-        check_attempt(root, &before, &[], None).unwrap();
+        check_attempt(root, &before, &[], &[], None).unwrap();
 
         let repaired = std::fs::read_to_string(root.join("docs/AGENTS.md")).unwrap();
         assert!(
@@ -384,8 +521,10 @@ mod tests {
 
         let report = document_optimization::analyze(root).unwrap();
         let steps = super::super::assemble_chained_steps(crate::models::AuditKind::Full);
-        assert!(recovery_plan(&report.diagnostics, &steps).is_empty());
-        let blocking = check_attempt(root, &before, &report.diagnostics, None).unwrap();
+        assert!(recovery_plan(&report.diagnostics, &steps, &Blame::default()).is_empty());
+        let blocking = check_attempt(root, &before, &report.diagnostics, &[], None)
+            .unwrap()
+            .blocking;
         assert!(blocking.is_empty());
         assert_eq!(
             std::fs::read_to_string(root.join("docs/legacy/guide.md")).unwrap(),
@@ -411,9 +550,196 @@ mod tests {
             blocking: true,
         })
         .collect();
-        let plan = recovery_plan(&diagnostics, &steps);
+        let plan = recovery_plan(&diagnostics, &steps, &Blame::default());
         assert!(plan.len() >= 2);
         assert_eq!(plan.values().map(Vec::len).sum::<usize>(), 3);
         assert!(feedback(&diagnostics).contains("docs/tech-debt/TD-1.md"));
+    }
+
+    fn blocker(path: &str, message: &str) -> Diagnostic {
+        Diagnostic {
+            code: "broken_citation".into(),
+            path: path.into(),
+            message: message.into(),
+            blocking: true,
+        }
+    }
+
+    #[test]
+    fn a_blocker_is_charged_to_the_step_that_introduced_it_not_the_founding_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let steps = super::super::assemble_chained_steps(crate::models::AuditKind::Full);
+        let founding = steps
+            .iter()
+            .position(|s| s.target_file.ends_with("AGENTS.md"))
+            .unwrap() as u32
+            + 1;
+        let (detail, workflow, carried) = (
+            blocker("docs/tech-debt/TD-9.md", "path does not exist `a.rs`"),
+            blocker("docs/workflow/ci-cd.md", "path does not exist `b.rs`"),
+            blocker("docs/AGENTS.md", "citation line `9` is outside `c.rs`"),
+        );
+        let mut blame = Blame::reset(dir.path());
+        // Already there when the audit began: nobody's.
+        blame.record_step(dir.path(), 1, &[], &[]);
+        blame.record_step(dir.path(), 5, &[], std::slice::from_ref(&carried));
+        blame.record_step(
+            dir.path(),
+            9,
+            std::slice::from_ref(&carried),
+            &[carried.clone(), workflow.clone()],
+        );
+        blame.record_step(
+            dir.path(),
+            10,
+            &[carried.clone(), workflow.clone()],
+            &[carried.clone(), workflow.clone(), detail.clone()],
+        );
+        let all = [detail.clone(), workflow.clone(), carried.clone()];
+        let plan = recovery_plan(&all, &steps, &blame);
+        assert_eq!(plan.keys().copied().collect::<Vec<_>>(), vec![5, 9, 10]);
+        assert_eq!(plan[&10], vec![detail.clone()]);
+        assert_eq!(plan[&9], vec![workflow.clone()]);
+        assert!(!plan.contains_key(&founding) || founding == 5);
+        // A resume reads the same attribution back from disk.
+        let reloaded = Blame::load(dir.path());
+        assert_eq!(recovery_plan(&all, &steps, &reloaded), plan);
+        // A blocker nobody introduced keeps the old mapping.
+        let orphan = blocker("docs/other.md", "missing");
+        let fallback = recovery_plan(&[orphan], &steps, &blame);
+        assert_eq!(fallback.keys().copied().collect::<Vec<_>>(), vec![founding]);
+        // Fixed, then brought back by a later step: charged to that one.
+        blame.record_step(dir.path(), 11, std::slice::from_ref(&detail), &[]);
+        blame.record_step(dir.path(), 12, &[], std::slice::from_ref(&detail));
+        assert_eq!(blame.charge(&detail), Some(12));
+        // A new run forgets it.
+        assert_eq!(Blame::reset(dir.path()).charge(&detail), None);
+        assert_eq!(Blame::load(dir.path()).charge(&detail), None);
+    }
+
+    #[test]
+    fn a_step_is_blocked_only_by_diagnostics_it_introduced() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("code.rs"), "first\nsecond\n").unwrap();
+        // A broken citation already sits in a document, before the step runs.
+        std::fs::write(
+            root.join("docs/old.md"),
+            "# Old\nStale [src: file: invented.rs:1]\n",
+        )
+        .unwrap();
+        let baseline = document_optimization::analyze(root)
+            .unwrap()
+            .blocking_diagnostics()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(baseline.len(), 1, "{baseline:?}");
+        let before = snapshot(root).unwrap();
+        // The step touches that document (appends a true claim) and writes a
+        // new one with its own broken citation.
+        std::fs::write(
+            root.join("docs/old.md"),
+            "# Old\nStale [src: file: invented.rs:1]\nTrue [src: file: code.rs:1]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("docs/new.md"),
+            "# New\nBad [src: file: missing.rs:1]\n",
+        )
+        .unwrap();
+
+        let check = check_attempt(root, &before, &[], &baseline, None).unwrap();
+        assert_eq!(check.blocking.len(), 1, "{:?}", check.blocking);
+        assert_eq!(check.blocking[0].path, "docs/new.md");
+        assert_eq!(check.preexisting, baseline);
+
+        // Handed to the step explicitly, the pre-existing blocker blocks it.
+        let handed = check_attempt(root, &before, &baseline, &baseline, None).unwrap();
+        assert_eq!(handed.blocking.len(), 2);
+        assert!(handed.preexisting.is_empty());
+    }
+
+    /// KT-1308 x KT-1306 — an unbacked `deps:` citation is a blocker like any
+    /// other: when it was already there it is in the baseline and does not
+    /// block the step, when the step wrote it, it blocks and is charged to it.
+    #[test]
+    fn an_unbacked_provenance_follows_the_baseline_and_the_blame() {
+        use crate::core::version_sources::{DependencySnapshot, WatchedPackage};
+        let run = RunProvenance {
+            deps: Some(DependencySnapshot {
+                checked_on: "2026-10-16".into(),
+                packages: vec![WatchedPackage {
+                    manager: "JS / TS".into(),
+                    manifest: "package.json".into(),
+                    name: "joi".into(),
+                    current: "1.0.0".into(),
+                    latest: "2.0.0".into(),
+                    major: true,
+                    declared_only: false,
+                }],
+                unchecked: vec![],
+                up_to_date: vec![],
+            }),
+            fetched: None,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("code.rs"), "first\nsecond\n").unwrap();
+        let invented =
+            |name: &str| format!("| {name} | 9.9.9 [src: deps: JS / TS/{name}@2026-10-16] |\n");
+        std::fs::write(
+            root.join("docs/old.md"),
+            format!("# Old\n{}", invented("prettier")),
+        )
+        .unwrap();
+        // Outside a run nothing can hold the citation: no baseline.
+        assert!(document_optimization::analyze(root)
+            .unwrap()
+            .blocking_diagnostics()
+            .next()
+            .is_none());
+        let baseline = document_optimization::analyze_with(root, Some(&run))
+            .unwrap()
+            .blocking_diagnostics()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(baseline.len(), 1, "{baseline:?}");
+        assert_eq!(baseline[0].code, UNBACKED_PROVENANCE);
+        let before = snapshot(root).unwrap();
+        // The step touches the same document with a true claim and writes a
+        // new one with its own invented version.
+        std::fs::write(
+            root.join("docs/old.md"),
+            format!(
+                "# Old\n{}True [src: file: code.rs:1]\n",
+                invented("prettier")
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("docs/new.md"),
+            format!("# New\n{}", invented("jest")),
+        )
+        .unwrap();
+
+        let check = check_attempt(root, &before, &[], &baseline, Some(&run)).unwrap();
+        assert_eq!(check.blocking.len(), 1, "{:?}", check.blocking);
+        assert_eq!(check.blocking[0].path, "docs/new.md");
+        assert_eq!(check.blocking[0].code, UNBACKED_PROVENANCE);
+        assert_eq!(check.preexisting, baseline);
+
+        // The ledger charges the new one to the step, keeps the old one's owner.
+        let after = document_optimization::analyze_with(root, Some(&run))
+            .unwrap()
+            .blocking_diagnostics()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut blame = Blame::reset(root);
+        blame.record_step(root, 4, &[], &baseline);
+        blame.record_step(root, 7, &baseline, &after);
+        assert_eq!(blame.charge(&baseline[0]), Some(4));
+        assert_eq!(blame.charge(&check.blocking[0]), Some(7));
     }
 }
