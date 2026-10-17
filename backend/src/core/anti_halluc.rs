@@ -1649,6 +1649,18 @@ pub(crate) fn anchor_miss(path: &Path, span: (usize, usize), symbol: &str) -> Op
         return None;
     }
     let content = std::fs::read_to_string(path).ok()?;
+    anchor_miss_in(&content, span, symbol)
+}
+
+/// [`anchor_miss`] on the text of a file, such as a past revision's blob.
+pub(crate) fn anchor_miss_in(
+    content: &str,
+    span: (usize, usize),
+    symbol: &str,
+) -> Option<AnchorMiss> {
+    if content.len() as u64 > LINE_COUNT_SIZE_CAP_BYTES {
+        return None;
+    }
     let text: Vec<&str> = content.lines().collect();
     let (start, end) = span;
     let holding: Vec<usize> = text

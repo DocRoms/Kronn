@@ -1907,16 +1907,26 @@ pub fn write_backup_ref(repo_path: &Path, slug: &str, sha: &str) -> Result<Strin
 /// a fast-forward and never a merge.
 pub fn build_candidate(worktree_path: &Path, base_sha: &str) -> Result<CandidateOutcome, String> {
     reject_option_like_rev(base_sha)?;
-    // Repositories that enforce DCO reject an unsigned merge commit.
+    // The merge stops before its commit so the doc citations the two sides
+    // shifted are settled into it (KT-1321) and the commit is made once.
     let out = crate::core::cmd::git_cmd()
-        .args(["merge", "--no-edit", "--signoff", base_sha])
+        .args(["merge", "--no-edit", "--no-commit", base_sha])
         .current_dir(worktree_path)
         .output()
         .map_err(|e| format!("git merge failed: {e}"))?;
-    if !out.status.success() {
-        let files = crate::core::cmd::git_cmd()
+    if !crate::core::docs_citations::merge::merge_in_progress(worktree_path) {
+        // Fast-forwarded, already up to date, or refused before any merge state.
+        if out.status.success() {
+            return Ok(CandidateOutcome::Built {
+                sha: git_head(worktree_path)?,
+            });
+        }
+        return Ok(CandidateOutcome::Conflict { files: Vec::new() });
+    }
+    let conflicted_files = |path: &Path| {
+        crate::core::cmd::git_cmd()
             .args(["diff", "--name-only", "--diff-filter=U"])
-            .current_dir(worktree_path)
+            .current_dir(path)
             .output()
             .ok()
             .map(|o| {
@@ -1925,18 +1935,79 @@ pub fn build_candidate(worktree_path: &Path, base_sha: &str) -> Result<Candidate
                     .map(str::to_string)
                     .collect::<Vec<_>>()
             })
-            .unwrap_or_default();
+            .unwrap_or_default()
+    };
+    // A conflict on nothing but citation line anchors is not a human decision.
+    let resolved = crate::core::docs_citations::merge::resolve_anchor_only_conflicts(worktree_path)
+        .unwrap_or_else(|error| {
+            tracing::warn!("anchor-only doc conflicts left to the worker: {error}");
+            Vec::new()
+        });
+    let files = conflicted_files(worktree_path);
+    if !files.is_empty() {
         // Leave no half-merged tree behind: the worker must find its worktree as
         // it left it, not mid-conflict from a merge it never asked for.
-        let _ = crate::core::cmd::git_cmd()
-            .args(["merge", "--abort"])
-            .current_dir(worktree_path)
-            .output();
+        abort_merge(worktree_path);
         return Ok(CandidateOutcome::Conflict { files });
+    }
+    use crate::core::docs_citations::merge::SettleError;
+    let docs = match crate::core::docs_citations::merge::reanchor_and_stage(worktree_path, resolved)
+    {
+        Ok(docs) => Some(docs),
+        Err(SettleError::Failed(error)) => {
+            tracing::warn!("doc citations not re-anchored by the merge: {error}");
+            None
+        }
+        // Unstaged work in a doc to rewrite, or a citation nobody can place
+        // safely: a human decides, as for any other conflict.
+        Err(
+            SettleError::Refused { paths: files, .. } | SettleError::Unplaced { docs: files, .. },
+        ) => {
+            tracing::warn!("doc citations left to the worker: {files:?}");
+            abort_merge(worktree_path);
+            return Ok(CandidateOutcome::Conflict { files });
+        }
+    };
+    // Repositories that enforce DCO reject an unsigned merge commit.
+    let mut commit = crate::core::cmd::git_cmd();
+    commit.args(["commit", "--signoff", "--cleanup=strip"]);
+    match docs.as_ref().and_then(|docs| docs.summary()) {
+        Some(note) => commit.args(["-m", &merge_subject(worktree_path, base_sha), "-m", &note]),
+        None => commit.arg("--no-edit"),
+    };
+    let committed = commit
+        .current_dir(worktree_path)
+        .output()
+        .map_err(|e| format!("git commit failed: {e}"))?;
+    if !committed.status.success() {
+        abort_merge(worktree_path);
+        return Ok(CandidateOutcome::Conflict { files: Vec::new() });
     }
     Ok(CandidateOutcome::Built {
         sha: git_head(worktree_path)?,
     })
+}
+
+fn abort_merge(worktree_path: &Path) {
+    let _ = crate::core::cmd::git_cmd()
+        .args(["merge", "--abort"])
+        .current_dir(worktree_path)
+        .output();
+}
+
+/// The subject git prepared for the merge in progress.
+fn merge_subject(worktree_path: &Path, base_sha: &str) -> String {
+    let prepared = crate::core::cmd::git_cmd()
+        .args(["rev-parse", "--git-path", "MERGE_MSG"])
+        .current_dir(worktree_path)
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|path| worktree_path.join(path.trim()))
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| text.lines().next().map(str::to_string))
+        .filter(|subject| !subject.trim().is_empty());
+    prepared.unwrap_or_else(|| format!("Merge commit '{base_sha}'"))
 }
 
 /// Phase 2 of `TwoPhaseFfOnly`: advance the parent onto the validated candidate.
