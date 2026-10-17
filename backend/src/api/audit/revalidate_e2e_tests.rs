@@ -1019,6 +1019,9 @@ async fn acknowledging_citations_refuses_with_docs_busy_and_records_nothing() {
 #[path = "partial_refresh_e2e_tests.rs"]
 mod partial_refresh_e2e_tests;
 
+#[path = "interrupted_chain_e2e_tests.rs"]
+mod interrupted_chain_e2e_tests;
+
 #[tokio::test]
 #[serial_test::serial]
 #[serial_test::serial(kronn_templates_env)]

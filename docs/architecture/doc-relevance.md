@@ -9,7 +9,7 @@ verdict, deterministically and without a model.
 ## What the revalidation already did (reused, not rewritten)
 
 - Per-citation fingerprints, `changed` / `removed` / `file missing` / `moved`,
-  recorded at validation. [src: file: backend/src/core/citation_drift.rs:955#check]
+  recorded at validation. [src: file: backend/src/core/citation_drift.rs:978#check]
 - The plan that re-anchors moved lines for free and sends the owning audit
   steps only the sections that need a model.
   [src: file: backend/src/api/audit/revalidate.rs:80#plan]
@@ -60,7 +60,7 @@ back depends on that step (`AnalysisStep.sources`):
   of the doc queues it again.
 
 [src: file: backend/src/core/citation_drift.rs:84#DocReview]
-[src: file: backend/src/core/citation_drift.rs:837#current_review]
+[src: file: backend/src/core/citation_drift.rs:860#current_review]
 [src: file: backend/src/api/audit/revalidate.rs:60#stamp_rereads]
 
 ### When a prose path counts as gone
@@ -122,7 +122,7 @@ sends exactly those (`shown_paths`): a path that is not in the request is not
 accepted, whatever is gone at the click, and an older client that sends none
 accepts none. The per-doc panel, which lists every gone path of its doc, still
 accepts them all.
-[src: file: backend/src/core/citation_drift.rs:537#acknowledge_accepting]
+[src: file: backend/src/core/citation_drift.rs:560#acknowledge_accepting]
 
 ## The measure
 

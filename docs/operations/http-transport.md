@@ -99,12 +99,12 @@ recomputes the matrix failure from the current index before its first attempt.
 Invalid tables remain blocking, provider errors do not trigger this correction,
 and existing TD files and human sections remain protected (KT-956).
 [src: file: backend/src/api/audit/validation.rs:96-117#coverage_repair_feedback]
-[src: file: backend/src/api/audit/full.rs:2309-2324#coverage_repair_feedback]
+[src: file: backend/src/api/audit/full.rs:2313-2328#coverage_repair_feedback]
 
 A failed provider launch finalizes the step with its error and elapsed time.
 If a corrective attempt had already consumed tokens, that usage remains in the
 persisted step and its terminal SSE event; an unmeasured launch stays unknown.
-[src: file: backend/src/api/audit/full.rs:2696-2743#previous_attempt_usage]
+[src: file: backend/src/api/audit/full.rs:2700-2747#previous_attempt_usage]
 
 A provider error during a step also survives in its persisted warning and SSE
 recap. HTTP status 429 is identified as a rate limit or exhausted quota, not as
