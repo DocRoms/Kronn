@@ -678,6 +678,24 @@ Release notes for 0.9.3 and earlier are available in the
   `linguist-vendored` with last-match-wins and negation), so they no longer
   force TDs; the security detectors, the Docker/CI inventory and a team's own
   bans still see every file, so a `.gitattributes` line can never hide them.
+- Agents now learn when and how to ask for a human arbitration (KT-1329).
+  Claude Code cuts the `kronn-internal` MCP `instructions` at 2 048 characters,
+  and the `kronn-question` guidance started at character 1 985 (cut to a single
+  sentence, no schema) or, on a first session, at 2 438 (cut entirely). It is
+  now a self-contained bullet with a valid inline example right after the intro
+  line, followed on a first session by a compact FIRST CONTACT line that points
+  to `kronn_intro` (also inside the cut), and a Python test pins both
+  onboarding states. A workflow step that can `disc_append` gets the bullet too; a spawned
+  task worker is told why it cannot post a card and to ask its principal. The
+  card is also named in the `disc_append` description, the `disc_join` next
+  steps and the project template, the native prompt triggers on any decision
+  the human must arbitrate, and the `structured-questions` skill keeps
+  `{{var}}:` for facts only. To keep `templates/docs/AGENTS.md` under its
+  800-word budget, two "Do NOT" lines were dropped from its § 2 DO NOT (new projects
+  no longer get "Load all T2 files at once — max 3, pick what you need" and
+  "Skip the test policy — see § Project parameters and § 4"); the test policy
+  itself is still stated in § 4 and the Do list.
+
 - The documentary gate no longer refuses what Claude Code's Read tool shows
   (KT-1322). A newline-terminated file of N lines is numbered up to N+1 there
   (the last line is empty), and a range ending at N+1 was refused as outside

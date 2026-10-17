@@ -85,9 +85,9 @@ time, so any other Kronn call ends that wait; the call's result carries
 `wait_preempted` and the agent must re-arm. True zero-turn silence on such a
 host needs an out-of-band push capability.
 [src: file: backend/src/api/disc_invite.rs:1691-1760#addressed_to_caller]
-[src: file: backend/src/api/disc_invite.rs:1064-1068#AWARENESS_MAX_MESSAGES]
+[src: file: backend/src/api/disc_invite.rs:1071-1075#AWARENESS_MAX_MESSAGES]
 [src: file: backend/scripts/disc-introspection-mcp.py:7303-7334#_WAIT_PREEMPTED_NOTICE]
-[src: file: backend/scripts/disc-introspection-mcp.py:12064-12071#_with_wait_preempted]
+[src: file: backend/scripts/disc-introspection-mcp.py:12087-12094#_with_wait_preempted]
 
 Awareness delivery follows a scan / offer / ack contract with two durable
 per-session cursors. When a wake response attaches a batch, the server
@@ -189,7 +189,7 @@ receives the Agent turn through its next poll, while every unrelated CLI skips
 it and advances its cursor. Bulk imports, historical appends, duplicates and
 appends without a live JOIN session never start a runner.
 [src: file: backend/src/db/discussions.rs:1543-1562#insert_message_with_targets_and_dispatches]
-[src: file: backend/src/api/disc_invite.rs:1691-1710#addressed_to_caller]
+[src: file: backend/src/api/disc_invite.rs:1698-1717#addressed_to_caller]
 
 Every verified live MCP append also records its exact author session in
 `message_cli_authors`. This is local routing provenance, not portable transcript
@@ -210,7 +210,7 @@ loading session tables.
 [src: file: backend/src/db/sql/100_message_cli_authors.sql:1-14#message_cli_authors]
 [src: file: backend/src/api/disc_source.rs:455-488#author_cli_session_id] [src: file: backend/src/api/disc_source.rs:542-577#message_cli_author_target]
 [src: file: backend/src/api/disc_invite.rs:1615-1673#reply_target]
-[src: file: backend/src/api/disc_invite.rs:1972-1992#addressed_to_session]
+[src: file: backend/src/api/disc_invite.rs:1979-1999#addressed_to_session]
 [src: file: backend/src/api/disc_introspection.rs:83-86#reply_target] [src: file: backend/src/api/disc_introspection.rs:515-528#reply_target]
 
 An untargeted live peer append in a native discussion deliberately addresses

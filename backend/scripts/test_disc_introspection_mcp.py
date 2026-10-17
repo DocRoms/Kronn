@@ -11988,6 +11988,86 @@ class JoinedRoomWorkProtocolTests(unittest.TestCase):
         self.assertNotIn("never re-delivers", room)
         self.assertNotIn("a quiet return costs nothing", room)
 
+    # KT-1329 — Claude Code cuts MCP `instructions` at 2048 chars. The card
+    # guidance used to start at char 1985 (onboarded) or 2438 (first contact),
+    # so a colleague's agent never learned to ask for an arbitration.
+    CLIENT_INSTRUCTIONS_LIMIT = 2048
+
+    def _initialize_instructions(self, onboarded):
+        with mock.patch.object(self.mod, "_onboarding_done_for", return_value=onboarded):
+            response = self.mod._handle({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {},
+            })
+        return response["result"]["instructions"]
+
+    def test_decision_card_survives_the_2048_char_client_cut(self):
+        for onboarded in (True, False):
+            with self.subTest(onboarded=onboarded):
+                seen = self._initialize_instructions(onboarded)[: self.CLIENT_INSTRUCTIONS_LIMIT]
+                for needle in ("kronn-question", '"version":1', '"key"', '{"id"',
+                               "disc_append", "disc_question_list"):
+                    self.assertIn(needle, seen)
+
+    def test_decision_card_inline_example_is_valid_json_with_the_right_shape(self):
+        for onboarded in (True, False):
+            with self.subTest(onboarded=onboarded):
+                seen = self._initialize_instructions(onboarded)[: self.CLIENT_INSTRUCTIONS_LIMIT]
+                start = seen.index('{"version"')
+                example, _ = json.JSONDecoder().raw_decode(seen[start:])
+                self.assertIs(type(example["version"]), int)
+                self.assertEqual(example["version"], 1)
+                self.assertIn("key", example)
+                self.assertNotIn("id", example)
+                self.assertTrue(example["question"])
+                self.assertEqual(list(example["options"][0]), ["id", "label"])
+
+    def test_critical_bullets_end_before_the_client_cut(self):
+        for onboarded in (True, False):
+            with self.subTest(onboarded=onboarded):
+                instructions = self._initialize_instructions(onboarded)
+                limit = self.CLIENT_INSTRUCTIONS_LIMIT
+                for bullet in (self.mod.HUMAN_DECISION_CARD_BULLET.strip(),):
+                    start = instructions.index(bullet)
+                    self.assertLessEqual(start + len(bullet), limit)
+
+    def test_first_contact_offer_follows_the_card_inside_the_client_cut(self):
+        first = self._initialize_instructions(False)
+        onboarded = self._initialize_instructions(True)
+        bullet = self.mod.HUMAN_DECISION_CARD_BULLET
+        self.assertNotIn("FIRST CONTACT", onboarded)
+        self.assertGreater(first.index("FIRST CONTACT"), first.index(bullet) + len(bullet) - 1)
+        seen = first[: self.CLIENT_INSTRUCTIONS_LIMIT]
+        self.assertIn("FIRST CONTACT", seen)
+        self.assertIn("`kronn_intro`", seen)
+        self.assertEqual(first.count("FIRST CONTACT"), 1)
+
+    def test_step_tools_session_learns_the_card_only_when_it_can_post(self):
+        initialize = {"jsonrpc": "2.0", "id": 3, "method": "initialize", "params": {}}
+        with mock.patch.object(self.mod, "_spawned_task_worker_mode", return_value=False):
+            for argv, expected in (
+                (["bridge", "--step-tools=disc_append,disc_question_list"], True),
+                (["bridge", "--step-tools=task_get"], False),
+            ):
+                with self.subTest(argv=argv), mock.patch.object(self.mod.sys, "argv", argv):
+                    result = self.mod._handle(initialize)["result"]
+                    self.assertEqual("instructions" in result, expected)
+                    if expected:
+                        self.assertIn("kronn-question", result["instructions"])
+                        self.assertIn('"version":1', result["instructions"])
+
+    def test_spawned_worker_is_told_why_it_cannot_post_a_card(self):
+        initialize = {"jsonrpc": "2.0", "id": 3, "method": "initialize", "params": {}}
+        with mock.patch.object(self.mod, "_spawned_task_worker_mode", return_value=True):
+            instructions = self.mod._handle(initialize)["result"]["instructions"]
+        self.assertIn("cannot post a decision card", instructions)
+        self.assertIn("kronn-question", instructions)
+        self.assertIn("principal", instructions)
+
+    def test_disc_append_description_points_to_the_card(self):
+        description = next(t for t in self.mod.TOOLS if t["name"] == "disc_append")["description"]
+        self.assertIn("kronn-question", description)
+        self.assertIn("disc_question_list", description)
+
 
 class WaitOutsideLlmLoopTests(unittest.TestCase):
     """KT-189 — disc_wait_for_peer holds quiet waits bridge-side.
