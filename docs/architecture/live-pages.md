@@ -84,7 +84,7 @@ definitions and import identities, and refuses stale decisions. All resources,
 datasets, points, origin mappings and the library activation commit in one
 SQLite transaction; an error rolls everything back. Origin mappings identify
 earlier imported copies without overwriting their source or local definitions.
-[src: file: backend/src/lib.rs:1413-1434#artifact_portability]
+[src: file: backend/src/lib.rs:1420-1441#artifact_portability]
 [src: file: backend/src/api/artifact_portability/import.rs:1029-1047#preview_digest]
 [src: file: backend/src/db/sql/188_artifact_import_origins.sql:4-9#artifact_import_origins]
 
@@ -573,10 +573,10 @@ preserve an existing execution when reassignment is possible, and present a
 resource wait separately from a failed plan. Do not send a generation request
 merely to guess whether a quota is available.
 [src: file: backend/src/models/orchestration.rs:1170-1193#TaskWorkerTier]
-[src: file: backend/src/api/orchestration.rs:11293-11482#reassign_execution]
-[src: file: backend/src/api/orchestration.rs:12424-12466#bounded_provider_quota_details]
-[src: file: backend/src/api/orchestration.rs:12698-12740#task_worker_catalogue]
-[src: file: backend/src/api/orchestration.rs:12742-12795#task_exec_prepare]
+[src: file: backend/src/api/orchestration.rs:11319-11508#reassign_execution]
+[src: file: backend/src/api/orchestration.rs:12450-12492#bounded_provider_quota_details]
+[src: file: backend/src/api/orchestration.rs:12724-12766#task_worker_catalogue]
+[src: file: backend/src/api/orchestration.rs:12768-12821#task_exec_prepare]
 
 A `user_input` value may also carry a `<page.…>` `source_ref`: when the card
 opens, `POST /api/live-page-actions/{id}/prefill` resolves it server-side for

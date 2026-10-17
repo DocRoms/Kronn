@@ -428,7 +428,7 @@ Cancellation and reassignment preserve the same lineage. Cancellation first canc
 due dispatches, then applies the persisted cleanup policy; `remove_if_clean` removes only the proven
 managed checkout and preserves its branch. Reassignment keeps the task, sub-discussion, worktree,
 manifests, findings and SHAs while recording the exact typed worker identity and assignment generation
-`[src: file: backend/src/api/orchestration.rs:10939-11092#cancel_execution]` `[src: file: backend/src/db/orchestration.rs:7015-7061#cancel_execution_tree]` `[src: file: backend/src/api/orchestration.rs:11293-11482#reassign_execution]` `[src: file: backend/src/db/orchestration.rs:6721-7013#reassign_execution_worker]`. Boot also
+`[src: file: backend/src/api/orchestration.rs:10965-11118#cancel_execution]` `[src: file: backend/src/db/orchestration.rs:7015-7061#cancel_execution_tree]` `[src: file: backend/src/api/orchestration.rs:11319-11508#reassign_execution]` `[src: file: backend/src/db/orchestration.rs:6721-7013#reassign_execution_worker]`. Boot also
 collects `managed` workspace rows orphaned by `ON DELETE SET NULL`; dirty or unverifiable worktrees are
 left visible for human action rather than silently deleted `[src: file: backend/src/api/orchestration.rs:385-482#list_orphaned_managed]`
 `[src: file: backend/src/db/discussion_workspaces.rs:439-464]`.
@@ -561,8 +561,8 @@ Explicitly deferred, to keep V1 = *one task → one worker → one sub-discussio
   explicit resume/cancel/reassign, independent timeout clocks and orphan-managed-workspace collection**
   is implemented by **KT-322** `[src: file: backend/src/api/orchestration.rs:283-383#reconcile_at_boot]`
   `[src: file: backend/src/api/orchestration.rs:654-825#start_resilience_watchdog]`
-  `[src: file: backend/src/api/orchestration.rs:10939-11092#cancel_execution]`
-  `[src: file: backend/src/api/orchestration.rs:11293-11482#reassign_execution]`.
+  `[src: file: backend/src/api/orchestration.rs:10965-11118#cancel_execution]`
+  `[src: file: backend/src/api/orchestration.rs:11319-11508#reassign_execution]`.
 - **Actor-kind schema change** (`backend`/`system`) is a shared prerequisite, surfaced in KT-317.
 - The ADR began as a decision record; KT-317–KT-322 now implement its durable aggregate,
   provisioning, review, protected integration, coordination and recovery boundaries.

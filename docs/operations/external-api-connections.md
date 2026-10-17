@@ -195,7 +195,7 @@ At startup, Kronn backfills the former single LiteLLM and NVIDIA settings into
 stable named connections. The insertion is idempotent and preserves a
 connection already created or edited through the new workflow. The canonical
 NVIDIA legacy row also receives the hosted default endpoint when its former
-configuration did not contain one. [src: file: backend/src/lib.rs:180-203#bootstrap_external_api_connections]
+configuration did not contain one. [src: file: backend/src/lib.rs:187-210#bootstrap_external_api_connections]
 [src: file: backend/src/db/external_api_connections.rs:334-365#backfill_legacy_config]
 
 The canonical LiteLLM and NVIDIA named cards are now the source of truth for
@@ -249,7 +249,7 @@ the runtime-resolution guide.
   tried instead. The catalogue now answers in every discussion, and a
   generation accepts the connection's id, alias or display name; a refusal
   lists the connections that can generate the requested modality.
-  [src: file: backend/src/api/orchestration.rs:12701-12707#task_worker_catalogue]
+  [src: file: backend/src/api/orchestration.rs:12727-12733#task_worker_catalogue]
   [src: file: backend/scripts/disc-introspection-mcp.py:6061-6076#call_agent_list]
   [src: file: backend/src/db/external_api_connections.rs:144-162#resolve]
   [src: file: backend/src/api/media.rs:150-206#ConnectionReference]

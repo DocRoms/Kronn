@@ -212,8 +212,8 @@ range. When anything outside the range changed, the range was deleted
 entirely, or it grew past 200 lines, the rework is refused with
 `stale range: …; relaunch with a new worker_scope`, naming the launch range
 and the observed change.
-`[src: file: backend/src/api/orchestration.rs:2492-2560#reanchor_worker_scope]`
-`[src: file: backend/src/api/orchestration.rs:2611-2668#reanchor_execution_scope]`
+`[src: file: backend/src/api/orchestration.rs:2518-2586#reanchor_worker_scope]`
+`[src: file: backend/src/api/orchestration.rs:2637-2694#reanchor_execution_scope]`
 `task_exec_status` now exposes `usage.http` — cumulative HTTP traffic, context peak, and per-phase detail — without prompts or arguments.
 
 Native HTTP delivery — and delivery from a spawned host CLI worker that uses
