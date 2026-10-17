@@ -555,6 +555,10 @@ fn inspect_citations(project: &Path, rel: &str, content: &str, out: &mut Vec<Dia
     }
     // `(src: file: …)` is not the grammar: the verifier and the drift check only
     // read the bracketed marker, so a parenthesised one would never be checked.
+    // Kronn's own partial-step banner quotes the gate's reason with its brackets
+    // turned round (`step_guard::partial_banner`): that is not the agent's text.
+    let body = crate::api::audit::step_guard::strip_partial_marker(content);
+    let visible = body.as_deref().map_or(visible, visible_markdown);
     for (at, marker) in visible.match_indices("(src: file:") {
         let tail = &visible[at + marker.len()..];
         let Some(raw) = tail.split(')').next().map(str::trim) else {
@@ -2574,6 +2578,25 @@ mod tests {
             messages.iter().all(|m| !m.contains("did you mean")),
             "{messages:#?}"
         );
+    }
+
+    #[test]
+    fn the_partial_banner_quoting_a_gate_reason_is_not_a_parenthesised_citation() {
+        // The banner turns the reason's brackets round and cuts it at a limit, so
+        // a quoted `[src: file: path:line]` ends as `(src: file: path:star)`.
+        let tmp = tempfile::tempdir().unwrap();
+        let banner = crate::api::audit::step_guard::partial_banner(
+            4,
+            "Use ONE [src: file: path:line] or [src: file: path:start-end] per reference",
+        );
+        assert!(banner.contains("(src: file: path:line)"), "{banner}");
+        let messages = citation_messages(tmp.path(), &format!("{banner}# Rules\n"));
+        assert!(messages.is_empty(), "{messages:#?}");
+        let messages = citation_messages(
+            tmp.path(),
+            &format!("{banner}# Rules\nBad (src: file: nope.rs:1)\n"),
+        );
+        assert_eq!(messages.len(), 1, "{messages:#?}");
     }
 
     #[test]

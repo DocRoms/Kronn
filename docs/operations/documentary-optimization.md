@@ -33,6 +33,6 @@ a parenthesised `(src: file: …)` is refused (only the bracketed marker is
 verified), and every path or range the gate suggests is one it accepts. A Stack table
 row without its `Latest stable` or `Support end` source and date (or
 `not verified: no source`) raises the non-blocking `stack_currency` warning.
-[src: file: backend/src/core/document_optimization.rs:1248-1263#inspect_stack_currency]
+[src: file: backend/src/core/document_optimization.rs:1255-1270#inspect_stack_currency]
 [src: file: backend/src/core/document_optimization.rs:1282-1354#stack_currency_problems]
 [src: file: backend/src/core/document_optimization.rs:1356-1373#diag]
