@@ -251,32 +251,51 @@ fn is_public_config(spec: &ApiSpec, trusted: bool, key: &str, value: &str) -> bo
             .iter()
             .any(|config| config.env_key == key && config.public);
     if declared {
-        // A declared value that is a URL still must not hold secrets; any
-        // other declared value (host, workspace id) is taken as is.
-        return !value.contains("://") || is_credential_free_url(value, true);
+        // A declared value that looks like a URL (any `/` or `\`) still must
+        // not hold secrets; any other declared value (host, workspace id) is
+        // taken as is.
+        return !value.contains(['/', '\\']) || is_credential_free_url(value, true);
     }
     spec.base_url.contains(&format!("{{{key}}}")) && is_credential_free_url(value, false)
 }
 
-/// An http(s) URL with a host and no user info, query, fragment, `;param` or
-/// percent-encoded `?`, `#`, `;`; with `allow_path` false, also an empty or
-/// `/` path (a bare origin).
+/// An http(s) URL decided on its RAW text, never on a parsed form:
+/// `Url::parse` resolves `..` and `%2e%2e`, which would turn
+/// `https://host/SECRET/..` into a bare origin. After the authority there must
+/// be nothing or exactly `/` (with `allow_path` false), or a path with no `.`
+/// / `..` segment. Never accepted: user info, query, fragment, `;param`, a
+/// backslash, whitespace or control characters (the URL parser strips tabs and
+/// newlines), and percent-encoded `.`, `?`, `#`, `;` or `\`.
 fn is_credential_free_url(value: &str, allow_path: bool) -> bool {
     let value = value.trim();
     let lower = value.to_ascii_lowercase();
-    if value.contains(';') || ["%3f", "%23", "%3b"].iter().any(|m| lower.contains(m)) {
+    if value.chars().any(|c| c.is_whitespace() || c.is_control())
+        || value.contains([';', '\\', '?', '#', '@'])
+        || ["%2e", "%3f", "%23", "%3b", "%5c"]
+            .iter()
+            .any(|marker| lower.contains(marker))
+    {
         return false;
     }
-    let Ok(url) = Url::parse(value) else {
+    let Some(rest) = lower
+        .strip_prefix("https://")
+        .or_else(|| lower.strip_prefix("http://"))
+    else {
         return false;
     };
-    matches!(url.scheme(), "http" | "https")
-        && url.host_str().is_some()
-        && url.username().is_empty()
-        && url.password().is_none()
-        && url.query().is_none()
-        && url.fragment().is_none()
-        && (allow_path || matches!(url.path(), "" | "/"))
+    let (authority, path) = match rest.find('/') {
+        Some(index) => rest.split_at(index),
+        None => (rest, ""),
+    };
+    if authority.is_empty() {
+        return false;
+    }
+    let path_ok = if allow_path {
+        !path.split('/').any(|segment| matches!(segment, "." | ".."))
+    } else {
+        matches!(path, "" | "/")
+    };
+    path_ok && Url::parse(value).is_ok_and(|url| url.host_str().is_some())
 }
 
 /// The env keys that hold the credential of this auth kind.
@@ -5972,6 +5991,118 @@ mod tests {
                     let state = test_app_state();
                     let stored = logged_error(&state, &step, &out).await;
                     assert!(!stored.contains(&secret), "{key}: {stored}");
+                }
+            }
+        }
+    }
+
+    /// KT-1249 — dot segments must not turn a secret base URL into a "bare
+    /// origin": the decision is on the raw text, not on the normalised URL.
+    #[test]
+    fn dot_segments_never_make_a_secret_base_url_public() {
+        let plugin = mk_plugin("{BASE_URL}", ApiAuthKind::None, vec![]);
+        for value in [
+            "https://hooks.slack.com/services/T0/B0/SECRET/../../../..",
+            "https://hooks.slack.com/SECRET/%2e%2e",
+            "https://hooks.slack.com/SECRET/%2E%2e/",
+            "https://hooks.slack.com/./SECRET/..",
+            "HTTPS://hooks.slack.com/SECRET/.%2E/",
+            "https://hooks.slack.com/SECRET/..\t/",
+            "https://hooks.slack.com\\SECRET\\..",
+            "https://hooks.slack.com/SECRET/..;x=1",
+        ] {
+            let env = HashMap::from([("BASE_URL".to_string(), value.to_string())]);
+            assert_eq!(call_secrets(&plugin, &env).scrub(value), "***", "{value}");
+            let spec = plugin.api_spec.as_ref().unwrap();
+            for trusted in [false, true] {
+                assert!(
+                    !is_public_config(spec, trusted, "BASE_URL", value),
+                    "{value}"
+                );
+            }
+        }
+        // A declared-public URL gets the same raw check.
+        let mut registry = plugin.clone();
+        registry.source = McpSource::Registry;
+        registry.api_spec.as_mut().unwrap().config_keys = vec![config_key("SITE", true)];
+        let spec = registry.api_spec.as_ref().unwrap();
+        for value in [
+            "https://acme.example/jira/../../SECRET",
+            "https://acme.example/a/%2e%2e/b",
+            "https://acme.example/a/./b",
+            "https://acme.example\\a",
+            "acme.example/a",
+        ] {
+            assert!(!is_public_config(spec, true, "SITE", value), "{value}");
+        }
+        assert!(is_public_config(
+            spec,
+            true,
+            "SITE",
+            "https://acme.example/jira"
+        ));
+        assert!(is_public_config(
+            spec,
+            true,
+            "SITE",
+            "https://acme.example/a.b/c..d"
+        ));
+        assert!(is_public_config(
+            plugin.api_spec.as_ref().unwrap(),
+            false,
+            "BASE_URL",
+            "https://euronews.atlassian.net"
+        ));
+    }
+
+    /// KT-1249 — the same dot-segment forms stay masked in the data, the
+    /// summary, the error and the call log.
+    #[tokio::test]
+    async fn a_dot_segment_secret_base_url_stays_masked_in_data_error_and_log() {
+        for suffix in [
+            "/SecretDot1/../../../..",
+            "/SecretDot2/%2e%2e",
+            "/./SecretDot3/..",
+            "/SecretDot4/.%2E/",
+        ] {
+            for status in [200u16, 500] {
+                let server = MockServer::start().await;
+                // The scheme in upper case, as one of the probed forms.
+                let value = format!("{}{suffix}", server.uri().replacen("http", "HTTP", 1));
+                Mock::given(method("GET"))
+                    .respond_with(
+                        ResponseTemplate::new(status).set_body_json(json!({"echo": value})),
+                    )
+                    .mount(&server)
+                    .await;
+                let plugin = mk_plugin(
+                    "{BASE_URL}",
+                    ApiAuthKind::None,
+                    vec![mk_endpoint("GET", "/items")],
+                );
+                let env = HashMap::from([("BASE_URL".to_string(), value.clone())]);
+                let step = mk_step("/items");
+                let out = execute_api_call_step_core(
+                    &step,
+                    &plugin,
+                    &env,
+                    &TemplateContext::new(),
+                    SecurityPolicy::allow_loopback_for_tests(),
+                )
+                .await;
+                let secret = suffix.trim_start_matches("/./").trim_start_matches('/');
+                let secret = &secret[..secret.find(['/', '%']).unwrap_or(secret.len())];
+                assert!(secret.starts_with("SecretDot"), "{secret}");
+                assert!(
+                    !out.result.output.contains(secret),
+                    "{suffix} {status}: {}",
+                    out.result.output
+                );
+                if status == 500 {
+                    assert_eq!(out.result.status, RunStatus::Failed);
+                    let state = test_app_state();
+                    let stored = logged_error(&state, &step, &out).await;
+                    assert!(!stored.contains(secret), "{suffix}: {stored}");
                 }
             }
         }

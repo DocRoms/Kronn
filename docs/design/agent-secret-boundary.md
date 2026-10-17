@@ -823,20 +823,27 @@ secret: Slack, Discord, Teams, Telegram webhook URLs):
    registry one (`McpSource::Registry`). A bundle import clears the flag
    (`plugin_portability::without_public_flags`) and a custom API never sets it,
    so only registry code can grant it (today `JIRA_URL`). A declared value that
-   is a URL must still hold no user info, query, fragment, `;param` or
-   percent-encoded `?`, `#`, `;`;
+   is a URL (it holds a `/` or `\`) must still pass the raw URL check below;
 2. the value is the plugin's base URL (`{KEY}` in `base_url`) and a bare
    origin: http(s) scheme, host and optional port, an empty or `/` path, none
-   of the credential markers above (`https://euronews.atlassian.net`). A
+   of the credential markers below (`https://euronews.atlassian.net`). A
    webhook base URL (`{SLACK_WEBHOOK_URL}`) has a path, so it is masked.
+
+The URL check (`is_credential_free_url`) decides on the RAW text, never on a
+parsed URL: `Url::parse` resolves `..` and `%2e%2e`, so
+`https://hooks.slack.com/SECRET/..` would otherwise look like a bare origin.
+After the authority there must be nothing or exactly `/`; a declared URL may
+keep a path but with no `.` or `..` segment. User info, query, fragment, `;`,
+a backslash, whitespace or control characters (the parser strips tabs and
+newlines) and percent-encoded `.`, `?`, `#`, `;`, `\` are never accepted.
 
 An auth key is never public, declared or not: Basic user and password, API key,
 bearer, OAuth2 client id and secret, token-exchange credentials and a
 `CliToken` fallback key. Logs and summaries share the same set, so they show
 public config unmasked too.
-[src: file: backend/src/workflows/api_call_executor.rs:231-259#is_public_config]
-[src: file: backend/src/workflows/api_call_executor.rs:261-280#is_credential_free_url]
-[src: file: backend/src/workflows/api_call_executor.rs:282-306#auth_env_keys]
+[src: file: backend/src/workflows/api_call_executor.rs:231-260#is_public_config]
+[src: file: backend/src/workflows/api_call_executor.rs:262-299#is_credential_free_url]
+[src: file: backend/src/workflows/api_call_executor.rs:301-325#auth_env_keys]
 [src: file: backend/src/api/plugin_portability.rs:663-672#without_public_flags]
 
 Every automatic disable is recorded on the workflow (reason, who, when, a
