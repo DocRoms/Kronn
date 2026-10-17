@@ -2535,8 +2535,11 @@ mod origin_and_admission_tests {
             assert!(*on);
             held_tx.send(()).unwrap();
             std::thread::sleep(Duration::from_millis(300));
+            // Read before the guard drops: once it has, the other thread may
+            // take the write side and its own instant first.
+            let released = std::time::Instant::now();
             drop(on);
-            std::time::Instant::now()
+            released
         });
         held_rx.recv().unwrap();
         let gate = state.p2p.clone();
@@ -2544,11 +2547,11 @@ mod origin_and_admission_tests {
             gate.set(false);
             std::time::Instant::now()
         });
-        let finished = publication.join().unwrap();
+        let released = publication.join().unwrap();
         let off = turning_off.join().unwrap();
         assert!(
-            off >= finished,
-            "off took effect only once the publication finished"
+            off >= released,
+            "off took effect only once the publication released the gate"
         );
 
         let base = tempfile::TempDir::new().unwrap();
