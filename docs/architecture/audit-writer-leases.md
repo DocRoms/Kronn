@@ -50,7 +50,7 @@ Full, Partial, or revalidation launches. The backend checks the merge branch
 before launch and again while holding the lease. The UI also holds launches for
 this state, including already audited projects; the optional-offer bypass cannot
 skip accepted commits pending integration.
-[src: file: backend/src/api/projects/template_merge.rs:324-330#audit_launch_refusal]
+[src: file: backend/src/api/projects/template_merge.rs:337-346#audit_launch_refusal]
 [src: file: backend/src/api/audit/full.rs:299-301#audit_launch_refusal]
 [src: file: backend/src/api/audit/full.rs:420-441#audit_launch_refusal]
 [src: file: backend/src/api/audit/drift.rs:284-286#audit_launch_refusal]

@@ -16,7 +16,9 @@ export type TemplateMergeStatus = 'none' | 'in_progress' | 'to_integrate';
 
 export function templateMergeStatus(state: TemplateMergeState | null | undefined): TemplateMergeStatus {
   if (!state) return 'none';
-  if (state.worktree_exists && (state.pending_files > 0 || state.branch_ahead_commits === 0)) return 'in_progress';
+  // A worktree with nothing proposed and nothing ahead is what an integrated
+  // merge leaves behind: the merge is done, not in progress.
+  if (state.worktree_exists && state.pending_files > 0) return 'in_progress';
   if (state.branch_ahead_commits > 0) return 'to_integrate';
   return 'none';
 }

@@ -712,7 +712,7 @@ pub async fn revalidate_audit(
     };
     let project_path = scanner::resolve_host_path(&project.path);
     if let Some(error) = crate::api::projects::template_merge::audit_launch_refusal(&project_path) {
-        return single_error(error);
+        return super::full::sse_refusal(error);
     }
     // A configured folder failing containment refuses the run (KT-1192).
     let docs_root = match crate::core::docs_location::DocsRoot::for_project(&project_path) {
@@ -783,7 +783,7 @@ fn deterministic_only(
             }
         };
         if let Some(error) = crate::api::projects::template_merge::audit_launch_refusal(&project_path) {
-            yield Event::default().event("error").data(serde_json::json!({"error":error}).to_string());
+            yield Event::default().event("error").data(error.to_string());
             return;
         }
         let path = project_path.clone();

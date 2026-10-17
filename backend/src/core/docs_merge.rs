@@ -118,19 +118,110 @@ pub fn source_paths(existing: &BTreeSet<String>) -> Vec<String> {
 }
 
 fn is_source_path(path: &str) -> bool {
-    let mut parts = path.split('/');
-    let Some(first) = parts.next() else {
-        return false;
-    };
-    match parts.next() {
-        None => {
+    let parts: Vec<&str> = path.split('/').collect();
+    match parts.as_slice() {
+        [] => false,
+        [first] => {
             let lower = first.to_ascii_lowercase();
             lower.ends_with(".md") && !SKIPPED_ROOT_FILES.contains(&lower.as_str())
         }
-        Some(second) => {
-            DOCS_DIR_CANDIDATES.contains(&first) && !SKIPPED_DOC_SUBDIRS.contains(&second)
+        [first, second, rest @ ..] => {
+            // The briefing and state files Kronn writes into the folder are not
+            // the team's documentation (KT-1310).
+            let kronn_state =
+                rest.is_empty() && crate::core::docs_folder::is_kronn_state_file(second);
+            DOCS_DIR_CANDIDATES.contains(first)
+                && !SKIPPED_DOC_SUBDIRS.contains(second)
+                && !kronn_state
         }
     }
+}
+
+/// Kronn's own template text: the v1 spec file, a `{{PLACEHOLDER}}` left by the
+/// template, the "TEMPLATE FILE" notice and the "How to fill" / "Examples (good
+/// shape …)" boilerplate sections. A source copying it would hand the team
+/// Kronn's instructions as its own content (KT-1310).
+fn is_kronn_template_text(section: &Section<'_>) -> bool {
+    const HEADINGS: &[&str] = &["how to fill", "examples (good shape", "annotated example"];
+    let heading_is_boilerplate = section.heading.as_deref().is_some_and(|h| {
+        let lower = h.to_lowercase();
+        let lower = lower.trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == ' ');
+        HEADINGS.iter().any(|b| lower.starts_with(b))
+    });
+    heading_is_boilerplate
+        || section
+            .lines
+            .iter()
+            .any(|l| l.contains("**TEMPLATE FILE.**") || has_template_placeholder(l))
+}
+
+/// `{{UPPER_SNAKE}}`, the shape of every placeholder in Kronn's templates.
+fn has_template_placeholder(line: &str) -> bool {
+    let mut rest = line;
+    while let Some(start) = rest.find("{{") {
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("}}") else {
+            return false;
+        };
+        let name = &after[..end];
+        if !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        {
+            return true;
+        }
+        rest = &after[end + 2..];
+    }
+    false
+}
+
+/// Kronn's v1 spec seeded into `conventions/`: its first heading names it.
+fn is_kronn_spec_file(content: &str) -> bool {
+    content
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .is_some_and(|l| l.trim().starts_with("# Kronn `AGENTS.md` convention"))
+}
+
+/// Push every heading of a copied block three levels down (H1 → H4, deeper ones
+/// capped at H6), outside code fences, so the block nests under the target's
+/// own `##` / `###` headings instead of adding a second H1 to it.
+fn demote_headings(lines: &[&str]) -> String {
+    let mut fence: Option<&str> = None;
+    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    for line in lines {
+        let trimmed = line.trim_start();
+        if let Some(marker) = fence {
+            if trimmed.starts_with(marker) {
+                fence = None;
+            }
+            out.push((*line).to_string());
+            continue;
+        }
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            fence = Some(&trimmed[..3]);
+            out.push((*line).to_string());
+            continue;
+        }
+        let indent = line.len() - trimmed.len();
+        let hashes = trimmed.len() - trimmed.trim_start_matches('#').len();
+        let after = &trimmed[hashes..];
+        let is_heading = indent <= 3
+            && (1..=6).contains(&hashes)
+            && (after.is_empty() || after.starts_with(' ') || after.starts_with('\t'));
+        if is_heading {
+            out.push(format!(
+                "{}{}{}",
+                &line[..indent],
+                "#".repeat((hashes + 3).min(6)),
+                after
+            ));
+        } else {
+            out.push((*line).to_string());
+        }
+    }
+    out.join("\n")
 }
 
 /// One template file, relative to the v2 docs directory.
@@ -599,6 +690,19 @@ pub fn plan_merge(
     template: &[TemplateFile],
     docs_dir: &str,
 ) -> Result<MergePlan, String> {
+    plan_merge_excluding(root, existing, template, docs_dir, &BTreeSet::new())
+}
+
+/// `plan_merge`, where `kronn_owned` (repo-relative files a previous merge
+/// wrote) are Kronn's: they still count as existing targets, but are never read
+/// as sources.
+pub fn plan_merge_excluding(
+    root: &Path,
+    existing: &BTreeSet<String>,
+    template: &[TemplateFile],
+    docs_dir: &str,
+    kronn_owned: &BTreeSet<String>,
+) -> Result<MergePlan, String> {
     let target_path = |rel: &str| format!("{docs_dir}/{rel}");
     let template_targets: BTreeSet<String> = template.iter().map(|t| target_path(&t.rel)).collect();
 
@@ -606,6 +710,9 @@ pub fn plan_merge(
     let mut imports: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
     for source in source_paths(existing) {
+        if kronn_owned.contains(&source) {
+            continue;
+        }
         let Some(content) = read_prose(root, &source) else {
             correspondence.push(Correspondence {
                 source,
@@ -617,12 +724,23 @@ pub fn plan_merge(
             });
             continue;
         };
+        if is_kronn_spec_file(&content) {
+            correspondence.push(Correspondence {
+                source,
+                section: None,
+                start_line: 1,
+                end_line: content.lines().count().max(1),
+                target: None,
+                action: MappingAction::KronnManaged,
+            });
+            continue;
+        }
         let context_target = classify(&file_context(&source));
         for section in split_sections(&content) {
             if !section.has_content() {
                 continue;
             }
-            if section.kronn_managed {
+            if section.kronn_managed || is_kronn_template_text(&section) {
                 correspondence.push(Correspondence {
                     source: source.clone(),
                     section: None,
@@ -648,7 +766,7 @@ pub fn plan_merge(
                         "### From `{source}` (lines {}-{})\n\n{}\n",
                         section.start,
                         section.end(),
-                        section.lines.join("\n")
+                        demote_headings(&section.lines)
                     );
                     imports.entry(t.clone()).or_default().push(block);
                     MappingAction::Extracted

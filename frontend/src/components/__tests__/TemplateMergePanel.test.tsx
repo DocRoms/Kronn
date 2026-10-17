@@ -57,6 +57,7 @@ function plan(overrides: Partial<TemplateMergeView> = {}): TemplateMergeView {
     ],
     existing_targets: ['docs/AGENTS.md'],
     untracked_in_checkout: [],
+    warnings: [],
     table_markdown: '',
     merge: mergeState(),
     ...overrides,
@@ -88,6 +89,22 @@ beforeEach(() => {
     branch: 'kronn/template-v2-merge', commit: 'abcdef1234567890', committed: paths,
   }));
   api.templateMergeDiscard.mockResolvedValue(undefined);
+});
+
+describe('TemplateMergePanel — plan warnings', () => {
+  it('shows what a remote-base plan warns about once the merge ran', async () => {
+    api.templateMergeStart.mockResolvedValueOnce({
+      ...result(),
+      warnings: [{ code: 'remote_base_misses_local_docs', paths: ['docs/a.md', 'docs/b.md'], more: 3 }],
+    });
+    wrap(<TemplateMergePanel projectId="p1" />);
+    await launch();
+    const warning = await screen.findByTestId('template-merge-warnings');
+    expect(warning).toHaveTextContent('docs/a.md, docs/b.md');
+    // Worded from the code by the active locale, not by the backend.
+    expect(warning).toHaveTextContent('5 doc(s) locaux');
+    expect(warning).toHaveTextContent('et 3 autre(s)');
+  });
 });
 
 describe('TemplateMergePanel — plan', () => {
@@ -298,7 +315,9 @@ describe('merge already on disk (KT-1182)', () => {
     expect(templateMergeStatus(null)).toBe('none');
     expect(templateMergeStatus(mergeState())).toBe('none');
     expect(templateMergeStatus(IN_PROGRESS)).toBe('in_progress');
-    expect(templateMergeStatus(mergeState({ worktree_exists: true, branch_exists: true }))).toBe('in_progress');
+    // Everything accepted and integrated, only the worktree left behind: done, not in progress (KT-1310).
+    expect(templateMergeStatus(mergeState({ worktree_exists: true, branch_exists: true }))).toBe('none');
+    expect(offersTemplateMerge(plan({ files: [], correspondence: [], merge: mergeState({ worktree_exists: true, branch_exists: true }) }))).toBe(false);
     expect(templateMergeStatus({ ...IN_PROGRESS, branch_ahead_commits: 1 })).toBe('in_progress');
     expect(templateMergeStatus({ ...IN_PROGRESS, pending_files: 0, branch_ahead_commits: 2 })).toBe('to_integrate');
     expect(templateMergeStatus(TO_INTEGRATE)).toBe('to_integrate');

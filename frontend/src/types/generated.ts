@@ -10006,7 +10006,29 @@ export type TemplateMergeView = { docs_dir: string, base: MergeBase, base_ref: s
 /**
  * Docs that only exist untracked in the checkout: a worktree cannot see them.
  */
-untracked_in_checkout: Array<string>, table_markdown: string, merge: TemplateMergeState, };
+untracked_in_checkout: Array<string>,
+/**
+ * Things the reviewer must know before trusting the plan, e.g. local docs
+ * a remote base cannot contain.
+ */
+warnings: Array<TemplateMergeWarning>, table_markdown: string, merge: TemplateMergeState, };
+
+/**
+ * A plan warning as data: the UI words it in the user's language from `code`.
+ */
+export type TemplateMergeWarning = {
+/**
+ * Stable identifier, e.g. `remote_base_misses_local_docs`.
+ */
+code: string,
+/**
+ * Paths the warning is about (capped), in a stable order.
+ */
+paths: Array<string>,
+/**
+ * How many more paths there are than `paths` lists.
+ */
+more: number, };
 
 export type TemplateReinstallPlan = { docs_dir: string, files: Array<ReinstallFile>,
 /**

@@ -393,7 +393,7 @@ as human-validated evidence until its trust conditions hold again.
   as `validation_started_by` when the validation is opened, and as
   `validated_by` when it is validated, on the run row and in
   `docs/.kronn.json` (`validated_by`, `validation_started_by`).
-  [src: file: backend/src/core/kronn_state.rs:295-311#mark_validated_by]
+  [src: file: backend/src/core/kronn_state.rs:330-346#mark_validated_by]
   [src: file: backend/src/db/audit_validation.rs:125-140#set_started_by]
 - **Boot repair.** At startup, completions already visible in the messages are
   stamped, and open validations an older audit left behind are archived only
