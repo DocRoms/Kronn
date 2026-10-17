@@ -24239,6 +24239,75 @@ mod cold_api_handlers_tests {
         assert_eq!(active, 2);
     }
 
+    // KT-1309 — over HTTP, two shapes that used to fail on save: a project
+    // with only the central index (no `docs/tech-debt/` yet) whose sheetless
+    // row is decided, and a flow `metadata` already holding `audit_history: []`.
+    #[tokio::test]
+    async fn td_review_decides_in_a_project_without_a_tech_debt_folder_and_with_flow_metadata() {
+        let (_dir, repo) = seed_repo("td-review-kt1309-shapes");
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        std::fs::write(
+            repo.join("docs/inconsistencies-tech-debt.md"),
+            "# Index\n\n## Current list\n\n| ID | Problem | Area | Severity | Status |\n|----|---------|------|----------|--------|\n| TD-20261016-rowonly | Row only | API | High | Open |\n",
+        )
+        .unwrap();
+        assert!(!repo.join("docs/tech-debt").exists());
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let list_url = format!("/api/projects/{pid}/audit/tds");
+        let decide_url = format!("/api/projects/{pid}/audit/tds/decide");
+        let strict = |path: std::path::PathBuf| -> serde_yaml::Value {
+            let sheet = std::fs::read_to_string(&path).unwrap();
+            let front = sheet.strip_prefix("---\n").unwrap();
+            serde_yaml::from_str(&front[..front.find("\n---").unwrap()])
+                .unwrap_or_else(|e| panic!("strict YAML parse failed: {e}\n{sheet}"))
+        };
+
+        let (_, listed) = get_json(build_router_with_auth(state.clone(), false), &list_url).await;
+        let items = listed["data"]["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1, "{listed}");
+        assert_eq!(
+            kronn::core::scanner::count_tech_debt(repo.to_str().unwrap()) as usize,
+            items.len()
+        );
+
+        let (_, decided) = post_json(
+            build_router_with_auth(state.clone(), false),
+            &decide_url,
+            serde_json::json!({ "items": [
+                { "td_id": "TD-20261016-rowonly", "decision": "confirm", "reason": "Seen in prod." }
+            ] }),
+        )
+        .await;
+        assert_eq!(decided["success"], true, "{decided}");
+        let front = strict(repo.join("docs/tech-debt/TD-20261016-rowonly.md"));
+        assert_eq!(
+            front["metadata"]["audit_history"][0]["note"].as_str(),
+            Some("Seen in prod.")
+        );
+
+        // A flow mapping that already lists an empty history.
+        std::fs::write(
+            repo.join("docs/tech-debt/TD-20261016-flow.md"),
+            "---\nname: td-flow\nmetadata: {type: tech-debt, audit_history: []}\n---\n\n# TD-20261016-flow\n\n- **Area**: API\n- **Severity**: Low\n- **Status**: Verified in source\n",
+        )
+        .unwrap();
+        let (_, decided) = post_json(
+            build_router_with_auth(state, false),
+            &decide_url,
+            serde_json::json!({ "items": [
+                { "td_id": "TD-20261016-flow", "decision": "defer", "reason": "later" }
+            ] }),
+        )
+        .await;
+        assert_eq!(decided["success"], true, "{decided}");
+        let front = strict(repo.join("docs/tech-debt/TD-20261016-flow.md"));
+        assert_eq!(front["metadata"]["type"].as_str(), Some("tech-debt"));
+        let history = front["metadata"]["audit_history"].as_sequence().unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0]["note"].as_str(), Some("later"));
+    }
+
     envelope_get!(audit_tds_unknown_project, "/api/projects/nope/audit/tds");
     envelope_post!(
         audit_tds_decide_unknown_project,

@@ -367,29 +367,46 @@ fn is_list_item(line: &str) -> bool {
     trimmed == "-" || trimmed.starts_with("- ")
 }
 
+/// A quote opens a quoted scalar only at the start of a value: an apostrophe
+/// inside a plain scalar (`don't`) is just a character.
+fn opens_quote(prev: Option<char>) -> bool {
+    prev.is_none_or(|p| p.is_whitespace() || "{[,:".contains(p))
+}
+
+/// Where the trailing comment of a line starts: a `#` outside quotes, at the
+/// start or after whitespace.
+fn comment_start(text: &str) -> Option<usize> {
+    let mut quote = None::<char>;
+    let mut prev: Option<char> = None;
+    let mut chars = text.char_indices();
+    while let Some((at, c)) = chars.next() {
+        match quote {
+            Some('"') if c == '\\' => {
+                chars.next();
+            }
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None if matches!(c, '"' | '\'') && opens_quote(prev) => quote = Some(c),
+            None if c == '#' && prev.is_none_or(char::is_whitespace) => return Some(at),
+            None => {}
+        }
+        prev = Some(c);
+    }
+    None
+}
+
 /// The value of a `key:` line, without its trailing comment (`""` for a
 /// block key); `None` when the line is another key.
 fn key_value(line: &str, key: &str) -> Option<String> {
     let rest = line.trim_start().strip_prefix(key)?.strip_prefix(':')?;
-    let value = match rest.find('#') {
-        Some(at) if rest[..at].is_empty() || rest[..at].ends_with(char::is_whitespace) => {
-            &rest[..at]
-        }
-        _ => rest,
-    };
+    let value = comment_start(rest).map_or(rest, |at| &rest[..at]);
     Some(value.trim().to_string())
 }
 
 /// The trailing ` # comment` of a `key:` line, with its leading space; empty
 /// when there is none.
 fn comment_of(line: &str) -> String {
-    let at = line.find('#').filter(|at| {
-        line[..*at]
-            .chars()
-            .next_back()
-            .is_some_and(char::is_whitespace)
-    });
-    at.map_or_else(String::new, |at| format!(" {}", &line[at..]))
+    comment_start(line).map_or_else(String::new, |at| format!(" {}", &line[at..]))
 }
 
 /// Splits the inside of a flow mapping on its top-level commas.
@@ -397,20 +414,32 @@ fn split_flow(inner: &str) -> Vec<String> {
     let mut parts = Vec::new();
     let mut current = String::new();
     let (mut depth, mut quote) = (0usize, None::<char>);
-    for c in inner.chars() {
+    let mut prev: Option<char> = None;
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
         match (quote, c) {
+            (Some('"'), '\\') => {
+                current.push(c);
+                if let Some(escaped) = chars.next() {
+                    current.push(escaped);
+                }
+                prev = Some('\\');
+                continue;
+            }
             (Some(q), c) if c == q => quote = None,
             (Some(_), _) => {}
-            (None, '"' | '\'') => quote = Some(c),
+            (None, '"' | '\'') if opens_quote(prev) => quote = Some(c),
             (None, '[' | '{') => depth += 1,
             (None, ']' | '}') => depth = depth.saturating_sub(1),
             (None, ',') if depth == 0 => {
                 parts.push(std::mem::take(&mut current));
+                prev = Some(c);
                 continue;
             }
             _ => {}
         }
         current.push(c);
+        prev = Some(c);
     }
     parts.push(current);
     parts
@@ -522,8 +551,9 @@ pub(crate) fn append_history_entry(
         let metadata_indent = indent_of(&lines[metadata_index]);
         let value = key_value(&lines[metadata_index], "metadata").unwrap_or_default();
         if value.starts_with('{') {
-            // A flow mapping is rewritten as a block, its pairs kept as written,
-            // so the history key is added once, beside them.
+            // A flow mapping is rewritten as a block, its pairs kept as written.
+            // An `audit_history` pair it already holds (empty) is the one the
+            // entry joins: the key is written once.
             let inner = value
                 .strip_prefix('{')
                 .and_then(|v| v.strip_suffix('}'))
@@ -535,6 +565,15 @@ pub(crate) fn append_history_entry(
                 comment_of(&lines[metadata_index])
             )];
             for pair in split_flow(inner) {
+                let (key, pair_value) = pair.split_once(':').unwrap_or((pair.as_str(), ""));
+                if key.trim().trim_matches(['"', '\'']) == "audit_history" {
+                    if !matches!(pair_value.trim(), "" | "[]" | "~" | "null") {
+                        return Err(anyhow!(
+                            "TD detail has an audit_history that is not a block list"
+                        ));
+                    }
+                    continue;
+                }
                 block.push(format!("{}{pair}", " ".repeat(child_indent)));
             }
             block.push(format!("{}audit_history:", " ".repeat(child_indent)));
@@ -761,7 +800,16 @@ pub(crate) fn apply_td_resolutions_at(
     }
     let docs_root = crate::core::docs_location::DocsRoot::of(project_path);
     let docs_dir = canonical_child(project_path, &docs_root.dir(project_path))?;
-    let td_dir = canonical_child(&docs_dir, &docs_dir.join("tech-debt"))?;
+    // A project with only the central index has no `tech-debt/` yet: the first
+    // decision creates it. One that exists is resolved, so a symlink out of
+    // the docs root is still refused.
+    let td_path = docs_dir.join("tech-debt");
+    let td_missing = td_path.symlink_metadata().is_err();
+    let td_dir = if td_missing {
+        td_path
+    } else {
+        canonical_child(&docs_dir, &td_path)?
+    };
 
     let mut seen = std::collections::HashSet::new();
     let mut updates = Vec::with_capacity(resolutions.len());
@@ -856,7 +904,21 @@ pub(crate) fn apply_td_resolutions_at(
     let mut decided = Vec::new();
     let mut written: Vec<(&Path, Option<&str>)> = Vec::new();
     let mut outcome: Result<()> = Ok(());
+    // Created only now that every decision computed: a refused one leaves no
+    // empty folder behind. `docs_dir` is canonical, so the folder lands in it.
+    let mut created_td_dir = false;
+    if td_missing {
+        match std::fs::create_dir(&td_dir) {
+            Ok(()) => created_td_dir = true,
+            Err(error) => {
+                outcome = Err(anyhow!(error).context(format!("cannot create {}", td_dir.display())))
+            }
+        }
+    }
     for ((path, original, content), (resolution, _)) in updates.iter().zip(resolutions.iter()) {
+        if outcome.is_err() {
+            break;
+        }
         if let Err(error) = crate::core::mcp_scanner::atomic_write(path, content) {
             outcome = Err(anyhow!(error));
             break;
@@ -885,6 +947,10 @@ pub(crate) fn apply_td_resolutions_at(
             if let Err(restore) = restored {
                 tracing::error!("Could not restore {}: {restore}", path.display());
             }
+        }
+        if created_td_dir {
+            // Empty again once its sheets are gone; a failure leaves it be.
+            let _ = std::fs::remove_dir(&td_dir);
         }
         return Err(error);
     }
@@ -1208,6 +1274,15 @@ mod tests {
             "name: td-x\nmetadata: {type: tech-debt, owner: \"a, b\", tags: [x, y]} # inline",
             "name: td-x\nmetadata: {}",
             "name: td-x\nmetadata: # meta only",
+            // A flow mapping that already holds an empty history: it is the
+            // key the entry joins, not one to repeat.
+            "name: td-x\nmetadata: {type: tech-debt, audit_history: []}",
+            "name: td-x\nmetadata: {audit_history: [], type: tech-debt} # inline",
+            "name: td-x\nmetadata: {\"audit_history\": ~, type: tech-debt}",
+            "name: td-x\nmetadata: {audit_history: }",
+            // A `#` inside quotes is text, not a comment.
+            "name: td-x\nmetadata: {type: tech-debt, note: \"see #12\", by: don't} # real",
+            "name: td-x\nmetadata:\n  audit_history: [] # \"quoted # inside\"",
         ] {
             let input = format!("---\n{front}\n---\n\n# TD-x\n\n- **Status**: Inferred\n");
             strict_front_matter(&input);
@@ -1249,15 +1324,130 @@ mod tests {
     }
 
     #[test]
-    fn a_history_that_is_not_a_block_list_is_refused_not_duplicated() {
-        let input = "---\nname: td-x\nmetadata:\n  audit_history: [{date: 2026-09-01}]\n---\n\n# TD-x\n\n- **Status**: Inferred\n";
-        assert!(update_td(
+    fn a_flow_mapping_keeps_its_pairs_and_its_history_key_once() {
+        let input = "---\nname: td-x\nmetadata: {type: tech-debt, audit_history: [], note: \"see #12, ok\", by: don't} # inline\n---\n\n# TD-x\n\n- **Status**: Inferred\n";
+        strict_front_matter(input);
+        let written = update_td(
+            input,
+            TdResolutionAction::Reject,
+            TdDecisionOrigin::Review,
+            Some("not real"),
+        )
+        .unwrap();
+        // Strict parse: a duplicate `audit_history` key would be an error.
+        let front = strict_front_matter(&written);
+        let meta = &front["metadata"];
+        assert_eq!(meta["type"].as_str(), Some("tech-debt"));
+        assert_eq!(meta["note"].as_str(), Some("see #12, ok"));
+        assert_eq!(meta["by"].as_str(), Some("don't"));
+        assert_eq!(
+            strict_history(&written),
+            [("Rejected".to_string(), "not real".to_string())]
+        );
+        assert_eq!(written.matches("audit_history").count(), 1, "{written}");
+        assert!(written.contains("# inline"), "{written}");
+    }
+
+    #[test]
+    fn a_hash_inside_quotes_is_not_taken_for_a_comment() {
+        // Was refused as "a metadata flow mapping on several lines".
+        let input = "---\nname: td-x\nmetadata: {type: tech-debt, note: \"a #b\"}\n---\n\n# TD-x\n\n- **Status**: Inferred\n";
+        let written = update_td(
             input,
             TdResolutionAction::Confirm,
             TdDecisionOrigin::Review,
-            None
+            None,
         )
-        .is_err());
+        .unwrap();
+        assert_eq!(
+            strict_front_matter(&written)["metadata"]["note"].as_str(),
+            Some("a #b")
+        );
+        assert_eq!(comment_start("a: \"x # y\" # z"), Some(11));
+        assert_eq!(comment_start("a: 'x # y'"), None);
+        assert_eq!(comment_start("a: it's # z"), Some(8));
+        assert_eq!(comment_start("a: b#c"), None);
+    }
+
+    #[test]
+    fn a_history_that_is_not_a_block_list_is_refused_not_duplicated() {
+        for input in [
+            "---\nname: td-x\nmetadata:\n  audit_history: [{date: 2026-09-01}]\n---\n\n# TD-x\n\n- **Status**: Inferred\n",
+            "---\nname: td-x\nmetadata: {audit_history: [{date: 2026-09-01}]}\n---\n\n# TD-x\n\n- **Status**: Inferred\n",
+            "---\nname: td-x\nmetadata: {audit_history: none}\n---\n\n# TD-x\n\n- **Status**: Inferred\n",
+        ] {
+            assert!(
+                update_td(
+                    input,
+                    TdResolutionAction::Confirm,
+                    TdDecisionOrigin::Review,
+                    None
+                )
+                .is_err(),
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_tech_debt_folder_is_created_by_the_first_decision() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let docs = tmp.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(
+            docs.join("inconsistencies-tech-debt.md"),
+            "# Index\n\n## Current list\n\n| ID | Problem | Area | Severity | Status |\n|----|---------|------|----------|--------|\n| TD-20261016-rowonly | Row only | API | High | Open |\n",
+        )
+        .unwrap();
+        assert!(!docs.join("tech-debt").exists());
+        let resolution = TdResolution {
+            td_id: "TD-20261016-rowonly".into(),
+            action: TdResolutionAction::Confirm,
+        };
+        apply_td_resolutions_at(
+            tmp.path(),
+            &[(&resolution, Some("Seen in prod."))],
+            TdDecisionOrigin::Review,
+        )
+        .unwrap();
+        let sheet = std::fs::read_to_string(docs.join("tech-debt/TD-20261016-rowonly.md")).unwrap();
+        assert_eq!(
+            strict_history(&sheet),
+            [("Confirmed by user".to_string(), "Seen in prod.".to_string())]
+        );
+        assert!(sheet.contains("- **Severity**: High"), "{sheet}");
+
+        // A decision that cannot be written leaves no folder behind.
+        let bare = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(bare.path().join("docs")).unwrap();
+        let ghost = TdResolution {
+            td_id: "TD-20261016-ghost".into(),
+            action: TdResolutionAction::Confirm,
+        };
+        assert!(
+            apply_td_resolutions_at(bare.path(), &[(&ghost, None)], TdDecisionOrigin::Review)
+                .is_err()
+        );
+        assert!(!bare.path().join("docs/tech-debt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tech_debt_folder_that_leaves_the_docs_root_is_still_refused() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        let docs = tmp.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::os::unix::fs::symlink(outside.path(), docs.join("tech-debt")).unwrap();
+        let resolution = TdResolution {
+            td_id: "TD-20261016-x".into(),
+            action: TdResolutionAction::Confirm,
+        };
+        let error =
+            apply_td_resolutions_at(tmp.path(), &[(&resolution, None)], TdDecisionOrigin::Review)
+                .unwrap_err();
+        assert!(error.to_string().contains("escapes"), "{error}");
+        assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
     }
 
     #[test]

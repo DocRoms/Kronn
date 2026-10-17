@@ -550,9 +550,14 @@ Release notes for 0.9.3 and earlier are available in the
   with no sheet file yet is listed and can be decided (the decision writes its
   sheet from the row). The history writer also handles a trailing comment on
   `audit_history:` / `metadata:` and a flow-style `metadata: {…}` without
-  duplicating the key, refuses an `audit_history` that is a non-empty flow list
-  rather than corrupting it, and keeps a new reason typed the same day for the
-  same status instead of dropping it.
+  duplicating the key (a flow mapping that already holds an empty
+  `audit_history` gets the entry in that key, written once), reads a `#` inside
+  quotes as text rather than a comment, refuses an `audit_history` that is a
+  non-empty flow list rather than corrupting it, and keeps a new reason typed
+  the same day for the same status instead of dropping it. A project with only
+  the central index (no `tech-debt/` folder yet) can decide a row that has no
+  sheet: the first decision creates the folder inside the docs root, and a
+  `tech-debt` link leaving it is still refused.
 - A review-wait timeout no longer locks the principal out of the review
   (KT-1293). The watchdog used to move the unreviewed delivery to `Escalated`
   while its alert told the principal to call `task_exec_review`, which only
