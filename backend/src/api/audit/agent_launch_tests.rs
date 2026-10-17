@@ -75,6 +75,7 @@ async fn litellm_state(endpoint: &str) -> AppState {
     let mut config = crate::core::config::default_config();
     config.agents.lite_llm.base_url = Some(endpoint.to_string());
     config.agents.model_tiers.lite_llm.reasoning = Some("audit-model".into());
+    config.agents.model_tiers.lite_llm.economy = Some("economy-model".into());
     AppState::new_defaults(
         Arc::new(tokio::sync::RwLock::new(config)),
         Arc::new(crate::db::Database::open_in_memory().unwrap()),
@@ -2064,21 +2065,79 @@ async fn a_resume_echoing_the_deleted_connection_of_its_run_falls_back_too() {
     resume_after_the_run_connection_was_deleted(Some("deleted-conn")).await;
 }
 
+/// KT-1320 — the same fallback on an HTTP provider: the retried step reaches the
+/// agent's default endpoint on the run's economy model, not the reasoning one.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_resume_whose_connection_was_deleted_reaches_the_default_provider_on_the_run_tier() {
+    let prose = text("The documentation is unchanged.");
+    let (server, requests) = provider(prose.clone(), prose).await;
+    let state = litellm_state(&server.uri()).await;
+    let project = tempfile::tempdir().unwrap();
+    project_among_others(&state, project.path(), false).await;
+    seed_run_on_a_deleted_connection(&state, project.path(), "LiteLlm").await;
+
+    let stream = resume_run_gone(&state, AgentType::LiteLlm, Some("deleted-conn")).await;
+
+    assert!(!stream.contains("event: error"), "{stream}");
+    assert!(
+        sse_events(&stream, "warning").iter().any(|w| w["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("deleted-conn") && m.contains("no longer exists"))),
+        "{stream}"
+    );
+    let seen = requests.lock().unwrap().clone();
+    assert!(
+        !seen.is_empty(),
+        "the retried step reached the default endpoint: {stream}"
+    );
+    assert!(
+        seen.iter().all(|body| body["model"] == "economy-model"),
+        "the run's economy tier picks the model: {seen:?}"
+    );
+    let run = latest_run(&state).await;
+    assert_eq!(run.tier.as_deref(), Some("economy"));
+    assert_eq!(run.connection_id, None);
+}
+
 #[cfg(unix)]
 async fn resume_after_the_run_connection_was_deleted(requested_connection: Option<&str>) {
-    use axum::response::IntoResponse;
     let tools = tempfile::tempdir().unwrap();
     let (fixture, _log) = recording_claude(tools.path());
     let state = fresh_state();
     let project = tempfile::tempdir().unwrap();
     project_among_others(&state, project.path(), false).await;
     let _route = route_claude(project.path(), &fixture);
-    std::fs::create_dir_all(project.path().join("docs/conventions")).unwrap();
-    std::fs::write(project.path().join("docs/AGENTS.md"), "# Audited project\n").unwrap();
+    seed_run_on_a_deleted_connection(&state, project.path(), "ClaudeCode").await;
+
+    let stream = resume_run_gone(&state, AgentType::ClaudeCode, requested_connection).await;
+
+    assert!(!stream.contains("event: error"), "{stream}");
+    let warnings = sse_events(&stream, "warning");
+    assert!(
+        warnings.iter().any(|w| w["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("deleted-conn") && m.contains("no longer exists"))),
+        "{stream}"
+    );
+    let run = latest_run(&state).await;
+    assert_ne!(run.id, "run-gone");
+    assert_eq!(
+        run.tier.as_deref(),
+        Some("economy"),
+        "the tier is still the run's"
+    );
+    assert_eq!(run.connection_id, None);
+}
+
+/// An interrupted economy run on `agent` and on a connection that no longer
+/// exists, whose step 5 is the one left to retry.
+#[cfg(unix)]
+async fn seed_run_on_a_deleted_connection(state: &AppState, project: &Path, agent: &'static str) {
+    std::fs::create_dir_all(project.join("docs/conventions")).unwrap();
+    std::fs::write(project.join("docs/AGENTS.md"), "# Audited project\n").unwrap();
     std::fs::write(
-        project
-            .path()
-            .join("docs/conventions/agents-md-format-v1.md"),
+        project.join("docs/conventions/agents-md-format-v1.md"),
         "# AGENTS.md format\n",
     )
     .unwrap();
@@ -2089,7 +2148,7 @@ async fn resume_after_the_run_connection_was_deleted(requested_connection: Optio
         .with_conn(move |conn| {
             use crate::db::audit_runs as runs;
             let started = chrono::Utc::now() - chrono::Duration::hours(1);
-            runs::insert_running(conn, "run-gone", PROJECT_ID, "Full", "ClaudeCode", started)?;
+            runs::insert_running(conn, "run-gone", PROJECT_ID, "Full", agent, started)?;
             runs::set_run_launch(conn, "run-gone", ModelTier::Economy, Some("deleted-conn"))?;
             for step in 1..=total {
                 let label = format!("docs/step-{step}.md");
@@ -2114,12 +2173,21 @@ async fn resume_after_the_run_connection_was_deleted(requested_connection: Optio
         })
         .await
         .unwrap();
+}
 
+/// Resumes `run-gone` the way the UI does, naming no tier, and returns the stream.
+#[cfg(unix)]
+async fn resume_run_gone(
+    state: &AppState,
+    agent: AgentType,
+    requested_connection: Option<&str>,
+) -> String {
+    use axum::response::IntoResponse;
     let response = crate::api::audit::full::full_audit(
         axum::extract::State(state.clone()),
         axum::extract::Path(PROJECT_ID.to_string()),
         axum::Json(crate::models::LaunchAuditRequest {
-            agent: AgentType::ClaudeCode,
+            agent,
             connection_id: requested_connection.map(str::to_string),
             tier: None,
             kind: None,
@@ -2132,16 +2200,12 @@ async fn resume_after_the_run_connection_was_deleted(requested_connection: Optio
     )
     .await
     .into_response();
-    let stream = sse_body(response).await;
-    assert!(!stream.contains("event: error"), "{stream}");
-    let warnings = sse_events(&stream, "warning");
-    assert!(
-        warnings.iter().any(|w| w["message"]
-            .as_str()
-            .is_some_and(|m| m.contains("deleted-conn") && m.contains("no longer exists"))),
-        "{stream}"
-    );
-    let run = state
+    sse_body(response).await
+}
+
+#[cfg(unix)]
+async fn latest_run(state: &AppState) -> crate::models::AuditRun {
+    state
         .db
         .with_conn(|conn| {
             Ok(crate::db::audit_runs::list_recent(conn, PROJECT_ID, 1)?
@@ -2150,12 +2214,5 @@ async fn resume_after_the_run_connection_was_deleted(requested_connection: Optio
         })
         .await
         .unwrap()
-        .expect("the resumed run");
-    assert_ne!(run.id, "run-gone");
-    assert_eq!(
-        run.tier.as_deref(),
-        Some("economy"),
-        "the tier is still the run's"
-    );
-    assert_eq!(run.connection_id, None);
+        .expect("the resumed run")
 }

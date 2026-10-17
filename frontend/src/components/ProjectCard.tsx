@@ -1,12 +1,12 @@
 import '../pages/Dashboard.css';
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
-import { planning, projects as projectsApi } from '../lib/api';
+import { planning, projects as projectsApi, externalApi, type ExternalApiConnectionView } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import { userError } from '../lib/userError';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { isValidationDisc, isBriefingDisc, isBootstrapDisc, isTrackerMcp } from '../lib/constants';
 import { canRunAudit } from '../lib/agentCapabilities';
-import { effectiveLaunchChoice, runLaunchChoice } from '../lib/auditLaunchChoice';
+import { effectiveLaunchChoice, runLaunchChoice, usableAuditTargets } from '../lib/auditLaunchChoice';
 import { AiDocViewer } from './AiDocViewer';
 import { unseenBasis } from '../lib/discussionUiUtils';
 import { onActivationKey } from '../lib/keyboardActivation';
@@ -455,6 +455,15 @@ export function ProjectCard({
   const [auditPickTouched, setAuditPickTouched] = useState(false);
   // KT-980 — the named external API connection picked for an HTTP agent.
   const [auditConnectionId, setAuditConnectionId] = useState<string | null>(null);
+  // The named connections the picker lists (the panel loads the same list).
+  const [auditConnections, setAuditConnections] = useState<ExternalApiConnectionView[]>([]);
+  useEffect(() => {
+    let alive = true;
+    externalApi.list()
+      .then(list => { if (alive) setAuditConnections(list ?? []); })
+      .catch(() => { if (alive) setAuditConnections([]); });
+    return () => { alive = false; };
+  }, []);
   /// Companion ref for `auditActive` — keeps `handleFullAudit` and
   /// `startPartialAudit` race-free against a double-click that fires
   /// before React re-renders.
@@ -631,17 +640,19 @@ export function ProjectCard({
     : (auditAgents[0]?.agent_type ?? 'ClaudeCode');
   // KT-1320 — what a launch runs on is what the panel shows: the run being
   // retried or resumed, unless the human picked something else.
+  // It resolves against the picker's own inventory: detected agents and named
+  // connections (a Custom run is on a connection, never on a detection).
   const runChoice = useMemo(
-    () => runLaunchChoice(resumableAudit, auditAgents.map(a => a.agent_type)),
-    [resumableAudit, auditAgents],
+    () => runLaunchChoice(resumableAudit, usableAuditTargets(agents, auditConnections)),
+    [resumableAudit, agents, auditConnections],
   );
   const { choice: launchChoice, fromRun: launchFromRun } = effectiveLaunchChoice(
     { agent: pickedAuditAgent, tier: auditTierChoice, connectionId: auditConnectionId },
     auditPickTouched,
     runChoice,
   );
-  // Only a resume of that run follows it (`handleFullAudit`): a fresh, partial
-  // or revalidation audit starts a run of its own, on what the picker holds.
+  // The panel, the full / partial audit and the revalidation all read this one
+  // choice: what is shown is what is launched.
   const selectedAuditAgent = launchChoice.agent;
   const selectedAuditTier = launchChoice.tier;
   const selectedAuditConnectionId = launchChoice.connectionId;
@@ -896,12 +907,12 @@ export function ProjectCard({
       stepIndex: 0, totalSteps: 16, currentFile: null,
     });
     try {
-      // KT-1320 — a resume keeps the run's footing; a fresh launch is a new run
-      // and runs on what the picker holds.
+      // KT-1320 — every launch runs on the choice the panel shows: the run's
+      // while the picker is untouched, else the human's.
       const onRun = resumeRunId !== null;
       await projectsApi.fullAuditStream(proj.id, {
-        agent: onRun ? selectedAuditAgent : pickedAuditAgent,
-        tier: onRun ? selectedAuditTier : auditTierChoice,
+        agent: selectedAuditAgent,
+        tier: selectedAuditTier,
         // A fresh launch always runs the complete 16-step chain. Resume sends
         // only the run id so the server remains authoritative for legacy runs.
         kind: resumeRunId ? null : 'Full',
@@ -912,10 +923,10 @@ export function ProjectCard({
         redo_steps: resumeRunId && options.redoSteps ? options.redoSteps : undefined,
         // KT-1169 — the confirmed choice to replay the whole audit.
         fresh: options.fresh ? true : undefined,
-        // The run's own connection is the server's to inherit (it falls back to
-        // the agent's default if that connection was deleted since); only a
-        // connection the human picked is sent.
-        connection_id: (onRun ? (launchFromRun ? null : selectedAuditConnectionId) : auditConnectionId) ?? undefined,
+        // The run's own connection is the server's to inherit when it resumes
+        // that run (it falls back to the agent's default if that connection was
+        // deleted since); any other launch sends the connection the panel shows.
+        connection_id: (onRun && launchFromRun ? null : selectedAuditConnectionId) ?? undefined,
       }, {
         onTemplateInstalled: () => {},
         // 0.8.3 TD #274 — backend-authoritative wallclock for the
@@ -1058,7 +1069,7 @@ export function ProjectCard({
     } finally {
       setAuditAbortController(null);
     }
-  }, [selectedAuditAgent, selectedAuditTier, selectedAuditConnectionId, pickedAuditAgent, auditTierChoice, auditConnectionId, proj.id, t, toast, onRefetch, onRefetchDiscussions, onAutoRunDiscussion, resumableAudit]);
+  }, [selectedAuditAgent, selectedAuditTier, selectedAuditConnectionId, launchFromRun, proj.id, t, toast, onRefetch, onRefetchDiscussions, onAutoRunDiscussion, resumableAudit]);
 
   const launchPartialAudit = useCallback(async (steps: number[]) => {
     if (auditActiveRef.current) return;
@@ -1077,7 +1088,7 @@ export function ProjectCard({
       stepIndex: 0, totalSteps: steps.length, currentFile: null,
     });
     try {
-      await projectsApi.partialAuditStream(proj.id, { agent: pickedAuditAgent, tier: auditTierChoice, steps, connection_id: auditConnectionId ?? undefined }, {
+      await projectsApi.partialAuditStream(proj.id, { agent: selectedAuditAgent, tier: selectedAuditTier, steps, connection_id: selectedAuditConnectionId ?? undefined }, {
         onStepStart: (step, total, file) => {
           setAuditStep(step);
           setAuditTotalSteps(total);
@@ -1165,7 +1176,7 @@ export function ProjectCard({
     } finally {
       setAuditAbortController(null);
     }
-  }, [pickedAuditAgent, auditTierChoice, auditConnectionId, proj.id, t, toast, onRefetch, onRefetchDrift, onRefetchDiscussions, onOpenDiscussion, onNavigate]);
+  }, [selectedAuditAgent, selectedAuditTier, selectedAuditConnectionId, proj.id, t, toast, onRefetch, onRefetchDrift, onRefetchDiscussions, onOpenDiscussion, onNavigate]);
 
   const startPartialAudit = useCallback(async (steps: number[]) => {
     await gateTemplateLaunch(() => void launchPartialAudit(steps));
@@ -1806,9 +1817,9 @@ export function ProjectCard({
         gateLaunch={templateMerge.gateLaunch}
         project={proj}
         auditActive={auditActive}
-        agent={pickedAuditAgent}
-        tier={auditTierChoice}
-        connectionId={auditConnectionId}
+        agent={selectedAuditAgent}
+        tier={selectedAuditTier}
+        connectionId={selectedAuditConnectionId}
         toast={toast}
         onRefetch={() => { onRefetch(); setDocStateReload(value => value + 1); }}
         onRefetchDrift={(projectId) => { onRefetchDrift(projectId); setDocStateReload(value => value + 1); }}

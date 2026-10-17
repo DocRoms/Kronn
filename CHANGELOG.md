@@ -555,9 +555,10 @@ Release notes for 0.9.3 and earlier are available in the
   A connection is inherited only by the same agent; if the run's connection
   was deleted since, the agent's default takes over and a warning says so,
   also when the client echoes that connection id back (the UI leaves it to the
-  server while its picker is untouched). A
-  partial or fresh audit runs on the picker's choice, and a pick is forgotten
-  when the project or the run to continue changes.
+  server while its picker is untouched). The run is resolved against the
+  picker's own targets, so a run on a named Custom connection is kept too, and
+  the full, partial and revalidation launches all run on the choice the panel
+  shows. A pick is forgotten when the project or the run to continue changes.
 - A finding that a file exists or is tracked can be cited without a line
   (KT-1320): `[src: file: .ssh/key:exists]` (or `:tracked`) passes the
   documentary gate for a text file, so a tracked private key or a

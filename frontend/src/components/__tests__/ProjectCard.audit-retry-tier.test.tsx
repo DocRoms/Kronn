@@ -21,8 +21,15 @@ vi.mock('../TemplateUpdateNotice', () => ({
   ),
 }));
 
+// The revalidation entry only matters here for the choice it is handed.
+vi.mock('../RevalidateAudit', () => ({
+  RevalidateAudit: (p: { agent: string; tier: string; connectionId: string | null }) => (
+    <div data-testid="revalidate" data-agent={p.agent} data-tier={p.tier} data-connection={p.connectionId ?? ''} />
+  ),
+}));
+
 import { ProjectCard } from '../ProjectCard';
-import { projects as projectsApi } from '../../lib/api';
+import { projects as projectsApi, externalApi } from '../../lib/api';
 import type { Project, AgentDetection } from '../../types/generated';
 
 const noop = () => {};
@@ -53,6 +60,13 @@ const RESUMABLE = {
   id: 'run-x', kind: 'Full' as const, last_completed_step: 2, steps_to_redo: [3],
   started_at: '2026-10-02T10:00:00Z', agent_type: 'ClaudeCode', tier: 'economy',
 };
+
+// A named OpenAI-compatible connection: it runs as `Custom`, which no detection reports.
+const NAMED = {
+  id: 'named-1', display_name: 'Named gateway', origin_preset: 'other', endpoint: 'https://gw.example/v1',
+  economy_model: 'cheap', default_model: 'mid', reasoning_model: 'big', mention_alias: 'gw',
+};
+const RUN_ON_NAMED = { ...RESUMABLE, agent_type: 'Custom', connection_id: 'named-1' };
 
 function renderCard() {
   const props = {
@@ -136,8 +150,29 @@ describe('ProjectCard — KT-1320 a retry runs on the tier of the run it continu
     expect(launches()[0].connection_id).toBeUndefined();
   });
 
-  it("a touched picker sends its connection, which the server still recognises as the run's own", async () => {
-    vi.mocked(projectsApi.auditResumable).mockResolvedValue({ ...RESUMABLE, connection_id: 'conn-gone' });
+  it("a run on a named Custom connection is shown and retried on it, tier included", async () => {
+    vi.mocked(externalApi.list).mockResolvedValue([NAMED] as never);
+    vi.mocked(projectsApi.auditResumable).mockResolvedValue(RUN_ON_NAMED);
+    const { container } = renderCard();
+    await openGroups(container);
+    expect(await screen.findByTestId('audit-timeline-selection-from-run')).toHaveTextContent('disc.tier.economy');
+    // The panel lights the named connection and the run's tier, not a detected agent.
+    await waitFor(() => {
+      const lit = Array.from(container.querySelectorAll<HTMLElement>('.audit-tl-choice[aria-pressed="true"]'));
+      expect(lit.map(b => b.textContent)).toEqual([
+        expect.stringContaining('Named gateway'), expect.stringContaining('disc.tier.economy'),
+      ]);
+    });
+    await act(async () => { fireEvent.click(await screen.findByTestId('audit-timeline-step-retry-3')); });
+    await waitFor(() => expect(launches()).toHaveLength(1));
+    // The connection itself is the server's to inherit on a resume.
+    expect(launches()[0]).toMatchObject({ resume_run_id: 'run-x', agent: 'Custom', tier: 'economy' });
+    expect(launches()[0].connection_id).toBeUndefined();
+  });
+
+  it("a touched picker sends the connection it shows", async () => {
+    vi.mocked(externalApi.list).mockResolvedValue([NAMED] as never);
+    vi.mocked(projectsApi.auditResumable).mockResolvedValue(RUN_ON_NAMED);
     const { container } = renderCard();
     await openGroups(container);
     await screen.findByTestId('audit-timeline-selection-from-run');
@@ -145,8 +180,7 @@ describe('ProjectCard — KT-1320 a retry runs on the tier of the run it continu
     await waitFor(() => expect(screen.queryByTestId('audit-timeline-selection-from-run')).toBeNull());
     await act(async () => { fireEvent.click(await screen.findByTestId('audit-timeline-step-retry-3')); });
     await waitFor(() => expect(launches()).toHaveLength(1));
-    // The panel seeded the picker with the run's connection: it is sent as picked.
-    expect(launches()[0]).toMatchObject({ tier: 'reasoning', connection_id: 'conn-gone' });
+    expect(launches()[0]).toMatchObject({ agent: 'Custom', tier: 'reasoning', connection_id: 'named-1' });
   });
 
   it("a run that kept no tier leaves the picker's choice", async () => {
@@ -160,13 +194,32 @@ describe('ProjectCard — KT-1320 a retry runs on the tier of the run it continu
     expect(launches()[0]).toMatchObject({ tier: 'reasoning' });
   });
 
-  it("a partial audit runs on the picker's choice, not on the interrupted run's", async () => {
+  it("a partial audit runs on the choice the panel shows, not on one it hides", async () => {
     vi.mocked(projectsApi.partialAuditStream).mockResolvedValue(undefined as never);
     renderCard();
-    await screen.findByTestId('audit-timeline-selection-from-run');
+    expect(await screen.findByTestId('audit-timeline-selection-from-run')).toHaveTextContent('disc.tier.economy');
     await act(async () => { fireEvent.click(await screen.findByTestId('run-partial')); });
     await waitFor(() => expect(vi.mocked(projectsApi.partialAuditStream)).toHaveBeenCalledTimes(1));
-    expect(vi.mocked(projectsApi.partialAuditStream).mock.calls[0][1]).toMatchObject({ agent: 'ClaudeCode', tier: 'reasoning', steps: [3] });
+    expect(vi.mocked(projectsApi.partialAuditStream).mock.calls[0][1]).toMatchObject({ agent: 'ClaudeCode', tier: 'economy', steps: [3] });
+  });
+
+  it("a partial audit on a named connection sends that connection", async () => {
+    vi.mocked(externalApi.list).mockResolvedValue([NAMED] as never);
+    vi.mocked(projectsApi.auditResumable).mockResolvedValue(RUN_ON_NAMED);
+    vi.mocked(projectsApi.partialAuditStream).mockResolvedValue(undefined as never);
+    renderCard();
+    await waitFor(() => expect(screen.getByTestId('revalidate')).toHaveAttribute('data-agent', 'Custom'));
+    await act(async () => { fireEvent.click(await screen.findByTestId('run-partial')); });
+    await waitFor(() => expect(vi.mocked(projectsApi.partialAuditStream)).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(projectsApi.partialAuditStream).mock.calls[0][1])
+      .toMatchObject({ agent: 'Custom', tier: 'economy', connection_id: 'named-1' });
+  });
+
+  it("the revalidation is handed the choice the panel shows", async () => {
+    renderCard();
+    await screen.findByTestId('audit-timeline-selection-from-run');
+    await waitFor(() => expect(screen.getByTestId('revalidate')).toHaveAttribute('data-tier', 'economy'));
+    expect(screen.getByTestId('revalidate')).toHaveAttribute('data-agent', 'ClaudeCode');
   });
 
   it("a pick made for one run does not follow the next run to continue", async () => {

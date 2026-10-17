@@ -15,6 +15,8 @@ vi.mock('../../lib/api', () => ({
   // Empty coverage is the honest neutral: no sessions, nothing claimed.
   telemetry: { coverage: vi.fn().mockResolvedValue([]) },
   measuredRatio: vi.fn(() => null),
+  // KT-1320 — ProjectCard lists the named connections the audit picker offers.
+  externalApi: { list: vi.fn().mockResolvedValue([]) },
   projects: {
     list: vi.fn().mockResolvedValue([]),
     scan: vi.fn().mockResolvedValue([]),
