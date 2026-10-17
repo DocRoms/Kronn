@@ -161,3 +161,53 @@ async fn warn_mode_accepts_not_verified() {
     assert!(step.warnings.is_empty(), "{:?}", step.warnings);
     assert!(step.success);
 }
+
+/// KT-1306 × KT-1308 — the blame ledger is recorded with the same provenance-aware
+/// analysis as the gate: an unbacked `deps:` row a step left in a document no step
+/// targets is charged to that step, not to nobody.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn an_unbacked_citation_is_charged_to_the_step_that_wrote_it() {
+    let h = harness().await;
+    let (tools, state, project) = (h.tools.path(), &h.state, h.project.path());
+    watch_dependencies(state).await;
+    let chain = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full);
+    let writer = chain
+        .iter()
+        .position(|s| s.target_file == "docs/glossary.md")
+        .unwrap() as u32
+        + 1;
+    let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let attempts = crate::api::audit::anti_hallu_enforce::MAX_ATTEMPTS;
+    let mut targets: Vec<&str> = Vec::new();
+    for (index, step) in chain.iter().enumerate() {
+        let n = if index as u32 + 1 == writer {
+            attempts
+        } else {
+            1
+        };
+        targets.extend(std::iter::repeat_n(step.target_file, n));
+    }
+    arm(tools, "fill", &targets);
+    let root = project.display();
+    super::after_each_step(
+        tools,
+        &format!(
+            "docs/glossary.md) printf '# Extra\\nNode 23.0.0 [src: deps: JS / TS/prettier@{date}]\\n' > '{root}/docs/extra.md' ;;"
+        ),
+    );
+    let run = run_full(state, None).await;
+    let done = sse_events(&run, "done").pop().expect("terminal done");
+    assert_eq!(done["status"], "interrupted", "{run}");
+    let step_done = sse_events(&run, "step_done")
+        .into_iter()
+        .find(|e| e["step"] == writer)
+        .unwrap();
+    assert_eq!(step_done["success"], false, "{run}");
+    let ledger = std::fs::read_to_string(project.join(".kronn/audit/document-blame.json")).unwrap();
+    assert!(
+        ledger.contains("unbacked_provenance") && ledger.contains(&format!("\"step\":{writer}")),
+        "{ledger}"
+    );
+}
