@@ -795,8 +795,8 @@ mod tests {
             ["file not found: src/gone.rs"]
         );
         assert_eq!(
-            reasons("[src: file: src/a.rs:2-4]", root),
-            ["line 4 beyond file length 3"]
+            reasons("[src: file: src/a.rs:2-5]", root),
+            ["line 5 beyond file length 3"]
         );
         assert_eq!(
             reasons("[src: file: src/a.rs]", root),
@@ -808,7 +808,9 @@ mod tests {
     fn the_last_line_passes_and_the_next_one_fails() {
         let tmp = repo();
         assert!(reasons("[src: file: src/a.rs:3]", tmp.path()).is_empty());
-        assert_eq!(reasons("[src: file: src/a.rs:4]", tmp.path()).len(), 1);
+        // Line 4 is the empty line a Read tool shows after the final newline.
+        assert!(reasons("[src: file: src/a.rs:4]", tmp.path()).is_empty());
+        assert_eq!(reasons("[src: file: src/a.rs:5]", tmp.path()).len(), 1);
     }
 
     #[test]

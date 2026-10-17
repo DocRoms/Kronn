@@ -545,6 +545,20 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- The documentary gate no longer refuses what Claude Code's Read tool shows
+  (KT-1322). A newline-terminated file of N lines is numbered up to N+1 there
+  (the last line is empty), and a range ending at N+1 was refused as outside
+  the file; it is now accepted by every range check (the gate, the
+  anti-hallucination verifier, citation drift and the bundle repair), through
+  one shared helper. The gate also stops suggesting what it refuses: a
+  comment after a non-numeric line (`docs/AGENTS.md:Focused on x`) is no
+  longer split into `[src: file: docs/AGENTS.md:Focused]`, an empty file gets
+  no `1-1` range, and a secret-looking file (`.ssh/…`, `.env`) is never
+  offered a range to cite. A parenthesised `(src: file: …)` citation, which
+  nothing verified, is refused with the bracketed form to write; a broken
+  relative link names the path it resolves to and the link that exists
+  (`../tech-debt/TD-1.md` from `docs/` → `tech-debt/TD-1.md`).
+
 - The audit's citation gate now says how to fix a citation (KT-1307). A path
   that only resolves under the docs root or next to the citing doc gets
   « paths are repository-root relative; did you mean `docs/AGENTS.md:94`? »,

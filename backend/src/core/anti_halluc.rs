@@ -1715,13 +1715,31 @@ pub(crate) fn percent_decoded_relative(raw: &str) -> Option<String> {
     (decoded != raw && !decoded.contains('\0') && !rooted).then_some(decoded)
 }
 
-fn count_lines_capped(path: &Path) -> Option<usize> {
+/// The last line a citation may end on. A newline-terminated file of N lines
+/// reads as N+1 numbered lines in an editor or in Claude Code's Read tool (the
+/// last one empty), so a model that copies the number it saw cites N+1: that is
+/// accepted, and it is the one place every range check takes its end bound from.
+pub(crate) fn last_citable_line(content: &str) -> usize {
+    content.lines().count() + usize::from(content.ends_with('\n'))
+}
+
+/// `(real line count, last citable line)` of a file, `None` when it is too big
+/// to bounds-check.
+fn count_lines_capped(path: &Path) -> Option<(usize, usize)> {
     let meta = std::fs::metadata(path).ok()?;
     if meta.len() > LINE_COUNT_SIZE_CAP_BYTES {
         return None; // too big — skip the bounds check, existence is enough
     }
     let content = std::fs::read_to_string(path).ok()?;
-    Some(content.lines().count().max(1))
+    Some((
+        content.lines().count().max(1),
+        last_citable_line(&content).max(1),
+    ))
+}
+
+/// [`last_citable_line`] of a file on disk; 0 when it cannot be read.
+pub(crate) fn last_citable_line_of(path: &Path) -> usize {
+    std::fs::read_to_string(path).map_or(0, |content| last_citable_line(&content))
 }
 
 /// Verify one `[src: …]` marker against the project root.
@@ -1843,8 +1861,8 @@ pub(crate) fn line_bounds_status(
                 SourceStatus::Verified,
                 "file exists (too large to bounds-check lines)".into(),
             ),
-            Some(total) => {
-                if end <= total {
+            Some((total, citable)) => {
+                if end <= citable {
                     (
                         SourceStatus::Verified,
                         format!("lines {}-{} within {} lines", start, end, total),
@@ -3718,8 +3736,13 @@ mod tests {
             verify_source_marker("src/foo.rs:5", Some(&root)).status,
             SourceStatus::Verified
         );
+        // The empty line after the final newline is what editors number N+1.
         assert_eq!(
             verify_source_marker("src/foo.rs:6", Some(&root)).status,
+            SourceStatus::Verified
+        );
+        assert_eq!(
+            verify_source_marker("src/foo.rs:7", Some(&root)).status,
             SourceStatus::OutOfBounds
         );
         // Range
@@ -4351,7 +4374,7 @@ mod tests {
         let cases: &[(&str, SourceStatus)] = &[
             ("`src/foo.rs`:3", SourceStatus::Verified),
             ("`src/foo.rs`:2-4", SourceStatus::Verified),
-            ("`src/foo.rs`:6", SourceStatus::OutOfBounds), // path resolved AND bounds ran
+            ("`src/foo.rs`:7", SourceStatus::OutOfBounds), // path resolved AND bounds ran
             ("`src/foo.rs`", SourceStatus::Verified),
             ("file: `src/foo.rs`:3", SourceStatus::Verified), // file: prefix + backticks combined
             (abs.as_str(), SourceStatus::Verified),           // absolute, backticked, line outside

@@ -23,7 +23,7 @@ pub(crate) mod bridge_env;
 mod claude_adapter;
 mod codex_adapter;
 mod permission_broker;
-mod secret_files;
+pub(crate) mod secret_files;
 
 pub use claude_adapter::ClaudeAcpAdapter;
 pub use codex_adapter::CodexAcpAdapter;
