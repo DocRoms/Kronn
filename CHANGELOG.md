@@ -560,8 +560,12 @@ Release notes for 0.9.3 and earlier are available in the
   (`How to fill`, `Examples (good shape …)`, `{{PLACEHOLDER}}` rows, the v1
   spec file) is left in place instead of copied as team content, copied
   headings nest under the target's own, a plan on the remote base warns about
-  local docs it cannot contain, and the pending-integration refusal carries
-  `error_code: template_merge_pending_integration`.
+  local docs it cannot contain (worded by the UI in the user's language), and
+  the pending-integration refusal carries
+  `error_code: template_merge_pending_integration`. Git failing to tell
+  whether the merge branch is integrated (e.g. a dangling `origin/HEAD`) counts
+  as not integrated: the branch is never deleted by guess and the audit refusal
+  stays.
 - Installing the template, then launching the full audit, is no longer refused
   as "files Kronn did not write" (KT-1299). `POST /install-template` now records
   the folder as Kronn's (`template_installed_at`) unless it already held a

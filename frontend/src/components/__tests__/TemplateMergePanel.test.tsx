@@ -95,11 +95,15 @@ describe('TemplateMergePanel — plan warnings', () => {
   it('shows what a remote-base plan warns about once the merge ran', async () => {
     api.templateMergeStart.mockResolvedValueOnce({
       ...result(),
-      warnings: ['This plan reads the remote default branch, which does not contain 1 local doc(s): docs/a.md.'],
+      warnings: [{ code: 'remote_base_misses_local_docs', paths: ['docs/a.md', 'docs/b.md'], more: 3 }],
     });
     wrap(<TemplateMergePanel projectId="p1" />);
     await launch();
-    expect(await screen.findByTestId('template-merge-warnings')).toHaveTextContent('docs/a.md');
+    const warning = await screen.findByTestId('template-merge-warnings');
+    expect(warning).toHaveTextContent('docs/a.md, docs/b.md');
+    // Worded from the code by the active locale, not by the backend.
+    expect(warning).toHaveTextContent('5 doc(s) locaux');
+    expect(warning).toHaveTextContent('et 3 autre(s)');
   });
 });
 

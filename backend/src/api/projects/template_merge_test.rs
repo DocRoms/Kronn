@@ -530,12 +530,116 @@ fn a_remote_plan_warns_about_local_docs_the_remote_base_lacks() {
     let view = run_merge_in_worktree(root, "Fixture", MergeBase::Remote, &template_docs()).unwrap();
     assert_eq!(view.warnings.len(), 1, "{:?}", view.warnings);
     let warning = &view.warnings[0];
-    assert!(warning.contains("docs/unpushed.md"), "{warning}");
-    assert!(warning.contains("docs/untracked.md"), "{warning}");
-    assert!(warning.contains("add/add"), "{warning}");
+    assert_eq!(warning.code, REMOTE_BASE_MISSES_LOCAL_DOCS);
+    assert_eq!(
+        warning.paths,
+        vec![
+            "docs/unpushed.md".to_string(),
+            "docs/untracked.md".to_string()
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+    );
+    assert_eq!(warning.more, 0);
     // The local base has everything: nothing to warn about.
     assert!(preview_plan(root, &template_docs())
         .unwrap()
         .warnings
         .is_empty());
+}
+
+/// A checkout whose `origin/HEAD` names a default branch that no longer exists.
+/// The bare remote lives in the returned guard.
+fn repo_with_dangling_origin_head() -> (TempDir, TempDir) {
+    let origin = TempDir::new().unwrap();
+    sh_git(origin.path(), &["init", "-q", "--bare", "-b", "main"]);
+    let tmp = documented_git_repo();
+    let root = tmp.path();
+    let origin_url = origin.path().to_string_lossy().to_string();
+    sh_git(root, &["remote", "add", "origin", &origin_url]);
+    sh_git(root, &["push", "-q", "origin", "main"]);
+    sh_git(root, &["fetch", "-q", "origin"]);
+    sh_git(
+        root,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/gone",
+        ],
+    );
+    (tmp, origin)
+}
+
+#[test]
+fn a_dangling_origin_head_never_makes_accepted_commits_look_integrated() {
+    let (tmp, _origin) = repo_with_dangling_origin_head();
+    let root = tmp.path();
+    let started =
+        run_merge_in_worktree(root, "Fixture", MergeBase::Local, &template_docs()).unwrap();
+    let wt = PathBuf::from(started.worktree_path.unwrap());
+    let all: Vec<String> = started.files.iter().map(|f| f.path.clone()).collect();
+    accept_merge(root, &all).unwrap();
+    let tip = sh_git(root, &["rev-parse", docs_merge::MERGE_BRANCH]);
+
+    // The remote default branch is found without origin/HEAD: the count is real.
+    assert_eq!(
+        known_remote_default_ref(root).as_deref(),
+        Some("origin/main")
+    );
+    assert_eq!(merge_state(root).branch_ahead_commits, 1);
+    assert!(audit_launch_refusal(root).is_some());
+
+    // Neither the cleanup (audit launch, merge start) nor a restart drops them.
+    clean_integrated_merge(root);
+    assert!(wt.exists() && branch_exists(root));
+    run_merge_in_worktree(root, "Fixture", MergeBase::Local, &template_docs()).unwrap();
+    assert_eq!(sh_git(root, &["rev-parse", docs_merge::MERGE_BRANCH]), tip);
+}
+
+#[test]
+fn a_git_error_counting_the_merge_branch_means_not_integrated() {
+    let (tmp, _origin) = repo_with_dangling_origin_head();
+    let root = tmp.path();
+    let started =
+        run_merge_in_worktree(root, "Fixture", MergeBase::Local, &template_docs()).unwrap();
+    let wt = PathBuf::from(started.worktree_path.unwrap());
+    let all: Vec<String> = started.files.iter().map(|f| f.path.clone()).collect();
+    accept_merge(root, &all).unwrap();
+    let tip = sh_git(root, &["rev-parse", docs_merge::MERGE_BRANCH]);
+
+    // `git rev-list` fails when HEAD names an unborn branch.
+    sh_git(root, &["symbolic-ref", "HEAD", "refs/heads/unborn"]);
+    assert_eq!(merge_branch_ahead(root), None);
+    assert!(audit_launch_refusal(root).is_some());
+    assert_eq!(merge_state(root).branch_ahead_commits, 1);
+    clean_integrated_merge(root);
+    assert!(wt.exists());
+    sh_git(root, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+    assert_eq!(sh_git(root, &["rev-parse", docs_merge::MERGE_BRANCH]), tip);
+}
+
+#[test]
+fn an_integrated_merge_is_still_cleaned_when_origin_head_dangles() {
+    let (tmp, _origin) = repo_with_dangling_origin_head();
+    let root = tmp.path();
+    let started =
+        run_merge_in_worktree(root, "Fixture", MergeBase::Local, &template_docs()).unwrap();
+    let all: Vec<String> = started.files.iter().map(|f| f.path.clone()).collect();
+    accept_merge(root, &all).unwrap();
+    sh_git(
+        root,
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "merge v2",
+            docs_merge::MERGE_BRANCH,
+        ],
+    );
+    clean_integrated_merge(root);
+    assert!(!branch_exists(root));
+    assert!(audit_launch_refusal(root).is_none());
 }

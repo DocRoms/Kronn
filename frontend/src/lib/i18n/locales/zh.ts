@@ -6472,6 +6472,8 @@ const zh: TranslationDict = {
   "templateMerge.plan.summary": "v2 目录：{0} · 待创建 {1} 个文件 · 已存在 {2} 个（不修改）。",
   "templateMerge.plan.files": "将创建的 v2 文件（{0}）",
   "templateMerge.importedSections": "导入 {0} 个章节",
+  "templateMerge.warning.remote_base_misses_local_docs": "此方案读取远程默认分支，而该分支不包含 {0} 个本地文档（未推送或未跟踪）：{1}。它们不会在此处映射，并可能与本次合并创建的 v2 文件冲突（add/add）。请先推送或提交它们，或改为从本地基线合并。",
+  "templateMerge.warning.more": "另有 {0} 个",
   "templateMerge.unmappedNote": "{0} 个未归类章节：保留原处，需手动放入 v2 文档。",
   "templateMerge.table.source": "来源",
   "templateMerge.table.section": "章节",

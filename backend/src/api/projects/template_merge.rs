@@ -56,6 +56,21 @@ pub struct MergeFileDiff {
     pub diff: String,
 }
 
+/// A plan warning as data: the UI words it in the user's language from `code`.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct TemplateMergeWarning {
+    /// Stable identifier, e.g. `remote_base_misses_local_docs`.
+    pub code: String,
+    /// Paths the warning is about (capped), in a stable order.
+    pub paths: Vec<String>,
+    /// How many more paths there are than `paths` lists.
+    pub more: u32,
+}
+
+/// `TemplateMergeWarning::code` of docs a remote base cannot contain.
+pub(crate) const REMOTE_BASE_MISSES_LOCAL_DOCS: &str = "remote_base_misses_local_docs";
+
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct TemplateMergeView {
@@ -72,7 +87,7 @@ pub struct TemplateMergeView {
     pub untracked_in_checkout: Vec<String>,
     /// Things the reviewer must know before trusting the plan, e.g. local docs
     /// a remote base cannot contain.
-    pub warnings: Vec<String>,
+    pub warnings: Vec<TemplateMergeWarning>,
     pub table_markdown: String,
     pub merge: TemplateMergeState,
 }
@@ -255,6 +270,20 @@ pub fn preview_plan(repo: &Path, template_docs: &Path) -> Result<TemplateMergeVi
 
 /// The remote default branch as last fetched; never fetches.
 fn known_remote_default_ref(repo: &Path) -> Option<String> {
+    let resolves = |candidate: &str| {
+        git(
+            repo,
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("{candidate}^{{commit}}"),
+            ],
+        )
+        .is_ok()
+    };
+    // `origin/HEAD` can dangle (default branch renamed or pruned): it then names
+    // a ref that does not exist, so it is only trusted when it resolves.
     if let Ok(head) = git(
         repo,
         &[
@@ -265,13 +294,13 @@ fn known_remote_default_ref(repo: &Path) -> Option<String> {
         ],
     ) {
         let head = head.trim();
-        if !head.is_empty() {
+        if !head.is_empty() && resolves(head) {
             return Some(head.to_string());
         }
     }
     ["origin/main", "origin/master"]
         .into_iter()
-        .find(|candidate| git(repo, &["rev-parse", "--verify", "--quiet", candidate]).is_ok())
+        .find(|candidate| resolves(candidate))
         .map(str::to_string)
 }
 
@@ -284,7 +313,8 @@ fn remote_default_ref(repo: &Path) -> Result<String, String> {
 
 /// Commits only the merge branch has. The remote default branch is excluded
 /// too: a remote-based merge must not count the upstream commits it started from.
-fn merge_branch_ahead(repo: &Path) -> u32 {
+/// `None` when git cannot tell: callers must then treat the merge as not integrated.
+fn merge_branch_ahead(repo: &Path) -> Option<u32> {
     let branch = format!("refs/heads/{}", docs_merge::MERGE_BRANCH);
     let remote = known_remote_default_ref(repo);
     let mut args = vec!["rev-list", "--count", branch.as_str(), "--not", "HEAD"];
@@ -294,7 +324,11 @@ fn merge_branch_ahead(repo: &Path) -> u32 {
     git(repo, &args)
         .ok()
         .and_then(|out| out.trim().parse().ok())
-        .unwrap_or(0)
+}
+
+/// The merge branch holds, or may hold, commits nothing else contains.
+fn merge_branch_unintegrated(repo: &Path) -> bool {
+    merge_branch_ahead(repo).is_none_or(|ahead| ahead > 0)
 }
 
 fn pending_files(worktree: &Path, configured: Option<&DocsRoot>) -> u32 {
@@ -326,7 +360,8 @@ pub fn merge_state(repo: &Path) -> TemplateMergeState {
     }
     state.branch_exists = branch_exists(repo);
     if state.branch_exists {
-        state.branch_ahead_commits = merge_branch_ahead(repo);
+        // Unknown counts as one: the branch is never reported as integrated by guess.
+        state.branch_ahead_commits = merge_branch_ahead(repo).unwrap_or(1);
     }
     state
 }
@@ -336,7 +371,7 @@ pub(crate) const PENDING_INTEGRATION_CODE: &str = "template_merge_pending_integr
 
 /// Refuse audits of a checkout that does not yet contain accepted template changes.
 pub(crate) fn audit_launch_refusal(repo: &Path) -> Option<serde_json::Value> {
-    (branch_exists(repo) && merge_branch_ahead(repo) > 0).then(|| serde_json::json!({
+    (branch_exists(repo) && merge_branch_unintegrated(repo)).then(|| serde_json::json!({
         "error": format!(
             "Template merge `{}` is pending integration — integrate its accepted commits into this checkout before launching an audit.",
             docs_merge::MERGE_BRANCH,
@@ -351,7 +386,7 @@ pub(crate) fn audit_launch_refusal(repo: &Path) -> Option<serde_json::Value> {
 /// a worktree with proposed or uncommitted files, or a branch some commit of
 /// which neither the checkout nor the remote default branch contains, stays.
 pub(crate) fn clean_integrated_merge(repo: &Path) {
-    if !is_git_repo(repo) || !branch_exists(repo) || merge_branch_ahead(repo) > 0 {
+    if !is_git_repo(repo) || !branch_exists(repo) || merge_branch_unintegrated(repo) {
         return;
     }
     if let Some(worktree) = existing_merge_worktree(repo) {
@@ -561,7 +596,7 @@ pub fn run_merge_in_worktree(
 /// A remote base cannot contain what exists only here: docs committed but not
 /// pushed, or untracked. The merge would not map them, and they would later
 /// collide (add/add) with the v2 files it creates.
-fn unpushed_docs_warnings(repo: &Path) -> Vec<String> {
+fn unpushed_docs_warnings(repo: &Path) -> Vec<TemplateMergeWarning> {
     let mut local_only: BTreeSet<String> = BTreeSet::new();
     if let Some(remote) = known_remote_default_ref(repo) {
         let range = format!("{remote}...HEAD");
@@ -584,20 +619,13 @@ fn unpushed_docs_warnings(repo: &Path) -> Vec<String> {
     if local_only.is_empty() {
         return Vec::new();
     }
-    let shown: Vec<&str> = local_only.iter().take(10).map(String::as_str).collect();
-    let more = local_only.len().saturating_sub(shown.len());
-    vec![format!(
-        "This plan reads the remote default branch, which does not contain {} local doc(s) \
-         (not pushed, or untracked): {}{}. They are not mapped here and may conflict (add/add) \
-         with the v2 files this merge creates. Push or commit them first, or merge from the local base.",
-        local_only.len(),
-        shown.join(", "),
-        if more > 0 {
-            format!(" and {more} more")
-        } else {
-            String::new()
-        },
-    )]
+    let paths: Vec<String> = local_only.iter().take(10).cloned().collect();
+    let more = (local_only.len() - paths.len()) as u32;
+    vec![TemplateMergeWarning {
+        code: REMOTE_BASE_MISSES_LOCAL_DOCS.to_string(),
+        paths,
+        more,
+    }]
 }
 
 /// Commit the accepted files on the merge branch. Unaccepted files stay
