@@ -4190,3 +4190,119 @@ async fn a_workflow_scope_stays_revocable_after_the_workflow_becomes_global() {
         "the pinned run lost it on its next call"
     );
 }
+
+/// KT-1336 — every project for a workflow's runs: read like any validated
+/// entry, write only behind the typed confirmation and the scope seen, and
+/// withdrawn on its own.
+#[tokio::test]
+async fn a_workflow_scope_may_reach_every_project() {
+    let (app, _repos, db) = fixture_with_db().await;
+    let (status, body) = call(
+        &app,
+        "PUT",
+        "/api/workflows/wf-a/scope",
+        None,
+        Some(json!({"entries": [], "all": "read"})),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["data"]["all"], "read", "{body}");
+    assert_eq!(body["data"]["valid"], true, "{body}");
+    pinned_run(&db, "wf-a", "run-all").await;
+    let step = step_of("run-all");
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/planning/tasks/task-b",
+        Some(step.value()),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "every project reads");
+    assert_eq!(
+        edits_task_b(&app, step.value()).await,
+        403,
+        "read is not write"
+    );
+
+    let seen = body["data"]["fingerprint"].as_str().unwrap().to_owned();
+    for (request, expected) in [
+        (json!({"entries": [], "all": "write"}), 400),
+        (
+            json!({"entries": [], "all": "write", "confirm": "yes"}),
+            400,
+        ),
+        (
+            json!({"entries": [], "all": "write", "confirm": "ALL-PROJECTS-WRITE"}),
+            400,
+        ),
+        (
+            json!({"entries": [], "all": "write", "confirm": "ALL-PROJECTS-WRITE", "expected_fingerprint": "stale"}),
+            409,
+        ),
+    ] {
+        let (status, response) = call(
+            &app,
+            "PUT",
+            "/api/workflows/wf-a/scope",
+            None,
+            Some(request.clone()),
+        )
+        .await;
+        assert_eq!(status, expected, "{request}: {response}");
+    }
+    assert_eq!(
+        edits_task_b(&app, step.value()).await,
+        403,
+        "no refused attempt opened anything"
+    );
+    let (status, body) = call(
+        &app,
+        "PUT",
+        "/api/workflows/wf-a/scope",
+        None,
+        Some(json!({"entries": [], "all": "write", "confirm": "ALL-PROJECTS-WRITE", "expected_fingerprint": seen})),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        edits_task_b(&app, step.value()).await,
+        200,
+        "every project, planning write"
+    );
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/api/agent-api/call",
+        Some(step.value()),
+        Some(json!({"api_plugin_slug": "synthetic-api", "api_config_id": "cfg-b", "endpoint_path": "/x"})),
+    )
+    .await;
+    assert_eq!(status, 403, "never another project's credentials");
+
+    let agent = bridge_for("room-a");
+    let (status, _) = call(
+        &app,
+        "PUT",
+        "/api/workflows/wf-a/scope",
+        Some(agent.value()),
+        Some(json!({"entries": [], "all": "read"})),
+    )
+    .await;
+    assert_eq!(status, 403, "a bridge token never sets it");
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/api/workflows/wf-a/scope/revoke",
+        None,
+        Some(json!({"all": true})),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body["data"]["all"].is_null(), "{body}");
+    assert_eq!(
+        edits_task_b(&app, step.value()).await,
+        403,
+        "withdrawn on the next call"
+    );
+}

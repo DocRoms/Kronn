@@ -605,7 +605,7 @@ export type ApiCallStatus = "OK" | "ERROR" | "RateLimited" | "TimedOut";
  * these as plain inputs (no mask). Prompts may reference them symbolically;
  * the broker resolves values server-side when it builds full URLs.
  */
-export type ApiConfigKey = { env_key: string, label: string, placeholder: string, description: string, 
+export type ApiConfigKey = { env_key: string, label: string, placeholder: string, description: string,
 /**
  * The value is not a credential (a base URL, a workspace id): the call
  * keeps it intact in the data it hands on instead of masking it as a
@@ -8112,9 +8112,13 @@ export type RevokeRequest = { authority: string, credential_id: string, reason: 
  */
 export type RevokeWorkflowScopeRequest = {
 /**
- * `None` withdraws every project.
+ * `None` (and `all` false) withdraws everything.
  */
-project_id?: string | null, };
+project_id?: string | null,
+/**
+ * Withdraw only the every-project entry.
+ */
+all?: boolean, };
 
 export type RotateAdminRequest = {
 /**
@@ -8899,7 +8903,19 @@ export type SetupStep = "Agents" | "ScanPaths" | "Detection" | "Complete";
 /**
  * Validate a workflow's scope as it is now; an empty list clears it.
  */
-export type SetWorkflowScopeRequest = { entries: Array<WorkflowScopeItem>, };
+export type SetWorkflowScopeRequest = { entries: Array<WorkflowScopeItem>,
+/**
+ * Every project (KT-1336), read or write.
+ */
+all?: ScopeAccess | null,
+/**
+ * Required for every project in write: [`ALL_PROJECTS_WRITE_CONFIRMATION`].
+ */
+confirm?: string | null,
+/**
+ * The scope fingerprint the human's screen showed.
+ */
+expected_fingerprint?: string | null, };
 
 /**
  * A copy of an agent CLI that PATH order hides behind the one Kronn runs.
@@ -11273,7 +11289,16 @@ export type WorkflowScope = { workflow_id: string,
 /**
  * False for a global or multi-project workflow, which cannot carry one.
  */
-supported: boolean, entries: Array<WorkflowScopeEntry>, valid: boolean, validated_by: string | null, validated_at: string | null, };
+supported: boolean, entries: Array<WorkflowScopeEntry>,
+/**
+ * Every project (KT-1336), besides the named entries.
+ */
+all: ScopeAccess | null,
+/**
+ * Digest of the scope as stored: every project in write names the one
+ * the human saw.
+ */
+fingerprint: string, valid: boolean, validated_by: string | null, validated_at: string | null, };
 
 /**
  * One project a workflow's runs reach.

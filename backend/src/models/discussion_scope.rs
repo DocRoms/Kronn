@@ -205,6 +205,13 @@ pub struct WorkflowScope {
     /// False for a global or multi-project workflow, which cannot carry one.
     pub supported: bool,
     pub entries: Vec<WorkflowScopeEntry>,
+    /// Every project (KT-1336), besides the named entries.
+    #[serde(default)]
+    pub all: Option<ScopeAccess>,
+    /// Digest of the scope as stored: every project in write names the one
+    /// the human saw.
+    #[serde(default)]
+    pub fingerprint: String,
     pub valid: bool,
     pub validated_by: Option<String>,
     pub validated_at: Option<String>,
@@ -222,13 +229,25 @@ pub struct WorkflowScopeItem {
 #[ts(export)]
 pub struct SetWorkflowScopeRequest {
     pub entries: Vec<WorkflowScopeItem>,
+    /// Every project (KT-1336), read or write.
+    #[serde(default)]
+    pub all: Option<ScopeAccess>,
+    /// Required for every project in write: [`ALL_PROJECTS_WRITE_CONFIRMATION`].
+    #[serde(default)]
+    pub confirm: Option<String>,
+    /// The scope fingerprint the human's screen showed.
+    #[serde(default)]
+    pub expected_fingerprint: Option<String>,
 }
 
 /// Withdraw one project from a workflow's scope, or all of it.
 #[derive(Debug, Clone, Deserialize, TS)]
 #[ts(export)]
 pub struct RevokeWorkflowScopeRequest {
-    /// `None` withdraws every project.
+    /// `None` (and `all` false) withdraws everything.
     #[serde(default)]
     pub project_id: Option<String>,
+    /// Withdraw only the every-project entry.
+    #[serde(default)]
+    pub all: bool,
 }
