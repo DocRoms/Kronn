@@ -3,4 +3,10 @@
 # Do not add an ignore without a dated rationale and review deadline. CI runs
 # `cargo audit` (see `.github/workflows/ci-test.yml`).
 [advisories]
-ignore = []
+# 2026-10-17 — RUSTSEC-2026-0367/0368/0369 (zip < 9: SUID/SGID bits kept, symlinks
+# and permissions escaping the destination, all on extraction to disk). Kronn's own
+# dependency is zip 9 (fixed). The remaining zip 8.6 comes only from calamine 0.36.1
+# (reads xlsx entries in memory, never extracts) and from utoipa-swagger-ui 9/10 at
+# build time (unpacks its own bundled Swagger UI archive). Both latest releases still
+# require zip ^8.6. Review by 2026-11-16, or as soon as either moves to zip 9.
+ignore = ["RUSTSEC-2026-0367", "RUSTSEC-2026-0368", "RUSTSEC-2026-0369"]
