@@ -1,6 +1,10 @@
 import type { AcceptAuditStepResponse, ArtifactBundle, AuditLatest, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditRunCost, AuditStepInfo, AuditRecentActivity, AuditTokenBreakdown, EmbedOriginsChange } from '../types/generated';
 import type { BriefingDetectedDoc, BriefingDocsAnswers, BriefingProjectAnswers, BriefingProjectRules, CrossAuditEstimate, LinkedRepoDocStatus, SavedBriefing } from '../types/generated';
 import type { WorkerConnectivity } from '../types/generated';
+import type {
+  DecideScopeRequest, DiscussionProjectGrant, DiscussionScope, GrantDiscussionProjectRequest,
+  RevokeDiscussionProjectRequest, RevokeWorkflowScopeRequest, SetWorkflowScopeRequest, WorkflowScope,
+} from '../types/generated';
 import type { DocProvenanceReport } from '../types/generated';
 import type { TemplateReinstallRequest, TemplateReinstallPlan, TemplateReinstallReport, MergeBase, TemplateMergeAccepted, TemplateMergeAcceptRequest, TemplateMergeRequest, TemplateMergeView } from '../types/generated';
 import { readTextAttachmentPreview } from './textAttachmentPreview';
@@ -2342,6 +2346,40 @@ export const discussions = {
       + (category ? `?category=${encodeURIComponent(category)}` : ''),
   ),
 
+  /** KT-1270 — the projects this room reaches besides its own, the pending
+   *  access requests of its agents, and the journal. */
+  scope: (id: string) => api<DiscussionScope>(
+    'GET',
+    `/discussions/${encodeURIComponent(id)}/scope`,
+  ),
+
+  /** Open a project (or every project) to the room. Every project in write
+   *  needs the typed confirmation and the fingerprint of the scope shown. */
+  grantScope: (id: string, request: GrantDiscussionProjectRequest) => api<DiscussionProjectGrant>(
+    'POST',
+    `/discussions/${encodeURIComponent(id)}/scope/grants`,
+    request,
+  ),
+
+  revokeScope: (id: string, grantId: string, request: RevokeDiscussionProjectRequest) => api<DiscussionScope>(
+    'POST',
+    `/discussions/${encodeURIComponent(id)}/scope/grants/${encodeURIComponent(grantId)}/revoke`,
+    request,
+  ),
+
+  /** Approve an agent's request, at most at the access it asked for. */
+  approveScopeRequest: (id: string, requestId: string, request: DecideScopeRequest) => api<DiscussionScope>(
+    'POST',
+    `/discussions/${encodeURIComponent(id)}/scope/requests/${encodeURIComponent(requestId)}/approve`,
+    request,
+  ),
+
+  declineScopeRequest: (id: string, requestId: string, request: DecideScopeRequest) => api<DiscussionScope>(
+    'POST',
+    `/discussions/${encodeURIComponent(id)}/scope/requests/${encodeURIComponent(requestId)}/decline`,
+    request,
+  ),
+
   /** KT-595 — the arbitration questions of a discussion, pending and past.
    *  Polled, so the backend checks the room exists without loading its
    *  transcript. */
@@ -2697,6 +2735,14 @@ export const workflows = {
   unsafeSteps: (id: string) => api<UnsafeExecStep[]>('GET', `/workflows/${id}/unsafe-steps`),
   /** KT-1138 — whether the saved workflow, its sub-workflows and rollbacks can start. */
   readiness: (id: string) => api<WorkflowReadiness>('GET', `/workflows/${id}/readiness`),
+  /** KT-1270 — the projects this workflow's runs reach, and whether the human
+   *  validation still holds (any change to the workflow suspends it). */
+  scope: (id: string) => api<WorkflowScope>('GET', `/workflows/${encodeURIComponent(id)}/scope`),
+  setScope: (id: string, request: SetWorkflowScopeRequest) =>
+    api<WorkflowScope>('PUT', `/workflows/${encodeURIComponent(id)}/scope`, request),
+  /** Withdraw one project (or all, `project_id: null`); always available. */
+  revokeScope: (id: string, request: RevokeWorkflowScopeRequest) =>
+    api<WorkflowScope>('POST', `/workflows/${encodeURIComponent(id)}/scope/revoke`, request),
   /** KT-1017 — whether a command line sends run values to an unmodelled program. */
   execLineCheck: (req: ExecLineCheckRequest) => api<ExecLineCheck>('POST', '/exec/line-check', req),
   /** KT-918 — where each declared script file stands against its approved hash. */

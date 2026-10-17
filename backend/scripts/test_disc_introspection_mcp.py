@@ -11950,12 +11950,16 @@ class JoinedRoomWorkProtocolTests(unittest.TestCase):
                     start = instructions.index(bullet)
                     self.assertLessEqual(start + len(bullet), limit)
 
-    def test_first_contact_is_appended_after_the_critical_guidance(self):
+    def test_first_contact_offer_follows_the_card_inside_the_client_cut(self):
         first = self._initialize_instructions(False)
         onboarded = self._initialize_instructions(True)
-        self.assertTrue(first.startswith(onboarded))
-        self.assertGreater(first.index("FIRST CONTACT"), self.mod.HUMAN_DECISION_CARD_BULLET.__len__())
+        bullet = self.mod.HUMAN_DECISION_CARD_BULLET
         self.assertNotIn("FIRST CONTACT", onboarded)
+        self.assertGreater(first.index("FIRST CONTACT"), first.index(bullet) + len(bullet) - 1)
+        seen = first[: self.CLIENT_INSTRUCTIONS_LIMIT]
+        self.assertIn("FIRST CONTACT", seen)
+        self.assertIn("`kronn_intro`", seen)
+        self.assertEqual(first.count("FIRST CONTACT"), 1)
 
     def test_step_tools_session_learns_the_card_only_when_it_can_post(self):
         initialize = {"jsonrpc": "2.0", "id": 3, "method": "initialize", "params": {}}

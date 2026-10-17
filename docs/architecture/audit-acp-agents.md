@@ -21,7 +21,7 @@ An environment file named like a template — `.env.dist`, `.env.example`,
 purpose. A real one (`.env`, `.env.local`, `.envrc`, `prod.env`) or a key file
 (`*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`, anything under `.ssh/` or `.aws/`)
 does not. The rule is one function, `is_secret_file`
-[src: file: backend/src/acp/secret_files.rs:51-79#is_secret_file].
+[src: file: backend/src/acp/secret_files.rs:51-86#is_secret_file].
 
 It is applied twice, because the two kinds of runtime are not alike.
 
@@ -44,7 +44,7 @@ asked. Kronn starts `opencode acp` with an inline configuration
 - `permission.read` denies `*.env` and `*.env.*`, then allows the four template
   suffixes (`*.env.<suffix>` and `*.env.*.<suffix>`). OpenCode honours the last
   matching rule, in the order written, so the allows follow the deny — a test
-  pins that order [src: file: backend/src/acp/secret_files.rs:232-266#the_opencode_config_denies_real_env_files_and_allows_templates_in_that_order]. A denial is not a
+  pins that order [src: file: backend/src/acp/secret_files.rs:247-281#the_opencode_config_denies_real_env_files_and_allows_templates_in_that_order]. A denial is not a
   question put to Kronn: OpenCode hands its model an error as the tool's answer
   and the turn goes on.
 - `experimental.continue_loop_on_deny` is `true`, so a refusal the broker does
@@ -84,14 +84,14 @@ Now an ACP agent is stopped like an HTTP agent (KT-924), through a token:
 2. `cancel_audit` trips the token. The ACP session writes `session/cancel`
    (bounded to five seconds, so a wedged agent cannot hold the stop hostage),
    drops the turn, and shuts the agent's process down
-   [src: file: backend/src/agents/runner.rs:5246-5248#ACP_CANCEL_GRACE] [src: file: backend/src/agents/runner.rs:5698-5717#task_cancel] [src: file: backend/src/agents/runner.rs:5772-5778#shutdown].
+   [src: file: backend/src/agents/runner.rs:5269-5271#ACP_CANCEL_GRACE] [src: file: backend/src/agents/runner.rs:5721-5740#task_cancel] [src: file: backend/src/agents/runner.rs:5795-5801#shutdown].
 3. The process is started as its own process group, and shutdown kills the
    group, so what the agent started — a shell command, an MCP server — stops
    with it [src: file: backend/src/acp.rs:991-995#process_group] [src: file: backend/src/acp.rs:780-793#kill_process_group] [src: file: backend/src/acp.rs:1795-1803#shutdown].
 4. The pipeline waits on the lifeline, which exits only after that shutdown, so
    the audit is finalised as `Cancelled` once the agent is really gone. This is
    also why the lifeline's PID is **not** killed: doing it ended the wait early
-   [src: file: backend/src/agents/runner.rs:5780-5783#lifeline_stdin].
+   [src: file: backend/src/agents/runner.rs:5803-5806#lifeline_stdin].
 
 The partial audit now checks the stop between two steps and after each step's
 agent, finalises the run as `Cancelled` and releases the project lease, like the
@@ -145,7 +145,7 @@ not before.
 - **Where the cost comes from.** Only what a runtime reports itself: Claude
   Code's `total_cost_usd` (its stream-json `result` line, or the adapter's
   `Cost` event) and OpenRouter's `usage.cost`, summed per response
-  [src: file: backend/src/agents/chat_codec.rs:151-160#cost_usd_micros] [src: file: backend/src/agents/runner.rs:14051-14057#total_cost_usd] [src: file: backend/src/agents/runner.rs:5673-5675#usd_micros] [src: file: backend/src/agents/runner.rs:9824-9830#cost_usd_micros].
+  [src: file: backend/src/agents/chat_codec.rs:151-160#cost_usd_micros] [src: file: backend/src/agents/runner.rs:14074-14080#total_cost_usd] [src: file: backend/src/agents/runner.rs:5696-5698#usd_micros] [src: file: backend/src/agents/runner.rs:9847-9853#cost_usd_micros].
   The recorded cost is never recomputed from a rate table; a finished step
   whose agent reported none is priced on read by `core::pricing` for the served
   model and shown as an estimate, never as a reported cost

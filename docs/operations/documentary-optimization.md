@@ -26,9 +26,13 @@ Diagnostics cover
 budget overruns, unresolved placeholders, broken local links and file
 citations, duplicate or obsolete guides, orphan documents, large inventories
 that are not search-first, and mutable citation line ranges; only broken links
-and broken citations are blocking, the others are warnings. A Stack table
+and broken citations are blocking, the others are warnings. A citation may end
+on the empty line N+1 of a newline-terminated file (what an editor numbers,
+but never start there),
+a parenthesised `(src: file: …)` is refused (only the bracketed marker is
+verified), and every path or range the gate suggests is one it accepts. A Stack table
 row without its `Latest stable` or `Support end` source and date (or
 `not verified: no source`) raises the non-blocking `stack_currency` warning.
-[src: file: backend/src/core/document_optimization.rs:1087-1102#inspect_stack_currency]
-[src: file: backend/src/core/document_optimization.rs:1121-1193#stack_currency_problems]
-[src: file: backend/src/core/document_optimization.rs:1195-1212#diag]
+[src: file: backend/src/core/document_optimization.rs:1248-1263#inspect_stack_currency]
+[src: file: backend/src/core/document_optimization.rs:1282-1354#stack_currency_problems]
+[src: file: backend/src/core/document_optimization.rs:1356-1373#diag]

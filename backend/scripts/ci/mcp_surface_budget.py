@@ -127,7 +127,12 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # (the contract stays in `tool_manual disc_question_list`); paid for by
 # tightening its alias sentence and four schema descriptions, ceiling lowered
 # by 11 B (84_966 -> 84_955) and the heaviest declaration by 11 B.
-CATALOGUE_MAX_BYTES = 84_955
+# KT-1270: `room_scope` (a room's project reach, and the human-decided request
+# for more) was paid for by moving the retry-key detail of `task_create` and
+# the `time.now` grammar of `qa_create_draft` into their manuals, which already
+# carried or now carry them; the catalogue nets 37 B less (84_966 -> 84_929).
+# Pinned to the payload measured on the tree merging both (84_918 B).
+CATALOGUE_MAX_BYTES = 84_918
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is

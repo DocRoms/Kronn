@@ -4777,8 +4777,31 @@ fn mint_launch_bridge_token(
             discussion_ids.push(id.to_owned());
         }
     }
+    // A step or a worker posts in a room without being its agent: a room's
+    // grants never reach it (KT-1270).
+    let room_grant_discussions =
+        if config.workflow_step_context.is_some() || config.task_worker_context.is_some() {
+            Vec::new()
+        } else {
+            let mut rooms: Vec<String> = Vec::new();
+            for id in [
+                config.discussion_id,
+                config
+                    .room_agent_context
+                    .map(|context| context.discussion_id.as_str()),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if !rooms.iter().any(|known| known == id) {
+                    rooms.push(id.to_owned());
+                }
+            }
+            rooms
+        };
     crate::core::bridge_token::mint(crate::core::bridge_token::BridgeScope {
         discussion_ids,
+        room_grant_discussions,
         task_execution_id: config
             .task_worker_context
             .map(|context| context.execution_id.clone()),
