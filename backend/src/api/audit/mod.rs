@@ -1944,6 +1944,27 @@ mod prompt_tests {
     }
 
     #[test]
+    fn docs_agents_md_template_teaches_the_human_decision_card() {
+        // KT-1329 — colleagues' agents never asked for an arbitration because
+        // nothing they read at project level mentioned the card.
+        let tpl_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .join("templates/docs/AGENTS.md");
+        let body = std::fs::read_to_string(&tpl_path)
+            .unwrap_or_else(|e| panic!("read template {}: {e}", tpl_path.display()));
+        for needle in [
+            "**Human decision**",
+            "`kronn-question` fence",
+            "`disc_append`",
+            "\"version\":1",
+            "`disc_question_list`",
+        ] {
+            assert!(body.contains(needle), "template must carry {needle}");
+        }
+    }
+
+    #[test]
     fn docs_agents_md_template_states_project_parameters_and_language_preservation() {
         // KT-843 DoD #3 — docs/tickets language, the comment→ticket
         // policy, and the test policy are project parameters (set once

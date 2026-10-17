@@ -28,6 +28,17 @@ fence and JSON field types, then republish the corrected payload with the same
 key. An absent row is neither a pending nor an answered decision, and never
 permits execution of the affected lot.
 
+**Where agents learn the card (KT-1329).** Claude Code truncates MCP
+`instructions` at 2,048 characters, so the card bullet
+(`HUMAN_DECISION_CARD_BULLET`) is self-contained and sits right after the intro
+line; on a first session a compact FIRST CONTACT line (pointing to `kronn_intro`) follows it. A `--step-tools` session receives it only
+when it declares `disc_append`. A spawned task worker has no way to post a card
+and is told to hand the blocker to its principal. The card is also named in the
+`disc_append` description, the `disc_join` next steps, the native discussion
+prompt and the project `docs/AGENTS.md` template. The Python test
+`test_decision_card_survives_the_2048_char_client_cut` pins the cut.
+`[src: file: backend/scripts/disc-introspection-mcp.py:9903-9910#HUMAN_DECISION_CARD_BULLET]`
+
 The stable `key` is unique within the room. Repeating it preserves one immutable
 card, not a second card or a silent change behind an already-open human form.
 Use a new key for a genuinely different question. Valid closed fences are

@@ -31,7 +31,7 @@ another room must not silently become a native-provider dispatch. Addressed
 turns require reading; `awareness` is background context. An append receipt
 never substitutes for the durable read cursor.
 [src: file: backend/src/api/disc_invite.rs:676-707#attention_required]
-[src: file: backend/src/api/disc_invite.rs:7494-7515#join_protocol_reports_each_step_and_preserves_wait_ownership]
+[src: file: backend/src/api/disc_invite.rs:7518-7539#join_protocol_reports_each_step_and_preserves_wait_ownership]
 
 A host may move a tool call to the background. That call remains owned and
 must reach a terminal result before another wait starts. A queued MCP request
