@@ -33,7 +33,7 @@ by a human (KT-1131). An accepted step keeps its failure on record:
 `cli_success` stays false and `step_warning` keeps the reason. It gains
 `accepted_at`, `accepted_by` and `accepted_reason`.
 
-- Done steps, as a resume reads them. [src: file: backend/src/api/audit/full.rs:3928-3950#already_succeeded_step_indices]
+- Done steps, as a resume reads them. [src: file: backend/src/api/audit/full.rs:3937-3959#already_succeeded_step_indices]
 - Per-run outcomes keep `succeeded`, `unchanged`, `accepted` and `failed` apart. [src: file: backend/src/api/audit/full.rs:3641-3659#RunProgress]
 
 ## Recovering from failed steps
@@ -224,7 +224,7 @@ sections.
   sections after the terminal commit; failed sections keep their previous
   fingerprints. Revalidation retains its explicit human acknowledgement for
   unchanged citations.
-  [src: file: backend/src/api/audit/drift.rs:1862-1885#citation_docs]
+  [src: file: backend/src/api/audit/drift.rs:1867-1890#citation_docs]
 - **« Vérifié, inchangé ».**
   `POST /api/projects/{id}/drift/acknowledge` refreshes the named sections'
   baseline mappings, and their citation fingerprints when recorded. It runs

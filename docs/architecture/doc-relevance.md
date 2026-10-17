@@ -21,7 +21,7 @@ Every section (heading to next heading, fenced code excluded, a heading with
 nothing under it skipped) is judged from its anchors: its `[src: file: …]`
 citations, read through the fingerprint report, and the repository paths its
 prose names in backticks.
-[src: file: backend/src/core/doc_relevance.rs:929#judge]
+[src: file: backend/src/core/doc_relevance.rs:995#judge]
 
 | Verdict | Meaning |
 |---|---|
@@ -30,7 +30,7 @@ prose names in backticks.
 | `no_longer_relevant` | every anchor points at a file that is gone |
 | `unanchored` | no citation and no path: Kronn cannot measure it |
 
-[src: file: backend/src/core/doc_relevance.rs:53#SectionVerdict]
+[src: file: backend/src/core/doc_relevance.rs:54#SectionVerdict]
 
 `anchors_intact` means Kronn found no contradiction, **not** that the prose
 was proven true: the agent pass settles substance. For that reason every
@@ -91,7 +91,13 @@ It is not a claim at all when it sits in:
 - a section whose heading is a proposal as a whole or by a proposal phrase
   (« Ideas », « Roadmap », « Future work », « Suggested direction », « TODO
   list »). A single word inside a real title (« Ma Todo », « Workflow
-  suggestions ») does not make one;
+  suggestions ») does not make one. A TD sheet's « Remediation », « Fix » or
+  « Next steps » heading is one, and so is a line that opens with such a
+  label (`- **Remediation**: …`, `- **Suggested fix**: …`; when the label
+  closes the line, the text under it up to the next blank line, heading or
+  sibling item): they name files still to be created (KT-1313). A section left
+  with nothing else to verify is listed as unanchored and says so in its
+  correction;
 - a naming pattern (`TD-YYYYMMDD-slug.md`);
 - a doc still holding the template's raw `{{PLACEHOLDER}}` slots;
 - a changelog, release-notes, history or archive doc, which relevance does not
@@ -124,7 +130,7 @@ accepts them all.
   (`anchored_intact_pct`), and `untouched_stale`: outdated or no-longer-relevant
   sections whose own digest equals the one recorded at validation, i.e.
   nobody revised them although the code they describe changed.
-  [src: file: backend/src/core/doc_relevance.rs:122#RelevanceCounts]
+  [src: file: backend/src/core/doc_relevance.rs:123#RelevanceCounts]
 - The same input gives the same output; the check never calls a model.
 
 ## Where it surfaces
@@ -141,7 +147,7 @@ accepts them all.
   counted apart in `missing_paths`, so `broken_citations` stays a count of
   citations.
   [src: file: backend/src/core/checksums.rs:844#check_drift]
-  [src: file: backend/src/core/doc_relevance.rs:172#escalate]
+  [src: file: backend/src/core/doc_relevance.rs:173#escalate]
 - **Validation state**: a human-validated doc whose prose names a vanished path
   stops counting as human-validated for learning sources, like one with a
   broken citation, whether or not the caller passes a citation report.
@@ -153,4 +159,4 @@ accepts them all.
 
 A citation the git diff maps to a new line past the fingerprint window is
 treated as moved, exactly as the plan re-anchors it.
-[src: file: backend/src/core/doc_relevance.rs:1056#analyze_with_moves]
+[src: file: backend/src/core/doc_relevance.rs:1126#analyze_with_moves]

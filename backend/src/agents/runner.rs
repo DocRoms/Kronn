@@ -14110,6 +14110,14 @@ pub fn parse_claude_stream_line(line: &str) -> StreamJsonEvent {
     }
 }
 
+/// Whether a Claude stream-json line is the final `result` line, whose usage is
+/// the whole run's, as opposed to one turn's.
+pub fn is_claude_result_line(line: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(line.trim())
+        .ok()
+        .is_some_and(|json| json.get("type").and_then(|v| v.as_str()) == Some("result"))
+}
+
 /// Remove literal `<thinking>` / `</thinking>` tags from a text delta.
 ///
 /// When Claude Opus runs with extended thinking enabled, the internal

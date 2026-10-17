@@ -314,7 +314,7 @@ A hosted HTTP agent (NVIDIA, a Custom endpoint) receives the repository content 
 audit reads, so choosing one is choosing what leaves the machine.
 
 **How an audit step reaches the project.** Both pipelines start the step's agent
-through one launcher [src: file: backend/src/api/audit/agent_launch.rs:253-308#start]. A CLI
+through one launcher [src: file: backend/src/api/audit/agent_launch.rs:290-345#start]. A CLI
 agent is spawned exactly as before. An HTTP agent gets a
 `KronnToolExecutor::audit_arc_for_step`, scoped to the project directory the pipeline
 already resolved (`resolve_host_path`, so it is right inside a container) rather

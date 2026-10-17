@@ -104,7 +104,7 @@ and existing TD files and human sections remain protected (KT-956).
 A failed provider launch finalizes the step with its error and elapsed time.
 If a corrective attempt had already consumed tokens, that usage remains in the
 persisted step and its terminal SSE event; an unmeasured launch stays unknown.
-[src: file: backend/src/api/audit/full.rs:2646-2693#previous_attempt_usage]
+[src: file: backend/src/api/audit/full.rs:2659-2706#previous_attempt_usage]
 
 A provider error during a step also survives in its persisted warning and SSE
 recap. HTTP status 429 is identified as a rate limit or exhausted quota, not as
@@ -122,7 +122,7 @@ actual files, including runs made before this fix. Auxiliary documents with no
 durable writer attribution are explicitly assigned to the founding step's
 repair prompt. A corrected reference establishes existence, not factual truth.
 [src: file: backend/src/api/audit/document_repair.rs:26-52#recovery_plan]
-[src: file: backend/src/db/audit_runs.rs:1423-1441#invalidate_documentary_steps]
+[src: file: backend/src/db/audit_runs.rs:1441-1459#invalidate_documentary_steps]
 
 A `TypedSchema` step sends its envelope schema as `response_format` with
 `strict: false` on the OpenAI wire: the envelope does not satisfy OpenAI's

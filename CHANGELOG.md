@@ -574,6 +574,18 @@ Release notes for 0.9.3 and earlier are available in the
   (or a hand-crafted `.kronn.json` entry) is theirs again, counted by the gate
   and moved on the choice. The install refuses a corrupt `.kronn.json` before
   writing anything, and records a renamed template file under its new path.
+- Revalidation no longer reads a remediation proposal as a claim (KT-1313). A
+  TD sheet's `Remediation` / `Fix` / `Next steps` section, or a
+  `- **Remediation**:` / `- **Suggested fix**:` line (and the text under a
+  label that closes its line), names files still to be created: they are no
+  longer judged by whether they exist, so `helpers/lib/plugin-factory.js`
+  does not turn its sheet `no_longer_relevant`. A section left with nothing
+  else to verify says why in its proposed correction.
+- A stopped audit step keeps what it consumed (KT-1313). Its tokens join the
+  run's tally and its reported cost is recorded (both pipelines); a Claude
+  step's turns are summed as they arrive instead of keeping only the largest,
+  the final `result` line replacing the sum; and `total_tokens_so_far` never
+  goes down (it read 630, 877, then 346).
 - The default-root audit golden no longer depends on the day it is run
   (KT-1317). The name of a `validated-originals/<hash>.bak` file is the hash
   of bytes holding the audit date; the golden now names it by the hash of the
