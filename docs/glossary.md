@@ -88,7 +88,7 @@ Project-specific terms. For deep dives, follow the linked `docs/architecture/` f
 
 **customized_contexts** — `Vec<String>` of `"slug:projectId"` pairs in `McpOverview` where the context file has been customized (not default template). Used by frontend to color FileText icons.
 
-**AgentType** — Enum: `ClaudeCode`, `Codex`, `OpenCode`, `Vibe`, `GeminiCli`, `Kiro`, `CopilotCli`, `Ollama`, `LiteLlm`, `Nvidia`, `Custom`. Determines which CLI/HTTP runtime to spawn. `DeepSeek` planned. Kiro uses `--trust-all-tools` (mandatory in `--no-interactive` mode, but not passed to a task worker) and `--wrap never` for clean output. `[src: file: backend/src/models/setup.rs:979-1019#AgentType]` `[src: file: backend/src/agents/runner.rs:13079-13088#Kiro]`
+**AgentType** — Enum: `ClaudeCode`, `Codex`, `OpenCode`, `Vibe`, `GeminiCli`, `Kiro`, `CopilotCli`, `Ollama`, `LiteLlm`, `Nvidia`, `Custom`. Determines which CLI/HTTP runtime to spawn. `DeepSeek` planned. Kiro uses `--trust-all-tools` (mandatory in `--no-interactive` mode, but not passed to a task worker) and `--wrap never` for clean output. `[src: file: backend/src/models/setup.rs:979-1019#AgentType]` `[src: file: backend/src/agents/runner.rs:13102-13111#Kiro]`
 
 **scan_depth** — Configurable depth for git repository scanning (2–10, default 4). Stored in `ScanConfig.scan_depth` in config.toml. Adjustable via UI slider in Config page. API: `GET/POST /api/config/scan-depth`.
 
