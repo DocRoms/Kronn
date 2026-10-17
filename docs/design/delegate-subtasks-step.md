@@ -49,7 +49,7 @@ drives a task execution (0.15.0 adds `DelegateSubtasks`).
   checked out (or by moving the ref when no worktree has it), refusing a dirty
   checkout, and sends a conflict back to the worker.
   `[src: file: backend/src/api/orchestration.rs:2690-2948#run_integration]`
-  `[src: file: backend/src/core/worktree.rs:2021-2043#IntegrationTarget]`
+  `[src: file: backend/src/core/worktree.rs:2034-2056#IntegrationTarget]`
 - **Workflow side.** `on_result` routes on a `[SIGNAL: X]` line among the last
   five of the step output; an Agent step can join a room through `room_id`
   (KT-793); `SubWorkflow` foreach records durable per-item markers.
