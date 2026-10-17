@@ -13,6 +13,13 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- A workflow's project scope can open every project (KT-1336): read, or
+  planning write behind the same typed confirmation as a room, shown in red on
+  the workflow page and the launch card, pinned to the validated revision and
+  withdrawn on its own. The scope editor is redone: every project in one
+  searchable view with a None / Read / Write picker, the projects already
+  opened first, and one « Validate the scope » action.
+
 - A merge no longer bounces on doc citation line anchors (KT-1321). The
   integration merge, and the merge a worker finishes through `task_exec_commit`,
   stop before the merge commit: a doc conflict that differs only by the line
