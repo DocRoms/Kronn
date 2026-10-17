@@ -912,7 +912,10 @@ export function ProjectCard({
         redo_steps: resumeRunId && options.redoSteps ? options.redoSteps : undefined,
         // KT-1169 — the confirmed choice to replay the whole audit.
         fresh: options.fresh ? true : undefined,
-        connection_id: (onRun ? selectedAuditConnectionId : auditConnectionId) ?? undefined,
+        // The run's own connection is the server's to inherit (it falls back to
+        // the agent's default if that connection was deleted since); only a
+        // connection the human picked is sent.
+        connection_id: (onRun ? (launchFromRun ? null : selectedAuditConnectionId) : auditConnectionId) ?? undefined,
       }, {
         onTemplateInstalled: () => {},
         // 0.8.3 TD #274 — backend-authoritative wallclock for the

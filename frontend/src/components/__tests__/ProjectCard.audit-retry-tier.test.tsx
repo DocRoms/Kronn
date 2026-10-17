@@ -125,6 +125,30 @@ describe('ProjectCard — KT-1320 a retry runs on the tier of the run it continu
     expect(launches()[0]).toMatchObject({ resume_run_id: 'run-x', tier: 'reasoning' });
   });
 
+  it("an untouched picker leaves the run's connection to the server (it may have been deleted)", async () => {
+    vi.mocked(projectsApi.auditResumable).mockResolvedValue({ ...RESUMABLE, connection_id: 'conn-gone' });
+    const { container } = renderCard();
+    await openGroups(container);
+    await screen.findByTestId('audit-timeline-selection-from-run');
+    await act(async () => { fireEvent.click(await screen.findByTestId('audit-timeline-step-retry-3')); });
+    await waitFor(() => expect(launches()).toHaveLength(1));
+    expect(launches()[0]).toMatchObject({ resume_run_id: 'run-x', tier: 'economy' });
+    expect(launches()[0].connection_id).toBeUndefined();
+  });
+
+  it("a touched picker sends its connection, which the server still recognises as the run's own", async () => {
+    vi.mocked(projectsApi.auditResumable).mockResolvedValue({ ...RESUMABLE, connection_id: 'conn-gone' });
+    const { container } = renderCard();
+    await openGroups(container);
+    await screen.findByTestId('audit-timeline-selection-from-run');
+    fireEvent.click(container.querySelectorAll<HTMLElement>('.audit-tl-tier')[0]);
+    await waitFor(() => expect(screen.queryByTestId('audit-timeline-selection-from-run')).toBeNull());
+    await act(async () => { fireEvent.click(await screen.findByTestId('audit-timeline-step-retry-3')); });
+    await waitFor(() => expect(launches()).toHaveLength(1));
+    // The panel seeded the picker with the run's connection: it is sent as picked.
+    expect(launches()[0]).toMatchObject({ tier: 'reasoning', connection_id: 'conn-gone' });
+  });
+
   it("a run that kept no tier leaves the picker's choice", async () => {
     vi.mocked(projectsApi.auditResumable).mockResolvedValue({ ...RESUMABLE, tier: undefined });
     renderCard();

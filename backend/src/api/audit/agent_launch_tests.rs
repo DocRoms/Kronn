@@ -2053,6 +2053,19 @@ async fn version_source_inputs_read_the_mcp_config_the_agent_is_handed() {
 #[cfg(unix)]
 #[tokio::test]
 async fn a_resume_whose_connection_was_deleted_falls_back_with_a_visible_note() {
+    resume_after_the_run_connection_was_deleted(None).await;
+}
+
+/// KT-1320 — the UI echoes the run's connection id back on a resume with an
+/// untouched picker: the server still recognises it as the run's own choice.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_resume_echoing_the_deleted_connection_of_its_run_falls_back_too() {
+    resume_after_the_run_connection_was_deleted(Some("deleted-conn")).await;
+}
+
+#[cfg(unix)]
+async fn resume_after_the_run_connection_was_deleted(requested_connection: Option<&str>) {
     use axum::response::IntoResponse;
     let tools = tempfile::tempdir().unwrap();
     let (fixture, _log) = recording_claude(tools.path());
@@ -2107,7 +2120,7 @@ async fn a_resume_whose_connection_was_deleted_falls_back_with_a_visible_note() 
         axum::extract::Path(PROJECT_ID.to_string()),
         axum::Json(crate::models::LaunchAuditRequest {
             agent: AgentType::ClaudeCode,
-            connection_id: None,
+            connection_id: requested_connection.map(str::to_string),
             tier: None,
             kind: None,
             custom_prompt: None,

@@ -4128,7 +4128,8 @@ pub(crate) fn rewrite_proof_verdict(
 /// choice, else the run it resumes (KT-1320), else the historical audit default
 /// (Reasoning, no connection). A resume that names nothing keeps what the run
 /// had, so a retry of an economy audit never drifts to the costliest tier. The
-/// third value says the connection comes from the run, not from the request.
+/// third value says the connection is the run's own (inherited, or echoed back
+/// by the client), so a deleted one may fall back to the agent's default.
 pub(crate) fn launch_footing(
     req: &crate::models::LaunchAuditRequest,
     resumed: Option<&crate::models::AuditRun>,
@@ -4140,13 +4141,17 @@ pub(crate) fn launch_footing(
         .tier
         .or(recorded_tier)
         .unwrap_or(crate::models::ModelTier::Reasoning);
-    if let Some(connection) = req.connection_id.clone() {
-        return (tier, Some(connection), false);
-    }
     // A connection belongs to its agent: another agent does not inherit it.
     let inherited = resumed
         .filter(|run| run.agent_type == format!("{:?}", req.agent))
         .and_then(|run| run.connection_id.clone());
+    if let Some(connection) = req.connection_id.clone() {
+        // A client echoing the run's own connection back (the UI does when its
+        // picker is untouched) is still the run's choice: if it was deleted
+        // since, the fallback applies instead of a refusal.
+        let echoes_run = inherited.as_deref() == Some(connection.as_str());
+        return (tier, Some(connection), echoes_run);
+    }
     let from_run = inherited.is_some();
     (tier, inherited, from_run)
 }
@@ -5239,6 +5244,28 @@ mod resume_resolution_tests {
             super::launch_footing(&other_conn, Some(&http)).1.as_deref(),
             Some("conn-b")
         );
+    }
+
+    #[test]
+    fn a_connection_echoed_from_the_run_counts_as_the_run_s_own() {
+        let mut http = run("Full", "Interrupted", "p1", 4);
+        http.agent_type = "LiteLlm".into();
+        http.connection_id = Some("conn-a".into());
+        let echoed = request("LiteLlm", None, Some("conn-a"));
+        assert_eq!(
+            super::launch_footing(&echoed, Some(&http)),
+            (
+                crate::models::ModelTier::Reasoning,
+                Some("conn-a".into()),
+                true
+            )
+        );
+        // A different connection named by the human stays theirs (validated, not replaced).
+        let other = request("LiteLlm", None, Some("conn-b"));
+        assert!(!super::launch_footing(&other, Some(&http)).2);
+        // The same id on another agent is not the run's choice either.
+        let other_agent = request("ClaudeCode", None, Some("conn-a"));
+        assert!(!super::launch_footing(&other_agent, Some(&http)).2);
     }
 
     #[test]

@@ -553,7 +553,9 @@ Release notes for 0.9.3 and earlier are available in the
   tier it will use, until the human picks another. A resume request that names
   no tier takes the run's, not Reasoning.
   A connection is inherited only by the same agent; if the run's connection
-  was deleted since, the agent's default takes over and a warning says so. A
+  was deleted since, the agent's default takes over and a warning says so,
+  also when the client echoes that connection id back (the UI leaves it to the
+  server while its picker is untouched). A
   partial or fresh audit runs on the picker's choice, and a pick is forgotten
   when the project or the run to continue changes.
 - A finding that a file exists or is tracked can be cited without a line
