@@ -17,10 +17,14 @@ Release notes for 0.9.3 and earlier are available in the
   integration merge, and the merge a worker finishes through `task_exec_commit`,
   stop before the merge commit: a doc conflict that differs only by the line
   numbers of `[src: file: …]` markers is resolved to the target's text, then
-  every citation the merged tree left broken is re-anchored by mapping its
-  lines from the side it was written against to the merged file (the `#symbol`
-  must lie in the new range; the nearest occurrence to the mapped position
-  settles a changed range). Both land in the signed merge commit. Any other
+  every citation to a changed file the merged tree left broken is re-anchored
+  by mapping its lines from the side it was written against to the merged file
+  (the `#symbol` must lie in the new range; the nearest occurrence to the
+  mapped position, within 20 lines and with no tie, settles a changed range;
+  otherwise the merge bounces on the doc). Only `docs/` and `backend/docs/`
+  are touched, from the merged index: a doc to rewrite, or a cited file, with
+  unstaged work makes the merge bounce instead of sweeping that work into the
+  commit. Both land in the signed merge commit. Any other
   conflict still bounces. `make docs-reanchor` also runs where no
   target-branch merge-base exists (a worker worktree) and, during an unfinished
   merge, maps from both sides of the merge without a `BASE`.

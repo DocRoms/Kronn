@@ -135,17 +135,30 @@ strict over every doc [src: file: backend/src/core/docs_citations.rs:31-33#CHANG
 A merge no longer bounces on them (KT-1321). When Kronn merges the target into
 a task branch (the integration candidate, or the merge a worker finishes with
 `task_exec_commit`), it stops before the merge commit and settles the docs
-first, for any project that uses `[src: file: …]` citations (every tracked `.md`
-file, `docs/releases` aside):
+first, for any project that uses `[src: file: …]` citations. It touches only
+the citation corpus the gate reads (`docs/` and `backend/docs/`, `docs/releases`
+aside), never `CHANGELOG.md`, a README, templates, prompts or fixtures:
 
 - a conflict whose two sides differ only by the line numbers of file citations
   is resolved to the target's text; any other conflict still bounces;
-- every citation the merged tree leaves broken is re-anchored by mapping its
-  lines from the side it was written against (the branch, the target or the
-  merge base) to the merged file, the `#symbol` having to lie in the mapped
-  range. When a hunk changed the cited lines themselves, the occurrence of the
-  symbol nearest the mapped position wins, under the same check; with no side
-  the citation held against, it is left alone.
+- every citation to a file the merge changed that the merged tree leaves broken
+  is re-anchored by mapping its lines from the side it was written against (the
+  branch, the target or the merge base) to the merged file, the `#symbol` having
+  to lie in the mapped range. When a hunk changed the cited lines themselves,
+  the occurrence of the symbol nearest the mapped position wins, under the same
+  check, if it lies within `NEAREST_OCCURRENCE_LIMIT` (20) lines of it and no
+  other is as near. Past that the citation is not guessed and the merge
+  bounces on the doc (a worker's merge is refused, naming the citations). A
+  citation to a file the merge did not change, or that held against no side, is
+  left alone.
+
+Re-anchoring reads the merged index, never the working tree, and writes only
+docs the merge brought into question. When a doc it must rewrite, or a file
+that doc cites, carries unstaged changes, it writes nothing and refuses
+(integration: the candidate bounces; worker: `task_exec_commit` refuses and
+leaves the merge as it was) rather than sweep unnamed work in progress into the
+commit. A staged path that is neither the merge's nor named in `files` is
+refused before any doc is touched.
 
 Both land in the merge commit, which carries the sign-off of the configured git
 identity and a line counting what was settled. The same step runs inside the

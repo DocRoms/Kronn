@@ -755,7 +755,9 @@ pub fn gate(root: &Path, env: &dyn Fn(&str) -> Option<String>) -> Result<GateRun
     if let Some(target) = env(REANCHOR_ENV).as_deref().and_then(ReanchorTarget::parse) {
         let base = env(REANCHOR_BASE_ENV).filter(|base| !base.trim().is_empty());
         let outcome = match base.as_deref() {
-            Some(REANCHOR_BASE_MERGE) => merge::reanchor_merge_in_progress(root),
+            Some(REANCHOR_BASE_MERGE) => {
+                merge::reanchor_merge_in_progress(root).map_err(|e| e.to_string())
+            }
             base => reanchor_corpus(root, &target, base),
         }
         .map_err(|e| format!("docs-reanchor: {e}"))?;

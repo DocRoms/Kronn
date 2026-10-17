@@ -1381,27 +1381,17 @@ pub fn run_git_merge_commit_with_child_lock(
         return Err("No files could be staged".to_string());
     }
 
-    // The citations the merge shifted are re-anchored into the same commit, so
-    // a worker needs no `make docs-reanchor` in its sandbox.
-    let settled = crate::core::docs_citations::merge::reanchor_and_stage(repo_path, resolved_docs)
-        .map_err(|error| tracing::warn!("doc citations not re-anchored by the merge: {error}"))
-        .ok();
-    let settled_paths: Vec<String> = settled
-        .iter()
-        .flat_map(|docs| docs.touched())
-        .map(|doc| doc.to_string_lossy().into_owned())
-        .collect();
-    let message = match settled.as_ref().and_then(|docs| docs.summary()) {
-        Some(note) => format!("{message}\n\n{note}"),
-        None => message.to_string(),
-    };
-    let message = message.as_str();
-
     // What the merge legitimately changes in the index: the paths the merged-in
     // side changed since the histories diverged (a three-way merge leaves a path
     // at our version whenever the other side did not touch it). Anything else
-    // staged was put there by hand and is not part of what the worker named.
+    // staged was put there by hand and is not part of what the worker named. This
+    // runs before the docs are settled, so nothing the settling stages can hide
+    // behind it.
     let brought_by_merge = paths_changed_by_merged_side(repo_path)?;
+    let resolved_paths: Vec<String> = resolved_docs
+        .iter()
+        .map(|doc| doc.to_string_lossy().into_owned())
+        .collect();
     let foreign = git_path_list(
         repo_path,
         &[
@@ -1417,7 +1407,7 @@ pub fn run_git_merge_commit_with_child_lock(
     .filter(|path| {
         !brought_by_merge.contains(path)
             && !clean_files.contains(&path.as_str())
-            && !settled_paths.contains(path)
+            && !resolved_paths.contains(path)
     })
     .collect::<Vec<_>>();
     if !foreign.is_empty() {
@@ -1427,6 +1417,26 @@ pub fn run_git_merge_commit_with_child_lock(
             foreign.join(", ")
         ));
     }
+
+    // The citations the merge shifted are re-anchored into the same commit, so
+    // a worker needs no `make docs-reanchor` in its sandbox. This reads the merged
+    // index only and refuses to rewrite a doc that carries unstaged work.
+    use crate::core::docs_citations::merge::SettleError;
+    let settled =
+        match crate::core::docs_citations::merge::reanchor_and_stage(repo_path, resolved_docs) {
+            Ok(docs) => Some(docs),
+            Err(SettleError::Failed(error)) => {
+                tracing::warn!("doc citations not re-anchored by the merge: {error}");
+                None
+            }
+            Err(SettleError::Refused { message, .. }) => return Err(message),
+            Err(error @ SettleError::Unplaced { .. }) => return Err(format!("refused: {error}")),
+        };
+    let message = match settled.as_ref().and_then(|docs| docs.summary()) {
+        Some(note) => format!("{message}\n\n{note}"),
+        None => message.to_string(),
+    };
+    let message = message.as_str();
 
     ensure_git_identity(repo_path);
 

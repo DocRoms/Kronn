@@ -1950,11 +1950,24 @@ pub fn build_candidate(worktree_path: &Path, base_sha: &str) -> Result<Candidate
         abort_merge(worktree_path);
         return Ok(CandidateOutcome::Conflict { files });
     }
-    let docs = crate::core::docs_citations::merge::reanchor_and_stage(worktree_path, resolved)
-        .map_err(|error| {
+    use crate::core::docs_citations::merge::SettleError;
+    let docs = match crate::core::docs_citations::merge::reanchor_and_stage(worktree_path, resolved)
+    {
+        Ok(docs) => Some(docs),
+        Err(SettleError::Failed(error)) => {
             tracing::warn!("doc citations not re-anchored by the merge: {error}");
-        })
-        .ok();
+            None
+        }
+        // Unstaged work in a doc to rewrite, or a citation nobody can place
+        // safely: a human decides, as for any other conflict.
+        Err(
+            SettleError::Refused { paths: files, .. } | SettleError::Unplaced { docs: files, .. },
+        ) => {
+            tracing::warn!("doc citations left to the worker: {files:?}");
+            abort_merge(worktree_path);
+            return Ok(CandidateOutcome::Conflict { files });
+        }
+    };
     // Repositories that enforce DCO reject an unsigned merge commit.
     let mut commit = crate::core::cmd::git_cmd();
     commit.args(["commit", "--signoff", "--cleanup=strip"]);
