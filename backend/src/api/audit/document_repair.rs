@@ -170,7 +170,12 @@ fn split_verified_citations(project: &Path, content: &str) -> Option<String> {
                     return false;
                 };
                 crate::core::anti_halluc::parse_line_bounds(range).is_some_and(|(a, b)| {
-                    a > 0 && a <= b && b <= crate::core::anti_halluc::last_citable_line(&source)
+                    crate::core::anti_halluc::range_is_citable(
+                        source.lines().count(),
+                        crate::core::anti_halluc::last_citable_line(&source),
+                        a,
+                        b,
+                    )
                 })
             });
             if parts.len() > 1

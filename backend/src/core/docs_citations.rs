@@ -809,7 +809,8 @@ mod tests {
         let tmp = repo();
         assert!(reasons("[src: file: src/a.rs:3]", tmp.path()).is_empty());
         // Line 4 is the empty line a Read tool shows after the final newline.
-        assert!(reasons("[src: file: src/a.rs:4]", tmp.path()).is_empty());
+        assert!(reasons("[src: file: src/a.rs:3-4]", tmp.path()).is_empty());
+        assert_eq!(reasons("[src: file: src/a.rs:4]", tmp.path()).len(), 1);
         assert_eq!(reasons("[src: file: src/a.rs:5]", tmp.path()).len(), 1);
     }
 

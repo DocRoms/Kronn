@@ -225,6 +225,45 @@ fn deleted_cited_lines_are_reported() {
 }
 
 #[test]
+fn a_range_ending_on_the_empty_line_after_the_last_newline_is_tracked() {
+    let tmp = fixture();
+    let dir = tmp.path();
+    fs::write(dir.join("a.yml"), "one: 1\ntwo: 2\n").unwrap();
+    fs::write(dir.join("b.yml"), "one: 1\ntwo: 2").unwrap();
+    fs::write(
+        dir.join("docs/ends.md"),
+        "# Ends\nAll of a [src: file: a.yml:1-3].\nAll of b [src: file: b.yml:1-3].\n",
+    )
+    .unwrap();
+    commit_all(dir, "yaml");
+    record_all(dir).unwrap();
+    let file = read_strict(dir).unwrap().unwrap();
+    let ends = &file.docs["docs/ends.md"];
+    // `a.yml` ends with a newline, so Read shows line 3 (empty): hashed, and
+    // evaluated as unchanged rather than "the file is now shorter".
+    assert!(ends.citations[0].sha256.is_some());
+    // `b.yml` has no trailing newline: 3 is past its end, as before.
+    assert!(ends.citations[1].sha256.is_none());
+    let report = check(dir);
+    assert_eq!(
+        states(&report, "docs/ends.md"),
+        [("b.yml:1-3".to_string(), CitationState::Removed)]
+    );
+    // The real content of `a.yml` still drifts a recorded N+1 citation.
+    fs::write(dir.join("a.yml"), "one: 1\ntwo: 22\n").unwrap();
+    commit_all(dir, "edit a");
+    let report = check(dir);
+    assert!(states(&report, "docs/ends.md")
+        .contains(&("a.yml:1-3".to_string(), CitationState::Changed)));
+    // Dropping a line takes the cited end past the new last line: removed.
+    fs::write(dir.join("a.yml"), "one: 1\n").unwrap();
+    commit_all(dir, "shrink a");
+    let report = check(dir);
+    assert!(states(&report, "docs/ends.md")
+        .contains(&("a.yml:1-3".to_string(), CitationState::Removed)));
+}
+
+#[test]
 fn deleted_line_in_the_middle_is_changed_not_moved() {
     let tmp = fixture();
     let dir = tmp.path();

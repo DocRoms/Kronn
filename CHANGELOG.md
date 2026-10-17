@@ -557,7 +557,14 @@ Release notes for 0.9.3 and earlier are available in the
   offered a range to cite. A parenthesised `(src: file: …)` citation, which
   nothing verified, is refused with the bracketed form to write; a broken
   relative link names the path it resolves to and the link that exists
-  (`../tech-debt/TD-1.md` from `docs/` → `tech-debt/TD-1.md`).
+  (`../tech-debt/TD-1.md` from `docs/` → `tech-debt/TD-1.md`). Review
+  follow-up: citation drift hashes and evaluates a range ending at N+1 (it
+  reported it « removed » on the next re-audit), a range that starts on the
+  empty line N+1 is refused everywhere, the verifier no longer rounds an empty
+  file up to one line (`empty.txt:1` is refused), a text file given without a
+  line is offered `path:<line>` instead of a bare path, and the secret-looking
+  list now covers `id_ecdsa`, `id_dsa`, `*.p12`, `*.pfx`, `.netrc`, `.npmrc`
+  and `.pgpass`.
 
 - The audit's citation gate now says how to fix a citation (KT-1307). A path
   that only resolves under the docs root or next to the citing doc gets

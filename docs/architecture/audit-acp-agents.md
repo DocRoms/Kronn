@@ -21,7 +21,7 @@ An environment file named like a template — `.env.dist`, `.env.example`,
 purpose. A real one (`.env`, `.env.local`, `.envrc`, `prod.env`) or a key file
 (`*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`, anything under `.ssh/` or `.aws/`)
 does not. The rule is one function, `is_secret_file`
-[src: file: backend/src/acp/secret_files.rs:51-79#is_secret_file].
+[src: file: backend/src/acp/secret_files.rs:51-86#is_secret_file].
 
 It is applied twice, because the two kinds of runtime are not alike.
 
@@ -44,7 +44,7 @@ asked. Kronn starts `opencode acp` with an inline configuration
 - `permission.read` denies `*.env` and `*.env.*`, then allows the four template
   suffixes (`*.env.<suffix>` and `*.env.*.<suffix>`). OpenCode honours the last
   matching rule, in the order written, so the allows follow the deny — a test
-  pins that order [src: file: backend/src/acp/secret_files.rs:232-266#the_opencode_config_denies_real_env_files_and_allows_templates_in_that_order]. A denial is not a
+  pins that order [src: file: backend/src/acp/secret_files.rs:247-281#the_opencode_config_denies_real_env_files_and_allows_templates_in_that_order]. A denial is not a
   question put to Kronn: OpenCode hands its model an error as the tool's answer
   and the turn goes on.
 - `experimental.continue_loop_on_deny` is `true`, so a refusal the broker does

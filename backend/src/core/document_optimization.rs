@@ -668,13 +668,17 @@ fn check_citation(project: &Path, rel: &str, raw: &str) -> CitationCheck {
              or a range (`{path_part}:12-20`)",
             line_part.trim()
         )),
-        Some((start, end)) if start > 0 && start <= end && end <= last_line => Valid {
-            path_part: path_part.to_string(),
-            line_part: line_part.trim().to_string(),
-            max_line,
-            start,
-            end,
-        },
+        Some((start, end))
+            if crate::core::anti_halluc::range_is_citable(max_line, last_line, start, end) =>
+        {
+            Valid {
+                path_part: path_part.to_string(),
+                line_part: line_part.trim().to_string(),
+                max_line,
+                start,
+                end,
+            }
+        }
         Some(_) => Defect(format!(
             "citation line `{}` is outside `{path_part}`, which has {max_line} line(s){}",
             line_part.trim(),
@@ -752,9 +756,12 @@ fn did_you_mean(project: &Path, citing: &str, cited: &str, line: Option<&str>) -
                 && match spec {
                     Some(Some((start, end))) => {
                         !crate::core::anti_halluc::is_binary_file(&full)
-                            && start > 0
-                            && start <= end
-                            && end <= last_line_of(&full)
+                            && crate::core::anti_halluc::range_is_citable(
+                                line_count(&full),
+                                last_line_of(&full),
+                                start,
+                                end,
+                            )
                     }
                     _ => true,
                 }
@@ -767,9 +774,32 @@ fn did_you_mean(project: &Path, citing: &str, cited: &str, line: Option<&str>) -
             format!(". Paths are repository-root relative; did you mean `{path}:<line>`?")
         }
         (Some(path), _, _) => {
-            format!(". Paths are repository-root relative; did you mean `{path}`?")
+            format!(
+                ". Paths are repository-root relative; {}",
+                bare_path_form(project, &path)
+            )
         }
         (None, _, _) => String::new(),
+    }
+}
+
+/// How to cite `path` when the model gave it without a line: only a binary file
+/// is cited by its bare path, so a text file is offered a line or the whole file
+/// and an empty one is not cited at all.
+fn bare_path_form(project: &Path, path: &str) -> String {
+    let full = project.join(path);
+    if crate::core::anti_halluc::is_binary_file(&full) {
+        return format!("did you mean `{path}`?");
+    }
+    match line_count(&full) {
+        0 => format!(
+            "`{path}` is empty, so it has no line to cite: say so and name it in backticks \
+             outside any [src:] marker"
+        ),
+        lines => format!(
+            "did you mean `{path}:<line>`, the line that supports the claim (or `{path}:1-{lines}` \
+             for the whole file)?"
+        ),
     }
 }
 
@@ -2108,7 +2138,7 @@ mod tests {
         );
         assert!(!messages[2].contains("did you mean"), "{}", messages[2]);
         assert!(
-            messages[3].contains("did you mean `docs/architecture/repo-map.md`?"),
+            messages[3].contains("did you mean `docs/architecture/repo-map.md:<line>`"),
             "{}",
             messages[3]
         );
@@ -2384,13 +2414,62 @@ mod tests {
         write(&tmp.path().join("open.txt"), "a\nb\nc");
         let messages = citation_messages(
             tmp.path(),
-            "[src: file: ended.txt:1-4] [src: file: ended.txt:4] [src: file: ended.txt:1-5] \
+            "[src: file: ended.txt:1-4] [src: file: ended.txt:3-4] [src: file: ended.txt:1-5] \
              [src: file: ended.txt:5] [src: file: open.txt:1-3] [src: file: open.txt:1-4]",
         );
         assert_eq!(messages.len(), 3, "{messages:#?}");
         assert!(messages[0].contains("`1-5` is outside `ended.txt`, which has 3 line(s)"));
         assert!(messages[1].contains("`5` is outside `ended.txt`"));
         assert!(messages[2].contains("`1-4` is outside `open.txt`, which has 3 line(s)"));
+    }
+
+    #[test]
+    fn a_range_starting_on_the_empty_line_cites_nothing_and_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(&tmp.path().join("ended.txt"), "a\nb\nc\n");
+        write(&tmp.path().join("empty.txt"), "");
+        write(&tmp.path().join("blank.txt"), "\n");
+        assert!(accepted(tmp.path(), "ended.txt:3-4"));
+        assert!(!accepted(tmp.path(), "ended.txt:4"));
+        assert!(!accepted(tmp.path(), "ended.txt:4-4"));
+        assert!(!accepted(tmp.path(), "empty.txt:1"));
+        assert!(!accepted(tmp.path(), "empty.txt:1-1"));
+        assert!(accepted(tmp.path(), "blank.txt:1-2"));
+        assert!(!accepted(tmp.path(), "blank.txt:2"));
+    }
+
+    #[test]
+    fn a_missing_line_never_gets_a_bare_path_the_gate_refuses_as_a_did_you_mean() {
+        // `docs/` holds the file the model meant; without a line, a bare path is
+        // only valid for a binary file, so a text file is offered a line.
+        let tmp = tempfile::tempdir().unwrap();
+        write(&tmp.path().join("docs/notes.md"), "a\nb\nc\n");
+        write(&tmp.path().join("docs/empty.md"), "");
+        write(&tmp.path().join("docs/.npmrc"), "registry=x\n");
+        let messages = citation_messages(
+            tmp.path(),
+            "[src: file: notes.md] [src: file: empty.md] [src: file: .npmrc]",
+        );
+        assert_eq!(messages.len(), 3, "{messages:#?}");
+        assert!(
+            messages[0].contains("did you mean `docs/notes.md:<line>`"),
+            "{}",
+            messages[0]
+        );
+        assert!(!messages[0].contains("`docs/notes.md`?"), "{}", messages[0]);
+        assert!(accepted(tmp.path(), "docs/notes.md:1-3"));
+        assert!(
+            messages[0].contains("`docs/notes.md:1-3`"),
+            "{}",
+            messages[0]
+        );
+        assert!(
+            messages[1].contains("`docs/empty.md` is empty"),
+            "{}",
+            messages[1]
+        );
+        assert!(!messages[1].contains("`docs/empty.md`?"), "{}", messages[1]);
+        assert!(!messages[2].contains("docs/.npmrc"), "{}", messages[2]);
     }
 
     #[test]
@@ -2404,6 +2483,13 @@ mod tests {
         assert_eq!(status("file: ended.txt:1-5"), SourceStatus::OutOfBounds);
         assert_eq!(status("file: open.txt:1-3"), SourceStatus::Verified);
         assert_eq!(status("file: open.txt:1-4"), SourceStatus::OutOfBounds);
+        // A range that starts on the empty line N+1 cites nothing; an empty file
+        // has no line at all (the verifier used to round it up to one).
+        write(&tmp.path().join("empty.txt"), "");
+        assert_eq!(status("file: ended.txt:3-4"), SourceStatus::Verified);
+        assert_eq!(status("file: ended.txt:4"), SourceStatus::OutOfBounds);
+        assert_eq!(status("file: empty.txt:1"), SourceStatus::OutOfBounds);
+        assert_eq!(status("file: empty.txt"), SourceStatus::Verified);
     }
 
     #[test]
