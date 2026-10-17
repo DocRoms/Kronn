@@ -106,7 +106,6 @@ impl Validated {
             "{provenance:?}"
         );
         assert_eq!(provenance.to_reconfirm, 0, "{provenance:?}");
-        reread_plain_docs(project);
         std::fs::write(fx.h.tools.path().join("steps.log"), "").unwrap();
         fx
     }
@@ -1067,7 +1066,7 @@ async fn an_all_unanchored_doc_is_re_read_once_after_the_code_changes() {
     let fx = Validated::new(|_| {}).await;
     assert!(
         fx.plan().await.agent_steps.is_empty(),
-        "stamped by the fixture"
+        "stamped by the validation"
     );
 
     // An uncited line appended: no citation moves, only the sources change.
@@ -1121,6 +1120,65 @@ async fn an_all_unanchored_doc_is_re_read_once_after_the_code_changes() {
     std::fs::write(fx.h.tools.path().join("steps.log"), "").unwrap();
     let again = fx.revalidate().await;
     assert!(started_steps(&again).is_empty(), "{again}");
+}
+
+/// Kronn's own TD sheet shape (step 8): a `Next step` closing the sheet, a
+/// fix naming a file to create, and a finding about a file that is gone.
+const STANDARD_TD_SHEETS: [(&str, &str); 3] = [
+    (
+        "docs/tech-debt/TD-20261016-404-vs-400.md",
+        "# TD-20261016-404-vs-400\n\n- **Area**: ApiDesign\n- **Severity**: Low\n\n\
+         ## Problem (fact)\nThe handlers answer 404 where 400 is meant.\n\n\
+         ## Where (pointers)\n- `src/kept.rs:2` — the handler\n\n\
+         ## Suggested direction\nMap the errors in one place.\n\n\
+         ## Next step\n3. Document correct status code usage in `docs/conventions/api-http-codes.md`\n",
+    ),
+    (
+        "docs/tech-debt/TD-20261016-schema-validation.md",
+        "# CQ-005: no schema validation\n\n- **Area**: Backend\n\
+         - **Where**: `src/kept.rs:3`\n\n\
+         ## Problem (fact)\nPayloads are not validated.\n\n\
+         ## Remediation\nCreate `plugins/articles/1.0.0/schema-validation.js` and call it from each plugin.\n\n\
+         - **Next step**: create ticket\n",
+    ),
+    (
+        "docs/tech-debt/TD-20261016-jenkinsfile-stale-config-refs.md",
+        "# TD-20261016-jenkinsfile-stale-config-refs\n\n- **Area**: CI\n\n\
+         ## Problem (fact)\nThe Jenkinsfile references the missing `config/config.trn_com.yml`.\n\n\
+         ## Where (pointers)\n- `src/kept.rs:4` — the build entry point\n\n\
+         ## Next step\n`create ticket` OR `link existing ticket <URL>`\n",
+    ),
+];
+
+// KT-1319 — a project validated a minute ago, its debt sheets in Kronn's own
+// shape, plans clean: no section the code outgrew, no doc sent back to be
+// re-read, no « modified since » badge.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_freshly_validated_audit_with_standard_td_sheets_plans_clean() {
+    let fx = Validated::new(|project| {
+        for (doc, text) in STANDARD_TD_SHEETS {
+            let path = project.join(doc);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+    })
+    .await;
+    for (doc, _) in STANDARD_TD_SHEETS {
+        assert!(fx.project().join(doc).is_file(), "{doc}");
+    }
+    let plan = fx.plan().await;
+    assert!(plan.sections.is_empty(), "{plan:?}");
+    assert!(plan.agent_steps.is_empty(), "no re-read queued: {plan:?}");
+    assert_eq!(
+        plan.sources_state,
+        crate::core::citation_drift::SourcesState::Clean,
+        "{plan:?}"
+    );
+    assert_eq!(plan.relevance.outdated, 0, "{plan:?}");
+    assert_eq!(plan.relevance.no_longer_relevant, 0, "{plan:?}");
+    assert_eq!(fx.audit_status(), crate::models::AiAuditStatus::Validated);
 }
 
 // KT-1292 — only a step that ran is stamped: when the agent's step fails, its

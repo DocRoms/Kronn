@@ -687,6 +687,16 @@ Release notes for 0.9.3 and earlier are available in the
   root's `workspaces` globs (or `pnpm-workspace.yaml`) list it; a Composer row
   read from `composer.lock` is labelled « from composer.lock », no longer « not
   installed ».
+- A project validated a minute ago no longer reads « Validé, modifié depuis »
+  with docs to re-check (KT-1319). Relevance judged Kronn's own TD sheets as
+  claims: a `Next step` section (and `Remedy` ones) is now a proposal, and a
+  path said missing right where it is cited (« the Jenkinsfile references the
+  missing `config/x.yml` », « `config/x.yml` is missing from the repo ») no
+  longer counts as a claim that the file exists. A « missing » elsewhere in
+  the sentence does not exempt it, and `Mitigation` / `Recommendation`
+  sections stay checked. The validation also stamps the docs
+  no citation anchors as re-read, so their steps are not queued again right
+  after it with no change to the code or the docs.
 - The audit's citation gate now says how to fix a citation (KT-1307). A path
   that only resolves under the docs root or next to the citing doc gets
   « paths are repository-root relative; did you mean `docs/AGENTS.md:94`? »,
