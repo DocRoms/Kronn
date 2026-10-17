@@ -406,11 +406,9 @@ pub fn detector_disposition_gap(
          Read `{index}` and the TD sheets it lists, then dispose of each detector signal \
          below that is still unaddressed: {list}.\n\n\
          For each one do ONE of: emit or refresh a TD, fold it into a baseline note, or cite \
-         its file path in the `## Dimension coverage` matrix with a verifiable reason. A \
-         signal in a generated or vendored file, or in framework scaffolding, may be \
-         dismissed there as `generated/vendor — not actionable`. Keep the existing TD sheets \
-         and human-owned sections; correct only the missing dispositions, do not repeat the \
-         entire audit.\n",
+         its file path in the `## Dimension coverage` matrix with a verifiable reason. Keep the \
+         existing TD sheets and human-owned sections; correct only the missing dispositions, \
+         do not repeat the entire audit.\n",
         index = docs_root.path("inconsistencies-tech-debt.md"),
     );
     Some(DispositionGap {

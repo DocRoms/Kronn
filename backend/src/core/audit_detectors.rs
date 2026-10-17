@@ -190,7 +190,7 @@ fn detect_zero_tests(root: &Path) -> Vec<DetectedSignal> {
     const MIN_SOURCES: usize = 5;
     let mut source_count = 0usize;
     let mut test_count = 0usize;
-    for entry in walk(root) {
+    for entry in walk_skipping_generated(root) {
         let path = entry.path();
         let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
             continue;
@@ -261,7 +261,7 @@ pub(crate) fn is_test_path(path: &Path) -> bool {
 fn detect_blank_without_noopener(root: &Path) -> Vec<DetectedSignal> {
     let mut out = Vec::new();
     let mut truncated = 0usize;
-    for entry in walk(root) {
+    for entry in walk_skipping_generated(root) {
         let path = entry.path();
         let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
             continue;
@@ -795,16 +795,19 @@ fn escape_markdown_table_cell(value: &str) -> String {
 /// Shared bounded, skip-aware walk. Files only; depth-capped; heavy dirs
 /// pruned. Matches `scanner::scan_kronn_markers` conventions.
 ///
-/// Generated, vendored and scaffolding files are skipped too: a signal there
-/// would force a TD nobody can fix in this repository (KT-1323).
+/// It visits generated and vendored files too: every security-dimension
+/// detector, the Docker/CI inventory and a team's own bans must see them, and
+/// a `.gitattributes` line must never be able to hide one. Hygiene detectors
+/// use [`walk_skipping_generated`].
 pub(crate) fn walk(root: &Path) -> impl Iterator<Item = walkdir::DirEntry> {
-    walk_with(root, true)
+    walk_with(root, false)
 }
 
-/// [`walk`] that still visits generated and vendored files, for a team's own
-/// bans (a rule against committed `*.min.js` must see them).
-pub(crate) fn walk_including_generated(root: &Path) -> impl Iterator<Item = walkdir::DirEntry> {
-    walk_with(root, false)
+/// [`walk`] without generated, vendored and framework-scaffolding files, for
+/// the hygiene detectors only: a signal there would force a TD nobody can fix
+/// in this repository (KT-1323).
+pub(crate) fn walk_skipping_generated(root: &Path) -> impl Iterator<Item = walkdir::DirEntry> {
+    walk_with(root, true)
 }
 
 fn walk_with(root: &Path, skip_generated: bool) -> impl Iterator<Item = walkdir::DirEntry> {
@@ -831,7 +834,9 @@ fn walk_with(root: &Path, skip_generated: bool) -> impl Iterator<Item = walkdir:
                     .strip_prefix(&base)
                     .ok()
                     .and_then(|rel| rel.to_str())
-                    .is_none_or(|rel| !generated.is_generated(&rel.replace('\\', "/")))
+                    .is_none_or(|rel| {
+                        !generated.is_generated(&rel.replace('\\', "/"), e.file_type().is_dir())
+                    })
         })
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
@@ -1469,18 +1474,69 @@ mod tests {
         write(t.path(), "web/config.php", "<?php");
         write(t.path(), "legacy/lib.html", blank);
         write(t.path(), ".gitattributes", "legacy/** linguist-vendored\n");
-        let files: Vec<String> = walk(t.path())
-            .map(|e| {
+        let rels = |it: &mut dyn Iterator<Item = walkdir::DirEntry>| -> Vec<String> {
+            it.map(|e| {
                 let rel = e.path().strip_prefix(t.path()).unwrap();
                 rel.to_string_lossy().into_owned()
             })
-            .collect();
+            .collect()
+        };
+        let files = rels(&mut walk_skipping_generated(t.path()));
         assert!(files.contains(&"src/a.html".to_string()));
         assert!(!files
             .iter()
             .any(|f| f.contains("generated") || f.contains("config.php") || f.contains("legacy")));
+        // The plain walk still sees every one of them.
+        let all = rels(&mut walk(t.path()));
+        assert!(all.iter().any(|f| f.contains("legacy")));
+        assert!(all.iter().any(|f| f.contains("config.php")));
         let signals = detect_blank_without_noopener(t.path());
         assert_eq!(signals.len(), 1, "{signals:?}");
         assert_eq!(signals[0].evidence, "src/a.html:1");
+    }
+
+    /// A `.gitattributes` or a generated-looking folder must never hide a
+    /// security-dimension signal (KT-1323 review).
+    #[test]
+    fn security_signals_fire_in_vendored_generated_and_scaffolding_paths() {
+        let t = proj();
+        write(
+            t.path(),
+            ".gitattributes",
+            ".github/** linguist-vendored\ndocker/** linguist-generated\n",
+        );
+        write(
+            t.path(),
+            "src/Headers.php",
+            "<?php $csp = \"script-src 'unsafe-inline'\";",
+        );
+        write(
+            t.path(),
+            "docker/Dockerfile",
+            "FROM a:1\nARG NPM_TOKEN=hunter2\n",
+        );
+        write(
+            t.path(),
+            "coverage/Dockerfile",
+            "FROM a:1\nARG DB_PASSWORD=x\n",
+        );
+        write(
+            t.path(),
+            ".github/workflows/a.yml",
+            "on: [pull_request_target]\n",
+        );
+        write(t.path(), "generated/csp.conf", "script-src 'unsafe-eval'");
+        write(t.path(), "web/app_dev.php", "<?php // unsafe-inline");
+        let ids: Vec<String> = scan_project(t.path())
+            .signals
+            .into_iter()
+            .map(|s| format!("{}@{}", s.detector_id, s.evidence))
+            .collect();
+        let has = |needle: &str| ids.iter().any(|i| i.contains(needle));
+        assert!(has("dockerfile-secret-arg@docker/Dockerfile:2"), "{ids:?}");
+        assert!(has("dockerfile-secret-arg@coverage/Dockerfile:2"), "{ids:?}");
+        assert!(has("ci-pull-request-target@.github/workflows/a.yml:1"), "{ids:?}");
+        assert!(has("csp-unsafe@generated/csp.conf"), "{ids:?}");
+        assert!(has("csp-unsafe@web/app_dev.php"), "{ids:?}");
     }
 }

@@ -1232,7 +1232,8 @@ pub(crate) fn markers_at(prose: &str) -> Vec<(usize, String)> {
 /// `value` cut to `max` characters without ever cutting inside a
 /// `[src: …]` marker: when the limit lands in one, the cut moves back to just
 /// before its `[`. `ellipsis` appends `…` when something was dropped (it counts
-/// toward `max`). A marker that is already unclosed in `value` is left alone.
+/// toward `max`). A marker already unclosed in `value` is dropped from its `[`
+/// on, so the cut text never carries a dangling opener.
 /// Every Kronn-generated text that can carry a citation must truncate through
 /// this, never through a bare `chars().take(n)`.
 pub fn truncate_outside_markers(value: &str, max: usize, ellipsis: bool) -> String {
@@ -1274,7 +1275,11 @@ pub fn truncate_outside_markers(value: &str, max: usize, ellipsis: bool) -> Stri
                 break;
             }
             Some(end) => i = end + 1,
-            None => break,
+            // An unclosed marker is malformed already: never keep its opener.
+            None => {
+                cut = i;
+                break;
+            }
         }
     }
     let mut out: String = chars[..cut].iter().collect();
@@ -2823,8 +2828,9 @@ mod tests {
         assert_eq!(truncate_outside_markers("short", 40, true), "short");
         assert_eq!(truncate_outside_markers("aaaa [src: file: a.rs:1] z", 12, false), "aaaa ");
         assert_eq!(truncate_outside_markers("aaaa [src: file: a.rs:1] z", 12, true), "aaaa…");
-        // A marker already unclosed in the input is left to the plain cut.
-        assert_eq!(truncate_outside_markers("ab [src: file: a", 8, false), "ab [src:");
+        // A marker already unclosed in the input is cut before its opener too.
+        assert_eq!(truncate_outside_markers("ab [src: file: a", 8, false), "ab ");
+        assert_eq!(truncate_outside_markers("ab [src: file: a.rs:1", 12, true), "ab…");
     }
 
     #[test]

@@ -554,11 +554,13 @@ Release notes for 0.9.3 and earlier are available in the
   `truncate_outside_markers`, which stops before a marker the limit would
   split. The detector disposition gate no longer fails step 8 outright: it
   gets the bounded retry of the other gates, with feedback naming the signals
-  to dispose of (and `generated/vendor — not actionable` as a valid
-  dismissal). Detector walks skip generated, vendored and framework
-  scaffolding files (`generated/` dirs, minified bundles, Symfony
-  `web/config.php`, `.gitattributes` `linguist-generated` / `linguist-vendored`),
-  so they no longer force TDs; a team's own bans still see every file.
+  to dispose of. The hygiene detectors (`_blank`, zero-tests, template
+  checks) skip generated, vendored and framework scaffolding files
+  (`generated/` dirs, root-level `coverage/` / `Pods/`, minified bundles,
+  Symfony `web/config.php`, `.gitattributes` `linguist-generated` /
+  `linguist-vendored` with last-match-wins and negation), so they no longer
+  force TDs; the security detectors, the Docker/CI inventory and a team's own
+  bans still see every file, so a `.gitattributes` line can never hide them.
 - The audit's citation gate now says how to fix a citation (KT-1307). A path
   that only resolves under the docs root or next to the citing doc gets
   « paths are repository-root relative; did you mean `docs/AGENTS.md:94`? »,
