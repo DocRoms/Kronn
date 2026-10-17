@@ -13,6 +13,37 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- A merge no longer bounces on doc citation line anchors (KT-1321). The
+  integration merge, and the merge a worker finishes through `task_exec_commit`,
+  stop before the merge commit: a doc conflict that differs only by the line
+  numbers of `[src: file: …]` markers is resolved to the target's text, then
+  every citation to a changed file the merged tree left broken is re-anchored
+  by mapping its lines from the side it was written against to the merged file
+  (the `#symbol` must lie in the new range; the nearest occurrence to the
+  mapped position, within 20 lines and with no tie, settles a changed range;
+  otherwise the merge bounces on the doc). Only `docs/` and `backend/docs/`
+  are touched, from the merged index: a doc to rewrite, or a cited file, with
+  unstaged work makes the merge bounce instead of sweeping that work into the
+  commit. Both land in the signed merge commit. Any other
+  conflict still bounces. `make docs-reanchor` also runs where no
+  target-branch merge-base exists (a worker worktree) and, during an unfinished
+  merge, maps from both sides of the merge without a `BASE`.
+- Kronn no longer fills the disk with per-lane build dirs (KT-1318). Every
+  parallel task lane builds in its own `target/wt-<lane>` (5-30 GB) and nothing
+  ever removed them: 195 of them took a 1.8 TB disk to 683 MB free. Now an
+  orphan sweeper (boot, then every 30 minutes) removes the build dirs Kronn
+  created, whose execution is finished, with no worktree, unwritten for
+  `server.disk_sweep_idle_hours` (default 6, minimum 1: `0` is read as 1, never
+  as "no idle check"); a dir Kronn did not create
+  (no ownership marker) and an active lane are never touched. Below
+  `server.disk_launch_min_free_gib` (default 30) a worker launch or a full
+  audit sweeps first, then is refused with the reason, the execution parked
+  `Blocked` and an alert in the principal room. **Settings → Disk**, the
+  `GET /api/maintenance/disk` report and the `disk_usage` MCP tool show free
+  space and Kronn's usage by kind and by task, with a Purge action that takes
+  orphans only (a named entry needs a confirmation). See
+  `docs/operations/disk-usage.md`.
+
 - « Revalider l'audit » now re-reads the docs whose sections are all
   unanchored (no citation, no repository path), once per change (KT-1292).
   Such a doc has no verdict, so nothing ever sent it to an agent. A review
@@ -564,6 +595,44 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- The tech-debt review keeps the sheet valid, keeps the "why" and counts the
+  debts the card counts (KT-1309). Saving a decision appends its
+  `audit_history` entry with the indentation of the list it joins, so a
+  standard YAML parser (Ruby, `serde_yaml`) still reads the header; the typed
+  reason is the entry's note for Confirm, Defer, Reject and Keep on purpose
+  (the fixed note only stands in for an empty one) and the field's label says
+  so. The review lists every sheet the card counts, including the `CQ-*` and
+  `PERF-*` detail files an audit wrote without front matter (severity and
+  status from their index row, else Unknown): a Critical or High one blocks
+  the validation gate until it is settled, and settling one gives it the
+  front matter and `Status` line it lacked. The generated tech-debt index
+  lists them too, so their severity survives a resync. The impact is rendered
+  as Markdown and a sheet with no verification criterion says so. Card and
+  review read one set of debts (`td_index::debt_entries`): settled ones
+  (rejected, kept on purpose, or marked resolved in the index of a sheet with
+  no status) drop out of the card's count and show as settled in the review,
+  the block header shows the same active count, and a `TD-*` row of the index
+  with no sheet file yet is listed and can be decided (the decision writes its
+  sheet from the row). The history writer also handles a trailing comment on
+  `audit_history:` / `metadata:` and a flow-style `metadata: {…}` without
+  duplicating the key (a flow mapping that already holds an empty
+  `audit_history` gets the entry in that key, written once), reads a `#` inside
+  quotes as text rather than a comment, refuses an `audit_history` that is a
+  non-empty flow list rather than corrupting it, and keeps a new reason typed
+  the same day for the same status instead of dropping it. A project with only
+  the central index (no `tech-debt/` folder yet) can decide a row that has no
+  sheet: the first decision creates the folder inside the docs root, and a
+  `tech-debt` link leaving it is still refused.
+- Revalidation after an interrupted audit (KT-1312). A refresh or a
+  revalidation is no longer refused once every failed step of the interrupted
+  run is accepted (`remaining_failed: []`): a resume would only finalize it.
+  A resume never runs an accepted step again, whatever blocker its document
+  still holds; only `redo_steps` does. The docs a step rewrote are
+  re-fingerprinted as soon as the step ends, so a chain of resumed runs leaves
+  none with the fingerprints of an earlier audit. A doc a failed step left
+  under its partial banner stays in the revalidation plan (its owning step, or
+  a manual line) and keeps the badge raised, though relevance sees nothing
+  wrong with its citations.
 - The documentary gate no longer refuses what Claude Code's Read tool shows
   (KT-1322). A newline-terminated file of N lines is numbered up to N+1 there
   (the last line is empty), and a range ending at N+1 was refused as outside

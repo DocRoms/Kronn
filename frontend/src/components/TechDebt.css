@@ -21,6 +21,10 @@
 }
 .td-block-head strong { font-weight: 600; }
 .td-block-head svg { color: var(--kr-warning); flex-shrink: 0; }
+.td-block-active {
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-secondary);
+}
 .td-block-remaining {
   margin-left: auto;
   padding: 2px var(--kr-sp-4);
@@ -432,6 +436,20 @@
   color: var(--kr-text-ghost);
 }
 .td-detail-section p { margin: 0; font-size: var(--kr-fs-md); line-height: 1.6; color: var(--kr-text-primary); }
+.td-detail-section p.td-missing { font-style: italic; color: var(--kr-text-tertiary); }
+.td-markdown { font-size: var(--kr-fs-sm); line-height: 1.5; overflow-wrap: anywhere; }
+.td-markdown > :first-child { margin-top: 0; }
+.td-markdown > :last-child { margin-bottom: 0; }
+.td-markdown p, .td-markdown ul, .td-markdown ol { margin: 0 0 var(--kr-sp-3); }
+.td-markdown ul, .td-markdown ol { padding-left: var(--kr-sp-9); }
+.td-markdown code {
+  padding: 0 var(--kr-sp-2);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-code);
+  color: var(--kr-text-on-dark);
+  font-family: var(--kr-font-mono);
+  font-size: var(--kr-fs-xs);
+}
 .td-detail-source { margin: 0; font-size: var(--kr-fs-sm); color: var(--kr-text-muted); overflow-wrap: anywhere; }
 .td-pointers { display: flex; flex-wrap: wrap; gap: var(--kr-sp-3); }
 /* Code background, dark in every theme: its text is the on-dark ink, never the page's. */

@@ -1426,13 +1426,25 @@ TOOLS = [
     {
         "name": "workflow_active_runs",
         "description": (
-            "Unfinished runs (Running, WaitingApproval, Pending) across all "
-            "workflows, the latest per workflow: [{workflow_id, workflow_name, "
-            "project_id, run_id, status, started_at}]. Check it before acting so "
-            "you never step on another agent's run; drill down with "
-            "`workflow_run_status`."
+            "Unfinished runs (Running, WaitingApproval, Pending), latest per "
+            "workflow: [{workflow_id, workflow_name, project_id, run_id, status, "
+            "started_at}]. Check before acting; drill down: `workflow_run_status`."
         ),
         "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "disk_usage",
+        "description": (
+            "Free disk and Kronn's own artefacts by kind/task. `purge_orphans` "
+            "removes only finished, idle, worktree-less lanes: tool_manual."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project_id": {"type": "string"},
+                "purge_orphans": {"type": "boolean"},
+            },
+        },
     },
     {
         "name": "workflow_runs",
@@ -1454,11 +1466,9 @@ TOOLS = [
     {
         "name": "workflow_run_get",
         "description": (
-            "Full detail of ONE run, incl per-step results (step_name · status · "
-            "duration_ms · tokens · kind · agent · truncated output) — for "
-            "debriefing a failed/finished run: which step failed and why. For an "
-            "agent step's full produced content, read the run's discussions via "
-            "`workflow_run_discussions`."
+            "Full detail of ONE run, incl per-step results (step_name, status, "
+            "duration_ms, tokens, kind, agent, truncated output) to debrief a "
+            "failed/finished run. Full agent output: `workflow_run_discussions`."
         ),
         "inputSchema": {
             "type": "object",
@@ -1472,11 +1482,9 @@ TOOLS = [
     {
         "name": "workflow_cancel_run",
         "description": (
-            "Cancel a RUNNING run (MCP equivalent of the UI 'Arrêter'). "
-            "DESTRUCTIVE — stops the run + its in-flight agents; completed "
-            "steps/commits are kept. Use to stop a stuck or duplicate run (e.g. "
-            "an overlapping cron tick). Confirm with the user before cancelling a "
-            "run you didn't start."
+            "Cancel a RUNNING run. DESTRUCTIVE: stops the run and its in-flight "
+            "agents; completed steps/commits are kept. Confirm with the user "
+            "before cancelling a run you didn't start."
         ),
         "inputSchema": {
             "type": "object",
@@ -7699,6 +7707,37 @@ def call_workflow_active_runs(_args):
     return out
 
 
+def call_disk_usage(args):
+    """KT-1318 - free disk and Kronn's own artefacts, compact; optionally purge
+    the orphans (finished, idle, worktree-less, Kronn-marked lanes only). A named
+    delete is a confirmed UI action, deliberately not offered here."""
+    project_id = args.get("project_id")
+    query = "?project_id=" + urllib.parse.quote(str(project_id)) if project_id else ""
+    limit = 25
+    out = {}
+    if args.get("purge_orphans") is True:
+        body = {"project_id": project_id} if project_id else {}
+        purged = _unwrap(_http("POST", "/api/maintenance/disk/purge", body))
+        out["purged"] = {
+            "freed_bytes": purged.get("freed_bytes"),
+            "removed": [item.get("path") for item in purged.get("items", []) if item.get("purged")],
+            "kept": purged.get("kept"),
+        }
+    report = _unwrap(_http("GET", "/api/maintenance/disk" + query))
+    entries = report.get("entries") or []
+    out.update({
+        "available_bytes": report.get("available_bytes"),
+        "under_pressure": report.get("under_pressure"),
+        "policy": report.get("policy"),
+        "totals": report.get("totals"),
+        "orphan_count": report.get("orphan_count"),
+        "orphan_bytes": report.get("orphan_bytes"),
+        "entries_total": len(entries),
+        "entries": entries[:limit],
+    })
+    return out
+
+
 def _compact_variable_contract(variable):
     """Display-safe PromptVariable metadata shared by QP/QA/QE catalogues.
 
@@ -10528,6 +10567,20 @@ TOOL_MANUALS["workflow_run_status"] = (
 TOOL_MANUALS["workflow_trigger"] = (
     "Discovery first: `workflow_list` gives the `workflow_id`. The workflow must be enabled — a disabled draft is refused with a clear error.\n\n`next_check` has the form `{wait_seconds, reason, confidence}`. The first wait is always at least 30s, a sanity check that the run actually started. `confidence: baseline` means the average duration is reliable; `confidence: no_baseline` means this workflow has never run, so check every 60s.\n\nWhen the workflow declares manual launch variables, pass them as `variables: {name: value, …}`. Required ones must be non-empty — the same validation the UI form applies.\n\n`step_agents` changes the agent of some Agent steps for this run only: `{\"<step id or name>\": {\"agent\": \"Codex\", \"model\": \"…\", \"reasoning_effort\": \"…\"}}`. Omitted model or effort means the agent's default. The workflow is never modified; the step keeps its budget and tools. An unknown step, a non-Agent step, an agent not installed or enabled, or tools/budget the agent cannot apply is refused before the run starts."
 )
+TOOL_MANUALS["disk_usage"] = (
+    "Answers: how much disk is free, and what Kronn itself holds on it. `totals` groups bytes by "
+    "kind (`worktree`, `lane_build_dir`, `cache`); `entries` lists the largest first with their "
+    "owner (`task_ref`, `execution_id`, `status`), `idle_seconds` and a `state`: `orphan` "
+    "(finished, no live worktree, idle past `policy.sweep_idle_hours`: the default purge removes "
+    "it), `reclaimable` (finished but recent, or its clean worktree is kept: only a confirmed "
+    "delete in Settings > Disk takes it), `active` (a live execution claims it: never removed), "
+    "`kept` and `foreign` (not created by Kronn: never touched, whatever its name). Sizes are "
+    "floors when `bytes_are_partial`.\n\n"
+    "`purge_orphans: true` removes the orphans and only them, then returns the fresh report. "
+    "Below `policy.launch_min_free_gib` Kronn already sweeps them before it refuses a worker "
+    "launch or a full audit, and says so in the principal room.\n\n"
+    "`entries` is capped at 25 (largest first); `entries_total` is the full count."
+)
 TOOL_MANUALS["task_exec_launch"] = TOOL_MANUALS["task_exec_prepare"]
 TOOL_MANUALS["task_assign"] = (
     "Without `assignee` it assigns YOU: your exact joined CLI session, resolved "
@@ -11118,6 +11171,7 @@ DISPATCH = {
     # new workflow without asking the user to paste them.
     "workflow_list": call_workflow_list,
     "workflow_active_runs": call_workflow_active_runs,
+    "disk_usage": call_disk_usage,
     # 0.8.8 (2026-06-25) — run HISTORY + per-run detail + cancel. The MCP only
     # exposed active runs / latest run; an agent debriefing a cron couldn't
     # enumerate past runs or their foreach children, and couldn't stop a

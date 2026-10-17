@@ -381,6 +381,10 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
             config.server.disk_warning_gib,
             config.server.disk_critical_gib,
         );
+        kronn::core::disk_usage::set_disk_policy(
+            config.server.disk_launch_min_free_gib,
+            config.server.disk_sweep_idle_hours,
+        );
     }
     // reply without spending tokens twice.
     match state
@@ -444,6 +448,9 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
             "Task orchestration boot reconciliation completed"
         );
     }
+    // KT-1318 — the boot pass above is not enough on a host that stays up for
+    // weeks: orphaned lane build dirs are swept periodically as well.
+    kronn::api::disk::spawn_periodic_sweep(state.db.clone());
     // KT-1256 — the lane-target sweep's readable view: what boot removed, what
     // it would remove, what it kept and which `target/wt-*` are not Kronn's.
     for line in &orchestration_recovery.lane_target_report {

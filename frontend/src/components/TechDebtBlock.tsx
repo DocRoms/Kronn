@@ -71,6 +71,9 @@ export function TechDebtBlock({
 
   const total = list.items.length;
   const remaining = list.counts.pending + list.counts.deferred;
+  // The debts the project card counts: a rejected finding or a kept-on-purpose
+  // choice is settled, not active debt.
+  const active = list.counts.pending + list.counts.confirmed + list.counts.deferred;
   const linkedTasks = list.items.filter(item => item.task).length;
   const { gate } = list;
   const validationId = list.validation_discussion_id;
@@ -80,6 +83,7 @@ export function TechDebtBlock({
       <header className="td-block-head">
         <AlertTriangle size={15} />
         <strong>{t('techDebt.title')}</strong>
+        <span className="td-block-active" data-testid="td-active-count">{t('techDebt.active', active)}</span>
         <span className="td-block-remaining">{t('techDebt.remaining', remaining)}</span>
       </header>
       <TdProgressBar counts={list.counts} total={total} />

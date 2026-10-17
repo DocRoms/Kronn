@@ -88,12 +88,29 @@ describe('TechDebtBlock', () => {
     expect(screen.queryByTestId('td-disputes')).toBeNull();
   });
 
+  it('shows the active debt count the project card shows', async () => {
+    // Pending, confirmed and deferred are active debt; rejected and
+    // kept-on-purpose are settled and the card does not count them.
+    mocked(projectsApi.auditTds).mockResolvedValueOnce(tdList([
+      tdItem('TD-1', 'High'),
+      tdItem('TD-2', 'Low', 'confirmed'),
+      tdItem('TD-3', 'Low', 'deferred'),
+      tdItem('TD-4', 'Low', 'rejected'),
+      tdItem('TD-5', 'Low', 'accepted_decision'),
+    ]));
+    renderBlock({ ...PROJECT, tech_debt_count: 3 });
+    expect(await screen.findByTestId('td-active-count')).toHaveTextContent('techDebt.active 3');
+  });
+
   it('opens the review screen', async () => {
+    // The review is a lazy chunk (markdown renderer included): load it before
+    // the click so the test measures the screen, not the first import.
+    await import('../TechDebtReview');
     mocked(projectsApi.auditTds).mockResolvedValueOnce(tdList([tdItem('TD-1', 'High')]));
     renderBlock();
     fireEvent.click(await screen.findByTestId('td-open-review'));
-    expect(await screen.findByTestId('td-review')).toBeInTheDocument();
-  });
+    expect(await screen.findByTestId('td-review', {}, { timeout: 10000 })).toBeInTheDocument();
+  }, 20000);
 
   it('stays hidden without tech debt', () => {
     renderBlock({ ...PROJECT, tech_debt_count: 0 });
