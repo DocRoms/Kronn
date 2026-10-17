@@ -196,8 +196,8 @@ timeline and a stale document's viewer. It has no lifecycle of its own.
 
 Sources:
 
-- The plan and the re-anchoring. [src: file: backend/src/api/audit/revalidate.rs:78-141#plan] [src: file: backend/src/api/audit/revalidate.rs:317-357#apply_reanchors]
-- The partial pipeline the agent part reuses. [src: file: backend/src/api/audit/revalidate.rs:702-715#run_partial_pipeline]
+- The plan and the re-anchoring. [src: file: backend/src/api/audit/revalidate.rs:91-153#plan] [src: file: backend/src/api/audit/revalidate.rs:329-369#apply_reanchors]
+- The partial pipeline the agent part reuses. [src: file: backend/src/api/audit/revalidate.rs:714-727#run_partial_pipeline]
 
 ## Refreshing stale sections (KT-1207)
 
@@ -312,7 +312,7 @@ Historical runs without fingerprints require a new audit before signoff.
 The explicit re-anchor action sends `deterministic_only: true`. It returns the
 remaining plan without launching an agent, even when other sections still need
 agent work; retry retains this mode. A later general fix is a separate choice.
-[src: file: backend/src/api/audit/revalidate.rs:699-701#deterministic_only]
+[src: file: backend/src/api/audit/revalidate.rs:711-713#deterministic_only]
 [src: file: frontend/src/components/RevalidateAudit.tsx:157-168#deterministicOnlyRef] [src: file: frontend/src/components/RevalidateAudit.tsx:213-220#deterministicOnlyRef]
 
 Local TD decisions and deterministic citation repairs advance this proof only
@@ -324,7 +324,7 @@ work for changed prose; deleted or unowned documents require manual attention.
 [src: file: backend/src/db/audit_documents.rs:93-126#advance_local_changes]
 [src: file: backend/src/db/audit_documents.rs:62-91#confirm_paths]
 [src: file: backend/src/core/doc_provenance.rs:703-713#contains_placeholder]
-[src: file: backend/src/api/audit/revalidate.rs:248-305#plan_with_documents]
+[src: file: backend/src/api/audit/revalidate.rs:260-317#plan_with_documents]
 
 A no-change partial run restores validation only when every tracked validated
 document and every selected target remained byte-identical. The learning gate

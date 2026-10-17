@@ -753,6 +753,92 @@ fn a_remediation_naming_a_file_to_create_is_not_judged_by_its_existence() {
     assert!(reason.contains("proposes work"), "{reason}");
 }
 
+// KT-1319 — Kronn's own TD sheet shapes: a `Next step` and a finding about a
+// gone file say what is to be done or what is missing, they do not claim it.
+#[test]
+fn the_standard_td_sheet_shapes_name_gone_files_without_claiming_them() {
+    for heading in ["Next step", "Next steps", "Remedy"] {
+        assert!(is_proposal_heading(heading), "{heading} proposes work");
+    }
+    // A mitigation describes a control that exists, a recommendation may
+    // restate the current setup: their paths stay checked.
+    for heading in ["Mitigation", "Mitigations", "Recommendation"] {
+        assert!(!is_proposal_heading(heading), "{heading} is not a proposal");
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    // The folders exist, so a path under them is a claim the files can break.
+    fs::create_dir_all(dir.join("config")).unwrap();
+    fs::create_dir_all(dir.join("docs/conventions")).unwrap();
+    let report = doc_with(
+        dir,
+        "docs/tech-debt/TD-20261016-a.md",
+        "# TD-20261016-a\n\n## Problem (fact)\n\
+         The Jenkinsfile references the missing `config/config.trn_com.yml`.\n\n\
+         ## Next step\n3. Document usage in `docs/conventions/api-http-codes.md`\n",
+    );
+    assert!(report.sections.is_empty(), "{:?}", report.sections);
+
+    // A present-tense claim of the same sheet is still judged.
+    let report = doc_with(
+        dir,
+        "docs/tech-debt/TD-20261016-b.md",
+        "# TD-20261016-b\n\n## Problem (fact)\nThe build reads `config/gone.yml`.\n",
+    );
+    assert_eq!(flagged(&report), ["config/gone.yml"]);
+}
+
+// KT-1319 — the absence must be about the cited path itself, not a "missing"
+// or "not found" elsewhere in the clause.
+#[test]
+fn a_missing_elsewhere_in_the_clause_does_not_exempt_a_present_tense_claim() {
+    let claims = [
+        ("a", "The build reads `config/gone.yml` when the cache is missing."),
+        ("b", "`src/api/x.rs` returns 404 Not Found."),
+        ("c", "`src/api/x.rs` is missing error handling."),
+        ("d", "The route in `src/api/x.rs` is not found by the router."),
+        ("e", "A dangling pointer is freed by `src/api/x.rs`."),
+        ("f", "If the cache is missing, `config/gone.yml` is read."),
+        ("g", "`config/gone.yml` is missing a null check in the loader."),
+    ];
+    for (id, line) in claims {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        fs::create_dir_all(dir.join("config")).unwrap();
+        fs::create_dir_all(dir.join("src/api")).unwrap();
+        let report = doc_with(
+            dir,
+            &format!("docs/tech-debt/TD-20261016-{id}.md"),
+            &format!("# TD-20261016-{id}\n\n## Problem (fact)\n{line}\n"),
+        );
+        assert_eq!(flagged(&report).len(), 1, "{line}: {:?}", report.sections);
+    }
+}
+
+#[test]
+fn a_path_said_missing_right_where_it_is_cited_is_not_a_claim() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    fs::create_dir_all(dir.join("config")).unwrap();
+    let findings = [
+        "The Jenkinsfile references the missing `config/gone.yml`.",
+        "The Jenkinsfile references a missing file `config/gone.yml`.",
+        "Build error — file not found: `config/gone.yml`.",
+        "`config/gone.yml` is missing from the repository.",
+        "`config/gone.yml` is not found on disk.",
+        "Le Jenkinsfile référence `config/gone.yml` manquant.",
+        "The Jenkinsfile points at `config/gone.yml` (missing).",
+    ];
+    for (i, line) in findings.iter().enumerate() {
+        let report = doc_with(
+            dir,
+            &format!("docs/tech-debt/TD-20261016-m{i}.md"),
+            &format!("# TD-20261016-m{i}\n\n## Problem (fact)\n{line}\n"),
+        );
+        assert!(report.sections.is_empty(), "{line}: {:?}", report.sections);
+    }
+}
+
 /// Run on demand against the repository's own docs:
 /// `cargo nextest run --offline --run-ignored only kronn_own_docs_report`.
 /// It prints the remaining prose-path hits so false positives can be audited.
