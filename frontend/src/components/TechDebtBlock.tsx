@@ -28,6 +28,24 @@ function publishList(projectId: string, list: TdReviewList) {
   listeners.get(projectId)?.forEach(listener => listener(list));
 }
 
+// Reads are ordered per project by start time: a response only gets published if no
+// read that started after it has already been published, so a read begun before a
+// decision's reload can never overwrite the reload's result.
+const readsStarted = new Map<string, number>();
+const readsPublished = new Map<string, number>();
+
+/** Fetches the project's list and publishes it to every entry, unless a newer read already did. */
+async function fetchAndPublish(projectId: string): Promise<TdReviewList> {
+  const ticket = (readsStarted.get(projectId) ?? 0) + 1;
+  readsStarted.set(projectId, ticket);
+  const data = await projectsApi.auditTds(projectId);
+  if (ticket > (readsPublished.get(projectId) ?? 0)) {
+    readsPublished.set(projectId, ticket);
+    publishList(projectId, data);
+  }
+  return data;
+}
+
 /** The project's debt list, its reload and the Validated action: one source for every entry to the review. */
 function useTechDebtList(
   project: Project,
@@ -53,7 +71,7 @@ function useTechDebtList(
 
   const reload = useCallback(async () => {
     try {
-      publishList(project.id, await projectsApi.auditTds(project.id));
+      await fetchAndPublish(project.id);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -62,8 +80,7 @@ function useTechDebtList(
   useEffect(() => {
     if (!hasDebt || auditActive) return;
     let cancelled = false;
-    projectsApi.auditTds(project.id)
-      .then(data => { if (!cancelled) publishList(project.id, data); })
+    fetchAndPublish(project.id)
       .catch(e => { if (!cancelled) setError(e instanceof Error ? e.message : String(e)); });
     return () => { cancelled = true; };
   }, [project.id, hasDebt, auditActive]);

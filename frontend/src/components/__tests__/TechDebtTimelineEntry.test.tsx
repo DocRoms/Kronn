@@ -2,7 +2,7 @@
 // screen as the project overview; the raw file stays a secondary link.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { render, fireEvent, screen, waitFor, within, act } from '@testing-library/react';
 import { buildApiMock } from '../../test/apiMock';
 
 vi.mock('../../lib/api', () => buildApiMock());
@@ -123,5 +123,46 @@ describe('TechDebtTimelineEntry', () => {
     const overviewReview = await screen.findByTestId('td-review', undefined, { timeout: 10000 });
     expect(within(overviewReview).queryByTestId('td-row-TD-1')).toBeNull();
     expect(within(overviewReview).getByTestId('td-row-TD-2')).toBeInTheDocument();
+  }, 30000);
+
+  it('never lets a read started before a decision overwrite the reload that followed it', async () => {
+    await import('../TechDebtReview');
+    const pending = tdList([tdItem('TD-1', 'High'), tdItem('TD-2', 'Medium')]);
+    const decided = tdList([tdItem('TD-1', 'High', 'confirmed'), tdItem('TD-2', 'Medium')]);
+    let answerFirstRead: (list: typeof pending) => void = () => {};
+    // 1st read (overview mount) stays in flight; 2nd (step 4 mount) answers; then the decision's reload.
+    mocked(projectsApi.auditTds)
+      .mockImplementationOnce(() => new Promise(resolve => { answerFirstRead = resolve; }))
+      .mockResolvedValueOnce(pending)
+      .mockResolvedValue(decided);
+    mocked(projectsApi.decideTds).mockResolvedValue({
+      results: [{ td_id: 'TD-1', state: 'confirmed' }],
+      gate: { blocking_total: 1, blocking_settled: 1, met: true, open_disputes: 0 },
+    });
+    const props = baseProps({ ...PROJECT, tech_debt_count: 2 });
+    const overviewOnly = <TechDebtBlock {...props} />;
+    const { rerender } = render(overviewOnly);
+    await waitFor(() => expect(projectsApi.auditTds).toHaveBeenCalledTimes(1));
+
+    // The user switches to the Audit tab while the overview's read is still in flight.
+    rerender(
+      <>
+        {overviewOnly}
+        <TechDebtTimelineEntry {...props} onOpenFile={vi.fn()} />
+      </>,
+    );
+    const stepButton = await screen.findByTestId('audit-timeline-td-open-review');
+    expect(stepButton).toHaveTextContent('techDebt.open 2');
+
+    fireEvent.click(stepButton);
+    const review = await screen.findByTestId('td-review', undefined, { timeout: 10000 });
+    fireEvent.click(within(review).getByTestId('td-decide-confirm'));
+    await waitFor(() => expect(screen.getByTestId('audit-timeline-td-open-review')).toHaveTextContent('techDebt.open 1'));
+    expect(screen.getByTestId('td-open-review')).toHaveTextContent('techDebt.open 1');
+
+    // The stale first read finally answers with the pre-decision state: it must be dropped.
+    await act(async () => { answerFirstRead(pending); });
+    expect(screen.getByTestId('audit-timeline-td-open-review')).toHaveTextContent('techDebt.open 1');
+    expect(screen.getByTestId('td-open-review')).toHaveTextContent('techDebt.open 1');
   }, 30000);
 });
