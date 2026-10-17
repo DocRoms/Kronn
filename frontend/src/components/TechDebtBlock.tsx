@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
-import { AlertTriangle, ListChecks, MessageSquare, ShieldCheck } from 'lucide-react';
+import { AlertTriangle, FileText, ListChecks, MessageSquare, ShieldCheck } from 'lucide-react';
 import { useT } from '../lib/I18nContext';
 import { projects as projectsApi } from '../lib/api';
 import { useAsyncGuard } from '../hooks/useAsyncGuard';
@@ -20,14 +20,16 @@ export interface TechDebtBlockProps {
   onRefetch: () => void;
 }
 
-/** "Dette technique" block of the project card: progress, the Validated rule, and the review entry. */
-export function TechDebtBlock({
-  project, auditActive, agents, modelTiers, toast, onOpenDiscussion, onNavigate, onRefetch,
-}: TechDebtBlockProps) {
+/** The project's debt list, its reload and the Validated action: one source for every entry to the review. */
+function useTechDebtList(
+  project: Project,
+  auditActive: boolean,
+  toast: TechDebtBlockProps['toast'],
+  onRefetch: () => void,
+) {
   const { t } = useT();
   const [list, setList] = useState<TdReviewList | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [open, setOpen] = useState(false);
   const hasDebt = (project.tech_debt_count ?? 0) > 0;
 
   const reload = useCallback(async () => {
@@ -58,6 +60,99 @@ export function TechDebtBlock({
       toast(t('techDebt.validateError', e instanceof Error ? e.message : String(e)), 'error');
     }
   });
+
+  return { list, error, reload, validate };
+}
+
+interface TechDebtReviewButtonProps extends Pick<TechDebtBlockProps,
+  'project' | 'agents' | 'modelTiers' | 'toast' | 'onOpenDiscussion' | 'onNavigate'> {
+  list: TdReviewList;
+  onReload: () => Promise<void>;
+  onValidate: () => Promise<unknown>;
+  testId: string;
+}
+
+/** The control that opens the tech-debt review screen: the overview and the audit timeline both render this one. */
+function TechDebtReviewButton({
+  project, list, agents, modelTiers, toast, onReload, onValidate, onOpenDiscussion, onNavigate, testId,
+}: TechDebtReviewButtonProps) {
+  const { t } = useT();
+  const [open, setOpen] = useState(false);
+  const remaining = list.counts.pending + list.counts.deferred;
+
+  return (
+    <>
+      <button type="button" className="td-primary-btn" data-testid={testId} onClick={() => setOpen(true)}>
+        {remaining > 0 ? t('techDebt.open', remaining) : t('techDebt.openAll')}
+      </button>
+      {open && (
+        <Suspense fallback={null}>
+          <TechDebtReview
+            project={project}
+            list={list}
+            agents={agents}
+            modelTiers={modelTiers}
+            toast={toast}
+            onReload={onReload}
+            onValidate={() => onValidate()}
+            onClose={() => setOpen(false)}
+            onOpenDiscussion={onOpenDiscussion}
+            onNavigate={onNavigate}
+          />
+        </Suspense>
+      )}
+    </>
+  );
+}
+
+export interface TechDebtTimelineEntryProps extends TechDebtBlockProps {
+  /** Opens the raw `inconsistencies-tech-debt.md` in the docs viewer. */
+  onOpenFile: () => void;
+}
+
+/** Step 4 of the audit timeline: the overview's review control, the raw file as a secondary link, an explicit empty state. */
+export function TechDebtTimelineEntry({
+  project, auditActive, agents, modelTiers, toast, onOpenDiscussion, onNavigate, onRefetch, onOpenFile,
+}: TechDebtTimelineEntryProps) {
+  const { t } = useT();
+  const { list, error, reload, validate } = useTechDebtList(project, auditActive, toast, onRefetch);
+  const hasDebt = (project.tech_debt_count ?? 0) > 0;
+
+  if (!hasDebt || (list && list.items.length === 0)) {
+    return <p className="audit-tl-muted" data-testid="audit-timeline-td-empty">{t('auditTimeline.validated.noDebt')}</p>;
+  }
+  return (
+    <div className="td-block-actions" data-testid="audit-timeline-td-entry">
+      {list ? (
+        <TechDebtReviewButton
+          project={project}
+          list={list}
+          agents={agents}
+          modelTiers={modelTiers}
+          toast={toast}
+          onReload={reload}
+          onValidate={validate}
+          onOpenDiscussion={onOpenDiscussion}
+          onNavigate={onNavigate}
+          testId="audit-timeline-td-open-review"
+        />
+      ) : error ? (
+        <span className="td-block-error">{t('techDebt.loadError', error)}</span>
+      ) : null}
+      <button type="button" className="td-link-btn" data-testid="audit-timeline-td-open-file" onClick={onOpenFile}>
+        <FileText size={12} /> {t('auditTimeline.validated.openFile')}
+      </button>
+    </div>
+  );
+}
+
+/** "Dette technique" block of the project card: progress, the Validated rule, and the review entry. */
+export function TechDebtBlock({
+  project, auditActive, agents, modelTiers, toast, onOpenDiscussion, onNavigate, onRefetch,
+}: TechDebtBlockProps) {
+  const { t } = useT();
+  const { list, error, reload, validate } = useTechDebtList(project, auditActive, toast, onRefetch);
+  const hasDebt = (project.tech_debt_count ?? 0) > 0;
 
   if (auditActive || !hasDebt) return null;
   if (error && !list) {
@@ -120,9 +215,18 @@ export function TechDebtBlock({
         </p>
       )}
       <div className="td-block-actions">
-        <button type="button" className="td-primary-btn" data-testid="td-open-review" onClick={() => setOpen(true)}>
-          {remaining > 0 ? t('techDebt.open', remaining) : t('techDebt.openAll')}
-        </button>
+        <TechDebtReviewButton
+          project={project}
+          list={list}
+          agents={agents}
+          modelTiers={modelTiers}
+          toast={toast}
+          onReload={reload}
+          onValidate={validate}
+          onOpenDiscussion={onOpenDiscussion}
+          onNavigate={onNavigate}
+          testId="td-open-review"
+        />
         {gate.met && !list.validated && (
           <button type="button" className="td-secondary-btn" data-testid="td-validate" onClick={() => { void validate(); }}>
             <ShieldCheck size={13} /> {t('techDebt.validate')}
@@ -143,22 +247,6 @@ export function TechDebtBlock({
           </button>
         )}
       </div>
-      {open && (
-        <Suspense fallback={null}>
-          <TechDebtReview
-            project={project}
-            list={list}
-            agents={agents}
-            modelTiers={modelTiers}
-            toast={toast}
-            onReload={reload}
-            onValidate={() => validate()}
-            onClose={() => setOpen(false)}
-            onOpenDiscussion={onOpenDiscussion}
-            onNavigate={onNavigate}
-          />
-        </Suspense>
-      )}
     </section>
   );
 }
