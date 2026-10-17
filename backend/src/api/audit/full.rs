@@ -567,7 +567,7 @@ pub async fn full_audit(
         let total_steps = steps.len();
         // Recompute from the actual documents, including predecessors created
         // before documentary failures were persisted on their owning steps.
-        let documentary_recovery = if resume_run_id_req.is_some() && should_optimize_documents(kind) {
+        let mut documentary_recovery = if resume_run_id_req.is_some() && should_optimize_documents(kind) {
             match crate::core::document_optimization::analyze(&project_path) {
                 Ok(report) => super::document_repair::recovery_plan(
                     &report.diagnostics,
@@ -582,6 +582,9 @@ pub async fn full_audit(
                 }
             }
         } else { Default::default() };
+        // KT-1312 — a step a human accepted is not queued again by a blocker its
+        // document still holds: only `redo_steps` runs it again.
+        documentary_recovery.retain(|step, _| !accepted_rows.iter().any(|row| row.step == *step));
         for step in documentary_recovery.keys() { already_succeeded_steps.remove(step); }
         // KT-1211 (M6) — steps the run inherited as done that the human asked
         // to redo because the sources moved since they ran.
@@ -1781,7 +1784,11 @@ pub async fn full_audit(
                 _ => false,
             };
 
-            let max_attempts = if enforce_mode || documentary_snapshot.is_some() {
+            // The detector disposition gate retries too (KT-1323): the TD
+            // index step gets the bounded budget whenever signals fired.
+            let detector_gated = analysis_step.target_file.ends_with("inconsistencies-tech-debt.md")
+                && !detector_signals.is_empty();
+            let max_attempts = if enforce_mode || documentary_snapshot.is_some() || detector_gated {
                 super::anti_hallu_enforce::MAX_ATTEMPTS
             } else {
                 1
@@ -1796,6 +1803,7 @@ pub async fn full_audit(
             }
             let mut previous_attempt_usage: Option<crate::db::audit_runs::StepTokens> = None;
             let mut step_cost = super::agent_launch::StepCost::default();
+            let rewritten_before = rewritten_docs.clone();
             'attempts: loop {
             if cross_handled {
                 break 'attempts;
@@ -2357,10 +2365,27 @@ pub async fn full_audit(
                     // Only runs when the prior checks passed (no point gating a
                     // step that's already failing).
                     if success && analysis_step.target_file.ends_with("inconsistencies-tech-debt.md") {
-                        if let Some(w) = crate::api::audit::validation::check_detector_disposition(
+                        if let Some(gap) = crate::api::audit::validation::detector_disposition_gap(
                             &project_path,
                             &detector_signals,
                         ) {
+                            let w = gap.warning;
+                            if attempt < max_attempts {
+                                tracing::warn!(
+                                    "Audit step {} ({}) detector disposition gate: {} undisposed signal(s), retry {}/{}",
+                                    step, file_label, gap.count, attempt + 1, max_attempts
+                                );
+                                yield Event::default().event("step_retry").data(
+                                    serde_json::json!({
+                                        "step": step, "file": file_label,
+                                        "attempt": attempt, "max_attempts": max_attempts,
+                                        "undisposed_count": gap.count,
+                                        "reason": "detector_disposition",
+                                    }).to_string()
+                                );
+                                citation_feedback = Some(gap.feedback);
+                                continue 'attempts;
+                            }
                             success = false;
                             tracing::warn!(
                                 "Audit step {} ({}) detector disposition gate failed: {}",
@@ -2824,6 +2849,18 @@ pub async fn full_audit(
                         doc_blame.record_step(&project_path, step as u32, &documentary_baseline, &after);
                     }
                     Err(e) => tracing::warn!("Audit step {step} ({file_label}): documentary blame not recorded: {e}"),
+                }
+            }
+            // KT-1312 — the docs this step rewrote are fingerprinted now: a run
+            // interrupted later, or a resume that finds nothing left to run, must
+            // not leave them with the fingerprints of an earlier audit.
+            let step_rewritten: Vec<String> = rewritten_docs.difference(&rewritten_before).cloned().collect();
+            if !step_rewritten.is_empty() {
+                let pp = project_path.clone();
+                match tokio::task::spawn_blocking(move || crate::core::citation_drift::record_after_audit(&pp, &step_rewritten)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => tracing::warn!("Audit step {step} ({file_label}): citation fingerprints not refreshed: {e}"),
+                    Err(e) => tracing::warn!("Audit step {step} ({file_label}): citation fingerprint task failed: {e}"),
                 }
             }
         }
@@ -4041,6 +4078,21 @@ pub(crate) fn fresh_launch_refusal(
          or run the whole audit again with fresh: true.",
         run.id
     ))
+}
+
+/// KT-1312 — whether a resume of `run` would still run a step. A run whose
+/// failed steps are all accepted has none: it blocks no refresh or
+/// revalidation, though a resume could still finalize it.
+pub(crate) fn resume_has_steps_left(
+    run: &crate::models::AuditRun,
+    steps: &[crate::models::AuditRunStep],
+) -> bool {
+    let Some(kind) = crate::models::AuditKind::from_label(&run.kind) else {
+        return true;
+    };
+    let done = already_succeeded_step_indices(steps);
+    let total = super::assemble_chained_steps(kind).len() as u32;
+    (1..=total).any(|step| !done.contains(&step))
 }
 
 /// KT-1131 — the steps a single-step retry runs: each one must exist and must

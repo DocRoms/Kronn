@@ -623,6 +623,32 @@ Release notes for 0.9.3 and earlier are available in the
   the central index (no `tech-debt/` folder yet) can decide a row that has no
   sheet: the first decision creates the folder inside the docs root, and a
   `tech-debt` link leaving it is still refused.
+- Revalidation after an interrupted audit (KT-1312). A refresh or a
+  revalidation is no longer refused once every failed step of the interrupted
+  run is accepted (`remaining_failed: []`): a resume would only finalize it.
+  A resume never runs an accepted step again, whatever blocker its document
+  still holds; only `redo_steps` does. The docs a step rewrote are
+  re-fingerprinted as soon as the step ends, so a chain of resumed runs leaves
+  none with the fingerprints of an earlier audit. A doc a failed step left
+  under its partial banner stays in the revalidation plan (its owning step, or
+  a manual line) and keeps the badge raised, though relevance sees nothing
+  wrong with its citations.
+- Kronn no longer cuts a text inside a `[src: …]` marker, and the detector
+  gate retries (KT-1323). The TD index cut a long title at 160 characters
+  inside a citation; the cut opener then swallowed the next `]` of the index,
+  the end-of-run gate blamed step 8, and the regenerated index failed again,
+  for ever. Every Kronn truncation that can hold a citation (index titles, TD
+  task text, banner and stored reasons, the briefing excerpt) now goes through
+  `truncate_outside_markers`, which stops before a marker the limit would
+  split. The detector disposition gate no longer fails step 8 outright: it
+  gets the bounded retry of the other gates, with feedback naming the signals
+  to dispose of. The hygiene detectors (`_blank`, zero-tests, template
+  checks) skip generated, vendored and framework scaffolding files
+  (`generated/` dirs, root-level `coverage/` / `Pods/`, minified bundles,
+  Symfony `web/config.php`, `.gitattributes` `linguist-generated` /
+  `linguist-vendored` with last-match-wins and negation), so they no longer
+  force TDs; the security detectors, the Docker/CI inventory and a team's own
+  bans still see every file, so a `.gitattributes` line can never hide them.
 - The documentary gate no longer refuses what Claude Code's Read tool shows
   (KT-1322). A newline-terminated file of N lines is numbered up to N+1 there
   (the last line is empty), and a range ending at N+1 was refused as outside
