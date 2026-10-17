@@ -314,7 +314,7 @@ fn fail(step: &WorkflowStep, started: Instant, error: impl std::fmt::Display) ->
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::models::{

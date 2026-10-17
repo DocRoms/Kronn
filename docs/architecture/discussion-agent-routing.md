@@ -43,7 +43,7 @@ This is the supported escape hatch when a human or agent needs to discuss the
 syntax itself (write `` `@codex` `` rather than a live mention). The UI composer
 and MCP bridge apply the same exemption before resolving targets.
 [src: file: frontend/src/lib/messageTargets.ts:131-147#proseOnly]
-[src: file: backend/scripts/disc-introspection-mcp.py:5080-5091#_structured_message_targets]
+[src: file: backend/scripts/disc-introspection-mcp.py:5101-5112#_structured_message_targets]
 
 | Room mode | Target state | Result |
 |---|---|---|
@@ -61,7 +61,7 @@ discussion agent sets `discussions.no_agent` without pausing, removing, or
 hiding joined peers. The mode switch retires pending native dispatches in the
 same transaction, and the dispatcher's final claim also checks that native
 mode is still enabled.
-[src: file: backend/src/db/discussions.rs:939-958#set_disc_no_agent_within_tx]
+[src: file: backend/src/db/discussions.rs:951-970#set_disc_no_agent_within_tx]
 [src: file: backend/src/db/agent_dispatch.rs:556-664#claim_with_limits]
 [src: file: backend/src/db/agent_dispatch.rs:838-856#mark_agent_started]
 
@@ -86,7 +86,7 @@ time, so any other Kronn call ends that wait; the call's result carries
 host needs an out-of-band push capability.
 [src: file: backend/src/api/disc_invite.rs:1691-1760#addressed_to_caller]
 [src: file: backend/src/api/disc_invite.rs:1064-1068#AWARENESS_MAX_MESSAGES]
-[src: file: backend/scripts/disc-introspection-mcp.py:7282-7313#_WAIT_PREEMPTED_NOTICE]
+[src: file: backend/scripts/disc-introspection-mcp.py:7303-7334#_WAIT_PREEMPTED_NOTICE]
 [src: file: backend/scripts/disc-introspection-mcp.py:12010-12017#_with_wait_preempted]
 
 Awareness delivery follows a scan / offer / ack contract with two durable
@@ -121,11 +121,11 @@ New and migrated sessions start both cursors at the room's current tip.
 [src: file: frontend/src/hooks/useMessageQueue.ts:13-26#QueuedMessage]
 [src: file: frontend/src/hooks/useMessageQueue.ts:162-258#processingDiscsRef]
 [src: file: frontend/src/hooks/useMessageQueue.ts:260-280#enqueue]
-[src: file: backend/src/db/discussions.rs:1293-1313#insert_user_message_with_dispatches]
+[src: file: backend/src/db/discussions.rs:1305-1325#insert_user_message_with_dispatches]
 [src: file: backend/src/db/agent_dispatch.rs:677-826#recover_after_restart]
-[src: file: backend/src/db/discussions.rs:3557-3559#DispatchInProgress]
+[src: file: backend/src/db/discussions.rs:3569-3571#DispatchInProgress]
 [src: file: backend/src/api/discussions/messaging.rs:1013-1021#DispatchInProgress]
-[src: file: backend/src/db/discussions.rs:3508-3768#revise_message_with_dispatch]
+[src: file: backend/src/db/discussions.rs:3520-3780#revise_message_with_dispatch]
 [src: file: backend/src/api/federation.rs:16-73#federate_message]
 [src: file: backend/src/api/federation.rs:102-147#federate_message_revision]
 [src: file: backend/src/api/ws.rs:1164-1172#resolved_targets]
@@ -163,7 +163,7 @@ reach the others; "parallel" keeps the fan-out above. A native reply's prose
 mention that launched nobody is annotated with its reason (already scheduled
 on the root turn, or no marker), computed from `message_targets`.
 [src: file: frontend/src/lib/agentDelegation.ts:62-149#detectDelegation]
-[src: file: backend/src/db/discussions.rs:1748-1792#native_agents_scheduled_for_root_turn]
+[src: file: backend/src/db/discussions.rs:1760-1804#native_agents_scheduled_for_root_turn]
 [src: file: backend/src/api/discussions/crud.rs:545-553#initial_participants]
 [src: file: backend/src/api/discussions/messaging.rs:115-158#enqueue_dispatches_for_trigger]
 [src: file: backend/src/api/discussions/crud.rs:896-900#attach_discussion_participants]
@@ -180,7 +180,7 @@ from exact joined aliases (`@codex-cli`, `@codex-cli-2`, …) using the
 discussion's participant order. Several mentions fan out once per durable
 identity. The legacy single `target_agent` field remains accepted during
 rolling upgrades, with its historical provider-level semantics.
-[src: file: backend/scripts/disc-introspection-mcp.py:5080-5166#_structured_message_targets]
+[src: file: backend/scripts/disc-introspection-mcp.py:5101-5187#_structured_message_targets]
 [src: file: backend/src/api/disc_source.rs:434-454#legacy_requested_target]
 
 For each native identity, the message and its dispatch obligation commit in one
@@ -188,7 +188,7 @@ transaction. Exact CLI identities create no local runner: the addressed session
 receives the Agent turn through its next poll, while every unrelated CLI skips
 it and advances its cursor. Bulk imports, historical appends, duplicates and
 appends without a live JOIN session never start a runner.
-[src: file: backend/src/db/discussions.rs:1531-1550#insert_message_with_targets_and_dispatches]
+[src: file: backend/src/db/discussions.rs:1543-1562#insert_message_with_targets_and_dispatches]
 [src: file: backend/src/api/disc_invite.rs:1691-1710#addressed_to_caller]
 
 Every verified live MCP append also records its exact author session in
@@ -270,7 +270,7 @@ Two distinctions the reason must not blur, and does not:
 - A backend restart resets a claimed durable job to pending for the boot drain.
 - A watchdog timeout is a completed failed attempt, not a restart. Its message
   names the elapsed deadline and offers an explicit retry.
-[src: file: backend/src/db/discussions.rs:1486-1529#insert_message_with_targeted_dispatch]
+[src: file: backend/src/db/discussions.rs:1498-1541#insert_message_with_targeted_dispatch]
   [src: file: backend/src/api/discussions/messaging.rs:115-158#enqueue_dispatches_for_trigger]
 [src: file: backend/src/db/agent_dispatch.rs:677-826#recover_after_restart]
 [src: file: backend/src/api/discussions/streaming.rs:658-674#timeout_notice]

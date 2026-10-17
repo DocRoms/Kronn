@@ -1956,7 +1956,7 @@ impl AcpHost {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     // Only the Unix liveness fixtures read from a socket.

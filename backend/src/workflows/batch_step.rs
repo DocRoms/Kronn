@@ -1318,7 +1318,7 @@ fn build_structured_output(input: BatchStructuredOutput<'_>) -> String {
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

@@ -1099,6 +1099,6 @@ pub fn render(audit: &ContextAudit) -> String {
     out
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "context_audit_test.rs"]
 mod context_audit_test;

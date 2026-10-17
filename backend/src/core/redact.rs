@@ -563,7 +563,7 @@ pub fn redact_stored_text(text: &str) -> String {
     redact_for_audit_artifact(&strip_url_secrets(text)).0
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

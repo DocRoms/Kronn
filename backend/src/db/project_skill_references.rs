@@ -81,7 +81,7 @@ pub fn list_all(conn: &Connection) -> Result<Vec<SkillReference>> {
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

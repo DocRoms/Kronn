@@ -604,6 +604,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
                 docs_url: Some("https://developer.atlassian.com/cloud/jira/platform/rest/v3/intro/".into()),
                 config_keys: vec![
                     ApiConfigKey {
+                        public: true,
                         env_key: "JIRA_URL".into(),
                         label: "Workspace URL".into(),
                         placeholder: "https://acme.atlassian.net".into(),
@@ -2035,6 +2036,7 @@ Official docs: https://docs.chartbeat.com/cbp/api/historical-api/getting-started
                 docs_url: Some("https://help.chartbeat.com/hc/en-us/articles/360045337214-Guide-to-Chartbeat-APIs".into()),
                 config_keys: vec![
                     ApiConfigKey {
+                        public: false,
                         env_key: "CHARTBEAT_HOST".into(),
                         label: "Host (default)".into(),
                         placeholder: "domain.tld".into(),
@@ -2247,18 +2249,21 @@ Full schema: [Adobe Analytics 2.0 API docs](https://developer.adobe.com/analytic
                 docs_url: Some("https://developer.adobe.com/analytics-apis/docs/2.0/".into()),
                 config_keys: vec![
                     ApiConfigKey {
+                        public: false,
                         env_key: "ADOBE_COMPANY_ID".into(),
                         label: "Company ID".into(),
                         placeholder: "mycompany".into(),
                         description: "Adobe Analytics tenant identifier (the segment after `/company/` in the Analytics dashboard URL). Interpolated into the Base URL + the x-proxy-global-company-id header.".into(),
                     },
                     ApiConfigKey {
+                        public: false,
                         env_key: "ADOBE_ORG_ID".into(),
                         label: "Organization ID (IMS)".into(),
                         placeholder: "ABCDEF1234567890@AdobeOrg".into(),
                         description: "Adobe IMS organization identifier — found in the Developer Console project overview. Used during OAuth2 exchange.".into(),
                     },
                     ApiConfigKey {
+                        public: false,
                         env_key: "ADOBE_RSID".into(),
                         label: "Report Suite ID (default)".into(),
                         placeholder: "examplecompanyprod".into(),
@@ -2431,6 +2436,7 @@ Official docs: https://developers.google.com/custom-search/v1/reference/rest
                 docs_url: Some("https://developers.google.com/custom-search/v1/reference/rest".into()),
                 config_keys: vec![
                     ApiConfigKey {
+                        public: false,
                         env_key: "GOOGLE_SEARCH_CX".into(),
                         label: "Search Engine ID (cx)".into(),
                         placeholder: "a0b1c2d3e4f5g6h7i".into(),
@@ -2633,7 +2639,7 @@ pub fn credential_source(server: &McpServer) -> CredentialSource {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

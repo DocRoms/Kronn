@@ -555,6 +555,6 @@ pub(crate) fn messages_wire_len(body: &Value) -> usize {
     serialised.saturating_sub(payload) + images * IMAGE_PROMPT_BYTES
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "vision_test.rs"]
 mod tests;

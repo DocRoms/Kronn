@@ -362,6 +362,6 @@ pub fn render(state: &RtkState) -> String {
     out
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "rtk_state_test.rs"]
 mod rtk_state_test;

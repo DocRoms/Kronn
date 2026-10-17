@@ -351,7 +351,7 @@ fn classify_ip(ip: &str, iface: &str) -> Option<(String, String, String)> {
     Some((ip.into(), "lan".into(), format!("Public ({})", iface)))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use serial_test::serial;

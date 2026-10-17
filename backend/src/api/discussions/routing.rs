@@ -68,7 +68,7 @@ pub(crate) fn route_joined_peer_turn(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

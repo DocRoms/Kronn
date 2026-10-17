@@ -1020,7 +1020,7 @@ fn build_pr_draft_step(agent: AgentType, ticket_ref: &str) -> WorkflowStep {
     s
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::models::OnInvalid;

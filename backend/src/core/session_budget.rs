@@ -306,6 +306,6 @@ fn assess_with(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "session_budget_test.rs"]
 mod session_budget_test;

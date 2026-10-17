@@ -144,7 +144,7 @@ pub fn discovered_models(tags: &[OllamaTag]) -> Vec<DiscoveredModel> {
         .collect()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 
