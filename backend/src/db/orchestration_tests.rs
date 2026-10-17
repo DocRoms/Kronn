@@ -1550,6 +1550,7 @@ fn activity_watchdog_interrupts_a_silent_dispatched_worker_and_settles_its_dispa
         session_tokens_at_message: None,
         author_cli_ordinal: None,
         session_continuity: None,
+        kind: Default::default(),
         model: None,
         lint_report: None,
         id: "watchdog-trigger".into(),
@@ -3021,6 +3022,20 @@ fn escalated_campaign_holds_the_principal_and_terminal_child_notifies_parent() {
         notices, 1,
         "terminal child event wakes the principal durably"
     );
+
+    // KT-1330 — what the orchestrator posts (campaign gate, its release, the
+    // terminal) is stored with the typed kind, not left to the id-prefix
+    // fallback that exists only for rows older than the column.
+    let (posted, untyped): (i64, i64) = conn
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(kind IS NOT 'orchestration'), 0) FROM messages \
+             WHERE discussion_id = ?1 AND id LIKE 'orch-%'",
+            [DISC],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert!(posted >= 3, "gate, release and terminal were posted");
+    assert_eq!(untyped, 0, "every orchestrator post carries kind=orchestration");
 
     // KT-619 — every steering event on this path mints a card, each in the same
     // transaction as the message it attaches to. Three happened above, in this
@@ -5965,6 +5980,7 @@ fn requested_changes_publish_a_steering_card_beside_the_findings() {
         reply_to_message_id: None,
         author_cli_ordinal: None,
         session_continuity: None,
+        kind: Default::default(),
     };
     let worker_target = MessageTarget::discussion_agent(AgentType::ClaudeCode);
     let outcome = commit_review_checkpoint(
@@ -6215,6 +6231,7 @@ fn a_replayed_campaign_gate_publishes_nothing_and_breaks_no_transition() {
         reply_to_message_id: None,
         author_cli_ordinal: None,
         session_continuity: None,
+        kind: Default::default(),
     };
     crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
         &conn,

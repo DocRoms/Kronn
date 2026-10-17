@@ -335,7 +335,7 @@ fn build_export_envelope(
     discussion.message_count = messages.len() as u32;
     discussion.non_system_message_count = messages
         .iter()
-        .filter(|message| !matches!(message.role, crate::models::MessageRole::System))
+        .filter(|message| message.counts_as_unread())
         .count() as u32;
 
     // Local execution/sharing state is deliberately non-portable.
@@ -998,6 +998,7 @@ fn tour_demo_envelope(ui_language: &str) -> DiscussionExportEnvelope {
                 session_tokens_at_message: None,
                 author_cli_ordinal: None,
                 session_continuity: None,
+                kind: Default::default(),
                 id: user_message_id.clone(),
                 role: crate::models::MessageRole::User,
                 channel: crate::models::MessageChannel::Main,
@@ -1022,6 +1023,7 @@ fn tour_demo_envelope(ui_language: &str) -> DiscussionExportEnvelope {
                 session_tokens_at_message: None,
                 author_cli_ordinal: None,
                 session_continuity: None,
+                kind: Default::default(),
                 id: preview_message_id,
                 role: crate::models::MessageRole::Agent,
                 channel: crate::models::MessageChannel::Main,
@@ -1532,6 +1534,7 @@ mod tests {
                     session_tokens_at_message: None,
                     author_cli_ordinal: None,
                     session_continuity: None,
+                    kind: Default::default(),
                     id: "portable-message".into(),
                     role: crate::models::MessageRole::User,
                     channel: crate::models::MessageChannel::Main,

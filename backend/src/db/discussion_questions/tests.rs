@@ -40,6 +40,7 @@ fn message(id: &str, content: String) -> DiscussionMessage {
         session_tokens_at_message: None,
         author_cli_ordinal: None,
         session_continuity: None,
+        kind: Default::default(),
         model: None,
         lint_report: None,
     }

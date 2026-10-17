@@ -1359,6 +1359,7 @@ async fn record_verdict(
         reply_to_message_id: None,
         author_cli_ordinal: None,
         session_continuity: None,
+        kind: Default::default(),
     };
     let discussion_id = discussion_id.to_string();
     delegation

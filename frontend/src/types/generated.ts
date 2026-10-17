@@ -3564,7 +3564,16 @@ author_cli_ordinal?: number | null,
  * KT-1202 — whether this agent turn continued its CLI/ACP conversation or
  * started a new one, and why. `None` for runtimes that never resume.
  */
-session_continuity?: SessionContinuity | null, };
+session_continuity?: SessionContinuity | null,
+/**
+ * KT-1330 — who this message speaks for. `Orchestration` marks what the
+ * orchestrator posts into a room (review requests, delivery summaries,
+ * terminal events, bounces, timeouts…) so the UI can fold a campaign
+ * room's machinery behind a marker WITHOUT sniffing the text. Display
+ * only: every read path for agents (bridge, MCP, prompts) keeps the
+ * message. Skipped on the wire while `Standard`.
+ */
+kind?: MessageKind, };
 
 /**
  * Lean surrounding-message shape for a `disc_get_message` window.
@@ -5546,6 +5555,11 @@ outcome: WriteOutcome | null, imported_sections: number, diff: string, };
 export type MessageAttachment = { id: string, filename: string, mime_type: string, disk_path: string | null, };
 
 export type MessageChannel = "main" | "note";
+
+/**
+ * KT-1330 — the durable origin of a message, orthogonal to `role`/`channel`.
+ */
+export type MessageKind = "standard" | "orchestration";
 
 export type MessageRevisionReceipt = { event_id: string, message_id: string, revision: string, sort_order: number, duplicate: boolean, dispatch_job_id: string | null, };
 
@@ -10161,10 +10175,6 @@ project_id?: string,
  */
 step_agents?: { [key in string]: StepAgentOverride }, };
 
-export type UnassignPlanningTaskRequest = { assignee?: PlanningAssigneeInput | null, actor?: PlanningActor, };
-
-export type UnlinkPlanningDiscussionRequest = { discussion_id: string, actor?: PlanningActor, };
-
 /**
  * A doc whose every section is unanchored, and when an agent pass last
  * re-read it (KT-1292).
@@ -10179,6 +10189,10 @@ reviewed_at: string | null,
  * does (it is listed, never queued).
  */
 owned: boolean, };
+
+export type UnassignPlanningTaskRequest = { assignee?: PlanningAssigneeInput | null, actor?: PlanningActor, };
+
+export type UnlinkPlanningDiscussionRequest = { discussion_id: string, actor?: PlanningActor, };
 
 /**
  * An Exec command line that interpolates a template value into inline code

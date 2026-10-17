@@ -8965,6 +8965,7 @@ pub(crate) fn orchestrator_message(id: String, content: String) -> DiscussionMes
         reply_to_message_id: None,
         author_cli_ordinal: None,
         session_continuity: None,
+        kind: crate::models::MessageKind::Orchestration,
     }
 }
 
@@ -9024,6 +9025,7 @@ fn build_control_offer_message(
         reply_to_message_id: None,
         author_cli_ordinal: None,
         session_continuity: None,
+        kind: crate::models::MessageKind::Orchestration,
     }
 }
 

@@ -13,6 +13,17 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- A « hide orchestration messages » toggle beside « hide notes » in the
+  discussion composer (KT-1330). What the orchestrator posts into a room
+  (review requests, delivery summaries, terminal events, bounces, timeouts,
+  worker-undelivered alerts) now carries a typed `kind: "orchestration"`
+  (`messages.kind`; rows older than the column resolve it from their `orch-…` /
+  `delivery-summary:…` id). Hiding folds each run of consecutive ones behind one
+  expandable marker, persisted like « hide notes » (`kronn:showOrchestrationMessages`).
+  A question card, a campaign gate waiting on a human, a message with an open
+  action and a search hit are never folded. Display only: agents and the
+  bridge/MCP read paths still get every message. Orchestration messages no
+  longer raise the unread badge. See `docs/architecture/orchestration-message-kind.md`.
 - « Revalider l'audit » now re-reads the docs whose sections are all
   unanchored (no citation, no repository path), once per change (KT-1292).
   Such a doc has no verdict, so nothing ever sent it to an agent. A review
