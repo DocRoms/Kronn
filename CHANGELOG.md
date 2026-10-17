@@ -634,6 +634,20 @@ Release notes for 0.9.3 and earlier are available in the
   path writes is charged to its step. A step is also blocked
   only by diagnostics absent before it ran: those already there are reported in
   a `documentary_preexisting` event instead of failing it.
+- A doc's citations are no longer lost to a truncated marker, and a citation
+  of an unknown kind is no longer judged as a file (KT-1311). The partial
+  banner cut its reason at 240 characters, sometimes inside a quoted
+  `[src: …]`, and the scanner then read the rest of the doc as one marker:
+  no fingerprint was recorded, so drift went unseen. The banner now writes the
+  reason with round brackets, and the scanner closes an unclosed marker at the
+  next `[src:` or blank line and carries on. `[src: command: git log …]`
+  (a kind on a closed list of non-file kinds: `command`, `shell`, `test-run`…)
+  is unverifiable and counted in `unverified_count`, not a missing file, so
+  relevance stops calling its section outdated. Any other word (`fil:`,
+  `path:`, `source:`) is not a free pass: a path-like text is still verified as
+  a file and is fabricated when missing, so the enforce gate keeps blocking it. Line references written in
+  backticked prose are not re-anchored; only markers are (documented in
+  `docs/conventions/agents-md-format-v1.md`).
 - A review-wait timeout no longer locks the principal out of the review
   (KT-1293). The watchdog used to move the unreviewed delivery to `Escalated`
   while its alert told the principal to call `task_exec_review`, which only
