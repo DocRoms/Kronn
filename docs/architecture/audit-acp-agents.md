@@ -149,7 +149,7 @@ not before.
   The recorded cost is never recomputed from a rate table; a finished step
   whose agent reported none is priced on read by `core::pricing` for the served
   model and shown as an estimate, never as a reported cost
-  [src: file: backend/src/db/audit_runs.rs:1629-1675#price_steps].
+  [src: file: backend/src/db/audit_runs.rs:1646-1692#price_steps].
 - **Per step.** `audit_run_steps.cost_usd_micros` (integer micro-USD) sums the
   step's attempts. It stays `NULL` when any attempt that ran reported no cost:
   a sum over a silent attempt would be a floor shown as the whole. A reported

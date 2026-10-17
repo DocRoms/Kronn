@@ -5,7 +5,7 @@ reconciliation and before validation. It writes
 `.kronn/audit/document-optimization.json`, Kronn's local working state (listed
 in `.git/info/exclude`, never in your `.gitignore`); any blocking diagnostic prevents the
 audit from completing and the validation endpoint re-runs the same gate before
-recording validated state. [src: file: backend/src/api/audit/full.rs:3010-3077#analyze_and_write] [src: file: backend/src/core/document_optimization.rs:208-218#analyze_and_write] [src: file: backend/src/core/audit_state.rs:38-58#state_dir]
+recording validated state. [src: file: backend/src/api/audit/full.rs:3054-3121#analyze_and_write] [src: file: backend/src/core/document_optimization.rs:208-218#analyze_and_write] [src: file: backend/src/core/audit_state.rs:38-58#state_dir]
 [src: file: backend/src/api/audit/validate.rs:610-626#blocking_diagnostics]
 
 Defaults are 220 words per root adapter, 800 words for `docs/AGENTS.md`, 1,200
@@ -33,6 +33,6 @@ a parenthesised `(src: file: …)` is refused (only the bracketed marker is
 verified), and every path or range the gate suggests is one it accepts. A Stack table
 row without its `Latest stable` or `Support end` source and date (or
 `not verified: no source`) raises the non-blocking `stack_currency` warning.
-[src: file: backend/src/core/document_optimization.rs:1255-1270#inspect_stack_currency]
-[src: file: backend/src/core/document_optimization.rs:1282-1354#stack_currency_problems]
-[src: file: backend/src/core/document_optimization.rs:1356-1373#diag]
+[src: file: backend/src/core/document_optimization.rs:1272-1287#inspect_stack_currency]
+[src: file: backend/src/core/document_optimization.rs:1299-1371#stack_currency_problems]
+[src: file: backend/src/core/document_optimization.rs:1373-1390#diag]

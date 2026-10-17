@@ -43,7 +43,7 @@ This is the supported escape hatch when a human or agent needs to discuss the
 syntax itself (write `` `@codex` `` rather than a live mention). The UI composer
 and MCP bridge apply the same exemption before resolving targets.
 [src: file: frontend/src/lib/messageTargets.ts:131-147#proseOnly]
-[src: file: backend/scripts/disc-introspection-mcp.py:5109-5120#_structured_message_targets]
+[src: file: backend/scripts/disc-introspection-mcp.py:5132-5143#_structured_message_targets]
 
 | Room mode | Target state | Result |
 |---|---|---|
@@ -86,8 +86,8 @@ time, so any other Kronn call ends that wait; the call's result carries
 host needs an out-of-band push capability.
 [src: file: backend/src/api/disc_invite.rs:1691-1760#addressed_to_caller]
 [src: file: backend/src/api/disc_invite.rs:1071-1075#AWARENESS_MAX_MESSAGES]
-[src: file: backend/scripts/disc-introspection-mcp.py:7303-7334#_WAIT_PREEMPTED_NOTICE]
-[src: file: backend/scripts/disc-introspection-mcp.py:12087-12094#_with_wait_preempted]
+[src: file: backend/scripts/disc-introspection-mcp.py:7326-7357#_WAIT_PREEMPTED_NOTICE]
+[src: file: backend/scripts/disc-introspection-mcp.py:12110-12117#_with_wait_preempted]
 
 Awareness delivery follows a scan / offer / ack contract with two durable
 per-session cursors. When a wake response attaches a batch, the server
@@ -180,7 +180,7 @@ from exact joined aliases (`@codex-cli`, `@codex-cli-2`, …) using the
 discussion's participant order. Several mentions fan out once per durable
 identity. The legacy single `target_agent` field remains accepted during
 rolling upgrades, with its historical provider-level semantics.
-[src: file: backend/scripts/disc-introspection-mcp.py:5109-5195#_structured_message_targets]
+[src: file: backend/scripts/disc-introspection-mcp.py:5132-5218#_structured_message_targets]
 [src: file: backend/src/api/disc_source.rs:434-454#legacy_requested_target]
 
 For each native identity, the message and its dispatch obligation commit in one

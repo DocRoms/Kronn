@@ -105,7 +105,7 @@ provisioning and builds; see [worktree-build-artifacts.md](worktree-build-artifa
   authorises a delete. [src: file: backend/src/api/disk.rs:897-909#run_purge]
 - MCP tool **`disk_usage`** (`project_id`, `purge_orphans`) — the same report, bounded to the 25 largest
   entries; `purge_orphans: true` takes the default purge and nothing else. A named delete is deliberately
-  a confirmed UI action. [src: file: backend/scripts/disc-introspection-mcp.py:7710-7741#call_disk_usage]
+  a confirmed UI action. [src: file: backend/scripts/disc-introspection-mcp.py:7733-7764#call_disk_usage]
 - **Settings → Disk** — measure on demand (never on page open), totals by kind, the table, **Purge
   orphans**, a per-entry delete behind a confirmation, and the two thresholds.
 

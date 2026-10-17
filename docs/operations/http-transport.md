@@ -48,7 +48,7 @@ no cost, the sum is partial and the run's cost is `None` as well.
 [src: file: backend/src/agents/chat_codec.rs:160#cost_usd_micros]
 [src: file: backend/src/agents/runner.rs:7984-7990#request_provider_cost]
 [src: file: backend/src/agents/runner.rs:1984-1989#cost_incomplete]
-[src: file: backend/src/api/audit/full.rs:2127#reported_cost_usd_micros]
+[src: file: backend/src/api/audit/full.rs:2171#reported_cost_usd_micros]
 [src: file: backend/src/api/audit/drift.rs:1165#reported_cost_usd_micros]
 
 Audit executors have a separate bounded policy: 64 calls per file mutation tool
@@ -87,8 +87,8 @@ paths and ranges still block validation. Retry usage is included in the step
 total (KT-952).
 [src: file: backend/src/api/audit/document_repair.rs:241-315#split_verified_citations]
 [src: file: backend/src/core/audit_state.rs:12#CITATION_ORIGINALS_DIR]
-[src: file: backend/src/api/audit/full.rs:2393-2423#check_attempt]
-[src: file: backend/src/api/audit/full.rs:1791-1795#max_attempts]
+[src: file: backend/src/api/audit/full.rs:2437-2467#check_attempt]
+[src: file: backend/src/api/audit/full.rs:1835-1839#max_attempts]
 [src: file: backend/src/api/audit/anti_hallu_enforce.rs:24#MAX_ATTEMPTS]
 [src: file: backend/src/api/audit/document_repair.rs:191-198#feedback]
 
@@ -99,12 +99,12 @@ recomputes the matrix failure from the current index before its first attempt.
 Invalid tables remain blocking, provider errors do not trigger this correction,
 and existing TD files and human sections remain protected (KT-956).
 [src: file: backend/src/api/audit/validation.rs:96-117#coverage_repair_feedback]
-[src: file: backend/src/api/audit/full.rs:2317-2332#coverage_repair_feedback]
+[src: file: backend/src/api/audit/full.rs:2361-2376#coverage_repair_feedback]
 
 A failed provider launch finalizes the step with its error and elapsed time.
 If a corrective attempt had already consumed tokens, that usage remains in the
 persisted step and its terminal SSE event; an unmeasured launch stays unknown.
-[src: file: backend/src/api/audit/full.rs:2700-2747#previous_attempt_usage]
+[src: file: backend/src/api/audit/full.rs:2744-2791#previous_attempt_usage]
 
 A provider error during a step also survives in its persisted warning and SSE
 recap. HTTP status 429 is identified as a rate limit or exhausted quota, not as
@@ -129,7 +129,7 @@ path's included); and a step is blocked only by diagnostics absent before it ran
 (`documentary_preexisting` reports the others) unless the recovery plan hands
 them to it (KT-1306).
 [src: file: backend/src/api/audit/document_repair.rs:140-172#recovery_plan]
-[src: file: backend/src/db/audit_runs.rs:1441-1459#invalidate_documentary_steps]
+[src: file: backend/src/db/audit_runs.rs:1458-1476#invalidate_documentary_steps]
 
 A `TypedSchema` step sends its envelope schema as `response_format` with
 `strict: false` on the OpenAI wire: the envelope does not satisfy OpenAI's
