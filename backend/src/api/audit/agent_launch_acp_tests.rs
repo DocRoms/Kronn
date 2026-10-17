@@ -364,7 +364,12 @@ fn first_step_done(body: &str) -> Value {
 }
 
 async fn until(what: &str, condition: impl Fn() -> bool) {
-    tokio::time::timeout(Duration::from_secs(20), async {
+    until_within(20, what, condition).await;
+}
+
+/// [`until`] with a budget for a step an interpreter starts on a loaded machine.
+async fn until_within(seconds: u64, what: &str, condition: impl Fn() -> bool) {
+    tokio::time::timeout(Duration::from_secs(seconds), async {
         while !condition() {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -1443,4 +1448,235 @@ async fn revoking_full_access_during_an_audit_refuses_its_next_step() {
         refused.starts_with(crate::agents::runner::NATIVE_FULL_ACCESS_REQUIRED),
         "{refused}"
     );
+}
+
+/// KT-1324 — a direct CLI agent carries its run's tag, and what a boot after a
+/// backend stop finds by that tag alone (the pid is no longer recorded, as for
+/// an adapter agent) is stopped: the agent's own descendants included, which
+/// kept writing in the incident that founded this. Both pipelines.
+#[cfg(unix)]
+async fn a_boot_stops_the_tagged_agent_a_dead_backend_left_writing(pipeline: Pipeline) {
+    // Python rather than `sh`: macOS shows no environment for a system binary,
+    // and the tag is read from it.
+    // Its absolute path goes in the shebang: the agent's own PATH is not ours.
+    let Some(python) = ["python3", "python"].into_iter().find_map(|name| {
+        let output = std::process::Command::new(name)
+            .args(["-c", "import sys; print(sys.executable)"])
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|output| output.status.success())?;
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        (!path.is_empty()).then_some(path)
+    }) else {
+        eprintln!("skipped: no python to script an agent with");
+        return;
+    };
+    let bin = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let tag_file = out.path().join("tag");
+    let canary = out.path().join("canary");
+    // The agent reports the tag it was given and forks a descendant that
+    // keeps writing (bounded, so a failing test leaves nothing running for
+    // long) while it waits.
+    let script = format!(
+        "#!{python}\n\
+         import os, time\n\
+         open('{tag}', 'w').write(os.environ.get('KRONN_TASK_DISPATCH_ID', ''))\n\
+         if os.fork() == 0:\n\
+         \x20   for _ in range(1500):\n\
+         \x20       open('{canary}', 'a').write('w\\n')\n\
+         \x20       time.sleep(0.02)\n\
+         \x20   os._exit(0)\n\
+         time.sleep(60)\n",
+        python = python,
+        tag = tag_file.display(),
+        canary = canary.display(),
+    );
+    let claude = bin.path().join("claude");
+    std::fs::write(&claude, script).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let _environment = ScriptedDirectClaude::install(bin.path());
+    let state = new_state();
+    add_project(&state, "proj-tag", project.path()).await;
+    let run = launch(&state, pipeline, "proj-tag", AgentType::ClaudeCode);
+
+    until_within(90, "the agent to report its tag", || {
+        std::fs::read_to_string(&tag_file).is_ok_and(|tag| !tag.is_empty())
+    })
+    .await;
+    let run_id = latest_run(&state, "proj-tag").await.id;
+    assert_eq!(
+        std::fs::read_to_string(&tag_file).unwrap(),
+        crate::core::dispatch_reaper::audit_run_tag(&run_id),
+        "{pipeline:?}: the agent's environment names its run"
+    );
+    until_within(90, "the agent's descendant to be writing", || {
+        std::fs::metadata(&canary).is_ok_and(|meta| meta.len() > 0)
+    })
+    .await;
+
+    // The backend stops; the new one finds no recorded group for this agent.
+    let cleared = run_id.clone();
+    state
+        .db
+        .with_conn(move |conn| crate::db::audit_runs::clear_agent_process(conn, &cleared))
+        .await
+        .unwrap();
+    state
+        .db
+        .with_conn(crate::api::audit::step_guard::stop_agents_and_settle_at_boot)
+        .await
+        .unwrap();
+
+    let written = std::fs::metadata(&canary).unwrap().len();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(
+        std::fs::metadata(&canary).unwrap().len(),
+        written,
+        "{pipeline:?}: nothing of the run writes once boot has settled it"
+    );
+
+    let _ = crate::api::audit::full::cancel_audit(
+        axum::extract::State(state.clone()),
+        axum::extract::Path("proj-tag".to_string()),
+    )
+    .await;
+    let _ = tokio::time::timeout(Duration::from_secs(15), run)
+        .await
+        .expect("the audit ends");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial_test::serial(acp_adapter_env_toggle)]
+async fn a_boot_stops_the_tagged_agent_of_a_full_audit_a_dead_backend_left_writing() {
+    a_boot_stops_the_tagged_agent_a_dead_backend_left_writing(Pipeline::Full).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial_test::serial(acp_adapter_env_toggle)]
+async fn a_boot_stops_the_tagged_agent_of_a_partial_audit_a_dead_backend_left_writing() {
+    a_boot_stops_the_tagged_agent_a_dead_backend_left_writing(Pipeline::Partial).await;
+}
+
+/// KT-1324 — a resume with no source change says nothing about the sources:
+/// the run it continues was fingerprinted before Kronn's own install wrote its
+/// root `AGENTS.md` pointer, the resume after it, and the two prints differed.
+#[tokio::test]
+async fn a_resume_with_no_source_change_does_not_warn_that_the_sources_changed() {
+    use axum::response::IntoResponse;
+    let git = |dir: &Path, args: &[&str]| {
+        let ok = crate::core::cmd::git_cmd()
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .expect("git runs")
+            .status
+            .success();
+        assert!(ok, "git {args:?} failed");
+    };
+    let state = new_state();
+    let project = tempfile::tempdir().unwrap();
+    git(project.path(), &["init", "-q"]);
+    git(project.path(), &["config", "user.email", "t@t"]);
+    git(project.path(), &["config", "user.name", "t"]);
+    std::fs::write(project.path().join("app.js"), "console.log(1)").unwrap();
+    git(project.path(), &["add", "-A"]);
+    git(project.path(), &["commit", "-qm", "src"]);
+    add_project(&state, "proj-fp", project.path()).await;
+
+    // The first run: Kronn installs its files, the agent hangs, the run is
+    // cut short.
+    let hanging = ScriptedAgent::new(Turn::Hang);
+    let first_route = route(project.path(), &hanging);
+    let first = launch(&state, Pipeline::Full, "proj-fp", AgentType::OpenCode);
+    until("the agent to be working on its step", || {
+        hanging.prompts.load(Ordering::SeqCst) > 0
+    })
+    .await;
+    // The backend stops: its run stays `Running` on disk until the next boot
+    // flips it, and the next backend holds none of the old one's leases. The
+    // old pipeline is left hanging, as a dead process's would be.
+    let _stopped_backend = first;
+    drop(first_route);
+    state
+        .db
+        .with_conn(|conn| crate::db::audit_runs::reconcile_stale_runs(conn, 0))
+        .await
+        .unwrap();
+    let interrupted = latest_run(&state, "proj-fp").await;
+    assert_eq!(interrupted.status, "Interrupted");
+    let state = AppState::new_defaults(
+        state.config.clone(),
+        state.db.clone(),
+        crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+    );
+    let recorded = interrupted
+        .source_fingerprint
+        .clone()
+        .expect("the run recorded the sources it audited");
+    let now = tokio::task::spawn_blocking({
+        let path = project.path().to_path_buf();
+        move || crate::core::checksums::stable_source_tree_fingerprint(&path)
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        now.as_deref(),
+        Some(recorded.as_str()),
+        "the sources did not move: the print the run recorded is the one they have now"
+    );
+
+    // The resume: same sources.
+    let answering = ScriptedAgent::new(Turn::Answer(None));
+    let _second_route = route(project.path(), &answering);
+    let response = crate::api::audit::full::full_audit(
+        axum::extract::State(state.clone()),
+        axum::extract::Path("proj-fp".to_string()),
+        axum::Json(LaunchAuditRequest {
+            agent: AgentType::OpenCode,
+            connection_id: None,
+            tier: None,
+            kind: None,
+            custom_prompt: None,
+            resume_run_id: Some(interrupted.id.clone()),
+            retry_steps: None,
+            redo_steps: None,
+            fresh: None,
+        }),
+    )
+    .await
+    .into_response();
+    let body = String::from_utf8_lossy(
+        &axum::body::to_bytes(response.into_body(), 1 << 22)
+            .await
+            .unwrap(),
+    )
+    .into_owned();
+    assert!(
+        !body.contains("event: error"),
+        "the resume must run: {body}"
+    );
+    let warnings: Vec<Value> = sse_events(&body)
+        .into_iter()
+        .filter(|(name, _)| name == "warning")
+        .map(|(_, data)| data)
+        .collect();
+    assert!(
+        warnings
+            .iter()
+            .all(|warning| !warning.to_string().contains("sources changed")),
+        "no source moved: {warnings:?}"
+    );
+    let resumed = latest_run(&state, "proj-fp").await;
+    assert_ne!(resumed.id, interrupted.id);
+    assert_eq!(resumed.resume_drift, None);
 }

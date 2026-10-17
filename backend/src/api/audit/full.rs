@@ -693,6 +693,7 @@ pub async fn full_audit(
             return;
         }
         drop_guard.set_run_id(audit_run_id.clone());
+        agent_launcher.bind_run(&audit_run_id);
 
         // KT-931 — a resumed run INHERITS the steps its predecessor completed
         // cleanly, recorded on its own row before anything else can interrupt
@@ -736,51 +737,6 @@ pub async fn full_audit(
                     }).to_string(),
                 );
                 return;
-            }
-        }
-
-        // KT-1021 — what this run audits; a resume says whether the sources
-        // moved since the run it continues.
-        {
-            let pp = project_path.clone();
-            let (head, branch, fingerprint) = tokio::task::spawn_blocking(move || {
-                let (head, branch) = crate::core::checksums::git_head_and_branch(&pp);
-                let fingerprint = crate::core::checksums::stable_source_tree_fingerprint(&pp)
-                    .ok()
-                    .flatten();
-                (head, branch, fingerprint)
-            }).await.unwrap_or_default();
-            let run_id = audit_run_id.clone();
-            let previous_id = resume_run_id_req.clone();
-            let (h, b, f) = (head.clone(), branch.clone(), fingerprint.clone());
-            let previous = db.with_conn(move |conn| {
-                crate::db::audit_runs::set_run_provenance(
-                    conn, &run_id, h.as_deref(), b.as_deref(), f.as_deref(), None,
-                )?;
-                match previous_id {
-                    Some(id) => crate::db::audit_runs::get_by_id(conn, &id),
-                    None => Ok(None),
-                }
-            }).await;
-            match previous {
-                Ok(Some(previous)) => {
-                    if let Some(message) = resume_drift_message(&previous, head.as_deref(), fingerprint.as_deref()) {
-                        tracing::warn!("{message}");
-                        // KT-1211 (M6) — saved on the run: the timeline and the
-                        // validation prompt say it after the toast is gone.
-                        let (run_id, saved) = (audit_run_id.clone(), message.clone());
-                        if let Err(e) = db.with_conn(move |conn| {
-                            crate::db::audit_runs::set_resume_drift(conn, &run_id, &saved)
-                        }).await {
-                            tracing::warn!("Could not record the resume's source drift: {e}");
-                        }
-                        yield Event::default().event("warning").data(
-                            serde_json::json!({ "message": message }).to_string(),
-                        );
-                    }
-                }
-                Ok(None) => {}
-                Err(e) => tracing::warn!("Could not record the audit run's provenance: {e}"),
             }
         }
 
@@ -1084,6 +1040,54 @@ pub async fn full_audit(
             );
         }
         super::briefing_rules::sync_from_notes(&project_path, briefing_notes.as_deref());
+
+        // KT-1021, KT-1324 — what this run audits; a resume says whether the sources
+        // moved since the run it continues. Read once Kronn's own install is done:
+        // a fresh install writes the root `AGENTS.md` pointer, which counts as
+        // source, so a print taken before it never matched the next run's. Before
+        // the `.mcp.json` swap below, which rewrites a source file for the run.
+        {
+            let pp = project_path.clone();
+            let (head, branch, fingerprint) = tokio::task::spawn_blocking(move || {
+                let (head, branch) = crate::core::checksums::git_head_and_branch(&pp);
+                let fingerprint = crate::core::checksums::stable_source_tree_fingerprint(&pp)
+                    .ok()
+                    .flatten();
+                (head, branch, fingerprint)
+            }).await.unwrap_or_default();
+            let run_id = audit_run_id.clone();
+            let previous_id = resume_run_id_req.clone();
+            let (h, b, f) = (head.clone(), branch.clone(), fingerprint.clone());
+            let previous = db.with_conn(move |conn| {
+                crate::db::audit_runs::set_run_provenance(
+                    conn, &run_id, h.as_deref(), b.as_deref(), f.as_deref(), None,
+                )?;
+                match previous_id {
+                    Some(id) => crate::db::audit_runs::get_by_id(conn, &id),
+                    None => Ok(None),
+                }
+            }).await;
+            match previous {
+                Ok(Some(previous)) => {
+                    if let Some(message) = resume_drift_message(&previous, head.as_deref(), fingerprint.as_deref()) {
+                        tracing::warn!("{message}");
+                        // KT-1211 (M6) — saved on the run: the timeline and the
+                        // validation prompt say it after the toast is gone.
+                        let (run_id, saved) = (audit_run_id.clone(), message.clone());
+                        if let Err(e) = db.with_conn(move |conn| {
+                            crate::db::audit_runs::set_resume_drift(conn, &run_id, &saved)
+                        }).await {
+                            tracing::warn!("Could not record the resume's source drift: {e}");
+                        }
+                        yield Event::default().event("warning").data(
+                            serde_json::json!({ "message": message }).to_string(),
+                        );
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!("Could not record the audit run's provenance: {e}"),
+            }
+        }
 
         // 0.8.3 (#280) — MCP allowlist for the audit. On projects
         // with 10+ MCP servers wired (Fastly, Docker, GitLab, M365,

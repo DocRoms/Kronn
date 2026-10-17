@@ -526,6 +526,7 @@ impl AcpTransport for CodexAcpAdapter {
             self.launch.worker_context.as_ref(),
             self.launch.room_agent_context.as_ref(),
             self.launch.workflow_step_context.as_ref(),
+            self.launch.audit_run_id.as_deref(),
             &self.launch.github_env,
             self.launch.bridge_token.as_deref(),
         )

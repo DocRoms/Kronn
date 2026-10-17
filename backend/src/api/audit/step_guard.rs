@@ -8,6 +8,7 @@
 //! — a human may accept it as it stands — but it carries a visible partial
 //! marker ([`mark_partial`]) until a step succeeds on it or a human accepts.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use super::validation::{target_snapshot, TargetSnapshot};
@@ -581,13 +582,28 @@ pub(crate) fn settle_unfinished_steps(
     Ok(settled)
 }
 
-/// Boot, after the recorded agents were killed: no step of a previous process
-/// is still running, so every step that never ended is settled now — not at
-/// the next launch, which may be days away with the doc half-written and
-/// nothing marking it. Returns how many steps were settled.
+/// Boot, after the agents of the previous process were stopped: no step of a
+/// previous process is still running, so every step that never ended is
+/// settled now — not at the next launch, which may be days away with the doc
+/// half-written and nothing marking it. Returns how many steps were settled.
 pub(crate) fn settle_unfinished_at_boot(conn: &rusqlite::Connection) -> anyhow::Result<usize> {
+    settle_unfinished_except(conn, &HashSet::new())
+}
+
+/// [`settle_unfinished_at_boot`] leaving the runs of `skip` alone: an agent of
+/// theirs may still be writing, so what is on disk is not settled yet.
+fn settle_unfinished_except(
+    conn: &rusqlite::Connection,
+    skip: &HashSet<String>,
+) -> anyhow::Result<usize> {
     let mut count = 0;
     for (run_id, project_id) in crate::db::audit_runs::runs_with_unfinished_steps(conn)? {
+        if skip.contains(&run_id) {
+            tracing::error!(
+                "Boot: the unfinished steps of audit run {run_id} are left unsettled — an agent of the run may still be writing"
+            );
+            continue;
+        }
         let Some(project) = crate::db::projects::get_project(conn, &project_id)? else {
             continue;
         };
@@ -608,6 +624,58 @@ pub(crate) fn settle_unfinished_at_boot(conn: &rusqlite::Connection) -> anyhow::
         }
     }
     Ok(count)
+}
+
+/// KT-1324 — stop every process still carrying the tag of a run this database
+/// knows (see `audit_run_tag`), wherever it moved in the process tree. The
+/// agent of an ACP adapter has no pid recorded on its run, and a recorded group
+/// misses what left it: only the tag, which everything an agent starts
+/// inherits, finds them all. Returns the runs something of which may still be
+/// alive (or could not be looked for): their steps must not be settled.
+pub(crate) fn reap_tagged_agents_at_boot(
+    conn: &rusqlite::Connection,
+) -> anyhow::Result<HashSet<String>> {
+    let mut unsafe_to_settle = HashSet::new();
+    for run_id in crate::db::audit_runs::runs_that_may_have_agents(conn)? {
+        let tag = crate::core::dispatch_reaper::audit_run_tag(&run_id);
+        let report = crate::core::dispatch_reaper::reap_dispatch(&tag);
+        if report.signalled > 0 {
+            tracing::warn!(
+                "Boot: stopped {} process(es) the previous backend left running for audit run {run_id}",
+                report.signalled
+            );
+        }
+        if report.may_still_run() {
+            tracing::error!(
+                "Boot: processes of audit run {run_id} survived the reap or could not be looked for: {report:?}"
+            );
+            unsafe_to_settle.insert(run_id);
+        }
+    }
+    Ok(unsafe_to_settle)
+}
+
+/// Boot (KT-1211, KT-1324): the previous backend's agents are stopped first —
+/// the one recorded on each run, then everything carrying a run's tag — and only
+/// then are the steps they never ended settled. Settling first lets an agent
+/// that outlived the backend write after the verdict ("it had written nothing")
+/// was recorded. A run something of which may still be alive is not settled.
+/// Returns how many steps were settled.
+pub(crate) fn stop_agents_and_settle_at_boot(conn: &rusqlite::Connection) -> anyhow::Result<usize> {
+    match crate::core::agent_orphans::reap_recorded_agents(conn) {
+        Ok(0) => {}
+        Ok(n) => tracing::warn!("Killed {n} audit agent(s) left running by the previous backend"),
+        Err(e) => tracing::warn!("Failed to reap orphaned audit agents: {e}"),
+    }
+    let skip = match reap_tagged_agents_at_boot(conn) {
+        Ok(skip) => skip,
+        Err(e) => {
+            // Unknown what still runs: no run is settled on a guess.
+            tracing::error!("Failed to reap the tagged audit agents: {e}");
+            return Ok(0);
+        }
+    };
+    settle_unfinished_except(conn, &skip)
 }
 
 /// Why accepting a failed step as it stands is refused unless a human
@@ -1274,6 +1342,13 @@ mod tests {
     }
 
     fn boot_conn(root: &Path) -> rusqlite::Connection {
+        boot_conn_of_run(root, "r1")
+    }
+
+    /// [`boot_conn`] with its run named: a tag is machine-wide, so a test that
+    /// starts a real agent must not share its run id with the boots of the
+    /// tests running beside it.
+    fn boot_conn_of_run(root: &Path, run_id: &str) -> rusqlite::Connection {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         crate::db::migrations::run(&conn).unwrap();
         let now = chrono::Utc::now().to_rfc3339();
@@ -1284,7 +1359,7 @@ mod tests {
         .unwrap();
         crate::db::audit_runs::insert_running(
             &conn,
-            "r1",
+            run_id,
             "p1",
             "Full",
             "ClaudeCode",
@@ -1292,6 +1367,245 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    /// The interpreter the scripted agents run under: macOS shows no
+    /// environment for a system binary such as `sh`, and the tag is read there.
+    /// Its absolute path: the agent's own environment has no `PATH` to find a
+    /// `python3` shim by.
+    #[cfg(unix)]
+    fn python() -> Option<String> {
+        ["python3", "python"].into_iter().find_map(|name| {
+            let output = std::process::Command::new(name)
+                .args(["-c", "import sys; print(sys.executable)"])
+                .stderr(std::process::Stdio::null())
+                .output()
+                .ok()
+                .filter(|output| output.status.success())?;
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            (!path.is_empty()).then_some(path)
+        })
+    }
+
+    /// An agent as the ACP adapter starts it — through `try_spawn`, so it
+    /// carries its run's tag — that keeps rewriting `docs/stack.md` until it
+    /// is stopped. No pid is recorded on the run, as for an adapter agent.
+    #[cfg(unix)]
+    fn spawn_writing_agent(python: &str, root: &Path, run_id: &str) -> tokio::process::Child {
+        const WRITER: &str = "import time\n\
+            while True:\n\
+            \x20   open('docs/stack.md', 'w').write('half\\n')\n\
+            \x20   time.sleep(0.02)\n";
+        crate::agents::runner::try_spawn(
+            python,
+            None,
+            &["-c".to_string(), WRITER.to_string()],
+            root,
+            "",
+            None,
+            crate::agents::runner::SpawnIo::Adapter(&[]),
+            None,
+            None,
+            None,
+            None,
+            Some(run_id),
+            &[],
+            None,
+        )
+        .expect("the scripted agent starts")
+    }
+
+    #[cfg(unix)]
+    async fn until_written(file: &Path, content: &str) {
+        // An interpreter's start-up is slow on a loaded machine.
+        for _ in 0..1500 {
+            if std::fs::read_to_string(file).is_ok_and(|now| now == content) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("the agent never wrote {content:?}");
+    }
+
+    /// KT-1324 — the founding bug: the agent outlived the backend, boot settled
+    /// the step it was writing, and the agent then wrote on. Boot now stops it
+    /// first (nothing is recorded on the run to find it by), so what boot puts
+    /// back is the last word.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_agent_that_outlived_the_backend_is_stopped_before_its_step_is_settled() {
+        let root = project();
+        let file = root.path().join("docs/stack.md");
+        let run = format!("r-{}", uuid::Uuid::new_v4());
+        let conn = boot_conn_of_run(root.path(), &run);
+        crate::db::audit_runs::insert_audit_step_start(
+            &conn,
+            &run,
+            2,
+            "docs/stack.md",
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        crate::db::audit_runs::save_step_snapshot(
+            &conn,
+            &run,
+            2,
+            "docs/stack.md",
+            Some("# Stack\nwhole\n"),
+        )
+        .unwrap();
+        let Some(python) = python() else {
+            eprintln!("skipped: no python to script an agent with");
+            return;
+        };
+        let mut agent = spawn_writing_agent(&python, root.path(), &run);
+        until_written(&file, "half\n").await;
+        crate::db::audit_runs::record_observed_output(&conn, &run, 2, &fingerprint(Some("half\n")))
+            .unwrap();
+        assert!(
+            crate::db::audit_runs::recorded_agent_processes(&conn)
+                .unwrap()
+                .is_empty(),
+            "nothing but the tag can find this agent"
+        );
+
+        assert_eq!(stop_agents_and_settle_at_boot(&conn).unwrap(), 1);
+
+        let status = agent.try_wait().unwrap();
+        assert!(
+            status.is_some_and(|status| !status.success()),
+            "the agent is stopped by the time boot returns: {status:?}"
+        );
+        // Whatever it would write after the verdict has nowhere to go.
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "# Stack\nwhole\n",
+            "no write lands after the step was settled"
+        );
+        let steps = crate::db::audit_runs::list_audit_steps(&conn, &run).unwrap();
+        let step = steps.iter().find(|s| s.step_index == 2).unwrap();
+        assert_eq!(step.target_state.as_deref(), Some(STATE_RESTORED));
+    }
+
+    /// A run whose agent may still be alive is not settled: the verdict would
+    /// be on a file somebody is still writing.
+    #[test]
+    fn a_run_that_may_still_have_a_writer_is_left_unsettled() {
+        let root = project();
+        let file = root.path().join("docs/stack.md");
+        std::fs::write(&file, "half\n").unwrap();
+        let conn = boot_conn(root.path());
+        crate::db::audit_runs::insert_audit_step_start(
+            &conn,
+            "r1",
+            2,
+            "docs/stack.md",
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        crate::db::audit_runs::save_step_snapshot(
+            &conn,
+            "r1",
+            2,
+            "docs/stack.md",
+            Some("# Stack\nwhole\n"),
+        )
+        .unwrap();
+        crate::db::audit_runs::record_observed_output(&conn, "r1", 2, &fingerprint(Some("half\n")))
+            .unwrap();
+
+        let skip = HashSet::from(["r1".to_string()]);
+        assert_eq!(settle_unfinished_except(&conn, &skip).unwrap(), 0);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "half\n");
+        let steps = crate::db::audit_runs::list_audit_steps(&conn, "r1").unwrap();
+        assert!(
+            steps
+                .iter()
+                .find(|s| s.step_index == 2)
+                .unwrap()
+                .ended_at
+                .is_none(),
+            "the step stays open for the next boot or launch"
+        );
+        assert!(crate::core::dispatch_reaper::ReapReport {
+            unverified: true,
+            ..Default::default()
+        }
+        .may_still_run());
+        assert!(crate::core::dispatch_reaper::ReapReport {
+            survivors: vec![42],
+            ..Default::default()
+        }
+        .may_still_run());
+        assert!(!crate::core::dispatch_reaper::ReapReport::default().may_still_run());
+        // Nothing to look for, nothing in the way.
+        assert_eq!(settle_unfinished_except(&conn, &HashSet::new()).unwrap(), 1);
+    }
+
+    /// Boot names only the runs of its own database: the agent of another
+    /// backend on the same machine (a lane, a second install) is none of its
+    /// business.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn boot_leaves_the_agents_of_other_runs_alone() {
+        let root = project();
+        let conn = boot_conn_of_run(root.path(), &format!("r-{}", uuid::Uuid::new_v4()));
+        let Some(python) = python() else {
+            eprintln!("skipped: no python to script an agent with");
+            return;
+        };
+        let mut stranger = spawn_writing_agent(&python, root.path(), "a-run-of-another-backend");
+
+        assert_eq!(stop_agents_and_settle_at_boot(&conn).unwrap(), 0);
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            stranger.try_wait().unwrap().is_none(),
+            "an agent that is not of this database's runs keeps running"
+        );
+        stranger.kill().await.unwrap();
+    }
+
+    #[test]
+    fn boot_names_the_running_runs_and_those_with_an_unfinished_step() {
+        let root = project();
+        let conn = boot_conn(root.path());
+        // Not running any more, nothing open: no agent to look for.
+        crate::db::audit_runs::insert_running(
+            &conn,
+            "r-done",
+            "p1",
+            "Full",
+            "ClaudeCode",
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        crate::db::audit_runs::mark_interrupted(&conn, "r-done", "done").unwrap();
+        // Interrupted, but a step of it never ended.
+        crate::db::audit_runs::insert_running(
+            &conn,
+            "r-open",
+            "p1",
+            "Full",
+            "ClaudeCode",
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        crate::db::audit_runs::insert_audit_step_start(
+            &conn,
+            "r-open",
+            1,
+            "docs/x.md",
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        crate::db::audit_runs::save_step_snapshot(&conn, "r-open", 1, "docs/x.md", None).unwrap();
+        crate::db::audit_runs::mark_interrupted(&conn, "r-open", "open").unwrap();
+
+        let mut runs = crate::db::audit_runs::runs_that_may_have_agents(&conn).unwrap();
+        runs.sort();
+        assert_eq!(runs, vec!["r-open".to_string(), "r1".to_string()]);
     }
 
     #[test]

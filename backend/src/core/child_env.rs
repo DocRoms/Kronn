@@ -888,6 +888,9 @@ pub struct AgentLaunch<'a> {
     pub task_worker: Option<&'a TaskWorkerBridgeContext>,
     pub room_agent: Option<&'a RoomAgentBridgeContext>,
     pub workflow_step: Option<&'a WorkflowStepBridgeContext>,
+    /// The audit run this agent works for (KT-1324): everything it starts
+    /// carries the run's tag, so boot can stop it after a backend stop.
+    pub audit_run: Option<&'a str>,
     /// The scoped bridge token minted for this launch (layer B).
     pub bridge_token: Option<&'a str>,
     /// This agent's provider key: `(variable, value)`.
@@ -940,6 +943,13 @@ pub fn apply_agent_launch(
         command.env(
             crate::core::dispatch_reaper::DISPATCH_ENV,
             &context.dispatch_job_id,
+        );
+    }
+    // KT-1324 — an audit run's agent is stopped by its run's tag at boot.
+    if let (Some(run_id), None) = (launch.audit_run, launch.task_worker) {
+        command.env(
+            crate::core::dispatch_reaper::DISPATCH_ENV,
+            crate::core::dispatch_reaper::audit_run_tag(run_id),
         );
     }
     // A worker's capability excludes the room and step identities.

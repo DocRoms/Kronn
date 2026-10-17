@@ -545,6 +545,22 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- An audit agent that outlived a backend stop no longer keeps writing after
+  boot settled its step, and a resume no longer warns that « the sources
+  changed » when they did not (KT-1324). Agents run through the ACP adapter
+  (Claude and Codex by default) have no pid recorded on their run, so boot had
+  nothing to stop: it settled the step as « it had written nothing » and the
+  orphan then edited `docs/` for minutes. Every process an audit run starts now
+  carries the run's tag in `KRONN_TASK_DISPATCH_ID` (`audit-run:<run id>`, the
+  variable `core::dispatch_reaper` already stops task workers by), whichever
+  route launched it. Boot stops what carries the tag of one of its own runs
+  (the recorded group first), and only then settles the steps that never ended;
+  a run something of which survived the reap, or could not be looked for, is
+  left unsettled for the next boot or launch rather than judged on a file still
+  being written. The sources' print a run records is now read once Kronn's own
+  install has written its root `AGENTS.md` pointer: taken before it, it
+  differed from the next run's and every resume of a freshly started audit
+  warned.
 - The audit's citation gate now says how to fix a citation (KT-1307). A path
   that only resolves under the docs root or next to the citing doc gets
   « paths are repository-root relative; did you mean `docs/AGENTS.md:94`? »,

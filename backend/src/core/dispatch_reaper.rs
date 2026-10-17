@@ -29,6 +29,14 @@ use crate::core::agent_orphans::start_stamp;
 /// The dispatch job a process was started under.
 pub const DISPATCH_ENV: &str = "KRONN_TASK_DISPATCH_ID";
 
+/// KT-1324 — the tag of the agents an audit run starts, in [`DISPATCH_ENV`]
+/// like a worker's: a run's agent can outlive the backend (an ACP-adapter agent
+/// has no pid recorded on the run), and boot stops whatever still carries the
+/// tag of a run before settling its steps.
+pub fn audit_run_tag(audit_run_id: &str) -> String {
+    format!("audit-run:{audit_run_id}")
+}
+
 /// What one reap found.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReapReport {
@@ -36,6 +44,15 @@ pub struct ReapReport {
     pub signalled: usize,
     /// Processes still alive after SIGKILL (not expected; logged by the caller).
     pub survivors: Vec<u32>,
+    /// The process table could not be read: nothing is known of what runs.
+    pub unverified: bool,
+}
+
+impl ReapReport {
+    /// Something of the run may still be alive, or could not be looked for.
+    pub fn may_still_run(&self) -> bool {
+        self.unverified || !self.survivors.is_empty()
+    }
 }
 
 /// One row of the process table.
@@ -459,6 +476,7 @@ pub fn reap_dispatch(dispatch_job_id: &str) -> ReapReport {
                 dispatch_job_id,
                 "cannot read the process table to reap a dispatch"
             );
+            report.unverified = true;
             return report;
         };
         let targets = run_processes(&rows, own_pid);

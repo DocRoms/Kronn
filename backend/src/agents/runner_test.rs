@@ -10604,6 +10604,7 @@ Suite de la réponse.";
             worker,
             room_agent,
             workflow_step,
+            None,
             &[],
             None,
         )
@@ -10641,6 +10642,7 @@ Suite de la réponse.";
             "ANTHROPIC_API_KEY",
             None,
             io,
+            None,
             None,
             None,
             None,
@@ -10706,6 +10708,7 @@ Suite de la réponse.";
             SpawnIo::Direct(None),
             None,
             Some(&worker),
+            None,
             None,
             None,
             &[],

@@ -607,6 +607,7 @@ pub(crate) async fn run_partial_pipeline(
             return;
         }
         drop_guard.set_run_id(audit_run_id.clone());
+        agent_launcher.bind_run(&audit_run_id);
         super::full::stop_validation_agents(&state, &project_id_for_progress).await;
         let provenance_writer = if revalidation.is_some() {
             crate::core::doc_provenance::DocWriter::Revalidation
