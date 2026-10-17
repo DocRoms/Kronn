@@ -20,6 +20,14 @@ export interface TechDebtBlockProps {
   onRefetch: () => void;
 }
 
+// Every mounted entry to the review (overview block, audit step 4) shows the same
+// list: a fetch from any of them is published to all the others of that project.
+const listeners = new Map<string, Set<(list: TdReviewList) => void>>();
+
+function publishList(projectId: string, list: TdReviewList) {
+  listeners.get(projectId)?.forEach(listener => listener(list));
+}
+
 /** The project's debt list, its reload and the Validated action: one source for every entry to the review. */
 function useTechDebtList(
   project: Project,
@@ -32,10 +40,20 @@ function useTechDebtList(
   const [error, setError] = useState<string | null>(null);
   const hasDebt = (project.tech_debt_count ?? 0) > 0;
 
+  useEffect(() => {
+    const set = listeners.get(project.id) ?? new Set();
+    const listener = (next: TdReviewList) => { setList(next); setError(null); };
+    set.add(listener);
+    listeners.set(project.id, set);
+    return () => {
+      set.delete(listener);
+      if (set.size === 0) listeners.delete(project.id);
+    };
+  }, [project.id]);
+
   const reload = useCallback(async () => {
     try {
-      setList(await projectsApi.auditTds(project.id));
-      setError(null);
+      publishList(project.id, await projectsApi.auditTds(project.id));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -45,7 +63,7 @@ function useTechDebtList(
     if (!hasDebt || auditActive) return;
     let cancelled = false;
     projectsApi.auditTds(project.id)
-      .then(data => { if (!cancelled) { setList(data); setError(null); } })
+      .then(data => { if (!cancelled) publishList(project.id, data); })
       .catch(e => { if (!cancelled) setError(e instanceof Error ? e.message : String(e)); });
     return () => { cancelled = true; };
   }, [project.id, hasDebt, auditActive]);

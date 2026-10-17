@@ -2,7 +2,7 @@
 // screen as the project overview; the raw file stays a secondary link.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, fireEvent, screen } from '@testing-library/react';
+import { render, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { buildApiMock } from '../../test/apiMock';
 
 vi.mock('../../lib/api', () => buildApiMock());
@@ -87,4 +87,41 @@ describe('TechDebtTimelineEntry', () => {
     expect(await screen.findByText('techDebt.loadError boom')).toBeInTheDocument();
     expect(screen.getByTestId('audit-timeline-td-open-file')).toBeInTheDocument();
   });
+
+  it('keeps both entries in step after a decision taken from either one', async () => {
+    await import('../TechDebtReview');
+    const pending = tdList([tdItem('TD-1', 'High'), tdItem('TD-2', 'Medium')]);
+    const decided = tdList([tdItem('TD-1', 'High', 'confirmed'), tdItem('TD-2', 'Medium')]);
+    mocked(projectsApi.auditTds).mockResolvedValue(pending);
+    mocked(projectsApi.decideTds).mockResolvedValue({
+      results: [{ td_id: 'TD-1', state: 'confirmed' }],
+      gate: { blocking_total: 1, blocking_settled: 1, met: true, open_disputes: 0 },
+    });
+    render(
+      <>
+        <TechDebtBlock {...baseProps({ ...PROJECT, tech_debt_count: 2 })} />
+        <TechDebtTimelineEntry {...baseProps({ ...PROJECT, tech_debt_count: 2 })} onOpenFile={vi.fn()} />
+      </>,
+    );
+    const overviewButton = await screen.findByTestId('td-open-review');
+    const stepButton = await screen.findByTestId('audit-timeline-td-open-review');
+    expect(overviewButton).toHaveTextContent('techDebt.open 2');
+    expect(stepButton).toHaveTextContent('techDebt.open 2');
+
+    // Decide from step 4: the next reload brings the list with TD-1 confirmed.
+    mocked(projectsApi.auditTds).mockResolvedValue(decided);
+    fireEvent.click(stepButton);
+    const stepReview = await screen.findByTestId('td-review', undefined, { timeout: 10000 });
+    fireEvent.click(within(stepReview).getByTestId('td-decide-confirm'));
+    await waitFor(() => expect(projectsApi.decideTds).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByTestId('audit-timeline-td-open-review')).toHaveTextContent('techDebt.open 1'));
+    expect(screen.getByTestId('td-open-review')).toHaveTextContent('techDebt.open 1');
+
+    // The overview's own dialog no longer lists TD-1 as pending.
+    fireEvent.click(within(stepReview).getByLabelText('techDebt.review.close'));
+    fireEvent.click(screen.getByTestId('td-open-review'));
+    const overviewReview = await screen.findByTestId('td-review', undefined, { timeout: 10000 });
+    expect(within(overviewReview).queryByTestId('td-row-TD-1')).toBeNull();
+    expect(within(overviewReview).getByTestId('td-row-TD-2')).toBeInTheDocument();
+  }, 30000);
 });

@@ -6292,7 +6292,7 @@ const zh: TranslationDict = {
   "auditTimeline.validation.desc": "审计完成后打开：先复查关键技术债，再由你做决定。",
   "auditTimeline.validated.title": "文档已验证",
   "auditTimeline.validated.desc": "此后该项目的智能体会先读取 docs/AGENTS.md。",
-  "auditTimeline.validated.noDebt": "没有需要审查的技术债务：审计未生成债务索引。",
+  "auditTimeline.validated.noDebt": "没有需要审查的活跃技术债务。",
   "auditTimeline.validated.openFile": "打开文件",
   "auditTimeline.agent.title": "审计智能体",
   "auditTimeline.agent.why": "审计会编写项目的参考文档，之后所有智能体都会读取它。值得使用最好的可用模型。",
