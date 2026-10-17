@@ -127,7 +127,11 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # for more) was paid for by moving the retry-key detail of `task_create` and
 # the `time.now` grammar of `qa_create_draft` into their manuals, which already
 # carried or now carry them; the catalogue nets 37 B less (84_966 -> 84_929).
-CATALOGUE_MAX_BYTES = 84_929
+# KT-1318: `disk_usage` (free disk and Kronn's artefacts, orphan purge) is paid
+# for inside the catalogue: `workflow_active_runs`, `workflow_run_get` and
+# `workflow_cancel_run` lost what their intent already carries; its contract
+# lives in its manual. Ceiling lowered by 24 B on top of KT-1270 (84_929 -> 84_905).
+CATALOGUE_MAX_BYTES = 84_905
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is

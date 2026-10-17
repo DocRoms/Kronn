@@ -42,7 +42,7 @@ The recurrence also exposed that non-terminal old executions and unregistered
 manual worktrees do not become reclaimable merely because a planning task is
 done. KT-638 keeps prevention open: it does not lower disk thresholds, ignore
 tests, scan recursively on a failing request, or authorise deletion of active
-or unowned targets. [src: file: backend/src/db/orchestration.rs:419-532#worktree_cleanup_liveness] [src: file: backend/src/core/worktree.rs:922-986#ensure_build_disk_headroom]
+or unowned targets. [src: file: backend/src/db/orchestration.rs:419-532#worktree_cleanup_liveness] [src: file: backend/src/core/worktree.rs:1072-1136#ensure_build_disk_headroom]
 
 The retained maintenance record distinguishes each authorised batch. These are
 dated physical free-space observations, not quotas or reusable deletion grants:
@@ -138,6 +138,11 @@ in the error so the operator knows which knob to turn. A warning configured
 below the critical mark is raised to it: a contradictory config must not read
 as "merely warn" on a disk that is in fact below the refusal line.
 
+Two further settings (KT-1318) make a launch sweep orphaned lane build dirs and
+then refuse below `server.disk_launch_min_free_gib` (default 30), and set how
+long such a dir must be idle (`server.disk_sweep_idle_hours`, default 6); see
+[disk-usage.md](disk-usage.md).
+
 ## Native development and qualification builds
 
 The native backend supervisor exports `CARGO_TARGET_DIR` as
@@ -168,11 +173,11 @@ created only at Cargo's exact target path when its immediate parent is already a
 real directory; an existing symlink, non-directory, or inspection failure is
 refused. Non-Cargo
 validations use their declared working directory. A critical-space refusal is
-stored as a refused validation rather than a pass. [src: file: backend/src/core/worktree.rs:922-986#ensure_build_disk_headroom]
-[src: file: backend/src/api/orchestration.rs:4582-4639#validation_build_path]
-[src: file: backend/src/api/orchestration.rs:4641-4737#validation_metadata_command]
-[src: file: backend/src/api/orchestration.rs:4495-4512#run_one_validation_with]
-[src: file: backend/src/api/orchestration.rs:4857-4923#run_one_validation_checked_with_runner]
+stored as a refused validation rather than a pass. [src: file: backend/src/core/worktree.rs:1072-1136#ensure_build_disk_headroom]
+[src: file: backend/src/api/orchestration.rs:4634-4691#validation_build_path]
+[src: file: backend/src/api/orchestration.rs:4693-4789#validation_metadata_command]
+[src: file: backend/src/api/orchestration.rs:4547-4564#run_one_validation_with]
+[src: file: backend/src/api/orchestration.rs:4909-4975#run_one_validation_checked_with_runner]
 
 There is intentionally no automatic lifecycle cleanup for the interactive
 target or unknown qualification caches. The only automatic reclamation remains
@@ -186,7 +191,7 @@ target and configured critical threshold, while the maintenance inventory lists
 managed candidates and their refusal reason. An operator may request a manual,
 path-specific reclaim only after the inventory's ownership and terminal-state
 checks; this document does not authorise a broad purge or deletion of unknown,
-active, or leased targets. [src: file: backend/src/core/worktree.rs:881-916#ensure_disk_headroom_for] [src: file: scripts/dev-backend-build-guard.sh:41-44#critical_gib]
+active, or leased targets. [src: file: backend/src/core/worktree.rs:1031-1066#ensure_disk_headroom_for] [src: file: scripts/dev-backend-build-guard.sh:41-44#critical_gib]
 [src: file: backend/src/api/maintenance.rs:77-142#list_build_artifacts]
 [src: file: backend/src/db/orchestration.rs:419-532#worktree_cleanup_liveness]
 

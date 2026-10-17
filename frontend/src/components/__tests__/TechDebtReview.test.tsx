@@ -114,6 +114,77 @@ describe('TechDebtReview', () => {
       expect(screen.getByTestId('td-row-TD-20261001-high')).toHaveAttribute('data-current', 'true'));
   });
 
+  it('sends the typed reason with every kind of decision, and none when it is empty', async () => {
+    mocked(projectsApi.decideTds).mockResolvedValue({
+      results: [], gate: { blocking_total: 2, blocking_settled: 0, met: false, open_disputes: 0 },
+    });
+    setup();
+    for (const decision of ['confirm', 'defer', 'reject'] as const) {
+      fireEvent.change(screen.getByPlaceholderText('techDebt.detail.reasonPlaceholder'), {
+        target: { value: `because ${decision}` },
+      });
+      fireEvent.click(screen.getByTestId(`td-decide-${decision}`));
+      await waitFor(() => expect(projectsApi.decideTds).toHaveBeenLastCalledWith('p1', [
+        { td_id: 'TD-20261001-crit', decision, reason: `because ${decision}` },
+      ]));
+      // A deferral keeps the item current, the others move on: come back to it.
+      fireEvent.click(screen.getByTestId('td-row-TD-20261001-crit').querySelector('.td-row-main') as HTMLElement);
+    }
+    fireEvent.change(screen.getByPlaceholderText('techDebt.detail.reasonPlaceholder'), { target: { value: '   ' } });
+    fireEvent.click(screen.getByTestId('td-decide-confirm'));
+    await waitFor(() => expect(projectsApi.decideTds).toHaveBeenLastCalledWith('p1', [
+      { td_id: 'TD-20261001-crit', decision: 'confirm' },
+    ]));
+    // The label says the reason is kept for every decision, not only "keep".
+    expect(screen.getByText('techDebt.detail.reason')).toBeInTheDocument();
+  });
+
+  it('renders the impact as Markdown, without raw HTML', () => {
+    setup(tdList([
+      tdItem('TD-20261001-crit', 'Critical', 'pending', {
+        impact: '**Critical** — a key is public.\n\n- anyone can read it\n- rotate it <script>alert(1)</script>',
+      }),
+    ]));
+    const impact = screen.getByTestId('td-markdown');
+    expect(within(impact).getByText('Critical').tagName).toBe('STRONG');
+    expect(within(impact).getAllByRole('listitem')).toHaveLength(2);
+    expect(impact.textContent).not.toContain('**');
+    expect(impact.querySelector('script')).toBeNull();
+  });
+
+  it('shows an explicit state when a sheet has no verification criterion', () => {
+    setup(tdList([
+      tdItem('TD-20261001-crit', 'Critical', 'pending', { verification: null }),
+      tdItem('TD-20261001-high', 'High', 'pending'),
+    ]));
+    expect(screen.getByTestId('td-verification')).toHaveTextContent('techDebt.detail.verification');
+    expect(screen.getByTestId('td-no-verification')).toHaveTextContent('techDebt.detail.noVerification');
+    fireEvent.click(within(screen.getByTestId('td-row-TD-20261001-high')).getByRole('button'));
+    expect(screen.queryByTestId('td-no-verification')).toBeNull();
+    expect(screen.getByTestId('td-verification')).toHaveTextContent('It no longer breaks.');
+  });
+
+  it('lists a detail file without front matter and offers no task for it', () => {
+    setup(tdList([
+      tdItem('CQ-001', 'High', 'pending', { status: 'Unknown' }),
+      tdItem('PERF-20261016-deep-clone', 'Unknown', 'pending'),
+    ]));
+    expect(screen.getByTestId('td-row-CQ-001')).toBeInTheDocument();
+    expect(screen.getByTestId('td-row-PERF-20261016-deep-clone')).toBeInTheDocument();
+    expect(screen.getByTestId('td-filter-todo')).toHaveTextContent('techDebt.filter.todo 2');
+    expect(screen.queryByTestId('td-task-create')).toBeNull();
+    fireEvent.click(within(screen.getByTestId('td-row-PERF-20261016-deep-clone')).getByRole('button'));
+    expect(screen.getByTestId('td-detail')).toHaveTextContent('techDebt.detail.severity : Unknown');
+  });
+
+  it('offers no task for a debt only the index lists, until a sheet exists', () => {
+    setup(tdList([
+      tdItem('TD-20261016-rowonly', 'High', 'pending', { source_path: 'docs/inconsistencies-tech-debt.md' }),
+    ]));
+    expect(screen.getByTestId('td-row-TD-20261016-rowonly')).toBeInTheDocument();
+    expect(screen.queryByTestId('td-task-create')).toBeNull();
+  });
+
   it('links an existing task, creates a missing one, and keeps trackers as placeholders', async () => {
     mocked(projectsApi.createTdTask).mockResolvedValueOnce({
       created: 1, already_linked: 0, skipped: 0, themes: [],

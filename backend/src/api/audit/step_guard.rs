@@ -41,7 +41,6 @@ Kronn kept what the agent wrote: retry the step, or accept it as it stands.\n{PA
 }
 
 /// Whether `content` starts with a partial marker.
-#[cfg(test)]
 pub(crate) fn has_partial_marker(content: &str) -> bool {
     content.trim_start().starts_with(PARTIAL_OPEN)
 }

@@ -3,7 +3,7 @@
  * grouped as the pipeline runs them, validation, validated. Presentational:
  * every action is a handler the ProjectCard already owns.
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
   Check, ChevronDown, ChevronRight, FileText, Loader2, Play, RotateCcw,
   ShieldCheck, Sparkles, StopCircle, X, AlertTriangle,
@@ -71,7 +71,6 @@ interface StepRow {
 export interface AuditTimelineProps {
   projectId: string;
   auditStatus: string;
-  techDebtCount: number;
   agents: AgentDetection[];
   selectedAgent: AgentType | null;
   selectedTier: ModelTier;
@@ -130,7 +129,8 @@ export interface AuditTimelineProps {
   onMarkValid: () => Promise<void>;
   /** Opens a discussion, archived ones included. */
   onOpenValidation: (discussionId: string) => void;
-  onViewTechDebts: () => void;
+  /** Step 4's tech-debt control: the same review entry as the project overview, plus the raw-file link. */
+  techDebtEntry: ReactNode;
   /** The same verifier opened from the compact project header and stale docs. */
   onVerifyDocs?: () => void;
   docStateCounts?: DocStateCounts | null;
@@ -1111,11 +1111,7 @@ export function AuditTimeline(props: AuditTimelineProps) {
                 ].filter(Boolean).join(' · ')}
               </p>
             )}
-            {validated && props.techDebtCount > 0 && (
-              <button type="button" className="audit-tl-btn audit-tl-btn-small" onClick={props.onViewTechDebts}>
-                {t('audit.viewTechDebts', props.techDebtCount)}
-              </button>
-            )}
+            {validated && props.techDebtEntry}
           </Phase>
         </ol>
 

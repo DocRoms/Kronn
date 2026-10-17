@@ -47,7 +47,7 @@ function mockTimeline({ status = 'Completed', steps = [], orphaned = false, vali
 
 function baseProps(over: Partial<AuditTimelineProps> = {}): AuditTimelineProps {
   return {
-    projectId: 'p1', auditStatus: 'TemplateInstalled', techDebtCount: 0, agents: [AGENT],
+    projectId: 'p1', auditStatus: 'TemplateInstalled', agents: [AGENT],
     selectedAgent: 'ClaudeCode', selectedTier: 'reasoning', modelTiers: null, selectedConnectionId: null, onSelect: vi.fn(),
     briefingDone: true, onBriefingSaved: vi.fn(), auditActive: false, liveStep: 0, liveTotal: 0,
     liveFile: '', liveElapsed: null, liveTool: null, liveStartedAt: null, liveToolCalls: null, liveStepTokens: null,
@@ -55,7 +55,7 @@ function baseProps(over: Partial<AuditTimelineProps> = {}): AuditTimelineProps {
     onLaunch: vi.fn(), onRetryStep: vi.fn(), onAcceptStep: vi.fn().mockResolvedValue(undefined),
     onRelaunchFull: vi.fn(), onCleanupLease: vi.fn().mockResolvedValue(undefined),
     validationInProgress: false, onMarkValid: vi.fn().mockResolvedValue(undefined),
-    onOpenValidation: vi.fn(), onViewTechDebts: vi.fn(), refreshTrigger: 0, toast: vi.fn(), ...over,
+    onOpenValidation: vi.fn(), techDebtEntry: null, refreshTrigger: 0, toast: vi.fn(), ...over,
   };
 }
 

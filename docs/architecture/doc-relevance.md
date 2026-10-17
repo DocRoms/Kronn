@@ -9,10 +9,10 @@ verdict, deterministically and without a model.
 ## What the revalidation already did (reused, not rewritten)
 
 - Per-citation fingerprints, `changed` / `removed` / `file missing` / `moved`,
-  recorded at validation. [src: file: backend/src/core/citation_drift.rs:955#check]
+  recorded at validation. [src: file: backend/src/core/citation_drift.rs:978#check]
 - The plan that re-anchors moved lines for free and sends the owning audit
   steps only the sections that need a model.
-  [src: file: backend/src/api/audit/revalidate.rs:80#plan]
+  [src: file: backend/src/api/audit/revalidate.rs:92#plan]
 - The `audit-revalidation` skill the bounded agent pass receives.
 
 ## What relevance adds
@@ -21,7 +21,7 @@ Every section (heading to next heading, fenced code excluded, a heading with
 nothing under it skipped) is judged from its anchors: its `[src: file: …]`
 citations, read through the fingerprint report, and the repository paths its
 prose names in backticks.
-[src: file: backend/src/core/doc_relevance.rs:995#judge]
+[src: file: backend/src/core/doc_relevance.rs:1123#judge]
 
 | Verdict | Meaning |
 |---|---|
@@ -43,7 +43,9 @@ queues it for its owning step when `citations.json` holds no review stamp for
 it, or when the stamp no longer matches the doc's hash or the digest of that
 step's sources. After the pass, the doc is stamped whether or not the agent
 added an anchor, so an unchanged repo plans clean and there is no re-queue
-loop. The panel lists each such doc with « re-read on <date> » (`RevalidationPlan.unanchored_docs`).
+loop. A validation stamps those docs too (`stamp_validated_rereads`, KT-1319):
+the human has just checked the whole set, so a project validated a minute ago
+queues no step. The panel lists each such doc with « re-read on <date> » (`RevalidationPlan.unanchored_docs`).
 A doc no audit step owns is listed but never queued; the panel says « no audit
 step re-reads this doc » for it (`UnanchoredDoc.owned`), not « not re-read ».
 
@@ -60,7 +62,7 @@ back depends on that step (`AnalysisStep.sources`):
   of the doc queues it again.
 
 [src: file: backend/src/core/citation_drift.rs:84#DocReview]
-[src: file: backend/src/core/citation_drift.rs:837#current_review]
+[src: file: backend/src/core/citation_drift.rs:860#current_review]
 [src: file: backend/src/api/audit/revalidate.rs:60#stamp_rereads]
 
 ### When a prose path counts as gone
@@ -82,7 +84,11 @@ It is not a claim at all when it sits in:
 
 - a fenced code block;
 - a sentence that tells history or absence (« the former `x.rs` », « no
-  longer », « does not exist », « if we add », « to be created »…), or an
+  longer », « does not exist », « if we add », « to be
+  created »…; and a path said missing right where it is cited, « the missing
+  `x.yml` » or « `x.yml` is missing from the repo »: a finding about a gone
+  file names it to say so, while a « missing » elsewhere in the sentence
+  exempts nothing), or an
   example sentence (« e.g. », « Detail file example: ») and, when it closes a
   line, the list right under it. The rule is scoped to the sentence holding
   the path, split on sentence punctuation outside inline code: Kronn's docs
@@ -92,7 +98,7 @@ It is not a claim at all when it sits in:
   (« Ideas », « Roadmap », « Future work », « Suggested direction », « TODO
   list »). A single word inside a real title (« Ma Todo », « Workflow
   suggestions ») does not make one. A TD sheet's « Remediation », « Fix » or
-  « Next steps » heading is one, and so is a line that opens with such a
+  « Next step(s) » heading (Kronn's own TD shape) is one, and so is a line that opens with such a
   label (`- **Remediation**: …`, `- **Suggested fix**: …`; when the label
   closes the line, the text under it up to the next blank line, heading or
   sibling item): they name files still to be created (KT-1313). A section left
@@ -122,7 +128,7 @@ sends exactly those (`shown_paths`): a path that is not in the request is not
 accepted, whatever is gone at the click, and an older client that sends none
 accepts none. The per-doc panel, which lists every gone path of its doc, still
 accepts them all.
-[src: file: backend/src/core/citation_drift.rs:537#acknowledge_accepting]
+[src: file: backend/src/core/citation_drift.rs:560#acknowledge_accepting]
 
 ## The measure
 
@@ -159,4 +165,4 @@ accepts them all.
 
 A citation the git diff maps to a new line past the fingerprint window is
 treated as moved, exactly as the plan re-anchors it.
-[src: file: backend/src/core/doc_relevance.rs:1126#analyze_with_moves]
+[src: file: backend/src/core/doc_relevance.rs:1254#analyze_with_moves]

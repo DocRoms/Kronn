@@ -8539,6 +8539,18 @@ disk_critical_gib: number,
  */
 disk_warning_gib: number,
 /**
+ * KT-1318 — free space, in GiB, a worker launch (or a full audit) needs on
+ * the volume holding the worktrees and lane build dirs. Below it Kronn
+ * sweeps its orphaned lane build dirs first, then refuses the launch with
+ * the reason and an alert in the principal room. `0` disables the guard.
+ */
+disk_launch_min_free_gib: number,
+/**
+ * KT-1318 — hours a Kronn-created lane build dir must be unwritten, with no
+ * live worktree, before a sweep (boot, periodic, pressure) may remove it.
+ */
+disk_sweep_idle_hours: number,
+/**
  * Maximum concurrent agent processes (default: 5)
  */
 max_concurrent_agents: number,
@@ -8727,7 +8739,15 @@ execution_variable_retention_days: number,
 /**
  * Days a finished workflow run keeps its step outputs. Zero keeps them.
  */
-run_payload_retention_days: number, p2p_enabled: boolean, frontend_origins: Array<string>,
+run_payload_retention_days: number,
+/**
+ * KT-1318 - free GiB a worker launch / full audit needs (`0` = guard off).
+ */
+disk_launch_min_free_gib: number,
+/**
+ * KT-1318 - hours a lane build dir must be idle before a sweep may take it.
+ */
+disk_sweep_idle_hours: number, p2p_enabled: boolean, frontend_origins: Array<string>,
 /**
  * The zone set in Settings; `None` follows the machine.
  */

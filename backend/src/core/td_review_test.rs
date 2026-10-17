@@ -184,3 +184,29 @@ fn read_items_lists_sheets_only_and_sorted() {
     assert_eq!(items[0].source_path, format!("{name}/tech-debt/TD-1.md"));
     assert!(read_items(&dir.path().join("missing")).is_empty());
 }
+
+#[test]
+fn impact_keeps_its_lines_so_the_review_can_render_the_markdown() {
+    let section = "# TD-x\n\n- **Status**: Inferred\n\n## Impact\n\n**Critical** — a key is public.\n\n- anyone can read it\n- rotate it\n\n## Verification\nDone.\n";
+    let item = item_from("TD-x", section, String::new());
+    assert_eq!(
+        item.impact.as_deref(),
+        Some("**Critical** — a key is public.\n\n- anyone can read it\n- rotate it")
+    );
+    // The one-line item form with indented continuation lines.
+    let listed = "# TD-y\n\n- **Impact**: **High** — slow builds\n  - CI waits\n  - devs wait\n- **Effort**: M\n";
+    let item = item_from("TD-y", listed, String::new());
+    assert_eq!(
+        item.impact.as_deref(),
+        Some("**High** — slow builds\n- CI waits\n- devs wait")
+    );
+    // No Impact at all stays absent; the other blocks still collapse to a line.
+    assert_eq!(item_from("TD-z", "# TD-z\n", String::new()).impact, None);
+    assert_eq!(item.effort.as_deref(), Some("M"));
+}
+
+#[test]
+fn a_sheet_without_a_verification_criterion_reports_none() {
+    let item = item_from("TD-v", "# TD-v\n\n## Problem\nIt breaks.\n", String::new());
+    assert_eq!(item.verification, None);
+}
