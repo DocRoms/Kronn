@@ -6,7 +6,7 @@ import { userError } from '../lib/userError';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { isValidationDisc, isBriefingDisc, isBootstrapDisc, isTrackerMcp } from '../lib/constants';
 import { canRunAudit } from '../lib/agentCapabilities';
-import { effectiveLaunchChoice, runLaunchChoice, usableAuditTargets } from '../lib/auditLaunchChoice';
+import { effectiveLaunchChoice, runLaunchChoice, type ConnectionsStatus } from '../lib/auditLaunchChoice';
 import { AiDocViewer } from './AiDocViewer';
 import { unseenBasis } from '../lib/discussionUiUtils';
 import { onActivationKey } from '../lib/keyboardActivation';
@@ -456,12 +456,19 @@ export function ProjectCard({
   // KT-980 — the named external API connection picked for an HTTP agent.
   const [auditConnectionId, setAuditConnectionId] = useState<string | null>(null);
   // The named connections the picker lists (the panel loads the same list).
+  // Loading and failed are told apart from an empty list: a run's connection is
+  // only known to be deleted once the list loaded without it.
   const [auditConnections, setAuditConnections] = useState<ExternalApiConnectionView[]>([]);
+  const [auditConnectionsStatus, setAuditConnectionsStatus] = useState<ConnectionsStatus>('loading');
   useEffect(() => {
     let alive = true;
     externalApi.list()
-      .then(list => { if (alive) setAuditConnections(list ?? []); })
-      .catch(() => { if (alive) setAuditConnections([]); });
+      .then(list => {
+        if (!alive) return;
+        setAuditConnections(list ?? []);
+        setAuditConnectionsStatus('ready');
+      })
+      .catch(() => { if (alive) setAuditConnectionsStatus('error'); });
     return () => { alive = false; };
   }, []);
   /// Companion ref for `auditActive` — keeps `handleFullAudit` and
@@ -640,13 +647,15 @@ export function ProjectCard({
     : (auditAgents[0]?.agent_type ?? 'ClaudeCode');
   // KT-1320 — what a launch runs on is what the panel shows: the run being
   // retried or resumed, unless the human picked something else.
-  // It resolves against the picker's own inventory: detected agents and named
-  // connections (a Custom run is on a connection, never on a detection).
+  // The run's agent and tier are kept whatever the connections or the detections
+  // say; only its named connection follows the list (see `runLaunchChoice`).
   const runChoice = useMemo(
-    () => runLaunchChoice(resumableAudit, usableAuditTargets(agents, auditConnections)),
-    [resumableAudit, agents, auditConnections],
+    () => runLaunchChoice(resumableAudit, { status: auditConnectionsStatus, list: auditConnections }),
+    [resumableAudit, auditConnectionsStatus, auditConnections],
   );
-  const { choice: launchChoice, fromRun: launchFromRun } = effectiveLaunchChoice(
+  const {
+    choice: launchChoice, fromRun: launchFromRun, connectionGone: launchConnectionGone,
+  } = effectiveLaunchChoice(
     { agent: pickedAuditAgent, tier: auditTierChoice, connectionId: auditConnectionId },
     auditPickTouched,
     runChoice,
@@ -2724,6 +2733,7 @@ export function ProjectCard({
                     modelTiers={modelTiers}
                     selectedConnectionId={selectedAuditConnectionId}
                     selectionFromRun={launchFromRun}
+                    selectionConnectionGone={launchConnectionGone}
                     onSelect={(agent, tier, connectionId) => {
                       setAuditPickTouched(true);
                       setAuditAgentChoice(agent);

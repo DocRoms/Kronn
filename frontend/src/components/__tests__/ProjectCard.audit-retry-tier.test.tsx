@@ -237,3 +237,70 @@ describe('ProjectCard — KT-1320 a retry runs on the tier of the run it continu
     expect(launches()[1]).toMatchObject({ resume_run_id: 'run-y', tier: 'default' });
   });
 });
+
+// The class: the run's agent and tier are never swapped for the picker's when its
+// connection cannot be resolved at click time — loading, failed, or really gone.
+describe('ProjectCard — KT-1320 the run keeps its agent and tier whatever its connection', () => {
+  const retry = async (container: HTMLElement) => {
+    await openGroups(container);
+    await act(async () => { fireEvent.click(await screen.findByTestId('audit-timeline-step-retry-3')); });
+    await waitFor(() => expect(launches()).toHaveLength(1));
+  };
+
+  it('B — a LiteLlm run whose connection is deleted, another LiteLlm connection existing', async () => {
+    const other = { ...NAMED, id: 'lite-2', display_name: 'Other lite', origin_preset: 'lite_llm' };
+    vi.mocked(externalApi.list).mockResolvedValue([other] as never);
+    vi.mocked(projectsApi.auditResumable).mockResolvedValue({ ...RESUMABLE, agent_type: 'LiteLlm', connection_id: 'lite-gone' });
+    const { container } = renderCard();
+    // The note is there before anything is launched.
+    expect(await screen.findByTestId('audit-timeline-connection-gone')).toHaveTextContent('LiteLLM');
+    await retry(container);
+    expect(launches()[0]).toMatchObject({ resume_run_id: 'run-x', agent: 'LiteLlm', tier: 'economy' });
+    expect(launches()[0].connection_id).toBeUndefined();
+  });
+
+  it('C — a Custom run whose connection is deleted, no connection left', async () => {
+    vi.mocked(projectsApi.auditResumable).mockResolvedValue(RUN_ON_NAMED);
+    const { container } = renderCard();
+    expect(await screen.findByTestId('audit-timeline-connection-gone')).toBeInTheDocument();
+    await retry(container);
+    expect(launches()[0]).toMatchObject({ resume_run_id: 'run-x', agent: 'Custom', tier: 'economy' });
+    expect(launches()[0].connection_id).toBeUndefined();
+  });
+
+  it('D — a Custom run on a valid connection, the connection list failing to load', async () => {
+    vi.mocked(externalApi.list).mockRejectedValue(new Error('boom'));
+    vi.mocked(projectsApi.auditResumable).mockResolvedValue(RUN_ON_NAMED);
+    const { container } = renderCard();
+    expect(await screen.findByTestId('audit-timeline-selection-from-run')).toHaveTextContent('disc.tier.economy');
+    // Unknown is not deleted: no note announces a fallback that may not happen.
+    expect(screen.queryByTestId('audit-timeline-connection-gone')).toBeNull();
+    await retry(container);
+    expect(launches()[0]).toMatchObject({ resume_run_id: 'run-x', agent: 'Custom', tier: 'economy' });
+    expect(launches()[0].connection_id).toBeUndefined();
+  });
+
+  it('E — a retry clicked while the connection list is still loading', async () => {
+    vi.mocked(externalApi.list).mockReturnValue(new Promise(() => {}) as never);
+    vi.mocked(projectsApi.auditResumable).mockResolvedValue(RUN_ON_NAMED);
+    const { container } = renderCard();
+    expect(await screen.findByTestId('audit-timeline-selection-from-run')).toHaveTextContent('disc.tier.economy');
+    expect(screen.queryByTestId('audit-timeline-connection-gone')).toBeNull();
+    await retry(container);
+    expect(launches()[0]).toMatchObject({ resume_run_id: 'run-x', agent: 'Custom', tier: 'economy' });
+    expect(launches()[0].connection_id).toBeUndefined();
+  });
+
+  it('a partial audit and the revalidation keep the same agent and tier when the list failed', async () => {
+    vi.mocked(externalApi.list).mockRejectedValue(new Error('boom'));
+    vi.mocked(projectsApi.auditResumable).mockResolvedValue(RUN_ON_NAMED);
+    vi.mocked(projectsApi.partialAuditStream).mockResolvedValue(undefined as never);
+    renderCard();
+    await waitFor(() => expect(screen.getByTestId('revalidate')).toHaveAttribute('data-agent', 'Custom'));
+    expect(screen.getByTestId('revalidate')).toHaveAttribute('data-tier', 'economy');
+    await act(async () => { fireEvent.click(await screen.findByTestId('run-partial')); });
+    await waitFor(() => expect(vi.mocked(projectsApi.partialAuditStream)).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(projectsApi.partialAuditStream).mock.calls[0][1])
+      .toMatchObject({ agent: 'Custom', tier: 'economy' });
+  });
+});
