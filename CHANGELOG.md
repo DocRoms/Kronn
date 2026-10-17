@@ -542,7 +542,10 @@ Release notes for 0.9.3 and earlier are available in the
   value, in the data, summaries, errors and logs. An imported bundle or a
   custom API cannot declare a value public. The URL decision is made on the
   raw text: a secret hidden behind dot segments (`…/SECRET/..`,
-  `…/SECRET/%2e%2e`) no longer passes for a bare origin.
+  `…/SECRET/%2e%2e`) no longer passes for a bare origin. A value declared
+  public is checked too, even with no `/`: user info, query, fragment, `;param`
+  and non-ASCII characters keep it masked (`https:user:SECRET@host`,
+  `host;SECRET`).
 - A review-wait timeout no longer locks the principal out of the review
   (KT-1293). The watchdog used to move the unreviewed delivery to `Escalated`
   while its alert told the principal to call `task_exec_review`, which only

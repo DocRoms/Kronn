@@ -212,6 +212,7 @@ pub(crate) fn call_secrets(
             continue;
         }
         set.add(value);
+        add_url_parts(&mut set, value);
     }
     if let ApiAuthKind::Basic {
         user_env,
@@ -228,13 +229,40 @@ pub(crate) fn call_secrets(
     set
 }
 
+/// A masked value that parses as a URL (`http:user:SECRET@host`,
+/// `http:host?token=SECRET`) is rewritten by the URL normalisation in the
+/// request line the summary prints (`http://user:SECRET@host/`), so the raw
+/// text no longer matches: its user info, query, fragment and normalised form
+/// are secrets too.
+fn add_url_parts(set: &mut crate::core::secret_scrub::SecretSet, value: &str) {
+    let Ok(url) = Url::parse(value.trim()) else {
+        return;
+    };
+    for part in [
+        Some(url.username()),
+        url.password(),
+        url.query(),
+        url.fragment(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        set.add(part);
+    }
+    if url.has_host() {
+        set.add(url.as_str().trim_end_matches('/'));
+    }
+}
+
 /// Whether an env value is public configuration rather than a credential.
 /// Everything is masked by default; a value is public only if
 ///
 /// 1. it is declared `public` in `api_spec.config_keys` AND the server is a
 ///    trusted registry one (`McpSource::Registry`): a bundle, a custom API or
-///    any other editable definition cannot grant it. A declared URL must
-///    still hold no user info, query, fragment, `;param` or encoded `?`/`#`; or
+///    any other editable definition cannot grant it. Every declared value is
+///    checked: no [`has_credential_marker`] text (user info, query, fragment,
+///    `;param`, backslash, whitespace, encoded forms, non-ASCII), and a value
+///    holding `:` or `/` must pass the full raw URL check; or
 /// 2. it is the plugin's base URL (`{KEY}` in `base_url`) and a bare origin:
 ///    http(s) scheme + host[+port] with an empty or `/` path, no user info,
 ///    query or fragment. A path may hold a secret (a webhook URL), so no name
@@ -251,32 +279,47 @@ fn is_public_config(spec: &ApiSpec, trusted: bool, key: &str, value: &str) -> bo
             .iter()
             .any(|config| config.env_key == key && config.public);
     if declared {
-        // A declared value that looks like a URL (any `/` or `\`) still must
-        // not hold secrets; any other declared value (host, workspace id) is
-        // taken as is.
-        return !value.contains(['/', '\\']) || is_credential_free_url(value, true);
+        // A declared value is never taken on trust: no credential marker, ever,
+        // and anything that can parse as a URL (a `:` or `/`) goes through the
+        // full raw URL check. Only a plain token (host, workspace id) is taken
+        // as is.
+        if has_credential_marker(value) {
+            return false;
+        }
+        return !value.contains([':', '/']) || is_credential_free_url(value, true);
     }
     spec.base_url.contains(&format!("{{{key}}}")) && is_credential_free_url(value, false)
+}
+
+/// Text that can carry or hide a credential in a URL-ish value, whatever the
+/// shape: user info (`@`, `%40`), query (`?`, `%3f`), fragment (`#`, `%23`),
+/// `;param`, a backslash, a percent-encoded `.`, whitespace or control
+/// characters (the URL parser strips tabs and newlines), and any non-ASCII
+/// character (zero-width, soft hyphen, U+2215, U+3002 fold into the host or a
+/// separator once IDNA has run).
+fn has_credential_marker(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    !value.is_ascii()
+        || value.chars().any(|c| c.is_whitespace() || c.is_control())
+        || value.contains([';', '\\', '?', '#', '@'])
+        || ["%2e", "%3f", "%23", "%3b", "%5c", "%40"]
+            .iter()
+            .any(|marker| lower.contains(marker))
 }
 
 /// An http(s) URL decided on its RAW text, never on a parsed form:
 /// `Url::parse` resolves `..` and `%2e%2e`, which would turn
 /// `https://host/SECRET/..` into a bare origin. After the authority there must
 /// be nothing or exactly `/` (with `allow_path` false), or a path with no `.`
-/// / `..` segment. Never accepted: user info, query, fragment, `;param`, a
-/// backslash, whitespace or control characters (the URL parser strips tabs and
-/// newlines), and percent-encoded `.`, `?`, `#`, `;` or `\`.
+/// / `..` segment. The authority is ASCII host characters only (letters,
+/// digits, `.`, `-`, `_`, and `:`/`[`/`]` for a port or IPv6 literal). Never
+/// accepted: any [`has_credential_marker`] text.
 fn is_credential_free_url(value: &str, allow_path: bool) -> bool {
     let value = value.trim();
-    let lower = value.to_ascii_lowercase();
-    if value.chars().any(|c| c.is_whitespace() || c.is_control())
-        || value.contains([';', '\\', '?', '#', '@'])
-        || ["%2e", "%3f", "%23", "%3b", "%5c"]
-            .iter()
-            .any(|marker| lower.contains(marker))
-    {
+    if has_credential_marker(value) {
         return false;
     }
+    let lower = value.to_ascii_lowercase();
     let Some(rest) = lower
         .strip_prefix("https://")
         .or_else(|| lower.strip_prefix("http://"))
@@ -287,7 +330,11 @@ fn is_credential_free_url(value: &str, allow_path: bool) -> bool {
         Some(index) => rest.split_at(index),
         None => (rest, ""),
     };
-    if authority.is_empty() {
+    if authority.is_empty()
+        || !authority
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '[' | ']'))
+    {
         return false;
     }
     let path_ok = if allow_path {
@@ -6103,6 +6150,118 @@ mod tests {
                     let state = test_app_state();
                     let stored = logged_error(&state, &step, &out).await;
                     assert!(!stored.contains(secret), "{suffix}: {stored}");
+                }
+            }
+        }
+    }
+
+    /// KT-1249 — a declared-public value is checked whatever its shape: a value
+    /// with no `/` is not exempt, and a non-ASCII character never folds into
+    /// the host.
+    #[test]
+    fn every_declared_public_value_is_checked() {
+        let mut plugin = mk_plugin("{SITE}", ApiAuthKind::None, vec![]);
+        plugin.source = McpSource::Registry;
+        plugin.api_spec.as_mut().unwrap().config_keys = vec![config_key("SITE", true)];
+        let spec = plugin.api_spec.as_ref().unwrap();
+        for value in [
+            "https:user:SECRET@jira.acme.example",
+            "user:SECRET@jira.acme.example",
+            "https:jira.acme.example?token=SECRET",
+            "https:jira.acme.example#SECRET",
+            "jira.acme.example;SECRET",
+            "jira.acme.example?token=SECRET",
+            "jira.acme.example#SECRET",
+            "user@jira.acme.example",
+            "user%40jira.acme.example",
+            "jira.acme.example%3Ftoken=SECRET",
+            "jira.acme.example%23SECRET",
+            "jira.acme.example%3bSECRET",
+            "jira.acme.example\\SECRET",
+            "jira.acme.example SECRET",
+            "jira.acme.example\tSECRET",
+            "https:jira.acme.example",
+            "https:/jira.acme.example",
+            "http:user:SECRET@127.0.0.1:8080",
+            "https://jira\u{200b}.acme.example",
+            "https://jira\u{ad}.acme.example",
+            "https://jira.acme.example\u{2215}SECRET",
+            "https://jira\u{3002}acme.example",
+            "https://jira.acme.example/\u{200b}SECRET",
+            "jira\u{200b}.acme.example",
+            "https://jira.acme.example%2fSECRET@evil.example",
+        ] {
+            assert!(!is_public_config(spec, true, "SITE", value), "{value:?}");
+            // And as the base URL of any server, trusted or not.
+            for trusted in [false, true] {
+                let mut base = plugin.clone();
+                base.api_spec.as_mut().unwrap().config_keys = vec![];
+                let spec = base.api_spec.as_ref().unwrap();
+                assert!(!is_public_config(spec, trusted, "SITE", value), "{value:?}");
+            }
+        }
+        // Plain declared values and bare origins stay public.
+        for value in [
+            "jira.acme.example",
+            "workspace-42",
+            "https://euronews.atlassian.net",
+            "https://acme.example/jira",
+            "http://127.0.0.1:8080",
+            // By design: a secret subdomain is public as a plugin's base URL
+            // (the host cannot be told from a tenant name).
+            "https://abc123.m.pipedream.net",
+        ] {
+            assert!(is_public_config(spec, true, "SITE", value), "{value:?}");
+        }
+    }
+
+    /// KT-1249 — a non-URL-shaped credential pasted in a declared-public key
+    /// stays masked in the data, the error and the call log.
+    #[tokio::test]
+    async fn a_credential_in_a_declared_public_key_stays_masked_in_data_error_and_log() {
+        for (form, secret) in [
+            ("http:user:SecretF1@{HOST}", "SecretF1"),
+            ("user:SecretF2@{HOST}", "SecretF2"),
+            ("http:{HOST}?token=SecretF3", "SecretF3"),
+            ("http:{HOST}#SecretF4", "SecretF4"),
+            ("{HOST};SecretF5", "SecretF5"),
+        ] {
+            for status in [200u16, 500] {
+                let server = MockServer::start().await;
+                let host = server.uri().replacen("http://", "", 1);
+                let value = form.replace("{HOST}", &host);
+                Mock::given(method("GET"))
+                    .respond_with(
+                        ResponseTemplate::new(status).set_body_json(json!({"echo": value})),
+                    )
+                    .mount(&server)
+                    .await;
+                let mut plugin = mk_plugin(
+                    "{SITE}",
+                    ApiAuthKind::None,
+                    vec![mk_endpoint("GET", "/items")],
+                );
+                plugin.source = McpSource::Registry;
+                plugin.api_spec.as_mut().unwrap().config_keys = vec![config_key("SITE", true)];
+                let env = HashMap::from([("SITE".to_string(), value.clone())]);
+                let step = mk_step("/items");
+                let out = execute_api_call_step_core(
+                    &step,
+                    &plugin,
+                    &env,
+                    &TemplateContext::new(),
+                    SecurityPolicy::allow_loopback_for_tests(),
+                )
+                .await;
+                assert!(
+                    !out.result.output.contains(secret),
+                    "{form} {status}: {}",
+                    out.result.output
+                );
+                if out.result.status == RunStatus::Failed {
+                    let state = test_app_state();
+                    let stored = logged_error(&state, &step, &out).await;
+                    assert!(!stored.contains(secret), "{form}: {stored}");
                 }
             }
         }
