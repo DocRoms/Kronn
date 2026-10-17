@@ -1761,6 +1761,61 @@ fn a_step_cost_sums_its_attempts_and_one_silent_attempt_makes_it_unknown() {
     );
 }
 
+/// KT-1313 — a Claude step stopped between turns holds every turn it consumed,
+/// the final line replaces the sum, and no reading ever lowers the counter.
+#[test]
+fn a_stream_step_sums_its_turns_and_its_final_line_replaces_the_sum() {
+    use crate::db::audit_runs::StepTokens;
+    let agent = AgentType::ClaudeCode;
+    let turn = |input: u64, output: u64| {
+        StepTokens {
+            input: Some(input),
+            output: Some(output),
+            cache_read: None,
+            cache_write: None,
+            accounting: Default::default(),
+        }
+        .inclusive_for(&agent)
+    };
+    let mut turns = StreamTurns::default();
+    let mut usage = StepTokens::UNKNOWN;
+    let mut seen = Vec::new();
+    for reading in [turn(300, 30), turn(500, 47), turn(200, 16)] {
+        usage = turns.fold(usage, reading, false);
+        seen.push(usage.total().unwrap());
+    }
+    assert_eq!(seen, [330, 877, 1093], "a smaller turn still adds");
+    assert_eq!((usage.input, usage.output), (Some(1000), Some(93)));
+
+    // The final line states the whole run: it replaces the sum.
+    let done = turns.fold(usage, turn(1000, 100), true);
+    assert_eq!(done.total(), Some(1100));
+    // …unless it counts less than what was already seen.
+    assert_eq!(turns.fold(done, turn(10, 1), true), done);
+
+    assert!(runner::is_claude_result_line(
+        r#"{"type":"result","usage":{"input_tokens":1}}"#
+    ));
+    assert!(!runner::is_claude_result_line(
+        r#"{"type":"stream_event","event":{"type":"message_delta"}}"#
+    ));
+    assert!(!runner::is_claude_result_line("not json"));
+}
+
+#[test]
+fn the_runs_live_token_counter_never_goes_down() {
+    let mut run = RunTokens::default();
+    assert_eq!(run.total(), None);
+    assert_eq!(run.with(630), 630);
+    assert_eq!(run.with(877), 877);
+    // A stopped step whose tokens were never added, then a smaller reading.
+    assert_eq!(run.with(346), 877, "the shown total holds");
+    run.add(Some(877));
+    assert_eq!(run.total(), Some(877));
+    assert_eq!(run.with(0), 877);
+    assert_eq!(run.with(100), 977);
+}
+
 #[test]
 fn the_run_model_is_the_observed_one_else_the_configured_one_labelled() {
     let observed = vec!["model-a".to_string(), "modèle-b".to_string()];

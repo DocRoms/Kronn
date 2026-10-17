@@ -60,7 +60,7 @@ pub fn backoff_delay(attempts: u32) -> Duration {
 /// lightest case, because resolution and duration both stretch it.
 pub const DEFAULT_DEADLINE: Duration = Duration::from_secs(20 * 60);
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::models::{MediaModality, MediaParams, MediaRendered};

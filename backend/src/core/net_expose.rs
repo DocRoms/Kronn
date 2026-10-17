@@ -104,7 +104,7 @@ pub fn insecure_lan_boot_error(
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

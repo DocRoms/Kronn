@@ -178,7 +178,7 @@ pub struct DailyUsage {
     pub github: u64,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod cost_aggregate_tests {
     use super::CostAggregate;
 

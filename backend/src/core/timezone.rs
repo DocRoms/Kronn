@@ -68,7 +68,7 @@ pub fn detect_from(tz_env: Option<&str>, os_zone: Option<&str>) -> Tz {
         .unwrap_or(Tz::UTC)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

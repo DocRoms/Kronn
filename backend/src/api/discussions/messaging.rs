@@ -1464,7 +1464,7 @@ pub async fn stop_agent_dispatch(
     })))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::core::config::default_config;

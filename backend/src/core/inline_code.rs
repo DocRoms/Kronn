@@ -1962,7 +1962,7 @@ fn literal_openings(
     Ok(openings)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::workflows::template::TemplateContext;

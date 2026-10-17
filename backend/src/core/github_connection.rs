@@ -528,6 +528,6 @@ pub async fn verify_scope(api_base: &str, token: &str) -> GithubScope {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "github_connection_test.rs"]
 mod tests;

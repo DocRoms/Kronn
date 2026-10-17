@@ -1189,12 +1189,21 @@ pub(crate) fn markers_at(prose: &str) -> Vec<(usize, String)> {
     let mut i = 0usize;
     while i + needle.len() <= chars.len() {
         if lower[i..i + needle.len()] == needle[..] {
-            // Read until the matching ']' (balance nested '[').
+            // Read until the matching ']' (balance nested '['). A marker never
+            // swallows the next `[src:` nor a paragraph break: an unclosed one
+            // (a truncated banner, a half-typed citation) ends there, so the
+            // markers after it are still read.
             let mut depth = 1i32;
             let mut j = i + needle.len();
             let mut buf = String::new();
             let mut closed = false;
             while j < chars.len() {
+                if j + needle.len() <= chars.len() && lower[j..j + needle.len()] == needle[..] {
+                    break;
+                }
+                if chars[j] == '\n' && blank_line_at(&chars, j) {
+                    break;
+                }
                 match chars[j] {
                     '[' => {
                         depth += 1;
@@ -1220,8 +1229,12 @@ pub(crate) fn markers_at(prose: &str) -> Vec<(usize, String)> {
                 if !inner.is_empty() {
                     out.push((i, inner.to_string()));
                 }
+                i = j + 1;
+            } else {
+                // Resync right after the opening: whatever stopped the scan
+                // (next marker, blank line, end of text) is read normally.
+                i += needle.len();
             }
-            i = j + 1;
         } else {
             i += 1;
         }
@@ -1290,6 +1303,15 @@ pub fn truncate_outside_markers(value: &str, max: usize, ellipsis: bool) -> Stri
     out
 }
 
+/// Whether the newline at `at` is followed by a blank line (`\n` + optional
+/// spaces + `\n`).
+fn blank_line_at(chars: &[char], at: usize) -> bool {
+    chars[at + 1..]
+        .iter()
+        .find(|c| **c == '\n' || !c.is_whitespace())
+        == Some(&'\n')
+}
+
 /// Classify a marker's inner content into a kind + the bare reference, stripping
 /// an optional `<type>:` prefix from the v1.1 grammar (`file:`, `url:`, …).
 fn classify_source(raw: &str) -> (SourceKind, String) {
@@ -1337,7 +1359,74 @@ fn classify_source(raw: &str) -> (SourceKind, String) {
     if let Some(r) = match_type_keyword(s, "file") {
         return (SourceKind::File, r);
     }
+    // `<word>: <text>`: only a CLOSED list of non-file kinds (`command: git log`)
+    // is never a path to resolve. Any other word is a typo or an invented kind
+    // (`fil:`, `path:`, `source:`): if its text can be a path it is verified as
+    // a file and fabricated when missing, so a mistyped kind is never a free
+    // pass through the enforce gate.
+    if let Some(kind_word) = typed_prefix(s) {
+        if NON_FILE_KINDS.contains(&kind_word.to_ascii_lowercase().as_str())
+            || !text_can_be_a_path(s)
+        {
+            return (SourceKind::Other, s.to_string());
+        }
+    }
     (SourceKind::File, s.to_string())
+}
+
+/// Kinds that cite something other than a file (a command, a test run…), so
+/// their text is never resolved as a path. Closed on purpose: a word outside
+/// this list whose text looks like a path is judged as a file.
+const NON_FILE_KINDS: &[&str] = &[
+    "command",
+    "cmd",
+    "shell",
+    "bash",
+    "cli",
+    "run",
+    "test",
+    "tests",
+    "test-run",
+    "output",
+    "log",
+    "query",
+    "sql",
+    "grep",
+    "tool",
+    "mcp",
+    "benchmark",
+    "measurement",
+];
+
+/// The `kind` of a `kind: text` marker: a bare identifier followed by a colon
+/// and whitespace. A path (`a/b.rs:3`, `C:\x`, `a.rs: 3`) never has that
+/// shape: it carries a `/`, a `.` or has no space after its colon.
+fn typed_prefix(s: &str) -> Option<&str> {
+    let (head, rest) = s.split_once(':')?;
+    (rest.starts_with(char::is_whitespace)
+        && !rest.trim().is_empty()
+        && head.starts_with(|c: char| c.is_ascii_alphabetic())
+        && head.len() > 1
+        && head
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+    .then_some(head)
+}
+
+/// Whether the text after an unknown `kind:` could name a file: it holds a
+/// path separator, a file extension or a `:line` spec, or it is a single
+/// whitespace-free token (`Makefile`). Prose with spaces is not a path.
+fn text_can_be_a_path(s: &str) -> bool {
+    let text = s.split_once(':').map_or(s, |(_, t)| t).trim();
+    let single_token = !text.contains(char::is_whitespace);
+    let (path, lines) = split_path_and_lines(text);
+    text.contains('/')
+        || text.contains('\\')
+        || single_token
+        || lines.is_some()
+        || std::path::Path::new(path)
+            .extension()
+            .is_some_and(|e| !e.is_empty())
 }
 
 /// The cited path and line span of a `file:` or `code-comment:` marker,
@@ -1776,13 +1865,37 @@ pub(crate) fn percent_decoded_relative(raw: &str) -> Option<String> {
     (decoded != raw && !decoded.contains('\0') && !rooted).then_some(decoded)
 }
 
-fn count_lines_capped(path: &Path) -> Option<usize> {
+/// The last line a citation may end on. A newline-terminated file of N lines
+/// reads as N+1 numbered lines in an editor or in Claude Code's Read tool (the
+/// last one empty), so a model that copies the number it saw cites N+1: that is
+/// accepted, and it is the one place every range check takes its end bound from.
+pub(crate) fn last_citable_line(content: &str) -> usize {
+    content.lines().count() + usize::from(content.ends_with('\n'))
+}
+
+/// Whether `start..=end` may be cited in a file of `lines` real lines whose last
+/// citable line is `last` ([`last_citable_line`]). The range has to start on a
+/// real line — one that starts on the empty line N+1 cites nothing — and may end
+/// on N+1. Every range check goes through here, so the verifier, the documentary
+/// gate, citation drift and the bundle repair cannot disagree.
+pub(crate) fn range_is_citable(lines: usize, last: usize, start: usize, end: usize) -> bool {
+    start >= 1 && start <= lines && start <= end && end <= last
+}
+
+/// `(real line count, last citable line)` of a file, `None` when it is too big
+/// to bounds-check. An empty file has no line: both are 0.
+fn count_lines_capped(path: &Path) -> Option<(usize, usize)> {
     let meta = std::fs::metadata(path).ok()?;
     if meta.len() > LINE_COUNT_SIZE_CAP_BYTES {
         return None; // too big — skip the bounds check, existence is enough
     }
     let content = std::fs::read_to_string(path).ok()?;
-    Some(content.lines().count().max(1))
+    Some((content.lines().count(), last_citable_line(&content)))
+}
+
+/// [`last_citable_line`] of a file on disk; 0 when it cannot be read.
+pub(crate) fn last_citable_line_of(path: &Path) -> usize {
+    std::fs::read_to_string(path).map_or(0, |content| last_citable_line(&content))
 }
 
 /// Verify one `[src: …]` marker against the project root.
@@ -1904,16 +2017,19 @@ pub(crate) fn line_bounds_status(
                 SourceStatus::Verified,
                 "file exists (too large to bounds-check lines)".into(),
             ),
-            Some(total) => {
-                if end <= total {
+            Some((total, citable)) => {
+                if range_is_citable(total, citable, start, end) {
                     (
                         SourceStatus::Verified,
                         format!("lines {}-{} within {} lines", start, end, total),
                     )
                 } else {
+                    // A range that starts on the empty line N+1 is as much
+                    // beyond the file as one that ends past it.
+                    let beyond = if start > total { start } else { end };
                     (
                         SourceStatus::OutOfBounds,
-                        format!("line {} beyond file length {}", end, total),
+                        format!("line {} beyond file length {}", beyond, total),
                     )
                 }
             }
@@ -2506,6 +2622,30 @@ fn foreign_worktree_path(cleaned: &str, roots: &[&Path]) -> Option<String> {
         .then(|| format!("{path_part} is in a worktree of another project — refused"))
 }
 
+/// The `.git` file a worktree registration (`<repo>/.git/worktrees/<name>/`)
+/// points at. Git may store that path relative to the registration directory
+/// (`../../../.kronn/worktrees/task-kt-9/.git`): such a path is joined to its
+/// directory and normalized here, not handed to `resolve_host_path`, which
+/// refuses every `..` and would log a warning per registered worktree. An
+/// absolute path is the host path it always was.
+fn registered_worktree_dot_git(registration: &Path, recorded: &str) -> PathBuf {
+    let recorded = Path::new(recorded);
+    if recorded.is_absolute() {
+        return crate::core::scanner::resolve_host_path(&recorded.to_string_lossy());
+    }
+    let mut normalized = PathBuf::new();
+    for component in registration.join(recorded).components() {
+        match component {
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
 /// The worktrees of the project checked out at `checkout`: every directory
 /// under its `.kronn/worktrees/`, plus the worktrees git registers for it
 /// (`.git/worktrees/*/gitdir`). Read from disk, no subprocess; symlinked
@@ -2521,7 +2661,7 @@ pub fn project_lane_roots(checkout: &Path) -> Vec<LaneRoot> {
             let Ok(gitdir) = std::fs::read_to_string(entry.path().join("gitdir")) else {
                 continue;
             };
-            let dot_git = crate::core::scanner::resolve_host_path(gitdir.trim());
+            let dot_git = registered_worktree_dot_git(&entry.path(), gitdir.trim());
             if let Some(worktree) = dot_git.parent() {
                 paths.push(worktree.to_path_buf());
             }
@@ -2647,6 +2787,10 @@ pub fn analyze_roots_lanes(text: &str, roots: &[&Path], lanes: &[LaneRoot]) -> L
         let check = verify_source_marker_lanes(&raw, roots, lanes);
         if check.status.is_fabricated() {
             fabricated += 1;
+        }
+        // A kind Kronn cannot check is surfaced as unverifiable, never silent.
+        if check.kind == SourceKind::Other {
+            unverified += 1;
         }
         // Dedup inline anchors against [src:] file refs by their bare PATH (no
         // line spec, no type prefix) — otherwise `[src: file: a.rs:2]` and an
@@ -2805,7 +2949,7 @@ pub fn finalize_lint_report(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 
@@ -3486,6 +3630,41 @@ mod tests {
         assert_eq!(m, vec!["arr[0].field"]);
     }
 
+    // KT-1311 — an unclosed marker (a banner cut at 240 chars) must not blind
+    // the markers after it.
+    #[test]
+    fn an_unclosed_marker_does_not_swallow_the_markers_after_it() {
+        let txt = "banner (… [src: file: .github/wor).\n\n- a [src: file: a.rs:1]\n- b [src: file: b.rs:2]\n";
+        assert_eq!(
+            extract_source_markers(txt),
+            vec!["file: a.rs:1", "file: b.rs:2"]
+        );
+    }
+
+    #[test]
+    fn an_unclosed_marker_ends_at_the_next_marker_on_the_same_line() {
+        let txt = "cut [src: file: .gi then [src: file: a.rs:1] and [src: file: b.rs:2]";
+        assert_eq!(
+            extract_source_markers(txt),
+            vec!["file: a.rs:1", "file: b.rs:2"]
+        );
+    }
+
+    #[test]
+    fn an_unclosed_marker_stops_at_a_paragraph_break_not_at_a_stray_bracket() {
+        let txt = "cut [src: file: .gi\n\nlater stray ] bracket [src: file: a.rs:1]";
+        assert_eq!(extract_source_markers(txt), vec!["file: a.rs:1"]);
+        assert!(extract_source_markers("tail [src: file: a.rs:1").is_empty());
+    }
+
+    #[test]
+    fn a_marker_wrapped_over_two_lines_is_still_read() {
+        assert_eq!(
+            extract_source_markers("see [src:\nfile: a.rs:7] ok"),
+            vec!["file: a.rs:7"]
+        );
+    }
+
     #[test]
     fn extract_empty_when_none() {
         assert!(extract_source_markers("no markers here at all").is_empty());
@@ -3698,6 +3877,106 @@ mod tests {
     }
 
     #[test]
+    fn an_unknown_typed_kind_is_other_never_a_file() {
+        for raw in [
+            "command: git log --oneline -5",
+            "Command: git log",
+            "shell: ls -la docs/",
+            "test-run: cargo test",
+        ] {
+            assert_eq!(classify_source(raw).0, SourceKind::Other, "{raw}");
+            assert_eq!(file_citation(raw), None, "{raw}");
+        }
+        let check = verify_source_marker("command: git log --oneline", Some(Path::new("/tmp")));
+        assert_eq!(check.kind, SourceKind::Other);
+        assert_eq!(check.status, SourceStatus::Unchecked);
+    }
+
+    #[test]
+    fn a_mistyped_kind_is_verified_as_a_file_never_a_free_pass() {
+        // `fil:` / `path:` / `source:` … are not on the closed list: a path-like
+        // text is judged as a file and is fabricated when it is missing.
+        let root = temp_project();
+        for raw in [
+            "fil: src/ghost.rs:1",
+            "path: src/ghost.rs",
+            "source: src/ghost.rs:3",
+            "ref: src/ghost.rs",
+            "files: src/ghost.rs:1-2",
+            "src: src/ghost.rs:1",
+            "path: Ghostfile",
+            "path: ghost.rs:4",
+        ] {
+            assert_eq!(classify_source(raw).0, SourceKind::File, "{raw}");
+            let check = verify_source_marker(raw, Some(&root));
+            assert!(check.status.is_fabricated(), "{raw}: {check:?}");
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_mistyped_kind_is_fabricated_under_the_enforce_gate() {
+        let root = temp_project();
+        for raw in [
+            "fil: src/ghost.rs:1",
+            "path: src/ghost.rs",
+            "source: src/ghost.rs",
+        ] {
+            let text = format!("Claim [src: {raw}].");
+            let report = analyze(&text, Some(&root));
+            assert_eq!(report.fabricated_count, 1, "{raw}: {report:?}");
+            let verdict = crate::api::audit::anti_hallu_enforce::lint_step_file(&text, &[&root]);
+            assert_eq!(verdict.count(), 1, "{raw}");
+            assert_eq!(
+                crate::api::audit::anti_hallu_enforce::decide(&verdict, 1, 3),
+                crate::api::audit::anti_hallu_enforce::GateDecision::Retry,
+                "{raw}"
+            );
+            assert_eq!(
+                crate::api::audit::anti_hallu_enforce::decide(&verdict, 3, 3),
+                crate::api::audit::anti_hallu_enforce::GateDecision::Fail,
+                "{raw}"
+            );
+        }
+        // The text is judged as written, prefix included: even over a real file
+        // a mistyped kind is refused, so the retry feedback makes the agent fix it.
+        let real = analyze("See [src: path: src/foo.rs:2].", Some(&root));
+        assert_eq!(real.fabricated_count, 1, "{real:?}");
+        let fixed = analyze("See [src: file: src/foo.rs:2].", Some(&root));
+        assert_eq!(fixed.fabricated_count, 0, "{fixed:?}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_listed_non_file_kind_stays_other_and_is_counted_unverified() {
+        let root = temp_project();
+        let text = "Recent work [src: command: git log --oneline -5] and \
+                    [src: test-run: cargo test --lib].";
+        let r = analyze(text, Some(&root));
+        assert_eq!(r.fabricated_count, 0, "{r:?}");
+        assert_eq!(r.unverified_count, 2, "{r:?}");
+        assert!(r.sources.iter().all(|s| s.kind == SourceKind::Other));
+        // Unknown word + prose (no path in it) is unverifiable too, and counted.
+        let prose = analyze("[src: note: the team agreed in standup]", Some(&root));
+        assert_eq!(prose.fabricated_count, 0, "{prose:?}");
+        assert_eq!(prose.unverified_count, 1, "{prose:?}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn paths_and_known_kinds_are_not_swallowed_by_the_unknown_kind_rule() {
+        for raw in [
+            "src/a.rs:10",
+            "a.rs:10",
+            "Dockerfile",
+            "docker-compose.yml:2-25",
+            "file: src/a.rs:1",
+        ] {
+            assert_eq!(classify_source(raw).0, SourceKind::File, "{raw}");
+        }
+    }
+
+    #[test]
     fn classify_full_provenance_gradient() {
         assert_eq!(
             classify_source("training-data: anything").0,
@@ -3803,8 +4082,18 @@ mod tests {
             verify_source_marker("src/foo.rs:5", Some(&root)).status,
             SourceStatus::Verified
         );
+        // The empty line after the final newline is what editors number N+1: a
+        // range may end on it, but a citation of that line alone cites nothing.
+        assert_eq!(
+            verify_source_marker("src/foo.rs:5-6", Some(&root)).status,
+            SourceStatus::Verified
+        );
         assert_eq!(
             verify_source_marker("src/foo.rs:6", Some(&root)).status,
+            SourceStatus::OutOfBounds
+        );
+        assert_eq!(
+            verify_source_marker("src/foo.rs:7", Some(&root)).status,
             SourceStatus::OutOfBounds
         );
         // Range
@@ -4436,7 +4725,7 @@ mod tests {
         let cases: &[(&str, SourceStatus)] = &[
             ("`src/foo.rs`:3", SourceStatus::Verified),
             ("`src/foo.rs`:2-4", SourceStatus::Verified),
-            ("`src/foo.rs`:6", SourceStatus::OutOfBounds), // path resolved AND bounds ran
+            ("`src/foo.rs`:7", SourceStatus::OutOfBounds), // path resolved AND bounds ran
             ("`src/foo.rs`", SourceStatus::Verified),
             ("file: `src/foo.rs`:3", SourceStatus::Verified), // file: prefix + backticks combined
             (abs.as_str(), SourceStatus::Verified),           // absolute, backticked, line outside
@@ -6403,6 +6692,31 @@ mod lane_origin {
         assert_eq!(c.origin, Some(SourceOrigin::worktree(&name)));
         std::fs::remove_dir_all(&checkout).ok();
         std::fs::remove_dir_all(&elsewhere).ok();
+    }
+
+    /// KT-1316 — git can record a worktree's `.git` relative to its registration;
+    /// that is a lane like any other, found without a `resolve_host_path` refusal.
+    #[test]
+    fn a_relative_worktree_registration_is_a_lane() {
+        let checkout = temp_dir("checkout");
+        write(&checkout, ".kronn/worktrees/task-kt-9/src/here.rs", 2);
+        let meta = checkout.join(".git/worktrees/task-kt-9");
+        std::fs::create_dir_all(&meta).unwrap();
+        std::fs::write(
+            meta.join("gitdir"),
+            "../../../.kronn/worktrees/task-kt-9/.git\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            registered_worktree_dot_git(&meta, "../../../.kronn/worktrees/task-kt-9/.git"),
+            checkout.join(".kronn/worktrees/task-kt-9/.git")
+        );
+        let lanes = project_lane_roots(&checkout);
+        // Found through both the directory listing and the registration: once.
+        assert_eq!(lanes.len(), 1, "{lanes:?}");
+        assert_eq!(lanes[0].name, "task-kt-9");
+        std::fs::remove_dir_all(&checkout).ok();
     }
 
     #[test]

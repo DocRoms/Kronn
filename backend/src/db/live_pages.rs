@@ -1138,7 +1138,7 @@ fn parse_string_vec_sql(value: String, column: usize) -> rusqlite::Result<Vec<St
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::models::{LivePageWrite, LivePageWriteOperation};

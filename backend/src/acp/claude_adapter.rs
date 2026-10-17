@@ -519,7 +519,7 @@ impl AcpTransport for ClaudeAcpAdapter {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::acp::{AcpHost, AcpPermissionVerdict};

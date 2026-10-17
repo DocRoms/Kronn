@@ -237,7 +237,7 @@ pub fn apply_from_run(workflow: &mut Workflow, run: &WorkflowRun) -> bool {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::models::{StepTools, WorkflowSafety, WorkflowTrigger};

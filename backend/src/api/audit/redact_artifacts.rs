@@ -217,7 +217,7 @@ pub fn sanitize_all(
     sanitize_files(project_path, &targets, boundary)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

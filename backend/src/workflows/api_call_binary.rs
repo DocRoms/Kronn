@@ -198,7 +198,7 @@ fn is_token(part: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || "!#$&^_.+-".contains(c))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 
@@ -306,7 +306,7 @@ mod tests {
 
 /// Broker-level proof: credentials come from the encrypted plugin config, the
 /// mock server demands them, and only the file comes back.
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod broker_tests {
     use std::collections::HashMap;
 

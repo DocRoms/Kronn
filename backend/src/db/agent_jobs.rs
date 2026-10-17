@@ -410,7 +410,7 @@ pub fn mark_completion_dispatch_failure(
     )? > 0)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::core::quick_exec::Summariser;

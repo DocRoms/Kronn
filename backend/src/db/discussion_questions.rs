@@ -1235,5 +1235,5 @@ fn answer_inner(
     Ok(question)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests;

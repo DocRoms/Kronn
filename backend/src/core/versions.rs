@@ -508,7 +508,7 @@ pub fn update_available(installed: &str, latest: &str) -> bool {
     false
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

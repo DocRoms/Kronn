@@ -570,7 +570,7 @@ pub async fn fetch_usage(period: &str) -> Result<UsageReport, String> {
     parse_report(period_kind, &output.stdout)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use std::fs;

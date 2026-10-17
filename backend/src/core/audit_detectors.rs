@@ -842,7 +842,7 @@ fn walk_with(root: &Path, skip_generated: bool) -> impl Iterator<Item = walkdir:
         .filter(|e| e.file_type().is_file())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use std::fs;

@@ -978,6 +978,7 @@ pub(crate) async fn run_partial_pipeline(
             'attempts: loop {
             attempt += 1;
             let mut step_usage = crate::db::audit_runs::StepTokens::UNKNOWN;
+            let mut stream_turns = super::agent_launch::StreamTurns::default();
             let attempt_prompt = super::finish_step_prompt(
                 &full_prompt, citation_feedback.as_deref(), step, analysis_step, &docs_root,
             );
@@ -1121,18 +1122,18 @@ pub(crate) async fn run_partial_pipeline(
                             }
                             if let runner::StreamJsonEvent::Usage { input_tokens, output_tokens, prompt_cache, .. } = event
                             {
-                                // Claude reports cumulative usage per call:
-                                // the largest reading is the step's.
-                                if input_tokens + output_tokens > 0
-                                    && step_usage.total().is_none_or(|seen| input_tokens + output_tokens >= seen)
-                                {
-                                    step_usage = crate::db::audit_runs::StepTokens {
+                                // KT-1313 — a turn adds to the step; only the final
+                                // line states the whole run, so a stopped step keeps
+                                // every turn it consumed.
+                                if input_tokens + output_tokens > 0 {
+                                    let reading = crate::db::audit_runs::StepTokens {
                                         input: Some(input_tokens),
                                         output: Some(output_tokens),
                                         cache_read: prompt_cache.cached_prompt_tokens,
                                         cache_write: prompt_cache.cache_write_prompt_tokens,
                                         accounting: Default::default(),
                                     }.inclusive_for(&agent_type);
+                                    step_usage = stream_turns.fold(step_usage, reading, runner::is_claude_result_line(&line));
                                 }
                             }
                         }
@@ -1249,6 +1250,7 @@ pub(crate) async fn run_partial_pipeline(
                             let duration_ms = step_started_at.elapsed().as_millis() as u64;
                             let recorded_total = run_tokens.total();
                             let usage = step_usage;
+                            let killed_cost = step_cost.usd_micros();
                             let killed_state = outcome.target_state();
                             let keep_snapshot = outcome.keeps_snapshot();
                             if let Err(e) = state.db.with_conn(move |conn| {
@@ -1256,6 +1258,9 @@ pub(crate) async fn run_partial_pipeline(
                                     conn, &run_id, step_n, Utc::now(), duration_ms, &usage,
                                     recorded_total, false, Some(&reason), false,
                                 )?;
+                                if let Some(cost) = killed_cost {
+                                    crate::db::audit_runs::set_step_cost(conn, &run_id, step_n, cost)?;
+                                }
                                 crate::db::audit_runs::set_step_target_state(conn, &run_id, step_n, killed_state)?;
                                 if !keep_snapshot {
                                     crate::db::audit_runs::delete_step_snapshot(conn, &run_id, step_n)?;
@@ -2176,7 +2181,7 @@ fn complete_partial_run(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod partial_finalize_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};

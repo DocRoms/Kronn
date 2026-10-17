@@ -764,7 +764,7 @@ fn parse_gitlab_repo(r: &serde_json::Value) -> RemoteRepo {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

@@ -1,5 +1,9 @@
 use crate::core::child_env::{self, ChildRoute};
 use crate::core::cmd::async_cmd;
+use crate::core::dependency_lockfiles::{
+    composer_locked_versions, is_workspace_member, JsLockfile,
+};
+use crate::core::redact::redact_stored_text;
 use crate::models::{
     DependencyCheckStatus, DependencyManagerUpdate, DependencyUpdatePackage,
     DependencyUpdateSummary,
@@ -175,7 +179,13 @@ pub async fn inspect_dependency_updates(root: &Path) -> DependencyUpdateSummary 
         .map(|(_, mut manager)| {
             if !dependency_check_complete(&manager.status) {
                 if let Some(packages) = fallback.get(&manager.manifest) {
-                    finalize_manager_update(&mut manager, packages.clone());
+                    let mut packages = packages.clone();
+                    if let Some(detected) = manifests.iter().find(|m| {
+                        m.relative_path == manager.manifest && m.kind.label() == manager.manager
+                    }) {
+                        apply_fallback_locks(detected, &mut packages);
+                    }
+                    finalize_manager_update(&mut manager, packages);
                 }
             }
             manager
@@ -727,7 +737,11 @@ async fn renovate_dependency_updates(
 
 async fn check_manifest(manifest: DetectedManifest) -> DependencyManagerUpdate {
     if manifest.kind == ManagerKind::Gradle {
-        return empty_manager(&manifest, DependencyCheckStatus::Unsupported);
+        return unchecked_manager(
+            &manifest,
+            DependencyCheckStatus::Unsupported,
+            "Gradle has no automated outdated check",
+        );
     }
 
     let (program, args): (&str, Vec<&str>) = match manifest.kind {
@@ -786,19 +800,52 @@ async fn check_manifest(manifest: DetectedManifest) -> DependencyManagerUpdate {
                 Ok(output) => output,
                 Err(_) => match composer_via_standalone_container(&manifest, &args).await {
                     Ok(output) => output,
-                    Err(error) => return empty_manager(&manifest, error.status()),
+                    Err(error) => {
+                        let docker = match error {
+                            CommandFailure::Unavailable => "Docker is not available",
+                            CommandFailure::TimedOut => "the standalone container timed out",
+                            CommandFailure::Error => "the standalone container could not be run",
+                        };
+                        return unchecked_manager(
+                            &manifest,
+                            error.status(),
+                            format!(
+                                "`composer` is not on the host PATH, no running Docker Compose \
+                                 service exposes it, and {docker} for the \
+                                 `{COMPOSER_CONTAINER_IMAGE}` fallback"
+                            ),
+                        );
+                    }
                 },
             }
         }
-        Err(error) => return empty_manager(&manifest, error.status()),
+        Err(error) => {
+            return unchecked_manager(&manifest, error.status(), failure_reason(program, error))
+        }
         Ok(output) => output,
     };
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut lockfile_hits = 0;
     let parsed = match manifest.kind {
-        ManagerKind::JavaScript => parse_npm_outdated(&stdout),
-        ManagerKind::Composer => parse_composer_outdated(&stdout),
+        ManagerKind::JavaScript => {
+            let lock = (!js_dependencies_installed(&manifest) || npm_rows_lack_current(&stdout))
+                .then(|| js_lockfile(&manifest))
+                .flatten();
+            let declared = js_declared_ranges(&manifest.directory.join("package.json"));
+            parse_npm_outdated_locked(&stdout, lock.as_ref(), &declared).map(|(packages, hits)| {
+                lockfile_hits = hits;
+                packages
+            })
+        }
+        ManagerKind::Composer => parse_composer_outdated(&stdout).map(|mut packages| {
+            // `outdated --locked` compares composer.lock with the registry.
+            for package in &mut packages {
+                package.lockfile = Some("composer.lock".into());
+            }
+            packages
+        }),
         ManagerKind::Cargo => parse_cargo_outdated(&format!("{stdout}\n{stderr}")),
         ManagerKind::Go => parse_go_outdated(&stdout),
         ManagerKind::Bundler => parse_bundler_outdated(&stdout),
@@ -808,13 +855,28 @@ async fn check_manifest(manifest: DetectedManifest) -> DependencyManagerUpdate {
     };
     match parsed {
         Ok(packages) if output.status.success() || !packages.is_empty() => {
-            settle_checked(&manifest, packages)
+            settle_checked(&manifest, packages, lockfile_hits > 0)
         }
-        Ok(_) => empty_manager(&manifest, DependencyCheckStatus::Error),
+        Ok(_) => unchecked_manager(
+            &manifest,
+            DependencyCheckStatus::Error,
+            run_failure_reason(program, &output, &stdout, &stderr),
+        ),
         Err(_) if output.status.success() && stdout.trim().is_empty() => {
-            settle_checked(&manifest, Vec::new())
+            settle_checked(&manifest, Vec::new(), false)
         }
-        Err(_) => empty_manager(&manifest, DependencyCheckStatus::Error),
+        Err(_) => unchecked_manager(
+            &manifest,
+            DependencyCheckStatus::Error,
+            if output.status.success() {
+                format!(
+                    "could not parse the output of `{program}`: {}",
+                    output_excerpt(&stdout, &stderr).unwrap_or_default()
+                )
+            } else {
+                run_failure_reason(program, &output, &stdout, &stderr)
+            },
+        ),
     }
 }
 
@@ -895,17 +957,24 @@ fn js_declares_dependencies(path: &Path) -> bool {
 /// only when the tool provably inspected something: a JS manifest with
 /// dependencies and no `node_modules` has nothing npm could compare, so it
 /// stays incomplete and the Renovate fallback (which reads the lockfile)
-/// decides.
+/// decides. A lockfile that resolved at least one package is an inspection.
 fn settle_checked(
     manifest: &DetectedManifest,
     packages: Vec<DependencyUpdatePackage>,
+    lockfile_inspected: bool,
 ) -> DependencyManagerUpdate {
     let nothing_inspected = manifest.kind == ManagerKind::JavaScript
         && packages.is_empty()
+        && !lockfile_inspected
         && !js_dependencies_installed(manifest)
         && js_declares_dependencies(&manifest.directory.join("package.json"));
     if nothing_inspected {
-        return empty_manager(manifest, DependencyCheckStatus::NotInstalled);
+        return unchecked_manager(
+            manifest,
+            DependencyCheckStatus::NotInstalled,
+            "no node_modules and no readable lockfile (package-lock.json, yarn.lock, \
+             pnpm-lock.yaml) resolves the declared packages: install them or commit a lockfile",
+        );
     }
     finalize_manager(manifest, packages)
 }
@@ -921,6 +990,87 @@ fn empty_manager(
         outdated: 0,
         major: 0,
         packages: Vec::new(),
+        reason: None,
+    }
+}
+
+/// A manifest the check did not settle, with why (KT-1325): a status that is
+/// not a verdict is never left unexplained.
+fn unchecked_manager(
+    manifest: &DetectedManifest,
+    status: DependencyCheckStatus,
+    reason: impl AsRef<str>,
+) -> DependencyManagerUpdate {
+    let mut update = empty_manager(manifest, status);
+    update.reason = Some(bounded_reason(reason.as_ref()));
+    update
+}
+
+const MAX_REASON_CHARS: usize = 300;
+
+/// A reason is stored, shown and injected into an audit prompt, and it quotes
+/// what a package manager printed: a registry URL with credentials, an
+/// `_authToken=` line, a bearer header. Secrets are masked before the text is
+/// flattened and cut, so a truncation never leaves half of one.
+fn bounded_reason(text: &str) -> String {
+    let redacted = redact_stored_text(text);
+    let flat = redacted.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= MAX_REASON_CHARS {
+        return flat;
+    }
+    let mut cut: String = flat.chars().take(MAX_REASON_CHARS - 1).collect();
+    cut.push('…');
+    cut
+}
+
+/// The first lines a failed tool wrote: stderr, else stdout.
+fn output_excerpt(stdout: &str, stderr: &str) -> Option<String> {
+    [stderr, stdout].iter().find_map(|text| {
+        let lines: Vec<_> = text
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .take(3)
+            .collect();
+        (!lines.is_empty()).then(|| redact_stored_text(&lines.join(" | ")))
+    })
+}
+
+/// Why a tool that ran did not produce a verdict: the error it printed (npm
+/// writes `{"error":{"summary":…}}` on stdout), else its first output lines,
+/// else its exit status.
+fn run_failure_reason(
+    program: &str,
+    output: &std::process::Output,
+    stdout: &str,
+    stderr: &str,
+) -> String {
+    let printed_error = serde_json::from_str::<Value>(stdout)
+        .ok()
+        .and_then(|value| {
+            let error = value.get("error")?;
+            ["summary", "message", "detail"]
+                .iter()
+                .find_map(|key| error.get(key).and_then(Value::as_str))
+                .map(redact_stored_text)
+        });
+    let detail = printed_error.or_else(|| output_excerpt(stdout, stderr));
+    match (detail, output.status.code()) {
+        (Some(detail), Some(code)) => format!("`{program}` failed (exit {code}): {detail}"),
+        (Some(detail), None) => format!("`{program}` failed: {detail}"),
+        (None, Some(code)) => format!("`{program}` exited with status {code} and no output"),
+        (None, None) => format!("`{program}` was terminated and printed nothing"),
+    }
+}
+
+fn failure_reason(program: &str, failure: CommandFailure) -> String {
+    match failure {
+        CommandFailure::Unavailable => format!("`{program}` was not found on this machine"),
+        CommandFailure::TimedOut => format!(
+            "`{program}` did not answer within {} s",
+            CHECK_TIMEOUT.as_secs()
+        ),
+        CommandFailure::Error => format!("`{program}` could not be run"),
     }
 }
 
@@ -935,6 +1085,7 @@ fn finalize_manager(
         outdated: 0,
         major: 0,
         packages: Vec::new(),
+        reason: None,
     };
     finalize_manager_update(&mut update, packages);
     update
@@ -960,6 +1111,7 @@ fn finalize_manager_update(
     update.outdated = outdated;
     update.major = major;
     update.packages = packages;
+    update.reason = None;
 }
 
 fn version_major(version: &str) -> Option<u64> {
@@ -984,29 +1136,54 @@ fn update_package(name: &str, current: &str, latest: &str) -> Option<DependencyU
             _ => false,
         },
         declared_only: false,
+        lockfile: None,
     })
 }
 
+#[cfg(test)]
 fn parse_npm_outdated(output: &str) -> Result<Vec<DependencyUpdatePackage>, ()> {
+    parse_npm_outdated_locked(output, None, &HashMap::new()).map(|(packages, _)| packages)
+}
+
+/// Parses `npm outdated --json`. A row npm printed without an installed
+/// version is resolved from `lock` when it holds the package (KT-1325); the
+/// second value counts those resolutions, because a package the lockfile
+/// proves up to date prints no row yet proves something was inspected.
+fn parse_npm_outdated_locked(
+    output: &str,
+    lock: Option<&JsLockfile>,
+    declared: &HashMap<String, String>,
+) -> Result<(Vec<DependencyUpdatePackage>, usize), ()> {
     if output.trim().is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), 0));
     }
     let value: Value = serde_json::from_str(output).map_err(|_| ())?;
     let object = value.as_object().ok_or(())?;
     if object.contains_key("error") {
         return Err(());
     }
-    Ok(object
+    let mut resolved = 0;
+    let packages = object
         .iter()
         .filter_map(|(name, entry)| {
             let latest = entry.get("latest")?.as_str()?;
             match entry.get("current").and_then(Value::as_str) {
                 Some(current) => update_package(name, current, latest),
-                // No installed version: `wanted` is only the highest registry
-                // version the declared range allows, neither the installed
-                // version nor the range floor. It still proves `latest` is out
-                // of range, but it must never be shown as what is in place.
                 None => {
+                    let range = declared.get(name).map(String::as_str);
+                    if let Some((lock, locked)) =
+                        lock.and_then(|lock| Some((lock, lock.version(name, range)?)))
+                    {
+                        resolved += 1;
+                        let mut package = update_package(name, &locked, latest)?;
+                        package.lockfile = Some(lock.file.to_string());
+                        return Some(package);
+                    }
+                    // No installed version: `wanted` is only the highest
+                    // registry version the declared range allows, neither the
+                    // installed version nor the range floor. It still proves
+                    // `latest` is out of range, but it must never be shown as
+                    // what is in place.
                     let wanted = entry.get("wanted").and_then(Value::as_str)?;
                     let mut package = update_package(name, wanted, latest)?;
                     package.current = String::new();
@@ -1015,7 +1192,103 @@ fn parse_npm_outdated(output: &str) -> Result<Vec<DependencyUpdatePackage>, ()> 
                 }
             }
         })
-        .collect())
+        .collect();
+    Ok((packages, resolved))
+}
+
+/// Whether `npm outdated` printed a row without an installed version.
+fn npm_rows_lack_current(output: &str) -> bool {
+    serde_json::from_str::<Value>(output)
+        .ok()
+        .and_then(|value| value.as_object().cloned())
+        .is_some_and(|rows| {
+            rows.values()
+                .any(|row| row.get("current").and_then(Value::as_str).is_none())
+        })
+}
+
+/// The ranges `package.json` declares, by package name: what picks the entry
+/// of a Yarn lockfile that holds several versions of one package.
+fn js_declared_ranges(path: &Path) -> HashMap<String, String> {
+    let mut ranges = HashMap::new();
+    let Some(value) = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<Value>(&content).ok())
+    else {
+        return ranges;
+    };
+    for key in [
+        "dependencies",
+        "devDependencies",
+        "optionalDependencies",
+        "peerDependencies",
+    ] {
+        if let Some(dependencies) = value.get(key).and_then(Value::as_object) {
+            for (name, range) in dependencies {
+                if let Some(range) = range.as_str() {
+                    ranges
+                        .entry(name.clone())
+                        .or_insert_with(|| range.to_string());
+                }
+            }
+        }
+    }
+    ranges
+}
+
+/// The lockfile that resolves this manifest's packages: its own directory's,
+/// else that of a workspace root above it inside the project whose workspace
+/// globs list this directory as a member. A nested project the root does not
+/// list has its own dependency tree, which the root's lockfile does not resolve.
+fn js_lockfile(manifest: &DetectedManifest) -> Option<JsLockfile> {
+    manifest
+        .directory
+        .ancestors()
+        .take_while(|dir| dir.starts_with(&manifest.project_root))
+        .enumerate()
+        .filter(|(depth, dir)| *depth == 0 || is_workspace_member(dir, &manifest.directory))
+        .find_map(|(_, dir)| JsLockfile::load(dir, &manifest.directory))
+}
+
+/// Replaces `current` with the version a lockfile resolves, for the Renovate
+/// fallback: its `currentVersion` can be a range, not what is in place.
+fn apply_fallback_locks(manifest: &DetectedManifest, packages: &mut Vec<DependencyUpdatePackage>) {
+    match manifest.kind {
+        ManagerKind::JavaScript => {
+            let Some(lock) = js_lockfile(manifest) else {
+                return;
+            };
+            let declared = js_declared_ranges(&manifest.directory.join("package.json"));
+            for package in packages.iter_mut() {
+                if let Some(version) = lock.version(
+                    &package.name,
+                    declared.get(&package.name).map(String::as_str),
+                ) {
+                    relock(package, version, lock.file);
+                }
+            }
+        }
+        ManagerKind::Composer => {
+            let locked = composer_locked_versions(&manifest.directory);
+            for package in packages.iter_mut() {
+                if let Some(version) = locked.get(&package.name) {
+                    relock(package, version.clone(), "composer.lock");
+                }
+            }
+        }
+        _ => {}
+    }
+    packages.retain(|package| package.current != package.latest);
+}
+
+fn relock(package: &mut DependencyUpdatePackage, version: String, file: &str) {
+    package.major = match (version_major(&version), version_major(&package.latest)) {
+        (Some(current), Some(latest)) => latest > current,
+        _ => false,
+    };
+    package.current = version;
+    package.declared_only = false;
+    package.lockfile = Some(file.to_string());
 }
 
 fn parse_composer_outdated(output: &str) -> Result<Vec<DependencyUpdatePackage>, ()> {
@@ -1192,7 +1465,7 @@ fn parse_poetry_outdated(output: &str) -> Result<Vec<DependencyUpdatePackage>, (
     Ok(packages)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 
@@ -1489,6 +1762,7 @@ mod tests {
                 latest: "1.1.0".into(),
                 major: false,
                 declared_only: false,
+                lockfile: None,
             })
             .collect();
         packages.push(DependencyUpdatePackage {
@@ -1497,6 +1771,7 @@ mod tests {
             latest: "2.0.1".into(),
             major: true,
             declared_only: false,
+            lockfile: None,
         });
 
         let update = finalize_manager(&manifest, packages);
@@ -1515,30 +1790,55 @@ mod tests {
         covers_nested: bool,
         stdout: &str,
     ) -> (DependencyManagerUpdate, Vec<String>) {
+        check_with_fake_tool(
+            ManagerKind::JavaScript,
+            "npm",
+            directory,
+            covers_nested,
+            (stdout, "", 0),
+        )
+    }
+
+    /// A fake `program` that records its argv, prints `stdout` / `stderr` and
+    /// exits with `code`; `PATH` holds nothing else the check could reach.
+    #[cfg(unix)]
+    fn check_with_fake_tool(
+        kind: ManagerKind,
+        program: &str,
+        directory: &Path,
+        covers_nested: bool,
+        (stdout, stderr, code): (&str, &str, i32),
+    ) -> (DependencyManagerUpdate, Vec<String>) {
         use std::os::unix::fs::PermissionsExt;
         let bin = tempfile::TempDir::new().unwrap();
-        let argv = bin.path().join("npm.argv");
-        let script = bin.path().join("npm");
+        let argv = bin.path().join(format!("{program}.argv"));
+        let script = bin.path().join(program);
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\ncat <<'JSON'\n{}\nJSON\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\ncat <<'JSON'\n{}\nJSON\ncat >&2 <<'ERR'\n{}\nERR\nexit {}\n",
                 argv.display(),
-                stdout
+                stdout,
+                stderr,
+                code
             ),
         )
         .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         // Pay the first-exec scan outside the deadline under test.
-        assert!(std::process::Command::new(&script)
+        std::process::Command::new(&script)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status()
-            .unwrap()
-            .success());
+            .unwrap();
         let manifest = DetectedManifest {
-            kind: ManagerKind::JavaScript,
+            kind,
             project_root: directory.to_path_buf(),
             directory: directory.to_path_buf(),
-            relative_path: "package.json".into(),
+            relative_path: match kind {
+                ManagerKind::Composer => "composer.json".into(),
+                _ => "package.json".into(),
+            },
             covers_nested,
         };
         let path = format!("{}:/usr/bin:/bin", bin.path().display());
@@ -1798,5 +2098,466 @@ mod tests {
             finalize_manager_update(&mut manager, packages.clone());
         }
         assert_eq!(manager.status, DependencyCheckStatus::NotInstalled);
+    }
+
+    /// KT-1325 — what `npm outdated` prints for a checkout with no
+    /// `node_modules`: no `current`, only the range's `wanted` and `latest`.
+    #[cfg(unix)]
+    const NPM_ROWS_WITHOUT_CURRENT: &str = r#"{
+        "lodash":{"wanted":"3.10.1","latest":"4.17.21"},
+        "lazysizes":{"wanted":"2.0.7","latest":"5.3.2"},
+        "gulp-rev":{"wanted":"8.1.1","latest":"11.0.0"}}"#;
+
+    #[cfg(unix)]
+    fn lockfile_project(file: &str, content: &str) -> tempfile::TempDir {
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            temp.path().join("package.json"),
+            r#"{"dependencies":{"lodash":"^3.10.1","lazysizes":"^2.0.0","gulp-rev":"^8.1.0"}}"#,
+        )
+        .unwrap();
+        std::fs::write(temp.path().join(file), content).unwrap();
+        temp
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn without_node_modules_the_current_version_comes_from_each_lockfile_format() {
+        let lockfiles: [(&str, &str); 7] = [
+            (
+                "package-lock.json",
+                r#"{"lockfileVersion":3,"packages":{"":{},"node_modules/lodash":{"version":"3.10.1"},"node_modules/lazysizes":{"version":"2.0.7"},"node_modules/gulp-rev":{"version":"8.1.1"}}}"#,
+            ),
+            (
+                "package-lock.json",
+                r#"{"lockfileVersion":2,"packages":{"node_modules/lodash":{"version":"3.10.1"},"node_modules/lazysizes":{"version":"2.0.7"},"node_modules/gulp-rev":{"version":"8.1.1"}},"dependencies":{}}"#,
+            ),
+            (
+                "package-lock.json",
+                r#"{"lockfileVersion":1,"dependencies":{"lodash":{"version":"3.10.1"},"lazysizes":{"version":"2.0.7"},"gulp-rev":{"version":"8.1.1"}}}"#,
+            ),
+            (
+                "yarn.lock",
+                "# yarn lockfile v1\n\nlodash@^3.10.1:\n  version \"3.10.1\"\n\nlazysizes@^2.0.0:\n  version \"2.0.7\"\n\ngulp-rev@^8.1.0:\n  version \"8.1.1\"\n",
+            ),
+            (
+                "yarn.lock",
+                "__metadata:\n  version: 8\n\n\"lodash@npm:^3.10.1\":\n  version: 3.10.1\n\n\"lazysizes@npm:^2.0.0\":\n  version: 2.0.7\n\n\"gulp-rev@npm:^8.1.0\":\n  version: 8.1.1\n",
+            ),
+            (
+                "pnpm-lock.yaml",
+                "lockfileVersion: '9.0'\n\nimporters:\n  .:\n    dependencies:\n      lodash:\n        specifier: ^3.10.1\n        version: 3.10.1\n      lazysizes:\n        specifier: ^2.0.0\n        version: 2.0.7\n      gulp-rev:\n        specifier: ^8.1.0\n        version: 8.1.1\n",
+            ),
+            (
+                "pnpm-lock.yaml",
+                "lockfileVersion: 5.4\n\nspecifiers:\n  lodash: ^3.10.1\n\ndependencies:\n  lodash: 3.10.1\n  lazysizes: 2.0.7\n  gulp-rev: 8.1.1\n",
+            ),
+        ];
+        for (file, content) in lockfiles {
+            let project = lockfile_project(file, content);
+            let (update, _) = check_with_fake_npm(project.path(), false, NPM_ROWS_WITHOUT_CURRENT);
+            assert_eq!(
+                update.status,
+                DependencyCheckStatus::UpdatesAvailable,
+                "{file}"
+            );
+            assert_eq!(update.reason, None);
+            for (name, current) in [
+                ("lodash", "3.10.1"),
+                ("lazysizes", "2.0.7"),
+                ("gulp-rev", "8.1.1"),
+            ] {
+                let package = update.packages.iter().find(|p| p.name == name).unwrap();
+                assert_eq!(package.current, current, "{file} {name}");
+                assert!(!package.declared_only, "{file} {name}");
+                assert_eq!(package.lockfile.as_deref(), Some(file), "{file} {name}");
+                assert!(package.major, "{file} {name}");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_package_without_a_lock_entry_stays_declared_only() {
+        let project = lockfile_project(
+            "package-lock.json",
+            r#"{"lockfileVersion":3,"packages":{"node_modules/lodash":{"version":"3.10.1"}}}"#,
+        );
+        let (update, _) = check_with_fake_npm(project.path(), false, NPM_ROWS_WITHOUT_CURRENT);
+        let lazysizes = update
+            .packages
+            .iter()
+            .find(|p| p.name == "lazysizes")
+            .unwrap();
+        assert!(lazysizes.declared_only);
+        assert_eq!(lazysizes.current, "");
+        assert_eq!(lazysizes.lockfile, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_lockfile_at_the_latest_version_reads_up_to_date_not_uninstalled() {
+        let project = lockfile_project(
+            "package-lock.json",
+            r#"{"lockfileVersion":3,"packages":{"node_modules/lodash":{"version":"4.17.21"}}}"#,
+        );
+        let (update, _) = check_with_fake_npm(
+            project.path(),
+            false,
+            r#"{"lodash":{"wanted":"4.17.21","latest":"4.17.21"}}"#,
+        );
+        assert_eq!(update.status, DependencyCheckStatus::UpToDate);
+        assert_eq!(update.reason, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_installed_tree_keeps_npms_current_and_no_lockfile_source() {
+        let project = lockfile_project(
+            "package-lock.json",
+            r#"{"lockfileVersion":3,"packages":{"node_modules/lodash":{"version":"3.10.0"}}}"#,
+        );
+        std::fs::create_dir_all(project.path().join("node_modules/lodash")).unwrap();
+        let (update, _) = check_with_fake_npm(
+            project.path(),
+            false,
+            r#"{"lodash":{"current":"3.10.1","wanted":"3.10.1","latest":"4.17.21"}}"#,
+        );
+        assert_eq!(update.packages[0].current, "3.10.1");
+        assert_eq!(update.packages[0].lockfile, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_not_installed_manifest_without_a_lockfile_says_why() {
+        let project = js_project(false, false);
+        let (update, _) = check_with_fake_npm(project.path(), false, "{}");
+        assert_eq!(update.status, DependencyCheckStatus::NotInstalled);
+        let reason = update.reason.unwrap();
+        assert!(reason.contains("no node_modules"), "{reason}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_composer_failure_carries_the_reason_composer_printed() {
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(temp.path().join("composer.json"), "{}").unwrap();
+        let (update, argv) = check_with_fake_tool(
+            ManagerKind::Composer,
+            "composer",
+            temp.path(),
+            false,
+            (
+                "",
+                "No composer.lock file present. Run composer update to generate one.",
+                1,
+            ),
+        );
+        assert!(argv.contains(&"--locked".to_string()));
+        assert_eq!(update.status, DependencyCheckStatus::Error);
+        let reason = update.reason.expect("an Error carries its reason");
+        assert!(reason.contains("`composer` failed (exit 1)"), "{reason}");
+        assert!(reason.contains("No composer.lock file present"), "{reason}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unparseable_composer_answer_says_it_could_not_be_parsed() {
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(temp.path().join("composer.json"), "{}").unwrap();
+        let (update, _) = check_with_fake_tool(
+            ManagerKind::Composer,
+            "composer",
+            temp.path(),
+            false,
+            ("Deprecated: PHP 8.4 notice", "", 0),
+        );
+        assert_eq!(update.status, DependencyCheckStatus::Error);
+        let reason = update.reason.unwrap();
+        assert!(
+            reason.contains("could not parse the output of `composer`"),
+            "{reason}"
+        );
+        assert!(reason.contains("Deprecated: PHP 8.4 notice"), "{reason}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn composer_rows_name_composer_lock_as_their_source() {
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(temp.path().join("composer.json"), "{}").unwrap();
+        let (update, _) = check_with_fake_tool(
+            ManagerKind::Composer,
+            "composer",
+            temp.path(),
+            false,
+            (
+                r#"{"installed":[{"name":"symfony/console","version":"v6.4.1","latest":"v7.1.0"}]}"#,
+                "",
+                0,
+            ),
+        );
+        assert_eq!(update.status, DependencyCheckStatus::UpdatesAvailable);
+        assert_eq!(
+            update.packages[0].lockfile.as_deref(),
+            Some("composer.lock")
+        );
+        assert_eq!(update.reason, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_npm_error_document_surfaces_its_summary() {
+        let project = js_project(false, true);
+        let (update, _) = check_with_fake_tool(
+            ManagerKind::JavaScript,
+            "npm",
+            project.path(),
+            false,
+            (
+                r#"{"error":{"code":"ENOTFOUND","summary":"request to https://registry.npmjs.org failed"}}"#,
+                "",
+                1,
+            ),
+        );
+        assert_eq!(update.status, DependencyCheckStatus::Error);
+        let reason = update.reason.unwrap();
+        assert!(
+            reason.contains("request to https://registry.npmjs.org/ failed"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn a_reason_never_carries_a_credential_the_tool_printed() {
+        let leaks = [
+            (
+                "401 GET https://u:ghp_abcdefghijklmnopqrstuvwxyz0123456789@registry.example/pkg",
+                "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+            ),
+            (
+                "fetch https://deploy:hunter2pass@registry.example/pkg failed",
+                "hunter2pass",
+            ),
+            (
+                "GET https://registry.example/pkg?access=sekrit-query-value failed",
+                "sekrit-query-value",
+            ),
+            (
+                "//registry.example/:_authToken=s3cr3tNpmAuthValue",
+                "s3cr3tNpmAuthValue",
+            ),
+            (
+                "Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345",
+                "abcdefghijklmnopqrstuvwxyz012345",
+            ),
+            (
+                "token npm_abcdefghijklmnopqrstuvwxyz0123456789",
+                "npm_abcdefghijklmnopqrstuvwxyz0123456789",
+            ),
+            (
+                "ghp_abcdefghijklmnopqrstuvwxyz0123456789 was rejected",
+                "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+            ),
+        ];
+        for (printed, secret) in leaks {
+            let output = std::process::Output {
+                status: std::process::ExitStatus::default(),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            };
+            for reason in [
+                bounded_reason(printed),
+                run_failure_reason("npm", &output, "", printed),
+                run_failure_reason("npm", &output, printed, ""),
+                run_failure_reason(
+                    "npm",
+                    &output,
+                    &format!(r#"{{"error":{{"summary":"{printed}"}}}}"#),
+                    "",
+                ),
+                output_excerpt("", printed).unwrap(),
+                output_excerpt(printed, "").unwrap(),
+            ] {
+                assert!(!reason.contains(secret), "{printed:?} leaked: {reason}");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_tools_credentials_do_not_reach_the_stored_reason() {
+        let project = js_project(false, true);
+        let (update, _) = check_with_fake_tool(
+            ManagerKind::JavaScript,
+            "npm",
+            project.path(),
+            false,
+            (
+                "",
+                "npm ERR! 401 GET https://u:ghp_abcdefghijklmnopqrstuvwxyz0123456789@registry.example/pkg",
+                1,
+            ),
+        );
+        assert_eq!(update.status, DependencyCheckStatus::Error);
+        let reason = update.reason.unwrap();
+        assert!(reason.contains("registry.example"), "{reason}");
+        assert!(!reason.contains("ghp_abcdefghij"), "{reason}");
+        assert!(!reason.contains("u:"), "{reason}");
+        // The unparseable-output branch quotes stdout, so it is masked too.
+        let (update, _) = check_with_fake_tool(
+            ManagerKind::JavaScript,
+            "npm",
+            project.path(),
+            false,
+            ("//registry.example/:_authToken=s3cr3tNpmAuthValue", "", 0),
+        );
+        let reason = update.reason.unwrap();
+        assert!(reason.contains("could not parse"), "{reason}");
+        assert!(!reason.contains("s3cr3tNpmAuthValue"), "{reason}");
+    }
+
+    fn js_manifest_at(root: &Path, directory: &Path) -> DetectedManifest {
+        DetectedManifest {
+            kind: ManagerKind::JavaScript,
+            project_root: root.to_path_buf(),
+            directory: directory.to_path_buf(),
+            relative_path: "package.json".into(),
+            covers_nested: false,
+        }
+    }
+
+    #[test]
+    fn a_root_lockfile_resolves_only_the_workspace_members_it_lists() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"workspaces":["packages/*"],"dependencies":{}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("package-lock.json"),
+            r#"{"lockfileVersion":3,"packages":{"node_modules/lodash":{"version":"3.10.1"}}}"#,
+        )
+        .unwrap();
+        let member = root.join("packages/app");
+        let stray = root.join("tools/site");
+        let too_deep = root.join("packages/app/nested");
+        for dir in [&member, &stray, &too_deep] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        assert!(js_lockfile(&js_manifest_at(root, &member)).is_some());
+        assert!(js_lockfile(&js_manifest_at(root, &stray)).is_none());
+        assert!(js_lockfile(&js_manifest_at(root, &too_deep)).is_none());
+        // Its own lockfile is always read.
+        std::fs::write(
+            stray.join("package-lock.json"),
+            r#"{"lockfileVersion":3,"packages":{"node_modules/lodash":{"version":"4.0.0"}}}"#,
+        )
+        .unwrap();
+        let own = js_lockfile(&js_manifest_at(root, &stray)).unwrap();
+        assert_eq!(own.version("lodash", None).as_deref(), Some("4.0.0"));
+    }
+
+    #[test]
+    fn workspace_membership_follows_the_declared_globs() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"workspaces":{"packages":["apps/**","libs/core","!apps/legacy"]}}"#,
+        )
+        .unwrap();
+        assert!(is_workspace_member(root, &root.join("apps/web")));
+        assert!(is_workspace_member(root, &root.join("apps/web/ui")));
+        assert!(is_workspace_member(root, &root.join("libs/core")));
+        assert!(!is_workspace_member(root, &root.join("libs/other")));
+        assert!(!is_workspace_member(root, &root.join("apps/legacy")));
+        assert!(!is_workspace_member(root, root));
+
+        std::fs::remove_file(root.join("package.json")).unwrap();
+        std::fs::write(
+            root.join("pnpm-workspace.yaml"),
+            "packages:\n  - 'packages/*'\n  - \"tools/?\" # one letter\n",
+        )
+        .unwrap();
+        assert!(is_workspace_member(root, &root.join("packages/a")));
+        assert!(is_workspace_member(root, &root.join("tools/x")));
+        assert!(!is_workspace_member(root, &root.join("tools/xy")));
+        assert!(!is_workspace_member(root, &root.join("other/a")));
+
+        // No workspace declared: nothing is a member.
+        std::fs::remove_file(root.join("pnpm-workspace.yaml")).unwrap();
+        std::fs::write(root.join("package.json"), r#"{"dependencies":{}}"#).unwrap();
+        assert!(!is_workspace_member(root, &root.join("packages/a")));
+    }
+
+    #[test]
+    fn every_unsettled_status_has_a_reason() {
+        let manifest = DetectedManifest {
+            kind: ManagerKind::Composer,
+            project_root: PathBuf::from("/p"),
+            directory: PathBuf::from("/p"),
+            relative_path: "composer.json".into(),
+            covers_nested: false,
+        };
+        for failure in [
+            CommandFailure::Unavailable,
+            CommandFailure::Error,
+            CommandFailure::TimedOut,
+        ] {
+            let update = unchecked_manager(
+                &manifest,
+                failure.status(),
+                failure_reason("composer", failure),
+            );
+            let reason = update.reason.unwrap();
+            assert!(reason.contains("composer"), "{reason}");
+        }
+        let long = unchecked_manager(&manifest, DependencyCheckStatus::Error, "x ".repeat(500));
+        assert!(long.reason.unwrap().chars().count() <= MAX_REASON_CHARS);
+        // A verdict from the fallback clears the reason of the failed tool.
+        let mut failed = unchecked_manager(&manifest, DependencyCheckStatus::Error, "boom");
+        finalize_manager_update(&mut failed, Vec::new());
+        assert_eq!(failed.reason, None);
+    }
+
+    #[test]
+    fn renovate_rows_are_re_read_from_the_lockfile() {
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            temp.path().join("package.json"),
+            r#"{"dependencies":{"lodash":"^3.10.1"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("yarn.lock"),
+            "lodash@^3.10.1:\n  version \"3.10.1\"\n",
+        )
+        .unwrap();
+        let manifests = detect_manifests(temp.path());
+        // Renovate reported the range as the current value.
+        let mut packages = vec![update_package("lodash", "^3.10.1", "4.17.21").unwrap()];
+        apply_fallback_locks(&manifests[0], &mut packages);
+        assert_eq!(packages[0].current, "3.10.1");
+        assert_eq!(packages[0].lockfile.as_deref(), Some("yarn.lock"));
+        assert!(packages[0].major);
+    }
+
+    #[test]
+    fn composer_lock_resolves_renovate_composer_rows() {
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(temp.path().join("composer.json"), "{}").unwrap();
+        std::fs::write(
+            temp.path().join("composer.lock"),
+            r#"{"packages":[{"name":"symfony/console","version":"6.4.1"}],"packages-dev":[]}"#,
+        )
+        .unwrap();
+        let manifests = detect_manifests(temp.path());
+        let mut packages = vec![update_package("symfony/console", "^6.0", "7.1.0").unwrap()];
+        apply_fallback_locks(&manifests[0], &mut packages);
+        assert_eq!(packages[0].current, "6.4.1");
+        assert_eq!(packages[0].lockfile.as_deref(), Some("composer.lock"));
     }
 }

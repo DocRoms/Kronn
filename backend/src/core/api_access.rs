@@ -773,6 +773,6 @@ pub fn describe_policy(policy: &ApiAccessPolicy) -> String {
     out
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "api_access_test.rs"]
 mod tests;

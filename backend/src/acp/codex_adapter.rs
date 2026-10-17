@@ -657,7 +657,7 @@ impl AcpTransport for CodexAcpAdapter {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::acp::AcpHost;

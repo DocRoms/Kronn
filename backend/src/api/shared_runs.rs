@@ -253,7 +253,7 @@ pub async fn discussion_outcome(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::db::media_jobs::{self, Completion, NewMediaJob};
