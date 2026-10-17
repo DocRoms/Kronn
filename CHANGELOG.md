@@ -545,6 +545,17 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- The dependency watch no longer reads only `node_modules` (KT-1325). Without
+  an install, the version in place comes from the lockfile — `package-lock.json`
+  / `npm-shrinkwrap.json` (v1, v2, v3), `yarn.lock` (classic and berry),
+  `pnpm-lock.yaml` — or `composer.lock` for Composer, so a checkout with a
+  lockfile no longer shows « declared only ». The source (lockfile vs
+  installed) is carried in the snapshot, the audit prompt's dependency table
+  and the `deps:` citation verdict, and the overview names the lockfile. Every
+  manifest the watch cannot settle (missing binary, network, parse error,
+  timeout, nothing installed) carries its reason in the snapshot, the audit
+  prompt block and the overview, instead of a bare « Error ». KT-1279's
+  workspace handling is unchanged.
 - The audit's citation gate now says how to fix a citation (KT-1307). A path
   that only resolves under the docs root or next to the citing doc gets
   « paths are repository-root relative; did you mean `docs/AGENTS.md:94`? »,

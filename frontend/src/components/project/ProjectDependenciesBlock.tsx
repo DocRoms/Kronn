@@ -179,10 +179,16 @@ export function ProjectDependenciesBlock({ projectId, enabled }: { projectId: st
                           {pkg.declared_only
                             ? t('projects.master.overview.dependencyDeclaredOnly')
                             : pkg.current}
+                          {pkg.lockfile && ` (${t('projects.master.overview.dependencyFromLockfile')} ${pkg.lockfile})`}
                           {' → '}{pkg.latest}
                         </span>
                       ))}
                       {manager.outdated > 3 && <span>{` · +${manager.outdated - 3}`}</span>}
+                    </small>
+                  )}
+                  {manager.reason && (
+                    <small data-testid="dependency-reason">
+                      {t('projects.master.overview.dependencyReason')} {manager.reason}
                     </small>
                   )}
                 </div>

@@ -31,6 +31,7 @@ pub mod cross_audit;
 pub mod cross_audit_decision;
 pub mod crypto;
 pub mod default_todo;
+pub mod dependency_lockfiles;
 pub mod dependency_updates;
 pub mod desktop_port;
 pub mod directives;

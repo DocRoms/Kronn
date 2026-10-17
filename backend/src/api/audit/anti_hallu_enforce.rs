@@ -1112,6 +1112,7 @@ mod enforce_gate_tests {
                 latest: "19.1.0".into(),
                 major: true,
                 declared_only: false,
+                lockfile: None,
             }],
             unchecked: vec![],
             up_to_date: vec![],
@@ -1136,6 +1137,7 @@ mod enforce_gate_tests {
                 latest: "2.0.0".into(),
                 major: true,
                 declared_only: false,
+                lockfile: None,
             })
             .collect();
         let cited: String = snap

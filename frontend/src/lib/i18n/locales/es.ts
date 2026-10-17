@@ -928,6 +928,8 @@ const es: TranslationDict = {
   'projects.master.overview.dependencyNotInstalled': 'Dependencias no instaladas',
   'projects.master.overview.dependencyDeclaredOnly': 'no instalado',
   'projects.master.overview.dependencyCheckFailed': 'Comprobación imposible',
+  'projects.master.overview.dependencyReason': 'Motivo:',
+  'projects.master.overview.dependencyFromLockfile': 'desde',
   'projects.source.loading': 'Cargando el código fuente…',
   'projects.source.loadingTreeBackground': 'Cargando el resto del proyecto en segundo plano',
   'projects.source.loadingFolder': 'Cargando la carpeta…',

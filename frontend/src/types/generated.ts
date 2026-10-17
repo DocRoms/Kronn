@@ -2746,7 +2746,12 @@ tests_executed?: TestsExecuted | null, };
 
 export type DependencyCheckStatus = "UpToDate" | "UpdatesAvailable" | "Unsupported" | "Unavailable" | "Error" | "TimedOut" | "NotInstalled";
 
-export type DependencyManagerUpdate = { manager: string, manifest: string, status: DependencyCheckStatus, outdated: number, major: number, packages?: Array<DependencyUpdatePackage>, };
+export type DependencyManagerUpdate = { manager: string, manifest: string, status: DependencyCheckStatus, outdated: number, major: number, packages?: Array<DependencyUpdatePackage>,
+/**
+ * Why the manifest could not be checked (missing binary, network, parse
+ * error, timeout…). Set for every status that is not a verdict (KT-1325).
+ */
+reason?: string | null, };
 
 export type DependencyUpdatePackage = { name: string, current: string, latest: string, major: boolean,
 /**
@@ -2754,7 +2759,13 @@ export type DependencyUpdatePackage = { name: string, current: string, latest: s
  * is empty because no installed version exists to report, and the row
  * only proves the declared range cannot reach `latest`.
  */
-declared_only?: boolean, };
+declared_only?: boolean,
+/**
+ * The lockfile `current` was read from when there is no installed tree
+ * (KT-1325), e.g. `package-lock.json`. `None`: `current` is what the
+ * package manager reports as installed (or the lock it was run against).
+ */
+lockfile?: string | null, };
 
 export type DependencyUpdateSummary = { managers: Array<DependencyManagerUpdate>, total_outdated: number, total_major: number, checked_at: string, cached: boolean,
 /**

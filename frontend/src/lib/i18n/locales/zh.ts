@@ -922,6 +922,8 @@ const zh: TranslationDict = {
   "projects.master.overview.dependencyNotInstalled": "依赖未安装",
   "projects.master.overview.dependencyDeclaredOnly": "未安装",
   "projects.master.overview.dependencyCheckFailed": "检查失败",
+  "projects.master.overview.dependencyReason": "原因：",
+  "projects.master.overview.dependencyFromLockfile": "来自",
   "projects.source.loading": "加载源代码…",
   "projects.source.loadingTreeBackground": "在后台加载项目其余部分",
   "projects.source.loadingFolder": "正在加载此文件夹…",

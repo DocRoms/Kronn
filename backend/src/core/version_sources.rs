@@ -36,6 +36,19 @@ pub struct WatchedPackage {
     pub major: bool,
     /// Declared in the manifest, not installed: `current` is empty.
     pub declared_only: bool,
+    /// The lockfile `current` was read from when nothing is installed; `None`
+    /// when the package manager reported the installed version (KT-1325).
+    pub lockfile: Option<String>,
+}
+
+impl WatchedPackage {
+    /// Where `current` comes from, for the table and the citation verdict.
+    fn version_source(&self) -> String {
+        match &self.lockfile {
+            Some(file) => format!("from {file}, not installed"),
+            None => "installed".to_string(),
+        }
+    }
 }
 
 /// A manifest the watch could not check: its packages have no dated source.
@@ -44,6 +57,8 @@ pub struct UncheckedManifest {
     pub manager: String,
     pub manifest: String,
     pub status: DependencyCheckStatus,
+    /// Why the check did not settle (missing binary, network, parse error…).
+    pub reason: Option<String>,
 }
 
 /// The dependency watch as injected into one audit run.
@@ -73,6 +88,7 @@ impl DependencySnapshot {
                         latest: p.latest.clone(),
                         major: p.major,
                         declared_only: p.declared_only,
+                        lockfile: p.lockfile.clone(),
                     }))
                 }
                 DependencyCheckStatus::UpToDate => {
@@ -82,6 +98,7 @@ impl DependencySnapshot {
                     manager: manager.manager.clone(),
                     manifest: manager.manifest.clone(),
                     status: manager.status.clone(),
+                    reason: manager.reason.clone(),
                 }),
             }
         }
@@ -158,8 +175,12 @@ pub fn verify_dep_marker(
                 )
             } else {
                 format!(
-                    "dependency watch {}: {} {} → {}",
-                    snapshot.checked_on, row.manifest, row.current, row.latest
+                    "dependency watch {}: {} {} ({}) → {}",
+                    snapshot.checked_on,
+                    row.manifest,
+                    row.current,
+                    row.version_source(),
+                    row.latest
                 )
             },
         )),
@@ -730,11 +751,11 @@ source citation AND its date; the `In place` cell keeps the lockfile or manifest
                 out.push_str("No outdated package recorded.\n");
             } else {
                 out.push_str(
-                    "| Manager | Manifest | Package | In place | Latest | Gap | Cite as |\n|---|---|---|---|---|---|---|\n",
+                    "| Manager | Manifest | Package | In place | Version source | Latest | Gap | Cite as |\n|---|---|---|---|---|---|---|---|\n",
                 );
                 for p in snapshot.packages.iter().take(MAX_RENDERED_PACKAGES) {
                     out.push_str(&format!(
-                        "| {} | {} | {} | {} | {} | {} | {} |\n",
+                        "| {} | {} | {} | {} | {} | {} | {} | {} |\n",
                         p.manager,
                         p.manifest,
                         p.name,
@@ -742,6 +763,11 @@ source citation AND its date; the `In place` cell keeps the lockfile or manifest
                             "not installed (declared range only; installed version unknown)"
                         } else {
                             p.current.as_str()
+                        },
+                        if p.declared_only {
+                            "none".to_string()
+                        } else {
+                            p.version_source()
                         },
                         p.latest,
                         if p.major { "major" } else { "minor/patch" },
@@ -758,8 +784,11 @@ source citation AND its date; the `In place` cell keeps the lockfile or manifest
             }
             for m in &snapshot.unchecked {
                 out.push_str(&format!(
-                    "- {} ({}): not checked ({:?}) — its packages have no dated source.\n",
-                    m.manifest, m.manager, m.status
+                    "- {} ({}): not checked ({:?}) — {} — its packages have no dated source.\n",
+                    m.manifest,
+                    m.manager,
+                    m.status,
+                    m.reason.as_deref().unwrap_or("no reason recorded")
                 ));
             }
             out.push_str(
