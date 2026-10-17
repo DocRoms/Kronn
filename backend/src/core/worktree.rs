@@ -539,6 +539,23 @@ pub fn mark_lane_target(
         execution_id: execution_id.to_string(),
         worktree: worktree_path.to_string_lossy().to_string(),
     };
+    // The stamp is Kronn's, not the project's: in a checkout that does not
+    // ignore `target/` it would read as uncommitted work and hold up the
+    // integration preflight. A `*` ignore file keeps git blind to the whole lane.
+    let ignore = lane_target.join(".gitignore");
+    if !ignore.exists() {
+        std::fs::write(&ignore, b"*\n").map_err(|error| {
+            format!(
+                "cannot write the lane ignore file in {}: {error}",
+                lane_target.display()
+            )
+        })?;
+    }
+    // Already stamped for this very execution: leave the file (and the lane's
+    // idle clock) alone, so a relaunch does not look like a build.
+    if read_lane_owner(&lane_target).as_ref() == Some(&owner) {
+        return Ok(lane_target);
+    }
     let bytes = serde_json::to_vec(&owner).map_err(|error| error.to_string())?;
     let staging = lane_target.join(format!("{LANE_OWNER_MARKER}.tmp"));
     std::fs::write(&staging, bytes)
@@ -550,6 +567,34 @@ pub fn mark_lane_target(
             )
         })?;
     Ok(lane_target)
+}
+
+/// [`mark_lane_target`] for a worktree whose repository is not known to the
+/// caller: it is derived from the managed layout
+/// (`<repo>/.kronn/worktrees/<name>`). A worktree outside that layout builds
+/// inside itself, has no `target/wt-*` lane, and is refused.
+///
+/// Every place that makes Kronn start a build in a worker's lane - the
+/// worker's own launch (task or campaign), and the sandbox a validation runs
+/// in - stamps it first, so no lane Kronn created is ever left unowned.
+pub fn mark_lane_target_for_worktree(
+    worktree_path: &Path,
+    execution_id: &str,
+) -> Result<PathBuf, String> {
+    let worktree = worktree_path.canonicalize().map_err(|error| {
+        format!(
+            "cannot canonicalize worktree {}: {error}",
+            worktree_path.display()
+        )
+    })?;
+    let lane = crate::core::task_worker_env::WorkerLane::for_worktree(&worktree)?;
+    let repo = lane.main_checkout.ok_or_else(|| {
+        format!(
+            "{} is not a managed worktree, so it has no lane target",
+            worktree.display()
+        )
+    })?;
+    mark_lane_target(&repo, &worktree, execution_id)
 }
 
 /// The marker of a lane target, when it is a plain, well-formed file whose
@@ -5338,11 +5383,63 @@ mod tests {
         assert_eq!(owners[0].execution_id, "exec-20");
         assert_eq!(owners[0].worktree, worktree.to_string_lossy());
         assert!(lane_target.join(LANE_OWNER_MARKER).is_file());
-        // Idempotent: a second launch of the same lane rewrites it, once.
+        // Idempotent: a second launch of the same lane finds it stamped and
+        // leaves the file (and the lane's idle clock) as it is.
+        let stamped = fs::metadata(lane_target.join(LANE_OWNER_MARKER))
+            .unwrap()
+            .modified()
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
         mark_lane_target(repo.path(), &worktree, "exec-20").unwrap();
         assert_eq!(lane_target_owners(repo.path()).len(), 1);
+        assert_eq!(
+            fs::metadata(lane_target.join(LANE_OWNER_MARKER))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            stamped
+        );
         // Nothing can be marked without an execution.
         assert!(mark_lane_target(repo.path(), &worktree, " ").is_err());
+    }
+
+    /// KT-1318 - the lanes Kronn starts a build in without having provisioned
+    /// them itself (a validation of any worker kind, a resumed launch) are
+    /// stamped from the worktree alone; a tree outside the managed layout has
+    /// no lane and gets nothing.
+    #[test]
+    fn a_lane_is_marked_from_its_worktree_alone_and_only_for_a_managed_one() {
+        let repo = make_test_repo("lane-mark-derived");
+        let base = head_sha(repo.path());
+        let info = create_task_worktree(repo.path(), "KT-21", "c3d4", &base).unwrap();
+        let worktree = PathBuf::from(&info.path);
+
+        let lane_target = mark_lane_target_for_worktree(&worktree, "exec-21").unwrap();
+        assert_eq!(
+            lane_target.canonicalize().unwrap(),
+            repo.path()
+                .canonicalize()
+                .unwrap()
+                .join("target/wt-kt-21-c3d4")
+        );
+        let owners = lane_target_owners(&repo.path().canonicalize().unwrap());
+        assert_eq!(owners.len(), 1, "{owners:?}");
+        assert_eq!(owners[0].execution_id, "exec-21");
+        // The stamp is Kronn's: a checkout that does not ignore `target/` must
+        // not read it as uncommitted work (it would block an integration).
+        assert!(
+            worktree_dirty_files(repo.path()).unwrap().is_empty(),
+            "{:?}",
+            worktree_dirty_files(repo.path())
+        );
+
+        let elsewhere = tempfile::tempdir().unwrap();
+        assert!(mark_lane_target_for_worktree(elsewhere.path(), "exec-21").is_err());
+        assert!(
+            !elsewhere.path().join("target").exists(),
+            "an unmanaged tree is left as it is"
+        );
+        assert!(mark_lane_target_for_worktree(&worktree, "").is_err());
     }
 
     /// KT-1256 — the principal's review: `target/wt-*` is also where humans

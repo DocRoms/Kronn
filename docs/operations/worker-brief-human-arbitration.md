@@ -5,7 +5,7 @@ the latter stay with a human. A joined CLI checks durable answers before asking,
 publishes a numeric-version `kronn-question` card when needed, verifies its
 recording, and pauses only the affected scope. Narrower native and HTTP worker
 surfaces request that the principal relay the card; neither actor may decide for
-the human. [src: file: backend/src/api/orchestration.rs:7989-8013#human_arbitration]
+the human. [src: file: backend/src/api/orchestration.rs:8012-8036#human_arbitration]
 
 The parent-milestones section is transport-aware, not a single shared string, and
 the two joined-CLI tools do not share one restriction. `disc_append` defaults to
@@ -26,9 +26,9 @@ them to report any other verified notable fact (progress, a blocker, a result)
 through their actually available output and to explicitly ask the principal to
 relay it toward the parent room — without promising automatic visibility,
 guaranteed delivery, or a publication tool the surface does not declare.
-[src: file: backend/src/api/orchestration.rs:8014-8043#parent_milestones]
+[src: file: backend/src/api/orchestration.rs:8037-8066#parent_milestones]
 [src: file: backend/src/db/orchestration.rs:5683-5727#get_execution_lineage]
-[src: file: backend/src/api/orchestration.rs:15813-15966#worker_briefs_make_human_arbitration_and_parent_milestones_transport_aware]
+[src: file: backend/src/api/orchestration.rs:15836-15989#worker_briefs_make_human_arbitration_and_parent_milestones_transport_aware]
 [src: file: backend/src/models/orchestration.rs:1324-1337#TaskExecutionLineage]
 
 The bridge documents that `disc_question_list` reads durable question state and

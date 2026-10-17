@@ -189,6 +189,12 @@ describe('DiskSection', () => {
     fireEvent.change(launch, { target: { value: '1.5' } });
     fireEvent.click(within(screen.getByTestId('disk-policy')).getByText('settings.disk.savePolicy'));
     expect(configApi.setServerConfig).not.toHaveBeenCalled();
+
+    // Zero idle hours would make every finished lane an orphan at once: refused.
+    fireEvent.change(launch, { target: { value: '50' } });
+    fireEvent.change(idle, { target: { value: '0' } });
+    fireEvent.click(within(screen.getByTestId('disk-policy')).getByText('settings.disk.savePolicy'));
+    expect(configApi.setServerConfig).not.toHaveBeenCalled();
   });
 
   it('surfaces a failing report instead of crashing', async () => {

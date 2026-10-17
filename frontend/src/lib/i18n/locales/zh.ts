@@ -2983,7 +2983,7 @@ const zh: TranslationDict = {
   "settings.disk.confirmEntry": "删除 {0}（{1}）？下次构建会重新生成，但此操作无法撤销。",
   "settings.disk.purged": "已删除 {0} 项，释放 {1}。",
   "settings.disk.refused": "未删除：{0}",
-  "settings.disk.invalidPolicy": "两个值都必须是不小于 0 的整数。",
+  "settings.disk.invalidPolicy": "可用空间必须是整数（0 = 关闭），闲置时间必须是不小于 1 的整数小时。",
   "settings.disk.policySaved": "磁盘策略已保存。",
   "settings.disk.launchMin": "低于此值拒绝启动（GiB，0 = 关闭）",
   "settings.disk.idleHours": "孤立目录闲置时间（小时）",

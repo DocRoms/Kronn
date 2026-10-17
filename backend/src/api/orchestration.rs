@@ -4292,6 +4292,10 @@ async fn run_pending_validations(
             continue;
         }
 
+        // The validation builds in the worker's lane whatever the worker kind
+        // is (a Codex or a joined CLI worker never got the Claude launch's
+        // stamp): the lane it creates here is Kronn's, so it is marked first.
+        mark_lane_target_for_worker(exec_id, child).await;
         let (code, duration, summary) = run_one_validation(spec, child).await;
         let id = exec_id.to_string();
         let spec = spec.clone();
@@ -7739,6 +7743,25 @@ async fn mark_lane_target_for_execution(
         Ok(Ok(_)) => {}
         Ok(Err(reason)) => {
             tracing::warn!(execution_id = %exec_id, "lane target not marked: {reason}");
+        }
+        Err(error) => {
+            tracing::warn!(execution_id = %exec_id, "lane target marking did not complete: {error}");
+        }
+    }
+}
+
+/// [`mark_lane_target_for_execution`] when the repository is derived from the
+/// managed worktree layout: for the launches that only know the worktree.
+async fn mark_lane_target_for_worker(exec_id: &str, worktree: &std::path::Path) {
+    let (worktree_path, id) = (worktree.to_path_buf(), exec_id.to_string());
+    match tokio::task::spawn_blocking(move || {
+        worktree::mark_lane_target_for_worktree(&worktree_path, &id)
+    })
+    .await
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(reason)) => {
+            tracing::debug!(execution_id = %exec_id, "lane target not marked: {reason}");
         }
         Err(error) => {
             tracing::warn!(execution_id = %exec_id, "lane target marking did not complete: {error}");
@@ -23364,6 +23387,60 @@ pub(crate) mod tests {
         assert!(rows[0].passed());
     }
 
+    /// KT-1318 - a validation builds in the worker's lane whatever the worker
+    /// kind: a non-Claude worker never got the Claude launch's stamp, so the
+    /// validation stamps the lane it is about to create.
+    #[tokio::test]
+    async fn a_validation_stamps_the_lane_it_builds_in_for_any_worker_kind() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let validation = ValidationSpec {
+            command: "false".into(),
+            quick_exec_id: None,
+            timeout_secs: Some(5),
+        };
+        let (execution, _task_ref, child) = approved_execution_with_commit(
+            &db,
+            repo.path(),
+            "validation-stamps-lane",
+            "worker.txt",
+            "done",
+            vec![validation.clone()],
+        )
+        .await;
+        // The lane of a worker that never got the Claude launch's stamp.
+        let _ = std::fs::remove_dir_all(repo.path().join("target"));
+        assert!(worktree::lane_target_owners(repo.path()).is_empty());
+        let target_sha = git_rev(repo.path(), "main");
+        checkpoint(
+            &db,
+            &execution.id,
+            CheckpointStep::Anchored(target_sha.clone()),
+        )
+        .await
+        .unwrap();
+        let merge_sha = match worktree::build_candidate(&child, &target_sha).unwrap() {
+            worktree::CandidateOutcome::Built { sha } => sha,
+            other => panic!("expected a candidate, got {other:?}"),
+        };
+        checkpoint(&db, &execution.id, CheckpointStep::Built(merge_sha.clone()))
+            .await
+            .unwrap();
+        checkpoint(&db, &execution.id, CheckpointStep::Validating)
+            .await
+            .unwrap();
+
+        let failure =
+            run_pending_validations(&db, &execution.id, &[validation], &child, &merge_sha)
+                .await
+                .unwrap();
+
+        assert!(failure.is_some(), "`false` is a red validation");
+        let owners = worktree::lane_target_owners(repo.path());
+        assert_eq!(owners.len(), 1, "{owners:?}");
+        assert_eq!(owners[0].execution_id, execution.id);
+    }
+
     /// An unpinned target is the case where the engine would have to guess which
     /// history to advance. It refuses instead.
     #[tokio::test]
@@ -31756,22 +31833,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// Restores the published disk policy even when an assertion panics.
-    struct DiskPolicyGuard((u64, u64));
-
-    impl DiskPolicyGuard {
-        fn set(launch_min_free_gib: u64, sweep_idle_hours: u64) -> Self {
-            let before = crate::core::disk_usage::disk_policy();
-            crate::core::disk_usage::set_disk_policy(launch_min_free_gib, sweep_idle_hours);
-            Self(before)
-        }
-    }
-
-    impl Drop for DiskPolicyGuard {
-        fn drop(&mut self) {
-            crate::core::disk_usage::set_disk_policy(self.0 .0, self.0 .1);
-        }
-    }
+    use crate::core::disk_usage::TestDiskPolicy as DiskPolicyGuard;
 
     /// KT-1318 — DoD 1, the orphan sweeper: a finished execution's lane with no
     /// worktree goes only once idle past the threshold; the human's `wt-*` and
@@ -31820,7 +31882,7 @@ pub(crate) mod tests {
             "{sweep:?}"
         );
 
-        let _policy = DiskPolicyGuard::set(0, 0);
+        let _policy = DiskPolicyGuard::set(0, 6);
         let orphans = crate::api::disk::purge_orphans(&fx.db, Some(&fx.project_id))
             .await
             .unwrap();

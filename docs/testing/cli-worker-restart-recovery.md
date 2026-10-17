@@ -10,7 +10,7 @@ directly to the CLI. A bridge reload therefore resumes the principal room instea
 of the child.
 [src: file: backend/src/api/orchestration.rs:4938-4958#accept_worker_offer_and_attach]
 [src: file: backend/src/api/orchestration.rs:5076-5095#worker_cli_session_id]
-[src: file: backend/src/api/orchestration.rs:13081-13110#source_binding_session_id]
+[src: file: backend/src/api/orchestration.rs:13104-13133#source_binding_session_id]
 [src: file: backend/scripts/disc-introspection-mcp.py:6310-6345#call_task_exec_accept_worker_offer]
 
 The terminal return path remains compatibility code for offers accepted by older
@@ -48,10 +48,10 @@ The four `cli_restart_*` tests in `backend/src/api/orchestration.rs` exercise:
 - Departed, third-room, wrong-provider and missing-child refusals, plus retained
   quota arbitration even when another same-provider CLI is present.
 - Preservation of an unaccepted offer in the principal room.
-[src: file: backend/src/api/orchestration.rs:26252-26343#cli_restart_recovers_the_exact_worker_after_accepted_child_handoff]
-[src: file: backend/src/api/orchestration.rs:26345-26466#cli_restart_same_worker_reassignment_keeps_principal_room_and_requires_acceptance]
-[src: file: backend/src/api/orchestration.rs:26468-26572#cli_restart_keeps_foreign_left_missing_and_quota_workers_gated]
-[src: file: backend/src/api/orchestration.rs:26574-26614#cli_restart_preserves_the_unaccepted_offer_in_the_parent]
+[src: file: backend/src/api/orchestration.rs:26329-26420#cli_restart_recovers_the_exact_worker_after_accepted_child_handoff]
+[src: file: backend/src/api/orchestration.rs:26422-26543#cli_restart_same_worker_reassignment_keeps_principal_room_and_requires_acceptance]
+[src: file: backend/src/api/orchestration.rs:26545-26649#cli_restart_keeps_foreign_left_missing_and_quota_workers_gated]
+[src: file: backend/src/api/orchestration.rs:26651-26691#cli_restart_preserves_the_unaccepted_offer_in_the_parent]
 
 Run with `cargo test --manifest-path backend/Cargo.toml --lib cli_restart`.
 These are isolated SQLite/Git protocol tests, not a live provider or host-reboot
@@ -80,8 +80,8 @@ Two regression tests reproduced the resulting stale child binding on cancellatio
 and CLI-to-native reassignment; both passed after the identity fix. This is a
 separate defect from KT-615's accepted-child eligibility check and from the stale
 session catalogue observed after a reload.
-[src: file: backend/src/api/orchestration.rs:25682-25700#cli_durable_return_terminal_preserves_the_distinct_binding_identity]
-[src: file: backend/src/api/orchestration.rs:25702-25724#cli_durable_return_reassignment_preserves_the_distinct_binding_identity]
+[src: file: backend/src/api/orchestration.rs:25759-25777#cli_durable_return_terminal_preserves_the_distinct_binding_identity]
+[src: file: backend/src/api/orchestration.rs:25779-25801#cli_durable_return_reassignment_preserves_the_distinct_binding_identity]
 
 Migration 171 adds `task_execution_cli_bindings`, keyed by execution and exact CLI
 session primary key. Offer acceptance records the server-derived source identity
@@ -114,8 +114,8 @@ cannot recapture workers after completion or replacement. Already terminal
 deliveries and their evidence are never rewritten.
 [src: file: backend/src/db/cli_worker_bindings.rs:110-115#was_pinned]
 [src: file: backend/src/db/cli_worker_bindings.rs:150-165#unresolved_child_binding]
-[src: file: backend/src/api/orchestration.rs:25842-25883#cli_durable_return_legacy_worker_can_explicitly_reconfirm_its_accepted_offer]
-[src: file: backend/src/api/orchestration.rs:25928-25936#cli_durable_return_old_offer_cannot_recapture_a_terminal_worker]
+[src: file: backend/src/api/orchestration.rs:25919-25960#cli_durable_return_legacy_worker_can_explicitly_reconfirm_its_accepted_offer]
+[src: file: backend/src/api/orchestration.rs:26005-26013#cli_durable_return_old_offer_cannot_recapture_a_terminal_worker]
 
 The original KT-618 report remains a historical independent review: it did not
 execute these later regressions and did not establish the subsequently reproduced

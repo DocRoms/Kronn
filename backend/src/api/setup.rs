@@ -1000,7 +1000,8 @@ pub async fn set_server_config(
         config.server.disk_launch_min_free_gib = gib.min(100_000);
     }
     if let Some(hours) = req.disk_sweep_idle_hours {
-        config.server.disk_sweep_idle_hours = hours.min(24 * 365);
+        config.server.disk_sweep_idle_hours =
+            hours.clamp(crate::core::disk_usage::MIN_SWEEP_IDLE_HOURS, 24 * 365);
     }
     if let Some(domain) = req.domain {
         config.server.domain = if domain.is_empty() {

@@ -3017,7 +3017,7 @@ const fr: TranslationDict = {
   'settings.disk.confirmEntry': 'Supprimer {0} ({1}) ? Le prochain build le régénère, mais c\'est irréversible.',
   'settings.disk.purged': '{0} supprimé(s), {1} libérés.',
   'settings.disk.refused': 'Non supprimé : {0}',
-  'settings.disk.invalidPolicy': 'Les deux valeurs doivent être des entiers, zéro ou plus.',
+  'settings.disk.invalidPolicy': "L'espace libre doit être un entier (0 = désactivé) et l'inactivité un nombre entier d'heures, au moins 1.",
   'settings.disk.policySaved': 'Politique disque enregistrée.',
   'settings.disk.launchMin': 'Refuser les lancements sous (Gio, 0 = désactivé)',
   'settings.disk.idleHours': 'Inactivité d\'un orphelin (h)',

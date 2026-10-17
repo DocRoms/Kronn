@@ -29,9 +29,14 @@ inside the lane or the worktree, so they go with it.
 
 **Ownership is a manifest, not a name.** `wt-*` proves nothing: humans and other tooling build in
 `target/wt-0151-integration`. Kronn writes `.kronn-lane.json` (execution id, lane, worktree) when it
-provisions a lane, and only a lane carrying it is ever swept. Everything else — an unmarked `wt-*`, the
-interactive `target/debug`, any directory Kronn did not create — is **reported as `foreign` and never
-touched**. [src: file: backend/src/core/worktree.rs:523-553#mark_lane_target]
+provisions a lane, again on every Claude worker launch (resumes and reworks, task or campaign) and before
+a validation builds in a worker's lane whatever the worker kind, so a lane Kronn made is never left
+unowned. The file is written once per execution (a relaunch leaves the lane's idle clock alone) next to a
+`.gitignore` of `*`, so a checkout that does not ignore `target/` never reads it as uncommitted work. Only a
+lane carrying the marker is ever swept. Everything else — an unmarked `wt-*`, the interactive
+`target/debug`, any directory Kronn did not create — is **reported as `foreign` and never touched**.
+[src: file: backend/src/core/worktree.rs:523-570#mark_lane_target]
+[src: file: backend/src/core/worktree.rs:580-598#mark_lane_target_for_worktree]
 
 ## When something is removed
 
@@ -44,7 +49,7 @@ touched**. [src: file: backend/src/core/worktree.rs:523-553#mark_lane_target]
 | Boot, **every 30 min**, and under pressure | **orphan** lane build dirs | the sweeper rules below |
 
 [src: file: backend/src/api/orchestration.rs:3668-3680#cleanup_integrated_execution]
-[src: file: backend/src/api/orchestration.rs:10279-10290#settle_cancelled_workspace]
+[src: file: backend/src/api/orchestration.rs:10302-10313#settle_cancelled_workspace]
 
 ### The sweeper's rules
 
@@ -53,14 +58,15 @@ A lane build dir is an **orphan** — and only then removed by the sweep — whe
 1. it carries Kronn's ownership marker (Kronn created it);
 2. durable state proves its execution **finished** (no live session, lease or unfinished execution);
 3. its worktree is **gone**;
-4. it has not been written for **`server.disk_sweep_idle_hours`** (default **6 h**). The age is the newest
+4. it has not been written for **`server.disk_sweep_idle_hours`** (default **6 h**, floor **1 h**: a
+   configured `0` is read as 1, never as "no idle check"). The age is the newest
    write among the lane, its entries and their children, so a build that just ran moves it forward; an
    unreadable age is *never* idle;
 5. Cargo does not hold its build lock.
 
 An aged lane of a live execution, or whose clean worktree is still there, is **not** an orphan.
-[src: file: backend/src/core/worktree.rs:825-860#process_lane_target_idle]
-[src: file: backend/src/core/worktree.rs:774-810#lane_target_last_write]
+[src: file: backend/src/core/worktree.rs:870-905#process_lane_target_idle]
+[src: file: backend/src/core/worktree.rs:819-855#lane_target_last_write]
 [src: file: backend/src/api/disk.rs:129-140#lane_entry_state]
 
 The periodic sweep is started at boot, after the boot reconciliation:
@@ -82,7 +88,7 @@ Kronn reads the free space of the volume holding the worktrees and `target/` (O(
 
 Until a config is published at boot the guard is off (`0`), so a process that never loaded one — a unit
 test — is never refused by a threshold nobody chose.
-[src: file: backend/src/core/disk_usage.rs:35-40#set_disk_policy]
+[src: file: backend/src/core/disk_usage.rs:42-51#set_disk_policy]
 
 The older hard floor still applies underneath: `server.disk_critical_gib` (default 5) refuses worktree
 provisioning and builds; see [worktree-build-artifacts.md](worktree-build-artifacts.md#thresholds).
@@ -106,14 +112,14 @@ provisioning and builds; see [worktree-build-artifacts.md](worktree-build-artifa
 `state` is one of `orphan` (the default purge takes it), `reclaimable` (finished but recent, or its clean
 worktree is kept: only a confirmed per-entry delete), `active` (a live execution claims it: **never
 removed**), `kept` (dirty worktree, unreadable state) and `foreign` (not Kronn's: never touched).
-[src: file: backend/src/core/disk_usage.rs:80-95#DiskState]
+[src: file: backend/src/core/disk_usage.rs:139-154#DiskState]
 
 ## Settings
 
 | Key | Default | Meaning |
 |---|---:|---|
 | `server.disk_launch_min_free_gib` | 30 | free GiB a worker launch / full audit needs; sweep first, then refuse |
-| `server.disk_sweep_idle_hours` | 6 | hours a lane must be unwritten before the sweeper may take it |
+| `server.disk_sweep_idle_hours` | 6 | hours (minimum 1; `0` is read as 1) a lane must be unwritten before the sweeper may take it |
 | `server.disk_warning_gib` / `disk_critical_gib` | 20 / 5 | KT-373 floor, unchanged |
 
 Both new keys are editable in Settings → Disk or `POST /api/config/server`, and apply without a restart.

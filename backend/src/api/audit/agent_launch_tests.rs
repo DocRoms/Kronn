@@ -2047,3 +2047,60 @@ async fn version_source_inputs_read_the_mcp_config_the_agent_is_handed() {
     assert_eq!(pick(&direct, false), VersionSource::Web);
     assert_eq!(pick(&acp, false), VersionSource::None);
 }
+
+/// KT-1318 — a full audit writes a lot of files and builds: below the
+/// configured free space it is refused before anything is recorded or written,
+/// with the number and the setting named.
+#[tokio::test]
+async fn a_full_audit_under_disk_pressure_is_refused_before_it_creates_anything() {
+    use axum::response::IntoResponse;
+    // A petabyte: more than any test host has free, whatever its disk.
+    let _policy = crate::core::disk_usage::TestDiskPolicy::set(1_000_000, 6);
+    let state = fresh_state();
+    let project = tempfile::tempdir().unwrap();
+    project_among_others(&state, project.path(), false).await;
+
+    let response = crate::api::audit::full::full_audit(
+        axum::extract::State(state.clone()),
+        axum::extract::Path(PROJECT_ID.to_string()),
+        axum::Json(crate::models::LaunchAuditRequest {
+            agent: AgentType::ClaudeCode,
+            connection_id: None,
+            tier: None,
+            kind: None,
+            custom_prompt: None,
+            resume_run_id: None,
+            retry_steps: None,
+            redo_steps: None,
+            fresh: None,
+        }),
+    )
+    .await
+    .into_response();
+    let stream = sse_body(response).await;
+
+    let refusal = sse_events(&stream, "error").pop().expect("a refusal");
+    let reason = refusal["error"].as_str().unwrap_or_default();
+    assert!(
+        reason.contains("refusing to start a full audit"),
+        "{reason}"
+    );
+    assert!(
+        reason.contains("server.disk_launch_min_free_gib") && reason.contains("1000000 GiB"),
+        "{reason}"
+    );
+    assert!(
+        sse_events(&stream, "step_start").is_empty(),
+        "no step started: {stream}"
+    );
+    let runs: i64 = state
+        .db
+        .with_conn(|conn| Ok(conn.query_row("SELECT COUNT(*) FROM audit_runs", [], |r| r.get(0))?))
+        .await
+        .unwrap();
+    assert_eq!(runs, 0, "no audit run was recorded");
+    assert!(
+        !project.path().join("docs").exists(),
+        "nothing was written into the project"
+    );
+}

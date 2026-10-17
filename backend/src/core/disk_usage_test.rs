@@ -36,12 +36,29 @@ fn the_launch_guard_refuses_strictly_below_the_threshold() {
 }
 
 #[test]
-fn the_policy_round_trips_and_the_idle_threshold_is_in_hours() {
-    let before = disk_policy();
-    set_disk_policy(42, 3);
-    assert_eq!(disk_policy(), (42, 3));
-    assert_eq!(sweep_idle(), Duration::from_secs(3 * 3600));
-    set_disk_policy(before.0, before.1);
+fn the_idle_threshold_is_in_hours_and_a_test_thread_owns_its_policy() {
+    assert_eq!(disk_policy(), (0, DEFAULT_DISK_SWEEP_IDLE_HOURS));
+    {
+        let _policy = TestDiskPolicy::set(42, 3);
+        assert_eq!(disk_policy(), (42, 3));
+        assert_eq!(sweep_idle(), Duration::from_secs(3 * 3600));
+        // Another thread never sees it: tests running side by side cannot
+        // refuse one another's launches.
+        let elsewhere = std::thread::spawn(disk_policy).join().unwrap();
+        assert_eq!(elsewhere, (0, DEFAULT_DISK_SWEEP_IDLE_HOURS));
+    }
+    assert_eq!(disk_policy(), (0, DEFAULT_DISK_SWEEP_IDLE_HOURS));
+}
+
+/// A configured `0` must not make every finished lane an instant orphan.
+#[test]
+fn zero_idle_hours_is_read_as_the_floor_not_as_no_idle_check() {
+    assert_eq!(MIN_SWEEP_IDLE_HOURS, 1);
+    assert_eq!(effective_sweep_idle_hours(0), 1);
+    assert_eq!(effective_sweep_idle_hours(6), 6);
+    let _policy = TestDiskPolicy::set(30, 0);
+    assert_eq!(disk_policy(), (30, 1));
+    assert_eq!(sweep_idle(), Duration::from_secs(3600));
 }
 
 #[test]

@@ -3007,7 +3007,7 @@ const es: TranslationDict = {
   'settings.disk.confirmEntry': '¿Eliminar {0} ({1})? El próximo build lo regenera, pero no se puede deshacer.',
   'settings.disk.purged': '{0} eliminado(s), {1} liberados.',
   'settings.disk.refused': 'No eliminado: {0}',
-  'settings.disk.invalidPolicy': 'Ambos valores deben ser enteros, cero o más.',
+  'settings.disk.invalidPolicy': 'El espacio libre debe ser un entero (0 = desactivado) y la inactividad un número entero de horas, al menos 1.',
   'settings.disk.policySaved': 'Política de disco guardada.',
   'settings.disk.launchMin': 'Rechazar lanzamientos por debajo de (GiB, 0 = desactivado)',
   'settings.disk.idleHours': 'Inactividad de un huérfano (h)',

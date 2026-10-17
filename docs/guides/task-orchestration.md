@@ -135,10 +135,10 @@ without that tool asks the principal to relay it. This follows the accepted
 KT-635 brief policy, not a guarantee that every external host CLI obeys it.
 An unreviewed delivery never appears as an accepted report. After approval,
 Kronn derives one fixed-layout report; replay does not produce another.
-[src: file: backend/src/api/orchestration.rs:7994-7998#has_room_publication]
-[src: file: backend/src/api/orchestration.rs:8018-8043#parent_milestones]
-[src: file: backend/src/api/orchestration.rs:6829-6854#publish_accepted_delivery_or_warn]
-[src: file: backend/src/api/orchestration.rs:29620-29721#approving_a_delivery_publishes_one_derived_report_in_the_parent]
+[src: file: backend/src/api/orchestration.rs:8017-8021#has_room_publication]
+[src: file: backend/src/api/orchestration.rs:8041-8066#parent_milestones]
+[src: file: backend/src/api/orchestration.rs:6838-6863#publish_accepted_delivery_or_warn]
+[src: file: backend/src/api/orchestration.rs:29697-29798#approving_a_delivery_publishes_one_derived_report_in_the_parent]
 
 Native conversational handoffs are a separate opt-in from launching a planning
 task. Their paid/unknown allowance is configurable and shared by the originating
@@ -183,9 +183,9 @@ delivery manifest and diff, then choose one of:
   worktree, these checks followed by `git merge --ff-only` are not an atomic
   compare-and-swap transaction; a target no worktree has checked out advances
   by a `git update-ref` compare-and-swap instead.
-  [src: file: backend/src/core/worktree.rs:1974-2002#write_backup_ref]
-  [src: file: backend/src/core/worktree.rs:2166-2186#fast_forward_target_to]
-  [src: file: backend/src/core/worktree.rs:2111-2163#update_ref_target_to]
+  [src: file: backend/src/core/worktree.rs:2019-2047#write_backup_ref]
+  [src: file: backend/src/core/worktree.rs:2211-2231#fast_forward_target_to]
+  [src: file: backend/src/core/worktree.rs:2156-2208#update_ref_target_to]
 - **Request changes** — enter concrete feedback. The same worker, discussion,
   branch and worktree resume for the next bounded review round.
 
@@ -199,7 +199,7 @@ files in the one checkout stop the operation without switching or overwriting
 another checkout. Unrelated changes in the registered project's
 main checkout do not block a clean target in another worktree. See
 [`pinned-target-worktree.md`](../testing/pinned-target-worktree.md).
-[src: file: backend/src/core/worktree.rs:2083-2090#integration_target]
+[src: file: backend/src/core/worktree.rs:2128-2135#integration_target]
 
 Worker-written DoD claims, a checked box in the live Planning task and a
 principal approval without attempt-scoped evidence are all insufficient. This

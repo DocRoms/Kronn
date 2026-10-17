@@ -18,7 +18,8 @@ Release notes for 0.9.3 and earlier are available in the
   ever removed them: 195 of them took a 1.8 TB disk to 683 MB free. Now an
   orphan sweeper (boot, then every 30 minutes) removes the build dirs Kronn
   created, whose execution is finished, with no worktree, unwritten for
-  `server.disk_sweep_idle_hours` (default 6); a dir Kronn did not create
+  `server.disk_sweep_idle_hours` (default 6, minimum 1: `0` is read as 1, never
+  as "no idle check"); a dir Kronn did not create
   (no ownership marker) and an active lane are never touched. Below
   `server.disk_launch_min_free_gib` (default 30) a worker launch or a full
   audit sweeps first, then is refused with the reason, the execution parked

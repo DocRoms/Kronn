@@ -94,7 +94,7 @@ export function DiskSection({ toast, t }: DiskSectionProps) {
   const savePolicy = async () => {
     const min = Number(launchMin);
     const hours = Number(idleHours);
-    if (!Number.isInteger(min) || min < 0 || !Number.isInteger(hours) || hours < 0) {
+    if (!Number.isInteger(min) || min < 0 || !Number.isInteger(hours) || hours < 1) {
       toast(t('settings.disk.invalidPolicy'), 'error');
       return;
     }
@@ -222,7 +222,7 @@ export function DiskSection({ toast, t }: DiskSectionProps) {
                 {t('settings.disk.idleHours')}{' '}
                 <input
                   type="number"
-                  min={0}
+                  min={1}
                   value={idleHours}
                   onChange={event => setIdleHours(event.target.value)}
                   aria-label={t('settings.disk.idleHours')}

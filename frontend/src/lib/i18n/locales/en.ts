@@ -3007,7 +3007,7 @@ const en: TranslationDict = {
   'settings.disk.confirmEntry': 'Delete {0} ({1})? The next build regenerates it, but this cannot be undone.',
   'settings.disk.purged': '{0} removed, {1} freed.',
   'settings.disk.refused': 'Not removed: {0}',
-  'settings.disk.invalidPolicy': 'Both values must be whole numbers, zero or more.',
+  'settings.disk.invalidPolicy': 'Free space must be a whole number (0 = off) and the idle time a whole number of hours, at least 1.',
   'settings.disk.policySaved': 'Disk policy saved.',
   'settings.disk.launchMin': 'Refuse launches under (GiB, 0 = off)',
   'settings.disk.idleHours': 'Orphan idle time (h)',

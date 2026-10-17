@@ -13845,6 +13845,16 @@ pub(crate) fn try_spawn(
     // keep their own sandbox's defaults.
     if task_worker_context.is_some() && is_claude_code_launch(binary, npx_package) {
         crate::core::task_worker_env::apply_launch_env(cmd.as_std_mut(), work_dir);
+        // KT-1318 - every launch of a task worker stamps the lane it builds in,
+        // resumes and reworks included, not only the first provisioning.
+        if let Some(context) = task_worker_context {
+            if let Err(reason) = crate::core::worktree::mark_lane_target_for_worktree(
+                work_dir,
+                &context.execution_id,
+            ) {
+                tracing::debug!(execution = %context.execution_id, "lane target not marked: {reason}");
+            }
+        }
     }
     // Hint shell-aware tools to use bash (dash does not support `-l`).
     // Only on Unix — Windows doesn't use SHELL env var.

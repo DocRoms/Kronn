@@ -29,29 +29,88 @@ const BYTES_PER_GIB: u64 = 1024 * 1024 * 1024;
 static LAUNCH_MIN_FREE_GIB: AtomicU64 = AtomicU64::new(0);
 static SWEEP_IDLE_HOURS: AtomicU64 = AtomicU64::new(DEFAULT_DISK_SWEEP_IDLE_HOURS);
 
+/// The shortest quiet period a lane build dir must have before a sweep may take
+/// it. A configured `0` would make every finished lane an orphan the instant it
+/// was last written, i.e. turn the idle check off; it is read as this floor.
+pub const MIN_SWEEP_IDLE_HOURS: u64 = 1;
+
+/// The idle threshold actually applied for a configured number of hours.
+pub fn effective_sweep_idle_hours(configured: u64) -> u64 {
+    configured.max(MIN_SWEEP_IDLE_HOURS)
+}
+
 /// Publish `server.disk_launch_min_free_gib` and `server.disk_sweep_idle_hours`.
 /// Called at boot and on every config save, so a changed setting applies
 /// without a restart.
 pub fn set_disk_policy(launch_min_free_gib: u64, sweep_idle_hours: u64) {
     LAUNCH_MIN_FREE_GIB.store(launch_min_free_gib, Ordering::Relaxed);
-    SWEEP_IDLE_HOURS.store(sweep_idle_hours, Ordering::Relaxed);
+    SWEEP_IDLE_HOURS.store(
+        effective_sweep_idle_hours(sweep_idle_hours),
+        Ordering::Relaxed,
+    );
+}
+
+/// What the process-wide policy currently holds.
+#[cfg(not(test))]
+fn published_policy() -> (u64, u64) {
+    (
+        LAUNCH_MIN_FREE_GIB.load(Ordering::Relaxed),
+        effective_sweep_idle_hours(SWEEP_IDLE_HOURS.load(Ordering::Relaxed)),
+    )
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The policy a test runs under. The process-wide one is shared by every
+    /// test thread (and `config::save` publishes into it), so a test never
+    /// reads it: it reads this, which only its own thread can change.
+    static TEST_POLICY: std::cell::Cell<Option<(u64, u64)>> =
+        const { std::cell::Cell::new(None) };
 }
 
 /// The configured `(launch_min_free_gib, sweep_idle_hours)`.
+///
+/// Under `cfg(test)` this is the calling thread's own policy (the guard off and
+/// the default idle period unless [`TestDiskPolicy`] set one), never the shared
+/// one, so tests that provision workers cannot refuse one another.
 pub fn disk_policy() -> (u64, u64) {
-    (
-        LAUNCH_MIN_FREE_GIB.load(Ordering::Relaxed),
-        SWEEP_IDLE_HOURS.load(Ordering::Relaxed),
-    )
+    #[cfg(test)]
+    {
+        TEST_POLICY
+            .with(std::cell::Cell::get)
+            .map(|(gib, hours)| (gib, effective_sweep_idle_hours(hours)))
+            .unwrap_or((0, DEFAULT_DISK_SWEEP_IDLE_HOURS))
+    }
+    #[cfg(not(test))]
+    {
+        published_policy()
+    }
+}
+
+/// Sets the calling test thread's policy, restoring the previous one on drop
+/// (also when an assertion panics).
+#[cfg(test)]
+pub struct TestDiskPolicy(Option<(u64, u64)>);
+
+#[cfg(test)]
+impl TestDiskPolicy {
+    pub fn set(launch_min_free_gib: u64, sweep_idle_hours: u64) -> Self {
+        let before =
+            TEST_POLICY.with(|cell| cell.replace(Some((launch_min_free_gib, sweep_idle_hours))));
+        Self(before)
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestDiskPolicy {
+    fn drop(&mut self) {
+        TEST_POLICY.with(|cell| cell.set(self.0));
+    }
 }
 
 /// How long a lane build dir must be unwritten before a sweep may remove it.
 pub fn sweep_idle() -> Duration {
-    Duration::from_secs(
-        SWEEP_IDLE_HOURS
-            .load(Ordering::Relaxed)
-            .saturating_mul(3600),
-    )
+    Duration::from_secs(disk_policy().1.saturating_mul(3600))
 }
 
 /// The three families of artefact Kronn leaves on the disk.
