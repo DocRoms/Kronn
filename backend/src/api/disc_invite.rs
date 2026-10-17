@@ -632,6 +632,13 @@ fn join_next_steps(
          actions, and `kronn-doc-data` exposes CSV/XLSX/PPTX export. A plain \
          `html` fence is only code. Use these formats only when they improve \
          the room result.\n\
+         HUMAN DECISION: when the human must arbitrate (trade-off, approval, \
+         ambiguous scope), post a closed `kronn-question` fence with \
+         `disc_append`, never prose alone: \
+         {{\"version\":1,\"key\":\"stable-key\",\"question\":\"…\",\
+         \"options\":[{{\"id\":\"a\",\"label\":\"…\"}}]}}. `version` is the \
+         number 1. Read back with `disc_question_list({{key}})`; only the human \
+         answers.\n\
          If one of the Planning tools named above is missing from your actual \
          MCP tool surface, your client cached an older catalogue: use the \
          read-only `plan_snapshot` in this join response, tell @user to \
@@ -7445,6 +7452,23 @@ mod tests {
             steps.contains("indistinguishable from having left"),
             "must state why silence is not acceptable",
         );
+    }
+
+    /// KT-1329 — a joined CLI that never learns the card asks the human in
+    /// prose, which the room cannot track or resume.
+    #[test]
+    fn join_protocol_teaches_the_human_decision_card() {
+        let steps = join_next_steps("d-1", "Room", 2, None);
+        for needle in [
+            "HUMAN DECISION",
+            "`kronn-question` fence",
+            "\"version\":1",
+            "\"key\":\"stable-key\"",
+            "disc_question_list({key})",
+            "only the human answers",
+        ] {
+            assert!(steps.contains(needle), "join protocol must carry {needle}");
+        }
     }
 
     #[test]

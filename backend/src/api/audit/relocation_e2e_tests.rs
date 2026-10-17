@@ -1171,7 +1171,7 @@ fn an_applied_template_merge_on_a_dot_ai_project_writes_and_commits_under_its_ro
         .collect();
     assert_eq!(
         committed,
-        [".ai/AGENTS.md", ".ai/glossary.md"]
+        [".ai/.kronn.json", ".ai/AGENTS.md", ".ai/glossary.md"]
             .into_iter()
             .map(str::to_string)
             .collect::<BTreeSet<_>>()
@@ -1738,3 +1738,7 @@ async fn the_default_root_snapshot_does_not_depend_on_the_day_of_the_audit() {
         "{after}"
     );
 }
+
+// KT-1310 — what follows an accepted template v2 merge.
+#[path = "template_merge_integration_e2e_tests.rs"]
+mod template_merge_integration_e2e_tests;

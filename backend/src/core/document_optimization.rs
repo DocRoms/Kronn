@@ -555,6 +555,10 @@ fn inspect_citations(project: &Path, rel: &str, content: &str, out: &mut Vec<Dia
     }
     // `(src: file: …)` is not the grammar: the verifier and the drift check only
     // read the bracketed marker, so a parenthesised one would never be checked.
+    // Kronn's own partial-step banner quotes the gate's reason with its brackets
+    // turned round (`step_guard::partial_banner`): that is not the agent's text.
+    let body = crate::api::audit::step_guard::strip_partial_marker(content);
+    let visible = body.as_deref().map_or(visible, visible_markdown);
     for (at, marker) in visible.match_indices("(src: file:") {
         let tail = &visible[at + marker.len()..];
         let Some(raw) = tail.split(')').next().map(str::trim) else {
@@ -620,7 +624,9 @@ fn check_citation(project: &Path, rel: &str, raw: &str) -> CitationCheck {
             Some(path) if crate::core::anti_halluc::is_binary_file(&path) => return Skip,
             Some(path) if crate::acp::secret_files::is_secret_file(&path) => format!(
                 "malformed file citation `{raw}`: this file may hold secrets, so no line of it is \
-                 cited. Name it in backticks outside any [src:] marker"
+                 cited. To state that it exists or is tracked, write [src: file: {raw}:exists] \
+                 and do not quote its content; otherwise name it in backticks outside any \
+                 [src:] marker"
             ),
             Some(path) => match line_count(&path) {
                 0 => format!(
@@ -631,7 +637,9 @@ fn check_citation(project: &Path, rel: &str, raw: &str) -> CitationCheck {
                     "malformed file citation `{raw}`: a text file is cited with the line \
                      that supports the claim, [src: file: {raw}:<line>]. To state that \
                      something is absent from it, cite the whole file as \
-                     [src: file: {raw}:1-{lines}] and write the absence outside the brackets"
+                     [src: file: {raw}:1-{lines}] and write the absence outside the brackets. \
+                     If the claim is only that the file exists or is tracked, write \
+                     [src: file: {raw}:exists] and do not quote its content"
                 ),
             },
             None => format!(
@@ -653,6 +661,19 @@ fn check_citation(project: &Path, rel: &str, raw: &str) -> CitationCheck {
             )
         });
     };
+    // A presence citation (`path:exists`) claims the file is there, not what it
+    // holds: no line to bound, and none to quote from a secret file.
+    if crate::core::anti_halluc::is_presence_marker(line_part) {
+        if crate::core::anti_halluc::is_tracked_marker(line_part)
+            && !crate::core::anti_halluc::is_git_tracked(project, path_part)
+        {
+            return Defect(format!(
+                "`{path_part}` is not tracked by git: write [src: file: {path_part}:exists] \
+                 if the claim is only that the file is there"
+            ));
+        }
+        return Skip;
+    }
     if crate::core::anti_halluc::is_binary_file(&path) {
         return Defect(format!(
             "`{path_part}` is a binary file and has no lines: cite it as \
@@ -2055,6 +2076,93 @@ mod tests {
     }
 
     #[test]
+    fn a_presence_citation_of_a_secret_file_needs_no_line() {
+        let tmp = document_project();
+        let project = tmp.path().join("proj");
+        fs::create_dir_all(project.join(".ssh")).unwrap();
+        write(
+            &project.join(".ssh/deploy-key"),
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nsecret\n-----END OPENSSH PRIVATE KEY-----\n",
+        );
+        write(&project.join("yarn-error.log"), "Error: boom\n");
+        let messages = citation_messages(
+            &project,
+            "key [src: file: .ssh/deploy-key:exists] log [src: file: yarn-error.log:exists] \
+             and binary [src: file: brief.pdf:exists].",
+        );
+        assert!(messages.is_empty(), "{messages:#?}");
+        // A bare secret path is still refused, and the refusal names the presence form.
+        let messages = citation_messages(&project, "[src: file: .ssh/deploy-key]");
+        assert_eq!(messages.len(), 1, "{messages:#?}");
+        assert!(
+            messages[0].contains("may hold secrets")
+                && messages[0].contains("[src: file: .ssh/deploy-key:exists]"),
+            "{}",
+            messages[0]
+        );
+    }
+
+    #[test]
+    fn a_tracked_citation_is_checked_against_the_git_index() {
+        let tmp = document_project();
+        let project = tmp.path().join("proj");
+        write(&project.join("yarn-error.log"), "Error: boom\n");
+        write(&project.join("local.log"), "Error: local\n");
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=Doc Test",
+                    "-c",
+                    "user.email=doc@example.invalid",
+                ])
+                .args(args)
+                .current_dir(&project)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["add", "yarn-error.log"]);
+        let text = "[src: file: yarn-error.log:tracked] [src: file: local.log:tracked]";
+        let messages = citation_messages(&project, text);
+        assert_eq!(messages.len(), 1, "{messages:#?}");
+        assert!(
+            messages[0].contains("local.log") && messages[0].contains("not tracked by git"),
+            "{}",
+            messages[0]
+        );
+        // The same file, claimed only to exist, needs no index entry.
+        assert!(citation_messages(&project, "[src: file: local.log:exists]").is_empty());
+    }
+
+    #[test]
+    fn a_content_claim_with_a_bare_path_is_still_refused_and_the_message_names_the_presence_form() {
+        let tmp = document_project();
+        let project = tmp.path().join("proj");
+        let messages = citation_messages(&project, "[src: file: notes.md]");
+        assert_eq!(messages.len(), 1, "{messages:#?}");
+        assert!(
+            messages[0].contains("[src: file: notes.md:<line>]")
+                && messages[0].contains("[src: file: notes.md:exists]"),
+            "{}",
+            messages[0]
+        );
+    }
+
+    #[test]
+    fn a_presence_citation_still_needs_the_file_to_exist_inside_the_project() {
+        let tmp = document_project();
+        let project = tmp.path().join("proj");
+        let messages = citation_messages(
+            &project,
+            "[src: file: missing.key:exists] [src: file: ../secret.bin:exists] \
+             [src: file: docs:exists]",
+        );
+        assert_eq!(messages.len(), 3, "{messages:#?}");
+    }
+
+    #[test]
     fn a_binary_file_is_cited_by_bare_path() {
         let tmp = document_project();
         let project = tmp.path().join("proj");
@@ -2574,6 +2682,25 @@ mod tests {
             messages.iter().all(|m| !m.contains("did you mean")),
             "{messages:#?}"
         );
+    }
+
+    #[test]
+    fn the_partial_banner_quoting_a_gate_reason_is_not_a_parenthesised_citation() {
+        // The banner turns the reason's brackets round and cuts it at a limit, so
+        // a quoted `[src: file: path:line]` ends as `(src: file: path:star)`.
+        let tmp = tempfile::tempdir().unwrap();
+        let banner = crate::api::audit::step_guard::partial_banner(
+            4,
+            "Use ONE [src: file: path:line] or [src: file: path:start-end] per reference",
+        );
+        assert!(banner.contains("(src: file: path:line)"), "{banner}");
+        let messages = citation_messages(tmp.path(), &format!("{banner}# Rules\n"));
+        assert!(messages.is_empty(), "{messages:#?}");
+        let messages = citation_messages(
+            tmp.path(),
+            &format!("{banner}# Rules\nBad (src: file: nope.rs:1)\n"),
+        );
+        assert_eq!(messages.len(), 1, "{messages:#?}");
     }
 
     #[test]

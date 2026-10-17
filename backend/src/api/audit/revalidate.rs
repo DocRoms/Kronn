@@ -76,6 +76,18 @@ pub(crate) fn stamp_rereads(
     citation_drift::record_reviews(project_path, &reviewed)
 }
 
+/// A validation vouches for the whole set the human just checked, so the docs
+/// no citation or path anchors count as re-read at the sources as they stand:
+/// without this stamp the plan sent them back to their steps right after the
+/// project was validated, with no change to the code or the docs (KT-1319).
+pub(crate) fn stamp_validated_rereads(project_path: &FsPath) -> Result<(), String> {
+    let planned = plan(project_path);
+    let rereads = RevalidationRun::of(&planned).rereads;
+    let docs_root = crate::core::docs_location::DocsRoot::of(project_path);
+    let chain = super::steps_for(AuditKind::Full, &docs_root);
+    stamp_rereads(project_path, &chain, &rereads)
+}
+
 /// What "Revalider l'audit" would do, computed without writing anything.
 pub fn plan(project_path: &FsPath) -> RevalidationPlan {
     let report = citation_drift::check(project_path);
@@ -700,7 +712,7 @@ pub async fn revalidate_audit(
     };
     let project_path = scanner::resolve_host_path(&project.path);
     if let Some(error) = crate::api::projects::template_merge::audit_launch_refusal(&project_path) {
-        return single_error(error);
+        return super::full::sse_refusal(error);
     }
     // A configured folder failing containment refuses the run (KT-1192).
     let docs_root = match crate::core::docs_location::DocsRoot::for_project(&project_path) {
@@ -783,7 +795,7 @@ fn deterministic_only(
             }
         };
         if let Some(error) = crate::api::projects::template_merge::audit_launch_refusal(&project_path) {
-            yield Event::default().event("error").data(serde_json::json!({"error":error}).to_string());
+            yield Event::default().event("error").data(error.to_string());
             return;
         }
         // KT-1324 — the re-anchors rewrite docs: an agent of a previous run

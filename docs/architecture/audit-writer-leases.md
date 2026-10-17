@@ -50,13 +50,13 @@ Full, Partial, or revalidation launches. The backend checks the merge branch
 before launch and again while holding the lease. The UI also holds launches for
 this state, including already audited projects; the optional-offer bypass cannot
 skip accepted commits pending integration.
-[src: file: backend/src/api/projects/template_merge.rs:324-330#audit_launch_refusal]
+[src: file: backend/src/api/projects/template_merge.rs:373-381#audit_launch_refusal]
 [src: file: backend/src/api/audit/full.rs:299-301#audit_launch_refusal]
-[src: file: backend/src/api/audit/full.rs:420-441#audit_launch_refusal]
+[src: file: backend/src/api/audit/full.rs:457-478#audit_launch_refusal]
 [src: file: backend/src/api/audit/drift.rs:284-286#audit_launch_refusal]
 [src: file: backend/src/api/audit/drift.rs:533-559#audit_launch_refusal]
-[src: file: backend/src/api/audit/revalidate.rs:702-704#audit_launch_refusal]
-[src: file: backend/src/api/audit/revalidate.rs:773-776#audit_launch_refusal]
+[src: file: backend/src/api/audit/revalidate.rs:714-716#audit_launch_refusal]
+[src: file: backend/src/api/audit/revalidate.rs:785-788#audit_launch_refusal]
 [src: file: frontend/src/hooks/useTemplateMergeOffer.ts:28-93#useTemplateMergeOffer]
 
 The regression suite exercises real HTTP refusals, cancellation before mutation,

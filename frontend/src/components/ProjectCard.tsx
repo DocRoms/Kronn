@@ -1,12 +1,13 @@
 import '../pages/Dashboard.css';
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
-import { planning, projects as projectsApi } from '../lib/api';
+import { planning, projects as projectsApi, externalApi, type ExternalApiConnectionView } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import { userError } from '../lib/userError';
 import { isUnverifiedAgentsRefusal } from '../lib/auditRefusal';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { isValidationDisc, isBriefingDisc, isBootstrapDisc, isTrackerMcp } from '../lib/constants';
 import { canRunAudit } from '../lib/agentCapabilities';
+import { effectiveLaunchChoice, runLaunchChoice, type ConnectionsStatus } from '../lib/auditLaunchChoice';
 import { AiDocViewer } from './AiDocViewer';
 import { unseenBasis } from '../lib/discussionUiUtils';
 import { onActivationKey } from '../lib/keyboardActivation';
@@ -22,7 +23,7 @@ import { SourcesBadge } from './SourcesBadge';
 import { RevalidateAudit } from './RevalidateAudit';
 import { DocReconfirm } from './DocReconfirm';
 import { TdTasksButton } from './TdTasksButton';
-import { TechDebtBlock } from './TechDebtBlock';
+import { TechDebtBlock, TechDebtTimelineEntry } from './TechDebtBlock';
 import {
   saveAuditCheckpoint, loadAuditCheckpoint, clearAuditCheckpoint,
   type AuditCheckpointKind,
@@ -459,8 +460,27 @@ export function ProjectCard({
   const [externalAdoptTick, setExternalAdoptTick] = useState(0);
   const [auditAgentChoice, setAuditAgentChoice] = useState<AgentType | undefined>(undefined);
   const [auditTierChoice, setAuditTierChoice] = useState<ModelTier>('reasoning');
+  // KT-1320 — set once the human picks in the panel: until then a retry or a
+  // resume runs on the agent, tier and connection of the run it continues.
+  const [auditPickTouched, setAuditPickTouched] = useState(false);
   // KT-980 — the named external API connection picked for an HTTP agent.
   const [auditConnectionId, setAuditConnectionId] = useState<string | null>(null);
+  // The named connections the picker lists (the panel loads the same list).
+  // Loading and failed are told apart from an empty list: a run's connection is
+  // only known to be deleted once the list loaded without it.
+  const [auditConnections, setAuditConnections] = useState<ExternalApiConnectionView[]>([]);
+  const [auditConnectionsStatus, setAuditConnectionsStatus] = useState<ConnectionsStatus>('loading');
+  useEffect(() => {
+    let alive = true;
+    externalApi.list()
+      .then(list => {
+        if (!alive) return;
+        setAuditConnections(list ?? []);
+        setAuditConnectionsStatus('ready');
+      })
+      .catch(() => { if (alive) setAuditConnectionsStatus('error'); });
+    return () => { alive = false; };
+  }, []);
   /// Companion ref for `auditActive` — keeps `handleFullAudit` and
   /// `startPartialAudit` race-free against a double-click that fires
   /// before React re-renders.
@@ -509,7 +529,7 @@ export function ProjectCard({
   // each audit completion/error so the "Lancer l'audit" button can
   // flip to the dynamic resume CTA when an Interrupted run is on file
   // for this project. `null` = no resumable run; otherwise the row.
-  const [resumableAudit, setResumableAudit] = useState<{ id: string; kind: AuditKind; last_completed_step: number; steps_to_redo?: number[]; started_at: string; from_repository?: boolean } | null>(null);
+  const [resumableAudit, setResumableAudit] = useState<{ id: string; kind: AuditKind; last_completed_step: number; steps_to_redo?: number[]; started_at: string; agent_type?: string; tier?: string; connection_id?: string; from_repository?: boolean } | null>(null);
   // Unknown is not "nothing to resume": launching waits until it is known (KT-1169).
   const [resumableUnknown, setResumableUnknown] = useState(false);
   const [resumableReload, setResumableReload] = useState(0);
@@ -522,6 +542,9 @@ export function ProjectCard({
     }).catch(() => { if (!cancelled) setResumableUnknown(true); });
     return () => { cancelled = true; };
   }, [proj.id, proj.audit_status, auditActive, auditCompletedTick, resumableReload]);
+  // KT-1320 — a pick belongs to the run it was made for: another project, or
+  // another run to continue, starts again from that run's own footing.
+  useEffect(() => { setAuditPickTouched(false); }, [proj.id, resumableAudit?.id]);
 
   // KT-1181 — a documented repo never merged gets the template v2 merge before its audit.
   const templateMerge = useTemplateMergeOffer(
@@ -628,10 +651,30 @@ export function ProjectCard({
 
   const auditAgents = useMemo(() => agents.filter(canRunAudit), [agents]);
   // A named connection is its own target: its agent need not be a detection.
-  const selectedAuditAgent = auditAgentChoice
+  const pickedAuditAgent = auditAgentChoice
     && (auditConnectionId !== null || auditAgents.some(a => a.agent_type === auditAgentChoice))
     ? auditAgentChoice
     : (auditAgents[0]?.agent_type ?? 'ClaudeCode');
+  // KT-1320 — what a launch runs on is what the panel shows: the run being
+  // retried or resumed, unless the human picked something else.
+  // The run's agent and tier are kept whatever the connections or the detections
+  // say; only its named connection follows the list (see `runLaunchChoice`).
+  const runChoice = useMemo(
+    () => runLaunchChoice(resumableAudit, { status: auditConnectionsStatus, list: auditConnections }),
+    [resumableAudit, auditConnectionsStatus, auditConnections],
+  );
+  const {
+    choice: launchChoice, fromRun: launchFromRun, connectionGone: launchConnectionGone,
+  } = effectiveLaunchChoice(
+    { agent: pickedAuditAgent, tier: auditTierChoice, connectionId: auditConnectionId },
+    auditPickTouched,
+    runChoice,
+  );
+  // The panel, the full / partial audit and the revalidation all read this one
+  // choice: what is shown is what is launched.
+  const selectedAuditAgent = launchChoice.agent;
+  const selectedAuditTier = launchChoice.tier;
+  const selectedAuditConnectionId = launchChoice.connectionId;
 
   // ── Computed ──
   const validationInProgress = headerTimeline?.latest?.status === 'Completed'
@@ -883,9 +926,12 @@ export function ProjectCard({
       stepIndex: 0, totalSteps: 16, currentFile: null,
     });
     try {
+      // KT-1320 — every launch runs on the choice the panel shows: the run's
+      // while the picker is untouched, else the human's.
+      const onRun = resumeRunId !== null;
       await projectsApi.fullAuditStream(proj.id, {
         agent: selectedAuditAgent,
-        tier: auditTierChoice,
+        tier: selectedAuditTier,
         // A fresh launch always runs the complete 16-step chain. Resume sends
         // only the run id so the server remains authoritative for legacy runs.
         kind: resumeRunId ? null : 'Full',
@@ -899,7 +945,10 @@ export function ProjectCard({
         // KT-1324 — the human's word that no agent runs, after a refusal for a
         // process table Kronn could not read.
         accept_unverified_agents: options.acceptUnverifiedAgents ? true : undefined,
-        connection_id: auditConnectionId ?? undefined,
+        // The run's own connection is the server's to inherit when it resumes
+        // that run (it falls back to the agent's default if that connection was
+        // deleted since); any other launch sends the connection the panel shows.
+        connection_id: (onRun && launchFromRun ? null : selectedAuditConnectionId) ?? undefined,
       }, {
         onTemplateInstalled: () => {},
         // 0.8.3 TD #274 — backend-authoritative wallclock for the
@@ -1048,7 +1097,7 @@ export function ProjectCard({
     } finally {
       setAuditAbortController(null);
     }
-  }, [selectedAuditAgent, auditTierChoice, auditConnectionId, proj.id, t, toast, onRefetch, onRefetchDiscussions, onAutoRunDiscussion, resumableAudit]);
+  }, [selectedAuditAgent, selectedAuditTier, selectedAuditConnectionId, launchFromRun, proj.id, t, toast, onRefetch, onRefetchDiscussions, onAutoRunDiscussion, resumableAudit]);
 
   const launchPartialAudit = useCallback(async (steps: number[], acceptUnverifiedAgents = false) => {
     if (auditActiveRef.current) return;
@@ -1068,7 +1117,7 @@ export function ProjectCard({
     });
     try {
       await projectsApi.partialAuditStream(proj.id, {
-        agent: selectedAuditAgent, tier: auditTierChoice, steps, connection_id: auditConnectionId ?? undefined,
+        agent: selectedAuditAgent, tier: selectedAuditTier, steps, connection_id: selectedAuditConnectionId ?? undefined,
         accept_unverified_agents: acceptUnverifiedAgents ? true : undefined,
       }, {
         onStepStart: (step, total, file) => {
@@ -1164,7 +1213,7 @@ export function ProjectCard({
     } finally {
       setAuditAbortController(null);
     }
-  }, [selectedAuditAgent, auditTierChoice, auditConnectionId, proj.id, t, toast, onRefetch, onRefetchDrift, onRefetchDiscussions, onOpenDiscussion, onNavigate]);
+  }, [selectedAuditAgent, selectedAuditTier, selectedAuditConnectionId, proj.id, t, toast, onRefetch, onRefetchDrift, onRefetchDiscussions, onOpenDiscussion, onNavigate]);
 
   const startPartialAudit = useCallback(async (steps: number[], acceptUnverifiedAgents = false) => {
     await gateTemplateLaunch(() => void launchPartialAudit(steps, acceptUnverifiedAgents));
@@ -1806,8 +1855,8 @@ export function ProjectCard({
         project={proj}
         auditActive={auditActive}
         agent={selectedAuditAgent}
-        tier={auditTierChoice}
-        connectionId={auditConnectionId}
+        tier={selectedAuditTier}
+        connectionId={selectedAuditConnectionId}
         toast={toast}
         onRefetch={() => { onRefetch(); setDocStateReload(value => value + 1); }}
         onRefetchDrift={(projectId) => { onRefetchDrift(projectId); setDocStateReload(value => value + 1); }}
@@ -2705,13 +2754,15 @@ export function ProjectCard({
                   <AuditTimeline
                     projectId={proj.id}
                     auditStatus={proj.audit_status}
-                    techDebtCount={proj.tech_debt_count ?? 0}
                     agents={agents}
                     selectedAgent={selectedAuditAgent}
-                    selectedTier={auditTierChoice}
+                    selectedTier={selectedAuditTier}
                     modelTiers={modelTiers}
-                    selectedConnectionId={auditConnectionId}
+                    selectedConnectionId={selectedAuditConnectionId}
+                    selectionFromRun={launchFromRun}
+                    selectionConnectionGone={launchConnectionGone}
                     onSelect={(agent, tier, connectionId) => {
+                      setAuditPickTouched(true);
                       setAuditAgentChoice(agent);
                       setAuditTierChoice(tier);
                       setAuditConnectionId(connectionId);
@@ -2795,12 +2846,24 @@ export function ProjectCard({
                       onOpenDiscussion(discussionId);
                       onNavigate('discussions');
                     }}
-                    onViewTechDebts={() => {
-                      if (!isOpen) onToggleOpen();
-                      selectDetailView('docs');
-                      setExpandedTab('docAi');
-                      setDocDeepLink('docs/tech-debt');
-                    }}
+                    techDebtEntry={(
+                      <TechDebtTimelineEntry
+                        project={proj}
+                        auditActive={auditActive}
+                        agents={agents}
+                        modelTiers={modelTiers}
+                        toast={toast}
+                        onOpenDiscussion={onOpenDiscussion}
+                        onNavigate={onNavigate}
+                        onRefetch={onRefetch}
+                        onOpenFile={() => {
+                          if (!isOpen) onToggleOpen();
+                          selectDetailView('docs');
+                          setExpandedTab('docAi');
+                          setDocDeepLink('docs/inconsistencies-tech-debt.md');
+                        }}
+                      />
+                    )}
                     onVerifyDocs={() => setVerifyDocsOpen(true)}
                     docStateCounts={docStateCounts}
                     refreshTrigger={auditCompletedTick}

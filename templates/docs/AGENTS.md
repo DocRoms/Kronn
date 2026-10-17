@@ -81,9 +81,7 @@ If T0–T2 are insufficient, state which additional file you need and why. Never
 - **Guess tool versions** — if prerequisites are not filled below, ask.
 - **Guess languages or frameworks** — check § 6 Stack.
 - **Edit auto-generated files** — if a file is marked as generated (e.g., types exported from another language), never edit it by hand.
-- **Load all T2 files at once** — max 3, pick what you need.
 - **Modify business code** when the task is only about project documentation — edit `docs/` only.
-- **Skip the test policy** — see § Project parameters above and § 4.
 
 ---
 
@@ -96,6 +94,7 @@ If T0–T2 are insufficient, state which additional file you need and why. Never
 ## 4. Constraints
 
 - If no command output: ask user to paste it.
+- **Human decision** (trade-off, approval, ambiguous scope) in a Kronn room: post a closed `kronn-question` fence via `disc_append`, never prose alone; numeric `"version":1`, stable `key`; read back with `disc_question_list`; never answer for the human.
 - {{WORKFLOW_CONSTRAINT_1}}
 - {{WORKFLOW_CONSTRAINT_2}}
 
@@ -141,9 +140,7 @@ New code placement: see [repo-map](repo-map.md).
 
 ## 9. Multi-agent config
 
-Redirectors at the project root: `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.kiro/steering/instructions.md`, `.vibe/instructions.md`, `.cursorrules`, `.cursor/rules/repo-instructions.mdc`, `.github/copilot-instructions.md`, `.windsurfrules`, `.clinerules`.
-
-Redirectors are stubs pointing to [docs/AGENTS.md](AGENTS.md); all content lives in `docs/`.
+Root redirectors: `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.kiro/steering/instructions.md`, `.vibe/instructions.md`, `.cursorrules`, `.cursor/rules/repo-instructions.mdc`, `.github/copilot-instructions.md`, `.windsurfrules`, `.clinerules`. They are stubs pointing to [docs/AGENTS.md](AGENTS.md); all content lives in `docs/`.
 
 ---
 

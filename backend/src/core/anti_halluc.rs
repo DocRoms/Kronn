@@ -319,6 +319,10 @@ impl SourceOrigin {
             name: Some(name.to_string()),
         }
     }
+
+    fn is_checkout(&self) -> bool {
+        self.kind == SourceOriginKind::Checkout
+    }
 }
 
 /// A worktree of the discussion's own project, consulted after the checkout.
@@ -1242,6 +1246,67 @@ pub(crate) fn markers_at(prose: &str) -> Vec<(usize, String)> {
     out
 }
 
+/// `value` cut to `max` characters without ever cutting inside a
+/// `[src: …]` marker: when the limit lands in one, the cut moves back to just
+/// before its `[`. `ellipsis` appends `…` when something was dropped (it counts
+/// toward `max`). A marker already unclosed in `value` is dropped from its `[`
+/// on, so the cut text never carries a dangling opener.
+/// Every Kronn-generated text that can carry a citation must truncate through
+/// this, never through a bare `chars().take(n)`.
+pub fn truncate_outside_markers(value: &str, max: usize, ellipsis: bool) -> String {
+    if value.chars().count() <= max {
+        return value.to_string();
+    }
+    let room = if ellipsis { max.saturating_sub(1) } else { max };
+    let chars: Vec<char> = value.chars().collect();
+    let mut cut = room;
+    let lower: Vec<char> = value.to_ascii_lowercase().chars().collect();
+    let needle: Vec<char> = "[src:".chars().collect();
+    let mut i = 0usize;
+    while i + needle.len() <= chars.len() && i < cut {
+        if lower[i..i + needle.len()] != needle[..] {
+            i += 1;
+            continue;
+        }
+        let mut depth = 1i32;
+        let mut j = i + needle.len();
+        let mut close = None;
+        while j < chars.len() {
+            match chars[j] {
+                '[' => depth += 1,
+                ']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(j);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        match close {
+            // The limit falls inside this closed marker: stop before it.
+            Some(end) if end >= cut => {
+                cut = i;
+                break;
+            }
+            Some(end) => i = end + 1,
+            // An unclosed marker is malformed already: never keep its opener.
+            None => {
+                cut = i;
+                break;
+            }
+        }
+    }
+    let mut out: String = chars[..cut].iter().collect();
+    if ellipsis {
+        out = out.trim_end().to_string();
+        out.push('…');
+    }
+    out
+}
+
 /// Whether the newline at `at` is followed by a blank line (`\n` + optional
 /// spaces + `\n`).
 fn blank_line_at(chars: &[char], at: usize) -> bool {
@@ -1452,9 +1517,53 @@ fn split_path_and_lines(reference: &str) -> (&str, Option<(usize, usize)>) {
             if let Some((s, e)) = parse_line_spec(after) {
                 return (path, Some((s, e)));
             }
+            // A presence citation names the file, not a line of it.
+            if is_presence_marker(after) {
+                return (path, None);
+            }
         }
     }
     (reference, None)
+}
+
+/// Suffixes of a presence citation, `[src: file: <path>:exists]`: the claim is
+/// that the file is there (or tracked), so it needs no line and never invites
+/// quoting the content of a private key or a log.
+const PRESENCE_MARKERS: &[&str] = &["exists", "tracked"];
+
+/// Whether the text after the last `:` of a file citation is a presence marker.
+pub(crate) fn is_presence_marker(after: &str) -> bool {
+    let after = after.trim();
+    PRESENCE_MARKERS
+        .iter()
+        .any(|marker| after.eq_ignore_ascii_case(marker))
+}
+
+/// Whether the presence marker claims the file is tracked by git, which the
+/// index must confirm: `exists` is settled by the file being there.
+pub(crate) fn is_tracked_marker(after: &str) -> bool {
+    after.trim().eq_ignore_ascii_case("tracked")
+}
+
+/// A `path:tracked` citation that no checkout root's git index backs.
+fn untracked_claim(reference: &str, roots: &[&Path]) -> bool {
+    let Some((path, after)) = clean_reference(reference).rsplit_once(':') else {
+        return false;
+    };
+    is_tracked_marker(after) && !roots.iter().any(|root| is_git_tracked(root, path.trim()))
+}
+
+/// Whether git tracks `rel` in the repository at `root`. Outside a repository,
+/// or without git, nothing is tracked.
+pub(crate) fn is_git_tracked(root: &Path, rel: &str) -> bool {
+    crate::core::cmd::git_cmd()
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "--error-unmatch", "--", rel])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 /// The en and em dash, which models write where a line range wants a hyphen.
@@ -1918,8 +2027,18 @@ pub fn verify_source_marker_lanes(raw: &str, roots: &[&Path], lanes: &[LaneRoot]
         }
         SourceKind::File => {
             let (st, detail, found_in) = verify_file_ref_located(&reference, roots, lanes);
+            let untracked = st == SourceStatus::Verified
+                && found_in.as_ref().is_some_and(SourceOrigin::is_checkout)
+                && untracked_claim(&reference, roots);
             origin = found_in;
-            (st, detail)
+            if untracked {
+                (
+                    SourceStatus::NotFound,
+                    format!("{detail} — but git does not track it"),
+                )
+            } else {
+                (st, detail)
+            }
         }
     };
 
@@ -2905,6 +3024,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn truncate_outside_markers_never_cuts_a_marker() {
+        let text = "aaaa [src: file: src/lib.rs:10] bbbb [src: file: x[0].rs:1] cccc";
+        for max in 1..=text.chars().count() + 2 {
+            for ellipsis in [false, true] {
+                let out = truncate_outside_markers(text, max, ellipsis);
+                assert!(out.chars().count() <= max, "max {max}: {out}");
+                let opened = out.to_ascii_lowercase().matches("[src:").count();
+                assert_eq!(
+                    opened,
+                    extract_source_markers(&out).len(),
+                    "max {max} ellipsis {ellipsis}: {out}"
+                );
+            }
+        }
+        // Under the limit: untouched. Cut before a marker: stops at its `[`.
+        assert_eq!(truncate_outside_markers("short", 40, true), "short");
+        assert_eq!(
+            truncate_outside_markers("aaaa [src: file: a.rs:1] z", 12, false),
+            "aaaa "
+        );
+        assert_eq!(
+            truncate_outside_markers("aaaa [src: file: a.rs:1] z", 12, true),
+            "aaaa…"
+        );
+        // A marker already unclosed in the input is cut before its opener too.
+        assert_eq!(
+            truncate_outside_markers("ab [src: file: a", 8, false),
+            "ab "
+        );
+        assert_eq!(
+            truncate_outside_markers("ab [src: file: a.rs:1", 12, true),
+            "ab…"
+        );
+    }
+
+    #[test]
     fn strip_fenced_code_drops_closed_blocks_but_restores_unclosed_ones() {
         // Closed fence: content is code, dropped.
         assert_eq!(
@@ -3738,6 +3893,38 @@ mod tests {
         assert_eq!(split_path_and_lines("weird:name"), ("weird:name", None));
         // Reversed range is rejected → treated as no line spec.
         assert_eq!(split_path_and_lines("foo.rs:20-10"), ("foo.rs:20-10", None));
+        // A presence marker names the file, not a line of it.
+        assert_eq!(split_path_and_lines("foo.rs:exists"), ("foo.rs", None));
+        assert_eq!(split_path_and_lines("foo.rs:Tracked"), ("foo.rs", None));
+    }
+
+    #[test]
+    fn a_presence_marker_verifies_the_file_exists_without_a_line() {
+        let root = temp_project();
+        let found = verify_source_marker("file: src/foo.rs:exists", Some(&root));
+        assert_eq!(found.status, SourceStatus::Verified, "{found:?}");
+        let missing = verify_source_marker("file: src/gone.rs:exists", Some(&root));
+        assert_eq!(missing.status, SourceStatus::NotFound, "{missing:?}");
+        // `tracked` is the index's word, not the disk's: this root is no repository yet.
+        let untracked = verify_source_marker("file: src/foo.rs:tracked", Some(&root));
+        assert_eq!(untracked.status, SourceStatus::NotFound, "{untracked:?}");
+        assert!(
+            untracked.detail.contains("git does not track it"),
+            "{untracked:?}"
+        );
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["add", "src/foo.rs"]);
+        let tracked = verify_source_marker("file: src/foo.rs:tracked", Some(&root));
+        assert_eq!(tracked.status, SourceStatus::Verified, "{tracked:?}");
+        std::fs::remove_dir_all(&root).ok();
     }
 
     // KT-1307: the en and em dash a model writes for a range hyphen are read the

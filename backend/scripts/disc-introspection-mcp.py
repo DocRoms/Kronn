@@ -683,19 +683,19 @@ TOOLS = [
     {
         "name": "disc_append",
         "description": (
-            "Post prose to the bound room. NEVER invent a pseudo: the human is `@user`; "
+            "Post to the bound room. Human decision → `kronn-question` fence "
+            "(`tool_manual disc_question_list`). NEVER invent a pseudo: the human is `@user`; "
             "native aliases are `@claude`, `@codex`, `@vibe`, `@gemini`, `@kiro`, "
             "`@copilot`, `@ollama`; a joined CLI requires its exact `@…-cli[-N]` alias "
-            "from `disc_meta`. Ambiguous bare aliases are refused. Use "
-            "`reply_to_message_id` for a durable reply. POSTING ALSO LISTENS unless "
-            "`wait_for_reply:false`; `last_sort_order` is only a write receipt, never a "
-            "read cursor. Bulk import and dedup: "
+            "from `disc_meta`; ambiguous bare aliases are refused. POSTING ALSO LISTENS unless "
+            "`wait_for_reply:false`; `last_sort_order` is a write receipt, not a "
+            "read cursor. Bulk import/dedup: "
             "`tool_manual({tool: \"disc_append\"})`."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "content": {"type": "string", "description": "Live message text."},
+                "content": {"type": "string", "description": "Message text."},
                 "role": {"type": "string", "description": "Default Agent; User is for imports."},
                 "channel": {"type": "string", "enum": ["main", "note"], "description": "Default main; notes do not wake."},
                 "agent_type": {"type": "string", "description": "Normally inferred."},
@@ -722,11 +722,11 @@ TOOLS = [
                 },
                 "wait_for_reply": {"type": "boolean", "description": "Default true."},
                 "source_msg_id": {"type": "string", "description": "Explicit dedup key."},
-                "wait_timeout_secs": {"type": "integer", "description": "Wait seconds; default 60."},
+                "wait_timeout_secs": {"type": "integer", "description": "Default 60 s."},
                 "disc_id": {"type": "string", "description": "Defaults to the bound discussion."},
                 "messages": {
                     "type": "array",
-                    "description": "Bulk transcript messages.",
+                    "description": "Bulk messages.",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -4292,6 +4292,29 @@ def _current_project_id():
     return meta.get("project_id") if meta else None
 
 
+# What the backend answers (403) when a request names a resource outside the
+# scope its bridge token was launched with (`core/bridge_token.rs`).
+_SCOPE_REFUSAL_MARKERS = (
+    "outside this bridge token's scope",
+    "outside this bridge token's project",
+)
+_SCOPE_REFUSAL_HINT = (
+    "this agent was launched with a scope, and the resource it asked for is "
+    "outside it: it is not a failure of the tool. Do not retry the same id. "
+    "Ask the human to attach that discussion to this one, or work with the "
+    "discussions of this project (disc_list)."
+)
+
+
+def _http_error(code, body):
+    """The error for a non-2xx reply. A scope refusal says why and what to do,
+    since an agent runtime relays a bare 403 as "the tool returned an error"."""
+    message = f"HTTP {code}: {body[:500]}"
+    if code == 403 and any(marker in body for marker in _SCOPE_REFUSAL_MARKERS):
+        message += f" — {_SCOPE_REFUSAL_HINT}"
+    return RuntimeError(message)
+
+
 def _http(method, path, body=None, timeout=180):
     url = f"{_backend_url()}{path}"
     data = json.dumps(body).encode() if body is not None else None
@@ -4305,7 +4328,7 @@ def _http(method, path, body=None, timeout=180):
             return json.load(resp)
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"HTTP {e.code}: {body[:500]}")
+        raise _http_error(e.code, body)
 
 
 def _http_transport_retry(
@@ -4362,7 +4385,7 @@ def _http_text(method, path):
             return resp.read().decode("utf-8")
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"HTTP {e.code}: {body[:500]}")
+        raise _http_error(e.code, body)
 
 
 def _unwrap(envelope):
@@ -4489,7 +4512,7 @@ def _http_upload_context_file(disc_id, file_path):
             return _unwrap(json.load(resp))
     except urllib.error.HTTPError as exc:
         response_body = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"HTTP {exc.code}: {response_body[:500]}")
+        raise _http_error(exc.code, response_body)
 
 
 def _rollback_uploaded_context_files(disc_id, uploaded):
@@ -9936,6 +9959,25 @@ def call_kronn_intro(_args):
 # guessed — traps, closed sets, binding rules — never the methodology.
 # KT-629 — one orientation shared by initialize and both room manuals.
 # This is emitted guidance, not a change to wait/cursor or authority behavior.
+# KT-1329 — Claude Code cuts MCP `instructions` at 2048 chars, so the card
+# bullet is self-contained, sits right after the intro line, and FIRST CONTACT
+# goes last. `test_decision_card_survives_the_2048_char_client_cut` pins it.
+HUMAN_DECISION_CARD_BULLET = (
+    "• **Human decision → `kronn-question` card.** For ANY choice the human must "
+    "arbitrate (trade-off, approval, ambiguous scope), post a closed "
+    "```kronn-question fence with `disc_append`, never prose alone: "
+    '{"version":1,"key":"stable-key","question":"…","options":[{"id":"a","label":"…"}]} '
+    "— `key` not `id`; `version` is the number 1. Read back with "
+    "`disc_question_list({key})`; only the human answers.\n"
+)
+
+# Spawned task workers have neither `disc_append` nor `disc_question_list`.
+HUMAN_DECISION_WORKER_NOTE = (
+    " You cannot post a decision card from here: when the human must arbitrate, "
+    "stop that scope, state the exact blocker and options in your output, and ask "
+    "the principal to relay a `kronn-question` card; never decide for the human."
+)
+
 ROOM_WORK_PROTOCOL = (
     "Read `plan_get` (and `task_list` for the wider backlog) before substantive action. "
     "Before each bounded step, announce task/scope/next action with `disc_append`. "
@@ -11888,33 +11930,35 @@ def _handle(req):
                         "evidence, docs/migrations/risks/limitations and summary). "
                         "Kronn injects and verifies execution/task identity, clean HEAD, "
                         "file inventory and opaque DoD ids; never invent them."
+                        + HUMAN_DECISION_WORKER_NOTE
                     ),
                 },
             }
-        if _declared_step_tools() is not None:
+        declared_tools = _declared_step_tools()
+        if declared_tools is not None:
             # A step that declared its tools gets them, not the catalogue map.
-            return {
-                "jsonrpc": "2.0",
-                "id": rid,
-                "result": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": _server_capabilities(),
-                    "serverInfo": {
-                        "name": "kronn-internal",
-                        "version": BRIDGE_TOOL_SURFACE_VERSION,
-                    },
+            # Only a step that can post to the room also learns the decision
+            # card; without `disc_append` it has no way to ask the human.
+            step_result = {
+                "protocolVersion": "2024-11-05",
+                "capabilities": _server_capabilities(),
+                "serverInfo": {
+                    "name": "kronn-internal",
+                    "version": BRIDGE_TOOL_SURFACE_VERSION,
                 },
             }
+            if "disc_append" in declared_tools:
+                step_result["instructions"] = HUMAN_DECISION_CARD_BULLET.removeprefix("• ")
+            return {"jsonrpc": "2.0", "id": rid, "result": step_result}
         client_name = (_CLIENT_INFO.get("name") or "unknown").strip() or "unknown"
+        # KT-1329 — right after the decision bullet, inside the client's
+        # 2048-char cut: a tail copy was never seen by Claude Code.
         first_contact = "" if _onboarding_done_for(client_name) else (
-            "🎉 **FIRST CONTACT** — this is the first Kronn session for this "
-            "CLI on this machine. Once the user's immediate request is "
-            "handled, offer ONCE, in the user's language: \"Je vois que "
-            "Kronn vient d'être connecté — veux-tu un tour rapide de ce que "
-            "je peux faire avec ?\" If they accept, call `kronn_intro` and "
-            "present its guide conversationally (do not paste it raw). "
-            "Accepted or declined, call `kronn_intro` afterwards anyway so "
-            "the offer is never repeated.\n\n"
+            "• 🎉 **FIRST CONTACT** — first Kronn session for this CLI on this "
+            "machine. Once the user's request is handled, offer ONCE, in their "
+            "language, a quick tour (\"Kronn vient d'être connecté — veux-tu un "
+            "tour rapide ?\"). If accepted, call `kronn_intro` and present it "
+            "conversationally; call it afterwards anyway so the offer never repeats.\n"
         )
         return {
             "jsonrpc": "2.0",
@@ -11937,17 +11981,19 @@ def _handle(req):
                 # `workflow_get`-only-saw-Agent-steps trap). Kept concise: a
                 # CLOSED map + pointers, not a manual (open catalogues stay
                 # behind on-demand tools like `mcp_list`).
-                "instructions": first_contact + (
+                "instructions": (
                     "You're connected to **Kronn** — it orchestrates agents, "
                     "discussions, multi-step workflows and external APIs. "
                     "Kronn stores configured credentials encrypted and injects API-broker "
                     "authentication server-side. MCP host sync may also write environment "
                     "values required by the local CLI configuration. Never paste secrets into prompts. "
                     "Your tools, by area:\n"
+                    + HUMAN_DECISION_CARD_BULLET
+                    + first_contact +
                     "• Opaque IDs: when the user pastes an ID without naming its type, call `resolve_id` FIRST; it returns compact routing context and the object-specific tool to use next.\n"
                     "• Discussions (multi-agent threads): `disc_meta`/`disc_get_message`/`disc_search`/`disc_load_other`/`disc_create`/`disc_append`/`disc_join`/`disc_invite_peer`…\n"
                     "• **Working in a room:** " + ROOM_WORK_PROTOCOL + "\n"
-                    '• Blocking human decisions MUST use a closed `kronn-question` JSON fence, never prose alone. `version` MUST be the JSON number 1, never the string "1". Read `disc_question_list` first; its tool_manual has a complete valid example. After publication, read back the exact key to verify recording; if absent, correct the payload and republish with the same key. Wait for a durable human answer before advancing the affected lot; independent work can continue. Agents cannot answer for humans.\n'
+                    "• Decision cards, details: read `disc_question_list` first to reuse an existing decision; `tool_manual({tool: \"disc_question_list\"})` has the full schema. If the key is absent after publication, correct the payload and republish with the same key. Wait for the durable human answer before advancing the affected lot; independent work can continue. Agents cannot answer for humans.\n"
                     "• Rich room output: messages are Markdown. A `mermaid` fence renders a diagram; `kronn-doc-preview` renders sandboxed HTML with PDF/DOCX actions (a plain `html` fence is only code); `kronn-doc-data` exposes CSV/XLSX/PPTX export. Use visual output only when it materially helps.\n"
                     "• Planning: a discussion may have a shared plan made of prioritized, editable tasks. The user may refer to it naturally as “the plan”, “the tasks”, “what remains”, “the priority”, and similar wording. Use `plan_get` (compact current objective/plan) · `task_list` (compact filtered backlog) · `task_get` (FULL task) · `task_changes` (deltas) · `proposal_list`/`proposal_get` (durable proposals, read-only) · narrow writes `task_create`/`task_update`/`task_update_dod`/`task_link_discussion`/`task_unlink_discussion`/`task_add_blocker`/`task_remove_blocker`/`task_assign` (yourself, when taking a task). Read the relevant plan first. Immediately before any direct `task_create`, call `plan_get` again so a peer's recent write is visible. Apply unambiguous intent directly; otherwise propose a human-gated `kronn-plan-action` fence (`create`, `create_many`, `status`, `complete`, `unblock`, `open`). You may read and propose, but only a human accepts, rejects or decides a durable proposal. Never replace a requested plan update with a prose-only summary. Whenever tracked work starts or materially changes, keep its status, DoD and priority honest in the plan. Write only on a real change: never reload or rewrite an unchanged task merely to report progress. If the announced Planning tools are missing from your MCP surface, use the read-only `plan_snapshot` from `disc_join`, ask @user to reconnect the Kronn MCP, and never fabricate an update.\n"
                     "• Human-gated Automation proposals: after resolving a real QP/QA/QE/Workflow id and its declared variables through the catalogue/get tools, an agent may emit one `kronn-action` fence with `{\"kind\":\"quick_prompt|quick_api|quick_exec|workflow\",\"target_id\":\"<real id>\",\"project_id\":\"<optional id>\",\"values\":[{\"name\":\"<declared variable>\",\"value\":\"<editable suggestion>\",\"provenance\":\"agent_suggestion\",\"suggested_by\":\"<your alias>\"}]}`. This proposes only: Kronn validates and persists the card, and the human click launches it. Never invent ids/variables or include secret/resolved values.\n"

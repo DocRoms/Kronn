@@ -92,6 +92,21 @@ fn has_kronn_state(state: Option<&crate::core::kronn_state::KronnState>) -> bool
     })
 }
 
+/// The v1 template's entry file: it opens on the `<!-- kronn:doc-version=… -->`
+/// header and carries Kronn's signature heading. A human's file mentioning
+/// either does not qualify; both together, at its head, only Kronn wrote.
+fn has_v1_signature(dir: &Path) -> bool {
+    let Ok(content) = std::fs::read_to_string(dir.join("AGENTS.md")) else {
+        return false;
+    };
+    content
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .is_some_and(|line| line.starts_with("<!-- kronn:doc-version="))
+        && crate::core::legacy_docs::is_kronn_managed_docs(dir)
+}
+
 /// The recorded files of `state` that are still what Kronn wrote: a recorded
 /// entry stands only while the file's current sha256 equals the recorded one.
 /// A file the human rewrote since (or a hand-crafted record naming a file Kronn
@@ -173,7 +188,15 @@ pub fn folder_state_with_runs(root: &Path, rel: &str, recorded_run: bool) -> Doc
         return DocsFolderState::Missing;
     }
     let state = read_state(&dir);
-    let recorded = recorded_run || has_kronn_state(state.as_ref());
+    // A clone of a v1-documented repository carries no `.kronn.json`: the v1
+    // entry file's own signature stands for the record (KT-1310). An unparsable
+    // or empty state file is not "no record", it stays unproven.
+    let recorded = recorded_run
+        || has_kronn_state(state.as_ref())
+        || (!dir
+            .join(crate::core::kronn_state::KRONN_STATE_FILENAME)
+            .exists()
+            && has_v1_signature(&dir));
     // What Kronn wrote is its own, never a human's. It stands as proof the
     // folder is Kronn's only once an install made the folder Kronn's: written
     // beside a human's docs, it must not turn them into Kronn's (KT-1299).
@@ -557,5 +580,89 @@ mod tests {
         let err = move_to_legacy(t.path(), &docs).unwrap_err();
         assert!(err.contains("never merges"), "{err}");
         assert!(t.path().join("docs/new.md").is_file());
+    }
+
+    const V1_ENTRY: &str =
+        "<!-- kronn:doc-version=\"1.0\" -->\n# AI agent context — Entry point\n\nBody\n";
+
+    #[test]
+    fn a_clone_of_v1_docs_without_a_state_file_is_kronns_by_its_signature() {
+        let t = tempfile::tempdir().unwrap();
+        write(t.path(), "docs/AGENTS.md", V1_ENTRY);
+        write(t.path(), "docs/architecture/overview.md", "# Overview\n");
+        write(t.path(), "docs/glossary.md", "# Glossary\n");
+        assert_eq!(
+            folder_state(t.path(), "docs"),
+            DocsFolderState::KronnManaged
+        );
+    }
+
+    #[test]
+    fn the_v1_signature_needs_both_the_header_and_the_heading_and_no_state_file() {
+        let human = |t: &Path| human_count(&folder_state(t, "docs")).is_some();
+        // Header only: a human's heading under it.
+        let t = tempfile::tempdir().unwrap();
+        write(
+            t.path(),
+            "docs/AGENTS.md",
+            "<!-- kronn:doc-version=\"1.0\" -->\n# Our own guide\n",
+        );
+        assert!(human(t.path()));
+        // Heading only.
+        let t = tempfile::tempdir().unwrap();
+        write(
+            t.path(),
+            "docs/AGENTS.md",
+            "# AI agent context — Entry point\n",
+        );
+        assert!(human(t.path()));
+        // The header quoted below a human's first line.
+        let t = tempfile::tempdir().unwrap();
+        write(
+            t.path(),
+            "docs/AGENTS.md",
+            "# Notes\n\n<!-- kronn:doc-version=\"1.0\" -->\n# AI agent context — Entry point\n",
+        );
+        assert!(human(t.path()));
+        // A state file that records nothing is not "no record": it stays unproven.
+        let t = tempfile::tempdir().unwrap();
+        write(t.path(), "docs/AGENTS.md", V1_ENTRY);
+        write(t.path(), "docs/.kronn.json", "{}");
+        assert!(human(t.path()));
+    }
+
+    #[test]
+    fn a_template_merge_makes_its_files_kronns_and_leaves_the_sources_human() {
+        let t = tempfile::tempdir().unwrap();
+        write(t.path(), "docs/coding-rules.md", "# Our rules\n");
+        write(
+            t.path(),
+            "docs/AGENTS.md",
+            "<!-- kronn:doc-version=\"1.1\" -->\n# Project guide\n\nMerged text.\n",
+        );
+        write(t.path(), "docs/glossary.md", "# Glossary\n");
+        // Unrecorded, the sources and the merged files are all a human's.
+        assert_eq!(human_count(&folder_state(t.path(), "docs")), Some(3));
+
+        crate::core::kronn_state::record_template_merge(
+            &t.path().join("docs"),
+            &["AGENTS.md".to_string(), "glossary.md".to_string()],
+        )
+        .unwrap();
+        assert_eq!(
+            folder_state(t.path(), "docs"),
+            DocsFolderState::KronnManaged
+        );
+        // The human's source is still theirs: rewritten merged file too.
+        let state = read_state(&t.path().join("docs")).unwrap();
+        assert_eq!(
+            state
+                .kronn_written
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["AGENTS.md", "glossary.md"]
+        );
+        assert!(!state.kronn_written.contains_key("coding-rules.md"));
     }
 }

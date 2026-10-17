@@ -282,7 +282,7 @@ pub async fn partial_audit(
     let project = project.expect("project is Some after early return");
     let project_path = scanner::resolve_host_path(&project.path);
     if let Some(error) = crate::api::projects::template_merge::audit_launch_refusal(&project_path) {
-        return super::full::sse_error(error);
+        return super::full::sse_refusal(error);
     }
     // One root for every artefact (KT-1192); a broken override refuses.
     let docs_root = match crate::core::docs_location::DocsRoot::for_project(&project_path) {
@@ -556,7 +556,7 @@ pub(crate) async fn run_partial_pipeline(
         drop_guard.hold_lease();
         if let Some(error) = crate::api::projects::template_merge::audit_launch_refusal(&project_path) {
             drop_guard.disarm();
-            yield Event::default().event("error").data(serde_json::json!({"error":error}).to_string());
+            yield Event::default().event("error").data(error.to_string());
             return;
         }
 
@@ -981,7 +981,9 @@ pub(crate) async fn run_partial_pipeline(
                 }
             }
 
-            let max_attempts = if enforce_mode || revalidation.is_some() {
+            let detector_gated = analysis_step.target_file.ends_with("inconsistencies-tech-debt.md")
+                && !detector_signals.is_empty();
+            let max_attempts = if enforce_mode || revalidation.is_some() || detector_gated {
                 super::anti_hallu_enforce::MAX_ATTEMPTS
             } else {
                 1
@@ -1344,14 +1346,26 @@ pub(crate) async fn run_partial_pipeline(
                     }
 
                     if success && analysis_step.target_file.ends_with("inconsistencies-tech-debt.md") {
-                        if let Some(w) = super::validation::check_detector_disposition(
+                        if let Some(gap) = super::validation::detector_disposition_gap(
                             &project_path, &detector_signals,
                         ) {
+                            if attempt < max_attempts {
+                                yield Event::default().event("step_retry").data(
+                                    serde_json::json!({
+                                        "step": step, "file": file_label,
+                                        "attempt": attempt, "max_attempts": max_attempts,
+                                        "undisposed_count": gap.count,
+                                        "reason": "detector_disposition",
+                                    }).to_string()
+                                );
+                                citation_feedback = Some(gap.feedback);
+                                continue 'attempts;
+                            }
                             success = false;
                             yield Event::default().event("step_warning").data(
                                 serde_json::json!({
                                     "step": step, "file": file_label,
-                                    "reason": w.reason, "repaired_from_template": false,
+                                    "reason": gap.warning.reason, "repaired_from_template": false,
                                 }).to_string()
                             );
                         }

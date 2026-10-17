@@ -13,6 +13,13 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- A workflow's project scope can open every project (KT-1336): read, or
+  planning write behind the same typed confirmation as a room, shown in red on
+  the workflow page and the launch card, pinned to the validated revision and
+  withdrawn on its own. The scope editor is redone: every project in one
+  searchable view with a None / Read / Write picker, the projects already
+  opened first, and one « Validate the scope » action.
+
 - A merge no longer bounces on doc citation line anchors (KT-1321). The
   integration merge, and the merge a worker finishes through `task_exec_commit`,
   stop before the merge commit: a doc conflict that differs only by the line
@@ -627,6 +634,36 @@ Release notes for 0.9.3 and earlier are available in the
   install has written its root `AGENTS.md` pointer: taken before it, it
   differed from the next run's and every resume of a freshly started audit
   warned.
+- Retrying a step, or resuming an audit, from the UI keeps the run's tier
+  (KT-1320). The card's picker defaulted to `reasoning`, so the retry of a
+  Haiku (economy) audit ran on Opus. The run now records its tier and
+  connection (migration 268, `audit_runs.tier` / `connection_id`); a retry or a
+  resume sends the run's agent, tier and connection, and the panel shows the
+  tier it will use, until the human picks another. A resume request that names
+  no tier takes the run's, not Reasoning.
+  A connection is inherited only by the same agent; if the run's connection
+  was deleted since, the agent's default takes over and a warning says so,
+  also when the client echoes that connection id back (the UI leaves it to the
+  server while its picker is untouched). The run's agent and tier are kept
+  whatever its connection does: a connection list still loading or failed to
+  load is "unknown", not "deleted", and a deleted connection (also a Custom
+  one, or one whose provider has another connection) shows a note before the
+  launch — the run goes on the agent's default connection, never on another
+  agent. The full, partial and revalidation launches all run on the choice the
+  panel shows. A pick is forgotten when the project or the run to continue
+  changes.
+- A finding that a file exists or is tracked can be cited without a line
+  (KT-1320): `[src: file: .ssh/key:exists]` (or `:tracked`) passes the
+  documentary gate for a text file, so a tracked private key or a
+  `yarn-error.log` no longer has to be cited `:1`, which invited quoting a
+  secret. A bare path for a text file is still refused — a claim about its
+  content needs a line — and the refusal now names the presence form.
+  `:tracked` is checked against the git index (`git ls-files`), not only
+  against the disk; a file that exists but is not tracked is refused.
+- A bridge-token 403 for a discussion outside the agent's scope now says why
+  and what to do (KT-1320), instead of reaching a Vibe/ACP agent as a bare
+  "the MCP tool returned an error": ask the human to attach the discussion, or
+  use one of the project's discussions.
 - The tech-debt review keeps the sheet valid, keeps the "why" and counts the
   debts the card counts (KT-1309). Saving a decision appends its
   `audit_history` entry with the indentation of the list it joins, so a
@@ -665,6 +702,40 @@ Release notes for 0.9.3 and earlier are available in the
   under its partial banner stays in the revalidation plan (its owning step, or
   a manual line) and keeps the badge raised, though relevance sees nothing
   wrong with its citations.
+- Kronn no longer cuts a text inside a `[src: …]` marker, and the detector
+  gate retries (KT-1323). The TD index cut a long title at 160 characters
+  inside a citation; the cut opener then swallowed the next `]` of the index,
+  the end-of-run gate blamed step 8, and the regenerated index failed again,
+  for ever. Every Kronn truncation that can hold a citation (index titles, TD
+  task text, banner and stored reasons, the briefing excerpt) now goes through
+  `truncate_outside_markers`, which stops before a marker the limit would
+  split. The detector disposition gate no longer fails step 8 outright: it
+  gets the bounded retry of the other gates, with feedback naming the signals
+  to dispose of. The hygiene detectors (`_blank`, zero-tests, template
+  checks) skip generated, vendored and framework scaffolding files
+  (`generated/` dirs, root-level `coverage/` / `Pods/`, minified bundles,
+  Symfony `web/config.php`, `.gitattributes` `linguist-generated` /
+  `linguist-vendored` with last-match-wins and negation), so they no longer
+  force TDs; the security detectors, the Docker/CI inventory and a team's own
+  bans still see every file, so a `.gitattributes` line can never hide them.
+- Agents now learn when and how to ask for a human arbitration (KT-1329).
+  Claude Code cuts the `kronn-internal` MCP `instructions` at 2 048 characters,
+  and the `kronn-question` guidance started at character 1 985 (cut to a single
+  sentence, no schema) or, on a first session, at 2 438 (cut entirely). It is
+  now a self-contained bullet with a valid inline example right after the intro
+  line, followed on a first session by a compact FIRST CONTACT line that points
+  to `kronn_intro` (also inside the cut), and a Python test pins both
+  onboarding states. A workflow step that can `disc_append` gets the bullet too; a spawned
+  task worker is told why it cannot post a card and to ask its principal. The
+  card is also named in the `disc_append` description, the `disc_join` next
+  steps and the project template, the native prompt triggers on any decision
+  the human must arbitrate, and the `structured-questions` skill keeps
+  `{{var}}:` for facts only. To keep `templates/docs/AGENTS.md` under its
+  800-word budget, two "Do NOT" lines were dropped from its § 2 DO NOT (new projects
+  no longer get "Load all T2 files at once — max 3, pick what you need" and
+  "Skip the test policy — see § Project parameters and § 4"); the test policy
+  itself is still stated in § 4 and the Do list.
+
 - The documentary gate no longer refuses what Claude Code's Read tool shows
   (KT-1322). A newline-terminated file of N lines is numbered up to N+1 there
   (the last line is empty), and a range ending at N+1 was refused as outside
@@ -703,6 +774,16 @@ Release notes for 0.9.3 and earlier are available in the
   root's `workspaces` globs (or `pnpm-workspace.yaml`) list it; a Composer row
   read from `composer.lock` is labelled « from composer.lock », no longer « not
   installed ».
+- A project validated a minute ago no longer reads « Validé, modifié depuis »
+  with docs to re-check (KT-1319). Relevance judged Kronn's own TD sheets as
+  claims: a `Next step` section (and `Remedy` ones) is now a proposal, and a
+  path said missing right where it is cited (« the Jenkinsfile references the
+  missing `config/x.yml` », « `config/x.yml` is missing from the repo ») no
+  longer counts as a claim that the file exists. A « missing » elsewhere in
+  the sentence does not exempt it, and `Mitigation` / `Recommendation`
+  sections stay checked. The validation also stamps the docs
+  no citation anchors as re-read, so their steps are not queued again right
+  after it with no change to the code or the docs.
 - The audit's citation gate now says how to fix a citation (KT-1307). A path
   that only resolves under the docs root or next to the citing doc gets
   « paths are repository-root relative; did you mean `docs/AGENTS.md:94`? »,
@@ -715,6 +796,27 @@ Release notes for 0.9.3 and earlier are available in the
   Hint paths are canonical and only name a file that holds the cited lines; a
   `#symbol` anchor is accepted after a range; a whole-file range backing a
   claim that is not an absence raises a non-blocking `whole_file_citation`.
+- After an accepted template v2 merge, the audit starts and the merge offer
+  ends (KT-1310). Accepting files now records them as Kronn's in the folder's
+  `.kronn.json` (committed with them, with the template install), so once the
+  merge branch is integrated the audit gate no longer refuses the folder as
+  "files Kronn did not write"; the team's sources stay theirs. The leftover
+  merge worktree and branch are removed when the integration is noticed (on the
+  next merge start or full audit), and a worktree with nothing left to review
+  no longer reads as a merge in progress. `briefing.md`, `.kronn.json` and the
+  run state are not docs to commit nor sources; a resumed or later plan no
+  longer reads the files an accepted merge wrote as sources. A fresh clone of a
+  v1-documented repository (entry file opening on `kronn:doc-version` and
+  Kronn's heading, no `.kronn.json`) is Kronn's. Kronn's v1 template text
+  (`How to fill`, `Examples (good shape …)`, `{{PLACEHOLDER}}` rows, the v1
+  spec file) is left in place instead of copied as team content, copied
+  headings nest under the target's own, a plan on the remote base warns about
+  local docs it cannot contain (worded by the UI in the user's language), and
+  the pending-integration refusal carries
+  `error_code: template_merge_pending_integration`. Git failing to tell
+  whether the merge branch is integrated (e.g. a dangling `origin/HEAD`) counts
+  as not integrated: the branch is never deleted by guess and the audit refusal
+  stays.
 - Installing the template, then launching the full audit, is no longer refused
   as "files Kronn did not write" (KT-1299). `POST /install-template` now records
   the folder as Kronn's (`template_installed_at`) unless it already held a

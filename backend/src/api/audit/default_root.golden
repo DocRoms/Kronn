@@ -19,7 +19,7 @@ volatile  .gemini/settings.json
 volatile  .kiro/settings/mcp.json
 volatile  .kronn/audit/document-blame.json
 volatile  .kronn/audit/document-optimization.json
-volatile  .kronn/audit/validated-originals/ac2a7c5b22c111d5685e6973f695e9ca923e212b8edffde5828b0c874f3f723c.bak
+volatile  .kronn/audit/validated-originals/a2404d07a79799f336d77c2fe9c3292b626fb280310d2bc2f0327f50329c611a.bak
 29e0381ab7727cabf4e2e376a13802181c29adbc2a9e24e369c486590545e4ee  .kronn/mcp-managed.json
 cc7671b8e29a1bc8b5075dfbdbc424054425a601849861698655aa49e36cea1e  .kronn/native-files.json
 volatile  .mcp.json
@@ -29,7 +29,7 @@ b6714c74ccfedc1bd3d63e7e688dec6685200089759fb3be6c8e717e846bb204  AGENTS.md
 7e98df7437f1b50bc0ea2ba7180f28bdb7a043cd2c6045e1783124cdba2fdcc5  README.md
 volatile  docs/.kronn-audit-run.json
 volatile  docs/.kronn.json
-bb714804bca4c4df7df342deea218ca0f22ba451634a8c459f8a364b71220de7  docs/AGENTS.md
+96162218d8938d495e8ce107346b18680b779426b82c557ed78aa64d99c71c6a  docs/AGENTS.md
 b5e84dee3bcdb87c24478516bb0cedb1609489df2f71b00ff48c573a02695049  docs/architecture/overview.md
 e8c24e11e5de4666c3ef2f4b676ca4834688c2cd9232c046d4e1ae6dd1811485  docs/architecture/sequences/README.md
 08754a44d9c1c58f351ef9d710da26018727ddc3e3bf2bc0c0f9d46f7acae5f9  docs/architecture/sequences/TEMPLATE.md
@@ -77,7 +77,7 @@ ff6e172fa2ce77e6121da8cdea362156286d20ef0636b6d1fb018a4b069e6b9d  prompt.2
 92ef9001e53edb06f451d34ad55e54fd37c1460c9153e68e70112721c36a4a3b  prompt.5
 5a6fbfc9fdcbe75bb6e36f21442594f7e9432b1b96969a136901e6cdbda979c7  prompt.6
 3f56d0c4a15ba7b91a41ec35fbdef708fdb2f73d3e84c9ef674019861db326c3  prompt.7
-0a4a7d71f2555b07fb22cd250d3f40543200b5da6908930f332ce8b81278fc9f  prompt.8
+35cffce796611f7d5ba7f4a685ec9d637b29d9cf475faa8b61c95f02fc481918  prompt.8
 a31e2f9d03090f61aaa29432be24bcd4e188cbc5a1b4ce82128bcc20af3e3792  prompt.9
 4991b071664a323b062aa86354def0df2e8044d8183c86f5ce477bfb19565a42  prompt.10
 5021823384ddac0d4f939a8b71049d1d3d9d35c98f8cfee3267d674f7ad24e9c  prompt.11

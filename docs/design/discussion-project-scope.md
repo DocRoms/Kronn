@@ -74,8 +74,17 @@ request body.
   another revision than the one validated: the API refuses a scope on it and
   the workflow page says why, rather than showing a validation that would never
   apply.
+- A workflow scope may also open **every project** (KT-1336), stored as the
+  reserved row `*`: read, or planning write behind the same typed confirmation
+  `ALL-PROJECTS-WRITE` and fingerprint of the scope seen as for a room, asked
+  again on every validation that keeps it. The fingerprint covers the stored
+  rows **and** the workflow's current revision, so a screen read before an edit
+  of the workflow is stale (409) and never validates code the human did not
+  see. Shown in
+  red on the workflow page and the launch card. It follows every rule above
+  (pinned revision, suspended by any change, never credentials).
 - Withdrawing is always possible (`POST /api/workflows/{id}/scope/revoke`, one
-  project or all), even once a workflow became global: it only removes, never
+  project, `{"all": true}` for the every-project entry, or `{}` for all), even once a workflow became global: it only removes, never
   validates the remaining entries again, and a run that pinned the validated
   revision loses the withdrawn project on its next call.
 - Nothing else gives a step another project.

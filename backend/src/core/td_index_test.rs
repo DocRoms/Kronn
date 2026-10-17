@@ -2,6 +2,46 @@ use super::*;
 use std::fs;
 use std::path::PathBuf;
 
+#[test]
+fn a_title_is_never_cut_inside_a_citation_marker() {
+    // The live case (KT-1323): the 160-char limit landed inside the marker, the
+    // end-of-run gate blamed step 8, and the regenerated index failed again.
+    let lead = "x".repeat(140);
+    let title = format!("{lead} [src: file: helpers/lib/body-fill.js:42] and more words after");
+    let make = |t: &str| {
+        parse_sheet(
+            "TD-20261001-cut",
+            &sheet("TD-20261001-cut", t, "Backend", "High", "Open", ""),
+        )
+    };
+    let parsed = make(&title);
+    assert!(parsed.title.chars().count() <= 160, "{}", parsed.title);
+    assert!(
+        !parsed.title.to_ascii_lowercase().contains("[src:"),
+        "no partial marker in {}",
+        parsed.title
+    );
+    assert!(parsed.title.ends_with('…'), "{}", parsed.title);
+
+    let (text, _) = resync_content(CENTRAL, &[make(&title)], &BTreeMap::new());
+    assert!(!text.contains("[src: file: helpers"), "{text}");
+    // What the end-of-run gate read: an opener cut open swallows the next `]`
+    // of the document as a bogus citation.
+    let following = format!("{text}\nSee [the guide](guide.md).\n");
+    assert!(
+        crate::core::anti_halluc::extract_source_markers(&following).is_empty(),
+        "{following}"
+    );
+    // Regenerating is stable: the same index again, no new failure.
+    let (again, outcome) = resync_content(&text, &[make(&title)], &BTreeMap::new());
+    assert_eq!(again, text);
+    assert!(!outcome.changed);
+
+    // A marker that fits whole is kept.
+    let short = "Short [src: file: a/b.rs:1] title";
+    assert_eq!(make(short).title, short);
+}
+
 const NO_ADR: crate::core::adr::Trust = crate::core::adr::Trust::RunBaseline {
     decisions: "",
     records: "",

@@ -446,6 +446,8 @@ async fn a_run_started_elsewhere_shows_from_the_repository_and_follows_a_rebase(
             project_profile_draft: None,
             cancelled_at_step: None,
             resume_drift: None,
+            tier: None,
+            connection_id: None,
         };
         run.ended_at = Some(at);
         run
