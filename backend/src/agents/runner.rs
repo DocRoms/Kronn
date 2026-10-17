@@ -4777,8 +4777,31 @@ fn mint_launch_bridge_token(
             discussion_ids.push(id.to_owned());
         }
     }
+    // A step or a worker posts in a room without being its agent: a room's
+    // grants never reach it (KT-1270).
+    let room_grant_discussions =
+        if config.workflow_step_context.is_some() || config.task_worker_context.is_some() {
+            Vec::new()
+        } else {
+            let mut rooms: Vec<String> = Vec::new();
+            for id in [
+                config.discussion_id,
+                config
+                    .room_agent_context
+                    .map(|context| context.discussion_id.as_str()),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if !rooms.iter().any(|known| known == id) {
+                    rooms.push(id.to_owned());
+                }
+            }
+            rooms
+        };
     crate::core::bridge_token::mint(crate::core::bridge_token::BridgeScope {
         discussion_ids,
+        room_grant_discussions,
         task_execution_id: config
             .task_worker_context
             .map(|context| context.execution_id.clone()),
@@ -13865,6 +13888,16 @@ pub(crate) fn try_spawn(
     // keep their own sandbox's defaults.
     if task_worker_context.is_some() && is_claude_code_launch(binary, npx_package) {
         crate::core::task_worker_env::apply_launch_env(cmd.as_std_mut(), work_dir);
+        // KT-1318 - every launch of a task worker stamps the lane it builds in,
+        // resumes and reworks included, not only the first provisioning.
+        if let Some(context) = task_worker_context {
+            if let Err(reason) = crate::core::worktree::mark_lane_target_for_worktree(
+                work_dir,
+                &context.execution_id,
+            ) {
+                tracing::debug!(execution = %context.execution_id, "lane target not marked: {reason}");
+            }
+        }
     }
     // Hint shell-aware tools to use bash (dash does not support `-l`).
     // Only on Unix — Windows doesn't use SHELL env var.

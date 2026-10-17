@@ -1242,6 +1242,67 @@ pub(crate) fn markers_at(prose: &str) -> Vec<(usize, String)> {
     out
 }
 
+/// `value` cut to `max` characters without ever cutting inside a
+/// `[src: …]` marker: when the limit lands in one, the cut moves back to just
+/// before its `[`. `ellipsis` appends `…` when something was dropped (it counts
+/// toward `max`). A marker already unclosed in `value` is dropped from its `[`
+/// on, so the cut text never carries a dangling opener.
+/// Every Kronn-generated text that can carry a citation must truncate through
+/// this, never through a bare `chars().take(n)`.
+pub fn truncate_outside_markers(value: &str, max: usize, ellipsis: bool) -> String {
+    if value.chars().count() <= max {
+        return value.to_string();
+    }
+    let room = if ellipsis { max.saturating_sub(1) } else { max };
+    let chars: Vec<char> = value.chars().collect();
+    let mut cut = room;
+    let lower: Vec<char> = value.to_ascii_lowercase().chars().collect();
+    let needle: Vec<char> = "[src:".chars().collect();
+    let mut i = 0usize;
+    while i + needle.len() <= chars.len() && i < cut {
+        if lower[i..i + needle.len()] != needle[..] {
+            i += 1;
+            continue;
+        }
+        let mut depth = 1i32;
+        let mut j = i + needle.len();
+        let mut close = None;
+        while j < chars.len() {
+            match chars[j] {
+                '[' => depth += 1,
+                ']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(j);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        match close {
+            // The limit falls inside this closed marker: stop before it.
+            Some(end) if end >= cut => {
+                cut = i;
+                break;
+            }
+            Some(end) => i = end + 1,
+            // An unclosed marker is malformed already: never keep its opener.
+            None => {
+                cut = i;
+                break;
+            }
+        }
+    }
+    let mut out: String = chars[..cut].iter().collect();
+    if ellipsis {
+        out = out.trim_end().to_string();
+        out.push('…');
+    }
+    out
+}
+
 /// Whether the newline at `at` is followed by a blank line (`\n` + optional
 /// spaces + `\n`).
 fn blank_line_at(chars: &[char], at: usize) -> bool {
@@ -1649,6 +1710,18 @@ pub(crate) fn anchor_miss(path: &Path, span: (usize, usize), symbol: &str) -> Op
         return None;
     }
     let content = std::fs::read_to_string(path).ok()?;
+    anchor_miss_in(&content, span, symbol)
+}
+
+/// [`anchor_miss`] on the text of a file, such as a past revision's blob.
+pub(crate) fn anchor_miss_in(
+    content: &str,
+    span: (usize, usize),
+    symbol: &str,
+) -> Option<AnchorMiss> {
+    if content.len() as u64 > LINE_COUNT_SIZE_CAP_BYTES {
+        return None;
+    }
     let text: Vec<&str> = content.lines().collect();
     let (start, end) = span;
     let holding: Vec<usize> = text
@@ -1804,13 +1877,37 @@ pub(crate) fn percent_decoded_relative(raw: &str) -> Option<String> {
     (decoded != raw && !decoded.contains('\0') && !rooted).then_some(decoded)
 }
 
-fn count_lines_capped(path: &Path) -> Option<usize> {
+/// The last line a citation may end on. A newline-terminated file of N lines
+/// reads as N+1 numbered lines in an editor or in Claude Code's Read tool (the
+/// last one empty), so a model that copies the number it saw cites N+1: that is
+/// accepted, and it is the one place every range check takes its end bound from.
+pub(crate) fn last_citable_line(content: &str) -> usize {
+    content.lines().count() + usize::from(content.ends_with('\n'))
+}
+
+/// Whether `start..=end` may be cited in a file of `lines` real lines whose last
+/// citable line is `last` ([`last_citable_line`]). The range has to start on a
+/// real line — one that starts on the empty line N+1 cites nothing — and may end
+/// on N+1. Every range check goes through here, so the verifier, the documentary
+/// gate, citation drift and the bundle repair cannot disagree.
+pub(crate) fn range_is_citable(lines: usize, last: usize, start: usize, end: usize) -> bool {
+    start >= 1 && start <= lines && start <= end && end <= last
+}
+
+/// `(real line count, last citable line)` of a file, `None` when it is too big
+/// to bounds-check. An empty file has no line: both are 0.
+fn count_lines_capped(path: &Path) -> Option<(usize, usize)> {
     let meta = std::fs::metadata(path).ok()?;
     if meta.len() > LINE_COUNT_SIZE_CAP_BYTES {
         return None; // too big — skip the bounds check, existence is enough
     }
     let content = std::fs::read_to_string(path).ok()?;
-    Some(content.lines().count().max(1))
+    Some((content.lines().count(), last_citable_line(&content)))
+}
+
+/// [`last_citable_line`] of a file on disk; 0 when it cannot be read.
+pub(crate) fn last_citable_line_of(path: &Path) -> usize {
+    std::fs::read_to_string(path).map_or(0, |content| last_citable_line(&content))
 }
 
 /// Verify one `[src: …]` marker against the project root.
@@ -1932,16 +2029,19 @@ pub(crate) fn line_bounds_status(
                 SourceStatus::Verified,
                 "file exists (too large to bounds-check lines)".into(),
             ),
-            Some(total) => {
-                if end <= total {
+            Some((total, citable)) => {
+                if range_is_citable(total, citable, start, end) {
                     (
                         SourceStatus::Verified,
                         format!("lines {}-{} within {} lines", start, end, total),
                     )
                 } else {
+                    // A range that starts on the empty line N+1 is as much
+                    // beyond the file as one that ends past it.
+                    let beyond = if start > total { start } else { end };
                     (
                         SourceStatus::OutOfBounds,
-                        format!("line {} beyond file length {}", end, total),
+                        format!("line {} beyond file length {}", beyond, total),
                     )
                 }
             }
@@ -2864,6 +2964,42 @@ pub fn finalize_lint_report(
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncate_outside_markers_never_cuts_a_marker() {
+        let text = "aaaa [src: file: src/lib.rs:10] bbbb [src: file: x[0].rs:1] cccc";
+        for max in 1..=text.chars().count() + 2 {
+            for ellipsis in [false, true] {
+                let out = truncate_outside_markers(text, max, ellipsis);
+                assert!(out.chars().count() <= max, "max {max}: {out}");
+                let opened = out.to_ascii_lowercase().matches("[src:").count();
+                assert_eq!(
+                    opened,
+                    extract_source_markers(&out).len(),
+                    "max {max} ellipsis {ellipsis}: {out}"
+                );
+            }
+        }
+        // Under the limit: untouched. Cut before a marker: stops at its `[`.
+        assert_eq!(truncate_outside_markers("short", 40, true), "short");
+        assert_eq!(
+            truncate_outside_markers("aaaa [src: file: a.rs:1] z", 12, false),
+            "aaaa "
+        );
+        assert_eq!(
+            truncate_outside_markers("aaaa [src: file: a.rs:1] z", 12, true),
+            "aaaa…"
+        );
+        // A marker already unclosed in the input is cut before its opener too.
+        assert_eq!(
+            truncate_outside_markers("ab [src: file: a", 8, false),
+            "ab "
+        );
+        assert_eq!(
+            truncate_outside_markers("ab [src: file: a.rs:1", 12, true),
+            "ab…"
+        );
+    }
 
     #[test]
     fn strip_fenced_code_drops_closed_blocks_but_restores_unclosed_ones() {
@@ -3970,8 +4106,18 @@ mod tests {
             verify_source_marker("src/foo.rs:5", Some(&root)).status,
             SourceStatus::Verified
         );
+        // The empty line after the final newline is what editors number N+1: a
+        // range may end on it, but a citation of that line alone cites nothing.
+        assert_eq!(
+            verify_source_marker("src/foo.rs:5-6", Some(&root)).status,
+            SourceStatus::Verified
+        );
         assert_eq!(
             verify_source_marker("src/foo.rs:6", Some(&root)).status,
+            SourceStatus::OutOfBounds
+        );
+        assert_eq!(
+            verify_source_marker("src/foo.rs:7", Some(&root)).status,
             SourceStatus::OutOfBounds
         );
         // Range
@@ -4603,7 +4749,7 @@ mod tests {
         let cases: &[(&str, SourceStatus)] = &[
             ("`src/foo.rs`:3", SourceStatus::Verified),
             ("`src/foo.rs`:2-4", SourceStatus::Verified),
-            ("`src/foo.rs`:6", SourceStatus::OutOfBounds), // path resolved AND bounds ran
+            ("`src/foo.rs`:7", SourceStatus::OutOfBounds), // path resolved AND bounds ran
             ("`src/foo.rs`", SourceStatus::Verified),
             ("file: `src/foo.rs`:3", SourceStatus::Verified), // file: prefix + backticks combined
             (abs.as_str(), SourceStatus::Verified),           // absolute, backticked, line outside

@@ -16,6 +16,7 @@ pub mod bundle;
 pub mod compare;
 pub mod db;
 pub mod dependencies;
+pub mod discussion_scope;
 pub mod discussion_weight;
 pub mod discussions;
 pub mod external_api_connection;

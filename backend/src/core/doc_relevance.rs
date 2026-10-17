@@ -16,7 +16,7 @@
 //!   write `lib/routes.ts` for `frontend/src/lib/routes.ts`), and is not a
 //!   file Kronn generates or git ignores. A line that tells history ("the
 //!   former `x.rs`") or speaks of a file's absence, a section titled as a
-//!   proposal (or a `Remediation` / `Fix` / `Next steps` line: a fix to make,
+//!   proposal (or a `Remediation` / `Fix` / `Next step` line: a fix to make,
 //!   not a fact), a naming pattern (`TD-YYYYMMDD-slug.md`), an example (and the
 //!   list right under it), a doc still
 //!   holding the template's placeholders, and the changelog / release docs
@@ -348,6 +348,187 @@ const ABSENCE_PHRASES: &[&str] = &[
     "à créer",
 ];
 
+/// Words right before a backticked path that say it is not there ("the
+/// Jenkinsfile references the missing `config/x.yml`", "File not found:
+/// `x`"). Matched at the end of the text that precedes the path.
+const MISSING_BEFORE: &[&str] = &[
+    "missing",
+    "missing file",
+    "missing path",
+    "nonexistent",
+    "non-existent",
+    "dangling",
+    "dangling reference to",
+    "absent",
+    "no such file:",
+    "no such file or directory:",
+    "not found:",
+    "file not found:",
+    "cannot find",
+    "can't find",
+    "could not find",
+    "couldn't find",
+    "fichier manquant",
+    "fichier introuvable",
+    "manquant",
+    "introuvable:",
+];
+
+/// Words right after a backticked path that say it is not there. A remainder
+/// that goes on ("`x.rs` is missing error handling") is a claim about a file
+/// that exists, see [`missing_tail_is_over`].
+const MISSING_AFTER: &[&str] = &[
+    "is missing",
+    "are missing",
+    "was missing",
+    "is absent",
+    "is not found",
+    "was not found",
+    "is not present",
+    "is not there",
+    "is nonexistent",
+    "is non-existent",
+    "is dangling",
+    "does not resolve",
+    "doesn't resolve",
+    "could not be found",
+    "cannot be found",
+    "can't be found",
+    "(missing)",
+    "(not found)",
+    "(absent)",
+    "(manquant)",
+    "(introuvable)",
+    "manquant",
+    "manquante",
+    "introuvable",
+    "inexistant",
+    "inexistante",
+    "est manquant",
+    "est manquante",
+    "est introuvable",
+    "est absent",
+    "est absente",
+    "est inexistant",
+    "est inexistante",
+];
+
+/// `rest` closes the absence statement: nothing more, or a where ("from the
+/// repo", "on disk"). "is missing a null check" goes on about the file.
+fn missing_tail_is_over(rest: &str) -> bool {
+    let rest = rest.trim_start_matches(|c: char| c.is_whitespace());
+    let first = rest
+        .split(|c: char| !c.is_alphabetic())
+        .find(|w| !w.is_empty());
+    let Some(first) = first else {
+        return true;
+    };
+    // Only the punctuation right after the phrase counts as "nothing more".
+    if rest.starts_with(|c: char| !c.is_alphanumeric() && !c.is_whitespace()) {
+        return true;
+    }
+    match first {
+        "from" | "since" | "entirely" | "altogether" | "here" | "there" | "anymore" | "depuis"
+        | "ici" => true,
+        // "is missing now." closes the statement, "is missing now that the
+        // loader moved" goes on about something else.
+        "now" => rest
+            .trim_start()
+            .strip_prefix("now")
+            .is_some_and(|tail| tail.chars().all(|c| !c.is_alphanumeric())),
+        // "is missing on disk / on main" says where; "on error paths" does not.
+        "on" => {
+            let after = rest
+                .trim_start()
+                .strip_prefix("on")
+                .unwrap_or("")
+                .trim_start();
+            let place = after
+                .split(|c: char| c.is_whitespace() || ",.;:!?)".contains(c))
+                .next()
+                .unwrap_or("");
+            let named = [
+                "disk",
+                "main",
+                "master",
+                "develop",
+                "trunk",
+                "head",
+                "branch",
+                "filesystem",
+                "fs",
+            ];
+            let this_branch = [
+                "the branch",
+                "this branch",
+                "the file system",
+                "the filesystem",
+            ]
+            .iter()
+            .any(|p| after.starts_with(p));
+            this_branch || named.contains(&place) || place.contains('/')
+        }
+        "in" => {
+            let after = rest
+                .trim_start_matches(|c: char| c.is_alphabetic())
+                .trim_start();
+            [
+                "the repo",
+                "the tree",
+                "the checkout",
+                "the project",
+                "the worktree",
+                "git",
+            ]
+            .iter()
+            .any(|p| after.starts_with(p))
+        }
+        _ => false,
+    }
+}
+
+/// The word right before `head` is a verb of being or having: "the key is
+/// missing `x`" / "is not found: `x`" say something of another noun, they do
+/// not label `x` as a gone file.
+fn follows_a_verb(head: &str) -> bool {
+    let word = head
+        .trim_end()
+        .rsplit(|c: char| !c.is_alphabetic())
+        .next()
+        .unwrap_or("");
+    [
+        "is", "are", "was", "were", "be", "been", "being", "has", "have", "had", "est", "sont",
+    ]
+    .contains(&word)
+}
+
+/// The path in backticks between `open` and `close` (byte offsets of the
+/// ticks in `clause`) is said, right where it is cited, not to be there.
+/// The absence must be about the path itself: a "missing" elsewhere in the
+/// clause ("reads `x.yml` when the cache is missing") says nothing of it.
+fn path_is_said_missing(clause: &str, open: usize, close: usize) -> bool {
+    let before = clause[..open].to_lowercase();
+    let before = before.trim_end();
+    let before_hit = MISSING_BEFORE.iter().any(|p| {
+        before.strip_suffix(p).is_some_and(|head| {
+            head.chars()
+                .next_back()
+                .is_none_or(|c| !c.is_alphanumeric())
+                && !follows_a_verb(head)
+        })
+    });
+    if before_hit {
+        return true;
+    }
+    let after = clause[close + 1..].to_lowercase();
+    let after = after.trim_start();
+    MISSING_AFTER.iter().any(|p| {
+        after.strip_prefix(p).is_some_and(|rest| {
+            rest.chars().next().is_none_or(|c| !c.is_alphanumeric()) && missing_tail_is_over(rest)
+        })
+    })
+}
+
 fn tells_history(clause: &str) -> bool {
     let outside_code = clause.split('`').step_by(2).collect::<Vec<_>>().join(" ");
     let lower = outside_code.to_lowercase();
@@ -411,6 +592,8 @@ const PROPOSAL_HEADINGS: &[&str] = &[
     "remediations",
     "fix",
     "fixes",
+    "remedy",
+    "remedies",
 ];
 
 /// Phrases that make a heading a proposal wherever they sit in it.
@@ -427,6 +610,7 @@ const PROPOSAL_PHRASES: &[&[&str]] = &[
     &["travaux", "futurs"],
     &["pistes", "d"],
     &["remediation"],
+    &["next", "step"],
     &["next", "steps"],
     &["recommended", "fix"],
     &["possible", "fix"],
@@ -592,13 +776,20 @@ fn prose_paths(project: &Path, text: &str) -> Vec<String> {
             if tells_example(clause) || tells_history(clause) {
                 continue;
             }
+            let mut offset = 0;
             for (i, piece) in clause.split('`').enumerate() {
+                let start = offset;
+                offset += piece.len() + 1;
                 if i % 2 == 0 {
                     continue;
                 }
                 let Some(path) = path_token(piece) else {
                     continue;
                 };
+                // `start` is the byte after the opening tick.
+                if path_is_said_missing(clause, start - 1, start + piece.len()) {
+                    continue;
+                }
                 let first = path.split('/').next().unwrap_or_default();
                 if project.join(first).is_dir() {
                     found.insert(path);

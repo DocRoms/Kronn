@@ -32,13 +32,13 @@ const step = (index: number, extra: Record<string, unknown> = {}) => ({
 
 function props(over: Partial<AuditTimelineProps> = {}): AuditTimelineProps {
   return {
-    projectId: 'p1', auditStatus: 'Audited', techDebtCount: 0, agents: [AGENT],
+    projectId: 'p1', auditStatus: 'Audited', agents: [AGENT],
     selectedAgent: 'ClaudeCode', selectedTier: 'reasoning', modelTiers: null, selectedConnectionId: null, onSelect: vi.fn(),
     briefingDone: true, onBriefingSaved: vi.fn(), auditActive: false, liveStep: 0, liveTotal: 0,
     liveFile: '', liveElapsed: null, liveTool: null, liveStartedAt: null, liveToolCalls: null, liveStepTokens: null,
     liveTotalTokens: null, onResumeBriefingDiscussion: null, onCancel: vi.fn(), resumable: null,
     onLaunch: vi.fn(), validationInProgress: false,
-    onMarkValid: vi.fn().mockResolvedValue(undefined), onOpenValidation: vi.fn(), onViewTechDebts: vi.fn(),
+    onMarkValid: vi.fn().mockResolvedValue(undefined), onOpenValidation: vi.fn(), techDebtEntry: null,
     refreshTrigger: 0, toast: vi.fn(), ...over,
   };
 }

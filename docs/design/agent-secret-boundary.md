@@ -121,6 +121,18 @@ discussion (or one task execution, or one workflow run) and to its project.
   JSON is refused.
 - The agent can read this token. Its scope is by design what the agent may do
   through room tools.
+- **Room grants (KT-1270).** A human may open other projects to a room: read,
+  write (planning only) or every project, the last in write only behind a typed
+  confirmation and the fingerprint of the scope the human saw. The token stays
+  bound to its primary project; grants are re-read on every request, so a revoke
+  applies on the next call. Grants never reach another project's credentials or
+  API configs, never run its workflows or other effects, and reach only the
+  room's own agents: never a workflow step or worker posting in the room. A
+  workflow's runs reach other projects only through a scope a human validated on
+  that workflow, suspended by any change to it. Every grant route is human-only
+  (no bridge token); an agent may only file a request a human decides. No bridge
+  response carries a credential field such as `token_override`. Details and
+  refused attacks: `docs/design/discussion-project-scope.md`.
 
 **Human proof per action.** Every secret-class route (section 3 rows 3 and 4,
 plus human-credential administration) requires a **proof bound to one action**:
@@ -803,9 +815,9 @@ step or the webhook supplied (whatever its name, `User-Agent` included).
 
 What comes back is scrubbed by value (`core/secret_scrub.rs`, KT-1035): an
 API call builds one set from every value it takes from the env or the
-credential store, wherever it lands, base URL included (no plugin metadata
-marks a value public), the resolved auth (Basic
-decoded) and its default headers, and carries it through the success
+credential store, wherever it lands, except the public config values (KT-1249:
+masking a base URL rewrote the links of the data handed to the next steps),
+the resolved auth (Basic decoded) and its default headers, and carries it through the success
 output, summaries, errors and the call log. Each value is masked raw,
 URL-encoded, hex, base64 and JSON-escaped, case-insensitively from 8
 characters, before truncation; shorter ones only as whole tokens. A
@@ -814,6 +826,55 @@ log, run detail and MCP `workflow_run_get`, MCP run status) gets URL
 query/userinfo stripping and the heuristics of `core/redact.rs` only;
 value-based scrubbing of legacy rows is impossible because their credential
 context is gone.
+
+A config value is public only under one of two rules; everything else stays
+masked, and no name heuristic ever makes a URL public (a path can hold the
+secret: Slack, Discord, Teams, Telegram webhook URLs):
+
+1. the key is declared `public` in `api_spec.config_keys` AND the server is a
+   registry one (`McpSource::Registry`). A bundle import clears the flag
+   (`plugin_portability::without_public_flags`) and a custom API never sets it,
+   so only registry code can grant it (today `JIRA_URL`). Every declared value
+   is checked, whatever its shape: none of the credential markers below, and a
+   value holding `:` or `/` must pass the raw URL check below (so
+   `https:user:SECRET@host`, `https:host?token=…` and `host;SECRET` are masked
+   even without a `/`);
+2. the value is the plugin's base URL (`{KEY}` in `base_url`) and a bare
+   origin: http(s) scheme, host and optional port, an empty or `/` path, none
+   of the credential markers below (`https://euronews.atlassian.net`). A
+   webhook base URL (`{SLACK_WEBHOOK_URL}`) has a path, so it is masked.
+
+The URL check (`is_credential_free_url`) decides on the RAW text, never on a
+parsed URL: `Url::parse` resolves `..` and `%2e%2e`, so
+`https://hooks.slack.com/SECRET/..` would otherwise look like a bare origin.
+After the authority there must be nothing or exactly `/`; a declared URL may
+keep a path but with no `.` or `..` segment. The authority is ASCII host
+characters only (letters, digits, `.`, `-`, `_`, and `:`, `[`, `]` for a port or
+IPv6 literal). The credential markers (`has_credential_marker`), never accepted
+in any public value: user info (`@`, `%40`), query, fragment, `;`, a backslash,
+whitespace or control characters (the parser strips tabs and newlines),
+percent-encoded `.`, `?`, `#`, `;`, `\`, and any non-ASCII character (zero-width
+space, soft hyphen, U+2215, ideographic full stop U+3002 fold into the host or a
+separator once IDNA has run).
+
+By design, a secret subdomain (`https://<id>.m.pipedream.net`) is public when
+it is the plugin's base URL: a bare origin cannot be told from a tenant name.
+
+A masked value that parses as a URL also masks its user info, query, fragment
+and normalised form (`add_url_parts`): the request line in the summary prints
+`http://user:SECRET@host/` for a pasted `http:user:SECRET@host`, which the raw
+text alone would not match.
+
+An auth key is never public, declared or not: Basic user and password, API key,
+bearer, OAuth2 client id and secret, token-exchange credentials and a
+`CliToken` fallback key. Logs and summaries share the same set, so they show
+public config unmasked too.
+[src: file: backend/src/workflows/api_call_executor.rs:232-255#add_url_parts]
+[src: file: backend/src/workflows/api_call_executor.rs:257-292#is_public_config]
+[src: file: backend/src/workflows/api_call_executor.rs:294-308#has_credential_marker]
+[src: file: backend/src/workflows/api_call_executor.rs:310-346#is_credential_free_url]
+[src: file: backend/src/workflows/api_call_executor.rs:348-372#auth_env_keys]
+[src: file: backend/src/api/plugin_portability.rs:663-672#without_public_flags]
 
 Every automatic disable is recorded on the workflow (reason, who, when, a
 short summary; migration 223) and listed on the Automations page for review;

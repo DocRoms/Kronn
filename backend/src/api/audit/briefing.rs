@@ -145,7 +145,7 @@ pub(crate) fn briefing_prompt_section_for(
     let body = if total <= budget {
         notes.to_string()
     } else {
-        let mut cut: String = notes.chars().take(budget).collect();
+        let mut cut = crate::core::anti_halluc::truncate_outside_markers(notes, budget, false);
         // End on a line break when one is close, so no line is cut mid-way.
         if let Some(i) = cut.rfind('\n') {
             if i >= cut.len() * 4 / 5 {

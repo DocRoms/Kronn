@@ -846,7 +846,10 @@ pub fn check_drift(project_path: &Path) -> DriftResult {
     // KT-1168 — the badge also weighs the relevance of each section: prose
     // naming a path that is gone needs a re-check though no citation broke.
     let relevance = crate::core::doc_relevance::analyze(project_path, &citations);
-    let sources_state = relevance.escalate(citations.sources_state);
+    let sources_state = crate::core::citation_drift::escalate_partial(
+        project_path,
+        relevance.escalate(citations.sources_state),
+    );
     let broken_citations = citations.broken_count;
     let missing_paths = relevance.counts.prose_missing;
     let checksums_file = match read_checksums_file(project_path) {

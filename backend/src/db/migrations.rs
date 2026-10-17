@@ -970,8 +970,12 @@ const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("sql/266_audit_step_observed_output.sql"),
     ),
     (
-        "267_message_kind",
-        include_str!("sql/267_message_kind.sql"),
+        "267_discussion_project_grants",
+        include_str!("sql/267_discussion_project_grants.sql"),
+    ),
+    (
+        "268_message_kind",
+        include_str!("sql/268_message_kind.sql"),
     ),
 ];
 
