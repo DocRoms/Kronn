@@ -568,9 +568,19 @@ pub(crate) async fn run_partial_pipeline(
 
         // KT-1169 — a refresh run would supersede an audit that can still be
         // resumed: that audit is finished first.
+        // KT-1312 — unless a resume would have nothing left to run: every
+        // failed step is accepted, which is what the refusal asks for.
         let latest = state.db.with_conn({
             let pid = project_id_for_progress.clone();
-            move |conn| crate::db::audit_runs::latest_resumable(conn, &pid)
+            move |conn| {
+                Ok(match crate::db::audit_runs::latest_resumable(conn, &pid)? {
+                    Some(run) => {
+                        let steps = crate::db::audit_runs::list_audit_steps(conn, &run.id)?;
+                        super::full::resume_has_steps_left(&run, &steps).then_some(run)
+                    }
+                    None => None,
+                })
+            }
         }).await;
         let refusal = match latest {
             Ok(latest) => super::full::fresh_launch_refusal(latest.as_ref(), false)

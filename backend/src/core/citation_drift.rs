@@ -445,6 +445,29 @@ pub(crate) fn cited_file_exists(project_path: &Path, file: &str) -> bool {
     resolve_cited(project_path, file).is_some_and(|path| path.exists())
 }
 
+/// KT-1312 — the docs a failed audit step left under its partial banner: kept
+/// for a human to retry or accept, and not trusted until one does.
+pub fn partial_docs(project_path: &Path) -> Vec<String> {
+    doc_files(project_path)
+        .into_iter()
+        .filter(|doc| {
+            read_doc(project_path, doc)
+                .is_some_and(|content| crate::api::audit::step_guard::has_partial_marker(&content))
+        })
+        .collect()
+}
+
+/// KT-1312 — the badge stays raised while a doc carries a partial banner,
+/// whatever its citations say. `Unknown` stays: nothing was validated yet.
+pub fn escalate_partial(project_path: &Path, state: SourcesState) -> SourcesState {
+    match state {
+        SourcesState::Clean if !partial_docs(project_path).is_empty() => {
+            SourcesState::NeedsReverification
+        }
+        other => other,
+    }
+}
+
 fn read_doc(project_path: &Path, doc: &str) -> Option<String> {
     std::fs::read_to_string(project_path.join(doc)).ok()
 }

@@ -545,6 +545,16 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- Revalidation after an interrupted audit (KT-1312). A refresh or a
+  revalidation is no longer refused once every failed step of the interrupted
+  run is accepted (`remaining_failed: []`): a resume would only finalize it.
+  A resume never runs an accepted step again, whatever blocker its document
+  still holds; only `redo_steps` does. The docs a step rewrote are
+  re-fingerprinted as soon as the step ends, so a chain of resumed runs leaves
+  none with the fingerprints of an earlier audit. A doc a failed step left
+  under its partial banner stays in the revalidation plan (its owning step, or
+  a manual line) and keeps the badge raised, though relevance sees nothing
+  wrong with its citations.
 - The audit's citation gate now says how to fix a citation (KT-1307). A path
   that only resolves under the docs root or next to the citing doc gets
   « paths are repository-root relative; did you mean `docs/AGENTS.md:94`? »,

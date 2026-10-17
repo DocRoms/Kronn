@@ -55,8 +55,8 @@ skip accepted commits pending integration.
 [src: file: backend/src/api/audit/full.rs:413-434#audit_launch_refusal]
 [src: file: backend/src/api/audit/drift.rs:284-286#audit_launch_refusal]
 [src: file: backend/src/api/audit/drift.rs:533-559#audit_launch_refusal]
-[src: file: backend/src/api/audit/revalidate.rs:668-670#audit_launch_refusal]
-[src: file: backend/src/api/audit/revalidate.rs:739-742#audit_launch_refusal]
+[src: file: backend/src/api/audit/revalidate.rs:702-704#audit_launch_refusal]
+[src: file: backend/src/api/audit/revalidate.rs:773-776#audit_launch_refusal]
 [src: file: frontend/src/hooks/useTemplateMergeOffer.ts:28-93#useTemplateMergeOffer]
 
 The regression suite exercises real HTTP refusals, cancellation before mutation,
