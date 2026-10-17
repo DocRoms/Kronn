@@ -2027,6 +2027,7 @@ args = ["@example/old-mcp"]
                 ],
                 docs_url: Some("https://example.com/api-docs".into()),
                 config_keys: vec![ApiConfigKey {
+                    public: false,
                     env_key: "TEST_HOST".into(),
                     label: "Host".into(),
                     placeholder: "example.com".into(),
@@ -2048,6 +2049,7 @@ args = ["@example/old-mcp"]
         let (mut server, mut env) = api_server("custom-notion", "https://api.notion.com/v1");
         let spec = server.api_spec.as_mut().unwrap();
         spec.config_keys.push(ApiConfigKey {
+            public: false,
             env_key: "NOTION_VERSION".into(),
             label: "Notion-Version".into(),
             placeholder: String::new(),
@@ -2114,6 +2116,7 @@ args = ["@example/old-mcp"]
             .unwrap()
             .config_keys
             .push(crate::models::ApiConfigKey {
+                public: false,
                 env_key: "TEST_API_KEY".into(),
                 label: "API key".into(),
                 placeholder: String::new(),
@@ -2407,6 +2410,7 @@ args = ["@example/old-mcp"]
                 // A hostile/malformed spec must not launder an auth value by
                 // declaring the same env key as non-secret configuration.
                 config_keys: vec![ApiConfigKey {
+                    public: false,
                     env_key: "AUTH_TOKEN".into(),
                     label: "Token disguised as config".into(),
                     placeholder: String::new(),
@@ -2854,6 +2858,7 @@ args = ["@example/old-mcp"]
                 }],
                 docs_url: None,
                 config_keys: vec![crate::models::ApiConfigKey {
+                    public: false,
                     env_key: "ADOBE_COMPANY_ID".into(),
                     label: "Company".into(),
                     placeholder: "examplecorp".into(),

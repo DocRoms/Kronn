@@ -182,6 +182,27 @@ async fn a_resume_never_reruns_an_accepted_step_unless_the_human_asks() {
     validation_settled(state, &done).await;
     let still = run_id_of(&done);
 
+    // Not re-running the step does not clear it: the final documentary gate
+    // still finds the blocker in the doc and charges it to the accepted step, so
+    // the run ends Interrupted with that step to redo. The acceptance itself
+    // survives on the step's row.
+    assert_eq!(done["status"], "interrupted", "{resumed}");
+    assert_eq!(done["steps_to_redo"], json!([writer]), "{resumed}");
+    let (run, steps, _) = persisted(state, &still).await;
+    assert_eq!(run.status, "Interrupted");
+    let row = steps
+        .iter()
+        .find(|s| u64::from(s.step_index) == writer)
+        .unwrap();
+    assert!(row.accepted_at.is_some(), "the acceptance survives");
+    assert!(
+        outcomes(&run)["failed"]
+            .as_array()
+            .is_some_and(|f| f.contains(&json!(writer))),
+        "{:?}",
+        run.step_outcomes_json
+    );
+
     // The human asks: only then does the accepted step run again.
     arm(tools, "noop", &[RULES]);
     let redone = resume(state, &still, Some(vec![writer as u32])).await;

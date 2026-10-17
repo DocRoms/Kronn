@@ -425,12 +425,19 @@ mod tests {
     fn a_dash_range_passes_the_enforce_gate_like_a_hyphen_range() {
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("long.md"), "x\n".repeat(30)).unwrap();
-        for ok in ["17\u{2013}23", "17\u{2014}23", "17-23", "1\u{2013}30"] {
+        // 31 is the empty line after the final newline.
+        for ok in [
+            "17\u{2013}23",
+            "17\u{2014}23",
+            "17-23",
+            "1\u{2013}30",
+            "1\u{2013}31",
+        ] {
             let verdict =
                 lint_step_file(&format!("Claim [src: file: long.md:{ok}]."), &[dir.path()]);
             assert!(verdict.is_clean(), "{ok}: {:?}", verdict.fabricated);
         }
-        for bad in ["17\u{2013}31", "31\u{2014}40", "23\u{2013}17"] {
+        for bad in ["17\u{2013}32", "32\u{2014}40", "23\u{2013}17"] {
             let verdict =
                 lint_step_file(&format!("Claim [src: file: long.md:{bad}]."), &[dir.path()]);
             assert!(!verdict.is_clean(), "{bad} must still be refused");
@@ -1149,6 +1156,7 @@ mod enforce_gate_tests {
                 latest: "19.1.0".into(),
                 major: true,
                 declared_only: false,
+                lockfile: None,
             }],
             unchecked: vec![],
             up_to_date: vec![],
@@ -1173,6 +1181,7 @@ mod enforce_gate_tests {
                 latest: "2.0.0".into(),
                 major: true,
                 declared_only: false,
+                lockfile: None,
             })
             .collect();
         let cited: String = snap
