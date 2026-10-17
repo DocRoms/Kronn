@@ -669,8 +669,16 @@ pub async fn revalidate_audit(
         return single_error(error);
     }
     // A configured folder failing containment refuses the run (KT-1192).
-    if let Err(reason) = crate::core::docs_location::DocsRoot::for_project(&project_path) {
-        return single_error(reason);
+    let docs_root = match crate::core::docs_location::DocsRoot::for_project(&project_path) {
+        Ok(docs_root) => docs_root,
+        Err(reason) => return single_error(reason),
+    };
+    // The folder's human docs wait for the briefing's choice, as for a Full run.
+    let recorded_run = super::has_recorded_full_run(&state, &project.id).await;
+    if let Some(refusal) =
+        super::docs_folder_choice_refusal(&project_path, &docs_root, recorded_run)
+    {
+        return super::full::sse_refusal(refusal);
     }
     let documents = match latest_documents(&state, &id).await {
         Ok(documents) => documents,

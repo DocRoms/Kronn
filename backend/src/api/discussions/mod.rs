@@ -16,7 +16,7 @@ use axum::response::sse::Event;
 use futures::stream::Stream;
 
 pub(crate) mod ceilings;
-#[cfg(all(test, unix))]
+#[cfg(all(test, unix, feature = "full-tests"))]
 mod companion_privacy_tests;
 pub mod context;
 pub mod crud;
@@ -225,7 +225,7 @@ pub(super) type SseStream = Pin<Box<dyn Stream<Item = Result<Event, Infallible>>
 
 // Tests for `detect_terminal_signal` / `truncate_after_signal` /
 // `message_matches_silent_crash` — appended below.
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod terminal_signal_tests {
     #[test]
     fn ends_with_terminal_signal_is_position_strict() {
@@ -487,7 +487,7 @@ mod terminal_signal_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod silent_crash_detector_tests {
     use super::message_matches_silent_crash;
 

@@ -743,6 +743,6 @@ pub fn summary_for_page(conn: &Connection, live_page_id: &str) -> Result<serde_j
         .collect::<Vec<_>>()))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "live_page_action_trusts_tests.rs"]
 pub(crate) mod tests;

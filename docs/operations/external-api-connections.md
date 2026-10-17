@@ -156,7 +156,7 @@ identity source once the detailed discussion is loaded. OpenAI-compatible
 usage markers are also counted for `Custom`, so OpenRouter token totals follow
 the same per-turn aggregation as LiteLLM and NVIDIA.
 [src: file: frontend/src/lib/externalAgentIdentity.ts:81-107#discussionConnectionId]
-[src: file: backend/src/agents/runner.rs:14254-14282#ollama_tokens]
+[src: file: backend/src/agents/runner.rs:14285-14313#ollama_tokens]
 
 Aliases are unique without regard to case. If an alias is already owned by
 another connection, create or update fails instead of silently routing to the
@@ -195,7 +195,7 @@ At startup, Kronn backfills the former single LiteLLM and NVIDIA settings into
 stable named connections. The insertion is idempotent and preserves a
 connection already created or edited through the new workflow. The canonical
 NVIDIA legacy row also receives the hosted default endpoint when its former
-configuration did not contain one. [src: file: backend/src/lib.rs:180-203#bootstrap_external_api_connections]
+configuration did not contain one. [src: file: backend/src/lib.rs:187-210#bootstrap_external_api_connections]
 [src: file: backend/src/db/external_api_connections.rs:334-365#backfill_legacy_config]
 
 The canonical LiteLLM and NVIDIA named cards are now the source of truth for

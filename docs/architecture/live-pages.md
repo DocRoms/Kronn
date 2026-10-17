@@ -84,7 +84,7 @@ definitions and import identities, and refuses stale decisions. All resources,
 datasets, points, origin mappings and the library activation commit in one
 SQLite transaction; an error rolls everything back. Origin mappings identify
 earlier imported copies without overwriting their source or local definitions.
-[src: file: backend/src/lib.rs:1413-1434#artifact_portability]
+[src: file: backend/src/lib.rs:1454-1475#artifact_portability]
 [src: file: backend/src/api/artifact_portability/import.rs:1029-1047#preview_digest]
 [src: file: backend/src/db/sql/188_artifact_import_origins.sql:4-9#artifact_import_origins]
 
@@ -252,7 +252,7 @@ normalization per observation and retain `observed_at` plus
 `workflow_run_id`. `[src: file: frontend/src/lib/live-page-csv.ts:1-106#ExportCell]` The
 export uses a semicolon for French and Spanish UI locales so spreadsheet tools
 configured with those regional separators open columns directly; other locales
-keep the standard comma. `[src: file: frontend/src/pages/PagesPage.tsx:475-487#exportDatasetCsv]`
+keep the standard comma. `[src: file: frontend/src/pages/PagesPage.tsx:567-579#exportDatasetCsv]`
 
 ## Theme and refresh behavior
 
@@ -545,7 +545,7 @@ fence carries one intention.
 [src: file: frontend/src/hooks/useLivePageActions.ts:174-218#handleIntent]
 [src: file: frontend/src/hooks/useLivePageActions.ts:276-288#anyInFlight]
 [src: file: frontend/src/components/LivePageActionOverlay.tsx:40#Escape]
-[src: file: frontend/src/components/DiscussionActionCard.tsx:32-34#relaunch]
+[src: file: frontend/src/components/DiscussionActionCard.tsx:33-35#relaunch]
 
 When authoring a local row move after an action succeeds, preserve the row's
 detail fields and update any separate detail dataset and in-memory index before
@@ -704,7 +704,7 @@ bridge-token list and the handlers refuse a bridge caller.
   and one action allows 30 per minute.
 - **Revocation.** Deletes the row; the next click opens the card.
 [src: file: backend/src/api/workflows.rs:4483-4493#create_manual_run_admitted]
-[src: file: backend/src/workflows/run_pins.rs:93-103#pin_within]
+[src: file: backend/src/workflows/run_pins.rs:98-108#pin_within]
 [src: file: backend/src/db/live_page_action_trusts.rs:31-35#ROW_MIN_INTERVAL_SECS]
 
 Embed permission (third-party embeds) is a separate mechanism and is not

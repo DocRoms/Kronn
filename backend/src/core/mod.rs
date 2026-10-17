@@ -31,6 +31,7 @@ pub mod cross_audit;
 pub mod cross_audit_decision;
 pub mod crypto;
 pub mod default_todo;
+pub mod dependency_lockfiles;
 pub mod dependency_updates;
 pub mod desktop_port;
 pub mod directives;
@@ -96,6 +97,7 @@ pub mod resource_refs;
 pub mod resource_snapshot;
 pub mod resume_bundle;
 pub mod review_payload;
+pub mod room_lang;
 pub mod root_agent_files;
 pub mod rooted_io;
 pub mod rtk_detect;
@@ -134,18 +136,18 @@ pub mod ws_client;
 // adding duplicate tests with zero new coverage. The inline suite + proptest
 // module in crypto.rs is the single source of truth.
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "registry_test.rs"]
 mod registry_test;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "scanner_test.rs"]
 mod scanner_test;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "mcp_scanner_test.rs"]
 mod mcp_scanner_test;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "template_homogeneity_test.rs"]
 mod template_homogeneity_test;

@@ -204,7 +204,7 @@ pub(crate) fn ceiling_question(report: &CeilingReport, language: &str) -> Ceilin
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::agents::runner::ToolCeilingHit;

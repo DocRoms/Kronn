@@ -628,9 +628,11 @@ async fn a_shared_workflow_triggered_from_a_room_runs_for_the_room_s_project() {
     );
 }
 
+/// The token of a room's own agent: the room's grants (KT-1270) reach it.
 fn bridge_for(room: &str) -> kronn::core::bridge_token::BridgeTokenGuard {
     mint(BridgeScope {
         discussion_ids: vec![room.into()],
+        room_grant_discussions: vec![room.into()],
         ..Default::default()
     })
     .unwrap()
@@ -3116,4 +3118,1075 @@ async fn a_bridge_token_cannot_approve_the_security_pause() {
         .unwrap()
         .unwrap();
     assert_eq!(run.status, kronn::models::RunStatus::WaitingApproval);
+}
+
+/// Every `discussion_ids` list in a response, at any depth.
+fn discussion_id_lists(value: &Value, out: &mut Vec<Vec<String>>) {
+    match value {
+        Value::Object(fields) => {
+            for (key, child) in fields {
+                if key == "discussion_ids" {
+                    if let Some(items) = child.as_array() {
+                        out.push(
+                            items
+                                .iter()
+                                .filter_map(|id| id.as_str().map(str::to_owned))
+                                .collect(),
+                        );
+                    }
+                } else {
+                    discussion_id_lists(child, out);
+                }
+            }
+        }
+        Value::Array(items) => items.iter().for_each(|item| discussion_id_lists(item, out)),
+        _ => {}
+    }
+}
+
+/// GitHub #248: one parent task shared by a room of each project stays
+/// visible from both rooms, each seeing only its own room among the links.
+#[tokio::test]
+async fn a_task_shared_by_rooms_of_two_projects_is_visible_from_each() {
+    let (app, _repos, db) = fixture_with_db().await;
+    db.with_conn(|conn| {
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO planning_tasks(id, task_number, title, created_at, updated_at) \
+             VALUES ('task-shared', 9010, 'task-shared', ?1, ?1)",
+            [&now],
+        )?;
+        for project in ["p1", "p2"] {
+            conn.execute(
+                "INSERT INTO planning_task_projects(task_id, project_id) VALUES ('task-shared', ?1)",
+                [project],
+            )?;
+        }
+        for room in ["room-a", "room-b"] {
+            conn.execute(
+                "INSERT INTO planning_task_discussions(task_id, discussion_id, placement, is_primary, created_at) \
+                 VALUES ('task-shared', ?1, 'active', 1, ?2)",
+                rusqlite::params![room, now],
+            )?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+    for (room, other) in [("room-a", "room-b"), ("room-b", "room-a")] {
+        let guard = bridge_for(room);
+        for path in [
+            "/api/planning/tasks/task-shared".to_owned(),
+            format!("/api/discussions/{room}/plan"),
+        ] {
+            let (status, response) = call(&app, "GET", &path, Some(guard.value()), None).await;
+            assert_eq!(status, 200, "{room} {path}: {response}");
+            let text = response.to_string();
+            assert!(text.contains("task-shared"), "{room} {path}: {text}");
+            assert!(
+                !text.contains(other),
+                "{room} {path} names the other project's room: {text}"
+            );
+            let mut lists = Vec::new();
+            discussion_id_lists(&response, &mut lists);
+            assert!(
+                !lists.is_empty(),
+                "{room} {path}: no discussion_ids in {text}"
+            );
+            for list in lists {
+                assert_eq!(list, vec![room.to_owned()], "{room} {path}: {text}");
+            }
+        }
+    }
+    // The operator still sees both links.
+    let (_, operator) = call(&app, "GET", "/api/planning/tasks/task-shared", None, None).await;
+    let text = operator.to_string();
+    assert!(text.contains("room-a") && text.contains("room-b"), "{text}");
+}
+
+/// KT-1270 — a human opens another project to a room; the room's token
+/// follows on its next call, and only a human can open or close it.
+async fn grant_scope(app: &Router, room: &str, body: Value) -> (u16, Value) {
+    call(
+        app,
+        "POST",
+        &format!("/api/discussions/{room}/scope/grants"),
+        None,
+        Some(body),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn a_read_grant_reads_another_project_and_changes_nothing_there() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-a");
+    let token = guard.value().to_owned();
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/planning/tasks/task-b",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 403, "no grant yet");
+
+    let (status, body) = grant_scope(
+        &app,
+        "room-a",
+        json!({"project_id": "p2", "access": "read"}),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = call(
+        &app,
+        "GET",
+        "/api/planning/tasks/task-b",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "read grant, same token, next call: {body}");
+    let (status, body) = call(
+        &app,
+        "GET",
+        "/api/planning/tasks?project_id=p2",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.to_string().contains("task-b"), "{body}");
+    let (status, body) = call(
+        &app,
+        "PATCH",
+        "/api/planning/tasks/task-b",
+        Some(&token),
+        Some(json!({"title": "changed"})),
+    )
+    .await;
+    assert_eq!(status, 403, "a read grant never writes: {body}");
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/discussions/room-b/meta",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "the granted project's rooms read too");
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/api/disc/append",
+        Some(&token),
+        Some(append("room-b", "g1")),
+    )
+    .await;
+    assert_eq!(status, 403, "but are never written to");
+}
+
+#[tokio::test]
+async fn a_write_grant_opens_planning_only_and_never_credentials() {
+    let (app, _repos, db) = fixture_with_db().await;
+    let guard = bridge_for("room-a");
+    let token = guard.value().to_owned();
+    let (status, body) = grant_scope(
+        &app,
+        "room-a",
+        json!({"project_id": "p2", "access": "write"}),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+
+    let (status, body) = call(
+        &app,
+        "PATCH",
+        "/api/planning/tasks/task-b",
+        Some(&token),
+        Some(json!({"title": "changed by the room"})),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/api/planning/tasks",
+        Some(&token),
+        Some(json!({"title": "api docs", "project_ids": ["p2"]})),
+    )
+    .await;
+    assert_eq!(status, 200, "a task created in the granted project: {body}");
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/api/planning/tasks",
+        Some(&token),
+        Some(json!({"title": "unnamed"})),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let (projects_api, projects_unnamed) = db
+        .with_read_conn(|conn| {
+            let of = |title: &str| -> rusqlite::Result<String> {
+                conn.query_row(
+                    "SELECT GROUP_CONCAT(p.project_id) FROM planning_task_projects p \
+                     JOIN planning_tasks t ON t.id = p.task_id WHERE t.title = ?1",
+                    [title],
+                    |row| row.get(0),
+                )
+            };
+            Ok((of("api docs")?, of("unnamed")?))
+        })
+        .await
+        .unwrap();
+    assert_eq!(projects_api, "p2");
+    assert_eq!(
+        projects_unnamed, "p1",
+        "a creation left unnamed lands in the room's project"
+    );
+
+    // Planning only: another project's workflow, page or room stays read-only.
+    let (status, body) = call(
+        &app,
+        "PUT",
+        "/api/workflows/wf-b",
+        Some(&token),
+        Some(json!({"name": "taken"})),
+    )
+    .await;
+    assert_eq!(status, 403, "{body}");
+    // Credentials never follow a grant.
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/api/agent-api/call",
+        Some(&token),
+        Some(json!({
+            "api_plugin_slug": "synthetic-api",
+            "api_config_id": "cfg-b",
+            "endpoint_path": "/anything",
+        })),
+    )
+    .await;
+    assert_eq!(status, 403, "{body}");
+    let (status, view) = call(&app, "GET", "/api/mcps", Some(&token), None).await;
+    assert_eq!(status, 200);
+    assert!(!view.to_string().contains("cfg-b"), "{view}");
+    // A route that changes the project itself is not planning.
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/api/projects/p2/install-template",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 403, "{body}");
+    // Effects stay on the room's project.
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/api/mcp/workflow-trigger",
+        Some(&token),
+        Some(json!({"workflow_id": "wf-b"})),
+    )
+    .await;
+    assert_eq!(status, 403, "{body}");
+}
+
+#[tokio::test]
+async fn a_revoke_closes_the_project_on_the_next_call() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-a");
+    let token = guard.value().to_owned();
+    let (_, granted) = grant_scope(
+        &app,
+        "room-a",
+        json!({"project_id": "p2", "access": "write"}),
+    )
+    .await;
+    let grant_id = granted["data"]["id"].as_str().unwrap().to_owned();
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/planning/tasks/task-b",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    let (status, body) = call(
+        &app,
+        "POST",
+        &format!("/api/discussions/room-a/scope/grants/{grant_id}/revoke"),
+        None,
+        Some(json!({"reason": "done"})),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/planning/tasks/task-b",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 403, "revoked, without restarting anything");
+    let (_, scope) = call(&app, "GET", "/api/discussions/room-a/scope", None, None).await;
+    assert_eq!(
+        scope["data"]["revoked"][0]["revoked_reason"], "done",
+        "{scope}"
+    );
+}
+
+#[tokio::test]
+async fn every_project_in_write_needs_a_typed_confirmation_and_the_seen_scope() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-a");
+    let token = guard.value().to_owned();
+    let (status, body) = grant_scope(&app, "room-a", json!({"all": true, "access": "read"})).await;
+    assert_eq!(status, 200, "{body}");
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/planning/tasks/task-b",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "every project reads");
+    let (status, _) = call(
+        &app,
+        "PATCH",
+        "/api/planning/tasks/task-b",
+        Some(&token),
+        Some(json!({"title": "x"})),
+    )
+    .await;
+    assert_eq!(
+        status, 403,
+        "and changes nothing outside the room's project"
+    );
+
+    let (_, scope) = call(&app, "GET", "/api/discussions/room-a/scope", None, None).await;
+    let seen = scope["data"]["fingerprint"].as_str().unwrap().to_owned();
+    for (body, expected) in [
+        (json!({"all": true, "access": "write"}), 400),
+        (
+            json!({"all": true, "access": "write", "confirm": "yes"}),
+            400,
+        ),
+        (
+            json!({"all": true, "access": "write", "confirm": "ALL-PROJECTS-WRITE"}),
+            400,
+        ),
+        (
+            json!({"all": true, "access": "write", "confirm": "ALL-PROJECTS-WRITE", "expected_fingerprint": "stale"}),
+            409,
+        ),
+    ] {
+        let (status, response) = grant_scope(&app, "room-a", body.clone()).await;
+        assert_eq!(status, expected, "{body}: {response}");
+    }
+    let (status, _) = call(
+        &app,
+        "PATCH",
+        "/api/planning/tasks/task-b",
+        Some(&token),
+        Some(json!({"title": "x"})),
+    )
+    .await;
+    assert_eq!(status, 403, "no refused attempt widened anything");
+    let (status, body) = grant_scope(
+        &app,
+        "room-a",
+        json!({"all": true, "access": "write", "confirm": "ALL-PROJECTS-WRITE", "expected_fingerprint": seen}),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = call(
+        &app,
+        "PATCH",
+        "/api/planning/tasks/task-b",
+        Some(&token),
+        Some(json!({"title": "x"})),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+}
+
+#[tokio::test]
+async fn only_a_human_opens_or_closes_a_room_s_scope() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-a");
+    let token = guard.value().to_owned();
+    for (path, body) in [
+        (
+            "/api/discussions/room-a/scope/grants",
+            json!({"project_id": "p2", "access": "write"}),
+        ),
+        (
+            "/api/discussions/room-a/scope/grants",
+            json!({"all": true, "access": "read"}),
+        ),
+        ("/api/discussions/room-a/scope/grants/any/revoke", json!({})),
+        (
+            "/api/discussions/room-a/scope/requests/any/approve",
+            json!({"access": "write"}),
+        ),
+        (
+            "/api/discussions/room-a/scope/requests/any/decline",
+            json!({}),
+        ),
+    ] {
+        let (status, response) = call(&app, "POST", path, Some(&token), Some(body)).await;
+        assert_eq!(status, 403, "{path}: {response}");
+    }
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/planning/tasks/task-b",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 403);
+}
+
+#[tokio::test]
+async fn an_agent_request_grants_nothing_until_a_human_approves_it() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-a");
+    let token = guard.value().to_owned();
+    let request =
+        json!({"project": "p2", "access": "write", "reason": "create the API doc sub-task"});
+    let (status, filed) = call(
+        &app,
+        "POST",
+        "/api/discussions/room-a/scope/requests",
+        Some(&token),
+        Some(request.clone()),
+    )
+    .await;
+    assert_eq!(status, 200, "{filed}");
+    assert_eq!(filed["data"]["status"], "pending", "{filed}");
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/planning/tasks/task-b",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 403, "a request is not a grant");
+    let (_, again) = call(
+        &app,
+        "POST",
+        "/api/discussions/room-a/scope/requests",
+        Some(&token),
+        Some(request),
+    )
+    .await;
+    assert_eq!(again["data"]["status"], "already_pending", "{again}");
+    let (status, other) = call(
+        &app,
+        "POST",
+        "/api/discussions/room-a2/scope/requests",
+        Some(&token),
+        Some(json!({"project": "p2", "access": "read", "reason": "x"})),
+    )
+    .await;
+    assert_eq!(status, 403, "only for its own room: {other}");
+
+    let request_id = filed["data"]["request_ref"].as_str().unwrap();
+    let (status, body) = call(
+        &app,
+        "POST",
+        &format!("/api/discussions/room-a/scope/requests/{request_id}/approve"),
+        None,
+        Some(json!({"access": "read"})),
+    )
+    .await;
+    assert_eq!(status, 200, "the human narrows it to read: {body}");
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/planning/tasks/task-b",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    let (status, _) = call(
+        &app,
+        "PATCH",
+        "/api/planning/tasks/task-b",
+        Some(&token),
+        Some(json!({"title": "x"})),
+    )
+    .await;
+    assert_eq!(status, 403);
+    let (status, scope) = call(
+        &app,
+        "GET",
+        "/api/discussions/room-a/scope",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "an agent sees its room's reach: {scope}");
+}
+
+#[tokio::test]
+async fn a_grant_belongs_to_its_room_and_never_spreads() {
+    let (app, _repos) = fixture().await;
+    grant_scope(
+        &app,
+        "room-a",
+        json!({"project_id": "p2", "access": "write"}),
+    )
+    .await;
+    let sibling = bridge_for("room-a2");
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/planning/tasks/task-b",
+        Some(sibling.value()),
+        None,
+    )
+    .await;
+    assert_eq!(status, 403, "a room of the same project gets nothing");
+    let (status, body) = grant_scope(
+        &app,
+        "room-g",
+        json!({"project_id": "p2", "access": "read"}),
+    )
+    .await;
+    assert_eq!(
+        status, 400,
+        "a room without a project reaches no other: {body}"
+    );
+    let (status, body) = grant_scope(
+        &app,
+        "room-a",
+        json!({"project_id": "p1", "access": "read"}),
+    )
+    .await;
+    assert_eq!(status, 400, "its own project needs no grant: {body}");
+}
+
+#[tokio::test]
+async fn a_task_shared_with_another_project_needs_write_on_both() {
+    let (app, _repos, db) = fixture_with_db().await;
+    db.with_conn(|conn| {
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO planning_tasks(id, task_number, title, created_at, updated_at) \
+             VALUES ('task-ab', 9011, 'task-ab', ?1, ?1)",
+            [&now],
+        )?;
+        for project in ["p1", "p2"] {
+            conn.execute(
+                "INSERT INTO planning_task_projects(task_id, project_id) VALUES ('task-ab', ?1)",
+                [project],
+            )?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let guard = bridge_for("room-a");
+    let token = guard.value().to_owned();
+    let patch = || json!({"title": "edited"});
+    let (status, _) = call(
+        &app,
+        "PATCH",
+        "/api/planning/tasks/task-ab",
+        Some(&token),
+        Some(patch()),
+    )
+    .await;
+    assert_eq!(
+        status, 403,
+        "shared with p2, unchanged rule without a grant"
+    );
+    grant_scope(
+        &app,
+        "room-a",
+        json!({"project_id": "p2", "access": "read"}),
+    )
+    .await;
+    let (status, _) = call(
+        &app,
+        "PATCH",
+        "/api/planning/tasks/task-ab",
+        Some(&token),
+        Some(patch()),
+    )
+    .await;
+    assert_eq!(status, 403, "read on p2 is not enough");
+    grant_scope(
+        &app,
+        "room-a",
+        json!({"project_id": "p2", "access": "write"}),
+    )
+    .await;
+    let (status, body) = call(
+        &app,
+        "PATCH",
+        "/api/planning/tasks/task-ab",
+        Some(&token),
+        Some(patch()),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+}
+
+/// KT-1270 review B2 — a workflow step posting in a room is not that room's
+/// agent: the room's grants never reach its token, so pointing a step's
+/// `room_id` at a granted room opens nothing.
+#[tokio::test]
+async fn a_step_posting_in_a_granted_room_gets_none_of_its_grants() {
+    let (app, _repos) = fixture().await;
+    grant_scope(
+        &app,
+        "room-a",
+        json!({"project_id": "p2", "access": "write"}),
+    )
+    .await;
+    let step = mint(BridgeScope {
+        discussion_ids: vec!["room-a".into()],
+        workflow_run_id: Some("run-a".into()),
+        ..Default::default()
+    })
+    .unwrap();
+    let token = step.value().to_owned();
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/api/disc/append",
+        Some(&token),
+        Some(append("room-a", "step-b2")),
+    )
+    .await;
+    assert_eq!(status, 200, "the step still posts in its room: {body}");
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/planning/tasks/task-b",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 403, "no read through the room's grant");
+    let (status, _) = call(
+        &app,
+        "PATCH",
+        "/api/planning/tasks/task-b",
+        Some(&token),
+        Some(json!({"title": "taken"})),
+    )
+    .await;
+    assert_eq!(status, 403, "no write through the room's grant");
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/api/planning/tasks",
+        Some(&token),
+        Some(json!({"title": "x", "project_ids": ["p2"]})),
+    )
+    .await;
+    assert_eq!(status, 403, "no creation through the room's grant");
+    // A task worker is not the room's agent either.
+    let worker = mint(BridgeScope {
+        discussion_ids: vec!["room-a".into()],
+        task_execution_id: Some("exec-a".into()),
+        ..Default::default()
+    })
+    .unwrap();
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/planning/tasks/task-b",
+        Some(worker.value()),
+        None,
+    )
+    .await;
+    assert_eq!(status, 403);
+    // The room's own agent does reach it.
+    let agent = bridge_for("room-a");
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/planning/tasks/task-b",
+        Some(agent.value()),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+}
+
+/// Start `run_id` for `workflow_id` and pin it with the production pin, as a
+/// launch does: the definitions it pins are the ones it executes.
+async fn pinned_run(db: &Arc<kronn::db::Database>, workflow_id: &str, run_id: &str) {
+    let (workflow_id, run_id) = (workflow_id.to_owned(), run_id.to_owned());
+    db.with_conn(move |conn| {
+        conn.execute(
+            "INSERT INTO workflow_runs(id, workflow_id, project_id, started_at) VALUES (?1, ?2, 'p1', ?3)",
+            rusqlite::params![run_id, workflow_id, chrono::Utc::now().to_rfc3339()],
+        )?;
+        let workflow = kronn::db::workflows::get_workflow(conn, &workflow_id)?.unwrap();
+        let run = kronn::db::workflows::get_run(conn, &run_id)?.unwrap();
+        kronn::workflows::run_pins::pin_or_load(conn, &workflow, &run)?.expect("pin");
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+fn step_of(run_id: &str) -> kronn::core::bridge_token::BridgeTokenGuard {
+    mint(BridgeScope {
+        discussion_ids: vec!["room-a".into()],
+        workflow_run_id: Some(run_id.into()),
+        ..Default::default()
+    })
+    .unwrap()
+}
+
+async fn edits_task_b(app: &Router, token: &str) -> u16 {
+    call(
+        app,
+        "PATCH",
+        "/api/planning/tasks/task-b",
+        Some(token),
+        Some(json!({"title": "edited by a run"})),
+    )
+    .await
+    .0
+}
+
+/// KT-1270 DoD — a workflow's scope, validated once by a human, reaches the
+/// runs that pinned the validated revision, and only them.
+#[tokio::test]
+async fn a_workflow_scope_reaches_only_runs_that_pinned_the_validated_revision() {
+    let (app, _repos, db) = fixture_with_db().await;
+    let scope = json!({"entries": [{"project_id": "p2", "access": "write"}]});
+    let agent = bridge_for("room-a");
+    let (status, body) = call(
+        &app,
+        "PUT",
+        "/api/workflows/wf-a/scope",
+        Some(agent.value()),
+        Some(scope.clone()),
+    )
+    .await;
+    assert_eq!(
+        status, 403,
+        "a bridge token cannot set a workflow's scope: {body}"
+    );
+    let (status, body) = call(&app, "PUT", "/api/workflows/wf-a/scope", None, Some(scope)).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["data"]["valid"], true, "{body}");
+
+    pinned_run(&db, "wf-a", "run-validated").await;
+    let validated = step_of("run-validated");
+    assert_eq!(
+        edits_task_b(&app, validated.value()).await,
+        200,
+        "the validated revision reaches p2"
+    );
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/api/planning/tasks",
+        Some(validated.value()),
+        Some(json!({"title": "api docs", "project_ids": ["p2"]})),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/api/agent-api/call",
+        Some(validated.value()),
+        Some(json!({"api_plugin_slug": "synthetic-api", "api_config_id": "cfg-b", "endpoint_path": "/x"})),
+    )
+    .await;
+    assert_eq!(status, 403, "never another project's credentials");
+
+    // An agent changes the workflow: the scope is suspended and a run that pins
+    // the change reaches nothing...
+    let changed = json!({"steps": [{"name": "changed", "step_type": {"type": "Agent"}, "prompt_template": "UNVALIDATED"}]});
+    let (status, body) = call(
+        &app,
+        "PUT",
+        "/api/workflows/wf-a",
+        Some(agent.value()),
+        Some(changed),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let (_, scope) = call(&app, "GET", "/api/workflows/wf-a/scope", None, None).await;
+    assert_eq!(scope["data"]["valid"], false, "{scope}");
+    pinned_run(&db, "wf-a", "run-changed").await;
+    let changed_run = step_of("run-changed");
+    assert_eq!(edits_task_b(&app, changed_run.value()).await, 403);
+    // ...and restoring the validated definition never re-opens it: the run is
+    // judged on what it pinned (review P1-A).
+    let (status, body) = call(
+        &app,
+        "PUT",
+        "/api/workflows/wf-a",
+        Some(agent.value()),
+        Some(json!({"steps": []})),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let (_, scope) = call(&app, "GET", "/api/workflows/wf-a/scope", None, None).await;
+    assert_eq!(
+        scope["data"]["valid"], true,
+        "the live definition is the validated one again: {scope}"
+    );
+    assert_eq!(
+        edits_task_b(&app, changed_run.value()).await,
+        403,
+        "the run that pinned the change stays closed"
+    );
+    assert_eq!(
+        edits_task_b(&app, validated.value()).await,
+        200,
+        "the run that pinned the validated revision keeps it"
+    );
+
+    // Another workflow's runs never reach it.
+    let other = mint(BridgeScope {
+        discussion_ids: vec!["room-b".into()],
+        workflow_run_id: Some("run-b".into()),
+        ..Default::default()
+    })
+    .unwrap();
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/planning/tasks/task-a",
+        Some(other.value()),
+        None,
+    )
+    .await;
+    assert_eq!(status, 403);
+}
+
+/// KT-1270 review P1-B — what a workflow executes is part of what a human
+/// validated: an edited Quick Prompt suspends the scope, and a run that pinned
+/// the edited prompt reaches nothing even after the prompt is put back.
+#[tokio::test]
+async fn an_edited_dependency_suspends_a_workflow_scope() {
+    let (app, _repos, db) = fixture_with_db().await;
+    let (status, body) = call(
+        &app,
+        "PUT",
+        "/api/workflows/wf-a",
+        None,
+        Some(json!({"steps": [{"name": "prompt-step", "step_type": {"type": "Agent"}, "quick_prompt_id": "qp-a"}]})),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = call(
+        &app,
+        "PUT",
+        "/api/workflows/wf-a/scope",
+        None,
+        Some(json!({"entries": [{"project_id": "p2", "access": "write"}]})),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let agent = bridge_for("room-a");
+    let (status, body) = call(
+        &app,
+        "PUT",
+        "/api/quick-prompts/qp-a",
+        Some(agent.value()),
+        Some(json!({"name": "qp-a", "prompt_template": "UNVALIDATED_DEPENDENCY"})),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let (_, scope) = call(&app, "GET", "/api/workflows/wf-a/scope", None, None).await;
+    assert_eq!(scope["data"]["valid"], false, "{scope}");
+    pinned_run(&db, "wf-a", "run-edited-prompt").await;
+    let edited = step_of("run-edited-prompt");
+    assert_eq!(edits_task_b(&app, edited.value()).await, 403);
+    let (status, body) = call(
+        &app,
+        "PUT",
+        "/api/quick-prompts/qp-a",
+        Some(agent.value()),
+        Some(json!({"name": "qp-a", "prompt_template": "x"})),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        edits_task_b(&app, edited.value()).await,
+        403,
+        "put back after the pin: still closed"
+    );
+}
+
+/// KT-1270 review — an agent's request never says whether a project exists.
+#[tokio::test]
+async fn an_agent_request_answers_the_same_for_an_unknown_project() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-a");
+    let token = guard.value().to_owned();
+    let ask = |project: &str| json!({"project": project, "access": "read", "reason": "look"});
+    let (status, known) = call(
+        &app,
+        "POST",
+        "/api/discussions/room-a/scope/requests",
+        Some(&token),
+        Some(ask("p2")),
+    )
+    .await;
+    assert_eq!(status, 200, "{known}");
+    let (status, unknown) = call(
+        &app,
+        "POST",
+        "/api/discussions/room-a/scope/requests",
+        Some(&token),
+        Some(ask("no-such-project")),
+    )
+    .await;
+    assert_eq!(status, 200, "{unknown}");
+    assert_eq!(known["data"]["status"], unknown["data"]["status"]);
+    let shape = |value: &Value| {
+        let mut keys: Vec<String> = value["data"].as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        keys
+    };
+    assert_eq!(shape(&known), shape(&unknown));
+}
+
+/// KT-1270 review — a project's token override never reaches a bridge token.
+#[tokio::test]
+async fn a_project_token_override_never_reaches_a_bridge_token() {
+    let (app, _repos, db) = fixture_with_db().await;
+    db.with_conn(|conn| {
+        conn.execute(
+            "UPDATE projects SET token_override_json = '{\"provider\":\"github\",\"token\":\"ghp-secret\"}' WHERE id = 'p1'",
+            [],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let guard = bridge_for("room-a");
+    let (status, body) = call(&app, "GET", "/api/projects/p1", Some(guard.value()), None).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(!body.to_string().contains("ghp-secret"), "{body}");
+    assert!(body["data"].get("token_override").is_none(), "{body}");
+}
+
+/// KT-1270 review P2 — a global or multi-project workflow resolves another
+/// revision per launch project: it cannot carry a scope, and says so rather
+/// than showing a validation that would never apply.
+#[tokio::test]
+async fn a_global_or_multi_project_workflow_cannot_carry_a_scope() {
+    let (app, _repos) = fixture().await;
+    for workflow in ["wf-global", "wf-all"] {
+        let (status, body) = call(
+            &app,
+            "PUT",
+            &format!("/api/workflows/{workflow}/scope"),
+            None,
+            Some(json!({"entries": [{"project_id": "p2", "access": "write"}]})),
+        )
+        .await;
+        assert_eq!(status, 400, "{workflow}: {body}");
+        let (status, scope) = call(
+            &app,
+            "GET",
+            &format!("/api/workflows/{workflow}/scope"),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, 200, "{scope}");
+        assert_eq!(scope["data"]["supported"], false, "{workflow}: {scope}");
+        assert_eq!(scope["data"]["valid"], false, "{workflow}: {scope}");
+    }
+    let (_, scope) = call(&app, "GET", "/api/workflows/wf-a/scope", None, None).await;
+    assert_eq!(scope["data"]["supported"], true, "{scope}");
+}
+
+/// KT-1270 review — a human can always withdraw a workflow's scope, even once
+/// the workflow became global: the run that pinned the validated revision loses
+/// it on its next call.
+#[tokio::test]
+async fn a_workflow_scope_stays_revocable_after_the_workflow_becomes_global() {
+    let (app, _repos, db) = fixture_with_db().await;
+    let (status, body) = call(
+        &app,
+        "PUT",
+        "/api/workflows/wf-a/scope",
+        None,
+        Some(json!({"entries": [{"project_id": "p2", "access": "write"}]})),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    pinned_run(&db, "wf-a", "run-before-global").await;
+    let step = step_of("run-before-global");
+    assert_eq!(edits_task_b(&app, step.value()).await, 200);
+
+    let (status, body) = call(
+        &app,
+        "PUT",
+        "/api/workflows/wf-a",
+        None,
+        Some(json!({"project_scope": {"type": "All"}})),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let (_, scope) = call(&app, "GET", "/api/workflows/wf-a/scope", None, None).await;
+    assert_eq!(scope["data"]["supported"], false, "{scope}");
+    assert_eq!(
+        scope["data"]["entries"].as_array().map(Vec::len),
+        Some(1),
+        "still listed: {scope}"
+    );
+    let (status, _) = call(
+        &app,
+        "PUT",
+        "/api/workflows/wf-a/scope",
+        None,
+        Some(json!({"entries": [{"project_id": "p2", "access": "write"}]})),
+    )
+    .await;
+    assert_eq!(status, 400, "no new validation on an unsupported workflow");
+
+    let agent = bridge_for("room-a");
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/api/workflows/wf-a/scope/revoke",
+        Some(agent.value()),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, 403, "a bridge token cannot revoke either");
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/api/workflows/wf-a/scope/revoke",
+        None,
+        Some(json!({"project_id": "p2"})),
+    )
+    .await;
+    assert_eq!(status, 200, "the human withdraws it: {body}");
+    assert_eq!(
+        edits_task_b(&app, step.value()).await,
+        403,
+        "the pinned run lost it on its next call"
+    );
 }

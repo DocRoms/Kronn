@@ -70,8 +70,8 @@ Three Docker services behind nginx gateway:
   content is withheld even when tags are split across chunks or never closed;
   once visible answer content starts, identically named literal tags are
   preserved. The same final sanitizer runs on persisted discussion output.
-  [src: file: backend/src/agents/runner.rs:8199-8309#LeadingThinkingFilter]
-  [src: file: backend/src/api/discussions/streaming.rs:5329-5330#strip_leading_thinking_blocks]
+  [src: file: backend/src/agents/runner.rs:8242-8352#LeadingThinkingFilter]
+  [src: file: backend/src/api/discussions/streaming.rs:5333-5334#strip_leading_thinking_blocks]
 
 ### Discussions
 - `Discussion.project_id` is `Option<String>` (Rust) / `string | null` (TS).
@@ -88,7 +88,7 @@ Three Docker services behind nginx gateway:
   [src: file: backend/src/api/disc_portability.rs:527-562#import_bundle]
   [src: file: backend/src/api/disc_portability.rs:849-866#discussion_imports]
   [src: file: backend/src/db/sql/093_discussion_imports.sql:1-15#discussion_imports]
-- Agent runs in its own folder, `~/.kronn/discussions/<id>`, for global discussions (no project context). Native final messages can attach linked files from the run/project folder: at most eight new files and 64 MiB read per message, excluding known credential paths and the Kronn data directory. Link destinations are rewritten to exact asset IDs before initial message persistence; failed insertion cleans up staged files. This is an attachment filter, not a filesystem sandbox. [src: file: backend/src/api/discussions/context.rs:281-286#attach_files_linked_in_message] [src: file: backend/src/api/discussions/context.rs:364-367#MAX_LINKED_FILE_BYTES] [src: file: backend/src/core/message_file_links.rs:11-12#MAX_LINKED_FILE_BYTES] [src: file: backend/src/core/message_file_links.rs:65-99#resolve_attachable] [src: file: backend/src/core/message_file_links.rs:249-276#is_sensitive] [src: file: backend/src/api/discussions/streaming.rs:5567-5581#attach_files_linked_in_message] [src: file: backend/src/api/discussions/streaming.rs:5677-5684#discard_uncommitted_message_files]
+- Agent runs in its own folder, `~/.kronn/discussions/<id>`, for global discussions (no project context). Native final messages can attach linked files from the run/project folder: at most eight new files and 64 MiB read per message, excluding known credential paths and the Kronn data directory. Link destinations are rewritten to exact asset IDs before initial message persistence; failed insertion cleans up staged files. This is an attachment filter, not a filesystem sandbox. [src: file: backend/src/api/discussions/context.rs:281-286#attach_files_linked_in_message] [src: file: backend/src/api/discussions/context.rs:364-367#MAX_LINKED_FILE_BYTES] [src: file: backend/src/core/message_file_links.rs:11-12#MAX_LINKED_FILE_BYTES] [src: file: backend/src/core/message_file_links.rs:65-99#resolve_attachable] [src: file: backend/src/core/message_file_links.rs:249-276#is_sensitive] [src: file: backend/src/api/discussions/streaming.rs:5567-5581#attach_files_linked_in_message] [src: file: backend/src/api/discussions/streaming.rs:5688-5695#discard_uncommitted_message_files]
 - `CreateDiscussionRequest.project_id` is also optional; frontend offers "Aucun projet" option.
 - **Discussion search/filter**: sidebar includes a search input (`discSearchFilter` state) that filters discussions by title (case-insensitive substring match). When a search term is active, collapsed groups are auto-expanded and only matching discussions are shown. A clear button resets the filter.
 - **Archive/unarchive**: `Discussion.archived: bool` (default false). Swipe right on sidebar item to archive, swipe left to delete. Archived discussions shown in a collapsible "Archives" section at the bottom of the sidebar. `PATCH /api/discussions/:id` with `UpdateDiscussionRequest { title?, archived? }`.
@@ -256,7 +256,7 @@ is still cut, by its own (wider) bound, with a reason naming the tool instead
 of accusing the model of a silence it never had.
 [src: file: backend/src/agents/idle_watchdog.rs:45-58#TOOL_TIMEOUT_MULTIPLIER] [src: file: backend/src/agents/idle_watchdog.rs:131-170#begin_tool]
 [src: file: backend/src/agents/idle_watchdog.rs:282-295#tool_stall_reason]
-[src: file: backend/src/agents/runner.rs:5521-5529#IdleWatchdog] [src: file: backend/src/agents/runner.rs:5627-5642#begin_tool]
+[src: file: backend/src/agents/runner.rs:5544-5552#IdleWatchdog] [src: file: backend/src/agents/runner.rs:5650-5665#begin_tool]
 [src: file: backend/src/agents/runner_idle_test.rs:1823-1946#a_long_silent_acp_tool_call_is_not_mistaken_for_a_dead_model]
 [src: file: backend/src/acp.rs:1477-1491#ToolCallEnded] [src: file: backend/src/acp.rs:522-527#Activity]
 

@@ -989,7 +989,7 @@ pub fn insert_migrated_seed_for_target(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::db::migrations;

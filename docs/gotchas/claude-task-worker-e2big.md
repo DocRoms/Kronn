@@ -26,7 +26,7 @@ the sandbox to enumerate. Any other unreadable Git root still fails closed with
 The worker remains fail-closed: sandbox availability is mandatory,
 unsandboxed commands are disabled, and the explicit write roots are the
 canonical managed task worktree and its lane's private Cargo target (see
-"Build and test policy" below). [src: file: backend/src/agents/runner.rs:12161-12196#claude_task_worker_settings]
+"Build and test policy" below). [src: file: backend/src/agents/runner.rs:12204-12239#claude_task_worker_settings]
 
 Regression coverage uses real synthetic Git common directories to exercise
 accepted and refused catalogue sizes, common-directory deduplication and

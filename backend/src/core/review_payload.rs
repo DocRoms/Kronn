@@ -341,6 +341,6 @@ pub fn final_verdict_blockers(
     Ok(blockers)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "review_payload_test.rs"]
 mod review_payload_test;

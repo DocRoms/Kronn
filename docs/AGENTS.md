@@ -155,7 +155,7 @@ Never load everything "just in case".
 | Change type | Required tests |
 |-------------|---------------|
 | New API endpoint | Integration test in `backend/tests/api_tests.rs` (HTTP request → response assertion) |
-| New backend function | Unit test in same file (`#[cfg(test)] mod tests`) |
+| New backend function | Same-file `#[cfg(all(test, feature = "full-tests"))] mod tests` |
 | Bug fix | Regression test proving the bug is fixed (test fails without fix, passes with) |
 | New frontend component | Test file in `__tests__/` (render + key interactions) |
 | Frontend behavior change | Update existing tests + add edge case coverage |

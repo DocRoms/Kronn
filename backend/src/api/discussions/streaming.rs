@@ -280,7 +280,7 @@ async fn cli_room_agent_context(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod native_http_tools_scope_tests {
     use super::{cli_task_worker_context, native_http_tools_for_discussion};
     use crate::agents::tools::ToolRunMode;
@@ -1527,7 +1527,7 @@ fn clear_awaiting_after_terminal(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod awaiting_terminal_tests {
     use super::clear_awaiting_after_terminal;
 
@@ -1566,7 +1566,7 @@ mod awaiting_terminal_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod dispatch_prompt_snapshot_tests {
     use super::{
         discussion_at_dispatch_trigger, excerpt_naming, independent_sibling_notice,
@@ -4454,10 +4454,14 @@ pub(super) async fn make_agent_stream_inner(
                 worker.agent_type.clone(),
             )
         });
+        // Every launch keeps its capture: the reply is priced at the model the
+        // runtime reported serving, not at the tier alias the discussion stores.
+        let provenance_capture = served_model
+            .as_ref()
+            .map(crate::api::delivery_publication::ServedModelRecorder::capture)
+            .unwrap_or_default();
         match runner::start_agent_with_config(runner::AgentStartConfig {
-            provenance: served_model
-                .as_ref()
-                .map(crate::api::delivery_publication::ServedModelRecorder::capture),
+            provenance: Some(provenance_capture.clone()),
             project_id: disc_project_id.as_deref(),
             work_dir: workspace_path.as_deref(),
             full_access,
@@ -5373,9 +5377,16 @@ pub(super) async fn make_agent_stream_inner(
                         usage.prompt_cache.cache_write_prompt_tokens,
                     )
                 });
+                let observed_models = provenance_capture
+                    .lock()
+                    .map(|state| state.observed_models.clone())
+                    .unwrap_or_default();
                 let priced = crate::core::pricing::price_reply(
                     &at_str,
-                    attempted_model.as_deref(),
+                    crate::core::pricing::serving_model_for_pricing(
+                        attempted_model.as_deref(),
+                        &observed_models,
+                    ),
                     tokens_used,
                     stream_json_cost,
                     message_counters,
@@ -6283,7 +6294,7 @@ fn agent_event_sse(
     Sse::new(crate::core::sse_limits::agent_run(stream))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod agent_event_sse_tests {
     use super::*;
 
@@ -6717,7 +6728,7 @@ fn pretty_kronn_args(tool_name: &str, raw_json: &str) -> String {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod pretty_kronn_args_tests {
     use super::pretty_kronn_args;
 
@@ -6777,7 +6788,7 @@ mod pretty_kronn_args_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod agent_lifecycle_tests {
     use super::{
         agent_http_status, agent_start_error_content, agent_start_failure_outcome,
@@ -7623,7 +7634,7 @@ mod agent_lifecycle_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod truncate_tool_args_tests {
     use super::truncate_tool_args;
 
@@ -7676,7 +7687,7 @@ mod truncate_tool_args_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod run_agent_collect_tests {
     //! Unit tests for the silent-collection loop, driven by a scripted
     //! `AgentIo` (no real subprocess). Pins the raw-vs-stream-json branch,
@@ -7760,7 +7771,7 @@ mod run_agent_collect_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod run_agent_streaming_tests {
     //! Unit tests for the SSE-producing agent loop, driven by a scripted
     //! `AgentIo`. These pin the bug-prone paths the 2026-05-28 QA audit
@@ -8195,7 +8206,7 @@ mod run_agent_streaming_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod resume_delta_tests {
     //! KT-562 — what a resumed turn actually sends. Every wrong answer here is
     //! an invisible one: the agent replies confidently to a history it was
@@ -8984,7 +8995,7 @@ mod resume_delta_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod stream_helpers_tests {
     //! Pure helpers extracted (0.8.8) from the two streaming loops so they're
     //! tested once instead of living as byte-identical copies.
@@ -9116,7 +9127,7 @@ mod stream_helpers_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod connection_fallback_tests {
     use super::{agent_http_status, effective_connection_id};
     use crate::models::AgentType;
@@ -9217,7 +9228,7 @@ mod connection_fallback_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod native_acp_start_timeout_tests {
     use super::{agent_start_failure_outcome, silent_native_prompt_notice, AgentExecutionOutcome};
     use crate::agents::acp_start::{AcpStartFailure, AcpStartPhase};
@@ -9499,7 +9510,7 @@ for line in sys.stdin:
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod http_run_progress_tests {
     use crate::models::{AgentRunPhase, AgentRunStop, MessageRole, WsMessage};
     use std::sync::Arc;
@@ -9702,7 +9713,7 @@ mod http_run_progress_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "streaming_pin_tests.rs"]
 mod pinned_batch_child_tests;
 

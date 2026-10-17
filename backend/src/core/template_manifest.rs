@@ -183,7 +183,7 @@ pub fn check(project: &Path, template_docs: &Path) -> Result<TemplateUpdate, Str
 
 /// Move only a uniquely proven upstream rename, keeping the project's bytes.
 /// Hard-link publication refuses an occupied destination rather than overwriting it.
-pub fn apply_renames(project: &Path, template_docs: &Path) -> Result<(), String> {
+pub fn apply_renames(project: &Path, template_docs: &Path) -> Result<Vec<TemplateRename>, String> {
     apply_renames_in(project, template_docs, None)
 }
 
@@ -191,7 +191,8 @@ pub fn apply_renames_in(
     project: &Path,
     template_docs: &Path,
     allowed: Option<&[String]>,
-) -> Result<(), String> {
+) -> Result<Vec<TemplateRename>, String> {
+    let mut applied = Vec::new();
     for rename in check(project, template_docs)?
         .renames
         .into_iter()
@@ -205,8 +206,9 @@ pub fn apply_renames_in(
         std::fs::hard_link(&from, &to)
             .map_err(|e| format!("rename {} to {}: {e}", rename.from, rename.to))?;
         std::fs::remove_file(&from).map_err(|e| format!("remove renamed {}: {e}", rename.from))?;
+        applied.push(rename);
     }
-    Ok(())
+    Ok(applied)
 }
 
 /// Refresh the bundled spec only with proof that its current bytes are ours.

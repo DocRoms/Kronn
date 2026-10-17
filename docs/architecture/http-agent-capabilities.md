@@ -219,7 +219,7 @@ rest of the discussion, or keep the partial answer.
 * **In a discussion, the round ceiling is no longer a failure.** The round's calls are
   refused, the model answers with what it has, and the question follows. A workflow step or
   a worker still fails with its reason: there is no one there to answer.
-  [src: file: backend/src/agents/runner.rs:10620-10661#ask_on_ceiling]
+  [src: file: backend/src/agents/runner.rs:10643-10684#ask_on_ceiling]
   [src: file: backend/src/api/discussions/ceilings.rs:117-205#ceiling_question]
 
 ## Saved Quick Prompt generation settings (KT-670)
@@ -243,7 +243,7 @@ context fitting; an explicit thinking request removes Kronn's older Qwen
 round trips, rather than defining a total run budget. The provider may refuse
 a setting its selected model does not support. Kronn does not retry by dropping
 the saved control. [src: file: backend/src/agents/generation_settings.rs:39-71#apply_http]
-[src: file: backend/src/agents/runner.rs:9298#apply_http]
+[src: file: backend/src/agents/runner.rs:9341#apply_http]
 [src: url: https://docs.ollama.com/api/chat]
 [src: url: https://docs.ollama.com/capabilities/thinking]
 [src: url: https://docs.litellm.ai/docs/completion/input]
@@ -289,7 +289,7 @@ Tiering reduces the initial declaration text, not the context capacity required
 to reach every family. Window reservation counts the whole reachable catalogue,
 including JSON separators, before loading a family. A regression test checks
 exact byte counts and an unchanged window through every family load.
-[src: file: backend/src/agents/runner.rs:6822-6852#reachable_tools_bytes]
+[src: file: backend/src/agents/runner.rs:6865-6895#reachable_tools_bytes]
 [src: file: backend/src/agents/runner_test.rs:1586-1624#the_window_does_not_move_when_a_run_loads_a_tool_family]
 
 ## Audits (KT-924)
@@ -305,16 +305,16 @@ that "succeed" without writing anything.
 
 **Who is accepted.** Every agent but Vibe: the CLI agents (Claude Code, Codex,
 OpenCode, Gemini CLI, Kiro, GitHub Copilot) and the HTTP agents Ollama, LiteLLM,
-NVIDIA and Custom [src: file: backend/src/api/audit/mod.rs:716-731#agent_can_audit].
+NVIDIA and Custom [src: file: backend/src/api/audit/mod.rs:750-765#agent_can_audit].
 Vibe is refused because it has no file tools. Both launch endpoints (Full and
 partial) share the gate and its refusal message, which lists the accepted agents
 and is pinned to the gate by a test
-[src: file: backend/src/api/audit/mod.rs:1476-1502#a_refused_agent_is_told_who_is_accepted_and_the_message_matches_the_gate].
+[src: file: backend/src/api/audit/mod.rs:1510-1536#a_refused_agent_is_told_who_is_accepted_and_the_message_matches_the_gate].
 A hosted HTTP agent (NVIDIA, a Custom endpoint) receives the repository content the
 audit reads, so choosing one is choosing what leaves the machine.
 
 **How an audit step reaches the project.** Both pipelines start the step's agent
-through one launcher [src: file: backend/src/api/audit/agent_launch.rs:253-308#start]. A CLI
+through one launcher [src: file: backend/src/api/audit/agent_launch.rs:290-345#start]. A CLI
 agent is spawned exactly as before. An HTTP agent gets a
 `KronnToolExecutor::audit_arc_for_step`, scoped to the project directory the pipeline
 already resolved (`resolve_host_path`, so it is right inside a container) rather
@@ -415,8 +415,8 @@ shipping it. Three things changed:
   on a later turn keeps it. A result that was already an extract gets no paths,
   which would not apply to the response the next `extract` runs on, and is told to
   select less. Other tools are shortened exactly as before
-  [src: file: backend/src/agents/runner.rs:7078-7106#shape_of]
-  [src: file: backend/src/agents/runner.rs:7108-7148#working_extract_examples].
+  [src: file: backend/src/agents/runner.rs:7121-7149#shape_of]
+  [src: file: backend/src/agents/runner.rs:7151-7191#working_extract_examples].
 - **A call that differs only by its `extract` or its query is not a repeat.** The
   duplicate guard compares the tool name and every argument, sorted by key, so an
   identical call is still replayed once and then refused, and a call with another
@@ -474,7 +474,7 @@ undergo the existing clamping. This protects a protocol contract;
 it does not establish model authoring quality. The measured attempts and their
 execution checks are recorded in
 [`native-workflow-2026-09-22.md`](../research/native-workflow-2026-09-22.md).
-[src: file: backend/src/agents/runner.rs:7516-7533#workflow_step_schema]
+[src: file: backend/src/agents/runner.rs:7564-7581#workflow_step_schema]
 [src: file: backend/src/agents/runner_test.rs:2275-2342#authoring_schemas_survive_clamping_when_tool_history_fills_the_window]
 
 ### Further capabilities

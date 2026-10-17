@@ -24,6 +24,7 @@ import {
 import { MatrixText } from './MatrixText';
 import { LearningsBadge } from './LearningsBadge';
 import { DiscParticipantsHeader } from './DiscParticipantsHeader';
+import { DiscussionScopeChip } from './DiscussionScope';
 import { DiscInviteButton } from './DiscInviteButton';
 import { AgentSwitchPicker } from './AgentSwitchPicker';
 import type { AgentSwitchTarget } from './AgentSwitchPicker';
@@ -474,6 +475,13 @@ export function ChatHeader({
             discId={discussion.id}
             t={t}
             refreshKey={participantsRefresh}
+          />
+          {/* KT-1270 — never folded away: what the room reaches beyond its project. */}
+          <DiscussionScopeChip
+            discussionId={discussion.id}
+            hasProject={!!discussion.project_id}
+            onOpen={onToggleSettingsPanel}
+            t={t}
           />
           <button
             type="button"

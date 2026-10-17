@@ -813,7 +813,7 @@ pub(crate) fn walk(root: &Path) -> impl Iterator<Item = walkdir::DirEntry> {
         .filter(|e| e.file_type().is_file())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use std::fs;

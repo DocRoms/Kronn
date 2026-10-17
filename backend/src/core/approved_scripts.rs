@@ -230,6 +230,6 @@ pub fn prepare_copy(root: &Path, files: &[ExecScriptFile], dest: &Path) -> Resul
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "approved_scripts_test.rs"]
 mod approved_scripts_test;

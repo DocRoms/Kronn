@@ -335,8 +335,14 @@ the Planning page is not checked.
 
 ## Stop or reassign
 
-**Stop** cancels live dispatch and preserves the child branch/worktree for
-inspection. It does not force-delete local work. It never changes the task's
+**Stop** cancels live dispatch and always keeps the child branch with its
+commits. What happens to the child worktree is the campaign's
+`cancellation_cleanup_policy`, which defaults to `remove_if_clean` [src: file: backend/src/api/orchestration.rs:9408]:
+a clean worktree is removed (its provenance is kept), while one with
+uncommitted work, or whose removal Git refuses, is preserved
+[src: file: backend/src/api/orchestration.rs:10846]. Set the policy to
+`preserve` to keep the worktree whatever its state. Stop does not force-delete
+local work. It never changes the task's
 status (KT-1267): an `in_progress` or `done` task stays so, because the work may
 already be integrated by hand and the principal decides. To run the task again,
 set it back to `todo` first (`task_update status=todo`); the launch preflight

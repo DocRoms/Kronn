@@ -387,7 +387,7 @@ pub fn parse(text: &str) -> Result<AgentSkillFile, String> {
     Ok(file)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

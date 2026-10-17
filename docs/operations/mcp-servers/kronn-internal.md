@@ -89,7 +89,7 @@ routing and idempotency guarantees as an answered one — they cannot drift apar
 as a message that says it is not a decision, and the question stays pending.
 In the card, a checked option can be clicked again to take it back.
 Discussion list items expose `pending_question_count`, including pagination.
-`[src: file: backend/src/lib.rs:2768-2783#decline]`
+`[src: file: backend/src/lib.rs:2809-2857#decline]`
 `[src: file: backend/src/db/discussion_questions.rs:504-609#publish_human_resolution]`
 `[src: file: backend/src/db/discussion_questions.rs:166-193#pending_question_count]`
 `[src: file: backend/src/api/discussions/crud.rs:22-88#with_pending_counts]`
@@ -345,6 +345,14 @@ owning public object is the addressable boundary.
 - Keep the plan honest when tracked work starts or materially changes (status,
   DoD, priority, blocker). Do not reload or rewrite an unchanged task merely
   to report progress.
+- A room plans in its own project. When a task belongs in another project
+  (one sub-task per repository), `room_scope()` shows what the room reaches and
+  `room_scope({project, access: "write", reason})` asks the human for it: the
+  request grants nothing, a human approves it in the room, then `task_create`
+  with `project_ids` naming that project succeeds. Grants never open another
+  project's credentials or workflows, and reach only the room's own agents: a
+  workflow step reaches another project only through the scope a human
+  validated on its workflow (`docs/design/discussion-project-scope.md`).
 - Immediately before a direct `task_create`, call `plan_get` again so another
   agent's recent write is visible. Direct create links the task atomically to
   the MCP runtime's current discussion by default. Pass an explicit
@@ -771,7 +779,7 @@ the MCP entry's `env_vars`. Kronn writes a narrow `KRONN_*` allowlist into the
 global Codex config and repeats it as a per-run `-c` override, so the dynamic
 discussion/task capability reaches that run immediately without rewriting
 shared config or leaking unrelated host variables.
-`[src: file: backend/src/agents/runner.rs:12697-12747#claude_task_worker_mcp_config]` `[src: file: backend/src/agents/runner.rs:2640-2668#KRONN_INTERNAL_CODEX_ENV_VARS]`
+`[src: file: backend/src/agents/runner.rs:12740-12790#claude_task_worker_mcp_config]` `[src: file: backend/src/agents/runner.rs:2640-2668#KRONN_INTERNAL_CODEX_ENV_VARS]`
 `[src: file: backend/src/api/discussions/streaming.rs:148-233#cli_task_worker_context]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:5815-5847#_spawned_task_worker_context]` `[src: file: backend/scripts/disc-introspection-mcp.py:11928-11941#_spawned_task_worker_mode]`
 
@@ -1086,7 +1094,7 @@ other visible timeline message.
 [src: file: backend/src/api/disc_invite.rs:121-123#note_count] [src: file: backend/src/api/disc_invite.rs:394-399#note_count]
 [src: file: backend/src/api/disc_source.rs:1763-1850#disc_load_other]
 [src: file: backend/src/api/discussions/messaging.rs:441-518#MessageChannel]
-[src: file: backend/src/db/discussions.rs:1413-1453#insert_note_message]
+[src: file: backend/src/db/discussions.rs:1425-1465#insert_note_message]
 
 A workflow Agent step receives its rendered `prompt_template` separately from
 the room transcript. A workflow may therefore inject a launch variable into

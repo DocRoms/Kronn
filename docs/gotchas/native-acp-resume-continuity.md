@@ -38,9 +38,9 @@ response and completed checkpoint are written in the same database transaction;
 an interrupted/failed turn or rolled-back write leaves no completed proof.
 [src: file: backend/src/db/sql/173_acp_completed_turn_checkpoint.sql:1-9]
 [src: file: backend/src/db/acp_runtime_sessions.rs:110-195#begin_turn]
-[src: file: backend/src/db/discussions.rs:1835-1859#insert_native_agent_message_with_checkpoint]
-[src: file: backend/src/db/discussions.rs:1891-1899#checkpoint]
-[src: file: backend/src/db/discussions.rs:2137-2140#complete_turn]
+[src: file: backend/src/db/discussions.rs:1847-1871#insert_native_agent_message_with_checkpoint]
+[src: file: backend/src/db/discussions.rs:1903-1911#checkpoint]
+[src: file: backend/src/db/discussions.rs:2149-2152#complete_turn]
 
 Claude CLI-print retains its separate `claude_cli_print_v1` identity. Its init
 event and final response share the same per-turn store; ACP adapter identities
@@ -70,7 +70,7 @@ positively identified missing session before a prompt is sent. Authentication,
 timeouts and ambiguous transport errors fail visibly. Prompt, cancellation and
 persistence failures are not followed by an automatic fresh-session replay.
 [src: file: backend/src/agents/runner.rs:5358-5414#resume_refused]
-[src: file: backend/src/agents/runner.rs:5706-5771#acp_failure_diagnostic]
+[src: file: backend/src/agents/runner.rs:5729-5794#acp_failure_diagnostic]
 
 OpenCode v1.18.27 defines a structured missing-session error using code -32602,
 the exact message `session not found: <id>` and `data.sessionId`. The transport
@@ -91,7 +91,7 @@ discussion layer decides `new` and its reason; the runner reports a refused
 resume once the runtime answered it. Runtimes that never resume record nothing.
 [src: file: backend/src/api/discussions/streaming.rs:2593-2725#resume_with_delta_if_possible]
 [src: file: backend/src/api/discussions/streaming.rs:2727-2737#settle_turn_continuity]
-[src: file: backend/src/agents/runner.rs:5786-5801#resume_refused]
+[src: file: backend/src/agents/runner.rs:5809-5824#resume_refused]
 
 ## Deterministic qualification boundaries
 
@@ -109,7 +109,7 @@ Additional tests cover scope isolation, stale turn/session events, incomplete
 legacy progress and atomic response/checkpoint rollback. Existing ACP fixtures
 cover capability absence, missing sessions, ambiguous errors, cancellation and
 redacted prompt/persistence failures.
-[src: file: backend/src/api/discussions/streaming.rs:8665-8984#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
+[src: file: backend/src/api/discussions/streaming.rs:8674-8993#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
 [src: file: backend/src/db/acp_runtime_sessions.rs:402-531#completed_checkpoint_is_scoped_and_a_new_turn_invalidates_it_before_prompt]
 [src: file: backend/src/agents/runner.rs:14767-14868#cli_print_checkpoint_requires_the_same_turn_store_and_is_retired_before_init]
 [src: file: backend/src/agents/runner.rs:14925-15129#run_acp_session_uses_resume_and_keeps_the_existing_fallback]

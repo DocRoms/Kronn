@@ -18,6 +18,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use uuid::Uuid;
 
+use crate::core::room_lang::RoomLang;
 use crate::db::run_state;
 use crate::models::{
     AgentType, BlockedReasonCode, CampaignTaskCandidate, CampaignTaskReason,
@@ -1400,6 +1401,19 @@ pub fn principal_attention(conn: &Connection, run_id: &str) -> Result<PrincipalA
 
 // ─── TaskExecution ───────────────────────────────────────────────────────────
 
+/// The language the orchestrator speaks about an execution: its principal
+/// (parent) room's language (KT-1316).
+pub fn execution_room_lang(conn: &Connection, exec_id: &str) -> RoomLang {
+    conn.query_row(
+        "SELECT d.language FROM task_executions e \
+         JOIN discussions d ON d.id = e.parent_discussion_id WHERE e.id = ?1",
+        [exec_id],
+        |row| row.get::<_, String>(0),
+    )
+    .map(|code| RoomLang::from_code(&code))
+    .unwrap_or_default()
+}
+
 pub fn get_task_execution(conn: &Connection, id: &str) -> Result<Option<TaskExecution>> {
     let execution = conn
         .query_row(
@@ -2624,8 +2638,9 @@ fn announce_integration_refusal(
         return Ok(());
     };
     let reference = format!("KT-{task_number}");
-    let (headline, body, next, highlight) = match parked {
-        TaskExecutionStatus::Blocked => (
+    let lang = RoomLang::from_code(&principal.language);
+    let (headline, body, next, highlight) = match (parked, lang) {
+        (TaskExecutionStatus::Blocked, RoomLang::Fr) => (
             "Intégration suspendue",
             format!(
                 "L'exécution `{exec_id}` (**{title}**) est validée, mais n'a pas pu être \
@@ -2636,7 +2651,18 @@ fn announce_integration_refusal(
              reconstruit le candidat si elle a avancé.",
             format!("{reference} est validée mais n'est pas appliquée."),
         ),
-        TaskExecutionStatus::Interrupted => (
+        (TaskExecutionStatus::Blocked, RoomLang::En) => (
+            "Integration suspended",
+            format!(
+                "Execution `{exec_id}` (**{title}**) is validated, but could not be applied \
+                 to the target branch: {reason}\n\n\
+                 It is put on hold (`Blocked`); the target branch did not move."
+            ),
+            "Then resume with `task_exec_resume`: Kronn re-checks the target branch and \
+             rebuilds the candidate if it advanced.",
+            format!("{reference} is validated but not applied."),
+        ),
+        (TaskExecutionStatus::Interrupted, RoomLang::Fr) => (
             "Intégration interrompue",
             format!(
                 "L'exécution `{exec_id}` (**{title}**) n'a pas pu construire son candidat \
@@ -2647,7 +2673,18 @@ fn announce_integration_refusal(
              pointe réelle de la branche cible.",
             format!("{reference} est approuvée mais son intégration est interrompue."),
         ),
-        _ => (
+        (TaskExecutionStatus::Interrupted, RoomLang::En) => (
+            "Integration interrupted",
+            format!(
+                "Execution `{exec_id}` (**{title}**) could not build its integration \
+                 candidate: {reason}\n\n\
+                 It is `Interrupted`; the target branch did not move."
+            ),
+            "Then resume with `task_exec_resume`: the candidate is rebuilt on the real tip \
+             of the target branch.",
+            format!("{reference} is approved but its integration is interrupted."),
+        ),
+        (_, RoomLang::Fr) => (
             "Intégration bloquée",
             format!(
                 "L'exécution `{exec_id}` (**{title}**) est approuvée, mais son intégration \
@@ -2657,12 +2694,25 @@ fn announce_integration_refusal(
              l'approbation reste acquise.",
             format!("{reference} est approuvée mais n'est pas intégrée."),
         ),
+        (_, RoomLang::En) => (
+            "Integration blocked",
+            format!(
+                "Execution `{exec_id}` (**{title}**) is approved, but its integration \
+                 could not start: {reason}"
+            ),
+            "Then restart the integration (`task_exec_resume` or a new approval): the \
+             approval stays acquired.",
+            format!("{reference} is approved but not integrated."),
+        ),
     };
     let message = DiscussionMessage {
         id: format!("orch-integration-refused:{exec_id}:{occurrence}"),
         role: MessageRole::User,
         channel: MessageChannel::Main,
-        content: format!("**{headline} — {reference}**\n\n{body}\n\n**Correctif :** {fix} {next}"),
+        content: format!(
+            "**{headline} — {reference}**\n\n{body}\n\n**{}** {fix} {next}",
+            lang.pick("Correctif :", "Fix:")
+        ),
         agent_type: None,
         timestamp: now,
         tokens_used: 0,
@@ -2698,10 +2748,19 @@ fn announce_integration_refusal(
         crate::db::discussion_important::SteeringCard {
             category: crate::db::discussion_important::ImportantCategory::HumanActionRequired,
             dedup_key: &format!("orch.integration.refused.{exec_id}.{occurrence}"),
-            title: &format!("{reference} — intégration bloquée"),
+            title: &format!(
+                "{reference} — {}",
+                lang.pick("intégration bloquée", "integration blocked")
+            ),
             highlight: &highlight,
-            impact: "La branche cible n'avance pas tant que la cause n'est pas corrigée.",
-            action_required: crate::db::discussion_important::ImportantAction::owed(fix, "Humain"),
+            impact: lang.pick(
+                "La branche cible n'avance pas tant que la cause n'est pas corrigée.",
+                "The target branch does not advance until the cause is fixed.",
+            ),
+            action_required: crate::db::discussion_important::ImportantAction::owed(
+                fix,
+                lang.pick("Humain", "Human"),
+            ),
             references: crate::db::discussion_important::ImportantReferences {
                 task_ref: Some(reference.clone()),
                 execution_id: Some(exec_id.to_string()),
@@ -3777,6 +3836,7 @@ pub fn commit_review_checkpoint(
                 )
                 .optional()?;
             let reference = reference.map(|n| format!("KT-{n}")).unwrap_or_default();
+            let lang = execution_room_lang(&tx, input.exec_id);
             crate::db::discussion_important::publish_steering_card(
                 &tx,
                 findings.child_discussion_id,
@@ -3787,17 +3847,34 @@ pub fn commit_review_checkpoint(
                         "orch.review.changes.{}.{}",
                         input.exec_id, input.attempt_no
                     ),
-                    title: &format!(
-                        "{reference} — changements demandés (tour {})",
-                        input.attempt_no
+                    title: &match lang {
+                        RoomLang::Fr => format!(
+                            "{reference} — changements demandés (tour {})",
+                            input.attempt_no
+                        ),
+                        RoomLang::En => format!(
+                            "{reference} — changes requested (round {})",
+                            input.attempt_no
+                        ),
+                    },
+                    highlight: lang.pick(
+                        "La revue a renvoyé le tour livré : il ne passe pas en l'état.",
+                        "The review sent the delivered round back: it does not pass as is.",
                     ),
-                    highlight: "La revue a renvoyé le tour livré : il ne passe pas en l'état.",
-                    impact: "La livraison n'est pas intégrée ; le worktree et la sous-discussion \
-                             restent ouverts pour la correction.",
+                    impact: lang.pick(
+                        "La livraison n'est pas intégrée ; le worktree et la sous-discussion \
+                         restent ouverts pour la correction.",
+                        "The delivery is not integrated; the worktree and the sub-discussion \
+                         stay open for the fix.",
+                    ),
                     // Somebody owes something here, and it is not a human.
                     action_required: crate::db::discussion_important::ImportantAction::owed(
-                        "Corriger les points de revue dans ce worktree, puis re-livrer via \
-                         `task_exec_deliver`",
+                        lang.pick(
+                            "Corriger les points de revue dans ce worktree, puis re-livrer via \
+                             `task_exec_deliver`",
+                            "Fix the review points in this worktree, then re-deliver through \
+                             `task_exec_deliver`",
+                        ),
                         "Worker",
                     ),
                     references: crate::db::discussion_important::ImportantReferences {
@@ -3945,6 +4022,10 @@ pub fn commit_integration_rework(
         .optional()?;
     let reference = task_number.map(|n| format!("KT-{n}")).unwrap_or_default();
     let principal = crate::db::discussions::get_discussion(&tx, &execution.parent_discussion_id)?;
+    let lang = principal
+        .as_ref()
+        .map(|discussion| RoomLang::from_code(&discussion.language))
+        .unwrap_or_default();
     let principal_target = match &principal {
         Some(discussion) => Some(principal_notice_target(
             &tx,
@@ -4004,14 +4085,29 @@ pub fn commit_integration_rework(
         crate::db::discussion_important::SteeringCard {
             category: crate::db::discussion_important::ImportantCategory::BlockingAlert,
             dedup_key: &format!("orch.integration.rework.{}.{next_attempt}", input.exec_id),
-            title: &format!("{reference} — renvoyé par l'intégration"),
-            highlight: &format!(
-                "La livraison approuvée n'a pas passé l'intégration : {reason_line}"
+            title: &format!(
+                "{reference} — {}",
+                lang.pick("renvoyé par l'intégration", "sent back by the integration")
             ),
-            impact: "La livraison n'est pas intégrée ; le worktree et la sous-discussion \
-                     restent ouverts pour la correction.",
+            highlight: &match lang {
+                RoomLang::Fr => {
+                    format!("La livraison approuvée n'a pas passé l'intégration : {reason_line}")
+                }
+                RoomLang::En => {
+                    format!("The approved delivery did not pass the integration: {reason_line}")
+                }
+            },
+            impact: lang.pick(
+                "La livraison n'est pas intégrée ; le worktree et la sous-discussion \
+                 restent ouverts pour la correction.",
+                "The delivery is not integrated; the worktree and the sub-discussion \
+                 stay open for the fix.",
+            ),
             action_required: crate::db::discussion_important::ImportantAction::owed(
-                "Corriger dans ce worktree, puis re-livrer via `task_exec_deliver`",
+                lang.pick(
+                    "Corriger dans ce worktree, puis re-livrer via `task_exec_deliver`",
+                    "Fix in this worktree, then re-deliver through `task_exec_deliver`",
+                ),
                 "Worker",
             ),
             references: crate::db::discussion_important::ImportantReferences {
@@ -4041,16 +4137,36 @@ pub fn commit_integration_rework(
             crate::db::discussion_important::SteeringCard {
                 category: crate::db::discussion_important::ImportantCategory::BlockingAlert,
                 dedup_key: &format!("orch.integration.reworked.{}.{next_attempt}", input.exec_id),
-                title: &format!("{reference} — intégration renvoyée au worker"),
-                highlight: &format!(
-                    "{reference} est approuvée mais l'intégration l'a renvoyée au worker : \
-                     {reason_line}"
+                title: &format!(
+                    "{reference} — {}",
+                    lang.pick(
+                        "intégration renvoyée au worker",
+                        "integration sent back to the worker"
+                    )
                 ),
-                impact: "La branche cible n'avance pas ; le worker est relancé avec la sortie \
-                         de l'échec.",
+                highlight: &match lang {
+                    RoomLang::Fr => format!(
+                        "{reference} est approuvée mais l'intégration l'a renvoyée au worker : \
+                         {reason_line}"
+                    ),
+                    RoomLang::En => format!(
+                        "{reference} is approved but the integration sent it back to the \
+                         worker: {reason_line}"
+                    ),
+                },
+                impact: lang.pick(
+                    "La branche cible n'avance pas ; le worker est relancé avec la sortie \
+                     de l'échec.",
+                    "The target branch does not advance; the worker is relaunched with the \
+                     failure output.",
+                ),
                 action_required: crate::db::discussion_important::ImportantAction::owed(
-                    "Attendre la re-livraison ; si l'échec ne vient pas de la livraison, \
-                     relancer les mêmes validations avec `task_exec_resume`",
+                    lang.pick(
+                        "Attendre la re-livraison ; si l'échec ne vient pas de la livraison, \
+                         relancer les mêmes validations avec `task_exec_resume`",
+                        "Wait for the re-delivery; if the failure does not come from the \
+                         delivery, rerun the same validations with `task_exec_resume`",
+                    ),
                     "Principal",
                 ),
                 references: crate::db::discussion_important::ImportantReferences {
@@ -4654,30 +4770,57 @@ fn publish_campaign_gate_card(
         return Ok(());
     };
     let reference = format!("KT-{task_number}");
+    let lang = RoomLang::from_code(&principal.language);
 
     let (side, content, category, highlight, impact, action) = match gate {
         CampaignGate::AwaitingHuman => (
             "awaiting",
-            format!(
-                "**Campagne en attente d'une décision humaine — {reference}**\n\n                 L'exécution `{exec_id}` (**{title}**) a été escaladée : le budget de revue                  automatique est épuisé. La campagne est en pause et n'enchaînera pas seule."
-            ),
+            match lang {
+                RoomLang::Fr => format!(
+                    "**Campagne en attente d'une décision humaine — {reference}**\n\n                 L'exécution `{exec_id}` (**{title}**) a été escaladée : le budget de revue                  automatique est épuisé. La campagne est en pause et n'enchaînera pas seule."
+                ),
+                RoomLang::En => format!(
+                    "**Campaign waiting for a human decision — {reference}**\n\nExecution `{exec_id}` (**{title}**) was escalated: the automatic review budget is exhausted. The campaign is paused and will not chain on its own."
+                ),
+            },
             crate::db::discussion_important::ImportantCategory::HumanActionRequired,
-            format!("{reference} — la campagne attend une décision humaine."),
-            "Aucune tâche de cette campagne n'avance tant que l'escalade n'est pas tranchée."
-                .to_string(),
+            match lang {
+                RoomLang::Fr => format!("{reference} — la campagne attend une décision humaine."),
+                RoomLang::En => format!("{reference} — the campaign is waiting for a human decision."),
+            },
+            lang.pick(
+                "Aucune tâche de cette campagne n'avance tant que l'escalade n'est pas tranchée.",
+                "No task of this campaign advances until the escalation is settled.",
+            )
+            .to_string(),
             crate::db::discussion_important::ImportantAction::owed(
-                "Trancher l'escalade, puis relancer la campagne",
-                "Humain",
+                lang.pick(
+                    "Trancher l'escalade, puis relancer la campagne",
+                    "Settle the escalation, then resume the campaign",
+                ),
+                lang.pick("Humain", "Human"),
             ),
         ),
         CampaignGate::Resumed => (
             "resumed",
-            format!(
-                "**Campagne relancée — {reference}**\n\n                 Plus aucune exécution escaladée : la campagne repasse en `Running` et                  poursuit avec la prochaine tâche prête."
-            ),
+            match lang {
+                RoomLang::Fr => format!(
+                    "**Campagne relancée — {reference}**\n\n                 Plus aucune exécution escaladée : la campagne repasse en `Running` et                  poursuit avec la prochaine tâche prête."
+                ),
+                RoomLang::En => format!(
+                    "**Campaign resumed — {reference}**\n\nNo escalated execution remains: the campaign goes back to `Running` and continues with the next ready task."
+                ),
+            },
             crate::db::discussion_important::ImportantCategory::Decision,
-            format!("{reference} — la campagne repart, l'escalade est levée."),
-            "Les tâches prêtes de la campagne peuvent de nouveau être lancées.".to_string(),
+            match lang {
+                RoomLang::Fr => format!("{reference} — la campagne repart, l'escalade est levée."),
+                RoomLang::En => format!("{reference} — the campaign resumes, the escalation is lifted."),
+            },
+            lang.pick(
+                "Les tâches prêtes de la campagne peuvent de nouveau être lancées.",
+                "The campaign's ready tasks can be launched again.",
+            )
+            .to_string(),
             crate::db::discussion_important::ImportantAction::none(),
         ),
     };
@@ -4840,17 +4983,34 @@ fn notify_principal_of_terminal(
     let Some(principal) = crate::db::discussions::get_discussion(conn, &parent)? else {
         return Ok(());
     };
-    let child_link = child
-        .as_deref()
-        .map(|id| format!(" Sous-discussion : `{id}`."))
-        .unwrap_or_default();
-    let content = format!(
-        "**Événement d'orchestration — {reference}**\n\n\
-         L'exécution `{exec_id}` (**{title}**) est maintenant `{status}`.{child_link} \
-         Relis l'état de la campagne et poursuis avec la prochaine tâche prête ; \
-         n'enchaîne pas si une décision humaine est signalée.",
-        status = terminal.as_str(),
-    );
+    let lang = RoomLang::from_code(&principal.language);
+    let status = terminal.as_str();
+    let content = match lang {
+        RoomLang::Fr => {
+            let child_link = child
+                .as_deref()
+                .map(|id| format!(" Sous-discussion : `{id}`."))
+                .unwrap_or_default();
+            format!(
+                "**Événement d'orchestration — {reference}**\n\n\
+                 L'exécution `{exec_id}` (**{title}**) est maintenant `{status}`.{child_link} \
+                 Relis l'état de la campagne et poursuis avec la prochaine tâche prête ; \
+                 n'enchaîne pas si une décision humaine est signalée."
+            )
+        }
+        RoomLang::En => {
+            let child_link = child
+                .as_deref()
+                .map(|id| format!(" Sub-discussion: `{id}`."))
+                .unwrap_or_default();
+            format!(
+                "**Orchestration event — {reference}**\n\n\
+                 Execution `{exec_id}` (**{title}**) is now `{status}`.{child_link} \
+                 Re-read the campaign state and continue with the next ready task; \
+                 do not chain if a human decision is flagged."
+            )
+        }
+    };
     let message = DiscussionMessage {
         id: format!("orch-principal-terminal:{exec_id}:{}", terminal.as_str()),
         role: MessageRole::User,
@@ -4893,10 +5053,10 @@ fn notify_principal_of_terminal(
     }
     // Failed/cancelled execution is a blocking steering event. Its card and
     // source notification remain in the same transaction.
-    let highlight = format!(
-        "{reference} — exécution terminée en `{}`.",
-        terminal.as_str()
-    );
+    let highlight = match lang {
+        RoomLang::Fr => format!("{reference} — exécution terminée en `{status}`."),
+        RoomLang::En => format!("{reference} — execution ended as `{status}`."),
+    };
     crate::db::discussion_important::publish_steering_card(
         conn,
         &parent,
@@ -4906,7 +5066,10 @@ fn notify_principal_of_terminal(
             dedup_key: &format!("orch.terminal.{exec_id}.{}", terminal.as_str()),
             title: &format!("{reference} — {title}"),
             highlight: &highlight,
-            impact: "La tâche n'a pas abouti ; la suite de la campagne dépend d'une décision.",
+            impact: lang.pick(
+                "La tâche n'a pas abouti ; la suite de la campagne dépend d'une décision.",
+                "The task did not succeed; the rest of the campaign depends on a decision.",
+            ),
             // A terminal transition is a fact, not an obligation. What follows
             // it may be one, and that card is minted by whatever produces it.
             action_required: crate::db::discussion_important::ImportantAction::none(),
@@ -6206,46 +6369,82 @@ fn notify_principal_of_timeout(
         return Ok(());
     };
     let reference = format!("KT-{task_number}");
+    let lang = RoomLang::from_code(&principal.language);
     let child_link = child
         .as_deref()
-        .map(|id| format!(" Sous-discussion : `{id}`."))
+        .map(|id| {
+            format!(
+                " {} `{id}`.",
+                lang.pick("Sous-discussion :", "Sub-discussion:")
+            )
+        })
         .unwrap_or_default();
     let minutes = timeout_secs.map(|seconds| (seconds + 59) / 60);
-    let (label, body) = match kind {
-        ExecutionTimeoutKind::Activity => (
+    let since = minutes
+        .map(|minutes| match lang {
+            RoomLang::Fr => format!(" depuis {minutes} min"),
+            RoomLang::En => format!(" for {minutes} min"),
+        })
+        .unwrap_or_default();
+    let (label, body) = match (kind, lang) {
+        (ExecutionTimeoutKind::Activity, RoomLang::Fr) => (
             "activity_timeout",
             format!(
                 "Le worker n'a produit aucune activité (appel d'outil, message, commit ou \
-                 livraison){} : l'exécution est passée en `Interrupted` (origine `Working`), \
+                 livraison){since} : l'exécution est passée en `Interrupted` (origine `Working`), \
                  `resume_worker`. Le worktree et la branche sont conservés. Décide :\n\n\
                  1. **Reprendre le même worker** — `task_exec_resume` ;\n\
                  2. **Réaffecter à un autre worker** — `task_exec_reassign` ;\n\
-                 3. **Reprendre la main** — `task_exec_reassign` vers ta propre session CLI.",
-                minutes
-                    .map(|minutes| format!(" depuis {minutes} min"))
-                    .unwrap_or_default()
+                 3. **Reprendre la main** — `task_exec_reassign` vers ta propre session CLI."
             ),
         ),
-        ExecutionTimeoutKind::ReviewWait => (
+        (ExecutionTimeoutKind::Activity, RoomLang::En) => (
+            "activity_timeout",
+            format!(
+                "The worker produced no activity (tool call, message, commit or \
+                 delivery){since}: the execution moved to `Interrupted` (origin `Working`), \
+                 `resume_worker`. The worktree and the branch are kept. Decide:\n\n\
+                 1. **Resume the same worker** — `task_exec_resume`;\n\
+                 2. **Reassign to another worker** — `task_exec_reassign`;\n\
+                 3. **Take over** — `task_exec_reassign` to your own CLI session."
+            ),
+        ),
+        (ExecutionTimeoutKind::ReviewWait, RoomLang::Fr) => (
             "review_wait_timeout",
             format!(
-                "Une livraison attend ta revue{} sans décision. Rien n'a été approuvé, rejeté \
+                "Une livraison attend ta revue{since} sans décision. Rien n'a été approuvé, rejeté \
                  ni annulé : l'exécution reste en `AwaitingReview`, la livraison, le worktree \
                  et la branche sont intacts. Relis-la puis appelle `task_exec_review` \
                  (approuver ou demander des changements), ou `task_exec_reassign` / \
-                 `task_exec_cancel` si le travail doit être repris.",
-                minutes
-                    .map(|minutes| format!(" depuis {minutes} min"))
-                    .unwrap_or_default()
+                 `task_exec_cancel` si le travail doit être repris."
             ),
         ),
-        ExecutionTimeoutKind::TotalDuration => (
+        (ExecutionTimeoutKind::ReviewWait, RoomLang::En) => (
+            "review_wait_timeout",
+            format!(
+                "A delivery has been waiting for your review{since} without a decision. \
+                 Nothing was approved, rejected or cancelled: the execution stays in \
+                 `AwaitingReview`, the delivery, the worktree and the branch are intact. Read \
+                 it again then call `task_exec_review` (approve or request changes), or \
+                 `task_exec_reassign` / `task_exec_cancel` if the work must be taken over."
+            ),
+        ),
+        (ExecutionTimeoutKind::TotalDuration, RoomLang::Fr) => (
             "total_duration_timeout",
             "La durée totale impartie au run est dépassée alors qu'une livraison attend ta \
              revue. Rien n'a été approuvé, rejeté ni annulé : l'exécution reste en \
              `AwaitingReview`, la livraison, le worktree et la branche sont intacts. Relis-la \
              puis appelle `task_exec_review` (approuver ou demander des changements), ou \
              `task_exec_reassign` / `task_exec_cancel` si le travail doit être repris."
+                .to_string(),
+        ),
+        (ExecutionTimeoutKind::TotalDuration, RoomLang::En) => (
+            "total_duration_timeout",
+            "The total duration allotted to the run is exceeded while a delivery is waiting \
+             for your review. Nothing was approved, rejected or cancelled: the execution stays \
+             in `AwaitingReview`, the delivery, the worktree and the branch are intact. Read it \
+             again then call `task_exec_review` (approve or request changes), or \
+             `task_exec_reassign` / `task_exec_cancel` if the work must be taken over."
                 .to_string(),
         ),
         _ => return Ok(()),
@@ -6257,10 +6456,16 @@ fn notify_principal_of_timeout(
         ),
         role: MessageRole::User,
         channel: MessageChannel::Main,
-        content: format!(
-            "**Événement d'orchestration — {reference}**\n\n\
-             L'exécution `{exec_id}` (**{title}**) demande une décision.{child_link} {body}"
-        ),
+        content: match lang {
+            RoomLang::Fr => format!(
+                "**Événement d'orchestration — {reference}**\n\n\
+                 L'exécution `{exec_id}` (**{title}**) demande une décision.{child_link} {body}"
+            ),
+            RoomLang::En => format!(
+                "**Orchestration event — {reference}**\n\n\
+                 Execution `{exec_id}` (**{title}**) needs a decision.{child_link} {body}"
+            ),
+        },
         agent_type: None,
         timestamp: Utc::now(),
         tokens_used: 0,

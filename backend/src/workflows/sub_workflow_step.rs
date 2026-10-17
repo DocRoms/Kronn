@@ -1551,7 +1551,7 @@ fn child_depth_exceeds(current_depth: usize) -> bool {
     current_depth + 1 > MAX_SUBWORKFLOW_DEPTH
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::child_depth_exceeds;
     use super::{aggregate_foreach, parse_foreach_items, MAX_SUBWORKFLOW_DEPTH};

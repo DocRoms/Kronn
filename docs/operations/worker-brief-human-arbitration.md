@@ -36,7 +36,7 @@ that `disc_append` is the live discussion publication tool; its implementation
 shows `disc_append` accepting an explicit `disc_id` (defaulting to the
 runtime-bound one) while `disc_question_list` always resolves `_disc_id()` and
 ignores any id argument.
-[src: file: backend/scripts/disc-introspection-mcp.py:221-223#disc_question_list]
+[src: file: backend/scripts/disc-introspection-mcp.py:226-228#disc_question_list]
 [src: file: backend/scripts/disc-introspection-mcp.py:682-684#disc_append]
 [src: file: backend/scripts/disc-introspection-mcp.py:5395-5413#call_disc_append]
 [src: file: backend/scripts/disc-introspection-mcp.py:4581-4591#call_disc_question_list]

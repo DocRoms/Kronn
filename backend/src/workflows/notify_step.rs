@@ -348,7 +348,7 @@ fn fail(step: &WorkflowStep, start: Instant, msg: impl Into<String>) -> StepOutc
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use std::collections::HashMap;

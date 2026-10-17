@@ -41,6 +41,8 @@ enum Turn {
     /// Calls this many tools, the usage growing with each, without a word of
     /// text; then works until stopped.
     ToolChain(u32),
+    /// Reports `REPORTED` usage and this cost, then works until stopped.
+    PricedHang { usd_micros: u64 },
 }
 
 struct ScriptedAgent {
@@ -153,6 +155,17 @@ impl AcpTransport for ScriptedAgent {
                 let _ = events.send(AcpSessionEvent::Completed).await;
                 Ok(())
             }
+            Turn::PricedHang { usd_micros } => {
+                let _ = events
+                    .send(AcpSessionEvent::Usage {
+                        input_tokens: REPORTED.input,
+                        output_tokens: REPORTED.output,
+                        prompt_cache: PromptCacheUsage::default(),
+                    })
+                    .await;
+                let _ = events.send(AcpSessionEvent::Cost { usd_micros }).await;
+                std::future::pending().await
+            }
             Turn::ToolChain(calls) => {
                 for call in 1..=u64::from(calls) {
                     let _ = events
@@ -231,6 +244,23 @@ fn state_with(config: crate::models::AppConfig) -> AppState {
         Arc::new(crate::db::Database::open_in_memory().unwrap()),
         crate::DEFAULT_MAX_CONCURRENT_AGENTS,
     )
+}
+
+/// The project's `docs/` as an earlier audit left it: recorded and marked, so
+/// the partial refresh is not held for the briefing's choice (KT-1299).
+fn kronn_docs(project: &Path) {
+    let docs = project.join("docs");
+    std::fs::create_dir_all(&docs).unwrap();
+    std::fs::write(
+        docs.join(".kronn.json"),
+        r#"{"audits":[{"date":"2026-05-01","kronn_version":"0.8.4","type":"full"}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        docs.join("audit-note.md"),
+        "<!-- kronn:generated=2026-05-01 -->\n",
+    )
+    .unwrap();
 }
 
 async fn add_project(state: &AppState, id: &str, path: &Path) {
@@ -450,6 +480,7 @@ async fn a_stop_mid_write_puts_the_target_back(pipeline: Pipeline) {
     let path = project.path().join(target);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     const BEFORE: &str = "# The doc before the step\n\nOriginal, whole content.\n";
+    kronn_docs(project.path());
     std::fs::write(&path, BEFORE).unwrap();
 
     let agent = ScriptedAgent::new(Turn::Hang);
@@ -588,6 +619,7 @@ async fn a_stop_that_cannot_settle_the_target_is_not_recorded_as_restored(pipeli
     let dir = path.parent().unwrap().to_path_buf();
     std::fs::create_dir_all(&dir).unwrap();
     const BEFORE: &str = "# The doc before the step\n\nOriginal, whole content.\n";
+    kronn_docs(project.path());
     std::fs::write(&path, BEFORE).unwrap();
 
     let agent = ScriptedAgent::new(Turn::Hang);
@@ -683,6 +715,7 @@ async fn a_hand_edit_between_a_crash_and_boot_survives(pipeline: Pipeline) {
     let path = project.path().join(first_target(pipeline));
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     const BEFORE: &str = "# The doc before the step\n\nOriginal, whole content.\n";
+    kronn_docs(project.path());
     std::fs::write(&path, BEFORE).unwrap();
 
     let agent = ScriptedAgent::new(Turn::Hang);
@@ -785,6 +818,7 @@ async fn a_backend_crash_mid_step_is_settled_at_boot(pipeline: Pipeline) {
     let path = project.path().join(target);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     const BEFORE: &str = "# The doc before the step\n\nOriginal, whole content.\n";
+    kronn_docs(project.path());
     std::fs::write(&path, BEFORE).unwrap();
 
     let agent = ScriptedAgent::new(Turn::Hang);
@@ -1243,6 +1277,74 @@ async fn a_full_audit_step_without_a_reported_cost_stays_unknown() {
 #[tokio::test]
 async fn a_partial_audit_step_without_a_reported_cost_stays_unknown() {
     an_unreported_cost_stays_unknown(Pipeline::Partial).await;
+}
+
+/// KT-1313 DoD — a step stopped mid-way is recorded with the tokens and the cost
+/// it consumed, and the run's token counter never goes down.
+async fn a_stopped_step_records_the_tokens_and_cost_it_consumed(pipeline: Pipeline) {
+    let state = new_state();
+    let project = tempfile::tempdir().unwrap();
+    let agent = ScriptedAgent::new(Turn::PricedHang {
+        usd_micros: 420_000,
+    });
+    let _route = route(project.path(), &agent);
+    add_project(&state, "proj-spent", project.path()).await;
+    let run = launch(&state, pipeline, "proj-spent", AgentType::OpenCode);
+
+    let tracker = state.audit_tracker.clone();
+    until("the step's tokens to show on the audit's progress", || {
+        tracker
+            .lock()
+            .unwrap()
+            .progress
+            .get("proj-spent")
+            .is_some_and(|p| p.step_tokens == Some(120))
+    })
+    .await;
+    let response = crate::api::audit::full::cancel_audit(
+        axum::extract::State(state.clone()),
+        axum::extract::Path("proj-spent".to_string()),
+    )
+    .await;
+    assert!(response.0.success, "{pipeline:?}: {:?}", response.0.error);
+    let body = tokio::time::timeout(Duration::from_secs(10), run)
+        .await
+        .unwrap_or_else(|_| panic!("{pipeline:?}: the stopped audit never ended"))
+        .unwrap();
+
+    let (status, steps) = latest_run_steps(&state, "proj-spent").await;
+    assert_eq!(status, "Cancelled", "{pipeline:?}");
+    let stopped = steps.first().expect("the stopped step is recorded");
+    assert_eq!(stopped.step_tokens, Some(120), "{pipeline:?}: {body}");
+    assert_eq!(
+        stopped.cumulative_tokens,
+        Some(120),
+        "{pipeline:?}: the run's tally holds the stopped step"
+    );
+    assert_eq!(
+        stopped.cost_usd_micros,
+        Some(420_000),
+        "{pipeline:?}: the reported cost of what it consumed"
+    );
+    let shown: Vec<u64> = sse_events(&body)
+        .iter()
+        .filter(|(name, _)| name == "step_progress")
+        .filter_map(|(_, data)| data["total_tokens_so_far"].as_u64())
+        .collect();
+    assert!(
+        shown.windows(2).all(|pair| pair[0] <= pair[1]),
+        "{pipeline:?}: the counter went down: {shown:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_stopped_full_audit_step_records_the_tokens_and_cost_it_consumed() {
+    a_stopped_step_records_the_tokens_and_cost_it_consumed(Pipeline::Full).await;
+}
+
+#[tokio::test]
+async fn a_stopped_partial_audit_step_records_the_tokens_and_cost_it_consumed() {
+    a_stopped_step_records_the_tokens_and_cost_it_consumed(Pipeline::Partial).await;
 }
 
 /// KT-950 DoD — an ACP step that only calls tools, without a word of text,

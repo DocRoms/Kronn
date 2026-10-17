@@ -650,7 +650,7 @@ pub async fn disc_workspace_history_lease(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use tempfile::TempDir;

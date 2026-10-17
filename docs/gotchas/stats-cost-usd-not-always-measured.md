@@ -9,8 +9,8 @@ of the total that billed cache reads as fresh input). With no counters or no
 confirmed rate the cost is NULL (unknown), and `message_usage.cost_unknown_reason`
 says why. Rows written before KT-894 keep their old figure, and nothing marks
 which ones those are.
-[src: file: backend/src/core/pricing.rs:324-347#price_reply]
-[src: file: backend/src/api/discussions/streaming.rs:5376-5382#price_reply]
+[src: file: backend/src/core/pricing.rs:340-363#price_reply]
+[src: file: backend/src/api/discussions/streaming.rs:5384-5390#price_reply]
 [src: file: backend/src/db/message_usage.rs:17-24#MessageUsage]
 [src: file: backend/src/db/message_usage.rs:26-61#record]
 

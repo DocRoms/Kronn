@@ -1001,7 +1001,7 @@ pub async fn docker_action(
     Json(ApiResponse::ok(inspect_compose(&root, &compose_file).await))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     /// Compose interpolates its environment into the repository's compose
     /// file: it gets Docker's settings, never a backend secret.

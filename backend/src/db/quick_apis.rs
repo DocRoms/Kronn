@@ -377,7 +377,7 @@ pub fn count_workflow_step_usage(conn: &Connection, id: &str) -> Result<u32> {
     Ok(workflow_step_references(conn, id)?.len().try_into()?)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::models::PromptVariable;

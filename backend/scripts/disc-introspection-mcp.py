@@ -218,6 +218,11 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
     {
+        "name": "room_scope",
+        "description": "Room's project reach; `project` asks a human for one. See tool_manual.",
+        "inputSchema": {"type": "object", "properties": {"project": {"type": "string"}, "access": {"enum": ["read", "write"]}, "reason": {"type": "string"}}},
+    },
+    {
         "name": "disc_question_list",
         "description": "Read pending human arbitrations (latest 50), or the durable answer for an exact key. Never answers for the human. A kronn-question requires numeric version 1, not string \"1\". After publication, read back its exact key to verify recording; absence is not consent. Complete valid example and recovery protocol: tool_manual({tool: \"disc_question_list\"}).",
         "inputSchema": {"type": "object", "properties": {"key": {"type": "string", "maxLength": 100}}, "additionalProperties": False},
@@ -441,10 +446,7 @@ TOOLS = [
             "discussion unless `discussion_id` targets another, which works "
             "even with no bound discussion or `rejoin_required`. Call "
             "`plan_get` again immediately before, so a peer's recent write is "
-            "visible, and write directly only on unambiguous intent. Pass "
-            "`idempotency_key` for a stable retry identity; omitted, "
-            "`source_message_id` derives one, so several tasks from one "
-            "message need distinct explicit keys. Titles are never identities."
+            "visible, and write directly only on unambiguous intent."
         ),
         "inputSchema": {
             "type": "object",
@@ -456,7 +458,7 @@ TOOLS = [
                 },
                 "idempotency_key": {
                     "type": "string",
-                    "description": "Stable caller key for this one logical create; scoped to the effective target discussion by the bridge.",
+                    "description": "Stable key for this one logical create, scoped to the target discussion; see tool_manual.",
                 },
                 "description": {"type": "string"},
                 "status": {
@@ -2195,10 +2197,8 @@ TOOLS = [
         "description": (
             "Save a Quick API for later `qa_run` calls. "
             "Discover `api_plugin_slug`/`api_config_id` with `mcp_list`; the "
-            "endpoint remains allow-listed and Kronn owns credentials. String "
-            "leaves may use declared `{{var_name}}` values or the generic "
-            "run-anchored `{{time.now|...}}` grammar documented by "
-            "`workflow_step_schema`. Call "
+            "endpoint remains allow-listed and Kronn owns credentials. Strings take "
+            "declared `{{var_name}}` values. Call "
             "`tool_manual({tool: \"qa_create_draft\"})` first for the required "
             "probe/extract method and variable contract; iterate with `qa_update`."
         ),
@@ -4577,6 +4577,27 @@ def _attach_files_to_appended_message(disc_id, message_id, paths, duplicate):
 
 
 # ─── Tool dispatch ─────────────────────────────────────────────────────────
+
+def call_room_scope(args):
+    """KT-1270 — the room's reach, or a request a human decides in the room."""
+    _reject_unknown_args("room_scope", args)
+    disc_id = _disc_id()
+    project = args.get("project")
+    if project is None:
+        return _unwrap(_http("GET", f"/api/discussions/{disc_id}/scope"))
+    access = args.get("access") or "read"
+    reason = args.get("reason")
+    if not isinstance(project, str) or not project.strip():
+        raise RuntimeError("room_scope: project must be a project name or id")
+    if access not in ("read", "write"):
+        raise RuntimeError("room_scope: access must be read or write")
+    if not isinstance(reason, str) or not reason.strip():
+        raise RuntimeError("room_scope: say why the room needs this project (reason)")
+    return _unwrap(_http(
+        "POST", f"/api/discussions/{disc_id}/scope/requests",
+        {"project": project.strip(), "access": access, "reason": reason.strip()},
+    ))
+
 
 def call_disc_question_list(args):
     key = args.get("key")
@@ -10494,6 +10515,26 @@ TOOL_MANUALS = {
 
 # Launch deliberately shares the prepare guide: both calls form one typed,
 # preflight-bound contract and duplicating the text would invite drift.
+TOOL_MANUALS["task_create"] = (
+    "Pass `idempotency_key` for a stable retry identity; omitted, `source_message_id` "
+    "derives one, so several tasks from one message need distinct explicit keys. "
+    "Titles are never identities. A task lands in the room's project unless "
+    "`project_ids` names a project the room holds a write grant on (`room_scope`)."
+)
+TOOL_MANUALS["room_scope"] = (
+    "A room has one primary project: its working directory, where what it creates "
+    "lands, and the only project whose API configs and credentials it may use. A human "
+    "may also grant it other projects: read (tasks, rooms, runs, pages) or write "
+    "(planning only: create and edit tasks there, `project_ids` naming it), or every "
+    "project. `room_scope()` returns the grants, the pending requests and the journal. "
+    "When a call is refused as outside the token's project, ask with "
+    "`room_scope({project, access, reason})`: it files a request the human approves, "
+    "narrows or declines in the room, and grants nothing by itself. Do not wait or "
+    "retry: continue with what you can do; the decision and every grant or revoke "
+    "appear in the room as a kronn-scope line, and apply on the next call. A grant never "
+    "opens another project's credentials, never runs its workflows, and never passes "
+    "to worker rooms."
+)
 TOOL_MANUALS["disc_update"] = (
     "**What it changes** — `title` (rename), `pinned`, `archived`. Nothing "
     "else. Every field is optional; at least one must be present.\n\n"
@@ -11069,6 +11110,7 @@ DISPATCH = {
     "audit_status": call_audit_status,
     "disc_meta": call_disc_meta,
     "disc_question_list": call_disc_question_list,
+    "room_scope": call_room_scope,
     "disc_get_message": call_disc_get_message,
     "disc_note_list": call_disc_note_list,
     "disc_summarize": call_disc_summarize,
