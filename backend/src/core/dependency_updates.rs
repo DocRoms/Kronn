@@ -1,6 +1,9 @@
 use crate::core::child_env::{self, ChildRoute};
 use crate::core::cmd::async_cmd;
-use crate::core::dependency_lockfiles::{composer_locked_versions, JsLockfile};
+use crate::core::dependency_lockfiles::{
+    composer_locked_versions, is_workspace_member, JsLockfile,
+};
+use crate::core::redact::redact_stored_text;
 use crate::models::{
     DependencyCheckStatus, DependencyManagerUpdate, DependencyUpdatePackage,
     DependencyUpdateSummary,
@@ -1005,8 +1008,13 @@ fn unchecked_manager(
 
 const MAX_REASON_CHARS: usize = 300;
 
+/// A reason is stored, shown and injected into an audit prompt, and it quotes
+/// what a package manager printed: a registry URL with credentials, an
+/// `_authToken=` line, a bearer header. Secrets are masked before the text is
+/// flattened and cut, so a truncation never leaves half of one.
 fn bounded_reason(text: &str) -> String {
-    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let redacted = redact_stored_text(text);
+    let flat = redacted.split_whitespace().collect::<Vec<_>>().join(" ");
     if flat.chars().count() <= MAX_REASON_CHARS {
         return flat;
     }
@@ -1024,7 +1032,7 @@ fn output_excerpt(stdout: &str, stderr: &str) -> Option<String> {
             .filter(|line| !line.is_empty())
             .take(3)
             .collect();
-        (!lines.is_empty()).then(|| lines.join(" | "))
+        (!lines.is_empty()).then(|| redact_stored_text(&lines.join(" | ")))
     })
 }
 
@@ -1044,7 +1052,7 @@ fn run_failure_reason(
             ["summary", "message", "detail"]
                 .iter()
                 .find_map(|key| error.get(key).and_then(Value::as_str))
-                .map(str::to_string)
+                .map(redact_stored_text)
         });
     let detail = printed_error.or_else(|| output_excerpt(stdout, stderr));
     match (detail, output.status.code()) {
@@ -1132,6 +1140,7 @@ fn update_package(name: &str, current: &str, latest: &str) -> Option<DependencyU
     })
 }
 
+#[cfg(test)]
 fn parse_npm_outdated(output: &str) -> Result<Vec<DependencyUpdatePackage>, ()> {
     parse_npm_outdated_locked(output, None, &HashMap::new()).map(|(packages, _)| packages)
 }
@@ -1228,19 +1237,16 @@ fn js_declared_ranges(path: &Path) -> HashMap<String, String> {
 }
 
 /// The lockfile that resolves this manifest's packages: its own directory's,
-/// else a workspace root's above it inside the project (the install npm would
-/// use from a member, as in [`js_dependencies_installed`]).
+/// else that of a workspace root above it inside the project whose workspace
+/// globs list this directory as a member. A nested project the root does not
+/// list has its own dependency tree, which the root's lockfile does not resolve.
 fn js_lockfile(manifest: &DetectedManifest) -> Option<JsLockfile> {
     manifest
         .directory
         .ancestors()
         .take_while(|dir| dir.starts_with(&manifest.project_root))
         .enumerate()
-        .filter(|(depth, dir)| {
-            *depth == 0
-                || manifest_covers_nested(ManagerKind::JavaScript, &dir.join("package.json"))
-                || dir.join("pnpm-workspace.yaml").is_file()
-        })
+        .filter(|(depth, dir)| *depth == 0 || is_workspace_member(dir, &manifest.directory))
         .find_map(|(_, dir)| JsLockfile::load(dir, &manifest.directory))
 }
 
@@ -2317,9 +2323,174 @@ mod tests {
         assert_eq!(update.status, DependencyCheckStatus::Error);
         let reason = update.reason.unwrap();
         assert!(
-            reason.contains("request to https://registry.npmjs.org failed"),
+            reason.contains("request to https://registry.npmjs.org/ failed"),
             "{reason}"
         );
+    }
+
+    #[test]
+    fn a_reason_never_carries_a_credential_the_tool_printed() {
+        let leaks = [
+            (
+                "401 GET https://u:ghp_abcdefghijklmnopqrstuvwxyz0123456789@registry.example/pkg",
+                "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+            ),
+            (
+                "fetch https://deploy:hunter2pass@registry.example/pkg failed",
+                "hunter2pass",
+            ),
+            (
+                "GET https://registry.example/pkg?access=sekrit-query-value failed",
+                "sekrit-query-value",
+            ),
+            (
+                "//registry.example/:_authToken=s3cr3tNpmAuthValue",
+                "s3cr3tNpmAuthValue",
+            ),
+            (
+                "Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345",
+                "abcdefghijklmnopqrstuvwxyz012345",
+            ),
+            (
+                "token npm_abcdefghijklmnopqrstuvwxyz0123456789",
+                "npm_abcdefghijklmnopqrstuvwxyz0123456789",
+            ),
+            (
+                "ghp_abcdefghijklmnopqrstuvwxyz0123456789 was rejected",
+                "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+            ),
+        ];
+        for (printed, secret) in leaks {
+            let output = std::process::Output {
+                status: std::process::ExitStatus::default(),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            };
+            for reason in [
+                bounded_reason(printed),
+                run_failure_reason("npm", &output, "", printed),
+                run_failure_reason("npm", &output, printed, ""),
+                run_failure_reason(
+                    "npm",
+                    &output,
+                    &format!(r#"{{"error":{{"summary":"{printed}"}}}}"#),
+                    "",
+                ),
+                output_excerpt("", printed).unwrap(),
+                output_excerpt(printed, "").unwrap(),
+            ] {
+                assert!(!reason.contains(secret), "{printed:?} leaked: {reason}");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_tools_credentials_do_not_reach_the_stored_reason() {
+        let project = js_project(false, true);
+        let (update, _) = check_with_fake_tool(
+            ManagerKind::JavaScript,
+            "npm",
+            project.path(),
+            false,
+            (
+                "",
+                "npm ERR! 401 GET https://u:ghp_abcdefghijklmnopqrstuvwxyz0123456789@registry.example/pkg",
+                1,
+            ),
+        );
+        assert_eq!(update.status, DependencyCheckStatus::Error);
+        let reason = update.reason.unwrap();
+        assert!(reason.contains("registry.example"), "{reason}");
+        assert!(!reason.contains("ghp_abcdefghij"), "{reason}");
+        assert!(!reason.contains("u:"), "{reason}");
+        // The unparseable-output branch quotes stdout, so it is masked too.
+        let (update, _) = check_with_fake_tool(
+            ManagerKind::JavaScript,
+            "npm",
+            project.path(),
+            false,
+            ("//registry.example/:_authToken=s3cr3tNpmAuthValue", "", 0),
+        );
+        let reason = update.reason.unwrap();
+        assert!(reason.contains("could not parse"), "{reason}");
+        assert!(!reason.contains("s3cr3tNpmAuthValue"), "{reason}");
+    }
+
+    fn js_manifest_at(root: &Path, directory: &Path) -> DetectedManifest {
+        DetectedManifest {
+            kind: ManagerKind::JavaScript,
+            project_root: root.to_path_buf(),
+            directory: directory.to_path_buf(),
+            relative_path: "package.json".into(),
+            covers_nested: false,
+        }
+    }
+
+    #[test]
+    fn a_root_lockfile_resolves_only_the_workspace_members_it_lists() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"workspaces":["packages/*"],"dependencies":{}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("package-lock.json"),
+            r#"{"lockfileVersion":3,"packages":{"node_modules/lodash":{"version":"3.10.1"}}}"#,
+        )
+        .unwrap();
+        let member = root.join("packages/app");
+        let stray = root.join("tools/site");
+        let too_deep = root.join("packages/app/nested");
+        for dir in [&member, &stray, &too_deep] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        assert!(js_lockfile(&js_manifest_at(root, &member)).is_some());
+        assert!(js_lockfile(&js_manifest_at(root, &stray)).is_none());
+        assert!(js_lockfile(&js_manifest_at(root, &too_deep)).is_none());
+        // Its own lockfile is always read.
+        std::fs::write(
+            stray.join("package-lock.json"),
+            r#"{"lockfileVersion":3,"packages":{"node_modules/lodash":{"version":"4.0.0"}}}"#,
+        )
+        .unwrap();
+        let own = js_lockfile(&js_manifest_at(root, &stray)).unwrap();
+        assert_eq!(own.version("lodash", None).as_deref(), Some("4.0.0"));
+    }
+
+    #[test]
+    fn workspace_membership_follows_the_declared_globs() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"workspaces":{"packages":["apps/**","libs/core","!apps/legacy"]}}"#,
+        )
+        .unwrap();
+        assert!(is_workspace_member(root, &root.join("apps/web")));
+        assert!(is_workspace_member(root, &root.join("apps/web/ui")));
+        assert!(is_workspace_member(root, &root.join("libs/core")));
+        assert!(!is_workspace_member(root, &root.join("libs/other")));
+        assert!(!is_workspace_member(root, &root.join("apps/legacy")));
+        assert!(!is_workspace_member(root, root));
+
+        std::fs::remove_file(root.join("package.json")).unwrap();
+        std::fs::write(
+            root.join("pnpm-workspace.yaml"),
+            "packages:\n  - 'packages/*'\n  - \"tools/?\" # one letter\n",
+        )
+        .unwrap();
+        assert!(is_workspace_member(root, &root.join("packages/a")));
+        assert!(is_workspace_member(root, &root.join("tools/x")));
+        assert!(!is_workspace_member(root, &root.join("tools/xy")));
+        assert!(!is_workspace_member(root, &root.join("other/a")));
+
+        // No workspace declared: nothing is a member.
+        std::fs::remove_file(root.join("pnpm-workspace.yaml")).unwrap();
+        std::fs::write(root.join("package.json"), r#"{"dependencies":{}}"#).unwrap();
+        assert!(!is_workspace_member(root, &root.join("packages/a")));
     }
 
     #[test]

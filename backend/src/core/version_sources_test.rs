@@ -646,9 +646,7 @@ fn a_lockfile_version_names_its_source_in_the_table_and_the_citation_verdict() {
         "2026-10-11",
     );
     assert!(
-        block.contains(
-            "| react | 18.2.0 | from package-lock.json, not installed | 19.1.0 | major |"
-        ),
+        block.contains("| react | 18.2.0 | from package-lock.json | 19.1.0 | major |"),
         "{block}"
     );
     assert!(
@@ -659,7 +657,7 @@ fn a_lockfile_version_names_its_source_in_the_table_and_the_citation_verdict() {
     let (status, detail) = verify_dep_marker("deps: npm/react@2026-10-04", Some(&snap)).unwrap();
     assert_eq!(status, SourceStatus::Verified);
     assert!(
-        detail.contains("18.2.0 (from package-lock.json, not installed)"),
+        detail.contains("18.2.0 (from package-lock.json)"),
         "{detail}"
     );
     let (_, installed) =

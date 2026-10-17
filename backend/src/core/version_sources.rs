@@ -36,8 +36,9 @@ pub struct WatchedPackage {
     pub major: bool,
     /// Declared in the manifest, not installed: `current` is empty.
     pub declared_only: bool,
-    /// The lockfile `current` was read from when nothing is installed; `None`
-    /// when the package manager reported the installed version (KT-1325).
+    /// The lockfile `current` was read from instead of an installed tree;
+    /// `None` when the package manager reported the installed version
+    /// (KT-1325).
     pub lockfile: Option<String>,
 }
 
@@ -45,7 +46,7 @@ impl WatchedPackage {
     /// Where `current` comes from, for the table and the citation verdict.
     fn version_source(&self) -> String {
         match &self.lockfile {
-            Some(file) => format!("from {file}, not installed"),
+            Some(file) => format!("from {file}"),
             None => "installed".to_string(),
         }
     }

@@ -302,6 +302,103 @@ fn parse_pnpm_importer(content: &str, importer: &str) -> HashMap<String, String>
     direct
 }
 
+/// The workspace globs `root` declares: `workspaces` of its `package.json`
+/// (an array, or `{ "packages": [...] }`) and `packages:` of
+/// `pnpm-workspace.yaml`. `None` when the directory declares no workspace.
+fn workspace_globs(root: &Path) -> Option<Vec<String>> {
+    let mut globs = Vec::new();
+    let mut declared = false;
+    if let Some(value) = read_lockfile(&root.join("package.json"))
+        .and_then(|content| serde_json::from_str::<Value>(&content).ok())
+    {
+        let list = match value.get("workspaces") {
+            Some(Value::Array(list)) => Some(list),
+            Some(Value::Object(map)) => map.get("packages").and_then(Value::as_array),
+            _ => None,
+        };
+        if let Some(list) = list {
+            declared = true;
+            globs.extend(list.iter().filter_map(Value::as_str).map(str::to_string));
+        }
+    }
+    if let Some(content) = read_lockfile(&root.join("pnpm-workspace.yaml")) {
+        declared = true;
+        let mut in_packages = false;
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if !line.starts_with(char::is_whitespace) && !trimmed.starts_with('-') {
+                in_packages = trimmed.starts_with("packages:");
+                continue;
+            }
+            if in_packages {
+                if let Some(item) = trimmed.strip_prefix('-') {
+                    let item = item.split(" #").next().unwrap_or("").trim();
+                    globs.push(unquote(item).to_string());
+                }
+            }
+        }
+    }
+    declared.then_some(globs)
+}
+
+/// Whether `pattern` (`*`, `?` within a segment; `**` across segments) matches
+/// the path segments `path`.
+fn glob_matches(pattern: &[&str], path: &[&str]) -> bool {
+    match pattern.split_first() {
+        None => path.is_empty(),
+        Some((&"**", rest)) => (0..=path.len()).any(|skip| glob_matches(rest, &path[skip..])),
+        Some((segment, rest)) => path
+            .split_first()
+            .is_some_and(|(head, tail)| segment_matches(segment, head) && glob_matches(rest, tail)),
+    }
+}
+
+fn segment_matches(pattern: &str, text: &str) -> bool {
+    fn go(pattern: &[char], text: &[char]) -> bool {
+        match pattern.split_first() {
+            None => text.is_empty(),
+            Some(('*', rest)) => (0..=text.len()).any(|skip| go(rest, &text[skip..])),
+            Some(('?', rest)) => !text.is_empty() && go(rest, &text[1..]),
+            Some((c, rest)) => text.first() == Some(c) && go(rest, &text[1..]),
+        }
+    }
+    let pattern: Vec<char> = pattern.chars().collect();
+    let text: Vec<char> = text.chars().collect();
+    go(&pattern, &text)
+}
+
+/// Whether `root` declares `member` as a workspace: a nested project outside
+/// the declared globs is not resolved by the root's lockfile.
+pub fn is_workspace_member(root: &Path, member: &Path) -> bool {
+    let Some(globs) = workspace_globs(root) else {
+        return false;
+    };
+    let Ok(relative) = member.strip_prefix(root) else {
+        return false;
+    };
+    let relative = relative.to_string_lossy().replace('\\', "/");
+    let path: Vec<&str> = relative.split('/').filter(|s| !s.is_empty()).collect();
+    if path.is_empty() {
+        return false;
+    }
+    let mut member_of = false;
+    for glob in &globs {
+        let (negated, glob) = match glob.strip_prefix('!') {
+            Some(rest) => (true, rest),
+            None => (false, glob.as_str()),
+        };
+        let glob = glob.trim_start_matches("./").trim_end_matches('/');
+        let pattern: Vec<&str> = glob.split('/').filter(|s| !s.is_empty()).collect();
+        if !pattern.is_empty() && glob_matches(&pattern, &path) {
+            member_of = !negated;
+        }
+    }
+    member_of
+}
+
 /// Versions locked by `composer.lock` (`packages` and `packages-dev`).
 pub fn composer_locked_versions(directory: &Path) -> HashMap<String, String> {
     let mut locked = HashMap::new();

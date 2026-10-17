@@ -555,7 +555,13 @@ Release notes for 0.9.3 and earlier are available in the
   manifest the watch cannot settle (missing binary, network, parse error,
   timeout, nothing installed) carries its reason in the snapshot, the audit
   prompt block and the overview, instead of a bare « Error ». KT-1279's
-  workspace handling is unchanged.
+  workspace handling is unchanged. Review follow-up: a reason quotes what the
+  tool printed, so credentials are masked before it is stored, shown or put in
+  a prompt (URL userinfo and query, `_authToken=`, bearer headers, `ghp_` /
+  `npm_` tokens); a root lockfile resolves a nested project only when the
+  root's `workspaces` globs (or `pnpm-workspace.yaml`) list it; a Composer row
+  read from `composer.lock` is labelled « from composer.lock », no longer « not
+  installed ».
 - The audit's citation gate now says how to fix a citation (KT-1307). A path
   that only resolves under the docs root or next to the citing doc gets
   « paths are repository-root relative; did you mean `docs/AGENTS.md:94`? »,
