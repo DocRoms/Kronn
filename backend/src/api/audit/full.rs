@@ -647,8 +647,36 @@ pub async fn full_audit(
             let recovered = match pending {
                 Ok(Some((last_id, pending))) if !pending.is_empty() => {
                     // Boot settles these already; this is the net for a backend
-                    // that did not go through boot (a run recorded since).
-                    let settled = super::step_guard::settle_pending(&root, &pending);
+                    // that did not go through boot (a run recorded since), or
+                    // for a run boot left open because an agent of it could not
+                    // be stopped. The run's agents are stopped again first: a
+                    // survivor is still writing the very file being settled.
+                    let reap_root = root.clone();
+                    let reap_id = last_id.clone();
+                    let reaped = tokio::task::spawn_blocking(move || {
+                        super::step_guard::settle_pending_after_reap(&reap_root, &pending, &reap_id)
+                    }).await;
+                    let settled = match reaped {
+                        Ok(Ok(settled)) => settled,
+                        Ok(Err(report)) => {
+                            yield Event::default().event("error").data(
+                                serde_json::json!({
+                                    "error": format!(
+                                        "An agent of the previous audit run {last_id} may still be running ({report:?}): its unfinished steps cannot be settled yet and a new audit would race its writes — stop it, then launch again."
+                                    )
+                                }).to_string(),
+                            );
+                            return;
+                        }
+                        Err(e) => {
+                            yield Event::default().event("error").data(
+                                serde_json::json!({
+                                    "error": format!("Could not stop the agents of the previous audit run {last_id} (task: {e}) — launch refused.")
+                                }).to_string(),
+                            );
+                            return;
+                        }
+                    };
                     if settled.is_empty() {
                         Ok(settled)
                     } else {

@@ -551,13 +551,17 @@ Release notes for 0.9.3 and earlier are available in the
   (Claude and Codex by default) have no pid recorded on their run, so boot had
   nothing to stop: it settled the step as « it had written nothing » and the
   orphan then edited `docs/` for minutes. Every process an audit run starts now
-  carries the run's tag in `KRONN_TASK_DISPATCH_ID` (`audit-run:<run id>`, the
-  variable `core::dispatch_reaper` already stops task workers by), whichever
-  route launched it. Boot stops what carries the tag of one of its own runs
-  (the recorded group first), and only then settles the steps that never ended;
-  a run something of which survived the reap, or could not be looked for, is
-  left unsettled for the next boot or launch rather than judged on a file still
-  being written. The sources' print a run records is now read once Kronn's own
+  carries the run's tag in `KRONN_TASK_DISPATCH_ID`
+  (`audit-run:<instance>:<run id>`, the variable `core::dispatch_reaper`
+  already stops task workers by; the instance is a hash of the data directory,
+  so a bench backend on a copy of the database never stops the live agents),
+  whichever route launched it. Boot stops what carries the tag of one of its
+  own runs (the recorded group first), and only then settles the steps that
+  never ended; a run something of which survived the reap, or could not be
+  looked for (on Linux, a process of the user's own that `/proc` will not
+  show), is left unsettled rather than judged on a file still being written.
+  The next audit launch stops the run's agents again before it settles such a
+  run, and refuses to launch while one may still be alive. The sources' print a run records is now read once Kronn's own
   install has written its root `AGENTS.md` pointer: taken before it, it
   differed from the next run's and every resume of a freshly started audit
   warned.

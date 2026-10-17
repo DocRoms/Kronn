@@ -632,13 +632,17 @@ fn settle_unfinished_except(
 /// misses what left it: only the tag, which everything an agent starts
 /// inherits, finds them all. Returns the runs something of which may still be
 /// alive (or could not be looked for): their steps must not be settled.
-pub(crate) fn reap_tagged_agents_at_boot(
+///
+/// `reap` stops one tag's processes; a test gives its own to report a survivor.
+type Reaper<'a> = &'a dyn Fn(&str) -> crate::core::dispatch_reaper::ReapReport;
+
+fn reap_tagged_agents_with(
     conn: &rusqlite::Connection,
+    reap: Reaper,
 ) -> anyhow::Result<HashSet<String>> {
     let mut unsafe_to_settle = HashSet::new();
     for run_id in crate::db::audit_runs::runs_that_may_have_agents(conn)? {
-        let tag = crate::core::dispatch_reaper::audit_run_tag(&run_id);
-        let report = crate::core::dispatch_reaper::reap_dispatch(&tag);
+        let report = reap(&crate::core::dispatch_reaper::audit_run_tag(&run_id));
         if report.signalled > 0 {
             tracing::warn!(
                 "Boot: stopped {} process(es) the previous backend left running for audit run {run_id}",
@@ -662,12 +666,16 @@ pub(crate) fn reap_tagged_agents_at_boot(
 /// was recorded. A run something of which may still be alive is not settled.
 /// Returns how many steps were settled.
 pub(crate) fn stop_agents_and_settle_at_boot(conn: &rusqlite::Connection) -> anyhow::Result<usize> {
+    stop_agents_and_settle_with(conn, &crate::core::dispatch_reaper::reap_dispatch)
+}
+
+fn stop_agents_and_settle_with(conn: &rusqlite::Connection, reap: Reaper) -> anyhow::Result<usize> {
     match crate::core::agent_orphans::reap_recorded_agents(conn) {
         Ok(0) => {}
         Ok(n) => tracing::warn!("Killed {n} audit agent(s) left running by the previous backend"),
         Err(e) => tracing::warn!("Failed to reap orphaned audit agents: {e}"),
     }
-    let skip = match reap_tagged_agents_at_boot(conn) {
+    let skip = match reap_tagged_agents_with(conn, reap) {
         Ok(skip) => skip,
         Err(e) => {
             // Unknown what still runs: no run is settled on a guess.
@@ -676,6 +684,41 @@ pub(crate) fn stop_agents_and_settle_at_boot(conn: &rusqlite::Connection) -> any
         }
     };
     settle_unfinished_except(conn, &skip)
+}
+
+/// The steps a previous run never ended, settled at a launch (the net for a run
+/// boot left open, or recorded since): the run's agents are stopped first,
+/// exactly as at boot. `Err` when something of the run may still be alive (a
+/// survivor, or a process table that could not be read): the steps stay open,
+/// because settling a document somebody may still be writing is the bug the
+/// reap exists to prevent. Blocking: call it off the async runtime's threads.
+pub(crate) fn settle_pending_after_reap(
+    project_root: &Path,
+    pending: &[crate::db::audit_runs::StepSnapshot],
+    run_id: &str,
+) -> Result<Vec<SettledStep>, crate::core::dispatch_reaper::ReapReport> {
+    settle_pending_after(
+        project_root,
+        pending,
+        run_id,
+        &crate::core::dispatch_reaper::reap_dispatch,
+    )
+}
+
+fn settle_pending_after(
+    project_root: &Path,
+    pending: &[crate::db::audit_runs::StepSnapshot],
+    run_id: &str,
+    reap: Reaper,
+) -> Result<Vec<SettledStep>, crate::core::dispatch_reaper::ReapReport> {
+    let report = reap(&crate::core::dispatch_reaper::audit_run_tag(run_id));
+    if report.may_still_run() {
+        tracing::error!(
+            "The unfinished steps of audit run {run_id} are left unsettled — an agent of the run may still be writing: {report:?}"
+        );
+        return Err(report);
+    }
+    Ok(settle_pending(project_root, pending))
 }
 
 /// Why accepting a failed step as it stands is refused unless a human
@@ -1563,6 +1606,125 @@ mod tests {
         assert!(
             stranger.try_wait().unwrap().is_none(),
             "an agent that is not of this database's runs keeps running"
+        );
+        stranger.kill().await.unwrap();
+    }
+
+    /// Boot found a survivor, left the run unsettled, and flipped it to
+    /// Interrupted; the next launch must not settle it either until the run's
+    /// agents are really gone — its net used to settle without looking.
+    #[test]
+    fn a_survivor_at_boot_keeps_the_next_launch_from_settling_the_run() {
+        use crate::core::dispatch_reaper::{audit_run_tag, ReapReport};
+        let root = project();
+        let file = root.path().join("docs/stack.md");
+        std::fs::write(&file, "half\n").unwrap();
+        let conn = boot_conn(root.path());
+        crate::db::audit_runs::insert_audit_step_start(
+            &conn,
+            "r1",
+            2,
+            "docs/stack.md",
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        crate::db::audit_runs::save_step_snapshot(
+            &conn,
+            "r1",
+            2,
+            "docs/stack.md",
+            Some("# Stack\nwhole\n"),
+        )
+        .unwrap();
+        crate::db::audit_runs::record_observed_output(&conn, "r1", 2, &fingerprint(Some("half\n")))
+            .unwrap();
+
+        // Boot: the reap reports a survivor (SIGKILL did not take it).
+        let asked = std::cell::RefCell::new(Vec::<String>::new());
+        let survivor = |tag: &str| {
+            asked.borrow_mut().push(tag.to_string());
+            ReapReport {
+                survivors: vec![4242],
+                ..Default::default()
+            }
+        };
+        assert_eq!(stop_agents_and_settle_with(&conn, &survivor).unwrap(), 0);
+        assert_eq!(asked.borrow().as_slice(), [audit_run_tag("r1")]);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "half\n");
+        // What boot does next: the zombie run is no longer `Running`.
+        crate::db::audit_runs::reconcile_stale_runs(&conn, 0).unwrap();
+        let pending = pending_steps(&conn, "r1").unwrap();
+        assert_eq!(pending.len(), 1, "the step is still open");
+
+        // The next launch: the same survivor, then a table nobody could read.
+        asked.borrow_mut().clear();
+        let refused = settle_pending_after(root.path(), &pending, "r1", &survivor);
+        assert_eq!(refused.unwrap_err().survivors, vec![4242]);
+        assert_eq!(
+            asked.borrow().as_slice(),
+            [audit_run_tag("r1")],
+            "it reaps the run's tag first"
+        );
+        let blind = |_: &str| ReapReport {
+            unverified: true,
+            ..Default::default()
+        };
+        assert!(
+            settle_pending_after(root.path(), &pending, "r1", &blind)
+                .unwrap_err()
+                .unverified
+        );
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "half\n",
+            "nothing was put back while a writer may be alive"
+        );
+
+        // Once the agents are gone the launch settles it, like boot would.
+        let gone = |_: &str| ReapReport::default();
+        let settled = settle_pending_after(root.path(), &pending, "r1", &gone).unwrap();
+        assert_eq!(settled.len(), 1);
+        record_settled(&conn, "r1", &settled).unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "# Stack\nwhole\n");
+        assert!(pending_steps(&conn, "r1").unwrap().is_empty());
+    }
+
+    /// The agents of another instance — a bench backend's, started on a copy
+    /// of this database, so with the same run id — are not this boot's.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn boot_leaves_the_agents_of_another_instance_alone() {
+        let root = project();
+        let run = format!("r-{}", uuid::Uuid::new_v4());
+        let conn = boot_conn_of_run(root.path(), &run);
+        let Some(python) = python() else {
+            eprintln!("skipped: no python to script an agent with");
+            return;
+        };
+        let mut ours = spawn_writing_agent(&python, root.path(), &run);
+        let mut stranger = tokio::process::Command::new(&python)
+            .args(["-c", "import time\nwhile True:\n    time.sleep(0.05)\n"])
+            .current_dir(root.path())
+            .env(
+                crate::core::dispatch_reaper::DISPATCH_ENV,
+                crate::core::dispatch_reaper::audit_run_tag_in("a-bench-on-a-copy", &run),
+            )
+            .kill_on_drop(true)
+            .spawn()
+            .expect("the other instance's agent starts");
+        until_written(&root.path().join("docs/stack.md"), "half\n").await;
+        // Let the stranger's interpreter get its environment in place.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        stop_agents_and_settle_at_boot(&conn).unwrap();
+
+        assert!(
+            ours.try_wait().unwrap().is_some(),
+            "this instance's agent of the run is stopped"
+        );
+        assert!(
+            stranger.try_wait().unwrap().is_none(),
+            "the same run id under another instance's tag is left running"
         );
         stranger.kill().await.unwrap();
     }

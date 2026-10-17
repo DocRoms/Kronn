@@ -381,3 +381,39 @@ mod processes {
         assert_eq!(reap_dispatch("  "), ReapReport::default());
     }
 }
+
+/// KT-1324 — a second backend on a copy of this database (a bench, a lane)
+/// knows the same run ids: the tag must tell the two instances apart, or its
+/// boot would stop the agents of the one that really runs them.
+#[test]
+fn the_audit_tag_names_the_instance_and_the_run() {
+    let live = instance_id_of(std::path::Path::new("/srv/kronn/live"));
+    let bench = instance_id_of(std::path::Path::new("/srv/kronn/bench-copy"));
+    assert_ne!(live, bench, "two data directories are two instances");
+    assert_eq!(
+        live,
+        instance_id_of(std::path::Path::new("/srv/kronn/live")),
+        "the same directory keeps its name across restarts"
+    );
+    assert_ne!(
+        audit_run_tag_in(&live, "run-1"),
+        audit_run_tag_in(&bench, "run-1"),
+        "the same run id, in two instances, is two tags"
+    );
+    assert_ne!(
+        audit_run_tag_in(&live, "run-1"),
+        audit_run_tag_in(&live, "run-2")
+    );
+    assert!(audit_run_tag("run-1").contains(instance_id()));
+    assert!(audit_run_tag("run-1").ends_with(":run-1"));
+}
+
+/// An entry of `/proc` that cannot be read counts only when it could be the
+/// run's: another user's processes are always unreadable to this one.
+#[test]
+fn an_unreadable_process_matters_only_if_it_could_be_ours() {
+    assert!(could_be_ours(Some(1000), 1000));
+    assert!(!could_be_ours(Some(0), 1000));
+    // The owner itself could not be read: it cannot be ruled out.
+    assert!(could_be_ours(None, 1000));
+}
