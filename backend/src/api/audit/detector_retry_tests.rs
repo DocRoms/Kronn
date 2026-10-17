@@ -222,6 +222,7 @@ async fn detector_gate_retries_with_feedback_and_skips_generated_files() {
                     retry_steps: None,
                     redo_steps: None,
                     fresh: None,
+                    accept_unverified_agents: None,
                 }),
             )
             .await
@@ -333,6 +334,7 @@ async fn partial_refresh_detector_gate_retries_with_feedback() {
                     connection_id: None,
                     tier: Some(ModelTier::Reasoning),
                     steps: vec![step],
+                    accept_unverified_agents: None,
                 }),
             )
             .await

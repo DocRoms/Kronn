@@ -629,7 +629,11 @@ Release notes for 0.9.3 and earlier are available in the
   timeline and in the revalidation panel, that repeats the launch with
   `accept_unverified_agents: true`, the human's word that none runs, which
   never covers a process Kronn saw. The flag is a human-only API field: no MCP
-  tool carries it. The
+  tool carries it. The refusal's SSE `error` event carries a typed `error_code`
+  (`agents_unverified` for the unreadable table, `agents_still_running` for a
+  process that was seen) on every path, and the UI reads that code, not the
+  message text; a retry never resends the flag, even after a confirmed launch
+  that failed again. The
   sources' print a run records is now read once Kronn's own
   install has written its root `AGENTS.md` pointer: taken before it, it
   differed from the next run's and every resume of a freshly started audit

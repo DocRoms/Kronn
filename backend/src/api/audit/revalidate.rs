@@ -805,7 +805,7 @@ fn deterministic_only(
         if let Err(error) = super::step_guard::settle_open_runs_before_launch(
             &state.db, &project_id, &project_path, accept_unverified_agents,
         ).await {
-            yield Event::default().event("error").data(serde_json::json!({"error":error}).to_string());
+            yield Event::default().event("error").data(error.event_data());
             return;
         }
         let path = project_path.clone();

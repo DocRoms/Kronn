@@ -961,6 +961,11 @@ async fn a_deterministic_revalidation_waits_for_the_agents_a_previous_run_left()
     let error = sse_events(&body, "error").pop().expect("a refusal");
     let error = error["error"].as_str().unwrap();
     assert!(error.contains("kill -9 4242"), "{error}");
+    assert_eq!(
+        sse_events(&body, "error").pop().unwrap()["error_code"],
+        "agents_still_running",
+        "{body}"
+    );
     assert!(sse_events(&body, "reanchored").is_empty(), "{body}");
     assert!(sse_events(&body, "done").is_empty(), "{body}");
     assert_eq!(
@@ -991,6 +996,7 @@ async fn a_deterministic_revalidation_waits_for_the_agents_a_previous_run_left()
             .contains("could not read the process table"),
         "{body}"
     );
+    assert_eq!(error["error_code"], "agents_unverified", "{body}");
     assert_eq!(docs_snapshot(fx.project()), docs_before);
 
     let body = deterministic(Some(true)).await;

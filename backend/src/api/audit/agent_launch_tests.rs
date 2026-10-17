@@ -2262,6 +2262,7 @@ async fn resume_run_gone(
             retry_steps: None,
             redo_steps: None,
             fresh: None,
+            accept_unverified_agents: None,
         }),
     )
     .await

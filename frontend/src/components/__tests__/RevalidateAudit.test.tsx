@@ -370,7 +370,7 @@ describe('RevalidateAudit', () => {
     setup();
     const panel = await openPanel();
     const handlers = await launchHeld();
-    await finish(() => handlers.onError('Kronn could not read the process table. Launch again with `accept_unverified_agents: true`.'));
+    await finish(() => handlers.onError('Kronn could not read the process table. Launch again with `accept_unverified_agents: true`.', 'agents_unverified'));
     expect(await within(panel).findByTestId('revalidate-unverified-explain')).toBeInTheDocument();
     expect(vi.mocked(projectsApi.revalidateAuditStream).mock.calls[0][1]).not.toHaveProperty('accept_unverified_agents');
 
@@ -387,8 +387,17 @@ describe('RevalidateAudit', () => {
     setup();
     const panel = await openPanel();
     const handlers = await launchHeld();
-    await finish(() => handlers.onError('An agent is still running (process 4242). Stop it (`kill -9 4242`), then launch again.'));
+    await finish(() => handlers.onError('An agent is still running (process 4242). Stop it (`kill -9 4242`), then launch again.', 'agents_still_running'));
     expect(await within(panel).findByRole('alert')).toHaveTextContent('kill -9 4242');
+    expect(within(panel).queryByTestId('revalidate-confirm-unverified')).toBeNull();
+  });
+
+  it('the confirm is read off the typed error code, never off the message text', async () => {
+    setup();
+    const panel = await openPanel();
+    const handlers = await launchHeld();
+    await finish(() => handlers.onError('Launch again with `accept_unverified_agents: true`.'));
+    expect(await within(panel).findByRole('alert')).toBeInTheDocument();
     expect(within(panel).queryByTestId('revalidate-confirm-unverified')).toBeNull();
   });
 

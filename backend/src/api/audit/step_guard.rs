@@ -699,6 +699,16 @@ pub(crate) struct AgentsMayStillRun {
 }
 
 impl AgentsMayStillRun {
+    /// What a client branches on: a seen survivor is stopped by hand, a table
+    /// nobody could read is the one case a human's word lifts.
+    pub(crate) fn code(&self) -> &'static str {
+        if self.report.survivors.is_empty() {
+            ERR_AGENTS_UNVERIFIED
+        } else {
+            ERR_AGENTS_STILL_RUNNING
+        }
+    }
+
     /// What to tell the human, and what they can do about it.
     pub(crate) fn message(&self) -> String {
         let run = &self.run_id;
@@ -717,6 +727,39 @@ impl AgentsMayStillRun {
         format!(
             "An agent of the previous audit run {run} is still running after being asked to stop (process {pids}). Stop it (`kill -9 {pids}`), then launch again: a new audit would snapshot and race a document it is still writing."
         )
+    }
+}
+
+/// `error_code` of the launch refusal for an agent of a previous run that was
+/// seen still running after being asked to stop: stop it by hand.
+pub(crate) const ERR_AGENTS_STILL_RUNNING: &str = "agents_still_running";
+/// `error_code` of the launch refusal for a process table that could not be
+/// read (nothing was seen running): the human may vouch that none is.
+pub(crate) const ERR_AGENTS_UNVERIFIED: &str = "agents_unverified";
+
+/// A launch the previous runs' agents (or the failure to look for them) stop.
+/// The text is for the human; `code` is what a client branches on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LaunchRefusal {
+    pub message: String,
+    pub code: Option<&'static str>,
+}
+
+impl LaunchRefusal {
+    fn plain(message: String) -> Self {
+        Self {
+            message,
+            code: None,
+        }
+    }
+
+    /// The payload of the SSE `error` event a refused launch emits.
+    pub(crate) fn event_data(&self) -> String {
+        match self.code {
+            Some(code) => serde_json::json!({ "error": self.message, "error_code": code }),
+            None => serde_json::json!({ "error": self.message }),
+        }
+        .to_string()
     }
 }
 
@@ -821,7 +864,7 @@ pub(crate) async fn settle_open_runs_before_launch(
     project_id: &str,
     project_root: &Path,
     accept_unverified: bool,
-) -> Result<usize, String> {
+) -> Result<usize, LaunchRefusal> {
     let pid = project_id.to_string();
     let runs: Vec<OpenRun> = db
         .with_conn(move |conn| {
@@ -834,7 +877,7 @@ pub(crate) async fn settle_open_runs_before_launch(
         })
         .await
         .map_err(|e| {
-            format!("Could not check the project's previous audit runs for agents still running (db): {e} — launch refused.")
+            LaunchRefusal::plain(format!("Could not check the project's previous audit runs for agents still running (db): {e} — launch refused."))
         })?;
     if runs.is_empty() {
         return Ok(0);
@@ -845,11 +888,14 @@ pub(crate) async fn settle_open_runs_before_launch(
     })
     .await
     .map_err(|e| {
-        format!(
+        LaunchRefusal::plain(format!(
             "Could not stop the agents of the previous audit runs (task: {e}) — launch refused."
-        )
+        ))
     })?
-    .map_err(|refusal| refusal.message())?;
+    .map_err(|refusal| LaunchRefusal {
+        message: refusal.message(),
+        code: Some(refusal.code()),
+    })?;
     let mut count = 0;
     for (run_id, settled) in settled {
         if settled.is_empty() {
@@ -1973,8 +2019,8 @@ mod tests {
         assert!(survivor.contains("process 4242 4243"), "{survivor}");
         assert!(survivor.contains("kill -9 4242 4243"), "{survivor}");
         assert!(!survivor.contains("ReapReport"), "{survivor}");
-        // The UI offers its confirm action on this token alone (see
-        // `isUnverifiedAgentsRefusal`): a survivor must never carry it.
+        // The flag is named in the unreadable-table refusal only: a survivor
+        // is stopped by hand, the flag would not lift it.
         assert!(!survivor.contains("accept_unverified_agents"), "{survivor}");
         let blind = AgentsMayStillRun {
             run_id: "r1".into(),
@@ -1991,6 +2037,58 @@ mod tests {
         assert!(blind.contains("accept_unverified_agents"), "{blind}");
         assert!(!blind.contains("may still be running"), "{blind}");
         assert!(!blind.contains("ReapReport"), "{blind}");
+    }
+
+    /// The UI reads the refusal's kind from `error_code`, never from its text:
+    /// a seen survivor and an unreadable table are told apart, and a refusal
+    /// that is neither (db, task) carries none.
+    #[test]
+    fn the_refusal_event_carries_a_typed_code() {
+        use crate::core::dispatch_reaper::ReapReport;
+        let refusal = |report| {
+            let may_run = AgentsMayStillRun {
+                run_id: "r1".into(),
+                report,
+            };
+            LaunchRefusal {
+                message: may_run.message(),
+                code: Some(may_run.code()),
+            }
+        };
+        let seen: serde_json::Value = serde_json::from_str(
+            &refusal(ReapReport {
+                survivors: vec![4242],
+                ..Default::default()
+            })
+            .event_data(),
+        )
+        .unwrap();
+        assert_eq!(seen["error_code"], ERR_AGENTS_STILL_RUNNING);
+        assert!(seen["error"].as_str().unwrap().contains("kill -9 4242"));
+        let blind: serde_json::Value = serde_json::from_str(
+            &refusal(ReapReport {
+                unverified: true,
+                ..Default::default()
+            })
+            .event_data(),
+        )
+        .unwrap();
+        assert_eq!(blind["error_code"], ERR_AGENTS_UNVERIFIED);
+        // A survivor seen alongside an unreadable table is still a survivor.
+        let both: serde_json::Value = serde_json::from_str(
+            &refusal(ReapReport {
+                survivors: vec![7],
+                unverified: true,
+                ..Default::default()
+            })
+            .event_data(),
+        )
+        .unwrap();
+        assert_eq!(both["error_code"], ERR_AGENTS_STILL_RUNNING);
+        let plain: serde_json::Value =
+            serde_json::from_str(&LaunchRefusal::plain("db down".into()).event_data()).unwrap();
+        assert!(plain.get("error_code").is_none(), "{plain}");
+        assert_eq!(plain["error"], "db down");
     }
 
     /// The agents of another instance — a bench backend's, started on a copy

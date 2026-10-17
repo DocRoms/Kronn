@@ -693,9 +693,7 @@ pub async fn full_audit(
             if let Err(error) = super::step_guard::settle_open_runs_before_launch(
                 &db, &project_id, &project_path, accept_unverified_agents_req,
             ).await {
-                yield Event::default().event("error").data(
-                    serde_json::json!({ "error": error }).to_string(),
-                );
+                yield Event::default().event("error").data(error.event_data());
                 return;
             }
         }

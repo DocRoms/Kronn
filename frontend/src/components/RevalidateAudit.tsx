@@ -21,7 +21,7 @@ type Phase =
   | { kind: 'running'; step: number; total: number; file: string }
   | { kind: 'done'; info: RevalidationDoneInfo }
   | { kind: 'cancelled' }
-  | { kind: 'error'; message: string; retry: 'plan' | 'run' };
+  | { kind: 'error'; message: string; retry: 'plan' | 'run'; errorCode?: string };
 
 export interface RevalidateAuditProps {
   gateLaunch?: (launch: () => void) => Promise<void>;
@@ -176,7 +176,7 @@ export function RevalidateAudit({
           if (!info) { runningRef.current = false; return; }
           settled({ kind: 'done', info });
         },
-        onError: (message) => settled({ kind: 'error', message, retry: 'run' }),
+        onError: (message, errorCode) => settled({ kind: 'error', message, retry: 'run', errorCode }),
       }, controller.signal);
     } catch (e) {
       settled({ kind: 'error', message: String(e instanceof Error ? e.message : e), retry: 'run' });
@@ -289,7 +289,7 @@ export function RevalidateAudit({
   const outcome = () => {
     if (phase.kind === 'cancelled') return <p className="rv-outcome" data-tone="warning">{t('audit.revalidate.cancelled')}</p>;
     if (phase.kind === 'error') {
-      if (phase.retry === 'run' && isUnverifiedAgentsRefusal(phase.message)) {
+      if (phase.retry === 'run' && isUnverifiedAgentsRefusal(phase.errorCode)) {
         return (
           <div className="rv-outcome" data-tone="error" role="alert">
             <p>{t('audit.revalidate.error', phase.message)}</p>

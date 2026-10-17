@@ -994,6 +994,14 @@ fn error_of(body: &str) -> String {
         .unwrap_or_else(|| panic!("the launch was not refused: {body}"))
 }
 
+/// The typed `error_code` of a refused launch's `error` event, if it carries one.
+fn error_code_of(body: &str) -> Option<String> {
+    sse_events(body)
+        .into_iter()
+        .find(|(name, _)| name == "error")
+        .and_then(|(_, data)| data["error_code"].as_str().map(str::to_string))
+}
+
 async fn stop_and_wait(state: &AppState, id: &str, run: tokio::task::JoinHandle<String>) {
     let _ = crate::api::audit::full::cancel_audit(
         axum::extract::State(state.clone()),
@@ -1033,6 +1041,11 @@ async fn a_launch_settles_the_open_runs_only_once_their_agents_are_gone(pipeline
         .unwrap();
     let error = error_of(&body);
     assert!(error.contains("kill -9 4242"), "{pipeline:?}: {error}");
+    assert_eq!(
+        error_code_of(&body).as_deref(),
+        Some("agents_still_running"),
+        "{pipeline:?}: {body}"
+    );
     assert!(error.contains(&reaped), "{pipeline:?}: {error}");
     assert!(!error.contains("ReapReport"), "{pipeline:?}: {error}");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Half writ");
@@ -1111,6 +1124,11 @@ async fn an_unreadable_process_table_can_be_accepted_by_the_human(pipeline: Pipe
         "{pipeline:?}: {error}"
     );
     assert!(!error.contains("ReapReport"), "{pipeline:?}: {error}");
+    assert_eq!(
+        error_code_of(&body).as_deref(),
+        Some("agents_unverified"),
+        "{pipeline:?}: {body}"
+    );
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Half writ");
 
     let run = launch_with(&state, pipeline, "proj-blind", AgentType::OpenCode, true);

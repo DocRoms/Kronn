@@ -14,6 +14,14 @@ vi.mock('../../lib/I18nContext', () => ({
 }));
 vi.mock('../../hooks/useMediaQuery', () => ({ useIsMobile: () => false }));
 
+// A partial refresh is launched from this notice: a button stands for its run action.
+vi.mock('../TemplateUpdateNotice', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../TemplateUpdateNotice')>()),
+  TemplateUpdateNotice: ({ onRunSteps }: { onRunSteps?: (steps: number[]) => void }) => (
+    <button data-testid="run-partial" onClick={() => onRunSteps?.([3])}>partial</button>
+  ),
+}));
+
 import { ProjectCard } from '../ProjectCard';
 import { projects as projectsApi } from '../../lib/api';
 import type { Project, AgentDetection } from '../../types/generated';
@@ -112,7 +120,7 @@ describe('ProjectCard — KT-1169 "Reprendre" after every audit error', () => {
   it('a refusal for an unreadable process table offers a confirm that resends with the flag; a plain retry never does', async () => {
     const blind = 'Kronn could not read the process table to check that no agent is still running. If you are sure none is running, launch again with `accept_unverified_agents: true`.';
     vi.mocked(projectsApi.fullAuditStream).mockImplementationOnce(async (_id, _req, handlers) => {
-      handlers.onError(blind);
+      handlers.onError(blind, 'agents_unverified');
     });
     renderCard();
     const launch = await screen.findByTestId('audit-timeline-launch');
@@ -123,21 +131,105 @@ describe('ProjectCard — KT-1169 "Reprendre" after every audit error', () => {
 
     // The plain retry replays the launch as it was: no override.
     vi.mocked(projectsApi.fullAuditStream).mockImplementationOnce(async (_id, _req, handlers) => {
-      handlers.onError(blind);
+      handlers.onError(blind, 'agents_unverified');
     });
     await act(async () => { fireEvent.click(screen.getByTestId('audit-timeline-launch-error-retry')); });
     await waitFor(() => expect(launches()).toHaveLength(2));
     expect(launches()[1].accept_unverified_agents).toBeUndefined();
 
+    // The confirmed launch fails again (here, for another reason): the retry
+    // that follows is a plain one — the word was given for one launch only.
+    vi.mocked(projectsApi.fullAuditStream).mockImplementationOnce(async (_id, _req, handlers) => {
+      handlers.onError('agent crashed');
+    });
     await act(async () => { fireEvent.click(await screen.findByTestId('audit-timeline-launch-error-confirm-unverified')); });
     await waitFor(() => expect(launches()).toHaveLength(3));
     expect(launches()[2]).toMatchObject({ resume_run_id: 'run-x', accept_unverified_agents: true });
+    expect(await screen.findByTestId('audit-timeline-launch-error')).toHaveTextContent('agent crashed');
+    expect(screen.queryByTestId('audit-timeline-launch-error-confirm-unverified')).toBeNull();
+
+    await act(async () => { fireEvent.click(screen.getByTestId('audit-timeline-launch-error-retry')); });
+    await waitFor(() => expect(launches()).toHaveLength(4));
+    expect(launches()[3]).toMatchObject({ resume_run_id: 'run-x' });
+    expect(launches()[3].accept_unverified_agents).toBeUndefined();
     await waitFor(() => expect(screen.queryByTestId('audit-timeline-launch-error')).toBeNull());
+  });
+
+  it('a confirmed launch refused again for the same reason asks again; its retry still carries no flag', async () => {
+    const blind = 'Kronn could not read the process table to check that no agent is still running.';
+    vi.mocked(projectsApi.fullAuditStream).mockImplementation(async (_id, _req, handlers) => {
+      handlers.onError(blind, 'agents_unverified');
+    });
+    renderCard();
+    const launch = await screen.findByTestId('audit-timeline-launch');
+    await waitFor(() => expect(launch).toBeEnabled());
+    await act(async () => { fireEvent.click(launch); });
+    await act(async () => { fireEvent.click(await screen.findByTestId('audit-timeline-launch-error-confirm-unverified')); });
+    await waitFor(() => expect(launches()).toHaveLength(2));
+    expect(launches()[1].accept_unverified_agents).toBe(true);
+
+    await act(async () => { fireEvent.click(screen.getByTestId('audit-timeline-launch-error-retry')); });
+    await waitFor(() => expect(launches()).toHaveLength(3));
+    expect(launches()[2].accept_unverified_agents).toBeUndefined();
+  });
+
+  it('the confirm is read off the typed error code, never off the message text', async () => {
+    // The text names the flag, but the backend sent no code: no confirm.
+    vi.mocked(projectsApi.fullAuditStream).mockImplementationOnce(async (_id, _req, handlers) => {
+      handlers.onError('Launch again with `accept_unverified_agents: true`.');
+    });
+    renderCard();
+    const launch = await screen.findByTestId('audit-timeline-launch');
+    await waitFor(() => expect(launch).toBeEnabled());
+    await act(async () => { fireEvent.click(launch); });
+    expect(await screen.findByTestId('audit-timeline-launch-error')).toBeInTheDocument();
+    expect(screen.queryByTestId('audit-timeline-launch-error-confirm-unverified')).toBeNull();
+  });
+
+  // The partial refresh has the same way out, and the same one-launch rule.
+  it('a partial refresh refused for an unreadable process table: the confirm resends with the flag, a retry never does', async () => {
+    const blind = 'Kronn could not read the process table to check that no agent is still running.';
+    const partial = () => vi.mocked(projectsApi.partialAuditStream).mock.calls.map(call => call[1]);
+    vi.mocked(projectsApi.partialAuditStream).mockImplementationOnce(async (_id, _req, handlers) => {
+      handlers.onError(blind, 'agents_unverified');
+    });
+    renderCard();
+    await act(async () => { fireEvent.click(await screen.findByTestId('run-partial')); });
+    expect(await screen.findByTestId('audit-timeline-launch-error-unverified')).toBeInTheDocument();
+    expect(partial()[0]).toMatchObject({ steps: [3] });
+    expect(partial()[0].accept_unverified_agents).toBeUndefined();
+
+    // The confirmed launch fails again: the retry that follows carries no flag.
+    vi.mocked(projectsApi.partialAuditStream).mockImplementationOnce(async (_id, _req, handlers) => {
+      handlers.onError('agent crashed');
+    });
+    await act(async () => { fireEvent.click(screen.getByTestId('audit-timeline-launch-error-confirm-unverified')); });
+    await waitFor(() => expect(partial()).toHaveLength(2));
+    expect(partial()[1]).toMatchObject({ steps: [3], accept_unverified_agents: true });
+    expect(await screen.findByTestId('audit-timeline-launch-error')).toHaveTextContent('agent crashed');
+
+    vi.mocked(projectsApi.partialAuditStream).mockImplementationOnce(async (_id, _req, handlers) => {
+      handlers.onError(blind, 'agents_unverified');
+    });
+    await act(async () => { fireEvent.click(screen.getByTestId('audit-timeline-launch-error-retry')); });
+    await waitFor(() => expect(partial()).toHaveLength(3));
+    expect(partial()[2]).toMatchObject({ steps: [3] });
+    expect(partial()[2].accept_unverified_agents).toBeUndefined();
+  });
+
+  it('a partial refresh refused for a surviving process offers no confirm', async () => {
+    vi.mocked(projectsApi.partialAuditStream).mockImplementationOnce(async (_id, _req, handlers) => {
+      handlers.onError('An agent of the previous audit run r1 is still running (process 4242). Stop it (`kill -9 4242`), then launch again.', 'agents_still_running');
+    });
+    renderCard();
+    await act(async () => { fireEvent.click(await screen.findByTestId('run-partial')); });
+    expect(await screen.findByTestId('audit-timeline-launch-error')).toHaveTextContent('kill -9 4242');
+    expect(screen.queryByTestId('audit-timeline-launch-error-confirm-unverified')).toBeNull();
   });
 
   it('a refusal naming a surviving process has no confirm: it is stopped by hand', async () => {
     vi.mocked(projectsApi.fullAuditStream).mockImplementationOnce(async (_id, _req, handlers) => {
-      handlers.onError('An agent of the previous audit run r1 is still running (process 4242). Stop it (`kill -9 4242`), then launch again.');
+      handlers.onError('An agent of the previous audit run r1 is still running (process 4242). Stop it (`kill -9 4242`), then launch again.', 'agents_still_running');
     });
     renderCard();
     const launch = await screen.findByTestId('audit-timeline-launch');

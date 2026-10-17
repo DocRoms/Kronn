@@ -886,7 +886,10 @@ export function ProjectCard({
     // so client state can never graft onto the wrong pipeline (Codex #3).
     // A fresh full audit ignores the resumable run on purpose (confirmed).
     const resumeRunId = options.fresh ? null : resumableAudit?.id ?? null;
-    const retry = () => { void handleFullAuditRef.current(options); };
+    // KT-1324 — the human's word that no agent runs covers the one launch it
+    // was given for: a retry never carries it, whatever launch it follows.
+    const { acceptUnverifiedAgents: _spent, ...retryOptions } = options;
+    const retry = () => { void handleFullAuditRef.current(retryOptions); };
     // A step retried alone needs its run: never fall back to a whole audit.
     if (options.retrySteps && !resumeRunId) {
       setAuditLaunchError({ message: t('audit.retryNeedsRun'), retry: () => setResumableReload(n => n + 1) });
@@ -1062,7 +1065,7 @@ export function ProjectCard({
             onAutoRunDiscussion(discussionId);
           }
         },
-        onError: (error) => {
+        onError: (error, errorCode) => {
           // SSE `event: error` from the backend (agent crash, install
           // failure, etc.). Pre-fix this only logged + cleared the
           // checkpoint, leaving `auditActive=true` so the spinner
@@ -1078,8 +1081,8 @@ export function ProjectCard({
           setAuditLaunchError({
             message: t('audit.streamError', error || 'unknown error'),
             retry,
-            confirmUnverified: isUnverifiedAgentsRefusal(error)
-              ? () => { void handleFullAuditRef.current({ ...options, acceptUnverifiedAgents: true }); }
+            confirmUnverified: isUnverifiedAgentsRefusal(errorCode)
+              ? () => { void handleFullAuditRef.current({ ...retryOptions, acceptUnverifiedAgents: true }); }
               : undefined,
           });
           setAuditCompletedTick((t) => t + 1);
@@ -1182,7 +1185,7 @@ export function ProjectCard({
             toast(t('audit.partialInterrupted'), 'error');
           }
         },
-        onError: (error) => {
+        onError: (error, errorCode) => {
           // Same fix as `handleFullAudit.onError` — without resetting
           // `auditActive`, the spinner stays on a dead run.
           console.warn('Partial audit error:', error);
@@ -1194,7 +1197,7 @@ export function ProjectCard({
           setAuditLaunchError({
             message: t('audit.partialStreamError', error || 'unknown error'),
             retry,
-            confirmUnverified: isUnverifiedAgentsRefusal(error)
+            confirmUnverified: isUnverifiedAgentsRefusal(errorCode)
               ? () => { void startPartialAuditRef.current(steps, true); }
               : undefined,
           });
