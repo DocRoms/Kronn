@@ -2100,6 +2100,31 @@ async fn wait_for_warm_up_to_settle(exec_id: &str, timeout: std::time::Duration)
 /// `Provisioning` (any cancel path — a run cancel, a reassignment — ends it).
 const WARM_UP_STATE_POLL: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// The poll interval of `repo_path`'s warm-up watcher. Tests may pin it per
+/// repository, so a scenario that depends on the watcher NOT having fired yet
+/// does not race the wall clock.
+fn warm_up_state_poll(repo_path: &str) -> std::time::Duration {
+    #[cfg(test)]
+    if let Some(poll) = test_warm_up_state_polls()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(repo_path)
+    {
+        return *poll;
+    }
+    let _ = repo_path;
+    WARM_UP_STATE_POLL
+}
+
+#[cfg(test)]
+fn test_warm_up_state_polls(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, std::time::Duration>> {
+    static POLLS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::time::Duration>>,
+    > = std::sync::OnceLock::new();
+    POLLS.get_or_init(Default::default)
+}
+
 /// The probe runner of a task worker's launch: real processes confined to the
 /// worker's sandbox profile (KT-1255), so a build script or proc-macro the
 /// worker wrote is never compiled with the host's rights. Tests register a
@@ -2182,6 +2207,7 @@ async fn defer_native_provisioning(
     let background = std::sync::Arc::new(db.share_handle());
     let task_db = background.clone();
     let id = exec_id.clone();
+    let state_poll = warm_up_state_poll(&launch.prepared.repo_path);
     tokio::spawn(async move {
         let _claim = claim;
         // Any cancel path (the execution's own, its run's, a reassignment)
@@ -2195,7 +2221,7 @@ async fn defer_native_provisioning(
                 loop {
                     tokio::select! {
                         _ = cancel.cancelled() => return,
-                        _ = tokio::time::sleep(WARM_UP_STATE_POLL) => {}
+                        _ = tokio::time::sleep(state_poll) => {}
                     }
                     let probe_id = id.clone();
                     let status = db
@@ -25907,6 +25933,16 @@ pub(crate) mod tests {
         let before = HeldFirstBuild::succeeding();
         let _release = ReleaseOnDrop(before.clone());
 
+        // The straggler's warm-up watcher stops its build once the execution
+        // is no longer `Provisioning`. Left on its 500 ms clock, that stop races
+        // the test's own `release()` below: on a busy machine the watcher wins,
+        // the build is cancelled instead of finished, and the wait for
+        // `finished() == 1` never ends. The test pins the worst case — a
+        // straggler that does finish — so the watcher must not fire.
+        test_warm_up_state_polls().lock().unwrap().insert(
+            repo.path().to_string_lossy().to_string(),
+            Duration::from_secs(3600),
+        );
         let launched =
             launch_with_cargo_crate(&db, repo.path(), before.clone(), "warm-restart").await;
         assert_eq!(launched.status, TaskExecutionStatus::Provisioning);
