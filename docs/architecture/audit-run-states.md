@@ -520,14 +520,14 @@ category.
   cannot restore it, but its step still never ended and so still needs the
   override). A new run drops the snapshots of the project's earlier runs and
   deleting a run cascades.
-  [src: file: backend/src/api/audit/step_guard.rs:126-151#restore_target] [src: file: backend/src/api/audit/step_guard.rs:243-260#KilledOutcome] [src: file: backend/src/api/audit/step_guard.rs:294-316#target_state] [src: file: backend/src/db/audit_runs.rs:272-305#MAX_SNAPSHOT_BYTES] [src: file: backend/src/db/audit_runs.rs:32-39#audit_step_snapshots] [src: file: backend/src/db/sql/265_audit_cancel_and_integrity.sql:20-31#audit_step_snapshots]
+  [src: file: backend/src/api/audit/step_guard.rs:130-155#restore_target] [src: file: backend/src/api/audit/step_guard.rs:247-264#KilledOutcome] [src: file: backend/src/api/audit/step_guard.rs:298-320#target_state] [src: file: backend/src/db/audit_runs.rs:272-305#MAX_SNAPSHOT_BYTES] [src: file: backend/src/db/audit_runs.rs:32-39#audit_step_snapshots] [src: file: backend/src/db/sql/265_audit_cancel_and_integrity.sql:20-31#audit_step_snapshots]
 - **A crash is settled at boot, not at the next launch.** Right after the
   recorded agents are killed, every step that never ended and has a snapshot
   is put back (or marked) and recorded failed with a `stopped during step N
   (the backend stopped)` reason. Until then the doc would sit half-written
   with no marker. A step that never ended and has no verdict is a blocker of
   its own (`NeverEnded`): accepting it needs the override too.
-  [src: file: backend/src/api/audit/step_guard.rs:584-611#settle_unfinished_at_boot] [src: file: backend/src/db/mod.rs:295-302#settle_unfinished_at_boot] [src: file: backend/src/api/audit/step_guard.rs:616-631#AcceptBlocker]
+  [src: file: backend/src/api/audit/step_guard.rs:588-615#settle_unfinished_at_boot] [src: file: backend/src/db/mod.rs:295-302#settle_unfinished_at_boot] [src: file: backend/src/api/audit/step_guard.rs:620-635#AcceptBlocker]
 - **Settling never destroys what the agent did not write.** The audit
   watches the target on the activity tick and keeps the fingerprint of what it
   saw the agent write (`audit_step_snapshots.observed_hash`, migration 264).
@@ -539,7 +539,7 @@ category.
   restores, but content it cannot vouch for is first copied to
   `<target>.kronn-displaced-<UTC timestamp>` and the step's reason names the
   path; if the copy cannot be made the target is not replaced.
-  [src: file: backend/src/api/audit/step_guard.rs:350-431#settle_killed] [src: file: backend/src/api/audit/step_guard.rs:153-186#save_aside]
+  [src: file: backend/src/api/audit/step_guard.rs:354-435#settle_killed] [src: file: backend/src/api/audit/step_guard.rs:157-190#save_aside]
 - **Settling never writes outside the project.** Every read, restore, marker
   and displaced copy goes through the project-containment check (no symlink
   on the path, no `..`), temp files are created exclusively
@@ -547,7 +547,7 @@ category.
   with `create_dir_all` beyond the project. A project root that does not exist
   (an unmounted volume) is never recreated: its steps stay open, snapshot
   kept, and are settled by the next boot or launch that finds the root.
-  [src: file: backend/src/api/audit/step_guard.rs:57-72#contained_path] [src: file: backend/src/api/audit/step_guard.rs:83-98#sibling] [src: file: backend/src/api/audit/step_guard.rs:100-114#create_new_file]
+  [src: file: backend/src/api/audit/step_guard.rs:61-76#contained_path] [src: file: backend/src/api/audit/step_guard.rs:87-102#sibling] [src: file: backend/src/api/audit/step_guard.rs:104-118#create_new_file]
 - **File work stays off the writer connection.** The launch-time net reads
   the pending snapshots, settles the files, then records the verdicts, in three
   separate steps (`pending_steps`, `settle_pending`, `record_settled`).
@@ -555,13 +555,13 @@ category.
   wrote its target, Kronn keeps the text (a human may accept it) under a
   `<!-- kronn:partial-step -->` banner and records `target_state = partial`.
   A later success, or an acceptance, removes the banner.
-  [src: file: backend/src/api/audit/step_guard.rs:16-22#PARTIAL_OPEN] [src: file: backend/src/api/audit/step_guard.rs:222-241#settle_failed_target] [src: file: backend/src/api/audit/step_guard.rs:209-220#clear_partial_marker]
+  [src: file: backend/src/api/audit/step_guard.rs:16-22#PARTIAL_OPEN] [src: file: backend/src/api/audit/step_guard.rs:226-245#settle_failed_target] [src: file: backend/src/api/audit/step_guard.rs:213-224#clear_partial_marker]
 - **Accept refuses an unsound step.** A step that failed for truncation,
   citations that do not resolve, an undisposed detector signal, incomplete
   coverage, or a stop is accepted only with `override_unsound: true`. The
   refusal starts with `override_required:` and carries a bounded diff against
   the pre-step content. The override is recorded in the acceptance reason.
-  [src: file: backend/src/api/audit/step_guard.rs:613-631#AcceptBlocker] [src: file: backend/src/api/audit/accept.rs:34-36#OVERRIDE_REQUIRED_PREFIX] [src: file: backend/src/api/audit/accept.rs:261-275#OVERRIDE_REQUIRED_PREFIX]
+  [src: file: backend/src/api/audit/step_guard.rs:617-635#AcceptBlocker] [src: file: backend/src/api/audit/accept.rs:34-36#OVERRIDE_REQUIRED_PREFIX] [src: file: backend/src/api/audit/accept.rs:261-275#OVERRIDE_REQUIRED_PREFIX]
 - **Boot kills an agent the previous backend left.** The run records the
   agent's process group and the start stamp of its leader (`agent_pgid`,
   `agent_started_marker`). At boot, before the lease is freed, the group is
