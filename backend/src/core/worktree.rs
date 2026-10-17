@@ -229,7 +229,7 @@ pub fn scan_build_artifacts(repo_path: &Path) -> Vec<BuildArtifactTarget> {
 ///
 /// Returns `(bytes, partial)`. Symlinks are counted as entries but never
 /// followed, so a link into a huge tree cannot make this walk unbounded.
-fn measure_within_budget(root: &Path) -> (u64, bool) {
+pub(crate) fn measure_within_budget(root: &Path) -> (u64, bool) {
     let mut bytes = 0u64;
     let mut visited = 0usize;
     let mut stack = vec![root.to_path_buf()];
@@ -539,6 +539,23 @@ pub fn mark_lane_target(
         execution_id: execution_id.to_string(),
         worktree: worktree_path.to_string_lossy().to_string(),
     };
+    // The stamp is Kronn's, not the project's: in a checkout that does not
+    // ignore `target/` it would read as uncommitted work and hold up the
+    // integration preflight. A `*` ignore file keeps git blind to the whole lane.
+    let ignore = lane_target.join(".gitignore");
+    if !ignore.exists() {
+        std::fs::write(&ignore, b"*\n").map_err(|error| {
+            format!(
+                "cannot write the lane ignore file in {}: {error}",
+                lane_target.display()
+            )
+        })?;
+    }
+    // Already stamped for this very execution: leave the file (and the lane's
+    // idle clock) alone, so a relaunch does not look like a build.
+    if read_lane_owner(&lane_target).as_ref() == Some(&owner) {
+        return Ok(lane_target);
+    }
     let bytes = serde_json::to_vec(&owner).map_err(|error| error.to_string())?;
     let staging = lane_target.join(format!("{LANE_OWNER_MARKER}.tmp"));
     std::fs::write(&staging, bytes)
@@ -550,6 +567,34 @@ pub fn mark_lane_target(
             )
         })?;
     Ok(lane_target)
+}
+
+/// [`mark_lane_target`] for a worktree whose repository is not known to the
+/// caller: it is derived from the managed layout
+/// (`<repo>/.kronn/worktrees/<name>`). A worktree outside that layout builds
+/// inside itself, has no `target/wt-*` lane, and is refused.
+///
+/// Every place that makes Kronn start a build in a worker's lane - the
+/// worker's own launch (task or campaign), and the sandbox a validation runs
+/// in - stamps it first, so no lane Kronn created is ever left unowned.
+pub fn mark_lane_target_for_worktree(
+    worktree_path: &Path,
+    execution_id: &str,
+) -> Result<PathBuf, String> {
+    let worktree = worktree_path.canonicalize().map_err(|error| {
+        format!(
+            "cannot canonicalize worktree {}: {error}",
+            worktree_path.display()
+        )
+    })?;
+    let lane = crate::core::task_worker_env::WorkerLane::for_worktree(&worktree)?;
+    let repo = lane.main_checkout.ok_or_else(|| {
+        format!(
+            "{} is not a managed worktree, so it has no lane target",
+            worktree.display()
+        )
+    })?;
+    mark_lane_target(&repo, &worktree, execution_id)
 }
 
 /// The marker of a lane target, when it is a plain, well-formed file whose
@@ -574,7 +619,7 @@ fn read_lane_owner(lane_target: &Path) -> Option<LaneOwner> {
 
 /// Every `<repo>/target/wt-*` entry, sorted so a dry run matches the pass that
 /// acts on it.
-fn lane_target_dirs(repo_path: &Path) -> Vec<PathBuf> {
+pub(crate) fn lane_target_dirs(repo_path: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(repo_path.join("target")) else {
         // No target directory means no lane was ever built here.
         return Vec::new();
@@ -761,6 +806,80 @@ pub fn process_lane_target(
     judge: &dyn Fn(&LaneOwner) -> Result<(), String>,
     scope: LaneSweepScope,
 ) -> LaneTargetOutcome {
+    process_lane_target_idle(
+        repo_path,
+        lane_target,
+        judge,
+        scope,
+        std::time::Duration::ZERO,
+    )
+}
+
+/// Most recent write inside a lane target, looked up without walking it: the
+/// directory itself, its entries and their direct children (`debug/`,
+/// `debug/.fingerprint`, `.cargo-lock`, the marker...). Cargo touches those at
+/// every build, so a build that ran a minute ago moves this forward.
+///
+/// `None` when nothing could be read: callers must then treat the lane as
+/// written just now, never as idle (KT-1318).
+pub fn lane_target_last_write(lane_target: &Path) -> Option<std::time::SystemTime> {
+    const ENTRY_BUDGET: usize = 4_000;
+    let modified = |path: &Path| std::fs::symlink_metadata(path).ok()?.modified().ok();
+    let mut newest = modified(lane_target)?;
+    let mut visited = 0usize;
+    let Ok(children) = std::fs::read_dir(lane_target) else {
+        return Some(newest);
+    };
+    for child in children.flatten() {
+        visited += 1;
+        if let Some(time) = child.metadata().ok().and_then(|meta| meta.modified().ok()) {
+            newest = newest.max(time);
+        }
+        let is_dir = child.file_type().is_ok_and(|kind| kind.is_dir());
+        if !is_dir {
+            continue;
+        }
+        let Ok(grandchildren) = std::fs::read_dir(child.path()) else {
+            continue;
+        };
+        for grandchild in grandchildren.flatten() {
+            visited += 1;
+            if visited > ENTRY_BUDGET {
+                return Some(newest);
+            }
+            if let Some(time) = grandchild
+                .metadata()
+                .ok()
+                .and_then(|meta| meta.modified().ok())
+            {
+                newest = newest.max(time);
+            }
+        }
+    }
+    Some(newest)
+}
+
+/// How long a lane target has gone without a write, or `None` when unknown.
+pub fn lane_target_idle_for(lane_target: &Path) -> Option<std::time::Duration> {
+    let written = lane_target_last_write(lane_target)?;
+    // A clock set back reads as "written just now", never as idle.
+    Some(
+        std::time::SystemTime::now()
+            .duration_since(written)
+            .unwrap_or_default(),
+    )
+}
+
+/// [`process_lane_target`] that also keeps a lane written less than `min_idle`
+/// ago (KT-1318): "no live worktree" is durable state, "not written for N
+/// hours" is the second, independent proof that nothing is still using it.
+pub fn process_lane_target_idle(
+    repo_path: &Path,
+    lane_target: &Path,
+    judge: &dyn Fn(&LaneOwner) -> Result<(), String>,
+    scope: LaneSweepScope,
+    min_idle: std::time::Duration,
+) -> LaneTargetOutcome {
     match classify_lane_target(repo_path, lane_target, judge) {
         LaneTargetState::Unmarked => LaneTargetOutcome::Unmarked,
         LaneTargetState::Claimed(owner, reason) => LaneTargetOutcome::Claimed(owner, reason),
@@ -774,6 +893,27 @@ pub fn process_lane_target(
                 LaneSweepScope::WorktreeGone => !worktree_present,
                 LaneSweepScope::WorktreeGoneOrClean => true,
             };
+            if allowed && !min_idle.is_zero() {
+                match lane_target_idle_for(lane_target) {
+                    Some(idle) if idle >= min_idle => {}
+                    Some(idle) => {
+                        return LaneTargetOutcome::Kept(
+                            Some(owner),
+                            format!(
+                                "written {} minute(s) ago, under the {}-hour idle threshold",
+                                idle.as_secs() / 60,
+                                min_idle.as_secs() / 3600
+                            ),
+                        )
+                    }
+                    None => {
+                        return LaneTargetOutcome::Kept(
+                            Some(owner),
+                            "its last write cannot be read, so it is not provably idle".to_string(),
+                        )
+                    }
+                }
+            }
             if !allowed {
                 let (bytes_reclaimed, bytes_are_partial) = measure_within_budget(lane_target);
                 return LaneTargetOutcome::WouldRemove(
@@ -803,9 +943,19 @@ pub fn sweep_lane_targets(
     judge: &dyn Fn(&LaneOwner) -> Result<(), String>,
     scope: LaneSweepScope,
 ) -> LaneTargetSweep {
+    sweep_lane_targets_idle(repo_path, judge, scope, std::time::Duration::ZERO)
+}
+
+/// [`sweep_lane_targets`] that leaves every lane written within `min_idle`.
+pub fn sweep_lane_targets_idle(
+    repo_path: &Path,
+    judge: &dyn Fn(&LaneOwner) -> Result<(), String>,
+    scope: LaneSweepScope,
+    min_idle: std::time::Duration,
+) -> LaneTargetSweep {
     let mut sweep = LaneTargetSweep::default();
     for path in lane_target_dirs(repo_path) {
-        match process_lane_target(repo_path, &path, judge, scope) {
+        match process_lane_target_idle(repo_path, &path, judge, scope, min_idle) {
             LaneTargetOutcome::Removed(owner, report) => sweep.removed.push((owner, report)),
             LaneTargetOutcome::WouldRemove(owner, report) => {
                 sweep.would_remove.push((owner, report))
@@ -871,7 +1021,7 @@ pub fn set_disk_thresholds(warning_gib: u64, critical_gib: u64) {
     DISK_CRITICAL_GIB.store(critical_gib, std::sync::atomic::Ordering::Relaxed);
 }
 
-fn configured_disk_thresholds() -> (u64, u64) {
+pub fn configured_disk_thresholds() -> (u64, u64) {
     (
         DISK_WARNING_GIB.load(std::sync::atomic::Ordering::Relaxed),
         DISK_CRITICAL_GIB.load(std::sync::atomic::Ordering::Relaxed),
@@ -5191,6 +5341,109 @@ mod tests {
         Err("execution is Working".to_string())
     }
 
+    /// Back-date every entry under `path` (children first, so writing a
+    /// directory's mtime is not undone by its own children).
+    fn age_tree(path: &Path, ago: std::time::Duration) {
+        fn walk(path: &Path, when: std::time::SystemTime) {
+            if let Ok(entries) = fs::read_dir(path) {
+                for entry in entries.flatten() {
+                    let child = entry.path();
+                    if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                        walk(&child, when);
+                    } else {
+                        fs::File::open(&child).unwrap().set_modified(when).unwrap();
+                    }
+                }
+            }
+            fs::File::open(path).unwrap().set_modified(when).unwrap();
+        }
+        walk(path, std::time::SystemTime::now() - ago);
+    }
+
+    const SIX_HOURS: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
+
+    /// KT-1318 — "no live worktree" is not enough on its own: a lane written
+    /// within the idle threshold stays, an aged one goes.
+    #[test]
+    fn an_orphan_lane_is_swept_only_once_idle_past_the_threshold() {
+        let repo = make_test_repo("lane-idle");
+        let (worktree, lane_target, _) = marked_lane(repo.path(), "KT-30", "c3d4", "exec-30");
+        fs::remove_dir_all(&worktree).unwrap();
+
+        let fresh = sweep_lane_targets_idle(
+            repo.path(),
+            &finished,
+            LaneSweepScope::WorktreeGone,
+            SIX_HOURS,
+        );
+        assert!(fresh.removed.is_empty(), "{fresh:?}");
+        assert!(lane_target.join("debug/kronn").exists());
+        assert!(
+            fresh
+                .kept
+                .iter()
+                .any(|(path, why)| path == &lane_target && why.contains("idle threshold")),
+            "{fresh:?}"
+        );
+
+        age_tree(&lane_target, SIX_HOURS + std::time::Duration::from_secs(60));
+        let aged = sweep_lane_targets_idle(
+            repo.path(),
+            &finished,
+            LaneSweepScope::WorktreeGone,
+            SIX_HOURS,
+        );
+        assert_eq!(aged.removed.len(), 1, "{aged:?}");
+        assert!(!lane_target.exists());
+    }
+
+    /// KT-1318 — age never overrides liveness: an aged lane of a live
+    /// execution, or whose worktree still exists, is not an orphan.
+    #[test]
+    fn an_aged_lane_is_still_kept_when_its_execution_or_worktree_is_alive() {
+        let repo = make_test_repo("lane-idle-live");
+        let (worktree, lane_target, _) = marked_lane(repo.path(), "KT-31", "e5f6", "exec-31");
+        age_tree(&lane_target, SIX_HOURS * 4);
+
+        let live =
+            sweep_lane_targets_idle(repo.path(), &alive, LaneSweepScope::WorktreeGone, SIX_HOURS);
+        assert!(
+            live.removed.is_empty() && live.claimed.len() == 1,
+            "{live:?}"
+        );
+
+        // Finished, but its clean worktree is still there: not an orphan.
+        let attached = sweep_lane_targets_idle(
+            repo.path(),
+            &finished,
+            LaneSweepScope::WorktreeGone,
+            SIX_HOURS,
+        );
+        assert!(attached.removed.is_empty(), "{attached:?}");
+        assert!(worktree.exists() && lane_target.join("debug/kronn").exists());
+    }
+
+    /// KT-1318 — a build that just ran inside the lane moves its idle age
+    /// forward even though the lane directory itself did not change.
+    #[test]
+    fn a_write_below_the_lane_resets_its_idle_age() {
+        let repo = make_test_repo("lane-idle-age");
+        let (_, lane_target, _) = marked_lane(repo.path(), "KT-32", "a7b8", "exec-32");
+        age_tree(&lane_target, SIX_HOURS * 2);
+        assert!(
+            lane_target_idle_for(&lane_target).unwrap()
+                >= SIX_HOURS * 2 - std::time::Duration::from_secs(5)
+        );
+
+        fs::write(lane_target.join("debug/fresh.o"), b"x").unwrap();
+        assert!(
+            lane_target_idle_for(&lane_target).unwrap() < std::time::Duration::from_secs(120),
+            "a write under debug/ is activity"
+        );
+        // A lane that does not exist has no age: never "idle".
+        assert!(lane_target_idle_for(&repo.path().join("target/wt-none")).is_none());
+    }
+
     #[test]
     fn mark_lane_target_writes_the_marker_the_sweep_reads() {
         let repo = make_test_repo("lane-mark");
@@ -5201,11 +5454,63 @@ mod tests {
         assert_eq!(owners[0].execution_id, "exec-20");
         assert_eq!(owners[0].worktree, worktree.to_string_lossy());
         assert!(lane_target.join(LANE_OWNER_MARKER).is_file());
-        // Idempotent: a second launch of the same lane rewrites it, once.
+        // Idempotent: a second launch of the same lane finds it stamped and
+        // leaves the file (and the lane's idle clock) as it is.
+        let stamped = fs::metadata(lane_target.join(LANE_OWNER_MARKER))
+            .unwrap()
+            .modified()
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
         mark_lane_target(repo.path(), &worktree, "exec-20").unwrap();
         assert_eq!(lane_target_owners(repo.path()).len(), 1);
+        assert_eq!(
+            fs::metadata(lane_target.join(LANE_OWNER_MARKER))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            stamped
+        );
         // Nothing can be marked without an execution.
         assert!(mark_lane_target(repo.path(), &worktree, " ").is_err());
+    }
+
+    /// KT-1318 - the lanes Kronn starts a build in without having provisioned
+    /// them itself (a validation of any worker kind, a resumed launch) are
+    /// stamped from the worktree alone; a tree outside the managed layout has
+    /// no lane and gets nothing.
+    #[test]
+    fn a_lane_is_marked_from_its_worktree_alone_and_only_for_a_managed_one() {
+        let repo = make_test_repo("lane-mark-derived");
+        let base = head_sha(repo.path());
+        let info = create_task_worktree(repo.path(), "KT-21", "c3d4", &base).unwrap();
+        let worktree = PathBuf::from(&info.path);
+
+        let lane_target = mark_lane_target_for_worktree(&worktree, "exec-21").unwrap();
+        assert_eq!(
+            lane_target.canonicalize().unwrap(),
+            repo.path()
+                .canonicalize()
+                .unwrap()
+                .join("target/wt-kt-21-c3d4")
+        );
+        let owners = lane_target_owners(&repo.path().canonicalize().unwrap());
+        assert_eq!(owners.len(), 1, "{owners:?}");
+        assert_eq!(owners[0].execution_id, "exec-21");
+        // The stamp is Kronn's: a checkout that does not ignore `target/` must
+        // not read it as uncommitted work (it would block an integration).
+        assert!(
+            worktree_dirty_files(repo.path()).unwrap().is_empty(),
+            "{:?}",
+            worktree_dirty_files(repo.path())
+        );
+
+        let elsewhere = tempfile::tempdir().unwrap();
+        assert!(mark_lane_target_for_worktree(elsewhere.path(), "exec-21").is_err());
+        assert!(
+            !elsewhere.path().join("target").exists(),
+            "an unmanaged tree is left as it is"
+        );
+        assert!(mark_lane_target_for_worktree(&worktree, "").is_err());
     }
 
     /// KT-1256 — the principal's review: `target/wt-*` is also where humans

@@ -532,6 +532,60 @@ pub fn worktree_cleanup_liveness(
     Ok(ExecutionLiveness::Terminal)
 }
 
+/// The task and state behind a disk artefact, for the disk view (KT-1318).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiskOwnerRow {
+    pub execution_id: String,
+    pub status: String,
+    /// `KT-<n>`, when the task row is still there.
+    pub task_ref: Option<String>,
+}
+
+fn disk_owner_row(row: &Row<'_>) -> rusqlite::Result<DiskOwnerRow> {
+    let number: Option<i64> = row.get(2)?;
+    Ok(DiskOwnerRow {
+        execution_id: row.get(0)?,
+        status: row.get(1)?,
+        task_ref: number.map(|n| format!("KT-{n}")),
+    })
+}
+
+/// The execution a lane target's ownership marker names.
+pub fn disk_owner_of_execution(
+    conn: &Connection,
+    execution_id: &str,
+) -> Result<Option<DiskOwnerRow>> {
+    Ok(conn
+        .query_row(
+            "SELECT te.id, te.status, pt.task_number
+               FROM task_executions te
+               LEFT JOIN planning_tasks pt ON pt.id = te.task_id
+              WHERE te.id = ?1",
+            params![execution_id],
+            disk_owner_row,
+        )
+        .optional()?)
+}
+
+/// The execution a managed worktree (by its checkout path) belongs to.
+pub fn disk_owner_of_workspace(
+    conn: &Connection,
+    canonical_path: &str,
+) -> Result<Option<DiskOwnerRow>> {
+    Ok(conn
+        .query_row(
+            "SELECT te.id, te.status, pt.task_number
+               FROM discussion_workspaces dw
+               JOIN task_executions te ON te.id = dw.task_execution_id
+               LEFT JOIN planning_tasks pt ON pt.id = te.task_id
+              WHERE dw.canonical_path = ?1
+              LIMIT 1",
+            params![canonical_path],
+            disk_owner_row,
+        )
+        .optional()?)
+}
+
 /// Which lane targets (`target/wt-<lane>`) of a project a live execution still
 /// claims, by lane name, with the reason.
 ///

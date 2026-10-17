@@ -17,12 +17,12 @@ reads "running" once the run has stopped.
 
 Sources:
 
-- The lease is the single gate of every launch. [src: file: backend/src/api/audit/full.rs:392-399#try_acquire_lease]
+- The lease is the single gate of every launch. [src: file: backend/src/api/audit/full.rs:395-402#try_acquire_lease]
 - The row is inserted `Running`. [src: file: backend/src/db/audit_runs.rs:17-19#insert_running]
-- The drift baseline is written before the terminal write, and only by a Full run; a baseline failure keeps the run `Interrupted`. [src: file: backend/src/api/audit/full.rs:3135-3141#baseline_ok] [src: file: backend/src/api/audit/full.rs:3435-3440#baseline_ok] [src: file: backend/src/api/audit/full.rs:4145-4151#should_write_full_baseline]
-- `Completed` or `Interrupted`, with the validation discussion, is one transaction. [src: file: backend/src/api/audit/full.rs:3899-3905#write_terminal_state]
+- The drift baseline is written before the terminal write, and only by a Full run; a baseline failure keeps the run `Interrupted`. [src: file: backend/src/api/audit/full.rs:3142-3148#baseline_ok] [src: file: backend/src/api/audit/full.rs:3442-3447#baseline_ok] [src: file: backend/src/api/audit/full.rs:4152-4158#should_write_full_baseline]
+- `Completed` or `Interrupted`, with the validation discussion, is one transaction. [src: file: backend/src/api/audit/full.rs:3906-3912#write_terminal_state]
 - `Interrupted` only moves a `Running` row. [src: file: backend/src/db/audit_runs.rs:825-832#mark_interrupted]
-- The worker marks a cancel before it acknowledges it. [src: file: backend/src/api/audit/full.rs:1349-1380#mark_cancelled_at_step] [src: file: backend/src/db/audit_runs.rs:184-213#mark_cancelled_at_step]
+- The worker marks a cancel before it acknowledges it. [src: file: backend/src/api/audit/full.rs:1356-1387#mark_cancelled_at_step] [src: file: backend/src/db/audit_runs.rs:184-213#mark_cancelled_at_step]
 - At boot, every `Running` row is a zombie and becomes `Interrupted`. [src: file: backend/src/db/mod.rs:276-308#reconcile_stale_runs] [src: file: backend/src/db/audit_runs.rs:842-873#reconcile_stale_runs]
 - A run is resumable when it is the project's latest, `Interrupted`, with at least one done step. [src: file: backend/src/db/audit_runs.rs:938-940#latest_resumable]
 
@@ -33,8 +33,8 @@ by a human (KT-1131). An accepted step keeps its failure on record:
 `cli_success` stays false and `step_warning` keeps the reason. It gains
 `accepted_at`, `accepted_by` and `accepted_reason`.
 
-- Done steps, as a resume reads them. [src: file: backend/src/api/audit/full.rs:3984-4006#already_succeeded_step_indices]
-- Per-run outcomes keep `succeeded`, `unchanged`, `accepted` and `failed` apart. [src: file: backend/src/api/audit/full.rs:3688-3706#RunProgress]
+- Done steps, as a resume reads them. [src: file: backend/src/api/audit/full.rs:3977-3999#already_succeeded_step_indices]
+- Per-run outcomes keep `succeeded`, `unchanged`, `accepted` and `failed` apart. [src: file: backend/src/api/audit/full.rs:3690-3708#RunProgress]
 
 ## Recovering from failed steps
 
@@ -43,7 +43,7 @@ by a human (KT-1131). An accepted step keeps its failure on record:
 - **Retry one step** (`retry_steps` with `resume_run_id`) replays only the
   named steps. The other failed steps are copied as they ended and are not
   run (`step_skipped`, reason `not_retried`).
-  [src: file: backend/src/api/audit/full.rs:4039-4064#retry_selection] [src: file: backend/src/api/audit/full.rs:1433-1444#not_retried] [src: file: backend/src/db/audit_runs.rs:1031-1058#carry_over_failed_steps]
+  [src: file: backend/src/api/audit/full.rs:4046-4071#retry_selection] [src: file: backend/src/api/audit/full.rs:1440-1451#not_retried] [src: file: backend/src/db/audit_runs.rs:1031-1058#carry_over_failed_steps]
 - **Accept as it stands** is
   `POST /api/projects/{id}/audit-runs/{run_id}/steps/{step}/accept`. It is a
   human action only: the route is not on the bridge list, and the handler
@@ -72,12 +72,12 @@ by a human (KT-1131). An accepted step keeps its failure on record:
   runs. While an audit of the project shows progress, such an agent is not
   started: its dispatch goes back to the queue with its attempts intact. A
   run clears its progress before it spawns its own validation agent.
-  [src: file: backend/src/api/audit/full.rs:791-793#stop_validation_agents] [src: file: backend/src/api/audit/full.rs:223-258#stop_validation_agents] [src: file: backend/src/api/discussions/runtime.rs:493#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1185-1188#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1204-1225#progress] [src: file: backend/src/api/audit/full.rs:3555-3558#clear_progress]
+  [src: file: backend/src/api/audit/full.rs:798-800#stop_validation_agents] [src: file: backend/src/api/audit/full.rs:223-258#stop_validation_agents] [src: file: backend/src/api/discussions/runtime.rs:493#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1185-1188#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1204-1225#progress] [src: file: backend/src/api/audit/full.rs:3562-3565#clear_progress]
 - **Cancel.** A cancel waits for the worker to acknowledge it. Without that
   acknowledgement it answers with an error, and the UI keeps the audit shown,
   marked "cancel pending". It deletes only the validation discussion linked to
   the run it cancelled, never one an earlier run left behind.
-  [src: file: backend/src/api/audit/full.rs:4321-4345#delete_run_validation_discussion] [src: file: backend/src/api/audit/full.rs:4410-4432#wait_for_cancel_ack]
+  [src: file: backend/src/api/audit/full.rs:4328-4352#delete_run_validation_discussion] [src: file: backend/src/api/audit/full.rs:4414-4436#wait_for_cancel_ack]
 
 ## Launching from the existing state (KT-1169)
 
@@ -88,7 +88,7 @@ by a human (KT-1131). An accepted step keeps its failure on record:
   refused in the same case: it would supersede the run. The refusal names the
   run, so a bridge agent knows what to resume. A partial run, which the Full
   launch cannot resume, never refuses a launch.
-  [src: file: backend/src/api/audit/full.rs:523-529#fresh_launch_refusal] [src: file: backend/src/api/audit/full.rs:4022-4037#fresh_launch_refusal] [src: file: backend/src/api/audit/drift.rs:576-583#fresh_launch_refusal]
+  [src: file: backend/src/api/audit/full.rs:526-532#fresh_launch_refusal] [src: file: backend/src/api/audit/full.rs:4029-4044#fresh_launch_refusal] [src: file: backend/src/api/audit/drift.rs:576-583#fresh_launch_refusal]
 - **The existing docs are never injected again.** The template is installed
   only into an empty AI doc folder, decided from its content rather than the
   displayed status; Kronn's own docs only get the template files they lack.
@@ -99,7 +99,7 @@ by a human (KT-1131). An accepted step keeps its failure on record:
   re-verification prompt (KT-1132). A documented repository that never had the
   template v2 merge is offered that merge before its first launch from the
   card (KT-1181), and never before a resume.
-  [src: file: backend/src/api/audit/full.rs:918-930#template_installed] [src: file: backend/src/api/audit/full.rs:358-389#sse_refusal] [src: file: backend/src/api/audit/full.rs:1476#reverifies_target]
+  [src: file: backend/src/api/audit/full.rs:925-937#template_installed] [src: file: backend/src/api/audit/full.rs:365-396#sse_refusal] [src: file: backend/src/api/audit/full.rs:1483#reverifies_target]
 - **Unknown is not "nothing to resume".** When the card cannot read whether a
   run is resumable, it says so and offers "Retry". Every launch button stays
   disabled until it knows. A step retried alone never falls back to a whole
@@ -175,7 +175,7 @@ timeline and a stale document's viewer. It has no lifecycle of its own.
 - **One name on every surface.** The MCP descriptions and manuals say
   “Verify docs” like the English label, present the full audit as an advanced
   option, and carry none of the retired CTA names.
-  [src: file: backend/scripts/test_disc_introspection_mcp.py:7874-7900#test_audit_surface_uses_the_verify_docs_vocabulary_of_the_ui]
+  [src: file: backend/scripts/test_disc_introspection_mcp.py:7954-7980#test_audit_surface_uses_the_verify_docs_vocabulary_of_the_ui]
 - **Header layout.** The compact header keeps the status, one next action, the
   doc-state summary and the « Détails » disclosure without overlap at 360, 768
   and 1440 px, closed and open.
@@ -575,4 +575,4 @@ category.
   moved between the run a resume continues and the resume. The timeline shows
   it, the validation prompt carries it, and `redo_steps` (with
   `resume_run_id`) redoes the inherited steps it affects.
-  [src: file: backend/src/api/audit/full.rs:773-787#set_resume_drift] [src: file: backend/src/api/audit/full.rs:575-597#redo_steps_req]
+  [src: file: backend/src/api/audit/full.rs:784-798#set_resume_drift] [src: file: backend/src/api/audit/full.rs:571-597#redo_steps_req]

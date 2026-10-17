@@ -52,7 +52,7 @@ this state, including already audited projects; the optional-offer bypass cannot
 skip accepted commits pending integration.
 [src: file: backend/src/api/projects/template_merge.rs:324-330#audit_launch_refusal]
 [src: file: backend/src/api/audit/full.rs:299-301#audit_launch_refusal]
-[src: file: backend/src/api/audit/full.rs:413-434#audit_launch_refusal]
+[src: file: backend/src/api/audit/full.rs:420-441#audit_launch_refusal]
 [src: file: backend/src/api/audit/drift.rs:284-286#audit_launch_refusal]
 [src: file: backend/src/api/audit/drift.rs:533-559#audit_launch_refusal]
 [src: file: backend/src/api/audit/revalidate.rs:668-670#audit_launch_refusal]

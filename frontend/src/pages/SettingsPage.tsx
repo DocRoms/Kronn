@@ -17,7 +17,7 @@ import {
   Layers, FolderSearch, Filter, FileText,
   Shield, Globe, Copy, Server, Mic, Volume2, HelpCircle, ChevronRight,
   Sun, Moon, Monitor, Terminal, Heart, Key, ExternalLink,
-  Minimize2, Maximize2, Maximize, Settings2, BookOpen, AppWindow,
+  Minimize2, Maximize2, Maximize, Settings2, BookOpen, AppWindow, Gauge,
 } from 'lucide-react';
 import { userError } from '../lib/userError';
 import { STT_MODELS, getSttModelId, setSttModelId } from '../lib/stt-models';
@@ -72,6 +72,7 @@ import { ContinualLearningSection } from '../components/settings/ContinualLearni
 import { ProfilesSection } from '../components/settings/ProfilesSection';
 import { UsageSection } from '../components/settings/UsageSection';
 import { DbUsageChart } from '../components/settings/DbUsageChart';
+import { DiskSection } from '../components/settings/DiskSection';
 import { RunRetentionBanner, RETENTION_FOCUS_TARGET } from '../components/settings/RunRetentionBanner';
 import { AppLink } from '../components/AppLink';
 import { revealWhenSettled } from '../lib/revealWhenSettled';
@@ -142,6 +143,7 @@ const SETTINGS_SECTION_IDS = [
   'settings-server',
   'settings-debug',
   'settings-api-audit',
+  'settings-disk',
   'settings-database',
   'settings-general',
 ] as const;
@@ -493,6 +495,7 @@ export function SettingsPage({
     ...(hasConfiguredApi
       ? [{ id: 'settings-api-audit', label: t('apiCallLogs.title'), icon: <Globe size={15} /> }]
       : []),
+    { id: 'settings-disk', label: t('settings.disk.title'), icon: <Gauge size={15} /> },
     { id: 'settings-database', label: t('config.database'), icon: <HardDrive size={15} /> },
     { id: 'settings-general', label: t('config.general'), icon: <Settings2 size={15} /> },
   ];
@@ -1907,6 +1910,9 @@ export function SettingsPage({
           <ApiCallLogsPage />
         </div>
       )}
+
+      {/* KT-1318 — what Kronn keeps on the disk, and its purge */}
+      <DiskSection toast={toast} t={t} />
 
       {/* Database */}
       <div id="settings-database" className="set-card">

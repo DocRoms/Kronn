@@ -299,6 +299,13 @@ pub async fn full_audit(
     if let Some(error) = crate::api::projects::template_merge::audit_launch_refusal(&project_path) {
         return sse_error(error);
     }
+    // KT-1318 — a full audit writes a lot; below the configured free space Kronn
+    // sweeps its orphaned lane build dirs first, then refuses with the reason.
+    if let Err(pressure) =
+        crate::api::disk::ensure_launch_headroom(&state.db, &project_id, &project_path).await
+    {
+        return sse_error(pressure.reason("start a full audit"));
+    }
     // Every artefact derives from this one root (KT-1192); a configured
     // folder failing containment refuses the run.
     let docs_root = match crate::core::docs_location::DocsRoot::for_project(&project_path) {

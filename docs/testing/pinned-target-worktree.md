@@ -11,8 +11,8 @@ the checkout's symbolic HEAD and shared Git directory, and refuses missing,
 ambiguous or foreign checkouts. It does not switch branches or create a target
 checkout on the user's behalf. Paths with spaces, Unicode and, on Unix,
 newlines are preserved.
-[src: file: backend/src/core/worktree.rs:1780-1812#target_branch_checkouts]
-[src: file: backend/src/core/worktree.rs:1814-1856#integration_target_worktree]
+[src: file: backend/src/core/worktree.rs:1930-1962#target_branch_checkouts]
+[src: file: backend/src/core/worktree.rs:1964-2006#integration_target_worktree]
 
 Normal integration, boot classification and Applying-origin recovery inspect
 the target checkout's uncommitted files. Immediately before fast-forwarding,
