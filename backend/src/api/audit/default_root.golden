@@ -17,6 +17,7 @@ f7922470284519c66aefd97b6719c34cc10bf31ddbe4e4be4ed3e61ffb44d31f  .claude/agents
 20b204acf9068af92f721d7e379128a9a6121e5d75dabfd7ee4c6e8332ca9f39  .gemini/agents/tech-lead.md
 volatile  .gemini/settings.json
 volatile  .kiro/settings/mcp.json
+volatile  .kronn/audit/document-blame.json
 volatile  .kronn/audit/document-optimization.json
 volatile  .kronn/audit/validated-originals/ac2a7c5b22c111d5685e6973f695e9ca923e212b8edffde5828b0c874f3f723c.bak
 29e0381ab7727cabf4e2e376a13802181c29adbc2a9e24e369c486590545e4ee  .kronn/mcp-managed.json

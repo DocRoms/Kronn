@@ -85,12 +85,12 @@ rewritten. Originals are saved by content hash under
 agent correction attempts, with existing human-section protection. Invalid
 paths and ranges still block validation. Retry usage is included in the step
 total (KT-952).
-[src: file: backend/src/api/audit/document_repair.rs:119-193#split_verified_citations]
+[src: file: backend/src/api/audit/document_repair.rs:241-315#split_verified_citations]
 [src: file: backend/src/core/audit_state.rs:12#CITATION_ORIGINALS_DIR]
 [src: file: backend/src/api/audit/full.rs:2347-2377#check_attempt]
 [src: file: backend/src/api/audit/full.rs:1751-1755#max_attempts]
 [src: file: backend/src/api/audit/anti_hallu_enforce.rs:24#MAX_ATTEMPTS]
-[src: file: backend/src/api/audit/document_repair.rs:71-78#feedback]
+[src: file: backend/src/api/audit/document_repair.rs:191-198#feedback]
 
 An incomplete dimension-coverage matrix also receives targeted feedback in a
 Full audit after the agent exits successfully. This shares the same three-attempt
@@ -121,8 +121,15 @@ documents that failed after their agent returned success. Recovery rechecks the
 actual files, including runs made before this fix. Auxiliary documents with no
 durable writer attribution are explicitly assigned to the founding step's
 repair prompt. A corrected reference establishes existence, not factual truth.
-[src: file: backend/src/api/audit/document_repair.rs:26-52#recovery_plan]
-[src: file: backend/src/db/audit_runs.rs:1441-1459#invalidate_documentary_steps]
+A blocker is charged to the step that introduced it (blocking set diffed
+around each step, kept in `.kronn/audit/document-blame.json`), so a document no
+step targets is redone with the step that wrote it, not with the founding
+step (the baseline is taken before any write of the step, the cross-agent
+path's included); and a step is blocked only by diagnostics absent before it ran
+(`documentary_preexisting` reports the others) unless the recovery plan hands
+them to it (KT-1306).
+[src: file: backend/src/api/audit/document_repair.rs:140-172#recovery_plan]
+[src: file: backend/src/db/audit_runs.rs:1423-1441#invalidate_documentary_steps]
 
 A `TypedSchema` step sends its envelope schema as `response_format` with
 `strict: false` on the OpenAI wire: the envelope does not satisfy OpenAI's
