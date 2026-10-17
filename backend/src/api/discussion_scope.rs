@@ -11,8 +11,9 @@ use axum::{
 use crate::db::discussion_scope::{self, Filed, ScopeError};
 use crate::models::discussion_scope::{
     DecideScopeRequest, DiscussionProjectGrant, DiscussionScope, DiscussionScopeRequest,
-    FileScopeRequest, GrantDiscussionProjectRequest, RevokeDiscussionProjectRequest, ScopeAccess,
-    ScopeGrantSource, SetWorkflowScopeRequest, WorkflowScope, ALL_PROJECTS_WRITE_CONFIRMATION,
+    FileScopeRequest, GrantDiscussionProjectRequest, RevokeDiscussionProjectRequest,
+    RevokeWorkflowScopeRequest, ScopeAccess, ScopeGrantSource, SetWorkflowScopeRequest,
+    WorkflowScope, ALL_PROJECTS_WRITE_CONFIRMATION,
 };
 use crate::models::{ApiErrorCode, ApiResponse};
 use crate::AppState;
@@ -344,6 +345,39 @@ pub async fn set_workflow_scope(
         .await
     {
         Ok(scope) => (StatusCode::OK, Json(ApiResponse::ok(scope))),
+        Err(error) => failure(error),
+    }
+}
+
+/// POST /api/workflows/{id}/scope/revoke — withdraw one project or all of
+/// them. Always available, even once the workflow can no longer carry a scope:
+/// a human never loses the way to close what they opened.
+pub async fn revoke_workflow_scope(
+    State(state): State<AppState>,
+    Path(workflow_id): Path<String>,
+    Json(request): Json<RevokeWorkflowScopeRequest>,
+) -> Reply<WorkflowScope> {
+    let id = workflow_id.clone();
+    match state
+        .db
+        .with_conn(move |conn| {
+            discussion_scope::revoke_workflow_scope(conn, &id, request.project_id.as_deref())
+        })
+        .await
+    {
+        Ok(Some(scope)) => (StatusCode::OK, Json(ApiResponse::ok(scope))),
+        // The workflow is gone: its scope rows are gone too.
+        Ok(None) => (
+            StatusCode::OK,
+            Json(ApiResponse::ok(WorkflowScope {
+                workflow_id,
+                supported: false,
+                entries: Vec::new(),
+                valid: false,
+                validated_by: None,
+                validated_at: None,
+            })),
+        ),
         Err(error) => failure(error),
     }
 }

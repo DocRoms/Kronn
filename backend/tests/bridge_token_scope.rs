@@ -4119,3 +4119,74 @@ async fn a_global_or_multi_project_workflow_cannot_carry_a_scope() {
     let (_, scope) = call(&app, "GET", "/api/workflows/wf-a/scope", None, None).await;
     assert_eq!(scope["data"]["supported"], true, "{scope}");
 }
+
+/// KT-1270 review — a human can always withdraw a workflow's scope, even once
+/// the workflow became global: the run that pinned the validated revision loses
+/// it on its next call.
+#[tokio::test]
+async fn a_workflow_scope_stays_revocable_after_the_workflow_becomes_global() {
+    let (app, _repos, db) = fixture_with_db().await;
+    let (status, body) = call(
+        &app,
+        "PUT",
+        "/api/workflows/wf-a/scope",
+        None,
+        Some(json!({"entries": [{"project_id": "p2", "access": "write"}]})),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    pinned_run(&db, "wf-a", "run-before-global").await;
+    let step = step_of("run-before-global");
+    assert_eq!(edits_task_b(&app, step.value()).await, 200);
+
+    let (status, body) = call(
+        &app,
+        "PUT",
+        "/api/workflows/wf-a",
+        None,
+        Some(json!({"project_scope": {"type": "All"}})),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let (_, scope) = call(&app, "GET", "/api/workflows/wf-a/scope", None, None).await;
+    assert_eq!(scope["data"]["supported"], false, "{scope}");
+    assert_eq!(
+        scope["data"]["entries"].as_array().map(Vec::len),
+        Some(1),
+        "still listed: {scope}"
+    );
+    let (status, _) = call(
+        &app,
+        "PUT",
+        "/api/workflows/wf-a/scope",
+        None,
+        Some(json!({"entries": [{"project_id": "p2", "access": "write"}]})),
+    )
+    .await;
+    assert_eq!(status, 400, "no new validation on an unsupported workflow");
+
+    let agent = bridge_for("room-a");
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/api/workflows/wf-a/scope/revoke",
+        Some(agent.value()),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, 403, "a bridge token cannot revoke either");
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/api/workflows/wf-a/scope/revoke",
+        None,
+        Some(json!({"project_id": "p2"})),
+    )
+    .await;
+    assert_eq!(status, 200, "the human withdraws it: {body}");
+    assert_eq!(
+        edits_task_b(&app, step.value()).await,
+        403,
+        "the pinned run lost it on its next call"
+    );
+}

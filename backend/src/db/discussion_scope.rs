@@ -827,6 +827,32 @@ pub fn set_workflow_scope(
         .ok_or_else(|| ScopeError::NotFound("workflow not found".into()).into())
 }
 
+/// Withdraw one project (or every one, `None`) from a workflow's scope.
+/// Always allowed, whatever the workflow became: it only removes, never
+/// validates the rest again (the other entries keep their own validation).
+pub fn revoke_workflow_scope(
+    conn: &Connection,
+    workflow_id: &str,
+    project_id: Option<&str>,
+) -> Result<Option<WorkflowScope>> {
+    let removed = match project_id {
+        Some(project) => conn.execute(
+            "DELETE FROM workflow_scopes WHERE workflow_id = ?1 AND project_id = ?2",
+            params![workflow_id, project],
+        )?,
+        None => conn.execute(
+            "DELETE FROM workflow_scopes WHERE workflow_id = ?1",
+            [workflow_id],
+        )?,
+    };
+    if removed == 0 && project_id.is_some() {
+        return Err(
+            ScopeError::NotFound("this project is not in the workflow's scope".into()).into(),
+        );
+    }
+    workflow_scope(conn, workflow_id)
+}
+
 /// What a workflow run's tokens reach through their workflow's scope. The run
 /// is judged on what it pinned, never on the live workflow: a run that pinned
 /// anything else than the validated revision (a definition changed, then

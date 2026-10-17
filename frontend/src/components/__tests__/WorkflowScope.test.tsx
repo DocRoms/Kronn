@@ -4,7 +4,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import type { Project, WorkflowScope } from '../../types/generated';
 
-const api = vi.hoisted(() => ({ scope: vi.fn(), setScope: vi.fn() }));
+const api = vi.hoisted(() => ({ scope: vi.fn(), setScope: vi.fn(), revokeScope: vi.fn() }));
 vi.mock('../../lib/api', () => ({ workflows: api }));
 
 import { WorkflowScopeEditor, WorkflowScopeSummary } from '../WorkflowScope';
@@ -25,6 +25,7 @@ function scope(overrides: Partial<WorkflowScope> = {}): WorkflowScope {
 beforeEach(() => {
   api.scope.mockReset();
   api.setScope.mockReset();
+  api.revokeScope.mockReset();
 });
 
 describe('WorkflowScopeSummary', () => {
@@ -55,5 +56,15 @@ describe('WorkflowScopeEditor', () => {
     await waitFor(() => expect(api.setScope).toHaveBeenCalledWith('wf', {
       entries: [{ project_id: 'p2', access: 'write' }],
     }));
+  });
+
+  it('keeps an unsupported workflow\'s grants visible and revocable, without offering new ones', async () => {
+    api.scope.mockResolvedValue(scope({ supported: false, valid: false }));
+    api.revokeScope.mockResolvedValue(scope({ supported: false, valid: false, entries: [] }));
+    render(<WorkflowScopeEditor workflowId="wf" ownProjectId="p1" projects={projects} toast={vi.fn()} t={t} />);
+    expect(await screen.findByText('wf.scopeUnsupported')).toBeTruthy();
+    expect(screen.queryByText('disc.scopeGrant')).toBeNull();
+    fireEvent.click(screen.getByText('disc.scopeRevoke'));
+    await waitFor(() => expect(api.revokeScope).toHaveBeenCalledWith('wf', { project_id: 'p2' }));
   });
 });

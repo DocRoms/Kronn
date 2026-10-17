@@ -223,3 +223,12 @@ pub struct WorkflowScopeItem {
 pub struct SetWorkflowScopeRequest {
     pub entries: Vec<WorkflowScopeItem>,
 }
+
+/// Withdraw one project from a workflow's scope, or all of it.
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+pub struct RevokeWorkflowScopeRequest {
+    /// `None` withdraws every project.
+    #[serde(default)]
+    pub project_id: Option<String>,
+}

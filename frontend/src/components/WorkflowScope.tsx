@@ -58,12 +58,12 @@ export function WorkflowScopeEditor({
   const [busy, setBusy] = useState(false);
   const entries = scope?.entries ?? [];
 
-  const save = async (next: { project_id: string; access: ScopeAccess }[]) => {
+  const run = async (action: () => Promise<WorkflowScopeData>, done: string) => {
     setBusy(true);
     try {
-      const saved = await workflowsApi.setScope(workflowId, { entries: next });
+      const saved = await action();
       setLoaded({ id: workflowId, scope: saved });
-      toast(t('wf.scopeSaved'), 'success');
+      toast(done, 'success');
       setProject('');
     } catch (error) {
       toast(userError(error), 'error');
@@ -71,24 +71,22 @@ export function WorkflowScopeEditor({
       setBusy(false);
     }
   };
+  const save = (next: { project_id: string; access: ScopeAccess }[]) =>
+    run(() => workflowsApi.setScope(workflowId, { entries: next }), t('wf.scopeSaved'));
+  // Revoking only removes: it never validates the remaining entries again.
+  const revoke = (projectId: string) =>
+    run(() => workflowsApi.revokeScope(workflowId, { project_id: projectId }), t('disc.scopeRevoked'));
   const current = entries.map(entry => ({ project_id: entry.project_id, access: entry.access }));
   const taken = new Set(current.map(entry => entry.project_id));
   const candidates = projects.filter(p => p.id !== ownProjectId && !taken.has(p.id));
 
-  if (scope && !scope.supported) {
-    return (
-      <div className="wf-info-row" data-testid="workflow-scope-editor">
-        <span className="wf-info-label">{t('wf.scopeTitle')}</span>
-        <p className="disc-scope-hint">{t('wf.scopeUnsupported')}</p>
-      </div>
-    );
-  }
+  const supported = scope?.supported ?? true;
   return (
     <div className="wf-info-row" data-testid="workflow-scope-editor">
       <span className="wf-info-label">{t('wf.scopeTitle')}</span>
       <div className="disc-scope">
-        <p className="disc-scope-hint">{t('wf.scopeHint')}</p>
-        {scope && entries.length > 0 && !scope.valid && (
+        <p className="disc-scope-hint">{supported ? t('wf.scopeHint') : t('wf.scopeUnsupported')}</p>
+        {scope && supported && entries.length > 0 && !scope.valid && (
           <p className="disc-scope-all-title"><ShieldAlert size={11} /> {t('wf.scopeNeedsValidation')}</p>
         )}
         {entries.length > 0 && (
@@ -103,7 +101,7 @@ export function WorkflowScopeEditor({
                   type="button"
                   className="btn-danger disc-scope-btn"
                   disabled={busy}
-                  onClick={() => void save(current.filter(item => item.project_id !== entry.project_id))}
+                  onClick={() => void revoke(entry.project_id)}
                 >
                   {t('disc.scopeRevoke')}
                 </button>
@@ -116,7 +114,7 @@ export function WorkflowScopeEditor({
             {t('wf.scopeValidatedBy', scope.validated_by, scope.validated_at ? new Date(scope.validated_at).toLocaleString() : '?')}
           </span>
         )}
-        <div className="disc-scope-add">
+        {supported && <div className="disc-scope-add">
           <select className="disc-popover-select" value={project} onChange={event => setProject(event.target.value)} aria-label={t('disc.scopeAddProject')}>
             <option value="">{t('disc.scopeAddProject')}</option>
             {candidates.map(candidate => <option key={candidate.id} value={candidate.id}>{candidate.name}</option>)}
@@ -139,7 +137,7 @@ export function WorkflowScopeEditor({
               {t('wf.scopeRevalidate')}
             </button>
           )}
-        </div>
+        </div>}
       </div>
     </div>
   );

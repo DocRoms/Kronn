@@ -2809,6 +2809,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
                 .put(api::discussion_scope::set_workflow_scope),
         )
         .route(
+            "/api/workflows/{id}/scope/revoke",
+            post(api::discussion_scope::revoke_workflow_scope),
+        )
+        .route(
             "/api/discussions/{id}/scope/grants",
             post(api::discussion_scope::grant),
         )

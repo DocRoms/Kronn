@@ -3,7 +3,7 @@ import type { BriefingDetectedDoc, BriefingDocsAnswers, BriefingProjectAnswers, 
 import type { WorkerConnectivity } from '../types/generated';
 import type {
   DecideScopeRequest, DiscussionProjectGrant, DiscussionScope, GrantDiscussionProjectRequest,
-  RevokeDiscussionProjectRequest, SetWorkflowScopeRequest, WorkflowScope,
+  RevokeDiscussionProjectRequest, RevokeWorkflowScopeRequest, SetWorkflowScopeRequest, WorkflowScope,
 } from '../types/generated';
 import type { DocProvenanceReport } from '../types/generated';
 import type { TemplateReinstallRequest, TemplateReinstallPlan, TemplateReinstallReport, MergeBase, TemplateMergeAccepted, TemplateMergeAcceptRequest, TemplateMergeRequest, TemplateMergeView } from '../types/generated';
@@ -2740,6 +2740,9 @@ export const workflows = {
   scope: (id: string) => api<WorkflowScope>('GET', `/workflows/${encodeURIComponent(id)}/scope`),
   setScope: (id: string, request: SetWorkflowScopeRequest) =>
     api<WorkflowScope>('PUT', `/workflows/${encodeURIComponent(id)}/scope`, request),
+  /** Withdraw one project (or all, `project_id: null`); always available. */
+  revokeScope: (id: string, request: RevokeWorkflowScopeRequest) =>
+    api<WorkflowScope>('POST', `/workflows/${encodeURIComponent(id)}/scope/revoke`, request),
   /** KT-1017 — whether a command line sends run values to an unmodelled program. */
   execLineCheck: (req: ExecLineCheckRequest) => api<ExecLineCheck>('POST', '/exec/line-check', req),
   /** KT-918 — where each declared script file stands against its approved hash. */

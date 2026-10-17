@@ -8089,6 +8089,15 @@ export type RevokeDiscussionProjectRequest = { reason?: string | null, };
 
 export type RevokeRequest = { authority: string, credential_id: string, reason: string, };
 
+/**
+ * Withdraw one project from a workflow's scope, or all of it.
+ */
+export type RevokeWorkflowScopeRequest = {
+/**
+ * `None` withdraws every project.
+ */
+project_id?: string | null, };
+
 export type RotateAdminRequest = {
 /**
  * The CURRENT admin secret. Nothing else opens this door.

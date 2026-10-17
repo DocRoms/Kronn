@@ -10,7 +10,7 @@ prompt style.
 [src: file: backend/src/api/signal_catalog.rs:10-64#catalogue]
 [src: file: backend/src/api/signal_catalog.rs:66-69#get]
 [src: file: backend/src/api/agent_tools.rs:4309-4311#signals]
-[src: file: backend/scripts/disc-introspection-mcp.py:10594-10595#signals]
+[src: file: backend/scripts/disc-introspection-mcp.py:10553-10554#signals]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:579#decision]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:275-339]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:24-72]
@@ -116,7 +116,7 @@ within its existing budget. No net workflow-token or latency improvement is clai
 [src: file: docs/research/signal-catalogue-2026-09-22.json:91#first_prompt_tokens]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:326#first_prompt_tokens]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:370#first_prompt_tokens]
-[src: file: backend/scripts/ci/mcp_surface_budget.py:130#CATALOGUE_MAX_BYTES]
+[src: file: backend/scripts/ci/mcp_surface_budget.py:126#CATALOGUE_MAX_BYTES]
 
 ## Functional checks and limits
 

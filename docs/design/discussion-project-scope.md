@@ -74,6 +74,10 @@ request body.
   another revision than the one validated: the API refuses a scope on it and
   the workflow page says why, rather than showing a validation that would never
   apply.
+- Withdrawing is always possible (`POST /api/workflows/{id}/scope/revoke`, one
+  project or all), even once a workflow became global: it only removes, never
+  validates the remaining entries again, and a run that pinned the validated
+  revision loses the withdrawn project on its next call.
 - Nothing else gives a step another project.
 - Worker launches are unchanged: a task of another project is never executed
   from a token that only holds a grant on it. A worker runs with its task
@@ -120,6 +124,7 @@ request body.
 | Reading a project's raw `token_override` | Credential fields are stripped from every bridge response. |
 | The agent answers its own request through a `kronn-question` | Requests are a separate table decided only by the human routes; a question answer creates no grant. |
 | A grant cached after a revoke | Grants are re-read on every request; the next call after a revoke is refused. |
+| A workflow scope that can no longer be withdrawn (the workflow became global) | The revoke route is separate from validation and always available. |
 | Credential pivot: write grant on p2, then `api_call` with p2's config | Config visibility and the executor scope use the token's own project only. |
 | Running p2's workflow from p1 | Effects keep the single-project rule. |
 | Pulling p2's workflow into p1 by an update | Write grants open planning only; the update route still forces the token's project and the target is not writable. |
