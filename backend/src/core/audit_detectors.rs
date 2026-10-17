@@ -1534,8 +1534,14 @@ mod tests {
             .collect();
         let has = |needle: &str| ids.iter().any(|i| i.contains(needle));
         assert!(has("dockerfile-secret-arg@docker/Dockerfile:2"), "{ids:?}");
-        assert!(has("dockerfile-secret-arg@coverage/Dockerfile:2"), "{ids:?}");
-        assert!(has("ci-pull-request-target@.github/workflows/a.yml:1"), "{ids:?}");
+        assert!(
+            has("dockerfile-secret-arg@coverage/Dockerfile:2"),
+            "{ids:?}"
+        );
+        assert!(
+            has("ci-pull-request-target@.github/workflows/a.yml:1"),
+            "{ids:?}"
+        );
         assert!(has("csp-unsafe@generated/csp.conf"), "{ids:?}");
         assert!(has("csp-unsafe@web/app_dev.php"), "{ids:?}");
     }

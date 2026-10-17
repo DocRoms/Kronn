@@ -2982,11 +2982,23 @@ mod tests {
         }
         // Under the limit: untouched. Cut before a marker: stops at its `[`.
         assert_eq!(truncate_outside_markers("short", 40, true), "short");
-        assert_eq!(truncate_outside_markers("aaaa [src: file: a.rs:1] z", 12, false), "aaaa ");
-        assert_eq!(truncate_outside_markers("aaaa [src: file: a.rs:1] z", 12, true), "aaaa…");
+        assert_eq!(
+            truncate_outside_markers("aaaa [src: file: a.rs:1] z", 12, false),
+            "aaaa "
+        );
+        assert_eq!(
+            truncate_outside_markers("aaaa [src: file: a.rs:1] z", 12, true),
+            "aaaa…"
+        );
         // A marker already unclosed in the input is cut before its opener too.
-        assert_eq!(truncate_outside_markers("ab [src: file: a", 8, false), "ab ");
-        assert_eq!(truncate_outside_markers("ab [src: file: a.rs:1", 12, true), "ab…");
+        assert_eq!(
+            truncate_outside_markers("ab [src: file: a", 8, false),
+            "ab "
+        );
+        assert_eq!(
+            truncate_outside_markers("ab [src: file: a.rs:1", 12, true),
+            "ab…"
+        );
     }
 
     #[test]

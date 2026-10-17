@@ -76,7 +76,9 @@ fn fixture(hit: &str, scaffolding: bool) -> (tempfile::TempDir, tempfile::TempDi
     std::fs::create_dir_all(project.path().join("docs/tech-debt")).unwrap();
     std::fs::create_dir_all(project.path().join("docs/conventions")).unwrap();
     std::fs::write(
-        project.path().join("docs/conventions/agents-md-format-v1.md"),
+        project
+            .path()
+            .join("docs/conventions/agents-md-format-v1.md"),
         "# Format\n",
     )
     .unwrap();
@@ -89,7 +91,11 @@ fn fixture(hit: &str, scaffolding: bool) -> (tempfile::TempDir, tempfile::TempDi
     std::fs::write(project.path().join(hit), BLANK).unwrap();
     if scaffolding {
         std::fs::create_dir_all(project.path().join("web")).unwrap();
-        std::fs::write(project.path().join("web/config.php"), "<?php // installer\n").unwrap();
+        std::fs::write(
+            project.path().join("web/config.php"),
+            "<?php // installer\n",
+        )
+        .unwrap();
     }
     std::fs::write(project.path().join(TARGET), index(OTHER_ANCHORS)).unwrap();
     (templates, project, restore)
@@ -106,19 +112,24 @@ async fn mock_agent(
     let attempts = Arc::new(Mutex::new(0usize));
     let (seen, launched) = (requests.clone(), attempts.clone());
     let target = project.join(TARGET);
-    Mock::given(method("POST")).and(path("/v1/chat/completions"))
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
         .respond_with(move |request: &wiremock::Request| {
             let body: Value = serde_json::from_slice(&request.body).unwrap();
             let is_audit = body["messages"].as_array().unwrap().iter().any(|message| {
-                message["content"].as_str().is_some_and(|content|
-                    content.contains(crate::api::audit::PROMPT_PREAMBLE))
+                message["content"]
+                    .as_str()
+                    .is_some_and(|content| content.contains(crate::api::audit::PROMPT_PREAMBLE))
             });
             if !is_audit {
-                return ResponseTemplate::new(200).set_body_string(sse(&[
-                    text("Validation fixture complete."),
-                ]));
+                return ResponseTemplate::new(200)
+                    .set_body_string(sse(&[text("Validation fixture complete.")]));
             }
-            let after_tool = body["messages"].as_array().unwrap().iter().any(|m| m["role"] == "tool");
+            let after_tool = body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["role"] == "tool");
             seen.lock().unwrap().push(body);
             let frame = if after_tool {
                 text("The index is ready.")
@@ -126,7 +137,9 @@ async fn mock_agent(
                 let mut attempt = launched.lock().unwrap();
                 *attempt += 1;
                 let digest: String = Sha256::digest(std::fs::read(&target).unwrap())
-                    .iter().map(|byte| format!("{byte:02x}")).collect();
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect();
                 let disposed = if repair && *attempt > 1 {
                     format!("{OTHER_ANCHORS} src/page.html")
                 } else {
@@ -134,12 +147,20 @@ async fn mock_agent(
                 };
                 tool_calls(&[
                     ("read_file", json!({"path":TARGET})),
-                    ("write_file", json!({"path":TARGET,"expected_sha256":digest,"content":index(&disposed)})),
+                    (
+                        "write_file",
+                        json!({"path":TARGET,"expected_sha256":digest,"content":index(&disposed)}),
+                    ),
                 ])
             };
-            ResponseTemplate::new(200).set_body_string(sse(&[frame,
-                json!({"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":7}}).to_string()]))
-        }).mount(&server).await;
+            ResponseTemplate::new(200).set_body_string(sse(&[
+                frame,
+                json!({"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":7}})
+                    .to_string(),
+            ]))
+        })
+        .mount(&server)
+        .await;
     (server, requests, attempts)
 }
 
@@ -170,8 +191,16 @@ async fn detector_gate_retries_with_feedback_and_skips_generated_files() {
                 for step in 1..=total {
                     runs::insert_audit_step_start(conn, "before-detector", step, "doc", now)?;
                     runs::finalize_audit_step(
-                        conn, "before-detector", step, now, 10,
-                        &runs::StepTokens::UNKNOWN, None, step != 8, None, false,
+                        conn,
+                        "before-detector",
+                        step,
+                        now,
+                        10,
+                        &runs::StepTokens::UNKNOWN,
+                        None,
+                        step != 8,
+                        None,
+                        false,
                     )?;
                 }
                 runs::update_last_completed_step(conn, "before-detector", total - 1)?;
@@ -200,10 +229,20 @@ async fn detector_gate_retries_with_feedback_and_skips_generated_files() {
         )
         .await;
         let expected_attempts = [2, 3, 1][scenario];
-        assert_eq!(*attempts.lock().unwrap(), expected_attempts, "scenario {scenario}: {stream}");
+        assert_eq!(
+            *attempts.lock().unwrap(),
+            expected_attempts,
+            "scenario {scenario}: {stream}"
+        );
         let retries = sse_events(&stream, "step_retry");
-        assert_eq!(retries.len(), expected_attempts - 1, "scenario {scenario}: {stream}");
-        assert!(retries.iter().all(|r| r["reason"] == "detector_disposition"));
+        assert_eq!(
+            retries.len(),
+            expected_attempts - 1,
+            "scenario {scenario}: {stream}"
+        );
+        assert!(retries
+            .iter()
+            .all(|r| r["reason"] == "detector_disposition"));
         if scenario < 2 {
             // The retry prompt names the signal still to dispose of.
             let second = requests.lock().unwrap()[2].to_string();
@@ -211,7 +250,10 @@ async fn detector_gate_retries_with_feedback_and_skips_generated_files() {
             assert!(second.contains("src/page.html"), "{second}");
         } else {
             let first = requests.lock().unwrap()[0].to_string();
-            assert!(!first.contains("sass/generated/icons.html"), "generated file not flagged");
+            assert!(
+                !first.contains("sass/generated/icons.html"),
+                "generated file not flagged"
+            );
             assert!(!first.contains("web/config.php"), "scaffolding not flagged");
         }
         let done = sse_events(&stream, "done").pop().unwrap();
@@ -257,7 +299,9 @@ async fn partial_refresh_detector_gate_retries_with_feedback() {
         // awaiting a choice.
         let agents = project.path().join("docs/AGENTS.md");
         let mut body = std::fs::read_to_string(&agents).unwrap();
-        body.push_str("<!-- KRONN-MANAGED-BLOCK:START -->\nManaged.\n<!-- KRONN-MANAGED-BLOCK:END -->\n");
+        body.push_str(
+            "<!-- KRONN-MANAGED-BLOCK:START -->\nManaged.\n<!-- KRONN-MANAGED-BLOCK:END -->\n",
+        );
         std::fs::write(&agents, body).unwrap();
         state
             .db
@@ -296,10 +340,16 @@ async fn partial_refresh_detector_gate_retries_with_feedback() {
         )
         .await;
         let expected = if repair { 2 } else { 3 };
-        assert_eq!(*attempts.lock().unwrap(), expected, "repair {repair}: {stream}");
+        assert_eq!(
+            *attempts.lock().unwrap(),
+            expected,
+            "repair {repair}: {stream}"
+        );
         let retries = sse_events(&stream, "step_retry");
         assert_eq!(retries.len(), expected - 1, "repair {repair}: {stream}");
-        assert!(retries.iter().all(|r| r["reason"] == "detector_disposition"));
+        assert!(retries
+            .iter()
+            .all(|r| r["reason"] == "detector_disposition"));
         let second = requests.lock().unwrap()[2].to_string();
         assert!(second.contains("Detector signals"), "{second}");
         assert!(second.contains("src/page.html"), "{second}");
@@ -308,9 +358,11 @@ async fn partial_refresh_detector_gate_retries_with_feedback() {
             assert!(warnings.is_empty(), "{stream}");
         } else {
             assert!(
-                warnings.iter().any(|w| w["reason"].as_str().is_some_and(|r| {
-                    r.contains(crate::api::audit::step_guard::DETECTOR_FRAGMENT)
-                })),
+                warnings
+                    .iter()
+                    .any(|w| w["reason"].as_str().is_some_and(|r| {
+                        r.contains(crate::api::audit::step_guard::DETECTOR_FRAGMENT)
+                    })),
                 "{stream}"
             );
         }

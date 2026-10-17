@@ -8,7 +8,12 @@ fn a_title_is_never_cut_inside_a_citation_marker() {
     // end-of-run gate blamed step 8, and the regenerated index failed again.
     let lead = "x".repeat(140);
     let title = format!("{lead} [src: file: helpers/lib/body-fill.js:42] and more words after");
-    let make = |t: &str| parse_sheet("TD-20261001-cut", &sheet("TD-20261001-cut", t, "Backend", "High", "Open", ""));
+    let make = |t: &str| {
+        parse_sheet(
+            "TD-20261001-cut",
+            &sheet("TD-20261001-cut", t, "Backend", "High", "Open", ""),
+        )
+    };
     let parsed = make(&title);
     assert!(parsed.title.chars().count() <= 160, "{}", parsed.title);
     assert!(
