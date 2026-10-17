@@ -1441,7 +1441,7 @@ export const projects = {
   /** Stream a partial re-audit for stale sections via SSE */
   partialAuditStream: async (
     id: string,
-    req: { agent: AgentType; tier?: ModelTier; steps: number[]; connection_id?: string },
+    req: { agent: AgentType; tier?: ModelTier; steps: number[]; connection_id?: string; accept_unverified_agents?: boolean },
     handlers: {
       onStepStart: (step: number, total: number, file: string) => void;
       onChunk: (text: string, step: number) => void;

@@ -106,6 +106,48 @@ describe('ProjectCard — KT-1169 "Reprendre" after every audit error', () => {
     await waitFor(() => expect(screen.queryByTestId('audit-timeline-launch-error')).toBeNull());
   });
 
+  // KT-1324 — the way out of a process table Kronn could not read is a human
+  // confirm on the timeline, never the plain "Reprendre" and never for a
+  // process that was seen.
+  it('a refusal for an unreadable process table offers a confirm that resends with the flag; a plain retry never does', async () => {
+    const blind = 'Kronn could not read the process table to check that no agent is still running. If you are sure none is running, launch again with `accept_unverified_agents: true`.';
+    vi.mocked(projectsApi.fullAuditStream).mockImplementationOnce(async (_id, _req, handlers) => {
+      handlers.onError(blind);
+    });
+    renderCard();
+    const launch = await screen.findByTestId('audit-timeline-launch');
+    await waitFor(() => expect(launch).toBeEnabled());
+    await act(async () => { fireEvent.click(launch); });
+    expect(await screen.findByTestId('audit-timeline-launch-error-unverified')).toBeInTheDocument();
+    expect(launches()[0].accept_unverified_agents).toBeUndefined();
+
+    // The plain retry replays the launch as it was: no override.
+    vi.mocked(projectsApi.fullAuditStream).mockImplementationOnce(async (_id, _req, handlers) => {
+      handlers.onError(blind);
+    });
+    await act(async () => { fireEvent.click(screen.getByTestId('audit-timeline-launch-error-retry')); });
+    await waitFor(() => expect(launches()).toHaveLength(2));
+    expect(launches()[1].accept_unverified_agents).toBeUndefined();
+
+    await act(async () => { fireEvent.click(await screen.findByTestId('audit-timeline-launch-error-confirm-unverified')); });
+    await waitFor(() => expect(launches()).toHaveLength(3));
+    expect(launches()[2]).toMatchObject({ resume_run_id: 'run-x', accept_unverified_agents: true });
+    await waitFor(() => expect(screen.queryByTestId('audit-timeline-launch-error')).toBeNull());
+  });
+
+  it('a refusal naming a surviving process has no confirm: it is stopped by hand', async () => {
+    vi.mocked(projectsApi.fullAuditStream).mockImplementationOnce(async (_id, _req, handlers) => {
+      handlers.onError('An agent of the previous audit run r1 is still running (process 4242). Stop it (`kill -9 4242`), then launch again.');
+    });
+    renderCard();
+    const launch = await screen.findByTestId('audit-timeline-launch');
+    await waitFor(() => expect(launch).toBeEnabled());
+    await act(async () => { fireEvent.click(launch); });
+    expect(await screen.findByTestId('audit-timeline-launch-error')).toHaveTextContent('kill -9 4242');
+    expect(screen.queryByTestId('audit-timeline-launch-error-confirm-unverified')).toBeNull();
+    expect(screen.getByTestId('audit-timeline-launch-error-retry')).toBeInTheDocument();
+  });
+
   it('a launch that throws before any event still leaves "Reprendre"', async () => {
     vi.mocked(projectsApi.fullAuditStream).mockRejectedValueOnce(new Error('network down'));
     renderCard();

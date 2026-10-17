@@ -6656,6 +6656,8 @@ const zh: TranslationDict = {
   "auditTimeline.error.retry": "重试",
   "auditTimeline.error.resumableUnknown": "无法读取上一次审计的状态。在确认是否还有可继续的审计之前，无法启动。",
   "auditTimeline.error.timeline": "无法加载审计历史。",
+  "auditTimeline.error.unverified.explain": "Kronn 无法读取进程表，因此无法确认之前审计的代理是否已全部停止。没有发现正在运行的代理。",
+  "auditTimeline.error.unverified.confirm": "我确定没有代理在运行：继续",
   "auditTimeline.step.acceptFailed": "接受失败：{0}",
   "audit.retryNeedsRun": "此步骤已无法单独重试：没有可继续的审计。“继续”会重新读取审计状态。",
   "projects.docAi.auditRecap.retry": "重试",

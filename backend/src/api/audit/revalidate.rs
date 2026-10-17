@@ -732,7 +732,12 @@ pub async fn revalidate_audit(
     // other sections in the same plan still need one. Recompute what remains
     // under the lease and return it to the caller for an explicit next choice.
     if req.deterministic_only.unwrap_or(false) {
-        return deterministic_only(state, project.id, project_path);
+        return deterministic_only(
+            state,
+            project.id,
+            project_path,
+            req.accept_unverified_agents.unwrap_or(false),
+        );
     }
     if planned.sources_state == SourcesState::Unknown && planned.agent_steps.is_empty() {
         return single_error(
@@ -754,7 +759,12 @@ pub async fn revalidate_audit(
         )
         .await;
     }
-    deterministic_only(state, project.id, project_path)
+    deterministic_only(
+        state,
+        project.id,
+        project_path,
+        req.accept_unverified_agents.unwrap_or(false),
+    )
 }
 
 /// No section needs an agent: re-anchor under the lease and report.
@@ -762,6 +772,7 @@ fn deterministic_only(
     state: AppState,
     project_id: String,
     project_path: std::path::PathBuf,
+    accept_unverified_agents: bool,
 ) -> Sse<SseStream> {
     let stream: SseStream = Box::pin(async_stream::try_stream! {
         let lease = match crate::api::audit::docs_write::DocsWriteLease::acquire(&state, &project_id).await {
@@ -772,6 +783,16 @@ fn deterministic_only(
             }
         };
         if let Some(error) = crate::api::projects::template_merge::audit_launch_refusal(&project_path) {
+            yield Event::default().event("error").data(serde_json::json!({"error":error}).to_string());
+            return;
+        }
+        // KT-1324 — the re-anchors rewrite docs: an agent of a previous run
+        // that is still alive may be writing the same files, and a step it never
+        // ended is settled against them. Under the lease (a live audit of this
+        // process holds it), the agents are stopped and the steps settled first.
+        if let Err(error) = super::step_guard::settle_open_runs_before_launch(
+            &state.db, &project_id, &project_path, accept_unverified_agents,
+        ).await {
             yield Event::default().event("error").data(serde_json::json!({"error":error}).to_string());
             return;
         }

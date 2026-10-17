@@ -10,6 +10,7 @@ import type {
 import { useDialogFocus } from '../hooks/useDialogFocus';
 import { placeholderSteps } from '../lib/placeholderDocs';
 import { formatUsd } from '../lib/audit-cost';
+import { isUnverifiedAgentsRefusal } from '../lib/auditRefusal';
 import { DocStateSummary } from './DocStateSummary';
 import type { DocStateCounts } from './docState';
 import './RevalidateAudit.css';
@@ -154,7 +155,7 @@ export function RevalidateAudit({
     void loadPlan(next);
   }, [loadPlan, onRefetch, onRefetchDrift, project.id]);
 
-  const runAudit = useCallback(async (deterministicOnly = false) => {
+  const runAudit = useCallback(async (deterministicOnly = false, acceptUnverifiedAgents = false) => {
     if (runningRef.current) return;
     runningRef.current = true;
     deterministicOnlyRef.current = deterministicOnly;
@@ -165,6 +166,8 @@ export function RevalidateAudit({
       await projectsApi.revalidateAuditStream(project.id, {
         agent, tier, connection_id: connectionId ?? undefined,
         ...(deterministicOnly ? { deterministic_only: true } : {}),
+        // KT-1324 — the human's word that no agent of a previous run is alive.
+        ...(acceptUnverifiedAgents ? { accept_unverified_agents: true } : {}),
       }, {
         onStepStart: (step, total, file) => setPhase({ kind: 'running', step, total, file }),
         onWarning: (message) => toast(message, 'warning'),
@@ -180,9 +183,9 @@ export function RevalidateAudit({
     }
   }, [agent, tier, connectionId, plan, project.id, settled, toast]);
 
-  const launch = useCallback(async (deterministicOnly = false) => {
-    if (gateLaunch) await gateLaunch(() => void runAudit(deterministicOnly));
-    else await runAudit(deterministicOnly);
+  const launch = useCallback(async (deterministicOnly = false, acceptUnverifiedAgents = false) => {
+    if (gateLaunch) await gateLaunch(() => void runAudit(deterministicOnly, acceptUnverifiedAgents));
+    else await runAudit(deterministicOnly, acceptUnverifiedAgents);
   }, [gateLaunch, runAudit]);
 
   const stop = useCallback(async () => {
@@ -285,7 +288,20 @@ export function RevalidateAudit({
 
   const outcome = () => {
     if (phase.kind === 'cancelled') return <p className="rv-outcome" data-tone="warning">{t('audit.revalidate.cancelled')}</p>;
-    if (phase.kind === 'error') return <p className="rv-outcome" data-tone="error" role="alert">{t('audit.revalidate.error', phase.message)}</p>;
+    if (phase.kind === 'error') {
+      if (phase.retry === 'run' && isUnverifiedAgentsRefusal(phase.message)) {
+        return (
+          <div className="rv-outcome" data-tone="error" role="alert">
+            <p>{t('audit.revalidate.error', phase.message)}</p>
+            <p data-testid="revalidate-unverified-explain">{t('auditTimeline.error.unverified.explain')}</p>
+            <button type="button" className="rv-btn" onClick={() => { void launch(deterministicOnlyRef.current, true); }} data-testid="revalidate-confirm-unverified">
+              {t('auditTimeline.error.unverified.confirm')}
+            </button>
+          </div>
+        );
+      }
+      return <p className="rv-outcome" data-tone="error" role="alert">{t('audit.revalidate.error', phase.message)}</p>;
+    }
     if (phase.kind !== 'done') return null;
     const { info } = phase;
     if (info.kind === 'deterministic') {

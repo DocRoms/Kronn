@@ -1973,6 +1973,9 @@ mod tests {
         assert!(survivor.contains("process 4242 4243"), "{survivor}");
         assert!(survivor.contains("kill -9 4242 4243"), "{survivor}");
         assert!(!survivor.contains("ReapReport"), "{survivor}");
+        // The UI offers its confirm action on this token alone (see
+        // `isUnverifiedAgentsRefusal`): a survivor must never carry it.
+        assert!(!survivor.contains("accept_unverified_agents"), "{survivor}");
         let blind = AgentsMayStillRun {
             run_id: "r1".into(),
             report: ReapReport {

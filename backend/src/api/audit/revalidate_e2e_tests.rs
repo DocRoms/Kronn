@@ -894,6 +894,117 @@ async fn a_revalidation_waits_for_the_agents_a_previous_run_left() {
     unplant_reap_of_run(&left);
 }
 
+/// KT-1324 — a revalidation with no agent step still rewrites docs (the
+/// re-anchors), so it waits for the agents a previous run left like the others:
+/// a survivor refuses it before a single citation moves, a process table nobody
+/// can read lets it through only on the human's word, and the settled run is not
+/// settled twice.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_deterministic_revalidation_waits_for_the_agents_a_previous_run_left() {
+    use crate::api::audit::step_guard::{plant_reap_of_run, unplant_reap_of_run};
+    use crate::core::dispatch_reaper::ReapReport;
+    let fx = Validated::new(|_| {}).await;
+    fx.edit_source(|lines| {
+        lines.insert(0, "// licence header".into());
+        lines.insert(0, "// generated banner".into());
+    });
+    let left = format!("left-{}", uuid::Uuid::new_v4());
+    {
+        let left = left.clone();
+        fx.h.state
+            .db
+            .with_conn(move |conn| {
+                crate::db::audit_runs::insert_running(
+                    conn,
+                    &left,
+                    PROJECT_ID,
+                    "Partial",
+                    "ClaudeCode",
+                    chrono::Utc::now() - chrono::Duration::minutes(5),
+                )
+            })
+            .await
+            .unwrap();
+    }
+    let deterministic = |accept: Option<bool>| {
+        let state = fx.h.state.clone();
+        async move {
+            sse_body(
+                crate::api::audit::revalidate_audit(
+                    axum::extract::State(state),
+                    axum::extract::Path(PROJECT_ID.to_string()),
+                    axum::Json(crate::models::RevalidateAuditRequest {
+                        deterministic_only: Some(true),
+                        accept_unverified_agents: accept,
+                        agent: AgentType::ClaudeCode,
+                        connection_id: None,
+                        tier: None,
+                    }),
+                )
+                .await
+                .into_response(),
+            )
+            .await
+        }
+    };
+    let docs_before = docs_snapshot(fx.project());
+
+    plant_reap_of_run(
+        &left,
+        ReapReport {
+            survivors: vec![4242],
+            ..Default::default()
+        },
+    );
+    let body = deterministic(None).await;
+    let error = sse_events(&body, "error").pop().expect("a refusal");
+    let error = error["error"].as_str().unwrap();
+    assert!(error.contains("kill -9 4242"), "{error}");
+    assert!(sse_events(&body, "reanchored").is_empty(), "{body}");
+    assert!(sse_events(&body, "done").is_empty(), "{body}");
+    assert_eq!(
+        docs_snapshot(fx.project()),
+        docs_before,
+        "a survivor, yet docs were rewritten"
+    );
+    assert_eq!(fx.plan().await.reanchor_count, 2);
+
+    // Not even the human's word lifts a refusal for a process that was seen.
+    let body = deterministic(Some(true)).await;
+    assert!(!sse_events(&body, "error").is_empty(), "{body}");
+    assert_eq!(docs_snapshot(fx.project()), docs_before);
+
+    plant_reap_of_run(
+        &left,
+        ReapReport {
+            unverified: true,
+            ..Default::default()
+        },
+    );
+    let body = deterministic(None).await;
+    let error = sse_events(&body, "error").pop().expect("a refusal");
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("could not read the process table"),
+        "{body}"
+    );
+    assert_eq!(docs_snapshot(fx.project()), docs_before);
+
+    let body = deterministic(Some(true)).await;
+    let done = sse_events(&body, "done").pop().expect("terminal done");
+    assert_eq!(done["status"], "clean", "{body}");
+    assert_ne!(
+        docs_snapshot(fx.project()),
+        docs_before,
+        "the re-anchors ran"
+    );
+    unplant_reap_of_run(&left);
+}
+
 /// KT-1187 — the citation broken under a doc edited by hand.
 fn broken_by_hand(fx: &Validated) -> Vec<(String, crate::core::citation_drift::CitationState)> {
     let report = crate::core::citation_drift::check(fx.project());

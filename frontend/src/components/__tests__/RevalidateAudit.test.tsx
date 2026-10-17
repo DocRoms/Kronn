@@ -364,6 +364,34 @@ describe('RevalidateAudit', () => {
     expect(projectsApi.revalidateAuditStream).toHaveBeenCalledTimes(2);
   });
 
+  // KT-1324 — a process table Kronn could not read is lifted by the human's
+  // word; a refusal for a process that was seen never offers it.
+  it('a refusal for an unreadable process table offers a confirm that resends with the flag', async () => {
+    setup();
+    const panel = await openPanel();
+    const handlers = await launchHeld();
+    await finish(() => handlers.onError('Kronn could not read the process table. Launch again with `accept_unverified_agents: true`.'));
+    expect(await within(panel).findByTestId('revalidate-unverified-explain')).toBeInTheDocument();
+    expect(vi.mocked(projectsApi.revalidateAuditStream).mock.calls[0][1]).not.toHaveProperty('accept_unverified_agents');
+
+    vi.mocked(projectsApi.revalidateAuditStream).mockImplementationOnce(async () => {});
+    await act(async () => {
+      fireEvent.click(within(panel).getByTestId('revalidate-confirm-unverified'));
+      await Promise.resolve();
+    });
+    expect(projectsApi.revalidateAuditStream).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(projectsApi.revalidateAuditStream).mock.calls[1][1]).toMatchObject({ accept_unverified_agents: true });
+  });
+
+  it('a refusal naming a surviving process has no confirm', async () => {
+    setup();
+    const panel = await openPanel();
+    const handlers = await launchHeld();
+    await finish(() => handlers.onError('An agent is still running (process 4242). Stop it (`kill -9 4242`), then launch again.'));
+    expect(await within(panel).findByRole('alert')).toHaveTextContent('kill -9 4242');
+    expect(within(panel).queryByTestId('revalidate-confirm-unverified')).toBeNull();
+  });
+
   it('an interrupted run offers « Reprendre »', async () => {
     setup();
     const panel = await openPanel();

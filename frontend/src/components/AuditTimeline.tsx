@@ -112,7 +112,13 @@ export interface AuditTimelineProps {
   resumableUnknown?: boolean;
   onReloadResumable?: () => void;
   /** The last launch stopped on this error; `retry` replays it (KT-1169). */
-  launchError?: { message: string; retry: () => void } | null;
+  launchError?: {
+    message: string;
+    retry: () => void;
+    /** KT-1324 — the refusal is a process table Kronn could not read (no agent
+     * was seen): this relaunches on the human's word that none is running. */
+    confirmUnverified?: () => void;
+  } | null;
   onDismissLaunchError?: () => void;
   onLaunch: () => void;
   /** Retry one failed step of the resumable run, alone (KT-1131). */
@@ -717,10 +723,18 @@ export function AuditTimeline(props: AuditTimelineProps) {
                 <div>
                   <p><strong>{t('auditTimeline.error.title')}</strong></p>
                   <p className="audit-tl-error-message">{props.launchError.message}</p>
+                  {props.launchError.confirmUnverified && (
+                    <p className="audit-tl-muted" data-testid="audit-timeline-launch-error-unverified">{t('auditTimeline.error.unverified.explain')}</p>
+                  )}
                   <div className="audit-tl-validation-actions">
                     <button type="button" className="audit-tl-btn audit-tl-btn-small audit-tl-btn-warn" onClick={props.launchError.retry} data-testid="audit-timeline-launch-error-retry">
                       <RotateCcw size={12} /> {t('auditTimeline.error.resume')}
                     </button>
+                    {props.launchError.confirmUnverified && (
+                      <button type="button" className="audit-tl-btn audit-tl-btn-small audit-tl-btn-warn" onClick={props.launchError.confirmUnverified} data-testid="audit-timeline-launch-error-confirm-unverified">
+                        {t('auditTimeline.error.unverified.confirm')}
+                      </button>
+                    )}
                     {props.onDismissLaunchError && (
                       <button type="button" className="audit-tl-btn audit-tl-btn-small" onClick={props.onDismissLaunchError}>
                         {t('auditTimeline.error.dismiss')}
