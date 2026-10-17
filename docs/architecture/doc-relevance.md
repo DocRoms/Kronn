@@ -21,7 +21,7 @@ Every section (heading to next heading, fenced code excluded, a heading with
 nothing under it skipped) is judged from its anchors: its `[src: file: …]`
 citations, read through the fingerprint report, and the repository paths its
 prose names in backticks.
-[src: file: backend/src/core/doc_relevance.rs:1123#judge]
+[src: file: backend/src/core/doc_relevance.rs:1186#judge]
 
 | Verdict | Meaning |
 |---|---|
@@ -165,4 +165,4 @@ accepts them all.
 
 A citation the git diff maps to a new line past the fingerprint window is
 treated as moved, exactly as the plan re-anchors it.
-[src: file: backend/src/core/doc_relevance.rs:1254#analyze_with_moves]
+[src: file: backend/src/core/doc_relevance.rs:1317#analyze_with_moves]

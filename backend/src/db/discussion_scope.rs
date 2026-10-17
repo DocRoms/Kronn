@@ -13,6 +13,9 @@ use crate::models::discussion_scope::{
     ScopeRequestStatus, WorkflowScope, WorkflowScopeEntry,
 };
 
+/// The workflow scope row that stands for every project (KT-1336).
+pub const ALL_PROJECTS: &str = "*";
+
 /// Pending requests a room may hold at once: an agent cannot flood the human.
 pub const MAX_PENDING_REQUESTS: usize = 5;
 
@@ -745,28 +748,46 @@ pub fn workflow_scope(conn: &Connection, workflow_id: &str) -> Result<Option<Wor
         ))
     })?;
     let mut entries = Vec::new();
+    let mut all = None;
     let mut valid = true;
     let mut validated_by = None;
     let mut validated_at = None;
+    let mut digest_lines = Vec::new();
     for row in rows {
         let (project_id, project_name, access, fingerprint, set_by, set_at) = row?;
         valid &= fingerprint == current;
+        digest_lines.push(format!("{project_id}|{access}|{fingerprint}|{set_at}"));
         validated_by = Some(set_by);
         validated_at = Some(set_at);
-        entries.push(WorkflowScopeEntry {
-            project_id,
-            project_name,
-            access: ScopeAccess::parse(&access)?,
-        });
+        let access = ScopeAccess::parse(&access)?;
+        if project_id == ALL_PROJECTS {
+            all = Some(access);
+        } else {
+            entries.push(WorkflowScopeEntry {
+                project_id,
+                project_name,
+                access,
+            });
+        }
     }
+    digest_lines.sort();
+    // What the human confirms covers the workflow as it is now, not only the
+    // stored rows: an edit after the screen was read makes its fingerprint stale.
+    digest_lines.push(format!("workflow|{workflow_id}|{current}"));
+    let scope_fingerprint: String = Sha256::digest(digest_lines.join("\n").as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
     let supported = crate::db::workflows::get_workflow(conn, workflow_id)?
         .as_ref()
         .is_some_and(scope_supported);
     Ok(Some(WorkflowScope {
         workflow_id: workflow_id.to_owned(),
         supported,
-        valid: supported && valid && !entries.is_empty(),
+        valid: supported && valid && (!entries.is_empty() || all.is_some()),
         entries,
+        all,
+        fingerprint: scope_fingerprint,
         validated_by,
         validated_at,
     }))
@@ -778,6 +799,7 @@ pub fn set_workflow_scope(
     conn: &Connection,
     workflow_id: &str,
     entries: &[(String, ScopeAccess)],
+    all: Option<ScopeAccess>,
     set_by: &str,
 ) -> Result<WorkflowScope> {
     let Some(workflow) = crate::db::workflows::get_workflow(conn, workflow_id)? else {
@@ -807,7 +829,8 @@ pub fn set_workflow_scope(
         [workflow_id],
     )?;
     let now = Utc::now().to_rfc3339();
-    for (project, access) in entries {
+    let every = all.map(|access| (ALL_PROJECTS.to_owned(), access));
+    for (project, access) in entries.iter().chain(every.iter()) {
         tx.execute(
             "INSERT INTO workflow_scopes \
              (workflow_id, project_id, access, workflow_fingerprint, set_by, set_at) \
@@ -834,7 +857,9 @@ pub fn revoke_workflow_scope(
     conn: &Connection,
     workflow_id: &str,
     project_id: Option<&str>,
+    all: bool,
 ) -> Result<Option<WorkflowScope>> {
+    let project_id = if all { Some(ALL_PROJECTS) } else { project_id };
     let removed = match project_id {
         Some(project) => conn.execute(
             "DELETE FROM workflow_scopes WHERE workflow_id = ?1 AND project_id = ?2",
@@ -884,6 +909,10 @@ pub fn run_granted_projects(conn: &Connection, run_id: &str) -> Result<GrantedPr
         .collect::<rusqlite::Result<_>>()?;
     for (project_id, access) in validated {
         let access = ScopeAccess::parse(&access)?;
+        if project_id == ALL_PROJECTS {
+            granted.all = Some(access);
+            continue;
+        }
         if access == ScopeAccess::Write {
             granted.write.insert(project_id.clone());
         }

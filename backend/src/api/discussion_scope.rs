@@ -332,6 +332,19 @@ pub async fn set_workflow_scope(
     Json(request): Json<SetWorkflowScopeRequest>,
 ) -> Reply<WorkflowScope> {
     let set_by = human(&state).await;
+    // Every project in write, as for a room: the typed confirmation and the
+    // scope the human saw, so a stale screen cannot open everything.
+    if request.all == Some(ScopeAccess::Write) {
+        if request.confirm.as_deref() != Some(ALL_PROJECTS_WRITE_CONFIRMATION) {
+            return refused(&format!(
+                "write access to every project needs confirm: \"{ALL_PROJECTS_WRITE_CONFIRMATION}\""
+            ));
+        }
+        if request.expected_fingerprint.is_none() {
+            return refused("write access to every project needs the scope fingerprint you saw");
+        }
+    }
+    let (all, expected) = (request.all, request.expected_fingerprint.clone());
     let entries: Vec<(String, ScopeAccess)> = request
         .entries
         .into_iter()
@@ -340,7 +353,18 @@ pub async fn set_workflow_scope(
     match state
         .db
         .with_conn(move |conn| {
-            discussion_scope::set_workflow_scope(conn, &workflow_id, &entries, &set_by)
+            if let Some(expected) = expected {
+                let current = discussion_scope::workflow_scope(conn, &workflow_id)?
+                    .ok_or_else(|| ScopeError::NotFound("workflow not found".into()))?;
+                if current.fingerprint != expected {
+                    return Err(ScopeError::Conflict(
+                        "the workflow's scope changed since you looked: reload and confirm again"
+                            .into(),
+                    )
+                    .into());
+                }
+            }
+            discussion_scope::set_workflow_scope(conn, &workflow_id, &entries, all, &set_by)
         })
         .await
     {
@@ -361,7 +385,12 @@ pub async fn revoke_workflow_scope(
     match state
         .db
         .with_conn(move |conn| {
-            discussion_scope::revoke_workflow_scope(conn, &id, request.project_id.as_deref())
+            discussion_scope::revoke_workflow_scope(
+                conn,
+                &id,
+                request.project_id.as_deref(),
+                request.all,
+            )
         })
         .await
     {
@@ -373,6 +402,8 @@ pub async fn revoke_workflow_scope(
                 workflow_id,
                 supported: false,
                 entries: Vec::new(),
+                all: None,
+                fingerprint: String::new(),
                 valid: false,
                 validated_by: None,
                 validated_at: None,

@@ -217,8 +217,8 @@ timeline and a stale document's viewer. It has no lifecycle of its own.
 
 Sources:
 
-- The plan and the re-anchoring. [src: file: backend/src/api/audit/revalidate.rs:78-144#plan] [src: file: backend/src/api/audit/revalidate.rs:351-391#apply_reanchors]
-- The partial pipeline the agent part reuses. [src: file: backend/src/api/audit/revalidate.rs:736-749#run_partial_pipeline]
+- The plan and the re-anchoring. [src: file: backend/src/api/audit/revalidate.rs:90-156#plan] [src: file: backend/src/api/audit/revalidate.rs:363-403#apply_reanchors]
+- The partial pipeline the agent part reuses. [src: file: backend/src/api/audit/revalidate.rs:748-761#run_partial_pipeline]
 
 ## Refreshing stale sections (KT-1207)
 
@@ -333,7 +333,7 @@ Historical runs without fingerprints require a new audit before signoff.
 The explicit re-anchor action sends `deterministic_only: true`. It returns the
 remaining plan without launching an agent, even when other sections still need
 agent work; retry retains this mode. A later general fix is a separate choice.
-[src: file: backend/src/api/audit/revalidate.rs:733-735#deterministic_only]
+[src: file: backend/src/api/audit/revalidate.rs:745-747#deterministic_only]
 [src: file: frontend/src/components/RevalidateAudit.tsx:157-168#deterministicOnlyRef] [src: file: frontend/src/components/RevalidateAudit.tsx:213-220#deterministicOnlyRef]
 
 Local TD decisions and deterministic citation repairs advance this proof only
@@ -345,7 +345,7 @@ work for changed prose; deleted or unowned documents require manual attention.
 [src: file: backend/src/db/audit_documents.rs:93-126#advance_local_changes]
 [src: file: backend/src/db/audit_documents.rs:62-91#confirm_paths]
 [src: file: backend/src/core/doc_provenance.rs:703-713#contains_placeholder]
-[src: file: backend/src/api/audit/revalidate.rs:282-339#plan_with_documents]
+[src: file: backend/src/api/audit/revalidate.rs:294-351#plan_with_documents]
 
 A no-change partial run restores validation only when every tracked validated
 document and every selected target remained byte-identical. The learning gate
@@ -393,7 +393,7 @@ as human-validated evidence until its trust conditions hold again.
   as `validation_started_by` when the validation is opened, and as
   `validated_by` when it is validated, on the run row and in
   `docs/.kronn.json` (`validated_by`, `validation_started_by`).
-  [src: file: backend/src/core/kronn_state.rs:295-311#mark_validated_by]
+  [src: file: backend/src/core/kronn_state.rs:330-346#mark_validated_by]
   [src: file: backend/src/db/audit_validation.rs:125-140#set_started_by]
 - **Boot repair.** At startup, completions already visible in the messages are
   stamped, and open validations an older audit left behind are archived only

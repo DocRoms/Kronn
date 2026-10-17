@@ -7,7 +7,7 @@ import { countByAction, errorText, MAPPING_ACTIONS, templateMergeStatus } from '
 import { LoadingState } from './LoadingState';
 import { GitDiffViewer } from './GitDiffViewer';
 import type {
-  Correspondence, MappingAction, MergeBase, TemplateMergeAccepted, TemplateMergeState, TemplateMergeView,
+  Correspondence, MappingAction, MergeBase, TemplateMergeAccepted, TemplateMergeState, TemplateMergeView, TemplateMergeWarning,
 } from '../types/generated';
 import './GitPanel.css';
 import './TemplateMergePanel.css';
@@ -135,6 +135,25 @@ function UntrackedWarning({ paths, onRecheck }: { paths: string[]; onRecheck: ()
         <button type="button" className="tm-btn" onClick={onRecheck}>
           <RotateCcw size={12} /> {t('templateMerge.untracked.recheck')}
         </button>
+      </div>
+    </div>
+  );
+}
+
+/** What the plan itself warns about, e.g. local docs a remote base cannot contain. */
+function PlanWarnings({ warnings }: { warnings: TemplateMergeWarning[] }) {
+  const { t } = useT();
+  if (warnings.length === 0) return null;
+  return (
+    <div className="tm-warning" role="alert" data-testid="template-merge-warnings">
+      <AlertTriangle size={14} className="tm-warning-icon" />
+      <div>
+        {warnings.map(w => {
+          const listed = w.more > 0
+            ? `${w.paths.join(', ')} ${t('templateMerge.warning.more', w.more)}`
+            : w.paths.join(', ');
+          return <p key={w.code}>{t(`templateMerge.warning.${w.code}`, w.paths.length + w.more, listed)}</p>;
+        })}
       </div>
     </div>
   );
@@ -394,6 +413,7 @@ export function TemplateMergePanel({ projectId, gate = false, onLaunchAuditAnywa
             </div>
           )}
           <UntrackedWarning paths={phase.view.untracked_in_checkout} onRecheck={() => start(base)} />
+          <PlanWarnings warnings={phase.view.warnings} />
           <details className="tm-details">
             <summary>{t('templateMerge.result.table', phase.view.correspondence.length)}</summary>
             <CorrespondenceTable plan={phase.view} />

@@ -17,7 +17,7 @@ const projects = [
 
 function scope(overrides: Partial<WorkflowScope> = {}): WorkflowScope {
   return {
-    workflow_id: 'wf', supported: true, entries: [{ project_id: 'p2', project_name: 'api', access: 'write' }],
+    workflow_id: 'wf', supported: true, all: null, fingerprint: 'fp-1', entries: [{ project_id: 'p2', project_name: 'api', access: 'write' }],
     valid: true, validated_by: 'romu', validated_at: '2026-10-16T10:00:00Z', ...overrides,
   };
 }
@@ -55,6 +55,9 @@ describe('WorkflowScopeEditor', () => {
     fireEvent.click(await screen.findByText('wf.scopeRevalidate'));
     await waitFor(() => expect(api.setScope).toHaveBeenCalledWith('wf', {
       entries: [{ project_id: 'p2', access: 'write' }],
+      all: null,
+      confirm: null,
+      expected_fingerprint: null,
     }));
   });
 
@@ -65,6 +68,58 @@ describe('WorkflowScopeEditor', () => {
     expect(await screen.findByText('wf.scopeUnsupported')).toBeTruthy();
     expect(screen.queryByText('disc.scopeGrant')).toBeNull();
     fireEvent.click(screen.getByText('disc.scopeRevoke'));
-    await waitFor(() => expect(api.revokeScope).toHaveBeenCalledWith('wf', { project_id: 'p2' }));
+    await waitFor(() => expect(api.revokeScope).toHaveBeenCalledWith('wf', { project_id: 'p2', all: false }));
+  });
+
+  it('opens every project in write only after the typed confirmation, with the scope seen', async () => {
+    api.scope.mockResolvedValue(scope({ entries: [], valid: false, validated_by: null, validated_at: null }));
+    api.setScope.mockResolvedValue(scope({ entries: [], all: 'write' }));
+    render(<WorkflowScopeEditor workflowId="wf" ownProjectId="p1" projects={projects} toast={vi.fn()} t={t} />);
+    const allGroup = await screen.findByRole('radiogroup', { name: 'disc.scopeAllProjects' });
+    fireEvent.click(allGroup.querySelector('[data-level="write"]')!);
+    const validate = screen.getByText('wf.scopeValidate').closest('button')!;
+    expect(validate.disabled).toBe(true);
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'ALL-PROJECTS-WRITE' } });
+    expect(validate.disabled).toBe(false);
+    fireEvent.click(validate);
+    await waitFor(() => expect(api.setScope).toHaveBeenCalledWith('wf', {
+      entries: [],
+      all: 'write',
+      confirm: 'ALL-PROJECTS-WRITE',
+      expected_fingerprint: 'fp-1',
+    }));
+  });
+
+  it('picks a project in one click and validates the whole scope at once', async () => {
+    api.scope.mockResolvedValue(scope({ entries: [], valid: false, validated_by: null, validated_at: null }));
+    api.setScope.mockResolvedValue(scope());
+    render(<WorkflowScopeEditor workflowId="wf" ownProjectId="p1" projects={projects} toast={vi.fn()} t={t} />);
+    const apiGroup = await screen.findByRole('radiogroup', { name: 'api' });
+    fireEvent.click(apiGroup.querySelector('[data-level="read"]')!);
+    expect(screen.queryByRole('radiogroup', { name: 'front' })).toBeNull();
+    fireEvent.click(screen.getByText('wf.scopeValidate'));
+    await waitFor(() => expect(api.setScope).toHaveBeenCalledWith('wf', {
+      entries: [{ project_id: 'p2', access: 'read' }],
+      all: null,
+      confirm: null,
+      expected_fingerprint: null,
+    }));
+  });
+
+  it('asks the typed confirmation again to revalidate every project in write', async () => {
+    api.scope.mockResolvedValue(scope({ entries: [], all: 'write', valid: false, fingerprint: 'fp-2' }));
+    api.setScope.mockResolvedValue(scope({ entries: [], all: 'write' }));
+    render(<WorkflowScopeEditor workflowId="wf" ownProjectId="p1" projects={projects} toast={vi.fn()} t={t} />);
+    const revalidate = (await screen.findByText('wf.scopeRevalidate')).closest('button')!;
+    expect(revalidate.disabled).toBe(true);
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'ALL-PROJECTS-WRITE' } });
+    expect(revalidate.disabled).toBe(false);
+    fireEvent.click(revalidate);
+    await waitFor(() => expect(api.setScope).toHaveBeenCalledWith('wf', {
+      entries: [],
+      all: 'write',
+      confirm: 'ALL-PROJECTS-WRITE',
+      expected_fingerprint: 'fp-2',
+    }));
   });
 });

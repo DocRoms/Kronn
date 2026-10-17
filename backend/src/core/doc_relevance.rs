@@ -438,25 +438,50 @@ fn missing_tail_is_over(rest: &str) -> bool {
             .is_some_and(|tail| tail.chars().all(|c| !c.is_alphanumeric())),
         // "is missing on disk / on main" says where; "on error paths" does not.
         "on" => {
-            let after = rest.trim_start().strip_prefix("on").unwrap_or("").trim_start();
+            let after = rest
+                .trim_start()
+                .strip_prefix("on")
+                .unwrap_or("")
+                .trim_start();
             let place = after
                 .split(|c: char| c.is_whitespace() || ",.;:!?)".contains(c))
                 .next()
                 .unwrap_or("");
             let named = [
-                "disk", "main", "master", "develop", "trunk", "head", "branch", "filesystem",
+                "disk",
+                "main",
+                "master",
+                "develop",
+                "trunk",
+                "head",
+                "branch",
+                "filesystem",
                 "fs",
             ];
-            let this_branch = ["the branch", "this branch", "the file system", "the filesystem"]
-                .iter()
-                .any(|p| after.starts_with(p));
+            let this_branch = [
+                "the branch",
+                "this branch",
+                "the file system",
+                "the filesystem",
+            ]
+            .iter()
+            .any(|p| after.starts_with(p));
             this_branch || named.contains(&place) || place.contains('/')
         }
         "in" => {
-            let after = rest.trim_start_matches(|c: char| c.is_alphabetic()).trim_start();
-            ["the repo", "the tree", "the checkout", "the project", "the worktree", "git"]
-                .iter()
-                .any(|p| after.starts_with(p))
+            let after = rest
+                .trim_start_matches(|c: char| c.is_alphabetic())
+                .trim_start();
+            [
+                "the repo",
+                "the tree",
+                "the checkout",
+                "the project",
+                "the worktree",
+                "git",
+            ]
+            .iter()
+            .any(|p| after.starts_with(p))
         }
         _ => false,
     }
@@ -471,8 +496,10 @@ fn follows_a_verb(head: &str) -> bool {
         .rsplit(|c: char| !c.is_alphabetic())
         .next()
         .unwrap_or("");
-    ["is", "are", "was", "were", "be", "been", "being", "has", "have", "had", "est", "sont"]
-        .contains(&word)
+    [
+        "is", "are", "was", "were", "be", "been", "being", "has", "have", "had", "est", "sont",
+    ]
+    .contains(&word)
 }
 
 /// The path in backticks between `open` and `close` (byte offsets of the
