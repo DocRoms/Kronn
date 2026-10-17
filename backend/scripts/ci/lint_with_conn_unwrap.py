@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """CI anti-regression lint (stab-1): no `.unwrap()` inside `with_conn`
 closures in production code. A panic there poisons the shared DB mutex
-(recovered since 0.8.11, but still fails the request). Test modules
-(everything after the first `#[cfg(test)]` in a file) are exempt.
+(recovered since 0.8.11, but still fails the request). Test code is exempt:
+every item carrying `#[cfg(test)]` or `#[cfg(all(test, …))]` (the latter being
+how the `full-tests` feature gates test modules) is blanked out, whether it is
+a `mod tests { … }` block, a `mod tests;` line or a test-only helper. The
+production code before, between and after those items is always scanned.
 Run from `backend/`: `python3 scripts/ci/lint_with_conn_unwrap.py`."""
 import pathlib
 import re
@@ -13,6 +16,11 @@ import sys
 _RAW_OPEN = re.compile(r'r#*"')
 _RAW_HASHES = re.compile(r'r(#*)"')
 _NOT_NEWLINE = re.compile(r"[^\n]")
+# `#[cfg(test)]` and `#[cfg(all(test, …))]` (feature = "full-tests", unix, …)
+# mark a test-only item. `#[cfg(feature = "full-tests")]` alone does not: the
+# predicate must start with `test`.
+_TEST_CFG = re.compile(r"#\[cfg\((?:test|all\(test\b[^\]]*)\)\]")
+_ATTRIBUTE_OPEN = re.compile(r"\s*#!?\[")
 _LITERAL_START = re.compile(r"[/\"r']")
 _CHAR_LITERAL = re.compile(r"'(\\(?:u\{[0-9a-fA-F]{1,6}\}|.)|[^\\'])'")
 
@@ -85,16 +93,76 @@ def _sanitize(text):
     return "".join(out)
 
 
+def _item_end(text, i):
+    """Offset just past the item that starts at `i` (sanitized text, right
+    after a cfg attribute). Further attributes are skipped; the item then ends
+    at the first `;` outside parens/brackets, or at the `}` matching the first
+    `{` outside parens/brackets. Covers `mod x;`, `use x;`, `static X = …;`,
+    `mod x { … }`, `fn f() { … }`, `impl … { … }` and macro blocks."""
+    n = len(text)
+    while True:
+        m = _ATTRIBUTE_OPEN.match(text, i)
+        if not m:
+            break
+        j, depth = m.end(), 1
+        while j < n and depth:
+            if text[j] == "[":
+                depth += 1
+            elif text[j] == "]":
+                depth -= 1
+            j += 1
+        i = j
+    nested = 0
+    j = i
+    while j < n:
+        c = text[j]
+        if c in "([":
+            nested += 1
+        elif c in ")]":
+            nested -= 1
+        elif c == ";" and nested <= 0:
+            return j + 1
+        elif c == "{" and nested <= 0:
+            depth, j = 1, j + 1
+            while j < n and depth:
+                if text[j] == "{":
+                    depth += 1
+                elif text[j] == "}":
+                    depth -= 1
+                j += 1
+            return j
+        j += 1
+    return n
+
+
+def _exempt_test_items(text):
+    """Blank every test-only item (same length, newlines kept): the item that
+    follows each `#[cfg(test)]` / `#[cfg(all(test, …))]` attribute, and only
+    that item. Earlier versions cut the file at the first attribute, which
+    hid every production `with_conn` placed after a `mod tests;` line."""
+    out = list(text)
+    pos = 0
+    while True:
+        m = _TEST_CFG.search(text, pos)
+        if not m:
+            break
+        end = _item_end(text, m.end())
+        out[m.start() : end] = _NOT_NEWLINE.sub(" ", text[m.start() : end])
+        pos = end
+    return "".join(out)
+
+
 def find_violations(text, path="<mem>"):
     """`path:line` for every `.unwrap()` inside a `with_conn(...)` call.
 
-    Runs on SANITIZED text (strings/comments blanked) and scans to the
-    BALANCED closing paren with no length cap (Codex review, findings 2+3:
-    a 4k cap skipped long closures; literal parens broke the balance).
-    An unbalanced call is a hard error — loud beats a silent blind spot.
+    Runs on SANITIZED text (strings/comments blanked, then test-only items
+    blanked) and scans to the BALANCED closing paren with no length cap
+    (Codex review, findings 2+3: a 4k cap skipped long closures; literal
+    parens broke the balance). An unbalanced call is a hard error — loud
+    beats a silent blind spot.
     """
     viol = []
-    prod = _sanitize(re.split(r"#\[cfg\(test\)\]", text)[0])
+    prod = _exempt_test_items(_sanitize(text))
     for m in re.finditer(r"with_conn(?:_blocking)?\s*\(", prod):
         i, depth, end = m.end() - 1, 0, None
         for j in range(i, len(prod)):

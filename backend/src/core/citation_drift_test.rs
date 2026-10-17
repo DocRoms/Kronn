@@ -120,6 +120,38 @@ fn recording_writes_paths_lines_and_digests_only() {
     assert_eq!(report.unchanged_count, 5);
 }
 
+// KT-1311 — a doc whose banner was cut inside a marker still records every
+// citation after it.
+#[test]
+fn a_banner_truncated_mid_marker_does_not_blind_the_doc() {
+    let tmp = fixture();
+    let dir = tmp.path();
+    let cut = "<!-- kronn:partial-step -->\n> Partial document (gate: [src: file: .github/wor).\n\
+               <!-- kronn:partial-step:end -->\n\n";
+    let body = fs::read_to_string(dir.join("docs/architecture.md")).unwrap();
+    fs::write(dir.join("docs/architecture.md"), format!("{cut}{body}")).unwrap();
+    record_all(dir).unwrap();
+    let file = read_strict(dir).unwrap().unwrap();
+    let cites: Vec<&str> = file.docs["docs/architecture.md"]
+        .citations
+        .iter()
+        .map(|c| c.cite.as_str())
+        .collect();
+    assert_eq!(
+        cites,
+        ["src/lib.rs:2", "src/lib.rs:6", "src/lib.rs:10", "README.md"]
+    );
+}
+
+// KT-1311 — a marker of a kind Kronn does not know is not a path.
+#[test]
+fn an_unknown_kind_marker_is_no_file_citation() {
+    let content = "Recent work [src: command: git log --oneline -5].\n\
+                   Real one [src: src/lib.rs:2].\n";
+    let labels: Vec<String> = cite_labels(content).into_iter().collect();
+    assert_eq!(labels, ["src/lib.rs:2"]);
+}
+
 #[test]
 fn commit_touching_no_cited_line_marks_nothing_stale() {
     let tmp = fixture();
@@ -222,6 +254,45 @@ fn deleted_cited_lines_are_reported() {
     let report = check(dir);
     assert!(states(&report, "docs/architecture.md")
         .contains(&("README.md".to_string(), CitationState::FileMissing)));
+}
+
+#[test]
+fn a_range_ending_on_the_empty_line_after_the_last_newline_is_tracked() {
+    let tmp = fixture();
+    let dir = tmp.path();
+    fs::write(dir.join("a.yml"), "one: 1\ntwo: 2\n").unwrap();
+    fs::write(dir.join("b.yml"), "one: 1\ntwo: 2").unwrap();
+    fs::write(
+        dir.join("docs/ends.md"),
+        "# Ends\nAll of a [src: file: a.yml:1-3].\nAll of b [src: file: b.yml:1-3].\n",
+    )
+    .unwrap();
+    commit_all(dir, "yaml");
+    record_all(dir).unwrap();
+    let file = read_strict(dir).unwrap().unwrap();
+    let ends = &file.docs["docs/ends.md"];
+    // `a.yml` ends with a newline, so Read shows line 3 (empty): hashed, and
+    // evaluated as unchanged rather than "the file is now shorter".
+    assert!(ends.citations[0].sha256.is_some());
+    // `b.yml` has no trailing newline: 3 is past its end, as before.
+    assert!(ends.citations[1].sha256.is_none());
+    let report = check(dir);
+    assert_eq!(
+        states(&report, "docs/ends.md"),
+        [("b.yml:1-3".to_string(), CitationState::Removed)]
+    );
+    // The real content of `a.yml` still drifts a recorded N+1 citation.
+    fs::write(dir.join("a.yml"), "one: 1\ntwo: 22\n").unwrap();
+    commit_all(dir, "edit a");
+    let report = check(dir);
+    assert!(states(&report, "docs/ends.md")
+        .contains(&("a.yml:1-3".to_string(), CitationState::Changed)));
+    // Dropping a line takes the cited end past the new last line: removed.
+    fs::write(dir.join("a.yml"), "one: 1\n").unwrap();
+    commit_all(dir, "shrink a");
+    let report = check(dir);
+    assert!(states(&report, "docs/ends.md")
+        .contains(&("a.yml:1-3".to_string(), CitationState::Removed)));
 }
 
 #[test]
@@ -764,4 +835,12 @@ fn recording_named_docs_leaves_the_others_as_validated() {
             .unwrap(),
         stamp
     );
+}
+
+#[test]
+fn a_dash_range_is_tracked_under_its_hyphen_label() {
+    let labels =
+        cite_labels("Claim [src: file: src/a.rs:2\u{2013}4] and [src: file: src/b.rs:1\u{2014}3].");
+    assert!(labels.contains("src/a.rs:2-4"), "{labels:?}");
+    assert!(labels.contains("src/b.rs:1-3"), "{labels:?}");
 }

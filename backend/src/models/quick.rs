@@ -906,7 +906,7 @@ pub struct BatchRunQuickApiResponse {
     pub error: Option<String>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

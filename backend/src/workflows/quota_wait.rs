@@ -342,6 +342,6 @@ async fn wake_one(state: &AppState, workflow: Workflow, mut run: WorkflowRun) ->
     Some(id)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "quota_wait_tests.rs"]
 mod tests;

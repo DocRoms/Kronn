@@ -26,7 +26,7 @@ const PROOF_TTL_SECONDS: i64 = 120;
 
 use crate::db::discussion_sessions::sha256_hex;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests;
 
 /// A secret in transit. Redacting `Debug`, no `Serialize`: a struct holding one

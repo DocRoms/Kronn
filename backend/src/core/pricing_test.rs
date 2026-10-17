@@ -314,3 +314,55 @@ fn kt837_on_the_model_it_really_ran_on_costs_about_twelve_dollars() {
     let cost = usd(message_cost("Codex", Some("gpt-5.6-sol"), Some(&kt837())));
     assert!((cost - 12.405_749_6).abs() < 1e-6, "got {cost}");
 }
+
+// ── a tier alias is not a model: price at the one that served (KT-1316) ──
+
+fn claude_counters() -> TokenCounters {
+    TokenCounters::from_agent_report("ClaudeCode", 1_000, 2_000, Some(10_000), Some(5_000))
+        .expect("consistent counters")
+}
+
+#[test]
+fn a_tier_alias_names_no_rate_but_the_reported_dated_id_does() {
+    let observed = vec!["claude-haiku-4-5-20251001".to_string()];
+    let served = serving_model_for_pricing(Some("haiku"), &observed);
+    assert_eq!(served, Some("claude-haiku-4-5-20251001"));
+
+    // Priced at the alias: unknown, as the live test found.
+    let alias = price_reply(
+        "ClaudeCode",
+        Some("haiku"),
+        18_000,
+        None,
+        Some(claude_counters()),
+    );
+    assert_eq!(alias.cost_usd, None);
+    assert_eq!(alias.cost_unknown, Some(UnknownCost::NoRateForModel));
+
+    // Priced at the served model: 1k x 1 + 10k x 0.1 + 5k x 1.25 + 2k x 5, per million.
+    let priced = price_reply("ClaudeCode", served, 18_000, None, Some(claude_counters()));
+    let cost = priced
+        .cost_usd
+        .expect("the dated id resolves to claude-haiku-4-5");
+    let expected = (1_000.0 + 10_000.0 * 0.1 + 5_000.0 * 1.25 + 2_000.0 * 5.0) / 1_000_000.0;
+    assert!(
+        (cost - expected).abs() < 1e-9,
+        "got {cost}, want {expected}"
+    );
+    assert_eq!(priced.cost_unknown, None);
+}
+
+#[test]
+fn without_an_observation_the_requested_model_stands_in() {
+    assert_eq!(
+        serving_model_for_pricing(Some("gpt-4.1"), &[]),
+        Some("gpt-4.1")
+    );
+    assert_eq!(serving_model_for_pricing(None, &[]), None);
+}
+
+#[test]
+fn several_served_models_leave_no_single_rate() {
+    let observed = vec!["claude-haiku-4-5".to_string(), "claude-opus-5".to_string()];
+    assert_eq!(serving_model_for_pricing(Some("haiku"), &observed), None);
+}

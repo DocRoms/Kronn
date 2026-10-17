@@ -605,7 +605,14 @@ export type ApiCallStatus = "OK" | "ERROR" | "RateLimited" | "TimedOut";
  * these as plain inputs (no mask). Prompts may reference them symbolically;
  * the broker resolves values server-side when it builds full URLs.
  */
-export type ApiConfigKey = { env_key: string, label: string, placeholder: string, description: string, };
+export type ApiConfigKey = { env_key: string, label: string, placeholder: string, description: string, 
+/**
+ * The value is not a credential (a base URL, a workspace id): the call
+ * keeps it intact in the data it hands on instead of masking it as a
+ * secret. Honoured for registry servers only: an imported or custom
+ * definition cannot declare it, see `api_call_executor::is_public_config`.
+ */
+public?: boolean, };
 
 /**
  * Fixed request header declared on an API plugin. `value` is a literal
@@ -2667,6 +2674,12 @@ gate_step?: string | null, };
  */
 export type DecideRunResponse = { run_id: string, new_status: RunStatus, };
 
+export type DecideScopeRequest = {
+/**
+ * Approve only: the access granted, at most the one asked for.
+ */
+access?: ScopeAccess | null, };
+
 export type DeclineDiscussionQuestionRequest = { idempotency_key: string,
 /**
  * Why it is refused. Optional: a human owes no justification, but the
@@ -2756,7 +2769,12 @@ tests_executed?: TestsExecuted | null, };
 
 export type DependencyCheckStatus = "UpToDate" | "UpdatesAvailable" | "Unsupported" | "Unavailable" | "Error" | "TimedOut" | "NotInstalled";
 
-export type DependencyManagerUpdate = { manager: string, manifest: string, status: DependencyCheckStatus, outdated: number, major: number, packages?: Array<DependencyUpdatePackage>, };
+export type DependencyManagerUpdate = { manager: string, manifest: string, status: DependencyCheckStatus, outdated: number, major: number, packages?: Array<DependencyUpdatePackage>,
+/**
+ * Why the manifest could not be checked (missing binary, network, parse
+ * error, timeout…). Set for every status that is not a verdict (KT-1325).
+ */
+reason?: string | null, };
 
 export type DependencyUpdatePackage = { name: string, current: string, latest: string, major: boolean,
 /**
@@ -2764,7 +2782,13 @@ export type DependencyUpdatePackage = { name: string, current: string, latest: s
  * is empty because no installed version exists to report, and the row
  * only proves the declared range cannot reach `latest`.
  */
-declared_only?: boolean, };
+declared_only?: boolean,
+/**
+ * The lockfile `current` was read from when there is no installed tree
+ * (KT-1325), e.g. `package-lock.json`. `None`: `current` is what the
+ * package manager reports as installed (or the lock it was run against).
+ */
+lockfile?: string | null, };
 
 export type DependencyUpdateSummary = { managers: Array<DependencyManagerUpdate>, total_outdated: number, total_major: number, checked_at: string, cached: boolean,
 /**
@@ -3664,6 +3688,12 @@ stats: PlanningPlanStats, };
  */
 export type DiscussionPoll = { revision: string, detail: DiscussionDetail | null, };
 
+export type DiscussionProjectGrant = { id: string, discussion_id: string,
+/**
+ * `None` = every project.
+ */
+project_id: string | null, project_name: string | null, access: ScopeAccess, source: ScopeGrantSource, request_id: string | null, granted_by: string, granted_at: string, revoked_by: string | null, revoked_at: string | null, revoked_reason: string | null, };
+
 export type DiscussionQuestion = { id: string, discussion_id: string, source_message_id: string, fence_index: number, key: string, question: string, context: string | null, options: Array<DiscussionQuestionOption>, items: Array<DiscussionQuestionItem>, multiple: boolean, recommended_option_ids: Array<string>, task_ref: string | null, requester_workflow_step: DiscussionQuestionWorkflowStep | null, resume: DiscussionQuestionResume | null, state: DiscussionQuestionState, answer: DiscussionQuestionAnswer | null, created_at: string, updated_at: string, };
 
 export type DiscussionQuestionAnswer = { selected_option_ids: Array<string>, item_answers: Array<DiscussionQuestionItemAnswer>, text: string | null, author_pseudo: string, answered_at: string, message_id: string, };
@@ -3683,6 +3713,37 @@ export type DiscussionQuestionResumeState = "pending" | "launching" | "launched"
 export type DiscussionQuestionState = "pending" | "answered" | "declined";
 
 export type DiscussionQuestionWorkflowStep = { active: boolean, run_id: string, workflow_id: string, workflow_name: string, step_key: string, step_name: string, };
+
+/**
+ * A room's whole scope, as the human panel and the agent see it.
+ */
+export type DiscussionScope = { discussion_id: string, primary_project_id: string | null,
+/**
+ * Active grants.
+ */
+grants: Array<DiscussionProjectGrant>,
+/**
+ * Revoked grants, newest first: the journal.
+ */
+revoked: Array<DiscussionProjectGrant>,
+/**
+ * Pending requests, then the latest decided ones.
+ */
+requests: Array<DiscussionScopeRequest>,
+/**
+ * Digest of the active grants: a human decision names the scope it saw.
+ */
+fingerprint: string, };
+
+export type DiscussionScopeRequest = { id: string, discussion_id: string,
+/**
+ * `None` when the agent named no single project.
+ */
+project_id?: string | null,
+/**
+ * The project as the agent named it.
+ */
+requested_name: string, project_name?: string | null, access: ScopeAccess, reason: string, requested_by: string, status: ScopeRequestStatus, decided_by?: string | null, decided_at?: string | null, granted_access?: ScopeAccess | null, created_at: string, };
 
 /**
  * A row of `discussion_sessions` — one live (or historical)
@@ -4152,6 +4213,15 @@ data_base64: string | null, };
 export type FileChangeKind = "added" | "modified" | "deleted";
 
 /**
+ * An agent's request for another project.
+ */
+export type FileScopeRequest = {
+/**
+ * The project's name or id.
+ */
+project: string, access: ScopeAccess, reason: string, };
+
+/**
  * Where a finding stands. `Open` and `Unproven` are distinct on purpose: a
  * finding nobody has evidence for is not the same as one known to be live.
  */
@@ -4389,6 +4459,20 @@ languages_cached: boolean, };
 export type GitSwitchBranchRequest = { branch: string, };
 
 export type GitWorkspaceProvenance = { workspace_id: string | null, ownership: string, state: string, path: string | null, branch: string, base_sha: string | null, head_sha: string | null, integrated_sha: string | null, task_execution_id: string | null, task_reference: string | null, };
+
+export type GrantDiscussionProjectRequest = {
+/**
+ * The project to open; omitted with `all: true`.
+ */
+project_id?: string | null, all?: boolean, access: ScopeAccess,
+/**
+ * Required for every project in write: [`ALL_PROJECTS_WRITE_CONFIRMATION`].
+ */
+confirm?: string | null,
+/**
+ * The scope fingerprint the human's screen showed.
+ */
+expected_fingerprint?: string | null, };
 
 /**
  * What a grant may do. Fixed at enrolment, never derived afterwards.
@@ -8029,7 +8113,18 @@ target_agents?: Array<AgentType>, };
  */
 export type ReviseNoteRequest = { content: string, };
 
+export type RevokeDiscussionProjectRequest = { reason?: string | null, };
+
 export type RevokeRequest = { authority: string, credential_id: string, reason: string, };
+
+/**
+ * Withdraw one project from a workflow's scope, or all of it.
+ */
+export type RevokeWorkflowScopeRequest = {
+/**
+ * `None` withdraws every project.
+ */
+project_id?: string | null, };
 
 export type RotateAdminRequest = {
 /**
@@ -8291,6 +8386,12 @@ export type ScheduleAgentWakeRequest = { delay_seconds: number, reason: string, 
  */
 export type ScheduledCheck = { checked_at: string, sources_state: SourcesState, broken_count: number, };
 
+export type ScopeAccess = "read" | "write";
+
+export type ScopeGrantSource = "link" | "request" | "all";
+
+export type ScopeRequestStatus = "pending" | "approved" | "declined";
+
 export type Section = { heading: string, bytes: number, class: SectionClass,
 /**
  * Why it was classed that way. Kept because a classification a human cannot
@@ -8447,6 +8548,18 @@ disk_critical_gib: number,
  * `disk_thresholds()`, which is the only place they are read together.
  */
 disk_warning_gib: number,
+/**
+ * KT-1318 — free space, in GiB, a worker launch (or a full audit) needs on
+ * the volume holding the worktrees and lane build dirs. Below it Kronn
+ * sweeps its orphaned lane build dirs first, then refuses the launch with
+ * the reason and an alert in the principal room. `0` disables the guard.
+ */
+disk_launch_min_free_gib: number,
+/**
+ * KT-1318 — hours a Kronn-created lane build dir must be unwritten, with no
+ * live worktree, before a sweep (boot, periodic, pressure) may remove it.
+ */
+disk_sweep_idle_hours: number,
 /**
  * Maximum concurrent agent processes (default: 5)
  */
@@ -8636,7 +8749,15 @@ execution_variable_retention_days: number,
 /**
  * Days a finished workflow run keeps its step outputs. Zero keeps them.
  */
-run_payload_retention_days: number, p2p_enabled: boolean, frontend_origins: Array<string>,
+run_payload_retention_days: number,
+/**
+ * KT-1318 - free GiB a worker launch / full audit needs (`0` = guard off).
+ */
+disk_launch_min_free_gib: number,
+/**
+ * KT-1318 - hours a lane build dir must be idle before a sweep may take it.
+ */
+disk_sweep_idle_hours: number, p2p_enabled: boolean, frontend_origins: Array<string>,
 /**
  * The zone set in Settings; `None` follows the machine.
  */
@@ -8784,6 +8905,11 @@ scan_paths_explored: Array<string>,
 config_set_aside: string | null, };
 
 export type SetupStep = "Agents" | "ScanPaths" | "Detection" | "Complete";
+
+/**
+ * Validate a workflow's scope as it is now; an empty list clears it.
+ */
+export type SetWorkflowScopeRequest = { entries: Array<WorkflowScopeItem>, };
 
 /**
  * A copy of an agent CLI that PATH order hides behind the one Kronn runs.
@@ -10160,10 +10286,6 @@ project_id?: string,
  */
 step_agents?: { [key in string]: StepAgentOverride }, };
 
-export type UnassignPlanningTaskRequest = { assignee?: PlanningAssigneeInput | null, actor?: PlanningActor, };
-
-export type UnlinkPlanningDiscussionRequest = { discussion_id: string, actor?: PlanningActor, };
-
 /**
  * A doc whose every section is unanchored, and when an agent pass last
  * re-read it (KT-1292).
@@ -10178,6 +10300,10 @@ reviewed_at: string | null,
  * does (it is listed, never queued).
  */
 owned: boolean, };
+
+export type UnassignPlanningTaskRequest = { assignee?: PlanningAssigneeInput | null, actor?: PlanningActor, };
+
+export type UnlinkPlanningDiscussionRequest = { discussion_id: string, actor?: PlanningActor, };
 
 /**
  * An Exec command line that interpolates a template value into inline code
@@ -11147,6 +11273,24 @@ export type WorkflowRunOutcome = "no_op" | "changed";
 export type WorkflowRunSummary = { id: string, status: RunStatus, started_at: string, finished_at: string | null, tokens_used: number, };
 
 export type WorkflowSafety = { sandbox: boolean, max_files?: number | null, max_lines?: number | null, require_approval: boolean, };
+
+/**
+ * The projects a workflow's runs reach (KT-1270 DoD: the scope a workflow
+ * declares at launch). `valid` is false once the workflow changed after a
+ * human validated it: its runs then reach nothing more than their project.
+ */
+export type WorkflowScope = { workflow_id: string,
+/**
+ * False for a global or multi-project workflow, which cannot carry one.
+ */
+supported: boolean, entries: Array<WorkflowScopeEntry>, valid: boolean, validated_by: string | null, validated_at: string | null, };
+
+/**
+ * One project a workflow's runs reach.
+ */
+export type WorkflowScopeEntry = { project_id: string, project_name: string | null, access: ScopeAccess, };
+
+export type WorkflowScopeItem = { project_id: string, access: ScopeAccess, };
 
 export type WorkflowStep = {
 /**

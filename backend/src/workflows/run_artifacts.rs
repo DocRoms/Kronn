@@ -155,7 +155,7 @@ async fn sweep_root(
     removed
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

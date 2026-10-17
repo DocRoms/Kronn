@@ -65,7 +65,7 @@ pub fn clear(conn: &Connection, endpoint: &str, model: &str) -> Result<bool> {
     )? > 0)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

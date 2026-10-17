@@ -453,7 +453,7 @@ fn sort_keys(mut v: Vec<String>) -> Vec<String> {
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use serial_test::serial;

@@ -4,6 +4,7 @@ import { discussionPath } from '../lib/routes';
 import { AlertTriangle, CheckCircle2, ChevronDown, ExternalLink, FolderGit2, Loader2, Play, RotateCcw, X } from 'lucide-react';
 import { discussionActions as discussionActionsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
+import { WorkflowScopeSummary } from './WorkflowScope';
 import { useAsyncGuard } from '../hooks/useAsyncGuard';
 import type { DiscussionAction, DiscussionActionValue, LivePageAction, PromptVariable, StepAgentOverride } from '../types/generated';
 import { PromptVariableInput } from './workflows/PromptVariableInput';
@@ -378,6 +379,9 @@ export function KronnActionCard<T extends KronnAction>({
         </div>
       )}
 
+      {expanded && current.state === 'proposed' && current.kind === 'workflow' && (
+        <WorkflowScopeSummary workflowId={current.target_id} t={t} />
+      )}
       {expanded && current.state === 'proposed' && current.kind === 'workflow' && (
         <WorkflowStepAgents
           workflowId={current.target_id}

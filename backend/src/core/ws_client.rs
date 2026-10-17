@@ -481,7 +481,7 @@ pub fn compute_backoff(current: Duration, max: Duration) -> Duration {
     (current * 2).min(max)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

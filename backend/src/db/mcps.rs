@@ -805,7 +805,7 @@ pub fn decrypt_env(encrypted: &str, secret: &str) -> Result<HashMap<String, Stri
     serde_json::from_str(&json).map_err(|e| format!("Invalid env JSON: {}", e))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::models::{HostSyncMode, McpServer, McpSource, McpTransport};

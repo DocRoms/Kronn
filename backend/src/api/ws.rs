@@ -121,7 +121,7 @@ mod rate_limit {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "full-tests"))]
     mod tests {
         use super::*;
         use std::net::Ipv4Addr;
@@ -1487,7 +1487,7 @@ async fn record_contact_request(state: &AppState, invite_code: &str, peer_ip: Ip
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod handshake_tests {
     use super::*;
 
@@ -1747,7 +1747,7 @@ mod handshake_tests {
 /// a relayable frame is re-broadcast (handler returns `true`) only the FIRST
 /// time it is applied; any duplicate returns `false` so it is never bounced
 /// back out to peers (the bug that produced duplicate invites/notifications).
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod relay_dedup_tests {
     use super::*;
     use rusqlite::Connection;
@@ -1948,7 +1948,7 @@ mod relay_dedup_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod origin_and_admission_tests {
     use super::*;
     use std::sync::Arc;

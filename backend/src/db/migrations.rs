@@ -970,6 +970,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("sql/266_audit_step_observed_output.sql"),
     ),
     (
+        "267_discussion_project_grants",
+        include_str!("sql/267_discussion_project_grants.sql"),
+    ),
+    (
         "268_audit_run_launch",
         include_str!("sql/268_audit_run_launch.sql"),
     ),
@@ -1529,7 +1533,7 @@ pub(crate) fn run_through(conn: &Connection, stop_after: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

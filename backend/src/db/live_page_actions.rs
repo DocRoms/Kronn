@@ -1240,11 +1240,11 @@ pub fn complete_quick_prompt(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "live_page_action_retention_tests.rs"]
 mod retention_tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::models::{

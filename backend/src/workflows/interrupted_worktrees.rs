@@ -168,7 +168,7 @@ pub async fn reclaim_stale_interrupted_worktrees(
     report
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::models::{RunStatus, WorkflowRun, WorkflowSafety, WorkflowTrigger};

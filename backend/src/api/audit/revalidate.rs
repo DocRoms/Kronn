@@ -101,7 +101,10 @@ pub fn plan(project_path: &FsPath) -> RevalidationPlan {
     let docs_root = crate::core::docs_location::DocsRoot::of(project_path);
     let chain = super::steps_for(AuditKind::Full, &docs_root);
     let mut plan = RevalidationPlan {
-        sources_state: relevance.escalate(report.sources_state),
+        sources_state: citation_drift::escalate_partial(
+            project_path,
+            relevance.escalate(report.sources_state),
+        ),
         relevance: relevance.counts.clone(),
         unanchored: relevance.unanchored.clone(),
         ..Default::default()
@@ -189,6 +192,37 @@ pub fn plan(project_path: &FsPath) -> RevalidationPlan {
             reread: false,
             doc,
         });
+        if let Some(step) = step {
+            plan.agent_steps.push(step);
+        }
+    }
+    // KT-1312 — a doc a failed step left under its partial banner stays in the
+    // plan whatever its citations say: relevance does not read every reference
+    // the documentary gate blocks on, and the banner is the one sign left.
+    for doc in citation_drift::partial_docs(project_path) {
+        let step = owning_step(&chain, &doc, &docs_root);
+        match plan.sections.iter_mut().find(|s| s.doc == doc) {
+            Some(section) => {
+                if step.is_some() && !section.doc_missing {
+                    section.action = RevalidationAction::Agent;
+                }
+            }
+            None => plan.sections.push(RevalidationSection {
+                action: if step.is_some() {
+                    RevalidationAction::Agent
+                } else {
+                    RevalidationAction::Manual
+                },
+                step,
+                doc_missing: false,
+                reanchor: Vec::new(),
+                broken: Vec::new(),
+                human: Vec::new(),
+                relevance: Vec::new(),
+                reread: false,
+                doc,
+            }),
+        }
         if let Some(step) = step {
             plan.agent_steps.push(step);
         }
@@ -669,8 +703,16 @@ pub async fn revalidate_audit(
         return single_error(error);
     }
     // A configured folder failing containment refuses the run (KT-1192).
-    if let Err(reason) = crate::core::docs_location::DocsRoot::for_project(&project_path) {
-        return single_error(reason);
+    let docs_root = match crate::core::docs_location::DocsRoot::for_project(&project_path) {
+        Ok(docs_root) => docs_root,
+        Err(reason) => return single_error(reason),
+    };
+    // The folder's human docs wait for the briefing's choice, as for a Full run.
+    let recorded_run = super::has_recorded_full_run(&state, &project.id).await;
+    if let Some(refusal) =
+        super::docs_folder_choice_refusal(&project_path, &docs_root, recorded_run)
+    {
+        return super::full::sse_refusal(refusal);
     }
     let documents = match latest_documents(&state, &id).await {
         Ok(documents) => documents,

@@ -13,7 +13,7 @@ when the database still contains an older enabled option. Full audit launch
 reads the resolved briefing once for both options.
 [src: file: backend/src/api/audit/td_tasks.rs:35-40#briefing_option_set]
 [src: file: backend/src/api/audit/cross_audit.rs:21-29#briefing_cross_agents]
-[src: file: backend/src/api/audit/full.rs:312-320#briefing_option_set]
+[src: file: backend/src/api/audit/full.rs:325-333#briefing_option_set]
 
 UI, MCP and workflow launches require saved briefing notes. A human can
 explicitly choose the form's default answers; that saves “Not provided”
@@ -28,7 +28,7 @@ therefore carries its briefing and options without the original database.
 When closed project answers are absent or unreadable, the project-doc hook
 keeps an existing generated `project.md`; a newly installed template still
 gets its default fields filled. The report exposes `kept_without_answers`.
-[src: file: backend/src/api/audit/full.rs:974-979#sync_briefing_file]
+[src: file: backend/src/api/audit/full.rs:967-972#sync_briefing_file]
 [src: file: backend/src/api/audit/full.rs:1087-1099#fill_project_doc_for_audit]
 [src: file: backend/src/api/audit/project_doc.rs:1202-1211#ProjectDocReport]
 [src: file: backend/src/api/audit/project_doc.rs:1266-1284#fill_project_doc_for_audit]

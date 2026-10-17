@@ -53,7 +53,7 @@ discussion identity. Switching Claude to Codex or Ollama changes more than the
 Kronn already has the useful abstraction needed for routing: `ModelTier` plus a
 per-agent `ModelTierConfig`. Concrete models are resolved independently for
 Claude, Codex, Gemini, Copilot, Ollama, and LiteLLM. An explicit per-step model
-currently wins over the tier. [src: file: backend/src/models/setup.rs:698-744#ModelTier]
+currently wins over the tier. [src: file: backend/src/models/setup.rs:718-764#ModelTier]
 [src: file: backend/src/agents/runner.rs:3441-3475#resolve_model_flag]
 
 Consequently, a fallback target must be represented as:
@@ -69,7 +69,7 @@ FallbackTarget {
 “Installed” is not enough to select that target. Current detection separately
 tracks installed, enabled, runtime-available, authentication-ready, and runtime
 warning states. HTTP providers additionally need endpoint health, model
-availability, and model capability checks. [src: file: backend/src/models/setup.rs:830-905#AgentDetection]
+availability, and model capability checks. [src: file: backend/src/models/setup.rs:850-925#AgentDetection]
 
 ## Policy and precedence
 
@@ -255,13 +255,13 @@ The current spawn audit found these distinct Kronn-owned paths:
 | Automatic discussion summary | None any more: removed in 0.13.0, a summary only exists on demand. [src: file: backend/src/models/discussions.rs:490-514#SummaryStrategy] |
 | Explicit discussion summary | User-triggered summary path. [src: file: backend/src/api/discussions/orchestration.rs:1291-1490#generate_summary_on_demand] |
 | Workflow Agent helper | Normal attempts, retries, structured-output repair, current Ollama quality escalation, multi-agent review turns, and rollback Agent steps. [src: file: backend/src/workflows/steps.rs:465-749#run_agent_with_timeout] [src: file: backend/src/workflows/steps.rs:1802-2043#run_multi_agent_debate] [src: file: backend/src/workflows/runner.rs:3700-3780#execute_step] |
-| Full audit | Reasoning-tier filesystem audit. [src: file: backend/src/api/audit/full.rs:327-343#audit_tier] [src: file: backend/src/api/audit/full.rs:1800-1814#start] |
-| Drift audit | Reasoning-tier partial audit. [src: file: backend/src/api/audit/drift.rs:483-506#audit_tier] [src: file: backend/src/api/audit/drift.rs:978-988#start] |
+| Full audit | Reasoning-tier filesystem audit. [src: file: backend/src/api/audit/full.rs:327-343#audit_tier] [src: file: backend/src/api/audit/full.rs:1809-1823#start] |
+| Drift audit | Reasoning-tier partial audit. [src: file: backend/src/api/audit/drift.rs:483-506#audit_tier] [src: file: backend/src/api/audit/drift.rs:989-999#start] |
 
 Audits still refuse Vibe, which has no file tools Kronn can scope to the
 project; every HTTP provider is admitted since KT-924 and KT-980, a `Custom`
 target only with a validated named connection. Eligibility is therefore a
-property of each surface, not of an agent being installed. [src: file: backend/src/api/audit/mod.rs:700-731#agent_can_audit]
+property of each surface, not of an agent being installed. [src: file: backend/src/api/audit/mod.rs:734-765#agent_can_audit]
 
 | Surface | Desired behavior | Initial rollout |
 |---|---|---:|

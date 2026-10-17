@@ -28,6 +28,10 @@ const MAX_MARKER_REASON_CHARS: usize = 240;
 /// reason, never the agent's text.
 pub(crate) fn partial_banner(step: u32, reason: &str) -> String {
     let one_line = reason.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Square brackets become round ones: a gate reason that quotes a
+    // `[src: …]` marker must neither read as a citation nor, cut at the limit,
+    // leave an unclosed one in the doc.
+    let one_line = one_line.replace('[', "(").replace(']', ")");
     let bounded: String = one_line.chars().take(MAX_MARKER_REASON_CHARS).collect();
     let bounded = bounded.replace("-->", "—>");
     format!(
@@ -37,7 +41,6 @@ Kronn kept what the agent wrote: retry the step, or accept it as it stands.\n{PA
 }
 
 /// Whether `content` starts with a partial marker.
-#[cfg(test)]
 pub(crate) fn has_partial_marker(content: &str) -> bool {
     content.trim_start().starts_with(PARTIAL_OPEN)
 }
@@ -764,6 +767,27 @@ mod tests {
             banner.matches("-->").count(),
             2,
             "only the open and close markers: {banner}"
+        );
+    }
+
+    #[test]
+    fn a_banner_never_carries_a_source_marker_even_cut_by_the_limit() {
+        // The live case: the gate reason quotes a marker and the 240-char
+        // limit lands inside it.
+        let reason = format!(
+            "{} [src: file: .github/workflows/ci.yml:12] and [src: file: docs/a.md:3]",
+            "x".repeat(MAX_MARKER_REASON_CHARS - 20)
+        );
+        let banner = partial_banner(3, &reason);
+        assert!(
+            !banner.to_ascii_lowercase().contains("[src:"),
+            "no marker opener in the banner: {banner}"
+        );
+        let body = "## Facts\n\n- a [src: file: src/a.rs:1]\n- b [src: file: src/b.rs:2]\n";
+        let doc = format!("{banner}{body}");
+        assert_eq!(
+            crate::core::anti_halluc::extract_source_markers(&doc),
+            vec!["file: src/a.rs:1", "file: src/b.rs:2"]
         );
     }
 

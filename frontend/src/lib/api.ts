@@ -1,6 +1,10 @@
 import type { AcceptAuditStepResponse, ArtifactBundle, AuditLatest, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditRunCost, AuditStepInfo, AuditRecentActivity, AuditTokenBreakdown, EmbedOriginsChange } from '../types/generated';
 import type { BriefingDetectedDoc, BriefingDocsAnswers, BriefingProjectAnswers, BriefingProjectRules, CrossAuditEstimate, LinkedRepoDocStatus, SavedBriefing } from '../types/generated';
 import type { WorkerConnectivity } from '../types/generated';
+import type {
+  DecideScopeRequest, DiscussionProjectGrant, DiscussionScope, GrantDiscussionProjectRequest,
+  RevokeDiscussionProjectRequest, RevokeWorkflowScopeRequest, SetWorkflowScopeRequest, WorkflowScope,
+} from '../types/generated';
 import type { DocProvenanceReport } from '../types/generated';
 import type { TemplateReinstallRequest, TemplateReinstallPlan, TemplateReinstallReport, MergeBase, TemplateMergeAccepted, TemplateMergeAcceptRequest, TemplateMergeRequest, TemplateMergeView } from '../types/generated';
 import { readTextAttachmentPreview } from './textAttachmentPreview';
@@ -982,7 +986,7 @@ export const config = {
       'GET',
       `/discussion-weights?discussion_ids=${encodeURIComponent(discussionIds.join(','))}`,
     ),
-  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; agent_global_timeout_min?: number; local_agent_global_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; discussion_notes_enabled?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'OnDemand' | 'Off'; agent_handoffs_enabled?: boolean; agent_handoff_paid_limit?: number; agent_handoff_paid_unlimited?: boolean; agent_handoff_blocked_agents?: AgentType[]; discussion_weight?: DiscussionWeightConfig; execution_variable_retention_days?: number; run_payload_retention_days?: number; p2p_enabled?: boolean; frontend_origins?: string[]; timezone?: string }) => api<void>('POST', '/config/server', req),
+  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; agent_global_timeout_min?: number; local_agent_global_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; discussion_notes_enabled?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'OnDemand' | 'Off'; agent_handoffs_enabled?: boolean; agent_handoff_paid_limit?: number; agent_handoff_paid_unlimited?: boolean; agent_handoff_blocked_agents?: AgentType[]; discussion_weight?: DiscussionWeightConfig; execution_variable_retention_days?: number; run_payload_retention_days?: number; disk_launch_min_free_gib?: number; disk_sweep_idle_hours?: number; p2p_enabled?: boolean; frontend_origins?: string[]; timezone?: string }) => api<void>('POST', '/config/server', req),
   regenerateAuthToken: () => api<string>('POST', '/config/auth-token/regenerate'),
 };
 
@@ -2347,6 +2351,40 @@ export const discussions = {
       + (category ? `?category=${encodeURIComponent(category)}` : ''),
   ),
 
+  /** KT-1270 — the projects this room reaches besides its own, the pending
+   *  access requests of its agents, and the journal. */
+  scope: (id: string) => api<DiscussionScope>(
+    'GET',
+    `/discussions/${encodeURIComponent(id)}/scope`,
+  ),
+
+  /** Open a project (or every project) to the room. Every project in write
+   *  needs the typed confirmation and the fingerprint of the scope shown. */
+  grantScope: (id: string, request: GrantDiscussionProjectRequest) => api<DiscussionProjectGrant>(
+    'POST',
+    `/discussions/${encodeURIComponent(id)}/scope/grants`,
+    request,
+  ),
+
+  revokeScope: (id: string, grantId: string, request: RevokeDiscussionProjectRequest) => api<DiscussionScope>(
+    'POST',
+    `/discussions/${encodeURIComponent(id)}/scope/grants/${encodeURIComponent(grantId)}/revoke`,
+    request,
+  ),
+
+  /** Approve an agent's request, at most at the access it asked for. */
+  approveScopeRequest: (id: string, requestId: string, request: DecideScopeRequest) => api<DiscussionScope>(
+    'POST',
+    `/discussions/${encodeURIComponent(id)}/scope/requests/${encodeURIComponent(requestId)}/approve`,
+    request,
+  ),
+
+  declineScopeRequest: (id: string, requestId: string, request: DecideScopeRequest) => api<DiscussionScope>(
+    'POST',
+    `/discussions/${encodeURIComponent(id)}/scope/requests/${encodeURIComponent(requestId)}/decline`,
+    request,
+  ),
+
   /** KT-595 — the arbitration questions of a discussion, pending and past.
    *  Polled, so the backend checks the room exists without loading its
    *  transcript. */
@@ -2702,6 +2740,14 @@ export const workflows = {
   unsafeSteps: (id: string) => api<UnsafeExecStep[]>('GET', `/workflows/${id}/unsafe-steps`),
   /** KT-1138 — whether the saved workflow, its sub-workflows and rollbacks can start. */
   readiness: (id: string) => api<WorkflowReadiness>('GET', `/workflows/${id}/readiness`),
+  /** KT-1270 — the projects this workflow's runs reach, and whether the human
+   *  validation still holds (any change to the workflow suspends it). */
+  scope: (id: string) => api<WorkflowScope>('GET', `/workflows/${encodeURIComponent(id)}/scope`),
+  setScope: (id: string, request: SetWorkflowScopeRequest) =>
+    api<WorkflowScope>('PUT', `/workflows/${encodeURIComponent(id)}/scope`, request),
+  /** Withdraw one project (or all, `project_id: null`); always available. */
+  revokeScope: (id: string, request: RevokeWorkflowScopeRequest) =>
+    api<WorkflowScope>('POST', `/workflows/${encodeURIComponent(id)}/scope/revoke`, request),
   /** KT-1017 — whether a command line sends run values to an unmodelled program. */
   execLineCheck: (req: ExecLineCheckRequest) => api<ExecLineCheck>('POST', '/exec/line-check', req),
   /** KT-918 — where each declared script file stands against its approved hash. */
@@ -3981,6 +4027,89 @@ export const runsApi = {
     if (filters.offset) query.set('offset', String(filters.offset));
     return api<SharedRun[]>('GET', `/runs${query.size ? `?${query}` : ''}`);
   },
+};
+
+// ─── Disk (KT-1318) ───────────────────────────────────────────────────────────
+export type DiskKind = 'worktree' | 'lane_build_dir' | 'cache';
+export type DiskState = 'orphan' | 'reclaimable' | 'active' | 'kept' | 'foreign';
+
+export interface DiskOwner {
+  task_ref: string | null;
+  execution_id: string;
+  status: string;
+}
+
+export interface DiskEntry {
+  project_id: string;
+  kind: DiskKind;
+  path: string;
+  name: string;
+  /** A floor when `bytes_are_partial`. */
+  bytes: number;
+  bytes_are_partial: boolean;
+  idle_seconds: number | null;
+  owner: DiskOwner | null;
+  state: DiskState;
+  reason: string | null;
+  /** A confirmed per-entry delete may take it. */
+  purgeable: boolean;
+}
+
+export interface DiskKindTotal {
+  kind: DiskKind;
+  entries: number;
+  bytes: number;
+  bytes_are_partial: boolean;
+  orphan_bytes: number;
+}
+
+export interface DiskPolicy {
+  launch_min_free_gib: number;
+  sweep_idle_hours: number;
+  warning_gib: number;
+  critical_gib: number;
+}
+
+export interface DiskReport {
+  available_bytes: number | null;
+  under_pressure: boolean;
+  policy: DiskPolicy;
+  volumes: { project_id: string; project_name: string; path: string; available_bytes: number | null; total_bytes: number | null }[];
+  totals: DiskKindTotal[];
+  orphan_bytes: number;
+  orphan_count: number;
+  entries: DiskEntry[];
+}
+
+export interface DiskPurgeItem {
+  path: string;
+  purged: boolean;
+  bytes: number;
+  bytes_are_partial: boolean;
+  reason: string | null;
+}
+
+export interface DiskPurgeResult {
+  mode: 'orphans' | 'entries';
+  items: DiskPurgeItem[];
+  freed_bytes: number;
+  kept: number;
+  available_bytes_after: number | null;
+}
+
+/** What Kronn keeps on the disk, and the purge. Without `paths` the purge takes
+ *  orphans only; named `paths` are deleted only with `confirm`. */
+export const diskApi = {
+  report: (projectId?: string) =>
+    api<DiskReport>('GET', `/maintenance/disk${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ''}`),
+  purgeOrphans: (projectId?: string) =>
+    api<DiskPurgeResult>('POST', '/maintenance/disk/purge', projectId ? { project_id: projectId } : {}),
+  purgeEntries: (paths: string[], projectId?: string) =>
+    api<DiskPurgeResult>('POST', '/maintenance/disk/purge', {
+      paths,
+      confirm: true,
+      ...(projectId ? { project_id: projectId } : {}),
+    }),
 };
 
 /** Shared catalog consumed by discussion, QP/compare and workflow pickers. */

@@ -302,7 +302,7 @@ async fn resolve_summarize_inline(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

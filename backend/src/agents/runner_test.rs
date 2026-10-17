@@ -1,4 +1,4 @@
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use crate::acp::{
         AcpAgent, AcpCapability, AcpConfigOption, AcpError, AcpInitialize,
@@ -11118,6 +11118,62 @@ Suite de la réponse.";
         assert_eq!(legacy.args, ["/app/scripts/disc-introspection-mcp.py"]);
     }
 
+    fn touch_bridge(root: &std::path::Path, relative: &str) -> String {
+        let script = root.join(relative).join("disc-introspection-mcp.py");
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        std::fs::write(&script, "# bridge").unwrap();
+        script.to_string_lossy().into_owned()
+    }
+
+    /// KT-1316 — the script is found from where the process runs, never from the
+    /// checkout the binary happened to be compiled in.
+    #[test]
+    fn the_bridge_script_is_found_from_the_running_process_not_the_build_checkout() {
+        let find = super::super::disc_introspection_mcp_path_near;
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(
+            find(Some(empty.path()), Some(empty.path())),
+            None,
+            "no script around the process: nothing, not the build checkout's"
+        );
+        assert_eq!(find(None, None), None);
+
+        // Run from a source checkout: its own script, whatever the binary's dir.
+        let checkout = tempfile::tempdir().unwrap();
+        let script = touch_bridge(checkout.path(), "backend/scripts");
+        let backend = checkout.path().join("backend");
+        assert_eq!(
+            find(Some(empty.path()), Some(&backend)),
+            Some(script.clone())
+        );
+        assert_eq!(
+            find(Some(empty.path()), Some(checkout.path())),
+            Some(script.clone())
+        );
+
+        // A binary in that checkout's target dir finds it too.
+        let target = checkout.path().join("target/lane/debug");
+        std::fs::create_dir_all(&target).unwrap();
+        assert_eq!(find(Some(&target), Some(empty.path())), Some(script));
+    }
+
+    #[test]
+    fn an_installed_bridge_wins_over_the_working_directory_checkout() {
+        let install = tempfile::tempdir().unwrap();
+        let installed = touch_bridge(install.path(), "scripts");
+        let bin = install.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let checkout = tempfile::tempdir().unwrap();
+        touch_bridge(checkout.path(), "backend/scripts");
+        let found =
+            super::super::disc_introspection_mcp_path_near(Some(&bin), Some(checkout.path()))
+                .expect("the installed script is found");
+        assert_eq!(
+            std::fs::canonicalize(found).unwrap(),
+            std::fs::canonicalize(installed).unwrap()
+        );
+    }
+
     #[test]
     fn packaged_project_mcp_config_binds_the_desktop_instance() {
         const PROBE: &str = "KRONN_TEST_PACKAGED_CONFIG";
@@ -16341,7 +16397,7 @@ sleep 3600
 }
 
 // ─── #223: text blocks never share a line ──────────────────────────────────
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod text_block_tests {
     use crate::agents::runner::*;
 

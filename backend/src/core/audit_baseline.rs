@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use crate::core::audit_detectors::{
     is_test_path, walk, DetectedSignal, Severity, MARKUP_EXTS, MAX_PER_DETECTOR,
 };
+use crate::core::generated_paths::GeneratedPaths;
 
 /// Files above this size are skipped: a baseline config is never that large.
 const MAX_READ_BYTES: u64 = 512 * 1024;
@@ -32,6 +33,9 @@ pub struct Inventory {
 impl Inventory {
     pub fn collect(root: &Path) -> Self {
         let mut inv = Inventory::default();
+        // Dockerfile / compose / CI files are security surface and always
+        // inventoried; only the template hygiene checks skip generated files.
+        let generated = GeneratedPaths::load(root);
         for entry in walk(root).take(MAX_WALKED_FILES) {
             let path = entry.path();
             let rel = path.strip_prefix(root).unwrap_or(path);
@@ -48,7 +52,10 @@ impl Inventory {
                 .extension()
                 .and_then(|e| e.to_str())
                 .unwrap_or_default();
-            if MARKUP_EXTS.contains(&ext) && !is_test_path(path) {
+            if MARKUP_EXTS.contains(&ext)
+                && !is_test_path(path)
+                && !generated.is_generated(&rel.to_string_lossy().replace('\\', "/"), false)
+            {
                 inv.templates.push(path.to_path_buf());
             }
         }

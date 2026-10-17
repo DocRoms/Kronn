@@ -192,7 +192,7 @@ fn classify_acp_error(error: AcpError) -> DiscoveryOutcome {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::acp::AcpConfigValue;

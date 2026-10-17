@@ -293,7 +293,7 @@ pub fn revoke_all_after_restart(conn: &Connection) -> Result<usize> {
     Ok(revoked)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

@@ -791,7 +791,7 @@ pub async fn disc_summarize(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     // Behavioural tests live in tests/api_tests.rs (integration) — the
     // routes need a full AppState + DB. Here we only unit-test the

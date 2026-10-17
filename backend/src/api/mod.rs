@@ -31,9 +31,11 @@ pub mod discover;
 pub mod discussion_actions;
 pub mod discussion_important;
 pub mod discussion_questions;
+pub mod discussion_scope;
 pub mod discussion_video_sequence;
 pub mod discussion_weight;
 pub mod discussions;
+pub mod disk;
 pub mod docs;
 pub mod execution_variables;
 pub mod external_api_connections;
@@ -56,7 +58,7 @@ pub mod nvidia;
 pub mod ollama;
 pub mod openapi;
 pub mod orchestration;
-#[cfg(all(test, unix))]
+#[cfg(all(test, unix, feature = "full-tests"))]
 pub(crate) mod other_projects_fixture;
 pub mod planning;
 pub mod plugin_portability;

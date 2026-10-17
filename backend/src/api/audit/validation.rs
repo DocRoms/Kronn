@@ -338,6 +338,23 @@ pub fn check_detector_disposition(
     project_path: &Path,
     signals: &[crate::core::audit_detectors::DetectedSignal],
 ) -> Option<StepValidationWarning> {
+    detector_disposition_gap(project_path, signals).map(|gap| gap.warning)
+}
+
+/// An undisposed-signals failure with the targeted correction the agent gets
+/// on a bounded retry (KT-1323), like every other Step-8 gate.
+pub struct DispositionGap {
+    pub warning: StepValidationWarning,
+    pub feedback: String,
+    pub count: usize,
+}
+
+/// [`check_detector_disposition`] with the retry feedback naming the signals
+/// still to dispose of.
+pub fn detector_disposition_gap(
+    project_path: &Path,
+    signals: &[crate::core::audit_detectors::DetectedSignal],
+) -> Option<DispositionGap> {
     if signals.is_empty() {
         return None;
     }
@@ -384,9 +401,23 @@ pub fn check_detector_disposition(
         .map(|s| format!("{} (`{}`)", s.title, s.evidence))
         .collect::<Vec<_>>()
         .join("; ");
-    Some(StepValidationWarning {
-        reason: undisposed_reason(undisposed.len(), &list),
-        repaired: false,
+    let feedback = format!(
+        "## Detector signals — targeted correction required\n\n\
+         Read `{index}` and the TD sheets it lists, then dispose of each detector signal \
+         below that is still unaddressed: {list}.\n\n\
+         For each one do ONE of: emit or refresh a TD, fold it into a baseline note, or cite \
+         its file path in the `## Dimension coverage` matrix with a verifiable reason. Keep the \
+         existing TD sheets and human-owned sections; correct only the missing dispositions, \
+         do not repeat the entire audit.\n",
+        index = docs_root.path("inconsistencies-tech-debt.md"),
+    );
+    Some(DispositionGap {
+        warning: StepValidationWarning {
+            reason: undisposed_reason(undisposed.len(), &list),
+            repaired: false,
+        },
+        feedback,
+        count: undisposed.len(),
     })
 }
 
@@ -692,7 +723,7 @@ fn template_source_for(target_file: &str) -> Option<PathBuf> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use serial_test::serial;

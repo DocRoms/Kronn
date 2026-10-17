@@ -1046,7 +1046,7 @@ fn destructive_reason(cmd: &str, args: &[String]) -> Option<String> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

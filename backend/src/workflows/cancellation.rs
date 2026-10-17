@@ -170,7 +170,7 @@ fn cancel_registered_token(state: &AppState, key: &str) -> Result<bool> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use std::sync::Arc;

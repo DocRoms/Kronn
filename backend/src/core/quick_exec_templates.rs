@@ -453,6 +453,6 @@ pub const REVIEW_COLLECTORS: &[&str] = &[
     "pr-reactions",
 ];
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "quick_exec_templates_test.rs"]
 mod quick_exec_templates_test;

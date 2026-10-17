@@ -1179,7 +1179,7 @@ pub async fn compare_agents(
     }))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod compare_tests {
     use super::*;
 

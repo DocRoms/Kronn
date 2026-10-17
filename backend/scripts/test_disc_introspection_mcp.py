@@ -5386,6 +5386,86 @@ class WorkflowActiveRunsTests(unittest.TestCase):
         self.assertEqual(path, "/api/workflows")
 
 
+class DiskUsageToolTests(unittest.TestCase):
+    """`disk_usage` (KT-1318) - the disk view and the orphan purge over HTTP.
+
+    The tool reads `GET /api/maintenance/disk`, keeps `entries` bounded, and its
+    only mutation is the default (orphans-only) purge: it can never name an
+    entry to delete.
+    """
+
+    REPORT = {
+        "success": True,
+        "data": {
+            "available_bytes": 123,
+            "under_pressure": False,
+            "policy": {"launch_min_free_gib": 30, "sweep_idle_hours": 6},
+            "totals": [{"kind": "lane_build_dir", "entries": 40, "bytes": 9}],
+            "orphan_count": 2,
+            "orphan_bytes": 5,
+            "entries": [{"path": f"/r/target/wt-{n}"} for n in range(40)],
+        },
+    }
+    PURGE = {
+        "success": True,
+        "data": {
+            "mode": "orphans",
+            "freed_bytes": 77,
+            "kept": 3,
+            "items": [
+                {"path": "/r/target/wt-a", "purged": True},
+                {"path": "/r/target/wt-b", "purged": False},
+            ],
+        },
+    }
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.calls = []
+
+        def fake_http(method, path, body=None, **_kwargs):
+            self.calls.append((method, path, body))
+            return self.PURGE if method == "POST" else self.REPORT
+
+        patcher = mock.patch.object(self.mod, "_http", fake_http)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_it_is_declared_with_a_manual_and_only_two_inputs(self):
+        tool = next(t for t in self.mod.TOOLS if t["name"] == "disk_usage")
+        self.assertEqual(
+            sorted(tool["inputSchema"]["properties"]), ["project_id", "purge_orphans"]
+        )
+        self.assertIn("disk_usage", self.mod.TOOL_MANUALS)
+        self.assertIn("never removed", self.mod.TOOL_MANUALS["disk_usage"])
+        self.assertIs(self.mod.DISPATCH["disk_usage"], self.mod.call_disk_usage)
+
+    def test_a_plain_call_only_reads_and_bounds_the_entries(self):
+        out = self.mod.call_disk_usage({})
+        self.assertEqual(self.calls, [("GET", "/api/maintenance/disk", None)])
+        self.assertEqual(out["entries_total"], 40)
+        self.assertEqual(len(out["entries"]), 25)
+        self.assertEqual(out["orphan_count"], 2)
+        self.assertNotIn("purged", out)
+
+    def test_the_project_filter_is_url_encoded(self):
+        self.mod.call_disk_usage({"project_id": "a b&c"})
+        self.assertEqual(self.calls[0][1], "/api/maintenance/disk?project_id=a%20b%26c")
+
+    def test_purge_orphans_takes_the_default_purge_then_reports_afresh(self):
+        out = self.mod.call_disk_usage({"purge_orphans": True, "project_id": "p1"})
+        method, path, body = self.calls[0]
+        self.assertEqual((method, path), ("POST", "/api/maintenance/disk/purge"))
+        self.assertEqual(body, {"project_id": "p1"}, "no paths, no confirm: orphans only")
+        self.assertEqual(self.calls[1][0], "GET")
+        self.assertEqual(out["purged"]["removed"], ["/r/target/wt-a"])
+        self.assertEqual(out["purged"]["freed_bytes"], 77)
+
+    def test_a_truthy_string_does_not_trigger_the_purge(self):
+        self.mod.call_disk_usage({"purge_orphans": "false"})
+        self.assertEqual([c[0] for c in self.calls], ["GET"])
+
+
 class WorkflowRunStatusTests(unittest.TestCase):
     """`workflow_run_status` MCP wrapper.
 

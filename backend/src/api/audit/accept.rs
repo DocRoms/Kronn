@@ -115,7 +115,8 @@ pub(crate) fn accept_blocker_of(
 fn normalized_reason(reason: Option<String>) -> Option<String> {
     let reason = reason?;
     let one_line = reason.split_whitespace().collect::<Vec<_>>().join(" ");
-    let bounded: String = one_line.chars().take(MAX_REASON_CHARS).collect();
+    let bounded =
+        crate::core::anti_halluc::truncate_outside_markers(&one_line, MAX_REASON_CHARS, false);
     (!bounded.is_empty()).then_some(bounded)
 }
 

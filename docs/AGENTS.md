@@ -97,6 +97,7 @@ Spec: [`agents-md-format-v1.md`](conventions/agents-md-format-v1.md). **Honest b
 | **HTTP model-provider transport** (LiteLLM / NVIDIA / Custom) | `docs/operations/http-transport.md`, `docs/design/adr-004-http-transport.md` |
 | **Media generation** (image / video — billable, read first) | `docs/architecture/media-generation.md` |
 | Token cost | `docs/operations/token-economy-0.9.6.md` |
+| Disk full / `target/wt-*` / purge | `docs/operations/disk-usage.md` |
 | Fix known issue | `docs/inconsistencies-tech-debt.md` |
 | Documentation history | `docs/release-notes-archive.md` |
 | Stack overview | `docs/stack.md` |
@@ -108,7 +109,6 @@ Spec: [`agents-md-format-v1.md`](conventions/agents-md-format-v1.md). **Honest b
 | repo structure / code placement | `docs/repo-map.md` |
 | testing / quality | `docs/testing-quality.md` |
 | coding rules | `docs/coding-rules.md` |
-| known issues / tech debt | `docs/inconsistencies-tech-debt.md` |
 | Architecture decisions | `docs/decisions.md` |
 | term definitions / project jargon | `docs/glossary.md` |
 | dependency versions per layer | `docs/stack.md` |
@@ -155,7 +155,7 @@ Never load everything "just in case".
 | Change type | Required tests |
 |-------------|---------------|
 | New API endpoint | Integration test in `backend/tests/api_tests.rs` (HTTP request → response assertion) |
-| New backend function | Unit test in same file (`#[cfg(test)] mod tests`) |
+| New backend function | Same-file `#[cfg(all(test, feature = "full-tests"))] mod tests` |
 | Bug fix | Regression test proving the bug is fixed (test fails without fix, passes with) |
 | New frontend component | Test file in `__tests__/` (render + key interactions) |
 | Frontend behavior change | Update existing tests + add edge case coverage |

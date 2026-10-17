@@ -292,7 +292,7 @@ pub fn estimate_extra_context_len(
     profiles_len + skills_len + directives_len + mcp_len + 20
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::models::ApiKey;

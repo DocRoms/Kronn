@@ -16,7 +16,8 @@
 //!   write `lib/routes.ts` for `frontend/src/lib/routes.ts`), and is not a
 //!   file Kronn generates or git ignores. A line that tells history ("the
 //!   former `x.rs`") or speaks of a file's absence, a section titled as a
-//!   proposal, a naming pattern (`TD-YYYYMMDD-slug.md`), an example (and the
+//!   proposal (or a `Remediation` / `Fix` / `Next steps` line: a fix to make,
+//!   not a fact), a naming pattern (`TD-YYYYMMDD-slug.md`), an example (and the
 //!   list right under it), a doc still
 //!   holding the template's placeholders, and the changelog / release docs
 //!   are not claims.
@@ -406,6 +407,10 @@ const PROPOSAL_HEADINGS: &[&str] = &[
     "pistes",
     "idees",
     "idées",
+    "remediation",
+    "remediations",
+    "fix",
+    "fixes",
 ];
 
 /// Phrases that make a heading a proposal wherever they sit in it.
@@ -421,6 +426,11 @@ const PROPOSAL_PHRASES: &[&[&str]] = &[
     &["roadmap"],
     &["travaux", "futurs"],
     &["pistes", "d"],
+    &["remediation"],
+    &["next", "steps"],
+    &["recommended", "fix"],
+    &["possible", "fix"],
+    &["how", "to", "fix"],
 ];
 
 /// A section titled as a proposal ("Suggested direction", "Future work",
@@ -439,6 +449,44 @@ fn is_proposal_heading(heading: &str) -> bool {
     PROPOSAL_PHRASES
         .iter()
         .any(|phrase| words.windows(phrase.len()).any(|w| w == *phrase))
+}
+
+/// The label a line opens with when it states a fix to make rather than a
+/// fact (`- **Remediation**: create x.js`, `Suggested fix: …`, a TD sheet's
+/// field): `Some(true)` when nothing follows the label, so the text under it
+/// is the proposal, `Some(false)` when the proposal is on the line itself.
+fn proposal_label(line: &str) -> Option<bool> {
+    let mut t = line.trim_start();
+    if is_list_item(line) {
+        t = t.split_once(' ')?.1.trim_start();
+    }
+    let (label, rest) = if let Some(bold) = t.strip_prefix("**").or_else(|| t.strip_prefix("__")) {
+        let end = bold.find("**").or_else(|| bold.find("__"))?;
+        (&bold[..end], &bold[end + 2..])
+    } else {
+        t.split_once(':')?
+    };
+    let label = label.trim().trim_end_matches(':').trim();
+    if label.len() > 40 || !is_proposal_heading(label) {
+        return None;
+    }
+    Some(rest.trim().trim_start_matches(':').trim().is_empty())
+}
+
+/// Whether a section's text carries a line that states a fix to make.
+fn names_proposal(text: &str) -> bool {
+    let mut in_fence = false;
+    text.split('\n').any(|line| {
+        if is_fence(line) {
+            in_fence = !in_fence;
+            return false;
+        }
+        !in_fence && proposal_label(line).is_some()
+    })
+}
+
+fn indent_of(line: &str) -> usize {
+    line.len() - line.trim_start().len()
 }
 
 /// A token that is a naming pattern, not a path: `TD-YYYYMMDD-slug.md`,
@@ -502,6 +550,10 @@ fn prose_paths(project: &Path, text: &str) -> Vec<String> {
     // An example line covers the list right under it, up to the next blank
     // line or heading.
     let mut example_block = false;
+    // A proposal label that closes a line covers the text under it, up to the
+    // next blank line, heading or (for a list item) sibling item.
+    let mut proposal_block = false;
+    let mut proposal_indent: Option<usize> = None;
     for line in text.split('\n') {
         if is_fence(line) {
             in_fence = !in_fence;
@@ -509,9 +561,23 @@ fn prose_paths(project: &Path, text: &str) -> Vec<String> {
         }
         if line.trim().is_empty() || heading_of(line).is_some() {
             example_block = false;
+            proposal_block = false;
         }
         if in_fence {
             continue;
+        }
+        if let Some(label_only) = proposal_label(line) {
+            proposal_block = label_only;
+            proposal_indent = is_list_item(line).then(|| indent_of(line));
+            continue;
+        }
+        if proposal_block {
+            let sibling =
+                proposal_indent.is_some_and(|ind| is_list_item(line) && indent_of(line) <= ind);
+            if !sibling {
+                continue;
+            }
+            proposal_block = false;
         }
         let parts = clauses(line);
         // An example clause that closes a line covers the list right under
@@ -982,7 +1048,11 @@ fn judge(
         let correction = ProposedCorrection {
             kind: CorrectionKind::CheckOrAnchor,
             reference: String::new(),
-            proposal: "Kronn cannot verify this section: it has no citation and names no repository path. Check it against the code, then anchor it with a `[src: file: path:line]` citation, or remove it if it no longer applies.".into(),
+            proposal: if is_proposal_heading(&section.heading) || names_proposal(&section.text) {
+                "Kronn does not judge the paths of this section: it proposes work still to be done (a fix, a remediation, next steps), so what it names is not a claim about the repository now. It has no citation to verify.".into()
+            } else {
+                "Kronn cannot verify this section: it has no citation and names no repository path. Check it against the code, then anchor it with a `[src: file: path:line]` citation, or remove it if it no longer applies.".into()
+            },
         };
         return Some(verdict_row(
             ctx,
