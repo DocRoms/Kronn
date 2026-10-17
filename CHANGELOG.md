@@ -684,6 +684,22 @@ Release notes for 0.9.3 and earlier are available in the
   a file and is fabricated when missing, so the enforce gate keeps blocking it. Line references written in
   backticked prose are not re-anchored; only markers are (documented in
   `docs/conventions/agents-md-format-v1.md`).
+- An ApiCall no longer masks a plugin's public config in the data it hands on
+  (KT-1249). The base URL (`https://acme.atlassian.net`) was scrubbed as a
+  secret since 0.14.3, so a Jira description reached the next steps with
+  `***/browse/EW-1` links, and a PUT would have written them back broken. A
+  config key declared `public` by a registry plugin (Jira's `JIRA_URL`) and a
+  plugin's base URL when it is a bare origin (scheme, host, optional port, no
+  path) are now left intact. Everything else stays masked, including any URL
+  with a path (webhook URLs hide their secret there), whatever its key name:
+  tokens, passwords, auth headers, the decoded Basic pair, every other config
+  value, in the data, summaries, errors and logs. An imported bundle or a
+  custom API cannot declare a value public. The URL decision is made on the
+  raw text: a secret hidden behind dot segments (`…/SECRET/..`,
+  `…/SECRET/%2e%2e`) no longer passes for a bare origin. A value declared
+  public is checked too, even with no `/`: user info, query, fragment, `;param`
+  and non-ASCII characters keep it masked (`https:user:SECRET@host`,
+  `host;SECRET`).
 - A review-wait timeout no longer locks the principal out of the review
   (KT-1293). The watchdog used to move the unreviewed delivery to `Escalated`
   while its alert told the principal to call `task_exec_review`, which only
