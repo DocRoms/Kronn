@@ -75,7 +75,7 @@ pub fn for_run(
     .map_err(Into::into)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

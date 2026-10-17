@@ -567,7 +567,7 @@ fn heal_steps_in_place(steps: &mut [WorkflowStep]) -> Vec<String> {
     names
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

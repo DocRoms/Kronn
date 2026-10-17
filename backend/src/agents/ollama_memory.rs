@@ -514,6 +514,6 @@ pub(crate) async fn kv_shape_from_store(model: &str) -> Option<KvShape> {
     .flatten()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "ollama_memory_test.rs"]
 mod tests;

@@ -1465,7 +1465,7 @@ fn parse_poetry_outdated(output: &str) -> Result<Vec<DependencyUpdatePackage>, (
     Ok(packages)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

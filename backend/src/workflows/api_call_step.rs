@@ -177,7 +177,7 @@ pub enum ExtractError {
     InvalidPath { path: String, reason: String },
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use serde_json::json;

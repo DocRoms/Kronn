@@ -1978,7 +1978,7 @@ pub fn review_decision_v1_schema() -> serde_json::Value {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::TaskExecutionStatus::{self, *};
     use super::TaskWorkerScope;

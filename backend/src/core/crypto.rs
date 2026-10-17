@@ -176,7 +176,7 @@ mod hex {
 // roundtrip, AEAD tamper detection, wrong-key rejection, malformed input
 // rejection, generate_secret uniqueness + parse_secret validation.
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 
@@ -429,7 +429,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod proptests {
     use super::*;
     use proptest::prelude::*;

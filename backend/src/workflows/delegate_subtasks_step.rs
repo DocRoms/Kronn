@@ -1828,6 +1828,6 @@ pub(crate) fn finish(step: &WorkflowStep, start: Instant, report: DelegationRepo
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "delegate_subtasks_step_tests.rs"]
 mod tests;

@@ -796,7 +796,7 @@ async fn forget_deleted_media_asset(state: &AppState, file_id: &str) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::db::Database;

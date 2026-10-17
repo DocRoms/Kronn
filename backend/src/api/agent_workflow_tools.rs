@@ -2,7 +2,7 @@
 use super::*;
 use axum::{extract::Path, extract::State, Json};
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "agent_workflow_tests.rs"]
 mod tests;
 

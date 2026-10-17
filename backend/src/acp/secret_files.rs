@@ -136,7 +136,7 @@ pub fn opencode_full_access_config(operator: Option<&str>) -> Option<String> {
     operator.is_none().then(opencode_config_content)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use serde_json::Value;

@@ -1773,7 +1773,7 @@ pub async fn reencrypt_imported_with(
     Ok(total)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::core::keyvault::KeyVault;

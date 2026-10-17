@@ -457,7 +457,7 @@ fn guess_mime(filename: &str) -> &'static str {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

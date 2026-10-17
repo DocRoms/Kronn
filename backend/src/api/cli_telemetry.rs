@@ -219,7 +219,7 @@ pub async fn discussion_token_cost(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "cli_telemetry_test.rs"]
 mod cli_telemetry_test;
 

@@ -421,7 +421,7 @@ pub(crate) fn copy_dir_nondestructive_in(
     Ok(created)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

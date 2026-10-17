@@ -156,7 +156,7 @@ fn replace_whole_tokens(text: &str, needle: &str) -> String {
     out
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

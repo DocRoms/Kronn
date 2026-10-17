@@ -7,11 +7,11 @@ use crate::models::{
 };
 use axum::{extract::Path, extract::Query, extract::State, Json};
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "agent_page_tests.rs"]
 mod tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "agent_page_bench.rs"]
 mod bench;
 

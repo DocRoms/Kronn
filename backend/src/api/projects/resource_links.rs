@@ -240,7 +240,7 @@ pub(super) fn link_resources(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::models::{

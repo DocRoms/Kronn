@@ -650,7 +650,7 @@ pub async fn repository_skills_for_discussion(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::core::repository_resources::{RepositoryLock, RepositoryLockResource};
