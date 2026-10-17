@@ -26,12 +26,16 @@ Diagnostics cover
 budget overruns, unresolved placeholders, broken local links and file
 citations, duplicate or obsolete guides, orphan documents, large inventories
 that are not search-first, and mutable citation line ranges; only broken links
-and broken citations are blocking, the others are warnings. A Stack table
+and broken citations are blocking, the others are warnings. A citation may end
+on the empty line N+1 of a newline-terminated file (what an editor numbers,
+but never start there),
+a parenthesised `(src: file: …)` is refused (only the bracketed marker is
+verified), and every path or range the gate suggests is one it accepts. A Stack table
 row without its `Latest stable` or `Support end` source and date (or
 `not verified: no source`) raises the non-blocking `stack_currency` warning.
-[src: file: backend/src/core/document_optimization.rs:1135-1150#inspect_stack_currency]
-[src: file: backend/src/core/document_optimization.rs:1169-1241#stack_currency_problems]
-[src: file: backend/src/core/document_optimization.rs:1243-1263#diag]
+[src: file: backend/src/core/document_optimization.rs:1307-1315#inspect_stack_currency]
+[src: file: backend/src/core/document_optimization.rs:1334-1406#stack_currency_problems]
+[src: file: backend/src/core/document_optimization.rs:1408-1415#diag]
 
 During an audit run (KT-1308), whatever the anti-hallucination mode, a
 `[src: deps: …]` citation the injected dependency watch does not hold and a

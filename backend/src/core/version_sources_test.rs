@@ -18,6 +18,7 @@ fn summary() -> DependencyUpdateSummary {
                         latest: "19.1.0".into(),
                         major: true,
                         declared_only: false,
+                        lockfile: None,
                     },
                     DependencyUpdatePackage {
                         name: "@types/node".into(),
@@ -25,8 +26,10 @@ fn summary() -> DependencyUpdateSummary {
                         latest: "20.4.0".into(),
                         major: false,
                         declared_only: false,
+                        lockfile: None,
                     },
                 ],
+                reason: None,
             },
             DependencyManagerUpdate {
                 manager: "cargo".into(),
@@ -35,6 +38,7 @@ fn summary() -> DependencyUpdateSummary {
                 outdated: 0,
                 major: 0,
                 packages: vec![],
+                reason: None,
             },
             DependencyManagerUpdate {
                 manager: "composer".into(),
@@ -43,6 +47,7 @@ fn summary() -> DependencyUpdateSummary {
                 outdated: 0,
                 major: 0,
                 packages: vec![],
+                reason: None,
             },
         ],
         total_outdated: 2,
@@ -128,6 +133,7 @@ fn every_citation_the_snapshot_emits_verifies_against_it() {
                     latest: "2.0.0".into(),
                     major: true,
                     declared_only: false,
+                    lockfile: None,
                 })
             })
             .collect(),
@@ -280,7 +286,7 @@ fn block_states_the_source_and_lists_citable_rows() {
     );
     assert!(block.contains("**Source used: dependency watch dated 2026-10-04.**"));
     assert!(block.contains("[src: deps: npm/react@2026-10-04]"));
-    assert!(block.contains("| react | 18.2.0 | 19.1.0 | major |"));
+    assert!(block.contains("| react | 18.2.0 | installed | 19.1.0 | major |"));
     assert!(block.contains("[src: file: .github/workflows/ci.yml:6]"));
     assert!(block.contains("not verified: no source"));
     assert!(block.contains("composer.json (composer): not checked"));
@@ -311,6 +317,7 @@ fn a_large_watch_is_capped_with_a_remainder_count() {
             latest: "2.0.0".into(),
             major: true,
             declared_only: false,
+            lockfile: None,
         })
         .collect();
     let snap = DependencySnapshot::from_summary(&s);
@@ -535,7 +542,9 @@ fn a_declared_only_row_is_never_rendered_as_the_version_in_place() {
                 latest: "18.0.0".into(),
                 major: true,
                 declared_only: true,
+                lockfile: None,
             }],
+            reason: None,
         }],
         total_outdated: 1,
         total_major: 1,
@@ -552,7 +561,7 @@ fn a_declared_only_row_is_never_rendered_as_the_version_in_place() {
         "2026-10-11",
     );
     assert!(
-        block.contains("| joi | not installed (declared range only; installed version unknown) | 18.0.0 | major |"),
+        block.contains("| joi | not installed (declared range only; installed version unknown) | none | 18.0.0 | major |"),
         "{block}"
     );
     assert!(!block.contains("| joi |  |"), "{block}");
@@ -615,4 +624,68 @@ fn a_not_installed_manifest_is_listed_as_unchecked() {
         .up_to_date
         .iter()
         .any(|(_, manifest)| manifest == "package.json"));
+}
+
+/// KT-1325 — the version source (lockfile vs installed) travels from the
+/// snapshot to the prompt table and the citation verdict.
+#[test]
+fn a_lockfile_version_names_its_source_in_the_table_and_the_citation_verdict() {
+    let mut s = summary();
+    s.managers[0].packages[0].lockfile = Some("package-lock.json".into());
+    let snap = DependencySnapshot::from_summary(&s);
+    assert_eq!(
+        snap.packages[0].lockfile.as_deref(),
+        Some("package-lock.json")
+    );
+    assert_eq!(snap.packages[1].lockfile, None);
+
+    let block = render_version_block(
+        VersionSource::DependencyWatch,
+        Some(&snap),
+        &[],
+        "2026-10-11",
+    );
+    assert!(
+        block.contains("| react | 18.2.0 | from package-lock.json | 19.1.0 | major |"),
+        "{block}"
+    );
+    assert!(
+        block.contains("| @types/node | 20.1.0 | installed | 20.4.0 | minor/patch |"),
+        "{block}"
+    );
+
+    let (status, detail) = verify_dep_marker("deps: npm/react@2026-10-04", Some(&snap)).unwrap();
+    assert_eq!(status, SourceStatus::Verified);
+    assert!(
+        detail.contains("18.2.0 (from package-lock.json)"),
+        "{detail}"
+    );
+    let (_, installed) =
+        verify_dep_marker("deps: npm/@types/node@2026-10-04", Some(&snap)).unwrap();
+    assert!(installed.contains("20.1.0 (installed)"), "{installed}");
+}
+
+/// KT-1325 — a manifest the watch could not check says why, in the snapshot
+/// and in the prompt block.
+#[test]
+fn an_unchecked_manifest_carries_its_reason_into_the_prompt_block() {
+    let mut s = summary();
+    s.managers[2].status = DependencyCheckStatus::Error;
+    s.managers[2].reason = Some("`composer` failed (exit 1): No composer.lock file present".into());
+    let snap = DependencySnapshot::from_summary(&s);
+    assert_eq!(snap.unchecked.len(), 1);
+    assert_eq!(
+        snap.unchecked[0].reason.as_deref(),
+        Some("`composer` failed (exit 1): No composer.lock file present")
+    );
+    let block = render_version_block(
+        VersionSource::DependencyWatch,
+        Some(&snap),
+        &[],
+        "2026-10-11",
+    );
+    assert!(
+        block.contains("composer.json (composer): not checked (Error) — `composer` failed (exit 1): No composer.lock file present"),
+        "{block}"
+    );
 }

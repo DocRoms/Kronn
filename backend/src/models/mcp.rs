@@ -406,6 +406,12 @@ pub struct ApiConfigKey {
     pub label: String,
     pub placeholder: String,
     pub description: String,
+    /// The value is not a credential (a base URL, a workspace id): the call
+    /// keeps it intact in the data it hands on instead of masking it as a
+    /// secret. Honoured for registry servers only: an imported or custom
+    /// definition cannot declare it, see `api_call_executor::is_public_config`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub public: bool,
 }
 
 // ─── Source / scope / config ──────────────────────────────────────────────

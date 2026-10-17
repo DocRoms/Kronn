@@ -126,7 +126,7 @@ caller still explicitly clears its old override when choosing a new agent/tier.
 [src: file: frontend/src/lib/modelCatalogSelection.ts:95-146#catalogModelOptions]
 [src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:32-93#useModelCatalogSnapshot]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:90-93#catalogModelProvenance]
-[src: file: frontend/src/components/ChatHeader.tsx:429-430#currentModel]
+[src: file: frontend/src/components/ChatHeader.tsx:430-431#currentModel]
 [src: file: frontend/src/pages/WorkflowsPage.tsx:1606-1637#changeQuickPromptAgent]
 [src: file: frontend/src/pages/WorkflowsPage.tsx:3220-3221#currentModel]
 

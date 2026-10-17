@@ -183,6 +183,7 @@ mod tests {
                     latest: "2.0.0".into(),
                     major: true,
                     declared_only: false,
+                    lockfile: None,
                 })
                 .collect(),
             unchecked: vec![],

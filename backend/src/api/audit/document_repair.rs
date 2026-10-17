@@ -293,8 +293,14 @@ fn split_verified_citations(project: &Path, content: &str) -> Option<String> {
                 let Ok(source) = std::fs::read_to_string(resolved) else {
                     return false;
                 };
-                crate::core::anti_halluc::parse_line_bounds(range)
-                    .is_some_and(|(a, b)| a > 0 && a <= b && b <= source.lines().count())
+                crate::core::anti_halluc::parse_line_bounds(range).is_some_and(|(a, b)| {
+                    crate::core::anti_halluc::range_is_citable(
+                        source.lines().count(),
+                        crate::core::anti_halluc::last_citable_line(&source),
+                        a,
+                        b,
+                    )
+                })
             });
             if parts.len() > 1
                 && strict
@@ -445,6 +451,50 @@ mod tests {
     }
 
     #[test]
+    fn a_scripted_step_follows_the_gate_feedback_to_a_clean_document() {
+        // KT-1322, through the step gate: attempt 1 cites the Read tool's last
+        // (empty) line, writes a parenthesised citation, a comment inside a
+        // marker and a dead relative link; attempt 2 does what the feedback says.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("docs/tech-debt")).unwrap();
+        std::fs::write(root.join("config.yml"), "a: 1\nb: 2\n").unwrap();
+        std::fs::write(root.join("empty.txt"), "").unwrap();
+        std::fs::write(root.join("docs/AGENTS.md"), "# P\n").unwrap();
+        std::fs::write(root.join("docs/tech-debt/TD-1.md"), "# T\n").unwrap();
+        let before = snapshot(root).unwrap();
+
+        // `1-3` is what Read shows for the 2-line file: it must hold.
+        let first = "# P\nRead [src: file: config.yml:1-3]\nParen (src: file: config.yml:2)\n\
+                     Comment [src: file: config.yml:Focused on x]\nEmpty [src: file: empty.txt]\n\
+                     [td](../tech-debt/TD-1.md)\n";
+        std::fs::write(root.join("docs/AGENTS.md"), first).unwrap();
+        let blocking = check_attempt(root, &before, &[], &[], None)
+            .unwrap()
+            .blocking;
+        let messages: Vec<_> = blocking.iter().map(|d| d.message.as_str()).collect();
+        assert_eq!(messages.len(), 5, "{messages:#?}");
+        assert!(!messages.iter().any(|m| m.contains("config.yml:1-3")));
+        assert!(messages
+            .iter()
+            .any(|m| m.contains("write [src: file: config.yml:2]")));
+        assert!(messages.iter().any(|m| m.contains("is not a line number")));
+        assert!(messages.iter().any(|m| m.contains("the file is empty")));
+        assert!(messages
+            .iter()
+            .any(|m| m.ends_with("did you mean `tech-debt/TD-1.md`?")));
+
+        let second = "# P\nRead [src: file: config.yml:1-3]\nParen [src: file: config.yml:2]\n\
+                      Comment [src: file: config.yml:1]\nThe `empty.txt` file is empty.\n\
+                      [td](tech-debt/TD-1.md)\n";
+        std::fs::write(root.join("docs/AGENTS.md"), second).unwrap();
+        let blocking = check_attempt(root, &before, &blocking, &[], None)
+            .unwrap()
+            .blocking;
+        assert!(blocking.is_empty(), "{blocking:#?}");
+    }
+
+    #[test]
     fn normalization_handles_repeated_file_prefixes_without_accepting_unverified_references() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("code.rs"), "first\nsecond\n").unwrap();
@@ -455,7 +505,7 @@ mod tests {
         );
         for reference in [
             "invented.rs:1",
-            "code.rs:3",
+            "code.rs:4",
             "code.rs:2-1",
             "../outside.rs:1",
         ] {
@@ -677,6 +727,7 @@ mod tests {
                     latest: "2.0.0".into(),
                     major: true,
                     declared_only: false,
+                    lockfile: None,
                 }],
                 unchecked: vec![],
                 up_to_date: vec![],

@@ -65,6 +65,25 @@ Release notes for 0.9.3 and earlier are available in the
   the sentence holding the path, not to the whole line, and a proposal heading
   must be a proposal phrase (« Ideas », « Future work »), not a word inside a
   real title.
+- A room can reach other projects, decided by a human (KT-1270). A room keeps
+  its own project: its working directory, where what it creates lands, and the
+  only project whose credentials and API configs it may use. In the room
+  settings a human opens another project in read (its tasks, rooms, runs,
+  pages) or in write (planning only: create and edit its tasks), or every
+  project, the latter in write only after a typed confirmation sent with the
+  scope the screen showed. An agent asks with the MCP tool `room_scope`; the
+  request grants nothing until a human approves it, narrows it to read or
+  declines it. The header always shows what the room reaches (a red badge for
+  every project) and the requests waiting. Grants are re-read on every agent
+  call, so a revoke applies at once; they never open another project's
+  credentials, never run its workflows, never pass to worker rooms, and are
+  kept as a journal with a `[kronn-scope: …]` line in the room for each change.
+  Only the room's own agents reach its grants, never a workflow step or a
+  worker posting in it. A workflow's runs reach other projects through a scope a
+  human sets on the workflow page; any change to the workflow suspends it until
+  validated again, and the launch card shows it. Design and refused attacks:
+  `docs/design/discussion-project-scope.md`.
+
 - AI documentation template and audit v2 gap audit (KT-819). The project
   facts of the briefing gain « Documentation externe » (Confluence, Notion,
   wiki, other; https addresses only, no credentials, at most 6), rendered in
@@ -558,7 +577,48 @@ Release notes for 0.9.3 and earlier are available in the
   The pre-step baseline and the blame ledger of the documentary gate (KT-1306)
   use the same run-aware analysis: an unbacked citation already there is in the
   baseline and does not block the step, one the step wrote blocks it and is
-  charged to it.
+  charged to it. The parenthesised-citation check of KT-1322 now reads a
+  document without Kronn's own partial-step banner, whose quoted gate reason
+  (`[src: file: path:line]` turned round and cut at its limit) was refused as a
+  `(src: file: …)` the step never wrote.
+- The documentary gate no longer refuses what Claude Code's Read tool shows
+  (KT-1322). A newline-terminated file of N lines is numbered up to N+1 there
+  (the last line is empty), and a range ending at N+1 was refused as outside
+  the file; it is now accepted by every range check (the gate, the
+  anti-hallucination verifier, citation drift and the bundle repair), through
+  one shared helper. The gate also stops suggesting what it refuses: a
+  comment after a non-numeric line (`docs/AGENTS.md:Focused on x`) is no
+  longer split into `[src: file: docs/AGENTS.md:Focused]`, an empty file gets
+  no `1-1` range, and a secret-looking file (`.ssh/…`, `.env`) is never
+  offered a range to cite. A parenthesised `(src: file: …)` citation, which
+  nothing verified, is refused with the bracketed form to write; a broken
+  relative link names the path it resolves to and the link that exists
+  (`../tech-debt/TD-1.md` from `docs/` → `tech-debt/TD-1.md`). Review
+  follow-up: citation drift hashes and evaluates a range ending at N+1 (it
+  reported it « removed » on the next re-audit), a range that starts on the
+  empty line N+1 is refused everywhere, the verifier no longer rounds an empty
+  file up to one line (`empty.txt:1` is refused), a text file given without a
+  line is offered `path:<line>` instead of a bare path, and the secret-looking
+  list now covers `id_ecdsa`, `id_dsa`, `*.p12`, `*.pfx`, `.netrc`, `.npmrc`
+  and `.pgpass`.
+
+- The dependency watch no longer reads only `node_modules` (KT-1325). Without
+  an install, the version in place comes from the lockfile — `package-lock.json`
+  / `npm-shrinkwrap.json` (v1, v2, v3), `yarn.lock` (classic and berry),
+  `pnpm-lock.yaml` — or `composer.lock` for Composer, so a checkout with a
+  lockfile no longer shows « declared only ». The source (lockfile vs
+  installed) is carried in the snapshot, the audit prompt's dependency table
+  and the `deps:` citation verdict, and the overview names the lockfile. Every
+  manifest the watch cannot settle (missing binary, network, parse error,
+  timeout, nothing installed) carries its reason in the snapshot, the audit
+  prompt block and the overview, instead of a bare « Error ». KT-1279's
+  workspace handling is unchanged. Review follow-up: a reason quotes what the
+  tool printed, so credentials are masked before it is stored, shown or put in
+  a prompt (URL userinfo and query, `_authToken=`, bearer headers, `ghp_` /
+  `npm_` tokens); a root lockfile resolves a nested project only when the
+  root's `workspaces` globs (or `pnpm-workspace.yaml`) list it; a Composer row
+  read from `composer.lock` is labelled « from composer.lock », no longer « not
+  installed ».
 - The audit's citation gate now says how to fix a citation (KT-1307). A path
   that only resolves under the docs root or next to the citing doc gets
   « paths are repository-root relative; did you mean `docs/AGENTS.md:94`? »,
@@ -662,6 +722,22 @@ Release notes for 0.9.3 and earlier are available in the
   a file and is fabricated when missing, so the enforce gate keeps blocking it. Line references written in
   backticked prose are not re-anchored; only markers are (documented in
   `docs/conventions/agents-md-format-v1.md`).
+- An ApiCall no longer masks a plugin's public config in the data it hands on
+  (KT-1249). The base URL (`https://acme.atlassian.net`) was scrubbed as a
+  secret since 0.14.3, so a Jira description reached the next steps with
+  `***/browse/EW-1` links, and a PUT would have written them back broken. A
+  config key declared `public` by a registry plugin (Jira's `JIRA_URL`) and a
+  plugin's base URL when it is a bare origin (scheme, host, optional port, no
+  path) are now left intact. Everything else stays masked, including any URL
+  with a path (webhook URLs hide their secret there), whatever its key name:
+  tokens, passwords, auth headers, the decoded Basic pair, every other config
+  value, in the data, summaries, errors and logs. An imported bundle or a
+  custom API cannot declare a value public. The URL decision is made on the
+  raw text: a secret hidden behind dot segments (`…/SECRET/..`,
+  `…/SECRET/%2e%2e`) no longer passes for a bare origin. A value declared
+  public is checked too, even with no `/`: user info, query, fragment, `;param`
+  and non-ASCII characters keep it masked (`https:user:SECRET@host`,
+  `host;SECRET`).
 - A review-wait timeout no longer locks the principal out of the review
   (KT-1293). The watchdog used to move the unreviewed delivery to `Escalated`
   while its alert told the principal to call `task_exec_review`, which only
@@ -791,6 +867,15 @@ Release notes for 0.9.3 and earlier are available in the
   `reviewed_head_sha`, `dod_verifications`, the string version `"1"`), and a
   spawned worker's `tests_executed` schema is declared in the measured `TOOLS`
   literal.
+- A project's `token_override` (a raw token) is no longer returned to a
+  Kronn-launched agent: credential fields are stripped from every bridge-token
+  response.
+
+- A task linked to rooms of several projects is visible from each of them
+  again (KT-1298, GitHub #248). One link to another project's room hid the
+  whole task, so `plan_get` answered 403 in every room and agents duplicated
+  the shared parent task. The links an agent cannot see are now left out of the
+  task instead.
 
 - The default-docs-root golden no longer depends on the day it runs: the
   compact date every step prompt opens with is masked like the dashed one.

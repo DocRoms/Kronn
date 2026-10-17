@@ -1014,6 +1014,7 @@ pub(crate) fn materialize_custom_server(payload: &CustomApiPayload) -> McpServer
         .iter()
         .filter(|f| !f.label.trim().is_empty())
         .map(|f| ApiConfigKey {
+            public: false,
             env_key: slug_env_key(&f.label),
             label: f.label.clone(),
             placeholder: String::new(),
@@ -4769,6 +4770,7 @@ mod tests {
                 config_keys: env_keys
                     .iter()
                     .map(|k| ApiConfigKey {
+                        public: false,
                         env_key: k.to_string(),
                         label: k.to_string(),
                         placeholder: String::new(),

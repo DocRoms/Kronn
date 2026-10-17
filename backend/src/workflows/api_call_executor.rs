@@ -190,9 +190,10 @@ async fn execute_core_gated(
 }
 
 /// Every value this call takes from the env or the credential store is a
-/// secret wherever it lands, base URL included: no plugin metadata declares
-/// a config value public. The resolved auth adds its wire forms (Basic
-/// decoded to its password, bearer and header tokens).
+/// secret wherever it lands, except the config values that are public (see
+/// [`is_public_config`]): masking a base URL would rewrite the links of the
+/// data handed to the next steps (`***/browse/EW-1`). The resolved auth adds
+/// its wire forms (Basic decoded to its password, bearer and header tokens).
 pub(crate) fn call_secrets(
     plugin: &McpServer,
     env: &HashMap<String, String>,
@@ -201,12 +202,17 @@ pub(crate) fn call_secrets(
     let Some(spec) = plugin.api_spec.as_ref() else {
         return set;
     };
+    let trusted = matches!(plugin.source, McpSource::Registry);
     for (key, value) in env {
         // `__token_error__` and friends carry a diagnostic, not a credential.
         if key.starts_with("__") && key.ends_with("_error__") {
             continue;
         }
+        if is_public_config(spec, trusted, key, value) {
+            continue;
+        }
         set.add(value);
+        add_url_parts(&mut set, value);
     }
     if let ApiAuthKind::Basic {
         user_env,
@@ -221,6 +227,148 @@ pub(crate) fn call_secrets(
         add_resolved_auth(&mut set, &auth);
     }
     set
+}
+
+/// A masked value that parses as a URL (`http:user:SECRET@host`,
+/// `http:host?token=SECRET`) is rewritten by the URL normalisation in the
+/// request line the summary prints (`http://user:SECRET@host/`), so the raw
+/// text no longer matches: its user info, query, fragment and normalised form
+/// are secrets too.
+fn add_url_parts(set: &mut crate::core::secret_scrub::SecretSet, value: &str) {
+    let Ok(url) = Url::parse(value.trim()) else {
+        return;
+    };
+    for part in [
+        Some(url.username()),
+        url.password(),
+        url.query(),
+        url.fragment(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        set.add(part);
+    }
+    if url.has_host() {
+        set.add(url.as_str().trim_end_matches('/'));
+    }
+}
+
+/// Whether an env value is public configuration rather than a credential.
+/// Everything is masked by default; a value is public only if
+///
+/// 1. it is declared `public` in `api_spec.config_keys` AND the server is a
+///    trusted registry one (`McpSource::Registry`): a bundle, a custom API or
+///    any other editable definition cannot grant it. Every declared value is
+///    checked: no [`has_credential_marker`] text (user info, query, fragment,
+///    `;param`, backslash, whitespace, encoded forms, non-ASCII), and a value
+///    holding `:` or `/` must pass the full raw URL check; or
+/// 2. it is the plugin's base URL (`{KEY}` in `base_url`) and a bare origin:
+///    http(s) scheme + host[+port] with an empty or `/` path, no user info,
+///    query or fragment. A path may hold a secret (a webhook URL), so no name
+///    heuristic ever makes a URL public.
+///
+/// An auth key (including a `CliToken` fallback key) is never public.
+fn is_public_config(spec: &ApiSpec, trusted: bool, key: &str, value: &str) -> bool {
+    if auth_env_keys(&spec.auth).contains(&key) {
+        return false;
+    }
+    let declared = trusted
+        && spec
+            .config_keys
+            .iter()
+            .any(|config| config.env_key == key && config.public);
+    if declared {
+        // A declared value is never taken on trust: no credential marker, ever,
+        // and anything that can parse as a URL (a `:` or `/`) goes through the
+        // full raw URL check. Only a plain token (host, workspace id) is taken
+        // as is.
+        if has_credential_marker(value) {
+            return false;
+        }
+        return !value.contains([':', '/']) || is_credential_free_url(value, true);
+    }
+    spec.base_url.contains(&format!("{{{key}}}")) && is_credential_free_url(value, false)
+}
+
+/// Text that can carry or hide a credential in a URL-ish value, whatever the
+/// shape: user info (`@`, `%40`), query (`?`, `%3f`), fragment (`#`, `%23`),
+/// `;param`, a backslash, a percent-encoded `.`, whitespace or control
+/// characters (the URL parser strips tabs and newlines), and any non-ASCII
+/// character (zero-width, soft hyphen, U+2215, U+3002 fold into the host or a
+/// separator once IDNA has run).
+fn has_credential_marker(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    !value.is_ascii()
+        || value.chars().any(|c| c.is_whitespace() || c.is_control())
+        || value.contains([';', '\\', '?', '#', '@'])
+        || ["%2e", "%3f", "%23", "%3b", "%5c", "%40"]
+            .iter()
+            .any(|marker| lower.contains(marker))
+}
+
+/// An http(s) URL decided on its RAW text, never on a parsed form:
+/// `Url::parse` resolves `..` and `%2e%2e`, which would turn
+/// `https://host/SECRET/..` into a bare origin. After the authority there must
+/// be nothing or exactly `/` (with `allow_path` false), or a path with no `.`
+/// / `..` segment. The authority is ASCII host characters only (letters,
+/// digits, `.`, `-`, `_`, and `:`/`[`/`]` for a port or IPv6 literal). Never
+/// accepted: any [`has_credential_marker`] text.
+fn is_credential_free_url(value: &str, allow_path: bool) -> bool {
+    let value = value.trim();
+    if has_credential_marker(value) {
+        return false;
+    }
+    let lower = value.to_ascii_lowercase();
+    let Some(rest) = lower
+        .strip_prefix("https://")
+        .or_else(|| lower.strip_prefix("http://"))
+    else {
+        return false;
+    };
+    let (authority, path) = match rest.find('/') {
+        Some(index) => rest.split_at(index),
+        None => (rest, ""),
+    };
+    if authority.is_empty()
+        || !authority
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '[' | ']'))
+    {
+        return false;
+    }
+    let path_ok = if allow_path {
+        !path.split('/').any(|segment| matches!(segment, "." | ".."))
+    } else {
+        matches!(path, "" | "/")
+    };
+    path_ok && Url::parse(value).is_ok_and(|url| url.host_str().is_some())
+}
+
+/// The env keys that hold the credential of this auth kind.
+fn auth_env_keys(auth: &ApiAuthKind) -> Vec<&str> {
+    match auth {
+        ApiAuthKind::Basic {
+            user_env,
+            password_env,
+        } => vec![user_env.as_str(), password_env.as_str()],
+        ApiAuthKind::ApiKeyQuery { env_key, .. }
+        | ApiAuthKind::ApiKeyHeader { env_key, .. }
+        | ApiAuthKind::Bearer { env_key }
+        | ApiAuthKind::BasicApiKey { env_key } => vec![env_key.as_str()],
+        ApiAuthKind::OAuth2ClientCredentials {
+            client_id_env,
+            client_secret_env,
+            ..
+        } => vec![client_id_env.as_str(), client_secret_env.as_str()],
+        ApiAuthKind::TokenExchange { creds_env_keys, .. } => {
+            creds_env_keys.iter().map(String::as_str).collect()
+        }
+        ApiAuthKind::CliToken {
+            fallback_env_key, ..
+        } => fallback_env_key.as_deref().into_iter().collect(),
+        ApiAuthKind::None => Vec::new(),
+    }
 }
 
 fn add_resolved_auth(set: &mut crate::core::secret_scrub::SecretSet, auth: &ResolvedAuth) {
@@ -5501,6 +5649,622 @@ mod tests {
             "{}",
             out.result.output
         );
+    }
+
+    /// KT-1249 — a Jira-shaped plugin (`{JIRA_URL}` base URL, Basic auth).
+    fn jira_plugin() -> McpServer {
+        let mut plugin = mk_plugin(
+            "{JIRA_URL}",
+            ApiAuthKind::Basic {
+                user_env: "JIRA_USERNAME".into(),
+                password_env: "JIRA_API_TOKEN".into(),
+            },
+            vec![mk_endpoint("GET", "/rest/api/3/issue/EW-1")],
+        );
+        plugin.source = McpSource::Registry;
+        if let Some(spec) = plugin.api_spec.as_mut() {
+            spec.config_keys = vec![ApiConfigKey {
+                public: true,
+                env_key: "JIRA_URL".into(),
+                label: "Workspace URL".into(),
+                placeholder: String::new(),
+                description: String::new(),
+            }];
+        }
+        plugin
+    }
+
+    #[tokio::test]
+    async fn a_jira_call_keeps_its_base_url_links_and_masks_the_credentials() {
+        use base64::Engine as _;
+        let header =
+            base64::engine::general_purpose::STANDARD.encode("dev@acme.io:ATATT-Jr7Secret");
+        let server = MockServer::start().await;
+        let base = server.uri();
+        Mock::given(method("GET"))
+            .and(path("/rest/api/3/issue/EW-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "description": format!("[EW-7685|{base}/browse/EW-7685] and [EW-2|{base}/browse/EW-2]"),
+                "self": format!("{base}/rest/api/3/issue/1"),
+                "echo_token": "ATATT-Jr7Secret",
+                "echo_email": "dev@acme.io",
+                "echo_header": format!("Basic {header}"),
+            })))
+            .mount(&server)
+            .await;
+        let env = HashMap::from([
+            ("JIRA_URL".to_string(), base.clone()),
+            ("JIRA_USERNAME".to_string(), "dev@acme.io".to_string()),
+            ("JIRA_API_TOKEN".to_string(), "ATATT-Jr7Secret".to_string()),
+        ]);
+        let out = execute_api_call_step_core(
+            &mk_step("/rest/api/3/issue/EW-1"),
+            &jira_plugin(),
+            &env,
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
+        let output = &out.result.output;
+        assert_eq!(out.result.status, RunStatus::Success, "{output}");
+        assert!(
+            output.contains(&format!("{base}/browse/EW-7685")),
+            "{output}"
+        );
+        assert!(output.contains(&format!("{base}/browse/EW-2")), "{output}");
+        assert!(!output.contains("***/browse"), "{output}");
+        for leaked in ["ATATT-Jr7Secret", "dev@acme.io", header.as_str()] {
+            assert!(!output.contains(leaked), "{leaked}: {output}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_jira_error_keeps_the_base_url_and_masks_the_token() {
+        let server = MockServer::start().await;
+        let base = server.uri();
+        Mock::given(method("GET"))
+            .and(path("/rest/api/3/issue/EW-1"))
+            .respond_with(ResponseTemplate::new(500).set_body_string(format!(
+                "failed at {base}/browse/EW-1 for token ATATT-Jr7Secret"
+            )))
+            .mount(&server)
+            .await;
+        let env = HashMap::from([
+            ("JIRA_URL".to_string(), base.clone()),
+            ("JIRA_USERNAME".to_string(), "dev@acme.io".to_string()),
+            ("JIRA_API_TOKEN".to_string(), "ATATT-Jr7Secret".to_string()),
+        ]);
+        let out = execute_api_call_step_core(
+            &mk_step("/rest/api/3/issue/EW-1"),
+            &jira_plugin(),
+            &env,
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
+        assert_eq!(out.result.status, RunStatus::Failed);
+        assert!(
+            !out.result.output.contains("ATATT-Jr7Secret"),
+            "{}",
+            out.result.output
+        );
+    }
+
+    #[test]
+    fn call_secrets_keeps_public_config_out_and_credentials_in() {
+        let mut plugin = jira_plugin();
+        let spec = plugin.api_spec.as_mut().unwrap();
+        spec.config_keys.push(ApiConfigKey {
+            public: false,
+            env_key: "TENANT".into(),
+            label: "Tenant".into(),
+            placeholder: String::new(),
+            description: String::new(),
+        });
+        let env = HashMap::from([
+            (
+                "JIRA_URL".to_string(),
+                "https://acme.atlassian.net".to_string(),
+            ),
+            ("JIRA_USERNAME".to_string(), "dev@acme.io".to_string()),
+            ("JIRA_API_TOKEN".to_string(), "ATATT-Jr7Secret".to_string()),
+            ("TENANT".to_string(), "tenant-secret-9".to_string()),
+        ]);
+        let set = call_secrets(&plugin, &env);
+        let text =
+            "https://acme.atlassian.net/browse/EW-1 ATATT-Jr7Secret dev@acme.io tenant-secret-9";
+        assert_eq!(
+            set.scrub(text),
+            "https://acme.atlassian.net/browse/EW-1 *** *** ***"
+        );
+    }
+
+    fn config_key(env_key: &str, public: bool) -> ApiConfigKey {
+        ApiConfigKey {
+            public,
+            env_key: env_key.into(),
+            label: env_key.into(),
+            placeholder: String::new(),
+            description: String::new(),
+        }
+    }
+
+    #[test]
+    fn is_public_config_rules() {
+        let mut plugin = mk_plugin(
+            "{BASE}/api",
+            ApiAuthKind::Bearer {
+                env_key: "SERVICE_URL".into(),
+            },
+            vec![],
+        );
+        let spec = plugin.api_spec.as_mut().unwrap();
+        spec.config_keys = vec![
+            config_key("SITE", true),
+            config_key("SERVICE_URL", true),
+            config_key("PLAIN", false),
+        ];
+        let spec = plugin.api_spec.as_ref().unwrap();
+
+        // The base URL is public only as a bare origin, trusted or not.
+        for trusted in [false, true] {
+            for origin in [
+                "https://acme.example",
+                "https://acme.example/",
+                "http://127.0.0.1:8080",
+            ] {
+                assert!(is_public_config(spec, trusted, "BASE", origin), "{origin}");
+            }
+            for secret in [
+                "https://acme.example/services/T0/B0/xyz",
+                "https://acme.example/bot123:ABC/",
+                "https://acme.example//",
+                "https://u:p@acme.example",
+                "https://u@acme.example",
+                "https://acme.example/?token=abc",
+                "https://acme.example?token=abc",
+                "https://acme.example#frag",
+                "https://acme.example/;key=abc",
+                "https://acme.example;key=abc",
+                "https://acme.example/%3Ftoken=abc",
+                "https://acme.example/%23x",
+                "acme.example",
+                "not a url",
+            ] {
+                assert!(!is_public_config(spec, trusted, "BASE", secret), "{secret}");
+            }
+        }
+
+        // No name makes a URL public: a path may hold the secret.
+        for key in [
+            "SLACK_URL",
+            "DISCORD_URL",
+            "TEAMS_URL",
+            "TELEGRAM_URL",
+            "CALLBACK_URL",
+            "NOTIFY_URL",
+            "S3_URL",
+            "GITLAB_URL",
+            "GITLAB_API_URL",
+        ] {
+            for trusted in [false, true] {
+                assert!(
+                    !is_public_config(spec, trusted, key, "https://acme.example"),
+                    "{key}"
+                );
+            }
+        }
+
+        // `public` is honoured for a trusted (registry) server only.
+        assert!(!is_public_config(spec, false, "SITE", "example.com"));
+        assert!(is_public_config(spec, true, "SITE", "example.com"));
+        assert!(is_public_config(
+            spec,
+            true,
+            "SITE",
+            "https://acme.example/jira"
+        ));
+        for secret in [
+            "https://acme.example/#frag",
+            "https://u:p@acme.example",
+            "https://acme.example/x;key=abc",
+            "https://acme.example/%3Ftoken=abc",
+        ] {
+            assert!(!is_public_config(spec, true, "SITE", secret), "{secret}");
+        }
+
+        // An auth key is never public, declared or not; nor is a plain value.
+        for trusted in [false, true] {
+            assert!(!is_public_config(
+                spec,
+                trusted,
+                "SERVICE_URL",
+                "https://acme.example"
+            ));
+            assert!(!is_public_config(spec, trusted, "PLAIN", "acme"));
+            assert!(!is_public_config(spec, trusted, "TENANT", "acme"));
+        }
+    }
+
+    #[test]
+    fn a_webhook_base_url_stays_masked_whatever_its_name() {
+        let plugin = mk_plugin(
+            "{SLACK_WEBHOOK_URL}",
+            ApiAuthKind::None,
+            vec![mk_endpoint("GET", "/items")],
+        );
+        let env = HashMap::from([(
+            "SLACK_WEBHOOK_URL".to_string(),
+            "https://hooks.slack.com/services/T000/B000/XXXXSECRET".to_string(),
+        )]);
+        let set = call_secrets(&plugin, &env);
+        assert_eq!(
+            set.scrub("posted to https://hooks.slack.com/services/T000/B000/XXXXSECRET"),
+            "posted to ***"
+        );
+    }
+
+    #[test]
+    fn a_declared_public_key_of_an_untrusted_server_is_masked() {
+        // A custom or imported server cannot declare a secret public.
+        let mut plugin = mk_plugin(
+            "https://api.acme.example",
+            ApiAuthKind::ApiKeyHeader {
+                header_name: "X-Api-Key".into(),
+                env_key: "KEY".into(),
+            },
+            vec![],
+        );
+        plugin.api_spec.as_mut().unwrap().config_keys = vec![
+            config_key("X_API_SECRET", true),
+            config_key("PATH_TOKEN_URL", true),
+        ];
+        let env = HashMap::from([
+            ("KEY".to_string(), "key-value-1".to_string()),
+            ("X_API_SECRET".to_string(), "header-secret-2".to_string()),
+            (
+                "PATH_TOKEN_URL".to_string(),
+                "https://acme.example/t/pathsecret3".to_string(),
+            ),
+        ]);
+        let text = "key-value-1 header-secret-2 https://acme.example/t/pathsecret3";
+        assert_eq!(call_secrets(&plugin, &env).scrub(text), "*** *** ***");
+        // The same declaration on a registry server is honoured.
+        plugin.source = McpSource::Registry;
+        assert_eq!(
+            call_secrets(&plugin, &env).scrub(text),
+            "*** header-secret-2 https://acme.example/t/pathsecret3"
+        );
+    }
+
+    #[test]
+    fn a_cli_token_fallback_key_and_exchange_credentials_are_never_public() {
+        let mut plugin = mk_plugin(
+            "https://api.fastly.example",
+            ApiAuthKind::CliToken {
+                command: "fastly".into(),
+                args: vec!["auth".into(), "token".into()],
+                inject: TokenInjection::default(),
+                fallback_env_key: Some("FASTLY_API_TOKEN".into()),
+            },
+            vec![],
+        );
+        plugin.source = McpSource::Registry;
+        plugin.api_spec.as_mut().unwrap().config_keys = vec![config_key("FASTLY_API_TOKEN", true)];
+        let spec = plugin.api_spec.as_ref().unwrap();
+        assert!(!is_public_config(
+            spec,
+            true,
+            "FASTLY_API_TOKEN",
+            "tokenvalue"
+        ));
+        let env = HashMap::from([("FASTLY_API_TOKEN".to_string(), "fastly-tok-77".to_string())]);
+        assert_eq!(call_secrets(&plugin, &env).scrub("fastly-tok-77"), "***");
+
+        let mut exchange = mk_plugin(
+            "https://api.acme.example",
+            ApiAuthKind::TokenExchange {
+                endpoint: "/sessions".into(),
+                method: "POST".into(),
+                body_template: json!({}),
+                body_format: TokenExchangeBodyFormat::Json,
+                token_jsonpath: "$.access_token".into(),
+                ttl_seconds: 60,
+                inject: TokenInjection::default(),
+                creds_env_keys: vec!["API_SECRET".into()],
+            },
+            vec![],
+        );
+        exchange.source = McpSource::Registry;
+        exchange.api_spec.as_mut().unwrap().config_keys = vec![config_key("API_SECRET", true)];
+        let spec = exchange.api_spec.as_ref().unwrap();
+        assert!(!is_public_config(spec, true, "API_SECRET", "exchange-sec"));
+    }
+
+    /// KT-1249 — a secret in the path of a URL under an ordinary `*_URL`
+    /// name (Slack, Discord, Telegram…) is masked in the data, the summary,
+    /// the error and the call log.
+    #[tokio::test]
+    async fn a_path_secret_in_a_url_config_stays_masked_in_data_error_and_log() {
+        let cases = [
+            ("SLACK_URL", "/services/T000/B000/XXXXSECRET"),
+            ("DISCORD_URL", "/api/webhooks/123456/DiscordTokSecret9"),
+            (
+                "TEAMS_URL",
+                "/webhookb2/aaaa@bbbb/IncomingWebhook/TeamsSecret7",
+            ),
+            ("TELEGRAM_URL", "/bot123456:AbCdEfTelegramSecret/"),
+            ("CALLBACK_URL", "/cb/CallbackSecret55"),
+            ("S3_URL", "/bucket/S3PathSecret66"),
+        ];
+        for (key, tail) in cases {
+            let secret = tail
+                .trim_matches('/')
+                .rsplit('/')
+                .next()
+                .unwrap()
+                .to_string();
+            for status in [200u16, 500] {
+                let server = MockServer::start().await;
+                let value = format!("{}{tail}", server.uri());
+                Mock::given(method("GET"))
+                    .respond_with(
+                        ResponseTemplate::new(status).set_body_json(json!({"echo": value})),
+                    )
+                    .mount(&server)
+                    .await;
+                let plugin = mk_plugin(
+                    &format!("{{{key}}}"),
+                    ApiAuthKind::None,
+                    vec![mk_endpoint("GET", "/items")],
+                );
+                let env = HashMap::from([(key.to_string(), value.clone())]);
+                let step = mk_step("/items");
+                let out = execute_api_call_step_core(
+                    &step,
+                    &plugin,
+                    &env,
+                    &TemplateContext::new(),
+                    SecurityPolicy::allow_loopback_for_tests(),
+                )
+                .await;
+                assert!(
+                    !out.result.output.contains(&secret),
+                    "{key} {status}: {}",
+                    out.result.output
+                );
+                if status == 500 {
+                    assert_eq!(out.result.status, RunStatus::Failed);
+                    let state = test_app_state();
+                    let stored = logged_error(&state, &step, &out).await;
+                    assert!(!stored.contains(&secret), "{key}: {stored}");
+                }
+            }
+        }
+    }
+
+    /// KT-1249 — dot segments must not turn a secret base URL into a "bare
+    /// origin": the decision is on the raw text, not on the normalised URL.
+    #[test]
+    fn dot_segments_never_make_a_secret_base_url_public() {
+        let plugin = mk_plugin("{BASE_URL}", ApiAuthKind::None, vec![]);
+        for value in [
+            "https://hooks.slack.com/services/T0/B0/SECRET/../../../..",
+            "https://hooks.slack.com/SECRET/%2e%2e",
+            "https://hooks.slack.com/SECRET/%2E%2e/",
+            "https://hooks.slack.com/./SECRET/..",
+            "HTTPS://hooks.slack.com/SECRET/.%2E/",
+            "https://hooks.slack.com/SECRET/..\t/",
+            "https://hooks.slack.com\\SECRET\\..",
+            "https://hooks.slack.com/SECRET/..;x=1",
+        ] {
+            let env = HashMap::from([("BASE_URL".to_string(), value.to_string())]);
+            assert_eq!(call_secrets(&plugin, &env).scrub(value), "***", "{value}");
+            let spec = plugin.api_spec.as_ref().unwrap();
+            for trusted in [false, true] {
+                assert!(
+                    !is_public_config(spec, trusted, "BASE_URL", value),
+                    "{value}"
+                );
+            }
+        }
+        // A declared-public URL gets the same raw check.
+        let mut registry = plugin.clone();
+        registry.source = McpSource::Registry;
+        registry.api_spec.as_mut().unwrap().config_keys = vec![config_key("SITE", true)];
+        let spec = registry.api_spec.as_ref().unwrap();
+        for value in [
+            "https://acme.example/jira/../../SECRET",
+            "https://acme.example/a/%2e%2e/b",
+            "https://acme.example/a/./b",
+            "https://acme.example\\a",
+            "acme.example/a",
+        ] {
+            assert!(!is_public_config(spec, true, "SITE", value), "{value}");
+        }
+        assert!(is_public_config(
+            spec,
+            true,
+            "SITE",
+            "https://acme.example/jira"
+        ));
+        assert!(is_public_config(
+            spec,
+            true,
+            "SITE",
+            "https://acme.example/a.b/c..d"
+        ));
+        assert!(is_public_config(
+            plugin.api_spec.as_ref().unwrap(),
+            false,
+            "BASE_URL",
+            "https://euronews.atlassian.net"
+        ));
+    }
+
+    /// KT-1249 — the same dot-segment forms stay masked in the data, the
+    /// summary, the error and the call log.
+    #[tokio::test]
+    async fn a_dot_segment_secret_base_url_stays_masked_in_data_error_and_log() {
+        for suffix in [
+            "/SecretDot1/../../../..",
+            "/SecretDot2/%2e%2e",
+            "/./SecretDot3/..",
+            "/SecretDot4/.%2E/",
+        ] {
+            for status in [200u16, 500] {
+                let server = MockServer::start().await;
+                // The scheme in upper case, as one of the probed forms.
+                let value = format!("{}{suffix}", server.uri().replacen("http", "HTTP", 1));
+                Mock::given(method("GET"))
+                    .respond_with(
+                        ResponseTemplate::new(status).set_body_json(json!({"echo": value})),
+                    )
+                    .mount(&server)
+                    .await;
+                let plugin = mk_plugin(
+                    "{BASE_URL}",
+                    ApiAuthKind::None,
+                    vec![mk_endpoint("GET", "/items")],
+                );
+                let env = HashMap::from([("BASE_URL".to_string(), value.clone())]);
+                let step = mk_step("/items");
+                let out = execute_api_call_step_core(
+                    &step,
+                    &plugin,
+                    &env,
+                    &TemplateContext::new(),
+                    SecurityPolicy::allow_loopback_for_tests(),
+                )
+                .await;
+                let secret = suffix.trim_start_matches("/./").trim_start_matches('/');
+                let secret = &secret[..secret.find(['/', '%']).unwrap_or(secret.len())];
+                assert!(secret.starts_with("SecretDot"), "{secret}");
+                assert!(
+                    !out.result.output.contains(secret),
+                    "{suffix} {status}: {}",
+                    out.result.output
+                );
+                if status == 500 {
+                    assert_eq!(out.result.status, RunStatus::Failed);
+                    let state = test_app_state();
+                    let stored = logged_error(&state, &step, &out).await;
+                    assert!(!stored.contains(secret), "{suffix}: {stored}");
+                }
+            }
+        }
+    }
+
+    /// KT-1249 — a declared-public value is checked whatever its shape: a value
+    /// with no `/` is not exempt, and a non-ASCII character never folds into
+    /// the host.
+    #[test]
+    fn every_declared_public_value_is_checked() {
+        let mut plugin = mk_plugin("{SITE}", ApiAuthKind::None, vec![]);
+        plugin.source = McpSource::Registry;
+        plugin.api_spec.as_mut().unwrap().config_keys = vec![config_key("SITE", true)];
+        let spec = plugin.api_spec.as_ref().unwrap();
+        for value in [
+            "https:user:SECRET@jira.acme.example",
+            "user:SECRET@jira.acme.example",
+            "https:jira.acme.example?token=SECRET",
+            "https:jira.acme.example#SECRET",
+            "jira.acme.example;SECRET",
+            "jira.acme.example?token=SECRET",
+            "jira.acme.example#SECRET",
+            "user@jira.acme.example",
+            "user%40jira.acme.example",
+            "jira.acme.example%3Ftoken=SECRET",
+            "jira.acme.example%23SECRET",
+            "jira.acme.example%3bSECRET",
+            "jira.acme.example\\SECRET",
+            "jira.acme.example SECRET",
+            "jira.acme.example\tSECRET",
+            "https:jira.acme.example",
+            "https:/jira.acme.example",
+            "http:user:SECRET@127.0.0.1:8080",
+            "https://jira\u{200b}.acme.example",
+            "https://jira\u{ad}.acme.example",
+            "https://jira.acme.example\u{2215}SECRET",
+            "https://jira\u{3002}acme.example",
+            "https://jira.acme.example/\u{200b}SECRET",
+            "jira\u{200b}.acme.example",
+            "https://jira.acme.example%2fSECRET@evil.example",
+        ] {
+            assert!(!is_public_config(spec, true, "SITE", value), "{value:?}");
+            // And as the base URL of any server, trusted or not.
+            for trusted in [false, true] {
+                let mut base = plugin.clone();
+                base.api_spec.as_mut().unwrap().config_keys = vec![];
+                let spec = base.api_spec.as_ref().unwrap();
+                assert!(!is_public_config(spec, trusted, "SITE", value), "{value:?}");
+            }
+        }
+        // Plain declared values and bare origins stay public.
+        for value in [
+            "jira.acme.example",
+            "workspace-42",
+            "https://euronews.atlassian.net",
+            "https://acme.example/jira",
+            "http://127.0.0.1:8080",
+            // By design: a secret subdomain is public as a plugin's base URL
+            // (the host cannot be told from a tenant name).
+            "https://abc123.m.pipedream.net",
+        ] {
+            assert!(is_public_config(spec, true, "SITE", value), "{value:?}");
+        }
+    }
+
+    /// KT-1249 — a non-URL-shaped credential pasted in a declared-public key
+    /// stays masked in the data, the error and the call log.
+    #[tokio::test]
+    async fn a_credential_in_a_declared_public_key_stays_masked_in_data_error_and_log() {
+        for (form, secret) in [
+            ("http:user:SecretF1@{HOST}", "SecretF1"),
+            ("user:SecretF2@{HOST}", "SecretF2"),
+            ("http:{HOST}?token=SecretF3", "SecretF3"),
+            ("http:{HOST}#SecretF4", "SecretF4"),
+            ("{HOST};SecretF5", "SecretF5"),
+        ] {
+            for status in [200u16, 500] {
+                let server = MockServer::start().await;
+                let host = server.uri().replacen("http://", "", 1);
+                let value = form.replace("{HOST}", &host);
+                Mock::given(method("GET"))
+                    .respond_with(
+                        ResponseTemplate::new(status).set_body_json(json!({"echo": value})),
+                    )
+                    .mount(&server)
+                    .await;
+                let mut plugin = mk_plugin(
+                    "{SITE}",
+                    ApiAuthKind::None,
+                    vec![mk_endpoint("GET", "/items")],
+                );
+                plugin.source = McpSource::Registry;
+                plugin.api_spec.as_mut().unwrap().config_keys = vec![config_key("SITE", true)];
+                let env = HashMap::from([("SITE".to_string(), value.clone())]);
+                let step = mk_step("/items");
+                let out = execute_api_call_step_core(
+                    &step,
+                    &plugin,
+                    &env,
+                    &TemplateContext::new(),
+                    SecurityPolicy::allow_loopback_for_tests(),
+                )
+                .await;
+                assert!(
+                    !out.result.output.contains(secret),
+                    "{form} {status}: {}",
+                    out.result.output
+                );
+                if out.result.status == RunStatus::Failed {
+                    let state = test_app_state();
+                    let stored = logged_error(&state, &step, &out).await;
+                    assert!(!stored.contains(secret), "{form}: {stored}");
+                }
+            }
+        }
     }
 
     /// KT-1047 — a JSON body past the cap fails the step explicitly.
