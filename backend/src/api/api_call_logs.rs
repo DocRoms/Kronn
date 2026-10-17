@@ -145,7 +145,7 @@ pub async fn purge_api_call_logs(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

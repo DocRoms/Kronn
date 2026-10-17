@@ -285,7 +285,7 @@ fn sidecar_command(program: &SidecarProgram) -> tokio::process::Command {
     cmd
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

@@ -27,6 +27,7 @@ use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::core::room_lang::RoomLang;
 use crate::core::task_worker_env::{Capability, ToolchainCapabilities};
 use crate::core::{scanner, worktree};
 use crate::db::orchestration::{CheckpointOutcome, ProvisioningCheckpoint};
@@ -802,12 +803,17 @@ pub fn start_resilience_watchdog(state: AppState) {
                     Ok(crate::db::agent_dispatch::WatchdogTransition::Escalated) => {
                         tracing::error!(dispatch_job_id = %job.id, "agent dispatch stalled again; human intervention required");
                         let discussion_id = job.discussion_id.clone();
+                        let job_id = &job.id;
                         let message = orchestrator_message(
                             format!("agent-dispatch-watchdog:{}", job.id),
-                            format!(
-                                "**Intervention humaine requise — agent bloqué**\n\nLe dispatch `{}` n'a plus de processus vivant après son unique relance automatique. Kronn ne le relancera plus à l'aveugle. Vérifie le provider, puis relance ou réaffecte explicitement.",
-                                job.id
-                            ),
+                            match room_lang(&state.db, &discussion_id).await {
+                                RoomLang::Fr => format!(
+                                    "**Intervention humaine requise — agent bloqué**\n\nLe dispatch `{job_id}` n'a plus de processus vivant après son unique relance automatique. Kronn ne le relancera plus à l'aveugle. Vérifie le provider, puis relance ou réaffecte explicitement."
+                                ),
+                                RoomLang::En => format!(
+                                    "**Human intervention required — agent stalled**\n\nDispatch `{job_id}` has no live process left after its single automatic retry. Kronn will not blindly retry it again. Check the provider, then explicitly retry or reassign."
+                                ),
+                            },
                         );
                         if let Err(error) = state
                             .db
@@ -1278,17 +1284,31 @@ fn check_dirty_files_for_handoff(
 /// `None` for a plain resume; a reassignment numbers its handoffs.
 /// If `tx` and `execution_id` are provided, the message will reflect any uncommitted
 /// changes in the worktree; otherwise a generic message is used.
-#[allow(dead_code)]
+#[cfg(test)]
 fn handoff_notice(has_delivered: bool, generation: Option<u32>) -> String {
     handoff_notice_with_context(has_delivered, generation, None, None)
 }
 
+#[cfg(test)]
 fn handoff_notice_with_context(
     has_delivered: bool,
     generation: Option<u32>,
     tx: Option<&rusqlite::Connection>,
     execution_id: Option<&str>,
 ) -> String {
+    handoff_notice_in(RoomLang::Fr, has_delivered, generation, tx, execution_id)
+}
+
+fn handoff_notice_in(
+    lang: RoomLang,
+    has_delivered: bool,
+    generation: Option<u32>,
+    tx: Option<&rusqlite::Connection>,
+    execution_id: Option<&str>,
+) -> String {
+    if lang == RoomLang::En {
+        return handoff_notice_en(has_delivered, generation, tx, execution_id);
+    }
     let suffix = match generation {
         Some(number) => format!(" — génération {number}"),
         None => String::new(),
@@ -1344,6 +1364,59 @@ fn handoff_notice_with_context(
     }
 }
 
+/// [`handoff_notice_in`] for an English room.
+fn handoff_notice_en(
+    has_delivered: bool,
+    generation: Option<u32>,
+    tx: Option<&rusqlite::Connection>,
+    execution_id: Option<&str>,
+) -> String {
+    let suffix = match generation {
+        Some(number) => format!(" — generation {number}"),
+        None => String::new(),
+    };
+    if has_delivered {
+        return format!(
+            "**Resume{suffix}**\n\n\
+             Resume exactly the unfinished step in this same worktree. \
+             The history, the manifests, the findings and the SHAs already persisted \
+             remain authoritative; do not replay an action already proven."
+        );
+    }
+    let git_status = match (tx, execution_id) {
+        (Some(tx), Some(exec_id)) => Some(check_dirty_files_for_handoff(tx, exec_id)),
+        _ => None,
+    };
+    match git_status {
+        Some(GitStatusForHandoff::Dirty(file_count)) => format!(
+            "**Start the task{suffix}**\n\n\
+             Uncommitted work is waiting for you in this worktree ({file_count} file{}).\n\
+             Read the `git_diff` of what precedes, complete it, then use the declared commit tool \
+             (`task_exec_commit` for a CLI host, `git_commit` for an HTTP agent) with a message \
+             that explains the context — what the previous generation left unfinished and \
+             why you are finishing it. Then deliver with `task_exec_deliver`.",
+            if file_count == 1 { "" } else { "s" }
+        ),
+        Some(GitStatusForHandoff::InspectionFailed) => format!(
+            "**Start the task{suffix}**\n\n\
+             The worktree inspection could not fully verify its state. \
+             First check with `git status` and `git diff` whether work is waiting for you: \
+             read the changes, complete them if needed, then proceed accordingly."
+        ),
+        _ => format!(
+            "**Start the task{suffix}**\n\n\
+             No work has been recorded yet for this execution: \
+             no delivery, nothing to resume.\n\n\
+             The shortest path: `search_text` to find the spot, \
+             `read_file` with `offset` and `limit` to read that region only, \
+             `edit_file` to replace exactly that passage — never any need to \
+             read or rewrite the whole file —, the declared commit tool \
+             (`task_exec_commit` or `git_commit`), then deliver with \
+             `task_exec_deliver`."
+        ),
+    }
+}
+
 async fn wake_recovered_worker(db: &Database, exec_id: &str) -> Result<String> {
     let id = exec_id.to_string();
     let execution = db
@@ -1352,9 +1425,10 @@ async fn wake_recovered_worker(db: &Database, exec_id: &str) -> Result<String> {
                 .context("execution vanished before worker wake")
         })
         .await?;
+    let lang = room_lang(db, &execution.parent_discussion_id).await;
     let scope_note = reanchor_execution_scope(db, &execution)
         .await?
-        .map(|reanchored| reanchored_scope_note(&reanchored));
+        .map(|reanchored| reanchored_scope_note(&reanchored, lang));
     let id = exec_id.to_string();
     db.with_conn(move |conn| {
         let tx = conn.unchecked_transaction()?;
@@ -1394,8 +1468,7 @@ async fn wake_recovered_worker(db: &Database, exec_id: &str) -> Result<String> {
         )?;
         if !exists {
             let has_delivered = has_recorded_delivery(&tx, &id)?;
-            let mut content =
-                handoff_notice_with_context(has_delivered, None, Some(&tx), Some(&id));
+            let mut content = handoff_notice_in(lang, has_delivered, None, Some(&tx), Some(&id));
             content.push_str(scope_note.as_deref().unwrap_or_default());
             let message = orchestrator_message(message_id, content);
             if target.kind == MessageTargetKind::Cli {
@@ -1514,13 +1587,20 @@ pub(crate) async fn wake_recovered_principal(db: &Database, exec_id: &str) -> Re
         if !exists {
             let message = orchestrator_message(
                 message_id,
-                format!(
-                    "**Revue à reprendre après redémarrage**\n\n\
-                     L'exécution `{}` possède déjà une livraison durable. Relis le manifeste, \
-                     les constats et les SHA persistés puis rends la décision de revue ; ne demande \
-                     pas au worker de rejouer son travail.",
-                    id
-                ),
+                match RoomLang::from_code(&principal.language) {
+                    RoomLang::Fr => format!(
+                        "**Revue à reprendre après redémarrage**\n\n\
+                         L'exécution `{id}` possède déjà une livraison durable. Relis le manifeste, \
+                         les constats et les SHA persistés puis rends la décision de revue ; ne demande \
+                         pas au worker de rejouer son travail."
+                    ),
+                    RoomLang::En => format!(
+                        "**Review to resume after restart**\n\n\
+                         Execution `{id}` already has a durable delivery. Read the manifest, \
+                         the findings and the persisted SHAs again, then give the review decision; \
+                         do not ask the worker to replay its work."
+                    ),
+                },
             );
             crate::db::discussions::insert_message(&tx, &execution.parent_discussion_id, &message)?;
         }
@@ -2020,6 +2100,31 @@ async fn wait_for_warm_up_to_settle(exec_id: &str, timeout: std::time::Duration)
 /// `Provisioning` (any cancel path — a run cancel, a reassignment — ends it).
 const WARM_UP_STATE_POLL: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// The poll interval of `repo_path`'s warm-up watcher. Tests may pin it per
+/// repository, so a scenario that depends on the watcher NOT having fired yet
+/// does not race the wall clock.
+fn warm_up_state_poll(repo_path: &str) -> std::time::Duration {
+    #[cfg(test)]
+    if let Some(poll) = test_warm_up_state_polls()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(repo_path)
+    {
+        return *poll;
+    }
+    let _ = repo_path;
+    WARM_UP_STATE_POLL
+}
+
+#[cfg(test)]
+fn test_warm_up_state_polls(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, std::time::Duration>> {
+    static POLLS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::time::Duration>>,
+    > = std::sync::OnceLock::new();
+    POLLS.get_or_init(Default::default)
+}
+
 /// The probe runner of a task worker's launch: real processes confined to the
 /// worker's sandbox profile (KT-1255), so a build script or proc-macro the
 /// worker wrote is never compiled with the host's rights. Tests register a
@@ -2102,6 +2207,7 @@ async fn defer_native_provisioning(
     let background = std::sync::Arc::new(db.share_handle());
     let task_db = background.clone();
     let id = exec_id.clone();
+    let state_poll = warm_up_state_poll(&launch.prepared.repo_path);
     tokio::spawn(async move {
         let _claim = claim;
         // Any cancel path (the execution's own, its run's, a reassignment)
@@ -2115,7 +2221,7 @@ async fn defer_native_provisioning(
                 loop {
                     tokio::select! {
                         _ = cancel.cancelled() => return,
-                        _ = tokio::time::sleep(WARM_UP_STATE_POLL) => {}
+                        _ = tokio::time::sleep(state_poll) => {}
                     }
                     let probe_id = id.clone();
                     let status = db
@@ -2237,12 +2343,14 @@ async fn finish_native_provisioning(
     };
 
     // ── Native worker: the single atomic "durably launchable" checkpoint. ──
+    let lang = room_lang(db, &prepared.execution.parent_discussion_id).await;
     let brief = build_brief(
         &prepared,
         &worktree_path_str,
         &branch,
         &base_sha,
         toolchain.as_ref(),
+        lang,
     );
     let outcome = {
         let exec_id = prepared.execution.id.clone();
@@ -2483,26 +2591,47 @@ struct ReanchoredScope {
     current: TaskWorkerScope,
 }
 
-fn reanchored_scope_note(scope: &ReanchoredScope) -> String {
-    let target = |scope: &TaskWorkerScope| match scope {
-        TaskWorkerScope::PrelocalizedEdit {
-            start_line,
-            end_line,
-            ..
-        } => format!("la plage inclusive `{start_line}..={end_line}`"),
-        TaskWorkerScope::PrelocalizedInsertAfter { anchor_line, .. } => {
+fn reanchored_scope_note(scope: &ReanchoredScope, lang: RoomLang) -> String {
+    let target = |scope: &TaskWorkerScope| match (scope, lang) {
+        (
+            TaskWorkerScope::PrelocalizedEdit {
+                start_line,
+                end_line,
+                ..
+            },
+            RoomLang::Fr,
+        ) => format!("la plage inclusive `{start_line}..={end_line}`"),
+        (
+            TaskWorkerScope::PrelocalizedEdit {
+                start_line,
+                end_line,
+                ..
+            },
+            RoomLang::En,
+        ) => format!("the inclusive range `{start_line}..={end_line}`"),
+        (TaskWorkerScope::PrelocalizedInsertAfter { anchor_line, .. }, RoomLang::Fr) => {
             format!("l'insertion après la ligne `{anchor_line}`")
         }
+        (TaskWorkerScope::PrelocalizedInsertAfter { anchor_line, .. }, RoomLang::En) => {
+            format!("the insertion after line `{anchor_line}`")
+        }
     };
-    format!(
-        "\n\n## Cible prélocalisée réancrée\n\
-         `{path}` a changé depuis le lancement : la cible est maintenant {current} \
-         (au lancement : {original}). Les outils imposent cette nouvelle cible ; ne te \
-         fie pas aux numéros de ligne du brief initial.",
-        path = worker_scope_path(&scope.current),
-        current = target(&scope.current),
-        original = target(&scope.original),
-    )
+    let path = worker_scope_path(&scope.current);
+    let (current, original) = (target(&scope.current), target(&scope.original));
+    match lang {
+        RoomLang::Fr => format!(
+            "\n\n## Cible prélocalisée réancrée\n\
+             `{path}` a changé depuis le lancement : la cible est maintenant {current} \
+             (au lancement : {original}). Les outils imposent cette nouvelle cible ; ne te \
+             fie pas aux numéros de ligne du brief initial."
+        ),
+        RoomLang::En => format!(
+            "\n\n## Prelocalized target re-anchored\n\
+             `{path}` changed since launch: the target is now {current} \
+             (at launch: {original}). The tools enforce this new target; do not rely on the \
+             line numbers of the initial brief."
+        ),
+    }
 }
 
 /// Re-anchor a prelocalized execution before another worker round reads its
@@ -2730,6 +2859,8 @@ pub async fn run_integration(
         // narrow gap re-enters with Done: finish the idempotent managed cleanup
         // instead of treating terminality as proof it already happened.
         if execution.status == TaskExecutionStatus::Done {
+            // The same gap can precede the report: publishing is idempotent.
+            publish_accepted_delivery_or_warn(db, &execution).await;
             if let (Some(integrated), Some(workspace), Some(project_id)) = (
                 execution.integrated_sha.as_deref(),
                 workspace.as_ref(),
@@ -3135,6 +3266,10 @@ async fn land_integration(
         }
         return Err(error);
     }
+    // The delivery is accepted once it has landed, not when it was approved: a
+    // bounced or refused integration must never leave an "accepted" report
+    // behind (KT-1316). Publication is total and idempotent.
+    publish_accepted_delivery_or_warn(db, execution).await;
     cleanup_integrated_execution(db, execution, repo, child_path, &integrated).await?;
     advance_campaign_after_integration(db, run).await;
     Ok(IntegrationOutcome::Integrated { sha: integrated })
@@ -3958,14 +4093,15 @@ impl ReworkReport {
 const REWORK_OUTPUT_LIMIT: usize = 4_000;
 
 /// A fenced block that the text itself cannot close early.
-fn fenced_output(output: &str) -> String {
+fn fenced_output(output: &str, lang: RoomLang) -> String {
     let total = output.chars().count();
     let shown: String = if total > REWORK_OUTPUT_LIMIT {
         let tail: String = output.chars().skip(total - REWORK_OUTPUT_LIMIT).collect();
-        format!(
-            "[… {} caractères omis]\n{tail}",
-            total - REWORK_OUTPUT_LIMIT
-        )
+        let omitted = total - REWORK_OUTPUT_LIMIT;
+        match lang {
+            RoomLang::Fr => format!("[… {omitted} caractères omis]\n{tail}"),
+            RoomLang::En => format!("[… {omitted} characters omitted]\n{tail}"),
+        }
     } else {
         output.to_string()
     };
@@ -3980,23 +4116,39 @@ fn fenced_output(output: &str) -> String {
 
 /// The evidence block both messages carry: the command, how it ended and what it
 /// printed, or the bare cause when no validation is involved (a merge conflict).
-fn rework_evidence(report: &ReworkReport) -> String {
+fn rework_evidence(report: &ReworkReport, lang: RoomLang) -> String {
     let Some(failure) = &report.failure else {
-        return format!("**Cause :** {}", report.reason);
+        return format!("**{}** {}", lang.pick("Cause :", "Cause:"), report.reason);
     };
     let code = failure
         .exit_code
         .map(|code| code.to_string())
-        .unwrap_or_else(|| "aucun (le processus n'a pas abouti)".to_string());
+        .unwrap_or_else(|| {
+            lang.pick(
+                "aucun (le processus n'a pas abouti)",
+                "none (the process did not complete)",
+            )
+            .to_string()
+        });
     let output = if failure.output.trim().is_empty() {
-        "_(la commande n'a rien affiché)_".to_string()
+        lang.pick(
+            "_(la commande n'a rien affiché)_",
+            "_(the command printed nothing)_",
+        )
+        .to_string()
     } else {
-        fenced_output(&failure.output)
+        fenced_output(&failure.output, lang)
     };
-    format!(
-        "**Commande :** `{}`\n**Code de sortie :** {code}\n\n**Sortie :**\n{output}",
-        failure.command
-    )
+    match lang {
+        RoomLang::Fr => format!(
+            "**Commande :** `{}`\n**Code de sortie :** {code}\n\n**Sortie :**\n{output}",
+            failure.command
+        ),
+        RoomLang::En => format!(
+            "**Command:** `{}`\n**Exit code:** {code}\n\n**Output:**\n{output}",
+            failure.command
+        ),
+    }
 }
 
 /// What the worker reads in its own room when the integration sends its approved
@@ -4009,26 +4161,50 @@ fn build_integration_rework_message(
     task_title: &str,
     target_branch: Option<&str>,
     report: &ReworkReport,
+    lang: RoomLang,
 ) -> DiscussionMessage {
-    let way_forward = match (&report.failure, target_branch) {
-        (Some(_), _) => "Reproduis l'échec, corrige-le **dans ce worktree**".to_string(),
-        (None, Some(target)) => format!(
-            "Corrige la cause ci-dessus **dans ce worktree** (pour un conflit : intègre \
-             `{target}` dans ta branche et résous-le)"
-        ),
-        (None, None) => "Corrige la cause ci-dessus **dans ce worktree**".to_string(),
+    let reason = &report.reason;
+    let evidence = rework_evidence(report, lang);
+    let content = match lang {
+        RoomLang::Fr => {
+            let way_forward = match (&report.failure, target_branch) {
+                (Some(_), _) => "Reproduis l'échec, corrige-le **dans ce worktree**".to_string(),
+                (None, Some(target)) => format!(
+                    "Corrige la cause ci-dessus **dans ce worktree** (pour un conflit : intègre \
+                     `{target}` dans ta branche et résous-le)"
+                ),
+                (None, None) => "Corrige la cause ci-dessus **dans ce worktree**".to_string(),
+            };
+            format!(
+                "**Intégration refusée — {task_reference} : {task_title}**\n\n\
+                 Ta livraison a été approuvée, mais l'intégration protégée l'a renvoyée : \
+                 {reason}. La branche cible n'a pas bougé.\n\n\
+                 {evidence}\n\n\
+                 {way_forward} (il est conservé, comme cette sous-discussion), puis re-livre un \
+                 nouveau DeliveryManifest via `task_exec_deliver`. Si l'échec ne vient pas de ton \
+                 changement, dis-le dans le résumé de ta livraison."
+            )
+        }
+        RoomLang::En => {
+            let way_forward = match (&report.failure, target_branch) {
+                (Some(_), _) => "Reproduce the failure, fix it **in this worktree**".to_string(),
+                (None, Some(target)) => format!(
+                    "Fix the cause above **in this worktree** (for a conflict: integrate \
+                     `{target}` into your branch and resolve it)"
+                ),
+                (None, None) => "Fix the cause above **in this worktree**".to_string(),
+            };
+            format!(
+                "**Integration refused — {task_reference}: {task_title}**\n\n\
+                 Your delivery was approved, but the protected integration sent it back: \
+                 {reason}. The target branch did not move.\n\n\
+                 {evidence}\n\n\
+                 {way_forward} (it is kept, like this sub-discussion), then re-deliver a new \
+                 DeliveryManifest through `task_exec_deliver`. If the failure does not come from \
+                 your change, say so in your delivery summary."
+            )
+        }
     };
-    let content = format!(
-        "**Intégration refusée — {task_reference} : {task_title}**\n\n\
-         Ta livraison a été approuvée, mais l'intégration protégée l'a renvoyée : {reason}. \
-         La branche cible n'a pas bougé.\n\n\
-         {evidence}\n\n\
-         {way_forward} (il est conservé, comme cette sous-discussion), puis re-livre un \
-         nouveau DeliveryManifest via `task_exec_deliver`. Si l'échec ne vient pas de ton \
-         changement, dis-le dans le résumé de ta livraison.",
-        reason = report.reason,
-        evidence = rework_evidence(report),
-    );
     orchestrator_message(
         format!("orch-integration-rework:{exec_id}:{next_attempt}"),
         content,
@@ -4045,22 +4221,38 @@ fn build_integration_rework_notice(
     task_title: &str,
     child_discussion_id: &str,
     report: &ReworkReport,
+    lang: RoomLang,
 ) -> DiscussionMessage {
-    let content = format!(
-        "**Intégration renvoyée au worker — {task_reference}**\n\n\
-         L'exécution `{exec_id}` (**{task_title}**) était approuvée, mais l'intégration l'a \
-         renvoyée : {reason}. La branche cible n'a pas bougé.\n\n\
-         {evidence}\n\n\
-         Le worker est relancé avec cette sortie dans la sous-discussion \
-         `{child_discussion_id}` (tentative {next_attempt}). Deux issues :\n\
-         - l'échec vient de la livraison : attends la re-livraison, puis relis-la avec \
-         `task_exec_review` ;\n\
-         - l'échec ne vient pas de la livraison (test instable, environnement) : relance les \
-         mêmes validations sur le même candidat, sans nouvelle livraison, avec \
-         `task_exec_resume`.",
-        reason = report.reason,
-        evidence = rework_evidence(report),
-    );
+    let reason = &report.reason;
+    let evidence = rework_evidence(report, lang);
+    let content = match lang {
+        RoomLang::Fr => format!(
+            "**Intégration renvoyée au worker — {task_reference}**\n\n\
+             L'exécution `{exec_id}` (**{task_title}**) était approuvée, mais l'intégration l'a \
+             renvoyée : {reason}. La branche cible n'a pas bougé.\n\n\
+             {evidence}\n\n\
+             Le worker est relancé avec cette sortie dans la sous-discussion \
+             `{child_discussion_id}` (tentative {next_attempt}). Deux issues :\n\
+             - l'échec vient de la livraison : attends la re-livraison, puis relis-la avec \
+             `task_exec_review` ;\n\
+             - l'échec ne vient pas de la livraison (test instable, environnement) : relance les \
+             mêmes validations sur le même candidat, sans nouvelle livraison, avec \
+             `task_exec_resume`."
+        ),
+        RoomLang::En => format!(
+            "**Integration sent back to the worker — {task_reference}**\n\n\
+             Execution `{exec_id}` (**{task_title}**) was approved, but the integration sent it \
+             back: {reason}. The target branch did not move.\n\n\
+             {evidence}\n\n\
+             The worker is relaunched with this output in the sub-discussion \
+             `{child_discussion_id}` (attempt {next_attempt}). Two outcomes:\n\
+             - the failure comes from the delivery: wait for the re-delivery, then review it \
+             again with `task_exec_review`;\n\
+             - the failure does not come from the delivery (flaky test, environment): rerun the \
+             same validations on the same candidate, with no new delivery, using \
+             `task_exec_resume`."
+        ),
+    };
     orchestrator_message(
         format!("orch-integration-reworked:{exec_id}:{next_attempt}"),
         content,
@@ -4116,6 +4308,7 @@ async fn send_back(
     let next_attempt = execution.attempt_no + 1;
     let reference = task.summary.reference.as_str();
     let title = task.summary.title.as_str();
+    let lang = room_lang(db, &execution.parent_discussion_id).await;
     let worker_message = build_integration_rework_message(
         &execution.id,
         next_attempt,
@@ -4123,6 +4316,7 @@ async fn send_back(
         title,
         target_branch.as_deref(),
         report,
+        lang,
     );
     let principal_message = build_integration_rework_notice(
         &execution.id,
@@ -4131,6 +4325,7 @@ async fn send_back(
         title,
         &child,
         report,
+        lang,
     );
     // The same two re-activation shapes a reviewer's `request_changes` uses: a
     // joined CLI re-accepts a control offer, a native worker gets a fresh dispatch.
@@ -4143,6 +4338,7 @@ async fn send_back(
             reference,
             title,
             &child,
+            lang,
         );
         (offer_id, message)
     });
@@ -4794,6 +4990,7 @@ async fn open_cli_worker_control_offer(
                         &task_ref,
                         &task_title,
                         &child,
+                        crate::db::discussions::room_lang(&tx, &origin),
                     );
                     let cli_target = MessageTarget::cli(agent_type.clone(), session_pk);
                     // Targeted to the exact session with NO dispatch spec: wakes the
@@ -5068,18 +5265,24 @@ pub async fn accept_worker_offer_and_attach(
         let recovery = reassignment.1.expect("checked above");
         let target = worker_target_from_execution(&reassignment.0)
             .map_err(|e| ProvisionError::Internal(e.to_string()))?;
+        let generation = recovery.assignment_generation;
+        let reason = &recovery.recovery_reason;
         let handoff = orchestrator_message(
-            format!(
-                "orch-reassign-handoff:{}:{}",
-                exec_id, recovery.assignment_generation
-            ),
-            format!(
-                "**Réassignation acceptée — génération {}**\n\n\
-                 Reprends exactement l'étape inachevée. Cette sous-discussion, son worktree, \
-                 les manifests, constats, revues et SHA existants restent la source de vérité. \
-                 Motif : {}",
-                recovery.assignment_generation, recovery.recovery_reason
-            ),
+            format!("orch-reassign-handoff:{exec_id}:{generation}"),
+            match room_lang(db, &reassignment.0.parent_discussion_id).await {
+                RoomLang::Fr => format!(
+                    "**Réassignation acceptée — génération {generation}**\n\n\
+                     Reprends exactement l'étape inachevée. Cette sous-discussion, son worktree, \
+                     les manifests, constats, revues et SHA existants restent la source de vérité. \
+                     Motif : {reason}"
+                ),
+                RoomLang::En => format!(
+                    "**Reassignment accepted — generation {generation}**\n\n\
+                     Resume exactly the unfinished step. This sub-discussion, its worktree, \
+                     the existing manifests, findings, reviews and SHAs remain the source of \
+                     truth. Reason: {reason}"
+                ),
+            },
         );
         let worker_instructions = handoff.content.clone();
         let (eid, oid, child_id) = (exec_id.clone(), offer.id.clone(), child.clone());
@@ -5149,6 +5352,7 @@ pub async fn accept_worker_offer_and_attach(
     let target = worker_target_from_execution(&execution)
         .map_err(|e| ProvisionError::Internal(e.to_string()))?;
 
+    let lang = room_lang(db, &execution.parent_discussion_id).await;
     let brief = build_cli_worker_brief(
         &exec_id,
         execution.attempt_no,
@@ -5159,6 +5363,7 @@ pub async fn accept_worker_offer_and_attach(
         &worktree_path,
         &branch,
         &base_sha,
+        lang,
     );
     let worker_instructions = brief.content.clone();
     let notice = build_attach_notice(
@@ -5168,6 +5373,7 @@ pub async fn accept_worker_offer_and_attach(
         &task.summary.title,
         &child,
         alias.as_deref(),
+        lang,
     );
 
     let outcome = {
@@ -5561,6 +5767,7 @@ async fn deliver_authorized_worker_manifest(
         &child,
         &manifest.head_sha,
         &manifest.summary,
+        room_lang(db, &exec.parent_discussion_id).await,
     );
     // The queryable obligation payload carries the exact TARGETED principal identity (DoD-3).
     let review_requested_changes = serde_json::json!({
@@ -6412,9 +6619,8 @@ async fn decide_authorized_review(
             .await
             .map_err(|error| ProvisionError::Internal(error.to_string()))?;
         return if approved {
-            // The report is derived here too: a crash between the approval and
-            // its publication must be repaired by the retry, not left silent.
-            publish_accepted_delivery_or_warn(db, &exec).await;
+            // No report here: it is published when the integration lands, and
+            // this retry is what resumes that integration.
             Ok(ReviewOutcome::Reviewed {
                 verdict: ReviewVerdict::Approve,
                 execution: exec,
@@ -6528,12 +6734,18 @@ async fn decide_authorized_review(
                 };
 
                 // (a) findings → the worker in the child (DoD-4).
-                let mut findings_msg =
-                    build_review_findings_message(&exec.id, exec.attempt_no, &decision, &child);
+                let lang = room_lang(db, &exec.parent_discussion_id).await;
+                let mut findings_msg = build_review_findings_message(
+                    &exec.id,
+                    exec.attempt_no,
+                    &decision,
+                    &child,
+                    lang,
+                );
                 if let Some(reanchored) = reanchored.as_ref() {
                     findings_msg
                         .content
-                        .push_str(&reanchored_scope_note(reanchored));
+                        .push_str(&reanchored_scope_note(reanchored, lang));
                 }
                 let findings = (child.clone(), findings_msg, worker_target.clone());
 
@@ -6547,6 +6759,7 @@ async fn decide_authorized_review(
                     exec.review_rounds + 1,
                     exec.max_review_rounds,
                     &child,
+                    lang,
                 );
                 let escalation = (
                     exec.parent_discussion_id.clone(),
@@ -6569,6 +6782,7 @@ async fn decide_authorized_review(
                         &task.summary.reference,
                         &task.summary.title,
                         &child,
+                        lang,
                     );
                     Some((
                         offer_id,
@@ -6669,9 +6883,6 @@ async fn decide_authorized_review(
                 })
                 .await
                 .map_err(|e| ProvisionError::Internal(e.to_string()))?;
-            if decision.decision == ReviewVerdict::Approve {
-                publish_accepted_delivery_or_warn(db, &execution).await;
-            }
             Ok(ReviewOutcome::Reviewed {
                 verdict: decision.decision,
                 execution,
@@ -6786,10 +6997,9 @@ fn enqueue_approved_integration(state: &AppState, outcome: ReviewOutcome) -> Rev
 /// false-refuses (the one case that distinguishes normalization from a raw string compare).
 /// Publish the accepted report, logging rather than failing.
 ///
-/// The approval is already durable when this runs. Turning a publication
-/// failure into an error would refuse an approval that HAPPENED, and invite a
-/// retry that the checkpoint would then reject. The record is idempotent and
-/// self-repairing, so the next approve replay finishes the job.
+/// The landing is already durable when this runs. Turning a publication
+/// failure into an error would fail an integration that HAPPENED. The record is
+/// idempotent and self-repairing, so a later landing replay finishes the job.
 async fn publish_accepted_delivery_or_warn(db: &Database, execution: &TaskExecution) {
     match crate::api::delivery_publication::publish_accepted_delivery(db, execution).await {
         Ok(Some(outcome)) => tracing::info!(
@@ -7088,10 +7298,15 @@ fn build_review_findings_message(
     attempt_no: u32,
     decision: &ReviewDecisionV1,
     _child_discussion_id: &str,
+    lang: RoomLang,
 ) -> DiscussionMessage {
     let comment = decision.comment.as_deref().unwrap_or("").trim();
     let findings = if decision.findings.is_empty() {
-        "_(aucun point structuré — voir le commentaire)_".to_string()
+        lang.pick(
+            "_(aucun point structuré — voir le commentaire)_",
+            "_(no structured point — see the comment)_",
+        )
+        .to_string()
     } else {
         decision
             .findings
@@ -7107,20 +7322,38 @@ fn build_review_findings_message(
             .collect::<Vec<_>>()
             .join("\n")
     };
-    let content = format!(
-        "**Changements demandés — revue du tour livré**\n\n\
-         Le principal a renvoyé ton travail avec `request_changes`. Corrige les points \
-         ci-dessous **dans ce worktree** (il est conservé, comme cette sous-discussion), \
-         puis re-livre un nouveau DeliveryManifest via `task_exec_deliver`.\n\n\
-         ## Commentaire\n{comment}\n\n\
-         ## Points à traiter\n{findings}",
-        comment = if comment.is_empty() {
-            "_(voir les points ci-dessous)_"
-        } else {
-            comment
-        },
-        findings = findings,
-    );
+    let content = match lang {
+        RoomLang::Fr => {
+            let comment = if comment.is_empty() {
+                "_(voir les points ci-dessous)_"
+            } else {
+                comment
+            };
+            format!(
+                "**Changements demandés — revue du tour livré**\n\n\
+                 Le principal a renvoyé ton travail avec `request_changes`. Corrige les points \
+                 ci-dessous **dans ce worktree** (il est conservé, comme cette sous-discussion), \
+                 puis re-livre un nouveau DeliveryManifest via `task_exec_deliver`.\n\n\
+                 ## Commentaire\n{comment}\n\n\
+                 ## Points à traiter\n{findings}"
+            )
+        }
+        RoomLang::En => {
+            let comment = if comment.is_empty() {
+                "_(see the points below)_"
+            } else {
+                comment
+            };
+            format!(
+                "**Changes requested — review of the delivered round**\n\n\
+                 The principal sent your work back with `request_changes`. Fix the points \
+                 below **in this worktree** (it is kept, like this sub-discussion), \
+                 then re-deliver a new DeliveryManifest through `task_exec_deliver`.\n\n\
+                 ## Comment\n{comment}\n\n\
+                 ## Points to address\n{findings}"
+            )
+        }
+    };
     orchestrator_message(
         format!("orch-review-findings:{exec_id}:{attempt_no}"),
         content,
@@ -7566,12 +7799,14 @@ fn build_brief(
     branch: &str,
     base_sha: &str,
     toolchain: Option<&ToolchainCapabilities>,
+    lang: RoomLang,
 ) -> DiscussionMessage {
     let can_run_shell = !matches!(
         prepared.execution.worker_agent_type.as_deref(),
         Some("Ollama" | "LiteLlm" | "Nvidia")
     );
-    let mut content = worker_brief_markdown(
+    let mut content = worker_brief_markdown_in(
+        lang,
         &prepared.task_reference,
         &prepared.task_title,
         &prepared.task_description,
@@ -7584,7 +7819,7 @@ fn build_brief(
         prepared.execution.worker_scope.as_ref(),
     );
     if let Some(toolchain) = toolchain {
-        content = insert_toolchain_section(content, toolchain);
+        content = insert_toolchain_section(content, toolchain, lang);
     }
     orchestrator_message(
         format!(
@@ -7597,18 +7832,41 @@ fn build_brief(
 
 /// The brief's "what you can run" section (KT-1246), from the launch-time smoke
 /// check: the worker reads it instead of discovering a refusal mid-task.
-fn toolchain_brief_section(toolchain: &ToolchainCapabilities) -> String {
+fn toolchain_brief_section(toolchain: &ToolchainCapabilities, lang: RoomLang) -> String {
     let line = |label: &str, capability: &Capability| {
         format!(
-            "- {label} : {} — {}\n",
+            "- {label}{} {} — {}\n",
+            lang.pick(" :", ":"),
             if capability.available {
-                "✅ disponible"
+                lang.pick("✅ disponible", "✅ available")
             } else {
-                "❌ indisponible"
+                lang.pick("❌ indisponible", "❌ unavailable")
             },
             capability.reason
         )
     };
+    if lang == RoomLang::En {
+        return format!(
+            "## Test capabilities (verified at launch)\n\
+             {rust}{frontend}{port}\
+             Servers: a Kronn backend or a Vite that you start listens on `$KRONN_PORT` / \
+             `$VITE_DEV_PORT` (already in your environment; Vite proxies to \
+             `$KRONN_VITE_BACKEND_URL`). Run your lane's binary (`$CARGO_TARGET_DIR/debug/kronn`). \
+             Never listen on 3140 or 5173: that is the host's Kronn, and you would hijack the UI \
+             and the other workers. What you start stops with your turn: Kronn ends every \
+             process launched by your session when the dispatch finishes.\n\
+             Vite and vitest run as they are (`vitest run`, `vite --port $VITE_DEV_PORT`): your \
+             lane's `node_modules` is a writable folder, Vite writes its config bundle there. If \
+             you see `EPERM` on `node_modules/.vite-temp`, run again with \
+             `--configLoader native`.\n\
+             Run only what is ✅. A ❌ validation is never asserted: report it `skipped` with the \
+             reason above, the principal will run it. `tests_executed` states explicitly whether \
+             at least one test actually ran and which.\n\n",
+            rust = line("Rust tests (`cargo nextest`)", &toolchain.rust_tests),
+            frontend = line("Frontend tests (`vitest`)", &toolchain.frontend_tests),
+            port = line("Loopback port binding", &toolchain.port_binding),
+        );
+    }
     format!(
         "## Capacités de test (vérifiées au lancement)\n\
          {rust}{frontend}{port}\
@@ -7632,8 +7890,12 @@ fn toolchain_brief_section(toolchain: &ToolchainCapabilities) -> String {
 }
 
 /// Put the capability section right before the brief's `## Tests` section.
-fn insert_toolchain_section(content: String, toolchain: &ToolchainCapabilities) -> String {
-    let section = toolchain_brief_section(toolchain);
+fn insert_toolchain_section(
+    content: String,
+    toolchain: &ToolchainCapabilities,
+    lang: RoomLang,
+) -> String {
+    let section = toolchain_brief_section(toolchain, lang);
     match content.find("## Tests\n") {
         Some(at) => format!("{}{section}{}", &content[..at], &content[at..]),
         None => format!("{content}\n\n{section}"),
@@ -7788,8 +8050,10 @@ fn build_cli_worker_brief(
     worktree_path: &str,
     branch: &str,
     base_sha: &str,
+    lang: RoomLang,
 ) -> DiscussionMessage {
-    let content = worker_brief_markdown(
+    let content = worker_brief_markdown_in(
+        lang,
         task_reference,
         task_title,
         task_description,
@@ -7814,19 +8078,30 @@ fn build_attach_notice(
     task_title: &str,
     child_discussion_id: &str,
     worker_alias: Option<&str>,
+    lang: RoomLang,
 ) -> DiscussionMessage {
-    let who = worker_alias
-        .map(|a| format!("La session worker `{a}`"))
-        .unwrap_or_else(|| "La session worker".to_string());
-    let content = format!(
-        "{who} a accepté **{reference} : {title}** comme worker de la sous-discussion \
-         `{child}`. Elle reste présente dans cette room principale ; son rôle worker \
-         est limité à cette exécution.",
-        who = who,
-        reference = task_reference,
-        title = task_title,
-        child = child_discussion_id,
-    );
+    let content = match lang {
+        RoomLang::Fr => {
+            let who = worker_alias
+                .map(|a| format!("La session worker `{a}`"))
+                .unwrap_or_else(|| "La session worker".to_string());
+            format!(
+                "{who} a accepté **{task_reference} : {task_title}** comme worker de la \
+                 sous-discussion `{child_discussion_id}`. Elle reste présente dans cette room \
+                 principale ; son rôle worker est limité à cette exécution."
+            )
+        }
+        RoomLang::En => {
+            let who = worker_alias
+                .map(|a| format!("The worker session `{a}`"))
+                .unwrap_or_else(|| "The worker session".to_string());
+            format!(
+                "{who} accepted **{task_reference}: {task_title}** as worker of the \
+                 sub-discussion `{child_discussion_id}`. It stays present in this main room; \
+                 its worker role is limited to this execution."
+            )
+        }
+    };
     orchestrator_message(format!("orch-attach:{exec_id}:{attempt_no}"), content)
 }
 
@@ -7834,6 +8109,7 @@ fn build_attach_notice(
 /// (KT-319 DoD-3). NOT the work brief: it tells the principal a delivery awaits its review
 /// and names the two possible decisions. Deterministic id per `(exec, attempt)` so a resume
 /// never double-posts (the message PK rejects it).
+#[allow(clippy::too_many_arguments)]
 fn build_review_request_message(
     exec_id: &str,
     attempt_no: u32,
@@ -7842,21 +8118,30 @@ fn build_review_request_message(
     child_discussion_id: &str,
     head_sha: &str,
     summary: &str,
+    lang: RoomLang,
 ) -> DiscussionMessage {
-    let content = format!(
-        "**Revue demandée — {reference} : {title}**\n\n\
-         Le worker a livré son travail (HEAD `{head}`) dans la sous-discussion `{child}` \
-         et soumis un DeliveryManifest. Décide via `task_exec_review` :\n\
-         - `approve` — le travail est intégré (refusé si le HEAD a dérivé depuis la \
-         livraison — le manifeste épingle l'état exact revu) ;\n\
-         - `request_changes` — renvoyé au worker avec un `comment` actionnable.\n\n\
-         Résumé du worker : {summary}",
-        reference = task_reference,
-        title = task_title,
-        head = head_sha,
-        child = child_discussion_id,
-        summary = summary,
-    );
+    let content = match lang {
+        RoomLang::Fr => format!(
+            "**Revue demandée — {task_reference} : {task_title}**\n\n\
+             Le worker a livré son travail (HEAD `{head_sha}`) dans la sous-discussion \
+             `{child_discussion_id}` et soumis un DeliveryManifest. Décide via \
+             `task_exec_review` :\n\
+             - `approve` — le travail est intégré (refusé si le HEAD a dérivé depuis la \
+             livraison — le manifeste épingle l'état exact revu) ;\n\
+             - `request_changes` — renvoyé au worker avec un `comment` actionnable.\n\n\
+             Résumé du worker : {summary}"
+        ),
+        RoomLang::En => format!(
+            "**Review requested — {task_reference}: {task_title}**\n\n\
+             The worker delivered its work (HEAD `{head_sha}`) in the sub-discussion \
+             `{child_discussion_id}` and submitted a DeliveryManifest. Decide through \
+             `task_exec_review`:\n\
+             - `approve` — the work is integrated (refused if HEAD drifted since the \
+             delivery — the manifest pins the exact state reviewed);\n\
+             - `request_changes` — sent back to the worker with an actionable `comment`.\n\n\
+             Worker summary: {summary}"
+        ),
+    };
     orchestrator_message(
         format!("orch-review-request:{exec_id}:{attempt_no}"),
         content,
@@ -7867,6 +8152,7 @@ fn build_review_request_message(
 /// is exhausted (KT-319 DoD-6). It tells the principal the run has paused in `Escalated` and names
 /// the human choices — it does NOT re-offer. Deterministic id per `(exec, attempt)` so a resume
 /// never double-posts.
+#[allow(clippy::too_many_arguments)]
 fn build_escalation_message(
     exec_id: &str,
     attempt_no: u32,
@@ -7875,29 +8161,38 @@ fn build_escalation_message(
     review_rounds: u32,
     max_review_rounds: u32,
     child_discussion_id: &str,
+    lang: RoomLang,
 ) -> DiscussionMessage {
-    let content = format!(
-        "**Escalade — budget de revue épuisé ({rounds}/{max}) — {reference} : {title}**\n\n\
-         Le worker vient de recevoir `request_changes` et le nombre de tours de revue autorisés \
-         est atteint. L'exécution est mise en pause en `Escalated` : elle ne sera **pas** \
-         ré-offerte automatiquement — une **décision humaine** est requise. Options :\n\
-         - reprendre la main sur la sous-discussion `{child}` (piloter le worker directement) ;\n\
-         - relever la limite de tours du run puis ré-offrir explicitement ;\n\
-         - basculer sur un worker natif, ou abandonner l'exécution.",
-        rounds = review_rounds,
-        max = max_review_rounds,
-        reference = task_reference,
-        title = task_title,
-        child = child_discussion_id,
-    );
+    let content = match lang {
+        RoomLang::Fr => format!(
+            "**Escalade — budget de revue épuisé ({review_rounds}/{max_review_rounds}) — \
+             {task_reference} : {task_title}**\n\n\
+             Le worker vient de recevoir `request_changes` et le nombre de tours de revue \
+             autorisés est atteint. L'exécution est mise en pause en `Escalated` : elle ne \
+             sera **pas** ré-offerte automatiquement — une **décision humaine** est requise. \
+             Options :\n\
+             - reprendre la main sur la sous-discussion `{child_discussion_id}` (piloter le \
+             worker directement) ;\n\
+             - relever la limite de tours du run puis ré-offrir explicitement ;\n\
+             - basculer sur un worker natif, ou abandonner l'exécution."
+        ),
+        RoomLang::En => format!(
+            "**Escalation — review budget exhausted ({review_rounds}/{max_review_rounds}) — \
+             {task_reference}: {task_title}**\n\n\
+             The worker has just received `request_changes` and the number of allowed review \
+             rounds is reached. The execution is paused in `Escalated`: it will **not** be \
+             re-offered automatically — a **human decision** is required. Options:\n\
+             - take over the sub-discussion `{child_discussion_id}` (drive the worker \
+             directly);\n\
+             - raise the run's round limit then explicitly re-offer;\n\
+             - switch to a native worker, or abandon the execution."
+        ),
+    };
     orchestrator_message(format!("orch-escalation:{exec_id}:{attempt_no}"), content)
 }
 
-/// Shared worker-brief markdown (KT-318 DoD-6: objective, DoD, decisions/scope,
-/// constraints, tests, workspace and the concrete DeliveryManifest v1 delivery
-/// format) — the focused context, not the whole plan. Native and CLI briefs both
-/// render through this so their lifecycle contract stays aligned while the
-/// concrete method names the tools each transport actually exposes.
+/// The French brief, which the existing brief tests pin.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn worker_brief_markdown(
     task_reference: &str,
@@ -7911,13 +8206,73 @@ fn worker_brief_markdown(
     native_delivery_projection: bool,
     worker_scope: Option<&TaskWorkerScope>,
 ) -> String {
+    worker_brief_markdown_in(
+        RoomLang::Fr,
+        task_reference,
+        task_title,
+        task_description,
+        dod,
+        worktree_path,
+        branch,
+        base_sha,
+        can_run_shell,
+        native_delivery_projection,
+        worker_scope,
+    )
+}
+
+/// Shared worker-brief markdown (KT-318 DoD-6: objective, DoD, decisions/scope,
+/// constraints, tests, workspace and the concrete DeliveryManifest v1 delivery
+/// format) — the focused context, not the whole plan. Native and CLI briefs both
+/// render through this so their lifecycle contract stays aligned while the
+/// concrete method names the tools each transport actually exposes.
+/// Written in the room's language (KT-1316).
+#[allow(clippy::too_many_arguments)]
+fn worker_brief_markdown_in(
+    lang: RoomLang,
+    task_reference: &str,
+    task_title: &str,
+    task_description: &str,
+    dod: &[PlanningDodItem],
+    worktree_path: &str,
+    branch: &str,
+    base_sha: &str,
+    can_run_shell: bool,
+    native_delivery_projection: bool,
+    worker_scope: Option<&TaskWorkerScope>,
+) -> String {
+    let fr = lang == RoomLang::Fr;
     let mediated_host_commit = can_run_shell && native_delivery_projection;
     // A joined CLI retains the room tools exposed by the regular bridge. Spawned
     // native workers and HTTP workers receive their narrower task/workspace
     // surfaces, so their briefs must request a relay instead of naming a tool
     // they cannot call.
     let has_room_publication = can_run_shell && !native_delivery_projection;
-    let human_arbitration = if has_room_publication {
+    let human_arbitration = if has_room_publication && !fr {
+        "## Human arbitration and parent milestones\n\
+         - A normal implementation choice, compatible with the objective and the DoD, is the \
+           worker's to make. A product decision that changes the need, the scope or a user \
+           trade-off is reserved to the human.\n\
+         - Before asking for a product decision, call `disc_question_list` and reuse any \
+           applicable durable human answer; do not ask again for an arbitration already made.\n\
+         - Without an applicable answer, publish through `disc_append` a closed `kronn-question` \
+           card with `\"version\":1` (a number), a stable key and the blocking question. Then read \
+           that key back with `disc_question_list` to verify it was recorded.\n\
+         - Meanwhile, pause only the affected scope and continue with independent work only. \
+           Neither the worker nor the principal ever decides in the human's place.\n\n"
+            .to_string()
+    } else if !has_room_publication && !fr {
+        "## Human arbitration and parent milestones\n\
+         - A normal implementation choice, compatible with the objective and the DoD, is the \
+           worker's to make. A product decision that changes the need, the scope or a user \
+           trade-off is reserved to the human.\n\
+         - This surface declares neither `disc_question_list` nor `disc_append`. Reuse any \
+           durable human answer provided in the context; without an applicable answer, state \
+           the exact blocker and ask the principal to relay a valid `kronn-question` card.\n\
+         - While waiting for the durable answer, pause only the affected scope. Neither the \
+           worker nor the principal ever decides in the human's place.\n\n"
+            .to_string()
+    } else if has_room_publication {
         "## Arbitrages humains et jalons parent\n\
          - Un choix normal d'implémentation, compatible avec l'objectif et la DoD, relève du worker. \
            Une décision produit qui change le besoin, le périmètre ou un compromis utilisateur est \
@@ -7946,7 +8301,31 @@ fn worker_brief_markdown(
     // so a joined CLI can target the real parent via `task_exec_status`'s `parent_discussion_id`.
     // `disc_question_list` truly is bound-only (backend/scripts/disc-introspection-mcp.py:4298-4309).
     // Native/HTTP workers declare neither tool.
-    let parent_milestones = if has_room_publication {
+    let parent_milestones = if has_room_publication && !fr {
+        "## Factual parent milestones\n\
+         `disc_append` targets by default the sub-discussion this session was re-attached to \
+         on acceptance, but accepts an explicit `disc_id`: call `task_exec_status` to get \
+         `parent_discussion_id`, the real and authorized id of the parent room, and publish a \
+         factual milestone there directly (notable progress, blocker, result) when there is one \
+         — no automatic or systematic mirroring. `disc_question_list` stays bound to this \
+         sub-discussion whatever argument is passed: it never gives access to the questions \
+         pending in the parent room. The milestones already visible without any action from you \
+         remain the attachment recorded by the orchestrator on acceptance and, after a valid \
+         DeliveryManifest, the review request it creates; they are not the only possible \
+         milestones. If a human decision must reach the parent room and you cannot or must not \
+         publish it yourself, explicitly ask the principal to relay it.\n\n"
+            .to_string()
+    } else if !fr {
+        "## Factual parent milestones\n\
+         This surface declares no message publication tool (neither `disc_append` nor \
+         `disc_question_list`). The only automatic parent milestones are the attachment recorded \
+         by the orchestrator and, after a valid DeliveryManifest, the review request. For any \
+         other notable verified fact (progress, blocker, result), report it in your available \
+         output and ask the principal to relay it to the parent room, not only for a human \
+         decision; no automatic visibility or guaranteed delivery, no automatic mirroring, no \
+         invented tool.\n\n"
+            .to_string()
+    } else if has_room_publication {
         "## Jalons parent factuels\n\
          `disc_append` cible par défaut la sous-discussion où cette session a été rebranchée \
          à l'acceptation, mais accepte un `disc_id` explicite : appelle `task_exec_status` pour \
@@ -7973,14 +8352,18 @@ fn worker_brief_markdown(
             .to_string()
     };
     let dod = if dod.is_empty() {
-        "_(aucune)_".to_string()
+        lang.pick("_(aucune)_", "_(none)_").to_string()
     } else {
         // KT-1254 — a live check is made by the principal AFTER integration:
         // the worker declares it unmet (`met: false`) with what it could not prove.
         let live = |item: &PlanningDodItem| {
             if item.verification == PlanningDodVerification::PostIntegration {
-                " _(vérification en direct par le principal APRÈS intégration : ne la \
-                 prouve pas, déclare `met: false` et dis ce qui reste à vérifier)_"
+                lang.pick(
+                    " _(vérification en direct par le principal APRÈS intégration : ne la \
+                     prouve pas, déclare `met: false` et dis ce qui reste à vérifier)_",
+                    " _(live check made by the principal AFTER integration: do not prove \
+                     it, declare `met: false` and say what remains to be verified)_",
+                )
             } else {
                 ""
             }
@@ -8011,28 +8394,78 @@ fn worker_brief_markdown(
                     start_line,
                     end_line,
                 } => (
-                    format!(
-                        "- Fichier : `{path}`\n- Plage inclusive : `{start_line}..={end_line}`"
-                    ),
+                    if fr {
+                        format!(
+                            "- Fichier : `{path}`\n- Plage inclusive : `{start_line}..={end_line}`"
+                        )
+                    } else {
+                        format!("- File: `{path}`\n- Inclusive range: `{start_line}..={end_line}`")
+                    },
                     "edit_lines",
-                    "remplacer uniquement la plage gelée",
+                    lang.pick(
+                        "remplacer uniquement la plage gelée",
+                        "replace only the frozen range",
+                    ),
                 ),
                 TaskWorkerScope::PrelocalizedInsertAfter { path, anchor_line } => (
-                    format!(
-                        "- Fichier : `{path}`\n- Insertion après la ligne d'ancre : `{anchor_line}`"
-                    ),
+                    if fr {
+                        format!(
+                            "- Fichier : `{path}`\n- Insertion après la ligne d'ancre : `{anchor_line}`"
+                        )
+                    } else {
+                        format!(
+                            "- File: `{path}`\n- Insertion after the anchor line: `{anchor_line}`"
+                        )
+                    },
                     "insert_after_line",
-                    "fournir uniquement le nouveau texte ; l'ancre est préservée mécaniquement",
+                    lang.pick(
+                        "fournir uniquement le nouveau texte ; l'ancre est préservée mécaniquement",
+                        "provide only the new text; the anchor is preserved mechanically",
+                    ),
                 ),
             };
-            let delivery = if native_delivery_projection {
-                "Dans `task_exec_deliver`, fournis uniquement `tests`, `dod_status` dans l'ordre, \
-                 `docs`, `migrations`, `risks`, `limitations` et `summary`. Kronn injecte les \
-                 identifiants, le SHA et l'inventaire depuis le worktree réel."
-            } else {
-                "Dans `task_exec_deliver`, remplis le DeliveryManifest v1 complet selon le schéma \
-                 déclaré par l'outil."
+            let delivery = match (native_delivery_projection, fr) {
+                (true, true) => {
+                    "Dans `task_exec_deliver`, fournis uniquement `tests`, `dod_status` dans l'ordre, \
+                     `docs`, `migrations`, `risks`, `limitations` et `summary`. Kronn injecte les \
+                     identifiants, le SHA et l'inventaire depuis le worktree réel."
+                }
+                (true, false) => {
+                    "In `task_exec_deliver`, provide only `tests`, `dod_status` in order, `docs`, \
+                     `migrations`, `risks`, `limitations` and `summary`. Kronn injects the ids, the \
+                     SHA and the inventory from the real worktree."
+                }
+                (false, true) => {
+                    "Dans `task_exec_deliver`, remplis le DeliveryManifest v1 complet selon le schéma \
+                     déclaré par l'outil."
+                }
+                (false, false) => {
+                    "In `task_exec_deliver`, fill in the complete DeliveryManifest v1 according to \
+                     the schema the tool declares."
+                }
             };
+            if !fr {
+                return format!(
+                    "# {task_reference} — {task_title}\n\n\
+                     ## Objective\n{objective}\n\n\
+                     ## Definition of Done\n{dod}\n\n\
+                     ## Prelocalized mechanical target\n{target}\n\n\
+                     ## Bounded protocol\n\
+                     1. Call the single constrained `read_file`.\n\
+                     2. Kronn permanently removes the read tools; call the single \
+                        `{mutation_tool}` with the `content_sha256` received to {mutation_instruction}.\n\
+                     3. Call `git_commit` with that single file.\n\
+                     4. Call `task_exec_deliver`.\n\n\
+                     Do not search elsewhere, do not re-read and never widen the target. Kronn exposes \
+                     a single constrained `read_file`. If the window is not enough, state the exact \
+                     blocker: not a single byte may be guessed. You have no shell: do not claim any \
+                     validation was run; report it `skipped` with the command the principal will have \
+                     to run. No push, merge or force-push.\n\n\
+                     {delivery}\n\n\
+                     Start now with `read_file`; the fresh worktree and the target are already \
+                     established, there is nothing to inventory."
+                );
+            }
             return format!(
                 "# {task_reference} — {task_title}\n\n\
                  ## Objectif\n{objective}\n\n\
@@ -8061,7 +8494,25 @@ fn worker_brief_markdown(
     // (`worker_completed_without_delivery`, twice on KT-847). The long gates the
     // principal persisted are Kronn's to run at integration; the worker's job is the
     // targeted tests, then commit and deliver in the same turn.
-    let tests = if can_run_shell {
+    let tests = if can_run_shell && !fr {
+        "Run the **targeted** tests that cover your change and report each result \
+         (`pass`/`fail`/`skipped` + non-empty evidence) in `tests`. A `pass` without a \
+         verifiable command or output is refused.\n\
+         The long validations persisted by the principal (often the full suite) are run by \
+         Kronn at integration, after the review: do not replay them in full. The shell tool \
+         cuts a long command (Bash: 600 s): never start one in the background to wait for it, \
+         because your process ends as soon as you hand the turn back and the execution ends \
+         without a delivery. Chain it all in the same turn: targeted tests, commit, then \
+         `task_exec_deliver`."
+            .to_string()
+    } else if !fr {
+        "You have no shell: never claim to have run `cargo`, `pnpm`, `make` or any other \
+         command. You may write the tests that are needed, then report the commands the \
+         principal must run with `status: skipped` and a non-empty reason. The principal will \
+         run these validations before approval and attach its evidence to the \
+         `ReviewDecision`."
+            .to_string()
+    } else if can_run_shell {
         "Lance les tests **ciblés** qui couvrent ton changement et reporte chaque résultat \
          (`pass`/`fail`/`skipped` + preuve non vide) dans `tests`. Un `pass` sans \
          commande ou sortie vérifiable est refusé.\n\
@@ -8080,7 +8531,7 @@ fn worker_brief_markdown(
          sa preuve au `ReviewDecision`."
             .to_string()
     };
-    let (method, first_action, mechanical_scope) = match worker_scope {
+    let french_scope = match worker_scope {
         Some(TaskWorkerScope::PrelocalizedEdit {
             path,
             start_line,
@@ -8162,7 +8613,118 @@ fn worker_brief_markdown(
             String::new(),
         ),
     };
-    let delivery_format = if !native_delivery_projection {
+    let (method, first_action, mechanical_scope) = if fr {
+        french_scope
+    } else {
+        match worker_scope {
+            Some(TaskWorkerScope::PrelocalizedEdit {
+                path,
+                start_line,
+                end_line,
+            }) => (
+                format!(
+                    "This execution is mechanically prelocalized. Kronn first exposes a single \
+                     `read_file` constrained to the frozen window around `{path}:{start_line}-{end_line}`, \
+                     then permanently removes the read tools and exposes only `edit_lines` \
+                     on that same range. Do not search elsewhere, do not re-read, and change \
+                     neither the file nor the range. If the window is not enough to produce \
+                     a safe edit, state the exact blocker: Kronn will hand control back to the \
+                     principal. After an accepted edit, commit then deliver."
+                ),
+                "First call: use the single declared `read_file` with its already constrained \
+                 arguments. On the next turn, immediately call the single declared `edit_lines` \
+                 with the fresh `content_sha256` received."
+                    .to_string(),
+                format!(
+                    "## Prelocalized mechanical target\n- File: `{path}`\n- Inclusive range: \
+                     `{start_line}..={end_line}`\n- The target is persisted and cannot be \
+                     widened by the worker; the hash comes from the real read of the worktree.\n\n"
+                ),
+            ),
+            Some(TaskWorkerScope::PrelocalizedInsertAfter { path, anchor_line }) => (
+                format!(
+                    "This execution is mechanically prelocalized for an insertion. Kronn first \
+                     exposes a single `read_file` constrained to the frozen window around \
+                     `{path}:{anchor_line}`, then permanently removes the read tools and \
+                     exposes only `insert_after_line` on that anchor. Do not search elsewhere, \
+                     do not re-read and change neither the file nor the anchor. The tool \
+                     mechanically preserves the anchor line: provide only the text to add. If the \
+                     window is not enough to produce a safe insertion, state the exact blocker. \
+                     After an accepted insertion, commit then deliver."
+                ),
+                "First call: use the single declared `read_file` with its already constrained \
+                 arguments. On the next turn, immediately call the single declared \
+                 `insert_after_line` with the fresh `content_sha256` received and only the text \
+                 to add."
+                    .to_string(),
+                format!(
+                    "## Prelocalized mechanical target\n- File: `{path}`\n- Insertion after \
+                     the anchor line: `{anchor_line}`\n- The target is persisted, the anchor line \
+                     is preserved mechanically and the hash comes from the real read of the \
+                     worktree.\n\n"
+                ),
+            ),
+            None if can_run_shell => (
+                format!(
+                    "Use your CLI's native tools (search, targeted reading, editing and shell). \
+                     First search for the symbol cited in the objective, read only the useful \
+                     region, then edit as soon as you know what to change. Run the targeted tests \
+                     (Tests section). {}",
+                    if mediated_host_commit {
+                        "Do not run `git commit` in the shell: call `task_exec_commit` with only \
+                         the explicit files and the message. Kronn alone owns administrative Git \
+                         access."
+                    } else {
+                        "Create a clean commit with `git commit -s` before delivery."
+                    }
+                ),
+                "Search for the symbol cited in the objective with your CLI's native tools, \
+                 read only the region found, then implement."
+                    .to_string(),
+                String::new(),
+            ),
+            None => (
+                "The shortest path, whatever the size of the file: \
+                 `search_text` to find the exact spot (file + line), \
+                 `read_file` with `offset` and `limit` to read that region only, \
+                 `edit_lines` with `start_line`, `end_line` and the `content_sha256` received \
+                 to replace that range without copying an anchor, then `git_commit`, \
+                 then deliver. If the hash drifted, re-read: Kronn refuses the mutation. \
+                 As soon as you know what to change, make the edit: re-reading a region \
+                 already read produces nothing new."
+                    .to_string(),
+                "First call: `search_text` on the symbol cited in the objective. \
+                 Then read ONLY the region found, and make the edit with \
+                 `edit_lines` as soon as you know what to change — reading the file \
+                 continuously, slice after slice, burns your turn without producing anything."
+                    .to_string(),
+                String::new(),
+            ),
+        }
+    };
+    let delivery_format = if !native_delivery_projection && !fr {
+        format!(
+            "Required fields:\n\
+             - `version`: `\"1\"`\n\
+             - `task_ref`: `{task_reference}`\n\
+             - `head_sha`: the exact HEAD delivered (SHA of the branch's last commit)\n\
+             - `files_touched`: list of `{{ path, kind: added|modified|deleted }}`\n\
+             - `tests`: list of `{{ name, status: pass|fail|skipped, evidence }}`\n\
+             - `dod_status`: one `{{ dod_id, met, evidence }}` per DoD item\n\
+             - `docs`, `migrations`, `risks`, `limitations`: lists (put `[]` explicitly if not applicable)\n\
+             - `summary`: short summary of the changes"
+        )
+    } else if !fr {
+        "You provide only the following semantic assertions:\n\
+         - `tests`: list of `{ name, status: pass|fail|skipped, evidence }`\n\
+         - `dod_status`: exactly one `{ met, evidence }` per DoD item, in the order above\n\
+         - `docs`, `migrations`, `risks`, `limitations`: lists (put `[]` explicitly if not applicable)\n\
+         - `summary`: short summary of the changes\n\
+         - `tests_executed`: `{ executed: bool, which: [commands] }` — mandatory; \
+           `{ executed: false, which: [] }` if no test actually ran\n\
+         Do not invent or copy any UUID, SHA or inventory: after authorization, Kronn itself injects `version`, `task_ref`, `head_sha`, `files_touched` and each `dod_id` from the task and the exact worktree."
+            .to_string()
+    } else if !native_delivery_projection {
         format!(
             "Champs requis :\n\
              - `version` : `\"1\"`\n\
@@ -8185,7 +8747,19 @@ fn worker_brief_markdown(
          N'invente et ne recopie aucun UUID, SHA ou inventaire : après autorisation, Kronn injecte lui-même `version`, `task_ref`, `head_sha`, `files_touched` et chaque `dod_id` depuis la tâche et le worktree exact."
             .to_string()
     };
-    let commit_boundary = if mediated_host_commit {
+    let commit_boundary = if !fr && mediated_host_commit {
+        "Before delivery, call `task_exec_commit` with only the relative paths actually \
+         modified and a concise message. Do not use `git commit` in the shell: the shared \
+         objects and refs are deliberately outside your sandbox."
+    } else if !fr && can_run_shell {
+        "Create a clean commit in this worktree before delivery, with `git commit -s`: \
+         it signs with the repository's git identity. Never write an identity trailer \
+         (`Signed-off-by`, `Co-Authored-By`…) by hand: Kronn refuses the delivery if a \
+         trailer does not match that identity."
+    } else if !fr {
+        "Before delivery, call `git_commit` with only the relative paths actually \
+         modified and a concise message."
+    } else if mediated_host_commit {
         "Avant la livraison, appelle `task_exec_commit` avec les seuls chemins relatifs réellement \
          modifiés et un message concis. N'utilise pas `git commit` dans le shell : les objets et \
          refs partagés restent volontairement hors de ta sandbox."
@@ -8205,6 +8779,31 @@ fn worker_brief_markdown(
     // integration (KT-854).
     let target_integration = if !can_run_shell {
         String::new()
+    } else if !fr && mediated_host_commit {
+        "## Integrate the target branch\n\
+         When the principal asks you to integrate the target branch into your branch, it is the \
+         only merge allowed (it goes in that direction: target → your branch, never the reverse).\n\
+         1. Run `git merge --no-commit --no-ff <target>` in your worktree.\n\
+         2. In case of a conflict, resolve it in the files.\n\
+         3. Call `task_exec_commit` with the resolved files and a message: Kronn completes \
+            the merge with both parents and the sign-off. Without a conflict, name at least one \
+            file the merge brings in or that you modify.\n\
+         Never delete `.git/MERGE_HEAD` and run neither `git merge --abort` nor `git reset` \
+         to re-commit by hand: a single-parent commit makes the target's files appear as \
+         \"added by both sides\" at integration. If `task_exec_commit` refuses (unresolved \
+         conflicts, foreign indexed path), it changed nothing: fix it then call it again.\n\n"
+            .to_string()
+    } else if !fr {
+        "## Integrate the target branch\n\
+         When the principal asks you to integrate the target branch into your branch, it is the \
+         only merge allowed (it goes in that direction: target → your branch, never the reverse).\n\
+         1. Run `git merge --signoff <target>` in your worktree.\n\
+         2. In case of a conflict, resolve it, `git add` the resolved files, then finish with \
+            `git commit -s --no-edit` — with no path and no `-m`: git refuses a path-limited \
+            commit during a merge.\n\
+         Never delete `.git/MERGE_HEAD` to re-commit by hand: a single-parent commit makes the \
+         target's files appear as \"added by both sides\" at integration.\n\n"
+            .to_string()
     } else if mediated_host_commit {
         "## Intégrer la branche cible\n\
          Quand le principal te demande d'intégrer la branche cible dans ta branche, c'est le \
@@ -8233,6 +8832,46 @@ fn worker_brief_markdown(
          l'intégration.\n\n"
             .to_string()
     };
+    if !fr {
+        return format!(
+            "# {task_reference} — {task_title}\n\n\
+             ## Objective\n{objective}\n\n\
+             ## Definition of Done\n{dod}\n\n\
+             {human_arbitration}\
+             {parent_milestones}\
+             ## Decisions & scope\n\
+             The exact scope of this task IS the Definition of Done above: touch only what \
+             satisfies it, do not spill over onto other tasks or unrelated files. The applicable \
+             design decisions are those already recorded in the objective and the linked design \
+             documents — respect them, do not replay them.\n\n\
+             ## Method\n\
+             {method}\n\n\
+             {mechanical_scope}\
+             ## Constraints\n\
+             - Work ONLY in this worktree; never touch another checkout.\n\
+             - No `git push`, no force-push, no merge into the target: the protected integration \
+             is done by Kronn AFTER review.\n\
+             - Stay within the DoD's scope.\n\n\
+             {target_integration}\
+             ## Tests\n\
+             {tests}\n\n\
+             ## Workspace\n\
+             - Branch: `{branch}`\n\
+             - Worktree: `{worktree_path}`\n\
+             - Pinned base: `{base_sha}`\n\n\
+             ## Delivery format\n\
+             {commit_boundary}\n\
+             When the DoD is satisfied, submit a **DeliveryManifest v1** through the \
+             `task_exec_deliver` tool (the body is validated; a non-conforming manifest is \
+             refused, not silently accepted).\n\
+             {delivery_format}\n\
+             Only report \"ready for review\" AFTER that submission: it is what wakes the \
+             principal agent for the review.\n\n\
+             ## Start now\n\
+             This worktree is fresh: there is NO state to inventory, that is established. \
+             {first_action}"
+        );
+    }
     format!(
         "# {reference} — {title}\n\n\
          ## Objectif\n{objective}\n\n\
@@ -8290,6 +8929,15 @@ fn worker_brief_markdown(
     )
 }
 
+/// The language the orchestrator speaks in a campaign's rooms: the parent
+/// discussion's configured language (KT-1316).
+async fn room_lang(db: &Database, parent_discussion_id: &str) -> RoomLang {
+    let id = parent_discussion_id.to_string();
+    db.with_conn(move |conn| Ok(crate::db::discussions::room_lang(conn, &id)))
+        .await
+        .unwrap_or_default()
+}
+
 /// An orchestrator-authored discussion message (brief, control offer, attach notice):
 /// a backend-authored `User`/`Main` message with the `Orchestrateur` pseudonym. The
 /// caller sets the deterministic id so a resume can never double-post.
@@ -8331,20 +8979,28 @@ fn build_control_offer_message(
     task_reference: &str,
     task_title: &str,
     child_discussion_id: &str,
+    lang: RoomLang,
 ) -> DiscussionMessage {
-    let content = format!(
-        "**Offre de prise en charge — {reference} : {title}**\n\n\
-         Une tâche t'est proposée comme worker. Pour l'accepter sans quitter cette \
-         room principale, appelle :\n\n\
-         `task_exec_accept_worker_offer({{ offer_id: \"{offer}\" }})`\n\n\
-         - Sous-discussion : `{child}`\n\
-         - Ceci est une offre de contrôle, pas encore le brief de travail : le brief \
-         est renvoyé directement par l'acceptation et conservé dans la sous-discussion.",
-        reference = task_reference,
-        title = task_title,
-        offer = offer_id,
-        child = child_discussion_id,
-    );
+    let content = match lang {
+        RoomLang::Fr => format!(
+            "**Offre de prise en charge — {task_reference} : {task_title}**\n\n\
+             Une tâche t'est proposée comme worker. Pour l'accepter sans quitter cette \
+             room principale, appelle :\n\n\
+             `task_exec_accept_worker_offer({{ offer_id: \"{offer_id}\" }})`\n\n\
+             - Sous-discussion : `{child_discussion_id}`\n\
+             - Ceci est une offre de contrôle, pas encore le brief de travail : le brief \
+             est renvoyé directement par l'acceptation et conservé dans la sous-discussion."
+        ),
+        RoomLang::En => format!(
+            "**Takeover offer — {task_reference}: {task_title}**\n\n\
+             A task is offered to you as worker. To accept it without leaving this \
+             main room, call:\n\n\
+             `task_exec_accept_worker_offer({{ offer_id: \"{offer_id}\" }})`\n\n\
+             - Sub-discussion: `{child_discussion_id}`\n\
+             - This is a control offer, not yet the work brief: the brief is returned \
+             directly by the acceptance and kept in the sub-discussion."
+        ),
+    };
     DiscussionMessage {
         id: format!("orch-offer:{exec_id}:{attempt_no}"),
         role: MessageRole::User,
@@ -10467,14 +11123,21 @@ pub async fn cancel_execution(
 /// provider decision and the actual wake-up.
 /// What a replacement worker must know when its reassignment rejected the
 /// delivery that was awaiting review (KT-791).
-fn rejected_delivery_note(before: &TaskExecution) -> Option<String> {
+fn rejected_delivery_note(before: &TaskExecution, lang: RoomLang) -> Option<String> {
     (before.status == TaskExecutionStatus::AwaitingReview).then(|| {
-        format!(
-            "\n\n## Livraison rejetée\n\nLa livraison de la tentative {} attendait une revue ; \
-             cette réaffectation l'a rejetée. Elle reste dans l'historique : produis et livre \
-             une nouvelle tentative.",
-            before.attempt_no
-        )
+        let attempt = before.attempt_no;
+        match lang {
+            RoomLang::Fr => format!(
+                "\n\n## Livraison rejetée\n\nLa livraison de la tentative {attempt} attendait une \
+                 revue ; cette réaffectation l'a rejetée. Elle reste dans l'historique : produis \
+                 et livre une nouvelle tentative."
+            ),
+            RoomLang::En => format!(
+                "\n\n## Delivery rejected\n\nThe delivery of attempt {attempt} was waiting for a \
+                 review; this reassignment rejected it. It stays in the history: produce and \
+                 deliver a new attempt."
+            ),
+        }
     })
 }
 
@@ -10497,10 +11160,11 @@ pub(crate) async fn reassign_native_execution(
                 .context("execution vanished before worker reassignment")
         })
         .await?;
+    let lang = room_lang(&state.db, &execution.parent_discussion_id).await;
     let scope_note = reanchor_execution_scope(&state.db, &execution)
         .await?
-        .map(|reanchored| reanchored_scope_note(&reanchored));
-    let rejected_note = rejected_delivery_note(&execution);
+        .map(|reanchored| reanchored_scope_note(&reanchored, lang));
+    let rejected_note = rejected_delivery_note(&execution, lang);
     let id = exec_id.to_string();
     let persisted_reason = reason.to_string();
     let (view, replaced_dispatch_id) = state
@@ -10569,14 +11233,18 @@ pub(crate) async fn reassign_native_execution(
                     Some(&format!("reassign:{id}")),
                 )?;
             }
-            let mut handoff = handoff_notice_with_context(
+            let mut handoff = handoff_notice_in(
+                lang,
                 has_recorded_delivery(&transaction, &id)?,
                 Some(generation),
                 Some(&transaction),
                 Some(&id),
             );
             if !persisted_reason.trim().is_empty() {
-                handoff.push_str("\n\n## Consigne du principal pour cette réaffectation\n\n");
+                handoff.push_str(lang.pick(
+                    "\n\n## Consigne du principal pour cette réaffectation\n\n",
+                    "\n\n## Principal's instruction for this reassignment\n\n",
+                ));
                 handoff.push_str(persisted_reason.trim());
             }
             handoff.push_str(scope_note.as_deref().unwrap_or_default());
@@ -10679,7 +11347,8 @@ pub async fn reassign_execution(
                 &reason,
                 &backend_actor(),
             )?;
-            Ok((execution, rejected_delivery_note(&before)))
+            let lang = crate::db::discussions::room_lang(conn, &before.parent_discussion_id);
+            Ok((execution, rejected_delivery_note(&before, lang)))
         })
         .await;
     let Ok((execution, rejected_note)) = reassigned else {
@@ -10781,15 +11450,28 @@ pub async fn reassign_execution(
                             "orch-reassign-offer:{}:{}",
                             id, recovery.assignment_generation
                         ),
-                        format!(
-                            "**Offre de réassignation — génération {}**\n\n\
-                             Accepte avec `task_exec_accept_worker_offer({{ offer_id: \"{}\" }})`. \
-                             Tu reprendras la même sous-discussion, le même worktree, les manifests, \
-                             constats et SHA déjà persistés ; aucun travail validé ne doit être rejoué.{}",
-                            recovery.assignment_generation,
-                            offer.id,
-                            rejected_note.as_deref().unwrap_or_default()
-                        ),
+                        {
+                            let generation = recovery.assignment_generation;
+                            let offer_id = &offer.id;
+                            let rejected = rejected_note.as_deref().unwrap_or_default();
+                            match crate::db::discussions::room_lang(
+                                &tx,
+                                &current.parent_discussion_id,
+                            ) {
+                                RoomLang::Fr => format!(
+                                    "**Offre de réassignation — génération {generation}**\n\n\
+                                     Accepte avec `task_exec_accept_worker_offer({{ offer_id: \"{offer_id}\" }})`. \
+                                     Tu reprendras la même sous-discussion, le même worktree, les manifests, \
+                                     constats et SHA déjà persistés ; aucun travail validé ne doit être rejoué.{rejected}"
+                                ),
+                                RoomLang::En => format!(
+                                    "**Reassignment offer — generation {generation}**\n\n\
+                                     Accept with `task_exec_accept_worker_offer({{ offer_id: \"{offer_id}\" }})`. \
+                                     You will take over the same sub-discussion, the same worktree, the manifests, \
+                                     findings and SHAs already persisted; no validated work must be replayed.{rejected}"
+                                ),
+                            }
+                        },
                     );
                     let target = MessageTarget::cli(provider, session_id);
                     crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
@@ -13866,7 +14548,7 @@ pub async fn human_review(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 pub(crate) mod tests {
     use super::*;
     use crate::models::{
@@ -22155,6 +22837,58 @@ pub(crate) mod tests {
         );
     }
 
+    /// KT-1316 — a delivery whose integration bounces was approved, never
+    /// accepted: the parent room gets no "Delivery accepted" report for it.
+    #[tokio::test]
+    async fn a_bounced_integration_never_posts_an_accepted_report() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (parent, _child, exec_id, _head, _path) =
+            delivered_awaiting_review(&db, repo.path()).await;
+        let run_id = exec_of(&db, &exec_id).await.orchestration_run_id;
+        let validations = vec![ValidationSpec {
+            command: "false".into(),
+            quick_exec_id: None,
+            timeout_secs: Some(5),
+        }];
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE orchestration_runs SET validation_json = ?2 WHERE id = ?1",
+                rusqlite::params![run_id, serde_json::to_string(&validations)?],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let reviewed = decide_review(
+            &db,
+            &exec_id,
+            &review_approve(&db, &exec_id).await,
+            "ClaudeCode",
+            "sess-b",
+        )
+        .await
+        .unwrap();
+        let _ = continue_approved_review(&db, reviewed).await;
+        assert!(
+            exec_of(&db, &exec_id).await.integrated_sha.is_none(),
+            "the delivery did not land"
+        );
+
+        let accepted_reports = db
+            .with_conn(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE discussion_id = ?1 AND content LIKE '## ✅ Delivery accepted%'",
+                    [parent],
+                    |row| row.get::<_, i64>(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(accepted_reports, 0);
+    }
+
     #[tokio::test]
     async fn failed_validation_redelivery_uses_a_fresh_review_request_message() {
         let repo = init_repo();
@@ -24589,7 +25323,7 @@ pub(crate) mod tests {
         );
         assert!(!plain.contains("Capacités de test"), "{plain}");
 
-        let brief = insert_toolchain_section(plain, &sample_toolchain());
+        let brief = insert_toolchain_section(plain, &sample_toolchain(), RoomLang::Fr);
         let section = brief.find("## Capacités de test").expect("section present");
         let tests = brief.find("## Tests\n").expect("tests section kept");
         assert!(section < tests, "the capabilities come first");
@@ -24605,6 +25339,151 @@ pub(crate) mod tests {
         assert!(brief.contains("--configLoader native"), "{brief}");
         assert!(brief.contains("s'arrête avec ton tour"), "{brief}");
         assert!(brief.contains("jamais sur 3140 ni 5173"), "{brief}");
+    }
+
+    /// KT-1316 — every brief variant reads in the room's language: an English
+    /// room gets no French heading or sentence, a French room keeps its brief.
+    #[test]
+    fn the_worker_brief_follows_the_room_language() {
+        let dod = vec![PlanningDodItem {
+            id: "dod-1".into(),
+            sentence: "It works".into(),
+            completed: false,
+            position: 0,
+            evidence: None,
+            verification: PlanningDodVerification::PostIntegration,
+        }];
+        let scopes = [
+            None,
+            Some(TaskWorkerScope::PrelocalizedEdit {
+                path: "src/lib.rs".into(),
+                start_line: 3,
+                end_line: 9,
+            }),
+        ];
+        let french = [
+            "## Objectif",
+            "## Méthode",
+            "## Contraintes",
+            "## Format de livraison",
+            "## Commence maintenant",
+            "Arbitrages humains",
+        ];
+        for (shell, native) in [(true, true), (true, false), (false, true), (false, false)] {
+            for scope in &scopes {
+                let brief = |lang| {
+                    worker_brief_markdown_in(
+                        lang,
+                        "KT-1316",
+                        "Title",
+                        "Objective text",
+                        &dod,
+                        "/wt",
+                        "kronn/task/kt-1316",
+                        "abc1234",
+                        shell,
+                        native,
+                        scope.as_ref(),
+                    )
+                };
+                let english = brief(RoomLang::En);
+                let case = format!("shell={shell} native={native} scope={scope:?}");
+                assert!(english.contains("## Definition of Done"), "{case}");
+                assert!(english.contains("task_exec_deliver"), "{case}");
+                assert!(english.contains("live check"), "{case}: {english}");
+                // A shell-less worker with a mechanical scope gets the short
+                // bounded protocol instead of the full brief.
+                if !shell && scope.is_some() {
+                    assert!(english.contains("## Bounded protocol"), "{case}");
+                    assert!(brief(RoomLang::Fr).contains("## Protocole borné"), "{case}");
+                } else {
+                    assert!(english.contains("## Workspace"), "{case}");
+                    assert!(english.contains("## Start now"), "{case}: {english}");
+                    assert!(english.contains("## Delivery format"), "{case}");
+                    let french_brief = brief(RoomLang::Fr);
+                    assert!(french_brief.contains("## Commence maintenant"), "{case}");
+                    assert!(!french_brief.contains("## Start now"), "{case}");
+                }
+                for word in french {
+                    assert!(!english.contains(word), "{case}: `{word}` in {english}");
+                }
+                for sentence in ["Tu ", "Ne ", "Appelle ", "ton ", " le worker "] {
+                    assert!(
+                        !english.contains(sentence),
+                        "{case}: `{sentence}` in {english}"
+                    );
+                }
+                assert!(brief(RoomLang::Fr).contains("## Objectif"), "{case}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_toolchain_section_and_room_messages_follow_the_room_language() {
+        let section = toolchain_brief_section(&sample_toolchain(), RoomLang::En);
+        assert!(section.contains("## Test capabilities"), "{section}");
+        assert!(
+            section.contains("✅ available — cargo nextest"),
+            "{section}"
+        );
+        assert!(section.contains("❌ unavailable"), "{section}");
+        assert!(!section.contains("Capacités"), "{section}");
+
+        let review = build_review_request_message(
+            "exec",
+            0,
+            "KT-1316",
+            "Title",
+            "child",
+            "abc1234",
+            "summary",
+            RoomLang::En,
+        );
+        assert!(
+            review.content.contains("Review requested"),
+            "{}",
+            review.content
+        );
+        assert!(!review.content.contains("Revue"), "{}", review.content);
+        let review_fr = build_review_request_message(
+            "exec",
+            0,
+            "KT-1316",
+            "Title",
+            "child",
+            "abc1234",
+            "summary",
+            RoomLang::Fr,
+        );
+        assert!(review_fr.content.contains("Revue demandée"));
+
+        let notice =
+            build_attach_notice("exec", 0, "KT-1316", "Title", "child", None, RoomLang::En);
+        assert!(notice.content.contains("accepted"), "{}", notice.content);
+        assert!(!notice.content.contains("accepté"), "{}", notice.content);
+
+        let escalation =
+            build_escalation_message("exec", 0, "KT-1316", "Title", 3, 3, "child", RoomLang::En);
+        assert!(
+            escalation.content.contains("review budget exhausted (3/3)"),
+            "{}",
+            escalation.content
+        );
+        let offer = build_control_offer_message(
+            "exec",
+            0,
+            "offer-1",
+            "KT-1316",
+            "Title",
+            "child",
+            RoomLang::En,
+        );
+        assert!(
+            offer.content.contains("Takeover offer"),
+            "{}",
+            offer.content
+        );
+        assert!(offer.content.contains("offer-1"));
     }
 
     struct FixedRunner(bool);
@@ -25054,6 +25933,16 @@ pub(crate) mod tests {
         let before = HeldFirstBuild::succeeding();
         let _release = ReleaseOnDrop(before.clone());
 
+        // The straggler's warm-up watcher stops its build once the execution
+        // is no longer `Provisioning`. Left on its 500 ms clock, that stop races
+        // the test's own `release()` below: on a busy machine the watcher wins,
+        // the build is cancelled instead of finished, and the wait for
+        // `finished() == 1` never ends. The test pins the worst case — a
+        // straggler that does finish — so the watcher must not fire.
+        test_warm_up_state_polls().lock().unwrap().insert(
+            repo.path().to_string_lossy().to_string(),
+            Duration::from_secs(3600),
+        );
         let launched =
             launch_with_cargo_crate(&db, repo.path(), before.clone(), "warm-restart").await;
         assert_eq!(launched.status, TaskExecutionStatus::Provisioning);
@@ -25511,7 +26400,14 @@ pub(crate) mod tests {
             dod: task.definition_of_done.clone(),
             already_launched: false,
         };
-        let brief = build_brief(&prepared, "/tmp/wt", "kronn/task/kt-x", "deadbeef", None);
+        let brief = build_brief(
+            &prepared,
+            "/tmp/wt",
+            "kronn/task/kt-x",
+            "deadbeef",
+            None,
+            RoomLang::Fr,
+        );
         let target = native_worker();
 
         let outcome = crate::db::orchestration::commit_provisioning_checkpoint(
@@ -29572,6 +30468,28 @@ pub(crate) mod tests {
             }
         ));
 
+        // KT-1316 — approved is not accepted: nothing is reported until the
+        // integration has landed.
+        let reports_after_approval = {
+            let parent = parent.clone();
+            db.with_conn(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE discussion_id = ?1 AND content LIKE '## ✅ Delivery accepted%'",
+                    [parent],
+                    |row| row.get::<_, i64>(0),
+                )?)
+            })
+            .await
+            .unwrap()
+        };
+        assert_eq!(reports_after_approval, 0, "approval alone must not report");
+        let outcome = continue_approved_review(&db, outcome).await.unwrap();
+        assert!(matches!(
+            outcome,
+            ReviewOutcome::Reviewed { ref execution, .. }
+                if execution.status == TaskExecutionStatus::Done
+        ));
+
         let attempt_no = exec_of(&db, &exec_id).await.attempt_no;
         let report_id = crate::db::delivery_summaries::message_id_for(&exec_id, attempt_no);
 
@@ -29610,18 +30528,9 @@ pub(crate) mod tests {
             format!("orch-delivery:{exec_id}:{attempt_no}")
         );
 
-        // Replay: the same approval must consume the existing checkpoint and
-        // republish nothing.
-        let replayed = decide_review(&db, &exec_id, &approve, "ClaudeCode", "sess-b")
-            .await
-            .unwrap();
-        assert!(matches!(
-            replayed,
-            ReviewOutcome::Reviewed {
-                verdict: ReviewVerdict::Approve,
-                ..
-            }
-        ));
+        // Replay: re-entering the landed integration must republish nothing.
+        let replayed = run_integration(&db, &exec_id).await.unwrap();
+        assert!(matches!(replayed, IntegrationOutcome::NotIntegrable { .. }));
         let count = {
             let parent = parent.clone();
             db.with_conn(move |conn| {

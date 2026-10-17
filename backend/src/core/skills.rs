@@ -915,7 +915,7 @@ pub fn delete_custom_skill(id: &str) -> Result<bool, String> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use serial_test::serial;

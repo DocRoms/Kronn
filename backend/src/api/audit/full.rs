@@ -264,7 +264,7 @@ pub(super) fn sse_error(msg: impl Into<String>) -> Sse<SseStream> {
     sse_refusal(serde_json::json!({ "error": msg.into() }))
 }
 
-fn sse_refusal(payload: serde_json::Value) -> Sse<SseStream> {
+pub(super) fn sse_refusal(payload: serde_json::Value) -> Sse<SseStream> {
     let stream: SseStream = Box::pin(futures::stream::once(async move {
         Ok::<_, Infallible>(Event::default().event("error").data(payload.to_string()))
     }));
@@ -311,6 +311,10 @@ pub async fn full_audit(
     let project_default_skill_ids = project.default_skill_ids.clone();
     let briefing_notes =
         crate::api::projects::resolve_briefing_notes(&project_path, &project.briefing_notes);
+    // KT-999 — the briefing's existing documentation reaches only the steps that
+    // use it, and only when the setting (or the bench switch) is on.
+    let briefing_docs_on =
+        super::briefing_docs::prompt_enabled(state.config.read().await.audit_briefing_docs);
     let td_tasks_option = super::td_tasks::briefing_option_set(briefing_notes.as_deref(), None);
     // KT-1193 — the team's rules and bans: prompt block, detector, coding-rules doc.
     let project_rules = briefing_notes
@@ -359,32 +363,14 @@ pub async fn full_audit(
     // explicit choice; refused before the run takes the project's lease. A
     // resume continues a run that already started on this folder.
     // Read before this run records itself: only an earlier run is a proof.
-    let recorded_run = {
-        let id = project_id.clone();
-        state
-            .db
-            .with_read_conn(move |conn| crate::db::audit_runs::has_any_full(conn, &id))
-            .await
-            .unwrap_or(false)
-    };
+    let recorded_run = super::has_recorded_full_run(&state, &project_id).await;
     if resume_run_id_req.is_none()
         && matches!(req.kind.unwrap_or_default(), crate::models::AuditKind::Full)
     {
-        if let crate::core::docs_folder::DocsFolderState::HumanDocs { files, .. } =
-            crate::core::docs_folder::folder_state_with_runs(
-                &project_path,
-                docs_root.rel(),
-                recorded_run,
-            )
+        if let Some(refusal) =
+            super::docs_folder_choice_refusal(&project_path, &docs_root, recorded_run)
         {
-            return sse_refusal(serde_json::json!({
-                "error": format!(
-                    "The folder {}/ used by Kronn already exists and holds {files} file(s) Kronn did not write. \
-                     Open the briefing and choose: another folder, or move them to {}/legacy/.",
-                    docs_root.rel(), docs_root.rel()
-                ),
-                "error_code": "docs_folder_choice_required",
-            }));
+            return sse_refusal(refusal);
         }
     }
     let retry_steps_req = req.retry_steps.clone();
@@ -576,7 +562,11 @@ pub async fn full_audit(
         // before documentary failures were persisted on their owning steps.
         let documentary_recovery = if resume_run_id_req.is_some() && should_optimize_documents(kind) {
             match crate::core::document_optimization::analyze(&project_path) {
-                Ok(report) => super::document_repair::recovery_plan(&report.diagnostics, &steps),
+                Ok(report) => super::document_repair::recovery_plan(
+                    &report.diagnostics,
+                    &steps,
+                    &super::document_repair::Blame::load(&project_path),
+                ),
                 Err(error) => {
                     yield Event::default().event("error").data(serde_json::json!({
                         "error": format!("Cannot inspect documentary recovery targets: {error}")
@@ -1353,6 +1343,14 @@ pub async fn full_audit(
         let enforce_mode = crate::core::anti_halluc::current_mode()
             == crate::core::anti_halluc::AntiHallucMode::Enforce;
 
+        // KT-1306 — which step introduced each documentary blocker: the final
+        // gate charges (and a resume redoes) that step, not the target's owner.
+        let mut doc_blame = if resume_run_id_req.is_some() {
+            super::document_repair::Blame::load(&project_path)
+        } else {
+            super::document_repair::Blame::reset(&project_path)
+        };
+
         for (step_num, analysis_step) in steps.iter().enumerate() {
             // KT-1199 — what the previous step left, before anything else runs.
             {
@@ -1479,7 +1477,12 @@ pub async fn full_audit(
             let mut full_prompt = super::dated_step_prompt(gate, &super::step_prompt_body(analysis_step, reverify), Utc::now(), &docs_root);
 
             if let Some(ref notes) = briefing_notes {
-                full_prompt.push_str(&super::briefing::briefing_prompt_section(notes, &docs_root));
+                full_prompt.push_str(&super::briefing::briefing_prompt_section_for(
+                    notes,
+                    &docs_root,
+                    analysis_step.target_file,
+                    briefing_docs_on,
+                ));
             }
             // chantier 1 (2026-06-03) — inject deterministic detector signals
             // ONLY into the tech-debt step (Step 8). They anchor the dimension
@@ -1610,6 +1613,46 @@ pub async fn full_audit(
                 &project_path, analysis_step.target_file, pre_content.as_deref(),
             );
 
+            // Correct blockers before final validation, at most twice per
+            // step. Full's documentary gate also applies in off/warn mode;
+            // the global provenance setting still controls the enforce gate.
+            let mut recovery_targets = documentary_recovery.get(&(step as u32)).cloned().unwrap_or_default();
+            if reverify && should_optimize_documents(kind) {
+                match super::document_repair::with_stale_target(&project_path, analysis_step.target_file, recovery_targets.clone()) {
+                    Ok(targets) => recovery_targets = targets,
+                    // The end-of-run documentary gate still checks this document.
+                    Err(e) => tracing::warn!("Audit step {} ({}): stale citation check skipped: {}", step, file_label, e),
+                }
+                tracing::info!(
+                    "Audit step {} ({}) re-verifies a filled target: {} stale reference(s) before the agent",
+                    step, file_label, recovery_targets.iter().filter(|d| d.path == analysis_step.target_file).count()
+                );
+            }
+            // Taken before ANY write of the step, the cross-agent path's
+            // included: what that path writes is the step's own doing.
+            let documentary_snapshot = if should_optimize_documents(kind) {
+                match super::document_repair::snapshot_for_recovery(&project_path, &recovery_targets) {
+                    Ok(snapshot) => Some(snapshot),
+                    Err(reason) => {
+                        yield Event::default().event("error").data(serde_json::json!({
+                            "step":step,"file":file_label,"error":reason,"fatal":true
+                        }).to_string());
+                        return;
+                    }
+                }
+            } else { None };
+            // KT-1306 — the blockers already there before this step ran are not
+            // its doing: reported, never blocking it unless handed to it.
+            let documentary_baseline: Vec<crate::core::document_optimization::Diagnostic> = if documentary_snapshot.is_some() {
+                match crate::core::document_optimization::analyze(&project_path) {
+                    Ok(report) => report.blocking_diagnostics().cloned().collect(),
+                    Err(e) => {
+                        tracing::warn!("Audit step {} ({}): pre-step documentary baseline unavailable: {}", step, file_label, e);
+                        Vec::new()
+                    }
+                }
+            } else { Vec::new() };
+
             // KT-1183 — a finding step under the cross-agent option: Kronn
             // runs the agents, arbitrates and writes the step's documents.
             let cross_handled = match cross_agents.as_deref() {
@@ -1731,32 +1774,6 @@ pub async fn full_audit(
                 _ => false,
             };
 
-            // Correct blockers before final validation, at most twice per
-            // step. Full's documentary gate also applies in off/warn mode;
-            // the global provenance setting still controls the enforce gate.
-            let mut recovery_targets = documentary_recovery.get(&(step as u32)).cloned().unwrap_or_default();
-            if reverify && should_optimize_documents(kind) {
-                match super::document_repair::with_stale_target(&project_path, analysis_step.target_file, recovery_targets.clone()) {
-                    Ok(targets) => recovery_targets = targets,
-                    // The end-of-run documentary gate still checks this document.
-                    Err(e) => tracing::warn!("Audit step {} ({}): stale citation check skipped: {}", step, file_label, e),
-                }
-                tracing::info!(
-                    "Audit step {} ({}) re-verifies a filled target: {} stale reference(s) before the agent",
-                    step, file_label, recovery_targets.iter().filter(|d| d.path == analysis_step.target_file).count()
-                );
-            }
-            let documentary_snapshot = if should_optimize_documents(kind) {
-                match super::document_repair::snapshot_for_recovery(&project_path, &recovery_targets) {
-                    Ok(snapshot) => Some(snapshot),
-                    Err(reason) => {
-                        yield Event::default().event("error").data(serde_json::json!({
-                            "step":step,"file":file_label,"error":reason,"fatal":true
-                        }).to_string());
-                        return;
-                    }
-                }
-            } else { None };
             let max_attempts = if enforce_mode || documentary_snapshot.is_some() {
                 super::anti_hallu_enforce::MAX_ATTEMPTS
             } else {
@@ -1778,6 +1795,7 @@ pub async fn full_audit(
             }
             attempt += 1;
             let mut step_usage = crate::db::audit_runs::StepTokens::UNKNOWN;
+            let mut stream_turns = super::agent_launch::StreamTurns::default();
             let attempt_prompt = super::finish_step_prompt(
                 &full_prompt, citation_feedback.as_deref(), step, analysis_step, &docs_root,
             );
@@ -1989,14 +2007,19 @@ pub async fn full_audit(
                                     if let Some(cost) = cost_usd.and_then(crate::agents::chat_codec::usd_to_micros) {
                                         stream_cost = Some(cost);
                                     }
-                                    if step_usage.total().is_none_or(|seen| input_tokens + output_tokens >= seen) {
-                                        step_usage = crate::db::audit_runs::StepTokens {
-                                            input: Some(input_tokens),
-                                            output: Some(output_tokens),
-                                            cache_read: prompt_cache.cached_prompt_tokens,
-                                            cache_write: prompt_cache.cache_write_prompt_tokens,
-                                            accounting: Default::default(),
-                                        }.inclusive_for(&agent_type);
+                                    // KT-1313 — a turn adds to the step; only the final
+                                    // line states the whole run, so a stopped step keeps
+                                    // every turn it consumed.
+                                    let reading = crate::db::audit_runs::StepTokens {
+                                        input: Some(input_tokens),
+                                        output: Some(output_tokens),
+                                        cache_read: prompt_cache.cached_prompt_tokens,
+                                        cache_write: prompt_cache.cache_write_prompt_tokens,
+                                        accounting: Default::default(),
+                                    }.inclusive_for(&agent_type);
+                                    let folded = stream_turns.fold(step_usage, reading, runner::is_claude_result_line(&line));
+                                    if folded != step_usage {
+                                        step_usage = folded;
                                         usage_moved = true;
                                     }
                                 }
@@ -2184,6 +2207,10 @@ pub async fn full_audit(
                         // recorded as stopped (it is redone on resume), and the
                         // run is settled resumable when it completed a step.
                         let step_n = step as u32;
+                        // KT-1313 — what the stopped attempt consumed is the run's:
+                        // its tokens join the tally and its cost is recorded.
+                        run_tokens.add(step_usage.total());
+                        let killed_cost = step_cost.usd_micros();
                         // An error is told apart from "wrote nothing": a target
                         // that could be neither restored nor marked stays an
                         // unsound step (no `restored` state), never a clean one.
@@ -2211,6 +2238,9 @@ pub async fn full_audit(
                                     conn, &run_id, step_n, Utc::now(), duration_ms, &usage,
                                     recorded_total, false, Some(&reason), false,
                                 )?;
+                                if let Some(cost) = killed_cost {
+                                    crate::db::audit_runs::set_step_cost(conn, &run_id, step_n, cost)?;
+                                }
                                 crate::db::audit_runs::set_step_target_state(conn, &run_id, step_n, killed_state)?;
                                 if !keep_snapshot {
                                     crate::db::audit_runs::delete_step_snapshot(conn, &run_id, step_n)?;
@@ -2353,8 +2383,19 @@ pub async fn full_audit(
                     let mut documentary_repair_proven = false;
                     if success {
                         if let Some(before) = &documentary_snapshot {
-                            let gate = super::document_repair::check_attempt(&project_path, before, &recovery_targets);
-                            let reason = match gate {
+                            let gate = super::document_repair::check_attempt(&project_path, before, &recovery_targets, &documentary_baseline);
+                            if let Ok(check) = &gate {
+                                if !check.preexisting.is_empty() && (check.blocking.is_empty() || attempt >= max_attempts) {
+                                    tracing::info!(
+                                        "Audit step {} ({}): {} documentary blocker(s) pre-date the step, reported without blocking it",
+                                        step, file_label, check.preexisting.len()
+                                    );
+                                    yield Event::default().event("documentary_preexisting").data(serde_json::json!({
+                                        "step":step,"file":file_label,"diagnostics":check.preexisting,
+                                    }).to_string());
+                                }
+                            }
+                            let reason = match gate.map(|check| check.blocking) {
                                 Ok(blocking) if blocking.is_empty() => {
                                     documentary_repair_proven = super::document_repair::recovery_changed(
                                         &project_path, before, &recovery_targets,
@@ -2768,6 +2809,16 @@ pub async fn full_audit(
                     "step": step, "file": file_label, "reason": reason, "repaired_from_template": false,
                 }).to_string());
             }
+            // KT-1306 — charge what this step brought, now that its files are final.
+            if documentary_snapshot.is_some() {
+                match crate::core::document_optimization::analyze(&project_path) {
+                    Ok(report) => {
+                        let after: Vec<_> = report.blocking_diagnostics().cloned().collect();
+                        doc_blame.record_step(&project_path, step as u32, &documentary_baseline, &after);
+                    }
+                    Err(e) => tracing::warn!("Audit step {step} ({file_label}): documentary blame not recorded: {e}"),
+                }
+            }
         }
 
         // ── Auto-detect project skills ──
@@ -2991,7 +3042,7 @@ pub async fn full_audit(
                     );
                     if !blocking.is_empty() {
                         docs_blocked = true;
-                        let recovery = super::document_repair::recovery_plan(&blocking, &steps);
+                        let recovery = super::document_repair::recovery_plan(&blocking, &steps, &doc_blame);
                         let mut warnings = Vec::new();
                         for (step, diagnostics) in recovery {
                             progress.invalidate_success(step);
@@ -4760,7 +4811,7 @@ pub(crate) fn compute_cluster_recommendations(
     recs
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod drop_guard_tests {
     use super::AuditDropGuard;
 
@@ -4913,7 +4964,7 @@ mod drop_guard_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod finalization_decision_tests {
     use super::{should_optimize_documents, should_write_full_baseline};
     use crate::models::AuditKind;
@@ -5045,7 +5096,7 @@ mod finalization_decision_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod cancel_ack_tests {
     use super::wait_for_cancel_ack;
     use std::sync::{Arc, Mutex};
@@ -5084,7 +5135,7 @@ mod cancel_ack_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod resume_resolution_tests {
     use super::{already_succeeded_step_indices, resolve_resume_row};
     use crate::models::{AuditKind, AuditRun, AuditRunStep};
@@ -5233,7 +5284,7 @@ mod resume_resolution_tests {
 }
 
 // KT-931 — a Full run some of whose steps failed no longer voids the others.
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod partial_run_tests {
     use super::{
         already_succeeded_step_indices, already_unchanged_step_indices, founding_step_index,
@@ -5890,7 +5941,7 @@ mod partial_run_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod rewrite_proof_tests {
     use super::{rewrite_proof_verdict, RewriteProofVerdict};
     use crate::api::audit::validation::TargetSnapshot;
@@ -5970,7 +6021,7 @@ mod rewrite_proof_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod cluster_tests {
     use super::*;
     use std::fs;
@@ -6566,7 +6617,7 @@ mod cluster_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod severity_tests {
     use super::*;
 

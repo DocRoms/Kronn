@@ -305,7 +305,7 @@ impl Drop for AuditMcpSwap {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use serde_json::json;

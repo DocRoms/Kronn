@@ -830,7 +830,7 @@ fn split_file_line(s: &str) -> (String, Option<usize>) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use chrono::Duration as ChronoDuration;

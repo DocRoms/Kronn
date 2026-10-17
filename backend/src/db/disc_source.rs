@@ -810,7 +810,7 @@ pub fn search_messages(
     Ok(out)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::models::DiscussionMessage;

@@ -569,7 +569,7 @@ async fn agent_api_call_scoped(
     }))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

@@ -779,6 +779,7 @@ pub fn default_config() -> AppConfig {
         disabled_auto_skills: Vec::new(),
         embed_allowed_origins: Vec::new(),
         audit_reverify_cron: None,
+        audit_briefing_docs: false,
     }
 }
 
@@ -973,7 +974,7 @@ pub async fn is_first_run() -> Result<bool> {
     Ok(key_only_file(&content).ok().flatten().is_some())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

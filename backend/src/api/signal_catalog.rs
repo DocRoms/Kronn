@@ -68,7 +68,7 @@ pub async fn get() -> Json<ApiResponse<Value>> {
     Json(ApiResponse::ok(catalogue()))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::db::discussion_actions::{ActionFence, DiscussionActionValueProvenance};

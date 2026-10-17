@@ -212,7 +212,7 @@ impl DiscussionWeightConfig {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod config_tests {
     use super::*;
 

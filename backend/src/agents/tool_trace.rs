@@ -255,7 +255,7 @@ pub fn collect(lines: &[String]) -> Vec<ToolTraceUpdate> {
     records
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

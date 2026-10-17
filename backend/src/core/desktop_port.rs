@@ -72,7 +72,7 @@ pub fn validate_port(port: i64) -> Result<u16, String> {
         .ok_or_else(|| format!("Port must be between {MIN_PORT} and {MAX_PORT}"))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

@@ -5,6 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+use crate::core::anti_halluc::parse_line_bounds;
+
 const CONFIG_FILE: &str = "docs/.kronn-document-budgets.json";
 pub use crate::core::audit_state::REPORT_FILE;
 
@@ -497,104 +499,325 @@ fn demote_human_section(rel: &str, name: &str, found: Vec<Diagnostic>, out: &mut
 /// A dead link or citation inside a human-owned section: a to-do for a person.
 pub const HUMAN_SECTION_REFERENCE: &str = "human_section_reference";
 
+/// What the documentary gate makes of one `[src: file: …]` marker.
+enum CitationCheck {
+    /// Accepted as it is (a bare path to an existing binary file).
+    Skip,
+    /// Refused; the message says what to write instead.
+    Defect(String),
+    /// A text file and a line range inside it.
+    Valid {
+        path_part: String,
+        line_part: String,
+        max_line: usize,
+        start: usize,
+        end: usize,
+    },
+}
+
 fn inspect_citations(project: &Path, rel: &str, content: &str, out: &mut Vec<Diagnostic>) {
     let visible = visible_markdown(content);
-    for tail in visible.split("[src: file:").skip(1) {
+    for (at, marker) in visible.match_indices("[src: file:") {
+        let tail = &visible[at + marker.len()..];
         let Some(raw) = tail.split(']').next() else {
             continue;
         };
-        let raw = raw.trim();
-        if raw.contains('<') || raw.contains('>') {
-            continue;
-        }
-        // Run O7: `.gitignore:3 — only logs/ ignored, not root-level` was told to
-        // split references; the fix was to move the comment out of the marker.
-        if let Some((reference, comment)) = raw.split_once(char::is_whitespace) {
-            if reference.contains(':') && !reference.contains(',') {
-                out.push(diag(
-                    "broken_citation",
-                    rel,
-                    format!(
-                        "malformed file citation `{raw}`: a marker holds only `path:line`. \
-                         Write [src: file: {reference}] and put `{}` outside the brackets",
-                        comment.trim()
-                    ),
-                ));
-                continue;
+        match check_citation(project, rel, raw.trim()) {
+            CitationCheck::Skip => {}
+            CitationCheck::Defect(detail) => out.push(diag("broken_citation", rel, detail)),
+            CitationCheck::Valid {
+                path_part,
+                line_part,
+                max_line,
+                start,
+                end,
+            } => {
+                if start == 1 && end >= max_line && max_line >= WHOLE_FILE_WARN_LINES {
+                    let claim = visible[..at].rfind('\n').map_or(0, |i| i + 1);
+                    let claim_end = visible[at..].find('\n').map_or(visible.len(), |i| at + i);
+                    if !reads_as_absence(&visible[claim..claim_end]) {
+                        let warning = diag(
+                            WHOLE_FILE_CITATION,
+                            rel,
+                            format!(
+                                "`{path_part}:{line_part}` cites all {max_line} lines of the file, \
+                                 which only supports a claim that something is absent from it; for \
+                                 a claim that something exists, cite the line that shows it"
+                            ),
+                        );
+                        if !out.contains(&warning) {
+                            out.push(warning);
+                        }
+                    }
+                }
             }
         }
-        if raw.contains(',') {
-            out.push(diag("broken_citation", rel,
-                format!("malformed file citation `{raw}`: use one [src: file: path:line] marker per reference")));
+    }
+    // `(src: file: …)` is not the grammar: the verifier and the drift check only
+    // read the bracketed marker, so a parenthesised one would never be checked.
+    for (at, marker) in visible.match_indices("(src: file:") {
+        let tail = &visible[at + marker.len()..];
+        let Some(raw) = tail.split(')').next().map(str::trim) else {
+            continue;
+        };
+        if raw.contains('<') || raw.contains('>') || raw.is_empty() {
             continue;
         }
-        // A bare path is the citation form of a binary file, which has no lines.
-        let Some((path_part, line_part)) = raw.rsplit_once(':') else {
-            let detail = if is_project_dir(project, raw) {
-                format!(
-                    "malformed file citation `{raw}`: {}",
-                    directory_citation_message(raw)
-                )
-            } else {
-                match cited_file(project, raw) {
-                    Some(path) if crate::core::anti_halluc::is_binary_file(&path) => continue,
-                    Some(_) => format!(
-                        "malformed file citation `{raw}`: a text file is cited with the line \
-                         that supports the claim, [src: file: {raw}:<line>]"
-                    ),
-                    None => format!(
-                        "malformed file citation `{raw}`: expected [src: file: path:line], \
-                         or a bare path for an existing binary file"
-                    ),
-                }
-            };
-            out.push(diag("broken_citation", rel, detail));
-            continue;
+        let write = match check_citation(project, rel, raw) {
+            CitationCheck::Defect(detail) => format!("and as written it is also refused: {detail}"),
+            _ => format!("write [src: file: {raw}]"),
         };
-        let path_part = path_part.trim();
-        let Some(path) = cited_file(project, path_part) else {
-            // Run O7: `helpers/hbs/:1` was reported as a path that does not exist.
-            let detail = if is_project_dir(project, path_part) {
-                directory_citation_message(path_part)
-            } else {
-                format!("citation path does not exist `{path_part}`")
-            };
-            out.push(diag("broken_citation", rel, detail));
-            continue;
-        };
-        if crate::core::anti_halluc::is_binary_file(&path) {
-            out.push(diag(
-                "broken_citation",
-                rel,
-                format!(
-                    "`{path_part}` is a binary file and has no lines: cite it as \
-                     [src: file: {path_part}] and name the page or section outside the brackets"
+        out.push(diag(
+            "broken_citation",
+            rel,
+            format!(
+                "parenthesised citation `(src: file: {raw})` is never verified: a citation is \
+                 written between square brackets, {write}"
+            ),
+        ));
+    }
+}
+
+/// Judge one marker's content. Every path and line this gate proposes in a
+/// message is one it accepts: the split suggestion is made only once the
+/// reference alone passes, and an empty or secret-looking file gets no range.
+fn check_citation(project: &Path, rel: &str, raw: &str) -> CitationCheck {
+    use CitationCheck::{Defect, Skip, Valid};
+    if raw.contains('<') || raw.contains('>') {
+        return Skip;
+    }
+    // Run O7: `.gitignore:3 — only logs/ ignored, not root-level` was told to
+    // split references; the fix was to move the comment out of the marker.
+    if let Some((reference, comment)) = raw.split_once(char::is_whitespace) {
+        if reference.contains(':') && !reference.contains(',') {
+            return Defect(match check_citation(project, rel, reference) {
+                Defect(why) => format!(
+                    "malformed file citation `{raw}`: a marker holds only `path:line`, and \
+                     `{reference}` is itself refused: {why}"
                 ),
-            ));
-            continue;
-        }
-        let max_line = read(&path).map(|s| s.lines().count()).unwrap_or(0);
-        let bounds: Vec<_> = line_part
-            .trim()
-            .split('-')
-            .map(str::parse::<usize>)
-            .collect();
-        let valid = match bounds.as_slice() {
-            [Ok(line)] => *line > 0 && *line <= max_line,
-            [Ok(start), Ok(end)] => *start > 0 && start <= end && *end <= max_line,
-            _ => false,
-        };
-        if !valid {
-            out.push(diag(
-                "broken_citation",
-                rel,
-                format!(
-                    "citation line `{line_part}` is outside `{}`",
-                    path_part.trim()
+                _ => format!(
+                    "malformed file citation `{raw}`: a marker holds only `path:line`. \
+                     Write [src: file: {reference}] and put `{}` outside the brackets",
+                    comment.trim()
                 ),
-            ));
+            });
         }
     }
+    if raw.contains(',') {
+        return Defect(format!(
+            "malformed file citation `{raw}`: use one [src: file: path:line] marker per reference"
+        ));
+    }
+    // A bare path is the citation form of a binary file, which has no lines.
+    let Some((path_part, line_part)) = raw.rsplit_once(':') else {
+        if is_project_dir(project, raw) {
+            return Defect(format!(
+                "malformed file citation `{raw}`: {}",
+                directory_citation_message(raw)
+            ));
+        }
+        return Defect(match cited_file(project, raw) {
+            Some(path) if crate::core::anti_halluc::is_binary_file(&path) => return Skip,
+            Some(path) if crate::acp::secret_files::is_secret_file(&path) => format!(
+                "malformed file citation `{raw}`: this file may hold secrets, so no line of it is \
+                 cited. Name it in backticks outside any [src:] marker"
+            ),
+            Some(path) => match line_count(&path) {
+                0 => format!(
+                    "malformed file citation `{raw}`: the file is empty, so it has no line to \
+                     cite. Say it is empty and name it in backticks outside any [src:] marker"
+                ),
+                lines => format!(
+                    "malformed file citation `{raw}`: a text file is cited with the line \
+                     that supports the claim, [src: file: {raw}:<line>]. To state that \
+                     something is absent from it, cite the whole file as \
+                     [src: file: {raw}:1-{lines}] and write the absence outside the brackets"
+                ),
+            },
+            None => format!(
+                "malformed file citation `{raw}`: expected [src: file: path:line], \
+                 or a bare path for an existing binary file{}",
+                did_you_mean(project, rel, raw, None)
+            ),
+        });
+    };
+    let path_part = path_part.trim();
+    let Some(path) = cited_file(project, path_part) else {
+        // Run O7: `helpers/hbs/:1` was reported as a path that does not exist.
+        return Defect(if is_project_dir(project, path_part) {
+            directory_citation_message(path_part)
+        } else {
+            format!(
+                "citation path does not exist `{path_part}`{}",
+                did_you_mean(project, rel, path_part, Some(line_part.trim()))
+            )
+        });
+    };
+    if crate::core::anti_halluc::is_binary_file(&path) {
+        return Defect(format!(
+            "`{path_part}` is a binary file and has no lines: cite it as \
+             [src: file: {path_part}] and name the page or section outside the brackets"
+        ));
+    }
+    let max_line = line_count(&path);
+    // An editor shows a newline-terminated file with one more, empty, line.
+    let last_line = last_line_of(&path);
+    match parse_line_bounds(without_anchor(line_part)) {
+        None => Defect(format!(
+            "citation line `{}` is not a line number: write a number (`{path_part}:12`) \
+             or a range (`{path_part}:12-20`)",
+            line_part.trim()
+        )),
+        Some((start, end))
+            if crate::core::anti_halluc::range_is_citable(max_line, last_line, start, end) =>
+        {
+            Valid {
+                path_part: path_part.to_string(),
+                line_part: line_part.trim().to_string(),
+                max_line,
+                start,
+                end,
+            }
+        }
+        Some(_) => Defect(format!(
+            "citation line `{}` is outside `{path_part}`, which has {max_line} line(s){}",
+            line_part.trim(),
+            did_you_mean(project, rel, path_part, Some(line_part.trim()))
+        )),
+    }
+}
+
+/// A whole-file range this long is rarely the line that proves a claim.
+const WHOLE_FILE_WARN_LINES: usize = 30;
+
+/// A citation spanning a whole long file backs a claim that is not an absence.
+pub const WHOLE_FILE_CITATION: &str = "whole_file_citation";
+
+/// The claim around a whole-file citation says something is missing or absent.
+fn reads_as_absence(claim: &str) -> bool {
+    const MARKERS: [&str; 15] = [
+        "no ", "not ", "n't", "never", "none", "nothing", "absent", "absence", "missing",
+        "without", "lack", "aucun", "pas de", "pas d'", "sans ",
+    ];
+    let claim = format!(" {} ", claim.to_lowercase());
+    MARKERS.iter().any(|marker| claim.contains(marker))
+}
+
+/// `12-20` of a `12-20#symbol` line spec: the anchor is checked by the
+/// anti-hallucination gate, which owns the symbol search.
+fn without_anchor(line_part: &str) -> &str {
+    match line_part.rsplit_once('#') {
+        Some((head, symbol))
+            if crate::core::anti_halluc::is_anchor_symbol(symbol.trim())
+                && crate::core::anti_halluc::parse_line_bounds(head).is_some() =>
+        {
+            head.trim_end()
+        }
+        _ => line_part,
+    }
+}
+
+fn line_count(path: &Path) -> usize {
+    read(path).map(|s| s.lines().count()).unwrap_or(0)
+}
+
+/// The last line a citation may end on: one past [`line_count`] for a
+/// newline-terminated file, as the verifier reads it.
+fn last_line_of(path: &Path) -> usize {
+    crate::core::anti_halluc::last_citable_line_of(path)
+}
+
+/// Citation paths resolve from the repository root. A model often writes the
+/// path relative to the docs root or to the citing document instead: name the
+/// root-relative form of that other file so the next attempt fixes the path. A
+/// candidate is proposed only if it holds the cited lines.
+fn did_you_mean(project: &Path, citing: &str, cited: &str, line: Option<&str>) -> String {
+    if Path::new(cited).is_absolute() {
+        return String::new();
+    }
+    let docs_dir = docs_root(project).path("");
+    let citing_dir = Path::new(citing)
+        .parent()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default();
+    let spec = line.map(|l| parse_line_bounds(without_anchor(l)));
+    let own = repo_relative(cited);
+    let hint = [docs_dir.trim_end_matches('/').to_string(), citing_dir]
+        .into_iter()
+        .filter(|dir| !dir.is_empty())
+        .filter_map(|dir| repo_relative(&format!("{dir}/{cited}")))
+        .filter(|candidate| own.as_ref() != Some(candidate))
+        .find(|candidate| {
+            let full = project.join(candidate);
+            full.is_file()
+                && !outside_project(project, &full)
+                && contained_path(project, &full)
+                && !crate::acp::secret_files::is_secret_file(&full)
+                && match spec {
+                    Some(Some((start, end))) => {
+                        !crate::core::anti_halluc::is_binary_file(&full)
+                            && crate::core::anti_halluc::range_is_citable(
+                                line_count(&full),
+                                last_line_of(&full),
+                                start,
+                                end,
+                            )
+                    }
+                    _ => true,
+                }
+        });
+    match (hint, spec, line) {
+        (Some(path), Some(Some(_)), Some(line)) => {
+            format!(". Paths are repository-root relative; did you mean `{path}:{line}`?")
+        }
+        (Some(path), Some(None), _) => {
+            format!(". Paths are repository-root relative; did you mean `{path}:<line>`?")
+        }
+        (Some(path), _, _) => {
+            format!(
+                ". Paths are repository-root relative; {}",
+                bare_path_form(project, &path)
+            )
+        }
+        (None, _, _) => String::new(),
+    }
+}
+
+/// How to cite `path` when the model gave it without a line: only a binary file
+/// is cited by its bare path, so a text file is offered a line or the whole file
+/// and an empty one is not cited at all.
+fn bare_path_form(project: &Path, path: &str) -> String {
+    let full = project.join(path);
+    if crate::core::anti_halluc::is_binary_file(&full) {
+        return format!("did you mean `{path}`?");
+    }
+    match line_count(&full) {
+        0 => format!(
+            "`{path}` is empty, so it has no line to cite: say so and name it in backticks \
+             outside any [src:] marker"
+        ),
+        lines => format!(
+            "did you mean `{path}:<line>`, the line that supports the claim (or `{path}:1-{lines}` \
+             for the whole file)?"
+        ),
+    }
+}
+
+/// `docs//AGENTS.md` and `docs/../AGENTS.md` as the canonical `AGENTS.md`;
+/// `None` when the path climbs out of the repository.
+fn repo_relative(path: &str) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    for component in Path::new(path).components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                parts.pop()?;
+            }
+            Component::Normal(part) => parts.push(part.to_string_lossy().into_owned()),
+            Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
 }
 
 fn root_adapters(project: &Path) -> Result<Vec<PathBuf>, String> {
@@ -700,7 +923,15 @@ fn routed_markdown(
                 diagnostics.push(diag(
                     "broken_link",
                     &relative(project, adapter),
-                    format!("broken routed document `{target}`"),
+                    format!(
+                        "broken routed document `{target}`{}",
+                        match root_relative_fix(project, adapter, clean) {
+                            Some(fix) => format!(
+                                ": `{clean}` exists from the repository root — write `{fix}`"
+                            ),
+                            None => link_resolution_hint(project, adapter, clean),
+                        }
+                    ),
                 ));
                 None
             } else {
@@ -833,7 +1064,10 @@ fn collect_valid_links(
                             "broken link target `{target}`: links resolve from this document's \
                              folder, and `{clean}` exists from the repository root — write `{fix}`"
                         ),
-                        None => format!("broken link target `{target}`"),
+                        None => format!(
+                            "broken link target `{target}`{}",
+                            link_resolution_hint(project, source, clean)
+                        ),
                     },
                 ));
             }
@@ -850,13 +1084,68 @@ fn root_relative_fix(project: &Path, source: &Path, clean: &str) -> Option<Strin
     if clean.is_empty() || outside_project(project, &target) || !target.exists() {
         return None;
     }
-    let dir = source.parent()?.strip_prefix(project).ok()?;
-    let target = Path::new(clean.trim_start_matches("./"));
-    if let Ok(inside) = target.strip_prefix(dir) {
-        return Some(inside.to_string_lossy().into_owned());
+    let dir: Vec<_> = source
+        .parent()?
+        .strip_prefix(project)
+        .ok()?
+        .components()
+        .collect();
+    let target = repo_relative(clean)?;
+    let parts: Vec<&str> = target.split('/').collect();
+    let shared = dir
+        .iter()
+        .zip(&parts)
+        .take_while(|(a, b)| a.as_os_str() == std::ffi::OsStr::new(**b))
+        .count()
+        .min(parts.len() - 1);
+    let ups = "../".repeat(dir.len() - shared);
+    Some(format!("{ups}{}", parts[shared..].join("/")))
+}
+
+/// Where a dead relative link lands, and the link that exists. A model writes
+/// `../tech-debt/TD-1.md` from `docs/` when the file is `docs/tech-debt/TD-1.md`:
+/// naming the resolved path shows the extra `../`, and a link that exists is
+/// proposed by dropping leading `../` and trying the document's folder and the
+/// docs root.
+fn link_resolution_hint(project: &Path, source: &Path, clean: &str) -> String {
+    let source_rel = relative(project, source);
+    let dir = source_rel.rsplit_once('/').map_or("", |(dir, _)| dir);
+    let join = |base: &str, path: &str| {
+        if base.is_empty() {
+            path.to_string()
+        } else {
+            format!("{base}/{path}")
+        }
+    };
+    let landing = match repo_relative(&join(dir, clean)) {
+        Some(path) => format!("`{path}` (repository root)"),
+        None => "a path outside the repository".to_string(),
+    };
+    let mut hint = format!(". From `{source_rel}` it resolves to {landing}, which does not exist");
+    let tail: Vec<&str> = clean
+        .split('/')
+        .skip_while(|part| matches!(*part, ".." | "." | ""))
+        .collect();
+    if tail.is_empty() {
+        return hint;
     }
-    let ups = "../".repeat(dir.components().count());
-    Some(format!("{ups}{}", target.to_string_lossy()))
+    let tail = tail.join("/");
+    let docs_dir = docs_root(project).path("");
+    let found = [dir.to_string(), docs_dir.trim_end_matches('/').to_string()]
+        .into_iter()
+        .filter_map(|base| repo_relative(&join(&base, &tail)))
+        .find(|candidate| {
+            let full = project.join(candidate);
+            full.exists()
+                && !outside_project(project, &full)
+                && contained_path(project, &full)
+                && !crate::acp::secret_files::is_secret_file(&full)
+        })
+        .and_then(|candidate| root_relative_fix(project, source, &candidate));
+    if let Some(fix) = found {
+        hint.push_str(&format!("; did you mean `{fix}`?"));
+    }
+    hint
 }
 
 /// The project file a citation names, as written or percent-decoded; both
@@ -907,6 +1196,7 @@ fn visible_markdown(s: &str) -> String {
     crate::core::anti_halluc::strip_inline_code(&crate::core::anti_halluc::strip_fenced_code(s))
 }
 fn mutable_line_reference(s: &str) -> bool {
+    let s = crate::core::anti_halluc::normalize_range_dashes(s);
     s.contains("[src: file:")
         && s.contains('-')
         && s.split("[src: file:").skip(1).any(|p| {
@@ -1082,7 +1372,7 @@ fn is_blocking_code(code: &str) -> bool {
     matches!(code, "broken_link" | "broken_citation")
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     fn write(path: &Path, body: &str) {
@@ -1217,7 +1507,14 @@ mod tests {
             "{}",
             messages[1]
         );
-        assert_eq!(messages[2], "broken link target `nowhere.md`");
+        assert!(
+            messages[2].starts_with(
+                "broken link target `nowhere.md`. From `docs/AGENTS.md` it resolves to \
+                 `docs/nowhere.md`"
+            ),
+            "{}",
+            messages[2]
+        );
     }
 
     #[test]
@@ -1808,6 +2105,197 @@ mod tests {
     }
 
     #[test]
+    fn a_doc_relative_citation_names_the_repo_root_path() {
+        // KT-1307: `AGENTS.md:94` meant `docs/AGENTS.md`; `repo-map.md:1` was
+        // relative to the citing document.
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path();
+        write(&project.join("AGENTS.md"), "pointer\n");
+        write(&project.join("docs/AGENTS.md"), &"line\n".repeat(100));
+        write(&project.join("docs/architecture/repo-map.md"), "a\nb\n");
+        let mut out = Vec::new();
+        inspect_citations(
+            project,
+            "docs/architecture/x.md",
+            "[src: file: AGENTS.md:94] [src: file: repo-map.md:1] [src: file: map.md:1] \
+             [src: file: repo-map.md]",
+            &mut out,
+        );
+        let messages: Vec<_> = out.iter().map(|d| d.message.as_str()).collect();
+        assert_eq!(messages.len(), 4, "{messages:#?}");
+        assert!(
+            messages[0].contains("which has 1 line(s)")
+                && messages[0].contains("did you mean `docs/AGENTS.md:94`?"),
+            "{}",
+            messages[0]
+        );
+        assert!(
+            messages[1].contains("does not exist")
+                && messages[1].contains("repository-root relative")
+                && messages[1].contains("did you mean `docs/architecture/repo-map.md:1`?"),
+            "{}",
+            messages[1]
+        );
+        assert!(!messages[2].contains("did you mean"), "{}", messages[2]);
+        assert!(
+            messages[3].contains("did you mean `docs/architecture/repo-map.md:<line>`"),
+            "{}",
+            messages[3]
+        );
+    }
+
+    #[test]
+    fn a_hint_never_points_outside_the_project() {
+        let tmp = document_project();
+        let project = tmp.path().join("proj");
+        let messages = citation_messages(&project, "[src: file: ../secret.bin:1]");
+        assert_eq!(messages.len(), 1, "{messages:#?}");
+        assert!(!messages[0].contains("did you mean"), "{}", messages[0]);
+    }
+
+    #[test]
+    fn dash_ranges_accept_en_and_em_dash_and_non_numeric_says_so() {
+        let tmp = document_project();
+        let project = tmp.path().join("proj");
+        write(&project.join("long.md"), &"x\n".repeat(30));
+        assert!(citation_messages(
+            &project,
+            "None of it is stale: [src: file: long.md:17\u{2013}23] [src: file: long.md:1\u{2014}30] \
+             [src: file: long.md:5-6]"
+        )
+        .is_empty());
+        let messages = citation_messages(
+            &project,
+            "[src: file: long.md:extends] [src: file: long.md:5-] [src: file: long.md:17\u{2013}32] \
+             [src: file: long.md:0] [src: file: long.md:9-3]",
+        );
+        assert_eq!(messages.len(), 5, "{messages:#?}");
+        assert!(messages[0].contains("not a line number"), "{}", messages[0]);
+        assert!(messages[1].contains("not a line number"), "{}", messages[1]);
+        for outside in &messages[2..] {
+            assert!(
+                outside.contains("is outside `long.md`, which has 30 line(s)"),
+                "{outside}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hint_is_a_canonical_path_that_holds_the_cited_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path();
+        write(&project.join("AGENTS.md"), "pointer\n");
+        write(&project.join("docs/AGENTS.md"), &"line\n".repeat(100));
+        write(&project.join("docs/architecture/repo-map.md"), "a\nb\n");
+        let hint = |cited: &str| {
+            let mut out = Vec::new();
+            inspect_citations(
+                project,
+                "docs/architecture/x.md",
+                &format!("[src: file: {cited}]"),
+                &mut out,
+            );
+            out.remove(0).message
+        };
+        // `docs/../AGENTS.md` is the 1-line root pointer: it does not hold
+        // line 90, so the hint skips it for the file that does.
+        let climbing = hint("../AGENTS.md:90");
+        assert!(
+            climbing.contains("did you mean `docs/AGENTS.md:90`?"),
+            "{climbing}"
+        );
+        let doubled = hint("architecture//repo-map.md:1");
+        assert!(
+            doubled.contains("did you mean `docs/architecture/repo-map.md:1`?"),
+            "{doubled}"
+        );
+        // A line past the end of the only candidate: no hint.
+        assert!(!hint("repo-map.md:7").contains("did you mean"));
+        // A non-numeric line still names the file, never the bad line.
+        assert!(hint("repo-map.md:extends")
+            .contains("did you mean `docs/architecture/repo-map.md:<line>`?"));
+        // The hint is never a path that climbs out of the repository.
+        assert!(!hint("../../../etc/hosts:1").contains("did you mean"));
+    }
+
+    #[test]
+    fn a_symbol_anchor_follows_the_line_spec_like_in_the_verifier() {
+        let tmp = document_project();
+        let project = tmp.path().join("proj");
+        write(&project.join("long.md"), &"x\n".repeat(30));
+        assert!(citation_messages(
+            &project,
+            "[src: file: long.md:5-6#retry_once] [src: file: long.md:7#Type.method] \
+             [src: file: long.md:5\u{2013}6#retry_once]"
+        )
+        .is_empty());
+        let messages = citation_messages(
+            &project,
+            "[src: file: long.md:32#retry_once] [src: file: long.md:#retry_once]",
+        );
+        assert_eq!(messages.len(), 2, "{messages:#?}");
+        assert!(
+            messages[0].contains("is outside `long.md`"),
+            "{}",
+            messages[0]
+        );
+        assert!(messages[1].contains("not a line number"), "{}", messages[1]);
+    }
+
+    #[test]
+    fn a_whole_file_range_backing_a_positive_claim_warns_without_blocking() {
+        let tmp = document_project();
+        let project = tmp.path().join("proj");
+        write(&project.join("long.md"), &"x\n".repeat(60));
+        write(&project.join("short.md"), "a\nb\n");
+        let run = |text: &str| {
+            let mut out = Vec::new();
+            inspect_citations(&project, "docs/AGENTS.md", text, &mut out);
+            out
+        };
+        let warned = run("The cache is shared [src: file: long.md:1-60]");
+        assert_eq!(warned.len(), 1, "{warned:?}");
+        assert_eq!(warned[0].code, WHOLE_FILE_CITATION);
+        assert!(!warned[0].blocking);
+        assert!(
+            warned[0].message.contains("all 60 lines"),
+            "{}",
+            warned[0].message
+        );
+        // An absence is what a whole-file range is for.
+        assert!(run("No audit step exists in it [src: file: long.md:1\u{2013}60]").is_empty());
+        assert!(run("The workflow never audits [src: file: long.md:1-60]").is_empty());
+        // A short file, or a real range, is an ordinary citation.
+        assert!(run("Two lines [src: file: short.md:1-2]").is_empty());
+        assert!(run("The cache is shared [src: file: long.md:10-20]").is_empty());
+    }
+
+    #[test]
+    fn a_dash_range_is_a_mutable_line_reference() {
+        assert!(mutable_line_reference("see [src: file: a.rs:2-4]"));
+        assert!(mutable_line_reference("see [src: file: a.rs:2\u{2013}4]"));
+        assert!(mutable_line_reference("see [src: file: a.rs:2\u{2014}4]"));
+        assert!(!mutable_line_reference("see [src: file: a.rs:2]"));
+    }
+
+    #[test]
+    fn an_absence_is_cited_as_the_whole_file_range() {
+        let tmp = document_project();
+        let project = tmp.path().join("proj");
+        let messages = citation_messages(&project, "[src: file: notes.md]");
+        assert_eq!(messages.len(), 1, "{messages:#?}");
+        assert!(
+            messages[0].contains("[src: file: notes.md:1-2]")
+                && messages[0].contains("absent")
+                && !messages[0].contains("remove"),
+            "{}",
+            messages[0]
+        );
+        // The proposed form is accepted by the gate.
+        assert!(citation_messages(&project, "no audit step [src: file: notes.md:1-2]").is_empty());
+    }
+
+    #[test]
     fn traversal_and_absolute_citations_stay_refused() {
         let tmp = document_project();
         let project = tmp.path().join("proj");
@@ -1898,5 +2386,260 @@ mod tests {
         )
         .unwrap();
         assert!(unindexed(root).is_empty());
+    }
+
+    /// Every `[src: file: …]` the gate writes into a message, in order.
+    fn proposed_markers(message: &str) -> Vec<String> {
+        message
+            .split("[src: file: ")
+            .skip(1)
+            .filter_map(|tail| tail.split(']').next())
+            .filter(|raw| !raw.contains('<') && !raw.contains('>'))
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn accepted(project: &Path, raw: &str) -> bool {
+        !matches!(
+            check_citation(project, "docs/AGENTS.md", raw),
+            CitationCheck::Defect(_)
+        )
+    }
+
+    #[test]
+    fn the_empty_line_after_a_final_newline_is_a_citable_end_bound() {
+        // Claude Code's Read tool numbers a 3-line, newline-terminated file up to 4.
+        let tmp = tempfile::tempdir().unwrap();
+        write(&tmp.path().join("ended.txt"), "a\nb\nc\n");
+        write(&tmp.path().join("open.txt"), "a\nb\nc");
+        let messages = citation_messages(
+            tmp.path(),
+            "[src: file: ended.txt:1-4] [src: file: ended.txt:3-4] [src: file: ended.txt:1-5] \
+             [src: file: ended.txt:5] [src: file: open.txt:1-3] [src: file: open.txt:1-4]",
+        );
+        assert_eq!(messages.len(), 3, "{messages:#?}");
+        assert!(messages[0].contains("`1-5` is outside `ended.txt`, which has 3 line(s)"));
+        assert!(messages[1].contains("`5` is outside `ended.txt`"));
+        assert!(messages[2].contains("`1-4` is outside `open.txt`, which has 3 line(s)"));
+    }
+
+    #[test]
+    fn a_range_starting_on_the_empty_line_cites_nothing_and_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(&tmp.path().join("ended.txt"), "a\nb\nc\n");
+        write(&tmp.path().join("empty.txt"), "");
+        write(&tmp.path().join("blank.txt"), "\n");
+        assert!(accepted(tmp.path(), "ended.txt:3-4"));
+        assert!(!accepted(tmp.path(), "ended.txt:4"));
+        assert!(!accepted(tmp.path(), "ended.txt:4-4"));
+        assert!(!accepted(tmp.path(), "empty.txt:1"));
+        assert!(!accepted(tmp.path(), "empty.txt:1-1"));
+        assert!(accepted(tmp.path(), "blank.txt:1-2"));
+        assert!(!accepted(tmp.path(), "blank.txt:2"));
+    }
+
+    #[test]
+    fn a_missing_line_never_gets_a_bare_path_the_gate_refuses_as_a_did_you_mean() {
+        // `docs/` holds the file the model meant; without a line, a bare path is
+        // only valid for a binary file, so a text file is offered a line.
+        let tmp = tempfile::tempdir().unwrap();
+        write(&tmp.path().join("docs/notes.md"), "a\nb\nc\n");
+        write(&tmp.path().join("docs/empty.md"), "");
+        write(&tmp.path().join("docs/.npmrc"), "registry=x\n");
+        let messages = citation_messages(
+            tmp.path(),
+            "[src: file: notes.md] [src: file: empty.md] [src: file: .npmrc]",
+        );
+        assert_eq!(messages.len(), 3, "{messages:#?}");
+        assert!(
+            messages[0].contains("did you mean `docs/notes.md:<line>`"),
+            "{}",
+            messages[0]
+        );
+        assert!(!messages[0].contains("`docs/notes.md`?"), "{}", messages[0]);
+        assert!(accepted(tmp.path(), "docs/notes.md:1-3"));
+        assert!(
+            messages[0].contains("`docs/notes.md:1-3`"),
+            "{}",
+            messages[0]
+        );
+        assert!(
+            messages[1].contains("`docs/empty.md` is empty"),
+            "{}",
+            messages[1]
+        );
+        assert!(!messages[1].contains("`docs/empty.md`?"), "{}", messages[1]);
+        assert!(!messages[2].contains("docs/.npmrc"), "{}", messages[2]);
+    }
+
+    #[test]
+    fn the_verifier_and_the_gate_agree_on_the_end_bound() {
+        use crate::core::anti_halluc::{verify_source_marker, SourceStatus};
+        let tmp = tempfile::tempdir().unwrap();
+        write(&tmp.path().join("ended.txt"), "a\nb\nc\n");
+        write(&tmp.path().join("open.txt"), "a\nb\nc");
+        let status = |raw: &str| verify_source_marker(raw, Some(tmp.path())).status;
+        assert_eq!(status("file: ended.txt:1-4"), SourceStatus::Verified);
+        assert_eq!(status("file: ended.txt:1-5"), SourceStatus::OutOfBounds);
+        assert_eq!(status("file: open.txt:1-3"), SourceStatus::Verified);
+        assert_eq!(status("file: open.txt:1-4"), SourceStatus::OutOfBounds);
+        // A range that starts on the empty line N+1 cites nothing; an empty file
+        // has no line at all (the verifier used to round it up to one).
+        write(&tmp.path().join("empty.txt"), "");
+        assert_eq!(status("file: ended.txt:3-4"), SourceStatus::Verified);
+        assert_eq!(status("file: ended.txt:4"), SourceStatus::OutOfBounds);
+        assert_eq!(status("file: empty.txt:1"), SourceStatus::OutOfBounds);
+        assert_eq!(status("file: empty.txt"), SourceStatus::Verified);
+    }
+
+    #[test]
+    fn a_comment_after_a_non_numeric_line_is_not_split_into_a_citation_the_gate_refuses() {
+        // Apollo step 12: told to write `[src: file: docs/AGENTS.md:Focused]`, then
+        // refused with "Focused is not a line number".
+        let tmp = tempfile::tempdir().unwrap();
+        write(&tmp.path().join("docs/AGENTS.md"), "a\nb\n");
+        write(&tmp.path().join("helpers/a.js"), "x\n");
+        let messages = citation_messages(
+            tmp.path(),
+            "[src: file: docs/AGENTS.md:Focused on routing] [src: file: nowhere.md:3 — gone] \
+             [src: file: helpers/a.js:1 — only logs ignored]",
+        );
+        assert_eq!(messages.len(), 3, "{messages:#?}");
+        assert!(messages[0].contains("is itself refused"), "{}", messages[0]);
+        assert!(
+            messages[0].contains("is not a line number"),
+            "{}",
+            messages[0]
+        );
+        assert!(messages[1].contains("is itself refused"), "{}", messages[1]);
+        assert!(messages[1].contains("does not exist"), "{}", messages[1]);
+        assert!(messages[2].contains("Write [src: file: helpers/a.js:1]"));
+        for message in &messages {
+            for marker in proposed_markers(message) {
+                if message.contains(&format!("Write [src: file: {marker}]")) {
+                    assert!(accepted(tmp.path(), &marker), "{marker}: {message}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_range_the_gate_proposes_for_a_bare_text_file_is_accepted() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(&tmp.path().join("ended.txt"), "a\nb\nc\n");
+        write(&tmp.path().join("open.txt"), "a\nb");
+        write(&tmp.path().join("blank.txt"), "\n");
+        for bare in ["ended.txt", "open.txt", "blank.txt"] {
+            let messages = citation_messages(tmp.path(), &format!("[src: file: {bare}]"));
+            assert_eq!(messages.len(), 1, "{messages:#?}");
+            let proposals = proposed_markers(&messages[0]);
+            assert!(!proposals.is_empty(), "{}", messages[0]);
+            for marker in proposals {
+                assert!(accepted(tmp.path(), &marker), "{marker}: {}", messages[0]);
+            }
+        }
+    }
+
+    #[test]
+    fn an_empty_file_is_not_offered_a_range_it_would_refuse() {
+        // Docroms step 3: `1-1` was suggested for an empty file, then refused
+        // ("0 line(s)").
+        let tmp = tempfile::tempdir().unwrap();
+        write(&tmp.path().join("empty.txt"), "");
+        let messages = citation_messages(tmp.path(), "[src: file: empty.txt]");
+        assert_eq!(messages.len(), 1, "{messages:#?}");
+        assert!(messages[0].contains("the file is empty"), "{}", messages[0]);
+        assert!(!messages[0].contains(":1-"), "{}", messages[0]);
+        assert!(proposed_markers(&messages[0])
+            .iter()
+            .all(|marker| accepted(tmp.path(), marker)));
+    }
+
+    #[test]
+    fn a_secret_looking_file_is_never_offered_a_range() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(&tmp.path().join(".ssh/id_deploy"), "k1\nk2\n");
+        write(&tmp.path().join(".env"), "TOKEN=x\n");
+        let messages =
+            citation_messages(tmp.path(), "[src: file: .ssh/id_deploy] [src: file: .env]");
+        assert_eq!(messages.len(), 2, "{messages:#?}");
+        for message in &messages {
+            assert!(message.contains("may hold secrets"), "{message}");
+            assert!(!message.contains(":1-"), "{message}");
+        }
+        // The did-you-mean never points at a secret-looking file either.
+        write(&tmp.path().join("docs/.env"), "TOKEN=x\nOTHER=y\n");
+        let messages = citation_messages(tmp.path(), "[src: file: .env.nope:1-2]");
+        assert!(
+            messages.iter().all(|m| !m.contains("did you mean")),
+            "{messages:#?}"
+        );
+    }
+
+    #[test]
+    fn a_parenthesised_citation_is_refused_with_the_bracketed_form() {
+        // Docroms wrote 90 of them; the verifier only reads `[src:`, so they
+        // were never checked (2 were out of range).
+        let tmp = tempfile::tempdir().unwrap();
+        write(&tmp.path().join("code.rs"), "a\nb\n");
+        let messages = citation_messages(
+            tmp.path(),
+            "Good (src: file: code.rs:1-2) bad (src: file: code.rs:9) gone (src: file: nope.rs:1) \
+             fine [src: file: code.rs:2] and `(src: file: code.rs:1)` in code",
+        );
+        assert_eq!(messages.len(), 3, "{messages:#?}");
+        assert!(
+            messages[0].contains("write [src: file: code.rs:1-2]"),
+            "{}",
+            messages[0]
+        );
+        assert!(messages[1].contains("also refused"), "{}", messages[1]);
+        assert!(
+            messages[1].contains("is outside `code.rs`"),
+            "{}",
+            messages[1]
+        );
+        assert!(messages[2].contains("does not exist"), "{}", messages[2]);
+        assert!(accepted(tmp.path(), "code.rs:1-2"));
+    }
+
+    #[test]
+    fn a_broken_relative_link_names_where_it_lands_and_the_link_that_exists() {
+        // Apollo step 11: `../tech-debt/TD-1.md` from docs/ failed three times.
+        let tmp = tempfile::tempdir().unwrap();
+        write(&tmp.path().join("docs/AGENTS.md"), "x\n");
+        write(&tmp.path().join("docs/tech-debt/TD-1.md"), "# t\n");
+        write(&tmp.path().join("docs/architecture/overview.md"), "# o\n");
+        let source = tmp.path().join("docs/architecture/overview.md");
+        let mut out = Vec::new();
+        let mut linked = BTreeSet::new();
+        collect_valid_links(
+            tmp.path(),
+            &source,
+            "[a](../tech-debt/TD-9.md) [b](../../tech-debt/TD-1.md) [c](../../../out.md)",
+            &mut linked,
+            Some(&mut out),
+        );
+        let messages: Vec<_> = out.iter().map(|d| d.message.clone()).collect();
+        assert_eq!(messages.len(), 3, "{messages:#?}");
+        assert!(
+            messages[0].contains(
+                "resolves to `docs/tech-debt/TD-9.md` (repository root), which does not exist"
+            ),
+            "{}",
+            messages[0]
+        );
+        assert!(!messages[0].contains("did you mean"), "{}", messages[0]);
+        assert!(
+            messages[1].contains("resolves to `tech-debt/TD-1.md` (repository root)")
+                && messages[1].ends_with("did you mean `../tech-debt/TD-1.md`?"),
+            "{}",
+            messages[1]
+        );
+        assert!(
+            messages[2].contains("a path outside the repository"),
+            "{}",
+            messages[2]
+        );
     }
 }

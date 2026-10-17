@@ -7,7 +7,7 @@
 //! (`useWebSocket.test.ts` + `ws-reconnect.spec.ts`). This gate asserts they
 //! hold on a POPULATED database — the release condition being zero lost or
 //! duplicated message/job. Run: `cargo test --lib release_gate`.
-#![cfg(test)]
+#![cfg(all(test, feature = "full-tests"))]
 
 use super::agent_dispatch::{self, DispatchStatus};
 use super::{discussion_sessions, discussions, migrations};

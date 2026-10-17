@@ -65,6 +65,25 @@ Release notes for 0.9.3 and earlier are available in the
   the sentence holding the path, not to the whole line, and a proposal heading
   must be a proposal phrase (« Ideas », « Future work »), not a word inside a
   real title.
+- A room can reach other projects, decided by a human (KT-1270). A room keeps
+  its own project: its working directory, where what it creates lands, and the
+  only project whose credentials and API configs it may use. In the room
+  settings a human opens another project in read (its tasks, rooms, runs,
+  pages) or in write (planning only: create and edit its tasks), or every
+  project, the latter in write only after a typed confirmation sent with the
+  scope the screen showed. An agent asks with the MCP tool `room_scope`; the
+  request grants nothing until a human approves it, narrows it to read or
+  declines it. The header always shows what the room reaches (a red badge for
+  every project) and the requests waiting. Grants are re-read on every agent
+  call, so a revoke applies at once; they never open another project's
+  credentials, never run its workflows, never pass to worker rooms, and are
+  kept as a journal with a `[kronn-scope: …]` line in the room for each change.
+  Only the room's own agents reach its grants, never a workflow step or a
+  worker posting in it. A workflow's runs reach other projects through a scope a
+  human sets on the workflow page; any change to the workflow suspends it until
+  validated again, and the launch card shows it. Design and refused attacks:
+  `docs/design/discussion-project-scope.md`.
+
 - AI documentation template and audit v2 gap audit (KT-819). The project
   facts of the briefing gain « Documentation externe » (Confluence, Notion,
   wiki, other; https addresses only, no credentials, at most 6), rendered in
@@ -157,6 +176,21 @@ Release notes for 0.9.3 and earlier are available in the
 - Linked repos show which AI doc they really have (KT-999): « doc IA »
   (`docs/AGENTS.md` or the legacy `ai/index.md`), « README seulement » or
   « pas de doc IA ».
+- The audit can read the briefing's existing documentation (KT-999), off by
+  default: `audit_briefing_docs = true` in `config.toml`, or
+  `KRONN_EXP_BRIEFING_DOCS=1` for one run (bench). It reaches only the steps
+  that use it — step 1 (`AGENTS.md`), step 8 (tech debt) and the API design
+  audit — as a `## Existing documentation` block within the 6,000-character
+  briefing cap (the block takes at most 3,000 of them, the briefing text gives
+  way). A `reference` location is read, reused and cited; an `obsolete` one IS
+  tech debt: step 8 records a TD row and a detail file citing the location and
+  its last-commit date whatever the audit's scope, and no step copies a fact
+  from it nor calls it out of scope — and on a later audit step 8 never parks
+  it under `## Reconciliation candidates` as « out of scope this audit »;
+  `old`/`partial` (and a state not provided) are verified before reuse, a
+  `recent` one is spot-checked. The recorded locations are re-validated before
+  they reach a prompt (a hand-edited `briefing.md` cannot add lines to it).
+  Disabled, the prompts (and the audit golden) are unchanged.
 
 - Docs record what a human validated and ask for a reconfirmation when Kronn
   changes it, never blocking (KT-1079). A validation (`validate-audit`, a TD
@@ -558,6 +592,163 @@ Release notes for 0.9.3 and earlier are available in the
   the central index (no `tech-debt/` folder yet) can decide a row that has no
   sheet: the first decision creates the folder inside the docs root, and a
   `tech-debt` link leaving it is still refused.
+- The documentary gate no longer refuses what Claude Code's Read tool shows
+  (KT-1322). A newline-terminated file of N lines is numbered up to N+1 there
+  (the last line is empty), and a range ending at N+1 was refused as outside
+  the file; it is now accepted by every range check (the gate, the
+  anti-hallucination verifier, citation drift and the bundle repair), through
+  one shared helper. The gate also stops suggesting what it refuses: a
+  comment after a non-numeric line (`docs/AGENTS.md:Focused on x`) is no
+  longer split into `[src: file: docs/AGENTS.md:Focused]`, an empty file gets
+  no `1-1` range, and a secret-looking file (`.ssh/…`, `.env`) is never
+  offered a range to cite. A parenthesised `(src: file: …)` citation, which
+  nothing verified, is refused with the bracketed form to write; a broken
+  relative link names the path it resolves to and the link that exists
+  (`../tech-debt/TD-1.md` from `docs/` → `tech-debt/TD-1.md`). Review
+  follow-up: citation drift hashes and evaluates a range ending at N+1 (it
+  reported it « removed » on the next re-audit), a range that starts on the
+  empty line N+1 is refused everywhere, the verifier no longer rounds an empty
+  file up to one line (`empty.txt:1` is refused), a text file given without a
+  line is offered `path:<line>` instead of a bare path, and the secret-looking
+  list now covers `id_ecdsa`, `id_dsa`, `*.p12`, `*.pfx`, `.netrc`, `.npmrc`
+  and `.pgpass`.
+
+- The dependency watch no longer reads only `node_modules` (KT-1325). Without
+  an install, the version in place comes from the lockfile — `package-lock.json`
+  / `npm-shrinkwrap.json` (v1, v2, v3), `yarn.lock` (classic and berry),
+  `pnpm-lock.yaml` — or `composer.lock` for Composer, so a checkout with a
+  lockfile no longer shows « declared only ». The source (lockfile vs
+  installed) is carried in the snapshot, the audit prompt's dependency table
+  and the `deps:` citation verdict, and the overview names the lockfile. Every
+  manifest the watch cannot settle (missing binary, network, parse error,
+  timeout, nothing installed) carries its reason in the snapshot, the audit
+  prompt block and the overview, instead of a bare « Error ». KT-1279's
+  workspace handling is unchanged. Review follow-up: a reason quotes what the
+  tool printed, so credentials are masked before it is stored, shown or put in
+  a prompt (URL userinfo and query, `_authToken=`, bearer headers, `ghp_` /
+  `npm_` tokens); a root lockfile resolves a nested project only when the
+  root's `workspaces` globs (or `pnpm-workspace.yaml`) list it; a Composer row
+  read from `composer.lock` is labelled « from composer.lock », no longer « not
+  installed ».
+- The audit's citation gate now says how to fix a citation (KT-1307). A path
+  that only resolves under the docs root or next to the citing doc gets
+  « paths are repository-root relative; did you mean `docs/AGENTS.md:94`? »,
+  and an out-of-range line reports the file's line count. Ranges accept the
+  en and em dash, and a non-numeric line says « not a line number ». A bare
+  path to a text file no longer tells the model to drop the claim: it proposes
+  the whole-file range `path:1-N` (N filled in) to cite an absence. The dash
+  normalisation lives in one place shared by the verifier, citation drift and
+  the documentary gate, so `path:17–23` is no longer fabricated under enforce.
+  Hint paths are canonical and only name a file that holds the cited lines; a
+  `#symbol` anchor is accepted after a range; a whole-file range backing a
+  claim that is not an absence raises a non-blocking `whole_file_citation`.
+- Installing the template, then launching the full audit, is no longer refused
+  as "files Kronn did not write" (KT-1299). `POST /install-template` now records
+  the folder as Kronn's (`template_installed_at`) unless it already held a
+  human's docs, so the template's own files are never counted as foreign. The
+  briefing's "move to legacy" choice now moves a human's docs even when their
+  entry file carries Kronn's signature (it used to skip silently and leave the
+  launch blocked), and keeps `briefing.md` and `.kronn.json` in place. The
+  partial audit and the revalidation hold on a human's docs the same way the
+  full audit does (`docs_folder_choice_required`). The install records every
+  file it wrote in `.kronn.json` (`kronn_written`, one reusable
+  `record_kronn_written`): beside a human's docs those files are never moved to
+  `legacy/` (only the human's are), and they never make the folder Kronn's —
+  not even next to an earlier recorded audit. A recorded file counts as Kronn's
+  only while its sha256 still equals the recorded one: a file the human rewrote
+  (or a hand-crafted `.kronn.json` entry) is theirs again, counted by the gate
+  and moved on the choice. The install refuses a corrupt `.kronn.json` before
+  writing anything, and records a renamed template file under its new path.
+- Revalidation no longer reads a remediation proposal as a claim (KT-1313). A
+  TD sheet's `Remediation` / `Fix` / `Next steps` section, or a
+  `- **Remediation**:` / `- **Suggested fix**:` line (and the text under a
+  label that closes its line), names files still to be created: they are no
+  longer judged by whether they exist, so `helpers/lib/plugin-factory.js`
+  does not turn its sheet `no_longer_relevant`. A section left with nothing
+  else to verify says why in its proposed correction.
+- A stopped audit step keeps what it consumed (KT-1313). Its tokens join the
+  run's tally and its reported cost is recorded (both pipelines); a Claude
+  step's turns are summed as they arrive instead of keeping only the largest,
+  the final `result` line replacing the sum; and `total_tokens_so_far` never
+  goes down (it read 630, 877, then 346).
+- The default-root audit golden no longer depends on the day it is run
+  (KT-1317). The name of a `validated-originals/<hash>.bak` file is the hash
+  of bytes holding the audit date; the golden now names it by the hash of the
+  date-masked bytes (KT-1278). A new test replays the same audit 40 days
+  earlier and requires a byte-identical snapshot, with no non-volatile entry
+  relaxed.
+- Orchestration live-test findings (KT-1316). A worker's reply is priced with
+  the model that served it (`claude-haiku-4-5-20251001`), not the tier alias
+  the discussion stores (`haiku`), which names no rate: its cost is no longer
+  « unknown », and the delivery report shows the cost and tokens of the
+  worker's replies (nothing when one reply is unpriced, never a partial sum).
+  The « Delivery accepted » report is posted when the integration lands, not
+  at approval: a delivery bounced by a merge conflict or a red validation never
+  shows one. The orchestrator's room messages (worker brief, review request,
+  escalation, control offer, send-back, timeout alerts, hand-offs, campaign
+  gates) follow the principal discussion's language, English or French,
+  instead of always French; a few fix hints and a handful of rarely-seen
+  notices are still French. The Stop guide now says a clean worktree is
+  removed by default (`remove_if_clean`) and the branch is kept. The scanner no
+  longer logs a `resolve_host_path … contains '..'` warning per worktree: a
+  worktree registered with a relative path is resolved against its
+  registration. The MCP bridge script is looked up next to the running binary
+  and in the checkout it runs from, never at the path of the checkout it was
+  built in.
+- Audit step 8 accepts a Dependencies row that states its source in any
+  of its forms (KT-1295). The coverage check demanded the literal
+  `source used:`, so a row backed by `[src: deps: …]` citations, or written
+  `source: …`, was refused and failed the step after the retry. It now passes
+  with `source used: …` or `source: …` (any case), a well-formed
+  `[src: deps: <manager>/<package>@<date>]` citation (the citation gate still
+  checks it against the watch table), or `not verified: no source`; a row
+  with no source still fails, and the refusal names these forms. The
+  `scanned — nothing substantiable` outcome also takes an en-dash or `--`.
+  `resource used:` no longer passes for `source used:`. A `deps:` citation
+  whose manager label holds a `/` (the npm label is `JS / TS`) is now
+  verified against the watch table instead of being read as manager `JS`:
+  every citation the snapshot emits verifies against it.
+
+- The Full audit's documentary gate blames the step that introduced a blocker
+  (KT-1306). A document no step targets (a tech-debt detail sheet, a workflow
+  page) used to be charged to the founding step, so a resume re-ran the most
+  expensive step for another step's file. Kronn now diffs the blocking
+  diagnostics around each step (`.kronn/audit/document-blame.json`) and the
+  final gate, and a resume, redo the introducing step; the baseline is taken
+  before any write of the step, the cross-agent path's included, so what that
+  path writes is charged to its step. A step is also blocked
+  only by diagnostics absent before it ran: those already there are reported in
+  a `documentary_preexisting` event instead of failing it.
+- A doc's citations are no longer lost to a truncated marker, and a citation
+  of an unknown kind is no longer judged as a file (KT-1311). The partial
+  banner cut its reason at 240 characters, sometimes inside a quoted
+  `[src: …]`, and the scanner then read the rest of the doc as one marker:
+  no fingerprint was recorded, so drift went unseen. The banner now writes the
+  reason with round brackets, and the scanner closes an unclosed marker at the
+  next `[src:` or blank line and carries on. `[src: command: git log …]`
+  (a kind on a closed list of non-file kinds: `command`, `shell`, `test-run`…)
+  is unverifiable and counted in `unverified_count`, not a missing file, so
+  relevance stops calling its section outdated. Any other word (`fil:`,
+  `path:`, `source:`) is not a free pass: a path-like text is still verified as
+  a file and is fabricated when missing, so the enforce gate keeps blocking it. Line references written in
+  backticked prose are not re-anchored; only markers are (documented in
+  `docs/conventions/agents-md-format-v1.md`).
+- An ApiCall no longer masks a plugin's public config in the data it hands on
+  (KT-1249). The base URL (`https://acme.atlassian.net`) was scrubbed as a
+  secret since 0.14.3, so a Jira description reached the next steps with
+  `***/browse/EW-1` links, and a PUT would have written them back broken. A
+  config key declared `public` by a registry plugin (Jira's `JIRA_URL`) and a
+  plugin's base URL when it is a bare origin (scheme, host, optional port, no
+  path) are now left intact. Everything else stays masked, including any URL
+  with a path (webhook URLs hide their secret there), whatever its key name:
+  tokens, passwords, auth headers, the decoded Basic pair, every other config
+  value, in the data, summaries, errors and logs. An imported bundle or a
+  custom API cannot declare a value public. The URL decision is made on the
+  raw text: a secret hidden behind dot segments (`…/SECRET/..`,
+  `…/SECRET/%2e%2e`) no longer passes for a bare origin. A value declared
+  public is checked too, even with no `/`: user info, query, fragment, `;param`
+  and non-ASCII characters keep it masked (`https:user:SECRET@host`,
+  `host;SECRET`).
 - A review-wait timeout no longer locks the principal out of the review
   (KT-1293). The watchdog used to move the unreviewed delivery to `Escalated`
   while its alert told the principal to call `task_exec_review`, which only
@@ -687,6 +878,15 @@ Release notes for 0.9.3 and earlier are available in the
   `reviewed_head_sha`, `dod_verifications`, the string version `"1"`), and a
   spawned worker's `tests_executed` schema is declared in the measured `TOOLS`
   literal.
+- A project's `token_override` (a raw token) is no longer returned to a
+  Kronn-launched agent: credential fields are stripped from every bridge-token
+  response.
+
+- A task linked to rooms of several projects is visible from each of them
+  again (KT-1298, GitHub #248). One link to another project's room hid the
+  whole task, so `plan_get` answered 403 in every room and agents duplicated
+  the shared parent task. The links an agent cannot see are now left out of the
+  task instead.
 
 - The default-docs-root golden no longer depends on the day it runs: the
   compact date every step prompt opens with is masked like the dashed one.
@@ -1118,6 +1318,18 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Changed
 
+- The macOS and Windows portability CI job compiles only the four suites it
+  runs. A new default Cargo feature, `full-tests`, gates every other
+  unit-test module; the job builds with `--no-default-features`. The full
+  lib-test binary (9 200 tests) made rustc peak above 13 GB while the
+  standard macOS runner has 7 GB, so the first step swapped for 45 to 55
+  minutes. The job also prints its rustc and machine facts, since two runner
+  images with different Rust releases rotate and invalidate the shared
+  cache. Every other job keeps the default feature set. The `with_conn`
+  unwrap lint exempts exactly the item carrying a `#[cfg(test)]` or
+  `#[cfg(all(test, …))]` attribute instead of cutting each file at its
+  first `#[cfg(test)]`, so production code after a `mod tests;` line is
+  scanned again. (KT-15)
 - Every view has its own address, and the browser's Back, Forward and reload
   follow it: the pages (`/projects`, `/discussions`, `/planning`,
   `/workflows`, `/pages`, `/plugins`, `/config`), what is open in them

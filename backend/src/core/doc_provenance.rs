@@ -746,8 +746,14 @@ fn parse_reference(project: &Path, reference: &str) -> Option<(String, Option<us
     let reference = reference.trim();
     let (path, line) = match reference.rsplit_once(':') {
         Some((path, tail))
-            if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit() || c == '-') =>
+            if !tail.is_empty()
+                && tail.chars().all(|c| {
+                    c.is_ascii_digit()
+                        || c == '-'
+                        || crate::core::anti_halluc::RANGE_DASHES.contains(&c)
+                }) =>
         {
+            let tail = crate::core::anti_halluc::normalize_range_dashes(tail);
             let start = tail.split('-').next().and_then(|s| s.parse::<usize>().ok());
             (path, start)
         }

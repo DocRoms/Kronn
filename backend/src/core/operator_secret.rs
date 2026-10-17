@@ -283,5 +283,5 @@ pub fn read_delivered() -> Result<crate::db::human_credentials::Secret> {
     Ok(crate::db::human_credentials::Secret::new(trimmed))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests;

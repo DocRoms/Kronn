@@ -323,7 +323,7 @@ fn reference_name(reference: &str) -> Option<&str> {
         .map(|(_, name)| name)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

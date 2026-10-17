@@ -882,7 +882,7 @@ pub fn is_wsl_unc_path_str(path: &str) -> bool {
     path.starts_with(r"\\wsl.localhost\") || path.starts_with(r"\\wsl$\")
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

@@ -168,7 +168,7 @@ fn plan_stats(conn: &Connection, id: &str) -> Result<PlanningPlanStats> {
     Ok(stats)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

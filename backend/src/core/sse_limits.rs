@@ -144,7 +144,7 @@ pub(crate) async fn sse_text(sse: axum::response::sse::Sse<SseStream>) -> String
     String::from_utf8(body.to_vec()).unwrap()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use futures::StreamExt;

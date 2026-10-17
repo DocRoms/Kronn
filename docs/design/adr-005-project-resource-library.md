@@ -241,7 +241,7 @@ checkout, and only a human publishes it
 [src: file: backend/src/core/project_profile.rs:392-460#default_branch_ref]
 [src: file: backend/src/core/project_profile.rs:187-238#schema_error]
 [src: file: backend/src/workflows/run_pins.rs:33#PROJECT_PROFILE]
-[src: file: backend/src/workflows/run_pins.rs:255-275#record_project_profile]
+[src: file: backend/src/workflows/run_pins.rs:263-283#record_project_profile]
 [src: file: backend/src/workflows/run_pins.rs:485-497#revision_fingerprint_with_profiles]
 [src: file: backend/src/core/project_profile.rs:711-730#draft_if_missing]
 [src: file: docs/guides/project-profile.md:166-177].
@@ -312,7 +312,7 @@ A workflow Agent step also loads the project's repository skills: the run pin
 reads each one as committed on the default branch and pins it, so neither the
 checkout's branch nor the run's worktree changes it; one the pin lacks stops
 the step by name. A discussion still reads the checkout as it is.
-`[src: file: backend/src/workflows/run_pins.rs:671-685#DefaultBranch]`
+`[src: file: backend/src/workflows/run_pins.rs:686-700#DefaultBranch]`
 `[src: file: backend/src/api/projects/used_skills.rs:506-539#default_branch_commit]`
 `[src: file: backend/src/api/projects/used_skills.rs:554-570#resolve_repository_skills]`
 
@@ -469,7 +469,7 @@ Branch `archive/feat-0.13.0-portable-prototype-20260830`.
   [src: file: frontend/src/lib/projectRepositoryResourcesTab.ts:17-23#rememberProjectRepositoryResourcesTab].
 - The Overview shows the linked MCP count and companion repositories, and owns
   the project deletion controls [src: file: frontend/src/components/ProjectCard.tsx:2204-2208#projMcps]
-  [src: file: frontend/src/components/ProjectCard.tsx:2255-2270#ProjectLinkedRepos]
+  [src: file: frontend/src/components/ProjectCard.tsx:2250-2265#ProjectLinkedRepos]
   [src: file: frontend/src/components/ProjectCard.tsx:2267-2315#handleDeleteProject].
 - **Automations and Artifacts pages**: grouped by project; everything not
   linked to a project goes into « Général ».

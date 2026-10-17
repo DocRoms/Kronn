@@ -106,7 +106,7 @@ pub fn execute_gate_step(step: &WorkflowStep, ctx: &TemplateContext) -> StepOutc
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

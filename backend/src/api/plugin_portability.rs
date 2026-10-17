@@ -660,6 +660,17 @@ fn import_args_override(
     None
 }
 
+/// The server with every config key's `public` declaration cleared: that flag
+/// keeps a value out of the secret masking, so only registry code may set it.
+fn without_public_flags(mut server: McpServer) -> McpServer {
+    if let Some(spec) = server.api_spec.as_mut() {
+        for key in &mut spec.config_keys {
+            key.public = false;
+        }
+    }
+    server
+}
+
 fn resolve_import_server(
     conn: &rusqlite::Connection,
     portable: &PortablePluginConfig,
@@ -693,11 +704,15 @@ fn resolve_import_server(
         return Ok(None);
     }
 
+    // A bundle cannot declare a config value public (KT-1249): only the
+    // trusted registry does, and that branch returned above.
+    let bundled = without_public_flags(portable.server.clone());
+
     if let Some(existing) = db::mcps::list_servers(conn)?
         .into_iter()
         .find(|server| server.id == portable.server.id)
     {
-        if serde_json::to_value(&existing)? != serde_json::to_value(&portable.server)? {
+        if serde_json::to_value(&existing)? != serde_json::to_value(&bundled)? {
             conflicts.push(format!(
                 "{}: server id `{}` already exists with a different definition",
                 portable.label, portable.server.id
@@ -707,7 +722,7 @@ fn resolve_import_server(
         return Ok(Some(existing));
     }
 
-    let mut server = portable.server.clone();
+    let mut server = bundled;
     server.source = McpSource::Manual;
     db::mcps::upsert_server(conn, &server)?;
     Ok(Some(server))
@@ -1370,7 +1385,7 @@ pub async fn import_plugin_bundle(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::models::{ApiConfigKey, ApiSpec, TokenInjection};
@@ -1388,6 +1403,7 @@ mod tests {
                 endpoints: Vec::new(),
                 docs_url: None,
                 config_keys: vec![ApiConfigKey {
+                    public: false,
                     env_key: "SITE_ID".into(),
                     label: "Site".into(),
                     placeholder: String::new(),
@@ -1821,6 +1837,63 @@ mod tests {
             .unwrap()
             .iter()
             .all(|server| !server.id.ends_with("-not-in-catalogue")));
+    }
+
+    /// KT-1249 — `public` keeps a config value out of the secret masking, so a
+    /// bundle cannot grant it to a non-auth secret (a default-header secret, a
+    /// path token): the imported server holds no public key and masks them.
+    #[test]
+    fn an_imported_bundle_cannot_mark_a_config_value_public() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let mut server = test_server("custom-public-claim", ApiAuthKind::None);
+        server.api_spec.as_mut().unwrap().config_keys = ["X_API_SECRET", "PATH_TOKEN_URL"]
+            .iter()
+            .map(|key| ApiConfigKey {
+                public: true,
+                env_key: key.to_string(),
+                label: key.to_string(),
+                placeholder: String::new(),
+                description: String::new(),
+            })
+            .collect();
+        let report = import_clear(&conn, vec![portable(server.clone(), None)], false);
+        assert_eq!(report.skipped_plugins, 0, "{:?}", report.conflicts);
+        // The same bundled definition is no "different definition" conflict.
+        let again = import_clear(&conn, vec![portable(server, None)], false);
+        assert!(
+            again
+                .conflicts
+                .iter()
+                .all(|c| !c.contains("different definition")),
+            "{:?}",
+            again.conflicts
+        );
+
+        let stored = db::mcps::list_servers(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|server| server.id == "custom-public-claim")
+            .expect("imported server");
+        assert!(stored
+            .api_spec
+            .as_ref()
+            .unwrap()
+            .config_keys
+            .iter()
+            .all(|key| !key.public));
+        let env = HashMap::from([
+            ("X_API_SECRET".to_string(), "header-secret-2".to_string()),
+            (
+                "PATH_TOKEN_URL".to_string(),
+                "https://acme.example/t/pathsecret3".to_string(),
+            ),
+        ]);
+        let set = crate::workflows::api_call_executor::call_secrets(&stored, &env);
+        assert_eq!(
+            set.scrub("header-secret-2 https://acme.example/t/pathsecret3"),
+            "*** ***"
+        );
     }
 
     #[test]

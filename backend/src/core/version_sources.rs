@@ -9,7 +9,9 @@
 
 use std::path::Path;
 
-use crate::core::anti_halluc::{dep_citation, verify_source_marker, SourceKind, SourceStatus};
+use crate::core::anti_halluc::{
+    dep_citation, dep_reference, verify_source_marker, SourceKind, SourceStatus,
+};
 use crate::models::{DependencyCheckStatus, DependencyUpdateSummary};
 
 /// Rows of the watch rendered into a prompt; the rest is counted.
@@ -34,6 +36,20 @@ pub struct WatchedPackage {
     pub major: bool,
     /// Declared in the manifest, not installed: `current` is empty.
     pub declared_only: bool,
+    /// The lockfile `current` was read from instead of an installed tree;
+    /// `None` when the package manager reported the installed version
+    /// (KT-1325).
+    pub lockfile: Option<String>,
+}
+
+impl WatchedPackage {
+    /// Where `current` comes from, for the table and the citation verdict.
+    fn version_source(&self) -> String {
+        match &self.lockfile {
+            Some(file) => format!("from {file}"),
+            None => "installed".to_string(),
+        }
+    }
 }
 
 /// A manifest the watch could not check: its packages have no dated source.
@@ -42,6 +58,8 @@ pub struct UncheckedManifest {
     pub manager: String,
     pub manifest: String,
     pub status: DependencyCheckStatus,
+    /// Why the check did not settle (missing binary, network, parse error…).
+    pub reason: Option<String>,
 }
 
 /// The dependency watch as injected into one audit run.
@@ -71,6 +89,7 @@ impl DependencySnapshot {
                         latest: p.latest.clone(),
                         major: p.major,
                         declared_only: p.declared_only,
+                        lockfile: p.lockfile.clone(),
                     }))
                 }
                 DependencyCheckStatus::UpToDate => {
@@ -80,6 +99,7 @@ impl DependencySnapshot {
                     manager: manager.manager.clone(),
                     manifest: manager.manifest.clone(),
                     status: manager.status.clone(),
+                    reason: manager.reason.clone(),
                 }),
             }
         }
@@ -99,10 +119,18 @@ impl DependencySnapshot {
         )
     }
 
-    fn holds(&self, manager: &str, package: &str) -> Option<&WatchedPackage> {
-        self.packages
-            .iter()
-            .find(|p| p.manager.eq_ignore_ascii_case(manager) && p.name == package)
+    /// The row a `<manager>/<package>` reference names. Matched against the
+    /// labels the watch holds rather than split at a `/`: the npm label is
+    /// `JS / TS`, and a scoped package (`@scope/pkg`) holds a `/` too.
+    fn holds(&self, reference: &str) -> Option<&WatchedPackage> {
+        self.packages.iter().find(|p| {
+            reference
+                .get(..p.manager.len())
+                .is_some_and(|m| m.eq_ignore_ascii_case(&p.manager))
+                && reference[p.manager.len()..]
+                    .strip_prefix('/')
+                    .is_some_and(|name| name.trim() == p.name)
+        })
     }
 }
 
@@ -116,7 +144,7 @@ pub fn verify_dep_marker(
     if verify_source_marker(raw, None).kind != SourceKind::Deps {
         return None;
     }
-    let Some((manager, package, date)) = dep_citation(raw) else {
+    let (Some(_), Some((reference, date))) = (dep_citation(raw), dep_reference(raw)) else {
         return Some((
             SourceStatus::EmptyRef,
             "dependency watch citation must read `deps: <manager>/<package>@<YYYY-MM-DD>`"
@@ -138,7 +166,7 @@ pub fn verify_dep_marker(
             ),
         ));
     }
-    match snapshot.holds(&manager, &package) {
+    match snapshot.holds(&reference) {
         Some(row) => Some((
             SourceStatus::Verified,
             if row.declared_only {
@@ -148,15 +176,19 @@ pub fn verify_dep_marker(
                 )
             } else {
                 format!(
-                    "dependency watch {}: {} {} → {}",
-                    snapshot.checked_on, row.manifest, row.current, row.latest
+                    "dependency watch {}: {} {} ({}) → {}",
+                    snapshot.checked_on,
+                    row.manifest,
+                    row.current,
+                    row.version_source(),
+                    row.latest
                 )
             },
         )),
         None => Some((
             SourceStatus::NotFound,
             format!(
-                "`{manager}/{package}` is not in the dependency watch dated {}",
+                "`{reference}` is not in the dependency watch dated {}",
                 snapshot.checked_on
             ),
         )),
@@ -720,11 +752,11 @@ source citation AND its date; the `In place` cell keeps the lockfile or manifest
                 out.push_str("No outdated package recorded.\n");
             } else {
                 out.push_str(
-                    "| Manager | Manifest | Package | In place | Latest | Gap | Cite as |\n|---|---|---|---|---|---|---|\n",
+                    "| Manager | Manifest | Package | In place | Version source | Latest | Gap | Cite as |\n|---|---|---|---|---|---|---|---|\n",
                 );
                 for p in snapshot.packages.iter().take(MAX_RENDERED_PACKAGES) {
                     out.push_str(&format!(
-                        "| {} | {} | {} | {} | {} | {} | {} |\n",
+                        "| {} | {} | {} | {} | {} | {} | {} | {} |\n",
                         p.manager,
                         p.manifest,
                         p.name,
@@ -732,6 +764,11 @@ source citation AND its date; the `In place` cell keeps the lockfile or manifest
                             "not installed (declared range only; installed version unknown)"
                         } else {
                             p.current.as_str()
+                        },
+                        if p.declared_only {
+                            "none".to_string()
+                        } else {
+                            p.version_source()
                         },
                         p.latest,
                         if p.major { "major" } else { "minor/patch" },
@@ -748,8 +785,11 @@ source citation AND its date; the `In place` cell keeps the lockfile or manifest
             }
             for m in &snapshot.unchecked {
                 out.push_str(&format!(
-                    "- {} ({}): not checked ({:?}) — its packages have no dated source.\n",
-                    m.manifest, m.manager, m.status
+                    "- {} ({}): not checked ({:?}) — {} — its packages have no dated source.\n",
+                    m.manifest,
+                    m.manager,
+                    m.status,
+                    m.reason.as_deref().unwrap_or("no reason recorded")
                 ));
             }
             out.push_str(

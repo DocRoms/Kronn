@@ -17,6 +17,7 @@ f7922470284519c66aefd97b6719c34cc10bf31ddbe4e4be4ed3e61ffb44d31f  .claude/agents
 20b204acf9068af92f721d7e379128a9a6121e5d75dabfd7ee4c6e8332ca9f39  .gemini/agents/tech-lead.md
 volatile  .gemini/settings.json
 volatile  .kiro/settings/mcp.json
+volatile  .kronn/audit/document-blame.json
 volatile  .kronn/audit/document-optimization.json
 volatile  .kronn/audit/validated-originals/ac2a7c5b22c111d5685e6973f695e9ca923e212b8edffde5828b0c874f3f723c.bak
 29e0381ab7727cabf4e2e376a13802181c29adbc2a9e24e369c486590545e4ee  .kronn/mcp-managed.json
@@ -37,7 +38,7 @@ volatile  docs/checksums.json
 volatile  docs/citations.json
 072acac446c5b13d76eed1e1f397559377515a650d1c4ce6125072821ec91eab  docs/coding-rules.md
 b389b0e31a416199ec5e6115081e48a5965d4ab2f83351f20795466c2722235b  docs/conventions/README.md
-4e48c77548bdb1dad236bfeffb454309547b4ac799ca6652c8aa7450a7b7b516  docs/conventions/agents-md-format-v1.md
+7a985ccdbbbb77fbd879253e104cfc65c3403ff70f2d65f763fb5843751cbe8b  docs/conventions/agents-md-format-v1.md
 d5328c9144505a665cbf8634d48d9a8645c414e717971bb8a8363c1c6e44d4d4  docs/decisions.md
 77aaaecf9eb45e0a4ae17373be38b40820a8d0420adfa54d531430b961e955e8  docs/environments.md
 5cc52ebd8358e991bae08bd5619ea04aa90cee4d25115a5c00f8f16feb046ce4  docs/examples/README.md
@@ -76,7 +77,7 @@ ff6e172fa2ce77e6121da8cdea362156286d20ef0636b6d1fb018a4b069e6b9d  prompt.2
 92ef9001e53edb06f451d34ad55e54fd37c1460c9153e68e70112721c36a4a3b  prompt.5
 5a6fbfc9fdcbe75bb6e36f21442594f7e9432b1b96969a136901e6cdbda979c7  prompt.6
 3f56d0c4a15ba7b91a41ec35fbdef708fdb2f73d3e84c9ef674019861db326c3  prompt.7
-7e496715613cf89e2e5ca7b2ede3aa5b3f9c285a5ffd85c74c25472db2b71521  prompt.8
+0a4a7d71f2555b07fb22cd250d3f40543200b5da6908930f332ce8b81278fc9f  prompt.8
 a31e2f9d03090f61aaa29432be24bcd4e188cbc5a1b4ce82128bcc20af3e3792  prompt.9
 4991b071664a323b062aa86354def0df2e8044d8183c86f5ce477bfb19565a42  prompt.10
 5021823384ddac0d4f939a8b71049d1d3d9d35c98f8cfee3267d674f7ad24e9c  prompt.11
