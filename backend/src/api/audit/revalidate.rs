@@ -750,6 +750,7 @@ pub async fn revalidate_audit(
             req.tier,
             req.connection_id,
             Some(run),
+            req.accept_unverified_agents.unwrap_or(false),
         )
         .await;
     }

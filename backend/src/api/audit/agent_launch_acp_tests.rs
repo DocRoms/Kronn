@@ -296,6 +296,18 @@ fn launch(
     id: &str,
     agent: AgentType,
 ) -> tokio::task::JoinHandle<String> {
+    launch_with(state, pipeline, id, agent, false)
+}
+
+/// [`launch`], saying (or not) that the human accepts a process table Kronn
+/// could not read (KT-1324).
+fn launch_with(
+    state: &AppState,
+    pipeline: Pipeline,
+    id: &str,
+    agent: AgentType,
+    accept_unverified_agents: bool,
+) -> tokio::task::JoinHandle<String> {
     use axum::response::IntoResponse;
     let state = state.clone();
     let id = id.to_string();
@@ -313,6 +325,7 @@ fn launch(
                     resume_run_id: None,
                     retry_steps: None,
                     redo_steps: None,
+                    accept_unverified_agents: Some(accept_unverified_agents),
                     fresh: None,
                 }),
             )
@@ -338,6 +351,7 @@ fn launch(
                         connection_id: None,
                         tier: None,
                         steps: vec![step],
+                        accept_unverified_agents: Some(accept_unverified_agents),
                     }),
                 )
                 .await
@@ -911,6 +925,217 @@ async fn a_backend_crash_mid_step_of_a_full_audit_is_settled_at_boot() {
 #[tokio::test]
 async fn a_backend_crash_mid_step_of_a_partial_audit_is_settled_at_boot() {
     a_backend_crash_mid_step_is_settled_at_boot(Pipeline::Partial).await;
+}
+
+/// KT-1324 — two runs of the project that no boot settled: the older one is
+/// still `Running` with nothing pending (its agent may be alive), the newer one
+/// holds a step that never ended and a half-written doc. A launch that looked
+/// only at the newest run would miss the older one's agent. Returns the ids of
+/// the run to reap, of the run to settle, and the doc.
+async fn leave_runs_open(
+    state: &AppState,
+    project_id: &str,
+    root: &Path,
+    pipeline: Pipeline,
+    before: &str,
+) -> (String, String, std::path::PathBuf) {
+    let target = first_target(pipeline);
+    let path = root.join(target);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "# Half writ").unwrap();
+    let (reaped, settled) = (
+        format!("older-{}", uuid::Uuid::new_v4()),
+        format!("newer-{}", uuid::Uuid::new_v4()),
+    );
+    let (older, newer, pid) = (reaped.clone(), settled.clone(), project_id.to_string());
+    let (before, target) = (before.to_string(), target.to_string());
+    state
+        .db
+        .with_conn(move |conn| {
+            use crate::db::audit_runs as runs;
+            let label = AuditKind::Docker.as_label();
+            let now = chrono::Utc::now();
+            let ago = |minutes| now - chrono::Duration::minutes(minutes);
+            runs::insert_running(conn, &older, &pid, label, "OpenCode", ago(10))?;
+            // Inserting a run drops the snapshots of the runs it supersedes:
+            // the step of the newer run is recorded after it.
+            runs::insert_running(conn, &newer, &pid, label, "OpenCode", ago(5))?;
+            runs::insert_audit_step_start(conn, &newer, 1, &target, now)?;
+            runs::save_step_snapshot(conn, &newer, 1, &target, Some(&before))?;
+            runs::record_observed_output(
+                conn,
+                &newer,
+                1,
+                &crate::api::audit::step_guard::fingerprint(Some("# Half writ")),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    (reaped, settled, path)
+}
+
+async fn run_is_settled(state: &AppState, run_id: &str) -> bool {
+    let run_id = run_id.to_string();
+    state
+        .db
+        .with_conn(move |conn| {
+            Ok(crate::api::audit::step_guard::pending_steps(conn, &run_id)?.is_empty())
+        })
+        .await
+        .unwrap()
+}
+
+fn error_of(body: &str) -> String {
+    sse_events(body)
+        .into_iter()
+        .find(|(name, _)| name == "error")
+        .map(|(_, data)| data["error"].as_str().unwrap_or_default().to_string())
+        .unwrap_or_else(|| panic!("the launch was not refused: {body}"))
+}
+
+async fn stop_and_wait(state: &AppState, id: &str, run: tokio::task::JoinHandle<String>) {
+    let _ = crate::api::audit::full::cancel_audit(
+        axum::extract::State(state.clone()),
+        axum::extract::Path(id.to_string()),
+    )
+    .await;
+    let _ = tokio::time::timeout(Duration::from_secs(10), run).await;
+}
+
+/// KT-1324 — a launch settles the open runs of its project only once the agents
+/// of every one of them are gone, not just the newest run's: a survivor of the
+/// older run refuses the launch, naming the process and how to stop it, leaving
+/// the doc and the step as they were and recording no run; once the agent is
+/// gone the same launch settles the newer run's step, then runs.
+async fn a_launch_settles_the_open_runs_only_once_their_agents_are_gone(pipeline: Pipeline) {
+    use crate::api::audit::step_guard::{plant_reap_of_run, unplant_reap_of_run};
+    use crate::core::dispatch_reaper::ReapReport;
+    const BEFORE: &str = "# The doc before the step\n\nOriginal, whole content.\n";
+    let state = new_state();
+    let project = tempfile::tempdir().unwrap();
+    kronn_docs(project.path());
+    let agent = ScriptedAgent::new(Turn::Hang);
+    let _route = route(project.path(), &agent);
+    add_project(&state, "proj-open", project.path()).await;
+    let (reaped, settled, path) =
+        leave_runs_open(&state, "proj-open", project.path(), pipeline, BEFORE).await;
+
+    plant_reap_of_run(
+        &reaped,
+        ReapReport {
+            survivors: vec![4242],
+            ..Default::default()
+        },
+    );
+    let body = launch(&state, pipeline, "proj-open", AgentType::OpenCode)
+        .await
+        .unwrap();
+    let error = error_of(&body);
+    assert!(error.contains("kill -9 4242"), "{pipeline:?}: {error}");
+    assert!(error.contains(&reaped), "{pipeline:?}: {error}");
+    assert!(!error.contains("ReapReport"), "{pipeline:?}: {error}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Half writ");
+    assert!(!run_is_settled(&state, &settled).await, "{pipeline:?}");
+    assert_eq!(agent.prompts.load(Ordering::SeqCst), 0, "no agent started");
+    let runs = state
+        .db
+        .with_conn(|conn| crate::db::audit_runs::list_recent(conn, "proj-open", 10))
+        .await
+        .unwrap();
+    assert_eq!(
+        runs.len(),
+        2,
+        "{pipeline:?}: a refused launch records no run"
+    );
+
+    // The agent is gone: the same launch settles the open step, then runs.
+    unplant_reap_of_run(&reaped);
+    let run = launch(&state, pipeline, "proj-open", AgentType::OpenCode);
+    until("the agent to be working on its step", || {
+        agent.prompts.load(Ordering::SeqCst) > 0
+    })
+    .await;
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        BEFORE,
+        "{pipeline:?}: the half-written doc was put back before the new run took its snapshot"
+    );
+    assert!(run_is_settled(&state, &settled).await, "{pipeline:?}");
+    stop_and_wait(&state, "proj-open", run).await;
+}
+
+#[tokio::test]
+async fn a_full_launch_settles_the_open_runs_only_once_their_agents_are_gone() {
+    a_launch_settles_the_open_runs_only_once_their_agents_are_gone(Pipeline::Full).await;
+}
+
+#[tokio::test]
+async fn a_partial_launch_settles_the_open_runs_only_once_their_agents_are_gone() {
+    a_launch_settles_the_open_runs_only_once_their_agents_are_gone(Pipeline::Partial).await;
+}
+
+/// KT-1324 — a process table nobody can read is no reason to block a project's
+/// audits forever: the refusal says so in plain words, and the human's explicit
+/// word on the launch settles the run.
+async fn an_unreadable_process_table_can_be_accepted_by_the_human(pipeline: Pipeline) {
+    use crate::api::audit::step_guard::{plant_reap_of_run, unplant_reap_of_run};
+    use crate::core::dispatch_reaper::ReapReport;
+    const BEFORE: &str = "# The doc before the step\n\nOriginal, whole content.\n";
+    let state = new_state();
+    let project = tempfile::tempdir().unwrap();
+    kronn_docs(project.path());
+    let agent = ScriptedAgent::new(Turn::Hang);
+    let _route = route(project.path(), &agent);
+    add_project(&state, "proj-blind", project.path()).await;
+    let (reaped, settled, path) =
+        leave_runs_open(&state, "proj-blind", project.path(), pipeline, BEFORE).await;
+    plant_reap_of_run(
+        &reaped,
+        ReapReport {
+            unverified: true,
+            ..Default::default()
+        },
+    );
+
+    let body = launch(&state, pipeline, "proj-blind", AgentType::OpenCode)
+        .await
+        .unwrap();
+    let error = error_of(&body);
+    assert!(
+        error.contains("could not read the process table"),
+        "{pipeline:?}: {error}"
+    );
+    assert!(
+        error.contains("accept_unverified_agents"),
+        "{pipeline:?}: {error}"
+    );
+    assert!(!error.contains("ReapReport"), "{pipeline:?}: {error}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Half writ");
+
+    let run = launch_with(&state, pipeline, "proj-blind", AgentType::OpenCode, true);
+    until("the agent to be working on its step", || {
+        agent.prompts.load(Ordering::SeqCst) > 0
+    })
+    .await;
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        BEFORE,
+        "{pipeline:?}"
+    );
+    assert!(run_is_settled(&state, &settled).await, "{pipeline:?}");
+    unplant_reap_of_run(&reaped);
+    stop_and_wait(&state, "proj-blind", run).await;
+}
+
+#[tokio::test]
+async fn an_unreadable_process_table_can_be_accepted_by_the_human_on_a_full_launch() {
+    an_unreadable_process_table_can_be_accepted_by_the_human(Pipeline::Full).await;
+}
+
+#[tokio::test]
+async fn an_unreadable_process_table_can_be_accepted_by_the_human_on_a_partial_launch() {
+    an_unreadable_process_table_can_be_accepted_by_the_human(Pipeline::Partial).await;
 }
 
 /// Puts a scripted `claude` first on `PATH` and forces the direct-CLI route
@@ -1731,6 +1956,7 @@ async fn a_resume_with_no_source_change_does_not_warn_that_the_sources_changed()
             resume_run_id: Some(interrupted.id.clone()),
             retry_steps: None,
             redo_steps: None,
+            accept_unverified_agents: None,
             fresh: None,
         }),
     )

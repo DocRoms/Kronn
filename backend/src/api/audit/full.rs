@@ -383,6 +383,7 @@ pub async fn full_audit(
     let retry_steps_req = req.retry_steps.clone();
     let redo_steps_req = req.redo_steps.clone();
     let fresh_req = req.fresh.unwrap_or(false);
+    let accept_unverified_agents_req = req.accept_unverified_agents.unwrap_or(false);
     let requested_kind = req.kind;
     let db = state.db.clone();
     let audit_tracker = state.audit_tracker.clone();
@@ -647,71 +648,18 @@ pub async fn full_audit(
         // back from the snapshot taken before that step, before this run
         // takes its own snapshots of the targets.
         {
-            let pid = project_id.clone();
-            let root = project_path.clone();
-            // Database reads and writes, with the file work between them
-            // outside the writer connection.
-            let pending = db.with_conn(move |conn| {
-                let Some(last) = crate::db::audit_runs::list_recent(conn, &pid, 1)?.into_iter().next() else {
-                    return Ok(None);
-                };
-                let pending = super::step_guard::pending_steps(conn, &last.id)?;
-                Ok(Some((last.id, pending)))
-            }).await;
-            let recovered = match pending {
-                Ok(Some((last_id, pending))) if !pending.is_empty() => {
-                    // Boot settles these already; this is the net for a backend
-                    // that did not go through boot (a run recorded since), or
-                    // for a run boot left open because an agent of it could not
-                    // be stopped. The run's agents are stopped again first: a
-                    // survivor is still writing the very file being settled.
-                    let reap_root = root.clone();
-                    let reap_id = last_id.clone();
-                    let reaped = tokio::task::spawn_blocking(move || {
-                        super::step_guard::settle_pending_after_reap(&reap_root, &pending, &reap_id)
-                    }).await;
-                    let settled = match reaped {
-                        Ok(Ok(settled)) => settled,
-                        Ok(Err(report)) => {
-                            yield Event::default().event("error").data(
-                                serde_json::json!({
-                                    "error": format!(
-                                        "An agent of the previous audit run {last_id} may still be running ({report:?}): its unfinished steps cannot be settled yet and a new audit would race its writes — stop it, then launch again."
-                                    )
-                                }).to_string(),
-                            );
-                            return;
-                        }
-                        Err(e) => {
-                            yield Event::default().event("error").data(
-                                serde_json::json!({
-                                    "error": format!("Could not stop the agents of the previous audit run {last_id} (task: {e}) — launch refused.")
-                                }).to_string(),
-                            );
-                            return;
-                        }
-                    };
-                    if settled.is_empty() {
-                        Ok(settled)
-                    } else {
-                        let to_record = settled.clone();
-                        db.with_conn(move |conn| {
-                            super::step_guard::record_settled(conn, &last_id, &to_record)?;
-                            Ok(settled)
-                        }).await
-                    }
-                }
-                Ok(_) => Ok(Vec::new()),
-                Err(e) => Err(e),
-            };
-            match recovered {
-                Ok(settled) => for step in settled {
-                    tracing::warn!(
-                        "Step {} of the previous run was killed mid-write: {} — {:?}",
-                        step.step_index, step.target_file, step.outcome
-                    );
-                },
-                Err(e) => tracing::warn!("Could not check the previous run for killed steps: {e}"),
+            // Boot settles these already; this is the net for a backend that
+            // did not go through boot (a run recorded since), or for a run boot
+            // left open because an agent of it could not be stopped. Every open
+            // run of the project has its agents stopped again first: a survivor
+            // is still writing the very file being settled.
+            if let Err(error) = super::step_guard::settle_open_runs_before_launch(
+                &db, &project_id, &project_path, accept_unverified_agents_req,
+            ).await {
+                yield Event::default().event("error").data(
+                    serde_json::json!({ "error": error }).to_string(),
+                );
+                return;
             }
         }
         let audit_run_id = Uuid::new_v4().to_string();

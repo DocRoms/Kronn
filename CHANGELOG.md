@@ -610,8 +610,16 @@ Release notes for 0.9.3 and earlier are available in the
   never ended; a run something of which survived the reap, or could not be
   looked for (on Linux, a process of the user's own that `/proc` will not
   show), is left unsettled rather than judged on a file still being written.
-  The next audit launch stops the run's agents again before it settles such a
-  run, and refuses to launch while one may still be alive. The sources' print a run records is now read once Kronn's own
+  Agents started under the former tag (`audit-run:<run id>`) are looked for
+  too, so an upgrade does not let one write past a settlement.
+  Every launch that takes snapshots (full audit, partial refresh,
+  revalidation) first stops the agents of all the project's open runs and
+  settles their unfinished steps, and refuses to launch while one may still be
+  alive. The refusal names the process and how to stop it (`kill -9 <pid>`);
+  when Kronn cannot read the process table (a restricted `/proc`) it says so
+  and the launch can be repeated with `accept_unverified_agents: true`, the
+  human's word that none runs, which never covers a process Kronn saw. The
+  sources' print a run records is now read once Kronn's own
   install has written its root `AGENTS.md` pointer: taken before it, it
   differed from the next run's and every resume of a freshly started audit
   warned.

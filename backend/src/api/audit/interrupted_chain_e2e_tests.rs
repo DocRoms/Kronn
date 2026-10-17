@@ -37,6 +37,7 @@ async fn resume(state: &AppState, run_id: &str, redo_steps: Option<Vec<u32>>) ->
             retry_steps: None,
             redo_steps,
             fresh: None,
+            accept_unverified_agents: None,
         }),
     )
     .await

@@ -407,6 +407,28 @@ pub fn runs_that_may_have_agents(conn: &Connection) -> Result<Vec<String>> {
     Ok(rows)
 }
 
+/// KT-1324 — [`runs_that_may_have_agents`] of one project: what a launch on it
+/// must stop and settle before it takes snapshots of the project's docs.
+pub fn project_runs_that_may_have_agents(
+    conn: &Connection,
+    project_id: &str,
+) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT id FROM audit_runs WHERE project_id = ?1 AND status = 'Running'
+         UNION
+         SELECT p.audit_run_id
+           FROM audit_step_snapshots p
+           JOIN audit_run_steps s
+             ON s.audit_run_id = p.audit_run_id AND s.step_index = p.step_index
+           JOIN audit_runs r ON r.id = p.audit_run_id
+          WHERE r.project_id = ?1 AND s.ended_at IS NULL AND s.accepted_at IS NULL",
+    )?;
+    let rows = stmt
+        .query_map([project_id], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    Ok(rows)
+}
+
 /// KT-1211 — a step that never ended (its agent died with the backend) is
 /// settled failed, with what became of its target. Its snapshot is dropped
 /// unless `keep_snapshot`: a target that could not be put back keeps it for

@@ -428,6 +428,7 @@ pub async fn partial_audit(
         req.tier,
         req.connection_id,
         None,
+        req.accept_unverified_agents.unwrap_or(false),
     )
     .await
 }
@@ -443,6 +444,7 @@ pub(crate) async fn run_partial_pipeline(
     tier: Option<crate::models::ModelTier>,
     connection_id: Option<String>,
     revalidation: Option<super::revalidate::RevalidationRun>,
+    accept_unverified_agents: bool,
 ) -> Sse<SseStream> {
     let id = project.id.clone();
     let project_path_str = project.path.clone();
@@ -590,6 +592,18 @@ pub(crate) async fn run_partial_pipeline(
         if let Some(msg) = refusal {
             yield Event::default().event("error").data(
                 serde_json::json!({ "error": msg }).to_string(),
+            );
+            return;
+        }
+
+        // KT-1324 — what a previous run's agent left is stopped and settled
+        // before this run snapshots its targets: a survivor still writing them
+        // would be snapshotted as if it were the document's own text.
+        if let Err(error) = super::step_guard::settle_open_runs_before_launch(
+            &state.db, &project_id_for_progress, &project_path, accept_unverified_agents,
+        ).await {
+            yield Event::default().event("error").data(
+                serde_json::json!({ "error": error }).to_string(),
             );
             return;
         }

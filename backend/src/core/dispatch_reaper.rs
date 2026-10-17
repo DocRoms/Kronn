@@ -46,6 +46,19 @@ pub fn audit_run_tag_in(instance: &str, audit_run_id: &str) -> String {
     format!("audit-run:{instance}:{audit_run_id}")
 }
 
+/// The tag agents carried before it named an instance. An agent started by the
+/// previous version and still alive after the upgrade carries this one: it is
+/// looked for too, so the upgrade does not let it write past a settlement.
+pub fn legacy_audit_run_tag(audit_run_id: &str) -> String {
+    format!("audit-run:{audit_run_id}")
+}
+
+/// Stop what an audit run's agents left, under both tag forms. `reap` stops
+/// the processes of one tag (see [`reap_dispatch`]); the reports are merged.
+pub fn reap_audit_run(audit_run_id: &str, reap: &dyn Fn(&str) -> ReapReport) -> ReapReport {
+    reap(&audit_run_tag(audit_run_id)).merged(reap(&legacy_audit_run_tag(audit_run_id)))
+}
+
 /// A short, stable name for this backend's data directory. Fixed for the life
 /// of the process, so the tag an agent is launched with is the one boot looks
 /// for after a restart on the same directory.
@@ -83,6 +96,18 @@ impl ReapReport {
     /// Something of the run may still be alive, or could not be looked for.
     pub fn may_still_run(&self) -> bool {
         self.unverified || !self.survivors.is_empty()
+    }
+
+    /// What two reaps of the same run found, together.
+    pub fn merged(mut self, other: ReapReport) -> ReapReport {
+        self.signalled += other.signalled;
+        for pid in other.survivors {
+            if !self.survivors.contains(&pid) {
+                self.survivors.push(pid);
+            }
+        }
+        self.unverified |= other.unverified;
+        self
     }
 }
 

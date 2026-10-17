@@ -408,6 +408,38 @@ fn the_audit_tag_names_the_instance_and_the_run() {
     assert!(audit_run_tag("run-1").ends_with(":run-1"));
 }
 
+/// KT-1324 — an agent started before the tag named an instance carries the
+/// former tag: a run is reaped under both, and what the two reaps found is told
+/// together (a pid once, whatever tag it was found by).
+#[test]
+fn a_run_is_reaped_under_its_current_and_its_former_tag() {
+    let asked = std::cell::RefCell::new(Vec::<String>::new());
+    let reap = |tag: &str| {
+        asked.borrow_mut().push(tag.to_string());
+        ReapReport {
+            signalled: 1,
+            survivors: vec![42],
+            unverified: tag == legacy_audit_run_tag("run-1"),
+        }
+    };
+    let report = reap_audit_run("run-1", &reap);
+    assert_eq!(
+        asked.borrow().as_slice(),
+        [audit_run_tag("run-1"), "audit-run:run-1".to_string()]
+    );
+    assert_eq!(report.signalled, 2);
+    assert_eq!(report.survivors, vec![42]);
+    assert!(
+        report.unverified,
+        "one blind reap leaves the run unverified"
+    );
+    assert_ne!(
+        legacy_audit_run_tag("run-1"),
+        audit_run_tag("run-1"),
+        "the former tag is not matched by the current one, nor the reverse"
+    );
+}
+
 /// An entry of `/proc` that cannot be read counts only when it could be the
 /// run's: another user's processes are always unreadable to this one.
 #[test]

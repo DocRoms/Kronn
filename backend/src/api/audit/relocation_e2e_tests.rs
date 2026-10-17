@@ -224,6 +224,7 @@ async fn a_partial_refresh_of_a_dot_ai_project_rewrites_its_section_there() {
             connection_id: None,
             tier: None,
             steps: vec![step],
+            accept_unverified_agents: None,
         }),
     )
     .await
@@ -311,6 +312,7 @@ async fn a_revalidation_of_a_dot_ai_project_finds_and_fixes_its_citations_there(
         axum::extract::Path(PROJECT_ID.to_string()),
         axum::Json(crate::models::RevalidateAuditRequest {
             deterministic_only: None,
+            accept_unverified_agents: None,
             agent: AgentType::ClaudeCode,
             connection_id: None,
             tier: None,
@@ -414,6 +416,7 @@ async fn provenance_citations_td_review_and_step_8_follow_a_dot_ai_root() {
             connection_id: None,
             tier: None,
             steps: vec![step],
+            accept_unverified_agents: None,
         }),
     )
     .await
@@ -757,6 +760,7 @@ async fn launch_route_fresh(h: &Harness, bridge: bool, fresh: Option<bool>) -> S
             resume_run_id: None,
             retry_steps: None,
             redo_steps: None,
+            accept_unverified_agents: None,
             fresh,
         }),
     )
@@ -923,6 +927,7 @@ async fn an_ai_folder_is_migrated_first_or_refused_as_human_docs() {
             connection_id: None,
             tier: None,
             steps: vec![2],
+            accept_unverified_agents: None,
         }),
     )
     .await
@@ -1624,6 +1629,7 @@ async fn partial_and_revalidation_wait_for_the_choice_on_human_docs() {
             connection_id: None,
             tier: None,
             steps: vec![1],
+            accept_unverified_agents: None,
         }),
     )
     .await
@@ -1633,6 +1639,7 @@ async fn partial_and_revalidation_wait_for_the_choice_on_human_docs() {
         axum::extract::Path(PROJECT_ID.to_string()),
         axum::Json(crate::models::RevalidateAuditRequest {
             deterministic_only: Some(true),
+            accept_unverified_agents: None,
             agent: AgentType::ClaudeCode,
             connection_id: None,
             tier: None,

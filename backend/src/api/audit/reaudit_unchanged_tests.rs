@@ -161,6 +161,7 @@ async fn launch_full(
             resume_run_id,
             retry_steps,
             redo_steps: None,
+            accept_unverified_agents: None,
             fresh,
         }),
     )
@@ -1154,6 +1155,7 @@ async fn a_launch_that_would_ignore_a_resumable_run_is_refused_unless_fresh() {
             connection_id: None,
             tier: None,
             steps: vec![1],
+            accept_unverified_agents: None,
         }),
     )
     .await
@@ -1346,6 +1348,7 @@ async fn a_full_audit_goes_on_after_the_session_that_launched_it_is_closed() {
             resume_run_id: None,
             retry_steps: None,
             redo_steps: None,
+            accept_unverified_agents: None,
             fresh: None,
         }),
     )
@@ -1623,6 +1626,7 @@ async fn a_reaudit_keeps_human_td_decisions_and_a_refresh_says_it_is_single_agen
             connection_id: None,
             tier: None,
             steps: vec![step],
+            accept_unverified_agents: None,
         }),
     )
     .await

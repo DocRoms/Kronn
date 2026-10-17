@@ -589,6 +589,7 @@ pub(crate) fn settle_unfinished_steps(
 /// previous process is still running, so every step that never ended is
 /// settled now — not at the next launch, which may be days away with the doc
 /// half-written and nothing marking it. Returns how many steps were settled.
+#[cfg(test)]
 pub(crate) fn settle_unfinished_at_boot(conn: &rusqlite::Connection) -> anyhow::Result<usize> {
     settle_unfinished_except(conn, &HashSet::new())
 }
@@ -645,7 +646,7 @@ fn reap_tagged_agents_with(
 ) -> anyhow::Result<HashSet<String>> {
     let mut unsafe_to_settle = HashSet::new();
     for run_id in crate::db::audit_runs::runs_that_may_have_agents(conn)? {
-        let report = reap(&crate::core::dispatch_reaper::audit_run_tag(&run_id));
+        let report = crate::core::dispatch_reaper::reap_audit_run(&run_id, reap);
         if report.signalled > 0 {
             tracing::warn!(
                 "Boot: stopped {} process(es) the previous backend left running for audit run {run_id}",
@@ -689,39 +690,188 @@ fn stop_agents_and_settle_with(conn: &rusqlite::Connection, reap: Reaper) -> any
     settle_unfinished_except(conn, &skip)
 }
 
-/// The steps a previous run never ended, settled at a launch (the net for a run
-/// boot left open, or recorded since): the run's agents are stopped first,
-/// exactly as at boot. `Err` when something of the run may still be alive (a
-/// survivor, or a process table that could not be read): the steps stay open,
-/// because settling a document somebody may still be writing is the bug the
-/// reap exists to prevent. Blocking: call it off the async runtime's threads.
-pub(crate) fn settle_pending_after_reap(
-    project_root: &Path,
-    pending: &[crate::db::audit_runs::StepSnapshot],
-    run_id: &str,
-) -> Result<Vec<SettledStep>, crate::core::dispatch_reaper::ReapReport> {
-    settle_pending_after(
-        project_root,
-        pending,
-        run_id,
-        &crate::core::dispatch_reaper::reap_dispatch,
-    )
+/// Why a launch cannot settle the open runs of a project: something of one of
+/// them may still be running.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentsMayStillRun {
+    pub run_id: String,
+    pub report: crate::core::dispatch_reaper::ReapReport,
 }
 
-fn settle_pending_after(
+impl AgentsMayStillRun {
+    /// What to tell the human, and what they can do about it.
+    pub(crate) fn message(&self) -> String {
+        let run = &self.run_id;
+        if self.report.survivors.is_empty() {
+            return format!(
+                "Kronn could not read the process table to check that no agent of the previous audit run {run} is still running (a restricted /proc, or a failed process listing). No running agent was seen. If you are sure none is running, launch again with `accept_unverified_agents: true`: the run's unfinished steps are then settled without that check."
+            );
+        }
+        let pids = self
+            .report
+            .survivors
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!(
+            "An agent of the previous audit run {run} is still running after being asked to stop (process {pids}). Stop it (`kill -9 {pids}`), then launch again: a new audit would snapshot and race a document it is still writing."
+        )
+    }
+}
+
+/// An open run of a project: its id and the steps it never ended.
+type OpenRun = (String, Vec<crate::db::audit_runs::StepSnapshot>);
+
+/// The reap of a run's tag at a launch. Tests plant the report for a tag (a
+/// survivor, a table nobody could read) that a real process cannot be made to
+/// produce.
+fn launch_reaper(tag: &str) -> crate::core::dispatch_reaper::ReapReport {
+    #[cfg(test)]
+    if let Some(report) = planted_reaps().lock().unwrap().get(tag).cloned() {
+        return report;
+    }
+    crate::core::dispatch_reaper::reap_dispatch(tag)
+}
+
+#[cfg(test)]
+type PlantedReaps =
+    std::sync::Mutex<std::collections::HashMap<String, crate::core::dispatch_reaper::ReapReport>>;
+
+#[cfg(test)]
+fn planted_reaps() -> &'static PlantedReaps {
+    static PLANTED: std::sync::OnceLock<PlantedReaps> = std::sync::OnceLock::new();
+    PLANTED.get_or_init(Default::default)
+}
+
+/// Make the launch-time reap of `run_id` report `report`, whatever runs.
+#[cfg(test)]
+pub(crate) fn plant_reap_of_run(run_id: &str, report: crate::core::dispatch_reaper::ReapReport) {
+    planted_reaps()
+        .lock()
+        .unwrap()
+        .insert(crate::core::dispatch_reaper::audit_run_tag(run_id), report);
+}
+
+/// Forget what [`plant_reap_of_run`] planted for `run_id`.
+#[cfg(test)]
+pub(crate) fn unplant_reap_of_run(run_id: &str) {
+    planted_reaps()
+        .lock()
+        .unwrap()
+        .remove(&crate::core::dispatch_reaper::audit_run_tag(run_id));
+}
+
+/// The steps the open runs of a project never ended, settled at a launch (the
+/// net for what boot left open, or recorded since): every run's agents are
+/// stopped first, exactly as at boot, and nothing is settled unless all of them
+/// are gone. `Err` when something of a run may still be alive — a survivor, or
+/// a process table that could not be read — because settling a document
+/// somebody may still be writing is the bug the reap exists to prevent.
+/// `accept_unverified` is the human's answer to a table that could not be read
+/// (nothing was seen running): it never lifts the refusal for a survivor, which
+/// can be stopped by hand. Blocking: call it off the async runtime's threads.
+fn settle_open_runs_with(
     project_root: &Path,
-    pending: &[crate::db::audit_runs::StepSnapshot],
-    run_id: &str,
+    runs: &[OpenRun],
+    accept_unverified: bool,
     reap: Reaper,
-) -> Result<Vec<SettledStep>, crate::core::dispatch_reaper::ReapReport> {
-    let report = reap(&crate::core::dispatch_reaper::audit_run_tag(run_id));
-    if report.may_still_run() {
+) -> Result<Vec<(String, Vec<SettledStep>)>, AgentsMayStillRun> {
+    let mut refusal: Option<AgentsMayStillRun> = None;
+    for (run_id, _) in runs {
+        let report = crate::core::dispatch_reaper::reap_audit_run(run_id, reap);
+        if !report.may_still_run() {
+            continue;
+        }
+        if report.survivors.is_empty() && accept_unverified {
+            tracing::warn!(
+                "Audit run {run_id}: its agents could not be looked for ({report:?}); its unfinished steps are settled on the human's word that none is running"
+            );
+            continue;
+        }
         tracing::error!(
             "The unfinished steps of audit run {run_id} are left unsettled — an agent of the run may still be writing: {report:?}"
         );
-        return Err(report);
+        // A survivor is the more actionable refusal: it names a process.
+        let replaces = refusal
+            .as_ref()
+            .is_none_or(|kept| kept.report.survivors.is_empty());
+        if replaces {
+            refusal = Some(AgentsMayStillRun {
+                run_id: run_id.clone(),
+                report,
+            });
+        }
     }
-    Ok(settle_pending(project_root, pending))
+    if let Some(refusal) = refusal {
+        return Err(refusal);
+    }
+    Ok(runs
+        .iter()
+        .map(|(run_id, pending)| (run_id.clone(), settle_pending(project_root, pending)))
+        .collect())
+}
+
+/// Launch-time net for a project (full audit, partial refresh, revalidation):
+/// every open run of the project has its agents stopped and its unfinished steps
+/// settled before the launch takes its own snapshots. Returns how many steps
+/// were settled, or what to tell the human when the launch must be refused.
+pub(crate) async fn settle_open_runs_before_launch(
+    db: &crate::db::Database,
+    project_id: &str,
+    project_root: &Path,
+    accept_unverified: bool,
+) -> Result<usize, String> {
+    let pid = project_id.to_string();
+    let runs: Vec<OpenRun> = db
+        .with_conn(move |conn| {
+            let mut runs = Vec::new();
+            for run_id in crate::db::audit_runs::project_runs_that_may_have_agents(conn, &pid)? {
+                let pending = pending_steps(conn, &run_id)?;
+                runs.push((run_id, pending));
+            }
+            Ok(runs)
+        })
+        .await
+        .map_err(|e| {
+            format!("Could not check the project's previous audit runs for agents still running (db): {e} — launch refused.")
+        })?;
+    if runs.is_empty() {
+        return Ok(0);
+    }
+    let root = project_root.to_path_buf();
+    let settled = tokio::task::spawn_blocking(move || {
+        settle_open_runs_with(&root, &runs, accept_unverified, &launch_reaper)
+    })
+    .await
+    .map_err(|e| {
+        format!(
+            "Could not stop the agents of the previous audit runs (task: {e}) — launch refused."
+        )
+    })?
+    .map_err(|refusal| refusal.message())?;
+    let mut count = 0;
+    for (run_id, settled) in settled {
+        if settled.is_empty() {
+            continue;
+        }
+        count += settled.len();
+        for step in &settled {
+            tracing::warn!(
+                "Step {} of the previous run {run_id} was killed mid-write: {} — {:?}",
+                step.step_index,
+                step.target_file,
+                step.outcome
+            );
+        }
+        let recorded = db
+            .with_conn(move |conn| record_settled(conn, &run_id, &settled))
+            .await;
+        if let Err(e) = recorded {
+            tracing::warn!("Could not record the steps settled at launch: {e}");
+        }
+    }
+    Ok(count)
 }
 
 /// Why accepting a failed step as it stands is refused unless a human
@@ -1639,7 +1789,7 @@ mod tests {
     /// agents are really gone — its net used to settle without looking.
     #[test]
     fn a_survivor_at_boot_keeps_the_next_launch_from_settling_the_run() {
-        use crate::core::dispatch_reaper::{audit_run_tag, ReapReport};
+        use crate::core::dispatch_reaper::{audit_run_tag, legacy_audit_run_tag, ReapReport};
         let root = project();
         let file = root.path().join("docs/stack.md");
         std::fs::write(&file, "half\n").unwrap();
@@ -1673,29 +1823,35 @@ mod tests {
             }
         };
         assert_eq!(stop_agents_and_settle_with(&conn, &survivor).unwrap(), 0);
-        assert_eq!(asked.borrow().as_slice(), [audit_run_tag("r1")]);
+        assert_eq!(
+            asked.borrow().as_slice(),
+            [audit_run_tag("r1"), legacy_audit_run_tag("r1")],
+            "boot looks for both tag forms"
+        );
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "half\n");
         // What boot does next: the zombie run is no longer `Running`.
         crate::db::audit_runs::reconcile_stale_runs(&conn, 0).unwrap();
         let pending = pending_steps(&conn, "r1").unwrap();
         assert_eq!(pending.len(), 1, "the step is still open");
+        let open = vec![("r1".to_string(), pending)];
 
         // The next launch: the same survivor, then a table nobody could read.
         asked.borrow_mut().clear();
-        let refused = settle_pending_after(root.path(), &pending, "r1", &survivor);
-        assert_eq!(refused.unwrap_err().survivors, vec![4242]);
+        let refused = settle_open_runs_with(root.path(), &open, false, &survivor);
+        assert_eq!(refused.unwrap_err().report.survivors, vec![4242]);
         assert_eq!(
             asked.borrow().as_slice(),
-            [audit_run_tag("r1")],
-            "it reaps the run's tag first"
+            [audit_run_tag("r1"), legacy_audit_run_tag("r1")],
+            "it reaps the run's tags first"
         );
         let blind = |_: &str| ReapReport {
             unverified: true,
             ..Default::default()
         };
         assert!(
-            settle_pending_after(root.path(), &pending, "r1", &blind)
+            settle_open_runs_with(root.path(), &open, false, &blind)
                 .unwrap_err()
+                .report
                 .unverified
         );
         assert_eq!(
@@ -1706,11 +1862,132 @@ mod tests {
 
         // Once the agents are gone the launch settles it, like boot would.
         let gone = |_: &str| ReapReport::default();
-        let settled = settle_pending_after(root.path(), &pending, "r1", &gone).unwrap();
+        let settled = settle_open_runs_with(root.path(), &open, false, &gone).unwrap();
         assert_eq!(settled.len(), 1);
-        record_settled(&conn, "r1", &settled).unwrap();
+        assert_eq!(settled[0].1.len(), 1);
+        record_settled(&conn, "r1", &settled[0].1).unwrap();
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "# Stack\nwhole\n");
         assert!(pending_steps(&conn, "r1").unwrap().is_empty());
+    }
+
+    fn open_run_with_half_written_doc(
+        root: &Path,
+        name: &str,
+        run: &str,
+    ) -> (OpenRun, std::path::PathBuf) {
+        let file = root.join("docs").join(name);
+        std::fs::write(&file, "half\n").unwrap();
+        let target = format!("docs/{name}");
+        let pending = vec![crate::db::audit_runs::StepSnapshot {
+            step_index: 2,
+            target_file: target,
+            content: Some("whole\n".to_string()),
+            observed_hash: Some(fingerprint(Some("half\n"))),
+        }];
+        ((run.to_string(), pending), file)
+    }
+
+    /// The way out of a process table nobody can read: the human's word that no
+    /// agent runs settles the run — but never a process Kronn saw and could not
+    /// stop, which a human stops by hand.
+    #[test]
+    fn an_unreadable_process_table_has_a_bounded_way_out_a_survivor_has_not() {
+        use crate::core::dispatch_reaper::ReapReport;
+        let root = project();
+        let (open, file) = open_run_with_half_written_doc(root.path(), "stack.md", "r1");
+        let open = vec![open];
+        let blind = |_: &str| ReapReport {
+            unverified: true,
+            ..Default::default()
+        };
+        assert!(settle_open_runs_with(root.path(), &open, false, &blind).is_err());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "half\n");
+
+        let settled = settle_open_runs_with(root.path(), &open, true, &blind).unwrap();
+        assert_eq!(settled[0].1.len(), 1, "the human's word settles it");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "whole\n");
+
+        let (open, file) = open_run_with_half_written_doc(root.path(), "other.md", "r2");
+        let open = vec![open];
+        let survivor = |_: &str| ReapReport {
+            survivors: vec![4242],
+            unverified: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            settle_open_runs_with(root.path(), &open, true, &survivor)
+                .unwrap_err()
+                .report
+                .survivors,
+            vec![4242],
+            "the word does not cover a process that was seen"
+        );
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "half\n");
+    }
+
+    /// Every open run of the project is looked at before any is settled: a
+    /// survivor of the second run holds back the first one's settlement too,
+    /// and its refusal is the one that names a process.
+    #[test]
+    fn one_survivor_among_the_open_runs_settles_none_of_them() {
+        use crate::core::dispatch_reaper::{audit_run_tag, ReapReport};
+        let root = project();
+        let (first, first_file) = open_run_with_half_written_doc(root.path(), "a.md", "r-first");
+        let (second, second_file) = open_run_with_half_written_doc(root.path(), "b.md", "r-second");
+        let open = vec![first, second];
+        let second_tag = audit_run_tag("r-second");
+        let reap = |tag: &str| {
+            if tag == second_tag {
+                ReapReport {
+                    survivors: vec![77],
+                    ..Default::default()
+                }
+            } else {
+                ReapReport {
+                    unverified: true,
+                    ..Default::default()
+                }
+            }
+        };
+        let refused = settle_open_runs_with(root.path(), &open, false, &reap).unwrap_err();
+        assert_eq!(refused.run_id, "r-second");
+        assert_eq!(refused.report.survivors, vec![77]);
+        assert_eq!(std::fs::read_to_string(&first_file).unwrap(), "half\n");
+        assert_eq!(std::fs::read_to_string(&second_file).unwrap(), "half\n");
+    }
+
+    /// The refusal speaks plainly: the process to stop and how, or that the
+    /// table could not be read — not a debug dump of the report.
+    #[test]
+    fn the_refusal_names_the_processes_and_the_way_out() {
+        use crate::core::dispatch_reaper::ReapReport;
+        let survivor = AgentsMayStillRun {
+            run_id: "r1".into(),
+            report: ReapReport {
+                signalled: 0,
+                survivors: vec![4242, 4243],
+                unverified: false,
+            },
+        }
+        .message();
+        assert!(survivor.contains("process 4242 4243"), "{survivor}");
+        assert!(survivor.contains("kill -9 4242 4243"), "{survivor}");
+        assert!(!survivor.contains("ReapReport"), "{survivor}");
+        let blind = AgentsMayStillRun {
+            run_id: "r1".into(),
+            report: ReapReport {
+                unverified: true,
+                ..Default::default()
+            },
+        }
+        .message();
+        assert!(
+            blind.contains("could not read the process table"),
+            "{blind}"
+        );
+        assert!(blind.contains("accept_unverified_agents"), "{blind}");
+        assert!(!blind.contains("may still be running"), "{blind}");
+        assert!(!blind.contains("ReapReport"), "{blind}");
     }
 
     /// The agents of another instance — a bench backend's, started on a copy
@@ -1751,6 +2028,51 @@ mod tests {
             "the same run id under another instance's tag is left running"
         );
         stranger.kill().await.unwrap();
+    }
+
+    /// An agent the previous version started — tagged `audit-run:<run id>`,
+    /// with no instance in it — and that outlived the upgrade is still stopped
+    /// before its step is settled.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn boot_stops_an_agent_started_under_the_former_tag() {
+        let root = project();
+        let run = format!("r-{}", uuid::Uuid::new_v4());
+        let conn = boot_conn_of_run(root.path(), &run);
+        let Some(python) = python() else {
+            eprintln!("skipped: no python to script an agent with");
+            return;
+        };
+        let mut former = tokio::process::Command::new(&python)
+            .args([
+                "-c",
+                "import time\nwhile True:\n    open('docs/stack.md', 'w').write('half\\n')\n    time.sleep(0.02)\n",
+            ])
+            .current_dir(root.path())
+            .env(
+                crate::core::dispatch_reaper::DISPATCH_ENV,
+                crate::core::dispatch_reaper::legacy_audit_run_tag(&run),
+            )
+            .kill_on_drop(true)
+            .spawn()
+            .expect("the former agent starts");
+        until_written(&root.path().join("docs/stack.md"), "half\n").await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        stop_agents_and_settle_at_boot(&conn).unwrap();
+
+        assert!(
+            former.try_wait().unwrap().is_some(),
+            "the agent of the former tag is stopped"
+        );
+        let after = std::fs::read_to_string(root.path().join("docs/stack.md")).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("docs/stack.md")).unwrap(),
+            after,
+            "nothing writes after the settlement"
+        );
+        let _ = former.kill().await;
     }
 
     #[test]
