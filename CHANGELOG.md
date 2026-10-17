@@ -545,6 +545,24 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- Orchestration live-test findings (KT-1316). A worker's reply is priced with
+  the model that served it (`claude-haiku-4-5-20251001`), not the tier alias
+  the discussion stores (`haiku`), which names no rate: its cost is no longer
+  « unknown », and the delivery report shows the cost and tokens of the
+  worker's replies (nothing when one reply is unpriced, never a partial sum).
+  The « Delivery accepted » report is posted when the integration lands, not
+  at approval: a delivery bounced by a merge conflict or a red validation never
+  shows one. The orchestrator's room messages (worker brief, review request,
+  escalation, control offer, send-back, timeout alerts, hand-offs, campaign
+  gates) follow the principal discussion's language, English or French,
+  instead of always French; a few fix hints and a handful of rarely-seen
+  notices are still French. The Stop guide now says a clean worktree is
+  removed by default (`remove_if_clean`) and the branch is kept. The scanner no
+  longer logs a `resolve_host_path … contains '..'` warning per worktree: a
+  worktree registered with a relative path is resolved against its
+  registration. The MCP bridge script is looked up next to the running binary
+  and in the checkout it runs from, never at the path of the checkout it was
+  built in.
 - Audit step 8 accepts a Dependencies row that states its source in any
   of its forms (KT-1295). The coverage check demanded the literal
   `source used:`, so a row backed by `[src: deps: …]` citations, or written
