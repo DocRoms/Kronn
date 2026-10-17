@@ -771,6 +771,9 @@ pub fn workflow_scope(conn: &Connection, workflow_id: &str) -> Result<Option<Wor
         }
     }
     digest_lines.sort();
+    // What the human confirms covers the workflow as it is now, not only the
+    // stored rows: an edit after the screen was read makes its fingerprint stale.
+    digest_lines.push(format!("workflow|{workflow_id}|{current}"));
     let scope_fingerprint: String = Sha256::digest(digest_lines.join("\n").as_bytes())
         .iter()
         .map(|byte| format!("{byte:02x}"))

@@ -116,8 +116,12 @@ export function WorkflowScopeEditor({
   }, [projects, ownProjectId, query, stored]);
   const chosen = Object.keys(current.levels).length;
   const allWrite = current.all === 'write';
-  const allWriteNew = allWrite && stored.all !== 'write';
-  const blockedByConfirm = allWriteNew && typed !== ALL_WRITE_CONFIRMATION;
+  // The server asks for the typed confirmation on every validation that keeps
+  // every project in write (a revalidation, another project changed), not only
+  // the first one: the form asks for it each time too.
+  const willValidate = changed || !valid;
+  const needsConfirm = allWrite && willValidate;
+  const blockedByConfirm = needsConfirm && typed !== ALL_WRITE_CONFIRMATION;
 
   const setLevel = (projectId: string, level: Level) => {
     const levels = { ...current.levels };
@@ -147,8 +151,8 @@ export function WorkflowScopeEditor({
   const validate = () => run(() => workflowsApi.setScope(workflowId, {
     entries: Object.entries(current.levels).map(([project_id, access]) => ({ project_id, access })),
     all: current.all === 'none' ? null : current.all,
-    confirm: allWriteNew ? typed : null,
-    expected_fingerprint: allWriteNew ? (scope?.fingerprint ?? null) : null,
+    confirm: needsConfirm ? typed : null,
+    expected_fingerprint: needsConfirm ? (scope?.fingerprint ?? null) : null,
   }), t('wf.scopeSaved'));
   // Withdrawing only removes: the remaining entries keep their own validation.
   const revoke = (projectId: string | null) => run(
@@ -206,7 +210,7 @@ export function WorkflowScopeEditor({
             </div>
             <LevelPicker value={current.all} onChange={setAll} disabled={busy} label={t('disc.scopeAllProjects')} t={t} />
           </div>
-          {allWriteNew && (
+          {needsConfirm && (
             <div className="wfs-confirm" role="alert">
               <p>{t('wf.scopeAllWriteWarning')}</p>
               <label>

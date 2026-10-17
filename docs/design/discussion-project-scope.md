@@ -76,7 +76,11 @@ request body.
   apply.
 - A workflow scope may also open **every project** (KT-1336), stored as the
   reserved row `*`: read, or planning write behind the same typed confirmation
-  `ALL-PROJECTS-WRITE` and fingerprint of the scope seen as for a room, shown in
+  `ALL-PROJECTS-WRITE` and fingerprint of the scope seen as for a room, asked
+  again on every validation that keeps it. The fingerprint covers the stored
+  rows **and** the workflow's current revision, so a screen read before an edit
+  of the workflow is stale (409) and never validates code the human did not
+  see. Shown in
   red on the workflow page and the launch card. It follows every rule above
   (pinned revision, suspended by any change, never credentials).
 - Withdrawing is always possible (`POST /api/workflows/{id}/scope/revoke`, one

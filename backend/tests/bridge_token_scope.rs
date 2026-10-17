@@ -4306,3 +4306,41 @@ async fn a_workflow_scope_may_reach_every_project() {
         "withdrawn on the next call"
     );
 }
+
+/// KT-1336 review P1 — the fingerprint a human confirms covers the workflow as
+/// it is now: once an agent edits it, the old screen can no longer open every
+/// project in write.
+#[tokio::test]
+async fn an_edited_workflow_makes_the_confirmation_screen_stale() {
+    let (app, _repos, _db) = fixture_with_db().await;
+    let (status, body) = call(
+        &app,
+        "PUT",
+        "/api/workflows/wf-a/scope",
+        None,
+        Some(json!({"entries": [], "all": "read"})),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let seen = body["data"]["fingerprint"].as_str().unwrap().to_owned();
+    let agent = bridge_for("room-a");
+    let changed = json!({"steps": [{"name": "changed", "step_type": {"type": "Agent"}, "prompt_template": "UNSEEN"}]});
+    let (status, body) = call(
+        &app,
+        "PUT",
+        "/api/workflows/wf-a",
+        Some(agent.value()),
+        Some(changed),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = call(
+        &app,
+        "PUT",
+        "/api/workflows/wf-a/scope",
+        None,
+        Some(json!({"entries": [], "all": "write", "confirm": "ALL-PROJECTS-WRITE", "expected_fingerprint": seen})),
+    )
+    .await;
+    assert_eq!(status, 409, "the human never saw this revision: {body}");
+}

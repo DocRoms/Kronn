@@ -105,4 +105,21 @@ describe('WorkflowScopeEditor', () => {
       expected_fingerprint: null,
     }));
   });
+
+  it('asks the typed confirmation again to revalidate every project in write', async () => {
+    api.scope.mockResolvedValue(scope({ entries: [], all: 'write', valid: false, fingerprint: 'fp-2' }));
+    api.setScope.mockResolvedValue(scope({ entries: [], all: 'write' }));
+    render(<WorkflowScopeEditor workflowId="wf" ownProjectId="p1" projects={projects} toast={vi.fn()} t={t} />);
+    const revalidate = (await screen.findByText('wf.scopeRevalidate')).closest('button')!;
+    expect(revalidate.disabled).toBe(true);
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'ALL-PROJECTS-WRITE' } });
+    expect(revalidate.disabled).toBe(false);
+    fireEvent.click(revalidate);
+    await waitFor(() => expect(api.setScope).toHaveBeenCalledWith('wf', {
+      entries: [],
+      all: 'write',
+      confirm: 'ALL-PROJECTS-WRITE',
+      expected_fingerprint: 'fp-2',
+    }));
+  });
 });
