@@ -428,8 +428,30 @@ fn missing_tail_is_over(rest: &str) -> bool {
         return true;
     }
     match first {
-        "from" | "on" | "since" | "entirely" | "altogether" | "now" | "here" | "there"
-        | "anymore" | "depuis" | "ici" => true,
+        "from" | "since" | "entirely" | "altogether" | "here" | "there" | "anymore" | "depuis"
+        | "ici" => true,
+        // "is missing now." closes the statement, "is missing now that the
+        // loader moved" goes on about something else.
+        "now" => rest
+            .trim_start()
+            .strip_prefix("now")
+            .is_some_and(|tail| tail.chars().all(|c| !c.is_alphanumeric())),
+        // "is missing on disk / on main" says where; "on error paths" does not.
+        "on" => {
+            let after = rest.trim_start().strip_prefix("on").unwrap_or("").trim_start();
+            let place = after
+                .split(|c: char| c.is_whitespace() || ",.;:!?)".contains(c))
+                .next()
+                .unwrap_or("");
+            let named = [
+                "disk", "main", "master", "develop", "trunk", "head", "branch", "filesystem",
+                "fs",
+            ];
+            let this_branch = ["the branch", "this branch", "the file system", "the filesystem"]
+                .iter()
+                .any(|p| after.starts_with(p));
+            this_branch || named.contains(&place) || place.contains('/')
+        }
         "in" => {
             let after = rest.trim_start_matches(|c: char| c.is_alphabetic()).trim_start();
             ["the repo", "the tree", "the checkout", "the project", "the worktree", "git"]
@@ -438,6 +460,19 @@ fn missing_tail_is_over(rest: &str) -> bool {
         }
         _ => false,
     }
+}
+
+/// The word right before `head` is a verb of being or having: "the key is
+/// missing `x`" / "is not found: `x`" say something of another noun, they do
+/// not label `x` as a gone file.
+fn follows_a_verb(head: &str) -> bool {
+    let word = head
+        .trim_end()
+        .rsplit(|c: char| !c.is_alphabetic())
+        .next()
+        .unwrap_or("");
+    ["is", "are", "was", "were", "be", "been", "being", "has", "have", "had", "est", "sont"]
+        .contains(&word)
 }
 
 /// The path in backticks between `open` and `close` (byte offsets of the
@@ -452,6 +487,7 @@ fn path_is_said_missing(clause: &str, open: usize, close: usize) -> bool {
             head.chars()
                 .next_back()
                 .is_none_or(|c| !c.is_alphanumeric())
+                && !follows_a_verb(head)
         })
     });
     if before_hit {

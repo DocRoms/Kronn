@@ -800,6 +800,11 @@ fn a_missing_elsewhere_in_the_clause_does_not_exempt_a_present_tense_claim() {
         ("e", "A dangling pointer is freed by `src/api/x.rs`."),
         ("f", "If the cache is missing, `config/gone.yml` is read."),
         ("g", "`config/gone.yml` is missing a null check in the loader."),
+        ("h", "`src/api/x.rs` is missing on error paths."),
+        ("i", "`src/api/x.rs` is missing now that the loader moved."),
+        ("j", "The key is missing `src/api/x.rs` rejects it."),
+        ("k", "The key is not found: `src/api/x.rs` raises."),
+        ("l", "`src/api/x.rs` is missing on the retry path."),
     ];
     for (id, line) in claims {
         let tmp = tempfile::tempdir().unwrap();
@@ -828,6 +833,10 @@ fn a_path_said_missing_right_where_it_is_cited_is_not_a_claim() {
         "`config/gone.yml` is not found on disk.",
         "Le Jenkinsfile référence `config/gone.yml` manquant.",
         "The Jenkinsfile points at `config/gone.yml` (missing).",
+        "`config/gone.yml` is missing now.",
+        "`config/gone.yml` is missing on main.",
+        "`config/gone.yml` is missing on disk.",
+        "`config/gone.yml` is missing on feat/loader.",
     ];
     for (i, line) in findings.iter().enumerate() {
         let report = doc_with(
