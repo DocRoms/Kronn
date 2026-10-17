@@ -4344,3 +4344,136 @@ async fn an_edited_workflow_makes_the_confirmation_screen_stale() {
     .await;
     assert_eq!(status, 409, "the human never saw this revision: {body}");
 }
+
+fn volume_projects(body: &Value) -> Vec<String> {
+    let mut ids: Vec<String> = body["data"]["volumes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|volume| volume["project_id"].as_str().unwrap().to_owned())
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// KT-1347 — a token reads free space and the aggregates, plus its own
+/// project's lanes; the operator keeps the full view.
+#[tokio::test]
+async fn the_disk_report_is_scoped_to_the_token_s_project() {
+    let (app, _repos) = fixture().await;
+    let (status, full) = call(&app, "GET", "/api/maintenance/disk", None, None).await;
+    assert_eq!(status, 200, "{full}");
+    assert_eq!(volume_projects(&full), ["p1", "p2"]);
+    assert!(full["data"].get("scoped").is_none(), "{full}");
+
+    let agent = bridge_for("room-a");
+    let (status, mine) = call(
+        &app,
+        "GET",
+        "/api/maintenance/disk",
+        Some(agent.value()),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{mine}");
+    assert_eq!(mine["data"]["scoped"], true);
+    assert_eq!(volume_projects(&mine), ["p1"]);
+    for entry in mine["data"]["entries"].as_array().unwrap() {
+        assert_eq!(entry["project_id"], "p1", "{mine}");
+    }
+    assert!(!mine.to_string().contains("p2"), "{mine}");
+    assert!(
+        mine["data"]["totals"]
+            .as_array()
+            .is_some_and(|totals| !totals.is_empty()),
+        "the aggregates stay: {mine}"
+    );
+
+    let (status, own) = call(
+        &app,
+        "GET",
+        "/api/maintenance/disk?project_id=p1",
+        Some(agent.value()),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{own}");
+    assert_eq!(volume_projects(&own), ["p1"]);
+}
+
+#[tokio::test]
+async fn another_project_s_disk_report_is_refused_and_a_projectless_token_gets_aggregates_only() {
+    let (app, _repos) = fixture().await;
+    let agent = bridge_for("room-a");
+    let (status, body) = call(
+        &app,
+        "GET",
+        "/api/maintenance/disk?project_id=p2",
+        Some(agent.value()),
+        None,
+    )
+    .await;
+    assert_eq!(status, 403, "{body}");
+
+    let general = bridge_for("room-g");
+    let (status, body) = call(
+        &app,
+        "GET",
+        "/api/maintenance/disk",
+        Some(general.value()),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["data"]["scoped"], true);
+    assert!(volume_projects(&body).is_empty(), "{body}");
+    assert!(
+        body["data"]["entries"].as_array().unwrap().is_empty(),
+        "{body}"
+    );
+
+    let nothing = mint(BridgeScope::default()).unwrap();
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/maintenance/disk",
+        Some(nothing.value()),
+        None,
+    )
+    .await;
+    assert_eq!(status, 403);
+}
+
+/// KT-1347 — the purge deletes host files: a human action, whatever the body.
+#[tokio::test]
+async fn a_bridge_token_cannot_purge_the_disk() {
+    use kronn::core::bridge_token::route_for;
+    assert!(route_for("POST", "/api/maintenance/disk/purge").is_none());
+    assert!(route_for("GET", "/api/maintenance/disk").is_some());
+    let (app, _repos) = fixture().await;
+    let agent = bridge_for("room-a");
+    for body in [
+        json!({}),
+        json!({"project_id": "p1"}),
+        json!({"project_id": "p1", "paths": ["/x"], "confirm": true}),
+    ] {
+        let (status, refused) = call(
+            &app,
+            "POST",
+            "/api/maintenance/disk/purge",
+            Some(agent.value()),
+            Some(body),
+        )
+        .await;
+        assert_eq!(status, 403, "{refused}");
+    }
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/api/maintenance/disk/purge",
+        None,
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, 200, "the operator's purge is unchanged");
+}

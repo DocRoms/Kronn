@@ -100,12 +100,19 @@ provisioning and builds; see [worktree-build-artifacts.md](worktree-build-artifa
   (`bytes_are_partial` = a floor: the walk is bounded in entries and time), `idle_seconds`, `owner`
   (`task_ref`, `execution_id`, `status`), `state` and `purgeable`.
   [src: file: backend/src/api/disk.rs:455-470#build_disk_report]
+  An agent's bridge token gets a **scoped view** (KT-1347): free space, `policy`, `totals` and `orphan_*`
+  stay whole-instance aggregates, but `volumes` and `entries` (paths, lane names, task refs) are those of
+  the token's own project only — none for a project-less launch — and the report carries `scoped: true`.
+  Naming another project in `?project_id=` is refused (403). The operator and the UI keep the full report.
+  [src: file: backend/src/api/disk.rs:519-528#scoped_for_bridge]
 - `POST /api/maintenance/disk/purge` — no `paths`: purge **orphans only**. With `paths`: delete exactly
   those entries, and only with `confirm: true`; each is re-judged at deletion time, so a report never
-  authorises a delete. [src: file: backend/src/api/disk.rs:897-909#run_purge]
-- MCP tool **`disk_usage`** (`project_id`, `purge_orphans`) — the same report, bounded to the 25 largest
-  entries; `purge_orphans: true` takes the default purge and nothing else. A named delete is deliberately
-  a confirmed UI action. [src: file: backend/scripts/disc-introspection-mcp.py:7710-7741#call_disk_usage]
+  authorises a delete. **Human / UI only**: the route is deliberately not on `BRIDGE_ROUTES`, so a bridge
+  token is refused (403). It deletes host files; even an own-project orphan purge was not worth giving to
+  an agent, which can tell the user instead. [src: file: backend/src/api/disk.rs:897-909#run_purge]
+- MCP tool **`disk_usage`** (`project_id`) — the scoped report above, read-only, bounded to the 25 largest
+  entries. It never calls the purge; a leftover `purge_orphans: true` argument returns a note that purging
+  is a human action in Settings > Disk. [src: file: backend/scripts/disc-introspection-mcp.py:7710-7741#call_disk_usage]
 - **Settings → Disk** — measure on demand (never on page open), totals by kind, the table, **Purge
   orphans**, a per-entry delete behind a confirmation, and the two thresholds.
 
