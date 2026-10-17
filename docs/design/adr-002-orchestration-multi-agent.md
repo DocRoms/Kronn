@@ -420,7 +420,7 @@ restart. Boot first quiesces due dispatches and moves non-terminal executions to
 same SQLite boundary, then classifies the checkpoint against discussions, worker availability,
 workspace ownership and the real Git refs. A pending decision survives a second crash and is consumed
 only by an explicit guarded resume `[src: file: backend/src/api/orchestration.rs:283-383#reconcile_at_boot]`
-`[src: file: backend/src/db/orchestration.rs:5929-6000#set_execution_recovery]`. The runtime watchdog uses four independent clocks — total
+`[src: file: backend/src/db/orchestration.rs:6092-6163#set_execution_recovery]`. The runtime watchdog uses four independent clocks — total
 duration, activity, review wait and human wait — so an acknowledged human gate is never mistaken for a
 dead worker `[src: file: backend/src/api/orchestration.rs:667-838#start_resilience_watchdog]`.
 
@@ -428,7 +428,7 @@ Cancellation and reassignment preserve the same lineage. Cancellation first canc
 due dispatches, then applies the persisted cleanup policy; `remove_if_clean` removes only the proven
 managed checkout and preserves its branch. Reassignment keeps the task, sub-discussion, worktree,
 manifests, findings and SHAs while recording the exact typed worker identity and assignment generation
-`[src: file: backend/src/api/orchestration.rs:10411-10564#cancel_execution]` `[src: file: backend/src/db/orchestration.rs:6864-6910#cancel_execution_tree]` `[src: file: backend/src/api/orchestration.rs:10753-10928#reassign_execution]` `[src: file: backend/src/db/orchestration.rs:6570-6862#reassign_execution_worker]`. Boot also
+`[src: file: backend/src/api/orchestration.rs:11067-11220#cancel_execution]` `[src: file: backend/src/db/orchestration.rs:7069-7115#cancel_execution_tree]` `[src: file: backend/src/api/orchestration.rs:11421-11610#reassign_execution]` `[src: file: backend/src/db/orchestration.rs:6775-7067#reassign_execution_worker]`. Boot also
 collects `managed` workspace rows orphaned by `ON DELETE SET NULL`; dirty or unverifiable worktrees are
 left visible for human action rather than silently deleted `[src: file: backend/src/api/orchestration.rs:385-482#list_orphaned_managed]`
 `[src: file: backend/src/db/discussion_workspaces.rs:439-464]`.
@@ -504,7 +504,7 @@ attributable handoff — "typed assignments and handoffs, never dependent on Mar
   reusing `SharedBudget`, the workflow engine's tree-wide LLM-call quota
   `[src: file: backend/src/workflows/runner.rs:307-325#SharedBudget]`. Once the tokens used by the run's
   sub-discussions reach it, the campaign stops offering new tasks (`token_budget` candidate reason)
-  `[src: file: backend/src/db/orchestration.rs:1225-1230#token_exhausted]`; it does not escalate an
+  `[src: file: backend/src/db/orchestration.rs:1226-1231#token_exhausted]`; it does not escalate an
   execution already running.
 - **Concurrency** — one active TaskExecution per task (a partial-unique index, like the one-primary and
   one-live-session invariants) `[src: file: backend/src/db/sql/127_task_orchestration.sql:207-212#idx_task_executions_one_active_per_task]`.
@@ -561,8 +561,8 @@ Explicitly deferred, to keep V1 = *one task → one worker → one sub-discussio
   explicit resume/cancel/reassign, independent timeout clocks and orphan-managed-workspace collection**
   is implemented by **KT-322** `[src: file: backend/src/api/orchestration.rs:283-383#reconcile_at_boot]`
   `[src: file: backend/src/api/orchestration.rs:667-838#start_resilience_watchdog]`
-  `[src: file: backend/src/api/orchestration.rs:10411-10564#cancel_execution]`
-  `[src: file: backend/src/api/orchestration.rs:10753-10928#reassign_execution]`.
+  `[src: file: backend/src/api/orchestration.rs:11067-11220#cancel_execution]`
+  `[src: file: backend/src/api/orchestration.rs:11421-11610#reassign_execution]`.
 - **Actor-kind schema change** (`backend`/`system`) is a shared prerequisite, surfaced in KT-317.
 - The ADR began as a decision record; KT-317–KT-322 now implement its durable aggregate,
   provisioning, review, protected integration, coordination and recovery boundaries.

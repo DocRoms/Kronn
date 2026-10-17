@@ -9,7 +9,7 @@ following that order could wait indefinitely before reaching the work clause.
 It also requested a substantive first reply before reading the shared plan.
 This is an instruction-order defect, not proof that a particular CLI host
 caused a reported stop or imposed a specific timeout.
-[src: file: backend/scripts/disc-introspection-mcp.py:7477-7485#call_disc_wait_for_peer]
+[src: file: backend/scripts/disc-introspection-mcp.py:7498-7506#call_disc_wait_for_peer]
 [src: file: backend/scripts/test_disc_introspection_mcp.py:12084-12103#test_default_wait_is_unbounded_and_does_not_return_on_inner_quiet_polls]
 [src: file: backend/src/api/disc_invite.rs:7472-7481#join_protocol_reads_plan_before_substantive_first_reply]
 
@@ -23,7 +23,7 @@ routing, cancellation and durable-cursor functions are unchanged.
 [src: file: backend/src/api/disc_invite.rs:676-682#max_total_secs]
 [src: file: backend/src/api/disc_invite.rs:691-696#disc_wait_for_peer]
 [src: file: backend/src/api/disc_invite.rs:7483-7492#join_protocol_does_not_put_unbounded_wait_before_ready_work]
-[src: file: backend/scripts/disc-introspection-mcp.py:9916-9933#ROOM_WORK_PROTOCOL]
+[src: file: backend/scripts/disc-introspection-mcp.py:9937-9954#ROOM_WORK_PROTOCOL]
 
 Each bounded step has a room announcement and an evidence/limits update.
 Delegated milestones belong in the parent room too. An exact CLI target in
@@ -39,7 +39,7 @@ can interrupt the wait normally; handle the request and resume the work loop.
 Neither condition is a command to leave. Kronn does not guarantee that every
 host will follow instructions or hide all background notifications.
 [src: file: backend/src/api/disc_invite.rs:697-702#CAVEAT]
-[src: file: backend/scripts/disc-introspection-mcp.py:7477-7485#call_disc_wait_for_peer]
+[src: file: backend/scripts/disc-introspection-mcp.py:7498-7506#call_disc_wait_for_peer]
 [src: file: backend/scripts/test_disc_introspection_mcp.py:12105-12112#test_wait_description_prevents_stacked_host_background_tasks]
 
 The Python catalogue distinguishes active work from idle listening too. One
@@ -47,10 +47,10 @@ shared `ROOM_WORK_PROTOCOL` supplies both join/wait manuals and the initialize
 orientation, including plan-first ordering, parent-room milestones and exact
 CLI routing. It no longer promises that cursor reads can never be replayed or
 that quiet returns cost nothing. The bridge's runtime functions did not change.
-[src: file: backend/scripts/disc-introspection-mcp.py:9916-9933#ROOM_WORK_PROTOCOL]
-[src: file: backend/scripts/disc-introspection-mcp.py:10202-10203#ROOM_WORK_PROTOCOL]
-[src: file: backend/scripts/disc-introspection-mcp.py:10518-10522#ROOM_WORK_PROTOCOL]
-[src: file: backend/scripts/disc-introspection-mcp.py:11907#ROOM_WORK_PROTOCOL]
+[src: file: backend/scripts/disc-introspection-mcp.py:9937-9954#ROOM_WORK_PROTOCOL]
+[src: file: backend/scripts/disc-introspection-mcp.py:10223-10224#ROOM_WORK_PROTOCOL]
+[src: file: backend/scripts/disc-introspection-mcp.py:10559-10563#ROOM_WORK_PROTOCOL]
+[src: file: backend/scripts/disc-introspection-mcp.py:11949#ROOM_WORK_PROTOCOL]
 [src: file: backend/scripts/test_disc_introspection_mcp.py:11939-11989#JoinedRoomWorkProtocolTests]
 
 ## Deaf windows in the bridge wait (KT-703)
@@ -64,7 +64,7 @@ the next poll, so a reply could take more than 8 minutes while presence showed
 the session as dormant but present. The bridge now chains polls without a pause,
 with a 1-second floor if the server answers early. The server's pacing values
 and the `next_poll_at` presence projection are unchanged.
-[src: file: backend/scripts/disc-introspection-mcp.py:7559-7580#_WAIT_MIN_QUIET_POLL_SECS]
+[src: file: backend/scripts/disc-introspection-mcp.py:7580-7601#_WAIT_MIN_QUIET_POLL_SECS]
 [src: file: backend/scripts/test_disc_introspection_mcp.py:12230-12244#test_quiet_polls_are_chained_without_a_listening_gap]
 [src: file: backend/src/api/disc_introspection.rs:175-185]
 
