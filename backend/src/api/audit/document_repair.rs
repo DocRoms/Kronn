@@ -480,7 +480,9 @@ mod tests {
                       Comment [src: file: config.yml:1]\nThe `empty.txt` file is empty.\n\
                       [td](tech-debt/TD-1.md)\n";
         std::fs::write(root.join("docs/AGENTS.md"), second).unwrap();
-        let blocking = check_attempt(root, &before, &blocking, &[]).unwrap().blocking;
+        let blocking = check_attempt(root, &before, &blocking, &[])
+            .unwrap()
+            .blocking;
         assert!(blocking.is_empty(), "{blocking:#?}");
     }
 
