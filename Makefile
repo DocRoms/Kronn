@@ -1,4 +1,4 @@
-.PHONY: install start start-prod stop logs clean build dev-backend run-backend dev-frontend setup check check-diff test-backend test-backend-cov test-backend-lib install-dev-tools require-nextest test-shell lint-backend .env kiro-login bump check-version desktop desktop-dev desktop-target
+.PHONY: install start start-prod stop logs clean build dev-backend run-backend dev-frontend setup check check-diff docs-reanchor test-backend test-backend-cov test-backend-lib install-dev-tools require-nextest test-shell lint-backend .env kiro-login bump check-version desktop desktop-dev desktop-target
 
 # Doc-skippers type `make` bare (or `make install`) before reading anything.
 # Bare `make` used to run the FIRST target — `_gen-override`, an internal Docker
@@ -532,6 +532,7 @@ help:
 	@echo "  make bump V=x.y.z  Bump version everywhere"
 	@echo "  make check-version  Verify release version consistency"
 	@echo "  make check-diff     Whitespace/conflict markers in the branch diff"
+	@echo "  make docs-reanchor [BASE=<rev>]  Re-anchor moved doc citations, then check them all"
 	@echo "  make desktop        Build desktop app (current platform)"
 	@echo "  make desktop-dev    Run desktop app (dev mode)"
 	@echo "  make desktop-target T=<triple>  Cross-compile desktop app"
@@ -591,3 +592,31 @@ check-version:
 ## (BASE defaults to the merge base with origin/main). CI runs the same script.
 check-diff:
 	@./scripts/check-diff.sh $(BASE)
+
+## Re-points a doc citation whose #symbol left its range: unique symbol first,
+## then a safe line map through `git diff -U0 BASE HEAD`. In a pull-request CI
+## checkout BASE is its base parent; locally it defaults to the merge-base with
+## origin/HEAD (then origin/main or origin/master, then a local main or master).
+## During an unfinished merge (`git merge --no-commit <target>`) both sides of
+## the merge are the evidence and no BASE is needed. With no base at all it still
+## re-points the unique-symbol citations instead of refusing to run (a worker
+## worktree has no origin refs to find one). DOCS="docs/a.md docs/b.md" limits
+## both the rewrite and the strict citation check to those docs.
+docs-reanchor:
+	@base="$(BASE)"; \
+	if [ -z "$$base" ] && git rev-parse --verify --quiet MERGE_HEAD >/dev/null; then \
+		base=merge; \
+	fi; \
+	if [ -z "$$base" ]; then \
+		if [ "$${GITHUB_EVENT_NAME:-}" = pull_request ] && git rev-parse --verify --quiet HEAD^2 >/dev/null; then \
+			base=HEAD^1; \
+		else \
+			target="$$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"; \
+			for candidate in origin/main origin/master main master; do \
+				if [ -z "$$target" ] && git rev-parse --verify --quiet "$$candidate" >/dev/null; then target="$$candidate"; fi; \
+			done; \
+			if [ -n "$$target" ]; then base="$$(git merge-base "$$target" HEAD 2>/dev/null || true)"; fi; \
+		fi; \
+	fi; \
+	if [ -z "$$base" ]; then echo "docs-reanchor: no target-branch merge-base found; re-anchoring unique #symbol moves only (pass BASE=<rev> for the Git line map)" >&2; fi; \
+	cd backend && KRONN_DOCS_REANCHOR="$(or $(DOCS),all)" KRONN_DOCS_REANCHOR_BASE="$$base" cargo test --lib core::docs_citations::tests::docs_citations_resolve_in_the_repo -- --nocapture

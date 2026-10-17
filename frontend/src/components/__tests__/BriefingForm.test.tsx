@@ -50,7 +50,8 @@ describe('BriefingForm (0.8.5)', () => {
         toast={() => {}}
       />
     );
-    const textareas = screen.getAllByRole('textbox');
+    // The single-line inputs (KT-999 documentation path) are not questions.
+    const textareas = Array.from(document.querySelectorAll('textarea'));
     expect(textareas).toHaveLength(6);
     expect(textareas[0]).toBeRequired();
     expect(textareas[1]).toBeRequired();
@@ -168,5 +169,197 @@ describe('BriefingForm (0.8.5)', () => {
     fireEvent.click(screen.getByRole('button', { name: /common\.close|Close|Fermer|Cerrar/i }));
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(projectsApi.saveBriefing).not.toHaveBeenCalled();
+  });
+
+  // KT-1167 — the option travels with the answers, unchecked by default.
+  it('sends the TD-to-tasks option with the answers', async () => {
+    (projectsApi.saveBriefing as ReturnType<typeof vi.fn>).mockResolvedValue({});
+    const props = {
+      onClose: () => {}, onSaved: () => {}, agent: 'ClaudeCode' as const,
+      tier: 'reasoning' as const, review: false, toast: () => {},
+    };
+    const { unmount } = wrap(<BriefingForm projectId="p-off" {...props} />);
+    fillMandatory();
+    fireEvent.click(screen.getByRole('button', { name: /Save|Enregistrer|Guardar/i }));
+    await waitFor(() => expect(projectsApi.saveBriefing).toHaveBeenCalledWith(
+      'p-off', expect.objectContaining({ td_to_tasks: false }),
+    ));
+    unmount();
+
+    wrap(<BriefingForm projectId="p-on" {...props} />);
+    fillMandatory();
+    fireEvent.click(screen.getByTestId('briefing-td-to-tasks'));
+    fireEvent.click(screen.getByRole('button', { name: /Save|Enregistrer|Guardar/i }));
+    await waitFor(() => expect(projectsApi.saveBriefing).toHaveBeenCalledWith(
+      'p-on', expect.objectContaining({ td_to_tasks: true }),
+    ));
+  });
+  // KT-1183 — experimental, off by default; 2 or 3 agents; cost shown first.
+  it('sends the cross-agent audit option with its agents, never by default', async () => {
+    (projectsApi.saveBriefing as ReturnType<typeof vi.fn>).mockResolvedValue({});
+    (projectsApi.crossAuditEstimate as ReturnType<typeof vi.fn>).mockResolvedValue({
+      agents: 2, cross_checked_steps: ['docs/inconsistencies-security.md'], low_factor: 2, high_factor: 4,
+      max_cross_checked: 30, base_run_id: 'run-1', low_cost_usd_micros: 200_000, high_cost_usd_micros: 400_000,
+      estimated: true,
+    });
+    const toast = vi.fn();
+    const props = {
+      onClose: () => {}, onSaved: () => {}, agent: 'ClaudeCode' as const,
+      tier: 'reasoning' as const, review: false, toast,
+    };
+    const { unmount } = wrap(<BriefingForm projectId="p-off" {...props} />);
+    expect(screen.getByTestId('briefing-cross-audit')).not.toBeChecked();
+    fillMandatory();
+    fireEvent.click(screen.getByRole('button', { name: /Save|Enregistrer|Guardar/i }));
+    await waitFor(() => expect(projectsApi.saveBriefing).toHaveBeenCalledWith(
+      'p-off', expect.objectContaining({ cross_audit_agents: [] }),
+    ));
+    expect(projectsApi.crossAuditEstimate).not.toHaveBeenCalled();
+    unmount();
+
+    wrap(<BriefingForm projectId="p-on" {...props} />);
+    fillMandatory();
+    fireEvent.click(screen.getByTestId('briefing-cross-audit'));
+    fireEvent.click(screen.getByTestId('briefing-cross-agent-ClaudeCode'));
+    // One agent is not a cross-check: refused before the round-trip.
+    fireEvent.click(screen.getByRole('button', { name: /Save|Enregistrer|Guardar/i }));
+    expect(toast).toHaveBeenCalledWith(expect.any(String), 'error');
+    expect(projectsApi.saveBriefing).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByTestId('briefing-cross-agent-Codex'));
+    await waitFor(() => expect(projectsApi.crossAuditEstimate).toHaveBeenCalledWith('p-on', 2));
+    await waitFor(() => expect(screen.getByTestId('briefing-cross-estimate').textContent).toMatch(/×2.*×4/));
+    fireEvent.click(screen.getByRole('button', { name: /Save|Enregistrer|Guardar/i }));
+    await waitFor(() => expect(projectsApi.saveBriefing).toHaveBeenCalledWith(
+      'p-on', expect.objectContaining({ cross_audit_agents: ['ClaudeCode', 'Codex'] }),
+    ));
+  });
+
+  it('pre-fills the AI doc folder and sends it with the answers (KT-1192)', async () => {
+    vi.mocked(projectsApi.briefingDefaults).mockResolvedValueOnce({
+      docs_dir: '.ai', docs_dir_source: 'global_default', folder_exists: true, folder: { kind: 'missing' },
+    });
+    wrap(
+      <BriefingForm
+        projectId="p-1"
+        onClose={() => {}}
+        onSaved={() => {}}
+        agent="ClaudeCode"
+        tier="reasoning"
+        review={false}
+        toast={() => {}}
+      />
+    );
+    const input = await screen.findByTestId('briefing-docs-dir-input');
+    await waitFor(() => expect(input).toHaveValue('.ai'));
+    expect(screen.getByTestId('briefing-docs-dir')).toHaveTextContent('.ai/');
+    fireEvent.change(input, { target: { value: 'context' } });
+    fillMandatory();
+    fireEvent.submit(input.closest('form')!);
+    await waitFor(() => expect(projectsApi.saveBriefing).toHaveBeenCalled());
+    expect(vi.mocked(projectsApi.saveBriefing).mock.calls[0][1]).toMatchObject({ docs_dir: 'context' });
+  });
+
+  it('saves default answers in one click (KT-1192)', async () => {
+    const onSaved = vi.fn();
+    wrap(
+      <BriefingForm
+        projectId="p-1"
+        onClose={() => {}}
+        onSaved={onSaved}
+        agent="ClaudeCode"
+        tier="reasoning"
+        review={false}
+        toast={() => {}}
+      />
+    );
+    const button = await screen.findByTestId('briefing-use-defaults');
+    await waitFor(() => expect(button).not.toBeDisabled());
+    fireEvent.click(button);
+    await waitFor(() => expect(projectsApi.saveBriefing).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(projectsApi.saveBriefing).mock.calls[0][1]).toMatchObject({
+      purpose: 'Not provided', traps: 'Not provided', docs_dir: 'docs',
+    });
+    await waitFor(() => expect(onSaved).toHaveBeenCalledWith(null));
+  });
+
+  it('asks for an explicit choice before touching human docs, with the warning (KT-1192)', async () => {
+    vi.mocked(projectsApi.briefingDefaults).mockResolvedValueOnce({
+      docs_dir: 'docs', docs_dir_source: 'existing', folder_exists: true,
+      folder: { kind: 'human_docs', files: 4, site_generator: 'mkdocs.yml', legacy_exists: false },
+    } as never);
+    const toast = vi.fn();
+    wrap(
+      <BriefingForm
+        projectId="p-1"
+        onClose={() => {}}
+        onSaved={() => {}}
+        agent="ClaudeCode"
+        tier="reasoning"
+        review={false}
+        toast={toast}
+      />
+    );
+    const choice = await screen.findByTestId('briefing-existing-docs');
+    expect(choice).toHaveTextContent('mkdocs.yml');
+    expect(choice).toHaveTextContent('4');
+    fillMandatory();
+    const form = screen.getByTestId('briefing-docs-dir-input').closest('form')!;
+    fireEvent.submit(form);
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.any(String), 'error'));
+    expect(projectsApi.saveBriefing).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByTestId('briefing-existing-legacy'));
+    fireEvent.submit(form);
+    await waitFor(() => expect(projectsApi.saveBriefing).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(projectsApi.saveBriefing).mock.calls[0][1]).toMatchObject({
+      docs_dir: 'docs', move_existing_to_legacy: true,
+    });
+  });
+
+  it('keeps the human docs where they are when another folder is typed', async () => {
+    vi.mocked(projectsApi.briefingDefaults).mockResolvedValueOnce({
+      docs_dir: 'docs', docs_dir_source: 'existing', folder_exists: true,
+      folder: { kind: 'human_docs', files: 4, site_generator: null, legacy_exists: false },
+    } as never);
+    wrap(
+      <BriefingForm
+        projectId="p-1"
+        onClose={() => {}}
+        onSaved={() => {}}
+        agent="ClaudeCode"
+        tier="reasoning"
+        review={false}
+        toast={() => {}}
+      />
+    );
+    await screen.findByTestId('briefing-existing-docs');
+    fireEvent.change(screen.getByTestId('briefing-docs-dir-input'), { target: { value: 'kronn-docs' } });
+    expect(screen.queryByTestId('briefing-existing-docs')).toBeNull();
+    fillMandatory();
+    fireEvent.submit(screen.getByTestId('briefing-docs-dir-input').closest('form')!);
+    await waitFor(() => expect(projectsApi.saveBriefing).toHaveBeenCalledTimes(1));
+    const sent = vi.mocked(projectsApi.saveBriefing).mock.calls[0][1];
+    expect(sent).toMatchObject({ docs_dir: 'kronn-docs' });
+    expect(sent).not.toHaveProperty('move_existing_to_legacy');
+  });
+
+  it('says a Kronn folder is updated in place, with nothing to choose', async () => {
+    vi.mocked(projectsApi.briefingDefaults).mockResolvedValueOnce({
+      docs_dir: 'docs', docs_dir_source: 'existing', folder_exists: true, folder: { kind: 'kronn_managed' },
+    } as never);
+    wrap(
+      <BriefingForm
+        projectId="p-1"
+        onClose={() => {}}
+        onSaved={() => {}}
+        agent="ClaudeCode"
+        tier="reasoning"
+        review={false}
+        toast={() => {}}
+      />
+    );
+    await waitFor(() => expect(screen.getByTestId('briefing-docs-dir-state').textContent).toMatch(/Kronn/));
+    expect(screen.queryByTestId('briefing-existing-docs')).toBeNull();
   });
 });

@@ -19,6 +19,7 @@
 //     manually edits the JSON and drops it still gets the warning back.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::Path;
 use ts_rs::TS;
 
@@ -73,8 +74,33 @@ pub struct KronnState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub validated_at: Option<String>,
 
+    /// Pseudo of the operator who validated (KT-1122). Meaningful only next
+    /// to `validated_at`: a revocation clears the date and leaves this stale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validated_by: Option<String>,
+
+    /// Pseudo of the operator whose audit opened the validation (KT-1122).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation_started_by: Option<String>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bootstrapped_at: Option<String>,
+
+    /// When an audit installed Kronn's template here: the folder is Kronn's
+    /// from then on, even if that first audit never finished.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_installed_at: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<crate::core::template_manifest::TemplateManifest>,
+
+    /// Files Kronn itself wrote into the docs folder (path relative to the
+    /// folder, hash of the bytes written). They are Kronn's whatever else the
+    /// folder holds: never counted as a human's docs, never moved to
+    /// `legacy/`. Only a folder that is Kronn's (`template_installed_at`)
+    /// lets them stand as proof that it is.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub kronn_written: BTreeMap<String, String>,
 }
 
 impl KronnState {
@@ -118,7 +144,8 @@ fn read_for_mutation(project_path: &Path) -> Result<Option<KronnState>, String> 
 /// file, `Err` (with a warn) for an unreadable/corrupt one so the caller aborts
 /// instead of clobbering. Seeding from legacy evidence keeps a marker-only
 /// project's Validated/Bootstrapped state when its first state file is written.
-fn load_for_mutation(project_path: &Path) -> Result<KronnState, String> {
+pub(crate) fn load_for_mutation(project_path: &Path) -> Result<KronnState, String> {
+    crate::core::docs_location::guard_write(project_path)?;
     read_for_mutation(project_path)
         .map(|state| {
             state
@@ -134,7 +161,8 @@ fn load_for_mutation(project_path: &Path) -> Result<KronnState, String> {
 /// reader never sees a torn file. Always rewrites the `_readme` field on the
 /// in-memory state before serializing.
 pub fn write(project_path: &Path, state: &mut KronnState) -> Result<(), String> {
-    let docs_dir = crate::core::scanner::detect_docs_dir(project_path);
+    // A configured folder that fails containment refuses the write (KT-263).
+    let docs_dir = crate::core::docs_location::guard_write(project_path)?;
     std::fs::create_dir_all(&docs_dir)
         .map_err(|e| format!("Failed to create {} dir: {e}", docs_dir.display()))?;
 
@@ -160,6 +188,14 @@ fn kronn_version() -> String {
 /// full/partial run).
 pub fn record_audit(project_path: &Path, audit_type: &str) -> Result<(), String> {
     let mut state = load_for_mutation(project_path)?;
+    let templates = crate::api::projects::template::resolve_templates_dir().join("docs");
+    if templates.is_dir() {
+        state.template = Some(crate::core::template_manifest::for_audit(
+            project_path,
+            &templates,
+            state.template.as_ref(),
+        )?);
+    }
     state.audits.push(AuditEntry {
         date: today_iso(),
         kronn_version: kronn_version(),
@@ -167,6 +203,99 @@ pub fn record_audit(project_path: &Path, audit_type: &str) -> Result<(), String>
         provenance: AuditProvenance::KronnAudit,
     });
     write(project_path, &mut state)
+}
+
+/// Record that an audit installed the template into the folder.
+pub fn mark_template_installed(project_path: &Path) -> Result<(), String> {
+    let mut state = load_for_mutation(project_path)?;
+    if state.template_installed_at.is_none() {
+        state.template_installed_at = Some(today_iso());
+    }
+    write(project_path, &mut state)
+}
+
+/// Record the files Kronn wrote into the docs folder (paths relative to it), so
+/// the folder gate and the move to `legacy/` tell them from a human's. The one
+/// place provenance of Kronn-written files is recorded: the template installer
+/// calls it, and so can any other writer (a template merge). A path that is
+/// not a regular file inside the folder is ignored.
+pub fn record_kronn_written(project_path: &Path, rel_paths: &[String]) -> Result<(), String> {
+    record_kronn_moves(project_path, &[], rel_paths)
+}
+
+/// `record_kronn_written` for files Kronn also moved: each `(from, to)` (paths
+/// relative to the folder) drops the entry of `from` and records `to`, so a
+/// renamed template file is Kronn's under its new path and the old entry does
+/// not linger.
+pub fn record_kronn_moves(
+    project_path: &Path,
+    moved: &[(String, String)],
+    rel_paths: &[String],
+) -> Result<(), String> {
+    if moved.is_empty() && rel_paths.is_empty() {
+        return Ok(());
+    }
+    let mut state = load_for_mutation(project_path)?;
+    let docs_dir = crate::core::scanner::detect_docs_dir(project_path);
+    for (from, _) in moved {
+        state.kronn_written.remove(&from.replace('\\', "/"));
+    }
+    let targets = moved.iter().map(|(_, to)| to).chain(rel_paths.iter());
+    insert_written(&mut state, &docs_dir, targets)?;
+    write(project_path, &mut state)
+}
+
+/// Hash `rels` (paths relative to `docs_dir`) into `state.kronn_written`. A path
+/// that escapes the folder, crosses a symlink or is not a regular file is ignored.
+fn insert_written<'a>(
+    state: &mut KronnState,
+    docs_dir: &Path,
+    rels: impl IntoIterator<Item = &'a String>,
+) -> Result<(), String> {
+    for rel in rels {
+        let rel = rel.replace('\\', "/");
+        if rel.is_empty()
+            || rel.starts_with('/')
+            || rel.split('/').any(|part| part.is_empty() || part == "..")
+        {
+            continue;
+        }
+        let path = docs_dir.join(&rel);
+        if crate::core::fs_guard::assert_contained_no_symlink(docs_dir, &path).is_err()
+            || !std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_file())
+        {
+            continue;
+        }
+        let bytes = std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        state
+            .kronn_written
+            .insert(rel, crate::core::docs_merge::sha256_hex(&bytes));
+    }
+    Ok(())
+}
+
+/// A template merge wrote `rel_paths` (relative to `docs_dir`, the merge
+/// worktree's folder): the folder becomes Kronn's (a template install) and the
+/// files are recorded as Kronn's, the human sources beside them staying the
+/// human's. It works on the folder itself, so the state file that travels with
+/// the accepted commit is the merge worktree's. An unreadable or corrupt state
+/// file refuses, as every other mutation does.
+pub fn record_template_merge(docs_dir: &Path, rel_paths: &[String]) -> Result<(), String> {
+    let path = docs_dir.join(KRONN_STATE_FILENAME);
+    let mut state: KronnState = match std::fs::read_to_string(&path) {
+        Ok(data) => serde_json::from_str(&data)
+            .map_err(|e| format!("{} exists but is not valid JSON: {e}", path.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => KronnState::default(),
+        Err(e) => return Err(format!("Cannot read {}: {e}", path.display())),
+    };
+    if state.template_installed_at.is_none() {
+        state.template_installed_at = Some(today_iso());
+    }
+    insert_written(&mut state, docs_dir, rel_paths)?;
+    state.touch_readme();
+    let json =
+        serde_json::to_string_pretty(&state).map_err(|e| format!("JSON serialize error: {e}"))?;
+    crate::core::mcp_scanner::atomic_write(&path, &json)
 }
 
 /// Record an explicit human attestation without pretending Kronn ran an audit.
@@ -198,6 +327,24 @@ pub fn mark_validated(project_path: &Path) -> Result<(), String> {
     write(project_path, &mut state)
 }
 
+/// Set `validated_at` (kept if already set) and record who validated and who
+/// opened the validation, so a clone shows who signed off (KT-1122).
+pub fn mark_validated_by(
+    project_path: &Path,
+    by: &str,
+    started_by: Option<&str>,
+) -> Result<(), String> {
+    let mut state = load_for_mutation(project_path)?;
+    if state.validated_at.is_none() {
+        state.validated_at = Some(today_iso());
+    }
+    state.validated_by = Some(by.to_string());
+    // Replaced, never merged: a validation whose opener is unknown must not
+    // keep crediting the previous run's opener.
+    state.validation_started_by = started_by.map(str::to_string);
+    write(project_path, &mut state)
+}
+
 /// Clear `validated_at` (Codex A5) — called at the start of EVERY audit
 /// mutation (full, specialized, partial): the Validated badge asserts the
 /// docs match a validated state, which stops being true the moment a new
@@ -218,6 +365,14 @@ pub fn revoke_validated(project_path: &Path) -> Result<(), String> {
         return Ok(());
     }
     state.validated_at = None;
+    write(project_path, &mut state)
+}
+
+/// Put back the `validated_at` a run revoked, when that run rewrote nothing
+/// (KT-1168): the docs are still the ones the human validated.
+pub fn restore_validated(project_path: &Path, date: &str) -> Result<(), String> {
+    let mut state = load_for_mutation(project_path)?;
+    state.validated_at = Some(date.to_string());
     write(project_path, &mut state)
 }
 

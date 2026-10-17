@@ -49,6 +49,7 @@ pub(super) fn compute_audit_info_sync(project_path_str: &str) -> AuditInfo {
 
     if !docs_dir.is_dir() {
         return AuditInfo {
+            template_update: None,
             files: vec![],
             todos: vec![],
             tech_debt_items: vec![],
@@ -105,45 +106,76 @@ pub(super) fn compute_audit_info_sync(project_path_str: &str) -> AuditInfo {
 
     files.sort_by(|a, b| a.path.cmp(&b.path));
 
-    // Parse tech-debt items from the "Current list" table in inconsistencies-tech-debt.md
-    let mut tech_debt_items = Vec::new();
-    let tech_debt_file = docs_dir.join("inconsistencies-tech-debt.md");
-    let tech_debt_dir = docs_dir.join("tech-debt");
-    if let Ok(content) = std::fs::read_to_string(&tech_debt_file) {
-        // Parse markdown table rows: | ID | Problem | Area | Severity |
-        for line in content.lines() {
-            let trimmed = line.trim();
-            if !trimmed.starts_with('|')
-                || trimmed.starts_with("| ID")
-                || is_table_separator_line(trimmed)
-                || scanner::has_unfilled_placeholder(trimmed)
-            {
+    // KT-949 — every active sheet under tech-debt/, whichever audit (Full or
+    // one of the seven sub-audits) wrote it. Index rows only fill in what a
+    // sheet leaves blank; a row without a sheet is never surfaced.
+    let mut rows: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    if let Ok(entries) = std::fs::read_dir(&docs_dir) {
+        let mut names: Vec<String> = entries
+            .flatten()
+            .filter_map(|e| e.file_name().to_str().map(str::to_string))
+            .filter(|n| n.starts_with("inconsistencies-") && n.ends_with(".md"))
+            .collect();
+        // The central index wins over the dimension indexes.
+        names.sort_by_key(|n| (n != crate::core::td_index::CENTRAL_INDEX, n.clone()));
+        for name in names {
+            let Ok(content) = std::fs::read_to_string(docs_dir.join(&name)) else {
                 continue;
-            }
-            let cols: Vec<&str> = trimmed.split('|').map(|c| c.trim()).collect();
-            // cols[0] is empty (before first |), cols[1]=ID, cols[2]=Problem, cols[3]=Area, cols[4]=Severity
-            if cols.len() >= 5 && cols[1].starts_with("TD-") {
-                // 0.8.2 — only surface a TD if its detail file actually
-                // exists on disk. Without this, a stale row in the
-                // index table makes the validation discussion's Phase 3
-                // ask questions about phantom TDs (the agent tries to
-                // `Read docs/tech-debt/<id>.md` and the tool returns
-                // empty, leading to a zero-length reply).
-                let detail_path = tech_debt_dir.join(format!("{}.md", cols[1]));
-                if !detail_path.is_file() {
+            };
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if !trimmed.starts_with('|') || scanner::has_unfilled_placeholder(trimmed) {
                     continue;
                 }
-                tech_debt_items.push(TechDebtItem {
-                    id: cols[1].to_string(),
-                    problem: cols[2].to_string(),
-                    area: cols[3].to_string(),
-                    severity: cols[4].to_string(),
-                });
+                let cols: Vec<String> = trimmed.split('|').map(|c| c.trim().to_string()).collect();
+                let id: String = cols
+                    .get(1)
+                    .map(|c| c.trim_start_matches(['[', '`']))
+                    .unwrap_or("")
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                    .collect();
+                if cols.len() >= 5 && crate::core::td_index::is_td_id(&id) {
+                    rows.entry(id).or_insert(cols);
+                }
             }
         }
     }
+    let known = |value: &str, row: Option<&Vec<String>>, col: usize| -> String {
+        if value != "Unknown" {
+            return value.to_string();
+        }
+        row.and_then(|r| r.get(col))
+            .cloned()
+            .unwrap_or_else(|| value.to_string())
+    };
+    let tech_debt_items = crate::core::td_index::read_sheets(&docs_dir)
+        .into_iter()
+        .filter(|sheet| sheet.is_active())
+        .map(|sheet| {
+            let row = rows.get(&sheet.id);
+            let problem = if sheet.title == sheet.id {
+                row.and_then(|r| r.get(2))
+                    .cloned()
+                    .unwrap_or(sheet.title.clone())
+            } else {
+                sheet.title.clone()
+            };
+            TechDebtItem {
+                area: known(&sheet.area, row, 3),
+                severity: known(&sheet.severity, row, 4),
+                id: sheet.id,
+                problem,
+            }
+        })
+        .collect();
 
     AuditInfo {
+        template_update: crate::core::template_manifest::check(
+            &project_path,
+            &crate::api::projects::template::resolve_templates_dir().join("docs"),
+        )
+        .ok(),
         files,
         todos,
         tech_debt_items,
@@ -283,6 +315,30 @@ pub(crate) fn prior_partial_validation_block(discussion_id: &str, language: &str
     format!("{title}\n{}\n\n", body.replace("{id}", discussion_id))
 }
 
+/// KT-1211 (M6) — the sources moved between the run this one resumed and the
+/// resume: the steps it inherited describe the earlier sources. Said in the
+/// validation prompt so the reviewer does not take them for current.
+pub(crate) fn resume_drift_block(drift: &str, language: &str) -> String {
+    let (title, lead) = match language {
+        "en" => (
+            "## SOURCE DRIFT DURING THE RESUME",
+            "The documents of the steps this run inherited were written against earlier sources. Check them against the current tree before trusting them, and report any that no longer match:",
+        ),
+        "es" => (
+            "## CAMBIO EN LAS FUENTES DURANTE LA REANUDACION",
+            "Los documentos de los pasos heredados por este run se escribieron sobre fuentes anteriores. Compruebalos con el arbol actual antes de fiarte y senala los que ya no coinciden:",
+        ),
+        _ => (
+            "## DÉRIVE DES SOURCES PENDANT LA REPRISE",
+            "Les documents des étapes héritées par ce run ont été écrits sur des sources antérieures. Vérifie-les contre l'arbre actuel avant de t'y fier et signale ceux qui ne correspondent plus :",
+        ),
+    };
+    format!(
+        "{title}\n{lead}\n> {}\n\n",
+        drift.split_whitespace().collect::<Vec<_>>().join(" ")
+    )
+}
+
 pub(crate) fn partial_run_block(
     steps_to_redo: &[(u32, String)],
     total_steps: u32,
@@ -329,6 +385,181 @@ pub(crate) fn partial_run_block(
     }
     block.push('\n');
     block
+}
+
+/// The sections a partial refresh did not update: outside its validation's
+/// scope and still stale. Empty when every step is done.
+pub(crate) fn partial_refresh_failed_block(
+    failed: &[(u32, String)],
+    total_steps: u32,
+    language: &str,
+) -> String {
+    if failed.is_empty() {
+        return String::new();
+    }
+    let list = failed
+        .iter()
+        .map(|(step, file)| format!("- {step}/{total_steps} — `{file}`"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (title, intro, rule) = match language {
+        "en" => (
+            "## SECTIONS NOT REFRESHED — out of scope",
+            "This partial refresh could not update these sections (failed or stopped):",
+            "They are still stale: do not validate them, do not fix them, do not quote them as a reference. Tell the user in your first message: \"Update\" on the project card re-runs only these sections, and the project cannot be marked validated until a refresh completes.",
+        ),
+        "es" => (
+            "## SECCIONES NO ACTUALIZADAS — fuera del alcance",
+            "Este refresh parcial no pudo actualizar estas secciones (fallo o parada):",
+            "Siguen obsoletas: no las valides, no las corrijas, no las cites como referencia. Dile al usuario en tu primer mensaje: \"Actualizar\" en la tarjeta del proyecto relanza solo estas secciones, y el proyecto no puede marcarse como validado hasta que un refresh termine.",
+        ),
+        _ => (
+            "## SECTIONS NON MISES À JOUR — hors périmètre",
+            "Ce refresh partiel n'a pas pu mettre à jour ces sections (échec ou arrêt) :",
+            "Elles restent obsolètes : ne les valide pas, ne les corrige pas, ne les cite pas comme référence. Dis-le à l'utilisateur dans ton premier message : « Mettre à jour » sur la carte du projet relance uniquement ces sections, et le projet ne peut pas être marqué validé tant qu'un refresh n'a pas abouti.",
+        ),
+    };
+    format!("{title}\n{intro}\n{list}\n\n{rule}\n\n")
+}
+
+/// Dead references inside human-owned sections: the audit may not fix them,
+/// so the human is asked to. Empty when there is none.
+pub(crate) fn human_references_block(
+    items: &[crate::core::document_optimization::Diagnostic],
+    language: &str,
+) -> String {
+    if items.is_empty() {
+        return String::new();
+    }
+    let list = items
+        .iter()
+        .map(|d| format!("- `{}` — {}", d.path, d.message))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (title, intro, rule) = match language {
+        "en" => (
+            "## DEAD REFERENCES IN HUMAN SECTIONS — for their owner",
+            "These `owner=\"human\"` sections cite a file or a line that no longer exists. The audit may not edit them, and they do not block it.",
+            "List them to the user in a separate section of your first message: the user corrects or confirms these sections. Do not edit them yourself.",
+        ),
+        "es" => (
+            "## REFERENCIAS MUERTAS EN SECCIONES HUMANAS — para su autor",
+            "Estas secciones `owner=\"human\"` citan un archivo o una linea que ya no existe. La auditoria no puede modificarlas y no la bloquean.",
+            "Enumeralas al usuario en una seccion aparte de tu primer mensaje: el usuario corrige o confirma esas secciones. No las modifiques tu.",
+        ),
+        _ => (
+            "## RÉFÉRENCES MORTES DANS DES SECTIONS HUMAINES — pour leur auteur",
+            "Ces sections `owner=\"human\"` citent un fichier ou une ligne qui n'existe plus. L'audit n'a pas le droit de les modifier, et elles ne le bloquent pas.",
+            "Liste-les à l'utilisateur dans une section à part de ton premier message : c'est lui qui corrige ou confirme ces sections. Ne les modifie pas toi-même.",
+        ),
+    };
+    format!("{title}\n{intro}\n{list}\n\n{rule}\n\n")
+}
+
+/// KT-1130 — the steps that verified their document and had nothing to
+/// change, listed apart so the human confirms them. Empty when there is none.
+pub(crate) fn unchanged_steps_block(
+    unchanged: &[(u32, String)],
+    total_steps: u32,
+    language: &str,
+) -> String {
+    if unchanged.is_empty() {
+        return String::new();
+    }
+    let list = unchanged
+        .iter()
+        .map(|(step, file)| format!("- {step}/{total_steps} — `{file}`"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (title, intro, rule) = match language {
+        "en" => (
+            "## UNCHANGED STEPS — to confirm",
+            "These steps checked their document and had nothing to fix: the file was already up to date and every check passed.",
+            "List them to the user in a separate section of your first message so they can confirm these documents still hold. They did not fail and have nothing to redo.",
+        ),
+        "es" => (
+            "## PASOS SIN CAMBIOS — por confirmar",
+            "Estos pasos verificaron su documento y no tuvieron nada que corregir: el archivo ya estaba al dia y todas las comprobaciones pasaron.",
+            "Enumeralos al usuario en una seccion aparte de tu primer mensaje para que confirme que esos documentos siguen siendo correctos. No fallaron y no hay nada que rehacer.",
+        ),
+        _ => (
+            "## ÉTAPES INCHANGÉES — à confirmer",
+            "Ces étapes ont vérifié leur document et n'avaient rien à corriger : le fichier était déjà à jour et toutes les vérifications sont passées.",
+            "Liste-les à l'utilisateur dans une section à part de ton premier message, pour qu'il confirme que ces documents restent justes. Elles ne sont pas en échec et n'ont rien à refaire.",
+        ),
+    };
+    format!("{title}\n{intro}\n{list}\n\n{rule}\n\n")
+}
+
+/// KT-1131 — one step a human accepted, as the validation prompt lists it.
+pub(crate) struct AcceptedStepLine {
+    pub step: u32,
+    pub file: String,
+    pub by: String,
+    pub reason: Option<String>,
+    pub failure: Option<String>,
+}
+
+/// KT-1131 — the steps a human accepted instead of fixing: the validation names
+/// them apart, with who accepted, why, and the failure they still carry.
+pub(crate) fn accepted_steps_block(
+    accepted: &[AcceptedStepLine],
+    total_steps: u32,
+    language: &str,
+) -> String {
+    if accepted.is_empty() {
+        return String::new();
+    }
+    let (title, intro, by_label, reason_label, failure_label, none, rule) = match language {
+        "en" => (
+            "## ACCEPTED STEPS — as they stand",
+            "A person accepted these steps although they failed: their document is kept as it is.",
+            "accepted by",
+            "reason",
+            "failure",
+            "none given",
+            "List them to the user in a separate section of your first message, with the failure each one still carries. Do not present them as succeeded and do not redo them.",
+        ),
+        "es" => (
+            "## PASOS ACEPTADOS — tal cual",
+            "Una persona acepto estos pasos aunque fallaron: su documento se conserva tal como esta.",
+            "aceptado por",
+            "motivo",
+            "fallo",
+            "sin motivo",
+            "Enumeralos al usuario en una seccion aparte de tu primer mensaje, con el fallo que cada uno conserva. No los presentes como exitosos y no los rehagas.",
+        ),
+        _ => (
+            "## ÉTAPES ACCEPTÉES — en l'état",
+            "Une personne a accepté ces étapes bien qu'elles aient échoué : leur document est gardé tel quel.",
+            "acceptée par",
+            "raison",
+            "échec",
+            "aucune",
+            "Liste-les à l'utilisateur dans une section à part de ton premier message, avec l'échec que chacune garde. Ne les présente pas comme réussies et ne les refais pas.",
+        ),
+    };
+    let list = accepted
+        .iter()
+        .map(|line| {
+            let mut text = format!(
+                "- {}/{total_steps} — `{}` — {by_label} {} — {reason_label} : {}",
+                line.step,
+                line.file,
+                line.by,
+                line.reason
+                    .as_deref()
+                    .filter(|r| !r.trim().is_empty())
+                    .unwrap_or(none)
+            );
+            if let Some(failure) = line.failure.as_deref() {
+                text.push_str(&format!(" — {failure_label} : {failure}"));
+            }
+            text
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{title}\n{intro}\n{list}\n\n{rule}\n\n")
 }
 
 /// 0.8.4 (#287) — sub-audit validation prompt. Shorter than the Full
@@ -474,78 +705,9 @@ pub(crate) fn build_sub_audit_validation_prompt(
 /// The prompt follows a strict 4-phase protocol to ensure thorough validation.
 fn validation_card_protocol(language: &str, has_issue_tracker_mcp: bool) -> String {
     let mut prompt = match language {
-        "en" => String::from(
-            r#"You are running the VALIDATION of the AI context in `docs/`, the final phase of the audit pipeline. Announce progress as "Phase X/4 of the validation" and never emit `KRONN:VALIDATION_COMPLETE` early.
-
-**You are a documentation auditor, not a code fixer. Modify only `docs/`.**
-
-## Phase 1 — Auto-fix
-Read source code to verify the documentation, then fix only inferable documentation gaps and stale facts.
-
-## Phase 2 — Critical and High TD cards
-Read only the TD detail files named in RUN SCOPE. In one response, emit one closed `kronn-question` card for every Critical or High TD. Use `task_ref:"audit-td:<TD-ID>"`, a stable key, and exactly these option IDs: `confirm`, `reject`, `accept_decision`, `defer`. Labels must explain: confirm the finding, reject it, accept it as an intentional decision, or defer it.
-
-## Phase 3 — Remaining TD cards
-For every remaining TD, emit batch cards containing at most 8 `items`. Each item is one TD (`id`, `label`, optional `description`); use `task_ref:"audit-td-batch"` and the same four options. Example shape:
-```kronn-question
-{"version":1,"key":"audit-td-batch-1","question":"Choose an outcome for each TD.","items":[{"id":"TD-YYYYMMDD-example","label":"Example TD"}],"options":[{"id":"confirm","label":"Confirm"},{"id":"reject","label":"Reject"},{"id":"accept_decision","label":"Accepted decision"},{"id":"defer","label":"Defer"}],"task_ref":"audit-td-batch"}
-```
-The human must choose exactly one outcome for every item. Do not ask for TD decisions in prose. Do not edit TD statuses, `audit_history`, or `docs/decisions.md` yourself: Kronn writes those repository files when each card is answered. Wait until all emitted cards are answered before continuing.
-
-## Phase 4 — Doc challenge
-Ask 2-3 practical onboarding questions answerable from `docs/` alone, verify the answers, and fix documentation gaps.
-
-## Completion
-When every phase and every card is complete, end with the exact phrase `KRONN:VALIDATION_COMPLETE`."#,
-        ),
-        "es" => String::from(
-            r#"Estas ejecutando la VALIDACION final del contexto AI en `docs/`. Anuncia el progreso como "Fase X/4 de la validacion" y nunca emitas `KRONN:VALIDATION_COMPLETE` antes de tiempo.
-
-**Eres auditor de documentacion, no corrector de codigo. Modifica solo `docs/`.**
-
-## Fase 1 — Auto-correccion
-Lee el codigo para verificar la documentacion y corrige solo lagunas documentales inferibles y datos obsoletos.
-
-## Fase 2 — Tarjetas TD Critical y High
-Lee solo los detalles TD de RUN SCOPE. En una respuesta, emite una tarjeta cerrada `kronn-question` por cada TD Critical o High. Usa `task_ref:"audit-td:<TD-ID>"`, una clave estable y exactamente estos IDs: `confirm`, `reject`, `accept_decision`, `defer`.
-
-## Fase 3 — Tarjetas TD restantes
-Para cada TD restante, emite tarjetas por lotes con un maximo de 8 `items`. Cada item es un TD (`id`, `label`, `description` opcional); usa `task_ref:"audit-td-batch"` y las mismas cuatro opciones. Forma de ejemplo:
-```kronn-question
-{"version":1,"key":"audit-td-batch-1","question":"Elige un resultado para cada TD.","items":[{"id":"TD-YYYYMMDD-example","label":"TD de ejemplo"}],"options":[{"id":"confirm","label":"Confirmar"},{"id":"reject","label":"Rechazar"},{"id":"accept_decision","label":"Decision aceptada"},{"id":"defer","label":"Diferir"}],"task_ref":"audit-td-batch"}
-```
-El humano debe elegir un resultado por item. No pidas decisiones TD en prosa. No edites estados TD, `audit_history` ni `docs/decisions.md`: Kronn escribe esos archivos al responder la tarjeta. Espera todas las respuestas antes de continuar.
-
-## Fase 4 — Desafio documental
-Haz 2-3 preguntas practicas de onboarding, verifica las respuestas solo con `docs/` y corrige las lagunas.
-
-## Fin
-Cuando todas las fases y tarjetas esten completas, termina exactamente con `KRONN:VALIDATION_COMPLETE`."#,
-        ),
-        _ => String::from(
-            r#"Tu conduis la VALIDATION finale du contexte AI dans `docs/`. Annonce l'avancement comme "Phase X/4 de la validation" et n'emets jamais `KRONN:VALIDATION_COMPLETE` trop tot.
-
-**Tu es un auditeur de documentation, pas un correcteur de code. Modifie uniquement `docs/`.**
-
-## Phase 1 — Auto-correction
-Lis le code pour verifier la documentation, puis corrige uniquement les lacunes documentaires inferables et les faits obsoletes.
-
-## Phase 2 — Cartes TD Critical et High
-Lis uniquement les fiches TD nommees dans RUN SCOPE. Dans une seule reponse, emets une carte fermee `kronn-question` pour chaque TD Critical ou High. Utilise `task_ref:"audit-td:<TD-ID>"`, une cle stable et exactement ces IDs : `confirm`, `reject`, `accept_decision`, `defer`.
-
-## Phase 3 — Cartes des autres TD
-Pour chaque TD restant, emets des cartes par lots contenant au maximum 8 `items`. Chaque item est un TD (`id`, `label`, `description` optionnelle) ; utilise `task_ref:"audit-td-batch"` et les quatre memes options. Exemple :
-```kronn-question
-{"version":1,"key":"audit-td-batch-1","question":"Choisis un statut pour chaque TD.","items":[{"id":"TD-YYYYMMDD-example","label":"TD exemple"}],"options":[{"id":"confirm","label":"Confirmer"},{"id":"reject","label":"Rejeter"},{"id":"accept_decision","label":"Decision assumee"},{"id":"defer","label":"Differer"}],"task_ref":"audit-td-batch"}
-```
-L'humain doit choisir exactement un resultat par item. Ne demande aucune decision TD en prose. Ne modifie pas toi-meme les statuts TD, `audit_history` ou `docs/decisions.md` : Kronn ecrit ces fichiers du depot a la reponse de chaque carte. Attends toutes les reponses avant de continuer.
-
-## Phase 4 — Challenge documentaire
-Pose 2-3 questions pratiques d'onboarding, verifie les reponses depuis `docs/` seulement et corrige les lacunes.
-
-## Fin
-Quand toutes les phases et toutes les cartes sont terminees, termine exactement par `KRONN:VALIDATION_COMPLETE`."#,
-        ),
+        "en" => String::from(include_str!("prompts/validation-cards-en.md")),
+        "es" => String::from(include_str!("prompts/validation-cards-es.md")),
+        _ => String::from(include_str!("prompts/validation-cards-fr.md")),
     };
     if has_issue_tracker_mcp {
         prompt.push_str(match language {
@@ -753,7 +915,7 @@ pub(crate) fn check_ai_dir_permissions(ai_dir: &std::path::Path) -> Result<(), S
     for entry in walkdir::WalkDir::new(ai_dir).max_depth(5).into_iter() {
         let entry = match entry {
             Ok(e) => e,
-            Err(e) => return Err(format!("Cannot traverse docs/ directory: {}", e)),
+            Err(e) => return Err(format!("Cannot traverse {}: {}", ai_dir.display(), e)),
         };
         let path = entry.path();
         if path.is_file() {
@@ -766,158 +928,117 @@ pub(crate) fn check_ai_dir_permissions(ai_dir: &std::path::Path) -> Result<(), S
 }
 
 #[derive(Debug)]
-pub(crate) struct HumanOwnedDocsSnapshot {
+pub(crate) struct ValidatedDocsSnapshot {
     files: Vec<(String, String)>,
+    briefing: (std::path::PathBuf, Option<Vec<u8>>),
 }
 
-/// Capture every documentation file that contains a human-owned section.
-/// Audit prompts may edit files beyond their declared validation target (the
-/// final review explicitly does), so ownership protection cannot be scoped to
-/// `AnalysisStep::target_file`.
-pub(crate) fn capture_human_owned_sections(
+/// Every doc an audit may edit, plus the immutable briefing before the step.
+pub(crate) fn capture_validated_docs(
     project_path: &std::path::Path,
-) -> Result<HumanOwnedDocsSnapshot, String> {
-    let docs_dir = crate::core::scanner::detect_docs_dir(project_path);
-    if !docs_dir.is_dir() {
-        return Ok(HumanOwnedDocsSnapshot { files: Vec::new() });
-    }
-
-    let mut files = Vec::new();
-    for entry in walkdir::WalkDir::new(&docs_dir).max_depth(5) {
-        let entry = entry.map_err(|e| format!("scan human-owned sections: {e}"))?;
-        if !entry.file_type().is_file()
-            || entry
-                .path()
-                .extension()
-                .is_none_or(|extension| extension != "md")
-        {
-            continue;
-        }
-        let content = std::fs::read_to_string(entry.path())
-            .map_err(|e| format!("read {}: {e}", entry.path().display()))?;
-        if !super::anti_hallu_enforce::contains_human_owned_section(&content) {
-            continue;
-        }
-        let relative = entry
-            .path()
-            .strip_prefix(project_path)
-            .map_err(|_| format!("{} escapes project root", entry.path().display()))?
-            .to_string_lossy()
-            .replace('\\', "/");
-        files.push((relative, content));
-    }
-    Ok(HumanOwnedDocsSnapshot { files })
-}
-
-/// Restore human-owned sections changed anywhere in the docs tree by one
-/// agent attempt and persist each rejected proposal as a dated report. This
-/// runs before retry/cancellation/failure branches can leave changes behind.
-pub(crate) fn protect_human_owned_sections(
-    project_path: &std::path::Path,
-    snapshot: &HumanOwnedDocsSnapshot,
-    today: &str,
-) -> Result<usize, String> {
-    let mut proposals = Vec::new();
-    let mut errors = Vec::new();
-    let mut restored_count = 0;
-
-    for (target_file, pre_content) in &snapshot.files {
-        let target_path = project_path.join(target_file);
-        let written = match std::fs::read_to_string(&target_path) {
-            Ok(content) => content,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(e) => {
-                errors.push(format!("read {}: {e}", target_path.display()));
-                continue;
-            }
-        };
-        let Some((restored, diffs)) =
-            super::anti_hallu_enforce::enforce_human_owned_sections(pre_content, &written)
-        else {
-            continue;
-        };
-
-        let restore_result =
-            crate::core::fs_guard::assert_contained_no_symlink(project_path, &target_path)
-                .and_then(|_| {
-                    crate::core::mcp_scanner::atomic_write(&target_path, &restored)
-                        .map_err(|e| format!("restore {}: {e}", target_path.display()))
-                });
-        match restore_result {
-            Ok(()) => {
-                restored_count += diffs.len();
-                proposals.push((target_file.as_str(), diffs));
-            }
-            Err(e) => errors.push(e),
-        }
-    }
-
-    for (target_file, diffs) in proposals {
-        if let Err(e) = write_human_section_diff_report(project_path, target_file, &diffs, today) {
-            errors.push(e);
-        }
-    }
-
-    if errors.is_empty() {
-        Ok(restored_count)
-    } else {
-        Err(errors.join("; "))
-    }
-}
-
-/// Write an audit proposal under `docs/reports/`. A same-day rerun for the
-/// same target replaces that day's report; a new day creates a new snapshot.
-fn write_human_section_diff_report(
-    project_path: &std::path::Path,
-    target_file: &str,
-    diffs: &[super::anti_hallu_enforce::HumanSectionDiff],
-    today: &str,
-) -> Result<(), String> {
-    let slug = target_file
-        .trim_end_matches(".md")
-        .replace(['/', '\\'], "-");
-    let reports_dir = project_path.join("docs/reports");
-    crate::core::fs_guard::guarded_create_dir_all(project_path, &reports_dir)?;
-    let report_path = reports_dir.join(format!("{today}-human-section-diff-{slug}.md"));
-    crate::core::fs_guard::assert_contained_no_symlink(project_path, &report_path)?;
-    let body =
-        super::anti_hallu_enforce::format_human_section_diff_report(target_file, diffs, today);
-    crate::core::mcp_scanner::atomic_write(&report_path, &body)
-        .map_err(|e| format!("write {}: {e}", report_path.display()))
-}
-
-/// Remove the KRONN:BOOTSTRAP block from docs/AGENTS.md
-pub(super) fn remove_bootstrap_block(index_file: &std::path::Path) {
-    let content = match std::fs::read_to_string(index_file) {
-        Ok(c) => c,
-        Err(_) => return,
+) -> Result<ValidatedDocsSnapshot, String> {
+    let files = crate::core::doc_provenance::snapshot_tracked(project_path)?;
+    let path = crate::core::scanner::detect_docs_dir(project_path).join("briefing.md");
+    crate::core::fs_guard::assert_contained_no_symlink(project_path, &path)?;
+    let briefing = match std::fs::read(&path) {
+        Ok(bytes) => Some(bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("Cannot snapshot briefing: {e}")),
     };
+    Ok(ValidatedDocsSnapshot {
+        files,
+        briefing: (path, briefing),
+    })
+}
 
-    if !content.contains("KRONN:BOOTSTRAP:START") {
+/// Restoration of a project-wide badge must cover every previously validated
+/// doc, including documents outside this refresh's declared step targets.
+pub(crate) fn validation_restore_snapshots(
+    project_path: &std::path::Path,
+    targets: &[&str],
+) -> Result<Vec<(String, super::validation::TargetSnapshot)>, String> {
+    let tracked = capture_validated_docs(project_path)?;
+    let mut snapshots: std::collections::BTreeMap<_, _> = tracked
+        .files
+        .into_iter()
+        .map(|(doc, content)| {
+            (
+                doc,
+                super::validation::TargetSnapshot::Present(
+                    super::validation::normalized_content_hash(&content),
+                ),
+            )
+        })
+        .collect();
+    for target in targets {
+        snapshots
+            .entry((*target).to_string())
+            .or_insert(super::validation::target_snapshot(project_path, target)?);
+    }
+    Ok(snapshots.into_iter().collect())
+}
+
+/// Mark every tracked doc one agent attempt changed "to reconfirm". The
+/// write itself stays on disk: human ownership never reverts it (KT-1079).
+pub(crate) fn mark_validated_doc_writes(
+    project_path: &std::path::Path,
+    snapshot: &ValidatedDocsSnapshot,
+    writer: crate::core::doc_provenance::DocWriter,
+) -> Result<usize, String> {
+    let protected = restore_step_briefing(project_path, snapshot);
+    let marked =
+        crate::core::doc_provenance::note_snapshot_writes(project_path, &snapshot.files, writer);
+    protected?;
+    marked
+}
+
+/// An audit step may read the briefing, but only a human briefing review may edit it.
+pub(crate) fn restore_step_briefing(
+    project_path: &std::path::Path,
+    snapshot: &ValidatedDocsSnapshot,
+) -> Result<(), String> {
+    let (path, before) = &snapshot.briefing;
+    crate::core::fs_guard::assert_contained_no_symlink(project_path, path)?;
+    let after = match std::fs::read(path) {
+        Ok(bytes) => Some(bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("Cannot check protected briefing: {e}")),
+    };
+    if before == &after {
+        return Ok(());
+    }
+    match before {
+        Some(bytes) => {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            std::fs::write(path, bytes)
+                .map_err(|e| format!("Cannot restore protected briefing: {e}"))?;
+        }
+        None => std::fs::remove_file(path)
+            .map_err(|e| format!("Cannot remove unauthorized briefing: {e}"))?,
+    }
+    Err(
+        "The audit step changed the protected briefing; its original contents were restored."
+            .into(),
+    )
+}
+
+/// Remove the legacy KRONN:BOOTSTRAP block from the docs entry file (the run
+/// start; `core::scanner::retire_legacy_bootstrap_block` does the same at boot).
+pub(super) fn remove_bootstrap_block(index_file: &std::path::Path) {
+    let Ok(observed) = std::fs::read(index_file) else {
         return;
-    }
-
-    // Remove everything between START and END markers (inclusive)
-    let mut result = String::new();
-    let mut in_block = false;
-    for line in content.lines() {
-        if line.contains("KRONN:BOOTSTRAP:START") {
-            in_block = true;
-            continue;
-        }
-        if line.contains("KRONN:BOOTSTRAP:END") {
-            in_block = false;
-            continue;
-        }
-        if !in_block {
-            result.push_str(line);
-            result.push('\n');
-        }
-    }
-
-    // Trim leading whitespace from the cleaned content
-    let trimmed = result.trim_start().to_string();
-    if let Err(e) = std::fs::write(index_file, trimmed) {
+    };
+    let Ok(content) = std::str::from_utf8(&observed) else {
+        return;
+    };
+    let Some(cleaned) = crate::core::scanner::without_legacy_bootstrap_block(content) else {
+        return;
+    };
+    if let Err(e) = crate::core::mcp_scanner::atomic_write_if_unchanged_preserving_permissions(
+        index_file, &cleaned, &observed,
+    ) {
         tracing::warn!("Failed to remove bootstrap block: {}", e);
     }
 }
@@ -936,17 +1057,38 @@ pub(super) fn remove_bootstrap_block(index_file: &std::path::Path) {
 /// When `prefilled_notes` is `None`, the agent runs the legacy 6-Q
 /// flow (kept for backwards-compat — callers that never wrote to the
 /// form still work).
+#[cfg(test)]
 pub(crate) fn build_briefing_prompt(language: &str, prefilled_notes: Option<&str>) -> String {
+    build_briefing_prompt_in(
+        language,
+        prefilled_notes,
+        &crate::core::docs_location::DocsRoot::default_root(),
+    )
+}
+
+/// `build_briefing_prompt` with Kronn's text pointing at `docs_root`
+/// (KT-1192). The user's own answers are inserted after the relocation.
+pub(crate) fn build_briefing_prompt_in(
+    language: &str,
+    prefilled_notes: Option<&str>,
+    docs_root: &crate::core::docs_location::DocsRoot,
+) -> String {
     // 0.8.7 anti-hallu: prefix the discipline reminder on every briefing
     // path (review + legacy). Briefing produces `docs/briefing.md` which is
     // then injected as project context — a hallucinated assertion here
     // ships into every future agent prompt for this project.
-    let body = if let Some(notes) = prefilled_notes {
-        build_briefing_review_prompt(language, notes)
+    const NOTES_SLOT: &str = "\u{0}kronn-briefing-notes\u{0}";
+    let body = if prefilled_notes.is_some() {
+        build_briefing_review_prompt(language, NOTES_SLOT)
     } else {
         build_briefing_legacy_prompt(language)
     };
-    format!("{}{}", anti_halluc_doc_writer_block(language), body)
+    let prompt = format!("{}{}", anti_halluc_doc_writer_block(language), body);
+    let prompt = docs_root.relocate(&prompt);
+    match prefilled_notes {
+        Some(notes) => prompt.replace(NOTES_SLOT, notes),
+        None => prompt.into_owned(),
+    }
 }
 
 /// 0.8.4 (#285+UX) — review prompt fired after the form has been
@@ -958,78 +1100,15 @@ pub(crate) fn build_briefing_prompt(language: &str, prefilled_notes: Option<&str
 fn build_briefing_review_prompt(language: &str, prefilled_notes: &str) -> String {
     match language {
         "en" => format!(
-            "ROLE: You are a project briefing reviewer.\n\n\
-             The user just submitted the briefing form. Their answers are at the bottom of this message.\n\n\
-             YOUR JOB — short and focused, NOT a full re-interrogation:\n\
-             1. Read their answers below.\n\
-             2. If 1-3 answers are ambiguous, vague (e.g. \"some traps\"), or contradict each other, ask for clarification on those SPECIFIC points only — in ONE message, max 3 questions, bulleted. Do NOT re-ask answers that already look complete.\n\
-             3. If all answers look usable as-is, skip to step 4.\n\
-             4. Write `docs/briefing.md` with the EXACT format below, merging the original answers + any clarifications you got.\n\
-             5. End your last message with: `KRONN:BRIEFING_COMPLETE`\n\n\
-             ABSOLUTE RULES:\n\
-             - Do NOT re-ask the 6 questions wholesale. The user has already answered. This is REVIEW, not interrogation.\n\
-             - Do NOT read source code or guess anything.\n\
-             - Do NOT modify any file other than `docs/briefing.md`.\n\n\
-             Format for `docs/briefing.md` (write this LITERALLY, in English even if the conversation is in another language):\n\n\
-             # Project Briefing\n\
-             > Auto-generated from user-submitted form + AI review.\n\
-             ## Purpose\n[from Q1, refined by clarification if any]\n\
-             ## Team\n[from Q2]\n\
-             ## Maturity\n[from Q3]\n\
-             ## External Dependencies\n[from Q4 — if none, write \"None.\"]\n\
-             ## Traps & Fragile Areas\n[from Q5 — bullet list if multiple]\n\
-             ## Additional Context\n[from Q6 — if skipped, write \"None.\"]\n\n\
-             USER'S FORM ANSWERS:\n\n{}\n",
+            include_str!("prompts/briefing-review-en.md"),
             prefilled_notes,
         ),
         "es" => format!(
-            "ROL: Eres un revisor de briefing de proyecto.\n\n\
-             El usuario acaba de enviar el formulario de briefing. Sus respuestas estan al final de este mensaje.\n\n\
-             TU TAREA — corta y enfocada, NO una re-interrogacion completa:\n\
-             1. Lee sus respuestas.\n\
-             2. Si 1-3 respuestas son ambiguas, vagas (ej. \"algunas trampas\") o se contradicen, pide aclaracion sobre esos puntos ESPECIFICOS — en UN solo mensaje, max 3 preguntas. NO repreguntes lo que ya esta claro.\n\
-             3. Si todas las respuestas son utiles tal cual, salta al paso 4.\n\
-             4. Escribe `docs/briefing.md` con el formato EXACTO de abajo.\n\
-             5. Termina con: `KRONN:BRIEFING_COMPLETE`\n\n\
-             REGLAS ABSOLUTAS:\n\
-             - NO repreguntes las 6 preguntas completas. El usuario ya respondio.\n\
-             - NO leas codigo fuente ni adivines nada.\n\
-             - NO modifiques ningun archivo fuera de `docs/briefing.md`.\n\n\
-             Formato (escribir LITERALMENTE, en ingles aunque la conversacion sea en otro idioma):\n\n\
-             # Project Briefing\n\
-             > Auto-generated from user-submitted form + AI review.\n\
-             ## Purpose\n[de Q1, refinado por aclaracion si la hay]\n\
-             ## Team\n[de Q2]\n\
-             ## Maturity\n[de Q3]\n\
-             ## External Dependencies\n[de Q4 — si ninguna, escribir \"None.\"]\n\
-             ## Traps & Fragile Areas\n[de Q5 — lista de puntos]\n\
-             ## Additional Context\n[de Q6 — si omitida, escribir \"None.\"]\n\n\
-             RESPUESTAS DEL USUARIO:\n\n{}\n",
+            include_str!("prompts/briefing-review-es.md"),
             prefilled_notes,
         ),
         _ => format!(
-            "ROLE: Tu es un relecteur de briefing projet.\n\n\
-             L'utilisateur vient de remplir le formulaire de briefing. Ses reponses sont en bas de ce message.\n\n\
-             TON JOB — court et cible, PAS une re-interrogation complete :\n\
-             1. Relis ses reponses ci-dessous.\n\
-             2. Si 1 a 3 reponses sont ambigues, vagues (ex: \"des pieges\"), ou se contredisent, demande des clarifications UNIQUEMENT sur ces points precis — en UN seul message, max 3 questions en liste. Ne repose PAS les questions deja completes.\n\
-             3. Si toutes les reponses sont utilisables telles quelles, saute a l'etape 4.\n\
-             4. Ecris `docs/briefing.md` avec le format EXACT ci-dessous, en fusionnant les reponses initiales + tes eventuelles clarifications.\n\
-             5. Termine ton dernier message par : `KRONN:BRIEFING_COMPLETE`\n\n\
-             REGLES ABSOLUES :\n\
-             - Ne repose PAS les 6 questions en bloc. L'utilisateur a deja repondu. C'est une RELECTURE, pas un interrogatoire.\n\
-             - Ne lis PAS le code source, ne devine rien.\n\
-             - Ne modifie aucun fichier autre que `docs/briefing.md`.\n\n\
-             Format pour `docs/briefing.md` (a ecrire LITTERALEMENT, en anglais meme si la conversation est dans une autre langue) :\n\n\
-             # Project Briefing\n\
-             > Auto-generated from user-submitted form + AI review.\n\
-             ## Purpose\n[depuis Q1, raffine par les clarifications si besoin]\n\
-             ## Team\n[depuis Q2]\n\
-             ## Maturity\n[depuis Q3]\n\
-             ## External Dependencies\n[depuis Q4 — si aucune, ecrire \"None.\"]\n\
-             ## Traps & Fragile Areas\n[depuis Q5 — liste a puces si plusieurs]\n\
-             ## Additional Context\n[depuis Q6 — si omise, ecrire \"None.\"]\n\n\
-             REPONSES DU FORMULAIRE :\n\n{}\n",
+            include_str!("prompts/briefing-review-fr.md"),
             prefilled_notes,
         ),
     }
@@ -1039,93 +1118,9 @@ fn build_briefing_review_prompt(language: &str, prefilled_notes: &str) -> String
 /// callers that didn't pre-fill the form (no `prefilled_notes`).
 fn build_briefing_legacy_prompt(language: &str) -> String {
     match language {
-        "en" => concat!(
-            "ROLE: You are a project briefing assistant.\n\n",
-            "ABSOLUTE RULE: Do NOT read source code, project files, or any file outside docs/. ",
-            "Do NOT guess ANYTHING. You ask questions and use ONLY the user's answers.\n\n",
-            "IF YOU HAVE FILE SYSTEM ACCESS: do NOT use it for this task. ",
-            "No ls, cat, read, glob, grep. The only allowed file operation is the final write of docs/briefing.md.\n\n",
-            "NOTE: The tech stack will be auto-detected during the audit (from package.json, Cargo.toml, etc.). No need to ask about it.\n\n",
-            "STEP 1 — Ask the following 6 questions IN A SINGLE MESSAGE, then STOP. Wait for answers.\n\n",
-            "1. What does this project do? (one sentence — what it does for its users)\n",
-            "2. Who works on it? (solo / small team / large team)\n",
-            "3. What stage is it at? (prototype, MVP, production, legacy, rewrite...)\n",
-            "4. Key external dependencies? Include names/URLs if relevant. (e.g. \"PostgreSQL on AWS RDS\", \"user-service API on gitlab.company.com/org/repo\" — or just \"none\")\n",
-            "5. What would a new contributor get wrong on day one? (traps, implicit rules, fragile areas)\n",
-            "6. Anything else the audit should know? (optional, keep it short)\n\n",
-            "STEP 2 — Check that the user answered questions 1-5. If some are missing, ask ONLY the unanswered ones before proceeding. Q6 is optional. ",
-            "Once you have answers 1-5 (or the user explicitly says 'skip' for some), write the file docs/briefing.md with THIS EXACT FORMAT:\n\n",
-            "# Project Briefing\n",
-            "> Auto-generated by AI briefing. Source: user answers (not code analysis).\n",
-            "## Purpose\n[answer Q1]\n",
-            "## Team\n[answer Q2]\n",
-            "## Maturity\n[answer Q3]\n",
-            "## External Dependencies\n[answer Q4 — if none, write \"None.\"]\n",
-            "## Traps & Fragile Areas\n[answer Q5 — bullet list if multiple]\n",
-            "## Additional Context\n[answer Q6 — if skipped, write \"None.\"]\n\n",
-            "Write docs/briefing.md IN ENGLISH even if the conversation is in another language.\n",
-            "If the user does not answer a question, write \"Not provided\" — do NOT invent ANYTHING.\n",
-            "Do NOT modify ANY other file.\n\n",
-            "STEP 3 — After writing the file, end your last message with: KRONN:BRIEFING_COMPLETE",
-        ).to_string(),
-        "es" => concat!(
-            "ROLE: Eres un asistente de briefing de proyecto.\n\n",
-            "REGLA ABSOLUTA: NO leas el codigo fuente, los archivos del proyecto, ni ningun archivo fuera de docs/. ",
-            "NO adivines NADA. Haces preguntas y usas UNICAMENTE las respuestas del usuario.\n\n",
-            "SI TIENES ACCESO AL SISTEMA DE ARCHIVOS: NO lo uses para esta tarea. ",
-            "Nada de ls, cat, read, glob, grep. La unica operacion de archivo permitida es la escritura final de docs/briefing.md.\n\n",
-            "NOTA: La stack tecnica sera auto-detectada durante la auditoria (desde package.json, Cargo.toml, etc.). No es necesario preguntar por ella.\n\n",
-            "PASO 1 — Haz las 6 preguntas siguientes EN UN SOLO MENSAJE, luego PARA. Espera las respuestas.\n\n",
-            "1. Que hace este proyecto? (una frase — que hace para sus usuarios)\n",
-            "2. Quien trabaja en el? (solo / equipo pequeno / equipo grande)\n",
-            "3. En que etapa esta? (prototipo, MVP, produccion, legacy, reescritura...)\n",
-            "4. Dependencias externas clave? Incluye nombres/URLs si es relevante. (ej: \"PostgreSQL en AWS RDS\", \"API user-service en gitlab.company.com/org/repo\" — o simplemente \"ninguna\")\n",
-            "5. Que haria mal un nuevo contributor el primer dia? (trampas, reglas implicitas, zonas fragiles)\n",
-            "6. Algo mas que la auditoria deberia saber? (opcional, breve)\n\n",
-            "PASO 2 — Verifica que el usuario respondio las preguntas 1-5. Si faltan algunas, pregunta SOLO las que faltan. La Q6 es opcional. ",
-            "Cuando tengas las respuestas 1-5 (o el usuario diga 'saltar'), escribe el archivo docs/briefing.md con ESTE FORMATO EXACTO:\n\n",
-            "# Project Briefing\n",
-            "> Auto-generated by AI briefing. Source: user answers (not code analysis).\n",
-            "## Purpose\n[respuesta Q1]\n",
-            "## Team\n[respuesta Q2]\n",
-            "## Maturity\n[respuesta Q3]\n",
-            "## External Dependencies\n[respuesta Q4 — si ninguna, escribir \"None.\"]\n",
-            "## Traps & Fragile Areas\n[respuesta Q5 — lista de puntos si hay varios]\n",
-            "## Additional Context\n[respuesta Q6 — si omitida, escribir \"None.\"]\n\n",
-            "Escribe docs/briefing.md EN INGLES aunque la conversacion sea en otro idioma.\n",
-            "Si el usuario no responde a una pregunta, escribe \"Not provided\" — NO inventes NADA.\n",
-            "NO modifiques NINGUN otro archivo.\n\n",
-            "PASO 3 — Despues de escribir el archivo, termina tu ultimo mensaje con: KRONN:BRIEFING_COMPLETE",
-        ).to_string(),
-        _ => concat!(
-            "ROLE: Tu es un assistant de briefing projet.\n\n",
-            "REGLE ABSOLUE: Tu ne lis PAS le code source, les fichiers du projet, ni aucun fichier en dehors de docs/. ",
-            "Tu ne devines RIEN. Tu poses des questions et tu utilises UNIQUEMENT les reponses de l'utilisateur.\n\n",
-            "SI TU AS ACCES AU SYSTEME DE FICHIERS: ne l'utilise PAS pour cette tache. ",
-            "Pas de ls, cat, read, glob, grep. La seule operation fichier autorisee est l'ecriture finale de docs/briefing.md.\n\n",
-            "NOTE: La stack technique sera auto-detectee pendant l'audit (depuis package.json, Cargo.toml, etc.). Inutile d'en parler ici.\n\n",
-            "ETAPE 1 — Pose les 6 questions suivantes EN UN SEUL MESSAGE, puis STOP. Attends les reponses.\n\n",
-            "1. Que fait ce projet ? (une phrase — ce qu'il fait pour ses utilisateurs)\n",
-            "2. Qui travaille dessus ? (solo / petite equipe / grosse equipe)\n",
-            "3. A quel stade en est-il ? (prototype, MVP, production, legacy, rewrite...)\n",
-            "4. Dependances externes cles ? Inclus les noms/URLs si pertinent. (ex: \"PostgreSQL sur AWS RDS\", \"API user-service sur gitlab.company.com/org/repo\" — ou juste \"aucune\")\n",
-            "5. Qu'est-ce qu'un nouveau contributeur ferait mal le premier jour ? (pieges, regles implicites, zones fragiles)\n",
-            "6. Autre chose que l'audit devrait savoir ? (optionnel, en bref)\n\n",
-            "ETAPE 2 — Verifie que l'utilisateur a repondu aux questions 1-5. S'il en manque, redemande UNIQUEMENT celles qui manquent. La Q6 est optionnelle. ",
-            "Une fois les reponses 1-5 obtenues (ou si l'utilisateur dit 'passer'), ecris le fichier docs/briefing.md avec CE FORMAT EXACT :\n\n",
-            "# Project Briefing\n",
-            "> Auto-generated by AI briefing. Source: user answers (not code analysis).\n",
-            "## Purpose\n[reponse Q1]\n",
-            "## Team\n[reponse Q2]\n",
-            "## Maturity\n[reponse Q3]\n",
-            "## External Dependencies\n[reponse Q4 — si aucune, ecrire \"None.\"]\n",
-            "## Traps & Fragile Areas\n[reponse Q5 — liste a puces si plusieurs]\n",
-            "## Additional Context\n[reponse Q6 — si omise, ecrire \"None.\"]\n\n",
-            "Ecris docs/briefing.md EN ANGLAIS meme si la conversation est en francais.\n",
-            "Si l'utilisateur ne repond pas a une question, ecris \"Not provided\" — n'invente RIEN.\n",
-            "Ne modifie AUCUN autre fichier.\n\n",
-            "ETAPE 3 — Apres avoir ecrit le fichier, termine ton dernier message par : KRONN:BRIEFING_COMPLETE",
-        ).to_string(),
+        "en" => include_str!("prompts/briefing-legacy-en.md").to_string(),
+        "es" => include_str!("prompts/briefing-legacy-es.md").to_string(),
+        _ => include_str!("prompts/briefing-legacy-fr.md").to_string(),
     }
 }
 
@@ -1203,6 +1198,84 @@ mod compute_audit_info_tests {
 
         let info = compute_audit_info_sync(dir.path().to_str().unwrap());
         assert_eq!(info.tech_debt_items.len(), 2);
+    }
+
+    // KT-949 — the seven sub-audits write their TDs into their own index;
+    // audit-info counts every active sheet, not only the central rows.
+    #[test]
+    fn tech_debt_items_count_every_sub_audit_sheet() {
+        let dir = tempdir().unwrap();
+        let docs = dir.path().join("docs");
+        let td = docs.join("tech-debt");
+        fs::create_dir_all(&td).unwrap();
+        fs::write(
+            docs.join("inconsistencies-tech-debt.md"),
+            "| ID | Problem | Area | Severity |\n|---|---|---|---|\n\
+             | TD-20261001-full | Full row | Backend | High |\n\
+             | TD-20261001-phantom | No sheet | Backend | High |\n",
+        )
+        .unwrap();
+        fs::write(
+            docs.join("inconsistencies-security.md"),
+            "| ID | Problem | Area | Severity |\n|---|---|---|---|\n\
+             | TD-20261002-sec | Secret row | Security | Critical |\n",
+        )
+        .unwrap();
+        fs::write(
+            docs.join("inconsistencies-rgaa.md"),
+            "| ID | Problem | Area | Severity |\n|---|---|---|---|\n\
+             | [TD-20261003-rgaa](tech-debt/TD-20261003-rgaa.md) | Alt row | A11y | Low |\n",
+        )
+        .unwrap();
+        fs::write(td.join("TD-20261001-full.md"), "x").unwrap();
+        fs::write(td.join("TD-20261002-sec.md"), "x").unwrap();
+        fs::write(
+            td.join("TD-20261003-rgaa.md"),
+            "---\ndescription: Images without alt\n---\n# TD-20261003-rgaa\n- **Severity**: Medium\n",
+        )
+        .unwrap();
+        fs::write(
+            td.join("TD-20261004-unlisted.md"),
+            "# TD-20261004-unlisted\n- **Area**: CI\n",
+        )
+        .unwrap();
+        fs::write(
+            td.join("TD-20261005-rejected.md"),
+            "# R\n- **Status**: Rejected\n",
+        )
+        .unwrap();
+        fs::write(td.join("_reconciliation-2026-10-05.md"), "# report\n").unwrap();
+
+        let info = compute_audit_info_sync(dir.path().to_str().unwrap());
+        let ids: Vec<&str> = info.tech_debt_items.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "TD-20261001-full",
+                "TD-20261002-sec",
+                "TD-20261003-rgaa",
+                "TD-20261004-unlisted",
+            ]
+        );
+        let sec = &info.tech_debt_items[1];
+        assert_eq!(
+            (
+                sec.problem.as_str(),
+                sec.area.as_str(),
+                sec.severity.as_str()
+            ),
+            ("Secret row", "Security", "Critical")
+        );
+        // The sheet wins over its index row.
+        let rgaa = &info.tech_debt_items[2];
+        assert_eq!(
+            (
+                rgaa.problem.as_str(),
+                rgaa.area.as_str(),
+                rgaa.severity.as_str()
+            ),
+            ("Images without alt", "A11y", "Medium")
+        );
     }
 
     // ── "filled" detector — no false negative on Twig / `${{ }}` / table-only docs ──
@@ -1435,7 +1508,7 @@ mod compute_audit_info_tests {
     }
 
     #[test]
-    fn protects_human_section_and_writes_report_from_shipped_template_fixture() {
+    fn a_human_section_rewrite_from_the_shipped_template_is_kept_and_marked() {
         let dir = tempdir().unwrap();
         let docs = dir.path().join("docs");
         fs::create_dir_all(&docs).unwrap();
@@ -1448,85 +1521,104 @@ mod compute_audit_info_tests {
             "{template}\n<!-- kronn:section name=\"team-notes\" curated=\"human\" owner=\"human\" -->\nOriginal human note.\n<!-- kronn:section:end -->\n"
         );
         fs::write(docs.join("AGENTS.md"), &pre).unwrap();
+        fs::write(docs.join("coding-rules.md"), "# Rules\nAI text.\n").unwrap();
+        let snapshot = capture_validated_docs(dir.path()).unwrap();
 
-        let coding_template = fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .unwrap()
-                .join("templates/docs/coding-rules.md"),
-        )
-        .unwrap();
-        let coding_pre = format!(
-            "{coding_template}\n<!-- kronn:section name=\"review-note\" owner=\"human\" -->\nKeep this review rule.\n<!-- kronn:section:end -->\n"
-        );
-        fs::write(docs.join("coding-rules.md"), &coding_pre).unwrap();
-        let snapshot = capture_human_owned_sections(dir.path()).unwrap();
-
-        fs::write(
-            docs.join("AGENTS.md"),
-            pre.replace("Original human note.", "Audit replacement."),
-        )
-        .unwrap();
+        let post = pre.replace("Original human note.", "Audit replacement.");
+        fs::write(docs.join("AGENTS.md"), &post).unwrap();
         fs::write(
             docs.join("coding-rules.md"),
-            coding_pre.replace("Keep this review rule.", "Rewrite this review rule."),
+            "# Rules\nAI text, refreshed.\n",
         )
         .unwrap();
-        let restored = protect_human_owned_sections(dir.path(), &snapshot, "2026-09-27").unwrap();
+        let marked = mark_validated_doc_writes(
+            dir.path(),
+            &snapshot,
+            crate::core::doc_provenance::DocWriter::FullAudit,
+        )
+        .unwrap();
 
-        assert_eq!(restored, 2);
-        let target = fs::read_to_string(docs.join("AGENTS.md")).unwrap();
-        assert!(target.contains("Original human note."));
-        assert!(!target.contains("Audit replacement."));
-        let coding = fs::read_to_string(docs.join("coding-rules.md")).unwrap();
-        assert!(coding.contains("Keep this review rule."));
-        assert!(!coding.contains("Rewrite this review rule."));
-        let report =
-            fs::read_to_string(docs.join("reports/2026-09-27-human-section-diff-docs-AGENTS.md"))
-                .unwrap();
-        assert!(report.contains("Original human note."));
-        assert!(report.contains("Audit replacement."));
-        assert!(docs
-            .join("reports/2026-09-27-human-section-diff-docs-coding-rules.md")
-            .is_file());
+        assert_eq!(marked, 2, "all preexisting text is tracked");
+        assert_eq!(fs::read_to_string(docs.join("AGENTS.md")).unwrap(), post);
+        assert!(!docs.join("reports").exists(), "no dated report any more");
+        let report = crate::core::doc_provenance::report(dir.path(), true).unwrap();
+        assert_eq!(report.to_reconfirm, 2);
+        let change = &report.docs[0].changes[0];
+        assert!(change
+            .before
+            .as_deref()
+            .unwrap()
+            .contains("Original human note."));
+        assert!(change
+            .after
+            .as_deref()
+            .unwrap()
+            .contains("Audit replacement."));
     }
 
-    /// KT-933: the on-disk restore catches the two ways an audit used to turn
-    /// a human section into an "example" without changing a byte of it —
-    /// fencing it, and documenting `section:end` inside it.
+    /// Fencing a human section turns it into an example: still a change to
+    /// reconfirm, not a silent loss.
     #[test]
-    fn protect_restores_a_fence_wrapped_human_section_and_one_with_a_quoted_closer() {
+    fn a_fence_wrapped_human_section_is_marked_to_reconfirm() {
         let dir = tempdir().unwrap();
         let docs = dir.path().join("docs");
         fs::create_dir_all(&docs).unwrap();
         let team = "<!-- kronn:section name=\"team\" owner=\"human\" -->\nKeep me live.\n<!-- kronn:section:end -->";
-        let howto = "<!-- kronn:section name=\"howto\" owner=\"human\" -->\nClose a section with:\n```\n<!-- kronn:section:end -->\n```\nRule after the example.\n<!-- kronn:section:end -->";
-        let pre = format!("# Doc\n{team}\n\n{howto}\n");
+        let pre = format!("# Doc\n{team}\n");
         fs::write(docs.join("AGENTS.md"), &pre).unwrap();
-        let snapshot = capture_human_owned_sections(dir.path()).unwrap();
-
-        // Audit: fences the first section, rewrites the rule after the example.
-        let post = pre
-            .replace(team, &format!("```\n{team}\n```"))
-            .replace("Rule after the example.", "Agent-made rule.");
+        let snapshot = capture_validated_docs(dir.path()).unwrap();
+        let post = pre.replace(team, &format!("```\n{team}\n```"));
         fs::write(docs.join("AGENTS.md"), &post).unwrap();
-        let restored = protect_human_owned_sections(dir.path(), &snapshot, "2026-10-01").unwrap();
+        let marked = mark_validated_doc_writes(
+            dir.path(),
+            &snapshot,
+            crate::core::doc_provenance::DocWriter::PartialAudit,
+        )
+        .unwrap();
+        assert_eq!(marked, 1);
+        assert_eq!(fs::read_to_string(docs.join("AGENTS.md")).unwrap(), post);
+        let doc = &crate::core::doc_provenance::report(dir.path(), true)
+            .unwrap()
+            .docs[0];
+        assert!(doc.changes[0].before.as_ref().unwrap().contains(team));
+        assert_eq!(doc.changes[0].after.as_deref(), Some(post.as_str()));
+    }
 
-        assert_eq!(restored, 2, "both sections are flagged");
-        let target = fs::read_to_string(docs.join("AGENTS.md")).unwrap();
-        assert!(
-            target.contains(howto),
-            "quoted-closer section restored whole"
-        );
-        assert!(!target.contains("Agent-made rule."));
-        assert!(
-            crate::api::audit::anti_hallu_enforce::enforce_human_owned_sections(&pre, &target)
-                .is_none(),
-            "every human section is live and intact again:\n{target}"
-        );
-        assert!(docs
-            .join("reports/2026-10-01-human-section-diff-docs-AGENTS.md")
-            .is_file());
+    #[test]
+    fn every_attempt_restores_briefing_rewrites_deletions_and_creations() {
+        for original in [Some("# Briefing\nNever delete customer data.\n"), None] {
+            for changed in [Some("# Briefing\nReplacement.\n"), None] {
+                if original == changed {
+                    continue;
+                }
+                let dir = tempdir().unwrap();
+                fs::create_dir_all(dir.path().join("docs")).unwrap();
+                let path = dir.path().join("docs/briefing.md");
+                if let Some(text) = original {
+                    fs::write(&path, text).unwrap();
+                }
+                let snapshot = capture_validated_docs(dir.path()).unwrap();
+                if let Some(text) = changed {
+                    fs::write(&path, text).unwrap();
+                } else {
+                    fs::remove_file(&path).unwrap();
+                }
+                let error = mark_validated_doc_writes(
+                    dir.path(),
+                    &snapshot,
+                    crate::core::doc_provenance::DocWriter::FullAudit,
+                )
+                .unwrap_err();
+                assert!(error.contains("protected briefing"), "{error}");
+                assert_eq!(fs::read_to_string(&path).ok().as_deref(), original);
+                assert!(mark_validated_doc_writes(
+                    dir.path(),
+                    &snapshot,
+                    crate::core::doc_provenance::DocWriter::FullAudit
+                )
+                .is_ok());
+            }
+        }
     }
 
     // ── check_ai_dir_permissions — defensive guard tests ────────────

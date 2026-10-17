@@ -16,6 +16,7 @@ pub mod bundle;
 pub mod compare;
 pub mod db;
 pub mod dependencies;
+pub mod discussion_scope;
 pub mod discussion_weight;
 pub mod discussions;
 pub mod external_api_connection;
@@ -167,6 +168,8 @@ pub enum ApiErrorCode {
     /// A model the request assigns was just refused by its provider; the
     /// caller may confirm to keep it anyway.
     UnreachableModel,
+    /// No audit starts without a briefing (KT-1192).
+    BriefingRequired,
 }
 
 impl ApiErrorCode {
@@ -177,6 +180,7 @@ impl ApiErrorCode {
             ApiErrorCode::Conflict => "conflict",
             ApiErrorCode::Internal => "internal",
             ApiErrorCode::UnreachableModel => "unreachable_model",
+            ApiErrorCode::BriefingRequired => "briefing_required",
         }
     }
 }

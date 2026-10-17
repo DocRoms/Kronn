@@ -20,7 +20,8 @@ This page is the operator workflow.
 3. Select a committed base SHA and preserve unrelated workspace changes. The
    child is pinned to that SHA; it never edits the parent checkout. Integration
    requires the selected target branch's checked-out worktree to be clean, not
-   every checkout of the project.
+   every checkout of the project; a target no worktree has checked out has
+   nothing to keep clean.
 4. Confirm that the chosen agent is installed and authenticated. HTTP agents
    such as Ollama, LiteLLM and NVIDIA can also be selected when configured.
 
@@ -134,9 +135,10 @@ without that tool asks the principal to relay it. This follows the accepted
 KT-635 brief policy, not a guarantee that every external host CLI obeys it.
 An unreviewed delivery never appears as an accepted report. After approval,
 Kronn derives one fixed-layout report; replay does not produce another.
-[src: file: backend/src/api/orchestration.rs:5494]
-[src: file: backend/src/api/orchestration.rs:15830]
-[src: file: backend/src/api/orchestration.rs:18430]
+[src: file: backend/src/api/orchestration.rs:8348-8352#has_room_publication]
+[src: file: backend/src/api/orchestration.rs:8396-8445#parent_milestones]
+[src: file: backend/src/api/orchestration.rs:7049-7073#publish_accepted_delivery_or_warn]
+[src: file: backend/src/api/orchestration.rs:30593-30694#approving_a_delivery_publishes_one_derived_report_in_the_parent]
 
 Native conversational handoffs are a separate opt-in from launching a planning
 task. Their paid/unknown allowance is configurable and shared by the originating
@@ -144,10 +146,11 @@ human turn. Removing that allowance explicitly does not remove structural
 guards: only attached, not-already-scheduled targets can run, delegation depth
 remains bounded and local handoffs retain a fixed ceiling. A typed wake to a
 joined CLI never silently substitutes a native responder.
-[src: file: backend/src/models/setup.rs:236]
-[src: file: backend/src/db/discussions.rs:1584]
-[src: file: backend/src/db/discussions.rs:1660]
-[src: file: backend/src/db/discussions.rs:1728]
+[src: file: backend/src/models/setup.rs:295-311#agent_handoff_paid_limit]
+[src: file: backend/src/db/discussions.rs:1684-1685#MAX_AGENT_HANDOFF_DEPTH]
+[src: file: backend/src/db/discussions.rs:1693-1728#agent_handoff_root]
+[src: file: backend/src/db/discussions.rs:1921-1961#cli_mention_targets]
+[src: file: backend/src/db/discussions.rs:2012-2055#already_scheduled]
 
 ### Highlight a message without changing the task
 
@@ -163,8 +166,9 @@ browser does not. If an outcome is uncertain, retry reconciles that exact
 attempt before another write. See [important messages](../architecture/important-messages.md#human-form-0130-kt-643)
 for the lifecycle and [publication authority](../architecture/important-message-publication-authority.md)
 for enrollment, recovery and security limits.
-[src: file: frontend/src/components/ImportantMessageForm.tsx:1]
-[src: file: frontend/src/lib/submitImportantMessage.ts:1]
+[src: file: frontend/src/components/ImportantMessageForm.tsx:87-110#onGrantChange]
+[src: file: frontend/src/lib/importantMessageDraft.ts:16-20#drafts]
+[src: file: frontend/src/lib/submitImportantMessage.ts:23-35#submitImportantMessage]
 
 ## Review and integrate
 
@@ -175,26 +179,60 @@ delivery manifest and diff, then choose one of:
   the delivered attempt and exact HEAD. Kronn then builds and validates that
   candidate in an ephemeral integration worktree. The selected target branch
   advances only by a guarded fast-forward after checking the expected target
-  SHA and clean worktree, with a backup ref. These checks followed by
-  `git merge --ff-only` are not an atomic compare-and-swap transaction.
-  [src: file: backend/src/core/worktree.rs:1419-1447]
+  SHA and clean worktree, with a backup ref. For a target checked out in a
+  worktree, these checks followed by `git merge --ff-only` are not an atomic
+  compare-and-swap transaction; a target no worktree has checked out advances
+  by a `git update-ref` compare-and-swap instead.
+  [src: file: backend/src/core/worktree.rs:2019-2047#write_backup_ref]
+  [src: file: backend/src/core/worktree.rs:2282-2302#fast_forward_target_to]
+  [src: file: backend/src/core/worktree.rs:2227-2279#update_ref_target_to]
 - **Request changes** — enter concrete feedback. The same worker, discussion,
   branch and worktree resume for the next bounded review round.
 
 Review-budget exhaustion escalates to the parent; it never converts a rejected
 candidate into an approval.
 
-Normal integration and restart recovery resolve the unique checked-out worktree
-of that pinned local target branch. A missing or ambiguous checkout, a changed
-target HEAD, or dirty target files stop the operation without switching or
-overwriting another checkout. Unrelated changes in the registered project's
+Normal integration and restart recovery resolve the shape of that pinned local
+target branch: checked out in exactly one worktree, or in none. Several
+checkouts, a target that is not a local branch, a changed target tip, or dirty
+files in the one checkout stop the operation without switching or overwriting
+another checkout. Unrelated changes in the registered project's
 main checkout do not block a clean target in another worktree. See
 [`pinned-target-worktree.md`](../testing/pinned-target-worktree.md).
+[src: file: backend/src/core/worktree.rs:2199-2206#integration_target]
 
 Worker-written DoD claims, a checked box in the live Planning task and a
 principal approval without attempt-scoped evidence are all insufficient. This
 keeps local workers useful without asking the model that produced the change to
 be its own quality gate.
+
+### A DoD item the principal checks live, after integration
+
+Some items cannot be proven before the code is integrated and running (a replay
+on a real input after a restart). Such an item is `verification:
+"post_integration"` — set on the task's `definition_of_done` with `task_update`
+while the execution is live, or, at review, with a `dod_verifications` entry
+`{dod_id, met: false, evidence, verification: "post_integration"}`. Only the
+principal of the task's execution, or a human, may set or remove it, and tick
+it: a worker's own session, an HTTP agent and an anonymous agent are refused.
+`task_create` cannot declare one for an agent, since a new task has no execution.
+
+- The worker still lists the item in its manifest, honestly `met: false`; the
+  manifest validation and the approve guard accept it unmet and need no
+  principal evidence for it. Every other DoD item keeps the rules above.
+- Approve integrates normally. The execution ends `Done`, but the plan task
+  stays `in_progress` with the item listed as `live_checks` on its summary.
+- The principal runs the check, then ticks it with `task_update_dod`
+  (`completed: true` and non-empty `evidence`). A bare tick is refused, as is
+  ticking it through a `definition_of_done` replace, and downgrading it to a
+  worker check in the same write that ticks it. The task closes on the last pending live check of an integrated execution.
+- Unticking a live check (by `task_update_dod` or an array replace, principal or
+  human only) clears its evidence, and a `done` task goes back to `in_progress`:
+  the proof is owed again and the stale one cannot re-tick it.
+- A discussion export carries each item's `verification` and `evidence`; the
+  import restores them as they were, without a principal session (its own
+  trusted door, never reachable from HTTP or MCP). A ticked live check whose
+  evidence is missing or unusable comes back pending, with a warning.
 
 ### What the accepted report says, and whose word it is
 
@@ -229,10 +267,86 @@ The limits worth knowing:
 - Nothing in this section is inferred. No metric, timestamp or verdict is
   derived from the worker's own claims.
 
+### A DoD item carried to another ticket
+
+An item that cannot be proven within this task (it needs lots that belong to
+another ticket) is carried, not moved by hand. The principal approves with a
+`dod_verifications` entry `{dod_id, met: false, evidence, carried_to: "KT-1290"}`.
+The carry is accepted only when the carrier is another task that exists, is
+not `done` or `archived`, shares a project with this task, and holds the
+requirement as an unticked DoD item with the same sentence (case and spacing
+aside). The sentence compared is the one the worker was briefed with: the
+execution records the `{id, sentence}` of its DoD items in its `created`
+event, and a `task_update` that removes an item records it (id and sentence)
+in the `removed_dod` of its `updated` event. The approve then integrates
+normally (validations, evidence, auto-tick of the other items); the item is
+detached from this task and a `dod_carried` event on the task names the
+carrier, the item's sentence and the principal's evidence. The detach runs in
+the review checkpoint's transaction, so a refused or failed approve detaches
+nothing. A carry that claims `met: true`, names itself, a missing or a closed
+task, a task of another project, or a task that does not hold the requirement
+is refused with that cause.
+
+The delivered manifest is judged against the execution's launch-time DoD
+snapshot, not against the task's current items: an id the principal removed or
+moved since the delivery is a known id, never "unknown". An item the task no
+longer holds that the manifest reports unmet still needs the explicit carry
+above; omitting it refuses the approve with that id.
+
+When no record names the sentence (an execution launched before the snapshot
+kept sentences, whose item was removed without a trace), the carry is refused
+instead of matching any open task: state the requirement on the carrier and
+restore the item on this task before carrying it.
+
+### The Definition of Done after an integration
+
+An approve that integrates ticks the DoD items it verified, in the same
+transaction that marks the task `done`. An item the principal named in
+`dod_verifications` carries the principal's evidence; one it did not name (a
+human approve supplies none) carries the worker's own `dod_status` evidence.
+The evidence is stored on the item (`evidence` on the DoD item) and shown with
+it. Only worker items are ticked this way: a `post_integration` live check
+(above) is never ticked by an integration, whatever the review said about it,
+because its evidence must come from the live check itself.
+
+A task does not reach `done` with an unticked worker DoD item. The one
+exception is the KT-1254 live check, which is not asked of the approve and keeps
+the task `in_progress` until the principal ticks it with evidence. There is a
+single model for it: the item's `verification` column, no sentence convention.
+
+The guard runs twice. BEFORE the integration touches the target, an item that
+neither the approve nor the delivery verified (one added between approve and
+integration, say) holds the approval as `IntegrationRefused`: the target does not
+move and no execution is left parked with its code already on it. The
+`Integrated` checkpoint then re-checks in the same transaction as the `done`
+move, and rolls back on a leftover.
+
+What a later manual write does to the evidence of a worker item:
+
+- `task_update_dod` with `completed: false` (or a definition-of-done replace that
+  unticks the item) drops it: the proof went with the tick.
+- Ticking again without `evidence` leaves a ticked item's evidence alone, and
+  ticks an unticked one with no evidence (a manual tick invents none).
+- Ticking with `evidence` replaces it; a replace that keeps the item ticked, in
+  the same mode, keeps it, and changing the mode drops it.
+
+Only the integration path enforces the guard; a task a human sets to `done` in
+the Planning page is not checked.
+
 ## Stop or reassign
 
-**Stop** cancels live dispatch and preserves the child branch/worktree for
-inspection. It does not force-delete local work.
+**Stop** cancels live dispatch and always keeps the child branch with its
+commits. What happens to the child worktree is the campaign's
+`cancellation_cleanup_policy`, which defaults to `remove_if_clean` [src: file: backend/src/api/orchestration.rs:9408]:
+a clean worktree is removed (its provenance is kept), while one with
+uncommitted work, or whose removal Git refuses, is preserved
+[src: file: backend/src/api/orchestration.rs:10846]. Set the policy to
+`preserve` to keep the worktree whatever its state. Stop does not force-delete
+local work. It never changes the task's
+status (KT-1267): an `in_progress` or `done` task stays so, because the work may
+already be integrated by hand and the principal decides. To run the task again,
+set it back to `todo` first (`task_update status=todo`); the launch preflight
+refuses any other status.
 
 **Reassign** is available only in resumable worker states. Choose another
 allowed agent/model; Kronn keeps the task, child discussion and Git lineage so
@@ -249,10 +363,10 @@ durable child discussion that the runtime will actually execute.
 | Validation failed | Open the child discussion, fix the reported command, deliver again. |
 | Target branch moved | Refresh/relaunch against the new target; Kronn will not overwrite it. |
 | Dirty target worktree | Intentionally preserve or commit changes in the selected target branch's checkout, then retry integration. Do not move unrelated files from another checkout. |
-| Target checkout missing or ambiguous | Restore exactly one checkout of the pinned local target branch before retrying; Kronn does not choose or switch a branch for you. |
+| Target checked out in several worktrees, or not a local branch | Leave at most one checkout of the pinned local target branch, and make sure the target is a branch, not a tag or SHA, before retrying; Kronn does not choose or switch a branch for you. |
 | Missing workspace | Restore/register the project workspace; do not edit execution rows manually. |
 | Interrupted after restart | Read the persisted reason, verify the worker/worktree, then use the guarded resume/reassign action. |
-| Initial CLI offer never accepted | Resume/reassign do not apply to `Blocked` from `Provisioning`. The principal may cancel with workspace preservation, verify the old execution is terminal, then select the exact available CLI and prepare a new execution for the same task. Launch only after a fresh launchable preflight confirms no active duplicate. Do not silently substitute a different CLI identity. |
+| Initial CLI offer never accepted | Resume/reassign do not apply to `Blocked` from `Provisioning`. The principal may cancel with workspace preservation, verify the old execution is terminal, set the task back to `todo` (`task_update status=todo`; the cancel keeps its status, usually `in_progress`, and the launch preflight refuses any other status), then select the exact available CLI and prepare a new execution for the same task. Launch only after a fresh launchable preflight confirms no active duplicate. Do not silently substitute a different CLI identity. |
 | Review budget exhausted | Decide in the parent discussion whether to expand scope, create a follow-up task or stop. |
 
 Do not repair orchestration by manually changing SQLite rows. The status,

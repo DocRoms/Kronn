@@ -2,7 +2,7 @@
 
 **Project:** Kronn — Self-hosted CLI + web UI for managing AI coding agents (Claude Code, Codex, Vibe, Gemini CLI, Kiro) across git repositories. Unified workflow engine for cron, multi-step pipelines, tracker-driven automation, source watches, and manual triggers.
 
-> **All files under `docs/` are in English by default.** Project documentation must be written in English.
+> **All files under `docs/` are in English by default.**
 > **ATTENTION — This is the reference file for all AI agents.**
 > Read this file first, then follow the context loading strategy below.
 > Do not read the other config files (.cursorrules, copilot-instructions, etc.) — they redirect here.
@@ -37,7 +37,7 @@ A human may also **decline**: settled, not pending. Never re-ask by republishing
 the key.
 See
 [`operations/mcp-servers/kronn-internal.md`](operations/mcp-servers/kronn-internal.md#human-arbitration-cards).
-`[src: file: backend/src/db/discussion_questions.rs:1]`
+`[src: file: backend/src/db/discussion_questions.rs:54-66#DiscussionQuestionState]`
 
 Use paths relative to the repo root.
 
@@ -57,14 +57,16 @@ You may NEVER state a non-trivial technical fact (file paths, function / API / c
 Attach a structured citation to every non-trivial assertion:
 
 - `[src: file: <path>:<line>]` — e.g. `[src: file: backend/src/lib.rs:440]`
-- `[src: file: <path>:<start-end>]` — line range
+- `[src: file: <path>:<start-end>#<symbol>]` — range; anchor on the symbol it names; a definition in the range must open it
 - `[src: url: <url>]` — external doc
 - `[src: user: <YYYY-MM-DD>: <ref>]` — human confirmation
 - `[src: commit: <sha>]` — git commit
 
-A citation pointing to a file/line that does not exist, or escaping the project root, is **rejected as fabricated**. A code comment is NOT authoritative — treat it as a hint to verify, never as the fact itself.
+A citation to a missing file/line or outside the project root (even absolute) is **rejected as fabricated**; in backticks a failure is only unverified. A code comment is a hint, never the fact.
 
-Full spec: [`docs/conventions/agents-md-format-v1.md`](conventions/agents-md-format-v1.md). **Honest by design**: `verified` means the citation *exists*, not that the claim is *true*.
+`cargo test docs_citations` fails on a `file:` citation in `docs/` (not `releases/`) or `backend/docs/` lacking a line, whose root-relative path or line is missing, or whose anchor left the range; fenced code and `<placeholder>`s are skipped.
+
+Spec: [`agents-md-format-v1.md`](conventions/agents-md-format-v1.md). **Honest by design**: `verified` means the citation *exists*, not that the claim is *true*.
 <!-- kronn:section:end -->
 
 ---
@@ -95,6 +97,7 @@ Full spec: [`docs/conventions/agents-md-format-v1.md`](conventions/agents-md-for
 | **HTTP model-provider transport** (LiteLLM / NVIDIA / Custom) | `docs/operations/http-transport.md`, `docs/design/adr-004-http-transport.md` |
 | **Media generation** (image / video — billable, read first) | `docs/architecture/media-generation.md` |
 | Token cost | `docs/operations/token-economy-0.9.6.md` |
+| Disk full / `target/wt-*` / purge | `docs/operations/disk-usage.md` |
 | Fix known issue | `docs/inconsistencies-tech-debt.md` |
 | Documentation history | `docs/release-notes-archive.md` |
 | Stack overview | `docs/stack.md` |
@@ -106,7 +109,6 @@ Full spec: [`docs/conventions/agents-md-format-v1.md`](conventions/agents-md-for
 | repo structure / code placement | `docs/repo-map.md` |
 | testing / quality | `docs/testing-quality.md` |
 | coding rules | `docs/coding-rules.md` |
-| known issues / tech debt | `docs/inconsistencies-tech-debt.md` |
 | Architecture decisions | `docs/decisions.md` |
 | term definitions / project jargon | `docs/glossary.md` |
 | dependency versions per layer | `docs/stack.md` |
@@ -126,9 +128,9 @@ Never load everything "just in case".
 - Do **not** edit `frontend/src/types/generated.ts` by hand — run `make typegen`.
 - Do **not** register two `.route()` calls with the same path in axum — chain methods: `.route("/path", get(h1).post(h2))`.
 - Do **not** forget `#[derive(PartialEq)]` on enums used in comparisons (`AgentType`, `MessageRole`).
-- Do **not** use the old axum 0.7 path-param syntax `:id` — axum 0.8 expects `{id}`. Failure to migrate means the route panics on registration.
+- Do **not** use the old axum 0.7 path-param syntax `:id` — axum 0.8 expects `{id}`; the old form panics on registration.
 - Do **not** wrap an extractor in `Option<Query<…>>` or `Option<ConnectInfo<…>>` — axum 0.8 dropped `OptionalFromRequestParts` for those. Use the concrete extractor with a sentinel default (`Query<…>` with `page=0` "no pagination") or wrap via `Option<Extension<…>>`.
-- Do **not** slice `&str` with a hard-coded byte index (`&s[..N]`) when truncating user/agent text — UTF-8 (French, emoji, accented filenames) panics at non-boundary bytes. Use `s.chars().take(N).collect::<String>()` instead. Pattern documented in `feedback_rust_str_slicing` memory.
+- Do **not** slice `&str` with a hard-coded byte index (`&s[..N]`) when truncating user/agent text — UTF-8 (French, emoji, accented filenames) panics at non-boundary bytes. Use `s.chars().take(N).collect::<String>()` instead.
 - Do **not** rely on `disabled={state}` alone to gate an async button handler — React's state update is async, so two synchronous clicks read the stale closure and fire two API calls. Use `useRef` + check at top of handler. Helper: `useAsyncGuard` in `frontend/src/hooks/useAsyncGuard.ts`.
 - Do **not** nest a `<button>` inside another `<button>` — invalid HTML and produces a React dev warning. Convert the outer to `<div role="button" tabIndex={0}>` with explicit `onKeyDown` for Enter/Space.
 ---
@@ -136,12 +138,12 @@ Never load everything "just in case".
 ## 4. Development constraints
 
 - **Docker-first**: the full app runs via `docker compose`. Backend, frontend, and gateway are separate services.
-- **Quality is mandatory**: `cargo clippy -- -D warnings` must pass. Frontend: `npx tsc --noEmit` + `pnpm test`. Shell: `make test-shell`. E2E: `pnpm test:e2e` (Playwright; backend must be running, Vite is auto-spawned). The `frontend/e2e/` tree has its own README — fixtures + page objects + 35+ specs covering the smoke surface, the wizard, the guided tour, MCP host-discovery, and the QP launch double-click race.
+- **Quality is mandatory**: `cargo clippy -- -D warnings` must pass. Frontend: `npx tsc --noEmit` + `pnpm test`. Shell: `make test-shell`. E2E: `pnpm test:e2e` (Playwright; backend must be running, Vite is auto-spawned). Fixtures, page objects and specs: `frontend/e2e/README.md`.
 - **Release versions are mechanically synchronized**: use `make bump V=x.y.z`,
   then `make check-version` before tagging. The guard compares `VERSION`, app
   manifests and lockfiles, the first changelog release, both READMEs (including
   clone commands), and the FR/EN/ES public site; CI runs the same check.
-  `[src: file: Makefile:417-460]`
+  `[src: file: Makefile:541-589#bump]`
   `[src: file: scripts/check-version-sync.sh:1-106]`
 - **Type generation**: Rust models are the source of truth. TypeScript types are auto-generated via `ts-rs`.
 - If stdout/stderr is missing: ask the user to copy/paste the full output.
@@ -171,7 +173,7 @@ Never load everything "just in case".
 
 ## 5. Source of truth
 
-- Project documentation: `docs/AGENTS.md` (this file) + `~/.kronn/user-context/` for personal/role-specific overrides. The legacy `ai/` directory was migrated to `docs/` in 0.7.1 (kept here as historical note; tooling no longer reads from `ai/`).
+- Project documentation: `docs/AGENTS.md` (this file) + `~/.kronn/user-context/` for personal/role-specific overrides. The legacy `ai/` directory was migrated to `docs/` in 0.7.1; nothing reads `ai/`.
 - Rust data models: `backend/src/models/mod.rs`.
 - TypeScript types: `frontend/src/types/generated.ts` (auto-generated from Rust).
 - API routes: `backend/src/lib.rs` (router definition in `build_router()`).

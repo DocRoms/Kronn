@@ -5,7 +5,7 @@ the configured LiteLLM proxy and `qwen3.8:27b-mlx` through Ollama. Both test
 processes exited successfully. This removes the previously observed network
 obstacle to a live LiteLLM check; it does not establish a general model success
 rate or repeat the unavailable historical `automations_probe.py` campaign.
-[src: file: docs/research/native-qp-litellm-ollama-2026-09-22.json]
+[src: file: docs/research/native-qp-litellm-ollama-2026-09-22.json:5-507]
 
 ## Method and provenance
 
@@ -16,7 +16,8 @@ LiteLLM ran first, 15:08:26–15:09:08 UTC; Ollama followed,
 15:09:27–15:10:46 UTC. The shipping full catalogue was selected explicitly.
 `KRONN_OLLAMA_NUM_CTX_CAP=24576` applied to the Ollama run. No compilation or
 second model campaign was launched during these two sequential runs.
-[src: file: docs/research/native-qp-litellm-ollama-2026-09-22.json]
+[src: file: docs/research/native-qp-litellm-ollama-2026-09-22.json:7-26]
+[src: file: docs/research/native-qp-litellm-ollama-2026-09-22.json:252-271]
 
 The native runner used the real `KronnToolExecutor`, isolated in-memory SQLite
 fixtures and a temporary workspace. Scenarios list Quick Prompts, enqueue one
@@ -27,7 +28,8 @@ prose. Quick Prompt and media dispatch workers remain stopped: those two cells
 prove the queued job, not child inference or image generation. Provider
 credentials are read through the existing runner configuration and are absent
 from the retained reports.
-[src: file: backend/src/api/agent_quick_prompt_bench.rs]
+[src: file: backend/src/api/agent_quick_prompt_bench.rs:139-164#campaign_state]
+[src: file: backend/src/api/agent_quick_prompt_bench.rs:269-378#bench_quick_prompt_native_catalogue]
 
 Reproduce from the measured commit, using an existing configured provider:
 
@@ -54,7 +56,7 @@ is total prompt tokens divided by observed turns. It is neither the incremental
 cost of the QP declarations nor a monetary charge. Output tokens, cache discounts
 and billed currency are not reported by this benchmark. Tokenizers differ;
 these numbers do not justify a price or efficiency ranking between providers.
-[src: file: backend/src/api/agent_quick_prompt_bench.rs]
+[src: file: backend/src/api/agent_quick_prompt_bench.rs:344-359]
 
 | Provider / model | Passed | Turns | Total input tokens | Mean input tokens/turn |
 |---|---:|---:|---:|---:|
@@ -82,7 +84,7 @@ All per-cell values, calls, arguments, emitted text and persistence checks are
 retained in the adjacent JSON. Original logs, individual JSON reports and
 metadata are also attached to room message
 `68cdb507-ab5b-44fa-96c6-6638552c50f8`.
-[src: file: docs/research/native-qp-litellm-ollama-2026-09-22.json]
+[src: file: docs/research/native-qp-litellm-ollama-2026-09-22.json:4-507]
 
 ## Historical reference and limits
 
@@ -101,13 +103,17 @@ previous six-model campaign and its failures remain evidence in their own
 right. The full catalogue was used here; progressive loading was not retested.
 No downstream provider override or saved-QP settings propagation is proved by
 these job-only cells; those contracts have separate regression tests.
-[src: file: docs/research/native-tool-catalogue-2026-09-22.md]
-[src: file: backend/src/api/agent_quick_prompt_tests.rs]
+[src: file: docs/research/native-tool-catalogue-2026-09-22.md:41-57]
+[src: file: backend/src/api/agent_quick_prompt_tests.rs:239-286]
+[src: file: backend/src/api/agent_quick_prompt_tests.rs:470-549]
 
 Before the VPN restart, DNS failed in both sandboxed and host-side probes.
 After Romuald restarted the VPN, the same configured endpoint answered HTTP 200
 and the real campaign above passed. No application setting was rewritten. A
 separate observation, named-connection `reachable: true` without a live probe,
-is recorded as follow-up KT-697 and was not changed in this lot.
+was recorded as follow-up KT-697 and was not changed in this lot. KT-697 has
+since landed: a named connection is probed over the network, and an address
+that does not resolve is reported unreachable.
 [src: user: 2026-09-22: litellm-live-access-20260922]
-[src: file: backend/src/api/orchestration.rs:8420]
+[src: file: backend/src/core/endpoint_reachability.rs:1-7]
+[src: file: backend/src/api/orchestration.rs:15400-15431#a_named_connection_failing_dns_is_unreachable_like_the_legacy_family]

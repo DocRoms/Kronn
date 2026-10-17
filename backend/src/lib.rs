@@ -42,20 +42,39 @@ pub use crate::models::AppConfig;
 pub use crate::workflows::WorkflowEngine;
 
 /// Loads the config (defaults when none is saved) and arms the process-wide
-/// timezone from it. Every entry point (standalone, desktop) loads its config
-/// through this, so no scheduler tick or preview runs in the wrong zone.
+/// timezone and anti-hallucination mode from it. Every entry point (standalone,
+/// desktop) loads its config through this, so no scheduler tick or preview runs
+/// in the wrong zone and the first agent run already honours the saved mode.
 pub async fn load_startup_config() -> anyhow::Result<AppConfig> {
-    load_startup_config_with(crate::core::timezone::detect_machine_timezone).await
+    load_startup_config_with(
+        crate::core::timezone::detect_machine_timezone,
+        crate::core::anti_halluc::set_mode,
+    )
+    .await
 }
 
+/// Arm every project's AI doc folder override from the database (KT-263).
+/// Both entry points call it once the database is open.
+pub async fn arm_docs_locations(database: &Arc<Database>) -> anyhow::Result<()> {
+    let rows = database
+        .with_read_conn(crate::db::projects::list_docs_dir_overrides)
+        .await?;
+    crate::core::docs_location::load_project_overrides(rows);
+    Ok(())
+}
+
+// `arm_mode` is injected so tests observe the arming without touching the
+// process-global mode that many other tests set.
 async fn load_startup_config_with(
     detect: impl FnOnce() -> chrono_tz::Tz,
+    arm_mode: impl FnOnce(&str),
 ) -> anyhow::Result<AppConfig> {
     let config = match crate::core::config::load().await? {
         Some(cfg) => cfg,
         None => crate::core::config::default_config_without_key(),
     };
     crate::core::timezone::apply_with(config.server.timezone.as_deref(), detect());
+    arm_mode(&config.server.anti_hallucination_mode);
     Ok(config)
 }
 
@@ -195,6 +214,20 @@ pub async fn bootstrap_external_api_connections(
 /// Default maximum concurrent agent processes.
 pub const DEFAULT_MAX_CONCURRENT_AGENTS: usize = 5;
 
+/// Worker stack size. In a debug build one nested workflow run costs about
+/// 1 MiB of stack, so a foreach child overflowed the 2 MiB default (KT-1161).
+pub const RUNTIME_THREAD_STACK_SIZE: usize = 8 << 20;
+
+/// The multi-threaded runtime the backend runs on, shared by the server and
+/// desktop entry points so both get the same worker configuration.
+pub fn runtime_builder() -> tokio::runtime::Builder {
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder
+        .enable_all()
+        .thread_stack_size(RUNTIME_THREAD_STACK_SIZE);
+    builder
+}
+
 /// Tracks running audit processes so they can be cancelled AND inspected.
 ///
 /// `progress` is the data source for `GET /api/projects/:id/audit-status` —
@@ -225,6 +258,10 @@ pub struct AuditTracker {
     /// idle, then both insert a Running row). Released by the run's
     /// drop-guard when it ends — normally, on cancel, or on abandonment.
     pub leased: HashSet<String>,
+    /// Leases whose run could not be settled (the drop guard's database write
+    /// failed): kept fail-closed, and named so the UI offers the cleanup that
+    /// releases them (KT-1134).
+    pub orphaned_leases: HashSet<String>,
 }
 
 impl AuditTracker {
@@ -238,6 +275,12 @@ impl AuditTracker {
     /// Release a project's audit lease. Idempotent.
     pub fn release_lease(&mut self, project_id: &str) {
         self.leased.remove(project_id);
+        self.orphaned_leases.remove(project_id);
+    }
+
+    /// Whether the project's lease is held by a run nobody can settle.
+    pub fn lease_orphaned(&self, project_id: &str) -> bool {
+        self.leased.contains(project_id) && self.orphaned_leases.contains(project_id)
     }
 
     /// Seed progress when an audit stream starts. Called from the `start`
@@ -515,16 +558,18 @@ impl AppState {
             .map(|config| (config.server.p2p_enabled, config.encryption_secret.clone()))
             .unwrap_or((false, None));
         db.assistant_guard().set_key(key);
+        let ws_broadcast = Arc::new(ws_tx);
+        let live_runs: Arc<crate::agents::run_progress::LiveRuns> = Arc::default();
         Self {
             p2p: Arc::new(P2pGate::new(p2p_enabled)),
             config,
             db,
             agent_semaphore: Arc::new(Semaphore::new(max_agents)),
             audit_tracker: Arc::new(Mutex::new(AuditTracker::default())),
-            ws_broadcast: Arc::new(ws_tx),
+            ws_broadcast: ws_broadcast.clone(),
             cancel_registry: Arc::new(Mutex::new(HashMap::new())),
             agent_runtime_registry: Arc::new(Mutex::new(HashSet::new())),
-            live_runs: Arc::default(),
+            live_runs: live_runs.clone(),
             execution_resumes: Arc::new(Mutex::new(HashSet::new())),
             oauth2_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             dependency_update_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -534,7 +579,9 @@ impl AppState {
             ollama_base_url_override: None,
             ollama_registry_override: None,
             data_dir_lock: None,
-            workflow_step_rooms: Arc::default(),
+            workflow_step_rooms: Arc::new(
+                crate::workflows::step_room::WorkflowStepRooms::publishing(ws_broadcast, live_runs),
+            ),
         }
     }
 
@@ -1022,7 +1069,42 @@ async fn bridge_gate(
             "this launch has no discussion, run or project: its bridge token reads catalogues only",
         );
     }
-    let (body, json) = match bridge_token::prepare_body(route, project.as_deref(), json.as_ref()) {
+    // The room grants (KT-1270), re-read on every call: a revoke applies to
+    // the next request, and a failed read refuses rather than guessing.
+    let reach = if project.is_some() {
+        let owned = grant.scope.room_grant_discussions.clone();
+        let run = grant.scope.workflow_run_id.clone();
+        match state
+            .db
+            .with_read_conn(move |conn| {
+                // A room's own agents reach its grants; a run's steps reach their
+                // workflow's validated scope; nothing else widens a token.
+                let mut granted = crate::db::discussion_scope::granted_projects(conn, &owned)?;
+                if let Some(run) = run {
+                    granted.merge(crate::db::discussion_scope::run_granted_projects(
+                        conn, &run,
+                    )?);
+                }
+                Ok(granted)
+            })
+            .await
+        {
+            Ok(granted) => bridge_token::Reach {
+                bound: project.clone(),
+                granted,
+            },
+            Err(error) => {
+                tracing::warn!(target: "kronn::bridge_token", token = %grant.id, "grant lookup failed: {error}");
+                return bridge_refusal(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "bridge scope check failed",
+                );
+            }
+        }
+    } else {
+        bridge_token::Reach::bound_only(None)
+    };
+    let (body, json) = match bridge_token::prepare_body_in(route, &reach, json.as_ref()) {
         Ok(Some(prepared)) => match serde_json::to_vec(&prepared) {
             Ok(bytes) => (axum::body::Body::from(bytes), Some(prepared)),
             Err(_) => return bridge_refusal(StatusCode::BAD_REQUEST, "invalid JSON body"),
@@ -1040,7 +1122,7 @@ async fn bridge_gate(
         Err(refusal) => return bridge_refusal(StatusCode::FORBIDDEN, &refusal.0),
     };
     let checked = grant.clone();
-    let bound = project.clone();
+    let gate_reach = reach.clone();
     let gate_query = query.clone();
     let decision = state
         .db
@@ -1054,7 +1136,7 @@ async fn bridge_gate(
             )?);
             let ids = bridge_token::canonical_ids(conn, ids)?;
             Ok(
-                bridge_token::authorize(&checked, route, bound.as_deref(), &ids, |kind, id| {
+                bridge_token::authorize_in(&checked, route, &gate_reach, &ids, |kind, id| {
                     bridge_token::residence(conn, kind, id).map_err(|error| {
                         bridge_token::Refusal(format!("scope lookup failed: {error}"))
                     })
@@ -1091,7 +1173,7 @@ async fn bridge_gate(
         .run(axum::extract::Request::from_parts(parts, body))
         .await;
     if bridge_token::scopes_response(route) && response.status().is_success() {
-        return scope_bridge_response(state, route, grant, project, response).await;
+        return scope_bridge_response(state, route, grant, reach, response).await;
     }
     response
 }
@@ -1104,7 +1186,7 @@ async fn scope_bridge_response(
     state: &AppState,
     route: &'static crate::core::bridge_token::BridgeRoute,
     grant: std::sync::Arc<crate::core::bridge_token::BridgeGrant>,
-    project: Option<String>,
+    reach: crate::core::bridge_token::Reach,
     response: axum::response::Response,
 ) -> axum::response::Response {
     use crate::core::bridge_token;
@@ -1154,8 +1236,7 @@ async fn scope_bridge_response(
     // An export is a bundle: one dependency the token may not see refuses it
     // whole rather than leaving a bundle that imports half a workflow.
     let whole = bridge_token::scoped_whole_or_refused(route).then(|| data.clone());
-    if let Err(refusal) =
-        bridge_token::scope_response(route, data, &grant, project.as_deref(), &residences)
+    if let Err(refusal) = bridge_token::scope_response_in(route, data, &grant, &reach, &residences)
     {
         return bridge_refusal(StatusCode::FORBIDDEN, &refusal.0);
     }
@@ -1594,6 +1675,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             get(api::setup::get_scan_ignore).post(api::setup::set_scan_ignore),
         )
         .route(
+            "/api/config/default-docs-dir",
+            get(api::setup::get_default_docs_dir).post(api::setup::save_default_docs_dir),
+        )
+        .route(
             "/api/config/scan-depth",
             get(api::setup::get_scan_depth).post(api::setup::set_scan_depth),
         )
@@ -1670,6 +1755,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             post(api::planning::link_discussion).delete(api::planning::unlink_discussion),
         )
         .route(
+            "/api/planning/tasks/{id}/assignees",
+            post(api::planning::assign_task).delete(api::planning::unassign_task),
+        )
+        .route(
             "/api/planning/tasks/{id}/blockers",
             post(api::planning::add_blocker),
         )
@@ -1713,6 +1802,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // tell (referenced native skills, skills Kronn published).
         .route("/api/projects/used-skills", get(api::projects::used_skills))
         .route("/api/projects/{id}", get(api::projects::get))
+        .route(
+            "/api/projects/{id}/docs-location",
+            get(api::projects::docs_location::get).put(api::projects::docs_location::set),
+        )
         .route(
             "/api/projects/{id}/agent-files",
             get(api::projects::agent_files::get).put(api::projects::agent_files::set),
@@ -1785,6 +1878,27 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/projects/{id}/install-template",
             post(api::projects::install_template),
         )
+        .route(
+            "/api/projects/{id}/template-reinstall/plan",
+            get(api::projects::template_reinstall::template_reinstall_plan),
+        )
+        .route(
+            "/api/projects/{id}/template-reinstall",
+            post(api::projects::template_reinstall::template_reinstall),
+        )
+        .route(
+            "/api/projects/{id}/template-merge",
+            post(api::projects::template_merge::template_merge_start)
+                .delete(api::projects::template_merge::template_merge_discard),
+        )
+        .route(
+            "/api/projects/{id}/template-merge/plan",
+            get(api::projects::template_merge::template_merge_plan),
+        )
+        .route(
+            "/api/projects/{id}/template-merge/accept",
+            post(api::projects::template_merge::template_merge_accept),
+        )
         // 0.8.7 anti-hallu migration : inject the canonical section into
         // pre-existing projects + re-sync redirectors. Both idempotent.
         .route(
@@ -1802,12 +1916,48 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/projects/{id}/audit-info", get(api::audit::audit_info))
         .route("/api/projects/{id}/drift", get(api::audit::check_drift))
         .route(
+            "/api/projects/{id}/drift/acknowledge",
+            post(api::audit::acknowledge_drift),
+        )
+        .route(
+            "/api/projects/{id}/citation-drift",
+            get(api::audit::citation_drift),
+        )
+        .route(
+            "/api/projects/{id}/citation-drift/acknowledge",
+            post(api::audit::acknowledge_citations),
+        )
+        .route(
+            "/api/projects/{id}/doc-provenance",
+            get(api::audit::doc_provenance_report),
+        )
+        .route(
+            "/api/projects/{id}/doc-provenance/confirm",
+            post(api::audit::confirm_doc_provenance),
+        )
+        .route(
             "/api/projects/{id}/partial-audit",
-            post(api::audit::partial_audit),
+            post(api::audit::briefing_cards::partial_audit_route),
+        )
+        .route(
+            "/api/projects/{id}/revalidation",
+            get(api::audit::revalidation_plan),
+        )
+        .route(
+            "/api/projects/{id}/revalidate-audit",
+            post(api::audit::briefing_cards::revalidate_audit_route),
         )
         .route(
             "/api/projects/{id}/validate-audit",
             post(api::audit::validate_audit),
+        )
+        .route(
+            "/api/projects/{id}/validation-state",
+            get(api::audit::get_validation_state),
+        )
+        .route(
+            "/api/projects/{id}/audit-repo-state",
+            get(api::audit::run_state::get_repo_audit_state),
         )
         .route(
             "/api/projects/{id}/mark-bootstrapped",
@@ -1815,7 +1965,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         .route(
             "/api/projects/{id}/full-audit",
-            post(api::audit::full_audit),
+            post(api::audit::briefing_cards::full_audit_route),
         )
         .route(
             "/api/projects/{id}/cancel-audit",
@@ -1852,6 +2002,16 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/audit-runs/{run_id}/steps",
             get(api::audit::audit_run_steps),
+        )
+        .route(
+            "/api/audit-runs/{run_id}/cost",
+            get(api::audit::audit_run_cost),
+        )
+        // KT-1131 — a human accepts a failed step as it stands. Kept off the
+        // bridge route list: an agent's token is refused.
+        .route(
+            "/api/projects/{id}/audit-runs/{run_id}/steps/{step}/accept",
+            post(api::audit::accept_audit_step),
         )
         // 0.8.4 (#317 / B1) — admin: force-clear all `Running` audit_runs.
         // The boot hook handles the 30-min threshold automatically; this
@@ -1923,9 +2083,36 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/projects/{id}/linked-repos/candidates",
             get(api::projects::linked_repos_candidates),
         )
+        // KT-999 — which AI doc each linked repo has, for the drawer badges.
+        .route(
+            "/api/projects/{id}/linked-repos/docs",
+            get(api::projects::linked_repos_docs),
+        )
+        // KT-999 — documentation locations for the briefing form.
+        .route(
+            "/api/projects/{id}/briefing/docs",
+            get(api::audit::detect_briefing_docs),
+        )
+        .route(
+            "/api/projects/{id}/briefing/docs/check",
+            post(api::audit::check_briefing_doc),
+        )
+        // KT-1196 — the saved briefing as answers, to pre-fill the form.
+        .route(
+            "/api/projects/{id}/briefing/answers",
+            get(api::audit::get_saved_briefing),
+        )
         .route(
             "/api/projects/{id}/briefing",
             get(api::audit::get_briefing).put(api::audit::set_briefing),
+        )
+        .route(
+            "/api/projects/{id}/briefing-status",
+            get(api::audit::briefing_cards::briefing_status),
+        )
+        .route(
+            "/api/projects/{id}/briefing-defaults",
+            get(api::audit::get_briefing_defaults),
         )
         .route(
             "/api/projects/{id}/start-briefing",
@@ -1937,6 +2124,27 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/projects/{id}/save-briefing",
             post(api::audit::save_briefing_form),
+        )
+        .route(
+            "/api/projects/{id}/audit/td-tasks",
+            post(api::audit::convert_td_tasks),
+        )
+        .route("/api/projects/{id}/audit/tds", get(api::audit::list_tds))
+        .route(
+            "/api/projects/{id}/audit/tds/decide",
+            post(api::audit::decide_tds),
+        )
+        .route(
+            "/api/projects/{id}/audit/tds/{td_id}/task",
+            post(api::audit::create_td_task),
+        )
+        .route(
+            "/api/projects/{id}/audit/tds/{td_id}/talk",
+            get(api::audit::td_talk).post(api::audit::start_td_talk),
+        )
+        .route(
+            "/api/projects/{id}/audit/cross-estimate",
+            get(api::audit::cross_audit_estimate),
         )
         .route(
             "/api/projects/{id}/ai-files",
@@ -2042,6 +2250,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/agents/uninstall", post(api::agents::uninstall))
         .route("/api/agents/toggle", post(api::agents::toggle))
         .route("/api/agents/readiness", post(api::agents::readiness))
+        .route("/api/agents/reachability", post(api::agents::reachability))
         // ── Dynamic model catalogs (KT-531) ──
         .route("/api/model-catalogs", get(api::model_catalog::list))
         .route(
@@ -2598,6 +2807,39 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             post(api::human_credentials::issue_proof),
         )
         .route(
+            "/api/discussions/{id}/scope",
+            get(api::discussion_scope::get_scope),
+        )
+        .route(
+            "/api/workflows/{id}/scope",
+            get(api::discussion_scope::get_workflow_scope)
+                .put(api::discussion_scope::set_workflow_scope),
+        )
+        .route(
+            "/api/workflows/{id}/scope/revoke",
+            post(api::discussion_scope::revoke_workflow_scope),
+        )
+        .route(
+            "/api/discussions/{id}/scope/grants",
+            post(api::discussion_scope::grant),
+        )
+        .route(
+            "/api/discussions/{id}/scope/grants/{grant_id}/revoke",
+            post(api::discussion_scope::revoke),
+        )
+        .route(
+            "/api/discussions/{id}/scope/requests",
+            post(api::discussion_scope::file_request),
+        )
+        .route(
+            "/api/discussions/{id}/scope/requests/{request_id}/approve",
+            post(api::discussion_scope::approve),
+        )
+        .route(
+            "/api/discussions/{id}/scope/requests/{request_id}/decline",
+            post(api::discussion_scope::decline),
+        )
+        .route(
             "/api/discussions/{id}/questions",
             get(api::discussion_questions::list),
         )
@@ -2882,6 +3124,23 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/maintenance/build-artifacts/reclaim",
             post(api::maintenance::reclaim_build_artifacts),
+        )
+        // KT-1256 — the same asymmetry for `target/wt-*`: a dry run that lists
+        // what is Kronn's and what is not, and a reclaim of named lanes only.
+        .route(
+            "/api/maintenance/lane-targets",
+            get(api::maintenance::list_lane_targets),
+        )
+        .route(
+            "/api/maintenance/lane-targets/reclaim",
+            post(api::maintenance::reclaim_lane_targets),
+        )
+        // KT-1318 — the disk view (free space, Kronn's usage by kind / task)
+        // and its purge (orphans by default; named entries need `confirm`).
+        .route("/api/maintenance/disk", get(api::disk::get_disk_report))
+        .route(
+            "/api/maintenance/disk/purge",
+            post(api::disk::post_disk_purge),
         )
         // ── Orchestration (KT-328) — reachable launch + CLI-worker accept surface.
         // Without these the control offer names a tool that resolves to nothing.
@@ -3717,12 +3976,48 @@ mod startup_config_tests {
         let previous = fresh_config_dir("empty");
         crate::core::timezone::apply_with(None, Tz::UTC);
 
-        let loaded = load_startup_config_with(|| Tz::Etc__UCT).await.unwrap();
+        let loaded = load_startup_config_with(|| Tz::Etc__UCT, |_| {})
+            .await
+            .unwrap();
         let (zone, preview) = (crate::core::timezone::current(), preview_zone());
         restore(previous);
         assert_eq!(loaded.server.timezone, None);
         assert_eq!(zone, Tz::Etc__UCT);
         assert_eq!(preview, "Etc/UCT");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn startup_arms_the_saved_anti_hallucination_mode() {
+        let previous = fresh_config_dir("antihalluc");
+        let mut cfg = crate::core::config::default_config();
+        cfg.server.anti_hallucination_mode = "enforce".into();
+        crate::core::config::save(&cfg).await.unwrap();
+
+        let mut armed = None;
+        let loaded = load_startup_config_with(|| Tz::UTC, |mode| armed = Some(mode.to_string()))
+            .await
+            .unwrap();
+        restore(previous);
+        assert_eq!(loaded.server.anti_hallucination_mode, "enforce");
+        assert_eq!(armed.as_deref(), Some("enforce"));
+    }
+
+    #[test]
+    fn the_public_startup_arms_the_real_mode_flag_and_no_entry_point_does_it_alone() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let lib = std::fs::read_to_string(root.join("backend/src/lib.rs")).unwrap();
+        assert!(
+            lib.contains("crate::core::anti_halluc::set_mode,\n    )\n    .await"),
+            "load_startup_config must arm the real anti-hallucination flag"
+        );
+        for entry in ["backend/src/main.rs", "desktop/src-tauri/src/main.rs"] {
+            let source = std::fs::read_to_string(root.join(entry)).unwrap();
+            assert!(
+                !source.contains("anti_halluc::set_mode"),
+                "{entry} arms the mode itself: it belongs to the shared startup"
+            );
+        }
     }
 
     #[test]
@@ -3739,5 +4034,41 @@ mod startup_config_tests {
                 "{entry} loads its config directly and skips the timezone"
             );
         }
+    }
+
+    #[test]
+    fn every_entry_point_arms_the_project_docs_locations() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        for entry in ["backend/src/main.rs", "desktop/src-tauri/src/main.rs"] {
+            let source = std::fs::read_to_string(root.join(entry)).unwrap();
+            assert!(
+                source.contains("kronn::arm_docs_locations(&database).await?"),
+                "{entry} must arm the AI doc folder overrides at startup"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn arming_reads_the_saved_overrides_from_the_database() {
+        let repo = tempfile::tempdir().unwrap();
+        let path = repo.path().join("p").to_string_lossy().into_owned();
+        std::fs::create_dir_all(&path).unwrap();
+        let database = Arc::new(Database::open_in_memory().unwrap());
+        let insert = path.clone();
+        database
+            .with_conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at, docs_dir) \
+                     VALUES ('p-arm', 'p', ?1, '2026-01-01', '2026-01-01', '.ai')",
+                    [&insert],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        arm_docs_locations(&database).await.unwrap();
+        let resolved = crate::core::docs_location::docs_dir(std::path::Path::new(&path));
+        crate::core::docs_location::set_project_override(&path, None);
+        assert_eq!(resolved, std::path::Path::new(&path).join(".ai"));
     }
 }

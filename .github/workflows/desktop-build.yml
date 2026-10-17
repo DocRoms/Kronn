@@ -403,6 +403,17 @@ jobs:
       - name: List verified artifacts
         run: find artifacts -type f | sort
 
+      # Real human contributors stay mentionable in the notes; agent aliases
+      # from the CHANGELOG are wrapped. A failed lookup never fails the release:
+      # the script then falls back to the maintainer.
+      - name: List human contributors
+        if: inputs.release_tag == ''
+        run: |
+          gh api "repos/$GH_REPO/contributors" --paginate \
+            --jq '.[] | select(.type == "User" and (.login | endswith("[bot]") | not)) | .login' \
+            > contributors.txt || echo "::warning::contributors lookup failed, mentions limited to the maintainer"
+          true
+
       # The body links only what is attached and carries the version's CHANGELOG
       # section; it fails when a platform or the section is missing.
       - name: Generate the release body
@@ -410,7 +421,8 @@ jobs:
         run: |
           python3 backend/scripts/ci/release_notes.py \
             --tag "$RELEASE_TAG" --changelog CHANGELOG.md \
-            --assets-dir artifacts --output release-body.md
+            --assets-dir artifacts --output release-body.md \
+            --allow-mentions-file contributors.txt
 
       - name: Create Release
         if: inputs.release_tag == ''

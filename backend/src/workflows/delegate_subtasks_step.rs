@@ -1358,6 +1358,7 @@ async fn record_verdict(
         target_agent: None,
         reply_to_message_id: None,
         author_cli_ordinal: None,
+        session_continuity: None,
     };
     let discussion_id = discussion_id.to_string();
     delegation

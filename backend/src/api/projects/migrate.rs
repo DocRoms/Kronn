@@ -83,9 +83,33 @@ pub async fn migrate_docs(
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
+    let lease =
+        match crate::api::audit::docs_write::DocsWriteLease::acquire(&state, &project.id).await {
+            Ok(lease) => lease,
+            Err(error) => return Json(ApiResponse::err(error)),
+        };
     let project_path = scanner::resolve_host_path(&project.path);
-    let outcome =
-        crate::core::docs_migration::migrate_project(&project_path, req.create_symlink).await;
+    // The legacy `ai/` → `docs/` move belongs to the historical layout; a
+    // configured folder is the operator's choice and is not moved (KT-1192).
+    match crate::core::docs_location::DocsRoot::for_project(&project_path) {
+        Err(reason) => return Json(ApiResponse::err(reason)),
+        Ok(docs_root) if !docs_root.is_default() => {
+            return Json(ApiResponse::err(format!(
+                "this project keeps its AI doc in `{docs_root}/`: the legacy ai/ → docs/ \
+                 migration does not apply to a configured folder."
+            )))
+        }
+        Ok(_) => {}
+    }
+    let outcome = match tokio::spawn(async move {
+        let _lease = lease;
+        crate::core::docs_migration::migrate_project(&project_path, req.create_symlink).await
+    })
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => return Json(ApiResponse::err(format!("Migration failed: {error}"))),
+    };
 
     use crate::core::docs_migration::MigrationOutcome;
     let response = match outcome {

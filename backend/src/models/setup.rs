@@ -74,6 +74,18 @@ pub struct AppConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[ts(skip)]
     pub embed_allowed_origins: Vec<String>,
+    /// Five-field cron for the scheduled re-verification of cited lines
+    /// (`citations.json`). Absent means off, the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(skip)]
+    pub audit_reverify_cron: Option<String>,
+    /// KT-999 — give the audit steps that use it the briefing's « Existing
+    /// documentation » (reference docs are cited, obsolete ones become tech
+    /// debt). Off by default until a bench shows the gain; the env switch
+    /// `KRONN_EXP_BRIEFING_DOCS=1` turns it on for a run.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[ts(skip)]
+    pub audit_briefing_docs: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -168,6 +180,16 @@ pub struct ServerConfig {
     /// `disk_thresholds()`, which is the only place they are read together.
     #[serde(default = "default_disk_warning_gib")]
     pub disk_warning_gib: u64,
+    /// KT-1318 — free space, in GiB, a worker launch (or a full audit) needs on
+    /// the volume holding the worktrees and lane build dirs. Below it Kronn
+    /// sweeps its orphaned lane build dirs first, then refuses the launch with
+    /// the reason and an alert in the principal room. `0` disables the guard.
+    #[serde(default = "default_disk_launch_min_free_gib")]
+    pub disk_launch_min_free_gib: u64,
+    /// KT-1318 — hours a Kronn-created lane build dir must be unwritten, with no
+    /// live worktree, before a sweep (boot, periodic, pressure) may remove it.
+    #[serde(default = "default_disk_sweep_idle_hours")]
+    pub disk_sweep_idle_hours: u64,
     /// Maximum concurrent agent processes (default: 5)
     #[serde(default = "default_max_agents")]
     pub max_concurrent_agents: usize,
@@ -338,6 +360,16 @@ fn default_anti_hallucination_mode() -> String {
 /// so a refused provisioning still leaves room to work, investigate and clean.
 pub(crate) const DEFAULT_DISK_CRITICAL_GIB: u64 = 5;
 pub(crate) const DEFAULT_DISK_WARNING_GIB: u64 = 20;
+/// KT-1318 — a worker's first build alone writes several GiB and a lane has
+/// been measured at 5-30 GiB; 30 GiB is the room a launch needs to finish.
+pub(crate) const DEFAULT_DISK_LAUNCH_MIN_FREE_GIB: u64 = 30;
+pub(crate) const DEFAULT_DISK_SWEEP_IDLE_HOURS: u64 = 6;
+fn default_disk_launch_min_free_gib() -> u64 {
+    DEFAULT_DISK_LAUNCH_MIN_FREE_GIB
+}
+fn default_disk_sweep_idle_hours() -> u64 {
+    DEFAULT_DISK_SWEEP_IDLE_HOURS
+}
 fn default_disk_critical_gib() -> u64 {
     DEFAULT_DISK_CRITICAL_GIB
 }
@@ -488,6 +520,11 @@ pub struct ScanConfig {
     /// Max depth when scanning for git repos (2–10, default 4)
     #[serde(default = "default_scan_depth")]
     pub scan_depth: usize,
+    /// Default AI doc folder, relative to each project root (KT-263). `None`
+    /// keeps the historical detection (`docs/` → `doc/` → `ai/`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub default_docs_dir: Option<String>,
 }
 
 fn default_scan_depth() -> usize {
@@ -691,6 +728,28 @@ pub enum ModelTier {
     Default,
     /// Most capable model (opus, o4-mini, pro). For audits, complex analysis.
     Reasoning,
+}
+
+impl ModelTier {
+    /// The label serde writes (`economy` / `default` / `reasoning`), as stored
+    /// on an audit run.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ModelTier::Economy => "economy",
+            ModelTier::Default => "default",
+            ModelTier::Reasoning => "reasoning",
+        }
+    }
+
+    /// Inverse of [`as_str`]; `None` for anything else.
+    pub fn parse(label: &str) -> Option<Self> {
+        match label {
+            "economy" => Some(ModelTier::Economy),
+            "default" => Some(ModelTier::Default),
+            "reasoning" => Some(ModelTier::Reasoning),
+            _ => None,
+        }
+    }
 }
 
 /// Per-agent model tier configuration. Maps Economy/Reasoning to concrete model names.
@@ -1083,6 +1142,10 @@ pub struct ServerConfigPublic {
     pub execution_variable_retention_days: u32,
     /// Days a finished workflow run keeps its step outputs. Zero keeps them.
     pub run_payload_retention_days: u32,
+    /// KT-1318 - free GiB a worker launch / full audit needs (`0` = guard off).
+    pub disk_launch_min_free_gib: u64,
+    /// KT-1318 - hours a lane build dir must be idle before a sweep may take it.
+    pub disk_sweep_idle_hours: u64,
     pub p2p_enabled: bool,
     pub frontend_origins: Vec<String>,
     /// The zone set in Settings; `None` follows the machine.
@@ -1133,6 +1196,12 @@ pub struct UpdateServerConfigRequest {
     /// Days a finished workflow run keeps its step outputs; zero keeps them.
     #[serde(default)]
     pub run_payload_retention_days: Option<u32>,
+    /// KT-1318 - `server.disk_launch_min_free_gib`; zero turns the guard off.
+    #[serde(default)]
+    pub disk_launch_min_free_gib: Option<u64>,
+    /// KT-1318 - `server.disk_sweep_idle_hours`.
+    #[serde(default)]
+    pub disk_sweep_idle_hours: Option<u64>,
     #[serde(default)]
     pub p2p_enabled: Option<bool>,
     /// Replaces the whole list; every entry must be an exact origin.

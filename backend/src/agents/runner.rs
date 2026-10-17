@@ -1769,6 +1769,9 @@ pub struct AgentProcess {
     activity_watched: bool,
     /// The launch's scoped bridge token; dropping the process revokes it.
     bridge_token: Option<crate::core::bridge_token::BridgeTokenGuard>,
+    /// Set when the runtime refused the requested resume and the turn went out
+    /// with the full history in a new session instead.
+    resume_fallback: Option<crate::models::SessionContinuityReason>,
 }
 
 /// Reads an HTTP agent's tool activity from outside its run.
@@ -1903,6 +1906,12 @@ impl AgentProcess {
     ) -> Self {
         self.bridge_token = guard;
         self
+    }
+
+    /// Why the requested resume was refused, when the turn fell back to the
+    /// full history in a new session.
+    pub fn resume_fallback(&self) -> Option<crate::models::SessionContinuityReason> {
+        self.resume_fallback
     }
 
     /// True when `next_line()` yields RAW token fragments to concatenate as-is,
@@ -2767,6 +2776,32 @@ impl AcpSessionStore {
             })
             .await
             .map_err(|error| format!("load completed conversation checkpoint: {error}"))
+    }
+
+    /// Why `load_completed_checkpoint` returned nothing for this scope.
+    pub async fn explain_missing_checkpoint(
+        &self,
+        agent_type: &AgentType,
+        project_scope: &Path,
+        cli_print: bool,
+    ) -> crate::models::SessionContinuityReason {
+        use crate::db::acp_runtime_sessions::CheckpointAbsence;
+        use crate::models::SessionContinuityReason as Reason;
+        let Some(key) = self.session_key(agent_type, project_scope, cli_print) else {
+            return Reason::ResumeUnsupported;
+        };
+        match self
+            .db
+            .with_read_conn(move |conn| {
+                crate::db::acp_runtime_sessions::checkpoint_absence(conn, &key)
+            })
+            .await
+        {
+            Ok(CheckpointAbsence::NoSession) => Reason::NoStoredId,
+            Ok(CheckpointAbsence::ScopeChanged) => Reason::ScopeChanged,
+            Ok(CheckpointAbsence::TurnUnfinished) => Reason::PreviousTurnUnfinished,
+            Err(_) => Reason::StoreUnavailable,
+        }
     }
 
     /// The response writer commits this proof in its existing transaction.
@@ -3882,9 +3917,13 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // never attached the skill. Idempotent (skipped when already in skill_ids)
     // and inert outside enforce. The content is injected inline (the skill isn't
     // in skill_ids, so the native-files path wouldn't write it to disk).
+    // The project's AI doc entry, under its docs root (KT-1192).
+    let docs_root =
+        crate::core::docs_location::DocsRoot::of(std::path::Path::new(config.project_path));
+    let entry_rel = docs_root.path("AGENTS.md");
     let project_has_agents_md = !config.project_path.is_empty()
         && std::path::Path::new(config.project_path)
-            .join("docs/AGENTS.md")
+            .join(&entry_rel)
             .exists();
     let doc_author_prompt = if crate::core::anti_halluc::should_auto_attach_doc_author(
         crate::core::anti_halluc::current_mode(),
@@ -3954,14 +3993,17 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             .is_some();
 
     // Workspace access controls project-doc and memory guidance, regardless of transport.
+    // Only an HTTP agent reads the catalogue: a CLI step never builds it here.
+    let is_http = is_http_chat_agent(config.agent_type);
     let http_agent_reads_files = http_agent_reads_its_own_files(
-        is_http_chat_agent(config.agent_type),
-        config.tools.as_ref().is_some_and(|executor| {
-            executor
-                .catalogue()
-                .iter()
-                .any(|tool| tool["function"]["name"] == "read_file")
-        }),
+        is_http,
+        is_http
+            && config.tools.as_ref().is_some_and(|executor| {
+                executor
+                    .catalogue()
+                    .iter()
+                    .any(|tool| tool["function"]["name"] == "read_file")
+            }),
     );
 
     // 0.7.1 — user-scoped cross-project context : the `~/.kronn/user-context/`
@@ -3974,7 +4016,9 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // when they discover stable facts, names the writable subfolders,
     // forbids `docs/AGENTS.md` direct edits, references the anti-secret
     // filter. Universal text, no per-agent customisation.
-    let memory_prelude = crate::core::user_context::build_memory_prelude_prompt();
+    let memory_prelude = docs_root
+        .relocate(&crate::core::user_context::build_memory_prelude_prompt())
+        .into_owned();
 
     // Combine all context parts with explicit section markers
     // (helps non-Claude agents distinguish instructions from task)
@@ -3985,7 +4029,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // chokepoint covers every agent surface (disc, audit, architect, QP
     // improver, batch, summarization, orchestration) — see core::anti_halluc.
     if let Some(preamble) = crate::core::anti_halluc::preamble_if_active() {
-        parts.push(preamble.to_string());
+        parts.push(docs_root.relocate(preamble).into_owned());
     }
     if !prelocalized_http_worker && !user_context.is_empty() {
         parts.push(format!(
@@ -4021,21 +4065,21 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 // Inline section headings to guide discovery; file-capable agents read the full
                 // entry document on demand.
                 let index = std::fs::read_to_string(
-                    std::path::Path::new(config.project_path).join("docs/AGENTS.md"),
+                    std::path::Path::new(config.project_path).join(&entry_rel),
                 )
                 .map(|doc| doc_section_index(&doc))
                 .unwrap_or_default();
                 parts.push(format!(
                     "=== PROJECT DOCUMENTATION ===\n\nThis project documents itself for agents \
-                     in `docs/AGENTS.md`. Call `read_file` on exactly that path, in ONE call, \
+                     in `{entry_rel}`. Call `read_file` on exactly that path, in ONE call, \
                      before working on the project. The file is there: do not go looking for it \
                      with `list_files`, `find_files` or `git_log`. It covers:\n\n{index}\n\n\
                      Open the files it points to the same way. Never describe this project from \
                      memory when the doc can be read."
                 ));
-            } else if let Ok(mut doc) = std::fs::read_to_string(
-                std::path::Path::new(config.project_path).join("docs/AGENTS.md"),
-            ) {
+            } else if let Ok(mut doc) =
+                std::fs::read_to_string(std::path::Path::new(config.project_path).join(&entry_rel))
+            {
                 // No workspace tools: inlining the entry doc is the only project
                 // grounding this agent can get.
                 const MAX_INLINE_DOC: usize = 24_000;
@@ -4054,10 +4098,11 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 // accessible" and cites files it never saw (observed 2026-07-01).
                 parts.push(format!(
                     "=== PROJECT DOCUMENTATION ===\n\nThe following is the ONLY project file \
-                     you have. Other files it mentions (docs/*, source code) are NOT available: \
+                     you have. Other files it mentions ({}/*, source code) are NOT available: \
                      you can NOT read or open them, and if asked you must say so. You may cite \
                      their paths as pointers for the USER to open, but never present their \
                      content as known to you.\n\n{}",
+                    docs_root.rel(),
                     doc
                 ));
             }
@@ -4702,6 +4747,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         token_fragments: false,
         activity_watched: false,
         bridge_token: bridge,
+        resume_fallback: None,
     })
 }
 
@@ -4731,8 +4777,31 @@ fn mint_launch_bridge_token(
             discussion_ids.push(id.to_owned());
         }
     }
+    // A step or a worker posts in a room without being its agent: a room's
+    // grants never reach it (KT-1270).
+    let room_grant_discussions =
+        if config.workflow_step_context.is_some() || config.task_worker_context.is_some() {
+            Vec::new()
+        } else {
+            let mut rooms: Vec<String> = Vec::new();
+            for id in [
+                config.discussion_id,
+                config
+                    .room_agent_context
+                    .map(|context| context.discussion_id.as_str()),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if !rooms.iter().any(|known| known == id) {
+                    rooms.push(id.to_owned());
+                }
+            }
+            rooms
+        };
     crate::core::bridge_token::mint(crate::core::bridge_token::BridgeScope {
         discussion_ids,
+        room_grant_discussions,
         task_execution_id: config
             .task_worker_context
             .map(|context| context.execution_id.clone()),
@@ -5143,6 +5212,32 @@ pub(crate) mod test_acp_routes {
         ROUTES.lock().unwrap().get(work_dir).cloned()
     }
 
+    /// Routes per agent, for tests that run several agents at once in one
+    /// directory: one adapter serves one prompt at a time.
+    static AGENT_ROUTES: LazyLock<Mutex<HashMap<(PathBuf, String), Transport>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub(crate) struct AgentRouteGuard(PathBuf, String);
+
+    impl Drop for AgentRouteGuard {
+        fn drop(&mut self) {
+            AGENT_ROUTES
+                .lock()
+                .unwrap()
+                .remove(&(self.0.clone(), self.1.clone()));
+        }
+    }
+
+    pub(crate) fn route_agent(
+        work_dir: &Path,
+        agent: &crate::models::AgentType,
+        transport: Transport,
+    ) -> AgentRouteGuard {
+        let key = (work_dir.to_path_buf(), format!("{agent:?}"));
+        AGENT_ROUTES.lock().unwrap().insert(key.clone(), transport);
+        AgentRouteGuard(key.0, key.1)
+    }
+
     pub(super) fn transport_for(
         config: &AgentStartConfig<'_>,
         work_dir: &Path,
@@ -5150,6 +5245,13 @@ pub(crate) mod test_acp_routes {
         config
             .test_acp_transport
             .clone()
+            .or_else(|| {
+                AGENT_ROUTES
+                    .lock()
+                    .unwrap()
+                    .get(&(work_dir.to_path_buf(), format!("{:?}", config.agent_type)))
+                    .cloned()
+            })
             .or_else(|| ROUTES.lock().unwrap().get(work_dir).cloned())
     }
 }
@@ -5276,7 +5378,7 @@ async fn run_acp_session(
         AgentRunPhase::OpeningSession,
         Some(startup_bounds.session_setup),
     );
-    let (resumed, resume_failed) = match resume_id {
+    let (resumed, resume_refused) = match resume_id {
         Some(conversation_id) => {
             let agent = match acp_agent(agent_type) {
                 Some(agent) => agent,
@@ -5304,15 +5406,21 @@ async fn run_acp_session(
                 return Err(acp_start_failure(&host, cancelled()).await);
             };
             match resumed {
-                Ok(()) => (Some(target), false),
+                Ok(()) => (Some(target), None),
                 // Capability absence and a positively identified missing
                 // session are safe before a prompt has any external effect.
                 // Authentication, timeout and transport errors are ambiguous:
                 // returning them avoids a potentially duplicate prompt.
                 Err(crate::acp::AcpError::CapabilityUnavailable {
                     capability: AcpCapability::Resume,
-                }) => (None, true),
-                Err(crate::acp::AcpError::SessionNotFound) => (None, true),
+                }) => (
+                    None,
+                    Some(crate::models::SessionContinuityReason::ResumeUnsupported),
+                ),
+                Err(crate::acp::AcpError::SessionNotFound) => (
+                    None,
+                    Some(crate::models::SessionContinuityReason::SessionExpired),
+                ),
                 Err(error) => {
                     let failure = timed_out(&error, AcpStartPhase::Session, started)
                         .unwrap_or_else(|| {
@@ -5325,7 +5433,7 @@ async fn run_acp_session(
                 }
             }
         }
-        None => (None, false),
+        None => (None, None),
     };
     let session = match resumed {
         Some(target) => target,
@@ -5413,7 +5521,7 @@ async fn run_acp_session(
         }
     }
 
-    let prompt_for_session = if resume_failed {
+    let prompt_for_session = if resume_refused.is_some() {
         fallback_prompt.unwrap_or(prompt)
     } else {
         prompt
@@ -5712,6 +5820,7 @@ async fn run_acp_session(
         token_fragments: true,
         activity_watched: true,
         bridge_token: None,
+        resume_fallback: resume_refused,
     })
 }
 
@@ -5977,34 +6086,54 @@ pub(crate) fn disc_introspection_mcp_path() -> Option<String> {
     if std::path::Path::new(docker_path).exists() {
         return Some(docker_path.to_string());
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let candidates = [
-                dir.join("scripts").join("disc-introspection-mcp.py"),
-                dir.join("..")
-                    .join("scripts")
-                    .join("disc-introspection-mcp.py"),
-                dir.join("..")
-                    .join("Resources")
-                    .join("scripts")
-                    .join("disc-introspection-mcp.py"),
-                dir.join("disc-introspection-mcp.py"),
-            ];
-            for c in &candidates {
-                if c.exists() {
-                    return Some(c.to_string_lossy().to_string());
-                }
-            }
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    let cwd = std::env::current_dir().ok();
+    disc_introspection_mcp_path_near(exe_dir.as_deref(), cwd.as_deref())
+}
+
+/// How far up from the binary or the working directory a source checkout's
+/// `scripts/` is looked for: deep enough for `<repo>/target/<lane>/debug/`.
+const BRIDGE_SOURCE_SEARCH_DEPTH: usize = 6;
+
+/// Find the bridge script from where the process actually runs: next to the
+/// installed binary, then in the source checkout it is run from (its working
+/// directory, then the checkout its binary sits in). Never from a path baked in
+/// at build time: a binary built in one checkout and run from another would
+/// launch the first checkout's script (KT-1316).
+fn disc_introspection_mcp_path_near(exe_dir: Option<&Path>, cwd: Option<&Path>) -> Option<String> {
+    const SCRIPT: &str = "disc-introspection-mcp.py";
+    let found = |candidate: PathBuf| {
+        candidate
+            .is_file()
+            .then(|| candidate.to_string_lossy().into_owned())
+    };
+    if let Some(dir) = exe_dir {
+        let installed = [
+            dir.join("scripts").join(SCRIPT),
+            dir.join("..").join("scripts").join(SCRIPT),
+            dir.join("..")
+                .join("Resources")
+                .join("scripts")
+                .join(SCRIPT),
+            dir.join(SCRIPT),
+        ];
+        if let Some(path) = installed.into_iter().find_map(found) {
+            return Some(path);
         }
     }
-    let dev_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/scripts/disc-introspection-mcp.py"
-    );
-    if std::path::Path::new(dev_path).exists() {
-        return Some(dev_path.to_string());
-    }
-    None
+    let in_source_tree = |start: &Path| {
+        start
+            .ancestors()
+            .take(BRIDGE_SOURCE_SEARCH_DEPTH)
+            .find_map(|dir| {
+                found(dir.join("backend").join("scripts").join(SCRIPT))
+                    .or_else(|| found(dir.join("scripts").join(SCRIPT)))
+            })
+    };
+    cwd.and_then(in_source_tree)
+        .or_else(|| exe_dir.and_then(in_source_tree))
 }
 
 pub(crate) struct InternalMcpCommand {
@@ -11975,6 +12104,7 @@ async fn start_ollama_http_with_idle(
         token_fragments: false,
         activity_watched: streamed,
         bridge_token: None,
+        resume_fallback: None,
     })
 }
 
@@ -12074,8 +12204,13 @@ pub fn resolve_agent_work_dir(
 /// Build the complete Claude sandbox policy for one task worktree.
 ///
 /// Keep this invocation-local and bounded regardless of how many unrelated
-/// worktrees exist on the host. The current task worktree is the only explicit
-/// write root; sandbox availability and unsandboxed fallback remain fail-closed.
+/// worktrees exist on the host. The write roots are the task worktree and its
+/// lane's private Cargo target (KT-1246, `core::task_worker_env`); sandbox
+/// availability and unsandboxed fallback remain fail-closed.
+///
+/// The widening is exactly what building and testing needs: loopback binding
+/// (no `allowedDomains`, so no external host), and read access to the host's
+/// dependency caches. Nothing else is added.
 fn claude_task_worker_settings(work_dir: &Path) -> Result<String, String> {
     let work_dir = work_dir.canonicalize().map_err(|error| {
         format!(
@@ -12083,6 +12218,9 @@ fn claude_task_worker_settings(work_dir: &Path) -> Result<String, String> {
             work_dir.display()
         )
     })?;
+    let lane = crate::core::task_worker_env::WorkerLane::for_worktree(&work_dir)?;
+    let caches =
+        crate::core::task_worker_env::SharedCaches::discover(lane.main_checkout.as_deref());
     serde_json::to_string(&serde_json::json!({
         "sandbox": {
             "enabled": true,
@@ -12090,10 +12228,23 @@ fn claude_task_worker_settings(work_dir: &Path) -> Result<String, String> {
             "autoAllowBashIfSandboxed": true,
             "allowUnsandboxedCommands": false,
             "excludedCommands": [],
-            "filesystem": { "allowWrite": [work_dir] }
+            "filesystem": {
+                "allowWrite": lane.write_roots(),
+                "allowRead": lane.read_roots(&caches),
+            },
+            "network": { "allowLocalBinding": true }
         }
     }))
     .map_err(|error| format!("Unable to encode the Claude task-worker sandbox policy: {error}"))
+}
+
+/// Whether the task-worker sandbox policy Kronn builds allows loopback binding;
+/// the smoke check's port capability is the conjunction with a real bind.
+pub(crate) fn claude_task_worker_allows_loopback_binding(work_dir: &Path) -> bool {
+    claude_task_worker_settings(work_dir)
+        .ok()
+        .and_then(|settings| serde_json::from_str::<serde_json::Value>(&settings).ok())
+        .is_some_and(|settings| settings["sandbox"]["network"]["allowLocalBinding"] == true)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13731,6 +13882,23 @@ pub(crate) fn try_spawn(
             cmd.env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1");
         }
     }
+    // KT-1246 — a Claude task worker builds and tests in its own lane: private
+    // Cargo target and home, offline Cargo, a scratch Kronn data dir, and the
+    // main checkout's frontend dependencies linked read-only. Other runtimes
+    // keep their own sandbox's defaults.
+    if task_worker_context.is_some() && is_claude_code_launch(binary, npx_package) {
+        crate::core::task_worker_env::apply_launch_env(cmd.as_std_mut(), work_dir);
+        // KT-1318 - every launch of a task worker stamps the lane it builds in,
+        // resumes and reworks included, not only the first provisioning.
+        if let Some(context) = task_worker_context {
+            if let Err(reason) = crate::core::worktree::mark_lane_target_for_worktree(
+                work_dir,
+                &context.execution_id,
+            ) {
+                tracing::debug!(execution = %context.execution_id, "lane target not marked: {reason}");
+            }
+        }
+    }
     // Hint shell-aware tools to use bash (dash does not support `-l`).
     // Only on Unix — Windows doesn't use SHELL env var.
     #[cfg(unix)]
@@ -13993,6 +14161,14 @@ pub fn parse_claude_stream_line(line: &str) -> StreamJsonEvent {
 
         _ => StreamJsonEvent::Skip,
     }
+}
+
+/// Whether a Claude stream-json line is the final `result` line, whose usage is
+/// the whole run's, as opposed to one turn's.
+pub fn is_claude_result_line(line: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(line.trim())
+        .ok()
+        .is_some_and(|json| json.get("type").and_then(|v| v.as_str()) == Some("result"))
 }
 
 /// Remove literal `<thinking>` / `</thinking>` tags from a text delta.
@@ -14504,6 +14680,62 @@ mod acp_resume_tests {
         output
     }
 
+    /// KT-1278 — over ACP the context and the task are ONE user message. An
+    /// audit step hands the session a prompt whose last words are its own
+    /// instruction, and the session puts that prompt last, after the context
+    /// (the workflow step and the task worker brief are pinned at their own
+    /// assembly: `build_step_prompt`, `worker_brief_markdown`).
+    #[tokio::test]
+    async fn an_acp_message_with_context_ends_with_the_tasks_own_instruction() {
+        let docs_root = crate::core::docs_location::DocsRoot::default_root();
+        let step = crate::api::audit::ANALYSIS_STEPS[7];
+        let prompt = crate::api::audit::finish_step_prompt(
+            "Step 8 instructions\n\n### Runtime versions pinned in the repository\n\nNone found.\n",
+            None,
+            8,
+            &step,
+            &docs_root,
+        );
+        let context = "=== ANTI-HALLUCINATION (pointer) ===\n\nCite your sources.\n\n=== AVAILABLE TOOLS ===\n\nA table of tools.";
+        let fixture = transport(ResumeOutcome::Ok, PromptOutcome::Complete);
+        let mut process = run_acp_session(
+            AcpSessionRequest {
+                step_tools: None,
+                agent_type: &AgentType::OpenCode,
+                work_dir: Path::new("."),
+                prompt: &prompt,
+                system_context: context,
+                project_path: "",
+                model_flag: None,
+                reasoning_effort: None,
+                parent_cancel: None,
+                discussion_id: None,
+                resume_id: None,
+                session_store: None,
+                fallback_prompt: None,
+                provenance: None,
+                activity: None,
+                idle_timeout: None,
+                run_progress: None,
+            },
+            fixture.clone(),
+        )
+        .await
+        .expect("run ACP fixture");
+        collect_output(&mut process).await;
+        let sent = fixture.prompts.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].starts_with(context), "context first");
+        assert!(sent[0].ends_with(&prompt), "the task's prompt comes last");
+        assert!(
+            sent[0]
+                .trim_end()
+                .ends_with("Stop once the work is written."),
+            "the message must end on the task's instruction, got …{}",
+            &sent[0][sent[0].len().saturating_sub(200)..]
+        );
+    }
+
     #[tokio::test]
     #[serial_test::serial(acp_adapter_env_toggle)]
     async fn adapted_acp_start_passes_the_full_prompt_to_safe_resume_fallback() {
@@ -14762,6 +14994,7 @@ mod acp_resume_tests {
             .success());
         assert_eq!(resumed.resumed.load(Ordering::SeqCst), 1);
         assert_eq!(resumed.created.load(Ordering::SeqCst), 0);
+        assert_eq!(resumed_process.resume_fallback(), None);
 
         let fallback = transport(ResumeOutcome::Missing, PromptOutcome::Complete);
         let mut fallback_process = run_fixture(
@@ -14787,6 +15020,11 @@ mod acp_resume_tests {
             ["complete history"],
             "a disappeared native session must receive the full prompt, never the delta"
         );
+        // KT-1202 — the message records that this turn fell back, and why.
+        assert_eq!(
+            fallback_process.resume_fallback(),
+            Some(crate::models::SessionContinuityReason::SessionExpired)
+        );
 
         let absent = transport(
             ResumeOutcome::CapabilityUnavailable,
@@ -14806,6 +15044,10 @@ mod acp_resume_tests {
         assert_eq!(
             absent.prompts.lock().unwrap().as_slice(),
             ["complete history"]
+        );
+        assert_eq!(
+            absent_process.resume_fallback(),
+            Some(crate::models::SessionContinuityReason::ResumeUnsupported)
         );
     }
 

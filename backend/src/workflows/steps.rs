@@ -23,18 +23,18 @@ pub struct StepOutcome {
 
 /// Output from a single agent run, including token usage.
 #[derive(Debug)]
-struct AgentOutput {
+pub(crate) struct AgentOutput {
     attempt_id: u32,
-    text: String,
+    pub(crate) text: String,
     /// `None`: the runtime reported no usage for this run.
-    tokens_used: Option<u64>,
+    pub(crate) tokens_used: Option<u64>,
     prompt_cache: runner::PromptCacheUsage,
     /// The usage `tokens_used` came from, parts kept apart: an attempt's cost is
     /// computed from these, never from the total (KT-894). `None` when the
     /// runtime reported only a total, or nothing.
-    reported_usage: Option<runner::ReportedUsage>,
+    pub(crate) reported_usage: Option<runner::ReportedUsage>,
     /// The cost the agent itself reported, when it gives one.
-    reported_cost_usd: Option<f64>,
+    pub(crate) reported_cost_usd: Option<f64>,
     native_tool_calls: Vec<NativeToolCallLog>,
     runtime_notices: Vec<String>,
 }
@@ -181,6 +181,10 @@ pub(crate) fn build_step_prompt(
                 serde_json::to_string(path).unwrap_or_default()
             ));
         }
+        // KT-1278 — a list is reference material: an ACP session joins its
+        // context and this prompt into one message, and a message that ends on
+        // a list reads as context to answer, not as work to run.
+        prompt.push_str("\nThe list above is reference only. Carry out the task stated before it now; there is no human in this turn to ask.\n");
     }
 
     // Auto-inject structured output format instructions when output_format
@@ -1541,7 +1545,7 @@ fn format_silent_exit_error(exit_desc: &str, killed_by_signal: bool, stdout: &st
 /// timeout, then collect text + tokens. Generic over [`runner::AgentIo`]
 /// (0.8.8 test-seam) so the loop is exercised by a `ScriptedProcess` in
 /// tests without spawning a CLI.
-async fn drive_agent_to_output(
+pub(crate) async fn drive_agent_to_output(
     mut process: impl runner::AgentIo,
     progress_tx: Option<&ProgressSender>,
     activity: Option<&AgentActivitySink>,
@@ -2792,6 +2796,25 @@ mod tests {
         assert!(prompt.contains("\"/repos/API équipe\""));
         assert!(prompt.contains("Never edit them"));
         assert!(prompt.contains("not a filesystem permission grant"));
+    }
+
+    #[test]
+    fn build_step_prompt_never_ends_on_the_read_only_repository_list() {
+        // KT-1278 — a free-text step with declared repositories used to end on
+        // the list itself; over ACP that list is the last thing the model read.
+        let mut step = make_step("Review the ticket");
+        step.read_only_repos = vec!["/repos/api".into(), "/repos/web".into()];
+        let prompt = build_step_prompt(&step, &TemplateContext::new()).unwrap();
+        let list_end = prompt.rfind("\"/repos/web\"").unwrap();
+        let tail = &prompt[list_end..];
+        assert!(
+            tail.contains("Carry out the task stated before it now"),
+            "{tail}"
+        );
+        assert!(
+            prompt.trim_end().ends_with("no human in this turn to ask."),
+            "{prompt}"
+        );
     }
 
     #[test]

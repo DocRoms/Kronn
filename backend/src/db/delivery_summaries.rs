@@ -179,6 +179,7 @@ mod tests {
             target_agent: None,
             reply_to_message_id: None,
             author_cli_ordinal: None,
+            session_continuity: None,
         }
     }
 

@@ -793,9 +793,12 @@ impl Workspace {
         // Worktree path: alongside the repo, in a .kronn/worktrees directory
         let worktree_base = repo_path.join(".kronn/worktrees");
         std::fs::create_dir_all(&worktree_base)?;
-        // Ensure .kronn/worktrees/ is gitignored in the project
         if let Some(p) = repo_path.to_str() {
-            crate::core::mcp_scanner::ensure_gitignore_public(p, ".kronn/");
+            let p = p.to_string();
+            let _ = tokio::task::spawn_blocking(move || {
+                crate::core::mcp_scanner::ensure_local_exclude(&p, ".kronn/")
+            })
+            .await;
         }
         let worktree_path = worktree_base.join(build_worktree_dir_name(workflow_name, run_id));
 
@@ -1488,6 +1491,97 @@ mod tests {
         let result = check_branch_for_preservation(&repo, "test-branch").await;
         let preserved = result.expect("no resolvable base → defensive preserve");
         assert_eq!(preserved.ahead, 0, "ahead unknown → 0 (still preserve)");
+    }
+
+    // ─── operator checkout stays untouched (KT-1125) ───────────────────
+
+    async fn git_out(dir: &Path, args: &[&str]) -> String {
+        let out = crate::core::cmd::async_git_cmd()
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .await
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).to_string()
+    }
+
+    async fn assert_operator_untouched(repo: &Path, gitignore_before: Option<Vec<u8>>) {
+        assert_eq!(git_out(repo, &["status", "--porcelain"]).await, "");
+        assert_eq!(
+            std::fs::read(repo.join(".gitignore")).ok(),
+            gitignore_before
+        );
+        let ignored = crate::core::cmd::async_git_cmd()
+            .args(["check-ignore", "-q", ".kronn/"])
+            .current_dir(repo)
+            .status()
+            .await
+            .unwrap();
+        assert!(ignored.success(), ".kronn/ must be ignored");
+    }
+
+    #[tokio::test]
+    async fn worktree_creation_leaves_an_absent_gitignore_absent() {
+        let (_dir, repo) = make_test_repo().await;
+        assert!(!repo.join(".gitignore").exists());
+        let ws = Workspace::create(&repo, "wf", "11111111-a", None, None)
+            .await
+            .unwrap();
+        assert_operator_untouched(&repo, None).await;
+        let _ = ws.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn worktree_creation_leaves_a_tracked_gitignore_byte_identical() {
+        let (_dir, repo) = make_test_repo().await;
+        let body = b"target/\nno-trailing-newline".to_vec();
+        std::fs::write(repo.join(".gitignore"), &body).unwrap();
+        git_out(&repo, &["add", ".gitignore"]).await;
+        git_out(&repo, &["commit", "-q", "-m", "gitignore"]).await;
+        let ws = Workspace::create(&repo, "wf", "22222222-a", None, None)
+            .await
+            .unwrap();
+        assert_operator_untouched(&repo, Some(body)).await;
+        let _ = ws.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn worktree_creation_keeps_an_existing_ignore_rule_untouched() {
+        let (_dir, repo) = make_test_repo().await;
+        let body = b".kronn/\n".to_vec();
+        std::fs::write(repo.join(".gitignore"), &body).unwrap();
+        git_out(&repo, &["add", ".gitignore"]).await;
+        git_out(&repo, &["commit", "-q", "-m", "gitignore"]).await;
+        let ws = Workspace::create(&repo, "wf", "33333333-a", None, None)
+            .await
+            .unwrap();
+        assert_operator_untouched(&repo, Some(body)).await;
+        let exclude = std::fs::read_to_string(repo.join(".git/info/exclude")).unwrap_or_default();
+        assert!(!exclude.lines().any(|l| l == ".kronn/"));
+        let _ = ws.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn local_exclude_is_idempotent_and_works_from_a_linked_worktree() {
+        let (_dir, repo) = make_test_repo().await;
+        let ws = Workspace::create(&repo, "wf", "44444444-a", None, None)
+            .await
+            .unwrap();
+        let again = Workspace::create(&repo, "wf", "55555555-a", None, None)
+            .await
+            .unwrap();
+        let exclude = std::fs::read_to_string(repo.join(".git/info/exclude")).unwrap();
+        assert_eq!(exclude.lines().filter(|l| *l == ".kronn/").count(), 1);
+
+        // From a linked worktree the rule lands in the shared common dir.
+        crate::core::mcp_scanner::ensure_local_exclude(&ws.path.to_string_lossy(), ".kronn-extra/");
+        crate::core::mcp_scanner::ensure_local_exclude(&ws.path.to_string_lossy(), ".kronn-extra/");
+        let exclude = std::fs::read_to_string(repo.join(".git/info/exclude")).unwrap();
+        assert_eq!(exclude.lines().filter(|l| *l == ".kronn-extra/").count(), 1);
+        assert!(!ws.path.join(".git/info").exists());
+        assert_eq!(git_out(&ws.path, &["status", "--porcelain"]).await, "");
+        let _ = again.cleanup().await;
+        let _ = ws.cleanup().await;
     }
 
     // ─── Workspace::create + cleanup (E2E worktree lifecycle) ──────────

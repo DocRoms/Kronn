@@ -1102,6 +1102,29 @@ pub struct AuditRun {
     /// (KT-920); never written into the checkout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_profile_draft: Option<String>,
+    /// KT-1211 — the user cancelled this run while this step was in flight
+    /// (0 = before step 1). `None` on a run nobody cancelled. A run cancelled
+    /// after a completed step is `Interrupted` (resumable) and carries this
+    /// flag; one cancelled before any step is `Cancelled`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cancelled_at_step: Option<u32>,
+    /// KT-1211 — what moved in the sources between the run this one resumes
+    /// and the resume itself; saved so the timeline and the validation prompt
+    /// can say so after the one-off toast is gone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub resume_drift: Option<String>,
+    /// KT-1320 — the model tier the run was launched with (`economy`,
+    /// `default`, `reasoning`); absent on a run recorded before it was kept.
+    /// A step retry or a resume reuses it unless the human picks another.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub tier: Option<String>,
+    /// KT-1320 — the named API connection the run's HTTP agent used, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub connection_id: Option<String>,
 }
 
 /// 0.8.4 (#298) — Per-step metrics for the post-audit recap panel.
@@ -1150,6 +1173,28 @@ pub struct AuditRunStep {
     /// Mirrors the `step_warning.repaired` field from #292.
     #[serde(default)]
     pub step_repaired_from_template: bool,
+    /// The target was already up to date: every gate passed and the agent had
+    /// nothing to change (KT-1130). Neither a success that wrote nor a failure.
+    #[serde(default)]
+    pub unchanged: bool,
+    /// A human accepted this failed step as it stands (KT-1131): when, who and
+    /// why. It counts as done; `cli_success` and `step_warning` keep the failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub accepted_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub accepted_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub accepted_reason: Option<String>,
+    /// KT-1211 — what became of the step's target when the step did not
+    /// succeed: `restored` (put back as it was before the step) or `partial`
+    /// (kept, with a visible partial marker). `None` when the step wrote
+    /// nothing wrong.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub target_state: Option<String>,
     /// The step's cost in millionths of a dollar, when its agent reported one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd_micros: Option<u64>,
@@ -1204,6 +1249,113 @@ pub struct AuditTokenBreakdown {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub total_with_cache: Option<u64>,
+}
+
+/// What one phase of an audit (briefing, audit steps, validation discussion)
+/// consumed (KT-1084). Every figure is absent when nothing reported it: a phase
+/// whose agents reported no usage is "not measured", never 0. A sum over items
+/// some of which reported nothing is a floor, and `cost_unknown_items` says so.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AuditPhaseCost {
+    /// Finished steps, or agent replies, the phase is made of.
+    pub items: u32,
+    /// Of those, the ones that reported token usage.
+    pub measured_items: u32,
+    /// Fresh traffic (uncached input plus output); input as reported when an
+    /// item's cache split is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub total_tokens: Option<u64>,
+    /// Uncached input, summed over the items whose cache split is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cache_read_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cache_write_tokens: Option<u64>,
+    /// Measured items whose cache split is unknown: the parts above leave them out.
+    pub split_unknown_items: u32,
+    /// Reported cost, else Kronn's estimate, summed over the items that have one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cost_usd_micros: Option<u64>,
+    /// At least one summed cost is an estimate, not an agent-reported figure.
+    pub cost_estimated: bool,
+    /// Items with no cost at all: the sum above is a floor.
+    pub cost_unknown_items: u32,
+    /// Steps a resume inherited from another run, counted once, at their origin's figures.
+    pub carried_items: u32,
+}
+
+/// An audit run's tokens and cost per phase and in total (KT-1084).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AuditRunCost {
+    pub run_id: String,
+    /// The project's briefing discussion(s) opened since the previous Full run.
+    pub briefing: AuditPhaseCost,
+    /// The run's steps, its own and the ones it carried, each counted once.
+    pub audit: AuditPhaseCost,
+    /// The agent replies of the run's validation discussion.
+    pub validation: AuditPhaseCost,
+    pub total: AuditPhaseCost,
+}
+
+/// The cost of a cross-agent audit, before launch (KT-1183, experimental).
+/// Detection runs each cross-checked step once per agent; the cross-check and
+/// the reply add at most one call per agent each: the range goes from N to 2N
+/// times the step's single-agent cost.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CrossAuditEstimate {
+    pub agents: u32,
+    /// The steps run cross-agent (finding steps only).
+    pub cross_checked_steps: Vec<String>,
+    pub low_factor: u32,
+    pub high_factor: u32,
+    /// Findings challenged per step; the rest are listed as not cross-checked.
+    pub max_cross_checked: u32,
+    /// The single-agent run the range scales (its cost: `GET /api/audit-runs/{id}/cost`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub base_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub base_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub base_cost_usd_micros: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub low_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub high_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub low_cost_usd_micros: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub high_cost_usd_micros: Option<u64>,
+    /// A past cross-agent run of the step with as many agents, as measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub measured_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub measured_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub measured_cost_usd_micros: Option<u64>,
+    /// No comparable cross-agent run was measured: the range is an estimate.
+    pub estimated: bool,
 }
 
 /// Recommendation emitted by the completion-time cluster detector. Lives in
@@ -1476,6 +1628,22 @@ pub struct LaunchAuditRequest {
     /// oversize, and no way to graft a checkpoint onto the wrong pipeline.
     #[serde(default)]
     pub resume_run_id: Option<String>,
+    /// KT-1131 — with `resume_run_id`: retry only these 1-based failed steps.
+    /// The run's other failed steps stay failed, unrun. Absent = every one.
+    #[serde(default)]
+    #[ts(optional)]
+    pub retry_steps: Option<Vec<u32>>,
+    /// KT-1211 (M6) — with `resume_run_id`: also redo these 1-based steps the
+    /// run inherited as done, because the sources moved since they ran.
+    #[serde(default)]
+    #[ts(optional)]
+    pub redo_steps: Option<Vec<u32>>,
+    /// KT-1169 — a launch without `resume_run_id` is refused while the
+    /// project's latest run can be resumed, unless this explicit choice says
+    /// to run the whole audit again.
+    #[serde(default)]
+    #[ts(optional)]
+    pub fresh: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, TS)]
@@ -1592,6 +1760,9 @@ pub struct DiscoverReposResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct AuditInfo {
+    #[serde(default)]
+    #[ts(optional)]
+    pub template_update: Option<crate::core::template_manifest::TemplateUpdate>,
     pub files: Vec<AuditFileInfo>,
     pub todos: Vec<AuditTodo>,
     #[serde(default)]
@@ -1627,10 +1798,77 @@ pub struct AuditTodo {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct DriftCheckResponse {
+    #[serde(default)]
+    #[ts(optional)]
+    pub template_update: Option<crate::core::template_manifest::TemplateUpdate>,
     pub audit_date: Option<String>,
     pub stale_sections: Vec<DriftSection>,
     pub fresh_sections: Vec<String>,
     pub total_sections: usize,
+    /// "Sources clean" badge, recomputed from the cited lines.
+    #[serde(default)]
+    pub sources_state: crate::core::citation_drift::SourcesState,
+    #[serde(default)]
+    pub broken_citations: usize,
+    /// Paths the docs' prose names that are gone, which no citation covers
+    /// (KT-1168). Counted apart from `broken_citations`.
+    #[serde(default)]
+    #[ts(optional)]
+    pub missing_paths: Option<usize>,
+    /// Template docs that still hold raw `{{PLACEHOLDERS}}` (KT-1203).
+    #[serde(default)]
+    pub placeholder_docs: Vec<PlaceholderDoc>,
+}
+
+/// A template doc still holding raw `{{PLACEHOLDERS}}`, with the Full-chain
+/// step that fills it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PlaceholderDoc {
+    /// Project-relative path.
+    pub path: String,
+    /// 1-based step for `partial-audit`; `None` when no audit step targets the file.
+    pub step: Option<usize>,
+}
+
+/// `POST /api/projects/:id/citation-drift/acknowledge` body: the doc whose
+/// citations were checked by hand and still hold.
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct AcknowledgeCitationsRequest {
+    pub doc: String,
+}
+
+/// `POST /api/projects/:id/drift/acknowledge` body: the stale sections (their
+/// `ai_file`) a human checked and found still true.
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct AcknowledgeDriftRequest {
+    pub sections: Vec<String>,
+    /// The gone prose paths the human was shown with those sections: only
+    /// these are accepted. Absent, none is (an older client accepts nothing
+    /// it never displayed).
+    #[serde(default)]
+    pub shown_paths: Vec<ShownPath>,
+}
+
+/// One gone path the stale block listed, in its doc's section.
+#[derive(Debug, Clone, Deserialize, Serialize, TS)]
+#[ts(export)]
+pub struct ShownPath {
+    pub doc: String,
+    pub section: String,
+    pub path: String,
+}
+
+/// `GET /api/projects/:id/citation-drift`: broken and moved citations per
+/// section, plus the last scheduled re-verification.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CitationDriftResponse {
+    #[serde(flatten)]
+    pub report: crate::core::citation_drift::CitationDriftReport,
+    pub last_scheduled_check: Option<crate::core::citation_drift::ScheduledCheck>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -1639,6 +1877,350 @@ pub struct DriftSection {
     pub ai_file: String,
     pub audit_step: usize,
     pub changed_sources: Vec<String>,
+    /// Gone paths the doc's prose names, none accepted yet (KT-1168).
+    #[serde(default)]
+    pub missing_paths: Vec<crate::core::doc_relevance::VanishedPaths>,
+}
+
+/// What "Revalider l'audit" does with one section (KT-1168).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum RevalidationAction {
+    /// Only moved citations: Kronn rewrites their line numbers, no agent.
+    Reanchor,
+    /// Broken citations, human sections included: the audit step re-verifies
+    /// them and a human-validated doc is then marked to reconfirm (KT-1079).
+    Agent,
+    /// Nothing left for Kronn to rewrite: a person acknowledges it.
+    Human,
+    /// Broken, but no audit step owns the doc (or it was deleted): by hand.
+    Manual,
+}
+
+/// A citation inside a human-owned section, listed for its owner: Kronn may
+/// correct it, and its owner then reconfirms the doc.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct HumanCitationTodo {
+    pub section: String,
+    pub citation: crate::core::citation_drift::CitationStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RevalidationSection {
+    pub doc: String,
+    /// The Full audit step that owns the doc, when one does.
+    #[ts(type = "number | null")]
+    pub step: Option<usize>,
+    pub action: RevalidationAction,
+    pub doc_missing: bool,
+    /// Moved citations outside human sections, re-anchored without an agent.
+    pub reanchor: Vec<crate::core::citation_drift::CitationStatus>,
+    /// Broken citations outside human sections.
+    pub broken: Vec<crate::core::citation_drift::CitationStatus>,
+    pub human: Vec<HumanCitationTodo>,
+    /// The doc's sections that are outdated or no longer relevant to the
+    /// code, with the evidence and the corrections Kronn proposes.
+    #[serde(default)]
+    pub relevance: Vec<crate::core::doc_relevance::SectionRelevance>,
+    /// Sent to the agent only to re-read prose no citation or path anchors
+    /// (KT-1292): never re-read, or edited / its step's sources changed since.
+    #[serde(default)]
+    #[ts(skip)]
+    pub reread: bool,
+}
+
+/// A doc whose every section is unanchored, and when an agent pass last
+/// re-read it (KT-1292).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UnanchoredDoc {
+    pub doc: String,
+    /// RFC 3339; `None` when no pass has re-read it since it last changed.
+    pub reviewed_at: Option<String>,
+    /// An audit step owns the doc, so a pass can re-read it; `false` when none
+    /// does (it is listed, never queued).
+    pub owned: bool,
+}
+
+/// `GET /api/projects/:id/revalidation`: the deterministic part of
+/// "Revalider l'audit", computed without writing anything.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, Default)]
+#[ts(export)]
+pub struct RevalidationPlan {
+    pub sources_state: crate::core::citation_drift::SourcesState,
+    /// Sections with something to do; clean ones are left out.
+    pub sections: Vec<RevalidationSection>,
+    /// Full audit steps the bounded agent pass runs, in chain order.
+    #[ts(type = "number[]")]
+    pub agent_steps: Vec<usize>,
+    #[ts(type = "number")]
+    pub reanchor_count: usize,
+    #[ts(type = "number")]
+    pub human_count: usize,
+    /// Sections per verdict over every doc, and how many of the stale ones
+    /// nobody revised since validation (KT-1168).
+    #[serde(default)]
+    pub relevance: crate::core::doc_relevance::RelevanceCounts,
+    /// The sections Kronn cannot measure (no citation, no path), listed so
+    /// each is confronted with the code: by a person or by the agent pass.
+    #[serde(default)]
+    pub unanchored: Vec<crate::core::doc_relevance::SectionRelevance>,
+    /// The docs made only of such sections, with their last re-read date.
+    #[serde(default)]
+    pub unanchored_docs: Vec<UnanchoredDoc>,
+}
+
+/// What the conversion did with one tech-debt sheet (KT-1167).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum TdTaskState {
+    Created,
+    AlreadyLinked,
+    /// Rejected, or covered by an accepted decision.
+    Skipped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TdTaskItem {
+    pub td_id: String,
+    pub theme: String,
+    pub state: TdTaskState,
+    pub task_reference: Option<String>,
+    /// `rejected` or `accepted_decision` for a skipped sheet.
+    pub reason: Option<String>,
+}
+
+/// The parent task grouping the sheets of one theme.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TdTaskTheme {
+    pub theme: String,
+    pub label: String,
+    pub task_reference: String,
+    pub created: bool,
+}
+
+/// `POST /api/projects/:id/audit/td-tasks`: tech-debt sheets turned into tasks.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TdTasksOutcome {
+    pub created: u32,
+    pub already_linked: u32,
+    pub skipped: u32,
+    pub themes: Vec<TdTaskTheme>,
+    pub items: Vec<TdTaskItem>,
+}
+
+/// KT-982 — where a tech-debt sheet stands in the human review.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum TdReviewState {
+    Pending,
+    Confirmed,
+    AcceptedDecision,
+    Deferred,
+    Rejected,
+}
+
+/// A decision taken from the review screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum TdReviewDecision {
+    Confirm,
+    AcceptDecision,
+    Defer,
+    Reject,
+}
+
+/// A `file[:line]` the sheet's "Where" section cites.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TdPointer {
+    pub path: String,
+    pub line: Option<u32>,
+}
+
+/// The Kronn task tracking a sheet (`audit:<project>:<TD-id>`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TdLinkedTask {
+    pub id: String,
+    pub reference: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TdReviewItem {
+    pub id: String,
+    pub title: String,
+    pub area: String,
+    /// `Critical`, `High`, `Medium`, `Low` or `Unknown`.
+    pub severity: String,
+    pub status: String,
+    pub effort: Option<String>,
+    pub blast_radius: Option<String>,
+    pub state: TdReviewState,
+    pub problem: Option<String>,
+    pub impact: Option<String>,
+    pub verification: Option<String>,
+    pub pointers: Vec<TdPointer>,
+    pub source_path: String,
+    pub task: Option<TdLinkedTask>,
+    /// Messages about this sheet: validation mentions plus its own discussion.
+    pub talk_count: u32,
+    pub talk_discussion_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TdStateCounts {
+    pub pending: u32,
+    pub confirmed: u32,
+    pub accepted_decision: u32,
+    pub deferred: u32,
+    pub rejected: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TdSeverityCount {
+    pub severity: String,
+    pub total: u32,
+    /// Pending or deferred.
+    pub remaining: u32,
+}
+
+/// The rule that lets a project be validated without the discussion marker:
+/// every Critical and High sheet settled (a deferral does not count).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TdValidationGate {
+    pub blocking_total: u32,
+    pub blocking_settled: u32,
+    pub met: bool,
+    /// Sheets whose cross-agent dispute card still waits for a human: none
+    /// may be open for the project to be validated.
+    #[serde(default)]
+    pub open_disputes: u32,
+}
+
+/// `GET /api/projects/:id/audit/tds`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TdReviewList {
+    pub items: Vec<TdReviewItem>,
+    pub counts: TdStateCounts,
+    pub by_severity: Vec<TdSeverityCount>,
+    pub gate: TdValidationGate,
+    pub validated: bool,
+    pub audit_date: Option<DateTime<Utc>>,
+    pub validation_discussion_id: Option<String>,
+    /// The discussion holding the oldest open dispute card.
+    #[serde(default)]
+    pub dispute_discussion_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TdDecisionItem {
+    pub td_id: String,
+    pub decision: TdReviewDecision,
+    #[serde(default)]
+    #[ts(optional)]
+    pub reason: Option<String>,
+}
+
+/// `POST /api/projects/:id/audit/tds/decide`: settled together or not at all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TdDecideRequest {
+    pub items: Vec<TdDecisionItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TdDecisionResult {
+    pub td_id: String,
+    pub state: TdReviewState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TdDecideOutcome {
+    pub results: Vec<TdDecisionResult>,
+    pub gate: TdValidationGate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum TdTalkSource {
+    Validation,
+    Td,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TdTalkMessage {
+    pub id: String,
+    pub discussion_id: String,
+    pub source: TdTalkSource,
+    pub role: String,
+    pub agent_type: Option<String>,
+    pub author: Option<String>,
+    pub content: String,
+    /// The content is the lines around the mention, not the whole message.
+    pub excerpt: bool,
+    pub timestamp: DateTime<Utc>,
+}
+
+/// `GET /api/projects/:id/audit/tds/:td_id/talk`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TdTalk {
+    pub validation_discussion_id: Option<String>,
+    pub discussion_id: Option<String>,
+    pub messages: Vec<TdTalkMessage>,
+}
+
+/// `POST /api/projects/:id/audit/tds/:td_id/talk`: the sheet's own discussion,
+/// created with the first message when it does not exist yet.
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+pub struct TdTalkRequest {
+    pub message: String,
+    pub targets: Vec<crate::models::MessageTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TdTalkStart {
+    pub discussion_id: String,
+    /// The message is already its first turn: run it instead of sending it.
+    pub created: bool,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct RevalidateAuditRequest {
+    pub agent: AgentType,
+    /// Apply only deterministic citation repairs, even when agent work remains.
+    /// Omitted or false preserves the existing combined reverification flow.
+    #[serde(default)]
+    #[ts(optional)]
+    pub deterministic_only: Option<bool>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub connection_id: Option<String>,
+    #[serde(default)]
+    pub tier: Option<crate::models::ModelTier>,
 }
 
 #[derive(Debug, Deserialize, TS)]
@@ -1676,4 +2258,383 @@ pub struct StartBriefingResponse {
 #[ts(export)]
 pub struct SetBriefingRequest {
     pub notes: Option<String>,
+}
+
+// ─── Briefing: closed project answers (KT-1173) ─────────────────────────────
+//
+// Every choice is a closed set of option ids, like a `kronn-question` card.
+// `Unknown` is the default: an unanswered card, never a guess.
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum BriefingTracker {
+    #[default]
+    Unknown,
+    Jira,
+    GithubIssues,
+    GitlabIssues,
+    Linear,
+    Other,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum BriefingForge {
+    #[default]
+    Unknown,
+    Github,
+    Gitlab,
+    Bitbucket,
+    AzureDevops,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum BriefingDefaultBranch {
+    #[default]
+    Unknown,
+    Main,
+    Master,
+    Develop,
+    Trunk,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum BriefingCommitConvention {
+    #[default]
+    Unknown,
+    Conventional,
+    TicketPrefixed,
+    Free,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum BriefingYesNo {
+    #[default]
+    Unknown,
+    Yes,
+    No,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum BriefingMergeStrategy {
+    #[default]
+    Unknown,
+    Squash,
+    Rebase,
+    MergeCommit,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum BriefingReviewPolicy {
+    #[default]
+    Unknown,
+    NoReview,
+    OneApproval,
+    TwoApprovals,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum BriefingReleaseCadence {
+    #[default]
+    Unknown,
+    Continuous,
+    Scheduled,
+    OnDemand,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum BriefingEnvironmentKind {
+    Local,
+    Dev,
+    Staging,
+    Preprod,
+    Production,
+    Preview,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct BriefingEnvironment {
+    pub kind: BriefingEnvironmentKind,
+    #[serde(default)]
+    pub url: String,
+}
+
+/// Where a project's documentation lives outside the repository.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum BriefingExternalDocKind {
+    Confluence,
+    Notion,
+    Wiki,
+    Other,
+}
+
+/// An external documentation space: its kind and its address, nothing else.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct BriefingExternalDoc {
+    pub kind: BriefingExternalDocKind,
+    #[serde(default)]
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum BriefingPersonRole {
+    Arbiter,
+    TechLead,
+    Devops,
+    ProductOwner,
+    Qa,
+}
+
+/// A role and the name/contact the user typed; nothing else is recorded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct BriefingPerson {
+    pub role: BriefingPersonRole,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub contact: String,
+}
+
+/// The answers `docs/project.md` is rendered from.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(default)]
+pub struct BriefingProjectAnswers {
+    pub tracker: BriefingTracker,
+    /// Jira project key, Linear team key, …: checked when a connection exists.
+    pub tracker_key: String,
+    pub forge: BriefingForge,
+    /// `owner/name`; inferred from the project's git remote when empty.
+    pub forge_repo: String,
+    pub default_branch: BriefingDefaultBranch,
+    pub commit_convention: BriefingCommitConvention,
+    pub signoff_required: BriefingYesNo,
+    pub merge_strategy: BriefingMergeStrategy,
+    pub review_policy: BriefingReviewPolicy,
+    pub release_cadence: BriefingReleaseCadence,
+    pub environments: Vec<BriefingEnvironment>,
+    pub people: Vec<BriefingPerson>,
+    /// External documentation (Confluence, Notion, a wiki). Omitted when empty
+    /// so machine copies written before it stay identical.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub external_docs: Vec<BriefingExternalDoc>,
+    /// KT-1196 — optional free-text note per fact: the "how" a closed option
+    /// cannot say. Omitted when empty so older machine copies stay identical.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub notes: std::collections::BTreeMap<BriefingFact, String>,
+}
+
+/// A project fact a briefing note can be attached to (KT-1196).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum BriefingFact {
+    Tracker,
+    TrackerKey,
+    Forge,
+    ForgeRepo,
+    DefaultBranch,
+    CommitConvention,
+    Signoff,
+    MergeStrategy,
+    Review,
+    ReleaseCadence,
+    Environments,
+    People,
+    ExternalDocs,
+}
+
+/// The saved briefing as the form's answers (KT-1196), read back from
+/// `docs/briefing.md` or the DB notes so the form opens pre-filled.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, TS)]
+#[ts(export)]
+pub struct SavedBriefing {
+    pub purpose: String,
+    pub team: String,
+    pub maturity: String,
+    pub dependencies: String,
+    pub traps: String,
+    pub additional: String,
+    pub project: Option<BriefingProjectAnswers>,
+    pub existing_docs: Option<BriefingDocsAnswers>,
+    /// KT-1193 rules and bans, from their machine copy.
+    pub project_rules: Option<BriefingProjectRules>,
+    pub td_to_tasks: bool,
+    pub cross_audit_agents: Vec<AgentType>,
+}
+
+// ─── Existing documentation (KT-999) ───────────────────────────────────────
+
+/// What a documentation location is, classified by Kronn from its path.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, TS,
+)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum BriefingDocKind {
+    Readme,
+    #[default]
+    Docs,
+    Wiki,
+    Adr,
+    Api,
+    Contributing,
+    Markdown,
+}
+
+/// The state the user gives a location. `Unknown` is an unanswered state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum BriefingDocState {
+    #[default]
+    Unknown,
+    Recent,
+    Old,
+    Obsolete,
+    Partial,
+    Reference,
+}
+
+/// One documentation location recorded in the briefing.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(default)]
+pub struct BriefingDocLocation {
+    /// Repository-relative, normalised, `/`-separated.
+    pub path: String,
+    /// Recomputed by Kronn on save; the client's value is ignored.
+    pub kind: BriefingDocKind,
+    pub state: BriefingDocState,
+    pub note: String,
+    /// At most one source of truth per kind.
+    pub source_of_truth: bool,
+    /// `YYYY-MM-DD` of the last commit touching the path, read by Kronn on save.
+    pub last_commit: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(default)]
+pub struct BriefingDocsAnswers {
+    pub locations: Vec<BriefingDocLocation>,
+}
+
+/// A location found in the repository, offered as a pre-filled answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct BriefingDetectedDoc {
+    pub path: String,
+    pub kind: BriefingDocKind,
+    pub is_dir: bool,
+    pub last_commit: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+pub struct CheckBriefingDocRequest {
+    pub path: String,
+}
+
+/// The context entry point Kronn found in a linked repository.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkedRepoAiDoc {
+    /// `docs/AGENTS.md`.
+    AgentsMd,
+    /// Legacy `ai/index.md`.
+    LegacyAiIndex,
+    ReadmeOnly,
+    NoAiDoc,
+    /// A URL: nothing on this machine to check.
+    Remote,
+    /// The local path does not exist.
+    Missing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LinkedRepoDocStatus {
+    pub id: String,
+    pub ai_doc: LinkedRepoAiDoc,
+    /// Path of the entry point relative to the repository, when there is one.
+    pub doc_path: Option<String>,
+}
+
+// ─── Project rules and bans (KT-1193) ──────────────────────────────────────
+
+/// A line the team states about the code: something always done, or never.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectRuleKind {
+    /// « Toujours… »: the code must do it.
+    #[default]
+    Rule,
+    /// « Jamais… »: the code must never do it.
+    Ban,
+}
+
+/// What a ban's verifiable pattern names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectRulePatternKind {
+    /// A package declared in package.json, Cargo.toml, composer.json or requirements*.txt.
+    Dependency,
+    /// An import or module name, word-matched in source files.
+    Import,
+    /// A file glob (`*` within a segment, `**` across segments).
+    FileGlob,
+}
+
+/// A deterministic pattern Kronn checks for a ban, read-only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ProjectRulePattern {
+    pub kind: ProjectRulePatternKind,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(default)]
+pub struct ProjectRule {
+    pub kind: ProjectRuleKind,
+    pub text: String,
+    /// Only on a ban.
+    pub pattern: Option<ProjectRulePattern>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(default)]
+pub struct BriefingProjectRules {
+    pub rules: Vec<ProjectRule>,
 }

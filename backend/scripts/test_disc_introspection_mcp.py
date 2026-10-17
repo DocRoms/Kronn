@@ -2089,6 +2089,23 @@ class TaskExecDeliverTests(unittest.TestCase):
         self.assertNotIn("cli_session_id", props)
         self.assertNotIn("source_agent", props)
 
+    def test_manifest_description_names_every_field_the_backend_requires(self):
+        """KT-1262 — `tests_executed` is required of a spawned worker since
+        KT-1246 and was missing from the field list. The fields below mirror
+        `delivery_manifest_v1_schema` (a Rust test pins that schema to the same
+        list), so a field the backend learns to require is named here too."""
+        tool = next(
+            item for item in self.mod.TOOLS if item["name"] == "task_exec_deliver"
+        )
+        text = tool["inputSchema"]["properties"]["manifest"]["description"]
+        for field in (
+            "version", "task_ref", "head_sha", "files_touched", "tests",
+            "dod_status", "docs", "migrations", "risks", "limitations",
+            "summary", "tests_executed",
+        ):
+            self.assertIn(field, text)
+        self.assertIn('"1" (string)', text)
+
     def test_deliver_derives_identity_and_posts_the_manifest(self):
         self.mod._set_current_disc_id("disc-parent")
         http = mock.MagicMock(return_value={
@@ -2161,9 +2178,19 @@ class TaskExecDeliverTests(unittest.TestCase):
             projected["required"],
             [
                 "tests", "dod_status", "docs", "migrations", "risks",
-                "limitations", "summary",
+                "limitations", "summary", "tests_executed",
             ],
         )
+        self.assertEqual(
+            projected["properties"]["tests_executed"]["required"],
+            ["executed", "which"],
+        )
+        # KT-1262 — the property is declared in the TOOLS literal, which the MCP
+        # surface budget measures; the projection only reuses it.
+        declared = next(
+            item for item in self.mod.TOOLS if item["name"] == "task_exec_deliver"
+        )["inputSchema"]["properties"]["manifest"]["properties"]["tests_executed"]
+        self.assertEqual(projected["properties"]["tests_executed"], declared)
         self.assertNotIn("head_sha", projected["properties"])
         self.assertNotIn("task_ref", projected["properties"])
         self.assertNotIn(
@@ -2419,6 +2446,28 @@ class TaskExecReviewTests(unittest.TestCase):
         self.assertNotIn("source_session_id", props)
         self.assertNotIn("cli_session_id", props)
         self.assertNotIn("source_agent", props)
+
+    def test_decision_description_names_every_field_the_backend_requires(self):
+        """KT-1262 — an approve is refused without `reviewed_head_sha` and one
+        `dod_verifications` entry per DoD item, and `version` is the STRING "1".
+        The fields below mirror `review_decision_v1_schema` (a Rust test pins that
+        schema to the same list), so a field the backend learns to require is
+        named here before an agent has to find it by a refusal."""
+        tool = next(
+            item for item in self.mod.TOOLS if item["name"] == "task_exec_review"
+        )
+        text = tool["inputSchema"]["properties"]["decision"]["description"]
+        for field in (
+            "version", "task_ref", "decision", "reviewed_head_sha",
+            "dod_verifications", "comment", "findings",
+        ):
+            self.assertIn(field, text)
+        self.assertIn('"1" (string)', text)
+        self.assertIn("dod_verifications [{dod_id, met, evidence", text)
+        # KT-1254 — the live check is excluded from "one per DoD item".
+        self.assertIn("verification?", text)
+        self.assertIn("post_integration", text)
+        self.assertIn("one per DoD item except a live check", text)
 
     def test_review_derives_identity_and_posts_the_decision(self):
         self.mod._set_current_disc_id("disc-parent")
@@ -4175,6 +4224,23 @@ class DiscAppendSimpleModeTests(unittest.TestCase):
         self.assertEqual(meta["agent"], "ClaudeCode")
         self.assertNotIn("addressable", meta)
 
+    def test_disc_tools_name_the_right_tool_for_an_unexpected_argument(self):
+        # KT-1158: Vibe called disc_meta({id}) for another discussion; the id
+        # was dropped and it read the current room instead.
+        cases = [
+            ("call_disc_meta", {"id": "9f67eeef"}, "disc_load_other({disc_id})"),
+            ("call_disc_list", {"disc_id": "9f67eeef"}, "disc_load_other({disc_id})"),
+            ("call_disc_load_other", {"id": "9f67eeef"}, "`disc_id`"),
+        ]
+        for function, args, hint in cases:
+            with mock.patch.object(self.mod, "_disc_id", return_value="d1"), \
+                 mock.patch.object(self.mod, "_http") as http:
+                with self.assertRaises(RuntimeError) as raised:
+                    getattr(self.mod, function)(args)
+            self.assertIn("unknown argument(s)", str(raised.exception), function)
+            self.assertIn(hint, str(raised.exception), function)
+            http.assert_not_called()
+
     def test_an_unreadable_participant_list_refuses_like_a_failed_one(self):
         # A 200 carrying an unexpected shape is not "no participants" — it is an
         # answer we cannot read. Treating it as empty would let the ambiguity
@@ -4951,6 +5017,45 @@ class DiscWaitForPeerTests(unittest.TestCase):
         self.assertIn("exact Codex CLI session", result["routing_hint"])
         self.assertIn("answer this turn once", result["routing_hint"])
 
+    def _untargeted_native_reply(self, addressed):
+        """KT-1201 — the native agent answers a CLI turn without naming anyone;
+        the server decides `addressed_to_caller` from the replied author."""
+        return {
+            "success": True,
+            "data": {
+                "timed_out": False,
+                "messages": [{
+                    "message_id": "m-litellm-verdict",
+                    "sort_order": 12,
+                    "role": "Agent",
+                    "agent_type": "LiteLlm",
+                    "content": "Verdict : approuvé avec deux réserves.",
+                    "timestamp": "2026-10-11T10:00:00Z",
+                    "targets": [],
+                    "target_agents": [],
+                    "addressed_to_caller": addressed,
+                }],
+                "latest_sort_order": 12,
+            },
+        }
+
+    def test_untargeted_reply_to_my_own_turn_is_addressed_to_me(self):
+        with mock.patch.object(self.mod, "_http") as mock_http:
+            mock_http.return_value = self._untargeted_native_reply(True)
+            result = self.mod.call_disc_wait_for_peer({"since_sort_order": 11})
+
+        self.assertEqual(len(result["messages"]), 1)
+        self.assertNotIn("withheld_by_routing", result)
+        self.assertIn("answer this turn once", result["routing_hint"])
+        self.assertNotIn("do NOT answer", result["routing_hint"])
+
+    def test_untargeted_reply_to_someone_else_is_not_addressed_to_me(self):
+        with mock.patch.object(self.mod, "_http") as mock_http:
+            mock_http.return_value = self._untargeted_native_reply(False)
+            result = self.mod.call_disc_wait_for_peer({"since_sort_order": 11})
+
+        self.assertNotIn("answer this turn once", result.get("routing_hint", ""))
+
     def test_unbound_disc_raises_before_http(self):
         with mock.patch.dict(os.environ, {
             k: v for k, v in os.environ.items() if k != "KRONN_DISCUSSION_ID"
@@ -5279,6 +5384,86 @@ class WorkflowActiveRunsTests(unittest.TestCase):
         method, path = self.fake_http.call_args.args[:2]
         self.assertEqual(method, "GET")
         self.assertEqual(path, "/api/workflows")
+
+
+class DiskUsageToolTests(unittest.TestCase):
+    """`disk_usage` (KT-1318) - the disk view and the orphan purge over HTTP.
+
+    The tool reads `GET /api/maintenance/disk`, keeps `entries` bounded, and its
+    only mutation is the default (orphans-only) purge: it can never name an
+    entry to delete.
+    """
+
+    REPORT = {
+        "success": True,
+        "data": {
+            "available_bytes": 123,
+            "under_pressure": False,
+            "policy": {"launch_min_free_gib": 30, "sweep_idle_hours": 6},
+            "totals": [{"kind": "lane_build_dir", "entries": 40, "bytes": 9}],
+            "orphan_count": 2,
+            "orphan_bytes": 5,
+            "entries": [{"path": f"/r/target/wt-{n}"} for n in range(40)],
+        },
+    }
+    PURGE = {
+        "success": True,
+        "data": {
+            "mode": "orphans",
+            "freed_bytes": 77,
+            "kept": 3,
+            "items": [
+                {"path": "/r/target/wt-a", "purged": True},
+                {"path": "/r/target/wt-b", "purged": False},
+            ],
+        },
+    }
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.calls = []
+
+        def fake_http(method, path, body=None, **_kwargs):
+            self.calls.append((method, path, body))
+            return self.PURGE if method == "POST" else self.REPORT
+
+        patcher = mock.patch.object(self.mod, "_http", fake_http)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_it_is_declared_with_a_manual_and_only_two_inputs(self):
+        tool = next(t for t in self.mod.TOOLS if t["name"] == "disk_usage")
+        self.assertEqual(
+            sorted(tool["inputSchema"]["properties"]), ["project_id", "purge_orphans"]
+        )
+        self.assertIn("disk_usage", self.mod.TOOL_MANUALS)
+        self.assertIn("never removed", self.mod.TOOL_MANUALS["disk_usage"])
+        self.assertIs(self.mod.DISPATCH["disk_usage"], self.mod.call_disk_usage)
+
+    def test_a_plain_call_only_reads_and_bounds_the_entries(self):
+        out = self.mod.call_disk_usage({})
+        self.assertEqual(self.calls, [("GET", "/api/maintenance/disk", None)])
+        self.assertEqual(out["entries_total"], 40)
+        self.assertEqual(len(out["entries"]), 25)
+        self.assertEqual(out["orphan_count"], 2)
+        self.assertNotIn("purged", out)
+
+    def test_the_project_filter_is_url_encoded(self):
+        self.mod.call_disk_usage({"project_id": "a b&c"})
+        self.assertEqual(self.calls[0][1], "/api/maintenance/disk?project_id=a%20b%26c")
+
+    def test_purge_orphans_takes_the_default_purge_then_reports_afresh(self):
+        out = self.mod.call_disk_usage({"purge_orphans": True, "project_id": "p1"})
+        method, path, body = self.calls[0]
+        self.assertEqual((method, path), ("POST", "/api/maintenance/disk/purge"))
+        self.assertEqual(body, {"project_id": "p1"}, "no paths, no confirm: orphans only")
+        self.assertEqual(self.calls[1][0], "GET")
+        self.assertEqual(out["purged"]["removed"], ["/r/target/wt-a"])
+        self.assertEqual(out["purged"]["freed_bytes"], 77)
+
+    def test_a_truthy_string_does_not_trigger_the_purge(self):
+        self.mod.call_disk_usage({"purge_orphans": "false"})
+        self.assertEqual([c[0] for c in self.calls], ["GET"])
 
 
 class WorkflowRunStatusTests(unittest.TestCase):
@@ -7677,6 +7862,50 @@ class HttpAuthHeaderTests(unittest.TestCase):
         self.assertEqual(req.get_header("Authorization"), "Bearer tok2")
 
 
+class ScopeRefusalMessageTests(unittest.TestCase):
+    """KT-1320 — a 403 for a resource outside the bridge token's scope says why
+    and what to do, because the agent runtime only relays "the tool returned an
+    error" otherwise."""
+
+    def setUp(self):
+        self.mod = _load_module(isolate_http=False)
+
+    def _refusal(self, status, error):
+        body = json.dumps({"success": False, "data": None, "error": error}).encode()
+        return urllib.error.HTTPError(
+            "http://127.0.0.1:3140/api/x", status, "Forbidden", {}, io.BytesIO(body))
+
+    def test_a_scope_refusal_tells_the_agent_what_to_do(self):
+        refusal = self._refusal(403, "a Discussion the request names is outside this bridge token's scope")
+        with mock.patch.dict(os.environ, {"KRONN_BACKEND_URL": "http://127.0.0.1:3140"}, clear=True), \
+             mock.patch("urllib.request.urlopen", side_effect=refusal):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.mod._http("GET", "/api/discussions/other")
+        msg = str(ctx.exception)
+        self.assertIn("HTTP 403", msg)
+        self.assertIn("outside this bridge token's scope", msg)
+        self.assertIn("Ask the human to attach that discussion", msg)
+        self.assertIn("disc_list", msg)
+
+    def test_the_text_variant_says_it_too(self):
+        refusal = self._refusal(403, "a Discussion the request names is outside this bridge token's scope")
+        with mock.patch.dict(os.environ, {"KRONN_BACKEND_URL": "http://127.0.0.1:3140"}, clear=True), \
+             mock.patch("urllib.request.urlopen", side_effect=refusal):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.mod._http_text("GET", "/api/x")
+        self.assertIn("Ask the human to attach that discussion", str(ctx.exception))
+
+    def test_other_errors_are_left_as_they_were(self):
+        for status, error in ((404, "not found"), (403, "this route is not available to a Kronn-launched agent's bridge token")):
+            with mock.patch.dict(os.environ, {"KRONN_BACKEND_URL": "http://127.0.0.1:3140"}, clear=True), \
+                 mock.patch("urllib.request.urlopen", side_effect=self._refusal(status, error)):
+                with self.assertRaises(RuntimeError) as ctx:
+                    self.mod._http("GET", "/api/x")
+            msg = str(ctx.exception)
+            self.assertTrue(msg.startswith(f"HTTP {status}: "), msg)
+            self.assertNotIn("Ask the human", msg)
+
+
 class AuditToolsTests(unittest.TestCase):
     """0.8.12 PR A — audit_prepare / audit_launch / audit_status.
 
@@ -7753,6 +7982,48 @@ class AuditToolsTests(unittest.TestCase):
             out = self.mod.call_audit_prepare({"project_id": "p1"})
         self.assertEqual(out, info, "AuditInfo must round-trip verbatim")
 
+    def test_audit_prepare_exposes_template_update_and_owning_steps_verbatim(self):
+        update = {"available": True, "installed_version": "1.0", "current_version": "1.1",
+                  "missing_files": [{"path": "docs/glossary.md", "step": 2}],
+                  "renames": [{"from": "docs/old.md", "to": "docs/new.md", "conflict": False}],
+                  "unresolved_files": [], "spec_modified": False}
+        info = {"files": [], "todos": [], "tech_debt_items": [], "template_update": update}
+        with mock.patch.object(self.mod, "_http", return_value={"success": True, "data": info}):
+            out = self.mod.call_audit_prepare({"project_id": "p1"})
+        self.assertEqual(out["template_update"], update)
+        description = next(t["description"] for t in self.mod.TOOLS if t["name"] == "audit_prepare")
+        self.assertIn("audit_install_template", description)
+        self.assertIn("owning steps", description)
+
+    def test_audit_surface_uses_the_verify_docs_vocabulary_of_the_ui(self):
+        # KT-1218 — one entry point, one name: the MCP descriptions and manuals
+        # say « Verify docs » exactly as the English UI labels the entry point,
+        # present the full audit as an explicit advanced option, and never
+        # bring back the three retired CTA names.
+        locale = (Path(__file__).resolve().parent.parent.parent
+                  / "frontend" / "src" / "lib" / "i18n" / "locales" / "en.ts").read_text(encoding="utf-8")
+        label = re.search(r"'audit\.revalidate\.button':\s*'([^']+)'", locale)
+        self.assertIsNotNone(label, "the English UI label of the entry point must exist")
+        self.assertEqual(label.group(1), "Verify docs")
+
+        tools = {t["name"]: t for t in self.mod.TOOLS}
+        manuals = self.mod.TOOL_MANUALS
+        self.assertIn(label.group(1), tools["audit_prepare"]["description"])
+        self.assertIn(label.group(1), tools["audit_launch"]["description"])
+        self.assertIn(label.group(1), manuals["audit_launch"])
+        # check -> smallest fix -> full audit, in that order of escalation.
+        manual = manuals["audit_launch"]
+        self.assertLess(manual.index("deterministic checks"), manual.index("smallest fix"))
+        self.assertLess(manual.index("smallest fix"), manual.index("full audit"))
+        self.assertIn("advanced option", manual)
+        self.assertIn("advanced", tools["audit_launch"]["inputSchema"]["properties"]["mode"]["description"])
+
+        retired = re.compile(r"revalidate the audit|re-?verify the doc|reverify the doc|revalider l.audit|rev[ée]rifier la doc|mettre [àa] jour \(",
+                             re.IGNORECASE)
+        for name in ("audit_prepare", "audit_install_template", "audit_launch", "audit_status"):
+            self.assertIsNone(retired.search(tools[name]["description"]), name)
+            self.assertIsNone(retired.search(manuals.get(name, "")), name)
+
     # ── audit_status ─────────────────────────────────────────────────
 
     def test_audit_status_null_live_falls_back_to_db_and_says_so(self):
@@ -7762,7 +8033,10 @@ class AuditToolsTests(unittest.TestCase):
             if path.endswith("/audit-status"):
                 return {"success": True, "data": None}
             if path.endswith("/audit-latest"):
-                return {"success": True, "data": {"run_id": "r-1", "status": "Completed"}}
+                return {"success": True, "data": {
+                    "latest": {"id": "r-1", "status": "Completed"},
+                    "latest_completed": {"id": "r-1", "status": "Completed"},
+                    "steps_to_redo": [], "lease_orphaned": False}}
             if path.endswith("/audit-resumable"):
                 return {"success": True, "data": None}
             raise AssertionError(f"unexpected path {path}")
@@ -7771,8 +8045,32 @@ class AuditToolsTests(unittest.TestCase):
             out = self.mod.call_audit_status({"project_id": "p1"})
         self.assertIsNone(out["live"])
         self.assertIsNone(out["bridge_stream"], "no local stream ever opened")
-        self.assertEqual(out["latest"]["run_id"], "r-1")
+        self.assertEqual(out["latest"]["id"], "r-1")
         self.assertIn("never means 'completed'", out["note"])
+
+    def test_audit_status_reports_the_true_latest_run_and_an_orphaned_lease(self):
+        # KT-1210 — a Cancelled run after a Completed one is the state, and the
+        # DB layer is read even while the tracker has a live entry.
+        def fake_http(method, path, body=None, **kwargs):
+            if path.endswith("/audit-status"):
+                return {"success": True, "data": {"phase": "auditing"}}
+            if path.endswith("/audit-latest"):
+                return {"success": True, "data": {
+                    "latest": {"id": "r-stop", "status": "Cancelled"},
+                    "latest_completed": {"id": "r-old", "status": "Completed"},
+                    "steps_to_redo": [5, 15], "lease_orphaned": True}}
+            if path.endswith("/audit-resumable"):
+                return {"success": True, "data": {"id": "r-stop"}}
+            raise AssertionError(f"unexpected path {path}")
+
+        with mock.patch.object(self.mod, "_http", side_effect=fake_http):
+            out = self.mod.call_audit_status({"project_id": "p1"})
+        self.assertEqual(out["live"], {"phase": "auditing"})
+        self.assertEqual(out["latest"]["status"], "Cancelled")
+        self.assertEqual(out["latest_completed"]["id"], "r-old")
+        self.assertEqual(out["resumable"], {"id": "r-stop"})
+        self.assertEqual(out["steps_to_redo"], [5, 15])
+        self.assertIs(out["lease_orphaned"], True)
 
     def test_audit_status_never_hands_the_agent_the_recent_actions(self):
         live = {"phase": "auditing", "current_tool": "Read", "current_tool_call_count": 3,
@@ -7791,6 +8089,46 @@ class AuditToolsTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     self.mod.call_audit_launch(
                         {"project_id": "p1", "mode": "partial", "steps": bad})
+
+    def test_full_launch_forwards_fresh_and_retry_steps(self):
+        # KT-1210 — the backend's refusal names `fresh: true`; the tool must
+        # be able to send it, and to retry chosen steps of a resumed run.
+        bodies = []
+
+        def fake_open(path, body):
+            bodies.append((path, body))
+            return self._FakeSse(self._sse("start", {"total_steps": 16}))
+
+        with mock.patch.object(self.mod, "_audit_open_sse", side_effect=fake_open):
+            self.mod.call_audit_launch(
+                {"project_id": "p1", "mode": "full", "agent": "Codex", "fresh": True})
+            with self.mod._AUDIT_LOCK:
+                self.mod._AUDIT_STREAMS.pop("p1", None)
+            self.mod.call_audit_launch(
+                {"project_id": "p1", "mode": "full", "agent": "Codex",
+                 "resume_run_id": "r-1", "retry_steps": [5]})
+        self.assertEqual(bodies[0], ("/api/projects/p1/full-audit",
+                                     {"agent": "Codex", "fresh": True}))
+        self.assertEqual(bodies[1][1], {"agent": "Codex", "resume_run_id": "r-1",
+                                        "retry_steps": [5]})
+
+    def test_fresh_and_retry_steps_misuse_is_refused_before_any_http(self):
+        bad_args = (
+            {"mode": "full", "retry_steps": [2]},
+            {"mode": "full", "resume_run_id": "r-1", "retry_steps": []},
+            {"mode": "full", "resume_run_id": "r-1", "retry_steps": [0]},
+            {"mode": "full", "resume_run_id": "r-1", "retry_steps": [True]},
+            {"mode": "full", "fresh": "yes"},
+            {"mode": "full", "fresh": True, "resume_run_id": "r-1"},
+            {"mode": "partial", "steps": [1], "fresh": True},
+            {"mode": "partial", "steps": [1], "resume_run_id": "r-1", "retry_steps": [1]},
+        )
+        with mock.patch.object(self.mod, "_audit_open_sse",
+                               side_effect=AssertionError("must not be called")):
+            for extra in bad_args:
+                with self.subTest(extra=extra), self.assertRaises(RuntimeError):
+                    self.mod.call_audit_launch({"project_id": "p1", **extra})
+        self.assertNotIn("p1", self.mod._AUDIT_STREAMS, "no phantom entry left")
 
     def test_blank_agent_falls_back_to_the_session_agent_type(self):
         # Copilot round 5: a whitespace `agent` must behave like an absent
@@ -7845,6 +8183,39 @@ class AuditToolsTests(unittest.TestCase):
             with self.assertRaises(RuntimeError) as ctx:
                 self.mod.call_audit_launch({"project_id": "p1", "mode": "full"})
         self.assertIn("already running", str(ctx.exception))
+
+    def test_a_launch_without_briefing_returns_the_cards_to_post(self):
+        # KT-1192 — the refusal is typed and carries the ready-to-post cards.
+        cards = [{"version": 1, "key": "briefing-purpose", "question": "Q",
+                  "options": [{"id": "not_provided", "label": "N"}],
+                  "task_ref": "audit-briefing:p1:d1"}]
+        stream = self._FakeSse(self._sse("error", {
+            "error": "This project has no briefing.",
+            "error_code": "briefing_required",
+            "discussion_id": "d1",
+            "briefing_cards": cards}))
+        with mock.patch.object(self.mod, "_audit_open_sse", return_value=stream):
+            out = self.mod.call_audit_launch({"project_id": "p1", "mode": "full"})
+        self.assertFalse(out["launched"])
+        self.assertEqual(out["error_code"], "briefing_required")
+        self.assertEqual(out["discussion_id"], "d1")
+        self.assertEqual(out["briefing_cards"], cards)
+
+    def test_audit_prepare_reports_a_missing_briefing_with_its_cards(self):
+        def fake_http(method, path, body=None, **kwargs):
+            if path.endswith("/audit-info"):
+                return {"success": True, "data": {"files": [], "todos": [], "tech_debt_items": []}}
+            if path.endswith("/briefing-status"):
+                return {"success": True, "data": {
+                    "present": False, "docs_dir": ".ai", "error_code": "briefing_required",
+                    "discussion_id": "d1", "briefing_cards": [{"key": "briefing-purpose"}]}}
+            return {"success": True, "data": {"audit_status": "NoTemplate", "path": "/x"}}
+
+        with mock.patch.object(self.mod, "_http", side_effect=fake_http):
+            out = self.mod.call_audit_prepare({"project_id": "p1"})
+        self.assertFalse(out["briefing"]["present"])
+        self.assertEqual(out["briefing"]["briefing_cards"], [{"key": "briefing-purpose"}])
+        self.assertIn("briefing_required", out["briefing_hint"])
 
     def test_second_local_launch_is_refused_while_one_runs(self):
         with self.mod._AUDIT_LOCK:
@@ -10045,10 +10416,16 @@ class PlanningToolTests(unittest.TestCase):
             "proposal_list", "proposal_get",
             "task_create", "task_update", "task_update_dod", "task_link_discussion",
             "task_add_blocker", "task_remove_blocker",
+            "task_assign",
         }
         names = {tool["name"] for tool in self.mod.TOOLS}
         self.assertTrue(expected.issubset(names))
         self.assertTrue(expected.issubset(self.mod.DISPATCH))
+        # KT-154 — one tool, declared in the TOOLS literal the byte gate parses;
+        # removing an assignment is `unassign: true`, not a second declaration.
+        self.assertNotIn("task_unassign", names)
+        self.assertNotIn("task_unassign", self.mod.DISPATCH)
+        self.assertIn("task_assign", self.mod.TOOL_MANUALS)
         self.assertFalse(
             {"proposal_accept", "proposal_reject", "proposal_decide"} & names,
             "proposal decisions must remain human-only",
@@ -10264,6 +10641,73 @@ class PlanningToolTests(unittest.TestCase):
         )
         self.assertEqual(body["completed"], True)
         self.assertEqual(body["actor"]["id"], "Codex")
+
+    def test_task_update_dod_forwards_the_live_check_evidence(self):
+        # KT-1254 — a post_integration item is ticked with the principal's proof.
+        with mock.patch.object(self.mod, "_http", self.fake_http), \
+             mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"):
+            self.mod.call_task_update_dod({
+                "task_id": "KT-42",
+                "dod_id": "dod-a",
+                "completed": True,
+                "evidence": "replayed on a real framing: ok",
+            })
+        _method, _path, body = self.fake_http.call_args.args
+        self.assertEqual(body["evidence"], "replayed on a real framing: ok")
+
+    def test_task_assign_without_assignee_names_the_caller_session(self):
+        # KT-154 — "myself" is resolved server-side from the durable session, so
+        # the bridge never invents a provider-only identity.
+        with mock.patch.object(self.mod, "_http", self.fake_http), \
+             mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"), \
+             mock.patch.object(self.mod, "_durable_session_id", return_value="cli-session-a"):
+            self.mod.call_task_assign({"task_id": "KT/154", "role": "reviewer"})
+        method, path, body = self.fake_http.call_args.args
+        self.assertEqual((method, path), ("POST", "/api/planning/tasks/KT%2F154/assignees"))
+        self.assertNotIn("assignee", body)
+        self.assertEqual(body["role"], "reviewer")
+        self.assertEqual(body["actor"]["id"], "Codex")
+        self.assertEqual(body["actor"]["session_id"], "cli-session-a")
+
+    def test_task_assign_forwards_only_the_typed_identity_fields(self):
+        with mock.patch.object(self.mod, "_http", self.fake_http), \
+             mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"):
+            self.mod.call_task_assign({
+                "task_id": "KT-154",
+                "assignee": {
+                    "kind": "cli",
+                    "agent_type": "Codex",
+                    "cli_session_id": 12,
+                    "ignored": "x",
+                },
+            })
+        body = self.fake_http.call_args.args[2]
+        self.assertEqual(
+            body["assignee"],
+            {"kind": "cli", "agent_type": "Codex", "cli_session_id": 12},
+        )
+
+    def test_task_assign_rejects_a_provider_only_assignee(self):
+        with self.assertRaisesRegex(RuntimeError, "kind and agent_type"):
+            self.mod.call_task_assign({"task_id": "KT-154", "assignee": {"agent_type": "Codex"}})
+        with self.assertRaisesRegex(RuntimeError, "task_id is required"):
+            self.mod.call_task_assign({"unassign": True})
+
+    def test_task_assign_unassign_is_a_delete_on_the_assignees_collection(self):
+        with mock.patch.object(self.mod, "_http", self.fake_http), \
+             mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"):
+            self.mod.call_task_assign({"task_id": "KT-154", "unassign": True, "role": "owner"})
+        method, path, body = self.fake_http.call_args.args
+        self.assertEqual((method, path), ("DELETE", "/api/planning/tasks/KT-154/assignees"))
+        self.assertNotIn("assignee", body)
+        self.assertNotIn("role", body, "a removal carries no role")
+
+    def test_assignees_reach_the_write_receipt(self):
+        ack = self.mod._task_ack({
+            "id": "t", "reference": "KT-154", "title": "x", "status": "in_progress",
+            "assignees": [{"kind": "cli", "agent_type": "Codex", "cli_session_id": 12}],
+        })
+        self.assertEqual(ack["assignees"][0]["cli_session_id"], 12)
 
     def test_task_add_blocker_requires_both_references(self):
         with self.assertRaisesRegex(RuntimeError, "task_id and blocker_task_id"):
@@ -11588,6 +12032,86 @@ class JoinedRoomWorkProtocolTests(unittest.TestCase):
         self.assertNotIn("never re-delivers", room)
         self.assertNotIn("a quiet return costs nothing", room)
 
+    # KT-1329 — Claude Code cuts MCP `instructions` at 2048 chars. The card
+    # guidance used to start at char 1985 (onboarded) or 2438 (first contact),
+    # so a colleague's agent never learned to ask for an arbitration.
+    CLIENT_INSTRUCTIONS_LIMIT = 2048
+
+    def _initialize_instructions(self, onboarded):
+        with mock.patch.object(self.mod, "_onboarding_done_for", return_value=onboarded):
+            response = self.mod._handle({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {},
+            })
+        return response["result"]["instructions"]
+
+    def test_decision_card_survives_the_2048_char_client_cut(self):
+        for onboarded in (True, False):
+            with self.subTest(onboarded=onboarded):
+                seen = self._initialize_instructions(onboarded)[: self.CLIENT_INSTRUCTIONS_LIMIT]
+                for needle in ("kronn-question", '"version":1', '"key"', '{"id"',
+                               "disc_append", "disc_question_list"):
+                    self.assertIn(needle, seen)
+
+    def test_decision_card_inline_example_is_valid_json_with_the_right_shape(self):
+        for onboarded in (True, False):
+            with self.subTest(onboarded=onboarded):
+                seen = self._initialize_instructions(onboarded)[: self.CLIENT_INSTRUCTIONS_LIMIT]
+                start = seen.index('{"version"')
+                example, _ = json.JSONDecoder().raw_decode(seen[start:])
+                self.assertIs(type(example["version"]), int)
+                self.assertEqual(example["version"], 1)
+                self.assertIn("key", example)
+                self.assertNotIn("id", example)
+                self.assertTrue(example["question"])
+                self.assertEqual(list(example["options"][0]), ["id", "label"])
+
+    def test_critical_bullets_end_before_the_client_cut(self):
+        for onboarded in (True, False):
+            with self.subTest(onboarded=onboarded):
+                instructions = self._initialize_instructions(onboarded)
+                limit = self.CLIENT_INSTRUCTIONS_LIMIT
+                for bullet in (self.mod.HUMAN_DECISION_CARD_BULLET.strip(),):
+                    start = instructions.index(bullet)
+                    self.assertLessEqual(start + len(bullet), limit)
+
+    def test_first_contact_offer_follows_the_card_inside_the_client_cut(self):
+        first = self._initialize_instructions(False)
+        onboarded = self._initialize_instructions(True)
+        bullet = self.mod.HUMAN_DECISION_CARD_BULLET
+        self.assertNotIn("FIRST CONTACT", onboarded)
+        self.assertGreater(first.index("FIRST CONTACT"), first.index(bullet) + len(bullet) - 1)
+        seen = first[: self.CLIENT_INSTRUCTIONS_LIMIT]
+        self.assertIn("FIRST CONTACT", seen)
+        self.assertIn("`kronn_intro`", seen)
+        self.assertEqual(first.count("FIRST CONTACT"), 1)
+
+    def test_step_tools_session_learns_the_card_only_when_it_can_post(self):
+        initialize = {"jsonrpc": "2.0", "id": 3, "method": "initialize", "params": {}}
+        with mock.patch.object(self.mod, "_spawned_task_worker_mode", return_value=False):
+            for argv, expected in (
+                (["bridge", "--step-tools=disc_append,disc_question_list"], True),
+                (["bridge", "--step-tools=task_get"], False),
+            ):
+                with self.subTest(argv=argv), mock.patch.object(self.mod.sys, "argv", argv):
+                    result = self.mod._handle(initialize)["result"]
+                    self.assertEqual("instructions" in result, expected)
+                    if expected:
+                        self.assertIn("kronn-question", result["instructions"])
+                        self.assertIn('"version":1', result["instructions"])
+
+    def test_spawned_worker_is_told_why_it_cannot_post_a_card(self):
+        initialize = {"jsonrpc": "2.0", "id": 3, "method": "initialize", "params": {}}
+        with mock.patch.object(self.mod, "_spawned_task_worker_mode", return_value=True):
+            instructions = self.mod._handle(initialize)["result"]["instructions"]
+        self.assertIn("cannot post a decision card", instructions)
+        self.assertIn("kronn-question", instructions)
+        self.assertIn("principal", instructions)
+
+    def test_disc_append_description_points_to_the_card(self):
+        description = next(t for t in self.mod.TOOLS if t["name"] == "disc_append")["description"]
+        self.assertIn("kronn-question", description)
+        self.assertIn("disc_question_list", description)
+
 
 class WaitOutsideLlmLoopTests(unittest.TestCase):
     """KT-189 — disc_wait_for_peer holds quiet waits bridge-side.
@@ -12538,7 +13062,7 @@ class TaskAckTests(unittest.TestCase):
         for name in (
             "call_task_create", "call_task_update", "call_task_update_dod",
             "call_task_add_blocker", "call_task_remove_blocker",
-            "call_task_link_discussion",
+            "call_task_link_discussion", "call_task_assign",
         ):
             source = inspect.getsource(getattr(self.mod, name))
             self.assertIn("_task_ack", source, f"{name} still returns the whole task")

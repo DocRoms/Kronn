@@ -5,7 +5,7 @@ import { useT } from '../../lib/I18nContext';
 import { useCachedResource } from '../../hooks/useCachedResource';
 import type { DependencyUpdateSummary } from '../../types/generated';
 
-const INCOMPLETE = ['Unsupported', 'Unavailable', 'Error', 'TimedOut'];
+const INCOMPLETE = ['Unsupported', 'Unavailable', 'Error', 'TimedOut', 'NotInstalled'];
 
 /** The project's dependency freshness: last known result at once, refreshed behind it. */
 export function ProjectDependenciesBlock({ projectId, enabled }: { projectId: string; enabled: boolean }) {
@@ -156,7 +156,9 @@ export function ProjectDependenciesBlock({ projectId, enabled }: { projectId: st
                     ? t('projects.master.overview.dependencyToolUnavailable')
                     : manager.status === 'TimedOut'
                       ? t('projects.master.overview.dependencyTimedOut')
-                      : t('projects.master.overview.dependencyCheckFailed');
+                      : manager.status === 'NotInstalled'
+                        ? t('projects.master.overview.dependencyNotInstalled')
+                        : t('projects.master.overview.dependencyCheckFailed');
             const tone = manager.status === 'UpdatesAvailable'
               ? 'warning'
               : manager.status === 'UpToDate' ? 'success' : 'muted';
@@ -173,10 +175,20 @@ export function ProjectDependenciesBlock({ projectId, enabled }: { projectId: st
                           className={pkg.major ? 'project-overview-dependency-package-major' : undefined}
                         >
                           {index > 0 ? ' · ' : ''}
-                          {pkg.name} {pkg.current} → {pkg.latest}
+                          {pkg.name}{' '}
+                          {pkg.declared_only
+                            ? t('projects.master.overview.dependencyDeclaredOnly')
+                            : pkg.current}
+                          {pkg.lockfile && ` (${t('projects.master.overview.dependencyFromLockfile')} ${pkg.lockfile})`}
+                          {' → '}{pkg.latest}
                         </span>
                       ))}
                       {manager.outdated > 3 && <span>{` · +${manager.outdated - 3}`}</span>}
+                    </small>
+                  )}
+                  {manager.reason && (
+                    <small data-testid="dependency-reason">
+                      {t('projects.master.overview.dependencyReason')} {manager.reason}
                     </small>
                   )}
                 </div>

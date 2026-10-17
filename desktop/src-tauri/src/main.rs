@@ -622,7 +622,7 @@ async fn start_backend(
         format!("http://127.0.0.1:{port}"),
     );
 
-    // Load or create config; also arms the process timezone (KT-1103).
+    // Load or create config; also arms the process timezone and anti-hallucination mode.
     let mut app_config = kronn::load_startup_config().await?;
 
     // Embedded mode: bind loopback by default, but HONOR the network-exposure
@@ -649,6 +649,8 @@ async fn start_backend(
 
     // Resolve the encryption key and the stored credentials now the DB is open.
     kronn::resolve_key_and_credentials(&mut app_config, &database, env_token).await?;
+    // Before any request resolves a project's AI doc folder (KT-263).
+    kronn::arm_docs_locations(&database).await?;
 
     // Same LAN guard as the standalone backend: never serve the network with
     // an unauthenticated API.
@@ -1182,8 +1184,7 @@ fn main() {
                 let backend_port = port;
                 let app_handle = app.handle().clone();
                 std::thread::spawn(move || {
-                    let rt = tokio::runtime::Builder::new_multi_thread()
-                        .enable_all()
+                    let rt = kronn::runtime_builder()
                         .build()
                         .expect("Failed to create Tokio runtime");
                     rt.block_on(async {

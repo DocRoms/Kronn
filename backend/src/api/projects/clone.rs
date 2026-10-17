@@ -518,7 +518,9 @@ pub async fn clone_and_remap(
         .with_conn(move |conn| crate::db::projects::update_project_path(conn, &pid2, &np))
         .await
     {
-        Ok(true) => {}
+        Ok(true) => {
+            super::docs_location::rekey(&state, &id, &project.path, Some(&project_path)).await
+        }
         Ok(false) => return Json(ApiResponse::err("Project not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {e}"))),
     }

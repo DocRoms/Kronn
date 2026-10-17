@@ -26,13 +26,15 @@ const serverConfig = vi.hoisted((): ServerConfigPublic => ({
   agent_handoff_paid_unlimited: false, agent_handoff_blocked_agents: [],
   discussion_weight: { enabled: true, amber_bytes: 512 * 1024, red_bytes: 2 * 1024 * 1024 },
   execution_variable_retention_days: 30, run_payload_retention_days: 0, p2p_enabled: false, frontend_origins: [],
+  disk_launch_min_free_gib: 30, disk_sweep_idle_hours: 6,
 }));
 
 vi.mock('../../lib/api', async () => {
   const { buildApiMock } = await import('../../test/apiMock');
   const api = buildApiMock();
   api.config.getServerConfig = vi.fn<typeof RealApi.config.getServerConfig>().mockResolvedValue(serverConfig);
-  api.config.dbUsage = vi.fn<typeof RealApi.config.dbUsage>().mockResolvedValue({
+  // `dbUsage` takes an options object, which `AnyFn` cannot express.
+  api.config.dbUsage = vi.fn().mockResolvedValue({
     file_bytes: 534 * 1024 * 1024, wal_bytes: 0, free_bytes: 0, tables: [],
   });
   api.config.dbInfo = vi.fn<typeof RealApi.config.dbInfo>().mockResolvedValue({

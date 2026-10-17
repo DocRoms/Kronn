@@ -379,7 +379,12 @@ pub async fn activate_api_key(
 pub async fn toggle_token_override(
     State(state): State<AppState>,
     Json(provider): Json<String>,
-) -> Json<ApiResponse<bool>> {
+) -> (StatusCode, Json<ApiResponse<bool>>) {
+    if matches!(provider.as_str(), "openai" | "google") {
+        if let Some(refused) = refuse_home_credential_write() {
+            return refused;
+        }
+    }
     let mut config = state.config.write().await;
     let disabled = &mut config.tokens.disabled_overrides;
     let is_now_enabled = if disabled.contains(&provider) {
@@ -391,24 +396,29 @@ pub async fn toggle_token_override(
     };
 
     // Sync agent auth files: write key if enabled, remove if disabled
-    if provider == "openai" {
-        sync_codex_auth(if is_now_enabled {
+    let synced = match provider.as_str() {
+        "openai" => sync_codex_auth(if is_now_enabled {
             config.tokens.active_key_for("openai")
         } else {
             None
-        });
-    }
-    if provider == "google" {
-        crate::core::key_discovery::write_gemini_key(if is_now_enabled {
+        }),
+        "google" => crate::core::key_discovery::write_gemini_key(if is_now_enabled {
             config.tokens.active_key_for("google")
         } else {
             None
-        });
+        }),
+        _ => Ok(()),
+    };
+    if let Err(e) = synced {
+        tracing::warn!("{e}");
     }
 
     match config::save(&config).await {
-        Ok(_) => Json(ApiResponse::ok(is_now_enabled)),
-        Err(e) => Json(ApiResponse::err(format!("Failed to save: {}", e))),
+        Ok(_) => (StatusCode::OK, Json(ApiResponse::ok(is_now_enabled))),
+        Err(e) => (
+            StatusCode::OK,
+            Json(ApiResponse::err(format!("Failed to save: {}", e))),
+        ),
     }
 }
 
@@ -695,6 +705,49 @@ pub async fn set_scan_depth(
     }
 }
 
+/// GET /api/config/default-docs-dir — the default AI doc folder (KT-263).
+pub async fn get_default_docs_dir(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<Option<String>>> {
+    let config = state.config.read().await;
+    Json(ApiResponse::ok(config.scan.default_docs_dir.clone()))
+}
+
+/// POST /api/config/default-docs-dir — `null` or blank clears it. Anything
+/// absolute or with `..` is a 400: the folder is resolved under every project.
+pub async fn save_default_docs_dir(
+    State(state): State<AppState>,
+    Json(value): Json<Option<String>>,
+) -> Response {
+    let normalized = match value.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        None => None,
+        Some(raw) => match crate::core::docs_location::normalize_relative(raw) {
+            Ok(rel) => Some(rel),
+            Err(reason) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ApiResponse::<Option<String>>::err_coded(
+                        ApiErrorCode::Validation,
+                        reason,
+                    )),
+                )
+                    .into_response()
+            }
+        },
+    };
+    let mut config = state.config.write().await;
+    let previous = config.scan.default_docs_dir.clone();
+    config.scan.default_docs_dir = normalized.clone();
+    if let Err(e) = config::save(&config).await {
+        config.scan.default_docs_dir = previous;
+        return Json(ApiResponse::<Option<String>>::err(format!(
+            "Failed to save: {e}"
+        )))
+        .into_response();
+    }
+    Json(ApiResponse::ok(normalized)).into_response()
+}
+
 /// GET /api/config/agent-access
 pub async fn get_agent_access(State(state): State<AppState>) -> Json<ApiResponse<AgentsConfig>> {
     let config = state.config.read().await;
@@ -875,6 +928,8 @@ pub async fn get_server_config(
         discussion_weight: config.server.discussion_weight,
         execution_variable_retention_days: config.server.execution_variable_retention_days,
         run_payload_retention_days: config.server.run_payload_retention_days,
+        disk_launch_min_free_gib: config.server.disk_launch_min_free_gib,
+        disk_sweep_idle_hours: config.server.disk_sweep_idle_hours,
         p2p_enabled: config.server.p2p_enabled,
         frontend_origins: config.server.frontend_origins.clone(),
         timezone: config.server.timezone.clone(),
@@ -939,6 +994,14 @@ pub async fn set_server_config(
     }
     if let Some(days) = req.run_payload_retention_days {
         config.server.run_payload_retention_days = days;
+    }
+    // KT-1318 - saved with the config, which republishes the live policy.
+    if let Some(gib) = req.disk_launch_min_free_gib {
+        config.server.disk_launch_min_free_gib = gib.min(100_000);
+    }
+    if let Some(hours) = req.disk_sweep_idle_hours {
+        config.server.disk_sweep_idle_hours =
+            hours.clamp(crate::core::disk_usage::MIN_SWEEP_IDLE_HOURS, 24 * 365);
     }
     if let Some(domain) = req.domain {
         config.server.domain = if domain.is_empty() {
@@ -1146,14 +1209,33 @@ pub async fn get_auth_token(State(state): State<AppState>) -> Json<ApiResponse<O
 }
 
 /// Write or remove the OpenAI key from ~/.codex/auth.json
-fn sync_codex_auth(key: Option<&str>) {
-    let home = crate::core::child_env::var("HOME").unwrap_or_else(|_| "/root".into());
-    let codex_auth_path = std::path::PathBuf::from(home)
-        .join(".codex")
-        .join("auth.json");
-    if let Err(e) = sync_codex_auth_at(&codex_auth_path, key) {
-        tracing::warn!("{e}");
+fn sync_codex_auth(key: Option<&str>) -> Result<(), String> {
+    if let Some(refusal) = crate::core::mcp_scanner::home_credential_write_refusal() {
+        return Err(refusal.to_string());
     }
+    sync_codex_auth_at(&codex_auth_path(), key)
+}
+
+/// In Docker `KRONN_HOST_HOME` is a host path absent from the container, and
+/// the container `HOME/.codex` is the bind-mounted host directory.
+fn codex_auth_path() -> std::path::PathBuf {
+    let host_home = crate::core::child_env::var("KRONN_HOST_HOME")
+        .ok()
+        .filter(|home| !home.is_empty() && !crate::core::env::is_docker());
+    let home = host_home
+        .or_else(|| crate::core::child_env::var("HOME").ok())
+        .unwrap_or_else(|| "/root".into());
+    std::path::PathBuf::from(home)
+        .join(".codex")
+        .join("auth.json")
+}
+
+/// 409 before anything changes: an isolated instance must not report a key
+/// sync it refused to perform.
+fn refuse_home_credential_write<T: serde::Serialize>() -> Option<(StatusCode, Json<ApiResponse<T>>)>
+{
+    crate::core::mcp_scanner::home_credential_write_refusal()
+        .map(|refusal| (StatusCode::CONFLICT, Json(ApiResponse::err(refusal))))
 }
 
 /// Merge Kronn's OpenAI key into (or out of) a Codex `auth.json`.
@@ -1267,7 +1349,12 @@ fn sync_codex_auth_at(codex_auth_path: &std::path::Path, key: Option<&str>) -> R
 
 /// POST /api/config/sync-agent-tokens
 /// Write API tokens into agent-specific auth files (e.g. ~/.codex/auth.json)
-pub async fn sync_agent_tokens(State(state): State<AppState>) -> Json<ApiResponse<Vec<String>>> {
+pub async fn sync_agent_tokens(
+    State(state): State<AppState>,
+) -> (StatusCode, Json<ApiResponse<Vec<String>>>) {
+    if let Some(refused) = refuse_home_credential_write() {
+        return refused;
+    }
     let config = state.config.read().await;
     let mut synced: Vec<String> = Vec::new();
 
@@ -1278,8 +1365,10 @@ pub async fn sync_agent_tokens(State(state): State<AppState>) -> Json<ApiRespons
             .disabled_overrides
             .contains(&"openai".to_string())
         {
-            sync_codex_auth(Some(openai_key));
-            synced.push("Codex".into());
+            match sync_codex_auth(Some(openai_key)) {
+                Ok(()) => synced.push("Codex".into()),
+                Err(e) => tracing::warn!("{e}"),
+            }
         }
     }
 
@@ -1290,12 +1379,14 @@ pub async fn sync_agent_tokens(State(state): State<AppState>) -> Json<ApiRespons
             .disabled_overrides
             .contains(&"google".to_string())
         {
-            crate::core::key_discovery::write_gemini_key(Some(google_key));
-            synced.push("Gemini CLI".into());
+            match crate::core::key_discovery::write_gemini_key(Some(google_key)) {
+                Ok(()) => synced.push("Gemini CLI".into()),
+                Err(e) => tracing::warn!("{e}"),
+            }
         }
     }
 
-    Json(ApiResponse::ok(synced))
+    (StatusCode::OK, Json(ApiResponse::ok(synced)))
 }
 
 /// POST /api/config/discover-keys
@@ -1438,7 +1529,15 @@ pub async fn db_info(State(state): State<AppState>) -> Json<ApiResponse<DbInfo>>
 /// Measured with `dbstat` in its aggregate form — one row per b-tree instead of
 /// one per page. Timed at 1.07 s on a 7.2 GB database; the per-page form walks
 /// every page and is not worth the accuracy here.
-pub async fn db_usage(State(state): State<AppState>) -> Json<ApiResponse<DbUsage>> {
+///
+/// `?tables=false` skips that walk and answers the file sizes alone, for
+/// callers that only need to know how big the database is. Either way it runs
+/// on a connection of its own: the walk takes seconds on a large file and
+/// would otherwise stall every request queued behind the shared connections.
+pub async fn db_usage(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<DbUsageQuery>,
+) -> Json<ApiResponse<DbUsage>> {
     let db_path = state.db.path().to_path_buf();
     let file_bytes = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
     // The WAL is a sibling file. Counted apart: a checkpoint reclaims it, so
@@ -1449,12 +1548,52 @@ pub async fn db_usage(State(state): State<AppState>) -> Json<ApiResponse<DbUsage
 
     match state
         .db
-        .with_conn(move |conn| measure_db_usage(conn, file_bytes, wal_bytes))
+        .with_dedicated_read_conn(move |conn| {
+            if query.tables {
+                measure_db_usage(conn, file_bytes, wal_bytes)
+            } else {
+                measure_db_size(conn, file_bytes, wal_bytes)
+            }
+        })
         .await
     {
         Ok(usage) => Json(ApiResponse::ok(usage)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct DbUsageQuery {
+    #[serde(default = "default_true")]
+    pub tables: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn free_bytes(conn: &rusqlite::Connection) -> u64 {
+    let page_size: u64 = conn
+        .query_row("PRAGMA page_size", [], |r| r.get::<_, i64>(0))
+        .unwrap_or(4096) as u64;
+    let free_pages: u64 = conn
+        .query_row("PRAGMA freelist_count", [], |r| r.get::<_, i64>(0))
+        .unwrap_or(0) as u64;
+    free_pages * page_size
+}
+
+/// `db_usage` without the per-table walk: two pragmas, no page read.
+pub(crate) fn measure_db_size(
+    conn: &rusqlite::Connection,
+    file_bytes: u64,
+    wal_bytes: u64,
+) -> anyhow::Result<DbUsage> {
+    Ok(DbUsage {
+        file_bytes,
+        wal_bytes,
+        free_bytes: free_bytes(conn),
+        tables: Vec::new(),
+    })
 }
 
 /// The measurement behind `db_usage`, separated from the handler so it can be
@@ -1465,13 +1604,6 @@ pub(crate) fn measure_db_usage(
     wal_bytes: u64,
 ) -> anyhow::Result<DbUsage> {
     {
-        let page_size: u64 = conn
-            .query_row("PRAGMA page_size", [], |r| r.get::<_, i64>(0))
-            .unwrap_or(4096) as u64;
-        let free_pages: u64 = conn
-            .query_row("PRAGMA freelist_count", [], |r| r.get::<_, i64>(0))
-            .unwrap_or(0) as u64;
-
         // Every index's owning table, so an index's weight is reported
         // against the rows that would take it away when deleted.
         let mut owner: std::collections::HashMap<String, String> = std::collections::HashMap::new();
@@ -1535,7 +1667,7 @@ pub(crate) fn measure_db_usage(
         Ok(DbUsage {
             file_bytes,
             wal_bytes,
-            free_bytes: free_pages * page_size,
+            free_bytes: free_bytes(conn),
             tables,
         })
     }
@@ -3421,6 +3553,36 @@ mod tests {
         assert!(!path.exists());
     }
 
+    #[test]
+    #[serial_test::serial]
+    fn codex_writer_refuses_an_isolated_instance_and_names_no_key() {
+        let _restore = crate::core::mcp_scanner::host_sync_tests::EnvRestore::capture(&[
+            "HOME",
+            "KRONN_DATA_DIR",
+            "KRONN_HOST_HOME",
+            "KRONN_HOST_MCP_SYNC",
+            "KRONN_IN_DOCKER",
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        crate::core::child_env::set_var("HOME", dir.path());
+        crate::core::child_env::set_var("KRONN_DATA_DIR", dir.path().join("data"));
+        for name in ["KRONN_HOST_HOME", "KRONN_HOST_MCP_SYNC", "KRONN_IN_DOCKER"] {
+            crate::core::child_env::remove_var(name);
+        }
+
+        for key in [Some("sk-kt1162-never-leaks"), None] {
+            let error = sync_codex_auth(key).unwrap_err();
+            assert!(error.contains("KRONN_HOST_HOME"), "{error}");
+            assert!(!error.contains("sk-kt1162"), "{error}");
+        }
+        assert!(!dir.path().join(".codex").exists());
+
+        // The explicit redirect is honoured outside Docker.
+        let host = dir.path().join("host");
+        crate::core::child_env::set_var("KRONN_HOST_HOME", &host);
+        assert_eq!(codex_auth_path(), host.join(".codex/auth.json"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn codex_sync_failure_leaves_the_original_byte_identical() {
@@ -3699,6 +3861,59 @@ mod tests {
             first.bytes,
             notes.bytes,
         );
+    }
+
+    #[test]
+    fn the_size_only_measure_skips_the_table_walk() {
+        let usage = measure_db_size(&weighted_db(), 123, 45).unwrap();
+        assert_eq!((usage.file_bytes, usage.wal_bytes), (123, 45));
+        assert!(usage.tables.is_empty());
+    }
+
+    #[tokio::test]
+    async fn db_usage_answers_while_the_write_connection_is_held() {
+        // The walk takes seconds on a large file; on the write connection it
+        // stalled every request queued behind it (KT-1148).
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = std::sync::Arc::new(
+            crate::db::Database::open_path(&tmp.path().join("usage.db")).unwrap(),
+        );
+        let state = AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(config::default_config())),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let (locked_tx, locked_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let writer = tokio::spawn(async move {
+            db.with_conn(move |_conn| {
+                let _ = locked_tx.send(());
+                let _ = release_rx.recv_timeout(std::time::Duration::from_secs(20));
+                Ok(())
+            })
+            .await
+        });
+        locked_rx.await.unwrap();
+
+        for tables in [true, false] {
+            let answer = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                db_usage(
+                    State(state.clone()),
+                    axum::extract::Query(DbUsageQuery { tables }),
+                ),
+            )
+            .await;
+            let Ok(Json(response)) = answer else {
+                let _ = release_tx.send(());
+                panic!("db-usage (tables={tables}) waited for the write connection");
+            };
+            let usage = response.data.expect("db usage");
+            assert!(usage.file_bytes > 0);
+            assert_eq!(usage.tables.is_empty(), !tables);
+        }
+        let _ = release_tx.send(());
+        writer.await.unwrap().unwrap();
     }
 
     #[test]
@@ -5497,5 +5712,68 @@ mod frontend_origin_tests {
         for bad in ["http://h:3140/path", "*", "http://evil#", "null"] {
             assert!(normalize_origin_list(&[bad.into()]).is_err(), "{bad}");
         }
+    }
+}
+
+#[cfg(test)]
+mod default_docs_dir_tests {
+    use super::*;
+
+    async fn docs_dir_reply(response: Response) -> (StatusCode, serde_json::Value) {
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    /// KT-263: the default AI doc folder is normalized and persisted (it only
+    /// pre-fills the briefing, KT-1192), and refused with a 400 when it could
+    /// leave a project.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn default_docs_dir_is_normalized_saved_and_refused_when_unsafe() {
+        // Saving persists config.toml: never the developer's real one.
+        let _restore =
+            crate::core::mcp_scanner::host_sync_tests::EnvRestore::capture(&["KRONN_DATA_DIR"]);
+        let data = tempfile::tempdir().unwrap();
+        crate::core::child_env::set_var("KRONN_DATA_DIR", data.path());
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let config = std::sync::Arc::new(tokio::sync::RwLock::new(config::default_config()));
+        let state = crate::AppState::new_defaults(config, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS);
+
+        let (status, body) = docs_dir_reply(
+            save_default_docs_dir(State(state.clone()), Json(Some(" ./handbook/ ".into()))).await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"], "handbook");
+        assert_eq!(
+            state.config.read().await.scan.default_docs_dir.as_deref(),
+            Some("handbook")
+        );
+
+        for bad in ["../outside", "/etc", "C:\\docs", ".git/x"] {
+            let (status, body) = docs_dir_reply(
+                save_default_docs_dir(State(state.clone()), Json(Some(bad.into()))).await,
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {body}");
+            assert_eq!(body["error_code"], "validation");
+            assert!(!body["error"].as_str().unwrap().is_empty());
+            assert_eq!(
+                state.config.read().await.scan.default_docs_dir.as_deref(),
+                Some("handbook"),
+                "a refused value leaves the saved one"
+            );
+        }
+
+        let (status, body) = docs_dir_reply(
+            save_default_docs_dir(State(state.clone()), Json(Some("  ".into()))).await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body["data"].is_null());
+        assert_eq!(state.config.read().await.scan.default_docs_dir, None);
     }
 }

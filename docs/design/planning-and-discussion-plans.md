@@ -4,11 +4,11 @@ Status: **implemented for 0.9.1** (2026-07-25).
 
 The domain schema, compact HTTP/MCP contract, discussion panel, global backlog,
 human-gated proposal cards and delta-only prompt notifications are implemented.
-`[src: file: backend/src/db/sql/081_planning_tasks.sql:1-99]`
-`[src: file: backend/src/api/planning.rs:1-156]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:169-365]`
-`[src: file: frontend/src/pages/PlanningPage.tsx:1-654]`
-`[src: file: frontend/src/components/DiscussionPlanPanel.tsx:1-304]`
+`[src: file: backend/src/db/sql/081_planning_tasks.sql:1-99#planning_tasks]`
+`[src: file: backend/src/api/planning.rs:223-264#get_discussion_plan]` `[src: file: backend/src/api/planning.rs:311-358#decide_proposal_item]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:326-650#plan_get]`
+`[src: file: frontend/src/pages/PlanningPage.tsx:175-195#withDiscussion]`
+`[src: file: frontend/src/components/DiscussionPlanPanel.tsx:786-998#plan-panel-list]` `[src: file: backend/src/api/discussions/streaming.rs:3710-3741#planning_change_count]`
 
 This document is the implementation brief for a future Planning workspace and
 the smaller discussion-plan panel that exposes the same task data inside a
@@ -115,9 +115,9 @@ The selected view is saved per discussion in session storage. A small spinner
 on in-progress rows reflects Planning status only, not a worker heartbeat; it
 stops animating when reduced motion is requested. Background plan refreshes
 update membership and indicators without resetting the selected view.
-`[src: file: frontend/src/components/DiscussionPlanPanel.tsx:387-427]`
-`[src: file: frontend/src/lib/orch-panel-state.ts:50-70]`
-`[src: file: frontend/src/components/DiscussionPlanPanel.css:163-182]`
+`[src: file: frontend/src/components/DiscussionPlanPanel.tsx:839-869#plan-view-switch]` `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:238-247#current]` `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:404-437#filteredAllRelations]`
+`[src: file: frontend/src/lib/orch-panel-state.ts:47-69#readPlanOrchestrationState]` `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:131-136#writePlanOrchestrationState]`
+`[src: file: frontend/src/components/DiscussionPlanPanel.tsx:547-551#renderProgress]` `[src: file: frontend/src/components/DiscussionPlanPanel.css:161-178#plan-task-progress]` `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:161-172#applyPlan]`
 
 Agents may instead emit structured proposals that the UI renders as existing
 action-like cards. Initial actions are:
@@ -170,7 +170,8 @@ the exact discussion id for MCP clients, so an explicit `plan_get` or
 Planning state changes, agents also receive a compact change notification and
 then pull only the required details. This prevents unrelated agents from paying
 for unused task content while ensuring “create the discussion plan” works on a
-new room. `[src: file: backend/src/api/disc_prompts.rs]`
+new room. `[src: file: backend/src/api/disc_prompts.rs:491-538#planning_notice]`
+`[src: file: backend/src/api/discussions/streaming.rs:3710-3741#planning_change_count]`
 
 The intended read surface is:
 
@@ -183,31 +184,52 @@ Writes are separate tools with narrow schemas. Lists are compact by default and
 full content is returned only for an explicitly requested task.
 `task_update_dod(task_id, dod_id, completed)` is the preferred narrow write for
 checkbox progress. Delta timestamps are compared numerically as RFC3339
-instants, independent of `Z`/offset spelling and fractional precision. Agents must be
-taught this contract in the same prompt/instruction layer that currently
-advertises discussion-history tools. Today that layer explicitly describes
-`disc_meta`, `disc_get_message`, and `disc_summarize`. `[src: file: backend/src/api/disc_prompts.rs:346-361]`
+instants, independent of `Z`/offset spelling and fractional precision. `[src: file: backend/src/db/planning.rs:2667-2715#task_changes]` Agents are
+taught this contract in the same prompt/instruction layer that advertises the
+discussion-history tools `disc_meta`, `disc_get_message` and `disc_summarize`:
+the delayed history notice also lists the Planning reads and says how to write (a direct `task_create`, or a `kronn-plan-action` proposal). `[src: file: backend/src/api/disc_prompts.rs:569-599#introspection_notice]`
 
 Runtime parity is capability-based:
 
-- Claude Code, Codex, Gemini CLI, Kiro and Copilot CLI call the
+- Claude Code, Codex, OpenCode, Gemini CLI, Kiro and Copilot CLI call the
   `kronn-internal` MCP tools. The injected explicit discussion id remains valid
   even when the bridge reports `no disc bound` or `rejoin_required`.
-- Ollama and LiteLLM call a compact native catalogue through the same Rust
+- Ollama, LiteLLM and NVIDIA call a compact native catalogue through the same Rust
   Planning handlers. Kronn enforces the current discussion scope server-side,
   records the concrete agent and source user message, hashes retry keys into a
   bounded discussion-scoped identity, and returns compact mutation receipts.
 - Vibe runs without MCP to avoid its stdio hang. It therefore emits a durable
   `kronn-plan-action` proposal for human validation instead of pretending that
   a direct task write succeeded.
-  `[src: file: backend/src/api/agent_tools.rs]`
-  `[src: file: backend/src/agents/runner.rs]`
+  `[src: file: backend/src/api/agent_tools.rs:2065-2272#plan_get]` `[src: file: backend/src/api/agent_tools.rs:2117-2148#task_create]` `[src: file: backend/src/api/agent_tools.rs:3746-3753#actor]`
+  `[src: file: backend/src/api/agent_tools.rs:4561-4588#unwrap_api_compact_task]`
+  `[src: file: backend/src/api/disc_prompts.rs:278-287#agent_has_native_planning]`
 
 The first release is local-only. Actor/audit metadata must still distinguish
 the human from an agent and record which agent changed a task. Assignment fields
-may be reserved in storage but remain absent from the initial UI. A later
+may be reserved in storage but remain absent from the initial UI. *(0.15.1,
+KT-154: assignment shipped — see "Assignees" below.)* A later
 delegation flow can create a prefilled discussion from a structured task and
 offer both “Create only” and “Create and run”. `[src: user: 2026-07-24: local-first and delegation decisions]`
+
+## Assignees
+
+A task carries any number of assignees (an owner and a reviewer, for example)
+in `planning_task_assignees`. An assignee is the typed message-target identity
+(KT-116): `kind` (`discussion_agent` | `agent` | `cli`), `agent_type`, and for a
+CLI the exact `discussion_sessions` id, so two CLIs of the same provider are two
+assignees. The role is optional (`owner` | `reviewer`).
+
+- **Execution worker, derived.** The worker of the task's latest non-terminal
+  TaskExecution (agent type, tier, status) is projected at read time with
+  `source: "execution"`; it is never stored, so it disappears with the
+  execution. When the same identity is also assigned by hand the two fold into
+  one row.
+- **Writes.** `POST`/`DELETE /api/planning/tasks/{id}/assignees` (UI and MCP
+  `task_assign`, with `unassign: true` to remove). An agent moving a task to `in_progress` is
+  assigned as `owner` unless the task already has a non-reviewer assignee.
+- **Reads.** `PlanningTaskSummary.assignees` is part of every task projection
+  (plan, list, detail); the plan row shows the pastilles and a quick menu.
 
 ## Suggested implementation slices
 
@@ -225,8 +247,8 @@ offer both “Create only” and “Create and run”. `[src: user: 2026-07-24: 
 6. **Project workspace — implemented** — project cards expose their linked
    tasks, quick creation/completion and direct navigation to each task's global
    Planning detail without duplicating task state.
-   `[src: file: frontend/src/components/ProjectTasksPanel.tsx:1-203]`
-   `[src: file: frontend/src/routes/ProjectsRoute.tsx:42-48]`
+   `[src: file: frontend/src/components/ProjectCard.tsx:2408-2419#ProjectTasksPanel]` `[src: file: frontend/src/components/ProjectTasksPanel.tsx:80-113#createTask]`
+   `[src: file: frontend/src/components/ProjectTasksPanel.tsx:152-161#onOpenPlanning]` `[src: file: frontend/src/routes/ProjectsRoute.tsx:51-58#toPlanningTask]`
 7. **Deferred delegation** — task-to-discussion briefing and agent launch only
    after the task workflow is proven manually.
 

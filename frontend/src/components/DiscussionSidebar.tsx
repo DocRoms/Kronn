@@ -1417,11 +1417,10 @@ export function DiscussionSidebar({
             !canMultiSelect && discussions.filter(disc => !disc.archived).length >= 20;
           const followUpDiscussions = (smartSectionsEnabled ? smartCandidates : [])
             .filter((disc) => {
-              if (isRunningDisc(disc) || isQueuedDisc(disc)) return true;
-              // A favorite has its own stable shortcut section. Keep it out of
-              // the unread catch-all so Favoris does not disappear on a fresh
-              // workspace where every old discussion is technically unseen.
+              // A favorite lives in Favoris whatever its state (live ones sort
+              // first there), so it never moves out of its stable shortcut.
               if (disc.pinned) return false;
+              if (isRunningDisc(disc) || isQueuedDisc(disc)) return true;
               if (disc.id === activeId) return false;
               return unseenBasis(disc) > (lastSeenMsgCount[disc.id] ?? 0);
             })
@@ -1437,7 +1436,7 @@ export function DiscussionSidebar({
             ? []
             : discussions.filter(disc => !disc.archived && matchesFilters(disc));
           const favoriteDiscussions = favoriteCandidates
-            .filter(disc => disc.pinned && !followUpIds.has(disc.id))
+            .filter(disc => disc.pinned)
             .sort(byLiveThenRecent);
           const favoriteIds = new Set(favoriteDiscussions.map(disc => disc.id));
           const recentDiscussions = (smartSectionsEnabled ? smartCandidates : [])

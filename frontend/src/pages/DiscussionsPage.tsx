@@ -12,6 +12,7 @@ import { ImportantMessagesBar } from '../components/ImportantMessageCard';
 import { ImportantMessageForm } from '../components/ImportantMessageForm';
 import { submitImportantMessage } from '../lib/submitImportantMessage';
 import { refreshImportantMessages } from '../lib/importantMessages';
+import { pinScrollTarget } from '../lib/pinScrollTarget';
 import { preparePublication } from '../lib/importantPublication';
 import { unseenBasis } from '../lib/discussionUiUtils';
 import { ToolCallsGroup } from '../components/ToolCallsGroup';
@@ -48,6 +49,8 @@ import type { Project, AgentDetection, AgentReadiness, Discussion, DiscussionDet
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useStableCallback } from '../hooks/useStableCallback';
 import { useQpChain } from '../hooks/useQpChain';
+import { useValidationState } from '../hooks/useValidationState';
+import { validationBanner } from '../lib/validationBanner';
 import { useMessageQueue, type QueuedMessage, type QueuedMessageControl } from '../hooks/useMessageQueue';
 import { useRafBatchedStream } from '../hooks/useRafBatchedStream';
 import { buildStreamingFlush } from '../lib/stream-flush';
@@ -340,6 +343,8 @@ interface MessageSearchMatch {
 interface GlobalSearchTarget {
   discussionId: string;
   messageId: string;
+  /** An element inside the message to centre instead of the whole row. */
+  anchorSelector?: string;
 }
 
 type HighlightRegistry = {
@@ -1164,18 +1169,11 @@ export function DiscussionsPage({
       registry.set(SEARCH_CURRENT_HIGHLIGHT_NAME, new HighlightCtor(range));
     }
     const match = messageSearchMatches[messageSearchIndex];
-    if (!match) return;
-    const row = messagesContainerRef.current?.querySelector<HTMLElement>(
-      `[data-message-id="${match.messageId}"]`,
-    );
-    if (row && typeof row.scrollIntoView === 'function') {
-      try {
-        row.scrollIntoView({ block: 'center', behavior: 'smooth' });
-      } catch {
-        // jsdom and a few embedded webviews expose the method without
-        // implementing it. The current-row highlight remains sufficient.
-      }
-    }
+    const container = messagesContainerRef.current;
+    if (!match || !container) return;
+    return pinScrollTarget(container, () => Array.from(
+      container.querySelectorAll<HTMLElement>('[data-message-id]'),
+    ).find(row => row.dataset.messageId === match.messageId) ?? null);
   }, [messageSearchIndex, messageSearchMatches]);
 
   useEffect(() => () => clearMessageSearchHighlights(), [clearMessageSearchHighlights]);
@@ -1343,55 +1341,25 @@ export function DiscussionsPage({
     if ((activeDiscussion.messages?.length ?? 0) === 0) return;
     const container = messagesContainerRef.current;
     if (!container) return;
-    let frame: number | null = null;
     let clearTimer: number | null = null;
-    let settleDeadline: number | null = null;
-    const lookupDeadline = performance.now() + 1_500;
-    const stop = () => {
-      if (frame !== null) cancelAnimationFrame(frame);
-      frame = null;
-      container.removeEventListener('wheel', abortByUser);
-      container.removeEventListener('touchstart', abortByUser);
-    };
-    const abortByUser = () => {
-      stop();
+    const clearTarget = () => {
       globalSearchTargetRef.current = null;
       setGlobalSearchTarget(null);
     };
-    container.addEventListener('wheel', abortByUser, { passive: true });
-    container.addEventListener('touchstart', abortByUser, { passive: true });
-    const step = () => {
-      const now = performance.now();
+    const stop = pinScrollTarget(container, () => {
       const row = Array.from(container.querySelectorAll<HTMLElement>('[data-message-id]'))
         .find(message => message.dataset.messageId === globalSearchTarget.messageId);
-      if (!row) {
-        if (now < lookupDeadline) {
-          frame = requestAnimationFrame(step);
-        } else {
-          globalSearchTargetRef.current = null;
-          setGlobalSearchTarget(null);
-        }
-        return;
-      }
-      setStickToBottom(false);
-      settleDeadline ??= now + 700;
-      const rowRect = row.getBoundingClientRect();
-      const containerRect = container.getBoundingClientRect();
-      container.scrollTop += (
-        (rowRect.top + rowRect.bottom) / 2
-        - (containerRect.top + containerRect.bottom) / 2
-      );
-      if (now <= settleDeadline) {
-        frame = requestAnimationFrame(step);
-        return;
-      }
-      stop();
-      clearTimer = window.setTimeout(() => {
-        globalSearchTargetRef.current = null;
-        setGlobalSearchTarget(null);
-      }, 3_000);
-    };
-    frame = requestAnimationFrame(step);
+      if (!row) return null;
+      const anchor = globalSearchTarget.anchorSelector
+        ? row.querySelector<HTMLElement>(globalSearchTarget.anchorSelector)
+        : null;
+      return anchor ?? row;
+    }, {
+      onStep: () => setStickToBottom(false),
+      onSettled: () => { clearTimer = window.setTimeout(clearTarget, 3_000); },
+      onMissing: clearTarget,
+      onAbort: clearTarget,
+    });
     return () => {
       stop();
       if (clearTimer !== null) window.clearTimeout(clearTimer);
@@ -1573,7 +1541,14 @@ export function DiscussionsPage({
   const activeDiscussionUnseenBasis = activeDiscussion ? unseenBasis(activeDiscussion) : 0;
 
   const sending = activeDiscussionId ? !!sendingMap[activeDiscussionId] : false;
-  const interruptedStream = activeDiscussionId ? interruptedStreams[activeDiscussionId] : undefined;
+  // KT-1122 — the validation banners read the server's verdict for the
+  // project's latest run (link + durable completion), not the discussion's
+  // title or the text of its last message. Re-read as the discussion moves.
+  const validationState = useValidationState(
+    activeDiscussion?.project_id,
+    `${activeDiscussionId ?? ''}:${activeDiscussion?.messages.length ?? 0}:${sending ? 1 : 0}`,
+  );
+  const interruptedStream =activeDiscussionId ? interruptedStreams[activeDiscussionId] : undefined;
   const durablePartial = activeDiscussion?.partial_response;
   // #220 — the local stream can drop while the server keeps running the agent;
   // only a run the server no longer reports is "interrupted".
@@ -1765,6 +1740,16 @@ export function DiscussionsPage({
       receiveRunFrame(msg);
       return;
     }
+    // KT-1252 — a workflow step entered, left or changed what it shows in this
+    // room: read the room now rather than at the next poll, and its live
+    // progress, which may have published before this page could hear it.
+    if (msg.type === 'workflow_step_room_changed') {
+      if (activeDiscussionId && msg.discussion_id === activeDiscussionId) {
+        void reloadDiscussion(activeDiscussionId);
+        loadRunProgress(activeDiscussionId);
+      }
+      return;
+    }
     if (msg.type === 'shared_run_updated') {
       // A brand-new media job (not yet in the by-message map) needs a relist
       // so its placeholder appears; a known one's own RunStatusCard
@@ -1945,6 +1930,7 @@ export function DiscussionsPage({
     activeDiscussionId,
     contactsList,
     loadContextFiles,
+    loadRunProgress,
     refetchBatchSummaries,
     refetchDiscussions,
     reloadDiscussion,
@@ -3474,9 +3460,9 @@ export function DiscussionsPage({
       });
     }
   }, [activeDiscussionId, editingMsgId, handleMsgEditCancel, refetchDiscussions, reloadDiscussion, t, toast]);
-  const handleReplyNavigate = useCallback((messageId: string) => {
+  const handleReplyNavigate = useCallback((messageId: string, anchorSelector?: string) => {
     if (!activeDiscussionId) return;
-    const target = { discussionId: activeDiscussionId, messageId };
+    const target = { discussionId: activeDiscussionId, messageId, anchorSelector };
     globalSearchTargetRef.current = target;
     setGlobalSearchTarget(target);
     setStickToBottom(false);
@@ -4698,6 +4684,7 @@ export function DiscussionsPage({
             <DiscussionQuestionBanner
               discussionId={activeDiscussion.id}
               messageRevision={activeDiscussion.messages.at(-1)?.id}
+              onNavigate={handleReplyNavigate}
             />
 
             {/* KT-619 — find the steering cards without scrolling the whole
@@ -4736,6 +4723,7 @@ export function DiscussionsPage({
                 <WorkflowStepActivityBubble
                   key={`${step.run_id}:${step.step_key}`}
                   step={step}
+                  discussionId={activeDiscussion.id}
                 />
               ))}
 
@@ -4825,8 +4813,32 @@ export function DiscussionsPage({
 
                 const proj = projects.find(p => p.id === activeDiscussion.project_id);
                 const projDiscs = allDiscussions.filter(d => d.project_id === activeDiscussion.project_id && d.id !== activeDiscussion.id);
-                const validationDisc = projDiscs.find(d => d.title === 'Validation audit AI');
-                const auditDone = proj && (proj.audit_status === 'Audited' || proj.audit_status === 'Validated');
+                // The validation of the LATEST run (the server's link), never
+                // the first discussion titled like one: an older audit's, an
+                // archived one or a project already Validated has nothing to resume.
+                const linkedValidation = validationState?.discussion_id
+                  ? projDiscs.find(d => d.id === validationState.discussion_id)
+                  : undefined;
+                const auditDone = proj && proj.audit_status === 'Audited';
+                const validationDisc = auditDone && linkedValidation && !linkedValidation.archived
+                  ? linkedValidation
+                  : undefined;
+                if (proj?.audit_status === 'Validated') return null;
+
+                // The linked validation finished and was auto-archived: what is
+                // left is validating the audit, from the project.
+                if (auditDone && linkedValidation?.archived && validationState?.finished) {
+                  return (
+                    <div className="disc-cta-banner" data-variant="accent">
+                      <p className="disc-cta-text" data-variant="accent">
+                        <ShieldCheck size={14} /> {t('audit.validationComplete')}
+                      </p>
+                      <button className="disc-cta-btn" data-variant="accent" {...newTabClickProps(activeDiscussion.project_id ? projectPath(activeDiscussion.project_id) : null)} onClick={() => { if (activeDiscussion.project_id) onNavigate('projects', { projectId: activeDiscussion.project_id, projectAt: { view: 'audit' } }); }}>
+                        <Play size={12} /> {t('audit.goToProject')}
+                      </button>
+                    </div>
+                  );
+                }
 
                 // State 3: Audit done + validation discussion exists → go to validation
                 if (auditDone && validationDisc) {
@@ -4871,13 +4883,38 @@ export function DiscussionsPage({
 
               {/* Validation complete banner */}
               {(() => {
-                if (activeDiscussion.title !== 'Validation audit AI' || !activeDiscussion.project_id) return null;
+                if (!isValidationDisc(activeDiscussion.title) || !activeDiscussion.project_id) return null;
                 const proj = projects.find(p => p.id === activeDiscussion.project_id);
-                if (!proj || proj.audit_status !== 'Audited') return null;
-                const valAgentMsgs = activeDiscussion.messages.filter((m, idx) => m.role === 'Agent' && idx > 0);
-                const lastAgentMsg = valAgentMsgs.length > 0 ? valAgentMsgs[valAgentMsgs.length - 1] : null;
-                const isComplete = lastAgentMsg && lastAgentMsg.content.toUpperCase().includes('KRONN:VALIDATION_COMPLETE');
-                if (!isComplete) return null;
+                if (!proj) return null;
+                const banner = validationBanner(validationState, activeDiscussion.id, proj.audit_status);
+                if (banner.kind === 'none') return null;
+                // A validation of an older audit run: say so, point at the
+                // one that counts, and offer nothing the server would refuse.
+                if (banner.kind === 'superseded') {
+                  const currentId = banner.currentDiscussionId;
+                  return (
+                    <div className="disc-cta-banner" data-variant="warning" data-testid="validation-superseded-banner">
+                      <p className="disc-cta-text" data-variant="warning">
+                        <AlertTriangle size={14} /> {t('audit.validationSuperseded')}
+                      </p>
+                      {currentId && (
+                        <button className="disc-cta-btn" data-variant="warning" onClick={() => { setActiveDiscussionId(currentId); }}>
+                          <MessageSquare size={12} /> {t('audit.resumeValidation')}
+                        </button>
+                      )}
+                    </div>
+                  );
+                }
+                // Finished, yet the server would refuse: show why, not a button.
+                if (banner.kind === 'blocked') {
+                  return (
+                    <div className="disc-cta-banner" data-variant="warning" data-testid="validation-blocked-banner">
+                      <p className="disc-cta-text" data-variant="warning">
+                        <AlertTriangle size={14} /> {banner.block ? t(`auditTimeline.validation.block.${banner.block}`) : t('audit.validationComplete')}
+                      </p>
+                    </div>
+                  );
+                }
                 return (
                   <div className="disc-cta-banner" data-variant="accent">
                     <p className="disc-cta-text" data-variant="accent">
@@ -4916,11 +4953,10 @@ export function DiscussionsPage({
                   Always offered (no team-size gate) — solo devs are the
                   biggest beneficiaries of mobile-issue → AutoPilot. */}
               {(() => {
-                if (activeDiscussion.title !== 'Validation audit AI' || !activeDiscussion.project_id) return null;
-                const valAgentMsgs = activeDiscussion.messages.filter((m, idx) => m.role === 'Agent' && idx > 0);
-                const lastAgentMsg = valAgentMsgs.length > 0 ? valAgentMsgs[valAgentMsgs.length - 1] : null;
-                const isComplete = lastAgentMsg && lastAgentMsg.content.toUpperCase().includes('KRONN:VALIDATION_COMPLETE');
-                if (!isComplete) return null;
+                if (!activeDiscussion.project_id || !validationState) return null;
+                // The server's verdict for THIS discussion: it is the latest
+                // run's validation and it signalled completion (durable).
+                if (validationState.discussion_id !== activeDiscussion.id || !validationState.finished) return null;
                 if (!onLaunchWorkflowFromPreset) return null;
                 const projectId = activeDiscussion.project_id;
                 return (
@@ -5863,13 +5899,12 @@ export function DiscussionsPage({
                 }}
                 onNavigateMessage={(messageId) => {
                   setShowAssetsPanel(false);
-                  setStickToBottom(false);
+                  handleReplyNavigate(messageId);
                   requestAnimationFrame(() => {
                     const row = [...(messagesContainerRef.current?.querySelectorAll<HTMLElement>(
                       '[data-message-id]',
                     ) ?? [])].find(item => item.dataset.messageId === messageId);
                     if (!row) return;
-                    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
                     row.classList.add('disc-message-asset-target');
                     window.setTimeout(() => row.classList.remove('disc-message-asset-target'), 1800);
                   });

@@ -12,26 +12,53 @@ use std::pin::Pin;
 use axum::response::sse::Event;
 use futures::{Stream, StreamExt};
 
+pub mod accept;
 mod agent_launch;
 pub mod anti_hallu_enforce;
 pub mod anti_hallu_step;
 pub mod briefing;
+pub mod briefing_cards;
+pub(crate) mod briefing_docs;
+pub(crate) mod briefing_load;
+#[cfg(test)]
+mod briefing_residuals_tests;
+pub(crate) mod briefing_rules;
+pub mod cross_audit;
+pub(crate) mod docs_write;
 mod document_repair;
 pub mod drift;
 pub mod full;
 pub mod helpers;
 pub mod info;
+pub(crate) mod project_doc;
+pub mod provenance;
 pub mod reconciliation;
 pub mod redact_artifacts;
+pub mod revalidate;
 pub mod run;
+pub(crate) mod run_state;
+#[cfg(test)]
+mod step_closing_tests;
+pub(crate) mod step_guard;
+pub mod td_review;
+pub mod td_tasks;
 pub mod validate;
 pub mod validation;
+mod version_context;
 
+pub use accept::*;
 pub use briefing::*;
+pub use briefing_docs::{check_briefing_doc, detect_briefing_docs};
+pub use briefing_load::get_saved_briefing;
+pub use cross_audit::cross_audit_estimate;
 pub use drift::*;
 pub use full::*;
 pub use info::*;
+pub use provenance::{confirm_doc_provenance, doc_provenance_report};
+pub use revalidate::{revalidate_audit, revalidation_plan};
 pub use run::*;
+pub use td_review::{create_td_task, decide_tds, list_tds, start_td_talk, td_talk};
+pub use td_tasks::convert_td_tasks;
 pub use validate::*;
 // Selective re-export of `pub(crate)` helpers actually consumed from
 // outside this module — sibling `api::projects::*` calls these via
@@ -157,38 +184,7 @@ mod detach_sse_stream_tests {
     }
 }
 
-pub(crate) const PROMPT_PREAMBLE: &str = "\
-Rules: Write new content in the documentation language declared by `docs/AGENTS.md` § Project parameters. While Step 1 is still filling that value, preserve the language of existing docs and use English only for a fresh skeleton with no established language. Be factual and concise — this is AI context for coding agents, NOT human documentation.\n\
-- Do NOT invent — read `docs/AGENTS.md` § 0 Anti-Hallucination Protocol (STEP 0 of this audit just wrote/refreshed it). The cascade is `read code → existing docs/ → external doc → escalate via TODO marker → never assert without proof`. Every non-trivial fact written into `docs/` MUST carry `[src: file: <path>:<line>]` or `[src: url: …]` ; fabricated citations (path doesn't exist / outside project root) are mechanically checked — `enforce` mode rejects them with a retry, the default `warn` logs them; treat any warning as a defect.\n\
-- Replace ALL `{{PLACEHOLDERS}}` and `<!-- ... -->` comment placeholders with real content. {{PLACEHOLDERS}} are literal text markers — replace by editing file content directly.\n\
-- Keep the existing file structure and section headings — fill in the blanks, do NOT rewrite the file from scratch.\n\
-- If a section does not apply to this project, replace placeholders with 'N/A — not used in this project.' Do not delete the section.\n\
-- Any section marked `owner=\"human\"` is owned by a person (legacy `curated=\"human\"` has the same protection): a full OR partial audit must NEVER rewrite, reorder, or delete its body. The pipeline restores attempted changes and records the proposal under `docs/reports/`; do not work around that guard.\n\
-- Never force-translate an existing `docs/` file into another language — a doc already written in a different language stays as-is; the docs/tickets language parameter only governs NEW content.\n\
-- Plain facts in docs/ files — no opinions, debate or trade-off analysis. One exception: `Suggested direction` in TD detail files (and index remediation lines) may carry a one-line, non-binding fix hint.\n\
-- Each section should be self-contained: another AI agent reading just that section should get the full picture.\n\
-- Add or remove table rows as needed to match the project. Write fewer entries rather than inventing content to fill slots.\n\
-\n\
-## MARKER DISCIPLINE (critical — avoid marker overuse)\n\
-\n\
-Three marker types exist. Each has a STRICT semantic — using the wrong one creates noise the user has to triage later.\n\
-\n\
-1. **`<!-- TODO: verify -->`** — RESERVED for facts you literally could not check.\n\
-   Examples: file lives outside the repo (linked_repos), tool requires credentials not provided, sandbox blocks the read.\n\
-   **DO NOT use** when you DID verify (via Glob/Read/ls) — write the conclusion directly:\n\
-   - WRONG: `phpstan.neon.dist <!-- TODO: verify — file not present at project root -->`\n\
-   - RIGHT: `phpstan.neon.dist (not present at project root)`\n\
-   If you Globed for a config and found nothing, that IS the verified answer — don't add a TODO marker.\n\
-\n\
-2. **`<!-- TODO: ask user -->`** — for facts that require a HUMAN DECISION, not a verification you could do yourself.\n\
-   Examples: \"is this rule aspirational or enforced?\", \"which domain is canonical?\", \"is this port intentional or vestigial?\".\n\
-   The Phase 2 validation discussion will ask the user these specific questions.\n\
-\n\
-3. **`<!-- TODO: unknown -->`** — placeholder when a previous validation pass left a question unanswered. Rare. Don't introduce new ones; only preserve existing.\n\
-\n\
-**Default behaviour**: if you can verify, verify and write the result. Markers are escape hatches, not opt-out tokens. A doc with 25 `TODO: verify` markers from a non-interactive audit usually means the agent gave up on verification — try harder.\n\
-\n\
-This is an autonomous (non-interactive) pass. Do NOT ask questions inline — use the marker discipline above and move on.";
+pub(crate) const PROMPT_PREAMBLE: &str = include_str!("prompts/prompt-preamble.md");
 
 #[derive(Clone, Copy)]
 pub(crate) struct AnalysisStep {
@@ -213,13 +209,7 @@ pub(crate) struct AnalysisStep {
 /// Lives here (not in `core::anti_halluc`) because the audit step 0 is the
 /// only writer ; the runtime `PREAMBLE` now points to this section instead
 /// of duplicating it.
-pub(crate) const ANTI_HALLU_SECTION_BODY: &str = "\
-## 0. Anti-Hallucination Protocol\n\
-\n\
-Never state a non-trivial technical fact (paths, APIs, config, versions, behaviour) without proof — read the code, then `docs/`, then official docs, then ask; never guess. Cite every assertion as `[src: file: <path>:<line>]` or `[src: url: <url>]`; a citation that doesn't resolve is rejected as fabricated.\n\
-\n\
-Full grammar and cascade: [`docs/conventions/agents-md-format-v1.md`](conventions/agents-md-format-v1.md).\n\
-";
+pub(crate) const ANTI_HALLU_SECTION_BODY: &str = include_str!("prompts/anti-hallu-section-body.md");
 
 /// 0.8.7 — Audit STEP 0 doctrine (used by the `apply_anti_hallu_section`
 /// deterministic function in `anti_hallu_step.rs`, NOT as an LLM prompt).
@@ -237,33 +227,7 @@ Full grammar and cascade: [`docs/conventions/agents-md-format-v1.md`](convention
 #[allow(dead_code)] // doc-only constant ; the real work is in anti_hallu_step.rs
 pub(crate) const STEP_0_ANTI_HALLU: AnalysisStep = AnalysisStep {
     target_file: "docs/AGENTS.md",
-    prompt: "\
-This is the FIRST step of the audit. Your job is to ensure `docs/AGENTS.md` carries the canonical anti-hallucination protocol section that every subsequent step (and every future agent reading this file) will rely on.\n\
-\n\
-## Algorithm\n\
-\n\
-1. Read `docs/AGENTS.md`.\n\
-2. Search for the opening marker `<!-- kronn:section name=\"anti-hallu\"`.\n\
-3. **If found** : refresh ONLY the `audit=\"<date>\"` attribute on the opening marker (set it to today's date, ISO YYYY-MM-DD). Do NOT touch the body — `owner=\"audit\"` means Kronn owns the content. Leave the closing `<!-- kronn:section:end -->` marker untouched.\n\
-4. **If NOT found** : insert the canonical block (exactly as below) immediately after the file's H1 (`# AI agent context — Entry point`) and BEFORE the next `---` separator. Preserve everything else.\n\
-\n\
-## Canonical block to write (EXACT, no edits)\n\
-\n\
-```markdown\n\
-<!-- kronn:section name=\"anti-hallu\" curated=\"ai\" owner=\"audit\" audit=\"<TODAY YYYY-MM-DD>\" -->\n\
-## 0. Anti-Hallucination Protocol\n\
-\n\
-Never state a non-trivial technical fact (paths, APIs, config, versions, behaviour) without proof — read the code, then `docs/`, then official docs, then ask; never guess. Cite every assertion as `[src: file: <path>:<line>]` or `[src: url: <url>]`; a citation that doesn't resolve is rejected as fabricated.\n\
-\n\
-Full grammar and cascade: [`docs/conventions/agents-md-format-v1.md`](conventions/agents-md-format-v1.md).\n\
-<!-- kronn:section:end -->\n\
-```\n\
-\n\
-## DO NOT\n\
-\n\
-- Do NOT touch any OTHER section of `docs/AGENTS.md` in this step (placeholders, tables, etc. are handled by subsequent steps).\n\
-- Do NOT add commentary, summary, or step-numbering. Output the file silently after the write.\n\
-- Do NOT escalate (no `<!-- TODO: ask user -->`). This step is purely mechanical.",
+    prompt: include_str!("prompts/step0-anti-hallu.md"),
     sources: &["docs/AGENTS.md"],
 };
 
@@ -271,348 +235,76 @@ pub(crate) const ANALYSIS_STEPS: &[AnalysisStep] = &[
     // Step 1: Project analysis + index
     AnalysisStep {
         target_file: "docs/AGENTS.md",
-        prompt: "\
-Read README.md, package.json (or composer.json, Cargo.toml, go.mod), Makefile, Dockerfile, docker-compose.yml, \
-CI configs (.github/workflows, .gitlab-ci.yml), and main config files.\n\
-Determine: tech stack, project structure, build/dev/test commands, key patterns, third-party services, CI/CD pipeline.\n\n\
-Then fill docs/AGENTS.md — replace ALL {{PLACEHOLDERS}} in each section:\n\
-- {{PROJECT_NAME}} and {{STACK_SUMMARY}}: project name and one-line stack description\n\
-- {{PROJECT_LANGUAGE}}: language used for code comments, commit messages, and identifiers\n\
-- Common tasks table: replace {{TASK_1}}..{{TASK_4}} with real task→file mappings (add/remove rows to match the project — see the general rule above)\n\
-- Prerequisites: replace the {{PREREQUISITES}} block with a table of Docker, language versions, build commands\n\
-- DO NOT rules: replace {{DO_NOT_1}}, {{DO_NOT_2}} with project-specific rules (add more rows if warranted)\n\
-- Source of truth: replace the {{SOURCES}} block with a table of key config files (models, routes, DB schema, types). Code placement (where new endpoints/pages/tests go) belongs in repo-map.md, NOT here — do not duplicate it\n\
-- Stack: replace the {{STACK}} block with a table of all major technologies, versions, and roles\n\
-- Workflow constraints: replace {{WORKFLOW_CONSTRAINT_1}}, {{WORKFLOW_CONSTRAINT_2}} with project-specific rules\n\
-- {{DOCS_LANGUAGE}}: language for new project documentation. If an existing doc is already written in another language, KEEP it as-is — do not force-translate it\n\
-- {{TICKET_LANGUAGE}}: language used for tickets\n\
-- {{COMMENT_TICKET_POLICY}}: whether code comments may cite a ticket/issue ID\n\
-- {{TEST_POLICY}}: this project's test policy (default: every code change needs a test — see docs/testing-quality.md)\n\
-- {{DATE}}: set to today's date (YYYY-MM-DD)\n\
-\n\
-**CLEANUP ONCE FILLED** — the template ships with scaffolding that MUST NOT survive the fill: \
-remove the `> **TEMPLATE FILE.** Every {{...}} MUST be filled…` banner block entirely, and strip \
-every inline bracketed hint left next to a value (e.g. `[ex: \"French\", \"English\" — …]`). \
-A filled file that still shows the banner or hints counts as a FAILED fill.\n\
-\n\
-**ANTI-HALLU FOR THIS STEP** — every cell in the Stack / Source-of-truth / Code-placement / Prerequisites / Common-tasks tables MUST be anchored. Append a citation at the end of each cell value using the EXACT bracket form the mechanical linter recognizes: `[src: file: <path>:<line>]`. For the Stack table specifically: a version cell MUST cite the lockfile or the manifest line where the version is pinned (e.g. `Rust 1.78 [src: file: Cargo.toml:5]`, `Symfony 7.3.6 [src: file: composer.lock:2884]`). If a row cannot be anchored to a real file/line, do NOT add it — Quality > quantity. {{DATE}} is the only exception.",
-        sources: &["README.md", "package.json", "Cargo.toml", "composer.json", "go.mod", "docker-compose.yml", "Makefile", "Dockerfile"],
+        prompt: include_str!("prompts/step1-project-index.md"),
+        sources: &[
+            "README.md",
+            "package.json",
+            "Cargo.toml",
+            "composer.json",
+            "go.mod",
+            "docker-compose.yml",
+            "Makefile",
+            "Dockerfile",
+        ],
     },
-
     // Step 2: Glossary (early — defines vocabulary for subsequent steps)
     AnalysisStep {
         target_file: "docs/glossary.md",
-        prompt: "\
-Read docs/AGENTS.md. Search codebase for domain terms, abbreviations, naming conventions.\n\n\
-Fill docs/glossary.md — replace ALL {{PLACEHOLDERS}}:\n\
-- Categorize: Architecture, Domain, Environments, External, Abbreviations\n\
-- Each term: one-line definition + optional docs/ reference\n\
-- Unknown domain terms: add `<!-- TODO: ask user -->` after the definition\n\
-- Cover: framework terms, model names, services, acronyms in code",
+        prompt: include_str!("prompts/step2-glossary.md"),
         sources: &[],
     },
-
     // Step 3: Repo map
     AnalysisStep {
         target_file: "docs/repo-map.md",
-        prompt: "\
-Read docs/AGENTS.md and docs/glossary.md for context. Explore the directory structure (2-3 levels deep).\n\n\
-Fill docs/repo-map.md — replace ALL {{PLACEHOLDERS}}:\n\
-- {{STACK_OVERVIEW}}: one paragraph summarizing the architecture\n\
-- Key folders: replace the {{KEY_FOLDERS}} block with every major directory (2-3 levels deep), tree format with annotations\n\
-- Entrypoints: replace the {{ENTRYPOINTS}} block with 5-7 key files (config, routes, models, etc.)\n\
-- Auto-generated files: replace the {{GENERATED_FILES}} block with files NOT to edit manually",
+        prompt: include_str!("prompts/step3-repo-map.md"),
         sources: &["__GIT_SOURCE_TREE__"],
     },
-
     // Step 4: Coding rules
     AnalysisStep {
         target_file: "docs/coding-rules.md",
-        prompt: "\
-Read docs/AGENTS.md for context. Find ALL linter, formatter, and type-checker configs in the repo \
-(e.g. .eslintrc, eslint.config.js, prettier, rustfmt.toml, tsconfig.json, phpcs.xml, etc.).\n\n\
-Fill docs/coding-rules.md — replace ALL {{PLACEHOLDERS}}:\n\
-- Replace {{LANGUAGE_1}}, {{LANGUAGE_2}} with one section per language/framework used in the project (add more sections if the project uses more than two)\n\
-- For each language, fill its {{TOOLS_1}}/{{TOOLS_2}} block with the linter, formatter, and type checker — config file and run command for each\n\
-- Replace {{CONVENTIONS_1}}, {{CONVENTIONS_2}} with coding conventions OBSERVED in existing code (naming, error handling, imports). Write fewer rather than inventing.\n\
-- Replace {{MISTAKES_1}}, {{MISTAKES_2}} with common mistakes to avoid (from linter configs, framework gotchas observed in code)\n\
-- If no linter/formatter is configured, write 'Not configured' in its place\n\
-- Add or remove language sections as needed to match the actual project stack\n\
-\n\
-**ANTI-HALLU FOR THIS STEP** — {{CONVENTIONS_*}} and {{MISTAKES_*}} are the #1 vector for training-data leakage into AGENTS.md. Apply this rule strictly:\n\
-- Every CONVENTION row MUST cite the rule's source: either a linter config (`[src: file: .eslintrc.json:12]`, `[src: file: rustfmt.toml:3]`) OR at least 3 observed call sites (`[src: file: src/foo.rs:120]`, `[src: file: src/bar.rs:45]`, …).\n\
-- Every MISTAKE row MUST cite either a linter rule that enforces the prohibition OR a real bug found in the repo's git history (`[src: commit: <sha>]`).\n\
-- A rule you 'know from the language ecosystem' but cannot anchor in this repo is NOT a project convention — do NOT add it. Write fewer rules with proof, not more rules from memory.",
-        sources: &["package.json", "Cargo.toml", "tsconfig.json", "rustfmt.toml", "pyproject.toml"],
+        prompt: include_str!("prompts/step4-coding-rules.md"),
+        sources: &[
+            "package.json",
+            "Cargo.toml",
+            "tsconfig.json",
+            "rustfmt.toml",
+            "pyproject.toml",
+        ],
     },
-
     // Step 5: Testing & quality
     AnalysisStep {
         target_file: "docs/testing-quality.md",
-        prompt: "\
-Read docs/AGENTS.md for context. Find test framework configs (jest, vitest, phpunit, pytest, cargo test, bats, etc.) \
-and CI quality gates.\n\n\
-Fill docs/testing-quality.md — replace ALL {{PLACEHOLDERS}}:\n\
-- Build & quality checks: replace the {{BUILD_CHECKS}} block with a table of all quality checks (compile, lint, format, test, build) and their commands\n\
-- Test infrastructure: replace the {{TEST_INFRASTRUCTURE}} block with the runner, config file, and Node/runtime version for each language\n\
-- Test suites: replace the {{TEST_SUITES}} block with each test file/suite and its approximate count\n\
-- Coverage: replace the {{COVERAGE}} block with the current status and target\n\
-- Replace {{UNTESTED}} with components that have NO tests\n\
-- Smoke checks: replace the {{SMOKE_CHECKS}} block with 3-5 quick pre-commit commands",
+        prompt: include_str!("prompts/step5-testing-quality.md"),
         sources: &["package.json", "Cargo.toml", "pyproject.toml"],
     },
-
     // Step 6: Architecture overview
     AnalysisStep {
         target_file: "docs/architecture/overview.md",
-        prompt: "\
-Read docs/AGENTS.md and docs/repo-map.md for context. Analyze the high-level architecture.\n\n\
-Fill docs/architecture/overview.md — replace ALL {{PLACEHOLDERS}}:\n\
-- Apps/services: replace the {{SERVICES}} block with a table of service, port, tech, and role for each service\n\
-- Key patterns: replace the {{PATTERNS}} block with 3-5 architectural patterns \
-  (API pattern, state management, auth, data flow, caching, etc.) — 2-3 sentences each\n\
-- {{SEPARATION_DESCRIPTION}}: how the codebase is organized (by feature, by layer, etc.)\n\
-- {{DATA_FLOW_DESCRIPTION}}: 2-3 sentences on how data moves through the system\n\
-- Legacy: replace the {{MIGRATIONS}} block with a table of area, current state, and target for any legacy patterns or planned migrations\n\n\
-**Mermaid diagrams** — mandatory, REPLACES the old ASCII placeholder:\n\
-1. **Architecture overview** — replace `{{ARCHITECTURE_MERMAID}}` with a `flowchart TD` (or `LR` for wide projects) inside a ```mermaid fence. \
-Show every service from the table above, the main data flow direction (HTTP, DB, message bus, etc.), and external systems (APIs, third-party providers). \
-Use `subgraph` blocks to group related components. If the project warrants it (multi-tier app, hexagonal arch), \
-simulate **C4-style layers** with named subgraphs (`Person`, `System`, `Container`, `Component`) — still in Mermaid syntax, no PlantUML/Structurizr.\n\
-2. **Sequence diagrams** — for the 2-3 MOST CRITICAL flows you can identify in the code (auth, primary request lifecycle, deploy/CI pipeline, payment, etc.), \
-write ONE file per flow under `docs/architecture/sequences/<flow-name>.md` using `sequenceDiagram` Mermaid syntax. \
-Hard cap: **3 files maximum**. Quality > quantity — if you only identify ONE clear critical flow, write only one. \
-Each file must include a 2-3 sentence intro before the diagram (\"This sequence describes how a user authenticates against the API. It starts when the client POSTs to /auth/login and ends with a JWT in the response cookie.\").\n\n\
-**Mermaid sequenceDiagram safety rules** — Mermaid 11.x parser is unforgiving on message strings; respect these or the diagram won't render and the user sees a parse error instead of a flow:\n\
-- **Message text is ASCII-only**. Replace `…` with `...`, `→` with `->`, em-dash with `-`. Unicode punctuation routinely trips the parser.\n\
-- **Avoid `:` and `;` inside message text**. The first `:` after the arrow is the separator (`A->>B: msg`), but additional `:` / `;` combined with parens or Unicode can confuse the lexer. Rephrase: write `Cache-Control maxage=604800` instead of `Cache-Control: maxage=604800`, `Link rel=preload` instead of `Link: ...; rel=preload`.\n\
-- **No literal `(`/`)`/`[`/`]`/`{`/`}` chains** inside a message. Short, declarative prose only: `301 redirect to /a-propos` not `301 Location: /a-propos (set by LocaleRedirectSubscriber)`. If you need the detail, add a `Note over X` block.\n\
-- **Keep each line ≤ 100 chars**. Long lines hide parser-state issues. Break into multiple messages or a `Note over` block.\n\
-- **Participant/actor aliases must NOT be Mermaid reserved words** (case-insensitive): `alt`, `else`, `end`, `opt`, `loop`, `par`, `and`, `rect`, `note`, `critical`, `break`, `activate`, `deactivate`, `box`. Declaring `participant Alt as AlternateLocaleSubscriber` then writing `Caddy->>Alt: msg` makes the lexer read `Alt` as the start of an `alt` block → parse error. Pick a non-keyword alias (`AltLoc`, `AltSub`, `Alternate`). Same for `flowchart` node ids — never name a node `end`/`alt`/etc.\n\
-- Test mentally: would `mermaid.parse` accept this verbatim? If unsure, simplify.\n\n\
-**Why Mermaid + file separation**: every viewer (GitHub, GitLab, Obsidian, VS Code) renders Mermaid natively — no external tools. \
-Sequence diagrams live in separate files so `docs/AGENTS.md` T0 stays small; an agent only loads them when working on the related flow.",
-        sources: &["docker-compose.yml", "src/main.*", "src/lib.*", "src/index.*"],
+        prompt: include_str!("prompts/step6-architecture.md"),
+        sources: &[
+            "docker-compose.yml",
+            "src/main.*",
+            "src/lib.*",
+            "src/index.*",
+        ],
     },
-
     // Step 7: Debug operations
     AnalysisStep {
         target_file: "docs/operations/debug-operations.md",
-        prompt: "\
-Read docs/AGENTS.md for context. Find operational commands from Makefile, package.json scripts, \
-docker-compose commands, and any run/build/debug procedures.\n\n\
-Fill docs/operations/debug-operations.md — replace ALL {{PLACEHOLDERS}}:\n\
-- Common commands: replace the {{COMMANDS}} block with a table of action → command for start, stop, logs, test, build, deploy\n\
-- Docker services: replace the {{DOCKER_SERVICES}} block with a table of service, port, role, and health check for each container\n\
-- Troubleshooting: replace the {{TROUBLESHOOTING}} block with 3-5 common issues (symptom, cause, fix)",
+        prompt: include_str!("prompts/step7-debug-operations.md"),
         sources: &["docker-compose.yml", "Makefile", "Dockerfile"],
     },
-
     // Step 8: Inconsistencies & tech debt
     //
-    // 0.8.2 — Step 8 is the load-bearing step of the audit. It must be
-    // intransigent on baseline issues (the 0.8.1 regression on DOCROMS_WEB
-    // missed 5 well-known Docker/CI security defaults because the agent
-    // prioritized novelty over baseline coverage). The prompt below is
-    // organized as:
-    //   A. Mandatory baseline checklist (Docker/compose/deploy/CI) — NEVER
-    //      skipped, NEVER counts against the finding cap.
-    //   B. Dimensional scan (10 dimensions, free-form).
-    //   C. Anti-repetition rules (read existing TDs as priors, reuse IDs).
-    //   D. Output format (severity calibration, two-tier Status, detail
-    //      file schema with audit_history YAML frontmatter).
-    //   E. Reconciliation hint (list dropped TDs for the pipeline to
-    //      handle in a separate reconciliation pass).
+    // The deterministic baseline lives in `core::audit_baseline` detectors
+    // (injected as signals, disposition enforced by validation.rs) and the
+    // stack-specific items in `core::audit_ecosystems`; this prompt keeps what
+    // needs judgement. Sections: A baseline, B dimensions, C priors, D output.
     AnalysisStep {
         target_file: "docs/inconsistencies-tech-debt.md",
-        prompt: "\
-Real issues only, not hypothetical. Read current docs guidance (exclude dated `docs/reports/` snapshots) AND scan source code. \
-Scan: entry points, config files, Dockerfiles, CI configs, and 5-10 core source files \
-(prioritize auth, data persistence, external input handling).\n\n\
-# A. MANDATORY BASELINE CHECKLIST (never skip, never trim)\n\
-\n\
-These are well-known defaults that silently break security/ops in production. \
-Each item that is NOT satisfied MUST produce a TD finding — these do NOT count \
-against the cap (see § D point 5). Be explicit when an item is satisfied (\"verified \
-present\", \"verified absent\") so the user can trust the audit.\n\n\
-\n\
-**If a `Dockerfile` exists** (in any subdirectory of the project root):\n\
-- `USER <non-root>` directive present (otherwise: container runs as root — emit TD).\n\
-- `display_errors = Off` for prod env (otherwise: stack traces leak in HTTP responses — emit TD).\n\
-- `opcache.enable = 1` for PHP projects (otherwise: every request re-compiles — perf disaster — emit TD).\n\
-- `HEALTHCHECK` directive present (otherwise: container orchestrator can't detect zombie processes — emit TD).\n\
-- `apt-get install` uses `--no-install-recommends` AND `rm -rf /var/lib/apt/lists/*` (otherwise: image bloat + outdated packages — emit TD if either missing).\n\
-- Base image has a tag pinned to a specific digest or version (not `latest` — otherwise: non-reproducible builds — emit TD).\n\
-- No `ADD <remote-url>` (only `RUN curl … && verify-checksum`; otherwise: silent supply-chain risk — emit TD).\n\
-- Secrets are NOT passed via `ARG` (build args are visible in `docker history` — emit TD if found).\n\n\
-\n\
-**If a `docker-compose.yml` or `compose.yaml` exists**:\n\
-- Resource limits (`mem_limit`/`cpus` or `deploy.resources.limits.*`) on services that can realistically run away (app, workers, DB). Missing limits are `Medium` at most — and NOT a finding when the compose file is clearly dev-only or the platform (Swarm/K8s) owns limits elsewhere; say which case applies.\n\
-- `read_only: true` where the service is stateless (otherwise: writable rootfs is a useful RCE escalation surface — emit TD only if clearly stateless).\n\
-- No `:latest` image tags (otherwise: non-reproducible — emit TD).\n\
-- Credential hygiene of `environment:` blocks: `Not evaluated safely (requires Kronn's local secret scanner)`. Safe signal only: `grep -lE 'secrets:|env_file:' <compose files>` (filename-only) tells you whether the safe mechanisms are used at all.\n\n\
-\n\
-**If `.github/workflows/*.y(a)ml` OR `.gitlab-ci.yml` OR equivalent CI config exists**:\n\
-- No `StrictHostKeyChecking=no` in ssh/scp calls (otherwise: trivial MitM — emit TD).\n\
-- Deploy workflow has a quality gate (lint OR test OR static analysis) before pushing to prod (otherwise: broken code can ship — emit TD).\n\
-- CI secret sourcing: `Not evaluated safely (requires Kronn's local secret scanner)` — detecting a hardcoded literal means reading the line that contains it. Safe signal only: `grep -l 'secrets.' <workflow files>` (filename-only) shows whether the secure mechanism is used at all.\n\
-- No `pull_request_target` without explicit checkout of the base branch's workflow definition (RCE risk — emit TD if pattern found).\n\
-- Pinned action versions (`uses: actions/checkout@v4` not `@master`) (emit TD only if drift is dramatic, e.g. pinning to a moving branch).\n\n\
-\n\
-**If `.env*` files exist at repo root**:\n\
-- No `.env` file tracked in git (only `.env.dist` / `.env.example`) — check `git ls-files .env*` (otherwise: emit TD).\n\
-- Values inside tracked `.env*` files: `Not evaluated safely (requires Kronn's local secret scanner)` — never open or pattern-scan their content. The tracking status itself (`git ls-files -- '*.env*' '.env*'`, quoted pathspec, filename-only) is the safe signal and already a finding when a real `.env` is tracked.\n\
-- Deploy step EXCLUDES `.env*` from the deploy bundle (rsync/scp/tar `--exclude .env*`) — otherwise the tracked `.env.dist` lands in production with its hardcoded defaults (emit TD if not excluded).\n\n\
-\n\
-**For any web project** (HTML templates detected — Twig / Blade / JSX / Vue / ERB / Razor — > 3 template files):\n\
-- Form `<input>` elements have associated `<label>` or `aria-label` (sample 3-5 templates; emit TD if pattern of missing labels).\n\
-- `<img>` elements have `alt=` attribute (sample; emit TD if pattern of missing alt).\n\
-- No inline `<script>` or `<style>` longer than ~50 lines per template (CSP risk + Asset Mapper bypass — emit TD if pattern).\n\
-- Content-Security-Policy header set (check controllers/middleware/web server config — emit TD if absent on a project that touches user input).\n\n\
-\n\
-**Community standards** — gated on OSS intent. Run this block ONLY if at least one of these holds: \
-(1) a `LICENSE` / `LICENSE.md` / `LICENSE.txt` file exists at repo root, \
-(2) `git remote -v` (or the `.git/config` you can read) points to a public host (`github.com`, `gitlab.com`, `codeberg.org`, `git.sr.ht`), \
-(3) the `README` body mentions \"contribute\", \"contribution\", \"contributing\", \"open source\", \"OSS\", or similar. \
-Otherwise this entire block is skipped (private/internal projects do not need community-standards scaffolding). \
-For OSS-intent projects, each missing item below emits a TD at **Low or Medium** severity — these are project-health, not security:\n\
-- `LICENSE` (or `LICENSE.md`/`LICENSE.txt`) file at repo root with a recognized license body (MIT / Apache-2.0 / GPL-3.0 / BSD / MPL-2.0 / Unlicense). Without one, downstream users have no legal permission to use the code (emit TD: Medium).\n\
-- `README.md` has a one-paragraph description after the title (not just `# Project Name` followed by sections). GitHub shows it next to the repo name in search (emit TD: Low if README is title-only).\n\
-- `.github/ISSUE_TEMPLATE/*.md` directory exists with at least one template, OR a top-level `.github/issue_template.md`. Without one, every issue is ad-hoc structure and audits like this one push unstructured tickets (emit TD: Low).\n\
-- `.github/pull_request_template.md` (or `PULL_REQUEST_TEMPLATE.md`) present. Without it PR descriptions drift across contributors (emit TD: Low).\n\
-- `SECURITY.md` (or `.github/SECURITY.md`) — tells researchers how to report a vulnerability responsibly (emit TD: Medium — silence here pushes researchers to public disclosure).\n\
-- `CONTRIBUTING.md` (or `.github/CONTRIBUTING.md`) — onboarding for external contributors (emit TD: Low — informational).\n\
-- `CODE_OF_CONDUCT.md` (or `.github/CODE_OF_CONDUCT.md`) — required by GitHub Community Standards checklist (emit TD: Low).\n\n\
-\n\
-**Repository hygiene** — universal (not gated on OSS intent). Use `git ls-files --cached` so only tracked/index content is judged; do not flag harmless local/untracked developer files:\n\
-- Package-manager caches (`.pnpm-store/`, `.npm/`, `.yarn/cache/`, `.gradle/caches/`, `.cargo/registry/`) are not tracked. They are generated, large and machine-specific (emit TD: Low when tracked), except a documented Yarn zero-install/offline-mirror setup (`enableGlobalCache: false` plus repository documentation).\n\
-- Runtime databases/logs/dumps (`*.db`, `*-wal`, `*-shm`, `*.log`, `*.trace`, `*.dump`) are not tracked from the repo root or cache/runtime/state/tmp directories. Test fixtures are legitimate and must not be flagged solely by extension.\n\
-- Ad-hoc audit/session handoff notes and generated review/test outputs (`findings/`, `playwright-report/`, `test-results/`) are ignored or stored in the project's documented artifact location, not tracked at the root by an agent run (emit TD: Low when clearly generated).\n\n\
-\n\
-The 7 categories above are MANDATORY when their gating condition matches. Even if you find 30 other findings, you MUST scan them. \
-Repository hygiene is always mandatory. Deterministic evidence is bounded to 15 paths per detector plus an explicit remainder count; the finding cap in § D point 5 applies AFTER these baseline findings are emitted.\n\n\
-# B. DIMENSIONAL SCAN — every dimension is ACCOUNTABLE (on top of the baseline)\n\
-\n\
-This is where audits silently under-deliver: the baseline (§ A) is easy + deterministic, so the model finds it and STOPS. \
-You MUST account for EACH of the 10 dimensions below — none may be silently skipped. \
-For EVERY dimension, record exactly ONE outcome in the `## Dimension coverage` matrix of the index file:\n\
-  - **findings** — one or more TDs (each with `[src: file:…]` evidence), OR\n\
-  - **scanned — nothing substantiable** — you actually opened the relevant code and found nothing you can anchor (this is NOT \"I didn't look\"), OR\n\
-  - **N/A: <verifiable reason>** — the dimension cannot apply, with a reason a human can CHECK (\"no Dockerfile\", \"no DB/ORM layer\", \"no web surface\", \"no CI config\") — NEVER a vague \"not relevant\".\n\
-A dimension absent from the matrix, or marked with an unverifiable reason, = **incomplete audit**: a cheap structural validator FAILS this step (it gets re-run) on a missing / short / ill-formed matrix. The matrix **records** breadth + makes it reviewable (it is a declaration, not proof the scan happened — the detectors will anchor that); the TDs carry the depth.\n\n\
-The 10 dimensions:\n\
-- **Dependencies**: EOL/deprecated runtimes, frameworks, packages, or versions significantly behind stable.\n\
-- **Security**: hardcoded secrets (regex: API keys, tokens, OAuth client_secret), missing auth checks, injection vectors (SQL/XSS/command), insecure defaults, exposed debug endpoints, default credentials.\n\
-- **Code quality**: functions >50 lines, god classes, SRP violations, dead code, error swallowing (empty catch / let _ = / unwrap_or_default on Result).\n\
-- **Scalability**: N+1 queries, unbounded loops, missing pagination, memory leaks, missing indexes on hot queries.\n\
-- **Maintainability**: tight coupling, circular dependencies, missing tests for critical paths, unclear naming, mixed languages in comments/strings.\n\
-- **Accessibility (a11y)**: covered by baseline if web project; on libraries/CLIs surface API a11y (machine-readable output, --quiet flag for scripts, etc.).\n\
-- **Observability**: missing logging in hot paths (auth, payment, write endpoints), no error tracker (Sentry/Glitchtip/equivalent), no health/readiness endpoints, no metrics on critical SLI.\n\
-- **Compliance**: GDPR issues (external resources, data retention), license incompatibilities (`composer licenses` / `cargo deny` / `license-checker`).\n\
-- **Performance** (if perf-sensitive per `docs/briefing.md` or repo README): CWV regression risk, bundle size, image optim missing, cache headers weak, no CDN.\n\
-- **Documentation drift**: cross-check the docs/ files you just wrote (steps 1-7) against the source code. Flag concrete contradictions (e.g. `coding-rules.md` says X is enforced but no linter rule exists, `testing-quality.md` claims N tests but actual count differs, `repo-map.md` points to a path that no longer exists).\n\n\
-**Self-critic before you finish § B** (cheap, catches the usual misses — do it, don't skip):\n\
-- Any dimension marked \"scanned — nothing substantiable\" on a non-trivial codebase is SUSPICIOUS: did you actually open files for it, or did you skip? If you skipped, go scan it now.\n\
-- Any mechanically-obvious signal you passed over? e.g. a committed secret/API key, a `target=\"_blank\"` without `rel=\"noopener\"`, `0` test files for N source files (a distinct TD from \"no CI gate\"), an `unsafe-eval`/`unsafe-inline` CSP, a god-file >500 lines. If it's real → add the TD; if intentional → say so in the matrix evidence column. Don't leave it silently undetected.\n\
-- The 10-row coverage matrix is the CONTRACT for this step: a reviewer must be able to see, per dimension, that you looked and what you concluded.\n\n\
-# C. ANTI-REPETITION (priors from previous audits)\n\
-\n\
-Before emitting findings, list existing files under `docs/tech-debt/` (excluding README.md, TEMPLATE.md, _template.md, and any file starting with `_`). \
-These are TDs from previous audits. For each finding you would emit:\n\
-\n\
-1. **Same root cause as an existing TD** (same file + same anti-pattern, regardless of date suffix in slug):\n\
-   → REUSE the existing TD ID. UPDATE the detail file in place (refresh `Where` pointers if line numbers shifted, add a new entry to the `audit_history` YAML block — see § D format).\n\
-   → Do NOT create a new `TD-YYYYMMDD-` file with a different slug for the same root cause. The user already saw and possibly confirmed the existing one.\n\
-\n\
-2. **Similar but refined** (same area, more precise scope or new evidence):\n\
-   → REUSE the existing TD ID but update the title/description. Note `\"refined from previous audit\"` in the audit_history entry.\n\
-\n\
-3. **Genuinely new** (different root cause, different files):\n\
-   → Create a new `TD-YYYYMMDD-slug.md` file with today's date.\n\
-\n\
-4. **Previously-existing TDs you did NOT re-emit** (because the problem is gone or not visible):\n\
-   → LIST them in your output as a separate `## Reconciliation candidates` markdown section. \
-For each: TD ID + your best guess (`fixed in commit X`, `no longer visible in source`, `out of scope this audit`, `uncertain`). \
-The pipeline will run a reconciliation pass after Step 8 to classify them definitively.\n\
-\n\
-This rule is critical: the user wiped TDs once to evaluate a fresh audit, but most users don't. Re-discovery under a new slug breaks their workflow.\n\n\
-# D. OUTPUT FORMAT\n\
-\n\
-Fill `docs/inconsistencies-tech-debt.md` — replace ALL `{{PLACEHOLDERS}}` and `<!-- ... -->` comments. For every finding:\n\
-\n\
-1. **Outdated prerequisites table** in the index file: flag EOL/deprecated/behind-stable runtimes, frameworks, packages with the actual reality column.\n\
-\n\
-2. **For each issue**: (a) create or update the TD detail file at `docs/tech-debt/TD-<date>-<slug>.md` first, then (b) add a one-line entry to the `Current list` table in the index. Do both or neither. For UPDATES of existing TDs (per § C), keep the original file name and date.\n\
-\n\
-3. **Severity calibration** (use concrete examples to avoid over-classification as Medium):\n\
-   - **Critical**: production down, data leak, exploitable flaw — e.g. hardcoded prod API key in repo, SQL injection in a public endpoint, secret in a logged response.\n\
-   - **High**: blocks release or a supported environment — e.g. test suite red on main, build fails on the documented version, auth bypass under specific conditions, baseline checklist failures touching prod safety (display_errors=On in prod, root container).\n\
-   - **Medium**: daily dev friction or measurable perf hit — e.g. test suite >30s, N+1 in the dashboard page, manual repetitive setup, broken hot reload, missing CI quality gate.\n\
-   - **Low**: cosmetic or minor improvement — e.g. inconsistent variable naming in one module, missing JSDoc, an unused dependency.\n\
-\n\
-4. **Two-tier Status** (the value matters — the validation phase skips findings already verified):\n\
-   - **Verified in source**: you confirmed the problem by reading the actual source code (file:line cited). This is the default for baseline findings (§ A) and most dimensional findings (§ B) — the validation phase will SKIP these from re-confirmation, saving the user time.\n\
-   - **Inferred**: you extrapolated from docs/ or briefing — needs user confirmation in validation. Use only when you couldn't reach the actual source (e.g. it lives in a linked repo, or the docs claim a behavior you couldn't verify directly).\n\
-   - **Blocked upstream**: depends on a third-party fix (vendor bug, language version bump, framework deprecation cycle).\n\
-   - **Mitigated**: partial fix shipped, residual work tracked.\n\
-   - **Confirmed by user**: only set by the validation phase after user confirms.\n\
-   - **Rejected**: only set by the validation phase if user rejects — the next audit will NOT recreate this TD.\n\
-   - **Accepted decision**: only set by the validation phase when the user records the TD as an intentional trade-off in `docs/decisions.md`.\n\
-   - **Deferred**: only set by the validation phase when the user postpones the TD decision.\n\
-\n\
-5. **Cap**: target 30 findings maximum. Critical + High findings (including all baseline checklist failures) are NEVER trimmed to fit the cap. Trim Medium and Low if needed. If you cannot stay under 30 even after trimming all Low, note the count of trimmed Medium in the index's `## Coverage gaps` section.\n\
-\n\
-6. **Tracker MCP dedup**: if a ticket tracker MCP is configured (Jira/Linear/GitHub Issues), before creating a NEW TD file, do a read-only search for an existing open ticket with a matching title fragment. If found: set `Next step: link existing ticket <URL>` instead of `create ticket`. Avoid duplicating tracked work.\n\
-\n\
-7. **No issues found**: single row in the index: `'None identified during initial audit'`. (Almost never happens on a real repo — even a green-field has baseline checklist gaps.)\n\
-\n\
-8. **Dimension coverage matrix — MANDATORY**: fill the `## Dimension coverage` table in the index — ALL 10 rows, each with an outcome per § B (`findings` / `scanned — nothing substantiable` / `N/A: <verifiable reason>`) and an evidence/reason cell. A blank row, or an `N/A` whose reason a human can't verify, = incomplete audit. **If the `## Dimension coverage` section is absent** (project installed before this section existed), CREATE it with the 10 dimensions. This is the breadth contract that stops the scan from silently skipping dimensions.\n\
-\n\
-**Detail file format** (YAML frontmatter + markdown sections, ENFORCE THIS SHAPE):\n\
-```\n\
----\n\
-name: td-<date>-<slug>\n\
-description: One-line summary (≤ 160 chars).\n\
-metadata:\n\
-  type: tech-debt\n\
-  audit_history:\n\
-    - date: YYYY-MM-DD\n\
-      status: Verified in source | Inferred | Blocked upstream | Mitigated | Confirmed by user | Rejected | Accepted decision | Deferred\n\
-      reviewer: <audit kind, e.g. \"Full audit\" or \"Security audit\">\n\
-      note: optional — what changed since previous entry (e.g. \"line numbers shifted\", \"severity bumped to High\")\n\
----\n\
-\n\
-# TD-<date>-<slug>\n\
-\n\
-- **Area**: Backend | Frontend | CI | Infra | Security | A11y | Observability | Database | ApiDesign | Docs | Other\n\
-- **Severity**: Critical | High | Medium | Low\n\
-- **Status**: <current value, mirrors latest audit_history entry>\n\
-- **Effort**: S (< 1h) | M (1-4h) | L (1+ day) | XL (multi-day / cross-team)\n\
-- **Blast radius**: local (1-2 files) | module (5-10 files) | cross-cutting (50+ files or new pattern)\n\
-\n\
-## Problem (fact)\n\
-<one or two sentences, factual — what is, not what should be>\n\
-\n\
-## Impact\n\
-<what goes wrong if not fixed — concrete, e.g. \"production crashes on Monday morning when peak traffic …\">\n\
-\n\
-## Where (pointers)\n\
-- `path/to/file.rs:42` — <one-line context>\n\
-- `path/to/other.toml:7-15` — <one-line context>\n\
-\n\
-## Suggested direction\n\
-<non-binding fix suggestion — what would a senior do? Skeleton, NOT full implementation>\n\
-\n\
-## Next step\n\
-`create ticket` OR `link existing ticket <URL>` (see point 6).\n\
-```\n\
-\n\
-For UPDATES of existing TDs: APPEND a new entry to `audit_history`, do not replace previous entries. The chronological list is the value.\n\n\
-\
-**Scope reminder**: this step ONLY fills `docs/inconsistencies-tech-debt.md` + creates/updates `docs/tech-debt/TD-*.md` detail files. The companion `docs/decisions.md` is intentionally filled in Step 9 (not here) so the agent has the full audit picture before recording positive choices.",
+        prompt: include_str!("prompts/step8-tech-debt.md"),
         sources: &["__GIT_SOURCE_TREE__"],
     },
-
     // Step 9: Final review + fill decisions.md
     //
     // Step 9 has a *real* target_file (`docs/decisions.md`) so the
@@ -629,50 +321,7 @@ For UPDATES of existing TDs: APPEND a new entry to `audit_history`, do not repla
     // free-form write where the agent has the full picture).
     AnalysisStep {
         target_file: "docs/decisions.md",
-        prompt: "\
-This is the FINAL step. Execute the two phases in order:\n\n\
-\
-# PHASE 1 — Final quality review (reports excluded)\n\
-\n\
-Read current guidance under `docs/`, but EXCLUDE `docs/reports/`: reports are dated snapshots outside routing and must not be rewritten during final review. EXCLUDE every `TEMPLATE.md` too: those gabarits are copied per instance, never filled in place. Fix issues directly in the remaining files (Write/Edit each file as needed).\n\
-\n\
-Check:\n\
-- **No remaining `{{...}}` placeholders** — replace with content or `N/A — not used` for missing features. \
-Any surviving uppercase double-brace placeholder is a hard failure: the file looked rendered but isn't.\n\
-- **Marker discipline** — there are 3 marker types, each with a strict semantic:\n\
-  · `<!-- TODO: ask user -->` — info requires human decision (intent, archi choice). KEEP — Phase 2 validation asks the user.\n\
-  · `<!-- TODO: verify -->` — you couldn't verify (sandbox blocked, file out-of-tree). FOR EACH ONE: try a final Glob/Read pass; if still impossible, CONVERT to `<!-- TODO: ask user -->` so Phase 2 escalates. If verification succeeded, write the conclusion WITHOUT any marker.\n\
-  · `<!-- TODO: unknown -->` — placeholder from a previous validation skip. KEEP — same path as `ask user`.\n\
-- No duplicated facts across files (one canonical home per concept).\n\
-- Consistent terminology with `glossary.md`.\n\
-- Valid cross-references (clickable links resolve to existing files).\n\
-- No contradictions between files (e.g. coding-rules says X is enforced but testing-quality says no linter exists).\n\
-- No empty critical sections.\n\
-- Clean markdown (no broken tables, no stray HTML).\n\
-- Each tech-debt entry in `inconsistencies-tech-debt.md` has a matching detail file under `tech-debt/`.\n\
-- Empty sections for missing features → write `N/A — not used` (don't leave the heading bare).\n\n\
-\
-# PHASE 2 — Fill docs/decisions.md\n\
-\n\
-This file captures **intentional architectural choices** observed in the code that might look unusual to a newcomer (e.g., why a certain pattern was chosen over a simpler one). It is the *positive* counterpart to `inconsistencies-tech-debt.md` — choices the team made deliberately, NOT problems.\n\n\
-\
-Read the source code (entry points, key modules, configs) AND the docs you just reviewed in Phase 1. Replace the `{{DECISION_*}}` / `{{REASON}}` / `{{ANTI_PATTERN}}` / `{{FILE_OR_USER}}` placeholders with **real decisions** you can trace to evidence.\n\n\
-\
-Format each row:\n\
-- **Decision**: one-line summary of the choice (e.g., \"Subdomain-based locale routing\").\n\
-- **Why chosen**: rationale you can defend from the code or docs (e.g., \"SEO + hreflang correctness, simpler than middleware-based path prefixing\").\n\
-- **What NOT to do**: anti-pattern a newcomer might attempt (e.g., \"Don't add a `/fr/` path prefix — it would duplicate routes and break the `_alternates` SEO logic\").\n\
-- **Source**: MUST be one of: a verifiable `file:line` (cite with `[src: file: path:line]`), a `briefing.md` reference, OR `user` (i.e. confirmed in a previous validation discussion). **FORBIDDEN**: `inferred from <evidence>` — if you cannot pin a single concrete source, the decision does NOT belong here. The whole point of `decisions.md` is that future agents can verify each entry; an inferred 'why chosen' is a fabricated rationale that becomes doctrine.\n\n\
-\
-Quality rules:\n\
-- **Quality > quantity**: target 3-8 real decisions. A repo with 2 strong decisions is fine; a list of 15 fluff items is worse than 3 strong ones.\n\
-- **Do NOT invent**: every decision must be traceable to code or a user-confirmed source. If you can't cite evidence, skip it. A 'Why chosen' you cannot anchor in `file:line` or `user` is a post-hoc rationalisation, not a recorded decision — drop the row.\n\
-- **Examples** (good shape — adapt to the actual repo):\n\
-  · \"Single Mutex on SQLite\" → \"Single-writer model fits our access pattern; multi-writer would need WAL + busy_timeout tuning\" → \"Don't add a connection pool\" → `src/db/conn.rs:42`\n\
-  · \"No ORM\" → \"Pure SQL is faster for our 12-table schema; the maintenance cost of an ORM dependency exceeds the win\" → \"Don't introduce diesel/sea-orm\" → `src/db/queries.rs` + user\n\
-- Remove the `{{DECISION_2}}` row entirely if you only have one real decision (don't pad).\n\n\
-\
-**End state**: `docs/decisions.md` has zero `{{...}}` placeholders, contains 3-8 traceable decisions, and all OTHER docs/ files passed the Phase 1 review with markers cleaned up per the discipline rules above.",
+        prompt: include_str!("prompts/step9-final-review.md"),
         sources: &["__GIT_SOURCE_TREE__"],
     },
 ];
@@ -686,459 +335,74 @@ Quality rules:\n\
 // per kind (e.g. `docs/inconsistencies-security.md`) so they don't
 // clobber the Full audit's `docs/inconsistencies-tech-debt.md`.
 //
-// S2.D3-D5 will replace the placeholder bodies below with vetted
-// prompts. The dispatcher (`kind_to_steps`) is stable now so the
-// front-end can already wire kind selection.
+// Drift reports checksum mismatches without rewriting documentation.
+// The other focused kinds emit their dimension-specific findings.
 
 pub(crate) const DRIFT_STEPS: &[AnalysisStep] = &[AnalysisStep {
     target_file: "REVIEW",
-    prompt: "\
-DRIFT AUDIT (0.8.2) — placeholder body, content lands in S2.D3.\n\n\
-Read docs/checksums.json. For every (file, sha256) recorded there, recompute the sha and \
-list the files where the recorded hash no longer matches. Do NOT rewrite any file — \
-your output is a short bullet list of stale docs/ files only.",
+    prompt: include_str!("prompts/drift.md"),
     sources: &["docs/checksums.json"],
 }];
 
-pub(crate) const SECURITY_STEPS: &[AnalysisStep] = &[
-    AnalysisStep {
-        target_file: "docs/inconsistencies-security.md",
-        prompt: "\
-You are running a FOCUSED SECURITY AUDIT (0.8.2). Output ONLY security findings — \
-ignore unrelated bugs, perf issues, documentation drift, etc.\n\n\
-\
-# A. MANDATORY SECURITY CHECKLIST (never skip, never trim)\n\
-\n\
-Walk through every item below. If satisfied, write \"verified present\" or \"verified absent\". \
-If NOT satisfied, emit a TD finding. These do NOT count against any cap.\n\n\
-\
-**Secrets & credentials in source:**\n\
-- No REAL `.env*` file is tracked (`git ls-files -- '*.env*' '.env*'` — pathspec listing, no grep) — `.env.example`/`.env.dist`/`.env.sample` are legitimate templates and NOT findings. Tracking status and file NAMES are the ONLY safe signals you may collect.\n\
-- **Secret VALUES are out of your scope entirely.** You may not open, grep, or otherwise inspect file contents for secret-looking values — any command whose output could echo a matched line would pull the secret into your context, which leaves the machine. For the value-scan sub-dimension, write exactly `Not evaluated safely (requires Kronn's local secret scanner)` — NEVER `verified absent`/`verified clean` on a scan you did not safely run.\n\
-- CI YAML / docker-compose credential hygiene: `Not evaluated safely (requires Kronn's local secret scanner)` — proving the absence of a hardcoded credential means reading the very content that could contain it. You may only note the SAFE structural facts: which workflow/compose files exist, and whether they use `secrets:`/`env_file:` — established EXCLUSIVELY via `grep -lE 'secrets:|env_file:' <files>` (filename-only output, zero lines, zero context; `-l` is the ONLY grep flag allowed near credential material).\n\
-- No private keys or certs in repo (`*.pem`, `*.key`, `*.p12`, `id_rsa*`). A key often has no extension: list `**/*.pub` — for each `X.pub`, a tracked `X` beside it is the private half — and every file under a `.ssh/` directory. Report their PATHS only, never open them.\n\
-- `git log --all -S 'BEGIN PRIVATE KEY' --name-only --format='%h %ad'` returns nothing recent (last 12 months) — metadata only, NEVER `-p` (a patch dump would pull the key itself into your context).\n\n\
-\
-**EXFILTRATION GUARD (absolute)**: you run with filesystem access and your context leaves the machine. NEVER open, quote, print or write the VALUE of any secret, key or token — in your output, in docs/, in TDs, anywhere. Findings carry file + line + pattern type only.\n\n\
-\
-**Authentication & sessions:**\n\
-- Session cookies set with `HttpOnly` AND `Secure` AND `SameSite=Lax|Strict` (grep for `setcookie`, `Set-Cookie`, `withCredentials`).\n\
-- Password storage uses a slow hash (`bcrypt`, `argon2`, `scrypt`, `PBKDF2`) — not MD5/SHA1/plain.\n\
-- JWT secret sourcing and hardcoded `Bearer` tokens: `Not evaluated safely (requires Kronn's local secret scanner)` — same boundary, the match line would BE the secret. You may note the safe structural fact that a JWT/auth library is configured (dependency name from the manifest) without inspecting its key material.\n\
-- Password reset tokens are single-use AND time-limited.\n\n\
-\
-**Input validation & injection:**\n\
-- SQL: every query uses parameterized binding (no raw string concat with user input). Grep for patterns like `query(\"...\" + ` or `query(f\"...{user_var}\"` or PHP `\".$user.\"`.\n\
-- Shell: no `exec`, `system`, `passthru`, `subprocess.run(..., shell=True)`, Rust `std::process::Command` spawning `sh`/`bash`/`cmd.exe` with `-c`/`/c` + user input.\n\
-- File paths: no user-controlled string flowing into `fs::open`, `open()`, `file_get_contents()` without `realpath`/`canonicalize` + allowlist root.\n\
-- Templates: no user input in `dangerouslySetInnerHTML`, `v-html`, `{!! $x !!}` (Blade), `{{ x | safe }}` (Jinja). Sample 3 templates.\n\
-- Deserialization: no `pickle.loads`, `unserialize`, `yaml.load` (without `SafeLoader`), `Marshal.load` on untrusted input.\n\n\
-\
-**Transport & headers:**\n\
-- HTTPS enforced (nginx/middleware redirects HTTP → HTTPS, or `secure_origin_whitelist` is empty in prod).\n\
-- `Strict-Transport-Security` header set with `max-age >= 15768000` and `includeSubDomains`.\n\
-- `Content-Security-Policy` header set (even a permissive one with `default-src 'self'` is better than absent).\n\
-- `X-Frame-Options: DENY` or CSP `frame-ancestors 'none'` to block clickjacking.\n\
-- `X-Content-Type-Options: nosniff` set.\n\
-- CORS allowlist is explicit (not `Access-Control-Allow-Origin: *` for any endpoint that touches credentials).\n\n\
-\
-**Dependencies & supply chain:**\n\
-- Lockfile present and tracked (`package-lock.json`, `pnpm-lock.yaml`, `composer.lock`, `Cargo.lock` for bins, `poetry.lock`, `Gemfile.lock`).\n\
-- Dependency risk signals you can VERIFY in the repo: lockfile pins to versions the project's own tooling flags (`cargo audit`/`npm audit`/`composer audit` output or config if present), deps several majors behind their manifest constraint, or abandoned forks. Do NOT assert specific CVEs from memory — model knowledge is stale; if no tooling output exists, record `Inferred` and suggest wiring an audit tool instead.\n\
-- CI runs a dependency audit step (`npm audit`, `pnpm audit`, `cargo audit`, `composer audit`, `pip-audit`, etc.) or has a Dependabot/Renovate config.\n\
-- No `npm install` / `pip install` of git URLs with `master`/`main` branches (must be tagged or pinned commit).\n\n\
-\
-**SSH/CI deploy:**\n\
-- No `StrictHostKeyChecking=no` in deploy scripts.\n\
-- Deploy SSH keys have a clear rotation procedure documented (search for `rotat` keyword in deploy docs).\n\
-- `pull_request_target` workflows do NOT check out the PR branch's workflow definition (RCE vector).\n\n\
-\
-# B. ANTI-REPETITION (priors)\n\
-\n\
-Before writing findings: read existing `docs/tech-debt/TD-*-{auth,security,secrets,xss,sql,cors,csp,...}*.md`. \
-If a finding you'd write matches an existing one, **REUSE its ID** (e.g. update the matching `TD-20260315-jwt-secret-hardcoded.md` in place — APPEND a new `audit_history` entry to the YAML frontmatter, never overwrite). \
-A new audit run does NOT mean new slugs. Slug churn is the #1 audit anti-pattern.\n\n\
-\
-# C. OUTPUT FORMAT\n\
-\n\
-1. Write `docs/inconsistencies-security.md` with the standard table header:\n\
-   `| ID | Problem | Area | Severity |`\n\
-2. For each finding, also write `docs/tech-debt/<ID>.md` using the existing TD detail template — \
-   add a `**Category**: security` line so a future Full-audit reconciliation can dedupe by category.\n\
-3. **Status taxonomy** (two-tier):\n\
-   - `Verified in source` — you opened the source file and confirmed the issue still exists at the cited path.\n\
-   - `Inferred` — pattern-matched only; the fix may already be in flight upstream.\n\
-   Use the first one whenever you actually read source.\n\
-4. **Cap**: 25 findings max from § A. Critical and High are exempt — if your scan finds 6 Critical, you emit all 6 even if the cap is hit.\n\
-5. Each finding has: file path + line number, one-sentence impact (what an attacker gains), one-sentence remediation. \
-   No long essays — this is a triage list, not a security report.\n\n\
-\
-Do NOT modify source code. Do NOT touch other docs/ files. Your scope is only the two output files above.",
-        sources: &[
-            "docker-compose.yml", "Dockerfile", ".github/workflows",
-            ".gitlab-ci.yml", "package.json", "composer.json", "Cargo.toml",
-            ".env", ".env.dist", ".env.example",
-        ],
-    },
-];
+pub(crate) const SECURITY_STEPS: &[AnalysisStep] = &[AnalysisStep {
+    target_file: "docs/inconsistencies-security.md",
+    prompt: include_str!("prompts/security.md"),
+    sources: &[
+        "docker-compose.yml",
+        "Dockerfile",
+        ".github/workflows",
+        ".gitlab-ci.yml",
+        "package.json",
+        "composer.json",
+        "Cargo.toml",
+        ".env",
+        ".env.dist",
+        ".env.example",
+    ],
+}];
 
-pub(crate) const DOCKER_STEPS: &[AnalysisStep] = &[
-    AnalysisStep {
-        target_file: "docs/inconsistencies-docker.md",
-        prompt: "\
-You are running a FOCUSED DOCKER & CONTAINER AUDIT (0.8.2). Output ONLY \
-container/image/orchestration findings — ignore unrelated bugs.\n\n\
-\
-# A. DOCKERFILE CHECKLIST (per Dockerfile in repo — root + subdirs)\n\
-\n\
-For EACH `Dockerfile`, `*.dockerfile`, or `*/Dockerfile` (use `git ls-files | grep -i dockerfile`):\n\
-- **Base image is pinned** to a specific tag (not `:latest`, not just `python` — must be `python:3.11.7-slim` or a digest).\n\
-- **`USER <non-root>` present** before the `CMD`/`ENTRYPOINT` (root inside a container is a privilege-escalation jump pad).\n\
-- **`HEALTHCHECK` directive present** (or documented absent because the orchestrator handles it).\n\
-- **Layer hygiene**: `apt-get install` chains `--no-install-recommends && rm -rf /var/lib/apt/lists/*` in the same RUN. Equivalent for `yum`, `apk`, `dnf`.\n\
-- **No secrets via `ARG`** (they leak via `docker history`). Multi-stage `--mount=type=secret` is fine.\n\
-- **No `ADD <remote-url>`** without checksum verification — prefer `RUN curl ... && sha256sum -c`.\n\
-- **Multi-stage** used when the final image carries a build toolchain (Node, Cargo, Go, JDK) it doesn't need at runtime.\n\
-- **`COPY --chown`** used when copying app files (otherwise root-owned files under a non-root USER).\n\
-- **`.dockerignore` present** at the directory the Dockerfile sits in, excluding at minimum `.git`, `node_modules`, `target`, `vendor`, `.env*`.\n\
-- **PHP-specific** (if the image runs PHP): `display_errors = Off`, `expose_php = Off`, `opcache.enable = 1` for prod; verify `php.ini`/`*.ini` overrides.\n\
-- **Node-specific**: `NODE_ENV=production` set, no `npm install` (must be `npm ci` for reproducibility).\n\n\
-\
-# B. COMPOSE CHECKLIST (per `docker-compose*.yml` / `compose*.yaml`)\n\
-\n\
-- **Resource limits**: services that can realistically starve the host (app, workers, DB) carry `mem_limit`/`cpus` or `deploy.resources.limits.*`. Not a finding on clearly dev-only compose files or when the deployment platform owns limits — state which case applies.\n\
-- **No `:latest`** image tags (reproducibility).\n\
-- **Healthchecks**: critical services (DB, app, gateway) have `healthcheck:` blocks AND `depends_on` uses `condition: service_healthy` instead of bare `depends_on: [svc]`.\n\
-- **Secrets handling**: `Not evaluated safely (requires Kronn's local secret scanner)` — never grep for credential literals (the match line would be the secret). Safe signal: `grep -lE 'secrets:|env_file:'` (filename-only) shows whether the safe mechanisms are present.\n\
-- **Read-only rootfs**: stateless services have `read_only: true` (or note exceptions). Worth a TD only when the service is obviously stateless (gateway, static-asset proxy).\n\
-- **Restart policy**: services have `restart: unless-stopped` or `restart: always` (otherwise a crash stops them silently).\n\
-- **Logging cap**: `logging.options.max-size` + `max-file` set somewhere — either per-service or via a default driver — otherwise the host disk fills up.\n\
-- **Networks**: services that don't need each other use separate networks (defense-in-depth — emit TD only for obvious cases like a DB sharing the same network as an outbound-facing proxy).\n\
-- **Volume mounts**: no `${HOME}:/host-home:rw` style host-root mounts on a service that doesn't need them. Read-only is OK; rw on `/`, `/home`, `/var` is a red flag.\n\n\
-\
-# C. CI/IMAGE-BUILD CHECKLIST\n\
-\n\
-- CI step that builds the image runs a vulnerability scanner (`trivy`, `grype`, `snyk container test`) OR a TD is filed acknowledging the gap.\n\
-- Image push uses a tag derived from git sha or release version, never just `:latest` alone (multi-tag with `:latest` is fine).\n\
-- Cache layers: COPY commands ordered cheapest-changing → most-changing (lockfiles before source).\n\n\
-\
-# D. ANTI-REPETITION (priors)\n\
-\n\
-Before writing findings: read existing `docs/tech-debt/TD-*-{docker,compose,dockerfile,image,layer,...}*.md`. \
-If a finding matches, reuse its ID (APPEND an `audit_history` entry to the YAML frontmatter — do not overwrite). \
-Slug churn is the #1 audit anti-pattern.\n\n\
-\
-# E. OUTPUT FORMAT\n\
-\n\
-1. Write `docs/inconsistencies-docker.md` with header `| ID | Problem | Area | Severity |`.\n\
-2. For each finding, write `docs/tech-debt/<ID>.md` with a `**Category**: docker` line in addition to the standard TD schema.\n\
-3. **Status taxonomy** (two-tier): `Verified in source` when you opened the file and confirmed; `Inferred` for pattern-match only.\n\
-4. **Cap**: 25 findings max. Critical/High exempt.\n\
-5. Each finding: file path + line number, one-sentence impact (outage/security/perf cost), one-sentence remediation.\n\n\
-\
-Do NOT modify source. Do NOT touch other docs/ files.",
-        sources: &["Dockerfile", "docker-compose.yml", "docker-compose.yaml", "compose.yaml", "compose.yml", ".dockerignore"],
-    },
-];
+pub(crate) const DOCKER_STEPS: &[AnalysisStep] = &[AnalysisStep {
+    target_file: "docs/inconsistencies-docker.md",
+    prompt: include_str!("prompts/docker.md"),
+    sources: &[
+        "Dockerfile",
+        "docker-compose.yml",
+        "docker-compose.yaml",
+        "compose.yaml",
+        "compose.yml",
+        ".dockerignore",
+    ],
+}];
 
-pub(crate) const PERFORMANCE_STEPS: &[AnalysisStep] = &[
-    AnalysisStep {
-        target_file: "docs/inconsistencies-performance.md",
-        prompt: "\
-You are running a FOCUSED PERFORMANCE AUDIT (0.8.2). Output ONLY perf findings.\n\n\
-\
-# A. DATA-ACCESS CHECKLIST\n\
-\n\
-- **N+1 queries**: look for ORM patterns where a list iteration triggers per-row queries. \
-  Specifically: Laravel/Doctrine `->load()` missing inside a `foreach`, Django `.get()` inside a `for` loop, \
-  Rails `.each do |x| x.assoc...` without `includes(:assoc)`, Sequelize `Model.findAll()` followed by per-record `await user.getProfile()`. \
-  Sample the top 5 controllers/services.\n\
-- **Missing indexes**: cross-check WHERE/ORDER BY/JOIN columns against migration files (`migrations/*`, `db/migrate/*`, `*.sql`). \
-  Any column used in WHERE/ORDER BY without an index = TD (unless table is provably tiny).\n\
-- **`SELECT *`** in hot paths — flag when a query joins large tables.\n\
-- **Synchronous DB calls in async handlers**: `await db.query()` is fine; `db.query_sync()` inside an async fn is not.\n\
-- **Pagination defaults**: list endpoints have a hard cap (e.g. `LIMIT 100`); unbounded queries are a TD.\n\n\
-\
-# B. CACHING CHECKLIST\n\
-\n\
-- **Cache headers** on static assets: `Cache-Control: public, max-age=31536000, immutable` for hashed bundles; `no-cache` for HTML shells.\n\
-- **CDN / edge cache** strategy documented (in docs/operations/ or in the load balancer config).\n\
-- **App-level cache** TTLs are explicit (no `cache.forever()` or `expiry: -1` without justification).\n\
-- **Cache stampede protection**: hot keys use SWR / single-flight / dogpile-style locking (or filed as TD if absent).\n\n\
-\
-# C. FRONTEND / RENDER CHECKLIST (when a frontend exists)\n\
-\n\
-- **Bundle size**: build output present? Check `dist/`, `build/`, `.next/` sizes from CI logs or `package.json` build script. Flag chunks > 500 KB gzipped.\n\
-- **Code-splitting**: routes lazy-loaded? Look for dynamic `import()` or `React.lazy()`.\n\
-- **Images**: `loading=\"lazy\"` on offscreen `<img>`. Sample 3 templates/components.\n\
-- **Long lists**: virtualization used for lists > 100 items? Look for `react-window`, `virtual-scroll`, etc.\n\
-- **Re-render hotspots**: `useEffect` deps include large objects/arrays not memoized? Sample 3 components.\n\n\
-\
-# D. BACKEND / WORKER CHECKLIST\n\
-\n\
-- **Sync I/O in async handlers**: file reads, HTTP calls without `await`/non-blocking client.\n\
-- **Blocking the event loop**: heavy CPU in JS handlers (large JSON parse, sync crypto, regex catastrophic backtracking). Tokio: blocking work outside `spawn_blocking`.\n\
-- **Connection pool sizing**: DB pool size set explicitly in config? Or relying on driver defaults (often too low or unbounded).\n\
-- **Background jobs** queued but never processed (orphan queues) — check for unused queue names in code vs worker config.\n\n\
-\
-# E. OBSERVABILITY (gap → can't measure → can't fix)\n\
-\n\
-- **APM / tracing**: at least one tool wired (OpenTelemetry, Datadog APM, NewRelic, Sentry Performance, etc.) — TD if none.\n\
-- **Slow query log**: enabled in DB or surfaced via APM.\n\
-- **Front-end RUM**: any tool collecting Core Web Vitals from real users.\n\n\
-\
-# F. ANTI-REPETITION (priors)\n\
-\n\
-Read existing `docs/tech-debt/TD-*-{perf,n-plus-one,index,cache,bundle,...}*.md` before writing. \
-Match → reuse ID + APPEND `audit_history` entry. Slug churn is the #1 audit anti-pattern.\n\n\
-\
-# G. OUTPUT FORMAT\n\
-\n\
-1. Write `docs/inconsistencies-performance.md` with header `| ID | Problem | Area | Severity |`.\n\
-2. For each finding, write `docs/tech-debt/<ID>.md` with `**Category**: performance`.\n\
-3. **Status taxonomy**: `Verified in source` vs `Inferred` (cf. Full audit).\n\
-4. **Cap**: 25 findings max. Critical/High exempt.\n\
-5. Each finding: file path + line number, one-sentence impact (latency / throughput cost — be quantitative when possible), one-sentence remediation.\n\n\
-\
-Do NOT modify source. Do NOT touch other docs/ files.",
-        sources: &["__GIT_SOURCE_TREE__"],
-    },
-];
+pub(crate) const PERFORMANCE_STEPS: &[AnalysisStep] = &[AnalysisStep {
+    target_file: "docs/inconsistencies-performance.md",
+    prompt: include_str!("prompts/performance.md"),
+    sources: &["__GIT_SOURCE_TREE__"],
+}];
 
-pub(crate) const ACCESSIBILITY_STEPS: &[AnalysisStep] = &[
-    AnalysisStep {
-        target_file: "docs/inconsistencies-accessibility.md",
-        prompt: "\
-You are running a FOCUSED ACCESSIBILITY AUDIT (0.8.2). Output ONLY a11y findings, \
-scoped to WCAG 2.1 AA where applicable.\n\n\
-\
-# A. SEMANTIC HTML CHECKLIST (sample 5 representative templates/components)\n\
-\n\
-- **Form inputs** have an associated `<label for=>` or wrap the input, OR `aria-label` / `aria-labelledby` is present. Placeholder-only is NOT a label.\n\
-- **Buttons vs links**: `<a>` used for navigation, `<button>` for actions. No `<div onClick=...>` masquerading as a clickable.\n\
-- **Headings**: exactly one `<h1>` per page; no jumps `<h1>` → `<h3>` (skipped levels).\n\
-- **Landmarks**: page uses `<header>`, `<nav>`, `<main>`, `<footer>` (or ARIA roles `banner`, `navigation`, `main`, `contentinfo`).\n\
-- **Lists**: groups of similar items use `<ul>` / `<ol>`, not stacks of `<div>`.\n\
-- **`<img alt=>`** present on every image; decorative images use `alt=\"\"`. Sample 5+ images.\n\
-- **SVG**: `<svg>` that conveys meaning has `<title>` or `aria-label`; decorative SVGs have `aria-hidden=\"true\"`.\n\n\
-\
-# B. KEYBOARD & FOCUS CHECKLIST\n\
-\n\
-- **`tabindex`**: no positive values (breaks natural tab order). `tabindex=\"-1\"` only on programmatic focus targets.\n\
-- **Focus visible**: at least one global focus style. Grep for `outline: none` / `outline: 0` without a corresponding `:focus-visible` override.\n\
-- **Skip link**: a \"Skip to main content\" link exists (or filed as TD on a multi-section page).\n\
-- **Modals/popovers**: focus is trapped while open AND returns to the trigger on close. Read the modal component once.\n\
-- **Custom widgets**: dropdowns/tabs/accordions follow ARIA Authoring Practices (correct roles + keyboard support). Open one custom widget and inspect.\n\n\
-\
-# C. COLOR & CONTRAST CHECKLIST\n\
-\n\
-- **Text contrast**: foreground/background pairs in the theme tokens meet 4.5:1 for body, 3:1 for large text (18pt+ or 14pt bold). \
-  Read the design-token file (`tokens.css`, `theme.ts`, `_colors.scss`, etc.) and compute contrast for the 3-5 most common pairings.\n\
-- **Non-text contrast**: focus rings, form borders, icon-only buttons hit 3:1 against adjacent colors.\n\
-- **Color-only state**: error states have a non-color cue (icon, text, underline) — not just red.\n\
-- **Hover state**: not the ONLY way to discover an interactive element (touch + keyboard users have no hover).\n\n\
-\
-# D. ARIA HYGIENE\n\
-\n\
-- **Role conflicts**: no `<button role=\"link\">`, no `<a role=\"button\">`, etc. (use the right tag).\n\
-- **Live regions**: status updates use `aria-live=\"polite\"` (or `assertive` for errors). Toast/notification components must announce.\n\
-- **`aria-hidden`** not applied to interactive elements (breaks screen readers).\n\
-- **Form errors** linked via `aria-describedby` to the input.\n\n\
-\
-# E. MEDIA / DYNAMIC\n\
-\n\
-- **Video**: tracks for captions / transcripts (or TD if absent).\n\
-- **Animations**: `prefers-reduced-motion` honored (CSS media query OR JS check).\n\
-- **Time limits**: auto-dismissing alerts can be paused/extended.\n\n\
-\
-# F. ANTI-REPETITION (priors)\n\
-\n\
-Read existing `docs/tech-debt/TD-*-{a11y,accessibility,aria,contrast,keyboard,...}*.md`. \
-Match → reuse ID + APPEND `audit_history` entry. Slug churn is the #1 audit anti-pattern.\n\n\
-\
-# G. OUTPUT FORMAT\n\
-\n\
-1. Write `docs/inconsistencies-accessibility.md` with header `| ID | Problem | Area | Severity |`.\n\
-2. For each finding, write `docs/tech-debt/<ID>.md` with `**Category**: accessibility` and a `**WCAG**: <criterion>` line (e.g. `1.1.1 Non-text Content`).\n\
-3. **Status taxonomy**: `Verified in source` vs `Inferred`.\n\
-4. **Cap**: 25 findings max. Critical/High exempt.\n\
-5. Each finding: file path + line number, who is impacted (screen reader / keyboard-only / low-vision / cognitive), and one-sentence remediation.\n\n\
-\
-Do NOT modify source. Do NOT touch other docs/ files.",
-        sources: &["__GIT_SOURCE_TREE__"],
-    },
-];
+pub(crate) const ACCESSIBILITY_STEPS: &[AnalysisStep] = &[AnalysisStep {
+    target_file: "docs/inconsistencies-accessibility.md",
+    prompt: include_str!("prompts/accessibility.md"),
+    sources: &["__GIT_SOURCE_TREE__"],
+}];
 
-pub(crate) const RGAA_STEPS: &[AnalysisStep] = &[
-    AnalysisStep {
-        target_file: "docs/inconsistencies-rgaa.md",
-        prompt: "\
-RGAA 4.1 AUDIT (0.8.4) — focused re-scan against the French Référentiel Général d'Amélioration de l'Accessibilité, version 4.1 (106 criteria across 13 topics). Stricter than WCAG 2.1 AA: RGAA mandates specific French-context implementations (e.g. `lang=\"fr\"` propagation, `aria-label` text in French, specific patterns for govt e-forms). Mandatory for French public-service sites + companies > 250 employees (loi du 11 février 2005, décret n° 2019-768).\n\n\
-\
-Read existing `docs/inconsistencies-rgaa.md` if present (anti-repetition: don't re-discover the same finding under a new slug — refresh / reuse the ID per § F below).\n\n\
-\
-# A. THÉMATIQUE 1 — IMAGES (8 critères)\n\
-- 1.1: Every `<img>` carries a `alt` (decorative ⇒ `alt=\"\"`, informative ⇒ pertinent text in the page's language).\n\
-- 1.2: SVG / icons that convey meaning have `<title>` or `aria-label`; decorative SVG → `aria-hidden=\"true\"` + no `tabindex`.\n\
-- 1.3: Image captions linked via `<figure>` / `<figcaption>` when applicable.\n\
-- 1.6: Map images (graph, chart) have a structured text equivalent (data table or `<details>`).\n\
-- 1.8: CAPTCHA: provide an alternative not based on vision.\n\n\
-\
-# B. THÉMATIQUE 3 — COULEURS (3 critères)\n\
-- 3.1: Information NEVER conveyed by color alone (RGAA stricter than WCAG: scan ALL status indicators + form-error styling, flag any color-only signal as critical, not just \"recommended\").\n\
-- 3.2: Body text contrast ≥ 4.5:1 ; large text (≥ 24px or ≥ 18.5px bold) ≥ 3:1. Read the design-token file (`tokens.css`, `_colors.scss`, etc.) and compute contrast for the 5 most common pairings. Flag any pair under 4.5:1 as Critical or High.\n\
-- 3.3: Non-text contrast (focus rings, form borders, icon-only buttons) ≥ 3:1 against adjacent colors.\n\n\
-\
-# C. THÉMATIQUE 7 — SCRIPTS (5 critères)\n\
-- 7.1: Custom widgets (dropdowns / tabs / accordions / modals) follow ARIA Authoring Practices (correct role + keyboard support).\n\
-- 7.3: Each scripted control is keyboard-operable (Tab, Enter, Esc, Arrow keys per pattern).\n\
-- 7.4: Status updates use `aria-live` (polite for non-urgent, assertive for errors). Toast/notification components MUST announce.\n\
-- 7.5: Time-limited interactions can be paused/extended (auto-dismissing alerts especially).\n\n\
-\
-# D. THÉMATIQUE 8 — ÉLÉMENTS OBLIGATOIRES (10 critères)\n\
-- 8.1: HTML validates (no parse errors that break assistive tech).\n\
-- 8.2: `<html lang=\"fr\">` (or appropriate locale) is set at the root.\n\
-- 8.4: Page title (`<title>`) is unique and descriptive.\n\
-- 8.6: Heading structure: ONE `<h1>`, no skipped levels.\n\
-- 8.7: Lists are real `<ul>`/`<ol>`, not stacks of `<div>`.\n\
-- 8.9: HTML uses semantic tags appropriately (no `<div onClick>` instead of `<button>`).\n\n\
-\
-# E. THÉMATIQUE 11 — FORMULAIRES (13 critères)\n\
-- 11.1: Every input has an associated `<label for=>` (or wraps the input, or carries `aria-label`/`aria-labelledby`). Placeholder-only is NOT a label.\n\
-- 11.2: Form labels are pertinent (in French if the page is French) — e.g. `<label>Adresse e-mail</label>` not `<label>Champ 3</label>`.\n\
-- 11.5: Required fields are explicitly marked (visual cue + `aria-required=\"true\"` + announced).\n\
-- 11.10: Form errors are bound to the field via `aria-describedby` AND announced via a live region.\n\
-- 11.13: Fields collecting personal data have the correct `autocomplete` attribute (RGPD + RGAA — `autocomplete=\"email\"`, `\"family-name\"`, `\"tel\"`, etc.).\n\n\
-\
-# F. ANTI-REPETITION + OUTPUT FORMAT\n\
-\n\
-Same rules as the Full audit Step 8: anti-repetition pass + detail-file schema + severity calibration. Index file = `docs/inconsistencies-rgaa.md`. For each finding, the detail file at `docs/tech-debt/TD-<date>-<slug>.md` carries:\n\
-- `**Category**: rgaa`\n\
-- `**RGAA Criterion**: <thématique>.<critère>` (e.g. `3.2`, `11.10`)\n\
-- `**WCAG mapping**: <reference>` if applicable (e.g. `1.4.3`)\n\
-- Severity calibration: Critical = bloquant + applicable au scope du décret 2019-768 (public service site or large org); High = compromet l'usabilité pour screen reader / keyboard-only users.\n\n\
-\
-If no findings, the index reads `'Aucune non-conformité RGAA identifiée lors de cet audit.'`.\n\n\
-\
-# G. POUR ALLER PLUS LOIN — AUDIT MANUEL + FORMATION (obligatoire)\n\
-\n\
-**À TOUJOURS ÉCRIRE en fin de `docs/inconsistencies-rgaa.md`**, même quand il n'y a aucune non-conformité automatisée. Section littérale (à reformuler dans le ton de la doc projet, mais le fond doit y être) :\n\n\
-\
-```\n\
-## ⚠️ Cet audit ne remplace PAS un audit complet\n\
-\n\
-**À lire AVANT de conclure que « le site est conforme ».**\n\
-\n\
-Cet audit automatique a dépoussiéré une grande partie des problèmes structurels — labels manquants, contrastes faibles, semantic HTML, marqueurs ARIA, attributs `autocomplete`. C'est utile pour rattraper le retard rapide, mais **il y a presque certainement des choses non trouvées** :\n\
-\n\
-- Beaucoup de critères RGAA (navigation clavier complète, parcours lecteur d'écran, pertinence des alternatives textuelles, gestion du focus dans les widgets complexes, accessibilité cognitive) **ne peuvent PAS être évalués par du tooling**. Le W3C et la DINUM le rappellent explicitement.\n\
-- Le tooling automatique couvre **30-40 % des critères au mieux**. Les 60-70 % restants demandent une revue humaine.\n\
-\n\
-**Deux options non négociables** pour se considérer réellement conforme :\n\
-\n\
-### 1. Re-tester soi-même avec une grille manuelle\n\
-\n\
-- Suivre la **grille d'évaluation officielle RGAA 4.1** (DINUM) — 106 critères, page par page, sur un échantillon représentatif du site.\n\
-- Compléter avec des outils : Wave, Axe DevTools, **et surtout** un vrai lecteur d'écran (NVDA sous Windows, VoiceOver sous macOS/iOS, TalkBack sous Android) + navigation au clavier seul + simulation de daltonisme.\n\
-- Livrable : déclaration d'accessibilité (obligatoire si vous êtes soumis au décret n° 2019-768) + plan d'action pluriannuel + schéma pluriannuel.\n\
-- Personne dédiée formée requise (cf. § Formation ci-dessous).\n\
-\n\
-### 2. Faire appel à un pro\n\
-\n\
-- **[Access42](https://access42.net)** — la référence française pour l'**audit RGAA officiel et certifiant**. C'est une agence spécialisée 100 % accessibilité : audits d'experts qui produisent la documentation légale opposable, accompagnement de mise en conformité, jurisprudence à jour. **C'est ici qu'on va si on a besoin d'un audit qui tienne devant une demande de la DGCCRF ou un contrôle d'un référent ministériel.**\n\
-\n\
-### Formation continue (pour ne plus laisser passer)\n\
-\n\
-Sans compréhension des enjeux, les correctifs sont superficiels et les régressions inévitables à chaque release.\n\
-\n\
-- **[Access42](https://access42.net)** propose aussi un cursus métier — référent accessibilité numérique, expert RGAA. À privilégier pour un profil dont c'est le cœur du job (référent a11y / lead front).\n\
-- **[Opquast](https://www.opquast.com)** — certification « Maîtrise de la qualité en projet web ». Plus large (240 règles : qualité, perf, RGPD, accessibilité, UX, SEO), accessible à tous les profils (devs, designers, PO, chefs de projet, contenu). RGAA y est traité comme un sous-ensemble. La cert reste valide à vie. **À privilégier pour faire monter en compétence toute l'équipe** sur la qualité Web globale, avec un volet a11y solide.\n\
-\n\
-Vise au minimum **un référent accessibilité Access42-formé par produit** + **toute l'équipe certifiée Opquast** pour que la qualité d'ensemble ne régresse pas entre deux audits.\n\
-```\n\n\
-\
-Apply the marker discipline (`TODO: verify` only if you couldn't check; `TODO: ask user` for human decisions). Do NOT modify source.",
-        sources: &[],
-    },
-];
+pub(crate) const RGAA_STEPS: &[AnalysisStep] = &[AnalysisStep {
+    target_file: "docs/inconsistencies-rgaa.md",
+    prompt: include_str!("prompts/rgaa.md"),
+    sources: &[],
+}];
 
-pub(crate) const DATABASE_STEPS: &[AnalysisStep] = &[
-    AnalysisStep {
-        target_file: "docs/inconsistencies-database.md",
-        prompt: "\
-DATABASE AUDIT (0.8.4) — focused re-scan on data-layer hygiene. Read existing `docs/inconsistencies-database.md` if present (anti-repetition: don't re-discover the same finding under a new slug — refresh / reuse the ID per § C below).\n\n\
-\
-# A. SCHEMA + MIGRATIONS\n\
-- **Migration safety**: any migration that ALTERs a table > 1M rows must be backed by a non-blocking strategy (online DDL, shadow column + backfill, pt-online-schema-change). Flag `ALTER TABLE ... ADD COLUMN NOT NULL DEFAULT ...` on big tables — locks the whole table on MySQL pre-8.0.\n\
-- **Migration reversibility**: each migration file should declare a `down()` or be explicitly marked irreversible. Check the `migrations/` folder (Flyway, Alembic, Diesel, Knex, sqlx, etc.).\n\
-- **Schema drift**: compare the live schema (or the dump committed alongside migrations) with what the ORM models declare. Stale columns, missing NOT NULL, missing FK constraints.\n\
-- **Charset/collation**: in 2026, only `utf8mb4` is acceptable on MySQL. `utf8` (3-byte) breaks emoji + supplementary planes.\n\n\
-\
-# B. INDEXES + PERFORMANCE\n\
-- Missing indexes on common WHERE clauses (read the ORM hot paths — list-by-user-id, filter-by-status, ordered-by-created-at).\n\
-- Over-indexing: tables with > 8 indexes incur write penalty + RAM pressure.\n\
-- Compound indexes with wrong column order (low-cardinality column first wastes the index).\n\
-- Missing `WHERE clause` in DELETE/UPDATE in app code (PostgreSQL: missing `... WHERE id = $1` on `DELETE FROM users` is catastrophic).\n\n\
-\
-# C. ORM + N+1\n\
-- **N+1 queries**: scan the most-used list / dashboard endpoints. ORM lazy-load on a collection of N parent rows produces N+1 queries.\n\
-- **Unbounded SELECT**: queries without LIMIT on user-facing endpoints (`User.all` on the admin page when the table grew to 500k rows).\n\
-- **Transaction boundaries**: long-running transactions that hold locks (PostgreSQL `idle in transaction`, MySQL row-locking) blocking other writers. Check that DB calls inside HTTP handlers commit promptly.\n\n\
-\
-# D. DATA INTEGRITY\n\
-- Foreign keys: missing constraints (ORM-level FK only is not enforced at the DB layer if `disable_constraints` was ever set in tests).\n\
-- Soft-delete vs hard-delete inconsistency (some queries scope WHERE deleted_at IS NULL, others don't — leak risk).\n\
-- Nullable columns that the app treats as required: TypeScript / Rust types may say `string` but the column allows NULL.\n\n\
-\
-# E. ANTI-REPETITION + OUTPUT FORMAT\n\
-\n\
-Same rules as the Full audit Step 8 (§ C and § D): scan `docs/tech-debt/` for existing TDs; for each finding, decide REUSE / REFINE / NEW per § C; create `docs/tech-debt/TD-<date>-<slug>.md` for new ones; UPDATE `audit_history` for existing. Detail file schema = the Full audit's. Index file = `docs/inconsistencies-database.md` (not `inconsistencies-tech-debt.md`). Severity calibration is the same.\n\n\
-\
-Apply the marker discipline (`TODO: verify` only if you couldn't check; `TODO: ask user` for human decisions). If no findings, the index reads `'None identified during this database audit pass'`.",
-        sources: &["__GIT_SOURCE_TREE__"],
-    },
-];
+pub(crate) const DATABASE_STEPS: &[AnalysisStep] = &[AnalysisStep {
+    target_file: "docs/inconsistencies-database.md",
+    prompt: include_str!("prompts/database.md"),
+    sources: &["__GIT_SOURCE_TREE__"],
+}];
 
-pub(crate) const API_DESIGN_STEPS: &[AnalysisStep] = &[
-    AnalysisStep {
-        target_file: "docs/inconsistencies-api.md",
-        prompt: "\
-API DESIGN AUDIT (0.8.4) — focused re-scan on the public-facing contract. Read existing `docs/inconsistencies-api.md` if present (anti-repetition rules apply, same as Full audit Step 8).\n\n\
-\
-# A. CONTRACT CONSISTENCY\n\
-- **Naming**: REST endpoints must follow ONE convention (kebab-case, snake_case, camelCase) — flag inconsistencies like `/api/users-list` next to `/api/orderItems`. Same for query params, JSON keys.\n\
-- **HTTP semantics**: GET that mutates state (anti-pattern); POST that returns 200 for create (should be 201); DELETE that returns the deleted resource (should be 204 unless explicitly part of the contract); PATCH vs PUT confusion.\n\
-- **Error envelope**: ONE shape, used by EVERY endpoint. Flag endpoints returning `{ \"error\": \"...\" }` next to ones returning `{ \"errors\": [...] }`, mixed status codes (400 vs 422 for validation).\n\
-- **Status codes**: judge against the API's OWN documented contract first (OpenAPI/docs); flag INTERNAL inconsistency (same operation returning different codes, 200 bodies carrying `{ \"error\": ... }` for failures, 401/403 confusion between authn and authz). 200-on-write is a style choice, not a defect, when the contract says so — flag it as `Low`/`Inferred` only if no contract exists.\n\n\
-\
-# B. VERSIONING + EVOLUTION\n\
-- **Versioning strategy**: header (`Accept: application/vnd.api+json; version=2`) vs path (`/api/v2/`) — pick one, don't mix.\n\
-- **Breaking changes**: removing a field, narrowing a type, renaming — without a deprecation window or version bump.\n\
-- **Additive changes safety**: new required field on an existing endpoint breaks old clients.\n\n\
-\
-# C. PAGINATION + LIST RESPONSES\n\
-- Unbounded list endpoints (no `?limit=` enforcement) — DoS surface + cursor unsafe at scale.\n\
-- Inconsistent pagination shape (cursor on some endpoints, offset on others, or no metadata at all).\n\
-- Missing `total` / `has_more` on responses that consumers need to render pagination UI.\n\n\
-\
-# D. AUTHN + AUTHZ + RATE LIMITING\n\
-- Endpoints that should require auth but don't (read the routing config — the audit's `repo-map.md` is a primer).\n\
-- IDOR risk: endpoints scoped by URL param (`/api/orders/:id`) without ownership check.\n\
-- Rate limiting absent on public auth endpoints (`/login`, `/register`, `/password-reset`).\n\
-- CSRF tokens absent on state-mutating endpoints when cookies are used for session (SPA + cookie auth).\n\n\
-\
-# E. DOC DRIFT\n\
-- OpenAPI / GraphQL schema in the repo (if any) vs what the endpoints actually accept / return. Flag fields documented but unused, or used but undocumented.\n\
-- Examples in the docs that no longer parse (wrong field names, stale auth headers).\n\n\
-\
-# F. ANTI-REPETITION + OUTPUT FORMAT\n\
-\n\
-Same rules as the Full audit Step 8: anti-repetition pass + detail-file schema + severity calibration. Index file = `docs/inconsistencies-api.md`. If no findings, the index reads `'None identified during this API design audit pass'`.\n\n\
-\
-Apply the marker discipline (`TODO: verify` only if you couldn't check; `TODO: ask user` for human decisions).",
-        sources: &["__GIT_SOURCE_TREE__"],
-    },
-];
+pub(crate) const API_DESIGN_STEPS: &[AnalysisStep] = &[AnalysisStep {
+    target_file: "docs/inconsistencies-api.md",
+    prompt: include_str!("prompts/api-design.md"),
+    sources: &["__GIT_SOURCE_TREE__"],
+}];
 
 /// Dispatch table for `LaunchAuditRequest.kind`. Returns the step
 /// slice to drive the agent through. For `Custom`, callers should
@@ -1147,63 +411,16 @@ Apply the marker discipline (`TODO: verify` only if you couldn't check; `TODO: a
 /// dogfooding: a Full audit surfaced docs & infra debt but zero findings
 /// about the CODE (templates, styles, backend smells) — "un audit qui ne
 /// sort pas de soucis de qualité de code, c'est super limité".
-pub(crate) const CODE_QUALITY_STEPS: &[AnalysisStep] = &[
-    AnalysisStep {
-        target_file: "docs/inconsistencies-code-quality.md",
-        prompt: "\
-You are running a FOCUSED CODE-QUALITY AUDIT. Output ONLY code quality / maintainability \
-findings — ignore security, docs drift, infra config (other audits own those).\n\n\
-If `docs/briefing.md` exists, read it FIRST: the user's stated quality concerns take priority \
-over the generic checklist below.\n\n\
-# A. MANDATORY QUALITY CHECKLIST (adapt to the project's actual stack)\n\n\
-Walk through every applicable item. If satisfied, write \"verified clean\". \
-If NOT, emit a TD finding. Sample REAL files — never assert from file names alone.\n\n\
-**Templates / markup (Twig, Blade, JSX, ERB, plain HTML…):**\n\
-- Duplication: same block/markup repeated across ≥3 templates instead of a partial/macro/component (diff 3 similar templates).\n\
-- Dead templates: files never referenced by any route/controller/include (grep template names against source).\n\
-- Inline `style=` / inline `<script>` blocks in templates (grep, count, sample) — belongs in the asset pipeline.\n\
-- Oversized templates (> ~300 lines): candidates for decomposition; name the worst 3.\n\
-- Data/logic in templates: heavy computation, raw SQL-ish calls or business rules inside template files.\n\n\
-**Styles (CSS/SCSS):**\n\
-- Architecture: is there a discernible convention (BEM, utility, tokens)? Mixed conventions in the same codebase = finding.\n\
-- Duplication: same rule blocks repeated (sample the 2 largest files); hardcoded colors/sizes repeated ≥5 times instead of variables.\n\
-- Dead selectors: classes defined but absent from every template (sample 20 selectors).\n\
-- Single global stylesheet > ~1500 lines with no imports/layers = finding.\n\n\
-**Backend code (PHP, TS/JS, Rust, Python… — whatever the project uses):**\n\
-- God files: source files > ~500 lines mixing unrelated responsibilities; name the worst 3 with line counts.\n\
-- Dead code: unreferenced functions/classes/exports (sample; use grep on symbol names).\n\
-- Swallowed errors: empty catch blocks, `catch (e) {}`, `@`-suppression (PHP), `.unwrap()` chains on fallible paths in handlers.\n\
-- Copy-paste logic: same function body duplicated across files (sample the controllers/services layer).\n\
-- Typing hygiene where the language offers it: untyped public signatures, `any`/`mixed` density.\n\
-- TODO/FIXME/HACK density: count them; > 20 in source (not docs) = finding listing the 5 oldest.\n\n\
-**Perf & eco hygiene (code-level only — infra belongs to other audits):**\n\
-- Assets: images > 300 KB served without modern format (webp/avif); JS/CSS bundles not minified in the build.\n\
-- Requests in loops: DB/HTTP calls inside iteration (N+1 shape) — sample controllers/services.\n\
-- Caching affordances in code: repeated identical computations/fetches with no memoization where an obvious hot path exists.\n\n\
-# B. ANTI-REPETITION (priors)\n\n\
-Before writing findings: read existing `docs/tech-debt/TD-*.md`. If a finding matches an \
-existing one, REUSE its ID (append an `audit_history` entry — never overwrite, never re-slug).\n\n\
-# C. OUTPUT FORMAT\n\n\
-1. Write `docs/inconsistencies-code-quality.md` with the standard table header:\n\
-   `| ID | Problem | Area | Severity |`\n\
-2. For each finding, also write `docs/tech-debt/<ID>.md` using the existing TD detail template — \
-   add a `**Category**: code-quality` line.\n\
-3. Status taxonomy: `Verified in source` (you read the file) vs `Inferred` (pattern only).\n\
-4. Cap: 20 findings. High severity exempt from the cap.\n\
-5. Each finding: file path + line, one-sentence maintainability impact, one-sentence remediation.",
-        sources: &["__GIT_SOURCE_TREE__"],
-    },
-];
+pub(crate) const CODE_QUALITY_STEPS: &[AnalysisStep] = &[AnalysisStep {
+    target_file: "docs/inconsistencies-code-quality.md",
+    prompt: include_str!("prompts/code-quality.md"),
+    sources: &["__GIT_SOURCE_TREE__"],
+}];
 
 /// Relevance gate prepended to every CHAINED sub-audit step: a dimension
 /// that doesn't apply to the audited project must cost one line, not a
 /// full agent pass ("si pas utile au projet → on passe").
-pub(crate) const CHAINED_STEP_GATE: &str = "\
-# RELEVANCE GATE (answer FIRST, before anything else)\n\
-This dimension may not apply to this project. Assess applicability in ≤ 5 tool calls \
-(e.g. a Docker audit on a project with no Dockerfile/compose, a Database audit on a \
-static site with no DB layer). If NOT applicable: write your index file with the single \
-line `Not applicable: <one-sentence reason>` and STOP — no findings, no TD files.\n";
+pub(crate) const CHAINED_STEP_GATE: &str = include_str!("prompts/chained-step-gate.md");
 
 /// The prompt of one audit step, dated: a model cannot know today's date, and
 /// a step that names it in its own words (a TD file name) must still get it.
@@ -1211,16 +428,106 @@ pub(crate) fn dated_step_prompt(
     gate: &str,
     step_prompt: &str,
     now: chrono::DateTime<chrono::Utc>,
+    docs_root: &crate::core::docs_location::DocsRoot,
 ) -> String {
     let today = now.format("%Y-%m-%d").to_string();
     let today_compact = now.format("%Y%m%d").to_string();
     format!(
         "Today's date is {today} (YYYYMMDD: {today_compact}).\n\n{}\n\n{}{}",
-        PROMPT_PREAMBLE, gate, step_prompt
+        docs_root.relocate(PROMPT_PREAMBLE),
+        gate,
+        step_prompt
     )
     .replace("YYYYMMDD=today", &format!("YYYYMMDD={today_compact}"))
     .replace("today's date (YYYY-MM-DD)", &today)
     .replace("set to today's date", &format!("set to {today}"))
+}
+
+/// Steps 1 to 7 fill a documentation template. Once their target is filled,
+/// a later audit re-verifies it instead of looking for placeholders.
+pub(crate) const REVERIFIED_STEPS: usize = 7;
+
+pub(crate) const REVERIFY_BLOCK: &str = include_str!("prompts/reverify-block.md");
+
+/// A legacy `ai/index.md` layout is moved to `docs/` by its migration first:
+/// an audit there would write a second tree beside it.
+pub(crate) fn legacy_layout_refusal(project: &std::path::Path) -> Option<serde_json::Value> {
+    crate::core::scanner::needs_docs_migration(project).then(|| {
+        serde_json::json!({
+            "error": "This project still uses the legacy ai/index.md layout. \
+                      Migrate it to docs/ from the project card first, then launch the audit.",
+            "error_code": "docs_migration_required",
+        })
+    })
+}
+
+/// A human's docs are never moved or written over without the briefing's
+/// explicit choice: every run that writes the folder (Full, partial,
+/// revalidation) refuses it the same way. `recorded_run`: a Full run this
+/// instance recorded stands for the record (see `DocsFolderState`).
+pub(crate) fn docs_folder_choice_refusal(
+    project: &std::path::Path,
+    docs_root: &crate::core::docs_location::DocsRoot,
+    recorded_run: bool,
+) -> Option<serde_json::Value> {
+    let crate::core::docs_folder::DocsFolderState::HumanDocs { files, .. } =
+        crate::core::docs_folder::folder_state_with_runs(project, docs_root.rel(), recorded_run)
+    else {
+        return None;
+    };
+    Some(serde_json::json!({
+        "error": format!(
+            "The folder {}/ used by Kronn already exists and holds {files} file(s) Kronn did not write. \
+             Open the briefing and choose: another folder, or move them to {}/legacy/.",
+            docs_root.rel(), docs_root.rel()
+        ),
+        "error_code": "docs_folder_choice_required",
+    }))
+}
+
+/// Whether this instance recorded a Full run for the project.
+pub(crate) async fn has_recorded_full_run(state: &crate::AppState, project_id: &str) -> bool {
+    let id = project_id.to_string();
+    state
+        .db
+        .with_read_conn(move |conn| crate::db::audit_runs::has_any_full(conn, &id))
+        .await
+        .unwrap_or(false)
+}
+
+/// Template steps reverify a filled target; finding and review steps always
+/// preserve existing text, including documents outside their nominal target.
+pub(crate) fn reverifies_target(
+    project: &std::path::Path,
+    step_1_based: usize,
+    step: &AnalysisStep,
+) -> bool {
+    step_1_based > REVERIFIED_STEPS
+        || (1..=REVERIFIED_STEPS).contains(&step_1_based)
+            && std::fs::read_to_string(project.join(step.target_file)).is_ok_and(|content| {
+                !content.trim().is_empty() && validation::count_raw_placeholders(&content) == 0
+            })
+}
+
+/// The step's own instructions, headed by the re-verification block when the
+/// target is already filled.
+pub(crate) fn step_prompt_body(
+    step: &AnalysisStep,
+    reverify: bool,
+) -> std::borrow::Cow<'static, str> {
+    if reverify {
+        let block = if step.target_file.ends_with("REVIEW") || !step.target_file.ends_with(".md") {
+            REVERIFY_BLOCK.replace(
+                "in `{target}` and every other document",
+                "in every document",
+            )
+        } else {
+            REVERIFY_BLOCK.replace("{target}", step.target_file)
+        };
+        std::borrow::Cow::Owned(format!("{block}\n{}", step.prompt))
+    } else {
+        std::borrow::Cow::Borrowed(step.prompt)
+    }
 }
 
 /// 0.9.0 — the chained audit: a Full run = the 9 foundation steps PLUS
@@ -1237,6 +544,107 @@ pub(crate) fn gate_for_step(step_1_based: usize, first_chained_step: usize) -> &
     } else {
         ""
     }
+}
+
+/// The last words of a step prompt (KT-1278). An ACP session has no system
+/// channel: the context and the step travel as ONE user message, and a prompt
+/// that ends on a reference block (versions table, briefing, rules, signals) is
+/// read by a small model as loaded context to answer, not as work to run. The
+/// directive names the step and its target, and says no human answers.
+pub(crate) fn step_closing_directive(
+    step_1_based: usize,
+    step: &AnalysisStep,
+    docs_root: &crate::core::docs_location::DocsRoot,
+) -> String {
+    let target = step.target_file;
+    let work = if target == "REVIEW" || target.is_empty() {
+        format!("Run step {step_1_based} now and answer with its result.")
+    } else {
+        let details = if docs_root
+            .strip(target)
+            .is_some_and(|rest| rest.starts_with("inconsistencies-"))
+        {
+            format!(
+                " and the detail files it lists under `{}`",
+                docs_root.path("tech-debt/")
+            )
+        } else {
+            String::new()
+        };
+        format!("Run step {step_1_based} now: write `{target}`{details}.")
+    };
+    format!(
+        "=== RUN THIS STEP NOW ===\n\
+         Everything above is the instructions of step {step_1_based} plus reference material to \
+         consult (versions, briefing, rules, signals). None of it is a question for you.\n\
+         {work} There is no human in this turn to answer: never ask what to do or what the \
+         priority is. Stop once the work is written."
+    )
+}
+
+/// The prompt one attempt sends: the step's reference blocks and instructions,
+/// then the retry feedback when there is one, then ALWAYS the closing directive
+/// — nothing may follow it (KT-1278).
+pub(crate) fn finish_step_prompt(
+    prompt: &str,
+    feedback: Option<&str>,
+    step_1_based: usize,
+    step: &AnalysisStep,
+    docs_root: &crate::core::docs_location::DocsRoot,
+) -> String {
+    let directive = step_closing_directive(step_1_based, step, docs_root);
+    match feedback {
+        Some(feedback) => format!("{prompt}\n\n{feedback}\n\n{directive}"),
+        None => format!("{prompt}\n\n{directive}"),
+    }
+}
+
+/// The chain for `kind` with every target, source and prompt rewritten under
+/// the project's docs root (KT-1192). Identity for `docs/`.
+pub(crate) fn steps_for(
+    kind: crate::models::AuditKind,
+    docs_root: &crate::core::docs_location::DocsRoot,
+) -> Vec<AnalysisStep> {
+    relocate_steps(assemble_chained_steps(kind), docs_root)
+}
+
+pub(crate) fn relocate_steps(
+    steps: Vec<AnalysisStep>,
+    docs_root: &crate::core::docs_location::DocsRoot,
+) -> Vec<AnalysisStep> {
+    if docs_root.is_default() {
+        return steps;
+    }
+    steps
+        .into_iter()
+        .map(|step| AnalysisStep {
+            target_file: docs_root.relocate_static(step.target_file),
+            prompt: docs_root.relocate_static(step.prompt),
+            sources: relocate_sources(step.sources, docs_root),
+        })
+        .collect()
+}
+
+fn relocate_sources(
+    sources: &'static [&'static str],
+    docs_root: &crate::core::docs_location::DocsRoot,
+) -> &'static [&'static str] {
+    if !sources.iter().any(|s| docs_root.relocate(s) != *s) {
+        return sources;
+    }
+    // Interned like the strings: one slice per (root, source list).
+    type Interned = std::collections::HashMap<(String, usize), &'static [&'static str]>;
+    static SLICES: std::sync::LazyLock<std::sync::Mutex<Interned>> =
+        std::sync::LazyLock::new(Default::default);
+    let key = (docs_root.rel().to_string(), sources.as_ptr() as usize);
+    let mut cache = SLICES.lock().unwrap_or_else(|e| e.into_inner());
+    cache.entry(key).or_insert_with(|| {
+        let relocated: Vec<&'static str> = sources
+            .iter()
+            .map(|s| docs_root.relocate_static(s))
+            .collect();
+        Box::leak(relocated.into_boxed_slice())
+    })
 }
 
 pub(crate) fn assemble_chained_steps(kind: crate::models::AuditKind) -> Vec<AnalysisStep> {
@@ -1260,33 +668,68 @@ pub(crate) fn assemble_chained_steps(kind: crate::models::AuditKind) -> Vec<Anal
 }
 
 /// Step-8 prompt context, shared by the Full and partial pipelines (Codex
-/// lot-3 #4): the deterministic detector signals AND the known-debt digest
-/// block travel together — a partial re-run of step 8 with only half the
+/// lot-3 #4): the deterministic detector signals, the stack-specific checklist
+/// AND the known-debt digest block travel together — a partial re-run of step 8 with only half the
 /// inputs would duplicate priors or miss anchored signals.
 pub(crate) fn step8_context_block(
     signals: &[crate::core::audit_detectors::DetectedSignal],
+    ecosystems: &[crate::core::audit_ecosystems::Ecosystem],
     prior_td_digests: &[reconciliation::PriorDigest],
+    docs_root: &crate::core::docs_location::DocsRoot,
 ) -> String {
     let mut out = format!(
-        "\n\n{}\n",
-        crate::core::audit_detectors::render_signals_block(signals)
+        "\n\n{}\n\n{}",
+        crate::core::audit_detectors::render_signals_block(signals),
+        crate::core::audit_ecosystems::render_ecosystem_block(ecosystems)
     );
     if !prior_td_digests.is_empty() {
         out.push_str(&format!(
             "\n\n{}\n",
-            reconciliation::render_known_debt_block(prior_td_digests),
+            reconciliation::render_known_debt_block(prior_td_digests, docs_root),
         ));
     }
     out
 }
 
+/// The decisions in force since before the run (`baseline` is
+/// `decisions.md` as the run found it), for every step that writes TD sheets
+/// (an `inconsistencies-*.md` index). Empty for other steps and when none.
+pub(crate) fn decisions_context_block(
+    project: &std::path::Path,
+    step: &AnalysisStep,
+    baseline: &str,
+    docs_root: &crate::core::docs_location::DocsRoot,
+) -> String {
+    if !docs_root
+        .strip(step.target_file)
+        .is_some_and(|rest| rest.starts_with("inconsistencies-"))
+    {
+        return String::new();
+    }
+    let block = crate::core::adr::in_force_prompt_block(&docs_root.dir(project), baseline);
+    if block.is_empty() {
+        block
+    } else {
+        // Only Kronn's header names the root; the ADR text stays as written.
+        let block = block.replacen(
+            "(docs/decisions.md)",
+            &format!("({})", docs_root.path("decisions.md")),
+            1,
+        );
+        format!("\n\n{block}")
+    }
+}
+
 /// Whether a chained step can be refreshed via partial-audit: only steps
 /// with a REAL docs/ target are verifiable post-run — the synthetic REVIEW
 /// pseudo-step (no file) would pass the validator on exit code 0 alone.
-pub(crate) fn partial_selectable(step: &AnalysisStep) -> bool {
+pub(crate) fn partial_selectable(
+    step: &AnalysisStep,
+    docs_root: &crate::core::docs_location::DocsRoot,
+) -> bool {
     step.target_file != "REVIEW"
         && !step.target_file.is_empty()
-        && step.target_file.starts_with("docs/")
+        && docs_root.contains(step.target_file)
 }
 
 /// Agents eligible to RUN an audit: the pipeline's only deliverable is
@@ -1347,7 +790,7 @@ pub(crate) fn audit_refusal_message(agent: &crate::models::AgentType) -> String 
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "{agent:?} cannot run audits: Kronn has no file tools it can scope to the project for it, so the docs/ deliverables would silently never be written. Pick one of: {accepted}."
+        "{agent:?} cannot run audits: Kronn has no file tools it can scope to the project for it, so the documentation deliverables would silently never be written. Pick one of: {accepted}."
     )
 }
 
@@ -1473,12 +916,7 @@ mod kind_dispatch_tests {
             AuditKind::CodeQuality,
         ] {
             let steps = kind_to_steps(kind);
-            assert_eq!(
-                steps.len(),
-                1,
-                "{:?} should expose one focused step in 0.8.2 (S2.D3-D5 fill the body)",
-                kind
-            );
+            assert_eq!(steps.len(), 1, "{:?} should expose one focused step", kind);
         }
     }
 
@@ -1611,6 +1049,9 @@ mod kind_dispatch_tests {
             drift[0].sources.contains(&"docs/checksums.json"),
             "Drift step must hash docs/checksums.json to compute drift"
         );
+        assert!(drift[0].prompt.contains("Do NOT rewrite any file"));
+        assert!(!drift[0].prompt.contains("placeholder body"));
+        assert!(!drift[0].prompt.contains("S2.D3"));
     }
 
     #[test]
@@ -1782,6 +1223,7 @@ mod prompt_tests {
         // the same prompt forbade batch confirmation. Silence must never
         // become `Confirmed by user`, in any locale or variant.
         let info = AuditInfo {
+            template_update: None,
             files: vec![],
             todos: vec![],
             tech_debt_items: vec![],
@@ -1902,6 +1344,7 @@ mod prompt_tests {
         );
 
         let info = AuditInfo {
+            template_update: None,
             files: vec![],
             todos: vec![],
             tech_debt_items: vec![],
@@ -1924,6 +1367,7 @@ mod prompt_tests {
         // Codex r6 P1 — the prompt announced "step 10/10" and "9 analysis
         // steps" after the pipeline grew to 16 chained steps.
         let info = AuditInfo {
+            template_update: None,
             files: vec![],
             todos: vec![],
             tech_debt_items: vec![],
@@ -1978,9 +1422,15 @@ mod prompt_tests {
             full.contains("Values inside tracked `.env*` files: `Not evaluated safely"),
             "Full step 7 .env value check must be honestly non-evaluated"
         );
+        // KT-152 — tracked `.env` detection is a filename-only detector now;
+        // no step may hand the agent an unquoted pathspec for it.
         assert!(
-            full.contains("git ls-files -- '*.env*' '.env*'"),
-            "tracked-.env detection must be the quoted pathspec form"
+            crate::core::audit_detectors::DETECTOR_IDS.contains(&"tracked-dotenv"),
+            "tracked-.env detection must stay mechanical"
+        );
+        assert!(
+            !full.contains("git ls-files .env"),
+            "an unquoted .env pathspec must never reach a prompt"
         );
         // The RULE, over EVERY step prompt of all three lists: any grep
         // command shape near credential material must be filename-only, and
@@ -2151,6 +1601,64 @@ mod prompt_tests {
             PROMPT_PREAMBLE.contains("Do NOT ask questions")
                 || PROMPT_PREAMBLE.contains("Do not ask"),
             "PREAMBLE must explicitly forbid questions"
+        );
+    }
+
+    #[test]
+    fn tech_debt_steps_consult_decisions_in_force() {
+        let td_step = ANALYSIS_STEPS
+            .iter()
+            .find(|s| s.target_file == "docs/inconsistencies-tech-debt.md")
+            .unwrap();
+        assert!(td_step.prompt.contains("Decisions are not debt"));
+        assert!(td_step
+            .prompt
+            .contains("read `docs/decisions.md` before emitting"));
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+        std::fs::write(
+            dir.path().join("docs/decisions.md"),
+            "## ADR-0001: CI is label-triggered\n\n- **Status**: accepted\n",
+        )
+        .unwrap();
+        let baseline = "## ADR-0001: CI is label-triggered\n\n- **Status**: accepted\n";
+        let block = decisions_context_block(
+            dir.path(),
+            td_step,
+            baseline,
+            &crate::core::docs_location::DocsRoot::default(),
+        );
+        assert!(
+            block.contains("ADR-0001 — CI is label-triggered"),
+            "{block}"
+        );
+        // Every sub-audit writes TD sheets too.
+        assert!(!decisions_context_block(
+            dir.path(),
+            &SECURITY_STEPS[0],
+            baseline,
+            &crate::core::docs_location::DocsRoot::default()
+        )
+        .is_empty());
+        // A documentation step gets nothing.
+        assert_eq!(
+            decisions_context_block(
+                dir.path(),
+                &ANALYSIS_STEPS[0],
+                baseline,
+                &crate::core::docs_location::DocsRoot::default()
+            ),
+            ""
+        );
+        // An ADR accepted during the run is not offered to later steps.
+        assert_eq!(
+            decisions_context_block(
+                dir.path(),
+                td_step,
+                "",
+                &crate::core::docs_location::DocsRoot::default()
+            ),
+            ""
         );
     }
 
@@ -2381,21 +1889,22 @@ mod prompt_tests {
     }
 
     #[test]
-    fn preamble_forbids_rewriting_human_owned_sections_on_any_audit() {
-        // KT-843 (Template v2) — the "Never edit docs/AGENTS.md" blanket
-        // ban is gone; ownership is now per-section (`owner="audit"` vs
-        // `owner="human"`). PROMPT_PREAMBLE is injected before EVERY
-        // step of a Full run (full.rs) AND a Drift/partial run
-        // (drift.rs), so this is the one place that guards BOTH: a
-        // human-owned section must never be silently rewritten, and a
-        // re-audit proposes the change as a diff instead.
+    fn preamble_lets_an_audit_correct_a_human_section_for_reconfirmation() {
+        // KT-1079 — PROMPT_PREAMBLE is injected before EVERY step of a Full
+        // run AND a partial run. A human section may be corrected where the
+        // code contradicts it; Kronn keeps the write and asks for a
+        // reconfirmation with the diff instead of blocking it.
         assert!(
             PROMPT_PREAMBLE.contains("owner=\"human\""),
             "PROMPT_PREAMBLE must name the owner=\"human\" ownership marker"
         );
         assert!(
-            PROMPT_PREAMBLE.to_lowercase().contains("never rewrite"),
-            "PROMPT_PREAMBLE must forbid rewriting a human-owned section"
+            PROMPT_PREAMBLE.contains("reconfirm"),
+            "the owner reconfirms a correction"
+        );
+        assert!(
+            !PROMPT_PREAMBLE.to_lowercase().contains("never rewrite"),
+            "no write into a human section is forbidden any more"
         );
         assert!(
             PROMPT_PREAMBLE
@@ -2406,7 +1915,7 @@ mod prompt_tests {
         );
         assert!(
             PROMPT_PREAMBLE.contains("diff"),
-            "a re-audit must propose the change as a diff, not silently overwrite"
+            "the owner sees the change as a diff"
         );
         // The old blanket ban must actually be gone (KT-843 objective).
         assert!(
@@ -2416,21 +1925,42 @@ mod prompt_tests {
     }
 
     #[test]
-    fn full_and_partial_audits_restore_human_sections_before_retry_decisions() {
+    fn full_and_partial_audits_mark_validated_docs_before_retry_decisions() {
         for (pipeline, source) in [
             ("full", include_str!("full.rs")),
             ("partial", include_str!("drift.rs")),
         ] {
             let protection = source
-                .find("protect_human_owned_sections")
-                .unwrap_or_else(|| panic!("{pipeline} audit must enforce section ownership"));
+                .find("mark_validated_doc_writes")
+                .unwrap_or_else(|| panic!("{pipeline} audit must mark validated docs"));
             let retry_gate = source
                 .find("evaluate_enforce_gate")
                 .unwrap_or_else(|| panic!("{pipeline} audit must contain its retry gate"));
             assert!(
                 protection < retry_gate,
-                "{pipeline} audit must restore owner=\"human\" content before a retry can start"
+                "{pipeline} audit must mark its writes before a retry can start"
             );
+        }
+    }
+
+    #[test]
+    fn docs_agents_md_template_teaches_the_human_decision_card() {
+        // KT-1329 — colleagues' agents never asked for an arbitration because
+        // nothing they read at project level mentioned the card.
+        let tpl_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .join("templates/docs/AGENTS.md");
+        let body = std::fs::read_to_string(&tpl_path)
+            .unwrap_or_else(|e| panic!("read template {}: {e}", tpl_path.display()));
+        for needle in [
+            "**Human decision**",
+            "`kronn-question` fence",
+            "`disc_append`",
+            "\"version\":1",
+            "`disc_question_list`",
+        ] {
+            assert!(body.contains(needle), "template must carry {needle}");
         }
     }
 
@@ -2618,13 +2148,108 @@ mod prompt_tests {
             .iter()
             .enumerate()
         {
-            let prompt = dated_step_prompt("", step.prompt, now);
+            let prompt = dated_step_prompt(
+                "",
+                step.prompt,
+                now,
+                &crate::core::docs_location::DocsRoot::default(),
+            );
             assert!(
                 prompt.starts_with("Today's date is 2026-10-03 (YYYYMMDD: 20261003)."),
                 "step {}",
                 index + 1
             );
             assert!(!prompt.contains("YYYYMMDD=today"), "step {}", index + 1);
+        }
+    }
+
+    #[test]
+    fn a_filled_target_gets_the_reverification_prompt_and_a_template_the_fill_prompt() {
+        let templates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../templates");
+        let project = tempfile::tempdir().unwrap();
+        let now = chrono::Utc::now();
+        let prompt_of = |index: usize| {
+            let step = &ANALYSIS_STEPS[index - 1];
+            let reverify = reverifies_target(project.path(), index, step);
+            dated_step_prompt(
+                "",
+                &step_prompt_body(step, reverify),
+                now,
+                &crate::core::docs_location::DocsRoot::default(),
+            )
+        };
+        for (index, step) in ANALYSIS_STEPS.iter().enumerate().take(REVERIFIED_STEPS) {
+            let index = index + 1;
+            let target = project.path().join(step.target_file);
+            // Absent: the template is installed before the step, nothing to verify.
+            assert!(
+                !prompt_of(index).contains("RE-VERIFICATION MODE"),
+                "step {index}"
+            );
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            let template = std::fs::read_to_string(templates.join(step.target_file)).unwrap();
+            assert!(
+                validation::count_raw_placeholders(&template) > 0,
+                "{}",
+                step.target_file
+            );
+            std::fs::write(&target, &template).unwrap();
+            assert!(
+                !prompt_of(index).contains("RE-VERIFICATION MODE"),
+                "step {index}"
+            );
+            std::fs::write(
+                &target,
+                "# Filled\n\nVerified fact [src: file: README.md:1]\n",
+            )
+            .unwrap();
+            let prompt = prompt_of(index);
+            assert!(
+                prompt.contains(&format!(
+                    "RE-VERIFICATION MODE (preserve existing documentation)\nRead the existing content in `{}`",
+                    step.target_file
+                )),
+                "step {index}"
+            );
+            let checklist = step.prompt.lines().next().unwrap();
+            assert!(
+                prompt.contains(checklist),
+                "the checklist stays: step {index}"
+            );
+        }
+        // Finding steps preserve true statements even when their target is absent.
+        let tech_debt = &ANALYSIS_STEPS[REVERIFIED_STEPS];
+        assert!(tech_debt
+            .target_file
+            .ends_with("inconsistencies-tech-debt.md"));
+        let target = project.path().join(tech_debt.target_file);
+        std::fs::write(&target, "# Filled\n").unwrap();
+        assert!(reverifies_target(
+            project.path(),
+            REVERIFIED_STEPS + 1,
+            tech_debt
+        ));
+        // A placeholder left anywhere still means filling, digits included.
+        let rules = project.path().join("docs/coding-rules.md");
+        std::fs::write(&rules, "# Rules\n\n## {{LANGUAGE_1}}\n").unwrap();
+        assert!(!prompt_of(4).contains("RE-VERIFICATION MODE"));
+        // Bounded: the block adds at most a few hundred tokens per step.
+        assert!(REVERIFY_BLOCK.split_whitespace().count() < 160);
+    }
+
+    #[test]
+    fn steps_eight_to_sixteen_keep_every_true_statement_in_every_existing_doc() {
+        let project = tempfile::tempdir().unwrap();
+        let steps = assemble_chained_steps(crate::models::AuditKind::Full);
+        assert!(steps.len() >= 16);
+        for (index, step) in steps.iter().enumerate().skip(7).take(9) {
+            let prompt = step_prompt_body(step, reverifies_target(project.path(), index + 1, step));
+            assert!(
+                prompt.contains("Keep every statement that is still true exactly as written"),
+                "step {}: {prompt}",
+                index + 1
+            );
+            assert!(prompt.contains("Check every fact"));
         }
     }
 
@@ -2835,17 +2460,17 @@ mod prompt_tests {
                 needle
             );
         }
+        // KT-152 — the hygiene item lists moved to the tracked-repo-artifacts
+        // detector; the prompt keeps the scope rules the agent must apply.
         for needle in [
             "Repository hygiene",
             "git ls-files --cached",
             "tracked/index content",
-            ".pnpm-store/",
-            "Runtime databases/logs/dumps",
-            "findings/",
             "harmless local/untracked developer files",
             "documented Yarn zero-install/offline-mirror",
-            "The 7 categories above",
             "bounded to 15 paths per detector",
+            "tracked-repo-artifacts",
+            "oss-community-standards",
         ] {
             assert!(
                 prompt.contains(needle),
@@ -2853,6 +2478,182 @@ mod prompt_tests {
                 needle
             );
         }
+    }
+
+    /// Where each item of the pre-KT-152 Step 8 baseline (§ A plus the
+    /// self-critic's mechanical examples) lives now. Nothing may be dropped.
+    enum Home {
+        Detector(&'static str),
+        Ecosystem(crate::core::audit_ecosystems::Ecosystem, &'static str),
+        Prompt(&'static str),
+    }
+
+    const STEP8_BASELINE_HOMES: &[(&str, Home)] = {
+        use crate::core::audit_ecosystems::Ecosystem::Php;
+        use Home::*;
+        &[
+            ("Dockerfile USER non-root", Detector("dockerfile-root-user")),
+            (
+                "Dockerfile display_errors Off",
+                Ecosystem(Php, "display_errors = Off"),
+            ),
+            (
+                "Dockerfile opcache.enable",
+                Ecosystem(Php, "opcache.enable = 1"),
+            ),
+            (
+                "Dockerfile HEALTHCHECK",
+                Detector("dockerfile-no-healthcheck"),
+            ),
+            (
+                "Dockerfile apt flags + lists cleanup",
+                Detector("dockerfile-apt-hygiene"),
+            ),
+            (
+                "Dockerfile base image pinned",
+                Detector("dockerfile-unpinned-base"),
+            ),
+            (
+                "Dockerfile no ADD remote URL",
+                Detector("dockerfile-add-remote"),
+            ),
+            (
+                "Dockerfile no secret ARG",
+                Detector("dockerfile-secret-arg"),
+            ),
+            (
+                "compose resource limits",
+                Prompt("deploy.resources.limits.*"),
+            ),
+            (
+                "compose read_only",
+                Prompt("`read_only: true` on clearly stateless services"),
+            ),
+            ("compose no :latest", Detector("compose-unpinned-image")),
+            (
+                "compose credential hygiene",
+                Prompt("Credential hygiene of `environment:` blocks: `Not evaluated safely"),
+            ),
+            ("CI StrictHostKeyChecking", Detector("ci-ssh-hostkey-off")),
+            (
+                "CI deploy quality gate",
+                Prompt("a deploy workflow runs a quality gate"),
+            ),
+            (
+                "CI secret sourcing",
+                Prompt("CI secret sourcing: `Not evaluated safely"),
+            ),
+            ("CI pull_request_target", Detector("ci-pull-request-target")),
+            ("CI pinned actions", Detector("ci-action-moving-ref")),
+            (".env tracked", Detector("tracked-dotenv")),
+            (
+                ".env values",
+                Prompt("Values inside tracked `.env*` files: `Not evaluated safely"),
+            ),
+            (
+                ".env deploy exclusion",
+                Prompt("The deploy step excludes `.env*` from the bundle"),
+            ),
+            (
+                "web input labels",
+                Prompt("form inputs carry a `<label>` or `aria-label`"),
+            ),
+            ("web img alt", Detector("img-missing-alt")),
+            ("web inline script/style", Detector("inline-block-oversize")),
+            (
+                "web CSP header",
+                Prompt("a Content-Security-Policy header is set"),
+            ),
+            ("OSS LICENSE", Detector("oss-community-standards")),
+            (
+                "OSS README description",
+                Detector("oss-community-standards"),
+            ),
+            ("OSS issue template", Detector("oss-community-standards")),
+            ("OSS PR template", Detector("oss-community-standards")),
+            ("OSS SECURITY.md", Detector("missing-community-files")),
+            ("OSS CONTRIBUTING", Detector("oss-community-standards")),
+            ("OSS CODE_OF_CONDUCT", Detector("oss-community-standards")),
+            ("hygiene package caches", Detector("tracked-repo-artifacts")),
+            (
+                "hygiene runtime db/logs",
+                Detector("tracked-repo-artifacts"),
+            ),
+            (
+                "hygiene ad-hoc notes/outputs",
+                Detector("tracked-repo-artifacts"),
+            ),
+            ("self-critic committed secret", Prompt("hardcoded secrets")),
+            ("self-critic _blank noopener", Detector("blank-noopener")),
+            ("self-critic zero tests", Detector("zero-tests")),
+            ("self-critic CSP unsafe-*", Detector("csp-unsafe")),
+            ("self-critic god-file", Prompt("files over 500 lines")),
+        ]
+    };
+
+    #[test]
+    fn step8_baseline_items_all_have_a_home() {
+        let prompt = ANALYSIS_STEPS
+            .iter()
+            .find(|s| s.target_file == "docs/inconsistencies-tech-debt.md")
+            .unwrap()
+            .prompt;
+        assert_eq!(
+            STEP8_BASELINE_HOMES.len(),
+            39,
+            "the pre-KT-152 baseline had 39 items"
+        );
+        for (item, home) in STEP8_BASELINE_HOMES {
+            match home {
+                Home::Detector(id) => assert!(
+                    crate::core::audit_detectors::DETECTOR_IDS.contains(id),
+                    "{item}: detector {id} is not run"
+                ),
+                Home::Ecosystem(eco, needle) => assert!(
+                    eco.checklist().iter().any(|line| line.contains(needle)),
+                    "{item}: {eco:?} checklist lost `{needle}`"
+                ),
+                Home::Prompt(needle) => {
+                    assert!(prompt.contains(needle), "{item}: prompt lost `{needle}`")
+                }
+            }
+        }
+        // Stack-specific items left the generic prompt (no cross-stack noise).
+        for php_only in ["display_errors", "opcache"] {
+            assert!(!prompt.contains(php_only), "`{php_only}` is PHP-only");
+        }
+    }
+
+    #[test]
+    fn step8_prompt_stays_within_its_budget() {
+        // KT-152 measured 19,941 bytes before and 10,6xx after; the ceiling
+        // keeps the baseline from growing back into the prompt.
+        let prompt = ANALYSIS_STEPS
+            .iter()
+            .find(|s| s.target_file == "docs/inconsistencies-tech-debt.md")
+            .unwrap()
+            .prompt;
+        assert!(
+            prompt.len() <= 11_000,
+            "Step 8 prompt is {} bytes",
+            prompt.len()
+        );
+    }
+
+    #[test]
+    fn step8_context_carries_signals_then_the_stack_checklist() {
+        use crate::core::audit_ecosystems::Ecosystem;
+        let block = step8_context_block(
+            &[],
+            &[Ecosystem::Rust],
+            &[],
+            &crate::core::docs_location::DocsRoot::default_root(),
+        );
+        let signals = block.find("Deterministic detector signals").unwrap();
+        let stack = block.find("Stack-specific checklist").unwrap();
+        assert!(signals < stack, "{block}");
+        assert!(block.contains("cargo deny"));
+        assert!(!block.contains("opcache"), "{block}");
     }
 
     #[test]
@@ -2881,15 +2682,17 @@ mod prompt_tests {
             p.contains("incomplete audit"),
             "a dimension absent from the matrix must mark the audit incomplete"
         );
+        // KT-152 — the self-critic's mechanical examples are detectors now.
         assert!(
-            p.contains("Self-critic"),
-            "must include the pre-finish self-critic pass"
+            !p.contains("Self-critic"),
+            "the self-critic pass moved to detectors"
         );
     }
 
     #[test]
     fn phase3_ticket_offer_only_with_tracker_mcp() {
         let info = AuditInfo {
+            template_update: None,
             files: vec![],
             todos: vec![],
             tech_debt_items: vec![],
@@ -2914,6 +2717,7 @@ mod prompt_tests {
     fn phases2_and3_use_td_cards_with_high_priority_singles_and_batches_of_eight() {
         for lang in ["fr", "en", "es"] {
             let info = AuditInfo {
+                template_update: None,
                 files: vec![],
                 todos: vec![],
                 tech_debt_items: vec![crate::models::TechDebtItem {
@@ -2959,6 +2763,7 @@ mod prompt_tests {
     fn validation_prompt_has_no_legacy_bulk_first_contradiction() {
         for lang in ["fr", "en", "es"] {
             let info = AuditInfo {
+                template_update: None,
                 files: vec![],
                 todos: vec![],
                 tech_debt_items: vec![],
@@ -2981,6 +2786,7 @@ mod prompt_tests {
     fn validation_prompt_forbids_code_modification() {
         for lang in ["fr", "en", "es"] {
             let info = AuditInfo {
+                template_update: None,
                 files: vec![],
                 todos: vec![],
                 tech_debt_items: vec![],

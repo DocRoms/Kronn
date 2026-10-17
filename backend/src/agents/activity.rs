@@ -81,6 +81,18 @@ pub fn category_of(name: &str) -> ActivityCategory {
     }
 }
 
+/// The category label of a stored tool-progress detail: a value written since
+/// the category was stored is kept, a legacy raw tool name is mapped.
+pub fn stored_tool_detail_label(detail: &str) -> &'static str {
+    use ActivityCategory::*;
+    let detail = detail.trim();
+    [Read, Search, Edit, Execute, Web, Mcp, Kronn, Think, Other]
+        .into_iter()
+        .find(|category| category.as_str() == detail)
+        .unwrap_or_else(|| category_of(detail))
+        .as_str()
+}
+
 /// Kronn's own tools in the HTTP tool loop.
 const KRONN_PREFIXES: &[&str] = &[
     "disc_",

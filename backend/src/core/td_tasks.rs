@@ -1,0 +1,558 @@
+//! Turns the audit's tech-debt sheets (`docs/tech-debt/TD-*.md`) into Kronn
+//! planning tasks. The sheets stay the source of truth; the tasks only track
+//! the work. One parent task per theme, one subtask per sheet, every task
+//! keyed so a second conversion creates nothing.
+
+use std::collections::BTreeMap;
+use std::path::Path;
+
+use anyhow::Result;
+use rusqlite::Connection;
+
+use crate::core::audit_validation::TdDecision;
+use crate::core::td_index::{is_td_id, parse_sheet, TdSheet};
+use crate::models::{
+    CreatePlanningDodItem, CreatePlanningTaskRequest, PlanningActor, PlanningTaskPriority,
+    PlanningTaskStatus, TdTaskItem, TdTaskState, TdTaskTheme, TdTasksOutcome,
+};
+
+/// Briefing line that opts a project into the conversion after a Full audit.
+pub const BRIEFING_OPTION_LINE: &str = "- Turn audit tech debt into Kronn tasks: yes";
+pub const BRIEFING_OPTIONS_HEADING: &str = "## Kronn options";
+pub const TECH_DEBT_TAG: &str = "tech-debt";
+const PROBLEM_MAX: usize = 600;
+const VERIFICATION_MAX: usize = 480;
+const TITLE_MAX: usize = 240;
+
+/// One sheet with the excerpts a task needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TdTaskSource {
+    pub sheet: TdSheet,
+    pub problem: Option<String>,
+    pub verification: Option<String>,
+    /// Repository-relative path of the sheet.
+    pub source_path: String,
+}
+
+/// The folder the sheets live in, from their own paths (`docs/tech-debt`).
+fn sheets_dir(sources: &[&TdTaskSource]) -> String {
+    sources
+        .first()
+        .and_then(|s| s.source_path.rsplit_once('/'))
+        .map(|(dir, _)| dir.to_string())
+        .unwrap_or_else(|| "docs/tech-debt".to_string())
+}
+
+pub fn briefing_wants_td_tasks(notes: &str) -> bool {
+    notes
+        .lines()
+        .any(|line| line.trim().eq_ignore_ascii_case(BRIEFING_OPTION_LINE))
+}
+
+/// Task key of one sheet: `audit:<project_id>:<TD-id>`.
+pub fn td_task_key(project_id: &str, td_id: &str) -> String {
+    format!("audit:{project_id}:{td_id}")
+}
+
+fn theme_task_key(project_id: &str, theme: &str) -> String {
+    format!("audit:{project_id}:theme:{theme}")
+}
+
+/// Every `TD-*.md` directly under `<docs>/tech-debt/`, sorted by id. Symlinks
+/// are skipped, as for the index.
+pub fn load_sources(docs_dir: &Path) -> Vec<TdTaskSource> {
+    let docs_name = docs_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("docs")
+        .to_string();
+    load_sources_rel(docs_dir, &docs_name)
+}
+
+/// `load_sources` with the sheets' paths under `docs_rel`, the docs root as
+/// the repository names it (`packages/x/docs`, KT-1192).
+pub fn load_sources_rel(docs_dir: &Path, docs_rel: &str) -> Vec<TdTaskSource> {
+    let Ok(entries) = std::fs::read_dir(docs_dir.join("tech-debt")) else {
+        return Vec::new();
+    };
+    let docs_name = docs_rel;
+    let mut sources: Vec<TdTaskSource> = entries
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .filter_map(|e| {
+            let name = e.file_name().to_str()?.to_string();
+            let id = name.strip_suffix(".md")?;
+            if !is_td_id(id) {
+                return None;
+            }
+            let content = std::fs::read_to_string(e.path()).ok()?;
+            Some(source_from(
+                id,
+                &content,
+                format!("{docs_name}/tech-debt/{name}"),
+            ))
+        })
+        .collect();
+    sources.sort_by(|a, b| a.sheet.id.cmp(&b.sheet.id));
+    sources
+}
+
+pub fn source_from(id: &str, content: &str, source_path: String) -> TdTaskSource {
+    let body = body_lines(content);
+    TdTaskSource {
+        sheet: parse_sheet(id, content),
+        problem: field_block(&body, &["problem"]).map(|p| truncate(&p, PROBLEM_MAX)),
+        verification: field_block(
+            &body,
+            &[
+                "verification",
+                "acceptance",
+                "done when",
+                "definition of done",
+            ],
+        )
+        .map(|v| truncate(&v, VERIFICATION_MAX)),
+        source_path,
+    }
+}
+
+/// Lines after the front matter, outside fenced code blocks.
+pub(crate) fn body_lines(content: &str) -> Vec<&str> {
+    let lines: Vec<&str> = content.lines().collect();
+    let start = if lines.first().is_some_and(|l| l.trim() == "---") {
+        (1..lines.len())
+            .find(|&i| lines[i].trim() == "---")
+            .map_or(0, |end| end + 1)
+    } else {
+        0
+    };
+    let mut in_fence = false;
+    let mut out = Vec::new();
+    for line in &lines[start..] {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if !in_fence {
+            out.push(*line);
+        }
+    }
+    out
+}
+
+/// Text of a `## Name…` section or of a `- **Name…**: text` item with its
+/// continuation lines, whitespace-collapsed.
+pub(crate) fn field_block(body: &[&str], names: &[&str]) -> Option<String> {
+    let starts_with_name = |text: &str| {
+        let lower = text.to_lowercase();
+        names.iter().any(|name| lower.starts_with(name))
+    };
+    for (idx, line) in body.iter().enumerate() {
+        let t = line.trim();
+        if let Some(heading) = t.strip_prefix("## ") {
+            if starts_with_name(heading.trim()) {
+                let text: Vec<&str> = body[idx + 1..]
+                    .iter()
+                    .map(|l| l.trim())
+                    .take_while(|l| !l.starts_with('#'))
+                    .filter(|l| !l.is_empty() && !l.starts_with("<!--"))
+                    .collect();
+                return collapse(&text.join(" "));
+            }
+            continue;
+        }
+        let item = t
+            .strip_prefix("- ")
+            .or_else(|| t.strip_prefix("* "))
+            .unwrap_or(t);
+        let Some(label) = item.strip_prefix("**") else {
+            continue;
+        };
+        if !starts_with_name(label) {
+            continue;
+        }
+        let Some(close) = label.find("**") else {
+            continue;
+        };
+        let rest = label[close + 2..].trim_start();
+        let rest = rest.strip_prefix(':').unwrap_or(rest);
+        let mut text = vec![rest.trim()];
+        for next in &body[idx + 1..] {
+            let n = next.trim();
+            if n.is_empty() || n.starts_with('#') || !next.starts_with(' ') {
+                break;
+            }
+            text.push(n);
+        }
+        return collapse(&text.join(" "));
+    }
+    None
+}
+
+fn collapse(value: &str) -> Option<String> {
+    let out = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!out.is_empty()).then_some(out)
+}
+
+pub(crate) fn truncate(value: &str, max: usize) -> String {
+    crate::core::anti_halluc::truncate_outside_markers(value, max, true)
+}
+
+pub fn priority_for(severity: &str) -> PlanningTaskPriority {
+    match severity.trim().to_lowercase().as_str() {
+        s if s.starts_with("critical") => PlanningTaskPriority::Critical,
+        s if s.starts_with("high") => PlanningTaskPriority::High,
+        s if s.starts_with("low") => PlanningTaskPriority::Low,
+        _ => PlanningTaskPriority::Normal,
+    }
+}
+
+fn priority_rank(priority: PlanningTaskPriority) -> u8 {
+    match priority {
+        PlanningTaskPriority::Critical => 0,
+        PlanningTaskPriority::High => 1,
+        PlanningTaskPriority::Normal => 2,
+        PlanningTaskPriority::Low => 3,
+    }
+}
+
+/// `(slug, label)` of the sheet's theme: its sub-audit `Category`, else its
+/// `Area` without the parenthesised detail.
+pub fn theme_of(sheet: &TdSheet) -> (String, String) {
+    let raw = sheet
+        .category
+        .as_deref()
+        .filter(|c| !c.trim().is_empty())
+        .unwrap_or(&sheet.area);
+    let label = raw
+        .split(['(', '|', ',', ';'])
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let mut slug = String::new();
+    for c in label.to_lowercase().chars() {
+        if c.is_alphanumeric() {
+            slug.push(c);
+        } else if !slug.ends_with('-') && !slug.is_empty() {
+            slug.push('-');
+        }
+    }
+    let slug: String = slug.trim_end_matches('-').chars().take(60).collect();
+    if slug.is_empty() || slug == "unknown" {
+        return ("other".to_string(), "Other".to_string());
+    }
+    (slug, label)
+}
+
+/// Why a sheet gets no task, if it gets none.
+pub fn skip_reason(sheet: &TdSheet) -> Option<&'static str> {
+    match sheet.decision {
+        Some(TdDecision::Rejected) => Some("rejected"),
+        Some(TdDecision::AcceptedDecision) => Some("accepted_decision"),
+        _ => None,
+    }
+}
+
+fn task_title(source: &TdTaskSource) -> String {
+    let suffix = format!(" ({})", source.sheet.id);
+    let room = TITLE_MAX.saturating_sub(suffix.chars().count()).max(1);
+    format!("{}{suffix}", truncate(&source.sheet.title, room))
+}
+
+fn verification_of(source: &TdTaskSource) -> String {
+    source.verification.clone().unwrap_or_else(|| {
+        format!(
+            "The problem described in {} no longer reproduces at the places it cites, and the next audit does not report it again.",
+            source.source_path
+        )
+    })
+}
+
+fn task_description(source: &TdTaskSource, theme_label: &str) -> String {
+    let sheet = &source.sheet;
+    let mut out = format!(
+        "Tech-debt sheet: `{}` (source of truth: record the fix there).\n\n\
+         - Severity: {}\n- Theme: {}\n- Area: {}\n- Status: {}\n",
+        source.source_path, sheet.severity, theme_label, sheet.area, sheet.status
+    );
+    if let Some(problem) = &source.problem {
+        out.push_str(&format!("\n## Problem\n{problem}\n"));
+    }
+    out.push_str(&format!("\n## Verification\n{}\n", verification_of(source)));
+    out
+}
+
+/// Common fields of every task of one theme.
+fn base_request(project_id: &str, slug: &str, actor: &PlanningActor) -> CreatePlanningTaskRequest {
+    CreatePlanningTaskRequest {
+        title: String::new(),
+        discussion_id: None,
+        idempotency_key: None,
+        description: String::new(),
+        status: PlanningTaskStatus::Todo,
+        priority: PlanningTaskPriority::Normal,
+        parent_id: None,
+        project_ids: vec![project_id.to_string()],
+        tags: vec![TECH_DEBT_TAG.to_string(), slug.to_string()],
+        definition_of_done: vec![],
+        links: vec![],
+        actor: actor.clone(),
+    }
+}
+
+/// Creates the missing tasks in one transaction. A sheet whose key already
+/// names a task is reported as linked, never recreated nor rewritten.
+pub fn convert(
+    conn: &Connection,
+    project_id: &str,
+    sources: &[TdTaskSource],
+    actor: &PlanningActor,
+) -> Result<TdTasksOutcome> {
+    use crate::db::planning::{create_task, task_by_idempotency_key};
+
+    let mut outcome = TdTasksOutcome::default();
+    let mut groups: BTreeMap<String, (String, Vec<&TdTaskSource>)> = BTreeMap::new();
+    for source in sources {
+        let (slug, label) = theme_of(&source.sheet);
+        if let Some(reason) = skip_reason(&source.sheet) {
+            outcome.skipped += 1;
+            outcome.items.push(TdTaskItem {
+                td_id: source.sheet.id.clone(),
+                theme: slug,
+                state: TdTaskState::Skipped,
+                task_reference: None,
+                reason: Some(reason.to_string()),
+            });
+            continue;
+        }
+        groups
+            .entry(slug)
+            .or_insert_with(|| (label, Vec::new()))
+            .1
+            .push(source);
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    for (slug, (label, members)) in &groups {
+        let mut linked = Vec::new();
+        let mut pending = Vec::new();
+        for source in members {
+            match task_by_idempotency_key(&tx, &td_task_key(project_id, &source.sheet.id))? {
+                Some((_, reference)) => linked.push((*source, reference)),
+                None => pending.push(*source),
+            }
+        }
+        let theme_key = theme_task_key(project_id, slug);
+        let mut parent = task_by_idempotency_key(&tx, &theme_key)?;
+        let mut parent_created = false;
+        if parent.is_none() && !pending.is_empty() {
+            let priority = pending
+                .iter()
+                .map(|s| priority_for(&s.sheet.severity))
+                .min_by_key(|p| priority_rank(*p))
+                .unwrap_or_default();
+            let created = create_task(
+                &tx,
+                &CreatePlanningTaskRequest {
+                    title: truncate(&format!("Tech debt: {label}"), TITLE_MAX),
+                    description: format!(
+                        "Audit tech debt of the theme `{slug}`, one subtask per sheet under \
+                         `{}/`. The sheets stay the source of truth.",
+                        sheets_dir(&pending)
+                    ),
+                    idempotency_key: Some(theme_key),
+                    priority,
+                    ..base_request(project_id, slug, actor)
+                },
+            )?;
+            parent = Some((created.summary.id, created.summary.reference));
+            parent_created = true;
+        }
+        for (source, reference) in linked {
+            outcome.already_linked += 1;
+            outcome.items.push(TdTaskItem {
+                td_id: source.sheet.id.clone(),
+                theme: slug.clone(),
+                state: TdTaskState::AlreadyLinked,
+                task_reference: Some(reference),
+                reason: None,
+            });
+        }
+        for source in pending {
+            let created = create_task(
+                &tx,
+                &CreatePlanningTaskRequest {
+                    title: task_title(source),
+                    description: task_description(source, label),
+                    idempotency_key: Some(td_task_key(project_id, &source.sheet.id)),
+                    priority: priority_for(&source.sheet.severity),
+                    parent_id: parent.as_ref().map(|(id, _)| id.clone()),
+                    definition_of_done: vec![CreatePlanningDodItem {
+                        id: None,
+                        sentence: verification_of(source),
+                        completed: false,
+                        verification: None,
+                    }],
+                    ..base_request(project_id, slug, actor)
+                },
+            )?;
+            outcome.created += 1;
+            outcome.items.push(TdTaskItem {
+                td_id: source.sheet.id.clone(),
+                theme: slug.clone(),
+                state: TdTaskState::Created,
+                task_reference: Some(created.summary.reference),
+                reason: None,
+            });
+        }
+        if let Some((_, reference)) = parent {
+            outcome.themes.push(TdTaskTheme {
+                theme: slug.clone(),
+                label: label.clone(),
+                task_reference: reference,
+                created: parent_created,
+            });
+        }
+    }
+    tx.commit()?;
+    Ok(outcome)
+}
+
+/// Why a linked sheet left the active list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InactiveReason {
+    Rejected,
+    AcceptedDecision,
+    SheetRemoved,
+}
+
+impl InactiveReason {
+    fn phrase(self) -> &'static str {
+        match self {
+            Self::Rejected => "was rejected: it is not real debt",
+            Self::AcceptedDecision => "was accepted as an intentional decision",
+            Self::SheetRemoved => {
+                "is no longer on file (fixed, reconciled or removed since the task was created)"
+            }
+        }
+    }
+}
+
+/// A task `close_inactive` archived or annotated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClosedTdTask {
+    pub td_id: String,
+    pub task_reference: String,
+    pub reason: InactiveReason,
+    /// False when the task was in progress or blocked: only annotated.
+    pub archived: bool,
+}
+
+fn inactive_reason(td_dir: &Path, td_id: &str) -> Option<InactiveReason> {
+    match std::fs::read_to_string(td_dir.join(format!("{td_id}.md"))) {
+        Ok(content) => match parse_sheet(td_id, &content).decision {
+            Some(TdDecision::Rejected) => Some(InactiveReason::Rejected),
+            Some(TdDecision::AcceptedDecision) => Some(InactiveReason::AcceptedDecision),
+            _ => None,
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(InactiveReason::SheetRemoved),
+        Err(_) => None,
+    }
+}
+
+/// Closes the KT-1167 task of every sheet that left the active list: an open
+/// task is archived, one already being worked on is only annotated. Done and
+/// archived tasks are left alone, and a task is annotated once per reason.
+pub fn close_inactive(
+    conn: &Connection,
+    project_id: &str,
+    docs_dir: &Path,
+    actor: &PlanningActor,
+) -> Result<Vec<ClosedTdTask>> {
+    use crate::db::planning::{get_task, tasks_by_idempotency_prefix, update_task};
+
+    let prefix = format!("audit:{project_id}:");
+    let td_dir = docs_dir.join("tech-debt");
+    let mut closed = Vec::new();
+    for (key, task_id, reference) in tasks_by_idempotency_prefix(conn, &format!("{prefix}TD-"))? {
+        let Some(td_id) = key.strip_prefix(&prefix).filter(|id| is_td_id(id)) else {
+            continue;
+        };
+        let Some(reason) = inactive_reason(&td_dir, td_id) else {
+            continue;
+        };
+        let Some(task) = get_task(conn, &task_id)? else {
+            continue;
+        };
+        let status = task.summary.status;
+        if matches!(
+            status,
+            PlanningTaskStatus::Done | PlanningTaskStatus::Archived
+        ) {
+            continue;
+        }
+        let archive = matches!(status, PlanningTaskStatus::Idea | PlanningTaskStatus::Todo);
+        let note = format!(
+            "Kronn: the tech-debt sheet `{td_id}` {}{}",
+            reason.phrase(),
+            if archive {
+                "; the task was archived."
+            } else {
+                "; the task was left as it is because work on it has started."
+            }
+        );
+        if task.description.contains(&note) {
+            continue;
+        }
+        let description = format!("{}\n\n{note}\n", task.description.trim_end());
+        update_task(
+            conn,
+            &task_id,
+            &crate::models::UpdatePlanningTaskRequest {
+                title: None,
+                description: Some(description),
+                status: archive.then_some(PlanningTaskStatus::Archived),
+                priority: None,
+                parent_id: None,
+                blocked_reason: None,
+                rank: None,
+                project_ids: None,
+                tags: None,
+                definition_of_done: None,
+                links: None,
+                actor: actor.clone(),
+            },
+        )?;
+        closed.push(ClosedTdTask {
+            td_id: td_id.to_string(),
+            task_reference: reference,
+            reason,
+            archived: archive,
+        });
+    }
+    Ok(closed)
+}
+
+/// `close_inactive` for a backend transition, logged instead of failing: the
+/// decision that triggered it is already on the sheet.
+pub fn close_inactive_logged(conn: &Connection, project_id: &str, docs_dir: &Path, origin: &str) {
+    let actor = PlanningActor {
+        kind: crate::models::PlanningActorKind::Backend,
+        id: Some(origin.to_string()),
+        session_id: None,
+        source_message_id: None,
+    };
+    match close_inactive(conn, project_id, docs_dir, &actor) {
+        Ok(closed) if !closed.is_empty() => tracing::info!(
+            "Closed {} tech-debt task(s) of project {project_id} whose sheet left the active list ({origin})",
+            closed.len()
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("Tech-debt tasks of project {project_id} not closed ({origin}): {e}"),
+    }
+}
+
+#[cfg(test)]
+#[path = "td_tasks_test.rs"]
+mod tests;

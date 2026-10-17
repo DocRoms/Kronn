@@ -115,6 +115,16 @@ a causal source (`reply_to_message_id`), not an anchor to reuse: concurrent
 generations started from one prompt therefore keep distinct transcript
 positions and run identities.
 
+The file is stored like an upload. The copy the UI serves (`disk_path`) stays
+in the project's main checkout under `.kronn/context-files/`, or in Kronn's data
+dir without a project, so removing a worktree never deletes it. When the agent
+runs elsewhere (a worktree, a project-less discussion's folder) it receives a
+git-excluded copy under its own `.kronn/context-files/`, made at save time and
+again when its prompt is built; a failed copy is logged and the original path
+given instead. Assets stored before keep working.
+[src: file: backend/src/core/context_files.rs:181-205#attachment_dirs_for]
+[src: file: backend/src/core/context_files.rs:267-293#agent_readable_path]
+
 The anchor is rendered as one media bubble whose state changes in place from
 pending/running to success or failure. On success it shows the media itself,
 fetched through the authenticated context-file endpoint as an object URL, and
@@ -150,7 +160,7 @@ without a reload.
 * Agents: `media_generate` and `media_job_status`, by two independent routes —
   CLI agents through the `kronn-internal` MCP bridge, HTTP agents through the
   native orchestration catalogue
-  [src: file: backend/src/api/agent_tools.rs:420-445]. The bridge route came
+  [src: file: backend/src/api/agent_tools.rs:1138-1178#media_generate]. The bridge route came
   first; the native one closed the half of the fleet that could not reach it.
 * **The connection is optional (KT-686).** A generation names one, or names
   none and Kronn uses the only connection configured for that modality. When
@@ -185,9 +195,9 @@ a normal `no_agent` discussion at an explicit Generate click, then passes that
 room to the existing generation endpoint. A successfully created room is kept
 across a generation error, and the same idempotency key is retained for an
 explicit identical retry; the UI never automatically repeats an ambiguous
-billable request. `[src: file: frontend/src/components/NewDiscussionForm.tsx:230-234]`
-`[src: file: frontend/src/components/MediaGenerateForm.tsx:476-532]`
-`[src: file: frontend/src/pages/DiscussionsPage.tsx:2408-2424]`
+billable request. `[src: file: frontend/src/components/NewDiscussionForm.tsx:400-419#createMediaDiscussion]`
+`[src: file: frontend/src/components/MediaGenerateForm.tsx:477-532#submit]`
+`[src: file: frontend/src/pages/DiscussionsPage.tsx:2635-2654#handleCreateMediaDiscussion]`
 
 ## What a model accepts, read rather than assumed
 
@@ -215,8 +225,8 @@ advertises leaves the submission to decide. Resolutions and ratios are compared
 trimmed and case-insensitively, so a caller is never refused over `720P`.
 
 The same read serves both surfaces. `agent_list` sweeps every configured media
-slot concurrently under one 8 s window and attaches what came back
-[src: file: backend/src/api/orchestration.rs:8547-8588]; the catalogue builder
+slot concurrently, each under its own 8 s window, and attaches what came back
+[src: file: backend/src/api/orchestration.rs:12645-12698#bounded_media_capabilities]; the catalogue builder
 itself stays pure and is handed the result, like the reachability and quota
 preflights beside it. An envelope is attached only when the model it was read
 for is still the configured one — a connection whose model changed between the
@@ -355,20 +365,20 @@ make the film, in what order, and plays them through.
   it names a file of another discussion, or the same clip twice, in either
   list. A deleted clip drops out when the order is read, not when it is
   deleted, so a deletion never needs to know about the sequence.
-  [src: file: backend/src/db/discussion_video_sequences.rs]
+  [src: file: backend/src/db/discussion_video_sequences.rs:26-47#get] [src: file: backend/src/db/discussion_video_sequences.rs:49-70#set]
 * **A new clip joins the film, at the end.** Clips nobody has placed yet
   follow the arranged ones, oldest first: clips are generated one after the
   other, so the order they were made in is the film's default. A clip that
   has nothing to do with the film is dragged to "Hors version finale", or
   taken out with its button: it stays in the discussion and is not played,
   until it is put back.
-  [src: file: frontend/src/lib/videoSequence.ts]
+  [src: file: frontend/src/lib/videoSequence.ts:14-37#orderVideos]
 * **Every move is saved at once.** Drag-and-drop or the buttons send both
   lists; a refusal is shown in place, and the list keeps the order on screen.
   While a clip is dragged, a line between two rows shows where it will land
   (the upper half of a row points above it, the lower half below), and none
   is drawn where the clip would not move.
-  [src: file: frontend/src/lib/videoSequence.ts]
+  [src: file: frontend/src/components/VideoSequenceEditor.tsx:170-181#move] [src: file: frontend/src/lib/videoSequence.ts:80-94#slotForGap]
 * **Each clip shows its first frame.** The thumbnail is the clip itself,
   paused near its start, fetched once its row is on screen. The bytes are
   fetched once per clip and shared with the player.
@@ -380,11 +390,11 @@ make the film, in what order, and plays them through.
   only the clips of the film. A clip with no declared price, an upload, or one
   billed on the user's own key is not added: the total says how many were left
   out rather than counting them as free.
-  [src: file: frontend/src/lib/videoSequence.ts]
+  [src: file: frontend/src/lib/videoSequence.ts:96-131#clipDurationMs]
 * **"Lire la version finale" plays, it does not render.** A full-screen player
   shows each clip of the film in order and starts the next one when the
   current one ends,
   fetching the following clip while the current one plays. A clip that cannot
   be loaded is announced with a button to skip it. No file is produced:
   cutting and exporting a single video are separate work.
-  [src: file: frontend/src/components/VideoSequenceEditor.tsx]
+  [src: file: frontend/src/components/VideoSequenceEditor.tsx:460-541#SequencePlayer] [src: file: frontend/src/components/VideoSequenceEditor.tsx:519-523#clipUnavailable]

@@ -2371,6 +2371,7 @@ mod tests {
             recovered_partial: false,
             session_tokens_at_message: None,
             author_cli_ordinal: None,
+            session_continuity: None,
             model: None,
             lint_report: None,
             id: "u1".to_string(),

@@ -19,11 +19,11 @@ use tokio::time::{timeout, Duration};
 use crate::models::AgentType;
 
 mod adapter_process;
-mod bridge_env;
+pub(crate) mod bridge_env;
 mod claude_adapter;
 mod codex_adapter;
 mod permission_broker;
-mod secret_files;
+pub(crate) mod secret_files;
 
 pub use claude_adapter::ClaudeAcpAdapter;
 pub use codex_adapter::CodexAcpAdapter;
@@ -936,6 +936,11 @@ impl AcpJsonRpcTransport {
         // The servers are authorized once, by the session's own broker: the
         // launch arguments never name a server `session/new` does not declare.
         let broker = session_broker(full_access, Some(scope));
+        // Vibe's permission request carries only the call id; the tool it
+        // resolved is in the update announcing that call.
+        if agent == AcpAgent::Vibe {
+            broker.identify_tools_by_runtime_name();
+        }
         let bridge_id = session_bridge_id(agent);
         let servers = native_session_mcp_servers(
             &broker,
@@ -1112,6 +1117,8 @@ impl AcpJsonRpcTransport {
                     }
                 } else {
                     trace_notification(&message);
+                    // Read in order: a runtime announces a call before asking about it.
+                    broker.observe_session_update(&message);
                     let _ = notifications.send(message);
                 }
             }
@@ -1317,7 +1324,7 @@ fn handle_client_request(
     params: &Value,
 ) -> Result<Value, (i64, String)> {
     match method {
-        "session/request_permission" => Ok(broker.decide_tool_call_permission(method, params)),
+        "session/request_permission" => Ok(broker.permission_response(method, params)),
         method if method.starts_with("fs/") || method.starts_with("terminal/") => {
             Err(broker.deny_unbound_capability(method))
         }
@@ -1975,9 +1982,24 @@ mod tests {
     /// environment only, and persists what `session/new` declares. The bridge's
     /// plain values are declared inline; its secrets sit in an owner-only file
     /// the declaration names, removed with the transport.
+    /// An executable stub named like an agent CLI in `dir`: the command is
+    /// built from a path the test controls, never the machine's CLI (KT-1189).
+    fn agent_stub(dir: &std::path::Path, name: &str, body: &str) -> String {
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path.to_string_lossy().into_owned()
+    }
+
     #[test]
     fn vibe_declares_the_bridge_environment_without_its_secrets() {
         let project = tempfile::tempdir().unwrap();
+        let stubs = tempfile::tempdir().unwrap();
+        let vibe = agent_stub(stubs.path(), "vibe-acp", "exit 0");
         let launch = NativeLaunchEnv {
             discussion_id: Some("room-1082".into()),
             workflow_step: Some(crate::agents::runner::WorkflowStepBridgeContext {
@@ -1992,7 +2014,7 @@ mod tests {
         let command = crate::core::child_env::with_parent_env(&[("PATH", "/usr/bin")], || {
             native_command(
                 AcpAgent::Vibe,
-                "vibe-acp",
+                &vibe,
                 &[],
                 &project.path().to_string_lossy(),
                 &launch,
@@ -2057,6 +2079,8 @@ mod tests {
     /// declaration and gets no secrets file.
     #[test]
     fn an_inheriting_runtime_declares_no_bridge_environment() {
+        let stubs = tempfile::tempdir().unwrap();
+        let opencode = agent_stub(stubs.path(), "opencode", "exit 0");
         let project = tempfile::tempdir().unwrap();
         let launch = NativeLaunchEnv {
             discussion_id: Some("room-1082".into()),
@@ -2066,7 +2090,7 @@ mod tests {
         let command = crate::core::child_env::with_parent_env(&[("PATH", "/usr/bin")], || {
             native_command(
                 AcpAgent::OpenCode,
-                "opencode",
+                &opencode,
                 &["acp"],
                 &project.path().to_string_lossy(),
                 &launch,
@@ -2083,6 +2107,11 @@ mod tests {
     /// a project temp dir; never the admin token nor another agent's key.
     #[test]
     fn a_native_launch_receives_its_key_and_contexts_through_the_builder() {
+        let stubs = tempfile::tempdir().unwrap();
+        let copilot_stub = agent_stub(stubs.path(), "copilot", "exit 0");
+        let gemini_stub = agent_stub(stubs.path(), "gemini", "exit 0");
+        let kiro_cli_stub = agent_stub(stubs.path(), "kiro-cli", "exit 0");
+
         let project = tempfile::tempdir().unwrap();
         let launch = NativeLaunchEnv {
             discussion_id: Some("room-7".into()),
@@ -2109,7 +2138,7 @@ mod tests {
             || {
                 native_command(
                     AcpAgent::GeminiCli,
-                    "gemini",
+                    &gemini_stub,
                     &["--acp"],
                     &project.path().to_string_lossy(),
                     &launch,
@@ -2149,7 +2178,7 @@ mod tests {
         };
         let command = native_command(
             AcpAgent::Kiro,
-            "kiro-cli",
+            &kiro_cli_stub,
             &[],
             &project.path().to_string_lossy(),
             &step,
@@ -2167,7 +2196,7 @@ mod tests {
         };
         let command = native_command(
             AcpAgent::CopilotCli,
-            "copilot",
+            &copilot_stub,
             &[],
             &project.path().to_string_lossy(),
             &connected,
@@ -3499,6 +3528,10 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(acp_adapter_env_toggle)]
     async fn a_refused_read_does_not_end_the_turn_and_the_turn_reports_its_usage() {
+        // The fixture interpreter runs on OpenCode's agent route: a shim the
+        // test controls relays to the real python3.
+        let stubs = tempfile::tempdir().unwrap();
+        let python = agent_stub(stubs.path(), "python3", "exec python3 \"$@\"");
         let out = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
         crate::core::child_env::remove_var("OPENCODE_CONFIG_CONTENT");
@@ -3506,7 +3539,7 @@ mod tests {
         // gives OpenCode is built by the same function.
         let mut command = native_command(
             AcpAgent::OpenCode,
-            "python3",
+            &python,
             &["-c", test_support::OPENCODE_ACP_FIXTURE],
             &project.path().to_string_lossy(),
             &NativeLaunchEnv::default(),
@@ -3785,6 +3818,81 @@ for line in sys.stdin:
             .find(|entry| entry.method == "fs/read_text_file")
             .expect("the fs/read_text_file decision must be audited");
         assert_eq!(audited.verdict, AcpPermissionVerdict::Deny);
+    }
+
+    /// KT-1158 — the live dispatcher reads Vibe's tool-call update before the
+    /// permission request naming only its call id, and answers it from it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dispatcher_identifies_a_vibe_bridge_call_from_the_update_that_announced_it() {
+        const VIBE_FIXTURE: &str = r#"
+import json, os, sys
+def send(frame):
+    sys.stdout.write(json.dumps(frame) + "\n"); sys.stdout.flush()
+replies = []
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"protocolVersion": 1}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"sessionId": "vibe-session"}})
+    elif method == "session/prompt":
+        for call, tool in [("call-1", "mcp_kronn_internal.disc_meta"),
+                           ("call-2", "mcp_github.create_issue")]:
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {
+                "sessionId": "vibe-session", "update": {
+                    "sessionUpdate": "tool_call", "toolCallId": call, "title": tool,
+                    "kind": "other", "status": "pending", "rawInput": {},
+                    "_meta": {"tool_name": tool, "effect_kind": "tool"}}}})
+            send({"jsonrpc": "2.0", "id": 90 + len(replies), "method": "session/request_permission",
+                  "params": {"sessionId": "vibe-session", "toolCall": {"toolCallId": call},
+                             "options": [{"optionId": "allow_once", "name": "Allow once", "kind": "allow_once"},
+                                         {"optionId": "reject_once", "name": "Deny", "kind": "reject_once"}]}})
+            replies.append(json.loads(sys.stdin.readline()))
+        with open(os.environ["RESPONSE_FILE"], "w") as handle:
+            json.dump(replies, handle)
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"stopReason": "end_turn"}})
+"#;
+        let project = tempfile::tempdir().unwrap();
+        let response_file = tempfile::NamedTempFile::new().unwrap();
+        let mut command = tokio::process::Command::new("python3");
+        command
+            .env("RESPONSE_FILE", response_file.path())
+            .args(["-c", VIBE_FIXTURE]);
+        let broker = AcpPermissionBroker::scoped(
+            true,
+            AcpSessionScope::new(Some(project.path().to_path_buf()), "disc-vibe"),
+        );
+        broker.identify_tools_by_runtime_name();
+        broker.register_trusted_mcp_server(&AcpMcpServer {
+            id: "kronn-internal".into(),
+            command: "python3".into(),
+            args: vec![],
+            allowed_tools: vec![],
+        });
+        let transport = AcpJsonRpcTransport::spawn_with_broker(AcpAgent::Vibe, command, broker)
+            .await
+            .unwrap();
+        transport.initialize(request()).await.unwrap();
+        let target = transport.create_session().await.unwrap();
+        let (tx, mut rx) = mpsc::channel(64);
+        transport
+            .prompt(&target, "fixture prompt", tx)
+            .await
+            .unwrap();
+        while rx.recv().await.is_some() {}
+        transport.shutdown().await.unwrap();
+
+        let replies: Vec<Value> =
+            serde_json::from_str(&std::fs::read_to_string(response_file.path()).unwrap()).unwrap();
+        assert_eq!(replies[0]["result"]["outcome"]["optionId"], "allow_once");
+        assert!(replies[0]["result"].get("_meta").is_none());
+        assert_eq!(replies[1]["result"]["outcome"]["optionId"], "reject_once");
+        let refusal = replies[1]["result"]["_meta"]["kronn"]["refusal"]
+            .as_str()
+            .unwrap();
+        assert!(refusal.contains("`mcp_github.create_issue`"), "{refusal}");
     }
 
     #[test]

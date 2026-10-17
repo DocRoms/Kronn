@@ -533,7 +533,7 @@ mod tests {
     fn both_binaries_take_the_key_override_first() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         for (file, before) in [
-            (root.join("src/main.rs"), "tokio::runtime::Builder"),
+            (root.join("src/main.rs"), "runtime_builder()"),
             (
                 root.join("../desktop/src-tauri/src/main.rs"),
                 "tracing_subscriber::",

@@ -132,44 +132,10 @@ pub(crate) async fn store_context_file(
         Err(e) => return Err(e.to_string()),
     };
 
-    // Resolve the work directory for this discussion. With a project, images
-    // land in its worktree (agents read them with file tools). WITHOUT a
-    // project we must NOT use the system temp dir: under Docker that's the
-    // container's /tmp, wiped on every restart/rebuild, so the attachment
-    // bytes vanish and the bubble thumbnail 404s. Fall back to the persistent
-    // data dir (KRONN_DATA_DIR volume) instead, only dropping to temp if even
-    // that can't be resolved.
-    let persistent_fallback =
-        || crate::core::config::config_dir().unwrap_or_else(|_| std::env::temp_dir());
-    let did_for_path = discussion_id.clone();
-    let fallback = persistent_fallback();
-    let work_dir: std::path::PathBuf = state
-        .db
-        .with_conn(move |conn| {
-            let project_id: Option<String> = conn
-                .query_row(
-                    "SELECT project_id FROM discussions WHERE id = ?1",
-                    rusqlite::params![did_for_path],
-                    |row| row.get(0),
-                )
-                .unwrap_or(None);
-            let path = if let Some(pid) = project_id {
-                conn.query_row(
-                    "SELECT path FROM projects WHERE id = ?1",
-                    rusqlite::params![pid],
-                    |row| row.get::<_, String>(0),
-                )
-                .ok()
-            } else {
-                None
-            };
-            Ok(match path {
-                Some(p) => std::path::PathBuf::from(p),
-                None => fallback,
-            })
-        })
-        .await
-        .unwrap_or_else(|_: anyhow::Error| persistent_fallback());
+    // The durable copy the UI serves; the agent reads a mirror in its work dir.
+    let dirs =
+        crate::core::context_files::discussion_attachment_dirs(&state.db, &discussion_id).await;
+    let work_dir = dirs.durable.clone();
 
     let id = uuid::Uuid::new_v4().to_string();
     let mime = crate::core::context_files::mime_from_extension(&filename).to_string();
@@ -196,20 +162,11 @@ pub(crate) async fn store_context_file(
             // Raw file saved to disk (worktree); only the preview lands in
             // context. The agent reads the full file by path. Falls back to the
             // persistent config dir if the project worktree write fails.
-            match crate::core::context_files::save_file_to_dir(
+            let path = crate::core::context_files::save_file_to_dir_or_disk(
                 &work_dir, &id, &filename, &file_data,
-            ) {
-                Ok(path) => (preview, Some(path)),
-                Err(e) => {
-                    match crate::core::context_files::save_file_to_disk(&id, &filename, &file_data)
-                    {
-                        Ok(path) => (preview, Some(path)),
-                        Err(e2) => {
-                            return Err(format!("Failed to save file: {e} / fallback: {e2}"))
-                        }
-                    }
-                }
-            }
+            )
+            .map_err(|error| format!("Failed to save file: {error}"))?;
+            (preview, Some(path))
         }
         crate::core::context_files::ExtractedContent::Image {
             data: img_data,
@@ -237,6 +194,10 @@ pub(crate) async fn store_context_file(
             }
         }
     };
+
+    if let (Some(path), Some(agent_dir)) = (disk_path.as_deref(), dirs.agent.as_deref()) {
+        crate::core::context_files::agent_readable_path(path, agent_dir);
+    }
 
     let extracted_size = extracted_text.len() as u64;
     let file_id = id.clone();
@@ -346,7 +307,9 @@ pub(crate) async fn attach_files_linked_in_message(
         return None;
     }
     let mut allowed_roots = Vec::new();
-    if let Ok(dir) = crate::agents::runner::resolve_agent_work_dir(workspace_path, project_path) {
+    let agent_dir =
+        crate::agents::runner::resolve_agent_work_dir(workspace_path, project_path).ok();
+    if let Some(dir) = agent_dir.clone() {
         allowed_roots.push(dir);
     }
     if !project_path.is_empty() {
@@ -382,9 +345,17 @@ pub(crate) async fn attach_files_linked_in_message(
         }
         // A previously attached asset is already available to this discussion.
         // Match its actual stored path, never a filename/size guess.
+        // The agent may link the mirror it was given rather than the canonical copy.
         if let Some(file) = existing.iter().find(|file| {
             file.disk_path.as_deref().is_some_and(|path| {
-                points_to_attached_file(&target, std::path::Path::new(path), home.as_deref())
+                let path = std::path::Path::new(path);
+                points_to_attached_file(&target, path, home.as_deref())
+                    || agent_dir
+                        .as_deref()
+                        .and_then(|dir| crate::core::context_files::mirror_path_for(path, dir))
+                        .is_some_and(|mirror| {
+                            points_to_attached_file(&target, &mirror, home.as_deref())
+                        })
             })
         }) {
             rewrites.insert(target, href(&file.id));
@@ -550,6 +521,7 @@ fn anchor_extracted_frame(
         recovered_partial: false,
         session_tokens_at_message: None,
         author_cli_ordinal: None,
+        session_continuity: None,
         model: None,
         lint_report: None,
         id: message_id.clone(),
@@ -1196,5 +1168,119 @@ mod tests {
             .await
             .expect("count");
         assert_eq!(messages, 0, "a refusal must not write a transcript slot");
+    }
+
+    /// KT-1202 — media generated before the move sit in the config dir, outside
+    /// every project. The route serves the stored `disk_path` as is, so they
+    /// still display, and the agent gets a mirror of them in its own work dir.
+    #[tokio::test]
+    #[serial_test::serial] // KRONN_DATA_DIR is process-wide
+    async fn media_saved_in_the_config_dir_before_the_move_still_displays() {
+        use http_body_util::BodyExt;
+        let _data_dir = crate::core::config::TestDataDir::new();
+        let project = tempfile::tempdir().expect("project dir");
+
+        // The legacy layout, written by the very function the runner used.
+        let image = crate::core::context_files::save_file_to_disk(
+            "11111111-aaaa",
+            "image-11111111.png",
+            b"legacy-png",
+        )
+        .expect("legacy image");
+        let video = crate::core::context_files::save_file_to_disk(
+            "22222222-bbbb",
+            "video-22222222.mp4",
+            b"legacy-mp4",
+        )
+        .expect("legacy video");
+        let config_dir = crate::core::config::config_dir().expect("config dir");
+        for path in [&image, &video] {
+            assert!(
+                std::path::Path::new(path).starts_with(config_dir.join("context-files")),
+                "{path} must be a legacy config-dir path"
+            );
+        }
+
+        let db = Database::open_in_memory().expect("in-memory db");
+        let (image_row, video_row, project_path) = (
+            image.clone(),
+            video.clone(),
+            project.path().to_string_lossy().to_string(),
+        );
+        db.with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO projects (id, name, path, created_at, updated_at)
+                 VALUES ('p-1', 'P', ?1, '2026-09-01 09:00:00', '2026-09-01 09:00:00')",
+                [&project_path],
+            )?;
+            conn.execute(
+                "INSERT INTO discussions (id, title, project_id, created_at, updated_at)
+                 VALUES ('d-1', 'Media', 'p-1', '2026-09-01 09:00:00', '2026-09-01 09:00:00')",
+                [],
+            )?;
+            crate::db::discussions::insert_context_file(
+                conn,
+                "img-1",
+                "d-1",
+                "image-11111111.png",
+                "image/png",
+                10,
+                "",
+                Some(&image_row),
+            )?;
+            crate::db::discussions::insert_context_file(
+                conn,
+                "vid-1",
+                "d-1",
+                "video-22222222.mp4",
+                "video/mp4",
+                10,
+                "",
+                Some(&video_row),
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("seed");
+        let state = AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            std::sync::Arc::new(db),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+
+        for (file_id, content_type, bytes) in [
+            ("img-1", "image/png", b"legacy-png"),
+            ("vid-1", "video/mp4", b"legacy-mp4"),
+        ] {
+            let response = get_context_file_content(
+                State(state.clone()),
+                Path(("d-1".to_string(), file_id.to_string())),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "{file_id}");
+            assert_eq!(
+                response.headers().get(header::CONTENT_TYPE).unwrap(),
+                content_type
+            );
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes();
+            assert_eq!(body.as_ref(), bytes, "{file_id}");
+        }
+
+        // The agent is handed a copy inside its work dir; the legacy file stays.
+        let given = crate::core::context_files::agent_readable_path(&image, project.path());
+        assert!(
+            std::path::Path::new(&given)
+                .starts_with(project.path().join(".kronn").join("context-files")),
+            "{given}"
+        );
+        assert_eq!(std::fs::read(&given).expect("mirror"), b"legacy-png");
+        assert_eq!(std::fs::read(&image).expect("legacy copy"), b"legacy-png");
     }
 }

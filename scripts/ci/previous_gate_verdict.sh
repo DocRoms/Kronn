@@ -31,6 +31,7 @@ repo="repos/$GITHUB_REPOSITORY"
 candidates="$(gh api "$repo/actions/workflows/$workflow/runs?event=pull_request&head_sha=$HEAD_SHA&per_page=100" \
   --jq "[.workflow_runs[] | select(.event == \"pull_request\" and .head_sha == \"$HEAD_SHA\" and .id < $GITHUB_RUN_ID)] | sort_by(.id) | reverse | .[].id")"
 
+cancelled_run=""
 for run in $candidates; do
   # Attempt the re-run replaces; 0 while none was requested.
   rerun_from=0
@@ -53,8 +54,20 @@ for run in $candidates; do
         echo "Run $run passed $job for pull request #$PR_NUMBER at head $HEAD_SHA, base $BASE_SHA."
         exit 0
         ;;
-      failure|cancelled|timed_out)
-        echo "::error::Run $run did not pass $job for this pull request state ($state): https://github.com/$GITHUB_REPOSITORY/actions/runs/$run"
+      cancelled)
+        # The gate itself never decided: an earlier run may have.
+        echo "Run $run cancelled $job before its verdict; checking earlier runs."
+        cancelled_run="$run"
+        break
+        ;;
+      failure|timed_out)
+        cancelled_jobs="$(gh api "$repo/actions/runs/$run/jobs?per_page=100" \
+          --jq '[.jobs[] | select(.conclusion == "cancelled") | .name] | join(", ")')"
+        if [ -n "$cancelled_jobs" ]; then
+          echo "::error::Run $run did not pass $job because these jobs were cancelled, not failed: $cancelled_jobs. Re-run them: https://github.com/$GITHUB_REPOSITORY/actions/runs/$run"
+        else
+          echo "::error::Run $run did not pass $job for this pull request state ($state): https://github.com/$GITHUB_REPOSITORY/actions/runs/$run"
+        fi
         exit 1
         ;;
       unlabelled\ *)
@@ -89,5 +102,9 @@ for run in $candidates; do
   done
 done
 
+if [ -n "${cancelled_run:-}" ]; then
+  echo "::error::Run $cancelled_run was cancelled before $job decided, and no earlier run tested this state. Re-run it: https://github.com/$GITHUB_REPOSITORY/actions/runs/$cancelled_run"
+  exit 1
+fi
 echo "::error::No earlier $workflow run tested pull request #$PR_NUMBER at head $HEAD_SHA, base $BASE_SHA. Push a commit, or close and reopen the pull request, to run it."
 exit 1

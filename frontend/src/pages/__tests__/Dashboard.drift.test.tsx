@@ -57,7 +57,7 @@ beforeEach(() => {
   vi.mocked(projectsApi.auditStatusAll).mockResolvedValue([]);
   vi.mocked(pagesApi.capability).mockResolvedValue({ activated: false, activated_at: null });
   vi.mocked(projectsApi.list).mockResolvedValue([project('audited', 'Audited'), project('bare', 'NoTemplate')]);
-  vi.mocked(projectsApi.checkDrift).mockResolvedValue({ audit_date: null, stale_sections: [], fresh_sections: [], total_sections: 0 });
+  vi.mocked(projectsApi.checkDrift).mockResolvedValue({ audit_date: null, stale_sections: [], fresh_sections: [], total_sections: 0, sources_state: 'unknown', broken_citations: 0, placeholder_docs: [] });
 });
 
 afterEach(() => {

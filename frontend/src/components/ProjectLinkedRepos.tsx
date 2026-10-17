@@ -10,12 +10,12 @@
 // otherwise add ~60 lines of useState to ProjectCard, which is
 // already pushing 1500 LoC.
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Plus, Trash2, ExternalLink, Folder, AlertCircle, Sparkles } from 'lucide-react';
 import { useT } from '../lib/I18nContext';
 import { Dropdown } from './Dropdown';
 import { projects as projectsApi } from '../lib/api';
-import type { LinkedRepo } from '../types/generated';
+import type { LinkedRepo, LinkedRepoDocStatus } from '../types/generated';
 
 // 0.8.6 (#27) — autocomplete picker. Shape mirrors the backend
 // `LinkedRepoCandidate` exposed by /api/projects/:id/linked-repos/candidates.
@@ -44,6 +44,25 @@ const KINDS: Array<{ value: LinkedRepo['kind']; emoji: string; label: string }> 
   { value: 'other',      emoji: '🔗', label: 'Other' },
 ];
 
+/** Suggestions shown before the draft opens (KT-999). */
+const INLINE_SUGGESTIONS_MAX = 6;
+
+/** KT-999 — badge for the AI doc a linked repo really has; none for a URL. */
+function aiDocBadge(status: LinkedRepoDocStatus | undefined): { key: string; tone: string } | null {
+  switch (status?.ai_doc) {
+    case 'agents_md':
+    case 'legacy_ai_index':
+      return { key: 'linkedRepos.aiDoc.yes', tone: 'ok' };
+    case 'readme_only':
+      return { key: 'linkedRepos.aiDoc.readmeOnly', tone: 'partial' };
+    case 'no_ai_doc':
+    case 'missing':
+      return { key: 'linkedRepos.aiDoc.none', tone: 'none' };
+    default:
+      return null;
+  }
+}
+
 function kindEmoji(kind: string): string {
   return KINDS.find(k => k.value === kind)?.emoji ?? '🔗';
 }
@@ -61,9 +80,11 @@ export interface ProjectLinkedReposProps {
   /** Fires after a successful PUT so the parent can refetch the
    *  project and the new list flows back as `currentRepos`. */
   onUpdate: () => void;
+  /** KT-999 — one-click suggestions visible before the add form opens. */
+  inlineSuggestions?: boolean;
 }
 
-export function ProjectLinkedRepos({ projectId, currentRepos, onUpdate }: ProjectLinkedReposProps) {
+export function ProjectLinkedRepos({ projectId, currentRepos, onUpdate, inlineSuggestions = false }: ProjectLinkedReposProps) {
   const { t } = useT();
   const [drafting, setDrafting] = useState(false);
   // 0.8.6 (#27 fix 2026-05-21) — toggle "+ N autres" expansion. Pre-fix
@@ -81,11 +102,25 @@ export function ProjectLinkedRepos({ projectId, currentRepos, onUpdate }: Projec
   // 0.8.6 (#27) — candidates list fed by the autocomplete picker.
   // Fetched lazily when the drawer expands the draft form.
   const [candidates, setCandidates] = useState<LinkedRepoCandidate[]>([]);
+  const [docStatus, setDocStatus] = useState<Record<string, LinkedRepoDocStatus>>({});
+  const descriptionRef = useRef<HTMLInputElement>(null);
+  const reposKey = currentRepos.map(r => `${r.id}=${r.location}`).join('|');
+
+  useEffect(() => {
+    if (!reposKey) return;
+    let cancelled = false;
+    projectsApi.linkedReposDocs(projectId)
+      .then(list => {
+        if (!cancelled) setDocStatus(Object.fromEntries(list.map(s => [s.id, s])));
+      })
+      .catch(e => console.warn('[ProjectLinkedRepos] doc status fetch failed:', e));
+    return () => { cancelled = true; };
+  }, [projectId, reposKey]);
 
   // Fetch candidates once on first draft-mode entry — they don't
   // change often enough to warrant a refresh on every key press.
   useEffect(() => {
-    if (!drafting) return;
+    if (!drafting && !inlineSuggestions) return;
     let cancelled = false;
     projectsApi.linkedReposCandidates(projectId)
       .then(list => { if (!cancelled) setCandidates(list); })
@@ -95,7 +130,7 @@ export function ProjectLinkedRepos({ projectId, currentRepos, onUpdate }: Projec
         console.warn('[ProjectLinkedRepos] candidates fetch failed:', e);
       });
     return () => { cancelled = true; };
-  }, [drafting, projectId]);
+  }, [drafting, inlineSuggestions, projectId]);
 
   // Filter out repos already linked so the user doesn't see them in
   // the picker (avoids accidental duplicates).
@@ -120,6 +155,13 @@ export function ProjectLinkedRepos({ projectId, currentRepos, onUpdate }: Projec
     setDraftName(c.name);
     setDraftLocation(c.path);
     setError(null);
+  }
+
+  /** One click opens the draft on a suggestion; only its description is left to fill in. */
+  function suggest(c: LinkedRepoCandidate) {
+    setDrafting(true);
+    pickCandidate(c);
+    setTimeout(() => descriptionRef.current?.focus(), 0);
   }
 
   async function commitList(next: LinkedRepo[]) {
@@ -161,7 +203,11 @@ export function ProjectLinkedRepos({ projectId, currentRepos, onUpdate }: Projec
   }
 
   return (
-    <div style={{ paddingTop: 6 }}>
+    // Enter in a field must not submit an enclosing form (the briefing).
+    <div
+      style={{ paddingTop: 6 }}
+      onKeyDown={e => { if (e.key === 'Enter' && e.target instanceof HTMLInputElement) e.preventDefault(); }}
+    >
       <p className="text-xs text-muted" style={{ marginBottom: 8 }}>
         {t('linkedRepos.hint')}
       </p>
@@ -177,6 +223,20 @@ export function ProjectLinkedRepos({ projectId, currentRepos, onUpdate }: Projec
             <div className="flex-row gap-3" style={{ alignItems: 'center' }}>
               <strong className="text-sm">{repo.name}</strong>
               <span className="text-2xs text-ghost">{repo.kind}</span>
+              {(() => {
+                const status = docStatus[repo.id];
+                const badge = aiDocBadge(status);
+                if (!badge) return null;
+                return (
+                  <span
+                    className={`linked-repo-ai-doc linked-repo-ai-doc-${badge.tone}`}
+                    data-testid={`linked-repo-ai-doc-${repo.id}`}
+                    title={status?.ai_doc === 'missing' ? t('linkedRepos.aiDoc.missing') : status?.doc_path ?? undefined}
+                  >
+                    {t(badge.key)}
+                  </span>
+                );
+              })()}
             </div>
             <div style={{ marginTop: 2 }}>
               {isFilesystemPath(repo.location) ? (
@@ -197,6 +257,7 @@ export function ProjectLinkedRepos({ projectId, currentRepos, onUpdate }: Projec
             )}
           </div>
           <button
+            type="button"
             className="dash-icon-btn dash-btn-cancel"
             onClick={() => handleRemove(repo.id)}
             disabled={saving}
@@ -312,6 +373,7 @@ export function ProjectLinkedRepos({ projectId, currentRepos, onUpdate }: Projec
             disabled={saving}
           />
           <input
+            ref={descriptionRef}
             className="dash-input text-sm"
             style={{ width: '100%', marginBottom: 6 }}
             placeholder={t('linkedRepos.descriptionPlaceholder')}
@@ -326,18 +388,40 @@ export function ProjectLinkedRepos({ projectId, currentRepos, onUpdate }: Projec
             </p>
           )}
           <div className="flex-row gap-3">
-            <button className="dash-icon-btn" onClick={resetDraft} disabled={saving}>
+            <button type="button" className="dash-icon-btn" onClick={resetDraft} disabled={saving}>
               {t('common.cancel')}
             </button>
-            <button className="dash-icon-btn dash-btn-accent-border" onClick={handleAdd} disabled={saving}>
+            <button type="button" className="dash-icon-btn dash-btn-accent-border" onClick={handleAdd} disabled={saving}>
               {saving ? '…' : t('linkedRepos.addBtn')}
             </button>
           </div>
         </div>
       )}
 
+      {!drafting && inlineSuggestions && availableCandidates.length > 0 && currentRepos.length < 20 && (
+        <div className="flex-row" style={{ flexWrap: 'wrap', gap: 4, marginTop: 8, alignItems: 'center' }} data-testid="linked-repos-suggestions">
+          <span className="text-xs text-muted" style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+            <Sparkles size={11} /> {t('linkedRepos.suggestionsLabel')}
+          </span>
+          {availableCandidates.slice(0, INLINE_SUGGESTIONS_MAX).map(c => (
+            <button
+              key={c.id}
+              type="button"
+              className="dash-icon-btn text-xs"
+              onClick={() => suggest(c)}
+              disabled={saving}
+              title={c.path}
+              style={{ padding: '2px 8px' }}
+            >
+              <Plus size={10} /> {c.name}
+            </button>
+          ))}
+        </div>
+      )}
+
       {!drafting && (
         <button
+          type="button"
           className="dash-icon-btn"
           style={{ marginTop: 8 }}
           onClick={() => setDrafting(true)}

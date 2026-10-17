@@ -1111,7 +1111,7 @@ fn both_mains_lock_before_loading_and_drop_the_env_token() {
     assert!(lock < load, "backend: lock before config::load()");
     // C2-29: read and removed before the multi-threaded runtime is built.
     let take = backend.find("take_env_auth_token()").unwrap();
-    let runtime = backend.find("new_multi_thread()").unwrap();
+    let runtime = backend.find("runtime_builder()").unwrap();
     assert!(
         take < runtime,
         "backend: env token removed before any thread"

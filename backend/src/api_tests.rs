@@ -2656,6 +2656,7 @@ mod tests {
                         recovered_partial: false,
                         session_tokens_at_message: None,
                         author_cli_ordinal: None,
+                        session_continuity: None,
                         id: "portable-http-message".into(),
                         role: crate::models::MessageRole::User,
                         channel: crate::models::MessageChannel::Main,
@@ -3526,6 +3527,7 @@ mod tests {
                         recovered_partial: false,
                         session_tokens_at_message: None,
                         author_cli_ordinal: None,
+                        session_continuity: None,
                         model: None,
                         lint_report: None,
                         id: uuid::Uuid::new_v4().to_string(),
@@ -4214,7 +4216,7 @@ mod tests {
                     mcp_sync_report: None,
                     default_skill_ids: vec![],
                     default_profile_id: None,
-                    briefing_notes: None,
+                    briefing_notes: Some("# Project Briefing".into()),
                     linked_repos: vec![],
                     workspace: None,
                     created_at: now,
@@ -4256,6 +4258,80 @@ mod tests {
             body_str.contains("Invalid step"),
             "Should contain error about invalid step: {body_str}"
         );
+    }
+
+    /// KT-1192 — no audit starts from the UI without a briefing: Full,
+    /// partial and revalidation answer a typed `briefing_required`, and the
+    /// gate opens once the briefing is saved.
+    #[tokio::test]
+    async fn every_audit_launch_without_a_briefing_is_refused_with_a_typed_code() {
+        let state = test_state();
+        let repo = tempfile::tempdir().unwrap();
+        let path = repo.path().to_string_lossy().into_owned();
+        state
+            .db
+            .with_conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at) \
+                     VALUES ('gate-proj', 'Gate', ?1, 'now', 'now')",
+                    [&path],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let sse = |uri: &'static str, body: serde_json::Value| {
+            let state = state.clone();
+            async move {
+                let req = Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap();
+                let resp = build_router_with_auth(state, false)
+                    .oneshot(req)
+                    .await
+                    .unwrap();
+                let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+                String::from_utf8_lossy(&bytes).into_owned()
+            }
+        };
+        let launches = [
+            (
+                "/api/projects/gate-proj/full-audit",
+                serde_json::json!({ "agent": "ClaudeCode" }),
+            ),
+            (
+                "/api/projects/gate-proj/partial-audit",
+                serde_json::json!({ "agent": "ClaudeCode", "steps": [99] }),
+            ),
+            (
+                "/api/projects/gate-proj/revalidate-audit",
+                serde_json::json!({ "agent": "ClaudeCode" }),
+            ),
+        ];
+        for (uri, body) in launches.clone() {
+            let text = sse(uri, body).await;
+            assert!(text.contains("briefing_required"), "{uri}: {text}");
+            assert!(text.contains("briefing form"), "{uri}: {text}");
+        }
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::projects::update_project_briefing_notes(
+                    conn,
+                    "gate-proj",
+                    Some("# Project Briefing"),
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        // Past the gate, the partial refresh reaches its own validation.
+        let text = sse(launches[1].0, launches[1].1.clone()).await;
+        assert!(!text.contains("briefing_required"), "{text}");
+        assert!(text.contains("Invalid step"), "{text}");
     }
 
     #[tokio::test]
@@ -4427,6 +4503,205 @@ mod tests {
         assert!(
             body["data"].is_null(),
             "Briefing should be null after clearing: {body}"
+        );
+    }
+
+    /// A project rooted in `root` (KT-1173 briefing tests).
+    async fn insert_briefing_project(state: &AppState, id: &str, root: &std::path::Path) {
+        let id = id.to_string();
+        let path = root.to_string_lossy().to_string();
+        state
+            .db
+            .with_conn(move |conn| {
+                let now = chrono::Utc::now();
+                let project = crate::models::Project {
+                    id,
+                    name: "Briefing Test".into(),
+                    path,
+                    repo_url: None,
+                    token_override: None,
+                    ai_config: crate::models::AiConfigStatus {
+                        detected: false,
+                        configs: vec![],
+                    },
+                    audit_status: crate::models::AiAuditStatus::NoTemplate,
+                    ai_todo_count: 0,
+                    tech_debt_count: 0,
+                    needs_docs_migration: false,
+                    path_exists: true,
+                    write_access: None,
+                    mcp_sync_report: None,
+                    default_skill_ids: vec![],
+                    default_profile_id: None,
+                    briefing_notes: None,
+                    linked_repos: vec![],
+                    workspace: None,
+                    created_at: now,
+                    updated_at: now,
+                };
+                crate::db::projects::insert_project(conn, &project)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    fn json_request(method: &str, uri: &str, body: serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn briefing_put_updates_an_existing_briefing_md() {
+        // AUD-14: the audit reads docs/briefing.md first, so a PUT that only
+        // wrote the DB was silently ignored once the file existed.
+        let state = test_state();
+        let tmp = tempfile::tempdir().unwrap();
+        let docs = tmp.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(
+            docs.join("briefing.md"),
+            "# Project Briefing\nOld answers\n",
+        )
+        .unwrap();
+        insert_briefing_project(&state, "brief-put", tmp.path()).await;
+
+        let req = json_request(
+            "PUT",
+            "/api/projects/brief-put/briefing",
+            serde_json::json!({"notes": "# Project Briefing\nNew answers\n"}),
+        );
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["success"].as_bool().unwrap_or(false), "{body}");
+        assert_eq!(
+            std::fs::read_to_string(docs.join("briefing.md")).unwrap(),
+            "# Project Briefing\nNew answers\n"
+        );
+        let resolved = crate::api::projects::resolve_briefing_notes(tmp.path(), &None);
+        assert_eq!(
+            resolved.as_deref(),
+            Some("# Project Briefing\nNew answers\n")
+        );
+
+        // Clearing removes the file too, so the audit stops reading the old one.
+        let req = json_request(
+            "PUT",
+            "/api/projects/brief-put/briefing",
+            serde_json::json!({"notes": null}),
+        );
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["success"].as_bool().unwrap_or(false), "{body}");
+        assert!(!docs.join("briefing.md").exists());
+        assert_eq!(
+            crate::api::projects::resolve_briefing_notes(tmp.path(), &None),
+            None
+        );
+    }
+
+    fn briefing_form(project: Option<serde_json::Value>) -> serde_json::Value {
+        let mut form = serde_json::json!({
+            "purpose": "News site",
+            "team": "Four devs",
+            "maturity": "Production",
+            "dependencies": "Jira, Fastly",
+            "traps": "Cache purge",
+            "additional": "",
+        });
+        if let Some(project) = project {
+            form["project"] = project;
+        }
+        form
+    }
+
+    #[tokio::test]
+    async fn save_briefing_form_without_project_cards_keeps_the_six_question_format() {
+        let state = test_state();
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("docs")).unwrap();
+        insert_briefing_project(&state, "brief-legacy", tmp.path()).await;
+        let req = json_request(
+            "POST",
+            "/api/projects/brief-legacy/save-briefing",
+            briefing_form(None),
+        );
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["success"].as_bool().unwrap_or(false), "{body}");
+        let written = std::fs::read_to_string(tmp.path().join("docs/briefing.md")).unwrap();
+        assert!(
+            written.ends_with("## Additional Context\nNone.\n"),
+            "{written}"
+        );
+        assert!(!written.contains("## Project facts"));
+    }
+
+    #[tokio::test]
+    async fn save_briefing_form_records_the_closed_project_cards() {
+        let state = test_state();
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("docs")).unwrap();
+        insert_briefing_project(&state, "brief-cards", tmp.path()).await;
+        let project = serde_json::json!({
+            "tracker": "jira",
+            "tracker_key": "ew",
+            "forge": "github",
+            "forge_repo": "euronews/front",
+            "default_branch": "develop",
+            "commit_convention": "ticket_prefixed",
+            "signoff_required": "no",
+            "merge_strategy": "squash",
+            "review_policy": "two_approvals",
+            "release_cadence": "scheduled",
+            "environments": [{"kind": "production", "url": "https://www.example.com"}],
+            "people": [{"role": "devops", "name": "Sam", "contact": "#devops"}],
+        });
+        let req = json_request(
+            "POST",
+            "/api/projects/brief-cards/save-briefing",
+            briefing_form(Some(project.clone())),
+        );
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["success"].as_bool().unwrap_or(false), "{body}");
+        let written = std::fs::read_to_string(tmp.path().join("docs/briefing.md")).unwrap();
+        assert!(written.contains("## Project facts"), "{written}");
+        let answers = crate::api::audit::project_doc::parse_answers(&written)
+            .expect("the answers are recorded");
+        assert_eq!(answers.tracker_key, "EW");
+        assert_eq!(answers.forge_repo, "euronews/front");
+        assert_eq!(answers.people[0].contact, "#devops");
+
+        // A choice outside the card's options is refused, not stored as prose.
+        let mut bad = project.clone();
+        bad["tracker"] = serde_json::json!("my favourite tracker");
+        let req = json_request(
+            "POST",
+            "/api/projects/brief-cards/save-briefing",
+            briefing_form(Some(bad)),
+        );
+        let (status, _) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+        let mut bad_key = project;
+        bad_key["tracker_key"] = serde_json::json!("not a key");
+        let req = json_request(
+            "POST",
+            "/api/projects/brief-cards/save-briefing",
+            briefing_form(Some(bad_key)),
+        );
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!body["success"].as_bool().unwrap_or(true), "{body}");
+        // The refused save left the recorded briefing untouched.
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("docs/briefing.md")).unwrap(),
+            written
         );
     }
 
@@ -6248,6 +6523,7 @@ mod tests {
             recovered_partial: false,
             session_tokens_at_message: None,
             author_cli_ordinal: None,
+            session_continuity: None,
             model: None,
             lint_report: None,
             id: "user-message-1".into(),
@@ -7433,6 +7709,7 @@ mod tests {
                     recovered_partial: false,
                     session_tokens_at_message: None,
                     author_cli_ordinal: None,
+                    session_continuity: None,
                     model: None,
                     lint_report: None,
                     id: uuid::Uuid::new_v4().to_string(),
@@ -7696,6 +7973,251 @@ mod tests {
                 !text.contains(ASSISTANT_TYPED),
                 "an active dispatch lost its values: {text}"
             );
+        }
+    }
+
+    // ─── Home credential gate (KT-1162) ──────────────────────────────────────
+
+    mod home_credential_gate {
+        use super::*;
+        use crate::core::mcp_scanner::host_sync_tests::{tree_digest, EnvRestore};
+        use crate::models::ApiKey;
+        use std::path::{Path, PathBuf};
+
+        const ENV: [&str; 5] = [
+            "HOME",
+            "KRONN_DATA_DIR",
+            "KRONN_HOST_HOME",
+            "KRONN_HOST_MCP_SYNC",
+            "KRONN_IN_DOCKER",
+        ];
+        const OPENAI_KEY: &str = "sk-kt1162-openai-never-leaks";
+        const GOOGLE_KEY: &str = "AIza-kt1162-google-never-leaks";
+
+        fn keyed_state() -> AppState {
+            let mut config = default_config();
+            for (provider, value) in [("openai", OPENAI_KEY), ("google", GOOGLE_KEY)] {
+                config.tokens.keys.push(ApiKey {
+                    id: format!("kt1162-{provider}"),
+                    name: "kt1162".into(),
+                    provider: provider.into(),
+                    value: value.into(),
+                    active: true,
+                });
+            }
+            let db = Arc::new(Database::open_in_memory().expect("in-memory DB"));
+            AppState::new_defaults(
+                Arc::new(RwLock::new(config)),
+                db,
+                DEFAULT_MAX_CONCURRENT_AGENTS,
+            )
+        }
+
+        /// A home holding the user's own Codex login and Gemini settings.
+        fn user_home(root: &Path, name: &str) -> PathBuf {
+            let home = root.join(name);
+            std::fs::create_dir_all(home.join(".codex")).unwrap();
+            std::fs::create_dir_all(home.join(".gemini")).unwrap();
+            std::fs::write(
+                home.join(".codex/auth.json"),
+                r#"{"auth_mode":"chatgpt","tokens":{"refresh_token":"user-rt"}}"#,
+            )
+            .unwrap();
+            std::fs::write(home.join(".gemini/settings.json"), r#"{"theme":"dark"}"#).unwrap();
+            home
+        }
+
+        fn env(home: &Path, data_dir: Option<&Path>, host_home: Option<&Path>, sync: Option<&str>) {
+            crate::core::child_env::set_var("HOME", home);
+            crate::core::child_env::remove_var("KRONN_IN_DOCKER");
+            match data_dir {
+                Some(dir) => crate::core::child_env::set_var("KRONN_DATA_DIR", dir),
+                None => crate::core::child_env::remove_var("KRONN_DATA_DIR"),
+            }
+            match host_home {
+                Some(dir) => crate::core::child_env::set_var("KRONN_HOST_HOME", dir),
+                None => crate::core::child_env::remove_var("KRONN_HOST_HOME"),
+            }
+            match sync {
+                Some(value) => crate::core::child_env::set_var("KRONN_HOST_MCP_SYNC", value),
+                None => crate::core::child_env::remove_var("KRONN_HOST_MCP_SYNC"),
+            }
+        }
+
+        async fn post(state: &AppState, uri: &str, provider: Option<&str>) -> (StatusCode, Value) {
+            let builder = Request::builder().method("POST").uri(uri);
+            let req = match provider {
+                Some(p) => builder
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(p).unwrap()))
+                    .unwrap(),
+                None => builder.body(Body::empty()).unwrap(),
+            };
+            send(state.clone(), false, req).await
+        }
+
+        fn assert_refused(status: StatusCode, body: &Value) {
+            assert_eq!(status, StatusCode::CONFLICT, "{body}");
+            assert_eq!(body["success"], false, "{body}");
+            let error = body["error"].as_str().unwrap_or_default();
+            assert!(error.contains("KRONN_HOST_HOME"), "{error}");
+            assert!(error.contains("KRONN_HOST_MCP_SYNC=1"), "{error}");
+            let text = body.to_string();
+            assert!(
+                !text.contains(OPENAI_KEY) && !text.contains(GOOGLE_KEY),
+                "{text}"
+            );
+        }
+
+        fn json(path: &Path) -> Value {
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+        }
+
+        const OWN_PROCESS_ENV: &str = "KRONN_TEST_HOME_GATE_CHILD";
+
+        /// Runs `body` alone in a fresh copy of this binary: HOME is process-wide,
+        /// and parallel tests resolving it would write into the fake home meanwhile.
+        fn in_own_process<F: std::future::Future<Output = ()>>(
+            test: &str,
+            body: impl FnOnce() -> F,
+        ) {
+            if crate::core::child_env::var_os(OWN_PROCESS_ENV).is_some() {
+                return tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(body());
+            }
+            let name = format!("api_tests::tests::home_credential_gate::{test}");
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &name, "--nocapture", "--test-threads=1"])
+                .env(OWN_PROCESS_ENV, "1")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&child.stdout);
+            assert!(
+                child.status.success() && stdout.contains("1 passed"),
+                "{test} child failed:\nstdout:\n{stdout}\nstderr:\n{}",
+                String::from_utf8_lossy(&child.stderr),
+            );
+        }
+
+        #[test]
+        fn an_isolated_instance_refuses_every_key_write_and_leaves_home_byte_identical() {
+            in_own_process(
+                "an_isolated_instance_refuses_every_key_write_and_leaves_home_byte_identical",
+                isolated_instance_refuses_every_key_write,
+            );
+        }
+
+        async fn isolated_instance_refuses_every_key_write() {
+            let _restore = EnvRestore::capture(&ENV);
+            let root = tempfile::tempdir().unwrap();
+            let home = user_home(root.path(), "home");
+            let before = tree_digest(&home);
+            let state = keyed_state();
+
+            // `=0` is the MCP off switch: it must not skip the isolation check.
+            for sync in [None, Some("0")] {
+                env(&home, Some(&root.path().join("data")), None, sync);
+                let (status, body) = post(&state, "/api/config/sync-agent-tokens", None).await;
+                assert_refused(status, &body);
+                for provider in ["openai", "google"] {
+                    let (status, body) =
+                        post(&state, "/api/config/toggle-token-override", Some(provider)).await;
+                    assert_refused(status, &body);
+                }
+                let error = crate::core::key_discovery::write_gemini_key(Some(GOOGLE_KEY))
+                    .expect_err("the writer itself refuses");
+                assert!(error.contains("KRONN_HOST_HOME") && !error.contains(GOOGLE_KEY));
+                crate::core::key_discovery::write_gemini_key(None).expect_err("removal too");
+            }
+
+            assert_eq!(tree_digest(&home), before, "no file under HOME may change");
+            assert!(
+                state
+                    .config
+                    .read()
+                    .await
+                    .tokens
+                    .disabled_overrides
+                    .is_empty(),
+                "a refused toggle changes nothing"
+            );
+        }
+
+        #[test]
+        fn kronn_host_home_receives_the_keys_and_home_stays_untouched() {
+            in_own_process(
+                "kronn_host_home_receives_the_keys_and_home_stays_untouched",
+                host_home_receives_the_keys,
+            );
+        }
+
+        async fn host_home_receives_the_keys() {
+            let _restore = EnvRestore::capture(&ENV);
+            let root = tempfile::tempdir().unwrap();
+            let home = user_home(root.path(), "home");
+            let host = user_home(root.path(), "host");
+            let before = tree_digest(&home);
+            env(&home, Some(&root.path().join("data")), Some(&host), None);
+            let state = keyed_state();
+
+            let (status, body) = post(&state, "/api/config/sync-agent-tokens", None).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["data"], serde_json::json!(["Codex", "Gemini CLI"]));
+            let codex = json(&host.join(".codex/auth.json"));
+            assert_eq!(codex["OPENAI_API_KEY"], OPENAI_KEY);
+            assert_eq!(codex["tokens"]["refresh_token"], "user-rt");
+            let gemini = json(&host.join(".gemini/settings.json"));
+            assert_eq!(gemini["apiKey"], GOOGLE_KEY);
+            assert_eq!(gemini["theme"], "dark");
+
+            let (status, body) =
+                post(&state, "/api/config/toggle-token-override", Some("openai")).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["data"], false);
+            assert!(json(&host.join(".codex/auth.json"))
+                .get("OPENAI_API_KEY")
+                .is_none());
+
+            assert_eq!(
+                tree_digest(&home),
+                before,
+                "HOME is not the redirected home"
+            );
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn the_default_instance_and_the_opt_in_still_write_into_home() {
+            let _restore = EnvRestore::capture(&ENV);
+            let root = tempfile::tempdir().unwrap();
+            let state = keyed_state();
+            let isolated = root.path().join("data");
+            let cases: [(&str, Option<&Path>, Option<&str>); 3] = [
+                ("default", None, None),
+                ("default-mcp-off", None, Some("0")),
+                ("opt-in", Some(isolated.as_path()), Some("1")),
+            ];
+            for (name, data_dir, sync) in cases {
+                let home = user_home(root.path(), name);
+                env(&home, data_dir, None, sync);
+                let (status, body) = post(&state, "/api/config/sync-agent-tokens", None).await;
+                assert_eq!(status, StatusCode::OK, "{name}: {body}");
+                assert_eq!(
+                    body["data"],
+                    serde_json::json!(["Codex", "Gemini CLI"]),
+                    "{name}"
+                );
+                let codex = json(&home.join(".codex/auth.json"));
+                assert_eq!(codex["OPENAI_API_KEY"], OPENAI_KEY, "{name}");
+                assert_eq!(codex["auth_mode"], "chatgpt", "{name}");
+                assert_eq!(
+                    json(&home.join(".gemini/settings.json"))["apiKey"],
+                    GOOGLE_KEY
+                );
+            }
         }
     }
 }

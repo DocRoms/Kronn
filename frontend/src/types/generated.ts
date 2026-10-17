@@ -5,6 +5,44 @@
 // ║  Regenerate: `make typegen`. CI fails if this file drifts from the models.  ║
 // ╚═══════════════════════════════════════════════════════════════════════════╝
 
+export type AcceptAuditStepRequest = {
+/**
+ * Why the step is accepted; optional.
+ */
+reason?: string,
+/**
+ * KT-1211 — accept a step whose failure is known to leave an unsound
+ * document (truncated, citations that do not resolve, an undisposed
+ * detector signal, a stopped step) anyway. Without it the acceptance is
+ * refused and the answer carries the diff to look at.
+ */
+override_unsound?: boolean, };
+
+export type AcceptAuditStepResponse = { step: number, accepted_by: string, accepted_at: string,
+/**
+ * Failed steps of the run still neither retried nor accepted. Empty: a
+ * resume now only finalizes the run.
+ */
+remaining_failed: Array<number>, };
+
+/**
+ * `POST /api/projects/:id/citation-drift/acknowledge` body: the doc whose
+ * citations were checked by hand and still hold.
+ */
+export type AcknowledgeCitationsRequest = { doc: string, };
+
+/**
+ * `POST /api/projects/:id/drift/acknowledge` body: the stale sections (their
+ * `ai_file`) a human checked and found still true.
+ */
+export type AcknowledgeDriftRequest = { sections: Array<string>,
+/**
+ * The gone prose paths the human was shown with those sections: only
+ * these are accepted. Absent, none is (an older client accepts nothing
+ * it never displayed).
+ */
+shown_paths?: Array<ShownPath>, };
+
 export type ActiveAgentDispatch = { id: string, trigger_message_id: string, agent_type: AgentType, status: string,
 /**
  * Number of times this durable dispatch has been claimed. A value above
@@ -31,7 +69,19 @@ connection_id?: string,
  */
 progress_phase?: string, };
 
-export type ActiveWorkflowStep = { agent_type: AgentType, started_at: string, run_id: string, workflow_id: string, workflow_name: string, step_key: string, step_name: string, };
+export type ActiveWorkflowStep = { agent_type: AgentType, started_at: string,
+/**
+ * KT-1252 — the `run_id` of the room's live `AgentRunProgress` frames for
+ * this step: the bubble reads the run's phase and tool activity from the
+ * run-progress store under it. Absent while the step has none.
+ */
+progress_run_id?: string,
+/**
+ * KT-1252 — the run targets this room but its agent has not entered it
+ * yet. `step_*` then name the step the run executes now (the preparation),
+ * and `agent_type` the agent about to enter.
+ */
+preparing?: boolean, run_id: string, workflow_id: string, workflow_name: string, step_key: string, step_name: string, };
 
 /**
  * What kind of action an agent's tool call is, from a fixed table
@@ -555,7 +605,14 @@ export type ApiCallStatus = "OK" | "ERROR" | "RateLimited" | "TimedOut";
  * these as plain inputs (no mask). Prompts may reference them symbolically;
  * the broker resolves values server-side when it builds full URLs.
  */
-export type ApiConfigKey = { env_key: string, label: string, placeholder: string, description: string, };
+export type ApiConfigKey = { env_key: string, label: string, placeholder: string, description: string,
+/**
+ * The value is not a credential (a base URL, a workspace id): the call
+ * keeps it intact in the data it hands on instead of masking it as a
+ * secret. Honoured for registry servers only: an imported or custom
+ * definition cannot declare it, see `api_call_executor::is_public_config`.
+ */
+public?: boolean, };
 
 /**
  * Fixed request header declared on an API plugin. `value` is a literal
@@ -775,6 +832,13 @@ path: string,
 format?: string | null, };
 
 /**
+ * KT-154 — `assignee: None` means "the acting agent itself": the server
+ * resolves the actor's exact joined CLI session and refuses when it cannot.
+ * `role` applies to that self-assignment (default `owner`).
+ */
+export type AssignPlanningTaskRequest = { assignee?: PlanningAssigneeInput | null, role?: PlanningAssigneeRole | null, actor?: PlanningActor, };
+
+/**
  * What a discussion is created for when it is an assistant conversation:
  * the link is written in the discussion's own transaction, and `secrets`
  * are masked out of its title and first message before anything is stored.
@@ -856,7 +920,7 @@ export type AuditFileInfo = { path: string, filled: boolean, };
 
 export type AuditFinding = { severity: string, what: string, where_: string, };
 
-export type AuditInfo = { files: Array<AuditFileInfo>, todos: Array<AuditTodo>, tech_debt_items: Array<TechDebtItem>, };
+export type AuditInfo = { template_update?: TemplateUpdate, files: Array<AuditFileInfo>, todos: Array<AuditTodo>, tech_debt_items: Array<TechDebtItem>, };
 
 /**
  * 0.8.2 — Specialized audit types ("Design C").
@@ -871,6 +935,80 @@ export type AuditInfo = { files: Array<AuditFileInfo>, todos: Array<AuditTodo>, 
  * `api::audit`.
  */
 export type AuditKind = "Full" | "Drift" | "Security" | "Docker" | "Performance" | "Accessibility" | "Rgaa" | "Database" | "ApiDesign" | "CodeQuality" | "Custom";
+
+/**
+ * What a client needs to tell where a project's audits stand.
+ */
+export type AuditLatest = {
+/**
+ * The newest run of any status: a Cancelled, Failed or Interrupted run
+ * after a Completed one is the project's state, not history.
+ */
+latest: AuditRun | null,
+/**
+ * The newest Completed run, the health snapshot.
+ */
+latest_completed: AuditRun | null,
+/**
+ * 1-based steps a resume of `latest` runs; empty when it is not resumable.
+ */
+steps_to_redo: Array<number>,
+/**
+ * The lease is held by a run nobody can settle: every launch is refused
+ * until the cleanup action releases it (KT-1134).
+ */
+lease_orphaned: boolean,
+/**
+ * The audit run the repository describes (KT-1199): a colleague's run
+ * after a fetch or a rebase. Shown as the project's state when
+ * `newer_than_local`; `None` when the repository carries no run state.
+ */
+repo: RepoAuditRun | null, };
+
+/**
+ * What one phase of an audit (briefing, audit steps, validation discussion)
+ * consumed (KT-1084). Every figure is absent when nothing reported it: a phase
+ * whose agents reported no usage is "not measured", never 0. A sum over items
+ * some of which reported nothing is a floor, and `cost_unknown_items` says so.
+ */
+export type AuditPhaseCost = {
+/**
+ * Finished steps, or agent replies, the phase is made of.
+ */
+items: number,
+/**
+ * Of those, the ones that reported token usage.
+ */
+measured_items: number,
+/**
+ * Fresh traffic (uncached input plus output); input as reported when an
+ * item's cache split is unknown.
+ */
+total_tokens?: number,
+/**
+ * Uncached input, summed over the items whose cache split is known.
+ */
+input_tokens?: number, output_tokens?: number, cache_read_tokens?: number, cache_write_tokens?: number,
+/**
+ * Measured items whose cache split is unknown: the parts above leave them out.
+ */
+split_unknown_items: number,
+/**
+ * Reported cost, else Kronn's estimate, summed over the items that have one.
+ */
+cost_usd_micros?: number,
+/**
+ * At least one summed cost is an estimate, not an agent-reported figure.
+ */
+cost_estimated: boolean,
+/**
+ * Items with no cost at all: the sum above is a floor.
+ */
+cost_unknown_items: number,
+/**
+ * Steps a resume inherited from another run, counted once, at their origin's figures.
+ */
+carried_items: number, };
 
 /**
  * Live progress of a running audit, exposed via `GET /api/projects/:id/audit-status`.
@@ -1051,7 +1189,47 @@ model?: string | null,
  * Starter `kronn/project.toml` drafted for a repository without one
  * (KT-920); never written into the checkout.
  */
-project_profile_draft?: string | null, };
+project_profile_draft?: string | null,
+/**
+ * KT-1211 — the user cancelled this run while this step was in flight
+ * (0 = before step 1). `None` on a run nobody cancelled. A run cancelled
+ * after a completed step is `Interrupted` (resumable) and carries this
+ * flag; one cancelled before any step is `Cancelled`.
+ */
+cancelled_at_step?: number,
+/**
+ * KT-1211 — what moved in the sources between the run this one resumes
+ * and the resume itself; saved so the timeline and the validation prompt
+ * can say so after the one-off toast is gone.
+ */
+resume_drift?: string,
+/**
+ * KT-1320 — the model tier the run was launched with (`economy`,
+ * `default`, `reasoning`); absent on a run recorded before it was kept.
+ * A step retry or a resume reuses it unless the human picks another.
+ */
+tier?: string,
+/**
+ * KT-1320 — the named API connection the run's HTTP agent used, if any.
+ */
+connection_id?: string, };
+
+/**
+ * An audit run's tokens and cost per phase and in total (KT-1084).
+ */
+export type AuditRunCost = { run_id: string,
+/**
+ * The project's briefing discussion(s) opened since the previous Full run.
+ */
+briefing: AuditPhaseCost,
+/**
+ * The run's steps, its own and the ones it carried, each counted once.
+ */
+audit: AuditPhaseCost,
+/**
+ * The agent replies of the run's validation discussion.
+ */
+validation: AuditPhaseCost, total: AuditPhaseCost, };
 
 /**
  * 0.8.4 (#298) — Per-step metrics for the post-audit recap panel.
@@ -1083,6 +1261,23 @@ cli_success: boolean, step_warning?: string | null,
  * Mirrors the `step_warning.repaired` field from #292.
  */
 step_repaired_from_template: boolean,
+/**
+ * The target was already up to date: every gate passed and the agent had
+ * nothing to change (KT-1130). Neither a success that wrote nor a failure.
+ */
+unchanged: boolean,
+/**
+ * A human accepted this failed step as it stands (KT-1131): when, who and
+ * why. It counts as done; `cli_success` and `step_warning` keep the failure.
+ */
+accepted_at?: string, accepted_by?: string, accepted_reason?: string,
+/**
+ * KT-1211 — what became of the step's target when the step did not
+ * succeed: `restored` (put back as it was before the step) or `partial`
+ * (kept, with a visible partial marker). `None` when the step wrote
+ * nothing wrong.
+ */
+target_state?: string,
 /**
  * The step's cost in millionths of a dollar, when its agent reported one.
  */
@@ -1131,17 +1326,47 @@ steps: Array<AuditRunStep>,
  */
 recorded_audits: Array<AuditEntry>, recorded_validated_at: string | null,
 /**
+ * Who validated and who opened the validation, from `.kronn.json`
+ * (only while `recorded_validated_at` is set).
+ */
+recorded_validated_by: string | null, recorded_validation_started_by: string | null,
+/**
  * The validation discussion linked to the latest run when that run is
  * Completed, archived or not: the timeline offers to validate once it
  * has finished.
  */
-latest_validation: AuditTimelineValidation | null, };
+latest_validation: AuditTimelineValidation | null,
+/**
+ * The project's audit lease is held by a run that could not be settled:
+ * every launch is refused until the cleanup action releases it (KT-1134).
+ */
+lease_orphaned: boolean,
+/**
+ * Why the server would refuse a validation now (`None` = it accepts):
+ * the UI shows the reason instead of offering the action.
+ */
+validation_block: ValidationBlock | null,
+/**
+ * The audit run the repository describes (KT-1199): a colleague's run
+ * after a fetch or a rebase, read off the working tree at every call.
+ */
+repo: RepoAuditRun | null,
+/**
+ * The repository's run is the project's state here and the server would
+ * accept a validation from it: the timeline offers to validate.
+ */
+repo_can_validate: boolean, };
 
 export type AuditTimelineValidation = { discussion_id: string,
 /**
- * Same terminal-signal parser as the validate-audit gate.
+ * The server's verdict, from the durable completion stamp: the one
+ * parser of the signal lives in the backend.
  */
-finished: boolean, archived: boolean, };
+finished: boolean, archived: boolean, completed_at: string | null,
+/**
+ * Pseudo of the operator whose audit opened the validation.
+ */
+started_by: string | null, validated_by: string | null, validated_at: string | null, };
 
 export type AuditTodo = { file: string, line: number, text: string, };
 
@@ -1290,6 +1515,130 @@ export type BlockedReasonCode = "awaiting_worker_acceptance" | "worker_session_c
 export type BootstrapProjectRequest = { name: string, description: string, agent: AgentType, mcp_config_ids?: Array<string>, skill_ids?: Array<string>, };
 
 export type BootstrapProjectResponse = { project_id: string, discussion_id: string, };
+
+export type BriefingCommitConvention = "unknown" | "conventional" | "ticket_prefixed" | "free";
+
+export type BriefingDefaultBranch = "unknown" | "main" | "master" | "develop" | "trunk";
+
+/**
+ * The folder the briefing proposes, and where the proposal comes from.
+ */
+export type BriefingDefaults = {
+/**
+ * Relative to the project root, without a trailing slash.
+ */
+docs_dir: string, docs_dir_source: BriefingDocsDirSource,
+/**
+ * The folder already exists in the project.
+ */
+folder_exists: boolean,
+/**
+ * What the proposed folder already holds.
+ */
+folder: DocsFolderState, };
+
+/**
+ * A location found in the repository, offered as a pre-filled answer.
+ */
+export type BriefingDetectedDoc = { path: string, kind: BriefingDocKind, is_dir: boolean, last_commit: string | null, };
+
+/**
+ * What a documentation location is, classified by Kronn from its path.
+ */
+export type BriefingDocKind = "readme" | "docs" | "wiki" | "adr" | "api" | "contributing" | "markdown";
+
+/**
+ * One documentation location recorded in the briefing.
+ */
+export type BriefingDocLocation = {
+/**
+ * Repository-relative, normalised, `/`-separated.
+ */
+path: string,
+/**
+ * Recomputed by Kronn on save; the client's value is ignored.
+ */
+kind: BriefingDocKind, state: BriefingDocState, note: string,
+/**
+ * At most one source of truth per kind.
+ */
+source_of_truth: boolean,
+/**
+ * `YYYY-MM-DD` of the last commit touching the path, read by Kronn on save.
+ */
+last_commit: string | null, };
+
+export type BriefingDocsAnswers = { locations: Array<BriefingDocLocation>, };
+
+export type BriefingDocsDirSource = "project_override" | "existing" | "global_default" | "default";
+
+/**
+ * The state the user gives a location. `Unknown` is an unanswered state.
+ */
+export type BriefingDocState = "unknown" | "recent" | "old" | "obsolete" | "partial" | "reference";
+
+export type BriefingEnvironment = { kind: BriefingEnvironmentKind, url: string, };
+
+export type BriefingEnvironmentKind = "local" | "dev" | "staging" | "preprod" | "production" | "preview";
+
+/**
+ * An external documentation space: its kind and its address, nothing else.
+ */
+export type BriefingExternalDoc = { kind: BriefingExternalDocKind, url: string, };
+
+/**
+ * Where a project's documentation lives outside the repository.
+ */
+export type BriefingExternalDocKind = "confluence" | "notion" | "wiki" | "other";
+
+/**
+ * A project fact a briefing note can be attached to (KT-1196).
+ */
+export type BriefingFact = "tracker" | "tracker_key" | "forge" | "forge_repo" | "default_branch" | "commit_convention" | "signoff" | "merge_strategy" | "review" | "release_cadence" | "environments" | "people" | "external_docs";
+
+export type BriefingForge = "unknown" | "github" | "gitlab" | "bitbucket" | "azure_devops" | "other";
+
+export type BriefingMergeStrategy = "unknown" | "squash" | "rebase" | "merge_commit";
+
+/**
+ * A role and the name/contact the user typed; nothing else is recorded.
+ */
+export type BriefingPerson = { role: BriefingPersonRole, name: string, contact: string, };
+
+export type BriefingPersonRole = "arbiter" | "tech_lead" | "devops" | "product_owner" | "qa";
+
+/**
+ * The answers `docs/project.md` is rendered from.
+ */
+export type BriefingProjectAnswers = { tracker: BriefingTracker,
+/**
+ * Jira project key, Linear team key, …: checked when a connection exists.
+ */
+tracker_key: string, forge: BriefingForge,
+/**
+ * `owner/name`; inferred from the project's git remote when empty.
+ */
+forge_repo: string, default_branch: BriefingDefaultBranch, commit_convention: BriefingCommitConvention, signoff_required: BriefingYesNo, merge_strategy: BriefingMergeStrategy, review_policy: BriefingReviewPolicy, release_cadence: BriefingReleaseCadence, environments: Array<BriefingEnvironment>, people: Array<BriefingPerson>,
+/**
+ * External documentation (Confluence, Notion, a wiki). Omitted when empty
+ * so machine copies written before it stay identical.
+ */
+external_docs?: Array<BriefingExternalDoc>,
+/**
+ * KT-1196 — optional free-text note per fact: the "how" a closed option
+ * cannot say. Omitted when empty so older machine copies stay identical.
+ */
+notes?: { [key in BriefingFact]?: string }, };
+
+export type BriefingProjectRules = { rules: Array<ProjectRule>, };
+
+export type BriefingReleaseCadence = "unknown" | "continuous" | "scheduled" | "on_demand";
+
+export type BriefingReviewPolicy = "unknown" | "no_review" | "one_approval" | "two_approvals";
+
+export type BriefingTracker = "unknown" | "jira" | "github_issues" | "gitlab_issues" | "linear" | "other" | "none";
+
+export type BriefingYesNo = "unknown" | "yes" | "no";
 
 export type BrowseEntry = { name: string, path: string,
 /**
@@ -1649,11 +1998,29 @@ detail?: string | null,
  */
 notice?: string | null, };
 
+export type CheckBriefingDocRequest = { path: string, };
+
 /**
  * What a CI check is known to be. `Unknown` is its own value: a check nobody
  * could read is not a passing one.
  */
 export type CiState = "passing" | "failing" | "unknown";
+
+export type CitationDriftReport = { sources_state: SourcesState, sections: Array<SectionCitations>, broken_count: number, moved_count: number, unchanged_count: number, };
+
+/**
+ * `GET /api/projects/:id/citation-drift`: broken and moved citations per
+ * section, plus the last scheduled re-verification.
+ */
+export type CitationDriftResponse = { last_scheduled_check: ScheduledCheck | null, sources_state: SourcesState, sections: Array<SectionCitations>, broken_count: number, moved_count: number, unchanged_count: number, };
+
+export type CitationState = "unchanged" | "moved" | "changed" | "removed" | "file_missing";
+
+export type CitationStatus = { cite: string, file: string, line: number | null, end_line: number | null, state: CitationState,
+/**
+ * Where a moved citation now starts.
+ */
+current_line: number | null, };
 
 /**
  * Body of `POST /api/disc/claim-by-token`. A PEER calls this to ask "do you
@@ -1786,6 +2153,12 @@ export type ComparePromptCompatibility = "identical" | "different" | "missing";
 
 export type ConditionAction = { "type": "Stop" } | { "type": "Skip" } | { "type": "Goto", step_name: string, max_iterations?: number | null, };
 
+export type ConfirmDocsRequest = {
+/**
+ * Docs to confirm; empty confirms every doc to reconfirm.
+ */
+docs?: Array<string>, };
+
 export type Contact = { id: string, pseudo: string, avatar_email: string | null, kronn_url: string, invite_code: string, status: string, created_at: string, updated_at: string, };
 
 export type ContextAudit = { files: Array<InstructionFile>, per_agent: Array<AgentContext>, proposal: Array<TierMove>, findings: Array<AuditFinding>,
@@ -1865,6 +2238,26 @@ cost_usd: number | null,
  * connection's credit.
  */
 is_byok: boolean, };
+
+export type CorrectionKind = "recheck" | "replace_or_remove" | "remove_section" | "check_or_anchor";
+
+export type Correspondence = {
+/**
+ * Repo-relative source path.
+ */
+source: string,
+/**
+ * Heading of the section; `None` for a preamble or a whole file.
+ */
+section: string | null,
+/**
+ * 1-based inclusive line range in the source (0..0 for non-prose files).
+ */
+start_line: number, end_line: number,
+/**
+ * Repo-relative v2 file the section belongs to.
+ */
+target: string | null, action: MappingAction, };
 
 /**
  * Cost aggregated across one or more token-cost observations. Never
@@ -1994,7 +2387,11 @@ host_sync?: HostSyncMode,
  */
 custom_spec?: CustomApiPayload | null, };
 
-export type CreatePlanningDodItem = { id: string | null, sentence: string, completed: boolean, };
+export type CreatePlanningDodItem = { id: string | null, sentence: string, completed: boolean,
+/**
+ * KT-1254 — `None` keeps an existing item's mode (`Worker` for a new one).
+ */
+verification?: PlanningDodVerification, };
 
 export type CreatePlanningTaskLink = { label: string, url: string, };
 
@@ -2070,6 +2467,34 @@ export type CronPreviewRequest = { schedule: string,
  * The trigger's own zone; absent means Kronn's global zone.
  */
 timezone?: string, };
+
+/**
+ * The cost of a cross-agent audit, before launch (KT-1183, experimental).
+ * Detection runs each cross-checked step once per agent; the cross-check and
+ * the reply add at most one call per agent each: the range goes from N to 2N
+ * times the step's single-agent cost.
+ */
+export type CrossAuditEstimate = { agents: number,
+/**
+ * The steps run cross-agent (finding steps only).
+ */
+cross_checked_steps: Array<string>, low_factor: number, high_factor: number,
+/**
+ * Findings challenged per step; the rest are listed as not cross-checked.
+ */
+max_cross_checked: number,
+/**
+ * The single-agent run the range scales (its cost: `GET /api/audit-runs/{id}/cost`).
+ */
+base_run_id?: string, base_tokens?: number, base_cost_usd_micros?: number, low_tokens?: number, high_tokens?: number, low_cost_usd_micros?: number, high_cost_usd_micros?: number,
+/**
+ * A past cross-agent run of the step with as many agents, as measured.
+ */
+measured_run_id?: string, measured_tokens?: number, measured_cost_usd_micros?: number,
+/**
+ * No comparable cross-agent run was measured: the range is an estimate.
+ */
+estimated: boolean, };
 
 export type CustomApiField = { label: string, value: string, };
 
@@ -2249,6 +2674,12 @@ gate_step?: string | null, };
  */
 export type DecideRunResponse = { run_id: string, new_status: RunStatus, };
 
+export type DecideScopeRequest = {
+/**
+ * Approve only: the access granted, at most the one asked for.
+ */
+access?: ScopeAccess | null, };
+
 export type DeclineDiscussionQuestionRequest = { idempotency_key: string,
 /**
  * Why it is refused. Optional: a human owes no justification, but the
@@ -2329,13 +2760,35 @@ export type DeleteManualModelRequest = { runtime_target_id: string, model_id: st
  * present even when empty, so "no migrations" is an explicit `[]`, never a
  * silent omission.
  */
-export type DeliveryManifestV1 = { version: string, task_ref: string, head_sha: string, files_touched: Array<ManifestFile>, tests: Array<ManifestTest>, dod_status: Array<ManifestDodStatus>, docs: Array<string>, migrations: Array<string>, risks: Array<string>, limitations: Array<string>, summary: string, };
+export type DeliveryManifestV1 = { version: string, task_ref: string, head_sha: string, files_touched: Array<ManifestFile>, tests: Array<ManifestTest>, dod_status: Array<ManifestDodStatus>, docs: Array<string>, migrations: Array<string>, risks: Array<string>, limitations: Array<string>, summary: string,
+/**
+ * KT-1246 — absent on deliveries made before the field existed and on
+ * joined-CLI deliveries; a spawned worker must always state it.
+ */
+tests_executed?: TestsExecuted | null, };
 
-export type DependencyCheckStatus = "UpToDate" | "UpdatesAvailable" | "Unsupported" | "Unavailable" | "Error" | "TimedOut";
+export type DependencyCheckStatus = "UpToDate" | "UpdatesAvailable" | "Unsupported" | "Unavailable" | "Error" | "TimedOut" | "NotInstalled";
 
-export type DependencyManagerUpdate = { manager: string, manifest: string, status: DependencyCheckStatus, outdated: number, major: number, packages?: Array<DependencyUpdatePackage>, };
+export type DependencyManagerUpdate = { manager: string, manifest: string, status: DependencyCheckStatus, outdated: number, major: number, packages?: Array<DependencyUpdatePackage>,
+/**
+ * Why the manifest could not be checked (missing binary, network, parse
+ * error, timeout…). Set for every status that is not a verdict (KT-1325).
+ */
+reason?: string | null, };
 
-export type DependencyUpdatePackage = { name: string, current: string, latest: string, major: boolean, };
+export type DependencyUpdatePackage = { name: string, current: string, latest: string, major: boolean,
+/**
+ * The package is declared but not installed (no `node_modules`): `current`
+ * is empty because no installed version exists to report, and the row
+ * only proves the declared range cannot reach `latest`.
+ */
+declared_only?: boolean,
+/**
+ * The lockfile `current` was read from when there is no installed tree
+ * (KT-1325), e.g. `package-lock.json`. `None`: `current` is what the
+ * package manager reports as installed (or the lock it was run against).
+ */
+lockfile?: string | null, };
 
 export type DependencyUpdateSummary = { managers: Array<DependencyManagerUpdate>, total_outdated: number, total_major: number, checked_at: string, cached: boolean,
 /**
@@ -3129,7 +3582,12 @@ reply_to_message_id?: string | null,
  * `None` for User/System/native-agent messages and legacy rows with no
  * recorded CLI author.
  */
-author_cli_ordinal?: number | null, };
+author_cli_ordinal?: number | null,
+/**
+ * KT-1202 — whether this agent turn continued its CLI/ACP conversation or
+ * started a new one, and why. `None` for runtimes that never resume.
+ */
+session_continuity?: SessionContinuity | null, };
 
 /**
  * Lean surrounding-message shape for a `disc_get_message` window.
@@ -3230,6 +3688,12 @@ stats: PlanningPlanStats, };
  */
 export type DiscussionPoll = { revision: string, detail: DiscussionDetail | null, };
 
+export type DiscussionProjectGrant = { id: string, discussion_id: string,
+/**
+ * `None` = every project.
+ */
+project_id: string | null, project_name: string | null, access: ScopeAccess, source: ScopeGrantSource, request_id: string | null, granted_by: string, granted_at: string, revoked_by: string | null, revoked_at: string | null, revoked_reason: string | null, };
+
 export type DiscussionQuestion = { id: string, discussion_id: string, source_message_id: string, fence_index: number, key: string, question: string, context: string | null, options: Array<DiscussionQuestionOption>, items: Array<DiscussionQuestionItem>, multiple: boolean, recommended_option_ids: Array<string>, task_ref: string | null, requester_workflow_step: DiscussionQuestionWorkflowStep | null, resume: DiscussionQuestionResume | null, state: DiscussionQuestionState, answer: DiscussionQuestionAnswer | null, created_at: string, updated_at: string, };
 
 export type DiscussionQuestionAnswer = { selected_option_ids: Array<string>, item_answers: Array<DiscussionQuestionItemAnswer>, text: string | null, author_pseudo: string, answered_at: string, message_id: string, };
@@ -3249,6 +3713,37 @@ export type DiscussionQuestionResumeState = "pending" | "launching" | "launched"
 export type DiscussionQuestionState = "pending" | "answered" | "declined";
 
 export type DiscussionQuestionWorkflowStep = { active: boolean, run_id: string, workflow_id: string, workflow_name: string, step_key: string, step_name: string, };
+
+/**
+ * A room's whole scope, as the human panel and the agent see it.
+ */
+export type DiscussionScope = { discussion_id: string, primary_project_id: string | null,
+/**
+ * Active grants.
+ */
+grants: Array<DiscussionProjectGrant>,
+/**
+ * Revoked grants, newest first: the journal.
+ */
+revoked: Array<DiscussionProjectGrant>,
+/**
+ * Pending requests, then the latest decided ones.
+ */
+requests: Array<DiscussionScopeRequest>,
+/**
+ * Digest of the active grants: a human decision names the scope it saw.
+ */
+fingerprint: string, };
+
+export type DiscussionScopeRequest = { id: string, discussion_id: string,
+/**
+ * `None` when the agent named no single project.
+ */
+project_id?: string | null,
+/**
+ * The project as the agent named it.
+ */
+requested_name: string, project_name?: string | null, access: ScopeAccess, reason: string, requested_by: string, status: ScopeRequestStatus, decided_by?: string | null, decided_at?: string | null, granted_access?: ScopeAccess | null, created_at: string, };
 
 /**
  * A row of `discussion_sessions` — one live (or historical)
@@ -3416,6 +3911,43 @@ export type DiscWorkspaceSetResponse = { workspace: DiscussionWorkspace, blocker
 
 export type DiscWorkspaceState = { disc_id: string, session_pk: number, current: DiscussionWorkspace | null, workspaces: Array<DiscussionWorkspace>, };
 
+export type DocProvenanceReport = { docs: Array<DocProvenanceStatus>, to_reconfirm: number, };
+
+export type DocProvenanceStatus = { doc: string, state: ProvenanceState, reason: ValidationReason, scope: ProvenanceScope, validated_at: string,
+/**
+ * The sections in scope (`sections` scope only).
+ */
+sections: Array<string>,
+/**
+ * Kronn writes since the validation; empty when edited outside Kronn.
+ */
+kronn_writes: Array<KronnWrite>,
+/**
+ * Filled on request, for docs to reconfirm only.
+ */
+changes: Array<ProvenanceChange>, };
+
+/**
+ * Which rule picked the folder.
+ */
+export type DocsDirSource = "project_override" | "detected";
+
+export type DocsFolderState = { "kind": "missing" } | { "kind": "kronn_managed" } | { "kind": "human_docs",
+/**
+ * Files a move to `legacy/` would carry.
+ */
+files: number,
+/**
+ * A static-site generator config that references the folder.
+ */
+site_generator: string | null,
+/**
+ * `<folder>/legacy/` already exists: Kronn never merges into it.
+ */
+legacy_exists: boolean, };
+
+export type DocWriter = "full_audit" | "partial_audit" | "revalidation" | "template_reinstall" | "document_repair" | "td_index";
+
 /**
  * What changed since a previous audit — KT-194 drift.
  */
@@ -3440,9 +3972,26 @@ unused_files: Array<string>,
  */
 paid_agent_growth: Array<AgentContextGrowth>, };
 
-export type DriftCheckResponse = { audit_date: string | null, stale_sections: Array<DriftSection>, fresh_sections: Array<string>, total_sections: number, };
+export type DriftCheckResponse = { template_update?: TemplateUpdate, audit_date: string | null, stale_sections: Array<DriftSection>, fresh_sections: Array<string>, total_sections: number,
+/**
+ * "Sources clean" badge, recomputed from the cited lines.
+ */
+sources_state: SourcesState, broken_citations: number,
+/**
+ * Paths the docs' prose names that are gone, which no citation covers
+ * (KT-1168). Counted apart from `broken_citations`.
+ */
+missing_paths?: number,
+/**
+ * Template docs that still hold raw `{{PLACEHOLDERS}}` (KT-1203).
+ */
+placeholder_docs: Array<PlaceholderDoc>, };
 
-export type DriftSection = { ai_file: string, audit_step: number, changed_sources: Array<string>, };
+export type DriftSection = { ai_file: string, audit_step: number, changed_sources: Array<string>,
+/**
+ * Gone paths the doc's prose names, none accepted yet (KT-1168).
+ */
+missing_paths: Array<VanishedPaths>, };
 
 /**
  * `POST /api/config/embed-origins`: origins to allow and to revoke, applied
@@ -3499,7 +4048,13 @@ export type Evidence = { kind: string, ref: string, quote?: string | null, };
 /**
  * Gate-1 verdict for one evidence row (rendered per-row in the validation modal).
  */
-export type EvidenceCheck = { reference: string, status: string, fabricated: boolean, };
+export type EvidenceCheck = { reference: string, status: string, fabricated: boolean,
+/**
+ * A source inside the project docs: human-validated or AI-generated (KT-1079).
+ */
+doc_provenance?: SourceProvenance, };
+
+export type EvidenceKind = "citation" | "path_reference";
 
 /**
  * What a run may be evidence for.
@@ -3656,6 +4211,15 @@ data_base64: string | null, };
  * How a file changed, in a [`DeliveryManifestV1`].
  */
 export type FileChangeKind = "added" | "modified" | "deleted";
+
+/**
+ * An agent's request for another project.
+ */
+export type FileScopeRequest = {
+/**
+ * The project's name or id.
+ */
+project: string, access: ScopeAccess, reason: string, };
 
 /**
  * Where a finding stands. `Open` and `Unproven` are distinct on purpose: a
@@ -3896,6 +4460,20 @@ export type GitSwitchBranchRequest = { branch: string, };
 
 export type GitWorkspaceProvenance = { workspace_id: string | null, ownership: string, state: string, path: string | null, branch: string, base_sha: string | null, head_sha: string | null, integrated_sha: string | null, task_execution_id: string | null, task_reference: string | null, };
 
+export type GrantDiscussionProjectRequest = {
+/**
+ * The project to open; omitted with `all: true`.
+ */
+project_id?: string | null, all?: boolean, access: ScopeAccess,
+/**
+ * Required for every project in write: [`ALL_PROJECTS_WRITE_CONFIRMATION`].
+ */
+confirm?: string | null,
+/**
+ * The scope fingerprint the human's screen showed.
+ */
+expected_fingerprint?: string | null, };
+
 /**
  * What a grant may do. Fixed at enrolment, never derived afterwards.
  */
@@ -3919,6 +4497,12 @@ export type HostScope = { "kind": "ClaudeUser" } | { "kind": "ClaudeLocal", "val
  * whether Kronn writes the entry into `~/.claude.json` & friends.
  */
 export type HostSyncMode = "None" | "GlobalOnly" | "MirrorAll";
+
+/**
+ * A citation inside a human-owned section, listed for its owner: Kronn may
+ * correct it, and its owner then reconfirms the doc.
+ */
+export type HumanCitationTodo = { section: string, citation: CitationStatus, };
 
 /**
  * A credential as the UI may see it. No hash, no plaintext — a list of these
@@ -4199,6 +4783,8 @@ export type JsonValue = number | string | boolean | Array<JsonValue> | { [key in
 
 export type KronnOwnership = { "type": "NotManaged" } | { "type": "ManagedByMarker", "config_id": string } | { "type": "ManagedByHash", "config_id": string };
 
+export type KronnWrite = { writer: DocWriter, at: string, };
+
 export type LaunchAuditRequest = { agent: AgentType,
 /**
  * KT-980 — the named external API connection an HTTP agent uses. Required
@@ -4228,7 +4814,23 @@ custom_prompt?: string | null,
  * makes resume impossible to misuse: no client-supplied step count to
  * oversize, and no way to graft a checkpoint onto the wrong pipeline.
  */
-resume_run_id?: string | null, };
+resume_run_id?: string | null,
+/**
+ * KT-1131 — with `resume_run_id`: retry only these 1-based failed steps.
+ * The run's other failed steps stay failed, unrun. Absent = every one.
+ */
+retry_steps?: Array<number>,
+/**
+ * KT-1211 (M6) — with `resume_run_id`: also redo these 1-based steps the
+ * run inherited as done, because the sources moved since they ran.
+ */
+redo_steps?: Array<number>,
+/**
+ * KT-1169 — a launch without `resume_run_id` is refused while the
+ * project's latest run can be resumed, unless this explicit choice says
+ * to run the whole audit again.
+ */
+fresh?: boolean, };
 
 export type LaunchDiscussionActionRequest = { variables?: Record<string, string>,
 /**
@@ -4337,6 +4939,11 @@ location: string,
 description?: string, };
 
 /**
+ * The context entry point Kronn found in a linked repository.
+ */
+export type LinkedRepoAiDoc = "agents_md" | "legacy_ai_index" | "readme_only" | "no_ai_doc" | "remote" | "missing";
+
+/**
  * 0.8.6 (#27) — One row in the linked-repos picker. Surfaces the
  * minimum needed for autocomplete : project id (for stable React
  * keys), human name, path, and a `proximity_hint` (`'same-parent'` |
@@ -4344,6 +4951,12 @@ description?: string, };
  * the top of the dropdown vs an "Other projects" group at the bottom.
  */
 export type LinkedRepoCandidate = { id: string, name: string, path: string, proximity_hint: string, };
+
+export type LinkedRepoDocStatus = { id: string, ai_doc: LinkedRepoAiDoc,
+/**
+ * Path of the entry point relative to the repository, when there is one.
+ */
+doc_path: string | null, };
 
 export type LinkLivePageDiscussionRequest = { discussion_id: string, relation?: LivePageDiscussionRelation | null, };
 
@@ -4598,6 +5211,8 @@ export type ManifestFile = { path: string, kind: FileChangeKind, };
  * green without evidence.
  */
 export type ManifestTest = { name: string, status: TestStatus, evidence: string | null, };
+
+export type MappingAction = "extracted" | "target_exists" | "unmapped" | "not_prose" | "kronn_managed";
 
 /**
  * A configured instance of an MCP server — with label, env secrets, etc.
@@ -4998,6 +5613,14 @@ reference_asset_ids?: Array<string>,
  * before a generation could start from several pictures.
  */
 reference_asset_id?: string | null, reference_mode?: MediaReferenceMode | null, };
+
+export type MergeBase = "local" | "remote";
+
+export type MergeFileDiff = { path: string,
+/**
+ * `None` on a read-only plan.
+ */
+outcome: WriteOutcome | null, imported_sections: number, diff: string, };
 
 /**
  * Lean attachment descriptor surfaced to agents via `disc_get_message`. The
@@ -5787,6 +6410,20 @@ resume_token: string,
  */
 self_alias: string | null, cli_ordinal: number | null, };
 
+/**
+ * A template doc still holding raw `{{PLACEHOLDERS}}`, with the Full-chain
+ * step that fills it.
+ */
+export type PlaceholderDoc = {
+/**
+ * Project-relative path.
+ */
+path: string,
+/**
+ * 1-based step for `partial-audit`; `None` when no audit step targets the file.
+ */
+step: number | null, };
+
 export type PlanningActor = { kind: PlanningActorKind, id: string | null,
 /**
  * Durable joined-CLI source session. Two sessions of the same provider
@@ -5795,6 +6432,43 @@ export type PlanningActor = { kind: PlanningActorKind, id: string | null,
 session_id: string | null, source_message_id: string | null, };
 
 export type PlanningActorKind = "human" | "agent" | "backend" | "system";
+
+/**
+ * KT-154 — one agent on a task, identified with the typed KT-116 regime
+ * (`kind` + `agent_type` + exact `cli_session_id`), never by provider alone.
+ */
+export type PlanningAssignee = { kind: MessageTargetKind, agent_type: AgentType, connection_id?: string | null,
+/**
+ * Exact joined CLI session (`discussion_sessions.id`) for a `cli` assignee.
+ */
+cli_session_id?: number | null,
+/**
+ * Stable room ordinal of that session (`@codex-cli-2` → 2), so two CLIs of
+ * one provider read differently in the plan.
+ */
+cli_ordinal?: number | null, role?: PlanningAssigneeRole | null, source: PlanningAssigneeSource,
+/**
+ * Model tier of an execution worker. Always `None` for a manual assignee.
+ */
+tier?: ModelTier | null, execution_id?: string | null, execution_status?: TaskExecutionStatus | null, };
+
+/**
+ * KT-154 — the identity a caller assigns or removes. Same shape as the
+ * persisted assignee minus the derived fields.
+ */
+export type PlanningAssigneeInput = { kind: MessageTargetKind, agent_type: AgentType, connection_id: string | null, cli_session_id: number | null, role: PlanningAssigneeRole | null, };
+
+/**
+ * KT-154 — what an assignee does on the task. Optional on a manual assignment.
+ */
+export type PlanningAssigneeRole = "owner" | "reviewer";
+
+/**
+ * KT-154 — where an assignee row comes from. `Manual` rows are stored and can
+ * be removed; `Execution` rows are the worker of a live TaskExecution, derived
+ * at read time and never stored (so they cannot outlive the execution).
+ */
+export type PlanningAssigneeSource = "manual" | "execution";
 
 /**
  * KT-30 — minimal, read-only dependency reference for the plan projection.
@@ -5818,7 +6492,29 @@ active_blockers: Array<PlanningDependencySummary>,
  */
 actionable: boolean, };
 
-export type PlanningDodItem = { id: string, sentence: string, completed: boolean, position: number, };
+export type PlanningDodItem = { id: string, sentence: string, completed: boolean, position: number,
+/**
+ * KT-1254 — who proves the item and when. `Worker` (default) is covered by
+ * the delivery; `PostIntegration` is the principal's live check, made
+ * after integration, and never blocks approve.
+ */
+verification: PlanningDodVerification,
+/**
+ * KT-1254 / KT-1262 — the proof the item was ticked on: the principal's
+ * live evidence for a post-integration item, or what an integrating
+ * approve verified for a worker item. Cleared when the item is unticked.
+ */
+evidence?: string | null, };
+
+/**
+ * KT-1254 — how a DoD item is verified.
+ */
+export type PlanningDodVerification = "worker" | "post_integration";
+
+/**
+ * KT-1254 — a pending principal live check, as the plan shows it.
+ */
+export type PlanningLiveCheck = { dod_id: string, sentence: string, };
 
 export type PlanningPlacement = "active" | "later";
 
@@ -5857,7 +6553,17 @@ result_task_id?: string, decided_at?: string, };
 
 export type PlanningTaskChange = { task_id: string, task_reference: string, task_title: string, id: string, action: string, actor_kind: PlanningActorKind, actor_id: string | null, actor_session_id: string | null, changes: JsonValue, source_message_id: string | null, created_at: string, };
 
-export type PlanningTaskDetail = { subtasks: Array<PlanningTaskSummary>, description: string, blocked_reason: string | null, definition_of_done: Array<PlanningDodItem>, links: Array<PlanningTaskLink>, blockers: Array<PlanningTaskSummary>, blocking: Array<PlanningTaskSummary>, workspaces?: Array<PlanningWorkspaceSummary>, events: Array<PlanningTaskEvent>, id: string, reference: string, parent_id: string | null, parent_reference: string | null, parent_title: string | null, title: string, status: PlanningTaskStatus, priority: PlanningTaskPriority, rank: number, completed_subtasks: number, total_subtasks: number, project_ids: Array<string>, discussion_ids: Array<string>, tags: Array<string>, blocker_count: number, created_at: string, updated_at: string, };
+export type PlanningTaskDetail = { subtasks: Array<PlanningTaskSummary>, description: string, blocked_reason: string | null, definition_of_done: Array<PlanningDodItem>, links: Array<PlanningTaskLink>, blockers: Array<PlanningTaskSummary>, blocking: Array<PlanningTaskSummary>, workspaces?: Array<PlanningWorkspaceSummary>, events: Array<PlanningTaskEvent>, id: string, reference: string, parent_id: string | null, parent_reference: string | null, parent_title: string | null, title: string, status: PlanningTaskStatus, priority: PlanningTaskPriority, rank: number, completed_subtasks: number, total_subtasks: number, project_ids: Array<string>, discussion_ids: Array<string>, tags: Array<string>, blocker_count: number,
+/**
+ * KT-154 — manual assignees first (assignment order), then the worker of a
+ * live TaskExecution when it is not already assigned by hand.
+ */
+assignees: Array<PlanningAssignee>,
+/**
+ * KT-1254 — unticked post-integration DoD items: the principal's live
+ * checks still owed on this task.
+ */
+live_checks?: Array<PlanningLiveCheck>, created_at: string, updated_at: string, };
 
 export type PlanningTaskEvent = { id: string, action: string, actor_kind: PlanningActorKind, actor_id: string | null, actor_session_id: string | null, changes: JsonValue, source_message_id: string | null, created_at: string, };
 
@@ -5869,7 +6575,17 @@ export type PlanningTaskPriority = "critical" | "high" | "normal" | "low";
 
 export type PlanningTaskStatus = "idea" | "todo" | "in_progress" | "blocked" | "done" | "archived";
 
-export type PlanningTaskSummary = { id: string, reference: string, parent_id: string | null, parent_reference: string | null, parent_title: string | null, title: string, status: PlanningTaskStatus, priority: PlanningTaskPriority, rank: number, completed_subtasks: number, total_subtasks: number, project_ids: Array<string>, discussion_ids: Array<string>, tags: Array<string>, blocker_count: number, created_at: string, updated_at: string, };
+export type PlanningTaskSummary = { id: string, reference: string, parent_id: string | null, parent_reference: string | null, parent_title: string | null, title: string, status: PlanningTaskStatus, priority: PlanningTaskPriority, rank: number, completed_subtasks: number, total_subtasks: number, project_ids: Array<string>, discussion_ids: Array<string>, tags: Array<string>, blocker_count: number,
+/**
+ * KT-154 — manual assignees first (assignment order), then the worker of a
+ * live TaskExecution when it is not already assigned by hand.
+ */
+assignees: Array<PlanningAssignee>,
+/**
+ * KT-1254 — unticked post-integration DoD items: the principal's live
+ * checks still owed on this task.
+ */
+live_checks?: Array<PlanningLiveCheck>, created_at: string, updated_at: string, };
 
 export type PlanningWorkspaceSummary = { id: string, disc_id: string, branch: string, state: string, ownership: string, session_agent_type: string | null, };
 
@@ -6093,6 +6809,25 @@ export type ProjectDockerService = { service: string, container_name: string | n
  */
 export type ProjectDockerStatus = { compose_present: boolean, compose_file: string | null, docker_available: boolean, daemon_available: boolean, services: Array<ProjectDockerService>, checked_at: string, error: string | null, };
 
+export type ProjectDocsLocation = {
+/**
+ * The project's own override, as saved.
+ */
+override_dir: string | null,
+/**
+ * The global default from the settings: it pre-fills the briefing and
+ * never applies by itself (KT-1192).
+ */
+default_dir: string | null,
+/**
+ * The folder in use, relative to the project root; `None` when refused.
+ */
+effective_dir: string | null, source: DocsDirSource,
+/**
+ * Why a configured folder is not used.
+ */
+refused: string | null, };
+
 export type ProjectGithubConnection = { project_id: string, mode: GithubConnectionMode, state: GithubConnectionState, machine_token_available: boolean, machine_token_source: GithubMachineTokenSource | null,
 /**
  * The project's remote is on github.com.
@@ -6221,6 +6956,27 @@ referenced: boolean, required_secrets: Array<RequiredSecretStatus>, adr_level: R
 repository_fingerprint?: string, kronn_fingerprint?: string, };
 
 export type ProjectRepositorySkillProvenance = "repository" | "kronn" | "both";
+
+export type ProjectRule = { kind: ProjectRuleKind, text: string,
+/**
+ * Only on a ban.
+ */
+pattern: ProjectRulePattern | null, };
+
+/**
+ * A line the team states about the code: something always done, or never.
+ */
+export type ProjectRuleKind = "rule" | "ban";
+
+/**
+ * A deterministic pattern Kronn checks for a ban, read-only.
+ */
+export type ProjectRulePattern = { kind: ProjectRulePatternKind, value: string, };
+
+/**
+ * What a ban's verifiable pattern names.
+ */
+export type ProjectRulePatternKind = "dependency" | "import" | "file_glob";
 
 /**
  * The `SKILL.md` of a used skill, as the repository holds it now: masked the
@@ -6395,7 +7151,31 @@ pending_proposal_count: number,
  */
 pending_item_count: number, };
 
+/**
+ * A correction Kronn proposes. Nothing is applied by itself: the agent pass
+ * the human launches carries it out, and the human validates the result.
+ */
+export type ProposedCorrection = { kind: CorrectionKind, reference: string, proposal: string, };
+
 export type ProposeResult = { accepted: boolean, reason: string | null, warnings: Array<string>, evidence_checks: Array<EvidenceCheck>, learning: Learning | null, };
+
+export type ProvenanceChange = {
+/**
+ * `None`: the whole doc.
+ */
+section: string | null,
+/**
+ * `None`: the validated text is not kept on this machine.
+ */
+before: string | null,
+/**
+ * `None`: the doc or section was removed.
+ */
+after: string | null, truncated: boolean, };
+
+export type ProvenanceScope = "doc" | "sections";
+
+export type ProvenanceState = "human_validated" | "to_reconfirm";
 
 /**
  * Read-only quota state shown to a human in Agent settings.  Re-arming is a
@@ -6680,6 +7460,8 @@ export type RecentMessagePreview = { sort_order: number, role: string, agent_typ
  */
 preview: string, };
 
+export type RecordReason = "validation" | "audit" | "acknowledged" | "revalidation";
+
 export type RecoveryStatus = { configured: boolean,
 /**
  * `recovery.key` is known (by its fingerprint) to wrap the key in use. An
@@ -6795,9 +7577,123 @@ restored_from_files: number, };
 
 export type RefreshModelCatalogRequest = { runtime_target_id: string, agent_type: AgentType, force?: boolean, };
 
+export type ReinstallAction = "create" | "replace" | "unchanged";
+
+export type ReinstallFile = {
+/**
+ * Project-relative path.
+ */
+path: string, action: ReinstallAction,
+/**
+ * Set for `replace` only.
+ */
+kind: ReinstallKind | null,
+/**
+ * `owner="human"` sections of the current file this reinstall rewrites.
+ */
+human_sections: Array<string>,
+/**
+ * The current file is human-validated: replacing it asks to reconfirm.
+ */
+human_validated: boolean, };
+
+/**
+ * Why an existing file differs from the template.
+ */
+export type ReinstallKind = "damaged_or_template" | "filled";
+
+/**
+ * What is measured, over every section of every doc.
+ */
+export type RelevanceCounts = { sections: number, anchors_intact: number, outdated: number, no_longer_relevant: number, unanchored: number,
+/**
+ * Outdated or no-longer-relevant sections nobody touched since the
+ * validation that recorded them.
+ */
+untouched_stale: number,
+/**
+ * Anchors (citations and prose paths) whose file is gone.
+ */
+missing_references: number,
+/**
+ * The part of `missing_references` that is prose only: no citation, so
+ * no fingerprint, broke: only this check sees it.
+ */
+prose_missing: number,
+/**
+ * `anchors_intact` over the anchored sections; `None` when none is
+ * anchored. Intact anchors are not proof the prose is true.
+ */
+anchored_intact_pct: number | null, };
+
+/**
+ * One anchor of a section that does not resolve any more.
+ */
+export type RelevanceEvidence = { kind: EvidenceKind,
+/**
+ * The citation label or path, as the doc writes it.
+ */
+reference: string, state: CitationState, };
+
+export type RelevanceReport = { counts: RelevanceCounts,
+/**
+ * Only the sections that need attention (`outdated`, `no_longer_relevant`).
+ */
+sections: Array<SectionRelevance>,
+/**
+ * The sections Kronn cannot measure (no citation, no path): handed to
+ * the agent pass to check or anchor. They do not raise the badge.
+ */
+unanchored: Array<SectionRelevance>,
+/**
+ * The docs where every judged section is unanchored: no verdict ever
+ * reads them, so a pass re-reads them once per change (KT-1292).
+ */
+unanchored_docs: Array<string>, };
+
 export type RemoteRepo = { name: string, full_name: string, clone_url: string, ssh_url: string, description: string | null, language: string | null, stargazers_count: number, updated_at: string, source: string, already_cloned: boolean, };
 
 export type RemovePlanningBlockerRequest = { actor?: PlanningActor, };
+
+export type ReplacedFile = { path: string,
+/**
+ * Project-relative path of the copy of the original.
+ */
+backup: string, };
+
+/**
+ * What the UI shows of an audit run that the repository describes.
+ */
+export type RepoAuditRun = { run_id: string, kind: string,
+/**
+ * The run's own status in the file: `Running` means an interruption or
+ * a run still going on another machine.
+ */
+status: string, started_by: string, started_at: string, ended_at: string | null, updated_at: string, total_steps: number,
+/**
+ * Finished steps whose produced file still matches.
+ */
+done_steps: Array<number>,
+/**
+ * Failed and pending steps: what a resume runs.
+ */
+resume_steps: Array<number>,
+/**
+ * Finished steps whose file changed since: « à revérifier », replayed.
+ */
+recheck_steps: Array<number>,
+/**
+ * The file is the committed one: a resume or a validation may rely on it.
+ */
+committed: boolean,
+/**
+ * This is the project's state: no local run, or the repository is newer.
+ */
+newer_than_local: boolean,
+/**
+ * A committed, unfinished run with steps left to run: can be resumed here.
+ */
+resumable: boolean, briefing_changed: boolean, td_total: number, td_settled: number, validated_at: string | null, validated_by: string | null, };
 
 export type ReportTelemetryRequest = {
 /**
@@ -7046,6 +7942,65 @@ export type RetryAgentDispatchResponse = { dispatch_id: string, trigger_message_
 
 export type RetryConfig = { max_retries: number, backoff: string, };
 
+export type RevalidateAuditRequest = { agent: AgentType,
+/**
+ * Apply only deterministic citation repairs, even when agent work remains.
+ * Omitted or false preserves the existing combined reverification flow.
+ */
+deterministic_only?: boolean, connection_id?: string, tier?: ModelTier | null, };
+
+/**
+ * What "Revalider l'audit" does with one section (KT-1168).
+ */
+export type RevalidationAction = "reanchor" | "agent" | "human" | "manual";
+
+/**
+ * `GET /api/projects/:id/revalidation`: the deterministic part of
+ * "Revalider l'audit", computed without writing anything.
+ */
+export type RevalidationPlan = { sources_state: SourcesState,
+/**
+ * Sections with something to do; clean ones are left out.
+ */
+sections: Array<RevalidationSection>,
+/**
+ * Full audit steps the bounded agent pass runs, in chain order.
+ */
+agent_steps: number[], reanchor_count: number, human_count: number,
+/**
+ * Sections per verdict over every doc, and how many of the stale ones
+ * nobody revised since validation (KT-1168).
+ */
+relevance: RelevanceCounts,
+/**
+ * The sections Kronn cannot measure (no citation, no path), listed so
+ * each is confronted with the code: by a person or by the agent pass.
+ */
+unanchored: Array<SectionRelevance>,
+/**
+ * The docs made only of such sections, with their last re-read date.
+ */
+unanchored_docs: Array<UnanchoredDoc>, };
+
+export type RevalidationSection = { doc: string,
+/**
+ * The Full audit step that owns the doc, when one does.
+ */
+step: number | null, action: RevalidationAction, doc_missing: boolean,
+/**
+ * Moved citations outside human sections, re-anchored without an agent.
+ */
+reanchor: Array<CitationStatus>,
+/**
+ * Broken citations outside human sections.
+ */
+broken: Array<CitationStatus>, human: Array<HumanCitationTodo>,
+/**
+ * The doc's sections that are outdated or no longer relevant to the
+ * code, with the evidence and the corrections Kronn proposes.
+ */
+relevance: Array<SectionRelevance>, };
+
 /**
  * Principal → backend review (ADR §5, KT-319). `comment` is schema-optional but
  * REQUIRED when `decision == request_changes` (a change request with no reason
@@ -7071,7 +8026,20 @@ dod_verifications: Array<ReviewDodVerification>, comment: string | null, finding
  * persisted inside the attempt-scoped ReviewDecision, never inferred from a
  * mutable Planning checkbox.
  */
-export type ReviewDodVerification = { dod_id: string, met: boolean, evidence: string, };
+export type ReviewDodVerification = { dod_id: string, met: boolean, evidence: string,
+/**
+ * KT-1254 — `post_integration` (with `met: false`) declares the item a
+ * principal live check made after integration: approve integrates with it
+ * pending and the task closes once it is ticked with evidence.
+ */
+verification?: PlanningDodVerification | null,
+/**
+ * KT-1291 — the task (`KT-1290`) that now holds this requirement, with
+ * `met: false`: approve integrates without the item, which is detached
+ * from this task and named in an event. Accepted only when that task
+ * exists, is open and holds the requirement.
+ */
+carried_to?: string | null, };
 
 /**
  * A structured review finding (ADR §5). `issue` is required; `path` / `line`
@@ -7145,7 +8113,22 @@ target_agents?: Array<AgentType>, };
  */
 export type ReviseNoteRequest = { content: string, };
 
+export type RevokeDiscussionProjectRequest = { reason?: string | null, };
+
 export type RevokeRequest = { authority: string, credential_id: string, reason: string, };
+
+/**
+ * Withdraw one project from a workflow's scope, or all of it.
+ */
+export type RevokeWorkflowScopeRequest = {
+/**
+ * `None` (and `all` false) withdraws everything.
+ */
+project_id?: string | null,
+/**
+ * Withdraw only the every-project entry.
+ */
+all?: boolean, };
 
 export type RotateAdminRequest = {
 /**
@@ -7378,13 +8361,40 @@ export type SagaResumeAction = "RebuildCandidate" | "RunValidations" | "ApplyFas
 
 export type SaveApiKeyRequest = { id?: string | null, name: string, provider: string, value: string, };
 
+/**
+ * The saved briefing as the form's answers (KT-1196), read back from
+ * `docs/briefing.md` or the DB notes so the form opens pre-filled.
+ */
+export type SavedBriefing = { purpose: string, team: string, maturity: string, dependencies: string, traps: string, additional: string, project: BriefingProjectAnswers | null, existing_docs: BriefingDocsAnswers | null,
+/**
+ * KT-1193 rules and bans, from their machine copy.
+ */
+project_rules: BriefingProjectRules | null, td_to_tasks: boolean, cross_audit_agents: Array<AgentType>, };
+
 export type ScanConfig = { paths: Array<string>, ignore: Array<string>,
 /**
  * Max depth when scanning for git repos (2–10, default 4)
  */
-scan_depth: number, };
+scan_depth: number,
+/**
+ * Default AI doc folder, relative to each project root (KT-263). `None`
+ * keeps the historical detection (`docs/` → `doc/` → `ai/`).
+ */
+default_docs_dir?: string, };
 
 export type ScheduleAgentWakeRequest = { delay_seconds: number, reason: string, dedupe_key: string, task_execution_id?: string | null, };
+
+/**
+ * Last scheduled result per project path; the report itself is recomputed
+ * on every read, the cron only records when it last looked and what it saw.
+ */
+export type ScheduledCheck = { checked_at: string, sources_state: SourcesState, broken_count: number, };
+
+export type ScopeAccess = "read" | "write";
+
+export type ScopeGrantSource = "link" | "request" | "all";
+
+export type ScopeRequestStatus = "pending" | "approved" | "declined";
 
 export type Section = { heading: string, bytes: number, class: SectionClass,
 /**
@@ -7393,11 +8403,46 @@ export type Section = { heading: string, bytes: number, class: SectionClass,
  */
 because: string, };
 
+export type SectionCitations = {
+/**
+ * Doc path relative to the project root, as `ai_file` in the drift report.
+ */
+doc: string, recorded_at: string, reason: RecordReason, stale: boolean, doc_missing: boolean,
+/**
+ * The doc was edited since its citations were recorded.
+ */
+doc_changed: boolean, unchanged_count: number,
+/**
+ * Broken and moved citations only; unchanged ones are counted above.
+ */
+citations: Array<CitationStatus>,
+/**
+ * Citations the doc carries now that were never fingerprinted.
+ */
+unrecorded: Array<string>, };
+
 /**
  * What a section is, for the purpose of deciding whether it must be loaded every
  * time.
  */
 export type SectionClass = "critical" | "universal" | "routed" | "historical" | "duplicated" | "possibly_obsolete";
+
+export type SectionRelevance = { doc: string,
+/**
+ * The Markdown heading; empty for the text before the first heading.
+ */
+heading: string, verdict: SectionVerdict,
+/**
+ * The anchors that no longer resolve.
+ */
+evidence: Array<RelevanceEvidence>, corrections: Array<ProposedCorrection>,
+/**
+ * The section's text is exactly what was recorded at validation: nobody
+ * revised it although the code it describes changed.
+ */
+untouched_since_code_changed: boolean, };
+
+export type SectionVerdict = "anchors_intact" | "outdated" | "no_longer_relevant" | "unanchored";
 
 export type SendMessageRequest = { content: string,
 /**
@@ -7507,6 +8552,18 @@ disk_critical_gib: number,
  * `disk_thresholds()`, which is the only place they are read together.
  */
 disk_warning_gib: number,
+/**
+ * KT-1318 — free space, in GiB, a worker launch (or a full audit) needs on
+ * the volume holding the worktrees and lane build dirs. Below it Kronn
+ * sweeps its orphaned lane build dirs first, then refuses the launch with
+ * the reason and an alert in the principal room. `0` disables the guard.
+ */
+disk_launch_min_free_gib: number,
+/**
+ * KT-1318 — hours a Kronn-created lane build dir must be unwritten, with no
+ * live worktree, before a sweep (boot, periodic, pressure) may remove it.
+ */
+disk_sweep_idle_hours: number,
 /**
  * Maximum concurrent agent processes (default: 5)
  */
@@ -7696,7 +8753,15 @@ execution_variable_retention_days: number,
 /**
  * Days a finished workflow run keeps its step outputs. Zero keeps them.
  */
-run_payload_retention_days: number, p2p_enabled: boolean, frontend_origins: Array<string>,
+run_payload_retention_days: number,
+/**
+ * KT-1318 - free GiB a worker launch / full audit needs (`0` = guard off).
+ */
+disk_launch_min_free_gib: number,
+/**
+ * KT-1318 - hours a lane build dir must be idle before a sweep may take it.
+ */
+disk_sweep_idle_hours: number, p2p_enabled: boolean, frontend_origins: Array<string>,
 /**
  * The zone set in Settings; `None` follows the machine.
  */
@@ -7744,6 +8809,18 @@ max_turns: number,
  * prepare a handover instead of being cut off mid-task.
  */
 soft_ratio: number, };
+
+export type SessionContinuity = { status: SessionContinuityStatus, reason?: SessionContinuityReason | null, };
+
+/**
+ * Why a turn did not resume.
+ */
+export type SessionContinuityReason = "no_stored_id" | "scope_changed" | "previous_turn_unfinished" | "session_expired" | "history_changed" | "nothing_new" | "delta_not_smaller" | "resume_unsupported" | "store_unavailable";
+
+/**
+ * How an agent turn related to the CLI/ACP conversation of the previous one.
+ */
+export type SessionContinuityStatus = "resumed" | "new" | "fallback_full_history";
 
 /**
  * A bridge-held secret, carried without ever being printed.
@@ -7800,6 +8877,12 @@ warnings: Array<string>, };
 
 export type SetProjectAgentFiles = { policy: AgentFilesPolicy, };
 
+export type SetProjectDocsLocation = {
+/**
+ * `None` or blank clears the override.
+ */
+dir?: string | null, };
+
 /**
  * `PUT /api/projects/{id}/github`. `token` is read only for `stored_token`.
  */
@@ -7828,6 +8911,23 @@ config_set_aside: string | null, };
 export type SetupStep = "Agents" | "ScanPaths" | "Detection" | "Complete";
 
 /**
+ * Validate a workflow's scope as it is now; an empty list clears it.
+ */
+export type SetWorkflowScopeRequest = { entries: Array<WorkflowScopeItem>,
+/**
+ * Every project (KT-1336), read or write.
+ */
+all?: ScopeAccess | null,
+/**
+ * Required for every project in write: [`ALL_PROJECTS_WRITE_CONFIRMATION`].
+ */
+confirm?: string | null,
+/**
+ * The scope fingerprint the human's screen showed.
+ */
+expected_fingerprint?: string | null, };
+
+/**
  * A copy of an agent CLI that PATH order hides behind the one Kronn runs.
  */
 export type ShadowedInstall = { path: string, version: string, };
@@ -7839,6 +8939,11 @@ export type SharedRun = { id: string, kind: SharedRunKind, source_id: string, pr
 export type SharedRunKind = "quick_prompt" | "quick_api" | "quick_exec" | "workflow" | "media";
 
 export type SharedRunStatus = "preflight_failed" | "queued" | "running" | "success" | "failed" | "cancelled" | "timeout";
+
+/**
+ * One gone path the stale block listed, in its doc's section.
+ */
+export type ShownPath = { doc: string, section: string, path: string, };
 
 export type Skill = { id: string, name: string, description: string, icon: string, category: SkillCategory, content: string, is_builtin: boolean,
 /**
@@ -8024,7 +9129,12 @@ raw: string, kind: SourceKind, status: SourceStatus,
 /**
  * Human-readable reason (shown in the pill drawer).
  */
-detail: string, };
+detail: string,
+/**
+ * Tree the cited file was found in. Absent on non-file sources, on
+ * unresolved files and on rows stored before it existed: read as checkout.
+ */
+origin?: SourceOrigin, };
 
 /**
  * One directory of the project source browser, and whether it is all of it.
@@ -8054,7 +9164,29 @@ export type SourceFileNode = { path: string, name: string, is_dir: boolean, chil
 /**
  * What kind of source a `[src: …]` marker points at.
  */
-export type SourceKind = "file" | "url" | "user" | "commit" | "api" | "code_comment" | "inferred" | "hypothesis" | "training_data" | "other";
+export type SourceKind = "file" | "url" | "user" | "commit" | "api" | "deps" | "code_comment" | "inferred" | "hypothesis" | "training_data" | "other";
+
+export type SourceOrigin = { kind: SourceOriginKind,
+/**
+ * Worktree directory name; absent for the checkout.
+ */
+name?: string, };
+
+/**
+ * Which tree held a cited file.
+ */
+export type SourceOriginKind = "checkout" | "worktree";
+
+/**
+ * How a learning source counts (KT-1079 §4).
+ */
+export type SourceProvenance = "human_validated" | "ai_generated";
+
+/**
+ * "Sources clean" badge, recomputed on every read. Distinct from the dated
+ * "audit complete" milestone (`validated_at` in `.kronn.json`).
+ */
+export type SourcesState = "unknown" | "clean" | "needs_reverification";
 
 /**
  * One source's contribution, or a stated reason it has none.
@@ -8564,7 +9696,7 @@ warnings?: Array<CampaignTaskReason>, active_execution: TaskExecution | null, };
 
 export type TaskExecutionProgress = { phase: TaskExecutionProgressPhase, reason: string | null, queue_position: number | null, queued_since: string | null, process_alive: boolean | null, last_reliable_signal_at: string | null, telemetry_mode: TaskExecutionTelemetryMode, };
 
-export type TaskExecutionProgressPhase = "queued" | "launching" | "upstream_wait" | "tool_activity" | "delivering" | "completed" | "failed" | "unknown";
+export type TaskExecutionProgressPhase = "warming" | "queued" | "launching" | "upstream_wait" | "tool_activity" | "delivering" | "completed" | "failed" | "unknown";
 
 /**
  * Recovery projection kept separately from the business state machine.
@@ -8717,6 +9849,121 @@ requested_model?: string,
  */
 warning?: CampaignTaskReason, };
 
+export type TdDecideOutcome = { results: Array<TdDecisionResult>, gate: TdValidationGate, };
+
+/**
+ * `POST /api/projects/:id/audit/tds/decide`: settled together or not at all.
+ */
+export type TdDecideRequest = { items: Array<TdDecisionItem>, };
+
+export type TdDecisionItem = { td_id: string, decision: TdReviewDecision, reason?: string, };
+
+export type TdDecisionResult = { td_id: string, state: TdReviewState, };
+
+/**
+ * The Kronn task tracking a sheet (`audit:<project>:<TD-id>`).
+ */
+export type TdLinkedTask = { id: string, reference: string, };
+
+/**
+ * A `file[:line]` the sheet's "Where" section cites.
+ */
+export type TdPointer = { path: string, line: number | null, };
+
+/**
+ * A decision taken from the review screen.
+ */
+export type TdReviewDecision = "confirm" | "accept_decision" | "defer" | "reject";
+
+export type TdReviewItem = { id: string, title: string, area: string,
+/**
+ * `Critical`, `High`, `Medium`, `Low` or `Unknown`.
+ */
+severity: string, status: string, effort: string | null, blast_radius: string | null, state: TdReviewState, problem: string | null, impact: string | null, verification: string | null, pointers: Array<TdPointer>, source_path: string, task: TdLinkedTask | null,
+/**
+ * Messages about this sheet: validation mentions plus its own discussion.
+ */
+talk_count: number, talk_discussion_id: string | null, };
+
+/**
+ * `GET /api/projects/:id/audit/tds`.
+ */
+export type TdReviewList = { items: Array<TdReviewItem>, counts: TdStateCounts, by_severity: Array<TdSeverityCount>, gate: TdValidationGate, validated: boolean, audit_date: string | null, validation_discussion_id: string | null,
+/**
+ * The discussion holding the oldest open dispute card.
+ */
+dispute_discussion_id: string | null, };
+
+/**
+ * KT-982 — where a tech-debt sheet stands in the human review.
+ */
+export type TdReviewState = "pending" | "confirmed" | "accepted_decision" | "deferred" | "rejected";
+
+export type TdSeverityCount = { severity: string, total: number,
+/**
+ * Pending or deferred.
+ */
+remaining: number, };
+
+export type TdStateCounts = { pending: number, confirmed: number, accepted_decision: number, deferred: number, rejected: number, };
+
+/**
+ * `GET /api/projects/:id/audit/tds/:td_id/talk`.
+ */
+export type TdTalk = { validation_discussion_id: string | null, discussion_id: string | null, messages: Array<TdTalkMessage>, };
+
+export type TdTalkMessage = { id: string, discussion_id: string, source: TdTalkSource, role: string, agent_type: string | null, author: string | null, content: string,
+/**
+ * The content is the lines around the mention, not the whole message.
+ */
+excerpt: boolean, timestamp: string, };
+
+/**
+ * `POST /api/projects/:id/audit/tds/:td_id/talk`: the sheet's own discussion,
+ * created with the first message when it does not exist yet.
+ */
+export type TdTalkRequest = { message: string, targets: Array<MessageTarget>, };
+
+export type TdTalkSource = "validation" | "td";
+
+export type TdTalkStart = { discussion_id: string,
+/**
+ * The message is already its first turn: run it instead of sending it.
+ */
+created: boolean, };
+
+export type TdTaskItem = { td_id: string, theme: string, state: TdTaskState, task_reference: string | null,
+/**
+ * `rejected` or `accepted_decision` for a skipped sheet.
+ */
+reason: string | null, };
+
+/**
+ * `POST /api/projects/:id/audit/td-tasks`: tech-debt sheets turned into tasks.
+ */
+export type TdTasksOutcome = { created: number, already_linked: number, skipped: number, themes: Array<TdTaskTheme>, items: Array<TdTaskItem>, };
+
+/**
+ * What the conversion did with one tech-debt sheet (KT-1167).
+ */
+export type TdTaskState = "created" | "already_linked" | "skipped";
+
+/**
+ * The parent task grouping the sheets of one theme.
+ */
+export type TdTaskTheme = { theme: string, label: string, task_reference: string, created: boolean, };
+
+/**
+ * The rule that lets a project be validated without the discussion marker:
+ * every Critical and High sheet settled (a deferral does not count).
+ */
+export type TdValidationGate = { blocking_total: number, blocking_settled: number, met: boolean,
+/**
+ * Sheets whose cross-agent dispute card still waits for a human: none
+ * may be open for the project to be validated.
+ */
+open_disputes: number, };
+
 export type TechDebtItem = { id: string, problem: string, area: string, severity: string, };
 
 /**
@@ -8736,6 +9983,109 @@ attributed: number,
  * collector yet. Counted apart so "attributed" cannot flatter itself.
  */
 attributed_without_counters: number, };
+
+export type TemplateMergeAccepted = { branch: string, commit: string, committed: Array<string>, };
+
+export type TemplateMergeAcceptRequest = {
+/**
+ * Repo-relative files to commit; the others stay uncommitted in the worktree.
+ */
+paths: Array<string>, };
+
+export type TemplateMergeRequest = { base?: MergeBase, };
+
+/**
+ * Where a merge stands, read from git without fetching or writing anything.
+ */
+export type TemplateMergeState = { branch: string, worktree_exists: boolean, worktree_path: string | null, branch_exists: boolean,
+/**
+ * Commits on the merge branch that neither the checkout's current branch
+ * nor the remote default branch contains yet.
+ */
+branch_ahead_commits: number,
+/**
+ * Files proposed in the merge worktree and not accepted yet.
+ */
+pending_files: number,
+/**
+ * `None` when the checkout is detached or not a git repository.
+ */
+checkout_branch: string | null, };
+
+export type TemplateMergeView = { docs_dir: string, base: MergeBase, base_ref: string, worktree_path: string | null, branch: string | null, resumed: boolean, correspondence: Array<Correspondence>, files: Array<MergeFileDiff>, existing_targets: Array<string>,
+/**
+ * Docs that only exist untracked in the checkout: a worktree cannot see them.
+ */
+untracked_in_checkout: Array<string>,
+/**
+ * Things the reviewer must know before trusting the plan, e.g. local docs
+ * a remote base cannot contain.
+ */
+warnings: Array<TemplateMergeWarning>, table_markdown: string, merge: TemplateMergeState, };
+
+/**
+ * A plan warning as data: the UI words it in the user's language from `code`.
+ */
+export type TemplateMergeWarning = {
+/**
+ * Stable identifier, e.g. `remote_base_misses_local_docs`.
+ */
+code: string,
+/**
+ * Paths the warning is about (capped), in a stable order.
+ */
+paths: Array<string>,
+/**
+ * How many more paths there are than `paths` lists.
+ */
+more: number, };
+
+export type TemplateReinstallPlan = { docs_dir: string, files: Array<ReinstallFile>,
+/**
+ * An audit holds the project's lease: the reinstall would be refused.
+ */
+audit_running: boolean, template_update?: TemplateUpdate, };
+
+export type TemplateReinstallReport = {
+/**
+ * Project-relative; `None` when nothing was replaced.
+ */
+backup_dir: string | null, replaced: Array<ReplacedFile>, created: Array<string>, unchanged: Array<string>,
+/**
+ * Differing files that were not selected, left as they are.
+ */
+skipped: Array<string>,
+/**
+ * Human-validated docs this reinstall rewrote, now to reconfirm.
+ */
+to_reconfirm: Array<string>,
+/**
+ * Template docs still holding placeholders afterwards, with their step.
+ */
+placeholder_docs: Array<PlaceholderDoc>,
+/**
+ * `TemplateInstalled` when the docs entry itself is a raw template again.
+ */
+audit_status: AiAuditStatus, };
+
+export type TemplateReinstallRequest = {
+/**
+ * Existing files to replace. `None`: the damaged ones only. Missing
+ * files are always created; a path the plan does not offer is refused.
+ */
+paths?: Array<string> | null, };
+
+export type TemplateRename = { from: string, to: string,
+/**
+ * An occupied destination is preserved and needs human reconciliation.
+ */
+conflict: boolean, };
+
+export type TemplateUpdate = { available: boolean, installed_version: string | null, current_version: string | null, missing_files: Array<PlaceholderDoc>, renames: Array<TemplateRename>,
+/**
+ * Removed upstream paths whose successor cannot be proven uniquely.
+ */
+unresolved_files: Array<string>, spec_modified: boolean, };
 
 export type TestApiCallRequest = {
 /**
@@ -8829,6 +10179,17 @@ is_empty: boolean,
  * shows this inline under the input.
  */
 error: string | null, };
+
+/**
+ * KT-1246 — the worker's explicit statement of whether any test was actually
+ * executed, and which. Replaces a sentence at the end of a report: a reviewer
+ * reads `executed` and `which` instead of inferring them from `tests`.
+ */
+export type TestsExecuted = { executed: boolean,
+/**
+ * The commands (or suites) that ran. Empty exactly when `executed` is false.
+ */
+which: Array<string>, };
 
 /**
  * A test verdict in a [`DeliveryManifestV1`].
@@ -8962,6 +10323,23 @@ project_id?: string,
  * (KT-1025). Stored on the run; the workflow is never modified.
  */
 step_agents?: { [key in string]: StepAgentOverride }, };
+
+/**
+ * A doc whose every section is unanchored, and when an agent pass last
+ * re-read it (KT-1292).
+ */
+export type UnanchoredDoc = { doc: string,
+/**
+ * RFC 3339; `None` when no pass has re-read it since it last changed.
+ */
+reviewed_at: string | null,
+/**
+ * An audit step owns the doc, so a pass can re-read it; `false` when none
+ * does (it is listed, never queued).
+ */
+owned: boolean, };
+
+export type UnassignPlanningTaskRequest = { assignee?: PlanningAssigneeInput | null, actor?: PlanningActor, };
 
 export type UnlinkPlanningDiscussionRequest = { discussion_id: string, actor?: PlanningActor, };
 
@@ -9118,7 +10496,11 @@ export type UpdateMcpConfigRequest = { label?: string | null, env?: Record<strin
 
 export type UpdateMcpContextRequest = { content: string, };
 
-export type UpdatePlanningDodItemRequest = { completed: boolean, actor?: PlanningActor, };
+export type UpdatePlanningDodItemRequest = { completed: boolean,
+/**
+ * Required to tick a post-integration item: the principal's live proof.
+ */
+evidence?: string | null, actor?: PlanningActor, };
 
 export type UpdatePlanningTaskRequest = { title?: string | null, description?: string | null, status?: PlanningTaskStatus | null, priority?: PlanningTaskPriority | null, parent_id?: string | null | null, blocked_reason?: string | null | null, rank?: number | null, project_ids?: Array<string> | null, tags?: Array<string> | null, definition_of_done?: Array<CreatePlanningDodItem> | null, links?: Array<CreatePlanningTaskLink> | null, actor?: PlanningActor, };
 
@@ -9242,9 +10624,56 @@ model_breakdowns: Array<UsageModelBreakdown>, input_tokens: number, output_token
 export type UsageTotals = { input_tokens: number, output_tokens: number, cache_creation_tokens: number, cache_read_tokens: number, total_tokens: number, total_cost: number, };
 
 /**
+ * Why validating the project's latest audit run is not possible now. The
+ * timeline and the discussion banners show this reason instead of offering
+ * an action the server would refuse.
+ */
+export type ValidationBlock = "no_local_run" | "audit_running" | "run_not_completed" | "no_linked_discussion" | "discussion_missing" | "foreign_discussion" | "not_finished" | "repo_run_not_committed" | "repo_steps_to_recheck" | "repo_td_open";
+
+export type ValidationReason = "audit_validation" | "validation_card" | "acknowledged" | "revalidation" | "confirmed" | "human_owned";
+
+/**
+ * Where a validation state comes from (KT-1199): the run this instance
+ * recorded, or the committed run state of the repository (a colleague's run
+ * after a fetch or a rebase).
+ */
+export type ValidationSource = "local" | "repo";
+
+/**
  * One validation to run on the candidate before the parent is advanced (§6).
  */
 export type ValidationSpec = { command: string, quick_exec_id?: string | null, timeout_secs?: number | null, };
+
+/**
+ * The validation of a project's latest audit run, and what can be done.
+ */
+export type ValidationState = { project_id: string, run_id: string | null, run_status: string | null,
+/**
+ * The discussion linked to the latest run (never a title match).
+ */
+discussion_id: string | null, archived: boolean,
+/**
+ * The linked discussion has signalled completion; never undone.
+ */
+finished: boolean, completed_at: string | null, completed_message_id: string | null,
+/**
+ * Pseudo of the operator whose audit opened the validation.
+ */
+started_by: string | null, validated_by: string | null, validated_at: string | null, source: ValidationSource,
+/**
+ * The server accepts a validation now (the tech-debt sheet path, which
+ * reads the filesystem, is decided by the POST itself).
+ */
+can_validate: boolean, blocked: ValidationBlock | null, };
+
+/**
+ * The gone prose paths of one section that no acknowledgement accepted.
+ */
+export type VanishedPaths = {
+/**
+ * The section's key within its doc (its heading).
+ */
+section: string, paths: Array<string>, };
 
 export type VersionCheck = { current: string, latest: string | null, release_url: string | null, up_to_date: boolean, };
 
@@ -9883,6 +11312,33 @@ export type WorkflowRunSummary = { id: string, status: RunStatus, started_at: st
 
 export type WorkflowSafety = { sandbox: boolean, max_files?: number | null, max_lines?: number | null, require_approval: boolean, };
 
+/**
+ * The projects a workflow's runs reach (KT-1270 DoD: the scope a workflow
+ * declares at launch). `valid` is false once the workflow changed after a
+ * human validated it: its runs then reach nothing more than their project.
+ */
+export type WorkflowScope = { workflow_id: string,
+/**
+ * False for a global or multi-project workflow, which cannot carry one.
+ */
+supported: boolean, entries: Array<WorkflowScopeEntry>,
+/**
+ * Every project (KT-1336), besides the named entries.
+ */
+all: ScopeAccess | null,
+/**
+ * Digest of the scope as stored: every project in write names the one
+ * the human saw.
+ */
+fingerprint: string, valid: boolean, validated_by: string | null, validated_at: string | null, };
+
+/**
+ * One project a workflow's runs reach.
+ */
+export type WorkflowScopeEntry = { project_id: string, project_name: string | null, access: ScopeAccess, };
+
+export type WorkflowScopeItem = { project_id: string, access: ScopeAccess, };
+
 export type WorkflowStep = {
 /**
  * Durable opaque identity of this step. `name` remains the editable
@@ -10350,6 +11806,8 @@ export type WorkspaceHistoryLease = { id: string, disc_id: string, session_pk: n
 
 export type WorkspaceHooks = { after_create?: string | null, before_run?: string | null, after_run?: string | null, before_remove?: string | null, };
 
+export type WriteOutcome = "created" | "already_present";
+
 /**
  * Tri-state write-liveness. Never inferred `false` from silence — `Unknown`
  * until a write is observed.
@@ -10442,4 +11900,4 @@ started_at: string,
 /**
  * Increases with every frame of one run.
  */
-seq: number, progress: AgentRunProgress, } | { "type": "embed_origins_changed" } | { "type": "live_page_data_changed", page_id: string, data_revision: number, };
+seq: number, progress: AgentRunProgress, } | { "type": "workflow_step_room_changed", discussion_id: string, } | { "type": "embed_origins_changed" } | { "type": "live_page_data_changed", page_id: string, data_revision: number, };

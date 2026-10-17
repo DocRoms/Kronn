@@ -1,0 +1,289 @@
+//! Kronn's audit working files (documentary report, citation originals).
+//! They live under the project's `.kronn/audit/`, excluded locally from Git,
+//! never inside the audited `docs/` tree where they would be committed.
+
+use sha2::{Digest, Sha256};
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+pub const STATE_DIR: &str = ".kronn/audit";
+pub const REPORT_FILE: &str = ".kronn/audit/document-optimization.json";
+pub const CITATION_ORIGINALS_DIR: &str = ".kronn/audit/citation-originals";
+const TEMPLATE_BACKUPS: &str = "template-backups";
+const LEGACY_REPORT_FILE: &str = "docs/.kronn-document-optimization.json";
+const LEGACY_CITATION_ORIGINALS_DIR: &str = "docs/.kronn-citation-originals";
+
+fn sha256_hex(content: &[u8]) -> String {
+    Sha256::digest(content)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Create `dir` if missing; refuse a symlink or a non-directory.
+fn ensure_real_dir(dir: &Path) -> Result<(), String> {
+    match fs::symlink_metadata(dir) {
+        Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
+            Err(format!("{} is not a regular directory", dir.display()))
+        }
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(dir).map_err(|e| format!("create {}: {e}", dir.display()))
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// The audit state directory, created on demand. Files an older version left
+/// in `docs/` are moved here on the first call.
+pub fn state_dir(project: &Path) -> Result<PathBuf, String> {
+    let root = project
+        .canonicalize()
+        .map_err(|e| format!("resolve project root: {e}"))?;
+    let mut dir = root.clone();
+    for part in STATE_DIR.split('/') {
+        dir.push(part);
+        ensure_real_dir(&dir)?;
+    }
+    // The local exclude, not the operator's `.gitignore`; a project outside
+    // Git has nothing to commit by mistake.
+    if let Err(e) = crate::core::worktree::ensure_local_git_exclude(&root, ".kronn/") {
+        tracing::debug!("no local Git exclude for {}: {e}", root.display());
+    }
+    if let Err(e) = migrate_legacy(&root, &dir) {
+        tracing::warn!("legacy audit files left in {}/docs: {e}", root.display());
+    }
+    Ok(dir)
+}
+
+/// A new, empty `template-backups/<stamp>` directory under the audit state:
+/// the originals a template reinstall is about to replace. A stamp already
+/// taken gets a numeric suffix, so one run never writes into another's folder.
+pub fn new_template_backup_dir(project: &Path, stamp: &str) -> Result<PathBuf, String> {
+    if stamp.is_empty() || !stamp.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err(format!("invalid backup stamp {stamp:?}"));
+    }
+    let parent = state_dir(project)?.join(TEMPLATE_BACKUPS);
+    ensure_real_dir(&parent)?;
+    for attempt in 0..100u32 {
+        let name = if attempt == 0 {
+            stamp.to_string()
+        } else {
+            format!("{stamp}-{attempt}")
+        };
+        let dir = parent.join(name);
+        match fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("create {}: {e}", dir.display())),
+        }
+    }
+    Err("no free template backup folder".into())
+}
+
+/// Content-addressed, create-new store: each distinct original is kept once.
+fn store_original(dir: &Path, content: &[u8]) -> Result<(), String> {
+    let path = dir.join(format!("{}.bak", sha256_hex(content)));
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(mut file) => file.write_all(content).map_err(|e| e.to_string()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink())
+                || fs::read(&path).map_err(|e| e.to_string())? != content
+            {
+                Err("citation backup collision or symlink".into())
+            } else {
+                Ok(())
+            }
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Save a document's original before a citation correction rewrites it.
+pub fn preserve_citation_original(project: &Path, content: &str) -> Result<(), String> {
+    let dir = state_dir(project)?.join("citation-originals");
+    ensure_real_dir(&dir)?;
+    store_original(&dir, content.as_bytes())
+}
+
+const VALIDATED_ORIGINALS: &str = "validated-originals";
+
+/// Keep the text of a doc as a human validated it: the "before" of its diff.
+pub fn preserve_validated_original(project: &Path, content: &str) -> Result<(), String> {
+    let dir = state_dir(project)?.join(VALIDATED_ORIGINALS);
+    ensure_real_dir(&dir)?;
+    store_original(&dir, content.as_bytes())
+}
+
+fn validated_originals_dir(project: &Path) -> Option<PathBuf> {
+    let mut dir = project.to_path_buf();
+    for part in STATE_DIR.split('/').chain([VALIDATED_ORIGINALS]) {
+        dir.push(part);
+        let meta = fs::symlink_metadata(&dir).ok()?;
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            return None;
+        }
+    }
+    Some(dir)
+}
+
+/// The validated text with this digest, if this machine kept it intact.
+pub fn read_validated_original(project: &Path, sha256: &str) -> Option<String> {
+    if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let path = validated_originals_dir(project)?.join(format!("{sha256}.bak"));
+    if fs::symlink_metadata(&path).ok()?.file_type().is_symlink() {
+        return None;
+    }
+    let bytes = fs::read(&path).ok()?;
+    (sha256_hex(&bytes) == sha256)
+        .then(|| String::from_utf8(bytes).ok())
+        .flatten()
+}
+
+/// Drop the validated texts no record points to any more.
+pub fn prune_validated_originals(project: &Path, keep: &std::collections::BTreeSet<String>) {
+    let Some(dir) = validated_originals_dir(project) else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(digest) = name.strip_suffix(".bak") else {
+            continue;
+        };
+        if !keep.contains(digest) && entry.file_type().is_ok_and(|t| t.is_file()) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
+fn migrate_legacy(root: &Path, state: &Path) -> Result<(), String> {
+    // The report is regenerated by every documentary pass; nothing reads it.
+    let report = root.join(LEGACY_REPORT_FILE);
+    if fs::symlink_metadata(&report).is_ok_and(|m| m.is_file()) {
+        fs::remove_file(&report).map_err(|e| format!("remove {LEGACY_REPORT_FILE}: {e}"))?;
+    }
+    let legacy = root.join(LEGACY_CITATION_ORIGINALS_DIR);
+    if !fs::symlink_metadata(&legacy).is_ok_and(|m| m.is_dir()) {
+        return Ok(());
+    }
+    let target = state.join("citation-originals");
+    ensure_real_dir(&target)?;
+    for entry in fs::read_dir(&legacy).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(digest) = name.strip_suffix(".bak") else {
+            continue;
+        };
+        if !entry.file_type().is_ok_and(|t| t.is_file()) {
+            continue;
+        }
+        let content = fs::read(entry.path()).map_err(|e| e.to_string())?;
+        // Only a file whose name is its own digest is Kronn's; anything else stays.
+        if sha256_hex(&content) != digest {
+            continue;
+        }
+        store_original(&target, &content)?;
+        fs::remove_file(entry.path()).map_err(|e| e.to_string())?;
+    }
+    // Succeeds only once nothing foreign is left in it.
+    let _ = fs::remove_dir(&legacy);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn git(root: &Path, args: &[&str]) -> String {
+        let out = crate::core::cmd::git_cmd()
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    #[test]
+    fn originals_land_outside_docs_and_git_never_offers_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        git(root, &["init", "-q"]);
+        fs::create_dir(root.join("docs")).unwrap();
+        preserve_citation_original(root, "# Before\n").unwrap();
+        // Idempotent across a resume.
+        preserve_citation_original(root, "# Before\n").unwrap();
+        let backup = root
+            .join(CITATION_ORIGINALS_DIR)
+            .join(format!("{}.bak", sha256_hex(b"# Before\n")));
+        assert_eq!(fs::read_to_string(backup).unwrap(), "# Before\n");
+        assert!(fs::read_dir(root.join("docs")).unwrap().next().is_none());
+        let status = git(root, &["status", "--porcelain", "--untracked-files=all"]);
+        assert!(status.is_empty(), "{status}");
+        let gitignore = root.join(".gitignore");
+        assert!(
+            !gitignore.exists(),
+            "the operator's .gitignore is untouched"
+        );
+    }
+
+    #[test]
+    fn legacy_files_move_once_and_foreign_entries_stay() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let legacy = root.join(LEGACY_CITATION_ORIGINALS_DIR);
+        fs::create_dir_all(&legacy).unwrap();
+        let original = b"# Legacy original\n";
+        let name = format!("{}.bak", sha256_hex(original));
+        fs::write(legacy.join(&name), original).unwrap();
+        fs::write(legacy.join("not-a-digest.bak"), "foreign").unwrap();
+        fs::write(root.join(LEGACY_REPORT_FILE), "{}\n").unwrap();
+
+        state_dir(root).unwrap();
+        assert_eq!(
+            fs::read(root.join(CITATION_ORIGINALS_DIR).join(&name)).unwrap(),
+            original
+        );
+        assert!(!legacy.join(&name).exists());
+        assert!(legacy.join("not-a-digest.bak").exists());
+        assert!(!root.join(LEGACY_REPORT_FILE).exists());
+
+        // Second pass: nothing left to read, the foreign file is still kept.
+        fs::remove_file(legacy.join("not-a-digest.bak")).unwrap();
+        state_dir(root).unwrap();
+        assert!(!legacy.exists());
+    }
+
+    #[test]
+    fn a_tampered_legacy_backup_is_not_imported() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let legacy = root.join(LEGACY_CITATION_ORIGINALS_DIR);
+        fs::create_dir_all(&legacy).unwrap();
+        let name = format!("{}.bak", sha256_hex(b"genuine"));
+        fs::write(legacy.join(&name), "tampered").unwrap();
+        state_dir(root).unwrap();
+        assert!(legacy.join(&name).exists());
+        assert!(!root.join(CITATION_ORIGINALS_DIR).join(&name).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_state_dir_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), tmp.path().join(".kronn")).unwrap();
+        assert!(preserve_citation_original(tmp.path(), "x").is_err());
+        assert!(fs::read_dir(outside.path()).unwrap().next().is_none());
+    }
+}

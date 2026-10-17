@@ -89,12 +89,16 @@ describe('generated types — drift detection', () => {
       ai_file: 'ai/index.md',
       audit_step: 1,
       changed_sources: ['src/main.rs'],
+      missing_paths: [],
     };
     const response: DriftCheckResponse = {
       audit_date: '2026-03-20T10:00:00Z',
       stale_sections: [staleSection],
       fresh_sections: ['ai/glossary.md'],
       total_sections: 2,
+      sources_state: 'needs_reverification',
+      broken_citations: 1,
+      placeholder_docs: [{ path: 'docs/glossary.md', step: 2 }],
     };
     expect(response.audit_date).toBe('2026-03-20T10:00:00Z');
     expect(response.stale_sections).toHaveLength(1);

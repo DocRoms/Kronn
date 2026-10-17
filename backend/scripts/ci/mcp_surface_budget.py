@@ -96,7 +96,48 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # KT-1104: `page_delete_dataset` was paid for by tightening the page family
 # and `convention_get` descriptions; re-measured on the 0.15.0 integration
 # head: exactly 85_341 B.
-CATALOGUE_MAX_BYTES = 85_341
+# KT-1210: audit_launch gains `fresh` and `retry_steps`, paid for by tightening
+# both audit descriptions; ceiling lowered by 73 B (85_341 -> 85_268).
+# KT-1205: the template update/fill flow lives in the audit_prepare manual;
+# compact audit descriptions lower the catalogue by 165 B.
+# KT-1205 + KT-1218: preserve both template and Verify docs guidance, measured
+# after integration and shortening repeated descriptions.
+# KT-154: `task_assign` (assign yourself or another agent, `unassign:true` to
+# remove; the contract lives in its tool_manual) was paid for by tightening the
+# qa_list, disc_link, disc_transfer_session, disc_find_by_session,
+# disc_workspace_set and task_exec_review descriptions; ceiling lowered by 6 B
+# (85_095 -> 85_089).
+# KT-1254: `task_update_dod` takes `evidence` and `task_exec_review` names the
+# post-integration live check (a DoD the principal verifies after integration,
+# never an approve blocker; `task_create` cannot declare one, a new task has no
+# execution); paid for by dropping what `task_exec_review`'s `decision` schema
+# already said and tightening its identity sentence, ceiling lowered by 86 B.
+# KT-1262: `task_exec_deliver` and `task_exec_review` name the fields the
+# backend requires (`tests_executed`, `reviewed_head_sha`, `dod_verifications`,
+# the string version "1"). The spawned worker's `tests_executed` schema is now
+# declared inside the TOOLS literal (the projection in `_visible_tools` reuses
+# it), so this gate measures it; the disc_link, disc_find_by_session,
+# disc_transfer_session and disc_workspace_set descriptions were tightened to
+# pay for it. Pinned to the payload measured on the merged tree, 84_967 B
+# (85_003 -> 84_967).
+# KT-1267: `task_exec_cancel` says the task status is left alone and how to
+# relaunch, inside the bytes of the text it replaces; ceiling lowered by 1 B
+# (84_967 -> 84_966).
+# KT-1329: `disc_append` names the `kronn-question` card for a human decision
+# (the contract stays in `tool_manual disc_question_list`); paid for by
+# tightening its alias sentence and four schema descriptions, ceiling lowered
+# by 11 B (84_966 -> 84_955) and the heaviest declaration by 11 B.
+# KT-1270: `room_scope` (a room's project reach, and the human-decided request
+# for more) was paid for by moving the retry-key detail of `task_create` and
+# the `time.now` grammar of `qa_create_draft` into their manuals, which already
+# carried or now carry them; the catalogue nets 37 B less (84_966 -> 84_929).
+# KT-1318: `disk_usage` (free disk and Kronn's artefacts, orphan purge) is paid
+# for inside the catalogue: `workflow_active_runs`, `workflow_run_get` and
+# `workflow_cancel_run` lost what their intent already carries; its contract
+# lives in its manual. Ceiling lowered by 24 B on top of KT-1270 (84_929 -> 84_905).
+# KT-1329: the decision-card guidance moved inside the first 2048 chars of the
+# instructions; re-measured on the merged tree.
+CATALOGUE_MAX_BYTES = 84_894
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is
@@ -105,7 +146,7 @@ CATALOGUE_MAX_BYTES = 85_341
 # Also corrected: this used to add raw `description` bytes to a separately
 # serialised schema, which counted neither the JSON envelope nor the escaping. It
 # now measures the whole declaration exactly as sent.
-DECLARATION_MAX_BYTES = 2_757
+DECLARATION_MAX_BYTES = 2_746
 
 # Tools allowed above DECLARATION_MAX_BYTES, with the reason. An entry here is a
 # debt acknowledged in writing, not an exemption to forget: shrink the tool and
@@ -115,6 +156,52 @@ DECLARATION_MAX_BYTES = 2_757
 DECLARATION_WAIVERS: dict[str, str] = {}
 
 BYTES_PER_TOKEN = 3.7
+
+
+CATALOGUE_MUTATORS = {"append", "extend", "insert", "__iadd__"}
+
+
+def reject_catalogue_mutations(tree: ast.Module) -> None:
+    """The gate measures the TOOLS literal, so the literal must be the catalogue.
+
+    A tool appended anywhere else (`TOOLS.extend([...])` after `main()`) reaches
+    `tools/list` while the measured bytes stay green.
+    """
+    assignments = 0
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if isinstance(target, ast.Name) and target.id == "TOOLS":
+                    if isinstance(node, ast.AugAssign):
+                        raise SystemExit(
+                            f"TOOLS in {BRIDGE} is extended with `+=` at line {node.lineno}: "
+                            "declare every tool inside the TOOLS literal"
+                        )
+                    assignments += 1
+                elif (
+                    isinstance(target, ast.Subscript)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id == "TOOLS"
+                ):
+                    raise SystemExit(
+                        f"TOOLS in {BRIDGE} is modified by index at line {node.lineno}: "
+                        "declare every tool inside the TOOLS literal"
+                    )
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "TOOLS"
+            and node.func.attr in CATALOGUE_MUTATORS
+        ):
+            raise SystemExit(
+                f"TOOLS in {BRIDGE} is changed by `TOOLS.{node.func.attr}` at line "
+                f"{node.lineno}: declare every tool inside the TOOLS literal so the "
+                "budget measures what tools/list serves"
+            )
+    if assignments > 1:
+        raise SystemExit(f"TOOLS in {BRIDGE} is assigned {assignments} times: keep one literal")
 
 
 def load_tools(root: pathlib.Path) -> list[dict]:
@@ -127,6 +214,7 @@ def load_tools(root: pathlib.Path) -> list[dict]:
     """
     source = (root / BRIDGE).read_text()
     tree = ast.parse(source)
+    reject_catalogue_mutations(tree)
 
     class LiteralNameResolver(ast.NodeTransformer):
         def __init__(self, values: dict[str, object]) -> None:

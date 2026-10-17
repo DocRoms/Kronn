@@ -14,6 +14,7 @@
 //! retry loop, and only calls into these helpers.
 
 use crate::core::anti_halluc::{self, scan_fences, FenceScan, SourceCheck};
+use crate::core::version_sources::{verify_dep_marker, DependencySnapshot};
 use std::path::Path;
 
 /// Total attempts (1 initial + retries) allowed per step in enforce mode.
@@ -79,6 +80,28 @@ pub fn lint_step_file(content: &str, roots: &[&Path]) -> CitationVerdict {
     CitationVerdict { fabricated }
 }
 
+/// [`lint_step_file`], with every `deps:` marker checked against the dependency
+/// watch the audit injected (KT-1000): a row it does not hold is fabricated.
+pub fn lint_step_file_with_deps(
+    content: &str,
+    roots: &[&Path],
+    deps: Option<&DependencySnapshot>,
+) -> CitationVerdict {
+    let report = anti_halluc::analyze_roots(content, roots);
+    let fabricated = report
+        .sources
+        .into_iter()
+        .filter_map(|mut source| {
+            if let Some((status, detail)) = verify_dep_marker(&source.raw, deps) {
+                source.status = status;
+                source.detail = detail;
+            }
+            source.status.is_fabricated().then_some(source)
+        })
+        .collect();
+    CitationVerdict { fabricated }
+}
+
 /// Build the corrective prompt addendum re-injected on a retry. Names each
 /// fabricated citation and the verdict so the agent can fix the reference or
 /// drop the claim — it must NOT invent a new path to satisfy the linter.
@@ -101,7 +124,8 @@ path / out-of-bounds line / outside the project is treated as **fabricated** and
         ));
     }
     out.push_str(
-        "\nFor EACH one: either correct it to a real `path:line` you have actually read, OR \
+        "\nFor EACH one: either correct it to a real `path:line` you have actually read (a binary \
+file: its bare path; a claim that a file merely exists or is tracked: `path:exists`), OR \
 remove the unverifiable claim entirely (do not weaken it into prose — drop it). \
 Do NOT invent a path just to pass the check. Re-write the file, then finish.\n",
     );
@@ -232,6 +256,49 @@ pub(super) fn is_human_owned_marker(line: &str) -> bool {
     line.contains("owner=\"human\"") || line.contains("curated=\"human\"")
 }
 
+/// `content` with every human-owned section blanked (line count kept), and
+/// each of those sections as `(name, text)`, markers included.
+pub fn split_human_owned_sections(content: &str) -> (String, Vec<(String, String)>) {
+    let mut lines: Vec<&str> = content.split('\n').collect();
+    let scan = code_line_mask(content, false);
+    let mut human = Vec::new();
+    for span in parse_named_sections(&lines, &scan.in_fence) {
+        if span.is_human {
+            human.push((span.name, lines[span.start..=span.end].join("\n")));
+            for line in &mut lines[span.start..=span.end] {
+                *line = "";
+            }
+        }
+    }
+    (lines.join("\n"), human)
+}
+
+/// One live named section: its text (markers included) and 0-based line span.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedSection {
+    pub name: String,
+    pub block: String,
+    pub human: bool,
+    pub start: usize,
+    pub end: usize,
+}
+
+/// Every live named section of `content`; fenced examples are not sections.
+pub fn named_sections(content: &str) -> Vec<NamedSection> {
+    let lines: Vec<&str> = content.split('\n').collect();
+    let scan = code_line_mask(content, false);
+    parse_named_sections(&lines, &scan.in_fence)
+        .into_iter()
+        .map(|span| NamedSection {
+            block: lines[span.start..=span.end].join("\n"),
+            name: span.name,
+            human: span.is_human,
+            start: span.start,
+            end: span.end,
+        })
+        .collect()
+}
+
 pub fn contains_human_owned_section(content: &str) -> bool {
     let lines: Vec<&str> = content.split('\n').collect();
     let scan = code_line_mask(content, false);
@@ -336,31 +403,6 @@ pub fn enforce_human_owned_sections(
     Some((out_lines.join("\n"), diffs))
 }
 
-/// Render the audit-proposed changes for a human to review by hand.
-pub fn format_human_section_diff_report(
-    file_label: &str,
-    diffs: &[HumanSectionDiff],
-    today: &str,
-) -> String {
-    let mut out = format!(
-        "# Proposed changes to human-owned sections — {today}\n\n\
-The audit tried to update the following `owner=\"human\"` section(s) in \
-`{file_label}` but left them untouched, as the convention requires. Review \
-each diff below and apply it by hand if you agree with it.\n"
-    );
-    for d in diffs {
-        out.push_str(&format!(
-            "\n## Section `{}`\n\n### Kept (current)\n\n```\n{}\n```\n\n### Audit-proposed\n\n```\n{}\n```\n",
-            d.name,
-            d.pre_block,
-            d.post_block
-                .as_deref()
-                .unwrap_or("(the audit removed this section — it was restored)"),
-        ));
-    }
-    out
-}
-
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
@@ -380,6 +422,29 @@ mod tests {
     }
 
     #[test]
+    fn a_dash_range_passes_the_enforce_gate_like_a_hyphen_range() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("long.md"), "x\n".repeat(30)).unwrap();
+        // 31 is the empty line after the final newline.
+        for ok in [
+            "17\u{2013}23",
+            "17\u{2014}23",
+            "17-23",
+            "1\u{2013}30",
+            "1\u{2013}31",
+        ] {
+            let verdict =
+                lint_step_file(&format!("Claim [src: file: long.md:{ok}]."), &[dir.path()]);
+            assert!(verdict.is_clean(), "{ok}: {:?}", verdict.fabricated);
+        }
+        for bad in ["17\u{2013}32", "32\u{2014}40", "23\u{2013}17"] {
+            let verdict =
+                lint_step_file(&format!("Claim [src: file: long.md:{bad}]."), &[dir.path()]);
+            assert!(!verdict.is_clean(), "{bad} must still be refused");
+        }
+    }
+
+    #[test]
     fn nonexistent_path_is_fabricated() {
         let dir = tempdir().unwrap();
         let content = "It lives in [src: file: does/not/exist.rs:10].";
@@ -395,6 +460,25 @@ mod tests {
         let content = "See [src: file: short.rs:999].";
         let verdict = lint_step_file(content, &[dir.path()]);
         assert_eq!(verdict.count(), 1, "out-of-bounds line → fabricated");
+    }
+
+    #[test]
+    fn absolute_citation_outside_the_project_is_fabricated() {
+        let dir = tempdir().unwrap();
+        let verdict = lint_step_file("Secrets in [src: file: /etc/passwd:1].", &[dir.path()]);
+        assert_eq!(verdict.count(), 1);
+        assert_eq!(
+            verdict.fabricated[0].status,
+            anti_halluc::SourceStatus::OutsideProject
+        );
+    }
+
+    #[test]
+    fn quoted_grammar_example_does_not_block_the_gate() {
+        // The AGENTS.md template quotes the grammar with placeholders.
+        let dir = tempdir().unwrap();
+        let content = "Cite `[src: file: <path>:<line>]` or `[src: file: ghost.rs:1]`.";
+        assert!(lint_step_file(content, &[dir.path()]).is_clean());
     }
 
     #[test]
@@ -736,35 +820,6 @@ mod tests {
     }
 
     #[test]
-    fn diff_report_names_the_file_and_every_section() {
-        let diffs = vec![
-            HumanSectionDiff {
-                name: "team".to_string(),
-                pre_block: "kept text".to_string(),
-                post_block: Some("agent text".to_string()),
-            },
-            HumanSectionDiff {
-                name: "roadmap".to_string(),
-                pre_block: "kept roadmap".to_string(),
-                post_block: None,
-            },
-        ];
-        let report = format_human_section_diff_report("docs/AGENTS.md", &diffs, "2026-09-27");
-        assert!(report.contains("docs/AGENTS.md"));
-        assert!(report.contains("2026-09-27"));
-        assert!(
-            report.contains("team")
-                && report.contains("kept text")
-                && report.contains("agent text")
-        );
-        assert!(report.contains("roadmap") && report.contains("kept roadmap"));
-        assert!(
-            report.contains("restored"),
-            "the removed section notes it was restored"
-        );
-    }
-
-    #[test]
     fn stamp_preserves_trailing_newline() {
         let with_nl = "<!-- kronn:section name=\"s\" curated=\"ai\" -->\nB\n";
         assert!(stamp_curated_audit_dates(with_nl, "2026-06-14")
@@ -909,6 +964,43 @@ mod tests {
     }
 
     #[test]
+    fn a_mistyped_kind_over_a_missing_file_is_retried_then_failed() {
+        // `fil:` / `path:` / `source:` are not known kinds: their path is judged
+        // as a file, so the step is retried and finally failed, not waved through.
+        for raw in [
+            "fil: src/ghost.rs:1",
+            "path: src/ghost.rs",
+            "source: ghost.rs",
+        ] {
+            let dir = tempdir().unwrap();
+            fs::write(
+                dir.path().join("AGENTS.md"),
+                format!("Claim [src: {raw}].\n"),
+            )
+            .unwrap();
+            let gate = |attempt| {
+                evaluate_enforce_gate(true, true, "AGENTS.md", dir.path(), attempt, 2, None)
+            };
+            assert!(
+                matches!(gate(1), EnforceGateOutcome::Retry { fabricated: 1, .. }),
+                "{raw}"
+            );
+            assert!(matches!(gate(2), EnforceGateOutcome::Fail { .. }), "{raw}");
+        }
+        // A listed non-file kind is not a path: the gate passes it.
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("AGENTS.md"),
+            "Recent [src: command: git log --oneline].\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            evaluate_enforce_gate(true, true, "AGENTS.md", dir.path(), 1, 2, None),
+            EnforceGateOutcome::Pass { .. }
+        ));
+    }
+
+    #[test]
     fn gate_fails_after_exhausting_attempts_without_stamping() {
         // The agent never fixes the fabricated citation. After MAX_ATTEMPTS the
         // step must Fail (→ audit ends Interrupted) and NEVER stamp the doc as
@@ -978,6 +1070,7 @@ pub fn evaluate_enforce_gate(
     project_path: &Path,
     attempt: usize,
     max_attempts: usize,
+    deps: Option<&DependencySnapshot>,
 ) -> EnforceGateOutcome {
     if !enforce_mode || !step_success_so_far || target_file == "REVIEW" {
         return EnforceGateOutcome::NotApplicable;
@@ -991,21 +1084,28 @@ pub fn evaluate_enforce_gate(
             ));
         }
     };
-    let verdict = lint_step_file(&written, &[project_path]);
+    let verdict = lint_step_file_with_deps(&written, &[project_path], deps);
     match decide(&verdict, attempt, max_attempts) {
         GateDecision::Retry => EnforceGateOutcome::Retry {
             feedback: corrective_feedback(target_file, &verdict),
             fabricated: verdict.count(),
         },
         GateDecision::Fail => EnforceGateOutcome::Fail {
-            reason: format!(
-                "{} fabricated `[src:]` citation(s) still present after {} attempts (enforce mode)",
-                verdict.count(),
-                max_attempts
-            ),
+            reason: enforce_failure_reason(verdict.count(), max_attempts),
         },
         GateDecision::Pass => EnforceGateOutcome::Pass { written },
     }
+}
+
+/// The reason of a step that still holds fabricated citations once its
+/// attempts are spent.
+pub(crate) fn enforce_failure_reason(count: usize, max_attempts: usize) -> String {
+    format!(
+        "{} {}(s) still present after {} attempts (enforce mode)",
+        count,
+        super::step_guard::FABRICATED_FRAGMENT,
+        max_attempts
+    )
 }
 
 #[cfg(all(test, feature = "full-tests"))]
@@ -1032,7 +1132,8 @@ mod enforce_gate_tests {
         let pre = target_snapshot(tmp.path(), "docs/architecture.md").unwrap();
         assert!(matches!(pre, TargetSnapshot::Present(_)));
 
-        let outcome = evaluate_enforce_gate(true, true, "docs/architecture.md", tmp.path(), 0, 3);
+        let outcome =
+            evaluate_enforce_gate(true, true, "docs/architecture.md", tmp.path(), 0, 3, None);
         assert!(
             matches!(outcome, EnforceGateOutcome::Pass { .. }),
             "lint-green must Pass"
@@ -1042,5 +1143,111 @@ mod enforce_gate_tests {
         assert_eq!(pre, post, "a passing gate must not fabricate a rewrite");
         let on_disk = std::fs::read_to_string(tmp.path().join("docs/architecture.md")).unwrap();
         assert_eq!(on_disk, stale, "byte-intact: the stale audit date survives");
+    }
+
+    fn watch() -> DependencySnapshot {
+        DependencySnapshot {
+            checked_on: "2026-10-04".into(),
+            packages: vec![crate::core::version_sources::WatchedPackage {
+                manager: "npm".into(),
+                manifest: "package.json".into(),
+                name: "react".into(),
+                current: "18.2.0".into(),
+                latest: "19.1.0".into(),
+                major: true,
+                declared_only: false,
+                lockfile: None,
+            }],
+            unchecked: vec![],
+            up_to_date: vec![],
+        }
+    }
+
+    /// KT-1295 — the bench row: the npm manager is labelled `JS / TS` by the
+    /// producer, and the citation it emits (a `/` in the label) passes the gate.
+    #[test]
+    fn deps_citations_with_the_real_js_ts_label_pass_the_gate() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let roots = [tmp.path()];
+        let mut snap = watch();
+        snap.checked_on = "2026-10-16".into();
+        snap.packages = ["argparse", "joi", "@types/node"]
+            .iter()
+            .map(|name| crate::core::version_sources::WatchedPackage {
+                manager: "JS / TS".into(),
+                manifest: "package.json".into(),
+                name: (*name).into(),
+                current: "1.0.0".into(),
+                latest: "2.0.0".into(),
+                major: true,
+                declared_only: false,
+                lockfile: None,
+            })
+            .collect();
+        let cited: String = snap
+            .packages
+            .iter()
+            .map(|p| format!("{} lags {}.\n", p.name, snap.citation(p)))
+            .collect();
+        assert!(cited.contains("[src: deps: JS / TS/argparse@2026-10-16]"));
+        assert!(lint_step_file_with_deps(&cited, &roots, Some(&snap)).is_clean());
+
+        let absent = "Vue lags [src: deps: JS / TS/vue@2026-10-16].";
+        assert_eq!(
+            lint_step_file_with_deps(absent, &roots, Some(&snap)).count(),
+            1
+        );
+    }
+
+    /// KT-1000 — a `deps:` row the injected watch holds passes; one it does
+    /// not hold (or with another date, or with no watch) fails the gate.
+    #[test]
+    fn deps_citations_are_gated_against_the_injected_watch() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let roots = [tmp.path()];
+        let snap = watch();
+        let held = "React lags a major [src: deps: npm/react@2026-10-04].";
+        assert!(lint_step_file_with_deps(held, &roots, Some(&snap)).is_clean());
+
+        for bad in [
+            "Vue lags [src: deps: npm/vue@2026-10-04].",
+            "React lags [src: deps: npm/react@2026-09-01].",
+            "React lags [src: deps: npm/react].",
+        ] {
+            let verdict = lint_step_file_with_deps(bad, &roots, Some(&snap));
+            assert_eq!(verdict.count(), 1, "{bad}");
+        }
+        assert_eq!(lint_step_file_with_deps(held, &roots, None).count(), 1);
+        // Outside an audit the marker stays honestly unchecked.
+        assert!(lint_step_file(held, &roots).is_clean());
+
+        std::fs::create_dir_all(tmp.path().join("docs")).unwrap();
+        std::fs::write(
+            tmp.path().join("docs/inconsistencies-tech-debt.md"),
+            "Vue [src: deps: npm/vue@2026-10-04].\n",
+        )
+        .unwrap();
+        let outcome = evaluate_enforce_gate(
+            true,
+            true,
+            "docs/inconsistencies-tech-debt.md",
+            tmp.path(),
+            1,
+            3,
+            Some(&snap),
+        );
+        match outcome {
+            EnforceGateOutcome::Retry {
+                feedback,
+                fabricated,
+            } => {
+                assert_eq!(fabricated, 1);
+                assert!(
+                    feedback.contains("not in the dependency watch dated 2026-10-04"),
+                    "{feedback}"
+                );
+            }
+            _ => panic!("an absent deps row must be retried"),
+        }
     }
 }

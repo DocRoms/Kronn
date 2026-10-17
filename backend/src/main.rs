@@ -12,16 +12,26 @@ use kronn::{
 // ─── Main ───────────────────────────────────────────────────────────────────
 
 fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match kronn::core::cli_args::cli_action(&args) {
+        kronn::core::cli_args::CliAction::Run => {}
+        kronn::core::cli_args::CliAction::PrintVersion => {
+            println!("kronn {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        kronn::core::cli_args::CliAction::PrintHelp => {
+            println!("{}", kronn::core::cli_args::HELP);
+            return Ok(());
+        }
+        kronn::core::cli_args::CliAction::Refuse(reason) => anyhow::bail!(reason),
+    }
     // An operator-set KRONN_AUTH_TOKEN enables auth through the config, then
     // leaves this process's environment before any thread exists (removing a
     // variable is not thread-safe): children never inherit the admin token.
     let env_token = kronn::core::config::take_env_auth_token();
     // Same for the operator's raw key: kept in memory, never inherited.
     kronn::core::keyvault::take_env_kek();
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?
-        .block_on(run(env_token))
+    kronn::runtime_builder().build()?.block_on(run(env_token))
 }
 
 async fn run(env_token: Option<String>) -> anyhow::Result<()> {
@@ -32,13 +42,8 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
 
     // Load config before tracing init so `debug_mode` can influence the
     // tracing filter's default level; `config::load()` emits no logs.
-    // Also arms the process timezone (KT-1103), shared with the desktop boot.
+    // Also arms the process timezone and anti-hallucination mode, shared with the desktop boot.
     let mut app_config = kronn::load_startup_config().await?;
-
-    // 0.8.7 anti-hallucination — arm the process-global mode flag from config
-    // so the runner chokepoint can gate P1/P2 without threading config through
-    // every agent-spawn site. Re-set on every save (see api::setup).
-    kronn::core::anti_halluc::set_mode(&app_config.server.anti_hallucination_mode);
 
     // Initialize tracing — write to stdout (Docker best practice: stdout for
     // logs, stderr for panics) AND to the in-memory ringbuffer that the
@@ -97,6 +102,12 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     tracing::info!("tracing initialized — filter: {}", filter_src);
     tracing::info!("timezone: {}", kronn::core::timezone::current());
     kronn::core::config::warn_secrets_taken_from_env(env_token.is_some());
+    if kronn::core::cmd::ignored_test_flag() {
+        tracing::warn!(
+            "{} is set but only test builds read it: ignored, agent CLIs stay available",
+            kronn::core::cmd::NO_REAL_AGENTS_ENV
+        );
+    }
 
     tracing::info!("Kronn — Entering the grid...");
     if app_config.server.debug_mode {
@@ -109,7 +120,14 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
         .unwrap_or_else(|_| "<unknown>".into());
     tracing::info!("Config loaded from {}", config_source);
 
-    let port = app_config.server.port;
+    // `KRONN_PORT` (a worker lane's own port) overrides the saved port for this
+    // process only: `runtime_port` is never written back to config.toml.
+    if let Some(port) = kronn::core::listen_guard::port_override(
+        kronn::core::child_env::var("KRONN_PORT").ok().as_deref(),
+    ) {
+        app_config.server.runtime_port = Some(port);
+    }
+    let port = app_config.server.listening_port();
     // Host binding priority:
     //   1. `KRONN_HOST` env — explicit opt-in (e.g. `KRONN_HOST=0.0.0.0` to
     //      expose a NATIVE instance on the LAN for the contacts / P2P feature,
@@ -160,6 +178,8 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     // deliberately never mints one — then load the encrypted credentials. Runs
     // before the auth-token handling below, which reads the stored token.
     kronn::resolve_key_and_credentials(&mut app_config, &database, env_token).await?;
+    // Before any request resolves a project's AI doc folder (KT-263).
+    kronn::arm_docs_locations(&database).await?;
 
     let max_agents = if app_config.server.max_concurrent_agents > 0 {
         app_config.server.max_concurrent_agents
@@ -361,6 +381,10 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
             config.server.disk_warning_gib,
             config.server.disk_critical_gib,
         );
+        kronn::core::disk_usage::set_disk_policy(
+            config.server.disk_launch_min_free_gib,
+            config.server.disk_sweep_idle_hours,
+        );
     }
     // reply without spending tokens twice.
     match state
@@ -406,6 +430,7 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     if orchestration_recovery.interrupted > 0
         || !orchestration_recovery.deferred_resumes.is_empty()
         || orchestration_recovery.orphan_workspaces_removed > 0
+        || orchestration_recovery.orphan_lane_targets_removed > 0
         || !orchestration_recovery.errors.is_empty()
     {
         tracing::warn!(
@@ -415,9 +440,21 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
             deferred = orchestration_recovery.deferred_resumes.len(),
             orphans_removed = orchestration_recovery.orphan_workspaces_removed,
             orphans_preserved = orchestration_recovery.orphan_workspaces_preserved,
+            lane_targets_removed = orchestration_recovery.orphan_lane_targets_removed,
+            lane_targets_preserved = orchestration_recovery.orphan_lane_targets_preserved,
+            lane_target_bytes = orchestration_recovery.orphan_lane_target_bytes,
+            lane_targets_unmarked = orchestration_recovery.lane_targets_unmarked,
             errors = ?orchestration_recovery.errors,
             "Task orchestration boot reconciliation completed"
         );
+    }
+    // KT-1318 — the boot pass above is not enough on a host that stays up for
+    // weeks: orphaned lane build dirs are swept periodically as well.
+    kronn::api::disk::spawn_periodic_sweep(state.db.clone());
+    // KT-1256 — the lane-target sweep's readable view: what boot removed, what
+    // it would remove, what it kept and which `target/wt-*` are not Kronn's.
+    for line in &orchestration_recovery.lane_target_report {
+        tracing::info!("lane targets: {line}");
     }
     kronn::api::orchestration::start_resilience_watchdog(state.clone());
 
@@ -708,7 +745,41 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
         }
     }
 
-    // Ensure .kronn/ is gitignored in all projects
+    // KT-819 A4 — a project installed before KT-841 still carries the "FIRST-RUN
+    // TASK" block in the docs entry file every agent reads, until an audit runs.
+    // At boot no audit holds a project's docs, so it is retired here.
+    // The project list is read first and the connection released: the file I/O
+    // below never holds the single DB connection.
+    {
+        let db = state.db.clone();
+        match db.with_conn(kronn::db::projects::list_projects).await {
+            Ok(projects) => {
+                let cleanup = tokio::task::spawn_blocking(move || {
+                    for p in &projects {
+                        let resolved = kronn::core::scanner::resolve_host_path(&p.path);
+                        match kronn::core::scanner::retire_legacy_bootstrap_block(&resolved) {
+                            Ok(true) => tracing::info!(
+                                "Removed the legacy bootstrap instruction from the docs entry of {}",
+                                p.name
+                            ),
+                            Ok(false) => {}
+                            Err(e) => tracing::warn!(
+                                "Legacy bootstrap instruction kept in {}: {e}",
+                                p.name
+                            ),
+                        }
+                    }
+                })
+                .await;
+                if let Err(e) = cleanup {
+                    tracing::warn!("Legacy bootstrap cleanup failed: {}", e);
+                }
+            }
+            Err(e) => tracing::warn!("Legacy bootstrap cleanup failed: {}", e),
+        }
+    }
+
+    // Keep .kronn/ out of git status in all projects (local exclude, never .gitignore)
     // (retroactive fix — also migrates old .kronn-tmp/ and .kronn-worktrees/ patterns)
     {
         let db = state.db.clone();
@@ -721,7 +792,7 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
                         || resolved.join(".kronn-tmp").exists()
                         || resolved.join(".kronn-worktrees").exists()
                     {
-                        mcp_scanner::ensure_gitignore_public(&p.path, ".kronn/");
+                        mcp_scanner::ensure_local_exclude(&p.path, ".kronn/");
                     }
                 }
                 Ok(())
@@ -860,6 +931,10 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
         println!();
     }
 
+    if let Err(refusal) = kronn::core::listen_guard::refuse_if_port_served(&host, port) {
+        tracing::error!("{refusal}");
+        anyhow::bail!(refusal);
+    }
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     kronn::api::orchestration::spawn_deferred_boot_resumes(
         deferred_resume_state,

@@ -1,22 +1,33 @@
 import '../pages/Dashboard.css';
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
-import { planning, projects as projectsApi } from '../lib/api';
+import { planning, projects as projectsApi, externalApi, type ExternalApiConnectionView } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import { userError } from '../lib/userError';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { isValidationDisc, isBriefingDisc, isBootstrapDisc, isTrackerMcp } from '../lib/constants';
 import { canRunAudit } from '../lib/agentCapabilities';
+import { effectiveLaunchChoice, runLaunchChoice, type ConnectionsStatus } from '../lib/auditLaunchChoice';
 import { AiDocViewer } from './AiDocViewer';
 import { unseenBasis } from '../lib/discussionUiUtils';
+import { onActivationKey } from '../lib/keyboardActivation';
 import AuditRecapPanel from './AuditRecapPanel';
-import { AuditTimeline } from './AuditTimeline';
+import { AuditTimeline, OVERRIDE_REQUIRED_PREFIX } from './AuditTimeline';
+import { TemplateMergeOfferSlot } from './TemplateMergePanel';
+import { PlaceholderDocsBadge, TemplateReinstall } from './TemplateReinstall';
+import { TemplateUpdateBadge, TemplateUpdateNotice } from './TemplateUpdateNotice';
+import { useTemplateMergeOffer } from '../hooks/useTemplateMergeOffer';
 import type { AuditKind } from '../types/AuditKind';
 import { ProjectLinkedRepos } from './ProjectLinkedRepos';
+import { SourcesBadge } from './SourcesBadge';
+import { RevalidateAudit } from './RevalidateAudit';
+import { DocReconfirm } from './DocReconfirm';
+import { TdTasksButton } from './TdTasksButton';
+import { TechDebtBlock, TechDebtTimelineEntry } from './TechDebtBlock';
 import {
   saveAuditCheckpoint, loadAuditCheckpoint, clearAuditCheckpoint,
   type AuditCheckpointKind,
 } from '../lib/audit-resume';
-import type { Project, AgentDetection, AgentType, ModelTier, ModelTiersConfig, DriftCheckResponse, Discussion, Skill, McpConfigDisplay, WorkflowSummary, AuditEvidenceResponse, ContextAuditResponse, AuditRecentActivity, AuditTokenBreakdown } from '../types/generated';
+import type { Project, AgentDetection, AgentType, ModelTier, ModelTiersConfig, DriftCheckResponse, Discussion, Skill, McpConfigDisplay, WorkflowSummary, AuditEvidenceResponse, ContextAuditResponse, AuditRecentActivity, AuditRun, AuditTimelineValidation, AuditTokenBreakdown, BriefingDefaults, RevalidationPlan } from '../types/generated';
 import {
   ChevronRight, ChevronDown, Cpu, Workflow,
   Plus, Trash2, Zap,
@@ -40,8 +51,11 @@ import { ProjectDependenciesBlock } from './project/ProjectDependenciesBlock';
 import { ProjectGithubRow } from './project/ProjectGithubRow';
 import { invalidateCachedResource, projectGitCacheKey } from '../hooks/useCachedResource';
 import { ProjectAgentFilesSetting } from './ProjectAgentFilesSetting';
+import { ProjectDocsLocationSetting } from './ProjectDocsLocationSetting';
 import { ProjectRepositoryResourcesPanel } from './ProjectRepositoryResourcesPanel';
 import { rememberProjectRepositoryResourcesTab } from '../lib/projectRepositoryResourcesTab';
+import { DocStateSummary } from './DocStateSummary';
+import { docStateNeedsAttention, type DocStateCounts } from './docState';
 import { PAGE_PATHS, PROJECT_VIEWS, discussionPath, projectPath, type ProjectLocation, type ProjectView } from '../lib/routes';
 import { newTabClickProps } from '../lib/newTabNavigation';
 
@@ -144,6 +158,21 @@ export function ProjectCard({
     : ownCodeFile;
   const codeInitialPath = codeFile?.path ?? null;
   const codeInitialLine = codeFile?.line ?? null;
+  const [verifyDocsOpen, setVerifyDocsOpen] = useState(false);
+  const [reconfirmOpen, setReconfirmOpen] = useState(false);
+  const [docProvenanceCount, setDocProvenanceCount] = useState<number | null>(null);
+  const [docProvenanceFailed, setDocProvenanceFailed] = useState(false);
+  const [headerRevalidationPlan, setHeaderRevalidationPlan] = useState<RevalidationPlan | null>(null);
+  const [headerRevalidationPlanFailed, setHeaderRevalidationPlanFailed] = useState(false);
+  const [docStateReload, setDocStateReload] = useState(0);
+  const [headerTimeline, setHeaderTimeline] = useState<{
+    latest: AuditRun | null;
+    latestCompleted: AuditRun | null;
+    validation: AuditTimelineValidation | null;
+  } | null>(null);
+  const [headerTimelineFailed, setHeaderTimelineFailed] = useState(false);
+  const [briefingDefaultsState, setBriefingDefaultsState] = useState<BriefingDefaults | null>(null);
+  const [briefingDefaultsFailed, setBriefingDefaultsFailed] = useState(false);
   const [expandedTab, setExpandedTab] = useState<string | undefined>(undefined);
   const selectDetailView = useCallback((view: ProjectDetailView) => {
     setOwnDetailView(view);
@@ -410,14 +439,45 @@ export function ProjectCard({
   const [auditRecent, setAuditRecent] = useState<AuditRecentActivity | null>(null);
   const [auditStepBreakdown, setAuditStepBreakdown] = useState<AuditTokenBreakdown | null>(null);
   const [auditAbortController, setAuditAbortController] = useState<AbortController | null>(null);
+  // KT-1134 — a cancel the backend has not acknowledged: the run may still go on.
+  const [cancelPending, setCancelPending] = useState(false);
+  // KT-1169 — the last launch that stopped on an error, and how to replay it.
+  const [auditLaunchError, setAuditLaunchError] = useState<{ message: string; retry: () => void } | null>(null);
+  // A "Reprendre" replays the launch with the state of the moment it is clicked.
+  const handleFullAuditRef = useRef<(options?: { retrySteps?: number[]; redoSteps?: number[]; fresh?: boolean }) => Promise<void>>(async () => {});
+  const startPartialAuditRef = useRef<(steps: number[]) => Promise<void>>(async () => {});
+  // Re-arms the status poll: an external launch, or a cancel left pending.
+  const [externalAdoptTick, setExternalAdoptTick] = useState(0);
   const [auditAgentChoice, setAuditAgentChoice] = useState<AgentType | undefined>(undefined);
   const [auditTierChoice, setAuditTierChoice] = useState<ModelTier>('reasoning');
+  // KT-1320 — set once the human picks in the panel: until then a retry or a
+  // resume runs on the agent, tier and connection of the run it continues.
+  const [auditPickTouched, setAuditPickTouched] = useState(false);
   // KT-980 — the named external API connection picked for an HTTP agent.
   const [auditConnectionId, setAuditConnectionId] = useState<string | null>(null);
+  // The named connections the picker lists (the panel loads the same list).
+  // Loading and failed are told apart from an empty list: a run's connection is
+  // only known to be deleted once the list loaded without it.
+  const [auditConnections, setAuditConnections] = useState<ExternalApiConnectionView[]>([]);
+  const [auditConnectionsStatus, setAuditConnectionsStatus] = useState<ConnectionsStatus>('loading');
+  useEffect(() => {
+    let alive = true;
+    externalApi.list()
+      .then(list => {
+        if (!alive) return;
+        setAuditConnections(list ?? []);
+        setAuditConnectionsStatus('ready');
+      })
+      .catch(() => { if (alive) setAuditConnectionsStatus('error'); });
+    return () => { alive = false; };
+  }, []);
   /// Companion ref for `auditActive` — keeps `handleFullAudit` and
   /// `startPartialAudit` race-free against a double-click that fires
   /// before React re-renders.
   const auditActiveRef = useRef(false);
+  // KT-1207 — « Vérifié, inchangé » on the stale sections, one request at a time.
+  const driftAckRef = useRef(false);
+  const [driftAcking, setDriftAcking] = useState(false);
   /// Handle to the polling interval so we can clear it on unmount / done.
   const auditPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   /// `true` once the mount-time resume effect has run — avoids racing a
@@ -459,15 +519,30 @@ export function ProjectCard({
   // each audit completion/error so the "Lancer l'audit" button can
   // flip to the dynamic resume CTA when an Interrupted run is on file
   // for this project. `null` = no resumable run; otherwise the row.
-  const [resumableAudit, setResumableAudit] = useState<{ id: string; kind: AuditKind; last_completed_step: number; steps_to_redo?: number[]; started_at: string } | null>(null);
+  const [resumableAudit, setResumableAudit] = useState<{ id: string; kind: AuditKind; last_completed_step: number; steps_to_redo?: number[]; started_at: string; agent_type?: string; tier?: string; connection_id?: string; from_repository?: boolean } | null>(null);
+  // Unknown is not "nothing to resume": launching waits until it is known (KT-1169).
+  const [resumableUnknown, setResumableUnknown] = useState(false);
+  const [resumableReload, setResumableReload] = useState(0);
   useEffect(() => {
     let cancelled = false;
     projectsApi.auditResumable(proj.id).then(row => {
       if (cancelled) return;
       setResumableAudit(row);
-    }).catch(() => { /* idle on error — button stays "Lancer" */ });
+      setResumableUnknown(false);
+    }).catch(() => { if (!cancelled) setResumableUnknown(true); });
     return () => { cancelled = true; };
-  }, [proj.id, proj.audit_status, auditActive]);
+  }, [proj.id, proj.audit_status, auditActive, auditCompletedTick, resumableReload]);
+  // KT-1320 — a pick belongs to the run it was made for: another project, or
+  // another run to continue, starts again from that run's own footing.
+  useEffect(() => { setAuditPickTouched(false); }, [proj.id, resumableAudit?.id]);
+
+  // KT-1181 — a documented repo never merged gets the template v2 merge before its audit.
+  const templateMerge = useTemplateMergeOffer(
+    proj.id,
+    proj.audit_status,
+    !auditActive && (detailMode ? detailView === 'audit' : isSectionOpen('aiContext')),
+  );
+  const gateTemplateLaunch = templateMerge.gateLaunch;
 
   // Keep the latest terminal result visible on an opened project card. The
   // live tracker owns the in-progress state; history owns the durable result
@@ -493,22 +568,110 @@ export function ProjectCard({
     return () => { cancelled = true; };
   }, [proj.id, isOpen, detailMode, auditCompletedTick]);
 
+  useEffect(() => {
+    let live = true;
+    setHeaderTimeline(null);
+    setHeaderTimelineFailed(false);
+    projectsApi.auditTimeline(proj.id).then(data => {
+      if (!live) return;
+      setHeaderTimeline({
+        latest: data.runs[0] ?? null,
+        latestCompleted: data.runs.find(run => run.status === 'Completed') ?? null,
+        validation: data.latest_validation ?? null,
+      });
+    }).catch(() => {
+      if (!live) return;
+      setHeaderTimeline(null);
+      setHeaderTimelineFailed(true);
+    });
+    return () => { live = false; };
+  }, [proj.id, proj.audit_status, auditActive, auditCompletedTick]);
+
+  useEffect(() => {
+    if (proj.audit_status !== 'Audited' && proj.audit_status !== 'Validated') {
+      setHeaderRevalidationPlan(null);
+      setHeaderRevalidationPlanFailed(false);
+      return;
+    }
+    let live = true;
+    setHeaderRevalidationPlan(null);
+    setHeaderRevalidationPlanFailed(false);
+    projectsApi.revalidationPlan(proj.id).then(plan => {
+      if (live) setHeaderRevalidationPlan(plan);
+    }).catch(() => {
+      if (!live) return;
+      setHeaderRevalidationPlan(null);
+      setHeaderRevalidationPlanFailed(true);
+    });
+    return () => { live = false; };
+  }, [proj.id, proj.audit_status, auditActive, auditCompletedTick, docStateReload]);
+
+  useEffect(() => {
+    let live = true;
+    setDocProvenanceCount(null);
+    setDocProvenanceFailed(false);
+    projectsApi.docProvenance(proj.id).then(report => {
+      if (live) setDocProvenanceCount(report.to_reconfirm);
+    }).catch(() => {
+      if (!live) return;
+      setDocProvenanceCount(null);
+      setDocProvenanceFailed(true);
+    });
+    return () => { live = false; };
+  }, [proj.id, auditActive, auditCompletedTick, docStateReload]);
+
+  useEffect(() => {
+    if (proj.audit_status !== 'TemplateInstalled') {
+      setBriefingDefaultsState(null);
+      setBriefingDefaultsFailed(false);
+      return;
+    }
+    let live = true;
+    setBriefingDefaultsState(null);
+    setBriefingDefaultsFailed(false);
+    projectsApi.briefingDefaults(proj.id).then(value => {
+      if (live) setBriefingDefaultsState(value);
+    }).catch(() => {
+      if (!live) return;
+      setBriefingDefaultsState(null);
+      setBriefingDefaultsFailed(true);
+    });
+    return () => { live = false; };
+  }, [proj.id, proj.audit_status]);
+
   const auditAgents = useMemo(() => agents.filter(canRunAudit), [agents]);
   // A named connection is its own target: its agent need not be a detection.
-  const selectedAuditAgent = auditAgentChoice
+  const pickedAuditAgent = auditAgentChoice
     && (auditConnectionId !== null || auditAgents.some(a => a.agent_type === auditAgentChoice))
     ? auditAgentChoice
     : (auditAgents[0]?.agent_type ?? 'ClaudeCode');
+  // KT-1320 — what a launch runs on is what the panel shows: the run being
+  // retried or resumed, unless the human picked something else.
+  // The run's agent and tier are kept whatever the connections or the detections
+  // say; only its named connection follows the list (see `runLaunchChoice`).
+  const runChoice = useMemo(
+    () => runLaunchChoice(resumableAudit, { status: auditConnectionsStatus, list: auditConnections }),
+    [resumableAudit, auditConnectionsStatus, auditConnections],
+  );
+  const {
+    choice: launchChoice, fromRun: launchFromRun, connectionGone: launchConnectionGone,
+  } = effectiveLaunchChoice(
+    { agent: pickedAuditAgent, tier: auditTierChoice, connectionId: auditConnectionId },
+    auditPickTouched,
+    runChoice,
+  );
+  // The panel, the full / partial audit and the revalidation all read this one
+  // choice: what is shown is what is launched.
+  const selectedAuditAgent = launchChoice.agent;
+  const selectedAuditTier = launchChoice.tier;
+  const selectedAuditConnectionId = launchChoice.connectionId;
 
   // ── Computed ──
-  const validationDisc = projDiscussions.find(d => isValidationDisc(d.title) && !d.archived);
-  // 0.8.3 (#311 + #312) — a resumable audit run takes priority over
-  // a leftover validation disc. Pre-fix, a rate-limit at step 5 still
-  // marked the project Audited + left a validation disc, so the
-  // ProjectCard read "Validation en cours" on an audit that hadn't
-  // actually produced anything past step 5. The resumable check
-  // catches that state and forces the "Reprendre" CTA instead.
-  const validationInProgress = !!validationDisc && proj.audit_status === 'Audited' && !resumableAudit;
+  const validationInProgress = headerTimeline?.latest?.status === 'Completed'
+    && headerTimeline.validation !== null
+    && !headerTimeline.validation.finished
+    && !resumableAudit
+    && !auditActive;
   const bootstrapDisc = projDiscussions.find(d => isBootstrapDisc(d.title) && !d.archived);
   const bootstrapInProgress = !!bootstrapDisc && proj.audit_status === 'TemplateInstalled';
   // Use the locale-aware detector — the backend's `start_briefing` emits
@@ -522,10 +685,9 @@ export function ProjectCard({
   // blocking the new "Définir le briefing" CTA. Same for validation
   // + bootstrap below.
   const briefingDisc = projDiscussions.find(d => isBriefingDisc(d.title) && !d.archived);
-  const briefingDone = proj.audit_status !== 'NoTemplate' && (
-    !!proj.briefing_notes ||
-    proj.audit_status === 'Audited' || proj.audit_status === 'Validated'
-  );
+  // KT-1192 — what the backend's gate checks: a saved briefing.
+  const briefingDone = !!proj.briefing_notes?.trim();
+  const briefingDefaults = !!proj.briefing_notes?.includes('kronn:briefing-defaults');
   const projMcps = mcpConfigs.filter(c => c.is_global || c.project_ids.includes(proj.id));
   const projWorkflows = workflows.filter(w => w.project_id === proj.id);
   const contextDrift = contextAudit?.drift;
@@ -674,8 +836,21 @@ export function ProjectCard({
       await projectsApi.cancelAudit(proj.id);
       toast(t('audit.cancelled'), 'success');
     } catch (e) {
+      // Not acknowledged: the run may still go on. Keep showing it, pending,
+      // and let the status poll say when it really stops.
       console.warn('Cancel audit failed:', e);
+      setCancelPending(true);
+      setAuditAbortController(null);
+      toast(t('audit.cancelPending'), 'warning');
+      resumeSettledRef.current = false;
+      if (auditPollRef.current) {
+        clearInterval(auditPollRef.current);
+        auditPollRef.current = null;
+      }
+      setExternalAdoptTick(n => n + 1);
+      return;
     }
+    setCancelPending(false);
     auditActiveRef.current = false;
     setAuditActive(false);
     setAuditAbortController(null);
@@ -686,7 +861,7 @@ export function ProjectCard({
     onRefetchDiscussions();
   }, [auditAbortController, proj.id, toast, t, onRefetch, onRefetchDiscussions, stopAuditPolling]);
 
-  const handleFullAudit = useCallback(async () => {
+  const handleFullAudit = useCallback(async (options: { retrySteps?: number[]; redoSteps?: number[]; fresh?: boolean } = {}) => {
     // Guard against double-click — `setAuditActive(true)` flips the UI to
     // the progress panel synchronously, but a fast double-click can call
     // this handler twice before React re-renders, spawning two concurrent
@@ -696,11 +871,19 @@ export function ProjectCard({
     // race-free guard — the second click reads the just-written ref and
     // bails out before the second SSE is dispatched.
     if (auditActiveRef.current) return;
-    auditActiveRef.current = true;
     // Resume support. When a resumable interrupted run exists we resume it
     // by id — the server derives the kind AND the checkpoint from that row,
     // so client state can never graft onto the wrong pipeline (Codex #3).
-    const resumeRunId = resumableAudit?.id ?? null;
+    // A fresh full audit ignores the resumable run on purpose (confirmed).
+    const resumeRunId = options.fresh ? null : resumableAudit?.id ?? null;
+    const retry = () => { void handleFullAuditRef.current(options); };
+    // A step retried alone needs its run: never fall back to a whole audit.
+    if (options.retrySteps && !resumeRunId) {
+      setAuditLaunchError({ message: t('audit.retryNeedsRun'), retry: () => setResumableReload(n => n + 1) });
+      return;
+    }
+    auditActiveRef.current = true;
+    setAuditLaunchError(null);
     // Progress-bar total: the UI now exposes the complete chained audit only;
     // a resumed legacy targeted run still keeps the kind stored by the server.
     const effectiveKind = resumeRunId ? resumableAudit?.kind : 'Full';
@@ -733,14 +916,26 @@ export function ProjectCard({
       stepIndex: 0, totalSteps: 16, currentFile: null,
     });
     try {
+      // KT-1320 — every launch runs on the choice the panel shows: the run's
+      // while the picker is untouched, else the human's.
+      const onRun = resumeRunId !== null;
       await projectsApi.fullAuditStream(proj.id, {
         agent: selectedAuditAgent,
-        tier: auditTierChoice,
+        tier: selectedAuditTier,
         // A fresh launch always runs the complete 16-step chain. Resume sends
         // only the run id so the server remains authoritative for legacy runs.
         kind: resumeRunId ? null : 'Full',
         resume_run_id: resumeRunId,
-        connection_id: auditConnectionId ?? undefined,
+        // KT-1131 — retry only these failed steps of the resumed run.
+        retry_steps: resumeRunId && options.retrySteps ? options.retrySteps : undefined,
+        // KT-1211 — also redo inherited steps the sources moved under.
+        redo_steps: resumeRunId && options.redoSteps ? options.redoSteps : undefined,
+        // KT-1169 — the confirmed choice to replay the whole audit.
+        fresh: options.fresh ? true : undefined,
+        // The run's own connection is the server's to inherit when it resumes
+        // that run (it falls back to the agent's default if that connection was
+        // deleted since); any other launch sends the connection the panel shows.
+        connection_id: (onRun && launchFromRun ? null : selectedAuditConnectionId) ?? undefined,
       }, {
         onTemplateInstalled: () => {},
         // 0.8.3 TD #274 — backend-authoritative wallclock for the
@@ -819,13 +1014,12 @@ export function ProjectCard({
         // (re-running the step is the only repair path) and the run
         // will end non-green; this per-step toast tells the user which
         // step is the culprit.
-        onStepWarning: (_step, file, reason, repaired) => {
-          console.warn(`[audit] step warning on ${file}: ${reason} (repaired=${repaired})`);
-          toast(
-            t('audit.stepWarning', file, reason, repaired ? t('audit.stepWarningRepaired') : t('audit.stepWarningNotRepaired')),
-            'error',
-          );
+        onStepWarning: (_step, file, reason) => {
+          console.warn(`[audit] step warning on ${file}: ${reason}`);
+          toast(t('audit.stepWarning', file, reason), 'error');
         },
+        // KT-1130 — already up to date: a neutral note, never an error.
+        onStepUnchanged: (_step, file) => { toast(t('audit.stepUnchanged', file), 'info'); },
         // NON-terminal: the step closed with its own step_done and the run
         // continues — the done/interrupted terminal owns the cleanup UX.
         onStepError: (error) => {
@@ -868,6 +1062,7 @@ export function ProjectCard({
           setAuditAbortController(null);
           clearAuditCheckpoint(proj.id);
           toast(t('audit.streamError', error || 'unknown error'), 'error');
+          setAuditLaunchError({ message: t('audit.streamError', error || 'unknown error'), retry });
           setAuditCompletedTick((t) => t + 1);
           onRefetch();
         },
@@ -878,16 +1073,18 @@ export function ProjectCard({
       auditActiveRef.current = false;
       setAuditActive(false);
       clearAuditCheckpoint(proj.id);
+      setAuditLaunchError({ message: t('audit.streamError', userError(e)), retry });
       setAuditCompletedTick((t) => t + 1);
     } finally {
       setAuditAbortController(null);
     }
-  }, [selectedAuditAgent, auditTierChoice, auditConnectionId, proj.id, t, toast, onRefetch, onRefetchDiscussions, onAutoRunDiscussion, resumableAudit]);
+  }, [selectedAuditAgent, selectedAuditTier, selectedAuditConnectionId, launchFromRun, proj.id, t, toast, onRefetch, onRefetchDiscussions, onAutoRunDiscussion, resumableAudit]);
 
-  const startPartialAudit = useCallback(async (drift: DriftCheckResponse) => {
+  const launchPartialAudit = useCallback(async (steps: number[]) => {
     if (auditActiveRef.current) return;
     auditActiveRef.current = true;
-    const steps = drift.stale_sections.map(s => s.audit_step);
+    setAuditLaunchError(null);
+    const retry = () => { void startPartialAuditRef.current(steps); };
     const controller = new AbortController();
     setAuditAbortController(controller);
     setAuditActive(true);
@@ -900,7 +1097,7 @@ export function ProjectCard({
       stepIndex: 0, totalSteps: steps.length, currentFile: null,
     });
     try {
-      await projectsApi.partialAuditStream(proj.id, { agent: selectedAuditAgent, tier: auditTierChoice, steps, connection_id: auditConnectionId ?? undefined }, {
+      await projectsApi.partialAuditStream(proj.id, { agent: selectedAuditAgent, tier: selectedAuditTier, steps, connection_id: selectedAuditConnectionId ?? undefined }, {
         onStepStart: (step, total, file) => {
           setAuditStep(step);
           setAuditTotalSteps(total);
@@ -919,6 +1116,7 @@ export function ProjectCard({
         // NON-terminal (post-commit baseline failure): surface it, no cleanup
         // — the `done complete` that follows stays the terminal signal.
         onWarning: (message) => { toast(t('audit.streamWarning', message), 'error'); },
+        onSingleAgent: () => { toast(t('audit.partialSingleAgent'), 'info'); },
         onDone: (info) => {
           // A user cancel aborts the fetch and the parser reports a clean
           // done with no payload — the cancel handler already owns that UX
@@ -945,10 +1143,18 @@ export function ProjectCard({
             // backend already spawned the agent post-commit).
             onOpenDiscussion(info.discussionId);
           } else if (info?.status === 'no_change') {
-            // Honest: nothing was rewritten, sections stay stale — and NO
-            // "just relaunch" nudge (manual review/acceptance is a future
-            // feature, not an available action).
-            toast(t('audit.partialNoChange'), 'error');
+            // KT-1207 — re-verified unchanged: the run completed and the
+            // sections are fresh. A validation opens only when none came back.
+            if (info.discussionId) {
+              toast(t('audit.partialReverifiedValidation', String(info.unchangedSteps.length)), 'success');
+              onOpenDiscussion(info.discussionId);
+              onNavigate('discussions');
+            } else {
+              toast(t('audit.partialReverified', String(info.unchangedSteps.length)), 'success');
+            }
+          } else if (info?.discussionId) {
+            // Interrupted, but its done steps got their validation discussion.
+            toast(t('audit.partialInterruptedValidation', String(info.succeededSteps.length + info.unchangedSteps.length)), 'error');
           } else {
             // Interrupted: some sections stayed stale — never a green toast.
             toast(t('audit.partialInterrupted'), 'error');
@@ -963,6 +1169,7 @@ export function ProjectCard({
           setAuditAbortController(null);
           clearAuditCheckpoint(proj.id);
           toast(t('audit.partialStreamError', error || 'unknown error'), 'error');
+          setAuditLaunchError({ message: t('audit.partialStreamError', error || 'unknown error'), retry });
           setAuditCompletedTick((t) => t + 1);
           onRefetch();
         },
@@ -973,11 +1180,42 @@ export function ProjectCard({
       auditActiveRef.current = false;
       setAuditActive(false);
       clearAuditCheckpoint(proj.id);
+      setAuditLaunchError({ message: t('audit.partialStreamError', userError(e)), retry });
       setAuditCompletedTick((t) => t + 1);
     } finally {
       setAuditAbortController(null);
     }
-  }, [selectedAuditAgent, auditTierChoice, auditConnectionId, proj.id, t, toast, onRefetch, onRefetchDrift, onRefetchDiscussions, onOpenDiscussion]);
+  }, [selectedAuditAgent, selectedAuditTier, selectedAuditConnectionId, proj.id, t, toast, onRefetch, onRefetchDrift, onRefetchDiscussions, onOpenDiscussion, onNavigate]);
+
+  const startPartialAudit = useCallback(async (steps: number[]) => {
+    await gateTemplateLaunch(() => void launchPartialAudit(steps));
+  }, [gateTemplateLaunch, launchPartialAudit]);
+
+  const acknowledgeDrift = useCallback(async (drift: DriftCheckResponse) => {
+    if (driftAckRef.current || auditActiveRef.current) return;
+    driftAckRef.current = true;
+    setDriftAcking(true);
+    const sections = [...new Set(drift.stale_sections.map(s => s.ai_file))];
+    // KT-1168 — only the gone paths the stale block displayed are accepted,
+    // as listed here, not as they are at the click.
+    const shownPaths = drift.stale_sections.flatMap(s =>
+      (s.missing_paths ?? []).flatMap(m => m.paths.map(path => ({ doc: s.ai_file, section: m.section, path }))));
+    try {
+      await projectsApi.acknowledgeDrift(proj.id, sections, shownPaths);
+      toast(t('audit.driftAckDone', String(sections.length)), 'success');
+      onRefetchDrift(proj.id);
+    } catch (e) {
+      toast(t('audit.driftAckFailed', userError(e)), 'error');
+    } finally {
+      driftAckRef.current = false;
+      setDriftAcking(false);
+    }
+  }, [proj.id, t, toast, onRefetchDrift]);
+
+  useEffect(() => {
+    handleFullAuditRef.current = handleFullAudit;
+    startPartialAuditRef.current = startPartialAudit;
+  }, [handleFullAudit, startPartialAudit]);
 
   // ─── Audit resume on mount ───────────────────────────────────────────────
   // When a local checkpoint indicates an audit was in-flight (tab switch, page
@@ -990,7 +1228,6 @@ export function ProjectCard({
   // AFTER mount was invisible — the card even offered to start an audit
   // while one was running. The Dashboard fleet poll tells us one is live:
   // re-arm the same adoption poll and every existing badge/chip/CTA works.
-  const [externalAdoptTick, setExternalAdoptTick] = useState(0);
   useEffect(() => {
     if (!externalAuditLive) return;
     if (auditActiveRef.current || auditPollRef.current) return; // already tracking
@@ -1078,6 +1315,7 @@ export function ProjectCard({
           const wasActive = auditActiveRef.current;
           auditActiveRef.current = false;
           setAuditActive(false);
+          setCancelPending(false);
           setAuditAuditor(null);
           setAuditStartedAt(null);
           // 0.8.3 (#274) — clear token chips when the audit wraps so
@@ -1186,6 +1424,120 @@ export function ProjectCard({
     setExpandedTab('aiContext');
   };
 
+  const docStateUnknown = docProvenanceFailed
+    || docProvenanceCount === null
+    || !driftStatus
+    || driftStatus.sources_state == null
+    || driftStatus.sources_state === 'unknown'
+    || ((proj.audit_status === 'Audited' || proj.audit_status === 'Validated')
+      && (headerRevalidationPlanFailed
+        || headerRevalidationPlan === null
+        || headerRevalidationPlan.sources_state === 'unknown'));
+  const docStateCounts: DocStateCounts | null = docStateUnknown
+    ? null
+    : {
+      broken: (driftStatus.broken_citations ?? 0) + (driftStatus.missing_paths ?? 0),
+      reanchor: headerRevalidationPlan?.reanchor_count ?? 0,
+      stale: (driftStatus.stale_sections ?? []).length,
+      reconfirm: docProvenanceCount,
+    };
+  const validatedModified = proj.audit_status === 'Validated'
+    && docStateNeedsAttention(docStateCounts)
+    && ((driftStatus?.stale_sections.length ?? 0) > 0
+      || (driftStatus?.broken_citations ?? 0) > 0
+      || (driftStatus?.missing_paths ?? 0) > 0
+      || (headerRevalidationPlan?.reanchor_count ?? 0) > 0
+      || (docProvenanceCount ?? 0) > 0
+      || driftStatus?.sources_state === 'needs_reverification');
+  const humanDocsDetected = proj.audit_status === 'TemplateInstalled'
+    && briefingDefaultsState?.folder.kind === 'human_docs';
+  const cancelledFirstAudit = headerTimeline?.latest?.status === 'Cancelled'
+    && headerTimeline.latestCompleted === null;
+  const auditTruthUnknown = (proj.audit_status === 'Audited' || proj.audit_status === 'Validated')
+    && (headerTimeline === null || headerTimelineFailed || docStateCounts === null);
+  const templateTruthUnknown = proj.audit_status === 'TemplateInstalled'
+    && (briefingDefaultsState === null || briefingDefaultsFailed || headerTimeline === null || headerTimelineFailed);
+
+  const auditHeaderStatus = auditActive
+    ? { tone: 'running', label: t('projects.master.status.auditRunning'), icon: <Loader2 size={10} className="spin" /> }
+    : proj.needs_docs_migration
+      ? { tone: 'warning', label: t('docState.status.legacy'), icon: <AlertTriangle size={10} /> }
+      : humanDocsDetected
+        ? { tone: 'warning', label: t('docState.status.humanDocs'), icon: <AlertTriangle size={10} /> }
+        : cancelledFirstAudit
+          ? {
+            tone: 'warning',
+            label: t('docState.status.cancelled', new Date(headerTimeline?.latest?.ended_at ?? headerTimeline?.latest?.started_at ?? '').toLocaleDateString(locale)),
+            icon: <AlertTriangle size={10} />,
+          }
+          : auditTruthUnknown || templateTruthUnknown
+            ? { tone: 'muted', label: t('docState.status.unknown'), icon: <Loader2 size={10} className="spin" /> }
+            : validationInProgress
+              ? { tone: 'running', label: t('projects.status.validating'), icon: <Loader2 size={10} className="spin" /> }
+              : validatedModified
+                ? { tone: 'warning', label: t('docState.status.validatedModified'), icon: <AlertTriangle size={10} /> }
+                : proj.audit_status === 'Validated'
+                  ? { tone: 'success', label: t('projects.master.status.validated'), icon: <ShieldCheck size={10} /> }
+                  : proj.audit_status === 'Audited'
+                    ? { tone: 'warning', label: t('projects.master.status.toValidate'), icon: <ShieldCheck size={10} /> }
+                    : proj.audit_status === 'Bootstrapped'
+                      ? { tone: 'info', label: t('projects.status.bootstrapped'), icon: <FileCode size={10} /> }
+                      : { tone: 'muted', label: t('projects.master.status.toPrepare'), icon: <FileCode size={10} /> };
+
+  const openAuditView = () => {
+    if (!isOpen) onToggleOpen();
+    if (detailMode) selectDetailView('audit');
+    setExpandedTab('aiContext');
+  };
+  const primaryAuditAction = auditActive
+    ? { label: t('docState.action.viewProgress'), run: openAuditView }
+    : proj.needs_docs_migration
+    ? { label: t('docState.action.migrate'), run: () => { if (!isOpen) onToggleOpen(); if (detailMode) selectDetailView('docs'); } }
+    : humanDocsDetected
+      ? { label: t('docState.action.chooseFolder'), run: openAuditView }
+      : cancelledFirstAudit
+        ? { label: t('docState.action.relaunch'), run: () => void templateMerge.gateLaunch(() => void handleFullAudit({ fresh: true })) }
+        : resumableAudit
+          ? { label: t('audit.resumeFromStep', resumableAudit.last_completed_step + 1), run: () => void templateMerge.gateLaunch(() => void handleFullAudit()) }
+          : proj.audit_status === 'Audited' || proj.audit_status === 'Validated'
+            ? { label: t('audit.revalidate.button'), run: () => setVerifyDocsOpen(true) }
+            : { label: t('docState.action.openAudit'), run: openAuditView };
+
+  const auditHeaderDetails = (
+    <div className="project-audit-details-content">
+      {dockerRunning && (
+        <span className="project-status-chip" data-tone="success"><Container size={10} /> {t('projects.master.dockerUp')}</span>
+      )}
+      {projectReadOnly && (
+        <span className="project-status-chip" data-tone="warning"><AlertTriangle size={10} /> {t('projects.writeAccess.readOnlyShort')}</span>
+      )}
+      {proj.mcp_sync_report && (
+        <span className="project-status-chip" data-tone={mcpSyncTone} title={proj.mcp_sync_report.detail ?? undefined}>
+          <Plug size={10} /> {t(`projects.mcpSync.${proj.mcp_sync_report.status}`)}
+        </span>
+      )}
+      {!auditActive && latestAuditOutcome && (
+        <button type="button" className="project-alert-chip" data-tone={auditOutcomeFailed ? 'error' : 'success'} data-testid="project-audit-outcome" onClick={openAuditOutcome}>
+          {auditOutcomeFailed ? <AlertTriangle size={10} /> : <ShieldCheck size={10} />} {auditOutcomeLabel}
+        </button>
+      )}
+      {!auditActive && <SourcesBadge drift={driftStatus} />}
+      <TdTasksButton project={proj} auditActive={auditActive} toast={toast} />
+      {!auditActive && !resumableAudit && driftStatus && (
+        <>
+          <TemplateUpdateBadge update={driftStatus.template_update} />
+          <PlaceholderDocsBadge docs={driftStatus.placeholder_docs ?? []} onRun={steps => { void startPartialAudit(steps); }} />
+        </>
+      )}
+      {!auditActive && driftStatus?.audit_date && (
+        <span className="dash-audit-date">{t('audit.auditDate', new Date(driftStatus.audit_date).toLocaleDateString(locale, { day: '2-digit', month: 'short', year: 'numeric' }))}</span>
+      )}
+      <button type="button" className="dash-icon-btn" onClick={() => { onSetDiscPrefill({ projectId: proj.id, title: '', prompt: '' }); onNavigate('discussions'); }}>
+        <Plus size={12} /> {t('disc.newTitle')}
+      </button>
+    </div>
+  );
+
   return (
     <div
       id={detailMode ? `project-detail-${proj.id}` : `project-${proj.id}`}
@@ -1218,90 +1570,30 @@ export function ProjectCard({
               </div>
             </div>
             <div className="project-detail-actions">
-              {dockerRunning && (
-                <span className="project-status-chip" data-tone="success" title={t('projects.master.dockerUp')}>
-                  <Container size={10} /> {t('projects.master.dockerUp')}
-                </span>
-              )}
-              {projectReadOnly && (
-                <span className="project-status-chip" data-tone="warning">
-                  <AlertTriangle size={10} /> {t('projects.writeAccess.readOnlyShort')}
-                </span>
-              )}
-              {proj.mcp_sync_report && (
-                <span
-                  className="project-status-chip"
-                  data-tone={mcpSyncTone}
-                  title={proj.mcp_sync_report.detail ?? undefined}
-                >
-                  <Plug size={10} /> {t(`projects.mcpSync.${proj.mcp_sync_report.status}`)}
-                </span>
-              )}
               <span
                 className="project-status-chip"
                 data-testid={auditActive ? 'project-audit-progress' : undefined}
-                data-tone={auditActive || validationInProgress
-                  ? 'running'
-                  : proj.audit_status === 'Validated'
-                    ? 'success'
-                    : proj.audit_status === 'Audited'
-                      ? 'warning'
-                      : 'muted'}
+                data-tone={auditHeaderStatus.tone}
               >
-                {auditActive
-                  ? <><Loader2 size={10} className="spin" /> {t('projects.master.status.auditRunning')} {auditStep}/{auditTotalSteps}</>
-                  : validationInProgress
-                    ? <><Loader2 size={10} className="spin" /> {t('projects.status.validating')}</>
-                    : proj.audit_status === 'Validated'
-                      ? <><ShieldCheck size={10} /> {t('projects.master.status.validated')}</>
-                      : proj.audit_status === 'Audited'
-                        ? <><ShieldCheck size={10} /> {t('projects.master.status.toValidate')}</>
-                      : <><FileCode size={10} /> {t('projects.master.status.toPrepare')}</>}
+                {auditHeaderStatus.icon} {auditHeaderStatus.label}
+                {auditActive && ` ${auditStep}/${auditTotalSteps}`}
               </span>
-              {!auditActive && latestAuditOutcome && (
-                <button
-                  type="button"
-                  className="project-alert-chip"
-                  data-tone={auditOutcomeFailed ? 'error' : 'success'}
-                  data-testid="project-audit-outcome"
-                  onClick={openAuditOutcome}
-                >
-                  {auditOutcomeFailed ? <AlertTriangle size={10} /> : <ShieldCheck size={10} />}
-                  {auditOutcomeLabel}
-                </button>
-              )}
-              {!auditActive && driftStatus && driftStatus.stale_sections.length > 0 && (
-                <>
-                  <span
-                    className="dash-badge-drift"
-                    data-testid="project-drift-status"
-                    title={driftStatus.stale_sections.map(section => section.ai_file).join(', ')}
-                  >
-                    <AlertTriangle size={9} />
-                    {t('audit.staleSections', String(driftStatus.stale_sections.length))}
-                  </span>
-                  <button
-                    type="button"
-                    className="dash-drift-update-btn"
-                    data-testid="project-drift-update"
-                    onClick={() => startPartialAudit(driftStatus)}
-                    title={t('audit.updateStale', String(driftStatus.stale_sections.length))}
-                  >
-                    <RefreshCw size={9} />
-                    {t('audit.updateStale', String(driftStatus.stale_sections.length))}
-                  </button>
-                </>
-              )}
               <button
                 type="button"
-                className="dash-icon-btn"
-                onClick={() => {
-                  onSetDiscPrefill({ projectId: proj.id, title: '', prompt: '' });
-                  onNavigate('discussions');
-                }}
+                className="project-audit-primary"
+                data-testid={(proj.audit_status === 'Audited' || proj.audit_status === 'Validated') ? 'project-revalidate' : 'project-audit-next-action'}
+                onClick={primaryAuditAction.run}
               >
-                <Plus size={12} /> {t('disc.newTitle')}
+                <ShieldCheck size={11} /> {primaryAuditAction.label}
               </button>
+              <DocStateSummary
+                counts={docStateCounts}
+                onOpen={() => (proj.audit_status === 'Audited' || proj.audit_status === 'Validated') ? setVerifyDocsOpen(true) : openAuditView()}
+              />
+              <details className="project-audit-details">
+                <summary>{t('common.details')} <ChevronDown size={11} /></summary>
+                {auditHeaderDetails}
+              </details>
             </div>
           </header>
           <nav className="project-detail-tabs" aria-label={t('projects.master.detailNav')}>
@@ -1333,7 +1625,7 @@ export function ProjectCard({
         </>
       )}
       {/* The header used to be a <button>, but it contains a nested <button>
-          (the drift-update CTA), which is invalid HTML and produces a React
+          (the interactive audit controls), which is invalid HTML and produces a React
           warning in dev. We keep the same a11y semantics via role="button"
           + Enter/Space keyboard handling, and the inner button keeps its
           stopPropagation guard so a click on it doesn't toggle the card. */}
@@ -1342,12 +1634,7 @@ export function ProjectCard({
         role="button"
         tabIndex={0}
         onClick={onToggleOpen}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            onToggleOpen();
-          }
-        }}
+        onKeyDown={onActivationKey(onToggleOpen)}
         aria-expanded={isOpen}
       >
         <ChevronRight size={14} style={{ color: 'var(--kr-accent-ink)', transform: isOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.2s' }} />
@@ -1370,6 +1657,29 @@ export function ProjectCard({
                 />
               )}
             </span>
+            <span className="project-status-chip" data-tone={auditHeaderStatus.tone}>
+              {auditHeaderStatus.icon} {auditHeaderStatus.label}
+              {auditActive && ` ${auditStep}/${auditTotalSteps}`}
+            </span>
+            <button
+              type="button"
+              className="project-audit-primary"
+              data-testid={(proj.audit_status === 'Audited' || proj.audit_status === 'Validated') ? 'project-revalidate' : 'project-audit-next-action'}
+              onClick={(event) => { event.stopPropagation(); primaryAuditAction.run(); }}
+            >
+              <ShieldCheck size={11} /> {primaryAuditAction.label}
+            </button>
+            <DocStateSummary
+              counts={docStateCounts}
+              onOpen={() => (proj.audit_status === 'Audited' || proj.audit_status === 'Validated') ? setVerifyDocsOpen(true) : openAuditView()}
+            />
+            <details
+              className="project-audit-details"
+              onClick={event => event.stopPropagation()}
+              onKeyDown={event => event.stopPropagation()}
+            >
+              <summary>{t('common.details')} <ChevronDown size={11} /></summary>
+              <div className="project-audit-details-content">
             {/* Project docs badge */}
             {proj.audit_status === 'NoTemplate' ? (
               <span className="dash-badge-gray"><FileCode size={9} /> Project docs</span>
@@ -1407,12 +1717,14 @@ export function ProjectCard({
             {!auditActive && proj.audit_status === 'Validated' ? (
               <span className="dash-badge-green"><ShieldCheck size={9} /> Validated</span>
             ) : !auditActive && validationInProgress ? (
-              <span className="dash-badge-orange cursor-pointer" {...newTabClickProps(validationDisc ? discussionPath(validationDisc.id) : PAGE_PATHS.discussions)} onClick={(e) => { e.stopPropagation(); if (validationDisc) onOpenDiscussion(validationDisc.id); else onNavigate('discussions'); }}>
+              <button type="button" className="dash-badge-orange cursor-pointer" data-testid="project-validation-badge" {...newTabClickProps(headerTimeline?.validation ? discussionPath(headerTimeline.validation.discussion_id) : PAGE_PATHS.discussions)} onClick={(e) => { e.stopPropagation(); if (headerTimeline?.validation) onOpenDiscussion(headerTimeline.validation.discussion_id); else onNavigate('discussions'); }}>
                 <Loader2 size={9} style={{ animation: 'spin 1s linear infinite' }} /> Validation
-              </span>
+              </button>
             ) : !auditActive && (proj.audit_status === 'Audited' || proj.audit_status === 'TemplateInstalled') ? (
               <span className="dash-badge-gray"><ShieldCheck size={9} /> Validated</span>
             ) : null}
+            {!auditActive && <SourcesBadge drift={driftStatus} />}
+            <TdTasksButton project={proj} auditActive={auditActive} toast={toast} />
             {!auditActive && latestAuditOutcome && (
               <button
                 type="button"
@@ -1444,8 +1756,10 @@ export function ProjectCard({
                   <ShieldCheck size={9} /> {t('projects.antiHallu.present')}
                 </span>
               ) : antiHalluStatus.file_exists ? (
-                <span
+                <button
+                  type="button"
                   className="dash-badge-orange cursor-pointer"
+                  data-testid="project-anti-hallu-inject"
                   onClick={(e) => { e.stopPropagation(); handleInjectAntiHallu(); }}
                   title={t('projects.antiHallu.injectTooltip')}
                 >
@@ -1453,12 +1767,19 @@ export function ProjectCard({
                     ? <><Loader2 size={9} style={{ animation: 'spin 1s linear infinite' }} /> {t('projects.antiHallu.injecting')}</>
                     : <><AlertTriangle size={9} /> {t('projects.antiHallu.missing')}</>
                   }
-                </span>
+                </button>
               ) : null
             )}
+            {briefingDefaults && (
+              <span className="dash-badge-briefing-defaults" data-testid="project-briefing-defaults">
+                <AlertTriangle size={9} /> {t('projects.briefingDefaultsBadge')}
+              </span>
+            )}
             {!auditActive && (proj.tech_debt_count ?? 0) > 0 && (
-              <span
+              <button
+                type="button"
                 className="dash-badge-tech-debt"
+                data-testid="project-tech-debt-badge"
                 title={t('projects.techDebtBadge', proj.tech_debt_count ?? 0)}
                 onClick={(e) => {
                   e.stopPropagation();
@@ -1477,31 +1798,7 @@ export function ProjectCard({
                 }}
               >
                 <AlertTriangle size={9} /> {proj.tech_debt_count} TD
-              </span>
-            )}
-            {/* Drift badge — hidden during active audit (#326 / F6) */}
-            {!auditActive && driftStatus && driftStatus.stale_sections.length > 0 && (
-              <>
-                <span
-                  className="dash-badge-drift"
-                  title={driftStatus.stale_sections.map(s => s.ai_file).join(', ')}
-                >
-                  <AlertTriangle size={9} />
-                  {t('audit.staleSections', String(driftStatus.stale_sections.length))}
-                </span>
-                <button
-                  className="dash-drift-update-btn"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    startPartialAudit(driftStatus);
-                  }}
-                  disabled={auditActive}
-                  title={t('audit.updateStale', String(driftStatus.stale_sections.length))}
-                >
-                  <RefreshCw size={9} />
-                  {t('audit.updateStale', String(driftStatus.stale_sections.length))}
-                </button>
-              </>
+              </button>
             )}
             {/* Audit date — hidden during active audit (#326 / F6) */}
             {!auditActive && driftStatus?.audit_date && (
@@ -1514,6 +1811,8 @@ export function ProjectCard({
                 {t('audit.auditDate', new Date(driftStatus.audit_date).toLocaleDateString(locale, { day: '2-digit', month: 'short', year: 'numeric' }))}
               </span>
             )}
+              </div>
+            </details>
           </div>
           <div className="dash-proj-path">{proj.path}</div>
         </div>
@@ -1522,6 +1821,45 @@ export function ProjectCard({
           <span className="dash-meta-item"><MessageSquare size={12} /> {projDiscussions.length}</span>
         </div>
       </div>}
+
+      <RevalidateAudit
+        gateLaunch={templateMerge.gateLaunch}
+        project={proj}
+        auditActive={auditActive}
+        agent={selectedAuditAgent}
+        tier={selectedAuditTier}
+        connectionId={selectedAuditConnectionId}
+        toast={toast}
+        onRefetch={() => { onRefetch(); setDocStateReload(value => value + 1); }}
+        onRefetchDrift={(projectId) => { onRefetchDrift(projectId); setDocStateReload(value => value + 1); }}
+        onOpenDiscussion={onOpenDiscussion}
+        onNavigate={onNavigate}
+        open={verifyDocsOpen}
+        onOpenChange={setVerifyDocsOpen}
+        hideTrigger
+        drift={driftStatus}
+        reconfirmCount={docProvenanceCount}
+        docStateUnknown={docStateUnknown}
+        onUpdateStale={(steps) => { setVerifyDocsOpen(false); void startPartialAudit(steps); }}
+        onAcknowledgeStale={() => { if (driftStatus) void acknowledgeDrift(driftStatus); }}
+        driftAcking={driftAcking}
+        onFillPlaceholders={(steps) => { setVerifyDocsOpen(false); void startPartialAudit(steps); }}
+        onReconfirm={() => { setVerifyDocsOpen(false); setReconfirmOpen(true); }}
+        onFullAudit={() => {
+          setVerifyDocsOpen(false);
+          void templateMerge.gateLaunch(() => void handleFullAudit({ fresh: true }));
+        }}
+      />
+
+      <DocReconfirm
+        project={proj}
+        auditActive={auditActive}
+        toast={toast}
+        open={reconfirmOpen}
+        onOpenChange={setReconfirmOpen}
+        hideTrigger
+        onChanged={() => setDocStateReload(value => value + 1)}
+      />
 
       {/* Remap banner — always visible (even on a collapsed card) when the
           project directory no longer resolves on disk. Lets the operator
@@ -1953,6 +2291,16 @@ export function ProjectCard({
                   <span>{t('projects.master.overview.stale')}</span>
                 </button>
               </div>
+              <TechDebtBlock
+                project={proj}
+                auditActive={auditActive}
+                agents={agents}
+                modelTiers={modelTiers}
+                toast={toast}
+                onOpenDiscussion={onOpenDiscussion}
+                onNavigate={onNavigate}
+                onRefetch={onRefetch}
+              />
               <section
                 id={`project-linked-repos-${proj.id}`}
                 className="project-overview-linked-repos"
@@ -1970,6 +2318,7 @@ export function ProjectCard({
                 />
               </section>
               <ProjectAgentFilesSetting projectId={proj.id} t={t} />
+              <ProjectDocsLocationSetting projectId={proj.id} t={t} />
               <div className="dash-delete-zone" data-testid="project-overview-delete-zone">
                 {deleteConfirmId === proj.id ? (
                   <div>
@@ -2270,6 +2619,8 @@ export function ProjectCard({
                     projectId={proj.id}
                     initialExpandFolder={docDeepLink}
                     banner={banner}
+                    staleSections={driftStatus?.stale_sections ?? []}
+                    onOpenDocState={() => setVerifyDocsOpen(true)}
                     onDiscussFile={(filePath) => {
                     // Tech-debt files get a resolution-oriented prompt
                     // (asks the agent to plan + execute the fix + update
@@ -2352,23 +2703,46 @@ export function ProjectCard({
                     </div>
                   </div>
                 )}
+                {!bootstrapInProgress && !auditActive && (
+                  <TemplateMergeOfferSlot offer={templateMerge} projectId={proj.id} />
+                )}
+                {!bootstrapInProgress && !auditActive && (
+                  <TemplateUpdateNotice
+                    key={proj.id}
+                    projectId={proj.id}
+                    update={driftStatus?.template_update}
+                    onRunSteps={steps => { void startPartialAudit(steps); }}
+                    onChanged={() => { onRefetch(); onRefetchDrift(proj.id); }}
+                  />
+                )}
+                {!bootstrapInProgress && !auditActive && proj.audit_status !== 'NoTemplate' && (
+                  <TemplateReinstall
+                    projectId={proj.id}
+                    onRunSteps={steps => { void startPartialAudit(steps); }}
+                    onChanged={() => { onRefetch(); onRefetchDrift(proj.id); }}
+                  />
+                )}
                 {!bootstrapInProgress && (
                   <AuditTimeline
                     projectId={proj.id}
                     auditStatus={proj.audit_status}
-                    techDebtCount={proj.tech_debt_count ?? 0}
                     agents={agents}
                     selectedAgent={selectedAuditAgent}
-                    selectedTier={auditTierChoice}
+                    selectedTier={selectedAuditTier}
                     modelTiers={modelTiers}
-                    selectedConnectionId={auditConnectionId}
+                    selectedConnectionId={selectedAuditConnectionId}
+                    selectionFromRun={launchFromRun}
+                    selectionConnectionGone={launchConnectionGone}
                     onSelect={(agent, tier, connectionId) => {
+                      setAuditPickTouched(true);
                       setAuditAgentChoice(agent);
                       setAuditTierChoice(tier);
                       setAuditConnectionId(connectionId);
                     }}
                     briefingDone={briefingDone}
                     onBriefingSaved={onRefetch}
+                    linkedRepos={proj.linked_repos ?? []}
+                    onLinkedReposChange={onRefetch}
                     auditActive={auditActive}
                     liveStep={auditStep}
                     liveTotal={auditTotalSteps}
@@ -2386,22 +2760,46 @@ export function ProjectCard({
                       ? () => onOpenDiscussion(briefingDisc.id)
                       : null}
                     onCancel={handleCancelAudit}
+                    cancelPending={cancelPending}
                     resumable={resumableAudit}
-                    onLaunch={() => void handleFullAudit()}
-                    validationInProgress={validationInProgress}
-                    onValidate={() => {
-                      if (validationInProgress && validationDisc) {
-                        onOpenDiscussion(validationDisc.id);
-                        return;
+                    resumableUnknown={resumableUnknown}
+                    onReloadResumable={() => setResumableReload(n => n + 1)}
+                    launchError={auditLaunchError}
+                    onDismissLaunchError={() => setAuditLaunchError(null)}
+                    onLaunch={() => void templateMerge.gateLaunch(() => void handleFullAudit())}
+                    onRetryStep={(step) => void templateMerge.gateLaunch(() => void handleFullAudit({ retrySteps: [step] }))}
+                    onRedoSteps={(steps) => void templateMerge.gateLaunch(() => void handleFullAudit({ redoSteps: steps }))}
+                    onRelaunchFull={() => void templateMerge.gateLaunch(() => void handleFullAudit({ fresh: true }))}
+                    onAcceptStep={async (step, reason, overrideUnsound) => {
+                      if (!resumableAudit) return;
+                      try {
+                        if (overrideUnsound) {
+                          await projectsApi.acceptAuditStep(proj.id, resumableAudit.id, step, reason, true);
+                        } else {
+                          await projectsApi.acceptAuditStep(proj.id, resumableAudit.id, step, reason);
+                        }
+                        toast(t('audit.stepAccepted', step), 'success');
+                        setAuditCompletedTick(n => n + 1);
+                      } catch (error) {
+                        // The override ask carries a diff the timeline shows
+                        // itself: no toast for it (KT-1211).
+                        if (!userError(error).includes(OVERRIDE_REQUIRED_PREFIX)) {
+                          toast(userError(error), 'error');
+                        }
+                        // The form stays open on its error, with its reason.
+                        throw error;
                       }
-                      onSetDiscPrefill({
-                        projectId: proj.id,
-                        title: 'Validation audit AI',
-                        prompt: t('audit.validationPrompt'),
-                        locked: true,
-                      });
-                      onNavigate('discussions');
                     }}
+                    onCleanupLease={async () => {
+                      try {
+                        await projectsApi.auditRunsCleanup();
+                        toast(t('auditTimeline.lease.released'), 'success');
+                        setAuditCompletedTick(n => n + 1);
+                      } catch (error) {
+                        toast(userError(error), 'error');
+                      }
+                    }}
+                    validationInProgress={validationInProgress}
                     onMarkValid={async () => {
                       try {
                         await projectsApi.validateAudit(proj.id);
@@ -2420,12 +2818,26 @@ export function ProjectCard({
                       onOpenDiscussion(discussionId);
                       onNavigate('discussions');
                     }}
-                    onViewTechDebts={() => {
-                      if (!isOpen) onToggleOpen();
-                      selectDetailView('docs');
-                      setExpandedTab('docAi');
-                      setDocDeepLink('docs/tech-debt');
-                    }}
+                    techDebtEntry={(
+                      <TechDebtTimelineEntry
+                        project={proj}
+                        auditActive={auditActive}
+                        agents={agents}
+                        modelTiers={modelTiers}
+                        toast={toast}
+                        onOpenDiscussion={onOpenDiscussion}
+                        onNavigate={onNavigate}
+                        onRefetch={onRefetch}
+                        onOpenFile={() => {
+                          if (!isOpen) onToggleOpen();
+                          selectDetailView('docs');
+                          setExpandedTab('docAi');
+                          setDocDeepLink('docs/inconsistencies-tech-debt.md');
+                        }}
+                      />
+                    )}
+                    onVerifyDocs={() => setVerifyDocsOpen(true)}
+                    docStateCounts={docStateCounts}
                     refreshTrigger={auditCompletedTick}
                     toast={toast}
                   />

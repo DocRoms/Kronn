@@ -205,7 +205,13 @@ impl KronnToolExecutor {
     /// document and stays free.
     fn foreign_step_target_refusal(&self, call: &ToolCall) -> Option<String> {
         let own = self.audit_step_target.as_deref()?;
-        if own == "docs/decisions.md" || own == "REVIEW" {
+        // Targets are under the run's docs root (KT-1192).
+        let docs_root = self
+            .audit_workspace
+            .as_deref()
+            .map(crate::core::docs_location::DocsRoot::of)
+            .unwrap_or_default();
+        if docs_root.strip(own) == Some("decisions.md") || own == "REVIEW" {
             return None;
         }
         if !matches!(
@@ -219,7 +225,7 @@ impl KronnToolExecutor {
         if normalized == own {
             return None;
         }
-        let owner = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full)
+        let owner = crate::api::audit::steps_for(crate::models::AuditKind::Full, &docs_root)
             .iter()
             .position(|step| step.target_file == normalized)?;
         Some(format!(
@@ -489,7 +495,16 @@ pub(crate) fn tiered(catalogue: Vec<Value>) -> Vec<Value> {
     core
 }
 
+/// Built once: the declarations are static, and building them takes a
+/// ~90 KiB debug frame on whichever deep runner stack asks for them (KT-1161).
+static TOOL_CATALOGUE: std::sync::LazyLock<Vec<Value>> =
+    std::sync::LazyLock::new(build_tool_catalogue);
+
 pub fn tool_catalogue() -> Vec<Value> {
+    TOOL_CATALOGUE.clone()
+}
+
+fn build_tool_catalogue() -> Vec<Value> {
     let mut catalogue = vec![
         json!({
             "type": "function",
@@ -906,13 +921,14 @@ pub fn tool_catalogue() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "task_update_dod",
-                "description": "Check or uncheck one DoD item atomically, using ids returned by task_get.",
+                "description": "Check or uncheck one DoD item atomically, using ids returned by task_get. A post_integration item is the principal's live check: ticking it needs evidence.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "task_id": { "type": "string" },
                         "dod_id": { "type": "string" },
-                        "completed": { "type": "boolean" }
+                        "completed": { "type": "boolean" },
+                        "evidence": { "type": "string" }
                     },
                     "required": ["task_id", "dod_id", "completed"]
                 },
@@ -1206,16 +1222,16 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
         ),
         tool(
             "task_exec_review",
-            "As the parent-room principal, submit a ReviewDecision v1. Approval is guarded and must name the exact reviewed_head_sha. If an HTTP worker honestly left a DoD unmet because it lacks a shell, include attempt-scoped dod_verifications with non-empty evidence from your own validation; a mutable Planning checkbox is not review evidence. request_changes requires an actionable comment.",
+            "As the parent-room principal, submit a ReviewDecision v1. Approval is guarded and must name the exact reviewed_head_sha plus one dod_verifications entry per DoD item (except a post-integration live check), each with non-empty evidence from your own validation; a mutable Planning checkbox is not review evidence. request_changes requires an actionable comment.",
             json!({
                 "task_execution_id": {"type": "string"},
-                "decision": {"type": "object", "description": "ReviewDecision v1: approve or request_changes, optional findings, reviewed_head_sha for approve, and principal dod_verifications when needed."}
+                "decision": {"type": "object", "description": "ReviewDecision v1: version \"1\" (string), task_ref, decision ('approve' | 'request_changes'), reviewed_head_sha (required for approve), dod_verifications [{dod_id, met, evidence, verification?}] (required for approve: one per DoD item except a live check, which is `post_integration` + met false, never a blocker), comment (required for request_changes), findings [{path?, line?, issue}]."}
             }),
             json!(["task_execution_id", "decision"]),
         ),
         tool(
             "task_exec_cancel",
-            "Cancel an execution as its parent-room principal. preserve is the safe default; remove_if_clean refuses dirty or unproven worktrees.",
+            "Cancel an execution as its parent-room principal. The task status is NOT changed (to relaunch: task_update status=todo). preserve is the safe default; remove_if_clean refuses dirty or unproven worktrees.",
             json!({
                 "task_execution_id": {"type": "string"},
                 "reason": {"type": "string"},
@@ -1478,6 +1494,12 @@ fn worker_room_catalogue(catalogue: Vec<Value>) -> Vec<Value> {
                     json!(["name", "status", "evidence"]);
                 properties["tests"]["items"]["additionalProperties"] = json!(false);
                 properties["dod_status"]["items"]["additionalProperties"] = json!(false);
+                // KT-1246 — a spawned worker states, explicitly, whether it ran
+                // any test and which, instead of a sentence in its summary.
+                properties["tests_executed"]["description"] = json!(
+                    "Whether any test was actually executed in this run, and which commands. `executed: false` requires `which: []`; `executed: true` requires the commands that ran, matching at least one `tests` entry reported pass or fail."
+                );
+                properties["tests_executed"]["additionalProperties"] = json!(false);
                 manifest_schema["additionalProperties"] = json!(false);
                 manifest_schema["required"] = json!([
                     "tests",
@@ -1486,7 +1508,8 @@ fn worker_room_catalogue(catalogue: Vec<Value>) -> Vec<Value> {
                     "migrations",
                     "risks",
                     "limitations",
-                    "summary"
+                    "summary",
+                    "tests_executed"
                 ]);
                 tool["function"]["parameters"]["properties"] = json!({
                     "manifest": manifest_schema
@@ -1618,6 +1641,16 @@ impl ToolExecutor for KronnToolExecutor {
                     call.name
                 ),
             );
+        }
+        // KT-1247 — any tool call a worker makes from its execution room is
+        // activity: it pushes the silent-worker clock. Best effort, and a no-op
+        // for every room that does not belong to a `Working` execution.
+        if let Some(room) = self.disc_id.clone() {
+            let _ = self
+                .state
+                .db
+                .with_conn(move |conn| crate::db::orchestration::note_room_activity(conn, &room))
+                .await;
         }
         use axum::extract::{Path, State};
         use axum::Json;
@@ -2150,6 +2183,7 @@ impl ToolExecutor for KronnToolExecutor {
                 let request = UpdatePlanningDodItemRequest {
                     completed,
                     actor: self.actor(),
+                    evidence: required_string(call, "evidence"),
                 };
                 let Json(res) = crate::api::planning::update_dod_item(
                     State(self.state.clone()),
@@ -4890,6 +4924,32 @@ mod tests {
         }
     }
 
+    /// KT-1262 — the review tool names what an approve is refused without.
+    #[test]
+    fn native_review_tool_names_the_fields_an_approve_requires() {
+        let review = orchestration_tool_catalogue()
+            .into_iter()
+            .find(|tool| tool["function"]["name"] == "task_exec_review")
+            .expect("review tool");
+        let decision = review["function"]["parameters"]["properties"]["decision"]["description"]
+            .as_str()
+            .expect("decision description");
+        for field in [
+            "version \"1\" (string)",
+            "reviewed_head_sha",
+            "dod_verifications [{dod_id, met, evidence, verification?}]",
+            "one per DoD item except a live check",
+            "post_integration",
+            "comment",
+            "findings",
+        ] {
+            assert!(
+                decision.contains(field),
+                "decision description lacks {field}"
+            );
+        }
+    }
+
     #[test]
     fn native_orchestration_catalogue_is_complete_and_identity_free() {
         let catalogue = orchestration_tool_catalogue();
@@ -5131,8 +5191,13 @@ mod tests {
                 "migrations",
                 "risks",
                 "limitations",
-                "summary"
+                "summary",
+                "tests_executed"
             ])
+        );
+        assert_eq!(
+            projected["properties"]["tests_executed"]["required"],
+            json!(["executed", "which"])
         );
         for mechanical in ["version", "task_ref", "head_sha", "files_touched"] {
             assert!(projected["properties"].get(mechanical).is_none());

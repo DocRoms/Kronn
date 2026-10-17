@@ -1,5 +1,49 @@
 /* AiDocViewer — component-specific styles (aidoc- prefix) */
 
+.aidoc-stale-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  border-bottom: 1px solid var(--kr-warning);
+  background: var(--kr-warning-bg);
+  color: var(--kr-warning-soft);
+  font-size: var(--kr-fs-xs);
+}
+
+.aidoc-stale-banner > div {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 2px;
+}
+
+.aidoc-stale-banner span {
+  overflow-wrap: anywhere;
+  color: var(--kr-text-secondary);
+}
+
+.aidoc-stale-banner button {
+  flex: 0 0 auto;
+  padding: var(--kr-sp-1) var(--kr-sp-3);
+  border: 1px solid var(--kr-warning);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-elevated);
+  color: var(--kr-warning-soft);
+  font: inherit;
+  cursor: pointer;
+}
+
+@media (max-width: 560px) {
+  .aidoc-stale-banner {
+    flex-wrap: wrap;
+  }
+
+  .aidoc-stale-banner button {
+    width: 100%;
+  }
+}
+
 /* State banner rendered above the viewer when audit_status isn't yet
    Validated. Wrapper just provides bottom spacing — the banner div
    itself carries the visual style (dash-doc-banner-* in Dashboard.css). */
@@ -302,3 +346,85 @@
 .aidoc-md hr { border: none; border-top: 1px solid var(--kr-border-medium); margin: 10px 0; }
 .aidoc-md a { color: var(--kr-accent); text-decoration: underline; }
 .aidoc-md strong { font-weight: 700; color: var(--kr-text-primary); }
+
+/* ── In-app doc links (KT-1200) ──────────────────────── */
+.aidoc-toolbar-lead {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  min-width: 0;
+}
+
+.aidoc-back-btn,
+.aidoc-link-notice-close,
+.aidoc-code-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 4px;
+  border: 1px solid var(--kr-border-ghost);
+  border-radius: var(--kr-r-sm);
+  background: transparent;
+  color: var(--kr-text-muted);
+  cursor: pointer;
+}
+
+.aidoc-back-btn:hover,
+.aidoc-link-notice-close:hover,
+.aidoc-code-close:hover {
+  color: var(--kr-text-primary);
+  border-color: var(--kr-border-strong);
+}
+
+.aidoc-link-notice {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--kr-border-ghost);
+  background: rgba(var(--kr-error-rgb), 0.08);
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-xs);
+  flex-shrink: 0;
+}
+
+.aidoc-link-notice span {
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+
+.aidoc-code-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: var(--kr-z-modal);
+  display: flex;
+  padding: var(--kr-sp-6);
+  background: var(--kr-bg-overlay);
+}
+
+.aidoc-code-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border: 1px solid var(--kr-border-strong);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-base);
+  box-shadow: var(--kr-shadow-xl);
+}
+
+.aidoc-code-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--kr-sp-3);
+  padding: 6px var(--kr-sp-3);
+  border-bottom: 1px solid var(--kr-border);
+  font-size: var(--kr-fs-xs);
+}
+
+.aidoc-code-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}

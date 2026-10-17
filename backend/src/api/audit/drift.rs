@@ -39,29 +39,213 @@ pub async fn check_drift(
     let project_path = scanner::resolve_host_path(&project.path);
 
     let result = tokio::task::spawn_blocking(move || {
-        crate::core::checksums::check_drift_cached(&project_path)
+        let placeholders = crate::api::projects::template_reinstall::placeholder_docs(
+            &project_path,
+            &crate::api::projects::template::resolve_templates_dir().join("docs"),
+        );
+        (
+            crate::core::checksums::check_drift_cached(&project_path),
+            placeholders,
+            crate::core::template_manifest::check(
+                &project_path,
+                &crate::api::projects::template::resolve_templates_dir().join("docs"),
+            )
+            .ok(),
+        )
     })
     .await;
 
     match result {
-        Ok(drift) => {
-            let response = DriftCheckResponse {
-                audit_date: drift.audit_date,
-                stale_sections: drift
-                    .stale_sections
-                    .into_iter()
-                    .map(|s| DriftSection {
-                        ai_file: s.ai_file,
-                        audit_step: s.audit_step,
-                        changed_sources: s.changed_sources,
-                    })
-                    .collect(),
-                fresh_sections: drift.fresh_sections,
-                total_sections: drift.total_sections,
-            };
-            Json(ApiResponse::ok(response))
-        }
+        Ok((drift, placeholder_docs, template_update)) => Json(ApiResponse::ok(drift_response(
+            drift,
+            placeholder_docs,
+            template_update,
+        ))),
         Err(e) => Json(ApiResponse::err(format!("Drift check failed: {}", e))),
+    }
+}
+
+fn drift_response(
+    drift: crate::core::checksums::DriftResult,
+    placeholder_docs: Vec<crate::models::PlaceholderDoc>,
+    template_update: Option<crate::core::template_manifest::TemplateUpdate>,
+) -> DriftCheckResponse {
+    DriftCheckResponse {
+        template_update,
+        audit_date: drift.audit_date,
+        stale_sections: drift
+            .stale_sections
+            .into_iter()
+            .map(|s| DriftSection {
+                ai_file: s.ai_file,
+                audit_step: s.audit_step,
+                changed_sources: s.changed_sources,
+                missing_paths: s.missing_paths,
+            })
+            .collect(),
+        fresh_sections: drift.fresh_sections,
+        total_sections: drift.total_sections,
+        sources_state: drift.sources_state,
+        broken_citations: drift.broken_citations,
+        missing_paths: Some(drift.missing_paths),
+        placeholder_docs,
+    }
+}
+
+/// POST /api/projects/:id/drift/acknowledge
+/// « Vérifié, inchangé » on stale sections: their baseline is refreshed
+/// without rewriting the docs. A human decision, held under the audit lease.
+pub async fn acknowledge_drift(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    Json(req): Json<AcknowledgeDriftRequest>,
+) -> Json<ApiResponse<DriftCheckResponse>> {
+    // Not on the bridge route list either: this guard holds if it ever is.
+    if bridge.is_some() {
+        return Json(ApiResponse::err(
+            "Acknowledging stale sections is a human decision: refused to an agent's bridge token.",
+        ));
+    }
+    let (project_id, project_path) = match project_path_of(&state, id).await {
+        Ok(found) => found,
+        Err(e) => return Json(ApiResponse::err(e)),
+    };
+    let lease =
+        match crate::api::audit::docs_write::DocsWriteLease::acquire(&state, &project_id).await {
+            Ok(lease) => lease,
+            Err(error) => return Json(ApiResponse::err(error)),
+        };
+    let result = lease
+        .blocking(move || {
+            let mut shown = crate::core::citation_drift::ShownPaths::new();
+            for p in &req.shown_paths {
+                shown
+                    .entry(p.doc.clone())
+                    .or_default()
+                    .entry(p.section.clone())
+                    .or_default()
+                    .push(p.path.clone());
+            }
+            crate::core::checksums::acknowledge_stale(&project_path, &req.sections, &shown)?;
+            if let Err(e) = crate::core::doc_provenance::record_validation(
+                &project_path,
+                &req.sections,
+                crate::core::doc_provenance::ValidationReason::Acknowledged,
+            ) {
+                tracing::warn!("Human-validation provenance not recorded: {e}");
+            }
+            let placeholders = crate::api::projects::template_reinstall::placeholder_docs(
+                &project_path,
+                &crate::api::projects::template::resolve_templates_dir().join("docs"),
+            );
+            Ok(drift_response(
+                crate::core::checksums::check_drift_cached(&project_path),
+                placeholders,
+                crate::core::template_manifest::check(
+                    &project_path,
+                    &crate::api::projects::template::resolve_templates_dir().join("docs"),
+                )
+                .ok(),
+            ))
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("Task failed: {e}")));
+    match result {
+        Ok(drift) => Json(ApiResponse::ok(drift)),
+        Err(e) => Json(ApiResponse::err(e)),
+    }
+}
+
+async fn project_path_of(
+    state: &AppState,
+    id: String,
+) -> Result<(String, std::path::PathBuf), String> {
+    match state
+        .db
+        .with_read_conn(move |conn| crate::db::projects::get_project(conn, &id))
+        .await
+    {
+        Ok(Some(p)) => {
+            let path = scanner::resolve_host_path(&p.path);
+            Ok((p.id, path))
+        }
+        Ok(None) => Err("Project not found".into()),
+        Err(e) => Err(format!("DB error: {e}")),
+    }
+}
+
+/// GET /api/projects/:id/citation-drift
+/// Every recorded citation compared with the current code, per section.
+/// Deterministic, no model: the base "Revalider l'audit" (KT-1168) reads.
+pub async fn citation_drift(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<CitationDriftResponse>> {
+    let project_path = match project_path_of(&state, id).await {
+        Ok((_, path)) => path,
+        Err(e) => return Json(ApiResponse::err(e)),
+    };
+    let result = tokio::task::spawn_blocking(move || CitationDriftResponse {
+        report: crate::core::citation_drift::check(&project_path),
+        last_scheduled_check: crate::core::citation_drift::last_scheduled_check(&project_path),
+    })
+    .await;
+    match result {
+        Ok(response) => Json(ApiResponse::ok(response)),
+        Err(e) => Json(ApiResponse::err(format!("Citation drift failed: {e}"))),
+    }
+}
+
+/// POST /api/projects/:id/citation-drift/acknowledge
+/// "Verified, unchanged": refreshes one section's fingerprints without
+/// rewriting the doc. Held under the project lease like a validation.
+pub async fn acknowledge_citations(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<AcknowledgeCitationsRequest>,
+) -> Json<ApiResponse<crate::core::citation_drift::SectionCitations>> {
+    let (project_id, project_path) = match project_path_of(&state, id).await {
+        Ok(found) => found,
+        Err(e) => return Json(ApiResponse::err(e)),
+    };
+    let lease =
+        match crate::api::audit::docs_write::DocsWriteLease::acquire(&state, &project_id).await {
+            Ok(lease) => lease,
+            Err(error) => return Json(ApiResponse::err(error)),
+        };
+    let result = lease
+        .blocking(move || {
+            let section = crate::core::citation_drift::acknowledge(&project_path, &req.doc)?;
+            if let Err(e) = crate::core::doc_provenance::record_validation(
+                &project_path,
+                std::slice::from_ref(&req.doc),
+                crate::core::doc_provenance::ValidationReason::Acknowledged,
+            ) {
+                tracing::warn!("Human-validation provenance not recorded: {e}");
+            }
+            let documents = crate::core::audit_documents::capture(&project_path)?;
+            Ok((section, req.doc, documents))
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("Task failed: {e}")));
+    let result = match result {
+        Ok((section, doc, documents)) => {
+            let pid = project_id.clone();
+            state
+                .db
+                .with_conn(move |conn| {
+                    crate::db::audit_documents::confirm_paths(conn, &pid, &[doc], &documents)
+                })
+                .await
+                .map(|()| section)
+                .map_err(|e| format!("Cannot record acknowledged audit documents: {e}"))
+        }
+        Err(e) => Err(e),
+    };
+    match result {
+        Ok(section) => Json(ApiResponse::ok(section)),
+        Err(e) => Json(ApiResponse::err(e)),
     }
 }
 
@@ -96,25 +280,41 @@ pub async fn partial_audit(
 
     // Safety: early return above guarantees project is Some
     let project = project.expect("project is Some after early return");
-    let project_path_str = project.path.clone();
     let project_path = scanner::resolve_host_path(&project.path);
-    let briefing_notes =
-        crate::api::projects::resolve_briefing_notes(&project_path, &project.briefing_notes);
-    // KT-926 — the only other repos this prompt names are the ones the user
-    // explicitly linked to the project. Never the list of the machine's Kronn
-    // projects: the prompt goes to the model provider, and a companion list
-    // would be copied into a versioned `docs/AGENTS.md`.
-    let linked_repos_block =
-        crate::api::projects::format_linked_repos_for_prompt(&project.linked_repos);
+    if let Some(error) = crate::api::projects::template_merge::audit_launch_refusal(&project_path) {
+        return super::full::sse_refusal(error);
+    }
+    // One root for every artefact (KT-1192); a broken override refuses.
+    let docs_root = match crate::core::docs_location::DocsRoot::for_project(&project_path) {
+        Ok(docs_root) => docs_root,
+        Err(reason) => {
+            let msg = serde_json::json!({ "error": reason });
+            let stream: SseStream = Box::pin(futures::stream::once(async move {
+                Ok::<_, Infallible>(Event::default().event("error").data(msg.to_string()))
+            }));
+            return Sse::new(stream);
+        }
+    };
+    if let Some(refusal) = super::legacy_layout_refusal(&project_path) {
+        let stream: SseStream = Box::pin(futures::stream::once(async move {
+            Ok::<_, Infallible>(Event::default().event("error").data(refusal.to_string()))
+        }));
+        return Sse::new(stream);
+    }
+    // The folder's human docs wait for the briefing's choice, as for a Full run.
+    let recorded_run = super::has_recorded_full_run(&state, &project.id).await;
+    if let Some(refusal) =
+        super::docs_folder_choice_refusal(&project_path, &docs_root, recorded_run)
+    {
+        return super::full::sse_refusal(refusal);
+    }
 
     // Validate requested step numbers against the FULL chained pipeline
     // (foundation 1..9 + chained sub-audits 10..16), not just the 9
     // foundation steps — otherwise a drift-flagged sub-audit section (Codex
     // #8) could never be refreshed, the "Mettre à jour" button would send a
     // step the endpoint rejects.
-    let chain = super::assemble_chained_steps(crate::models::AuditKind::Full);
-    let redact_targets: Vec<String> = chain.iter().map(|s| s.target_file.to_string()).collect();
-    let first_chained_step = ANALYSIS_STEPS.len() + 1;
+    let chain = super::steps_for(crate::models::AuditKind::Full, &docs_root);
     let total_steps_available = chain.len();
     // An empty selection would run nothing and still end `done complete` — a
     // no-op masquerading as a refresh. Refuse it like the bridge does.
@@ -131,7 +331,7 @@ pub async fn partial_audit(
         // alone and a "refresh" could end Completed having verified
         // nothing. Refused before any lease/row exists.
         if (1..=total_steps_available).contains(&step)
-            && !super::partial_selectable(&chain[step - 1])
+            && !super::partial_selectable(&chain[step - 1], &docs_root)
         {
             let msg = serde_json::json!({
                 "error": format!("Step {step} ({}) is a synthetic step — it cannot be refreshed via partial-audit", chain[step - 1].target_file)
@@ -220,13 +420,77 @@ pub async fn partial_audit(
         }
     }
 
+    run_partial_pipeline(
+        state,
+        project,
+        resolved_steps,
+        req.agent,
+        req.tier,
+        req.connection_id,
+        None,
+    )
+    .await
+}
+
+/// The partial pipeline over canonical chain steps: lease, run row, revoked
+/// validation, per-step gates, cancel, terminal write. A revalidation
+/// (KT-1168) runs through it with its findings and its own restore rules.
+pub(crate) async fn run_partial_pipeline(
+    state: AppState,
+    project: Project,
+    requested_steps: Vec<usize>,
+    agent_type: AgentType,
+    tier: Option<crate::models::ModelTier>,
+    connection_id: Option<String>,
+    revalidation: Option<super::revalidate::RevalidationRun>,
+) -> Sse<SseStream> {
+    let id = project.id.clone();
+    let project_path_str = project.path.clone();
+    let project_path = scanner::resolve_host_path(&project.path);
+    let briefing_notes =
+        crate::api::projects::resolve_briefing_notes(&project_path, &project.briefing_notes);
+    // KT-999 — same documentation switch as the Full pipeline.
+    let briefing_docs_on =
+        super::briefing_docs::prompt_enabled(state.config.read().await.audit_briefing_docs);
+    // KT-1193 — same rules inputs as the Full pipeline.
+    let project_rules = briefing_notes
+        .as_deref()
+        .and_then(super::briefing_rules::parse);
+    // KT-926 — the only other repos this prompt names are the ones the user
+    // explicitly linked to the project. Never the list of the machine's Kronn
+    // projects: the prompt goes to the model provider, and a companion list
+    // would be copied into a versioned `docs/AGENTS.md`.
+    let linked_repos_block =
+        crate::api::projects::format_linked_repos_for_prompt(&project.linked_repos);
+    let docs_root = match crate::core::docs_location::DocsRoot::for_project(&project_path) {
+        Ok(docs_root) => docs_root,
+        Err(reason) => {
+            let msg = serde_json::json!({ "error": reason });
+            let stream: SseStream = Box::pin(futures::stream::once(async move {
+                Ok::<_, Infallible>(Event::default().event("error").data(msg.to_string()))
+            }));
+            return Sse::new(stream);
+        }
+    };
+    let chain = super::steps_for(crate::models::AuditKind::Full, &docs_root);
+    // KT-1208 — a partial refresh runs every step single-agent; it says so
+    // when the briefing asked for the cross-agent audit on a refreshed step.
+    let cross_agent_skipped =
+        super::cross_audit::briefing_cross_agents(briefing_notes.as_deref(), None).is_some()
+            && requested_steps.iter().any(|&n| {
+                chain.get(n.wrapping_sub(1)).is_some_and(|s| {
+                    crate::core::cross_audit::is_cross_checked_target(s.target_file, &docs_root)
+                })
+            });
+    let redact_targets: Vec<String> = chain.iter().map(|s| s.target_file.to_string()).collect();
+    let first_chained_step = ANALYSIS_STEPS.len() + 1;
+
     let tokens = {
         let config = state.config.read().await;
         config.tokens.clone()
     };
 
-    let audit_tier = req.tier.unwrap_or(crate::models::ModelTier::Reasoning);
-    let agent_type = req.agent;
+    let audit_tier = tier.unwrap_or(crate::models::ModelTier::Reasoning);
     if !super::agent_can_audit(&agent_type) {
         let msg = serde_json::json!({
             "error": super::audit_refusal_message(&agent_type)
@@ -241,7 +505,7 @@ pub async fn partial_audit(
     let agent_launcher = match super::agent_launch::AuditAgentLauncher::for_request(
         &state,
         &agent_type,
-        req.connection_id.as_deref(),
+        connection_id.as_deref(),
     )
     .await
     {
@@ -254,7 +518,6 @@ pub async fn partial_audit(
             return Sse::new(stream);
         }
     };
-    let requested_steps = resolved_steps;
     let total_requested = requested_steps.len();
     let audit_tracker = state.audit_tracker.clone();
     let guard_db = state.db.clone();
@@ -289,8 +552,47 @@ pub async fn partial_audit(
             guard_project,
         );
         drop_guard.hold_lease();
+        if let Some(error) = crate::api::projects::template_merge::audit_launch_refusal(&project_path) {
+            drop_guard.disarm();
+            yield Event::default().event("error").data(error.to_string());
+            return;
+        }
+
+
+        // A flag left by a previous run's Stop must not stop this one.
+        if let Ok(mut tracker) = audit_tracker.lock() {
+            tracker.cancelled.remove(&project_id_for_progress);
+        }
         // Its agent sessions get the audit MCP rule (no kronn-internal, no Memory).
         let _audit_session = crate::core::audit_mcp_filter::AuditSessionGuard::enter(&project_path);
+
+        // KT-1169 — a refresh run would supersede an audit that can still be
+        // resumed: that audit is finished first.
+        // KT-1312 — unless a resume would have nothing left to run: every
+        // failed step is accepted, which is what the refusal asks for.
+        let latest = state.db.with_conn({
+            let pid = project_id_for_progress.clone();
+            move |conn| {
+                Ok(match crate::db::audit_runs::latest_resumable(conn, &pid)? {
+                    Some(run) => {
+                        let steps = crate::db::audit_runs::list_audit_steps(conn, &run.id)?;
+                        super::full::resume_has_steps_left(&run, &steps).then_some(run)
+                    }
+                    None => None,
+                })
+            }
+        }).await;
+        let refusal = match latest {
+            Ok(latest) => super::full::fresh_launch_refusal(latest.as_ref(), false)
+                .map(|_| "An interrupted audit can be resumed: resume it, or accept its failed steps, before refreshing stale sections.".to_string()),
+            Err(e) => Some(format!("Could not read the project's latest audit run (db): {e} — refresh refused.")),
+        };
+        if let Some(msg) = refusal {
+            yield Event::default().event("error").data(
+                serde_json::json!({ "error": msg }).to_string(),
+            );
+            return;
+        }
 
         // A3 — partial runs get their own audit_runs row: history and the
         // resume/validate rules must see a failed or newer partial, not
@@ -315,6 +617,15 @@ pub async fn partial_audit(
             return;
         }
         drop_guard.set_run_id(audit_run_id.clone());
+        super::full::stop_validation_agents(&state, &project_id_for_progress).await;
+        let provenance_writer = if revalidation.is_some() {
+            crate::core::doc_provenance::DocWriter::Revalidation
+        } else {
+            crate::core::doc_provenance::DocWriter::PartialAudit
+        };
+        // A run that ends up rewriting nothing gives the validation back.
+        let validated_before: Option<String> =
+            crate::core::kronn_state::read(&project_path).and_then(|s| s.validated_at);
         // CONTRACTUAL revocation (Codex A5) — AFTER the row insert, like the
         // full pipeline: if the insert fails the launch is refused with ZERO
         // mutation (Validated intact); if the revocation fails, the armed
@@ -373,6 +684,42 @@ pub async fn partial_audit(
         }
 
 
+        // KT-1168 — the deterministic part first: moved citations follow
+        // their line. Then every agent target is snapshotted so a run that
+        // rewrites nothing can give the validation back.
+        if revalidation.is_some() {
+            let pp = project_path.clone();
+            let reanchored = tokio::task::spawn_blocking(move || super::revalidate::apply_reanchors(&pp))
+                .await
+                .unwrap_or_else(|e| Err(format!("re-anchor task failed: {e}")));
+            match reanchored {
+                Ok(docs) => {
+                    for doc in docs {
+                        yield Event::default().event("reanchored").data(
+                            serde_json::to_string(&doc).unwrap_or_default(),
+                        );
+                    }
+                }
+                Err(e) => {
+                    yield Event::default().event("warning").data(
+                        serde_json::json!({ "message": format!("Moved citations not re-anchored: {e}") }).to_string(),
+                    );
+                }
+            }
+        }
+        let targets: Vec<&str> = requested_steps.iter().map(|&step| chain[step - 1].target_file).collect();
+        let target_snapshots = match super::helpers::validation_restore_snapshots(&project_path, &targets) {
+            Ok(snapshots) => snapshots,
+            Err(error) => {
+                yield Event::default().event("error").data(serde_json::json!({
+                    "error": format!("Could not snapshot validated documentation: {error} — refresh refused.")
+                }).to_string());
+                return;
+            }
+        };
+        let restore_reason = revalidation.is_some()
+            .then_some(crate::core::doc_provenance::ValidationReason::Revalidation);
+
         if let Ok(mut t) = audit_tracker.lock() {
             t.start_progress(&project_id_for_progress, total_requested as u32, "partial");
             t.set_auditor(
@@ -392,6 +739,30 @@ pub async fn partial_audit(
             "requested_steps": &requested_steps,
         });
         yield Event::default().event("start").data(start.to_string());
+        if cross_agent_skipped {
+            yield Event::default().event("single_agent").data(serde_json::json!({
+                "message": "This refresh runs single-agent: the cross-agent audit option applies to Full audits only.",
+            }).to_string());
+        }
+        // KT-1199 — the refresh is a run too: its state travels with the repository.
+        let run_state_writer = std::sync::Arc::new(super::run_state::RunStateWriter::new(
+            project_path.clone(),
+            audit_run_id.clone(),
+            super::run_state::RunStateMeta::capture(
+                &project_path,
+                super::validate::operator_pseudo(&state).await,
+                None,
+            ),
+            requested_steps
+                .iter()
+                .map(|&n| (n as u32, super::full::step_file_label(&chain[n - 1]).to_string()))
+                .collect(),
+        ));
+        {
+            let writer = run_state_writer.clone();
+            let _ = state.db.with_conn(move |conn| { writer.sync(conn, false); Ok(()) }).await;
+        }
+        let td_decisions_before = crate::core::td_decisions::snapshot(&docs_root.dir(&project_path));
 
         // Same-inputs parity with the Full pipeline (Codex lot-3 #4/#3):
         // when step 8 is selected, its deterministic detector signals AND
@@ -401,23 +772,28 @@ pub async fn partial_audit(
             == crate::core::anti_halluc::AntiHallucMode::Enforce;
         let step8_selected = requested_steps.iter()
             .any(|&n| chain[n - 1].target_file.ends_with("inconsistencies-tech-debt.md"));
-        let (detector_signals, prior_td_digests) = if step8_selected {
+        // KT-1174 — only the ADRs in force and the TD record lines present
+        // before this refresh settle a TD.
+        let adr_baseline = crate::core::adr::StartOfRun::capture(&docs_root.dir(&project_path));
+        let (detector_signals, ecosystems, prior_td_digests) = if step8_selected {
             let p = project_path.clone();
-            let signals = tokio::task::spawn_blocking(move || {
-                crate::core::audit_detectors::run_detectors(&p)
+            let rules = project_rules.clone().unwrap_or_default().rules;
+            let (signals, ecosystems) = tokio::task::spawn_blocking(move || {
+                let scan = crate::core::audit_detectors::scan_project_with_rules(&p, &rules);
+                (scan.signals, scan.ecosystems)
             }).await.unwrap_or_default();
-            let digests = super::reconciliation::digest_prior_tech_debt(&project_path.join("docs"));
-            (signals, digests)
+            let digests = super::reconciliation::digest_prior_tech_debt(&docs_root.dir(&project_path));
+            (signals, ecosystems, digests)
         } else {
-            (Vec::new(), Vec::new())
+            (Vec::new(), Vec::new(), Vec::new())
         };
+        let version_ctx = super::version_context::VersionContext::load(
+            &state.db, &project_id_for_progress, &project_path, &project_path_str, &agent_launcher, &agent_type,
+        ).await;
 
-        // Only steps whose agent actually SUCCEEDED get their baseline entry
-        // refreshed — a failed section must stay stale (false-freshness
-        // otherwise: the docs weren't regenerated but drift stops flagging).
-        // A step whose target did NOT change (normalized hash equal after
-        // every gate passed) is `unchanged`: exit 0 + old file is not a
-        // refresh — the section stays stale too (matrix v2).
+        // A failed section stays stale: only a done step refreshes its baseline
+        // entry. An `unchanged` step passed every gate on its untouched target:
+        // the section was re-verified, so it is done too (KT-1207).
         let mut succeeded_steps: Vec<usize> = Vec::new();
         let mut unchanged_steps: Vec<usize> = Vec::new();
         // KT-927 — unknown until an agent reports usage, never 0.
@@ -442,6 +818,9 @@ pub async fn partial_audit(
                     Err(e) => tracing::error!(
                         "mark_cancelled failed for {audit_run_id}: {e} — leaving the drop-guard armed"
                     ),
+                }
+                if super::revalidate::restore_validation_if_untouched(&project_path, validated_before.as_deref(), &target_snapshots, restore_reason) {
+                    tracing::info!("Partial run stopped before rewriting anything: validation restored");
                 }
                 if let Ok(mut t) = audit_tracker.lock() {
                     t.clear_progress(&project_id_for_progress);
@@ -470,22 +849,35 @@ pub async fn partial_audit(
             });
             yield Event::default().event("step_start").data(step_start.to_string());
 
-            let today = Utc::now().format("%Y-%m-%d").to_string();
             // Chained sub-audit steps (10..16) carry the relevance gate, same
             // as a full chained run — a partial re-run of a sub-audit that no
             // longer applies must still write its one-line "Not applicable".
             let gate = super::gate_for_step(step, first_chained_step);
-            let mut full_prompt = super::dated_step_prompt(gate, analysis_step.prompt, Utc::now());
+            let reverify = super::reverifies_target(&project_path, step, analysis_step);
+            let mut full_prompt = super::dated_step_prompt(gate, &super::step_prompt_body(analysis_step, reverify), Utc::now(), &docs_root);
 
             if let Some(ref notes) = briefing_notes {
-                full_prompt.push_str(&format!("\n\n## Project briefing (from the user)\n{}\n", notes));
+                full_prompt.push_str(&super::briefing::briefing_prompt_section_for(
+                    notes,
+                    &docs_root,
+                    analysis_step.target_file,
+                    briefing_docs_on,
+                ));
             }
             if let Some(ref block) = linked_repos_block {
                 full_prompt.push_str(&format!("\n\n{}\n", block));
             }
             if analysis_step.target_file.ends_with("inconsistencies-tech-debt.md") {
-                full_prompt.push_str(&super::step8_context_block(&detector_signals, &prior_td_digests));
+                full_prompt.push_str(&super::step8_context_block(&detector_signals, &ecosystems, &prior_td_digests, &docs_root));
             }
+            if let Some(block) = version_ctx.block_for(analysis_step.target_file) {
+                full_prompt.push_str(&block);
+            }
+            if let Some(block) = revalidation.as_ref().and_then(|r| r.blocks.get(&step)) {
+                full_prompt.push_str(block);
+            }
+            full_prompt.push_str(&super::decisions_context_block(&project_path, analysis_step, &adr_baseline.decisions, &docs_root));
+            full_prompt.push_str(&super::briefing_rules::prompt_block(analysis_step.target_file, project_rules.as_ref()));
 
             // Rewrite-proof snapshot BEFORE the agent runs — compared as the
             // LAST gate after CLI/validator (and step-8/enforce gates when
@@ -510,8 +902,34 @@ pub async fn partial_audit(
                     continue;
                 }
             };
-            let human_owned_snapshot =
-                match super::helpers::capture_human_owned_sections(&project_path) {
+            // KT-1211 — the target's content before the agent runs: a stop puts
+            // it back, a failure marks what the agent left as partial.
+            // Kept durably too (same table as the Full pipeline): a backend
+            // that dies mid-step leaves the doc half-written, and boot puts it
+            // back from here — memory alone would be gone.
+            let pre_content: Option<String> = if analysis_step.target_file == "REVIEW" {
+                None
+            } else {
+                let content = super::step_guard::read_target(&project_path, analysis_step.target_file)
+                    .ok()
+                    .flatten();
+                let (run_id, target, saved) = (
+                    audit_run_id.clone(), analysis_step.target_file.to_string(), content.clone(),
+                );
+                if let Err(e) = state.db.with_conn(move |conn| {
+                    crate::db::audit_runs::save_step_snapshot(conn, &run_id, step as u32, &target, saved.as_deref())
+                }).await {
+                    tracing::warn!("Could not keep the pre-step snapshot of partial step {step}: {e}");
+                }
+                content
+            };
+            // What the agent is seen writing is kept durably: a crash settles
+            // the target only from content it can vouch for.
+            let mut target_watch = super::step_guard::TargetWatch::new(
+                &project_path, analysis_step.target_file, pre_content.as_deref(),
+            );
+            let validated_docs_snapshot =
+                match super::helpers::capture_validated_docs(&project_path) {
                     Ok(snapshot) => snapshot,
                     Err(reason) => {
                         yield Event::default().event("step_warning").data(
@@ -548,21 +966,32 @@ pub async fn partial_audit(
                 }
             }
 
-            let max_attempts = if enforce_mode {
+            let detector_gated = analysis_step.target_file.ends_with("inconsistencies-tech-debt.md")
+                && !detector_signals.is_empty();
+            let max_attempts = if enforce_mode || revalidation.is_some() || detector_gated {
                 super::anti_hallu_enforce::MAX_ATTEMPTS
             } else {
                 1
             };
             let mut attempt: usize = 0;
-            let mut citation_feedback: Option<String> = None;
+            // KT-1168 — the KT-1132 stale-target check: what no longer
+            // resolves is named before the agent runs.
+            let mut citation_feedback: Option<String> = if revalidation.is_some() {
+                super::document_repair::with_stale_target(&project_path, analysis_step.target_file, Vec::new())
+                    .ok()
+                    .filter(|d| !d.is_empty())
+                    .map(|d| super::document_repair::feedback(&d))
+            } else {
+                None
+            };
             let mut step_cost = super::agent_launch::StepCost::default();
             'attempts: loop {
             attempt += 1;
             let mut step_usage = crate::db::audit_runs::StepTokens::UNKNOWN;
-            let attempt_prompt = match &citation_feedback {
-                Some(fb) => format!("{full_prompt}\n\n{fb}"),
-                None => full_prompt.clone(),
-            };
+            let mut stream_turns = super::agent_launch::StreamTurns::default();
+            let attempt_prompt = super::finish_step_prompt(
+                &full_prompt, citation_feedback.as_deref(), step, analysis_step, &docs_root,
+            );
             // Stop reaches an HTTP or ACP agent through this token and a direct
             // CLI agent through its PID — the same registration as the Full
             // pipeline, made BEFORE the start so a Stop during the handshake
@@ -592,6 +1021,18 @@ pub async fn partial_audit(
                         if let Some(pid) = process.child.id() {
                             if let Ok(mut tracker) = audit_tracker.lock() {
                                 tracker.running_pids.insert(project_id_for_progress.clone(), pid);
+                            }
+                            // KT-1211 (M5) — the group and the leader's start
+                            // stamp, so a boot after a crash kills an agent the
+                            // dead backend left rewriting the docs.
+                            let stamp = tokio::task::spawn_blocking(move || {
+                                crate::core::agent_orphans::start_stamp(pid)
+                            }).await.ok().flatten();
+                            let run_id = audit_run_id.clone();
+                            if let Err(e) = state.db.with_conn(move |conn| {
+                                crate::db::audit_runs::set_agent_process(conn, &run_id, pid as i64, stamp.as_deref())
+                            }).await {
+                                tracing::warn!("Could not record the partial audit agent's process group: {e}");
                             }
                         }
                     }
@@ -629,6 +1070,14 @@ pub async fn partial_audit(
                                         t.set_recent_activity(&project_id_for_progress, snapshot);
                                     }
                                     yield Event::default().event("activity").data(payload.to_string());
+                                }
+                                if let Some(seen) = target_watch.as_mut().and_then(|w| w.moved()) {
+                                    let (run_id, step_n) = (audit_run_id.clone(), step as u32);
+                                    if let Err(e) = state.db.with_conn(move |conn| {
+                                        crate::db::audit_runs::record_observed_output(conn, &run_id, step_n, &seen)
+                                    }).await {
+                                        tracing::warn!("Could not record what partial step {step} wrote: {e}");
+                                    }
                                 }
                                 let Some(watch) = activity.as_mut() else { continue };
                                 if let Some((tool, calls)) = watch.tool_moved() {
@@ -683,18 +1132,18 @@ pub async fn partial_audit(
                             }
                             if let runner::StreamJsonEvent::Usage { input_tokens, output_tokens, prompt_cache, .. } = event
                             {
-                                // Claude reports cumulative usage per call:
-                                // the largest reading is the step's.
-                                if input_tokens + output_tokens > 0
-                                    && step_usage.total().is_none_or(|seen| input_tokens + output_tokens >= seen)
-                                {
-                                    step_usage = crate::db::audit_runs::StepTokens {
+                                // KT-1313 — a turn adds to the step; only the final
+                                // line states the whole run, so a stopped step keeps
+                                // every turn it consumed.
+                                if input_tokens + output_tokens > 0 {
+                                    let reading = crate::db::audit_runs::StepTokens {
                                         input: Some(input_tokens),
                                         output: Some(output_tokens),
                                         cache_read: prompt_cache.cached_prompt_tokens,
                                         cache_write: prompt_cache.cache_write_prompt_tokens,
                                         accounting: Default::default(),
                                     }.inclusive_for(&agent_type);
+                                    step_usage = stream_turns.fold(step_usage, reading, runner::is_claude_result_line(&line));
                                 }
                             }
                         }
@@ -720,6 +1169,15 @@ pub async fn partial_audit(
                     if let Ok(mut tracker) = audit_tracker.lock() {
                         tracker.running_pids.remove(&project_id_for_progress);
                         tracker.agent_cancels.remove(&project_id_for_progress);
+                    }
+                    {
+                        // KT-1211 (M5) — the agent is reaped: nothing to kill at boot.
+                        let run_id = audit_run_id.clone();
+                        if let Err(e) = state.db.with_conn(move |conn| {
+                            crate::db::audit_runs::clear_agent_process(conn, &run_id)
+                        }).await {
+                            tracing::warn!("Could not clear the partial audit agent's process group: {e}");
+                        }
                     }
                     run_tokens.add(step_usage.total());
                     tracing::debug!("Partial audit step {}: fix_ownership applied for {}", step, file_label);
@@ -758,43 +1216,83 @@ pub async fn partial_audit(
                         }
                     }
 
-                    // Restore protected sections before any retry/failure
-                    // branch can leave this attempt's rewrite on disk.
-                    let ownership_error = match super::helpers::protect_human_owned_sections(
+                    // The rules section belongs to Kronn: an agent rewrite never keeps it.
+                    super::briefing_rules::sync_from_notes(&project_path, briefing_notes.as_deref());
+                    // Every write of the attempt stays; the docs a human
+                    // validated are marked to reconfirm (KT-1079).
+                    if let Err(reason) = super::helpers::mark_validated_doc_writes(
                         &project_path,
-                        &human_owned_snapshot,
-                        &today,
+                        &validated_docs_snapshot,
+                        provenance_writer,
                     ) {
-                        Ok(_) => None,
-                        Err(reason) => {
-                            let reason = format!(
-                                "human-owned section protection failed for {file_label}: {reason}"
-                            );
-                            yield Event::default().event("step_warning").data(
-                                serde_json::json!({
-                                    "step": step, "file": file_label,
-                                    "reason": reason.clone(), "repaired_from_template": false,
-                                }).to_string()
-                            );
-                            Some(reason)
-                        }
-                    };
+                        let reason = format!(
+                            "documentation protection notice for {file_label}: {reason}"
+                        );
+                        yield Event::default().event("step_warning").data(
+                            serde_json::json!({
+                                "step": step, "file": file_label,
+                                "reason": reason, "repaired_from_template": false,
+                            }).to_string()
+                        );
+                    }
 
                     // KT-927 — a Stop during the step. Checked AFTER the
                     // sweeps above, like the Full pipeline, so the attempt's
-                    // rewrite is already redacted and the human-owned sections
-                    // restored; BEFORE any gate or retry, so a stopped step
+                    // rewrite is already redacted and the validated docs
+                    // marked; BEFORE any gate or retry, so a stopped step
                     // neither counts as a failure nor spawns another agent.
                     if audit_tracker.lock().map(|t| t.cancelled.contains(&project_id_for_progress)).unwrap_or(false) {
+                        // KT-1211 — the agent was killed mid-write: the target
+                        // goes back as it was before the step, never left
+                        // half-written (marked partial when it cannot be put back).
+                        let step_n = step as u32;
+                        let outcome = super::step_guard::settle_killed(
+                            &project_path,
+                            analysis_step.target_file,
+                            pre_content.as_deref(),
+                            target_watch.as_ref().map(|w| w.last_seen()),
+                            super::step_guard::StopKind::Cancelled,
+                            step_n,
+                        );
+                        {
+                            let run_id = audit_run_id.clone();
+                            let reason = super::step_guard::killed_reason(step_n, &outcome);
+                            let duration_ms = step_started_at.elapsed().as_millis() as u64;
+                            let recorded_total = run_tokens.total();
+                            let usage = step_usage;
+                            let killed_cost = step_cost.usd_micros();
+                            let killed_state = outcome.target_state();
+                            let keep_snapshot = outcome.keeps_snapshot();
+                            if let Err(e) = state.db.with_conn(move |conn| {
+                                crate::db::audit_runs::finalize_audit_step(
+                                    conn, &run_id, step_n, Utc::now(), duration_ms, &usage,
+                                    recorded_total, false, Some(&reason), false,
+                                )?;
+                                if let Some(cost) = killed_cost {
+                                    crate::db::audit_runs::set_step_cost(conn, &run_id, step_n, cost)?;
+                                }
+                                crate::db::audit_runs::set_step_target_state(conn, &run_id, step_n, killed_state)?;
+                                if !keep_snapshot {
+                                    crate::db::audit_runs::delete_step_snapshot(conn, &run_id, step_n)?;
+                                }
+                                Ok(())
+                            }).await {
+                                tracing::error!("Failed to record the cancelled partial step {step} for run {audit_run_id}: {e}");
+                            }
+                        }
                         let run_id = audit_run_id.clone();
                         let persisted = state.db.with_conn(move |conn| {
-                            crate::db::audit_runs::mark_cancelled(conn, &run_id)
+                            crate::db::audit_runs::mark_cancelled_at_step(conn, &run_id, step_n)
+                                .map(|_| ())
                         }).await;
                         match persisted {
                             Ok(()) => drop_guard.disarm(),
                             Err(e) => tracing::error!(
                                 "mark_cancelled failed for {audit_run_id}: {e} — leaving the drop-guard armed"
                             ),
+                        }
+                        if super::revalidate::restore_validation_if_untouched(&project_path, validated_before.as_deref(), &target_snapshots, restore_reason) {
+                            tracing::info!("Partial run stopped before rewriting anything: validation restored");
                         }
                         if let Ok(mut t) = audit_tracker.lock() {
                             t.clear_progress(&project_id_for_progress);
@@ -821,9 +1319,6 @@ pub async fn partial_audit(
                         super::validation::validate_step_output(
                             cli_success, &project_path, analysis_step.target_file,
                         );
-                    if ownership_error.is_some() {
-                        success = false;
-                    }
                     let validation_warning = super::validation::with_http_diagnostics(
                         success, validation_warning, &process.captured_stderr(),
                     );
@@ -836,14 +1331,26 @@ pub async fn partial_audit(
                     }
 
                     if success && analysis_step.target_file.ends_with("inconsistencies-tech-debt.md") {
-                        if let Some(w) = super::validation::check_detector_disposition(
+                        if let Some(gap) = super::validation::detector_disposition_gap(
                             &project_path, &detector_signals,
                         ) {
+                            if attempt < max_attempts {
+                                yield Event::default().event("step_retry").data(
+                                    serde_json::json!({
+                                        "step": step, "file": file_label,
+                                        "attempt": attempt, "max_attempts": max_attempts,
+                                        "undisposed_count": gap.count,
+                                        "reason": "detector_disposition",
+                                    }).to_string()
+                                );
+                                citation_feedback = Some(gap.feedback);
+                                continue 'attempts;
+                            }
                             success = false;
                             yield Event::default().event("step_warning").data(
                                 serde_json::json!({
                                     "step": step, "file": file_label,
-                                    "reason": w.reason, "repaired_from_template": false,
+                                    "reason": gap.warning.reason, "repaired_from_template": false,
                                 }).to_string()
                             );
                         }
@@ -853,7 +1360,7 @@ pub async fn partial_audit(
                         use super::anti_hallu_enforce::EnforceGateOutcome;
                         match super::anti_hallu_enforce::evaluate_enforce_gate(
                             enforce_mode, success, analysis_step.target_file,
-                            &project_path, attempt, max_attempts,
+                            &project_path, attempt, max_attempts, version_ctx.snapshot.as_ref(),
                         ) {
                             EnforceGateOutcome::NotApplicable => {}
                             EnforceGateOutcome::Unreadable(reason) => {
@@ -890,6 +1397,36 @@ pub async fn partial_audit(
                                 // No mutation here (Codex msg 150): stamping
                                 // happens only after `succeeded` is proven.
                             }
+                        }
+                    }
+
+                    // KT-1168 — a revalidated target leaves nothing stale:
+                    // the documentary blockers still on it retry the step.
+                    if success && revalidation.is_some() {
+                        match super::document_repair::with_stale_target(&project_path, analysis_step.target_file, Vec::new()) {
+                            Ok(left) if !left.is_empty() => {
+                                if attempt < max_attempts {
+                                    yield Event::default().event("step_retry").data(
+                                        serde_json::json!({
+                                            "step": step, "file": file_label,
+                                            "attempt": attempt, "max_attempts": max_attempts,
+                                            "reason": "revalidation_stale_target",
+                                        }).to_string()
+                                    );
+                                    citation_feedback = Some(super::document_repair::feedback(&left));
+                                    continue 'attempts;
+                                }
+                                success = false;
+                                yield Event::default().event("step_warning").data(
+                                    serde_json::json!({
+                                        "step": step, "file": file_label,
+                                        "reason": format!("{} stale reference(s) left after revalidation", left.len()),
+                                        "repaired_from_template": false,
+                                    }).to_string()
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(e) => tracing::warn!("Revalidation step {step} ({file_label}): stale check skipped: {e}"),
                         }
                     }
 
@@ -959,6 +1496,23 @@ pub async fn partial_audit(
                     };
 
                     let step_succeeded = success && outcome == "succeeded";
+                    // KT-1211 — a step that failed never leaves an unmarked
+                    // half-written doc: what the agent wrote stays under a
+                    // visible partial marker; a success drops an earlier one.
+                    let mut target_state: Option<&'static str> = None;
+                    if step_succeeded {
+                        if let Err(e) = super::step_guard::clear_partial_marker(&project_path, analysis_step.target_file) {
+                            tracing::warn!("Partial audit step {step} ({file_label}): {e}");
+                        }
+                    } else if outcome == "failed" {
+                        match super::step_guard::settle_failed_target(
+                            &project_path, analysis_step.target_file, &pre_snapshot, step as u32,
+                            "the step did not pass its checks",
+                        ) {
+                            Ok(state) => target_state = state,
+                            Err(e) => tracing::warn!("Partial audit step {step} ({file_label}): {e}"),
+                        }
+                    }
                     let duration_ms = step_started_at.elapsed().as_millis() as u64;
                     if let (Some(step_tokens), Ok(mut t)) = (step_usage.total(), audit_tracker.lock()) {
                         t.update_chips(&project_id_for_progress, Some(step_tokens), run_tokens.total(), None);
@@ -980,8 +1534,10 @@ pub async fn partial_audit(
                         let run_id = audit_run_id.clone();
                         let recorded_usage = step_usage;
                         let recorded_total = run_tokens.total();
+                        let step_unchanged = outcome == "unchanged";
+                        let writer = run_state_writer.clone();
                         if let Err(e) = state.db.with_conn(move |conn| {
-                            crate::db::audit_runs::finalize_audit_step(
+                            let finalized = crate::db::audit_runs::finalize_audit_step_with_outcome(
                                 conn,
                                 &run_id,
                                 step as u32,
@@ -992,7 +1548,16 @@ pub async fn partial_audit(
                                 step_succeeded,
                                 None,
                                 false,
-                            )
+                                step_unchanged,
+                            );
+                            writer.sync(conn, false);
+                            finalized?;
+                            // A done step has nothing left to restore; a failed
+                            // one keeps its snapshot (acceptance diff).
+                            if step_succeeded {
+                                crate::db::audit_runs::delete_step_snapshot(conn, &run_id, step as u32)?;
+                            }
+                            crate::db::audit_runs::set_step_target_state(conn, &run_id, step as u32, target_state)
                         }).await {
                             tracing::error!("Failed to finalize partial audit step {step} for run {audit_run_id}: {e}");
                         }
@@ -1020,8 +1585,9 @@ pub async fn partial_audit(
                         let run_id = audit_run_id.clone();
                         let duration_ms = step_started_at.elapsed().as_millis() as u64;
                         let recorded_total = run_tokens.total();
+                        let writer = run_state_writer.clone();
                         if let Err(e) = state.db.with_conn(move |conn| {
-                            crate::db::audit_runs::finalize_audit_step(
+                            let finalized = crate::db::audit_runs::finalize_audit_step(
                                 conn,
                                 &run_id,
                                 step as u32,
@@ -1032,7 +1598,9 @@ pub async fn partial_audit(
                                 false,
                                 None,
                                 false,
-                            )
+                            );
+                            writer.sync(conn, false);
+                            finalized
                         }).await {
                             tracing::error!("Failed to finalize partial audit step {step} for run {audit_run_id}: {e}");
                         }
@@ -1059,6 +1627,13 @@ pub async fn partial_audit(
             }
             break 'attempts;
             } // 'attempts
+            if let Err(reason) = super::helpers::mark_validated_doc_writes(
+                &project_path, &validated_docs_snapshot, provenance_writer,
+            ) {
+                yield Event::default().event("step_warning").data(serde_json::json!({
+                    "step": step, "file": file_label, "reason": reason, "repaired_from_template": false,
+                }).to_string());
+            }
         }
 
         // PRE-PUBLICATION backstop. Baseline merge, TD extraction and
@@ -1095,23 +1670,24 @@ pub async fn partial_audit(
             }
         }
 
-        // Compute the refreshed baseline — ONLY for steps whose agent
-        // succeeded — but do NOT write it yet (Codex lot-2 #4): the file
-        // write happens strictly AFTER the terminal DB transaction commits,
-        // so a terminal failure can never leave drift green while the run
-        // is Interrupted (the retry would lose its scope). A failed
-        // baseline write after a committed Completed is the conservative
-        // direction: sections merely stay stale.
-        let merged_baseline: Option<Vec<crate::core::checksums::ChecksumMapping>> = if !succeeded_steps.is_empty() {
+        // Compute the refreshed baseline — ONLY for done steps — but do NOT
+        // write it yet (Codex lot-2 #4): the file write happens strictly
+        // AFTER the terminal DB transaction commits, so a terminal failure
+        // can never leave drift green while the run is reconciled (the
+        // retry would lose its scope). A failed baseline write after the
+        // commit is the conservative direction: sections merely stay stale.
+        let done_steps: Vec<usize> = requested_steps.iter()
+            .filter(|s| succeeded_steps.contains(s) || unchanged_steps.contains(s))
+            .copied().collect();
+        let merged_baseline: Option<Vec<crate::core::checksums::ChecksumMapping>> = if !done_steps.is_empty() {
             let pp = project_path.clone();
-            let steps_clone = succeeded_steps.clone();
+            let steps_clone = done_steps.clone();
             let chain_for_merge = chain.clone();
             let merge_res = tokio::task::spawn_blocking(move || {
                 compute_merged_baseline(&pp, &steps_clone, &chain_for_merge)
             }).await
-                // A JoinError must NOT silently downgrade the run to
-                // no-change (the tx would persist Failed while the SSE lists
-                // still say steps succeeded — DB/SSE divergence).
+                // A JoinError must NOT silently drop the done steps (the tx
+                // would persist a terminal the SSE lists contradict).
                 .map_err(|e| format!("baseline merge task failed: {e}"))
                 .and_then(|r| r);
             match merge_res {
@@ -1133,25 +1709,41 @@ pub async fn partial_audit(
             None
         };
 
+        // Nothing rewritten: the docs are still the validated ones, whatever
+        // the run's status, so the validation comes back before the commit.
+        let validation_restored = succeeded_steps.is_empty()
+            && super::revalidate::restore_validation_if_untouched(&project_path, validated_before.as_deref(), &target_snapshots, restore_reason);
+        if validation_restored {
+            tracing::info!("Partial run rewrote nothing: validation restored");
+        }
+
         // ── Terminal write (Codex A5 v3): authoritative + atomic, same
-        // contract as the full pipeline. A successful partial creates its
-        // SCOPED validation discussion in the same transaction that stamps
-        // Completed + links it + persists the structured outcomes; the
-        // project stays Audited until that discussion ends on the terminal
-        // signal and the user validates. Failure path: Interrupted +
-        // outcomes, no discussion. A failed write = terminal `error` +
-        // return with the guard armed — never a `done`.
-        let no_failures = requested_steps.iter()
-            .all(|s| succeeded_steps.contains(s) || unchanged_steps.contains(s));
-        let partial_success = no_failures && !succeeded_steps.is_empty() && merged_baseline.is_some();
+        // contract as the full pipeline. The done steps get their SCOPED
+        // validation discussion in the same transaction that stamps the
+        // status + links it + persists the structured outcomes; a project
+        // whose validation came back needs none. A failed write = terminal
+        // `error` + return with the guard armed — never a `done`.
+        let failed_steps: Vec<usize> = requested_steps.iter()
+            .filter(|s| !succeeded_steps.contains(s) && !unchanged_steps.contains(s))
+            .copied().collect();
         let refreshed_files: Vec<String> = succeeded_steps.iter()
+            .map(|&n| chain[n - 1].target_file.to_string())
+            .collect();
+        let scope_files: Vec<String> = done_steps.iter()
             .map(|&n| chain[n - 1].target_file.to_string())
             .collect();
         let run_td_ids: Vec<String> = {
             let pp = project_path.clone();
             let idx: Vec<String> = refreshed_files.iter()
                 .filter(|f| f.contains("inconsistencies-")).cloned().collect();
+            let baseline = adr_baseline.clone();
             tokio::task::spawn_blocking(move || {
+                // A trusted ADR settles its sheets before the scope is read.
+                let trust = baseline.trust();
+                let docs = crate::core::docs_location::DocsRoot::of(&pp).dir(&pp);
+                if let Err(e) = crate::core::adr::settle_covered_sheets(&docs, trust) {
+                    tracing::warn!("ADR check after the refresh failed: {e}");
+                }
                 super::reconciliation::td_validation_scope(&pp, &idx).undecided
             }).await.unwrap_or_default()
         };
@@ -1160,22 +1752,29 @@ pub async fn partial_audit(
             "requested": requested_steps,
             "succeeded": succeeded_steps,
             "unchanged": unchanged_steps,
-            "failed": requested_steps.iter()
-                .filter(|s| !succeeded_steps.contains(s) && !unchanged_steps.contains(s))
-                .collect::<Vec<_>>(),
+            "failed": failed_steps,
         }).to_string();
 
-        let pending_validation: Option<(Discussion, DiscussionMessage)> = if partial_success {
+        let pending_validation: Option<(Discussion, DiscussionMessage)> = if !scope_files.is_empty() && !validation_restored {
             let language = { state.config.read().await.language.clone() };
-            let prompt = super::helpers::build_partial_validation_prompt(
-                &refreshed_files, &run_td_ids, &language,
+            let total_chain = chain.len() as u32;
+            let listed = |steps: &[usize]| -> Vec<(u32, String)> {
+                steps.iter().map(|&n| (n as u32, chain[n - 1].target_file.to_string())).collect()
+            };
+            let prompt = format!(
+                "{}{}{}",
+                super::helpers::unchanged_steps_block(&listed(&unchanged_steps), total_chain, &language),
+                super::helpers::partial_refresh_failed_block(&listed(&failed_steps), total_chain, &language),
+                super::helpers::build_partial_validation_prompt(&scope_files, &run_td_ids, &language),
             );
+            let prompt = docs_root.relocate(&prompt).into_owned();
             let now = Utc::now();
             let disc_id = uuid::Uuid::new_v4().to_string();
             let msg = DiscussionMessage {
                 recovered_partial: false,
                 session_tokens_at_message: None,
                 author_cli_ordinal: None,
+                session_continuity: None,
                 model: None, lint_report: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 role: MessageRole::User,
@@ -1195,7 +1794,7 @@ pub async fn partial_audit(
                 id: disc_id,
                 project_id: Some(project_id_for_progress.clone()),
                 title: format!("Validation audit partiel ({} section{})",
-                    refreshed_files.len(), if refreshed_files.len() > 1 { "s" } else { "" }),
+                    scope_files.len(), if scope_files.len() > 1 { "s" } else { "" }),
                 agent: agent_type.clone(),
                 language,
                 participants: vec![agent_type.clone()],
@@ -1223,16 +1822,12 @@ pub async fn partial_audit(
             None
         };
 
-        let failed_steps: Vec<usize> = requested_steps.iter()
-            .filter(|s| !succeeded_steps.contains(s) && !unchanged_steps.contains(s))
-            .copied().collect();
-        let terminal = if !failed_steps.is_empty() {
-            PartialTerminal::Interrupted { failed_steps: failed_steps.clone() }
-        } else if let Some(pending) = pending_validation.clone() {
-            PartialTerminal::Success(Box::new(pending))
-        } else {
-            PartialTerminal::NoChange { unchanged_steps: unchanged_steps.clone() }
-        };
+        let terminal = partial_terminal(
+            failed_steps.clone(),
+            !succeeded_steps.is_empty(),
+            pending_validation.clone(),
+        );
+        let completed = !matches!(terminal, PartialTerminal::Interrupted { .. });
         // Single terminal authority (Codex): the SSE `done` mirrors THIS
         // object — never a second computation that could diverge from what
         // the transaction persists.
@@ -1256,38 +1851,112 @@ pub async fn partial_audit(
             return;
         }
 
+        // KT-1199 — the terminal state, with the documents as they now stand.
+        {
+            let writer = run_state_writer.clone();
+            let _ = state.db.with_conn(move |conn| { writer.sync(conn, true); Ok(()) }).await;
+        }
+
+        // KT-1122 — who opened this partial run's validation. Best-effort:
+        // never fails a run whose terminal status is already committed.
+        if pending_validation.is_some() {
+            let by = super::validate::operator_pseudo(&state).await;
+            let run_for_by = audit_run_id.clone();
+            if let Err(e) = state
+                .db
+                .with_conn(move |conn| {
+                    crate::db::audit_validation::set_started_by(conn, &run_for_by, &by)
+                })
+                .await
+            {
+                tracing::warn!("Validation starter not recorded: {e}");
+            }
+        }
+
         // Baseline write STRICTLY after the committed terminal status
         // (Codex lot-2 #4): a DB failure above never leaves drift green,
         // and a write failure here is the conservative direction (the
-        // sections merely stay stale on a Completed run).
-        if partial_success {
-            if let Some(merged) = merged_baseline.clone() {
-                let pp = project_path.clone();
-                let write_res = tokio::task::spawn_blocking(move || -> Result<(), String> {
-                    crate::core::checksums::write_checksums_file(&pp, &merged)?;
+        // sections merely stay stale).
+        if let Some(merged) = merged_baseline.clone() {
+            let pp = project_path.clone();
+            let rewritten = refreshed_files.clone();
+            let write_res = tokio::task::spawn_blocking(move || -> Result<(), String> {
+                crate::core::checksums::write_checksums_file(&pp, &merged, &rewritten)?;
+                if completed {
                     if let Err(e) = crate::core::kronn_state::record_audit(&pp, "partial") {
                         tracing::warn!("Failed to record partial audit in .kronn.json: {e}");
                     }
-                    Ok(())
-                }).await;
-                let outcome: Result<(), String> = match write_res {
-                    Ok(r) => r,
-                    Err(e) => Err(format!("baseline write task failed: {e}")),
-                };
-                if let Err(msg) = outcome {
-                    tracing::error!("Baseline write failed after commit: {msg}");
-                    // Post-commit: the run IS Completed — a fatal-looking
-                    // event here would contradict the `done complete` that
-                    // follows. Non-terminal warning; sections merely stay
-                    // stale (conservative direction).
+                }
+                Ok(())
+            }).await;
+            let outcome: Result<(), String> = match write_res {
+                Ok(r) => r,
+                Err(e) => Err(format!("baseline write task failed: {e}")),
+            };
+            if let Err(msg) = outcome {
+                tracing::error!("Baseline write failed after commit: {msg}");
+                // Post-commit: the terminal status IS persisted — a
+                // fatal-looking event here would contradict the `done` that
+                // follows. Non-terminal warning; sections merely stay stale.
+                yield Event::default().event("warning").data(
+                    serde_json::json!({
+                        "message": format!("Baseline write failed: {msg} — the refreshed sections will still show as stale; re-run the update to rewrite the baseline.")
+                    }).to_string(),
+                );
+            }
+        }
+
+        // A normal refresh accepts a gated unchanged step as re-verified.
+        // Revalidation keeps its explicit human acknowledgement for unchanged
+        // citations; only its rewritten targets receive new fingerprints.
+        let citation_docs: Vec<String> = if revalidation.is_some() {
+            refreshed_files.clone()
+        } else {
+            unchanged_steps.iter().map(|&n| chain[n - 1].target_file.to_string()).collect()
+        };
+        if !citation_docs.is_empty() {
+            let reason = if revalidation.is_some() {
+                crate::core::citation_drift::RecordReason::Revalidation
+            } else {
+                crate::core::citation_drift::RecordReason::Audit
+            };
+            let pp = project_path.clone();
+            let recorded = tokio::task::spawn_blocking(move || {
+                crate::core::citation_drift::record_docs(&pp, &citation_docs, reason)
+            }).await.unwrap_or_else(|e| Err(format!("record task failed: {e}")));
+            if let Err(e) = recorded {
+                yield Event::default().event("warning").data(
+                    serde_json::json!({ "message": format!("Citation fingerprints not refreshed: {e}") }).to_string(),
+                );
+            }
+        }
+
+        // KT-1292 — a doc sent only to be re-read is stamped once its step ran,
+        // whether or not the agent anchored it: the plan does not queue it again
+        // until the doc or the step's sources change.
+        if let Some(run) = &revalidation {
+            let reread: Vec<(usize, String)> = run.rereads.iter()
+                .filter(|(step, _)| succeeded_steps.contains(step) || unchanged_steps.contains(step))
+                .cloned()
+                .collect();
+            if !reread.is_empty() {
+                let pp = project_path.clone();
+                let steps = chain.clone();
+                let stamped = tokio::task::spawn_blocking(move || {
+                    super::revalidate::stamp_rereads(&pp, &steps, &reread)
+                }).await.unwrap_or_else(|e| Err(format!("review task failed: {e}")));
+                if let Err(e) = stamped {
                     yield Event::default().event("warning").data(
-                        serde_json::json!({
-                            "message": format!("Baseline write failed: {msg} — the refreshed sections will still show as stale; re-run the update to rewrite the baseline.")
-                        }).to_string(),
+                        serde_json::json!({ "message": format!("Re-read stamps not recorded: {e}") }).to_string(),
                     );
                 }
             }
         }
+
+        if let Some(event) = super::td_tasks::guard_decisions(&project_path, td_decisions_before).await {
+            yield event;
+        }
+        super::td_tasks::close_after_audit(&state.db, &project_id_for_progress, &project_path, &audit_run_id).await;
 
         let disc_id: Option<String> = pending_validation.as_ref().map(|(d, _)| d.id.clone());
         if let Some(vdisc) = disc_id.clone() {
@@ -1316,6 +1985,8 @@ pub async fn partial_audit(
             "failed_steps": failed_steps,
             "discussion_id": disc_id,
             "audit_run_id": audit_run_id,
+            "revalidation": revalidation.is_some(),
+            "cross_agent_skipped": cross_agent_skipped,
         });
         drop_guard.disarm();
         yield Event::default().event("done").data(done.to_string());
@@ -1379,22 +2050,49 @@ pub(crate) fn done_status_of(terminal: &PartialTerminal) -> &'static str {
     match terminal {
         PartialTerminal::Success(_) => "complete",
         PartialTerminal::Interrupted { .. } => "interrupted",
-        PartialTerminal::NoChange { .. } => "no_change",
+        PartialTerminal::Reverified { .. } => "no_change",
     }
 }
 
-/// Terminal branch of a partial run (Codex lot-3 matrix v2).
+type PendingValidation = (Discussion, DiscussionMessage);
+
+/// The terminal branch for a run's partition. `validation` is the scoped
+/// discussion of the done steps, absent when their validation came back.
+pub(crate) fn partial_terminal(
+    failed_steps: Vec<usize>,
+    rewrote: bool,
+    validation: Option<PendingValidation>,
+) -> PartialTerminal {
+    let validation = validation.map(Box::new);
+    if !failed_steps.is_empty() {
+        return PartialTerminal::Interrupted {
+            failed_steps,
+            validation,
+        };
+    }
+    match validation {
+        Some(pending) if rewrote => PartialTerminal::Success(pending),
+        validation => PartialTerminal::Reverified { validation },
+    }
+}
+
+/// Terminal branch of a partial run (Codex lot-3 matrix v2, KT-1207).
 pub(crate) enum PartialTerminal {
     /// failed == 0 && succeeded >= 1 — validation discussion SCOPED to the
-    /// succeeded sections, Completed + link, all in one commit.
-    Success(Box<(Discussion, DiscussionMessage)>),
-    /// failed > 0 — Interrupted, no discussion.
-    Interrupted { failed_steps: Vec<usize> },
-    /// failed == 0 && succeeded == 0 && unchanged >= 1 — the refresh
-    /// postcondition was not reached: Failed (NEVER Completed — the health
-    /// snapshot and the 076 validation contract stay pure), no discussion,
-    /// baseline untouched. The SSE layer reports `no_change`.
-    NoChange { unchanged_steps: Vec<usize> },
+    /// done sections, Completed + link, all in one commit.
+    Success(Box<PendingValidation>),
+    /// failed > 0 — Interrupted; the done steps, if any, get their scoped
+    /// discussion (KT-931 convention). Validate still refuses the run.
+    Interrupted {
+        failed_steps: Vec<usize>,
+        validation: Option<Box<PendingValidation>>,
+    },
+    /// failed == 0 && succeeded == 0 — every section re-verified unchanged:
+    /// Completed. A discussion only when the validation did not come back.
+    /// The SSE layer reports `no_change`.
+    Reverified {
+        validation: Option<Box<PendingValidation>>,
+    },
 }
 
 /// Terminal write of a partial run — authoritative and ATOMIC: every
@@ -1417,35 +2115,80 @@ pub(crate) async fn finalize_partial_run(
                 let (disc, msg) = pending.as_ref();
                 crate::db::discussions::insert_discussion(&tx, disc)?;
                 crate::db::discussions::insert_message(&tx, &disc.id, msg)?;
-                let td_dir = project_path.join("docs/tech-debt");
-                let counts = super::full::count_td_severities(&td_dir);
-                let score = crate::models::compute_health_score(
-                    counts.critical, counts.high, counts.medium, counts.low,
-                );
-                crate::db::audit_runs::complete(
-                    &tx, &run_id, chrono::Utc::now(), "Completed",
-                    counts.critical, counts.high, counts.medium, counts.low,
-                    0, 0, 0, score, None, None,
-                )?;
+                complete_partial_run(&tx, &run_id, &project_path)?;
                 crate::db::audit_runs::set_validation_discussion(&tx, &run_id, &disc.id)?;
             }
-            PartialTerminal::Interrupted { failed_steps } => {
+            PartialTerminal::Interrupted {
+                failed_steps,
+                validation,
+            } => {
                 crate::db::audit_runs::mark_interrupted_strict(
-                    &tx, &run_id,
+                    &tx,
+                    &run_id,
                     &format!("partial refresh incomplete (failed steps: {failed_steps:?})"),
                 )?;
+                if let Some(pending) = validation {
+                    let (disc, msg) = pending.as_ref();
+                    crate::db::discussions::insert_discussion(&tx, disc)?;
+                    crate::db::discussions::insert_message(&tx, &disc.id, msg)?;
+                    crate::db::audit_runs::set_validation_discussion(&tx, &run_id, &disc.id)?;
+                }
             }
-            PartialTerminal::NoChange { unchanged_steps } => {
-                crate::db::audit_runs::mark_failed_strict(
-                    &tx, &run_id,
-                    &format!("partial refresh wrote nothing (unchanged steps: {unchanged_steps:?}) — sections stay stale"),
-                )?;
+            PartialTerminal::Reverified { validation, .. } => {
+                if let Some(pending) = validation {
+                    let (disc, msg) = pending.as_ref();
+                    crate::db::discussions::insert_discussion(&tx, disc)?;
+                    crate::db::discussions::insert_message(&tx, &disc.id, msg)?;
+                }
+                complete_partial_run(&tx, &run_id, &project_path)?;
+                if let Some(pending) = validation {
+                    crate::db::audit_runs::set_validation_discussion(&tx, &run_id, &pending.0.id)?;
+                }
             }
         }
         crate::db::audit_runs::set_step_outcomes(&tx, &run_id, &outcomes_json)?;
         tx.commit()?;
         Ok(())
-    }).await.map_err(|e| format!("terminal write failed: {e}"))
+    })
+    .await
+    .map_err(|e| format!("terminal write failed: {e}"))
+}
+
+/// Stamps a Running partial row Completed with the TD counts on disk.
+fn complete_partial_run(
+    tx: &rusqlite::Connection,
+    run_id: &str,
+    project_path: &std::path::Path,
+) -> anyhow::Result<()> {
+    let documents =
+        crate::core::audit_documents::capture_json(project_path).map_err(anyhow::Error::msg)?;
+    let td_dir =
+        crate::core::docs_location::DocsRoot::of(project_path).file(project_path, "tech-debt");
+    let counts = super::full::count_td_severities(&td_dir);
+    let score = crate::models::compute_health_score(
+        counts.critical,
+        counts.high,
+        counts.medium,
+        counts.low,
+    );
+    crate::db::audit_runs::complete(
+        tx,
+        run_id,
+        chrono::Utc::now(),
+        "Completed",
+        counts.critical,
+        counts.high,
+        counts.medium,
+        counts.low,
+        0,
+        0,
+        0,
+        score,
+        None,
+        None,
+    )?;
+    crate::db::audit_documents::record(tx, run_id, &documents)?;
+    Ok(())
 }
 
 #[cfg(all(test, feature = "full-tests"))]
@@ -1484,6 +2227,7 @@ mod partial_finalize_tests {
             recovered_partial: false,
             session_tokens_at_message: None,
             author_cli_ordinal: None,
+            session_continuity: None,
             model: None,
             lint_report: None,
             id: format!("{id}-m"),
@@ -1568,6 +2312,7 @@ mod partial_finalize_tests {
         let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
         seed_run(&db).await;
         let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join("docs")).unwrap();
         finalize_partial_run(
             &db,
             "run-p".into(),
@@ -1600,6 +2345,7 @@ mod partial_finalize_tests {
             tmp.path().to_path_buf(),
             PartialTerminal::Interrupted {
                 failed_steps: vec![8],
+                validation: None,
             },
             r#"{"requested":[3,8],"succeeded":[3],"failed":[8],"unchanged":[]}"#.into(),
         )
@@ -1659,10 +2405,75 @@ mod partial_finalize_tests {
         );
     }
 
+    async fn run_and_discussions(
+        db: &std::sync::Arc<crate::db::Database>,
+    ) -> (crate::models::AuditRun, i64) {
+        db.with_conn(|conn| {
+            let run = crate::db::audit_runs::get_by_id(conn, "run-p")?.unwrap();
+            let n: i64 = conn.query_row("SELECT COUNT(*) FROM discussions", [], |r| r.get(0))?;
+            Ok((run, n))
+        })
+        .await
+        .unwrap()
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn all_unchanged_marks_failed_no_change_without_touching_anything() {
-        // Matrix v2: refresh postcondition not reached → Failed (NEVER
-        // Completed — latest_completed/health stay pure), no discussion.
+    async fn all_unchanged_completes_and_needs_no_discussion_when_validation_came_back() {
+        // KT-1207 — re-verified unchanged is done: Completed, so validate and
+        // every later refresh see a finished run instead of a Failed loop.
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+        seed_run(&db).await;
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join("docs")).unwrap();
+        finalize_partial_run(
+            &db,
+            "run-p".into(),
+            tmp.path().to_path_buf(),
+            PartialTerminal::Reverified { validation: None },
+            r#"{"requested":[3,8],"succeeded":[],"failed":[],"unchanged":[3,8]}"#.into(),
+        )
+        .await
+        .unwrap();
+        let (run, disc_count) = run_and_discussions(&db).await;
+        assert_eq!(run.status, "Completed");
+        assert!(run.validation_discussion_id.is_none());
+        assert_eq!(disc_count, 0);
+        assert!(run
+            .step_outcomes_json
+            .unwrap()
+            .contains("\"unchanged\":[3,8]"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn all_unchanged_links_its_scoped_discussion_when_validation_did_not_come_back() {
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+        seed_run(&db).await;
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join("docs")).unwrap();
+        finalize_partial_run(
+            &db,
+            "run-p".into(),
+            tmp.path().to_path_buf(),
+            PartialTerminal::Reverified {
+                validation: Some(Box::new(mini_disc("d-reverified", "p1"))),
+            },
+            r#"{"requested":[3],"succeeded":[],"failed":[],"unchanged":[3]}"#.into(),
+        )
+        .await
+        .unwrap();
+        let (run, disc_count) = run_and_discussions(&db).await;
+        assert_eq!(run.status, "Completed");
+        assert_eq!(
+            run.validation_discussion_id.as_deref(),
+            Some("d-reverified")
+        );
+        assert_eq!(disc_count, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn interrupted_with_done_steps_links_their_scoped_discussion() {
+        // KT-1207 M17 — the KT-931 convention: the run stays Interrupted
+        // (validate refuses it) and its done steps get their discussion.
         let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
         seed_run(&db).await;
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1670,29 +2481,55 @@ mod partial_finalize_tests {
             &db,
             "run-p".into(),
             tmp.path().to_path_buf(),
-            PartialTerminal::NoChange {
-                unchanged_steps: vec![3, 8],
+            PartialTerminal::Interrupted {
+                failed_steps: vec![8],
+                validation: Some(Box::new(mini_disc("d-done", "p1"))),
             },
-            r#"{"requested":[3,8],"succeeded":[],"failed":[],"unchanged":[3,8]}"#.into(),
+            r#"{"requested":[3,8],"succeeded":[3],"failed":[8],"unchanged":[]}"#.into(),
         )
         .await
         .unwrap();
-        let (run, disc_count) = db
-            .with_conn(|conn| {
-                let run = crate::db::audit_runs::get_by_id(conn, "run-p")?.unwrap();
-                let n: i64 =
-                    conn.query_row("SELECT COUNT(*) FROM discussions", [], |r| r.get(0))?;
-                Ok((run, n))
-            })
-            .await
-            .unwrap();
-        assert_eq!(run.status, "Failed");
-        assert!(run.report_path.unwrap().contains("wrote nothing"));
-        assert_eq!(disc_count, 0);
-        assert!(run
-            .step_outcomes_json
-            .unwrap()
-            .contains("\"unchanged\":[3,8]"));
+        let (run, disc_count) = run_and_discussions(&db).await;
+        assert_eq!(run.status, "Interrupted");
+        assert_eq!(run.validation_discussion_id.as_deref(), Some("d-done"));
+        assert_eq!(disc_count, 1);
+    }
+
+    #[test]
+    fn the_terminal_follows_the_partition() {
+        let disc = || Some(mini_disc("d", "p"));
+        assert!(matches!(
+            partial_terminal(vec![], true, disc()),
+            PartialTerminal::Success(_)
+        ));
+        assert!(matches!(
+            partial_terminal(vec![], false, None),
+            PartialTerminal::Reverified {
+                validation: None,
+                ..
+            }
+        ));
+        assert!(matches!(
+            partial_terminal(vec![], false, disc()),
+            PartialTerminal::Reverified {
+                validation: Some(_),
+                ..
+            }
+        ));
+        assert!(matches!(
+            partial_terminal(vec![4], true, disc()),
+            PartialTerminal::Interrupted {
+                validation: Some(_),
+                ..
+            }
+        ));
+        assert!(matches!(
+            partial_terminal(vec![4], false, None),
+            PartialTerminal::Interrupted {
+                validation: None,
+                ..
+            }
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1710,10 +2547,9 @@ mod partial_finalize_tests {
             PartialTerminal::Success(Box::new(mini_disc("d-refused", "p1"))),
             PartialTerminal::Interrupted {
                 failed_steps: vec![1],
+                validation: None,
             },
-            PartialTerminal::NoChange {
-                unchanged_steps: vec![1],
-            },
+            PartialTerminal::Reverified { validation: None },
         ] {
             let err = finalize_partial_run(
                 &db,
@@ -1752,7 +2588,7 @@ mod partial_finalize_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn same_status_transition_is_still_refused() {
         // The sneakiest weak-guard case: a re-read based check would accept
-        // Interrupted→Interrupted (or Failed→Failed) since the row already
+        // Interrupted→Interrupted (or Completed→Completed) since the row already
         // reads as expected. The strict marks refuse it — a terminal row is
         // written exactly once.
         let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
@@ -1766,6 +2602,7 @@ mod partial_finalize_tests {
             std::path::PathBuf::from("/tmp"),
             PartialTerminal::Interrupted {
                 failed_steps: vec![2],
+                validation: None,
             },
             r#"{"marker":"second-write"}"#.into(),
         )
@@ -1775,30 +2612,35 @@ mod partial_finalize_tests {
 
         let db2 = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
         seed_run(&db2).await;
-        db2.with_conn(|conn| {
-            crate::db::audit_runs::mark_failed_strict(conn, "run-p", "first no-change")
-        })
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("docs")).unwrap();
+        finalize_partial_run(
+            &db2,
+            "run-p".into(),
+            tmp.path().to_path_buf(),
+            PartialTerminal::Reverified { validation: None },
+            r#"{"marker":"first-write"}"#.into(),
+        )
         .await
         .unwrap();
         let err = finalize_partial_run(
             &db2,
             "run-p".into(),
-            std::path::PathBuf::from("/tmp"),
-            PartialTerminal::NoChange {
-                unchanged_steps: vec![1],
-            },
+            tmp.path().to_path_buf(),
+            PartialTerminal::Reverified { validation: None },
             r#"{"marker":"second-write"}"#.into(),
         )
         .await
         .unwrap_err();
         assert!(err.contains("terminal write failed"), "{err}");
-        for d in [&db, &db2] {
+        for (d, outcomes) in [(&db, None), (&db2, Some(r#"{"marker":"first-write"}"#))] {
             let run = d
                 .with_conn(|conn| Ok(crate::db::audit_runs::get_by_id(conn, "run-p")?.unwrap()))
                 .await
                 .unwrap();
-            assert!(
-                run.step_outcomes_json.is_none(),
+            assert_eq!(
+                run.step_outcomes_json.as_deref(),
+                outcomes,
                 "the second write must leave no trace"
             );
         }
@@ -1811,10 +2653,9 @@ mod partial_finalize_tests {
             PartialTerminal::Success(Box::new(mini_disc("d-ghost", "p1"))),
             PartialTerminal::Interrupted {
                 failed_steps: vec![1],
+                validation: None,
             },
-            PartialTerminal::NoChange {
-                unchanged_steps: vec![1],
-            },
+            PartialTerminal::Reverified { validation: None },
         ] {
             let err = finalize_partial_run(
                 &db,
@@ -1841,7 +2682,7 @@ mod partial_finalize_tests {
             sources: vec!["src.rs".into()],
             checksums: std::collections::BTreeMap::new(),
         };
-        crate::core::checksums::write_checksums_file(tmp.path(), &[untargeted]).unwrap();
+        crate::core::checksums::write_checksums_file(tmp.path(), &[untargeted], &[]).unwrap();
 
         static SOURCES: &[&str] = &["src.rs"];
         let chain = vec![super::super::AnalysisStep {
@@ -1903,23 +2744,21 @@ mod partial_finalize_tests {
     #[test]
     fn done_status_mirrors_the_persisted_terminal_exactly() {
         // Codex P0 (msg 158): the SSE done must come from the SAME object
-        // the transaction persists. In particular a NoChange terminal (the
-        // branch a swallowed baseline failure used to fall into) can never
-        // read as `complete` on the wire.
+        // the transaction persists: a run that rewrote nothing never reads
+        // as `complete` on the wire.
         assert_eq!(
             done_status_of(&PartialTerminal::Success(Box::new(mini_disc("d", "p")))),
             "complete"
         );
         assert_eq!(
             done_status_of(&PartialTerminal::Interrupted {
-                failed_steps: vec![1]
+                failed_steps: vec![1],
+                validation: None,
             }),
             "interrupted"
         );
         assert_eq!(
-            done_status_of(&PartialTerminal::NoChange {
-                unchanged_steps: vec![1]
-            }),
+            done_status_of(&PartialTerminal::Reverified { validation: None }),
             "no_change"
         );
     }
@@ -1933,12 +2772,18 @@ mod partial_finalize_tests {
             prompt: "",
             sources: &[],
         };
-        assert!(!super::super::partial_selectable(&review));
+        assert!(!super::super::partial_selectable(
+            &review,
+            &crate::core::docs_location::DocsRoot::default()
+        ));
         let real = super::super::AnalysisStep {
             target_file: "docs/repo-map.md",
             prompt: "",
             sources: &[],
         };
-        assert!(super::super::partial_selectable(&real));
+        assert!(super::super::partial_selectable(
+            &real,
+            &crate::core::docs_location::DocsRoot::default()
+        ));
     }
 }

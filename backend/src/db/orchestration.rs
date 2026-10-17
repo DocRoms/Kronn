@@ -18,6 +18,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use uuid::Uuid;
 
+use crate::core::room_lang::RoomLang;
 use crate::db::run_state;
 use crate::models::{
     AgentType, BlockedReasonCode, CampaignTaskCandidate, CampaignTaskReason,
@@ -529,6 +530,245 @@ pub fn worktree_cleanup_liveness(
     }
 
     Ok(ExecutionLiveness::Terminal)
+}
+
+/// The task and state behind a disk artefact, for the disk view (KT-1318).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiskOwnerRow {
+    pub execution_id: String,
+    pub status: String,
+    /// `KT-<n>`, when the task row is still there.
+    pub task_ref: Option<String>,
+}
+
+fn disk_owner_row(row: &Row<'_>) -> rusqlite::Result<DiskOwnerRow> {
+    let number: Option<i64> = row.get(2)?;
+    Ok(DiskOwnerRow {
+        execution_id: row.get(0)?,
+        status: row.get(1)?,
+        task_ref: number.map(|n| format!("KT-{n}")),
+    })
+}
+
+/// The execution a lane target's ownership marker names.
+pub fn disk_owner_of_execution(
+    conn: &Connection,
+    execution_id: &str,
+) -> Result<Option<DiskOwnerRow>> {
+    Ok(conn
+        .query_row(
+            "SELECT te.id, te.status, pt.task_number
+               FROM task_executions te
+               LEFT JOIN planning_tasks pt ON pt.id = te.task_id
+              WHERE te.id = ?1",
+            params![execution_id],
+            disk_owner_row,
+        )
+        .optional()?)
+}
+
+/// The execution a managed worktree (by its checkout path) belongs to.
+pub fn disk_owner_of_workspace(
+    conn: &Connection,
+    canonical_path: &str,
+) -> Result<Option<DiskOwnerRow>> {
+    Ok(conn
+        .query_row(
+            "SELECT te.id, te.status, pt.task_number
+               FROM discussion_workspaces dw
+               JOIN task_executions te ON te.id = dw.task_execution_id
+               LEFT JOIN planning_tasks pt ON pt.id = te.task_id
+              WHERE dw.canonical_path = ?1
+              LIMIT 1",
+            params![canonical_path],
+            disk_owner_row,
+        )
+        .optional()?)
+}
+
+/// Which lane targets (`target/wt-<lane>`) of a project a live execution still
+/// claims, by lane name, with the reason.
+///
+/// A lane is claimed by every workspace row of the project that still carries a
+/// checkout path and whose durable state is not [`ExecutionLiveness::Terminal`]
+/// (an unfinished execution, a live session, a held lease, an unmanaged row, or
+/// state that cannot answer: all fail closed). A lane no row names — rows of
+/// finished executions are retired with their path cleared — is an orphan.
+/// KT-1256.
+pub fn live_lane_claims(
+    conn: &Connection,
+    project_id: &str,
+) -> Result<std::collections::HashMap<String, String>> {
+    use crate::core::worktree::ExecutionLiveness;
+
+    let mut statement = conn.prepare(
+        "SELECT canonical_path FROM discussion_workspaces
+          WHERE project_id = ?1 AND canonical_path IS NOT NULL",
+    )?;
+    let paths = statement
+        .query_map(params![project_id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut claims = std::collections::HashMap::new();
+    for path in paths {
+        let Ok(lane) =
+            crate::core::task_worker_env::WorkerLane::for_worktree(std::path::Path::new(&path))
+        else {
+            continue;
+        };
+        match worktree_cleanup_liveness(conn, &path)? {
+            ExecutionLiveness::Terminal => {}
+            ExecutionLiveness::Active(reason) | ExecutionLiveness::Unknown(reason) => {
+                claims.insert(lane.name, reason);
+            }
+        }
+    }
+    Ok(claims)
+}
+
+/// Which marked lane targets of a project must stay, by lane name, with why.
+///
+/// A lane is *not* in the result only when durable state proves it finished:
+/// its marker's execution exists and is terminal, no workspace row of that
+/// execution is still live (attached session, held lease, unmanaged), and no
+/// workspace row of the project claims the lane by path. A missing execution,
+/// an unreadable status or any state that cannot answer keeps the lane.
+/// KT-1256.
+pub fn lane_target_claims(
+    conn: &Connection,
+    project_id: &str,
+    owners: &[crate::core::worktree::LaneOwner],
+) -> Result<std::collections::HashMap<String, String>> {
+    use crate::core::worktree::ExecutionLiveness;
+
+    let mut claims = live_lane_claims(conn, project_id)?;
+    for owner in owners {
+        if claims.contains_key(&owner.lane) {
+            continue;
+        }
+        let status: Option<String> = conn
+            .query_row(
+                "SELECT status FROM task_executions WHERE id = ?1",
+                params![&owner.execution_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(status) = status else {
+            claims.insert(
+                owner.lane.clone(),
+                format!(
+                    "execution {} is not in the database, so nothing durable says it finished",
+                    owner.execution_id
+                ),
+            );
+            continue;
+        };
+        match TaskExecutionStatus::from_str(&status) {
+            Ok(parsed) if parsed.is_terminal() => {}
+            Ok(_) => {
+                claims.insert(
+                    owner.lane.clone(),
+                    format!(
+                        "execution {} is {status}, which is not a finished state",
+                        owner.execution_id
+                    ),
+                );
+                continue;
+            }
+            Err(error) => {
+                claims.insert(
+                    owner.lane.clone(),
+                    format!(
+                        "execution {} has an unreadable status: {error}",
+                        owner.execution_id
+                    ),
+                );
+                continue;
+            }
+        }
+        // A finished execution can still have a workspace row with a live
+        // session or an unreleased lease: the same verdict as for its worktree.
+        let mut statement = conn.prepare(
+            "SELECT canonical_path FROM discussion_workspaces
+              WHERE task_execution_id = ?1 AND canonical_path IS NOT NULL",
+        )?;
+        let paths = statement
+            .query_map(params![&owner.execution_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for path in paths {
+            match worktree_cleanup_liveness(conn, &path)? {
+                ExecutionLiveness::Terminal => {}
+                ExecutionLiveness::Active(reason) | ExecutionLiveness::Unknown(reason) => {
+                    claims.insert(owner.lane.clone(), reason);
+                    break;
+                }
+            }
+        }
+    }
+    Ok(claims)
+}
+
+/// Audit one lane target reclaim against the execution that owned `canonical_path`.
+/// The same shape as [`record_artifact_reclaim`], under its own actions so a
+/// worktree's `target/` and its lane target are told apart. KT-1256.
+pub fn record_lane_target_reclaim(
+    conn: &Connection,
+    canonical_path: &str,
+    lane_target: &str,
+    outcome: Result<(u64, bool), String>,
+) -> Result<()> {
+    let execution_id: Option<String> = conn
+        .query_row(
+            "SELECT task_execution_id FROM discussion_workspaces
+              WHERE canonical_path = ?1 AND task_execution_id IS NOT NULL
+              ORDER BY updated_at DESC
+              LIMIT 1",
+            params![canonical_path],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(execution_id) = execution_id else {
+        return Ok(());
+    };
+    record_lane_target_reclaim_for_execution(conn, &execution_id, lane_target, outcome)
+}
+
+/// [`record_lane_target_reclaim`] for a lane whose execution is already known:
+/// the sweep reads it from the lane's ownership marker.
+pub fn record_lane_target_reclaim_for_execution(
+    conn: &Connection,
+    execution_id: &str,
+    lane_target: &str,
+    outcome: Result<(u64, bool), String>,
+) -> Result<()> {
+    let (action, changes) = match outcome {
+        Ok((bytes, partial)) => (
+            "lane_target_reclaimed",
+            serde_json::json!({
+                "target": lane_target,
+                "bytes_reclaimed": bytes,
+                "bytes_are_partial": partial,
+            }),
+        ),
+        Err(reason) => (
+            "lane_target_refused",
+            serde_json::json!({ "target": lane_target, "reason": reason }),
+        ),
+    };
+    record_execution_event(
+        conn,
+        execution_id,
+        action,
+        None,
+        None,
+        &OrchestrationActor {
+            kind: PlanningActorKind::Backend,
+            id: Some("disk-maintenance".to_string()),
+            session_id: None,
+            source_message_id: None,
+        },
+        changes,
+    )
 }
 
 /// Is this discussion a worker's execution room?
@@ -1161,6 +1401,19 @@ pub fn principal_attention(conn: &Connection, run_id: &str) -> Result<PrincipalA
 
 // ─── TaskExecution ───────────────────────────────────────────────────────────
 
+/// The language the orchestrator speaks about an execution: its principal
+/// (parent) room's language (KT-1316).
+pub fn execution_room_lang(conn: &Connection, exec_id: &str) -> RoomLang {
+    conn.query_row(
+        "SELECT d.language FROM task_executions e \
+         JOIN discussions d ON d.id = e.parent_discussion_id WHERE e.id = ?1",
+        [exec_id],
+        |row| row.get::<_, String>(0),
+    )
+    .map(|code| RoomLang::from_code(&code))
+    .unwrap_or_default()
+}
+
 pub fn get_task_execution(conn: &Connection, id: &str) -> Result<Option<TaskExecution>> {
     let execution = conn
         .query_row(
@@ -1385,7 +1638,11 @@ pub fn launch_single_task(
             None,
             Some(TaskExecutionStatus::Pending),
             actor,
-            serde_json::json!({ "task_id": input.task_id, "kind": "single_task" }),
+            serde_json::json!({
+                "task_id": input.task_id,
+                "kind": "single_task",
+                "worker_dod": launch_dod_snapshot(conn, input)?,
+            }),
         )?;
 
         let execution = get_task_execution(conn, &id)?
@@ -1396,6 +1653,67 @@ pub fn launch_single_task(
             deduplicated: false,
         })
     })
+}
+
+/// KT-1291 — the `{id, sentence}` of every DoD item the execution is launched
+/// against, recorded in its `created` event: the ids alone cannot say WHAT a
+/// requirement was once the principal removes it from the task.
+fn launch_dod_snapshot(
+    conn: &Connection,
+    input: &LaunchSingleTaskInput,
+) -> Result<serde_json::Value> {
+    let Some(ids) = input.worker_dod_ids.as_ref() else {
+        return Ok(serde_json::Value::Array(Vec::new()));
+    };
+    let mut statement = conn.prepare(
+        "SELECT id, sentence FROM planning_task_dod_items
+          WHERE task_id = ?1 ORDER BY position, id",
+    )?;
+    let rows = statement
+        .query_map(params![input.task_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(serde_json::Value::Array(
+        rows.into_iter()
+            .filter(|(id, _)| ids.contains(id))
+            .map(|(id, sentence)| serde_json::json!({ "id": id, "sentence": sentence }))
+            .collect(),
+    ))
+}
+
+/// KT-1291 — the sentence the execution was launched with for DoD item
+/// `dod_id`; `None` for an execution launched before the snapshot recorded
+/// sentences.
+pub fn execution_dod_sentence(
+    conn: &Connection,
+    exec_id: &str,
+    dod_id: &str,
+) -> Result<Option<String>> {
+    let payloads = conn
+        .prepare(
+            "SELECT changes_json FROM task_execution_events
+              WHERE task_execution_id = ?1 AND action = 'created'
+              ORDER BY created_at ASC, rowid ASC",
+        )?
+        .query_map(params![exec_id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for payload in payloads {
+        let Ok(changes) = serde_json::from_str::<serde_json::Value>(&payload) else {
+            continue;
+        };
+        let found = changes
+            .get("worker_dod")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .find(|item| item.get("id").and_then(serde_json::Value::as_str) == Some(dod_id))
+            .and_then(|item| item.get("sentence").and_then(serde_json::Value::as_str));
+        if let Some(sentence) = found {
+            return Ok(Some(sentence.to_string()));
+        }
+    }
+    Ok(None)
 }
 
 /// Atomically add one ordered, policy-compliant task to an existing campaign.
@@ -1514,6 +1832,7 @@ pub fn launch_task_in_run(
                 "kind": "campaign",
                 "worker_model": input.worker_model,
                 "worker_profile_id": input.worker_profile_id,
+                "worker_dod": launch_dod_snapshot(conn, input)?,
             }),
         )?;
         let execution = get_task_execution(conn, &id)?
@@ -2319,8 +2638,9 @@ fn announce_integration_refusal(
         return Ok(());
     };
     let reference = format!("KT-{task_number}");
-    let (headline, body, next, highlight) = match parked {
-        TaskExecutionStatus::Blocked => (
+    let lang = RoomLang::from_code(&principal.language);
+    let (headline, body, next, highlight) = match (parked, lang) {
+        (TaskExecutionStatus::Blocked, RoomLang::Fr) => (
             "Intégration suspendue",
             format!(
                 "L'exécution `{exec_id}` (**{title}**) est validée, mais n'a pas pu être \
@@ -2331,7 +2651,18 @@ fn announce_integration_refusal(
              reconstruit le candidat si elle a avancé.",
             format!("{reference} est validée mais n'est pas appliquée."),
         ),
-        TaskExecutionStatus::Interrupted => (
+        (TaskExecutionStatus::Blocked, RoomLang::En) => (
+            "Integration suspended",
+            format!(
+                "Execution `{exec_id}` (**{title}**) is validated, but could not be applied \
+                 to the target branch: {reason}\n\n\
+                 It is put on hold (`Blocked`); the target branch did not move."
+            ),
+            "Then resume with `task_exec_resume`: Kronn re-checks the target branch and \
+             rebuilds the candidate if it advanced.",
+            format!("{reference} is validated but not applied."),
+        ),
+        (TaskExecutionStatus::Interrupted, RoomLang::Fr) => (
             "Intégration interrompue",
             format!(
                 "L'exécution `{exec_id}` (**{title}**) n'a pas pu construire son candidat \
@@ -2342,7 +2673,18 @@ fn announce_integration_refusal(
              pointe réelle de la branche cible.",
             format!("{reference} est approuvée mais son intégration est interrompue."),
         ),
-        _ => (
+        (TaskExecutionStatus::Interrupted, RoomLang::En) => (
+            "Integration interrupted",
+            format!(
+                "Execution `{exec_id}` (**{title}**) could not build its integration \
+                 candidate: {reason}\n\n\
+                 It is `Interrupted`; the target branch did not move."
+            ),
+            "Then resume with `task_exec_resume`: the candidate is rebuilt on the real tip \
+             of the target branch.",
+            format!("{reference} is approved but its integration is interrupted."),
+        ),
+        (_, RoomLang::Fr) => (
             "Intégration bloquée",
             format!(
                 "L'exécution `{exec_id}` (**{title}**) est approuvée, mais son intégration \
@@ -2352,12 +2694,25 @@ fn announce_integration_refusal(
              l'approbation reste acquise.",
             format!("{reference} est approuvée mais n'est pas intégrée."),
         ),
+        (_, RoomLang::En) => (
+            "Integration blocked",
+            format!(
+                "Execution `{exec_id}` (**{title}**) is approved, but its integration \
+                 could not start: {reason}"
+            ),
+            "Then restart the integration (`task_exec_resume` or a new approval): the \
+             approval stays acquired.",
+            format!("{reference} is approved but not integrated."),
+        ),
     };
     let message = DiscussionMessage {
         id: format!("orch-integration-refused:{exec_id}:{occurrence}"),
         role: MessageRole::User,
         channel: MessageChannel::Main,
-        content: format!("**{headline} — {reference}**\n\n{body}\n\n**Correctif :** {fix} {next}"),
+        content: format!(
+            "**{headline} — {reference}**\n\n{body}\n\n**{}** {fix} {next}",
+            lang.pick("Correctif :", "Fix:")
+        ),
         agent_type: None,
         timestamp: now,
         tokens_used: 0,
@@ -2375,6 +2730,7 @@ fn announce_integration_refusal(
         target_agent: None,
         reply_to_message_id: None,
         author_cli_ordinal: None,
+        session_continuity: None,
     };
     let targets = [principal_notice_target(conn, exec_id, principal.agent)?];
     crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
@@ -2392,10 +2748,19 @@ fn announce_integration_refusal(
         crate::db::discussion_important::SteeringCard {
             category: crate::db::discussion_important::ImportantCategory::HumanActionRequired,
             dedup_key: &format!("orch.integration.refused.{exec_id}.{occurrence}"),
-            title: &format!("{reference} — intégration bloquée"),
+            title: &format!(
+                "{reference} — {}",
+                lang.pick("intégration bloquée", "integration blocked")
+            ),
             highlight: &highlight,
-            impact: "La branche cible n'avance pas tant que la cause n'est pas corrigée.",
-            action_required: crate::db::discussion_important::ImportantAction::owed(fix, "Humain"),
+            impact: lang.pick(
+                "La branche cible n'avance pas tant que la cause n'est pas corrigée.",
+                "The target branch does not advance until the cause is fixed.",
+            ),
+            action_required: crate::db::discussion_important::ImportantAction::owed(
+                fix,
+                lang.pick("Humain", "Human"),
+            ),
             references: crate::db::discussion_important::ImportantReferences {
                 task_ref: Some(reference.clone()),
                 execution_id: Some(exec_id.to_string()),
@@ -3119,11 +3484,18 @@ pub struct ReviewCheckpoint<'a> {
     /// dispatch triggered by the findings message. Mutually exclusive with
     /// `reactivation` (which is the joined-CLI handshake).
     pub native_dispatch: Option<NativeReworkDispatch<'a>>,
+    /// approve only (KT-1291): `(dod_id, carried_to, evidence)` of the DoD items the
+    /// principal carries to another ticket. They are detached INSIDE the checkpoint
+    /// transaction, so a refused or failed checkpoint detaches nothing.
+    pub carried_dod: &'a [(String, String, String)],
     pub actor: &'a OrchestrationActor,
 }
 
 /// The verdict of the review checkpoint.
 pub enum ReviewCheckpointOutcome {
+    /// approve refused (KT-1291): a carrier of a carried DoD item no longer qualifies.
+    /// Nothing was persisted — no review, no detached item.
+    DodCarryRefused(String),
     /// approve committed: the ReviewDecision is persisted and the execution is `Approved`.
     Approved,
     /// request_changes committed: decision persisted, `review_rounds` bumped, findings posted
@@ -3307,6 +3679,25 @@ pub fn commit_review_checkpoint(
 
     match input.verdict {
         ReviewVerdict::Approve => {
+            // (1b) KT-1291 — carried DoD items leave the task in this same
+            // transaction: a refusal, a lost CAS or a failed write below rolls
+            // them back with the review row.
+            if !input.carried_dod.is_empty() {
+                let task_id: String = tx.query_row(
+                    "SELECT task_id FROM task_executions WHERE id = ?1",
+                    params![input.exec_id],
+                    |r| r.get(0),
+                )?;
+                if let Some(detail) = crate::db::planning::carry_dod_items(
+                    &tx,
+                    &task_id,
+                    input.exec_id,
+                    input.carried_dod,
+                    input.actor,
+                )? {
+                    return Ok(ReviewCheckpointOutcome::DodCarryRefused(detail));
+                }
+            }
             // (2) AwaitingReview → Approved (guarded CAS + journal; the CAS is the sole
             // anti-race authority). Approved is NOT terminal: KT-320 resumes it to
             // Integrating.
@@ -3445,6 +3836,7 @@ pub fn commit_review_checkpoint(
                 )
                 .optional()?;
             let reference = reference.map(|n| format!("KT-{n}")).unwrap_or_default();
+            let lang = execution_room_lang(&tx, input.exec_id);
             crate::db::discussion_important::publish_steering_card(
                 &tx,
                 findings.child_discussion_id,
@@ -3455,17 +3847,34 @@ pub fn commit_review_checkpoint(
                         "orch.review.changes.{}.{}",
                         input.exec_id, input.attempt_no
                     ),
-                    title: &format!(
-                        "{reference} — changements demandés (tour {})",
-                        input.attempt_no
+                    title: &match lang {
+                        RoomLang::Fr => format!(
+                            "{reference} — changements demandés (tour {})",
+                            input.attempt_no
+                        ),
+                        RoomLang::En => format!(
+                            "{reference} — changes requested (round {})",
+                            input.attempt_no
+                        ),
+                    },
+                    highlight: lang.pick(
+                        "La revue a renvoyé le tour livré : il ne passe pas en l'état.",
+                        "The review sent the delivered round back: it does not pass as is.",
                     ),
-                    highlight: "La revue a renvoyé le tour livré : il ne passe pas en l'état.",
-                    impact: "La livraison n'est pas intégrée ; le worktree et la sous-discussion \
-                             restent ouverts pour la correction.",
+                    impact: lang.pick(
+                        "La livraison n'est pas intégrée ; le worktree et la sous-discussion \
+                         restent ouverts pour la correction.",
+                        "The delivery is not integrated; the worktree and the sub-discussion \
+                         stay open for the fix.",
+                    ),
                     // Somebody owes something here, and it is not a human.
                     action_required: crate::db::discussion_important::ImportantAction::owed(
-                        "Corriger les points de revue dans ce worktree, puis re-livrer via \
-                         `task_exec_deliver`",
+                        lang.pick(
+                            "Corriger les points de revue dans ce worktree, puis re-livrer via \
+                             `task_exec_deliver`",
+                            "Fix the review points in this worktree, then re-deliver through \
+                             `task_exec_deliver`",
+                        ),
                         "Worker",
                     ),
                     references: crate::db::discussion_important::ImportantReferences {
@@ -3613,6 +4022,10 @@ pub fn commit_integration_rework(
         .optional()?;
     let reference = task_number.map(|n| format!("KT-{n}")).unwrap_or_default();
     let principal = crate::db::discussions::get_discussion(&tx, &execution.parent_discussion_id)?;
+    let lang = principal
+        .as_ref()
+        .map(|discussion| RoomLang::from_code(&discussion.language))
+        .unwrap_or_default();
     let principal_target = match &principal {
         Some(discussion) => Some(principal_notice_target(
             &tx,
@@ -3672,14 +4085,29 @@ pub fn commit_integration_rework(
         crate::db::discussion_important::SteeringCard {
             category: crate::db::discussion_important::ImportantCategory::BlockingAlert,
             dedup_key: &format!("orch.integration.rework.{}.{next_attempt}", input.exec_id),
-            title: &format!("{reference} — renvoyé par l'intégration"),
-            highlight: &format!(
-                "La livraison approuvée n'a pas passé l'intégration : {reason_line}"
+            title: &format!(
+                "{reference} — {}",
+                lang.pick("renvoyé par l'intégration", "sent back by the integration")
             ),
-            impact: "La livraison n'est pas intégrée ; le worktree et la sous-discussion \
-                     restent ouverts pour la correction.",
+            highlight: &match lang {
+                RoomLang::Fr => {
+                    format!("La livraison approuvée n'a pas passé l'intégration : {reason_line}")
+                }
+                RoomLang::En => {
+                    format!("The approved delivery did not pass the integration: {reason_line}")
+                }
+            },
+            impact: lang.pick(
+                "La livraison n'est pas intégrée ; le worktree et la sous-discussion \
+                 restent ouverts pour la correction.",
+                "The delivery is not integrated; the worktree and the sub-discussion \
+                 stay open for the fix.",
+            ),
             action_required: crate::db::discussion_important::ImportantAction::owed(
-                "Corriger dans ce worktree, puis re-livrer via `task_exec_deliver`",
+                lang.pick(
+                    "Corriger dans ce worktree, puis re-livrer via `task_exec_deliver`",
+                    "Fix in this worktree, then re-deliver through `task_exec_deliver`",
+                ),
                 "Worker",
             ),
             references: crate::db::discussion_important::ImportantReferences {
@@ -3709,16 +4137,36 @@ pub fn commit_integration_rework(
             crate::db::discussion_important::SteeringCard {
                 category: crate::db::discussion_important::ImportantCategory::BlockingAlert,
                 dedup_key: &format!("orch.integration.reworked.{}.{next_attempt}", input.exec_id),
-                title: &format!("{reference} — intégration renvoyée au worker"),
-                highlight: &format!(
-                    "{reference} est approuvée mais l'intégration l'a renvoyée au worker : \
-                     {reason_line}"
+                title: &format!(
+                    "{reference} — {}",
+                    lang.pick(
+                        "intégration renvoyée au worker",
+                        "integration sent back to the worker"
+                    )
                 ),
-                impact: "La branche cible n'avance pas ; le worker est relancé avec la sortie \
-                         de l'échec.",
+                highlight: &match lang {
+                    RoomLang::Fr => format!(
+                        "{reference} est approuvée mais l'intégration l'a renvoyée au worker : \
+                         {reason_line}"
+                    ),
+                    RoomLang::En => format!(
+                        "{reference} is approved but the integration sent it back to the \
+                         worker: {reason_line}"
+                    ),
+                },
+                impact: lang.pick(
+                    "La branche cible n'avance pas ; le worker est relancé avec la sortie \
+                     de l'échec.",
+                    "The target branch does not advance; the worker is relaunched with the \
+                     failure output.",
+                ),
                 action_required: crate::db::discussion_important::ImportantAction::owed(
-                    "Attendre la re-livraison ; si l'échec ne vient pas de la livraison, \
-                     relancer les mêmes validations avec `task_exec_resume`",
+                    lang.pick(
+                        "Attendre la re-livraison ; si l'échec ne vient pas de la livraison, \
+                         relancer les mêmes validations avec `task_exec_resume`",
+                        "Wait for the re-delivery; if the failure does not come from the \
+                         delivery, rerun the same validations with `task_exec_resume`",
+                    ),
                     "Principal",
                 ),
                 references: crate::db::discussion_important::ImportantReferences {
@@ -4322,30 +4770,57 @@ fn publish_campaign_gate_card(
         return Ok(());
     };
     let reference = format!("KT-{task_number}");
+    let lang = RoomLang::from_code(&principal.language);
 
     let (side, content, category, highlight, impact, action) = match gate {
         CampaignGate::AwaitingHuman => (
             "awaiting",
-            format!(
-                "**Campagne en attente d'une décision humaine — {reference}**\n\n                 L'exécution `{exec_id}` (**{title}**) a été escaladée : le budget de revue                  automatique est épuisé. La campagne est en pause et n'enchaînera pas seule."
-            ),
+            match lang {
+                RoomLang::Fr => format!(
+                    "**Campagne en attente d'une décision humaine — {reference}**\n\n                 L'exécution `{exec_id}` (**{title}**) a été escaladée : le budget de revue                  automatique est épuisé. La campagne est en pause et n'enchaînera pas seule."
+                ),
+                RoomLang::En => format!(
+                    "**Campaign waiting for a human decision — {reference}**\n\nExecution `{exec_id}` (**{title}**) was escalated: the automatic review budget is exhausted. The campaign is paused and will not chain on its own."
+                ),
+            },
             crate::db::discussion_important::ImportantCategory::HumanActionRequired,
-            format!("{reference} — la campagne attend une décision humaine."),
-            "Aucune tâche de cette campagne n'avance tant que l'escalade n'est pas tranchée."
-                .to_string(),
+            match lang {
+                RoomLang::Fr => format!("{reference} — la campagne attend une décision humaine."),
+                RoomLang::En => format!("{reference} — the campaign is waiting for a human decision."),
+            },
+            lang.pick(
+                "Aucune tâche de cette campagne n'avance tant que l'escalade n'est pas tranchée.",
+                "No task of this campaign advances until the escalation is settled.",
+            )
+            .to_string(),
             crate::db::discussion_important::ImportantAction::owed(
-                "Trancher l'escalade, puis relancer la campagne",
-                "Humain",
+                lang.pick(
+                    "Trancher l'escalade, puis relancer la campagne",
+                    "Settle the escalation, then resume the campaign",
+                ),
+                lang.pick("Humain", "Human"),
             ),
         ),
         CampaignGate::Resumed => (
             "resumed",
-            format!(
-                "**Campagne relancée — {reference}**\n\n                 Plus aucune exécution escaladée : la campagne repasse en `Running` et                  poursuit avec la prochaine tâche prête."
-            ),
+            match lang {
+                RoomLang::Fr => format!(
+                    "**Campagne relancée — {reference}**\n\n                 Plus aucune exécution escaladée : la campagne repasse en `Running` et                  poursuit avec la prochaine tâche prête."
+                ),
+                RoomLang::En => format!(
+                    "**Campaign resumed — {reference}**\n\nNo escalated execution remains: the campaign goes back to `Running` and continues with the next ready task."
+                ),
+            },
             crate::db::discussion_important::ImportantCategory::Decision,
-            format!("{reference} — la campagne repart, l'escalade est levée."),
-            "Les tâches prêtes de la campagne peuvent de nouveau être lancées.".to_string(),
+            match lang {
+                RoomLang::Fr => format!("{reference} — la campagne repart, l'escalade est levée."),
+                RoomLang::En => format!("{reference} — the campaign resumes, the escalation is lifted."),
+            },
+            lang.pick(
+                "Les tâches prêtes de la campagne peuvent de nouveau être lancées.",
+                "The campaign's ready tasks can be launched again.",
+            )
+            .to_string(),
             crate::db::discussion_important::ImportantAction::none(),
         ),
     };
@@ -4406,6 +4881,7 @@ fn publish_campaign_gate_card(
         target_agent: None,
         reply_to_message_id: None,
         author_cli_ordinal: None,
+        session_continuity: None,
     };
     let targets = [principal_notice_target(conn, exec_id, principal.agent)?];
     crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
@@ -4507,17 +4983,34 @@ fn notify_principal_of_terminal(
     let Some(principal) = crate::db::discussions::get_discussion(conn, &parent)? else {
         return Ok(());
     };
-    let child_link = child
-        .as_deref()
-        .map(|id| format!(" Sous-discussion : `{id}`."))
-        .unwrap_or_default();
-    let content = format!(
-        "**Événement d'orchestration — {reference}**\n\n\
-         L'exécution `{exec_id}` (**{title}**) est maintenant `{status}`.{child_link} \
-         Relis l'état de la campagne et poursuis avec la prochaine tâche prête ; \
-         n'enchaîne pas si une décision humaine est signalée.",
-        status = terminal.as_str(),
-    );
+    let lang = RoomLang::from_code(&principal.language);
+    let status = terminal.as_str();
+    let content = match lang {
+        RoomLang::Fr => {
+            let child_link = child
+                .as_deref()
+                .map(|id| format!(" Sous-discussion : `{id}`."))
+                .unwrap_or_default();
+            format!(
+                "**Événement d'orchestration — {reference}**\n\n\
+                 L'exécution `{exec_id}` (**{title}**) est maintenant `{status}`.{child_link} \
+                 Relis l'état de la campagne et poursuis avec la prochaine tâche prête ; \
+                 n'enchaîne pas si une décision humaine est signalée."
+            )
+        }
+        RoomLang::En => {
+            let child_link = child
+                .as_deref()
+                .map(|id| format!(" Sub-discussion: `{id}`."))
+                .unwrap_or_default();
+            format!(
+                "**Orchestration event — {reference}**\n\n\
+                 Execution `{exec_id}` (**{title}**) is now `{status}`.{child_link} \
+                 Re-read the campaign state and continue with the next ready task; \
+                 do not chain if a human decision is flagged."
+            )
+        }
+    };
     let message = DiscussionMessage {
         id: format!("orch-principal-terminal:{exec_id}:{}", terminal.as_str()),
         role: MessageRole::User,
@@ -4540,6 +5033,7 @@ fn notify_principal_of_terminal(
         target_agent: None,
         reply_to_message_id: None,
         author_cli_ordinal: None,
+        session_continuity: None,
     };
     let targets = [principal_notice_target(conn, exec_id, principal.agent)?];
     crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
@@ -4559,10 +5053,10 @@ fn notify_principal_of_terminal(
     }
     // Failed/cancelled execution is a blocking steering event. Its card and
     // source notification remain in the same transaction.
-    let highlight = format!(
-        "{reference} — exécution terminée en `{}`.",
-        terminal.as_str()
-    );
+    let highlight = match lang {
+        RoomLang::Fr => format!("{reference} — exécution terminée en `{status}`."),
+        RoomLang::En => format!("{reference} — execution ended as `{status}`."),
+    };
     crate::db::discussion_important::publish_steering_card(
         conn,
         &parent,
@@ -4572,7 +5066,10 @@ fn notify_principal_of_terminal(
             dedup_key: &format!("orch.terminal.{exec_id}.{}", terminal.as_str()),
             title: &format!("{reference} — {title}"),
             highlight: &highlight,
-            impact: "La tâche n'a pas abouti ; la suite de la campagne dépend d'une décision.",
+            impact: lang.pick(
+                "La tâche n'a pas abouti ; la suite de la campagne dépend d'une décision.",
+                "The task did not succeed; the rest of the campaign depends on a decision.",
+            ),
             // A terminal transition is a fact, not an obligation. What follows
             // it may be one, and that card is minted by whatever produces it.
             action_required: crate::db::discussion_important::ImportantAction::none(),
@@ -4657,6 +5154,7 @@ fn return_cli_worker_to_origin(
         session_tokens_at_message: None,
         recovered_partial: false,
         author_cli_ordinal: None,
+        session_continuity: None,
     };
     let child_message = message(
         format!("orch-return-child:{exec_id}:{terminal}"),
@@ -4741,6 +5239,80 @@ pub enum IntegrationCheckpointOutcome {
     ExecutionRaced,
 }
 
+/// The DoD items the approved attempt verified as met, with the evidence each
+/// one carries. A principal's `dod_verifications` entry wins; an item it does not
+/// name falls back to the delivery manifest's own `met` claim (a human approve
+/// supplies no principal evidence). Unreadable stored JSON yields nothing: the
+/// unticked-item guard then refuses the completion instead of guessing.
+fn approved_dod_evidence(conn: &Connection, exec_id: &str) -> Result<Vec<(String, String)>> {
+    let Some(attempt_no) = conn
+        .query_row(
+            "SELECT attempt_no FROM task_executions WHERE id = ?1",
+            params![exec_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+    else {
+        return Ok(Vec::new());
+    };
+    let attempt_no = attempt_no as u32;
+    let mut evidence: Vec<(String, String)> = Vec::new();
+    if let Some(delivery) = crate::db::worker_deliveries::get_delivery(conn, exec_id, attempt_no)? {
+        if let Ok(manifest) =
+            serde_json::from_str::<crate::models::DeliveryManifestV1>(&delivery.manifest_json)
+        {
+            for status in manifest.dod_status.into_iter().filter(|status| status.met) {
+                let text = status.evidence.unwrap_or_default();
+                if !text.trim().is_empty() {
+                    evidence.push((status.dod_id, text));
+                }
+            }
+        }
+    }
+    if let Some(review) = crate::db::worker_reviews::get_review(conn, exec_id, attempt_no)? {
+        if let Ok(decision) =
+            serde_json::from_str::<crate::models::ReviewDecisionV1>(&review.decision_json)
+        {
+            if decision.decision == crate::models::ReviewVerdict::Approve {
+                for verification in decision.dod_verifications.into_iter().filter(|v| v.met) {
+                    evidence.retain(|(id, _)| *id != verification.dod_id);
+                    evidence.push((verification.dod_id, verification.evidence));
+                }
+            }
+        }
+    }
+    Ok(evidence)
+}
+
+/// KT-1262 — the worker DoD items the Integrated checkpoint would leave
+/// unticked: unticked now and not verified by the approved attempt. A
+/// post-integration live check is not one. Read BEFORE the git apply, so an item
+/// added between approve and integration holds the approval while the target is
+/// untouched, instead of parking an execution whose code already landed.
+pub fn unverified_worker_dod(conn: &Connection, exec_id: &str) -> Result<Vec<(String, String)>> {
+    let Some(task_id) = conn
+        .query_row(
+            "SELECT task_id FROM task_executions WHERE id = ?1",
+            params![exec_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    else {
+        return Ok(Vec::new());
+    };
+    let verified = approved_dod_evidence(conn, exec_id)?
+        .into_iter()
+        .filter(|(_, evidence)| !evidence.trim().is_empty())
+        .map(|(dod_id, _)| dod_id)
+        .collect::<std::collections::HashSet<_>>();
+    Ok(
+        crate::db::planning::unticked_worker_dod_within_tx(conn, &task_id)?
+            .into_iter()
+            .filter(|(dod_id, _)| !verified.contains(dod_id))
+            .collect(),
+    )
+}
+
 /// Commit one integration-saga step: pin its checkpoint columns and its transition
 /// in a single transaction (ADR §4bis, KT-320 DoD-7). The four columns declared by
 /// migration 127 come alive here — until this, the boot-time reconciliation reasoned
@@ -4805,6 +5377,11 @@ pub fn commit_integration_checkpoint(
                 [exec_id],
                 |row| row.get(0),
             )?;
+            // KT-1262 — the approve's evidence reaches the DoD before the task
+            // completes; `mark_task_done_within_tx` then refuses a task that
+            // still has an unticked worker item (the transaction rolls back).
+            let verified = approved_dod_evidence(&tx, exec_id)?;
+            crate::db::planning::tick_verified_dod_within_tx(&tx, &task_id, &verified, actor)?;
             if !crate::db::planning::mark_task_done_within_tx(&tx, &task_id, actor)? {
                 return Ok(IntegrationCheckpointOutcome::TaskNotCompletable);
             }
@@ -4884,6 +5461,135 @@ pub fn list_execution_events(conn: &Connection, exec_id: &str) -> Result<Vec<Tas
         .query_map(params![exec_id], row_to_event)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(events)
+}
+
+/// Journal what the launch-time toolchain smoke check found (KT-1246). The
+/// record is an append-only event, so a re-provisioned attempt keeps its own
+/// finding; readers take the latest.
+pub fn record_toolchain_capabilities(
+    conn: &Connection,
+    exec_id: &str,
+    capabilities: &crate::core::task_worker_env::ToolchainCapabilities,
+    actor: &OrchestrationActor,
+) -> Result<()> {
+    record_execution_event(
+        conn,
+        exec_id,
+        crate::core::task_worker_env::TOOLCHAIN_EVENT_ACTION,
+        None,
+        None,
+        actor,
+        serde_json::to_value(capabilities)?,
+    )
+}
+
+/// The most recent toolchain capability record of an execution, if any.
+pub fn latest_toolchain_capabilities(
+    conn: &Connection,
+    exec_id: &str,
+) -> Result<Option<crate::core::task_worker_env::ToolchainCapabilities>> {
+    let latest: Option<String> = conn
+        .query_row(
+            "SELECT changes_json FROM task_execution_events \
+             WHERE task_execution_id = ?1 AND action = ?2 \
+             ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            params![
+                exec_id,
+                crate::core::task_worker_env::TOOLCHAIN_EVENT_ACTION
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    latest
+        .map(|changes| serde_json::from_str(&changes).map_err(anyhow::Error::from))
+        .transpose()
+}
+
+/// Journal how a lane started (KT-1250): where its target was seeded from and
+/// how long its first build took, so the gain of a warm start is measurable.
+/// A sibling of the capability record; readers take the latest.
+pub fn record_lane_warm_start(
+    conn: &Connection,
+    exec_id: &str,
+    record: &crate::core::task_worker_lane_warm::WarmStartRecord,
+    actor: &OrchestrationActor,
+) -> Result<()> {
+    record_execution_event(
+        conn,
+        exec_id,
+        crate::core::task_worker_lane_warm::WARM_START_EVENT_ACTION,
+        None,
+        None,
+        actor,
+        serde_json::to_value(record)?,
+    )
+}
+
+/// The most recent warm-start record of an execution, if any.
+pub fn latest_lane_warm_start(
+    conn: &Connection,
+    exec_id: &str,
+) -> Result<Option<crate::core::task_worker_lane_warm::WarmStartRecord>> {
+    let latest: Option<String> = conn
+        .query_row(
+            "SELECT changes_json FROM task_execution_events \
+             WHERE task_execution_id = ?1 AND action = ?2 \
+             ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            params![
+                exec_id,
+                crate::core::task_worker_lane_warm::WARM_START_EVENT_ACTION
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    latest
+        .map(|changes| serde_json::from_str(&changes).map_err(anyhow::Error::from))
+        .transpose()
+}
+
+/// Action of the event that says a lane is warming (KT-1250): its first build
+/// is queued or running and the worker is not dispatched yet.
+const LANE_WARMING_ACTION: &str = "lane_warming";
+
+/// Journal that the execution's lane started warming, with the longest the
+/// warm-up may take before the worker starts regardless.
+pub fn record_lane_warming(
+    conn: &Connection,
+    exec_id: &str,
+    bound_secs: u64,
+    actor: &OrchestrationActor,
+) -> Result<()> {
+    record_execution_event(
+        conn,
+        exec_id,
+        LANE_WARMING_ACTION,
+        None,
+        None,
+        actor,
+        serde_json::json!({ "bound_secs": bound_secs }),
+    )
+}
+
+/// Since when the execution's lane has been warming: the latest `lane_warming`
+/// event not yet followed by a `lane_warm_start` record. `None` once the
+/// warm-up has finished (or never started).
+pub fn lane_warming_since(conn: &Connection, exec_id: &str) -> Result<Option<DateTime<Utc>>> {
+    let since: Option<String> = conn
+        .query_row(
+            "SELECT created_at FROM task_execution_events \
+             WHERE task_execution_id = ?1 AND action = ?2 \
+               AND rowid > COALESCE((SELECT MAX(rowid) FROM task_execution_events \
+                                      WHERE task_execution_id = ?1 AND action = ?3), 0) \
+             ORDER BY rowid DESC LIMIT 1",
+            params![
+                exec_id,
+                LANE_WARMING_ACTION,
+                crate::core::task_worker_lane_warm::WARM_START_EVENT_ACTION
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(since.map(parse_dt))
 }
 
 const WORKER_SCOPE_REANCHORED: &str = "worker_scope_reanchored";
@@ -5238,6 +5944,70 @@ fn recovery_row(row: &Row) -> rusqlite::Result<TaskExecutionRecovery> {
     })
 }
 
+/// KT-1247 — a silent worker must be detectable even when the campaign set no
+/// resilience policy (every campaign so far). Twenty minutes without a tool
+/// call, a message, a commit or a delivery is the default; both defaults can be
+/// moved globally through the environment, and per campaign through the
+/// `orchestration_run_resilience_policy` row, which always wins.
+pub const DEFAULT_ACTIVITY_TIMEOUT_SECS: u32 = 20 * 60;
+/// How long a delivery may sit unreviewed before the principal is alerted.
+pub const DEFAULT_REVIEW_TIMEOUT_SECS: u32 = 4 * 60 * 60;
+const ACTIVITY_TIMEOUT_ENV: &str = "KRONN_TASK_ACTIVITY_TIMEOUT_SECS";
+/// How long a single tool call (a cold `cargo build`, a full test suite) may
+/// run before the worker counts as silent again.
+const TOOL_IN_FLIGHT_CAP_ENV: &str = "KRONN_TASK_TOOL_IN_FLIGHT_CAP_SECS";
+const DEFAULT_TOOL_IN_FLIGHT_CAP_SECS: u32 = 2 * 60 * 60;
+
+pub fn tool_in_flight_cap_secs() -> u32 {
+    crate::core::child_env::var(TOOL_IN_FLIGHT_CAP_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|seconds| *seconds > 0)
+        .unwrap_or(DEFAULT_TOOL_IN_FLIGHT_CAP_SECS)
+}
+
+/// A tool that started and has not finished is activity: a worker compiling
+/// for 25 minutes is busy, not silent. Past the cap it is treated as hung.
+fn tool_in_flight(phase: Option<&str>, started: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
+    phase == Some("tool_activity")
+        && started.is_some_and(|started| {
+            started + chrono::Duration::seconds(i64::from(tool_in_flight_cap_secs())) > now
+        })
+}
+const REVIEW_TIMEOUT_ENV: &str = "KRONN_TASK_REVIEW_TIMEOUT_SECS";
+
+fn timeout_secs_from_env(name: &str, fallback: u32) -> u32 {
+    crate::core::child_env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|seconds| *seconds > 0)
+        .unwrap_or(fallback)
+}
+
+/// Global default activity timeout (`KRONN_TASK_ACTIVITY_TIMEOUT_SECS`).
+pub fn default_activity_timeout_secs() -> u32 {
+    timeout_secs_from_env(ACTIVITY_TIMEOUT_ENV, DEFAULT_ACTIVITY_TIMEOUT_SECS)
+}
+
+/// Global default review timeout (`KRONN_TASK_REVIEW_TIMEOUT_SECS`).
+pub fn default_review_timeout_secs() -> u32 {
+    timeout_secs_from_env(REVIEW_TIMEOUT_ENV, DEFAULT_REVIEW_TIMEOUT_SECS)
+}
+
+/// The activity clock a status owes. A worker owes activity only while it is
+/// `Working`; the default therefore arms nowhere else, so an `Interrupted`,
+/// `AwaitingReview` or `Escalated` row is never "silent". An explicit campaign
+/// policy keeps the clock it always armed.
+fn effective_activity_secs(policy: Option<i64>, status: TaskExecutionStatus) -> Option<i64> {
+    policy.or_else(|| {
+        (status == TaskExecutionStatus::Working).then(|| i64::from(default_activity_timeout_secs()))
+    })
+}
+
+fn effective_review_secs(policy: Option<i64>) -> i64 {
+    policy.unwrap_or_else(|| i64::from(default_review_timeout_secs()))
+}
+
 pub fn get_resilience_policy(
     conn: &Connection,
     run_id: &str,
@@ -5333,14 +6103,18 @@ pub fn set_execution_recovery(
     let total_deadline = run
         .timeout_secs
         .map(|seconds| execution.created_at + chrono::Duration::seconds(i64::from(seconds)));
-    let activity_deadline = policy
-        .activity_timeout_secs
-        .map(|seconds| now + chrono::Duration::seconds(i64::from(seconds)));
+    let activity_deadline = effective_activity_secs(
+        policy.activity_timeout_secs.map(i64::from),
+        execution.status,
+    )
+    .map(|seconds| now + chrono::Duration::seconds(seconds));
     let review_deadline =
         if execution.interrupted_from_status == Some(TaskExecutionStatus::AwaitingReview) {
-            policy
-                .review_timeout_secs
-                .map(|seconds| now + chrono::Duration::seconds(i64::from(seconds)))
+            Some(
+                now + chrono::Duration::seconds(effective_review_secs(
+                    policy.review_timeout_secs.map(i64::from),
+                )),
+            )
         } else {
             None
         };
@@ -5428,9 +6202,11 @@ pub fn touch_execution_activity(conn: &Connection, exec_id: &str) -> Result<()> 
     else {
         return Ok(());
     };
-    let deadline = activity_secs.map(|seconds| now + chrono::Duration::seconds(seconds));
-    let review_deadline = if status == TaskExecutionStatus::AwaitingReview.as_str() {
-        review_secs.map(|seconds| now + chrono::Duration::seconds(seconds))
+    let current_status = TaskExecutionStatus::from_str(&status)?;
+    let deadline = effective_activity_secs(activity_secs, current_status)
+        .map(|seconds| now + chrono::Duration::seconds(seconds));
+    let review_deadline = if current_status == TaskExecutionStatus::AwaitingReview {
+        Some(now + chrono::Duration::seconds(effective_review_secs(review_secs)))
     } else {
         None
     };
@@ -5472,6 +6248,44 @@ pub fn touch_execution_activity(conn: &Connection, exec_id: &str) -> Result<()> 
     Ok(())
 }
 
+/// Push the silent-worker clock of the `Working` execution owning this dispatch.
+/// Best effort by design: failing to move a clock must never fail the progress
+/// write or the message that carries the activity.
+pub fn note_dispatch_activity(conn: &Connection, dispatch_id: &str) -> Result<()> {
+    let exec_id: Option<String> = conn
+        .query_row(
+            "SELECT id FROM task_executions \
+             WHERE dispatch_job_id = ?1 AND status = 'Working' LIMIT 1",
+            [dispatch_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(exec_id) = exec_id {
+        if let Err(error) = touch_execution_activity(conn, &exec_id) {
+            tracing::warn!(execution_id = %exec_id, "could not push activity clock: {error}");
+        }
+    }
+    Ok(())
+}
+
+/// Same, keyed by the worker room a message was posted in.
+pub fn note_room_activity(conn: &Connection, discussion_id: &str) -> Result<()> {
+    let exec_id: Option<String> = conn
+        .query_row(
+            "SELECT id FROM task_executions \
+             WHERE sub_discussion_id = ?1 AND status = 'Working' LIMIT 1",
+            [discussion_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(exec_id) = exec_id {
+        if let Err(error) = touch_execution_activity(conn, &exec_id) {
+            tracing::warn!(execution_id = %exec_id, "could not push activity clock: {error}");
+        }
+    }
+    Ok(())
+}
+
 /// Expired clocks with their precise semantic kind. Human waits are reported,
 /// never auto-cancelled by this query; the watchdog decides policy explicitly.
 pub fn expired_execution_timeouts(
@@ -5481,11 +6295,13 @@ pub fn expired_execution_timeouts(
     let mut stmt = conn.prepare(
         "SELECT r.task_execution_id, e.status, r.total_deadline_at, \
                 r.activity_deadline_at, r.review_deadline_at, r.human_wait_started_at, \
-                p.human_wait_timeout_secs \
+                p.human_wait_timeout_secs, d.progress_phase, d.last_progress_at \
          FROM task_execution_recovery r \
          JOIN task_executions e ON e.id = r.task_execution_id \
          LEFT JOIN orchestration_run_resilience_policy p \
            ON p.orchestration_run_id = e.orchestration_run_id \
+         LEFT JOIN agent_dispatch_jobs d \
+           ON d.id = e.dispatch_job_id AND d.status = 'Running' \
          WHERE e.status NOT IN ('Done', 'Failed', 'Cancelled')",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -5497,11 +6313,13 @@ pub fn expired_execution_timeouts(
             row.get::<_, Option<String>>(4)?,
             row.get::<_, Option<String>>(5)?,
             row.get::<_, Option<i64>>(6)?,
+            row.get::<_, Option<String>>(7)?,
+            row.get::<_, Option<String>>(8)?,
         ))
     })?;
     let mut expired = Vec::new();
     for row in rows {
-        let (id, status, total, activity, review, human_since, human_secs) = row?;
+        let (id, status, total, activity, review, human_since, human_secs, phase, phase_at) = row?;
         let parse = |value: Option<String>| value.map(parse_dt);
         if parse(total).is_some_and(|deadline| deadline <= now) {
             expired.push((id, ExecutionTimeoutKind::TotalDuration));
@@ -5513,11 +6331,170 @@ pub fn expired_execution_timeouts(
             if since + chrono::Duration::seconds(seconds) <= now {
                 expired.push((id, ExecutionTimeoutKind::HumanWait));
             }
-        } else if parse(activity).is_some_and(|deadline| deadline <= now) {
+        } else if status == TaskExecutionStatus::Working.as_str()
+            && parse(activity).is_some_and(|deadline| deadline <= now)
+            && !tool_in_flight(phase.as_deref(), phase_at.map(parse_dt), now)
+        {
+            // Only a worker that owes work can be silent. A delivered attempt
+            // (`AwaitingReview`) or a parked one is never an activity timeout.
             expired.push((id, ExecutionTimeoutKind::Activity));
         }
     }
     Ok(expired)
+}
+
+/// Alert the principal room that an execution needs a decision, without
+/// deciding for it. The message names the execution, its child room and the
+/// concrete options; it is posted in the transaction that parked the row.
+fn notify_principal_of_timeout(
+    conn: &Connection,
+    exec_id: &str,
+    kind: ExecutionTimeoutKind,
+    timeout_secs: Option<i64>,
+) -> Result<()> {
+    let context: Option<(String, Option<String>, i64, String)> = conn
+        .query_row(
+            "SELECT e.parent_discussion_id, e.sub_discussion_id, t.task_number, t.title \
+             FROM task_executions e \
+             JOIN planning_tasks t ON t.id = e.task_id \
+             WHERE e.id = ?1",
+            [exec_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    let Some((parent, child, task_number, title)) = context else {
+        return Ok(());
+    };
+    let Some(principal) = crate::db::discussions::get_discussion(conn, &parent)? else {
+        return Ok(());
+    };
+    let reference = format!("KT-{task_number}");
+    let lang = RoomLang::from_code(&principal.language);
+    let child_link = child
+        .as_deref()
+        .map(|id| {
+            format!(
+                " {} `{id}`.",
+                lang.pick("Sous-discussion :", "Sub-discussion:")
+            )
+        })
+        .unwrap_or_default();
+    let minutes = timeout_secs.map(|seconds| (seconds + 59) / 60);
+    let since = minutes
+        .map(|minutes| match lang {
+            RoomLang::Fr => format!(" depuis {minutes} min"),
+            RoomLang::En => format!(" for {minutes} min"),
+        })
+        .unwrap_or_default();
+    let (label, body) = match (kind, lang) {
+        (ExecutionTimeoutKind::Activity, RoomLang::Fr) => (
+            "activity_timeout",
+            format!(
+                "Le worker n'a produit aucune activité (appel d'outil, message, commit ou \
+                 livraison){since} : l'exécution est passée en `Interrupted` (origine `Working`), \
+                 `resume_worker`. Le worktree et la branche sont conservés. Décide :\n\n\
+                 1. **Reprendre le même worker** — `task_exec_resume` ;\n\
+                 2. **Réaffecter à un autre worker** — `task_exec_reassign` ;\n\
+                 3. **Reprendre la main** — `task_exec_reassign` vers ta propre session CLI."
+            ),
+        ),
+        (ExecutionTimeoutKind::Activity, RoomLang::En) => (
+            "activity_timeout",
+            format!(
+                "The worker produced no activity (tool call, message, commit or \
+                 delivery){since}: the execution moved to `Interrupted` (origin `Working`), \
+                 `resume_worker`. The worktree and the branch are kept. Decide:\n\n\
+                 1. **Resume the same worker** — `task_exec_resume`;\n\
+                 2. **Reassign to another worker** — `task_exec_reassign`;\n\
+                 3. **Take over** — `task_exec_reassign` to your own CLI session."
+            ),
+        ),
+        (ExecutionTimeoutKind::ReviewWait, RoomLang::Fr) => (
+            "review_wait_timeout",
+            format!(
+                "Une livraison attend ta revue{since} sans décision. Rien n'a été approuvé, rejeté \
+                 ni annulé : l'exécution reste en `AwaitingReview`, la livraison, le worktree \
+                 et la branche sont intacts. Relis-la puis appelle `task_exec_review` \
+                 (approuver ou demander des changements), ou `task_exec_reassign` / \
+                 `task_exec_cancel` si le travail doit être repris."
+            ),
+        ),
+        (ExecutionTimeoutKind::ReviewWait, RoomLang::En) => (
+            "review_wait_timeout",
+            format!(
+                "A delivery has been waiting for your review{since} without a decision. \
+                 Nothing was approved, rejected or cancelled: the execution stays in \
+                 `AwaitingReview`, the delivery, the worktree and the branch are intact. Read \
+                 it again then call `task_exec_review` (approve or request changes), or \
+                 `task_exec_reassign` / `task_exec_cancel` if the work must be taken over."
+            ),
+        ),
+        (ExecutionTimeoutKind::TotalDuration, RoomLang::Fr) => (
+            "total_duration_timeout",
+            "La durée totale impartie au run est dépassée alors qu'une livraison attend ta \
+             revue. Rien n'a été approuvé, rejeté ni annulé : l'exécution reste en \
+             `AwaitingReview`, la livraison, le worktree et la branche sont intacts. Relis-la \
+             puis appelle `task_exec_review` (approuver ou demander des changements), ou \
+             `task_exec_reassign` / `task_exec_cancel` si le travail doit être repris."
+                .to_string(),
+        ),
+        (ExecutionTimeoutKind::TotalDuration, RoomLang::En) => (
+            "total_duration_timeout",
+            "The total duration allotted to the run is exceeded while a delivery is waiting \
+             for your review. Nothing was approved, rejected or cancelled: the execution stays \
+             in `AwaitingReview`, the delivery, the worktree and the branch are intact. Read it \
+             again then call `task_exec_review` (approve or request changes), or \
+             `task_exec_reassign` / `task_exec_cancel` if the work must be taken over."
+                .to_string(),
+        ),
+        _ => return Ok(()),
+    };
+    let message = DiscussionMessage {
+        id: format!(
+            "orch-principal-timeout:{exec_id}:{label}:{}",
+            Uuid::new_v4()
+        ),
+        role: MessageRole::User,
+        channel: MessageChannel::Main,
+        content: match lang {
+            RoomLang::Fr => format!(
+                "**Événement d'orchestration — {reference}**\n\n\
+                 L'exécution `{exec_id}` (**{title}**) demande une décision.{child_link} {body}"
+            ),
+            RoomLang::En => format!(
+                "**Orchestration event — {reference}**\n\n\
+                 Execution `{exec_id}` (**{title}**) needs a decision.{child_link} {body}"
+            ),
+        },
+        agent_type: None,
+        timestamp: Utc::now(),
+        tokens_used: 0,
+        session_tokens_at_message: None,
+        recovered_partial: false,
+        auth_mode: None,
+        model_tier: None,
+        model: None,
+        cost_usd: None,
+        author_pseudo: Some("Orchestrateur".to_string()),
+        author_avatar_email: None,
+        source_msg_id: None,
+        duration_ms: None,
+        lint_report: None,
+        target_agent: None,
+        reply_to_message_id: None,
+        author_cli_ordinal: None,
+        session_continuity: None,
+    };
+    let targets = [principal_notice_target(conn, exec_id, principal.agent)?];
+    crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
+        conn,
+        &parent,
+        &message,
+        &targets,
+        &[],
+        None,
+    )?;
+    Ok(())
 }
 
 pub fn apply_execution_timeout(
@@ -5538,61 +6515,124 @@ pub fn apply_execution_timeout(
             ExecutionTimeoutKind::HumanWait => "human_wait_timeout",
         };
         if kind == ExecutionTimeoutKind::Activity {
-            let watchdog_redispatches: u32 = conn
+            // KT-1247 — a silent worker is handed back, never discarded. The
+            // clock only means something while the attempt is `Working`: a
+            // delivery that already moved the row on (`AwaitingReview`) or a
+            // parked row owes no activity, so the stale deadline is disarmed
+            // and nothing is interrupted.
+            if execution.status != TaskExecutionStatus::Working {
+                conn.execute(
+                    "UPDATE task_execution_recovery SET activity_deadline_at = NULL, \
+                            updated_at = ?2 WHERE task_execution_id = ?1",
+                    params![exec_id, Utc::now().to_rfc3339()],
+                )?;
+                return Ok(false);
+            }
+            // Activity may have landed between the scan and this apply.
+            let pushed: Option<String> = conn
                 .query_row(
-                    "SELECT watchdog_redispatches FROM task_execution_recovery \
+                    "SELECT activity_deadline_at FROM task_execution_recovery \
                      WHERE task_execution_id = ?1",
                     [exec_id],
-                    |row| Ok(row.get::<_, i64>(0)?.max(0) as u32),
+                    |row| row.get(0),
                 )
                 .optional()?
-                .unwrap_or(0);
-            if watchdog_redispatches == 0 {
-                if let Some(dispatch_id) = execution.dispatch_job_id.as_deref() {
-                    if crate::db::agent_dispatch::apply_watchdog_stall(conn, dispatch_id)?
-                        == crate::db::agent_dispatch::WatchdogTransition::Redispatched
-                    {
-                        let activity_timeout_secs: Option<i64> = conn
-                            .query_row(
-                                "SELECT policy.activity_timeout_secs \
-                                 FROM orchestration_run_resilience_policy policy \
-                                 WHERE policy.orchestration_run_id = ?1",
-                                [&execution.orchestration_run_id],
-                                |row| row.get(0),
-                            )
-                            .optional()?
-                            .flatten();
-                        let now = Utc::now();
-                        let next_deadline = activity_timeout_secs
-                            .map(|seconds| now + chrono::Duration::seconds(seconds));
-                        conn.execute(
-                            "UPDATE task_execution_recovery \
-                             SET watchdog_redispatches = 1, recovery_action = 'resume_worker', \
-                                 recovery_reason = 'watchdog_stall_redispatch', \
-                                 last_activity_at = ?2, activity_deadline_at = ?3, \
-                                 pending = 1, updated_at = ?2 WHERE task_execution_id = ?1",
-                            params![
-                                exec_id,
-                                now.to_rfc3339(),
-                                next_deadline.map(|value| value.to_rfc3339()),
-                            ],
-                        )?;
-                        record_reconciliation_event(
-                            conn,
-                            "execution",
-                            exec_id,
-                            "watchdog_stall_redispatch",
-                            serde_json::json!({"dispatch_job_id": dispatch_id}),
-                        )?;
-                        return Ok(true);
-                    }
-                }
-            } else if let Some(dispatch_id) = execution.dispatch_job_id.as_deref() {
-                // The only retry budget was already consumed. Settle the
-                // dispatch cause before escalating the business execution so
-                // attention/presence readers see the same honest state.
-                let _ = crate::db::agent_dispatch::apply_watchdog_stall(conn, dispatch_id)?;
+                .flatten();
+            if pushed.is_some_and(|value| parse_dt(value) > Utc::now()) {
+                return Ok(false);
             }
+            let policy_secs = get_resilience_policy(conn, &execution.orchestration_run_id)?
+                .activity_timeout_secs
+                .map(i64::from);
+            let timeout_secs = effective_activity_secs(policy_secs, TaskExecutionStatus::Working);
+            // The provider run is settled with the execution so the later
+            // resume enqueues a fresh dispatch instead of mistaking a dead
+            // Running row for a live worker.
+            if let Some(dispatch_id) = execution.dispatch_job_id.as_deref() {
+                crate::db::agent_dispatch::mark_failed_with_kind(
+                    conn,
+                    dispatch_id,
+                    "activity_timeout: no worker activity before the deadline",
+                    "dispatch_stalled",
+                )?;
+            }
+            record_reconciliation_event(
+                conn,
+                "execution",
+                exec_id,
+                label,
+                serde_json::json!({ "status": execution.status.as_str() }),
+            )?;
+            transition_execution(
+                conn,
+                exec_id,
+                TaskExecutionStatus::Interrupted,
+                &OrchestrationActor {
+                    kind: PlanningActorKind::System,
+                    id: Some("orchestration-watchdog".into()),
+                    session_id: None,
+                    source_message_id: None,
+                },
+                serde_json::json!({ "timeout_kind": label }),
+            )?;
+            conn.execute(
+                "UPDATE task_execution_recovery SET activity_deadline_at = NULL, \
+                        review_deadline_at = NULL, human_wait_started_at = NULL, \
+                        recovery_action = 'resume_worker', recovery_reason = ?2, \
+                        pending = 1, updated_at = ?3 \
+                 WHERE task_execution_id = ?1",
+                params![exec_id, label, Utc::now().to_rfc3339()],
+            )?;
+            notify_principal_of_timeout(conn, exec_id, kind, timeout_secs)?;
+            return Ok(true);
+        }
+        let delivered = execution.status == TaskExecutionStatus::AwaitingReview;
+        if kind == ExecutionTimeoutKind::ReviewWait
+            || (kind == ExecutionTimeoutKind::TotalDuration && delivered)
+        {
+            // KT-1293 — the delivery is untouched and no review is written: the
+            // principal is alerted, and only the principal decides. The row
+            // therefore stays `AwaitingReview`, the one state `task_exec_review`
+            // accepts, so the alert's own advice (approve / request changes) is
+            // still honoured. Escalating here locked the principal out of the
+            // review. The total-duration clock takes the same road for a
+            // delivered attempt; the review clock only means something while a
+            // delivery waits.
+            if !delivered {
+                conn.execute(
+                    "UPDATE task_execution_recovery SET review_deadline_at = NULL, \
+                            updated_at = ?2 WHERE task_execution_id = ?1",
+                    params![exec_id, Utc::now().to_rfc3339()],
+                )?;
+                return Ok(false);
+            }
+            record_reconciliation_event(
+                conn,
+                "execution",
+                exec_id,
+                label,
+                serde_json::json!({ "status": execution.status.as_str() }),
+            )?;
+            // Disarming the review deadline makes the alert fire once; the
+            // total-duration clock is dropped like on every human wait.
+            conn.execute(
+                "UPDATE task_execution_recovery SET activity_deadline_at = NULL, \
+                        review_deadline_at = NULL, total_deadline_at = NULL, \
+                        human_wait_started_at = NULL, recovery_action = 'await_review', \
+                        recovery_reason = ?2, pending = 0, updated_at = ?3 \
+                 WHERE task_execution_id = ?1",
+                params![exec_id, label, Utc::now().to_rfc3339()],
+            )?;
+            let waited_secs = if kind == ExecutionTimeoutKind::ReviewWait {
+                let policy_secs = get_resilience_policy(conn, &execution.orchestration_run_id)?
+                    .review_timeout_secs
+                    .map(i64::from);
+                Some(effective_review_secs(policy_secs))
+            } else {
+                None
+            };
+            notify_principal_of_timeout(conn, exec_id, kind, waited_secs)?;
+            return Ok(true);
         }
         record_reconciliation_event(
             conn,
@@ -6060,7 +7100,8 @@ pub fn cancel_execution_tree(
             "UPDATE task_executions SET outcome_reason = ?2 WHERE id = ?1",
             params![exec_id, reason],
         )?;
-        crate::db::planning::restore_task_todo_after_cancellation(conn, &execution.task_id, actor)?;
+        // KT-1267 — the task status is deliberately left alone: the work may
+        // already be integrated by hand, so the principal decides (done / todo).
         record_reconciliation_event(
             conn,
             "execution",

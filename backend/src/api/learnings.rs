@@ -144,9 +144,11 @@ pub async fn propose_learning(
     // 5. kind binding — a `fact` should carry at least one Verified evidence
     let mut warnings = Vec::new();
     if req.kind == LearningKind::Fact && report.verified_count == 0 {
-        warnings.push(
-            "kind=fact sans evidence mécaniquement vérifiée (url/user only) — à confirmer".into(),
-        );
+        warnings.push(if report.ai_doc_count > 0 {
+            "kind=fact appuyé seulement sur une doc non validée par un humain (ou modifiée depuis) — à confirmer".into()
+        } else {
+            "kind=fact sans evidence mécaniquement vérifiée (url/user only) — à confirmer".into()
+        });
     }
     if req.kind == LearningKind::Inference {
         warnings.push("kind=inference — double validation recommandée avant promotion".into());
@@ -330,9 +332,11 @@ pub async fn validate_learning(
         ));
     }
     if learning.kind == LearningKind::Fact && report.verified_count == 0 {
-        return Json(ApiResponse::err(
-            "kind=fact sans evidence mécaniquement vérifiée — corrige l'evidence ou reclasse en preference/inference",
-        ));
+        return Json(ApiResponse::err(if report.ai_doc_count > 0 {
+            "kind=fact appuyé seulement sur une doc générée par IA (ou modifiée depuis sa validation humaine) — reconfirme la doc, cite le code, ou reclasse en preference/inference"
+        } else {
+            "kind=fact sans evidence mécaniquement vérifiée — corrige l'evidence ou reclasse en preference/inference"
+        }));
     }
     // §5 binding — a `preference` (User scope, high blast-radius) must carry a
     // dated user evidence (kind=user + a YYYY-MM-DD date in the ref). Spec
@@ -352,7 +356,13 @@ pub async fn validate_learning(
     let scope = route_scope(learning.kind, learning.project_id.as_deref());
     let target = match scope {
         LearningScope::Project => match project_root.as_deref() {
-            Some(root) => std::path::PathBuf::from(root).join(promotion_target(scope)),
+            Some(root) => {
+                // Under the project's docs root (KT-1192).
+                let resolved = crate::core::scanner::resolve_host_path(root);
+                let rel = crate::core::docs_location::DocsRoot::of(&resolved)
+                    .relocate_static(promotion_target(scope));
+                std::path::PathBuf::from(root).join(rel)
+            }
             None => return Json(ApiResponse::err("scope=project mais projet sans chemin")),
         },
         LearningScope::User => user_context::user_context_dir().join(promotion_target(scope)),

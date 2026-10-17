@@ -264,6 +264,7 @@ pub fn reconcile_awaiting_agents(conn: &Connection) -> Result<Vec<String>> {
                 target_agent: None,
                 reply_to_message_id: None,
                 author_cli_ordinal: None,
+                session_continuity: None,
             };
             // If the notice can't be persisted, KEEP awaiting_agent=1 so the
             // next boot retries: no notice landed, so retrying can't duplicate
@@ -387,6 +388,7 @@ pub fn recover_partial_responses(conn: &Connection) -> Result<Vec<String>> {
             target_agent: None,
             reply_to_message_id: trigger_message_id,
             author_cli_ordinal: None,
+            session_continuity: None,
         };
         let recovery_result = (|| -> Result<()> {
             let transaction = conn.unchecked_transaction()?;
@@ -703,6 +705,18 @@ pub fn list_discussions_with_messages(conn: &Connection) -> Result<Vec<Discussio
     }
 
     Ok(discussions)
+}
+
+/// The language the orchestrator speaks in a room: the discussion's own
+/// `language`. A missing discussion reads English, the language every reader has.
+pub fn room_lang(conn: &Connection, id: &str) -> crate::core::room_lang::RoomLang {
+    conn.query_row(
+        "SELECT language FROM discussions WHERE id = ?1",
+        [id],
+        |row| row.get::<_, String>(0),
+    )
+    .map(|code| crate::core::room_lang::RoomLang::from_code(&code))
+    .unwrap_or_default()
 }
 
 pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>> {
@@ -1845,6 +1859,47 @@ pub fn insert_native_agent_message_with_checkpoint(
     paid_limit: Option<u32>,
     checkpoint: Option<&super::acp_runtime_sessions::TurnCompletion>,
 ) -> Result<NativeAgentMessageOutcome> {
+    insert_native_agent_message_with_audit_documents(
+        conn,
+        discussion_id,
+        msg,
+        child_run_was_success,
+        dispatch_job_id,
+        source_agent,
+        candidate_agents,
+        globally_enabled,
+        paid_limit,
+        checkpoint,
+        None,
+    )
+}
+
+/// A validation reply certifies the exact post-agent documents in the SAME
+/// transaction as its terminal message and conversation checkpoint.
+#[allow(clippy::too_many_arguments)]
+pub fn insert_native_agent_message_with_audit_documents(
+    conn: &Connection,
+    discussion_id: &str,
+    msg: &DiscussionMessage,
+    child_run_was_success: bool,
+    dispatch_job_id: Option<&str>,
+    source_agent: &AgentType,
+    candidate_agents: &[AgentType],
+    globally_enabled: bool,
+    paid_limit: Option<u32>,
+    checkpoint: Option<&super::acp_runtime_sessions::TurnCompletion>,
+    validation_documents: Option<&str>,
+) -> Result<NativeAgentMessageOutcome> {
+    if validation_documents.is_some() {
+        anyhow::ensure!(
+            child_run_was_success
+                && crate::api::discussions::ends_with_terminal_signal(
+                    &msg.content,
+                    "KRONN:VALIDATION_COMPLETE"
+                ),
+            "Document fingerprints require a successful terminal validation reply"
+        );
+    }
     let checkpoint = checkpoint.filter(|_| child_run_was_success);
     if checkpoint.is_some_and(|proof| {
         proof.key.discussion_id != discussion_id
@@ -1854,6 +1909,9 @@ pub fn insert_native_agent_message_with_checkpoint(
         anyhow::bail!("conversation checkpoint does not match its native response");
     }
     let transaction = conn.unchecked_transaction()?;
+    if let Some(documents) = validation_documents {
+        super::audit_documents::finish_validation(&transaction, discussion_id, documents)?;
+    }
     let (no_agent, discussion_disabled, primary_agent, participants_json): (
         i64,
         i64,
@@ -1869,7 +1927,7 @@ pub fn insert_native_agent_message_with_checkpoint(
         serde_json::from_str::<Vec<AgentType>>(&participants_json).unwrap_or_default();
     let primary_agent = parse_agent_type(&primary_agent)?;
     if !attached_agents.contains(&primary_agent) {
-        attached_agents.push(primary_agent);
+        attached_agents.push(primary_agent.clone());
     }
 
     // KT-330 — a native reply that names a joined CLI peer by its room alias
@@ -1877,7 +1935,7 @@ pub fn insert_native_agent_message_with_checkpoint(
     // aliases to Cli targets and persist them regardless of the handoff branch
     // below: a bare provider mention stays inert (marker-gated), but naming a
     // joined session is an explicit wake even when native handoffs are off.
-    let cli_mention_targets: Vec<MessageTarget> =
+    let (cli_mention_targets, joined_cli): (Vec<MessageTarget>, Vec<MessageTarget>) =
         if crate::db::discussion_sessions::count_cli_sessions(&transaction, discussion_id)? > 0 {
             let views = crate::db::discussion_sessions::list_participant_views(
                 &transaction,
@@ -1892,26 +1950,76 @@ pub fn insert_native_agent_message_with_checkpoint(
                     session_pk: v.id,
                 })
                 .collect();
-            crate::db::discussion_sessions::resolve_cli_session_mentions(&msg.content, &joined)
-                .into_iter()
-                .map(|pk| {
-                    let view = views
-                        .iter()
-                        .find(|view| view.id == pk)
-                        .ok_or(rusqlite::Error::InvalidQuery)?;
-                    Ok(session_cli_target(&view.agent_type, pk))
-                })
-                .collect::<rusqlite::Result<Vec<_>>>()?
-                .into_iter()
-                .flatten()
-                .collect()
+            let joined_cli = joined
+                .iter()
+                .filter_map(|session| session_cli_target(&session.agent_type, session.session_pk))
+                .collect();
+            let mentioned =
+                crate::db::discussion_sessions::resolve_cli_session_mentions(&msg.content, &joined)
+                    .into_iter()
+                    .map(|pk| {
+                        let view = views
+                            .iter()
+                            .find(|view| view.id == pk)
+                            .ok_or(rusqlite::Error::InvalidQuery)?;
+                        Ok(session_cli_target(&view.agent_type, pk))
+                    })
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+                    .into_iter()
+                    .flatten()
+                    .collect();
+            (mentioned, joined_cli)
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
     let connection_mention_targets = {
         let connections = crate::db::external_api_connections::list(&transaction)?;
         crate::db::external_api_connections::resolve_connection_mentions(&msg.content, &connections)
     };
+    // KT-1201 — the CLI that wrote the turn this reply answers, and the joined
+    // CLIs an agent-written short alias (`@claude`, marker or prose) names.
+    // A provider resolved to a CLI never spawns a punctual agent.
+    let reply_author = match msg.reply_to_message_id.as_deref() {
+        Some(parent) => message_cli_author_target(&transaction, discussion_id, parent)?,
+        None => None,
+    };
+    let mut alias_cli_targets: Vec<MessageTarget> = Vec::new();
+    let mut providers_resolved_to_cli: Vec<AgentType> = Vec::new();
+    for provider in
+        candidate_agents
+            .iter()
+            .cloned()
+            .chain(crate::api::disc_helpers::agent_mentions_in_prose(
+                &msg.content,
+            ))
+    {
+        if &provider == source_agent || providers_resolved_to_cli.contains(&provider) {
+            continue;
+        }
+        if let Some(target) = agent_alias_cli_target(
+            &provider,
+            reply_author.as_ref(),
+            &joined_cli,
+            &primary_agent,
+        ) {
+            providers_resolved_to_cli.push(provider);
+            alias_cli_targets.push(target);
+        }
+    }
+    let candidate_agents: Vec<AgentType> = candidate_agents
+        .iter()
+        .filter(|agent| !providers_resolved_to_cli.contains(agent))
+        .cloned()
+        .collect();
+    let mut cli_targets = cli_mention_targets;
+    for target in alias_cli_targets {
+        if !cli_targets
+            .iter()
+            .any(|existing| existing.cli_session_id == target.cli_session_id)
+        {
+            cli_targets.push(target);
+        }
+    }
 
     let mut allowed = Vec::new();
     let root =
@@ -1932,7 +2040,7 @@ pub fn insert_native_agent_message_with_checkpoint(
             discussion_id,
             msg.reply_to_message_id.as_deref(),
         )?;
-        for agent in candidate_agents {
+        for agent in &candidate_agents {
             if agent == source_agent
                 || already_scheduled.contains(agent)
                 || !attached_agents.contains(agent)
@@ -1972,7 +2080,10 @@ pub fn insert_native_agent_message_with_checkpoint(
             .collect::<Vec<_>>();
         // CLI wake targets ride the same message but never trigger a native
         // dispatch or `awaiting_agent`: the joined peer wakes via wait_for_peer.
-        targets.extend(cli_mention_targets.iter().cloned());
+        targets.extend(cli_targets.iter().cloned());
+        if targets.is_empty() && connection_mention_targets.is_empty() {
+            targets.extend(reply_author.clone());
+        }
         crate::db::external_api_connections::merge_connection_mention_targets(
             &mut targets,
             connection_mention_targets.clone(),
@@ -2024,7 +2135,10 @@ pub fn insert_native_agent_message_with_checkpoint(
          WHERE id = ?1",
         params![msg.id, child_run_was_success as i64, dispatch_job_id],
     )?;
-    let mut mention_targets = cli_mention_targets;
+    let mut mention_targets = cli_targets;
+    if mention_targets.is_empty() && connection_mention_targets.is_empty() {
+        mention_targets.extend(reply_author);
+    }
     crate::db::external_api_connections::merge_connection_mention_targets(
         &mut mention_targets,
         connection_mention_targets,
@@ -2371,6 +2485,11 @@ pub fn update_discussion_participants(
 
 // ─── Messages ───────────────────────────────────────────────────────────────
 
+/// An unreadable value is unknown, never a reason to drop the message.
+fn parse_session_continuity(raw: Option<String>) -> Option<crate::models::SessionContinuity> {
+    raw.and_then(|value| serde_json::from_str(&value).ok())
+}
+
 /// Load all messages grouped by discussion_id in a single query (avoids N+1).
 fn list_all_messages(
     conn: &Connection,
@@ -2386,7 +2505,8 @@ fn list_all_messages(
                     AND NOT EXISTS (
                         SELECT 1 FROM workflow_step_room_sessions step_session
                          WHERE step_session.session_pk = mca.cli_session_id
-                    )) AS author_cli_ordinal
+                    )) AS author_cli_ordinal,
+                session_continuity
          FROM messages ORDER BY sort_order, timestamp"
     )?;
 
@@ -2431,6 +2551,7 @@ fn list_all_messages(
                     .unwrap_or(Some(false))
                     .unwrap_or(false),
                 author_cli_ordinal: row.get::<_, Option<i64>>(17).unwrap_or(None),
+                session_continuity: parse_session_continuity(row.get(18)?),
             },
         ))
     })?;
@@ -2471,7 +2592,8 @@ pub fn list_messages(conn: &Connection, discussion_id: &str) -> Result<Vec<Discu
                     AND NOT EXISTS (
                         SELECT 1 FROM workflow_step_room_sessions step_session
                          WHERE step_session.session_pk = mca.cli_session_id
-                    )) AS author_cli_ordinal
+                    )) AS author_cli_ordinal,
+                session_continuity
          FROM messages WHERE discussion_id = ?1
          ORDER BY sort_order, timestamp"
     )?;
@@ -2517,6 +2639,7 @@ pub fn list_messages(conn: &Connection, discussion_id: &str) -> Result<Vec<Discu
                     .unwrap_or(Some(false))
                     .unwrap_or(false),
                 author_cli_ordinal: row.get::<_, Option<i64>>(20).unwrap_or(None),
+                session_continuity: parse_session_continuity(row.get(21)?),
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -2558,6 +2681,7 @@ pub fn list_notes(
                     recovered_partial: false,
                     session_tokens_at_message: None,
                     author_cli_ordinal: None,
+                    session_continuity: None,
                     id: row.get(1)?,
                     role: parse_role(&role),
                     channel: parse_message_channel(&channel),
@@ -2745,8 +2869,8 @@ fn insert_message_inner(
         crate::db::assistant_conversations::mask_for_discussion(conn, discussion_id, &msg.content)?;
 
     conn.execute(
-        "INSERT INTO messages (id, discussion_id, role, channel, content, agent_type, timestamp, sort_order, tokens_used, auth_mode, model_tier, cost_usd, author_pseudo, author_avatar_email, source_msg_id, duration_ms, lint_report, model, target_agent, received_at, reply_to_message_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+        "INSERT INTO messages (id, discussion_id, role, channel, content, agent_type, timestamp, sort_order, tokens_used, auth_mode, model_tier, cost_usd, author_pseudo, author_avatar_email, source_msg_id, duration_ms, lint_report, model, target_agent, received_at, reply_to_message_id, session_continuity)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
         params![
             msg.id,
             discussion_id,
@@ -2771,6 +2895,8 @@ fn insert_message_inner(
             // timestamp — the pacing anchors depend on it.
             chrono::Utc::now().to_rfc3339(),
             msg.reply_to_message_id,
+            msg.session_continuity
+                .and_then(|continuity| serde_json::to_string(&continuity).ok()),
         ],
     )?;
     if let Some(target) = msg.target_agent.as_ref() {
@@ -2808,6 +2934,19 @@ fn insert_message_inner(
             &msg.id,
             &msg.content,
         )?;
+        super::audit_validation::on_agent_message(
+            conn,
+            discussion_id,
+            &msg.id,
+            &msg.content,
+            &msg.timestamp.to_rfc3339(),
+        )?;
+    }
+
+    // KT-1247 — a message from the worker is activity: it pushes the silent-
+    // worker clock of the execution that owns this room.
+    if matches!(msg.role, crate::models::MessageRole::Agent) {
+        let _ = super::orchestration::note_room_activity(conn, discussion_id);
     }
 
     Ok(next_order)
@@ -3918,6 +4057,48 @@ pub fn update_message_tokens(
         params![tokens_used as i64, auth_mode, message_id],
     )?;
     Ok(())
+}
+
+/// KT-1201 — the joined CLI an AGENT-written short alias (`@claude`) names: the
+/// CLI of that provider that wrote the turn being answered, else the only
+/// joined CLI of that provider unless the provider is the room's own agent.
+/// `None` keeps the native meaning (punctual spawn or discussion agent).
+/// Human-composed mentions never go through this: KT-211 keeps them literal.
+pub(crate) fn agent_alias_cli_target(
+    provider: &AgentType,
+    reply_author: Option<&MessageTarget>,
+    joined_cli: &[MessageTarget],
+    room_agent: &AgentType,
+) -> Option<MessageTarget> {
+    if let Some(author) = reply_author
+        .filter(|author| author.kind == MessageTargetKind::Cli && &author.agent_type == provider)
+    {
+        return Some(author.clone());
+    }
+    if provider == room_agent {
+        return None;
+    }
+    let mut same_provider = joined_cli
+        .iter()
+        .filter(|target| &target.agent_type == provider);
+    match (same_provider.next(), same_provider.next()) {
+        (Some(only), None) => Some(only.clone()),
+        _ => None,
+    }
+}
+
+/// Every joined, non-workflow CLI session of a discussion as a typed target.
+pub(crate) fn joined_cli_targets(
+    conn: &Connection,
+    discussion_id: &str,
+) -> Result<Vec<MessageTarget>> {
+    Ok(
+        crate::db::discussion_sessions::list_participant_views(conn, discussion_id)?
+            .into_iter()
+            .filter(|view| view.workflow_step.is_none())
+            .filter_map(|view| session_cli_target(&view.agent_type, view.id))
+            .collect(),
+    )
 }
 
 /// A joined session as a typed CLI target, or `None` when the bridge could not

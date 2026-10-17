@@ -291,6 +291,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
+          # Both parents of the pull request's merge commit, for the doc-citation scope.
+          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 1 }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
@@ -308,15 +310,30 @@ jobs:
       # would be thousands of multi-MB files. An extracted test binary no
       # longer sits under the checkout, so it cannot find `templates/` by
       # walking up from itself: point at it.
+      # The doc-citation gate blocks a pull request only on the docs it
+      # changes; other triggers leave the variable unset and stay strict.
+      - name: Doc citations — paths this pull request changes
+        if: github.event_name == 'pull_request'
+        run: ../scripts/ci/docs_citations_changed.sh "$RUNNER_TEMP/docs-citations-changed.txt"
+
       - name: Run test slice ${{ matrix.shard }}/3
         env:
           NEXTEST_PROFILE: ci
+          KRONN_DOCS_CITATIONS_REPORT_DIR: ${{ runner.temp }}/docs-citations
           KRONN_TEMPLATES_DIR: ${{ github.workspace }}/templates
           LLVM_PROFILE_FILE: ${{ runner.temp }}/profraw/shard-${{ matrix.shard }}-%8m.profraw
         run: |
           cargo nextest run --archive-file "$RUNNER_TEMP/kronn-tests.tar.zst" \
             --workspace-remap "$PWD" \
             --partition slice:${{ matrix.shard }}/3
+
+      # nextest hides a passing test's output: the gate leaves its warnings here.
+      - name: Doc citations — annotations and summary
+        if: always()
+        run: |
+          dir="$RUNNER_TEMP/docs-citations"
+          if [ -f "$dir/summary.md" ]; then cat "$dir/summary.md" >> "$GITHUB_STEP_SUMMARY"; fi
+          if [ -f "$dir/annotations.txt" ]; then cat "$dir/annotations.txt"; fi
 
       - name: Upload coverage profiles
         if: always()

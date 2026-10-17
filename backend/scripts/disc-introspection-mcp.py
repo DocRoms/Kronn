@@ -218,6 +218,11 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
     {
+        "name": "room_scope",
+        "description": "Room's project reach; `project` asks a human for one. See tool_manual.",
+        "inputSchema": {"type": "object", "properties": {"project": {"type": "string"}, "access": {"enum": ["read", "write"]}, "reason": {"type": "string"}}},
+    },
+    {
         "name": "disc_question_list",
         "description": "Read pending human arbitrations (latest 50), or the durable answer for an exact key. Never answers for the human. A kronn-question requires numeric version 1, not string \"1\". After publication, read back its exact key to verify recording; absence is not consent. Complete valid example and recovery protocol: tool_manual({tool: \"disc_question_list\"}).",
         "inputSchema": {"type": "object", "properties": {"key": {"type": "string", "maxLength": 100}}, "additionalProperties": False},
@@ -441,10 +446,7 @@ TOOLS = [
             "discussion unless `discussion_id` targets another, which works "
             "even with no bound discussion or `rejoin_required`. Call "
             "`plan_get` again immediately before, so a peer's recent write is "
-            "visible, and write directly only on unambiguous intent. Pass "
-            "`idempotency_key` for a stable retry identity; omitted, "
-            "`source_message_id` derives one, so several tasks from one "
-            "message need distinct explicit keys. Titles are never identities."
+            "visible, and write directly only on unambiguous intent."
         ),
         "inputSchema": {
             "type": "object",
@@ -456,7 +458,7 @@ TOOLS = [
                 },
                 "idempotency_key": {
                     "type": "string",
-                    "description": "Stable caller key for this one logical create; scoped to the effective target discussion by the bridge.",
+                    "description": "Stable key for this one logical create, scoped to the target discussion; see tool_manual.",
                 },
                 "description": {"type": "string"},
                 "status": {
@@ -571,10 +573,10 @@ TOOLS = [
     {
         "name": "task_update_dod",
         "description": (
-            "Check or uncheck one Definition of Done item atomically. Use the "
-            "DoD item id returned by task_get. Prefer this over replacing the "
-            "whole definition_of_done array when only completion changed: two "
-            "agents can update different items without overwriting each other."
+            "Check or uncheck one DoD item atomically, by the id task_get "
+            "returns; prefer it to replacing the whole array. A "
+            "post_integration item is the principal's live check: ticking it "
+            "needs `evidence`."
         ),
         "inputSchema": {
             "type": "object",
@@ -582,6 +584,7 @@ TOOLS = [
                 "task_id": {"type": "string"},
                 "dod_id": {"type": "string"},
                 "completed": {"type": "boolean"},
+                "evidence": {"type": "string"},
                 "source_message_id": {"type": "string"},
             },
             "required": ["task_id", "dod_id", "completed"],
@@ -620,6 +623,33 @@ TOOLS = [
             "required": ["task_id", "blocker_task_id"],
         },
     },
+    {
+        "name": "task_assign",
+        "description": (
+            "Put yourself, or `assignee`, on a task; `unassign:true` takes "
+            "it off. Contract: tool_manual."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string"},
+                "role": {"type": "string", "enum": ["owner", "reviewer"]},
+                "unassign": {"type": "boolean"},
+                "assignee": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"type": "string", "enum": ["discussion_agent", "agent", "cli"]},
+                        "agent_type": {"type": "string"},
+                        "cli_session_id": {"type": "integer"},
+                        "connection_id": {"type": "string"},
+                    },
+                    "required": ["kind", "agent_type"],
+                },
+                "source_message_id": {"type": "string"},
+            },
+            "required": ["task_id"],
+        },
+    },
     # ─── 0.8.4 (#294) cross-agent memory tools ─────────────────────────
     # Each one is a 1:1 mirror of a backend route in
     # `backend/src/api/disc_source.rs`. They let an external CLI
@@ -653,19 +683,19 @@ TOOLS = [
     {
         "name": "disc_append",
         "description": (
-            "Post prose to the bound room. NEVER invent a pseudo: the human is `@user`; "
+            "Post to the bound room. Human decision → `kronn-question` fence "
+            "(`tool_manual disc_question_list`). NEVER invent a pseudo: the human is `@user`; "
             "native aliases are `@claude`, `@codex`, `@vibe`, `@gemini`, `@kiro`, "
             "`@copilot`, `@ollama`; a joined CLI requires its exact `@…-cli[-N]` alias "
-            "from `disc_meta`. Ambiguous bare aliases are refused. Use "
-            "`reply_to_message_id` for a durable reply. POSTING ALSO LISTENS unless "
-            "`wait_for_reply:false`; `last_sort_order` is only a write receipt, never a "
-            "read cursor. Bulk import and dedup: "
+            "from `disc_meta`; ambiguous bare aliases are refused. POSTING ALSO LISTENS unless "
+            "`wait_for_reply:false`; `last_sort_order` is a write receipt, not a "
+            "read cursor. Bulk import/dedup: "
             "`tool_manual({tool: \"disc_append\"})`."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "content": {"type": "string", "description": "Live message text."},
+                "content": {"type": "string", "description": "Message text."},
                 "role": {"type": "string", "description": "Default Agent; User is for imports."},
                 "channel": {"type": "string", "enum": ["main", "note"], "description": "Default main; notes do not wake."},
                 "agent_type": {"type": "string", "description": "Normally inferred."},
@@ -692,11 +722,11 @@ TOOLS = [
                 },
                 "wait_for_reply": {"type": "boolean", "description": "Default true."},
                 "source_msg_id": {"type": "string", "description": "Explicit dedup key."},
-                "wait_timeout_secs": {"type": "integer", "description": "Wait seconds; default 60."},
+                "wait_timeout_secs": {"type": "integer", "description": "Default 60 s."},
                 "disc_id": {"type": "string", "description": "Defaults to the bound discussion."},
                 "messages": {
                     "type": "array",
-                    "description": "Bulk transcript messages.",
+                    "description": "Bulk messages.",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -739,12 +769,10 @@ TOOLS = [
             "finds the room again via `disc_find_by_session` without a fresh "
             "invite token. ⚠ EVERY ARGUMENT IS OPTIONAL: called bare, "
             "`disc_link({})` binds THIS CLI session to the currently-bound "
-            "disc — you cannot know your own durable session id, the bridge "
-            "derives it. `disc_join` already does this for you; call this only "
-            "to bind a disc you reached another way. Safe by default: if that "
-            "session already owns another discussion the call fails instead of "
-            "silently stealing it. Set force_reassign=true only when the user "
-            "explicitly asks to transfer ownership."
+            "disc. `disc_join` already does this; call this only for a disc "
+            "you reached another way. A session that already owns another "
+            "discussion fails instead of being stolen: set force_reassign=true "
+            "only when the user explicitly asks to transfer ownership."
         ),
         "inputSchema": {
             "type": "object",
@@ -767,16 +795,12 @@ TOOLS = [
     {
         "name": "disc_transfer_session",
         "description": (
-            "Explicitly hand THIS durable CLI session from its previous room "
-            "to the room currently joined by this bridge. Use only after the "
-            "human clearly asks to change rooms. `from_disc_id` pins the room "
-            "the caller expects to release and `confirm_transfer=true` is "
-            "mandatory; ownership changes or missing confirmation fail closed. "
-            "The backend atomically closes the previous append-only binding "
-            "history row, opens the new one and returns `session_bound: true`. "
-            "Afterward, a bare `disc_find_by_session({})` resumes this new room "
-            "after an MCP reload. This transfers durable resume ownership only; "
-            "it does not impersonate `disc_leave` or alter unrelated peers."
+            "Hand THIS durable CLI session from its previous room to the room "
+            "this bridge has joined, only after the human clearly asks to "
+            "change rooms. `from_disc_id` pins the room you expect to release "
+            "and `confirm_transfer=true` is mandatory; a missing confirmation "
+            "or an ownership change fails closed. The binding moves "
+            "atomically (`session_bound: true`)."
         ),
         "inputSchema": {
             "type": "object",
@@ -864,15 +888,12 @@ TOOLS = [
         "description": (
             "Declare or refresh THIS joined CLI session's Git worktree in the "
             "current discussion. `workspace_path` defaults to the bridge's "
-            "current directory; Kronn canonicalizes it and reads the real "
-            "branch + HEAD from Git, so never guess or send those fields. "
-            "Optionally link the workspace to a planning task with `task_ref` "
-            "(for example `KT-140`). The path must be a registered worktree of "
-            "the discussion project's primary or linked repositories, and one "
-            "physical worktree cannot belong to two discussions. The result "
-            "always exposes a `blockers` array: dirty/branch-concurrency guards "
-            "on success, or a structured missing/repository/ownership blocker "
-            "when the declaration is refused."
+            "current directory; Kronn reads the real branch + HEAD from Git, "
+            "so never send those fields. Optionally link a planning task with "
+            "`task_ref`. The path must be a registered worktree of the "
+            "discussion project's repositories, and one physical worktree "
+            "cannot belong to two discussions. The result always has a "
+            "`blockers` array: guards on success, or the refusal's blocker."
         ),
         "inputSchema": {
             "type": "object",
@@ -1001,10 +1022,10 @@ TOOLS = [
     {
         "name": "task_exec_cancel",
         "description": (
-            "Cancel a non-terminal TaskExecution as its principal. Kronn cancels due/live "
-            "dispatches; completed commits and audit history are preserved. The worktree is "
-            "kept by default; `remove_if_clean` removes only a proven-clean owned worktree "
-            "and refuses dirty or unproven paths."
+            "Cancel a non-terminal TaskExecution as its principal. Dispatches stop, commits "
+            "stay, the task status is NOT changed (to relaunch: task_update status=todo). "
+            "Worktree kept by default; `remove_if_clean` removes only a proven-clean owned "
+            "one, refusing dirty/unproven paths."
         ),
         "inputSchema": {
             "type": "object",
@@ -1082,11 +1103,10 @@ TOOLS = [
     {
         "name": "task_exec_deliver",
         "description": (
-            "Submit your DeliveryManifest v1 when the task's DoD is met. Identity is derived "
-            "from this bridge's durable session, and only the execution's EXACT worker is "
-            "accepted. On success the execution flips to AwaitingReview and the principal is "
-            "woken: call this BEFORE announcing 'ready for review'. A malformed manifest is "
-            "refused."
+            "Submit your DeliveryManifest v1 when the task's DoD is met; only the execution's "
+            "EXACT worker is accepted (identity comes from this bridge's session). On success "
+            "the execution flips to AwaitingReview and the principal is woken: call this "
+            "BEFORE announcing 'ready for review'. A malformed manifest is refused."
         ),
         "inputSchema": {
             "type": "object",
@@ -1098,10 +1118,28 @@ TOOLS = [
                 "manifest": {
                     "type": "object",
                     "description": (
-                        "The DeliveryManifest v1 object: version, task_ref, head_sha, "
+                        "DeliveryManifest v1: version \"1\" (string), task_ref, head_sha, "
                         "files_touched, tests, dod_status, docs, migrations, risks, "
-                        "limitations, summary (see the brief's delivery format)."
+                        "limitations, summary, tests_executed (required)."
                     ),
+                    # Declared here, inside the literal the budget gate measures:
+                    # the spawned-worker projection in `_visible_tools` reuses it.
+                    "properties": {
+                        "tests_executed": {
+                            "type": "object",
+                            "description": (
+                                "Whether a test really ran, and which commands: "
+                                "`executed: false` needs `which: []`; `true` needs the "
+                                "commands, matching a pass/fail `tests` entry."
+                            ),
+                            "additionalProperties": False,
+                            "required": ["executed", "which"],
+                            "properties": {
+                                "executed": {"type": "boolean"},
+                                "which": {"type": "array", "items": {"type": "string"}},
+                            },
+                        },
+                    },
                 },
             },
             "required": ["task_execution_id", "manifest"],
@@ -1110,16 +1148,11 @@ TOOLS = [
     {
         "name": "task_exec_review",
         "description": (
-            "Decide a delivered task attempt as the principal (KT-319). Pass the "
-            "`task_execution_id` and a ReviewDecision v1 `decision` object "
-            "(`decision`: 'approve' | 'request_changes'; `comment` is required for "
-            "request_changes; optional structured `findings`). The backend derives "
-            "your identity from this bridge's durable session and authorizes you as a "
-            "party to the execution — the parent-room principal, or the worker only if "
-            "the run explicitly enables self-review. approve is REFUSED if the manifest "
-            "is missing, the worktree HEAD drifted since delivery, or a DoD is unmet; "
-            "request_changes hands your findings to the worker in its sub-discussion "
-            "and keeps the worktree. A caller who is not a party gets one opaque refusal."
+            "Decide a delivered task attempt as the principal (identity comes from this "
+            "bridge's session; the worker only if the run enables self-review). approve "
+            "is REFUSED if the manifest is missing, the worktree HEAD drifted since "
+            "delivery, or a DoD is unmet; request_changes hands your findings to the "
+            "worker and keeps the worktree. A non-party gets one opaque refusal."
         ),
         "inputSchema": {
             "type": "object",
@@ -1131,9 +1164,13 @@ TOOLS = [
                 "decision": {
                     "type": "object",
                     "description": (
-                        "The ReviewDecision v1 object: version, task_ref, decision "
-                        "('approve' | 'request_changes'), comment (required for "
-                        "request_changes), optional findings [{path?, line?, issue}]."
+                        "ReviewDecision v1: version \"1\" (string), task_ref, decision "
+                        "('approve' | 'request_changes'), reviewed_head_sha (required for "
+                        "approve), dod_verifications [{dod_id, met, evidence, "
+                        "verification?}] (required for approve: one per DoD item except a "
+                        "live check, which is `post_integration` + met false, never a "
+                        "blocker), comment (required for request_changes), findings "
+                        "[{path?, line?, issue}]."
                     ),
                 },
             },
@@ -1168,15 +1205,12 @@ TOOLS = [
         "description": (
             "Look up the Kronn disc_id bound to a CLI session, or `null` if "
             "none. ⚠ BOTH ARGUMENTS ARE OPTIONAL: called bare, "
-            "`disc_find_by_session({})` answers « which room is MY session "
-            "bound to? » and actively restores THIS bridge's runtime binding "
-            "and durable read cursor after an MCP reload. A legacy/pre-fix "
-            "session can still have a server link but no local resume "
-            "credential; that exceptional response carries "
-            "`rejoin_required: true` instead of falsely claiming the bridge is "
-            "ready, and needs one fresh kr-join bootstrap. "
-            "Also the way to decide between `disc_create` (no prior thread) "
-            "and `disc_append` (resume an existing one)."
+            "`disc_find_by_session({})` answers which room MY session is "
+            "bound to and restores THIS bridge's runtime binding and durable "
+            "read cursor after an MCP reload. A legacy session with no local "
+            "resume credential returns `rejoin_required: true` and needs one "
+            "fresh kr-join bootstrap. Decides between `disc_create` (no prior "
+            "thread) and `disc_append` (resume)."
         ),
         "inputSchema": {
             "type": "object",
@@ -1392,13 +1426,25 @@ TOOLS = [
     {
         "name": "workflow_active_runs",
         "description": (
-            "Unfinished runs (Running, WaitingApproval, Pending) across all "
-            "workflows, the latest per workflow: [{workflow_id, workflow_name, "
-            "project_id, run_id, status, started_at}]. Check it before acting so "
-            "you never step on another agent's run; drill down with "
-            "`workflow_run_status`."
+            "Unfinished runs (Running, WaitingApproval, Pending), latest per "
+            "workflow: [{workflow_id, workflow_name, project_id, run_id, status, "
+            "started_at}]. Check before acting; drill down: `workflow_run_status`."
         ),
         "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "disk_usage",
+        "description": (
+            "Free disk and Kronn's own artefacts by kind/task. `purge_orphans` "
+            "removes only finished, idle, worktree-less lanes: tool_manual."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project_id": {"type": "string"},
+                "purge_orphans": {"type": "boolean"},
+            },
+        },
     },
     {
         "name": "workflow_runs",
@@ -1420,11 +1466,9 @@ TOOLS = [
     {
         "name": "workflow_run_get",
         "description": (
-            "Full detail of ONE run, incl per-step results (step_name · status · "
-            "duration_ms · tokens · kind · agent · truncated output) — for "
-            "debriefing a failed/finished run: which step failed and why. For an "
-            "agent step's full produced content, read the run's discussions via "
-            "`workflow_run_discussions`."
+            "Full detail of ONE run, incl per-step results (step_name, status, "
+            "duration_ms, tokens, kind, agent, truncated output) to debrief a "
+            "failed/finished run. Full agent output: `workflow_run_discussions`."
         ),
         "inputSchema": {
             "type": "object",
@@ -1438,11 +1482,9 @@ TOOLS = [
     {
         "name": "workflow_cancel_run",
         "description": (
-            "Cancel a RUNNING run (MCP equivalent of the UI 'Arrêter'). "
-            "DESTRUCTIVE — stops the run + its in-flight agents; completed "
-            "steps/commits are kept. Use to stop a stuck or duplicate run (e.g. "
-            "an overlapping cron tick). Confirm with the user before cancelling a "
-            "run you didn't start."
+            "Cancel a RUNNING run. DESTRUCTIVE: stops the run and its in-flight "
+            "agents; completed steps/commits are kept. Confirm with the user "
+            "before cancelling a run you didn't start."
         ),
         "inputSchema": {
             "type": "object",
@@ -1487,16 +1529,13 @@ TOOLS = [
     {
         "name": "qa_list",
         "description": (
-            "List every Quick API in the user's library — compact view "
-            "(id, name, api_plugin_slug, api_endpoint_path, api_method, "
-            "description, project_id, variables[]). The `variables[]` "
-            "entries include `{name, label, required, description, source, "
-            "source_ref, allow_manual_override, control}`. Pass only user-input "
-            "values to `qa_run`; project/context values resolve at dispatch. Use this to (a) "
-            "discover the right QA for an action via `qa_run`, (b) "
-            "reuse a matching QA via `quick_api_id` in a workflow "
-            "`ApiCall` / `BatchApiCall` step, or as a source in "
-            "`CollectApiData`, instead of re-specifying the endpoint inline."
+            "List every Quick API in the user's library — compact view with "
+            "`variables[]` (name, label, required, source, control…). Pass "
+            "only user-input values to `qa_run`; project/context values "
+            "resolve at dispatch. Use it to find the QA for `qa_run`, or to "
+            "reuse one via `quick_api_id` in a workflow `ApiCall` / "
+            "`BatchApiCall` step or a `CollectApiData` source instead of "
+            "re-specifying the endpoint inline."
         ),
         "inputSchema": {"type": "object", "properties": {}},
     },
@@ -2158,10 +2197,8 @@ TOOLS = [
         "description": (
             "Save a Quick API for later `qa_run` calls. "
             "Discover `api_plugin_slug`/`api_config_id` with `mcp_list`; the "
-            "endpoint remains allow-listed and Kronn owns credentials. String "
-            "leaves may use declared `{{var_name}}` values or the generic "
-            "run-anchored `{{time.now|...}}` grammar documented by "
-            "`workflow_step_schema`. Call "
+            "endpoint remains allow-listed and Kronn owns credentials. Strings take "
+            "declared `{{var_name}}` values. Call "
             "`tool_manual({tool: \"qa_create_draft\"})` first for the required "
             "probe/extract method and variable contract; iterate with `qa_update`."
         ),
@@ -2710,15 +2747,12 @@ TOOLS = [
     {
         "name": "audit_prepare",
         "description": (
-            "0.8.12 — Read a project's audit surface BEFORE launching: the "
-            "docs/ files with their filled/unfilled status, the open TODOs "
-            "and the tech-debt items. Returns the backend's AuditInfo "
-            "verbatim (`files`, `todos`, `tech_debt_items`) plus the "
-            "project's `audit_status`. Empty arrays do NOT mean 'clean': "
-            "when `audit_status` is `NoTemplate` there is simply nothing "
-            "to audit yet — call `audit_install_template` first. Use it to "
-            "brief yourself, pick between full/partial, and know what to "
-            "validate once the audit completes."
+            "Verify docs: read files, TODOs, debt, briefing and audit_status before launch. "
+            "template_update lists versions, missing files/steps and proven renames. "
+            "NoTemplate + empty files means no docs. Update via audit_install_template, "
+            "then audit_launch partial for non-null owning steps; unowned files stay manual. "
+            "Full audit is an explicit advanced option. "
+            "See tool_manual(audit_prepare)."
         ),
         "inputSchema": {
             "type": "object",
@@ -2731,11 +2765,10 @@ TOOLS = [
     {
         "name": "audit_install_template",
         "description": (
-            "0.9.0 — Step 0 of the audit pipeline (template → audit → "
-            "validation): install the docs/ template into a `NoTemplate` "
-            "project so `audit_launch` has a surface to fill. Idempotent "
-            "and non-destructive (never overwrites existing docs). Returns "
-            "the project's new `audit_status`."
+            "Install/update a project's docs template: add missing files, preserve existing "
+            "docs, move proven renames without clobbering, and refresh unchanged Kronn-owned "
+            "spec copies. Returns audit_status; refused during an audit. "
+            "See tool_manual(audit_prepare) for the update/fill flow."
         ),
         "inputSchema": {
             "type": "object",
@@ -2748,8 +2781,8 @@ TOOLS = [
     {
         "name": "audit_launch",
         "description": (
-            "Launch a detached audit; only a backend restart interrupts it, "
-            "then `audit_status` reports any `resume_run_id`."
+            "Run the Verify docs fix detached; survives disconnect, not backend restart. "
+            "Resume via audit_status."
         ),
         "inputSchema": {
             "type": "object",
@@ -2758,27 +2791,31 @@ TOOLS = [
                 "mode": {
                     "type": "string",
                     "enum": ["full", "partial"],
-                    "description": "full = whole pipeline + validation discussion; partial = selected steps only and REQUIRES `steps` (a fully-successful partial ALSO creates a validation discussion scoped to the refreshed sections and gets its own audit_runs row).",
+                    "description": "partial = smallest fix on selected `steps`, with run row and scoped validation on success; full = advanced whole pipeline + validation discussion.",
                 },
                 "steps": {
                     "type": "array",
                     "minItems": 1,
                     "items": {"type": "integer", "minimum": 1},
-                    "description": "REQUIRED for partial: 1-based step indices to re-run. Ignored for full.",
+                    "description": "REQUIRED for partial: 1-based steps to re-run.",
                 },
                 "resume_run_id": {
                     "type": "string",
-                    "description": (
-                        "full mode only: resume an Interrupted run by its id "
-                        "(see audit_status.resumable.id). The backend derives "
-                        "the kind AND the checkpoint from that run — you cannot "
-                        "oversize a step count or resume the wrong pipeline. "
-                        "Omit to start fresh."
-                    ),
+                    "description": "full: resume this Interrupted run (audit_status.resumable.id); kind and checkpoint come from the run.",
+                },
+                "retry_steps": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {"type": "integer", "minimum": 1},
+                    "description": "With resume_run_id: run only these of its steps_to_redo.",
+                },
+                "fresh": {
+                    "type": "boolean",
+                    "description": "full: true reruns everything; without it a launch is refused while a run is resumable.",
                 },
                 "agent": {
                     "type": "string",
-                    "description": "Agent that runs the audit steps (default: this bridge's agent type).",
+                    "description": "Agent running the steps (default: this bridge's).",
                 },
             },
             # "partial ⇒ steps required" was expressed here as a top-level
@@ -2797,13 +2834,11 @@ TOOLS = [
     {
         "name": "audit_status",
         "description": (
-            "Consolidated audit state for a project, three layers kept "
-            "SEPARATE and never merged: `bridge_stream` (what this bridge's "
-            "reader saw), `live` (the backend's in-memory tracker), and "
-            "`latest`/`resumable` (DB history, read when `live` is null).\n\n"
-            "⚠ `live: null` means 'no live state known', NOT 'finished': a "
-            "backend restart wipes the tracker while an agent may still be "
-            "working. Statuses are exposed verbatim."
+            "Audit state in separate layers: `bridge_stream` (this bridge's "
+            "reader), `live` (backend tracker; null is NOT 'finished', a "
+            "restart wipes it), then DB: `latest` (newest run, any status), "
+            "`latest_completed`, `resumable`, `steps_to_redo`. "
+            "`lease_orphaned`: launches refused until the UI cleanup."
         ),
         "inputSchema": {
             "type": "object",
@@ -4257,6 +4292,29 @@ def _current_project_id():
     return meta.get("project_id") if meta else None
 
 
+# What the backend answers (403) when a request names a resource outside the
+# scope its bridge token was launched with (`core/bridge_token.rs`).
+_SCOPE_REFUSAL_MARKERS = (
+    "outside this bridge token's scope",
+    "outside this bridge token's project",
+)
+_SCOPE_REFUSAL_HINT = (
+    "this agent was launched with a scope, and the resource it asked for is "
+    "outside it: it is not a failure of the tool. Do not retry the same id. "
+    "Ask the human to attach that discussion to this one, or work with the "
+    "discussions of this project (disc_list)."
+)
+
+
+def _http_error(code, body):
+    """The error for a non-2xx reply. A scope refusal says why and what to do,
+    since an agent runtime relays a bare 403 as "the tool returned an error"."""
+    message = f"HTTP {code}: {body[:500]}"
+    if code == 403 and any(marker in body for marker in _SCOPE_REFUSAL_MARKERS):
+        message += f" — {_SCOPE_REFUSAL_HINT}"
+    return RuntimeError(message)
+
+
 def _http(method, path, body=None, timeout=180):
     url = f"{_backend_url()}{path}"
     data = json.dumps(body).encode() if body is not None else None
@@ -4270,7 +4328,7 @@ def _http(method, path, body=None, timeout=180):
             return json.load(resp)
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"HTTP {e.code}: {body[:500]}")
+        raise _http_error(e.code, body)
 
 
 def _http_transport_retry(
@@ -4327,7 +4385,7 @@ def _http_text(method, path):
             return resp.read().decode("utf-8")
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"HTTP {e.code}: {body[:500]}")
+        raise _http_error(e.code, body)
 
 
 def _unwrap(envelope):
@@ -4454,7 +4512,7 @@ def _http_upload_context_file(disc_id, file_path):
             return _unwrap(json.load(resp))
     except urllib.error.HTTPError as exc:
         response_body = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"HTTP {exc.code}: {response_body[:500]}")
+        raise _http_error(exc.code, response_body)
 
 
 def _rollback_uploaded_context_files(disc_id, uploaded):
@@ -4543,6 +4601,27 @@ def _attach_files_to_appended_message(disc_id, message_id, paths, duplicate):
 
 # ─── Tool dispatch ─────────────────────────────────────────────────────────
 
+def call_room_scope(args):
+    """KT-1270 — the room's reach, or a request a human decides in the room."""
+    _reject_unknown_args("room_scope", args)
+    disc_id = _disc_id()
+    project = args.get("project")
+    if project is None:
+        return _unwrap(_http("GET", f"/api/discussions/{disc_id}/scope"))
+    access = args.get("access") or "read"
+    reason = args.get("reason")
+    if not isinstance(project, str) or not project.strip():
+        raise RuntimeError("room_scope: project must be a project name or id")
+    if access not in ("read", "write"):
+        raise RuntimeError("room_scope: access must be read or write")
+    if not isinstance(reason, str) or not reason.strip():
+        raise RuntimeError("room_scope: say why the room needs this project (reason)")
+    return _unwrap(_http(
+        "POST", f"/api/discussions/{disc_id}/scope/requests",
+        {"project": project.strip(), "access": access, "reason": reason.strip()},
+    ))
+
+
 def call_disc_question_list(args):
     key = args.get("key")
     if key is not None and (not isinstance(key, str) or not key or len(key) > 100):
@@ -4556,7 +4635,7 @@ def call_disc_question_list(args):
             "pending_count": data.get("pending_count", 0), "truncated": len(matches) > 50}
 
 
-def call_disc_meta(_args):
+def call_disc_meta(args):
     """Room metadata, plus who can actually be addressed in it (KT-372 DoD-4).
 
     The 2026-08-21 incident was not a resolution failure: `@claude` really is
@@ -4567,6 +4646,13 @@ def call_disc_meta(_args):
     So the cheap call an agent already makes before acting now carries the exact
     aliases — no second HTTP round trip, and no internal session pk to know.
     """
+    # An id passed here was silently ignored, so the agent read this room's
+    # metadata believing it was another discussion's.
+    _reject_unknown_args(
+        "disc_meta", args,
+        hint="disc_meta reads only the current discussion; for another one call "
+        "disc_load_other({disc_id}).",
+    )
     disc_id = _disc_id()
     meta = _unwrap(_http("GET", f"/api/discussions/{disc_id}/meta"))
     if not isinstance(meta, dict):
@@ -4750,7 +4836,7 @@ def call_task_changes(args):
 # already knows the task; it needs proof the write landed and nothing else.
 _TASK_ACK_FIELDS = (
     "id", "reference", "title", "status", "priority",
-    "parent_reference", "blocker_count",
+    "parent_reference", "blocker_count", "assignees",
 )
 
 
@@ -4882,6 +4968,7 @@ def call_task_update_dod(args):
             f"/api/planning/tasks/{encoded_task}/dod/{encoded_dod}",
             {
                 "completed": args["completed"],
+                "evidence": args.get("evidence"),
                 "actor": _planning_actor(args),
             },
         )),
@@ -4920,6 +5007,45 @@ def call_task_remove_blocker(args):
         "DELETE",
         f"/api/planning/tasks/{encoded_task}/blockers/{encoded_blocker}",
         {"actor": _planning_actor(args)},
+    )))
+
+
+def _assignee_arg(args):
+    """The typed identity an agent names, or `None` for "myself".
+
+    The server resolves "myself" from the caller's durable CLI session, so
+    this side never guesses a session pk or a provider.
+    """
+    assignee = args.get("assignee")
+    if assignee is None:
+        return None
+    if not isinstance(assignee, dict):
+        raise RuntimeError("task_assign: assignee must be an object")
+    if not assignee.get("kind") or not assignee.get("agent_type"):
+        raise RuntimeError("task_assign: assignee needs kind and agent_type")
+    return {
+        key: assignee[key]
+        for key in ("kind", "agent_type", "cli_session_id", "connection_id")
+        if assignee.get(key) is not None
+    }
+
+
+def call_task_assign(args):
+    task_id = (args.get("task_id") or "").strip()
+    if not task_id:
+        raise RuntimeError("task_assign: task_id is required")
+    body = {"actor": _planning_actor(args)}
+    assignee = _assignee_arg(args)
+    if assignee is not None:
+        body["assignee"] = assignee
+    unassign = args.get("unassign") is True
+    if args.get("role") is not None and not unassign:
+        body["role"] = args["role"]
+    encoded = urllib.parse.quote(task_id, safe="")
+    return _task_ack(_unwrap(_http(
+        "DELETE" if unassign else "POST",
+        f"/api/planning/tasks/{encoded}/assignees",
+        body,
     )))
 
 
@@ -5826,7 +5952,7 @@ def _visible_tools():
         "additionalProperties": False,
         "required": [
             "tests", "dod_status", "docs", "migrations", "risks",
-            "limitations", "summary",
+            "limitations", "summary", "tests_executed",
         ],
         "properties": {
             "tests": {
@@ -5866,6 +5992,10 @@ def _visible_tools():
             "risks": {"type": "array", "items": {"type": "string"}},
             "limitations": {"type": "array", "items": {"type": "string"}},
             "summary": {"type": "string", "minLength": 1},
+            # Declared in the TOOLS literal (the budget gate counts it there).
+            "tests_executed": delivery["inputSchema"]["properties"]["manifest"][
+                "properties"
+            ]["tests_executed"],
         },
     }
     status = next(item for item in TOOLS if item["name"] == "task_exec_status")
@@ -6662,6 +6792,10 @@ def call_disc_list(args):
     default (the rooms worth joining cross-instance); shared_only=false for all.
     No search keyword needed — complements disc_search (keyword) and
     disc_load_other (read one by id)."""
+    _reject_unknown_args(
+        "disc_list", args,
+        hint="To read one discussion by id call disc_load_other({disc_id}).",
+    )
     shared_only = args.get("shared_only", True)
     try:
         limit = int(args.get("limit") or 30)
@@ -7062,6 +7196,11 @@ def _wait_once(args):
                     )
                     if not (message_addressed_here and kind == "cli"):
                         other_targets.add(label)
+                continue
+            # KT-1201 — an untargeted reply to this session's own message is
+            # addressed here by the server; never fold it into room context.
+            if message.get("addressed_to_caller"):
+                addressed_here = True
                 continue
             targets = message.get("target_agents") or []
             if not targets and message.get("target_agent"):
@@ -7503,6 +7642,9 @@ def _wait_budget_hint(started, polls):
 
 
 def call_disc_load_other(args):
+    _reject_unknown_args(
+        "disc_load_other", args, hint="The discussion id goes in `disc_id`."
+    )
     disc_id = args.get("disc_id")
     if not disc_id:
         raise RuntimeError("disc_load_other: missing required 'disc_id'")
@@ -7585,6 +7727,37 @@ def call_workflow_active_runs(_args):
                 "status": lr.get("status"),
                 "started_at": lr.get("started_at"),
             })
+    return out
+
+
+def call_disk_usage(args):
+    """KT-1318 - free disk and Kronn's own artefacts, compact; optionally purge
+    the orphans (finished, idle, worktree-less, Kronn-marked lanes only). A named
+    delete is a confirmed UI action, deliberately not offered here."""
+    project_id = args.get("project_id")
+    query = "?project_id=" + urllib.parse.quote(str(project_id)) if project_id else ""
+    limit = 25
+    out = {}
+    if args.get("purge_orphans") is True:
+        body = {"project_id": project_id} if project_id else {}
+        purged = _unwrap(_http("POST", "/api/maintenance/disk/purge", body))
+        out["purged"] = {
+            "freed_bytes": purged.get("freed_bytes"),
+            "removed": [item.get("path") for item in purged.get("items", []) if item.get("purged")],
+            "kept": purged.get("kept"),
+        }
+    report = _unwrap(_http("GET", "/api/maintenance/disk" + query))
+    entries = report.get("entries") or []
+    out.update({
+        "available_bytes": report.get("available_bytes"),
+        "under_pressure": report.get("under_pressure"),
+        "policy": report.get("policy"),
+        "totals": report.get("totals"),
+        "orphan_count": report.get("orphan_count"),
+        "orphan_bytes": report.get("orphan_bytes"),
+        "entries_total": len(entries),
+        "entries": entries[:limit],
+    })
     return out
 
 
@@ -9447,6 +9620,12 @@ def _audit_handle_event(entry, event_name, payload_raw):
         elif event_name == "error":
             entry["state"] = "error"
             entry["error"] = (payload.get("error") or payload_raw)[:500]
+            # KT-1192 — a launch refused for want of a briefing carries the
+            # cards the agent posts in its discussion.
+            entry["error_code"] = payload.get("error_code")
+            if payload.get("briefing_cards"):
+                entry["briefing_cards"] = payload.get("briefing_cards")
+                entry["briefing_discussion_id"] = payload.get("discussion_id")
             entry["_start_evt"].set()
         elif event_name in ("step_done", "step_error", "step_start", "step_unchanged"):
             entry["last_step_event"] = {"event": event_name, **{
@@ -9602,10 +9781,18 @@ def _audit_open_sse(path, body):
     return urllib.request.urlopen(req, timeout=None)  # noqa: S310
 
 
-def _briefing_state(project: dict) -> dict:
-    """Filesystem check (same host as the backend): does the project carry a
-    pre-audit briefing? Its absence measurably degrades the audit (user-known
-    pain points never reach the steps — observed live on docroms-web)."""
+def _briefing_state(project: dict, project_id: str = "") -> dict:
+    """Does the project carry a pre-audit briefing? Asked to the backend
+    (KT-1192: no audit starts without one, and the backend knows the project's
+    docs folder and the caller's discussion for the cards); the filesystem
+    check is the fallback when the backend cannot answer."""
+    if project_id:
+        try:
+            status = _unwrap(_http("GET", f"/api/projects/{project_id}/briefing-status"))
+            if isinstance(status, dict) and "present" in status:
+                return status
+        except Exception:
+            pass
     path = (project or {}).get("path") or ""
     for candidate in ("docs/briefing.md", "ai/briefing.md"):
         full = os.path.join(path, candidate)
@@ -9635,7 +9822,14 @@ def call_audit_prepare(args):
         status = project.get("audit_status") if isinstance(project, dict) else None
         if status is not None:
             info["audit_status"] = status
-            info["briefing"] = _briefing_state(project)
+            info["briefing"] = _briefing_state(project, project_id)
+            if not info["briefing"].get("present"):
+                info["briefing_hint"] = (
+                    "briefing_required: no audit starts without a briefing. Post each "
+                    "card of `briefing.briefing_cards` in your discussion as a "
+                    "```kronn-question fence; once the human has answered them all, "
+                    "Kronn saves the briefing and audit_launch works."
+                )
             if status == "NoTemplate":
                 info["hint"] = (
                     "The docs template is NOT installed — files/todos are empty "
@@ -9765,6 +9959,25 @@ def call_kronn_intro(_args):
 # guessed — traps, closed sets, binding rules — never the methodology.
 # KT-629 — one orientation shared by initialize and both room manuals.
 # This is emitted guidance, not a change to wait/cursor or authority behavior.
+# KT-1329 — Claude Code cuts MCP `instructions` at 2048 chars, so the card
+# bullet is self-contained, sits right after the intro line, and FIRST CONTACT
+# goes last. `test_decision_card_survives_the_2048_char_client_cut` pins it.
+HUMAN_DECISION_CARD_BULLET = (
+    "• **Human decision → `kronn-question` card.** For ANY choice the human must "
+    "arbitrate (trade-off, approval, ambiguous scope), post a closed "
+    "```kronn-question fence with `disc_append`, never prose alone: "
+    '{"version":1,"key":"stable-key","question":"…","options":[{"id":"a","label":"…"}]} '
+    "— `key` not `id`; `version` is the number 1. Read back with "
+    "`disc_question_list({key})`; only the human answers.\n"
+)
+
+# Spawned task workers have neither `disc_append` nor `disc_question_list`.
+HUMAN_DECISION_WORKER_NOTE = (
+    " You cannot post a decision card from here: when the human must arbitrate, "
+    "stop that scope, state the exact blocker and options in your output, and ask "
+    "the principal to relay a `kronn-question` card; never decide for the human."
+)
+
 ROOM_WORK_PROTOCOL = (
     "Read `plan_get` (and `task_list` for the wider backlog) before substantive action. "
     "Before each bounded step, announce task/scope/next action with `disc_append`. "
@@ -9913,6 +10126,18 @@ TOOL_MANUALS = {
         "Launch may persist principal-owned `validations: [{command, quick_exec_id?, "
         "timeout_secs?}]`; never copy gates from the worker manifest. Reuse one idempotency key "
         "if the launch response is lost.\n\n"
+        "**Live checks.** A DoD item that can only be proven once the code is integrated and "
+        "running (a replay on a real input) is a principal live check. Only the principal of the "
+        "task's execution, or a human, may declare or remove it: a worker, an HTTP agent or an "
+        "anonymous agent is refused. Declare it either with `task_update` while the execution is "
+        "live (`definition_of_done` item `{id, sentence, verification: \"post_integration\"}`) or "
+        "at review, with a `dod_verifications` entry `{dod_id, met: false, evidence, "
+        "verification: \"post_integration\"}`; `task_create` cannot, a new task has no execution. "
+        "The worker reports it `met: false` honestly; approve integrates with it pending, the task "
+        "stays open and the plan lists it as a live check. Run it yourself after integration, then "
+        "tick it with `task_update_dod({completed: true, evidence})`: evidence is mandatory, and "
+        "the task closes on the last tick. Downgrading it to a worker check and ticking it in "
+        "one write is refused.\n\n"
         "**Validations contract.** Kronn runs each `command` on the candidate at integration, "
         "after review — NOT through a shell. The command is split on whitespace into ONE binary "
         "and its literal arguments, then run like a Quick Exec:\n"
@@ -10279,16 +10504,34 @@ TOOL_MANUALS = {
         "accepts or rejects the candidate. Avoid `always`/`never` unless the evidence truly "
         "supports that scope. Discussion, project and agent provenance are inherited."
     ),
+    "audit_prepare": (
+        "Inspect `template_update`: installed/current versions, missing files with their "
+        "current Full-chain owning step (or null), proven renames, unresolved old paths, "
+        "and local spec edits. `template_update: null` is unknown, never up-to-date. "
+        "Missing docs under NoTemplate are an absent audit surface, not a clean audit.\n\n"
+        "When an update is available, call `audit_install_template`. It adds missing "
+        "files and safely moves only unique upstream-hash renames; occupied destinations "
+        "and ambiguous mappings remain for human reconciliation. Filled docs stay intact. "
+        "The anti-hallucination spec updates only when its bytes match a recorded or "
+        "verified historical bundled copy; local edits stay intact.\n\n"
+        "Read the new surface, then call `audit_launch(mode='partial', steps=[...])` "
+        "with only the distinct non-null owning steps of the new files. Files without "
+        "an owner need manual completion; never launch an empty partial audit. "
+        "Briefing requirements still apply."
+    ),
     "audit_launch": (
-        "Call `audit_prepare` first and read its briefing status. A full audit runs the complete "
-        "pipeline; a partial audit requires explicit 1-based step indices. Every audit runs "
+        "Use the 'Verify docs' sequence: call `audit_prepare` first, run deterministic checks, "
+        "then propose the smallest fix. A partial audit requires explicit 1-based step indices; "
+        "a full audit is an explicit advanced option that runs the complete pipeline. Every audit runs "
         "detached on the backend: this bridge only subscribes to its SSE, so closing or "
         "reloading this MCP does not interrupt it; only a backend restart does. Only one audit "
         "may run per project.\n\n"
         "Observe durable truth with `audit_status`. An interrupted full or specialized run may "
-        "resume by its reported `resume_run_id`; an interrupted partial is relaunched for its "
-        "stale scope. Successful full audits and fully successful partial audits create a "
-        "validation discussion. Missing briefing context lowers audit quality and should be "
+        "resume with `resume_run_id` = `resumable.id`, all its `steps_to_redo` or only "
+        "`retry_steps`; `fresh: true` starts over instead, and a launch without either is refused "
+        "while a run is resumable. An interrupted partial is relaunched for its stale scope. "
+        "Successful full audits and fully successful partial audits create a validation "
+        "discussion. Missing briefing context lowers audit quality and should be "
         "addressed in the UI when relevant."
     ),
     "qe_create_draft": (
@@ -10314,6 +10557,26 @@ TOOL_MANUALS = {
 
 # Launch deliberately shares the prepare guide: both calls form one typed,
 # preflight-bound contract and duplicating the text would invite drift.
+TOOL_MANUALS["task_create"] = (
+    "Pass `idempotency_key` for a stable retry identity; omitted, `source_message_id` "
+    "derives one, so several tasks from one message need distinct explicit keys. "
+    "Titles are never identities. A task lands in the room's project unless "
+    "`project_ids` names a project the room holds a write grant on (`room_scope`)."
+)
+TOOL_MANUALS["room_scope"] = (
+    "A room has one primary project: its working directory, where what it creates "
+    "lands, and the only project whose API configs and credentials it may use. A human "
+    "may also grant it other projects: read (tasks, rooms, runs, pages) or write "
+    "(planning only: create and edit tasks there, `project_ids` naming it), or every "
+    "project. `room_scope()` returns the grants, the pending requests and the journal. "
+    "When a call is refused as outside the token's project, ask with "
+    "`room_scope({project, access, reason})`: it files a request the human approves, "
+    "narrows or declines in the room, and grants nothing by itself. Do not wait or "
+    "retry: continue with what you can do; the decision and every grant or revoke "
+    "appear in the room as a kronn-scope line, and apply on the next call. A grant never "
+    "opens another project's credentials, never runs its workflows, and never passes "
+    "to worker rooms."
+)
 TOOL_MANUALS["disc_update"] = (
     "**What it changes** — `title` (rename), `pinned`, `archived`. Nothing "
     "else. Every field is optional; at least one must be present.\n\n"
@@ -10346,7 +10609,35 @@ TOOL_MANUALS["workflow_run_status"] = (
 TOOL_MANUALS["workflow_trigger"] = (
     "Discovery first: `workflow_list` gives the `workflow_id`. The workflow must be enabled — a disabled draft is refused with a clear error.\n\n`next_check` has the form `{wait_seconds, reason, confidence}`. The first wait is always at least 30s, a sanity check that the run actually started. `confidence: baseline` means the average duration is reliable; `confidence: no_baseline` means this workflow has never run, so check every 60s.\n\nWhen the workflow declares manual launch variables, pass them as `variables: {name: value, …}`. Required ones must be non-empty — the same validation the UI form applies.\n\n`step_agents` changes the agent of some Agent steps for this run only: `{\"<step id or name>\": {\"agent\": \"Codex\", \"model\": \"…\", \"reasoning_effort\": \"…\"}}`. Omitted model or effort means the agent's default. The workflow is never modified; the step keeps its budget and tools. An unknown step, a non-Agent step, an agent not installed or enabled, or tools/budget the agent cannot apply is refused before the run starts."
 )
+TOOL_MANUALS["disk_usage"] = (
+    "Answers: how much disk is free, and what Kronn itself holds on it. `totals` groups bytes by "
+    "kind (`worktree`, `lane_build_dir`, `cache`); `entries` lists the largest first with their "
+    "owner (`task_ref`, `execution_id`, `status`), `idle_seconds` and a `state`: `orphan` "
+    "(finished, no live worktree, idle past `policy.sweep_idle_hours`: the default purge removes "
+    "it), `reclaimable` (finished but recent, or its clean worktree is kept: only a confirmed "
+    "delete in Settings > Disk takes it), `active` (a live execution claims it: never removed), "
+    "`kept` and `foreign` (not created by Kronn: never touched, whatever its name). Sizes are "
+    "floors when `bytes_are_partial`.\n\n"
+    "`purge_orphans: true` removes the orphans and only them, then returns the fresh report. "
+    "Below `policy.launch_min_free_gib` Kronn already sweeps them before it refuses a worker "
+    "launch or a full audit, and says so in the principal room.\n\n"
+    "`entries` is capped at 25 (largest first); `entries_total` is the full count."
+)
 TOOL_MANUALS["task_exec_launch"] = TOOL_MANUALS["task_exec_prepare"]
+TOOL_MANUALS["task_assign"] = (
+    "Without `assignee` it assigns YOU: your exact joined CLI session, resolved "
+    "by Kronn from your durable session id. `role` is optional: `owner` = doing "
+    "it, `reviewer` = reviewing it. To assign another agent, pass `assignee` "
+    "with its typed identity: `kind` `cli` (needs its `cli_session_id`), `agent` "
+    "(a punctual agent) or `discussion_agent` (the room's configured agent, "
+    "with its `connection_id` when it is a custom one) and `agent_type`. Never "
+    "name a provider alone for a CLI: two Codex CLIs are two identities.\n\n"
+    "`unassign: true` removes YOU, or `assignee`. Only manual assignments can be "
+    "removed: the worker of a running task execution is shown from the "
+    "execution itself.\n\n"
+    "Moving a task to `in_progress` via `task_update` already makes you its "
+    "owner, unless someone other than a reviewer is on it. Safe to retry."
+)
 TOOL_MANUALS["media_generate"] = (
     "Which connection. `connection_id` is OPTIONAL: leave it out and Kronn uses "
     "the only connection configured for the modality you asked for. Never ask a "
@@ -10524,6 +10815,23 @@ def call_audit_launch(args):
         # The backend derives kind + checkpoint from the run id, so all the
         # bridge must guarantee is a non-empty string.
         raise RuntimeError("audit_launch: resume_run_id must be a non-empty string")
+    fresh = args.get("fresh")
+    if fresh is not None and not isinstance(fresh, bool):
+        raise RuntimeError("audit_launch: fresh must be a boolean")
+    retry_steps = args.get("retry_steps")
+    if retry_steps is not None and (
+        not isinstance(retry_steps, list) or not retry_steps or not all(
+            isinstance(s, int) and not isinstance(s, bool) and s >= 1 for s in retry_steps
+        )
+    ):
+        raise RuntimeError("audit_launch: retry_steps must be a non-empty list of 1-based integers")
+    # The partial endpoint has neither field: refuse rather than drop them silently.
+    if mode == "partial" and (resume_run_id or fresh is not None or retry_steps is not None):
+        raise RuntimeError("audit_launch: resume_run_id, fresh and retry_steps are full-mode only")
+    if retry_steps is not None and not resume_run_id:
+        raise RuntimeError("audit_launch: retry_steps needs resume_run_id")
+    if fresh and resume_run_id:
+        raise RuntimeError("audit_launch: fresh and resume_run_id are exclusive")
     # Blank/whitespace agent falls back like an absent one — never forward
     # an empty attribution to the backend.
     agent = (args.get("agent") or "").strip() or _agent_type_for_session()
@@ -10553,6 +10861,10 @@ def call_audit_launch(args):
         body = {"agent": agent}
         if resume_run_id:
             body["resume_run_id"] = resume_run_id.strip()
+        if retry_steps is not None:
+            body["retry_steps"] = retry_steps
+        if fresh is not None:
+            body["fresh"] = fresh
     else:
         path = f"/api/projects/{project_id}/partial-audit"
         body = {"agent": agent, "steps": steps}
@@ -10590,6 +10902,18 @@ def call_audit_launch(args):
             "Check audit_status / backend logs before retrying."
         )
     with _AUDIT_LOCK:
+        if entry["state"] == "error" and entry.get("error_code") == "briefing_required":
+            # Not a failure to hide: the agent posts the cards and relaunches.
+            refused = {
+                "launched": False,
+                "project_id": project_id,
+                "error_code": "briefing_required",
+                "message": entry.get("error"),
+            }
+            if entry.get("briefing_cards"):
+                refused["discussion_id"] = entry.get("briefing_discussion_id")
+                refused["briefing_cards"] = entry.get("briefing_cards")
+            return refused
         if entry["state"] == "error":
             raise RuntimeError(f"audit_launch refused: {entry.get('error')}")
         if not (entry.get("_saw_accepted") or entry.get("_saw_start")):
@@ -10604,7 +10928,7 @@ def call_audit_launch(args):
     briefing = None
     try:
         project = _unwrap(_http("GET", f"/api/projects/{project_id}"))
-        briefing = _briefing_state(project if isinstance(project, dict) else {})
+        briefing = _briefing_state(project if isinstance(project, dict) else {}, project_id)
     except Exception:
         pass
     lifecycle_warning = (
@@ -10637,25 +10961,26 @@ def call_audit_status(args):
     if isinstance(live, dict):
         # The audit agent's recent actions are for the user's panel only.
         live.pop("recent_activity", None)
-    out = {
+    # The DB layer is read even while `live` is set: an orphaned lease or a
+    # newer terminal run is true state either way.
+    state = _unwrap(_http("GET", f"/api/projects/{project_id}/audit-latest"))
+    state = state if isinstance(state, dict) else {}
+    return {
         "bridge_stream": bridge_stream,
         "live": live,
-        "latest": None,
-        "resumable": None,
-        "note": None,
+        "latest": state.get("latest"),
+        "latest_completed": state.get("latest_completed"),
+        "resumable": _unwrap(_http("GET", f"/api/projects/{project_id}/audit-resumable")),
+        "steps_to_redo": state.get("steps_to_redo") or [],
+        "lease_orphaned": bool(state.get("lease_orphaned")),
+        "note": (
+            "live=null never means 'completed' (idle, or tracker wiped by a "
+            "restart). `latest` is the newest run of any status. With "
+            "`resumable`, launch with its id as resume_run_id (retry_steps "
+            "picks steps) or start over with fresh: true; without it a plain "
+            "full launch starts fresh."
+        ),
     }
-    if live is None:
-        # `live: null` = no LIVE state known — NOT "finished". Fall back to
-        # DB history so the caller can tell done/interrupted/never-ran apart.
-        out["latest"] = _unwrap(_http("GET", f"/api/projects/{project_id}/audit-latest"))
-        out["resumable"] = _unwrap(_http("GET", f"/api/projects/{project_id}/audit-resumable"))
-        out["note"] = (
-            "live=null means the backend tracker has no LIVE entry (idle OR "
-            "tracker wiped by a backend restart) — it never means 'completed'. "
-            "`latest` is the last terminal run from the DB, `resumable` the "
-            "last Interrupted-but-resumable one."
-        )
-    return out
 
 
 # ─── KT-374 — the room reaches the agent, instead of waiting to be asked ────
@@ -10827,6 +11152,7 @@ DISPATCH = {
     "audit_status": call_audit_status,
     "disc_meta": call_disc_meta,
     "disc_question_list": call_disc_question_list,
+    "room_scope": call_room_scope,
     "disc_get_message": call_disc_get_message,
     "disc_note_list": call_disc_note_list,
     "disc_summarize": call_disc_summarize,
@@ -10844,6 +11170,7 @@ DISPATCH = {
     "task_unlink_discussion": call_task_unlink_discussion,
     "task_add_blocker": call_task_add_blocker,
     "task_remove_blocker": call_task_remove_blocker,
+    "task_assign": call_task_assign,
     # 0.8.4 (#294) cross-agent memory
     "disc_create": call_disc_create,
     "disc_append": call_disc_append,
@@ -10886,6 +11213,7 @@ DISPATCH = {
     # new workflow without asking the user to paste them.
     "workflow_list": call_workflow_list,
     "workflow_active_runs": call_workflow_active_runs,
+    "disk_usage": call_disk_usage,
     # 0.8.8 (2026-06-25) — run HISTORY + per-run detail + cancel. The MCP only
     # exposed active runs / latest run; an agent debriefing a cron couldn't
     # enumerate past runs or their foreach children, and couldn't stop a
@@ -11602,33 +11930,35 @@ def _handle(req):
                         "evidence, docs/migrations/risks/limitations and summary). "
                         "Kronn injects and verifies execution/task identity, clean HEAD, "
                         "file inventory and opaque DoD ids; never invent them."
+                        + HUMAN_DECISION_WORKER_NOTE
                     ),
                 },
             }
-        if _declared_step_tools() is not None:
+        declared_tools = _declared_step_tools()
+        if declared_tools is not None:
             # A step that declared its tools gets them, not the catalogue map.
-            return {
-                "jsonrpc": "2.0",
-                "id": rid,
-                "result": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": _server_capabilities(),
-                    "serverInfo": {
-                        "name": "kronn-internal",
-                        "version": BRIDGE_TOOL_SURFACE_VERSION,
-                    },
+            # Only a step that can post to the room also learns the decision
+            # card; without `disc_append` it has no way to ask the human.
+            step_result = {
+                "protocolVersion": "2024-11-05",
+                "capabilities": _server_capabilities(),
+                "serverInfo": {
+                    "name": "kronn-internal",
+                    "version": BRIDGE_TOOL_SURFACE_VERSION,
                 },
             }
+            if "disc_append" in declared_tools:
+                step_result["instructions"] = HUMAN_DECISION_CARD_BULLET.removeprefix("• ")
+            return {"jsonrpc": "2.0", "id": rid, "result": step_result}
         client_name = (_CLIENT_INFO.get("name") or "unknown").strip() or "unknown"
+        # KT-1329 — right after the decision bullet, inside the client's
+        # 2048-char cut: a tail copy was never seen by Claude Code.
         first_contact = "" if _onboarding_done_for(client_name) else (
-            "🎉 **FIRST CONTACT** — this is the first Kronn session for this "
-            "CLI on this machine. Once the user's immediate request is "
-            "handled, offer ONCE, in the user's language: \"Je vois que "
-            "Kronn vient d'être connecté — veux-tu un tour rapide de ce que "
-            "je peux faire avec ?\" If they accept, call `kronn_intro` and "
-            "present its guide conversationally (do not paste it raw). "
-            "Accepted or declined, call `kronn_intro` afterwards anyway so "
-            "the offer is never repeated.\n\n"
+            "• 🎉 **FIRST CONTACT** — first Kronn session for this CLI on this "
+            "machine. Once the user's request is handled, offer ONCE, in their "
+            "language, a quick tour (\"Kronn vient d'être connecté — veux-tu un "
+            "tour rapide ?\"). If accepted, call `kronn_intro` and present it "
+            "conversationally; call it afterwards anyway so the offer never repeats.\n"
         )
         return {
             "jsonrpc": "2.0",
@@ -11651,19 +11981,21 @@ def _handle(req):
                 # `workflow_get`-only-saw-Agent-steps trap). Kept concise: a
                 # CLOSED map + pointers, not a manual (open catalogues stay
                 # behind on-demand tools like `mcp_list`).
-                "instructions": first_contact + (
+                "instructions": (
                     "You're connected to **Kronn** — it orchestrates agents, "
                     "discussions, multi-step workflows and external APIs. "
                     "Kronn stores configured credentials encrypted and injects API-broker "
                     "authentication server-side. MCP host sync may also write environment "
                     "values required by the local CLI configuration. Never paste secrets into prompts. "
                     "Your tools, by area:\n"
+                    + HUMAN_DECISION_CARD_BULLET
+                    + first_contact +
                     "• Opaque IDs: when the user pastes an ID without naming its type, call `resolve_id` FIRST; it returns compact routing context and the object-specific tool to use next.\n"
                     "• Discussions (multi-agent threads): `disc_meta`/`disc_get_message`/`disc_search`/`disc_load_other`/`disc_create`/`disc_append`/`disc_join`/`disc_invite_peer`…\n"
                     "• **Working in a room:** " + ROOM_WORK_PROTOCOL + "\n"
-                    '• Blocking human decisions MUST use a closed `kronn-question` JSON fence, never prose alone. `version` MUST be the JSON number 1, never the string "1". Read `disc_question_list` first; its tool_manual has a complete valid example. After publication, read back the exact key to verify recording; if absent, correct the payload and republish with the same key. Wait for a durable human answer before advancing the affected lot; independent work can continue. Agents cannot answer for humans.\n'
+                    "• Decision cards, details: read `disc_question_list` first to reuse an existing decision; `tool_manual({tool: \"disc_question_list\"})` has the full schema. If the key is absent after publication, correct the payload and republish with the same key. Wait for the durable human answer before advancing the affected lot; independent work can continue. Agents cannot answer for humans.\n"
                     "• Rich room output: messages are Markdown. A `mermaid` fence renders a diagram; `kronn-doc-preview` renders sandboxed HTML with PDF/DOCX actions (a plain `html` fence is only code); `kronn-doc-data` exposes CSV/XLSX/PPTX export. Use visual output only when it materially helps.\n"
-                    "• Planning: a discussion may have a shared plan made of prioritized, editable tasks. The user may refer to it naturally as “the plan”, “the tasks”, “what remains”, “the priority”, and similar wording. Use `plan_get` (compact current objective/plan) · `task_list` (compact filtered backlog) · `task_get` (FULL task) · `task_changes` (deltas) · `proposal_list`/`proposal_get` (durable proposals, read-only) · narrow writes `task_create`/`task_update`/`task_update_dod`/`task_link_discussion`/`task_unlink_discussion`/`task_add_blocker`/`task_remove_blocker`. Read the relevant plan first. Immediately before any direct `task_create`, call `plan_get` again so a peer's recent write is visible. Apply unambiguous intent directly; otherwise propose a human-gated `kronn-plan-action` fence (`create`, `create_many`, `status`, `complete`, `unblock`, `open`). You may read and propose, but only a human accepts, rejects or decides a durable proposal. Never replace a requested plan update with a prose-only summary. Whenever tracked work starts or materially changes, keep its status, DoD and priority honest in the plan. Write only on a real change: never reload or rewrite an unchanged task merely to report progress. If the announced Planning tools are missing from your MCP surface, use the read-only `plan_snapshot` from `disc_join`, ask @user to reconnect the Kronn MCP, and never fabricate an update.\n"
+                    "• Planning: a discussion may have a shared plan made of prioritized, editable tasks. The user may refer to it naturally as “the plan”, “the tasks”, “what remains”, “the priority”, and similar wording. Use `plan_get` (compact current objective/plan) · `task_list` (compact filtered backlog) · `task_get` (FULL task) · `task_changes` (deltas) · `proposal_list`/`proposal_get` (durable proposals, read-only) · narrow writes `task_create`/`task_update`/`task_update_dod`/`task_link_discussion`/`task_unlink_discussion`/`task_add_blocker`/`task_remove_blocker`/`task_assign` (yourself, when taking a task). Read the relevant plan first. Immediately before any direct `task_create`, call `plan_get` again so a peer's recent write is visible. Apply unambiguous intent directly; otherwise propose a human-gated `kronn-plan-action` fence (`create`, `create_many`, `status`, `complete`, `unblock`, `open`). You may read and propose, but only a human accepts, rejects or decides a durable proposal. Never replace a requested plan update with a prose-only summary. Whenever tracked work starts or materially changes, keep its status, DoD and priority honest in the plan. Write only on a real change: never reload or rewrite an unchanged task merely to report progress. If the announced Planning tools are missing from your MCP surface, use the read-only `plan_snapshot` from `disc_join`, ask @user to reconnect the Kronn MCP, and never fabricate an update.\n"
                     "• Human-gated Automation proposals: after resolving a real QP/QA/QE/Workflow id and its declared variables through the catalogue/get tools, an agent may emit one `kronn-action` fence with `{\"kind\":\"quick_prompt|quick_api|quick_exec|workflow\",\"target_id\":\"<real id>\",\"project_id\":\"<optional id>\",\"values\":[{\"name\":\"<declared variable>\",\"value\":\"<editable suggestion>\",\"provenance\":\"agent_suggestion\",\"suggested_by\":\"<your alias>\"}]}`. This proposes only: Kronn validates and persists the card, and the human click launches it. Never invent ids/variables or include secret/resolved values.\n"
                     "• Workflows (multi-step pipelines): `workflow_list` (compact) · `workflow_get` (FULL, every step) · `workflow_step_schema` (CANONICAL step schema as an untruncatable result — the closed 12 `step_type`s, per-type fields, runtime contracts; call before authoring) · `workflow_create_draft` · `workflow_clone`/`workflow_update`/`workflow_set_enabled` · `workflow_trigger`/`workflow_run_status` · run history `workflow_runs`/`workflow_run_get` · `workflow_active_runs`/`workflow_cancel_run`. Agent-step bindings (full CRUD): `skills_list`/`profiles_list`/`directives_list` enumerate valid ids; `skill_get`/`profile_get`/`directive_get` read FULL bodies; `skill_create`/`skill_update`/`skill_delete` (+ `profile_*`/`directive_*`) author & edit custom ones.\n"
                     "• Quick Prompts (reusable prompt templates): `qp_list` (no body) · `qp_get` (FULL incl `prompt_template` — read this to know what a QP does, or to run it yourself) · `qp_create_draft`/`qp_update`/`qp_delete` · `qp_run`/`qp_batch_run`.\n"

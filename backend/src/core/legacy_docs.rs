@@ -67,7 +67,7 @@ pub struct LegacyMigrationReport {
 }
 
 impl LegacyMigrationReport {
-    fn skipped(reason: impl Into<String>) -> Self {
+    pub(crate) fn skipped(reason: impl Into<String>) -> Self {
         Self {
             migrated: false,
             skip_reason: reason.into(),
@@ -86,10 +86,39 @@ pub fn is_kronn_managed_docs(docs_dir: &Path) -> bool {
     let Ok(content) = fs::read_to_string(&agents) else {
         return false;
     };
-    let first_line = content.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    let first_line = first_content_line(&content);
     KRONN_SIGNATURE_LINES
         .iter()
         .any(|s| first_line.trim() == *s)
+}
+
+/// First non-empty line outside HTML comments: the v2 template opens with
+/// `<!-- kronn:doc-version=… -->` metadata before its signature heading.
+fn first_content_line(content: &str) -> &str {
+    let mut in_comment = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if in_comment {
+            in_comment = !trimmed.contains("-->");
+            continue;
+        }
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("<!--") {
+            if rest.contains("-->") {
+                if rest.trim_end().ends_with("-->") {
+                    continue;
+                }
+                // Text after a closed comment is content.
+                return line;
+            }
+            in_comment = true;
+            continue;
+        }
+        return line;
+    }
+    ""
 }
 
 /// Run the migration on the given `docs/` directory. Idempotent: a
@@ -103,6 +132,17 @@ pub fn is_kronn_managed_docs(docs_dir: &Path) -> bool {
 /// would move the freshly-installed Kronn templates into legacy/ on
 /// every audit.
 pub fn migrate_user_docs_to_legacy(docs_dir: &Path) -> std::io::Result<LegacyMigrationReport> {
+    migrate_user_docs_to_legacy_in(
+        docs_dir,
+        &crate::core::docs_location::DocsRoot::default_root(),
+    )
+}
+
+/// `migrate_user_docs_to_legacy` whose README names `docs_root` (KT-1192).
+pub fn migrate_user_docs_to_legacy_in(
+    docs_dir: &Path,
+    docs_root: &crate::core::docs_location::DocsRoot,
+) -> std::io::Result<LegacyMigrationReport> {
     if !docs_dir.exists() {
         return Ok(LegacyMigrationReport::skipped("no-docs-dir"));
     }
@@ -112,22 +152,26 @@ pub fn migrate_user_docs_to_legacy(docs_dir: &Path) -> std::io::Result<LegacyMig
     if is_kronn_managed_docs(docs_dir) {
         return Ok(LegacyMigrationReport::skipped("already-kronn-managed"));
     }
+    move_user_docs_to_legacy_in(docs_dir, docs_root)
+}
 
-    // Gather candidate top-level entries to move. Anything NOT in
-    // `PROTECTED_TOP_LEVEL` is fair game — files AND directories.
-    // Reading the dir once into a Vec before any move so the iterator
-    // doesn't observe its own mutations (filesystem readdir semantics
-    // vary across platforms).
-    let mut to_move: Vec<PathBuf> = Vec::new();
-    for entry in fs::read_dir(docs_dir)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if PROTECTED_TOP_LEVEL.iter().any(|p| name_str == *p) {
-            continue;
-        }
-        to_move.push(entry.path());
-    }
+/// Move everything but Kronn's own files into `legacy/`, without asking whether
+/// the folder looks Kronn-managed: the caller decided (the briefing's explicit
+/// choice on a folder `docs_folder` reads as a human's, even when its entry
+/// file carries Kronn's signature, KT-1299).
+pub fn move_user_docs_to_legacy_in(
+    docs_dir: &Path,
+    docs_root: &crate::core::docs_location::DocsRoot,
+) -> std::io::Result<LegacyMigrationReport> {
+    // Gather what to move: anything NOT in `PROTECTED_TOP_LEVEL` and not a
+    // file Kronn recorded writing (`kronn_written`, KT-1299) — files AND
+    // directories. A directory holding both is split: its foreign files move,
+    // Kronn's stay. Read once into a Vec before any move so the iterator
+    // doesn't observe its own mutations (filesystem readdir semantics vary
+    // across platforms).
+    let written = crate::core::docs_folder::kronn_written(docs_dir);
+    let mut to_move: Vec<(PathBuf, String)> = Vec::new();
+    collect_foreign(docs_dir, docs_dir, &written, &mut to_move)?;
 
     if to_move.is_empty() {
         return Ok(LegacyMigrationReport::skipped("nothing-to-migrate"));
@@ -137,18 +181,17 @@ pub fn migrate_user_docs_to_legacy(docs_dir: &Path) -> std::io::Result<LegacyMig
     fs::create_dir_all(&legacy_dir)?;
 
     let mut moved_entries: Vec<String> = Vec::new();
-    for src in &to_move {
-        let file_name = match src.file_name() {
-            Some(n) => n.to_owned(),
-            None => continue,
-        };
-        let dst = legacy_dir.join(&file_name);
+    for (src, rel) in &to_move {
+        let dst = legacy_dir.join(rel);
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent)?;
+        }
         // If a destination already exists from a partial prior run,
         // append a numeric suffix so we don't clobber. Cheap, rare
         // case (truly partial migration after a crash).
         let dst_final = unique_destination(&dst);
         fs::rename(src, &dst_final)?;
-        moved_entries.push(file_name.to_string_lossy().to_string());
+        moved_entries.push(rel.clone());
     }
 
     // 0.8.3 (#273) — write a navigational README inside docs/legacy/
@@ -156,7 +199,7 @@ pub fn migrate_user_docs_to_legacy(docs_dir: &Path) -> std::io::Result<LegacyMig
     // an explanation of why this folder exists and what to do with
     // it. Token cost = 0 (deterministic write). Idempotent : if the
     // user has hand-edited the file post-audit, we don't clobber.
-    write_legacy_readme_if_absent(&legacy_dir)?;
+    write_legacy_readme_if_absent(&legacy_dir, docs_root)?;
 
     let moved_count = moved_entries.len();
     // Cap the surfaced list to keep SSE payloads small on legacy
@@ -214,18 +257,56 @@ where your changes will survive Kronn updates.\n\
 /// already exist. Idempotent : a hand-edited copy (the user added
 /// their own notes) is never clobbered. The file name `README.md`
 /// matches Git/GitHub convention so it surfaces in folder views.
-fn write_legacy_readme_if_absent(legacy_dir: &Path) -> std::io::Result<()> {
+fn write_legacy_readme_if_absent(
+    legacy_dir: &Path,
+    docs_root: &crate::core::docs_location::DocsRoot,
+) -> std::io::Result<()> {
     let readme = legacy_dir.join("README.md");
     if readme.exists() {
         return Ok(());
     }
-    fs::write(&readme, LEGACY_README_BODY)
+    fs::write(&readme, docs_root.relocate(LEGACY_README_BODY).as_bytes())
 }
 
 /// If `dst` exists, return `dst-1`, `dst-2`, … so a re-run after a
 /// partial prior migration doesn't fail-or-clobber. Stops at -99 and
 /// returns the last attempt (lets the caller's `rename` fail loudly
 /// if we're somehow at 100 conflicts — a real-world impossibility).
+/// What a move to `legacy/` carries from `dir`, with each path relative to
+/// `docs_dir`: whole entries when nothing in them is Kronn's, else, for a
+/// directory, the foreign files inside it.
+fn collect_foreign(
+    docs_dir: &Path,
+    dir: &Path,
+    written: &std::collections::BTreeSet<String>,
+    out: &mut Vec<(PathBuf, String)>,
+) -> std::io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if dir == docs_dir
+            && (PROTECTED_TOP_LEVEL.iter().any(|p| name_str == *p)
+                || crate::core::docs_folder::is_kronn_state_file(&name_str))
+        {
+            continue;
+        }
+        let path = entry.path();
+        let rel = crate::core::docs_folder::rel_key(docs_dir, &path);
+        if entry.file_type()?.is_dir() {
+            let prefix = format!("{rel}/");
+            if written.iter().any(|w| w.starts_with(&prefix)) {
+                collect_foreign(docs_dir, &path, written, out)?;
+            } else {
+                out.push((path, rel));
+            }
+        } else if !written.contains(&rel) {
+            out.push((path, rel));
+        }
+    }
+    Ok(())
+}
+
 fn unique_destination(dst: &Path) -> PathBuf {
     if !dst.exists() {
         return dst.to_path_buf();
@@ -252,6 +333,40 @@ mod tests {
             fs::create_dir_all(parent).unwrap();
         }
         fs::write(p, content).unwrap();
+    }
+
+    #[test]
+    fn the_shipped_template_agents_md_is_recognized_as_kronn_managed() {
+        // The real template opens with version comments, not the heading.
+        let tmp = TempDir::new().unwrap();
+        let docs = tmp.path().join("docs");
+        let template = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../templates/docs/AGENTS.md"),
+        )
+        .unwrap();
+        assert!(template.trim_start().starts_with("<!--"));
+        write(&docs.join("AGENTS.md"), &template);
+        write(&docs.join("user-doc.md"), "user-curated content");
+        assert!(is_kronn_managed_docs(&docs));
+        let r = migrate_user_docs_to_legacy(&docs).unwrap();
+        assert_eq!(r.skip_reason, "already-kronn-managed");
+        assert!(docs.join("user-doc.md").exists());
+    }
+
+    #[test]
+    fn a_multi_line_leading_comment_is_skipped_but_user_text_is_not() {
+        let tmp = TempDir::new().unwrap();
+        let docs = tmp.path().join("docs");
+        write(
+            &docs.join("AGENTS.md"),
+            "<!--\n  note\n-->\n# AI agent context — Entry point\n",
+        );
+        assert!(is_kronn_managed_docs(&docs));
+        write(
+            &docs.join("AGENTS.md"),
+            "<!-- x --> hand text\n# AI agent context — Entry point\n",
+        );
+        assert!(!is_kronn_managed_docs(&docs));
     }
 
     #[test]

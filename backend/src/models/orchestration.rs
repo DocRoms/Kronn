@@ -17,7 +17,7 @@ use ts_rs::TS;
 
 use super::{
     AgentType, MessageTarget, MessageTargetKind, ModelTier, PlanningActor, PlanningDodItem,
-    PlanningTaskSummary,
+    PlanningDodVerification, PlanningTaskSummary,
 };
 
 /// Versioned so downstream contract changes stay backward-compatible: new struct
@@ -1579,6 +1579,9 @@ pub struct TaskExecutionDetail {
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
 pub enum TaskExecutionProgressPhase {
+    /// The lane's first build is queued or running; the worker is not
+    /// dispatched yet (KT-1250). Bounded: it ends with the worker dispatched.
+    Warming,
     Queued,
     Launching,
     UpstreamWait,
@@ -1746,6 +1749,18 @@ pub struct ManifestTest {
     pub evidence: Option<String>,
 }
 
+/// KT-1246 — the worker's explicit statement of whether any test was actually
+/// executed, and which. Replaces a sentence at the end of a report: a reviewer
+/// reads `executed` and `which` instead of inferring them from `tests`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TestsExecuted {
+    pub executed: bool,
+    /// The commands (or suites) that ran. Empty exactly when `executed` is false.
+    #[serde(default)]
+    pub which: Vec<String>,
+}
+
 /// A per-DoD coverage claim. `dod_id` references the task's DoD item; the schema
 /// only enforces shape — the approve guard (DoD-5, tranche 3) enforces coverage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -1775,6 +1790,10 @@ pub struct DeliveryManifestV1 {
     pub risks: Vec<String>,
     pub limitations: Vec<String>,
     pub summary: String,
+    /// KT-1246 — absent on deliveries made before the field existed and on
+    /// joined-CLI deliveries; a spawned worker must always state it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tests_executed: Option<TestsExecuted>,
 }
 
 /// JSON-subset schema for [`DeliveryManifestV1`] (triage precedent). Required
@@ -1834,7 +1853,17 @@ pub fn delivery_manifest_v1_schema() -> serde_json::Value {
             "migrations": { "type": "array", "items": { "type": "string" } },
             "risks": { "type": "array", "items": { "type": "string" } },
             "limitations": { "type": "array", "items": { "type": "string" } },
-            "summary": { "type": "string", "minLength": 1 }
+            "summary": { "type": "string", "minLength": 1 },
+            // Optional here (legacy and joined-CLI producers); required by the
+            // spawned-worker projection, which is where it is authored.
+            "tests_executed": {
+                "type": "object",
+                "required": ["executed", "which"],
+                "properties": {
+                    "executed": { "type": "boolean" },
+                    "which": { "type": "array", "items": { "type": "string" } }
+                }
+            }
         }
     })
 }
@@ -1870,6 +1899,17 @@ pub struct ReviewDodVerification {
     pub dod_id: String,
     pub met: bool,
     pub evidence: String,
+    /// KT-1254 — `post_integration` (with `met: false`) declares the item a
+    /// principal live check made after integration: approve integrates with it
+    /// pending and the task closes once it is ticked with evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<PlanningDodVerification>,
+    /// KT-1291 — the task (`KT-1290`) that now holds this requirement, with
+    /// `met: false`: approve integrates without the item, which is detached
+    /// from this task and named in an event. Accepted only when that task
+    /// exists, is open and holds the requirement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carried_to: Option<String>,
 }
 
 /// Principal → backend review (ADR §5, KT-319). `comment` is schema-optional but
@@ -1915,7 +1955,9 @@ pub fn review_decision_v1_schema() -> serde_json::Value {
                     "properties": {
                         "dod_id": { "type": "string", "minLength": 1 },
                         "met": { "type": "boolean" },
-                        "evidence": { "type": "string", "minLength": 1 }
+                        "evidence": { "type": "string", "minLength": 1 },
+                        "verification": { "type": "string", "enum": ["post_integration"] },
+                        "carried_to": { "type": "string", "minLength": 1 }
                     }
                 }
             },
@@ -1940,6 +1982,57 @@ pub fn review_decision_v1_schema() -> serde_json::Value {
 mod tests {
     use super::TaskExecutionStatus::{self, *};
     use super::TaskWorkerScope;
+
+    /// KT-1262 — the MCP tool descriptions name every field of these two
+    /// contracts (`test_disc_introspection_mcp.py` pins the same lists). A field
+    /// added here without being named there fails this test, not an agent's
+    /// approve.
+    #[test]
+    fn contract_fields_match_the_ones_the_mcp_descriptions_name() {
+        fn properties(schema: &serde_json::Value) -> std::collections::BTreeSet<String> {
+            schema["properties"]
+                .as_object()
+                .expect("schema properties")
+                .keys()
+                .cloned()
+                .collect()
+        }
+        let named = |fields: &[&str]| {
+            fields
+                .iter()
+                .map(|field| field.to_string())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        assert_eq!(
+            properties(&super::delivery_manifest_v1_schema()),
+            named(&[
+                "version",
+                "task_ref",
+                "head_sha",
+                "files_touched",
+                "tests",
+                "dod_status",
+                "docs",
+                "migrations",
+                "risks",
+                "limitations",
+                "summary",
+                "tests_executed",
+            ]),
+        );
+        assert_eq!(
+            properties(&super::review_decision_v1_schema()),
+            named(&[
+                "version",
+                "task_ref",
+                "decision",
+                "reviewed_head_sha",
+                "dod_verifications",
+                "comment",
+                "findings",
+            ]),
+        );
+    }
 
     /// KT-514 — a cancellation with no explicit policy must reclaim the clean
     /// checkout (branch preserved) rather than hoard it. This default is what

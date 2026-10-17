@@ -44,7 +44,7 @@ Free-form prose owned by humans. Kronn never validates this section.
 |---|---|---|
 | `name` | yes | Stable, unique-within-file section id. Survives reordering/renames. |
 | `curated` | yes | `"ai"` (provenance required) or `"human"` (free-form, never validated). |
-| `owner` | template v2 | `"audit"` (the audit may refresh it) or `"human"` (the audit must preserve it byte-for-byte and propose changes separately). If absent on a legacy marker, `curated="human"` implies human ownership; otherwise audit ownership is assumed. |
+| `owner` | template v2 | `"audit"` (the audit may refresh it) or `"human"` (a person wrote or validated it: Kronn may still correct it, and then asks for a reconfirmation). If absent on a legacy marker, `curated="human"` implies human ownership; otherwise audit ownership is assumed. |
 | `audit` | for `curated="ai"` | ISO-8601 date the section was last **verified against reality**. Distinct from git's "last edited". |
 
 The file SHOULD open with `<!-- kronn:doc-version="1.0" -->`. A file with **no**
@@ -56,12 +56,40 @@ is strictly opt-in by presence.
 - **`curated="ai"`** — provenance is required: every non-trivial assertion needs a
   `[src: …]` citation.
 - **`curated="human"`** — owned by a person, free-form, never validated.
-- **`owner="human"`** — never rewritten by a full or partial audit. A re-audit
-  restores the original block and records its proposal as a dated diff. The
-  legacy `curated="human"` spelling receives the same protection. This holds for
-  the audit's own STEP 0 too (the `anti-hallu` section included), and a
-  `kronn:section` marker inside a fenced code block (``` or `~~~`) is an example,
-  never a boundary: it neither opens nor closes a protected section.
+- **`owner="human"`** — written or validated by a person. No Kronn write is
+  refused or reverted because of it: an audit, a revalidation, a template
+  reinstall or a documentary repair applies its change, and the section is
+  then marked "to reconfirm" with the diff until its owner confirms it. The
+  legacy `curated="human"` spelling is read the same way. STEP 0 never restamps
+  a human opener, and a `kronn:section` marker inside a fenced code block
+  (``` or `~~~`) is an example, never a boundary.
+- **Human-validation provenance** — a validation (`validate-audit`, a TD
+  validation card, « Vérifié, inchangé », « Confirmer ») records the digest of
+  what the person approved in `docs/provenance.json`, next to `citations.json`.
+  No marker is added to the prose. A doc whose validated text changed reads as
+  AI-generated, for the learning gate too, until it is reconfirmed.
+- **Text added between runs** — audits snapshot every Markdown document in the
+  resolved documentation directory, excluding its `legacy/` and `var/`
+  subdirectories. Symbolic links are refused. A change since the last Kronn write or
+  validation becomes the next diff's baseline, including unmarked human text.
+  Older unreviewed baselines remain available, and whole-audit validation does
+  not clear pending reconfirmations. Generated files are tracked separately
+  until a human changes or validates them.
+  `backend/src/core/doc_provenance.rs` (`record_all`)
+  `backend/src/core/doc_provenance.rs` (`snapshot_tracked`)
+  `backend/src/core/doc_provenance.rs` (`note_snapshot_writes`)
+- **Briefing protection** — each audit step snapshots the briefing and restores
+  a rewrite, deletion or unauthorized creation with a visible warning. Review
+  completion requires a nonempty file and a successful save; a failure remains
+  visible in the open discussion. Reviews restore saved project facts, rules,
+  documentation choices and Kronn options before storing the result.
+  `backend/src/api/audit/helpers.rs` (`restore_step_briefing`)
+  `backend/src/api/audit/briefing.rs` (`complete_reviewed_briefing`)
+  `backend/src/api/audit/project_doc.rs` (`reattach_facts`)
+- **Keep accurate prose** — finding and review steps also reverify existing
+  documentation and must keep true statements as written.
+  `backend/src/api/audit/mod.rs` (`REVERIFY_BLOCK`)
+  `backend/src/api/audit/mod.rs` (`reverifies_target`)
 - **Asymmetric conversion** — a human may convert a `curated="ai"` section to
   `curated="human"`. The reverse never happens automatically: human authority outranks AI,
   never the other way around.
@@ -101,6 +129,7 @@ names, versions, behaviour). The grammar:
 | `user` | **HIGH** | A traceable human declaration, e.g. `[src: user:romuald:2026-05-25: disc-123]`. Not machine-verifiable → `unchecked`, but a legitimate trust tier. |
 | `commit` | HIGH if recent | A commit hash. `unchecked`. |
 | `api` | HIGH if recent | A captured API response (`api_call_log#…`). `unchecked`. |
+| `deps` | HIGH, dated | A dependency-watch row: `deps: <manager>/<package>@<YYYY-MM-DD>`. An audit checks it against the snapshot it injected (absent = fabricated); elsewhere `unchecked`. |
 | `code-comment` | **LOW** ⚠️ | A code comment is **not authoritative** — a hint to verify, never a fact. |
 | `inferred` | **SOFT** | A derived guess, not a stated fact. |
 | `hypothesis` | **VERY SOFT** | Unverified, confirm before acting. |
@@ -110,12 +139,70 @@ names, versions, behaviour). The grammar:
 
 - `[src: file: backend/src/api/mod.rs:14]` — file + single line.
 - `[src: file: backend/src/api/mod.rs:14-22]` — file + line range.
-- `[src: backend/src/api/mod.rs]` — file only (type defaulted).
+- `[src: <path>:<line>]` — the `file:` type is the default.
+- `[src: file: backend/src/api/mod.rs:14-22#context_audit]` — line or range + **symbol anchor**.
+  The anchor (an identifier; `.` and `-` allowed inside, e.g. `Type.method`, `check-version`)
+  must appear as a whole word inside the cited lines. When the range *contains* a definition
+  of the symbol (`fn`, `def`, `class`, `struct`, `enum`, `const`, `interface`, `function` or
+  `type`, after any visibility or `async` modifier), that definition must open the range: its
+  doc comment and attributes, then up to 5 sibling lines (a constant and its comment), may
+  sit above it. A range that holds no definition of the symbol only has to name it, so a call
+  site or a usage backs a claim about wiring. It is only read after a line spec. Use it
+  to say *what* the lines hold: when code moves, a stale range fails instead of silently
+  pointing beside the claim.
+- `[src: file: <path>.docx]` — file only. Required for a binary file (.docx,
+  .pdf, images), which has no lines; detected by content, not extension. In audited `docs/`
+  a text file always takes a line, and a binary file never does.
+- To cite an **absence** ("no audit step in `ci.yaml`"), cite the whole file as
+  `[src: file: <path>:1-N]` with `N` its line count and state the absence outside the brackets. En and
+  em dashes are accepted in ranges, and a `#symbol` anchor may follow a range (`path:1-2#name`). A
+  whole-file range backing a claim that is not an absence draws a non-blocking warning. Paths are
+  repository-root relative, never relative to the citing document.
+- Percent-encoded paths (`My%20File.docx`) are decoded before resolving.
 
 Mechanical verification is **path-jailed to the project root**: a citation that escapes the
-root (`../../etc/passwd`) is rejected as `outside_project` without ever touching the
-filesystem. This is the ungameable core — an agent cannot fabricate a file or line that
-actually exists.
+root (`../../etc/passwd`, an absolute path such as `/etc/passwd`, or a symlink leading out) is
+rejected as `outside_project` without ever touching a file outside the root. An absolute path
+under the root is verified like a relative one. This is the ungameable core — an agent cannot
+fabricate a file or line that actually exists.
+
+An anchor absent from the cited lines makes the citation `out_of_bounds` (the range is wrong
+for what it names); the detail says where the symbol does appear, if anywhere. The same goes
+for a range that contains the definition without opening with it (`a definition anchor must
+start the range`); `make docs-reanchor` then proposes the range that starts at its doc comment
+or attributes. The check is
+textual and deterministic: no code is parsed.
+
+**One anchor rule, no tolerance window.** The runtime verifier, the `verified` badge it feeds
+and Kronn's docs check apply this same rule: the symbol is inside the cited lines (and opens them
+when they contain its definition), or the citation fails; one line past the range fails everywhere. A tool that re-anchors a moved
+citation first rewrites the range when the symbol occurs once in the cited file. If the symbol
+occurs several times, the tool may instead map the old range's endpoints through a zero-context
+Git diff from the chosen base to `HEAD`; a line inside a changed hunk has no mapping, and the
+rewrite is allowed only when the mapped range still passes the anchor rule. The
+path and anchor stay unchanged, and a single-line citation stays single-line while a range stays
+a range. Anything still ambiguous is listed with its candidate lines for a human to choose; a
+missing file or line is never re-anchored.
+
+A marker quoted in inline backticks is verified too: it is `verified` when it resolves, but a
+failure there counts as *unverified*, not fabricated, because backticks also quote the grammar
+as an example. Markers inside fenced code blocks are not read.
+
+**What the marker scanner reads.** A marker ends at its matching `]`. One that never closes
+(a half-typed citation, a banner cut mid-marker) ends at the next `[src:` or the next blank
+line, so the markers after it are still read. A `<kind>: <text>` marker whose kind is on Kronn's
+closed list of non-file kinds (`command`, `shell`, `test-run`, `output`, `query`, `tool`, …;
+`[src: command: git log --oneline]`) is *unverifiable*: it is never resolved as a path, it counts
+in `unverified_count`, and a section citing only such a marker is not reported as outdated. Any
+other word is not trusted as a kind: if its text can be a path (it holds a `/`, a file extension, a
+`:line` spec, or is a single token) the marker is verified as a file and is **fabricated** when
+the file is missing, so a marker written with a mistyped kind (`fil:`, `path:`, `source:`) over a missing
+file is blocked by the enforce gate. Only prose after an unknown word (`[src: note: agreed in standup]`) is
+unverifiable. A bare path with no kind stays a file.
+
+**Only markers are maintained.** The re-anchor rewrites `[src: …]` markers. A line reference
+written in prose (`` `docker-compose.yml:2-25` ``) is not a citation and is left as written when
+the marker beside it moves: write the line in the marker, not in the sentence.
 
 > **What verification proves — and what it does not.** A `verified` status means the cited
 > source *exists and is in bounds*. It does **not** prove the source *supports the claim*.
@@ -151,7 +238,7 @@ mode (`Settings → Anti-hallucination`, or `config.toml anti_hallucination_mode
 **P2 lint, concretely** — what is mechanically checked on each agent reply:
 1. A prose heuristic flags confident technical claims left **unsourced** (one confidence tier).
 2. Every `[src: …]` marker present is **mechanically verified**: file exists, path is jailed to
-   the project root, line/range is in bounds. A citation pointing at a non-existent or
+   the project root, line/range is in bounds, a `#symbol` anchor appears in the range (and opens it when the range contains its definition). A citation pointing at a non-existent or
    out-of-project path is flagged **fabricated**; a `training-data` source is **rejected**.
 
 **Convention vs enforcement.** The markers and citation grammar above are a *writing

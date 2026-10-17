@@ -15,8 +15,10 @@ release gates.
 
 The frontend warning debt was subsequently reduced contextually to 92 without
 disabling the authoritative ESLint rules. Details and the remaining inventory
-live in the dedicated React debt entry. [src: file:
-docs/tech-debt/TD-20260509-react19-effect-rules.md:20-43]
+live in the dedicated React debt entry, whose last recorded count (2026-08-11)
+is 72 warnings; the CI warning budget has since been ratcheted to 63.
+[src: file: docs/tech-debt/TD-20260509-react19-effect-rules.md:21-34#Current]
+[src: file: .github/workflows/ci-test.yml:670-671#max-warnings]
 
 ## Dependency and security outcome
 
@@ -59,13 +61,13 @@ plus the root Tauri JavaScript API. Exact transitive overrides close advisories
 in `adm-zip`, `postcss`, `flatted`, `brace-expansion`, `dompurify`, `protobufjs`
 and `sharp`. Major updates remain protected by the complete frontend
 typecheck/lint/test/build gate.
-[src: file: frontend/pnpm-workspace.yaml:21-42]
+[src: file: frontend/pnpm-workspace.yaml:50-57#overrides]
 
 `pnpm audit --audit-level=moderate` now passes and is mandatory in both the
 regular CI and aggregate dependency-review workflow. The review deliberately
 runs all three audits before failing, so one graph cannot hide findings in
-another. [src: file: .github/workflows/ci-test.yml:587-595] [src: file:
-.github/workflows/dependency-review.yml:27-63]
+another. [src: file: .github/workflows/ci-test.yml:964-966#audit-level]
+[src: file: .github/workflows/dependency-review.yml:35-113#continue-on-error]
 
 After the final direct-dependency refresh, `pnpm audit` reports no known
 vulnerabilities and both the root and frontend `pnpm outdated` checks report
@@ -90,8 +92,9 @@ TypeScript 7.0.2 is the default compiler for `build` and
 without the programmatic API consumed by typescript-eslint, the official
 side-by-side arrangement keeps `@typescript/typescript6` aliased as the
 `typescript` package and exposes its `tsc6` binary through
-`typecheck:legacy`. Both compiler paths are explicit CI gates. [src: file:
-frontend/package.json:9-16] [src: file: frontend/package.json:43-65] [src: url:
+`typecheck:legacy`. Both compiler paths are explicit CI gates.
+[src: file: frontend/package.json:11-13#tsc6] [src: file: frontend/package.json:56#native] [src: file: frontend/package.json:64#typescript]
+[src: file: .github/workflows/ci-test.yml:653-660#typecheck] [src: url:
 https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/]
 
 The earlier preview pilot produced zero diagnostics with both compilers on the
@@ -108,16 +111,16 @@ The preview was approximately 77% faster and used 27% less peak memory in that
 local sample. Once 7.0.2 became stable, Kronn adopted it for compilation while
 retaining TypeScript 6 only for the API-dependent toolchain. A dedicated
 manifest regression test prevents either compiler alias or script from being
-silently collapsed. [src: file:
-frontend/src/__tests__/toolchain-contract.test.ts:1-27]
+silently collapsed.
+[src: file: frontend/src/__tests__/toolchain-contract.test.ts:15-26#toolchain]
 
 ## Oxlint dual-run pilot
 
 Oxlint runs first as a fast feedback gate, followed by authoritative ESLint in
 CI. The generated configuration mirrors implemented rules and documents the
-fallback implicitly through the retained ESLint pass. [src: file:
-.github/workflows/ci-test.yml:343-352] [src: file:
-frontend/.oxlintrc.json:1-18]
+fallback implicitly through the retained ESLint pass.
+[src: file: .github/workflows/ci-test.yml:667-671#oxlint]
+[src: file: frontend/.oxlintrc.json:18-130#rules]
 
 Same-machine measurements:
 
@@ -132,7 +135,7 @@ principally React Compiler rules and the project-specific
 `no-restricted-syntax` selectors. `no-unsafe-optional-chaining` is disabled in
 Oxlint because its current implementation reported five test expressions that
 the authoritative ESLint configuration accepts; ESLint continues to enforce
-the project policy. [src: file: frontend/.oxlintrc.json:18-83]
+the project policy. [src: file: frontend/.oxlintrc.json:67#no-unsafe-optional-chaining]
 
 ## Installer evidence
 
@@ -149,12 +152,13 @@ timeouts; the subsequent warm smoke passed without changing production timeout
 policy. The local DMG script then stopped without an actionable underlying
 diagnostic. It must not be presented as installer proof.
 
-Release installer proof therefore remains the existing platform CI matrix:
-macOS DMG, Windows NSIS and Linux DEB, followed by the bundled DOCX/PDF smoke
-test on each runner. [src: file:
-.github/workflows/desktop-build.yml:1-166] The bundle configuration itself
-declares the document sidecar resource and desktop installer targets. [src:
-file: desktop/src-tauri/tauri.conf.json:35-55]
+Release installer proof therefore remains the existing platform CI matrix
+(Windows, macOS and Linux), where each runner smoke-tests the frozen DOCX/PDF
+sidecar before the Tauri build produces its installer.
+[src: file: .github/workflows/desktop-build.yml:49-64#matrix]
+[src: file: .github/workflows/desktop-build.yml:181-192#docs-smoke] The bundle configuration itself
+declares the document sidecar resource and desktop installer targets.
+[src: file: desktop/src-tauri/tauri.conf.json:35-44#targets]
 
 ## Release decision
 

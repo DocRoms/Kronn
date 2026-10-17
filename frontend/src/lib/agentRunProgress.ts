@@ -163,6 +163,16 @@ export function runForReply(
   return latest;
 }
 
+/**
+ * A run by its own id. A workflow step's run has no dispatch and no trigger
+ * message, so no reply selector can name it (KT-1252): the room's step row
+ * carries the id instead.
+ */
+export function runById(runs: LiveRuns, discussionId: string, runId: string): LiveRun | null {
+  const run = runs[discussionId]?.[runId];
+  return run && !run.retired ? run : null;
+}
+
 /** Elapsed run time at `now`, frozen once the run stopped. */
 export function runElapsedMs(run: LiveRun, now: number): number {
   if (run.progress.stopped) return run.progress.elapsed_ms;
@@ -254,4 +264,13 @@ export function useLiveRun(
 ): LiveRun | null {
   const runs = useSyncExternalStore(subscribe, readStore, readStore);
   return discussionId ? runForReply(runs, discussionId, reply, replyIds) : null;
+}
+
+/** The live run of a workflow step's room row, or `null` before its first frame. */
+export function useLiveRunById(
+  discussionId: string | undefined,
+  runId: string | undefined,
+): LiveRun | null {
+  const runs = useSyncExternalStore(subscribe, readStore, readStore);
+  return discussionId && runId ? runById(runs, discussionId, runId) : null;
 }

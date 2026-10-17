@@ -631,6 +631,7 @@ pub async fn orchestrate(
                 recovered_partial: false,
                 session_tokens_at_message: None,
                 author_cli_ordinal: None,
+                session_continuity: None,
                 model: None,
                 lint_report: None,
                 id: Uuid::new_v4().to_string(),
@@ -964,6 +965,7 @@ pub async fn orchestrate(
                                 recovered_partial: false,
                                 session_tokens_at_message: None,
                                 author_cli_ordinal: None,
+                                session_continuity: None,
                                 model: round_model,
                                 lint_report: None,
                                 id: Uuid::new_v4().to_string(),
@@ -1142,6 +1144,7 @@ pub async fn orchestrate(
                             recovered_partial: false,
                             session_tokens_at_message: None,
                             author_cli_ordinal: None,
+                            session_continuity: None,
                             model: synthesis_model,
                             lint_report: None,
                             id: Uuid::new_v4().to_string(),
@@ -1958,6 +1961,7 @@ mod orchestrate_validation_tests {
                 target_agent: None,
                 reply_to_message_id: None,
                 author_cli_ordinal: None,
+                session_continuity: None,
             }],
             message_count: 1,
             non_system_message_count: 1,
@@ -3044,6 +3048,7 @@ mod debate_context_tests {
             target_agent: None,
             reply_to_message_id: None,
             author_cli_ordinal: None,
+            session_continuity: None,
         }
     }
 

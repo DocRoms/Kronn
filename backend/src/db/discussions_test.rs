@@ -60,6 +60,7 @@ mod tests {
             recovered_partial: false,
             session_tokens_at_message: None,
             author_cli_ordinal: None,
+            session_continuity: None,
             model: None,
             lint_report: None,
             id: id.into(),
@@ -452,6 +453,26 @@ mod tests {
         assert_eq!(disc.messages.len(), 1);
         assert_eq!(disc.messages[0].content, "Content of m1");
         assert!(matches!(disc.messages[0].role, MessageRole::User));
+    }
+
+    /// KT-1202 — a turn's session continuity survives the round trip on both readers.
+    #[test]
+    fn session_continuity_is_stored_with_the_message() {
+        use crate::models::{SessionContinuity, SessionContinuityReason};
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d1")).unwrap();
+        let mut msg = make_message("m1", MessageRole::Agent, Some(AgentType::ClaudeCode));
+        let continuity =
+            SessionContinuity::fallback_because(SessionContinuityReason::SessionExpired);
+        msg.session_continuity = Some(continuity);
+        insert_message(&conn, "d1", &msg).unwrap();
+        insert_message(&conn, "d1", &make_message("m2", MessageRole::User, None)).unwrap();
+
+        let disc = get_discussion(&conn, "d1").unwrap().unwrap();
+        assert_eq!(disc.messages[0].session_continuity, Some(continuity));
+        assert_eq!(disc.messages[1].session_continuity, None);
+        let exported = list_discussions_with_messages(&conn).unwrap();
+        assert_eq!(exported[0].messages[0].session_continuity, Some(continuity));
     }
 
     #[test]
@@ -3723,6 +3744,214 @@ mod tests {
             list_message_targets(&conn, "a-cli-wake").unwrap(),
             vec![MessageTarget::cli(AgentType::ClaudeCode, cli_pk)],
             "the joined CLI peer must get a durable Cli wake target"
+        );
+    }
+
+    /// KT-1201 — the 11/10 room: LiteLLM is the native agent, two Claude CLIs
+    /// are joined and `@claude-cli-2` posts a turn under a User message.
+    /// Returns (cli_1, cli_2).
+    fn litellm_room_with_cli_turn(conn: &Connection, disc_id: &str) -> (i64, i64) {
+        let mut discussion = handoff_discussion(disc_id);
+        discussion.agent = AgentType::LiteLlm;
+        insert_discussion(conn, &discussion).unwrap();
+        let cli_1 = crate::db::discussion_sessions::create_session(
+            conn,
+            disc_id,
+            "ClaudeCode",
+            Some("cli-one"),
+            "peer",
+        )
+        .unwrap();
+        let cli_2 = crate::db::discussion_sessions::create_session(
+            conn,
+            disc_id,
+            "ClaudeCode",
+            Some("cli-two"),
+            "peer",
+        )
+        .unwrap();
+        insert_message(
+            conn,
+            disc_id,
+            &make_message("u-root", MessageRole::User, None),
+        )
+        .unwrap();
+        let mut cli_turn = agent_reply("c-cli-turn", AgentType::ClaudeCode, "u-root");
+        cli_turn.content = "@litellm peux-tu relire le lot ?".into();
+        insert_message(conn, disc_id, &cli_turn).unwrap();
+        set_message_cli_author(conn, "c-cli-turn", cli_2).unwrap();
+        (cli_1, cli_2)
+    }
+
+    fn native_litellm_reply(
+        conn: &Connection,
+        disc_id: &str,
+        content: &str,
+        parent: &str,
+        candidates: &[AgentType],
+    ) -> NativeAgentMessageOutcome {
+        let mut response = agent_reply("a-litellm", AgentType::LiteLlm, parent);
+        response.content = content.into();
+        insert_native_agent_message_with_handoffs(
+            conn,
+            disc_id,
+            &response,
+            true,
+            None,
+            &AgentType::LiteLlm,
+            candidates,
+            true,
+            None,
+        )
+        .unwrap()
+    }
+
+    fn handoff_jobs(conn: &Connection) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM agent_dispatch_jobs WHERE trigger_message_id = 'a-litellm'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn native_reply_to_a_cli_turn_targets_that_cli_without_a_mention() {
+        let conn = test_conn();
+        let (_, cli_2) = litellm_room_with_cli_turn(&conn, "d-reply-author");
+        native_litellm_reply(
+            &conn,
+            "d-reply-author",
+            "Verdict : approuvé.",
+            "c-cli-turn",
+            &[],
+        );
+        assert_eq!(
+            list_message_targets(&conn, "a-litellm").unwrap(),
+            vec![MessageTarget::cli(AgentType::ClaudeCode, cli_2)]
+        );
+    }
+
+    #[test]
+    fn an_explicit_mention_overrides_the_replied_cli_author() {
+        let conn = test_conn();
+        let (cli_1, _) = litellm_room_with_cli_turn(&conn, "d-reply-override");
+        native_litellm_reply(
+            &conn,
+            "d-reply-override",
+            "@claude-cli, reprends ce point.",
+            "c-cli-turn",
+            &[],
+        );
+        assert_eq!(
+            list_message_targets(&conn, "a-litellm").unwrap(),
+            vec![MessageTarget::cli(AgentType::ClaudeCode, cli_1)]
+        );
+    }
+
+    #[test]
+    fn native_reply_to_a_human_turn_stays_untargeted() {
+        let conn = test_conn();
+        litellm_room_with_cli_turn(&conn, "d-reply-human");
+        native_litellm_reply(&conn, "d-reply-human", "Bonjour.", "u-root", &[]);
+        assert!(list_message_targets(&conn, "a-litellm").unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_agent_short_alias_reaches_the_replied_cli_instead_of_spawning() {
+        // The incident: LiteLLM ends with "@claude — …" plus a handoff marker,
+        // and a punctual Claude was spawned in place of @claude-cli-2.
+        let conn = test_conn();
+        let (_, cli_2) = litellm_room_with_cli_turn(&conn, "d-alias-author");
+        let outcome = native_litellm_reply(
+            &conn,
+            "d-alias-author",
+            "@claude — je propose de réécrire les cartes.",
+            "c-cli-turn",
+            &[AgentType::ClaudeCode],
+        );
+        assert!(outcome.dispatched_agents.is_empty());
+        assert_eq!(handoff_jobs(&conn), 0);
+        assert_eq!(
+            list_message_targets(&conn, "a-litellm").unwrap(),
+            vec![MessageTarget::cli(AgentType::ClaudeCode, cli_2)]
+        );
+    }
+
+    #[test]
+    fn an_agent_short_alias_reaches_the_only_joined_cli_of_that_provider() {
+        let conn = test_conn();
+        let (_, _) = litellm_room_with_cli_turn(&conn, "d-alias-only");
+        let codex = crate::db::discussion_sessions::create_session(
+            &conn,
+            "d-alias-only",
+            "Codex",
+            Some("codex-one"),
+            "peer",
+        )
+        .unwrap();
+        let outcome = native_litellm_reply(
+            &conn,
+            "d-alias-only",
+            "@codex, relis le diff.",
+            "u-root",
+            &[AgentType::Codex],
+        );
+        assert!(outcome.dispatched_agents.is_empty());
+        assert_eq!(
+            list_message_targets(&conn, "a-litellm").unwrap(),
+            vec![MessageTarget::cli(AgentType::Codex, codex)]
+        );
+    }
+
+    #[test]
+    fn an_ambiguous_agent_short_alias_keeps_the_punctual_handoff() {
+        // Two Claude CLIs, neither wrote the replied turn: no guess.
+        let conn = test_conn();
+        litellm_room_with_cli_turn(&conn, "d-alias-ambiguous");
+        let outcome = native_litellm_reply(
+            &conn,
+            "d-alias-ambiguous",
+            "@claude, une relecture ?",
+            "u-root",
+            &[AgentType::ClaudeCode],
+        );
+        assert_eq!(outcome.dispatched_agents, vec![AgentType::ClaudeCode]);
+        assert_eq!(handoff_jobs(&conn), 1);
+    }
+
+    #[test]
+    fn agent_alias_cli_target_never_takes_the_room_agent_by_presence() {
+        let joined = vec![MessageTarget::cli(AgentType::ClaudeCode, 7)];
+        assert_eq!(
+            agent_alias_cli_target(
+                &AgentType::ClaudeCode,
+                None,
+                &joined,
+                &AgentType::ClaudeCode
+            ),
+            None,
+            "a bare alias of the room's own agent names the discussion agent"
+        );
+        let author = MessageTarget::cli(AgentType::ClaudeCode, 7);
+        assert_eq!(
+            agent_alias_cli_target(
+                &AgentType::ClaudeCode,
+                Some(&author),
+                &joined,
+                &AgentType::ClaudeCode
+            ),
+            Some(author.clone()),
+            "the reply context still names the author"
+        );
+        assert_eq!(
+            agent_alias_cli_target(
+                &AgentType::Codex,
+                Some(&author),
+                &joined,
+                &AgentType::LiteLlm
+            ),
+            None
         );
     }
 

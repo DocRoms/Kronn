@@ -5143,6 +5143,14 @@ fn isolate_config_dir() {
         std::fs::create_dir_all(&host_home).expect("create API host fixture");
         kronn::core::child_env::set_var("KRONN_DATA_DIR", data_dir);
         kronn::core::child_env::set_var("KRONN_HOST_HOME", host_home);
+        // The binary-relative lookup misses when CARGO_TARGET_DIR is outside
+        // the repository; pin the repo templates unless already set.
+        if kronn::core::child_env::var("KRONN_TEMPLATES_DIR").is_err() {
+            kronn::core::child_env::set_var(
+                "KRONN_TEMPLATES_DIR",
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../templates"),
+            );
+        }
         root
     });
 }
@@ -5499,6 +5507,7 @@ fn agent_action_message(id: &str, content: &str) -> kronn::models::DiscussionMes
         recovered_partial: false,
         session_tokens_at_message: None,
         author_cli_ordinal: None,
+        session_continuity: None,
         model: None,
         lint_report: None,
         id: id.into(),
@@ -7140,7 +7149,7 @@ async fn orchestrator_return_resume_route_authenticates_and_replays_exact_rotati
             parent_id: None,
             project_ids: vec!["return-http-project".into()],
             tags: vec![],
-            definition_of_done: vec![kronn::models::CreatePlanningDodItem { id: None, sentence: "worker returns".into(), completed: false }],
+            definition_of_done: vec![kronn::models::CreatePlanningDodItem { id: None, sentence: "worker returns".into(), completed: false, verification: None }],
             links: vec![],
             actor: kronn::models::PlanningActor { kind: kronn::models::PlanningActorKind::Backend, id: Some("api-test".into()), session_id: None, source_message_id: None },
         })?;
@@ -7655,6 +7664,309 @@ async fn a_project_can_switch_its_agent_files_outside_its_repository_and_back() 
     )
     .await;
     assert_eq!(unknown["error_code"], "not_found", "{unknown}");
+}
+
+fn docs_location_project(id: &str, path: &std::path::Path) -> kronn::models::Project {
+    let now = chrono::Utc::now();
+    kronn::models::Project {
+        id: id.into(),
+        name: id.into(),
+        path: path.to_string_lossy().into_owned(),
+        repo_url: None,
+        token_override: None,
+        ai_config: kronn::models::AiConfigStatus {
+            detected: false,
+            configs: vec![],
+        },
+        audit_status: kronn::models::AiAuditStatus::NoTemplate,
+        ai_todo_count: 0,
+        tech_debt_count: 0,
+        needs_docs_migration: false,
+        path_exists: true,
+        write_access: None,
+        mcp_sync_report: None,
+        default_skill_ids: vec![],
+        default_profile_id: None,
+        briefing_notes: None,
+        linked_repos: vec![],
+        workspace: None,
+        created_at: now,
+        updated_at: now,
+    }
+}
+
+#[tokio::test]
+async fn a_project_keeping_its_ai_doc_in_dot_ai_is_detected_audited_and_badged() {
+    // KT-263 — detection, audit status, badge, evidence file and the context
+    // audit all follow the override; clearing it restores the old view.
+    let state = test_state();
+    let repo = tempfile::tempdir().unwrap();
+    let root = repo.path().join("repo");
+    std::fs::create_dir_all(root.join(".ai")).unwrap();
+    std::fs::write(root.join(".ai/AGENTS.md"), "# Project\n\nReal content.\n").unwrap();
+    std::fs::write(root.join("CLAUDE.md"), "Read `.ai/AGENTS.md` first.\n").unwrap();
+    let project = docs_location_project("p-docs-dot-ai", &root);
+    state
+        .db
+        .with_conn(move |conn| kronn::db::projects::insert_project(conn, &project))
+        .await
+        .unwrap();
+    let app = || build_router_with_auth(state.clone(), false);
+    let uri = "/api/projects/p-docs-dot-ai/docs-location";
+
+    let (_, badge) = get_json(app(), "/api/projects/p-docs-dot-ai").await;
+    assert_eq!(badge["data"]["audit_status"], "NoTemplate", "{badge}");
+    let (_, read) = get_json(app(), uri).await;
+    assert_eq!(read["data"]["effective_dir"], "docs", "{read}");
+    assert_eq!(read["data"]["source"], "detected");
+
+    let (status, saved) = put_json_root(app(), uri, serde_json::json!({"dir": "./.ai/"})).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["data"]["override_dir"], ".ai");
+    assert_eq!(saved["data"]["effective_dir"], ".ai");
+    assert_eq!(saved["data"]["source"], "project_override");
+
+    // Detection: a filled entry with no evidence yet is a template.
+    let (_, badge) = get_json(app(), "/api/projects/p-docs-dot-ai").await;
+    assert_eq!(
+        badge["data"]["audit_status"], "TemplateInstalled",
+        "{badge}"
+    );
+    // The evidence write lands in `.ai/`, and the badge follows it.
+    kronn::core::kronn_state::record_audit(&root, "full").unwrap();
+    assert!(root.join(".ai/.kronn.json").is_file());
+    assert!(!root.join("docs").exists());
+    let (_, badge) = get_json(app(), "/api/projects/p-docs-dot-ai").await;
+    assert_eq!(badge["data"]["audit_status"], "Audited", "{badge}");
+    let (_, evidence) = get_json(app(), "/api/projects/p-docs-dot-ai/audit-evidence").await;
+    assert_eq!(
+        evidence["data"]["state_file"], ".ai/.kronn.json",
+        "{evidence}"
+    );
+    assert_eq!(evidence["data"]["kind"], "kronn_audit");
+    let (_, context) = get_json(app(), "/api/projects/p-docs-dot-ai/context-audit").await;
+    let claude = context["data"]["audit"]["per_agent"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["agent"] == "ClaudeCode")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        claude["files"],
+        serde_json::json!(["CLAUDE.md", ".ai/AGENTS.md"]),
+        "{context}"
+    );
+    // The docs/ pipeline refuses instead of writing a second tree.
+    let (_, migrate) = post_json(
+        app(),
+        "/api/projects/p-docs-dot-ai/migrate-docs",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(migrate["success"], false, "{migrate}");
+    assert!(
+        migrate["error"].as_str().unwrap().contains("`.ai/`"),
+        "{migrate}"
+    );
+
+    let (status, cleared) = put_json_root(app(), uri, serde_json::json!({"dir": null})).await;
+    assert_eq!(status, StatusCode::OK, "{cleared}");
+    assert!(cleared["data"]["override_dir"].is_null());
+    let (_, badge) = get_json(app(), "/api/projects/p-docs-dot-ai").await;
+    assert_eq!(badge["data"]["audit_status"], "NoTemplate", "{badge}");
+}
+
+#[tokio::test]
+async fn a_project_ai_doc_folder_leaving_the_root_is_refused_with_a_400() {
+    // KT-263 — save-time containment: absolute, `..`, `.git` and a symlink out
+    // are 400s with a message; nothing is stored.
+    let state = test_state();
+    let repo = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let root = repo.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(outside.path(), root.join("linked")).unwrap();
+    let project = docs_location_project("p-docs-escape", &root);
+    state
+        .db
+        .with_conn(move |conn| kronn::db::projects::insert_project(conn, &project))
+        .await
+        .unwrap();
+    let uri = "/api/projects/p-docs-escape/docs-location";
+    let mut refused = vec!["../outside", "/etc", ".git/hooks", "a/../../b"];
+    if cfg!(unix) {
+        refused.push("linked");
+        refused.push("linked/docs");
+    }
+    for dir in refused {
+        let (status, body) = put_json_root(
+            build_router_with_auth(state.clone(), false),
+            uri,
+            serde_json::json!({ "dir": dir }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{dir}: {body}");
+        assert_eq!(body["error_code"], "validation", "{dir}: {body}");
+        assert!(!body["error"].as_str().unwrap().is_empty());
+    }
+    let (_, read) = get_json(build_router_with_auth(state.clone(), false), uri).await;
+    assert!(read["data"]["override_dir"].is_null(), "{read}");
+    assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
+
+    let (status, unknown) = put_json_root(
+        build_router_with_auth(state, false),
+        "/api/projects/nope/docs-location",
+        serde_json::json!({ "dir": ".ai" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(unknown["error_code"], "not_found");
+}
+
+#[tokio::test]
+async fn briefing_file_drives_http_reads_and_audited_project_cards() {
+    let state = test_state();
+    let repo = tempfile::tempdir().unwrap();
+    let docs = repo.path().join("docs");
+    std::fs::create_dir_all(&docs).unwrap();
+    std::fs::write(docs.join("AGENTS.md"), "# Project\nRead the briefing.\n").unwrap();
+    let mut project = docs_location_project("p-brief-source", repo.path());
+    project.briefing_notes = Some("Stale DB briefing".into());
+    state
+        .db
+        .with_conn(move |conn| kronn::db::projects::insert_project(conn, &project))
+        .await
+        .unwrap();
+    kronn::core::kronn_state::record_audit(repo.path(), "full").unwrap();
+    let app = || build_router_with_auth(state.clone(), false);
+    for body in ["# Briefing\nCommitted on another machine.\n", " \n"] {
+        std::fs::write(docs.join("briefing.md"), body).unwrap();
+        let expected = if body.trim().is_empty() {
+            Value::Null
+        } else {
+            Value::String(body.into())
+        };
+        let (_, briefing) = get_json(app(), "/api/projects/p-brief-source/briefing").await;
+        assert_eq!(briefing["success"], true, "{briefing}");
+        assert_eq!(briefing["data"], expected, "{briefing}");
+        let (_, card) = get_json(app(), "/api/projects/p-brief-source").await;
+        assert_eq!(card["data"]["audit_status"], "Audited", "{card}");
+        assert_eq!(card["data"]["briefing_notes"], expected, "{card}");
+        let (_, cards) = get_json(app(), "/api/projects").await;
+        let card = cards["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == "p-brief-source")
+            .unwrap();
+        assert_eq!(card["briefing_notes"], expected, "{cards}");
+    }
+}
+
+fn briefing_answers(docs_dir: Option<&str>) -> Value {
+    let mut body = serde_json::json!({
+        "purpose": "P", "team": "T", "maturity": "M",
+        "dependencies": "D", "traps": "Tr", "additional": ""
+    });
+    if let Some(dir) = docs_dir {
+        body["docs_dir"] = serde_json::json!(dir);
+    }
+    body
+}
+
+#[tokio::test]
+async fn a_global_default_only_prefills_the_briefing_until_the_briefing_is_saved() {
+    // KT-1192 — a fresh project with a global default of `.ai/` and no
+    // briefing resolves exactly as before; saving the briefing with the
+    // pre-filled folder makes it the project's.
+    let state = test_state();
+    state.config.write().await.scan.default_docs_dir = Some(".ai".into());
+    let repo = tempfile::tempdir().unwrap();
+    let root = repo.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    let project = docs_location_project("p-brief-dir", &root);
+    state
+        .db
+        .with_conn(move |conn| kronn::db::projects::insert_project(conn, &project))
+        .await
+        .unwrap();
+    let app = || build_router_with_auth(state.clone(), false);
+    let location = "/api/projects/p-brief-dir/docs-location";
+
+    let (_, read) = get_json(app(), location).await;
+    assert_eq!(read["data"]["effective_dir"], "docs", "{read}");
+    assert_eq!(read["data"]["default_dir"], ".ai", "{read}");
+    assert_eq!(
+        kronn::core::scanner::detect_docs_dir(&root),
+        root.join("docs")
+    );
+
+    let (_, defaults) = get_json(app(), "/api/projects/p-brief-dir/briefing-defaults").await;
+    assert_eq!(defaults["data"]["docs_dir"], ".ai", "{defaults}");
+    assert_eq!(defaults["data"]["docs_dir_source"], "global_default");
+    assert_eq!(defaults["data"]["folder_exists"], false);
+
+    let (status, refused) = post_json(
+        app(),
+        "/api/projects/p-brief-dir/save-briefing",
+        briefing_answers(Some("../outside")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert_eq!(refused["error_code"], "validation");
+    let (_, read) = get_json(app(), location).await;
+    assert!(read["data"]["override_dir"].is_null(), "{read}");
+
+    let (status, saved) = post_json(
+        app(),
+        "/api/projects/p-brief-dir/save-briefing",
+        briefing_answers(Some(".ai/")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["success"], true, "{saved}");
+    let (_, read) = get_json(app(), location).await;
+    assert_eq!(read["data"]["override_dir"], ".ai", "{read}");
+    assert_eq!(read["data"]["effective_dir"], ".ai");
+    assert_eq!(
+        kronn::core::scanner::detect_docs_dir(&root),
+        root.join(".ai")
+    );
+    let (_, defaults) = get_json(app(), "/api/projects/p-brief-dir/briefing-defaults").await;
+    assert_eq!(defaults["data"]["docs_dir_source"], "project_override");
+
+    // Keeping the folder the project would use anyway stores no override.
+    let (status, kept) = post_json(
+        app(),
+        "/api/projects/p-brief-dir/save-briefing",
+        briefing_answers(Some("docs")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{kept}");
+    let (_, read) = get_json(app(), location).await;
+    assert!(read["data"]["override_dir"].is_null(), "{read}");
+    assert_eq!(read["data"]["effective_dir"], "docs");
+}
+
+#[tokio::test]
+async fn the_default_ai_doc_folder_setting_refuses_unsafe_values_with_a_400() {
+    // KT-263 — only refusals here: a saved default is process-wide and would
+    // move other tests' fresh-project fallback (the save path is a lib test).
+    let app = test_app();
+    let (_, read) = get_json(app.clone(), "/api/config/default-docs-dir").await;
+    assert_eq!(read["success"], true, "{read}");
+    for bad in ["../x", "/abs", ".git"] {
+        let (status, body) = post_json(
+            app.clone(),
+            "/api/config/default-docs-dir",
+            serde_json::json!(bad),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {body}");
+        assert_eq!(body["error_code"], "validation");
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -11753,10 +12065,15 @@ fn analysis_steps_tech_debt_creates_detail_files() {
 
 #[test]
 fn analysis_steps_tech_debt_checks_outdated_prerequisites() {
-    let source = include_str!("../src/api/audit/mod.rs");
+    // KT-153: the step prompts live in embedded Markdown, not in mod.rs.
+    let source = include_str!("../src/api/audit/prompts/step8-tech-debt.md");
     // The tech debt step should mention checking for outdated prerequisites
     assert!(
-        source.contains("deprecated") || source.contains("EOL") || source.contains("outdated"),
+        source.contains("Outdated prerequisites"),
+        "Tech debt step should instruct filling the outdated prerequisites table"
+    );
+    assert!(
+        source.contains("deprecated") || source.contains("EOL"),
         "Tech debt step should instruct checking for outdated prerequisites"
     );
 }
@@ -15176,6 +15493,34 @@ async fn agent_readiness_reports_each_selected_agent() {
     assert_eq!(json["error"], "Project not found");
 }
 
+/// KT-1154 — the composer reads the transport state of the HTTP agents a
+/// draft names: a named connection on a closed port is unreachable, refused;
+/// a CLI agent has no address to probe.
+#[tokio::test]
+async fn agent_reachability_reports_a_closed_connection_and_skips_cli_agents() {
+    // Port 1 is closed everywhere and dialing it needs no bind.
+    let state = litellm_saved_connection_state("http://127.0.0.1:1".into()).await;
+    let (status, json) = post_json(
+        build_router_with_auth(state, false),
+        "/api/agents/reachability",
+        serde_json::json!({ "targets": [
+            { "agent_type": "LiteLlm", "connection_id": "litellm-saved" },
+            { "agent_type": "ClaudeCode" }
+        ] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true, "{json}");
+    let results = json["data"].as_array().unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0]["connection_id"], "litellm-saved");
+    assert_eq!(results[0]["connectivity"]["state"], "unreachable", "{json}");
+    assert_eq!(results[0]["connectivity"]["unreachable_reason"], "refused");
+    assert!(results[0]["connectivity"]["checked_at"].is_string());
+    assert!(!json.to_string().contains("127.0.0.1"), "{json}");
+    assert_eq!(results[1]["connectivity"], serde_json::Value::Null);
+}
+
 // ─── Compare-agents mode (POST /api/quick-prompts/:id/compare-agents) ───
 //
 // Pinned regression for the new fan-out-across-agents endpoint. We
@@ -16721,6 +17066,7 @@ async fn disc_sync_request_resends_missing_messages() {
         recovered_partial: false,
         session_tokens_at_message: None,
         author_cli_ordinal: None,
+        session_continuity: None,
         model: None,
         lint_report: None,
         id: "sync-msg-1".into(),
@@ -16941,6 +17287,7 @@ async fn wait_for_peer_surfaces_same_agent_type_peer_but_not_own_local() {
         recovered_partial: false,
         session_tokens_at_message: None,
         author_cli_ordinal: None,
+        session_continuity: None,
         model: None,
         lint_report: None,
         id: id.into(),
@@ -21715,6 +22062,31 @@ mod cold_api_handlers_tests {
         }).await.unwrap();
     }
 
+    /// `seed_completed_validation` for a project whose docs are already on
+    /// disk: also record the final document fingerprints the way a completed
+    /// audit's terminal transaction does, so the KT-1206 gate sees a baseline
+    /// matching the reviewed contents (and still refuses any later edit).
+    async fn seed_completed_validation_with_docs(
+        state: &AppState,
+        project_id: &str,
+        repo: &std::path::Path,
+    ) {
+        seed_completed_validation(state, project_id).await;
+        let documents = kronn::core::audit_documents::capture_json(repo).unwrap();
+        let pid = project_id.to_string();
+        state
+            .db
+            .with_conn(move |conn| {
+                let run = kronn::db::audit_runs::list_recent(conn, &pid, 1)?
+                    .into_iter()
+                    .next()
+                    .expect("the seeded run");
+                kronn::db::audit_documents::record(conn, &run.id, &documents)
+            })
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn project_git_status_real_repo_returns_envelope() {
         let (_dir, repo) = seed_repo("proj-status");
@@ -22314,6 +22686,133 @@ mod cold_api_handlers_tests {
     }
 
     #[tokio::test]
+    async fn check_drift_lists_the_template_docs_still_holding_placeholders() {
+        let (_dir, repo) = seed_repo("drift-placeholders");
+        let write = |rel: &str, body: &str| {
+            let path = repo.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        };
+        write("docs/AGENTS.md", "# Entry\n\nAudited.\n");
+        write("docs/coding-rules.md", "# Rules\n\nFilled.\n");
+        write("docs/glossary.md", "| {{TERM_1}} | {{DEFINITION_1}} |\n");
+        write("docs/workflow/tickets.md", "{{TRACKER}}\n");
+        write("docs/examples/TEMPLATE.md", "{{EXAMPLE_NAME}}\n");
+        write("docs/not-from-the-template.md", "{{ANYTHING}}\n");
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = get_json(app, &format!("/api/projects/{}/drift", pid)).await;
+
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(true), "{json}");
+        assert_eq!(
+            json["data"]["placeholder_docs"],
+            serde_json::json!([
+                { "path": "docs/glossary.md", "step": 2 },
+                { "path": "docs/workflow/tickets.md", "step": null },
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn older_template_update_is_visible_in_ui_drift_and_mcp_audit_info() {
+        let (_dir, repo) = seed_repo("template-update");
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        let original =
+            "<!-- kronn:doc-version=\"1.0\" -->\n# Audited documentation\nHuman content.";
+        std::fs::write(repo.join("docs/AGENTS.md"), original).unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+        for endpoint in ["drift", "audit-info"] {
+            let (status, json) =
+                get_json(app.clone(), &format!("/api/projects/{pid}/{endpoint}")).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(json["success"], true, "{json}");
+            let update = &json["data"]["template_update"];
+            assert_eq!(update["available"], true, "{json}");
+            assert_eq!(update["installed_version"], "1.0");
+            assert_eq!(update["current_version"], "1.1");
+            assert!(update["missing_files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["path"] == "docs/glossary.md" && f["step"].is_number()));
+            assert_eq!(update["renames"], serde_json::json!([]));
+        }
+        assert_eq!(
+            std::fs::read_to_string(repo.join("docs/AGENTS.md")).unwrap(),
+            original
+        );
+        assert!(
+            !repo.join("docs/.kronn.json").exists(),
+            "inspection does not install or rewrite state"
+        );
+    }
+
+    #[tokio::test]
+    async fn template_update_install_tracks_manifest_preserves_filled_docs_and_respects_audit_lease(
+    ) {
+        let (_dir, repo) = seed_repo("template-update-install");
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        let original = "# Human project docs\nVue example: {{ message }}";
+        std::fs::write(repo.join("docs/AGENTS.md"), original).unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state.clone(), false);
+        assert!(state.audit_tracker.lock().unwrap().try_acquire_lease(&pid));
+        let (_, refused) = post_json(
+            app.clone(),
+            &format!("/api/projects/{pid}/install-template"),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(refused["success"], false, "{refused}");
+        assert!(!repo.join("docs/environments.md").exists());
+        state.audit_tracker.lock().unwrap().release_lease(&pid);
+        std::fs::write(repo.join("docs/provenance.json"), "not valid JSON").unwrap();
+        let (_, refused) = post_json(
+            app.clone(),
+            &format!("/api/projects/{pid}/install-template"),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(refused["success"], false, "{refused}");
+        assert!(refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("provenance.json"));
+        assert!(!repo.join("docs/environments.md").exists());
+        std::fs::remove_file(repo.join("docs/provenance.json")).unwrap();
+        let (_, installed) = post_json(
+            app.clone(),
+            &format!("/api/projects/{pid}/install-template"),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(installed["success"], true, "{installed}");
+        assert!(repo.join("docs/environments.md").is_file());
+        assert_eq!(
+            std::fs::read_to_string(repo.join("docs/AGENTS.md")).unwrap(),
+            original
+        );
+        let recorded = kronn::core::kronn_state::read(&repo).unwrap();
+        assert_eq!(recorded.template.unwrap().version.as_deref(), Some("1.1"));
+        let (_, drift) = get_json(app, &format!("/api/projects/{pid}/drift")).await;
+        assert_eq!(
+            drift["data"]["template_update"]["available"], false,
+            "{drift}"
+        );
+        assert!(
+            state.audit_tracker.lock().unwrap().try_acquire_lease(&pid),
+            "install released the lease"
+        );
+        state.audit_tracker.lock().unwrap().release_lease(&pid);
+    }
+
+    #[tokio::test]
     async fn check_drift_unknown_project_returns_err_envelope() {
         // Already covered by the wrong-id sweep but pinning here too
         // because the audit_status -> drift handoff is a critical UX path.
@@ -22554,7 +23053,7 @@ mod cold_api_handlers_tests {
         std::fs::write(repo.join("docs/AGENTS.md"), "# AGENTS\n").unwrap();
         let state = test_state();
         let pid = seed_project_with_repo(&state, &repo).await;
-        seed_completed_validation(&state, &pid).await;
+        seed_completed_validation_with_docs(&state, &pid, &repo).await;
         let app = build_router_with_auth(state, false);
 
         let (st, json) = post_json(
@@ -22564,7 +23063,7 @@ mod cold_api_handlers_tests {
         )
         .await;
         assert_eq!(st, StatusCode::OK);
-        assert_eq!(json["success"], serde_json::Value::Bool(true));
+        assert_eq!(json["success"], serde_json::Value::Bool(true), "{json}");
 
         let kronn_state = repo.join("docs/.kronn.json");
         assert!(kronn_state.exists(), "docs/.kronn.json must be created");
@@ -22576,6 +23075,152 @@ mod cold_api_handlers_tests {
     }
 
     #[tokio::test]
+    async fn validation_records_citations_and_the_sources_badge_follows_them() {
+        let (_dir, repo) = seed_repo("validate-citations");
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/config.rs"), "pub const RETRIES: u32 = 3;\n").unwrap();
+        std::fs::write(
+            repo.join("docs/AGENTS.md"),
+            "# AGENTS\nRetries are three [src: src/config.rs:1].\n",
+        )
+        .unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        seed_completed_validation_with_docs(&state, &pid, &repo).await;
+
+        let (_, json) = post_json(
+            build_router_with_auth(state.clone(), false),
+            &format!("/api/projects/{pid}/validate-audit"),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(json["success"], serde_json::Value::Bool(true), "{json}");
+        assert!(repo.join("docs/citations.json").exists());
+
+        let drift_url = format!("/api/projects/{pid}/citation-drift");
+        let (_, json) = get_json(build_router_with_auth(state.clone(), false), &drift_url).await;
+        assert_eq!(json["data"]["sources_state"], "clean", "{json}");
+
+        std::fs::write(repo.join("src/config.rs"), "pub const RETRIES: u32 = 5;\n").unwrap();
+        let (_, json) = get_json(build_router_with_auth(state.clone(), false), &drift_url).await;
+        assert_eq!(
+            json["data"]["sources_state"], "needs_reverification",
+            "{json}"
+        );
+        assert_eq!(json["data"]["broken_count"], 1);
+        assert_eq!(json["data"]["sections"][0]["doc"], "docs/AGENTS.md");
+        assert_eq!(
+            json["data"]["sections"][0]["citations"][0]["cite"],
+            "src/config.rs:1"
+        );
+        assert_eq!(
+            json["data"]["sections"][0]["citations"][0]["state"],
+            "changed"
+        );
+        // The dated milestone is untouched: the two badges are distinct.
+        let (_, project) = get_json(
+            build_router_with_auth(state.clone(), false),
+            &format!("/api/projects/{pid}"),
+        )
+        .await;
+        assert_eq!(project["data"]["audit_status"], "Validated", "{project}");
+
+        let (_, json) = post_json(
+            build_router_with_auth(state.clone(), false),
+            &format!("/api/projects/{pid}/citation-drift/acknowledge"),
+            serde_json::json!({ "doc": "docs/AGENTS.md" }),
+        )
+        .await;
+        assert_eq!(json["success"], serde_json::Value::Bool(true), "{json}");
+        assert_eq!(json["data"]["stale"], serde_json::Value::Bool(false));
+        let (_, json) = get_json(build_router_with_auth(state, false), &drift_url).await;
+        assert_eq!(json["data"]["sources_state"], "clean", "{json}");
+    }
+
+    /// KT-1168 — « Revalider l'audit » through the router: the plan is
+    /// read-only, a moved line is re-anchored without an agent, and the
+    /// validation stays.
+    #[tokio::test]
+    async fn revalidation_reanchors_a_moved_citation_through_the_router() {
+        let (_dir, repo) = seed_repo("revalidate-moved");
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/config.rs"), "pub const RETRIES: u32 = 3;\n").unwrap();
+        std::fs::write(
+            repo.join("docs/AGENTS.md"),
+            "# AGENTS\nRetries are three [src: src/config.rs:1].\n",
+        )
+        .unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        // A revalidation is an audit run, and no audit starts without a briefing.
+        std::fs::write(repo.join("docs/briefing.md"), "Test briefing content\n").unwrap();
+        seed_completed_validation_with_docs(&state, &pid, &repo).await;
+        let (_, json) = post_json(
+            build_router_with_auth(state.clone(), false),
+            &format!("/api/projects/{pid}/validate-audit"),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(json["success"], serde_json::Value::Bool(true), "{json}");
+
+        std::fs::write(
+            repo.join("src/config.rs"),
+            "// Retry policy.\npub const RETRIES: u32 = 3;\n",
+        )
+        .unwrap();
+        let plan_url = format!("/api/projects/{pid}/revalidation");
+        let (_, json) = get_json(build_router_with_auth(state.clone(), false), &plan_url).await;
+        assert_eq!(json["success"], serde_json::Value::Bool(true), "{json}");
+        assert_eq!(json["data"]["reanchor_count"], 1, "{json}");
+        assert_eq!(json["data"]["agent_steps"], serde_json::json!([]), "{json}");
+        assert_eq!(json["data"]["sections"][0]["action"], "reanchor", "{json}");
+        assert_eq!(
+            json["data"]["sections"][0]["reanchor"][0]["current_line"], 2,
+            "{json}"
+        );
+        // Reading the plan writes nothing.
+        assert_eq!(
+            std::fs::read_to_string(repo.join("docs/AGENTS.md")).unwrap(),
+            "# AGENTS\nRetries are three [src: src/config.rs:1].\n"
+        );
+
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/api/projects/{pid}/revalidate-audit"))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"agent":"ClaudeCode"}"#))
+            .unwrap();
+        let mut req = req;
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                45678,
+            ))));
+        let resp = build_router_with_auth(state.clone(), false)
+            .oneshot(req)
+            .await
+            .unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8_lossy(&body);
+        assert!(body.contains("event: done"), "{body}");
+        assert!(body.contains(r#""status":"clean""#), "{body}");
+        assert_eq!(
+            std::fs::read_to_string(repo.join("docs/AGENTS.md")).unwrap(),
+            "# AGENTS\nRetries are three [src: src/config.rs:2].\n"
+        );
+        let (_, json) = get_json(build_router_with_auth(state.clone(), false), &plan_url).await;
+        assert_eq!(json["data"]["sections"], serde_json::json!([]), "{json}");
+        let (_, project) = get_json(
+            build_router_with_auth(state, false),
+            &format!("/api/projects/{pid}"),
+        )
+        .await;
+        assert_eq!(project["data"]["audit_status"], "Validated", "{project}");
+    }
+
+    #[tokio::test]
     async fn validate_audit_is_idempotent_preserves_first_date() {
         // Second call must NOT overwrite the validated_at timestamp.
         // (kronn_state::mark_validated does the no-op-if-set check).
@@ -22584,7 +23229,7 @@ mod cold_api_handlers_tests {
         std::fs::write(repo.join("docs/AGENTS.md"), "# AGENTS\n").unwrap();
         let state = test_state();
         let pid = seed_project_with_repo(&state, &repo).await;
-        seed_completed_validation(&state, &pid).await;
+        seed_completed_validation_with_docs(&state, &pid, &repo).await;
 
         // First call.
         let (_, first_response) = post_json(
@@ -22593,7 +23238,11 @@ mod cold_api_handlers_tests {
             serde_json::json!({}),
         )
         .await;
-        assert_eq!(first_response["success"], serde_json::Value::Bool(true));
+        assert_eq!(
+            first_response["success"],
+            serde_json::Value::Bool(true),
+            "{first_response}"
+        );
         let first = std::fs::read_to_string(repo.join("docs/.kronn.json")).unwrap();
 
         // Second call (could be hours / days later).
@@ -22603,7 +23252,11 @@ mod cold_api_handlers_tests {
             serde_json::json!({}),
         )
         .await;
-        assert_eq!(second_response["success"], serde_json::Value::Bool(true));
+        assert_eq!(
+            second_response["success"],
+            serde_json::Value::Bool(true),
+            "{second_response}"
+        );
         let second = std::fs::read_to_string(repo.join("docs/.kronn.json")).unwrap();
 
         // The validated_at line must be unchanged (both runs happen on
@@ -22840,6 +23493,827 @@ mod cold_api_handlers_tests {
             "no docs/ dir → no briefing.md should have been written"
         );
     }
+
+    #[tokio::test]
+    async fn save_briefing_form_persists_the_td_tasks_option() {
+        let (_dir, repo) = seed_repo("brief-td-tasks");
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+        let (st, json) = post_json(
+            app,
+            &format!("/api/projects/{}/save-briefing", pid),
+            serde_json::json!({
+                "purpose": "P", "team": "T", "maturity": "M",
+                "dependencies": "D", "traps": "Tr", "additional": "",
+                "td_to_tasks": true
+            }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(true));
+        let body = std::fs::read_to_string(repo.join("docs/briefing.md")).unwrap();
+        assert!(
+            kronn::core::td_tasks::briefing_wants_td_tasks(&body),
+            "{body}"
+        );
+    }
+
+    // KT-1193 — project rules and bans in the briefing.
+    fn briefing_with_rules(rules: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "purpose": "P", "team": "T", "maturity": "M",
+            "dependencies": "D", "traps": "Tr", "additional": "",
+            "project_rules": { "rules": rules }
+        })
+    }
+
+    #[tokio::test]
+    async fn briefing_rules_are_recorded_and_written_to_the_coding_rules_doc() {
+        let (_dir, repo) = seed_repo("brief-rules");
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        std::fs::write(repo.join("docs/AGENTS.md"), "# A\n").unwrap();
+        let human = "# Coding rules\n\n## Global\n\nHuman text.\n";
+        std::fs::write(repo.join("docs/coding-rules.md"), human).unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, json) = post_json(
+            app,
+            &format!("/api/projects/{pid}/save-briefing"),
+            briefing_with_rules(serde_json::json!([
+                {"kind": "rule", "text": "toujours passer par le service X"},
+                {"kind": "ban", "text": "ne jamais utiliser lodash",
+                 "pattern": {"kind": "dependency", "value": "lodash"}}
+            ])),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{json}");
+        assert_eq!(json["success"], serde_json::Value::Bool(true), "{json}");
+        let body = std::fs::read_to_string(repo.join("docs/briefing.md")).unwrap();
+        assert!(body.contains("## Project rules\n"), "{body}");
+        assert!(
+            body.contains(
+                "- Never: ne jamais utiliser lodash — checked by Kronn: dependency `lodash`"
+            ),
+            "{body}"
+        );
+        assert!(body.contains("<!-- kronn:project-rules v1 "), "{body}");
+        let doc = std::fs::read_to_string(repo.join("docs/coding-rules.md")).unwrap();
+        assert!(
+            doc.contains("<!-- kronn:section name=\"project-rules\""),
+            "{doc}"
+        );
+        assert!(
+            doc.contains("**Always:** toujours passer par le service X"),
+            "{doc}"
+        );
+        assert!(doc.ends_with("## Global\n\nHuman text.\n"), "{doc}");
+
+        // Saving without rules removes the section and leaves the human doc.
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, _) = post_json(
+            app,
+            &format!("/api/projects/{pid}/save-briefing"),
+            briefing_with_rules(serde_json::json!([])),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let body = std::fs::read_to_string(repo.join("docs/briefing.md")).unwrap();
+        assert!(!body.contains("## Project rules"), "{body}");
+        assert_eq!(
+            std::fs::read_to_string(repo.join("docs/coding-rules.md")).unwrap(),
+            human
+        );
+    }
+
+    #[tokio::test]
+    async fn briefing_save_is_refused_while_an_audit_runs() {
+        let (_dir, repo) = seed_repo("brief-rules-lock");
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        assert!(state.audit_tracker.lock().unwrap().try_acquire_lease(&pid));
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, json) = post_json(
+            app,
+            &format!("/api/projects/{pid}/save-briefing"),
+            briefing_with_rules(serde_json::json!([{"kind": "rule", "text": "always X"}])),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT, "{json}");
+        assert!(
+            // KT-1212: every docs writer refuses with the shared DOCS_BUSY message.
+            json["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("currently running"),
+            "{json}"
+        );
+        assert!(!repo.join("docs/briefing.md").exists());
+
+        state.audit_tracker.lock().unwrap().release_lease(&pid);
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, _) = post_json(
+            app,
+            &format!("/api/projects/{pid}/save-briefing"),
+            briefing_with_rules(serde_json::json!([{"kind": "rule", "text": "always X"}])),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(repo.join("docs/briefing.md").exists());
+    }
+
+    #[tokio::test]
+    async fn raw_briefing_put_is_refused_while_an_audit_runs() {
+        let (_dir, repo) = seed_repo("brief-put-lock");
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let uri = format!("/api/projects/{pid}/briefing");
+        let body = serde_json::json!({"notes": "# Project Briefing\n\nfacts"});
+        assert!(state.audit_tracker.lock().unwrap().try_acquire_lease(&pid));
+        let app = build_router_with_auth(state.clone(), false);
+        let (_, json) = put_json_root(app, &uri, body.clone()).await;
+        assert_eq!(json["success"], false, "{json}");
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("currently running"),
+            "{json}"
+        );
+        assert!(!repo.join("docs/briefing.md").exists());
+
+        state.audit_tracker.lock().unwrap().release_lease(&pid);
+        let app = build_router_with_auth(state.clone(), false);
+        let (_, json) = put_json_root(app, &uri, body).await;
+        assert_eq!(json["success"], true, "{json}");
+        assert!(repo.join("docs/briefing.md").exists());
+    }
+
+    #[tokio::test]
+    async fn briefing_rules_out_of_bounds_are_refused_with_400() {
+        let (_dir, repo) = seed_repo("brief-rules-bad");
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let too_many: Vec<_> = (0..21)
+            .map(|i| serde_json::json!({"kind": "rule", "text": format!("rule {i}")}))
+            .collect();
+        for bad in [
+            serde_json::Value::Array(too_many),
+            serde_json::json!([{"kind": "rule", "text": "x".repeat(201)}]),
+            serde_json::json!([{"kind": "rule", "text": "always",
+                "pattern": {"kind": "import", "value": "lodash"}}]),
+            serde_json::json!([{"kind": "ban", "text": "never",
+                "pattern": {"kind": "file_glob", "value": "../secret/*"}}]),
+        ] {
+            let app = build_router_with_auth(state.clone(), false);
+            let (st, json) = post_json(
+                app,
+                &format!("/api/projects/{pid}/save-briefing"),
+                briefing_with_rules(bad),
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "{json}");
+            assert_eq!(json["success"], serde_json::Value::Bool(false));
+        }
+        assert!(!repo.join("docs/briefing.md").exists());
+    }
+
+    // KT-999 — existing documentation in the briefing.
+    fn briefing_with_docs(locations: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "purpose": "P", "team": "T", "maturity": "M",
+            "dependencies": "D", "traps": "Tr", "additional": "",
+            "existing_docs": { "locations": locations }
+        })
+    }
+
+    fn briefing_full_form() -> serde_json::Value {
+        serde_json::json!({
+            "purpose": "News site\n\nTwo paragraphs", "team": "Four devs",
+            "maturity": "Production", "dependencies": "- Jira\n- Fastly",
+            "traps": "Cache purge", "additional": "",
+            "project": {
+                "tracker": "jira", "tracker_key": "ew", "forge": "github",
+                "forge_repo": "euronews/front", "default_branch": "develop",
+                "commit_convention": "conventional", "signoff_required": "yes",
+                "merge_strategy": "squash", "review_policy": "two_approvals",
+                "release_cadence": "scheduled",
+                "environments": [{"kind": "production", "url": "https://www.example.com"}],
+                "people": [{"role": "devops", "name": "Sam", "contact": "#devops"}],
+                "notes": {
+                    "tracker": "Jira Cloud", "tracker_key": "EW board only",
+                    "forge": "GitHub Enterprise", "forge_repo": "monorepo",
+                    "default_branch": "develop, then main", "commit_convention": "type(scope)",
+                    "signoff": "DCO bot", "merge_strategy": "squash only",
+                    "review": "2 approbations, CODEOWNERS sur backend/, réglé dans la protection de branche GitHub",
+                    "release_cadence": "Tuesdays", "environments": "VPN for staging",
+                    "people": "  ask in #team  "
+                }
+            },
+            "existing_docs": {"locations": [
+                {"path": "README.md", "state": "reference", "source_of_truth": true, "note": "setup"}
+            ]},
+            "td_to_tasks": true,
+            "cross_audit_agents": ["ClaudeCode", "Codex"]
+        })
+    }
+
+    #[tokio::test]
+    async fn briefing_answers_prefill_every_section_and_an_unchanged_resave_is_byte_identical() {
+        let (_dir, repo) = seed_repo("brief-reload");
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, json) = get_json(app, &format!("/api/projects/{pid}/briefing/answers")).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(json["data"].is_null(), "no briefing yet: {json}");
+
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, json) = post_json(
+            app,
+            &format!("/api/projects/{pid}/save-briefing"),
+            briefing_full_form(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{json}");
+        assert_eq!(json["success"], serde_json::Value::Bool(true), "{json}");
+        let first = std::fs::read(repo.join("docs/briefing.md")).unwrap();
+        let text = String::from_utf8(first.clone()).unwrap();
+        assert!(
+            text.contains("  - Review note: 2 approbations, CODEOWNERS sur backend/"),
+            "{text}"
+        );
+
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, json) = get_json(app, &format!("/api/projects/{pid}/briefing/answers")).await;
+        assert_eq!(st, StatusCode::OK);
+        let saved = json["data"].clone();
+        assert_eq!(saved["purpose"], "News site\n\nTwo paragraphs");
+        assert_eq!(saved["team"], "Four devs");
+        assert_eq!(saved["maturity"], "Production");
+        assert_eq!(saved["dependencies"], "- Jira\n- Fastly");
+        assert_eq!(saved["traps"], "Cache purge");
+        assert_eq!(saved["additional"], "");
+        assert_eq!(saved["project"]["tracker_key"], "EW");
+        assert_eq!(saved["project"]["notes"]["people"], "ask in #team");
+        assert_eq!(saved["project"]["notes"].as_object().unwrap().len(), 12);
+        assert_eq!(saved["existing_docs"]["locations"][0]["path"], "README.md");
+        assert_eq!(saved["existing_docs"]["locations"][0]["note"], "setup");
+        assert_eq!(saved["td_to_tasks"], true);
+        assert_eq!(
+            saved["cross_audit_agents"],
+            serde_json::json!(["ClaudeCode", "Codex"])
+        );
+
+        // The form sends back what it loaded, untouched.
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, json) = post_json(app, &format!("/api/projects/{pid}/save-briefing"), saved).await;
+        assert_eq!(st, StatusCode::OK, "{json}");
+        assert_eq!(json["success"], serde_json::Value::Bool(true), "{json}");
+        assert_eq!(std::fs::read(repo.join("docs/briefing.md")).unwrap(), first);
+    }
+
+    #[tokio::test]
+    async fn briefing_answers_reload_the_rules_and_a_mid_audit_resave_is_refused() {
+        let (_dir, repo) = seed_repo("brief-reload-rules");
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        std::fs::write(
+            repo.join("docs/coding-rules.md"),
+            "# Coding rules\n\n## Global\n",
+        )
+        .unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let mut form = briefing_full_form();
+        form["project"] = serde_json::Value::Null;
+        form["existing_docs"] = serde_json::Value::Null;
+        form["td_to_tasks"] = serde_json::Value::Bool(false);
+        form["cross_audit_agents"] = serde_json::json!([]);
+        form["additional"] = serde_json::json!("Ask Sam first.");
+        form["project_rules"] = serde_json::json!({"rules": [
+            {"kind": "rule", "text": "## Additional Context"},
+            {"kind": "ban", "text": "No lodash", "pattern": {"kind": "dependency", "value": "lodash"}}
+        ]});
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, json) = post_json(app, &format!("/api/projects/{pid}/save-briefing"), form).await;
+        assert_eq!(st, StatusCode::OK, "{json}");
+        let first = std::fs::read(repo.join("docs/briefing.md")).unwrap();
+        let coding_rules = std::fs::read(repo.join("docs/coding-rules.md")).unwrap();
+
+        let app = build_router_with_auth(state.clone(), false);
+        let (_, json) = get_json(app, &format!("/api/projects/{pid}/briefing/answers")).await;
+        let saved = json["data"].clone();
+        assert_eq!(saved["additional"], "Ask Sam first.", "{saved}");
+        assert_eq!(
+            saved["project_rules"]["rules"][0]["text"],
+            "## Additional Context"
+        );
+        assert_eq!(
+            saved["project_rules"]["rules"][1]["pattern"]["value"],
+            "lodash"
+        );
+
+        // The reloaded answers are refused while an audit holds the lease.
+        assert!(state.audit_tracker.lock().unwrap().try_acquire_lease(&pid));
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, json) = post_json(
+            app,
+            &format!("/api/projects/{pid}/save-briefing"),
+            saved.clone(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT, "{json}");
+        state.audit_tracker.lock().unwrap().release_lease(&pid);
+
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, json) = post_json(app, &format!("/api/projects/{pid}/save-briefing"), saved).await;
+        assert_eq!(st, StatusCode::OK, "{json}");
+        assert_eq!(std::fs::read(repo.join("docs/briefing.md")).unwrap(), first);
+        assert_eq!(
+            std::fs::read(repo.join("docs/coding-rules.md")).unwrap(),
+            coding_rules
+        );
+    }
+
+    #[tokio::test]
+    async fn briefing_answers_fall_back_to_the_db_notes_without_a_docs_folder() {
+        let (_dir, repo) = seed_repo("brief-reload-db");
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let mut form = briefing_full_form();
+        form["existing_docs"] = serde_json::Value::Null;
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, json) = post_json(app, &format!("/api/projects/{pid}/save-briefing"), form).await;
+        assert_eq!(st, StatusCode::OK, "{json}");
+        assert_eq!(json["success"], serde_json::Value::Bool(true), "{json}");
+        assert!(!repo.join("docs/briefing.md").exists());
+
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, json) = get_json(app, &format!("/api/projects/{pid}/briefing/answers")).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["data"]["team"], "Four devs");
+        assert_eq!(json["data"]["project"]["notes"]["signoff"], "DCO bot");
+
+        let app = build_router_with_auth(state.clone(), false);
+        let (_, json) = get_json(app, "/api/projects/nope/briefing/answers").await;
+        assert_eq!(json["success"], serde_json::Value::Bool(false));
+    }
+
+    #[tokio::test]
+    async fn briefing_docs_are_detected_dated_and_recorded_in_the_briefing() {
+        let (_dir, repo) = seed_repo("brief-docs");
+        std::fs::create_dir_all(repo.join("docs/adr")).unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, json) = get_json(app, &format!("/api/projects/{pid}/briefing/docs")).await;
+        assert_eq!(st, StatusCode::OK);
+        let found = json["data"].as_array().expect("a list");
+        let readme = found
+            .iter()
+            .find(|d| d["path"] == "README.md")
+            .expect("README.md is detected");
+        assert_eq!(readme["kind"], "readme");
+        assert!(
+            readme["last_commit"]
+                .as_str()
+                .is_some_and(|d| d.len() == 10),
+            "{readme}"
+        );
+        assert!(found
+            .iter()
+            .any(|d| d["path"] == "docs/adr" && d["kind"] == "adr"));
+
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, json) = post_json(
+            app,
+            &format!("/api/projects/{pid}/save-briefing"),
+            briefing_with_docs(serde_json::json!([
+                {"path": "README.md", "state": "reference", "source_of_truth": true, "note": "setup"},
+                {"path": "./docs/adr/", "state": "partial"}
+            ])),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{json}");
+        assert_eq!(json["success"], serde_json::Value::Bool(true), "{json}");
+        let body = std::fs::read_to_string(repo.join("docs/briefing.md")).unwrap();
+        assert!(body.contains("## Existing documentation"), "{body}");
+        assert!(
+            body.contains("- `README.md` — README; reference; last commit "),
+            "{body}"
+        );
+        assert!(
+            body.contains("**source of truth** for the README — note: setup"),
+            "{body}"
+        );
+        assert!(
+            body.contains("- `docs/adr` — decision records (ADR); partial; last commit unknown"),
+            "{body}"
+        );
+        assert!(body.contains("<!-- kronn:existing-docs v1 "), "{body}");
+    }
+
+    #[tokio::test]
+    async fn briefing_docs_outside_the_repository_are_refused_with_400() {
+        let (_dir, repo) = seed_repo("brief-docs-out");
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        let outside_dir = tempfile::tempdir().unwrap();
+        let outside = outside_dir.path().to_path_buf();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, repo.join("escape")).unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+
+        let mut refused = vec!["../x", "/etc", "missing.md"];
+        if cfg!(unix) {
+            refused.push("escape");
+        }
+        for bad in refused {
+            let app = build_router_with_auth(state.clone(), false);
+            let (st, json) = post_json(
+                app,
+                &format!("/api/projects/{pid}/briefing/docs/check"),
+                serde_json::json!({ "path": bad }),
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "{bad}: {json}");
+            assert_eq!(json["success"], serde_json::Value::Bool(false));
+
+            let app = build_router_with_auth(state.clone(), false);
+            let (st, _) = post_json(
+                app,
+                &format!("/api/projects/{pid}/save-briefing"),
+                briefing_with_docs(serde_json::json!([{ "path": bad }])),
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "{bad}");
+        }
+        assert!(
+            !repo.join("docs/briefing.md").exists(),
+            "a refused save writes nothing"
+        );
+
+        // Two sources of truth of one kind are refused too.
+        std::fs::write(repo.join("README.fr.md"), "x").unwrap();
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, json) = post_json(
+            app,
+            &format!("/api/projects/{pid}/save-briefing"),
+            briefing_with_docs(serde_json::json!([
+                {"path": "README.md", "source_of_truth": true},
+                {"path": "README.fr.md", "source_of_truth": true}
+            ])),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{json}");
+
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, json) = post_json(
+            app,
+            &format!("/api/projects/{pid}/briefing/docs/check"),
+            serde_json::json!({ "path": "./docs/" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["data"]["path"], "docs");
+        assert_eq!(json["data"]["is_dir"], true);
+    }
+
+    #[tokio::test]
+    async fn linked_repos_docs_reports_the_ai_doc_of_each_repo() {
+        let (_dir, repo) = seed_repo("lr-docs");
+        let (_c1, with_doc) = seed_repo("lr-docs-agents");
+        std::fs::create_dir_all(with_doc.join("docs")).unwrap();
+        std::fs::write(with_doc.join("docs/AGENTS.md"), "x").unwrap();
+        let (_c2, readme_only) = seed_repo("lr-docs-readme");
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, json) = put_json(
+            app,
+            &format!("/api/projects/{pid}/linked-repos"),
+            serde_json::json!([
+                {"id": "a", "name": "a", "kind": "api", "location": with_doc.to_string_lossy()},
+                {"id": "r", "name": "r", "kind": "api", "location": readme_only.to_string_lossy()},
+                {"id": "u", "name": "u", "kind": "api", "location": "https://github.com/org/u"}
+            ]),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(true), "{json}");
+
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, json) = get_json(app, &format!("/api/projects/{pid}/linked-repos/docs")).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(
+            json["data"],
+            serde_json::json!([
+                {"id": "a", "ai_doc": "agents_md", "doc_path": "docs/AGENTS.md"},
+                {"id": "r", "ai_doc": "readme_only", "doc_path": "README.md"},
+                {"id": "u", "ai_doc": "remote", "doc_path": null}
+            ])
+        );
+    }
+
+    // KT-1167 — the button: idempotent, a second click creates nothing.
+    #[tokio::test]
+    async fn td_tasks_endpoint_creates_once_then_reports_links() {
+        let (_dir, repo) = seed_repo("td-tasks");
+        let td = repo.join("docs/tech-debt");
+        std::fs::create_dir_all(&td).unwrap();
+        std::fs::write(
+            td.join("TD-20261001-a.md"),
+            "# TD-20261001-a\n\n- **Area**: Backend\n- **Severity**: High\n- **Status**: Verified in source\n",
+        )
+        .unwrap();
+        std::fs::write(
+            td.join("TD-20261001-b.md"),
+            "# TD-20261001-b\n\n- **Area**: Backend\n- **Severity**: Low\n- **Status**: Rejected\n",
+        )
+        .unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let url = format!("/api/projects/{pid}/audit/td-tasks");
+
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, first) = post_json(app, &url, serde_json::json!({})).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(first["success"], serde_json::Value::Bool(true), "{first}");
+        assert_eq!(first["data"]["created"], 1);
+        assert_eq!(first["data"]["skipped"], 1);
+
+        let app = build_router_with_auth(state, false);
+        let (_, second) = post_json(app, &url, serde_json::json!({})).await;
+        assert_eq!(second["data"]["created"], 0);
+        assert_eq!(second["data"]["already_linked"], 1);
+        assert_eq!(second["data"]["skipped"], 1);
+    }
+
+    envelope_post!(
+        audit_td_tasks_unknown_project,
+        "/api/projects/nope/audit/td-tasks",
+        serde_json::json!({})
+    );
+
+    // KT-982 — the review screen: list, settle in bulk, read back.
+    #[tokio::test]
+    async fn td_review_lists_settles_and_reads_back_over_http() {
+        let (_dir, repo) = seed_repo("td-review");
+        let td = repo.join("docs/tech-debt");
+        std::fs::create_dir_all(&td).unwrap();
+        for (id, severity) in [("TD-20261001-a", "Critical"), ("TD-20261001-b", "Low")] {
+            std::fs::write(
+                td.join(format!("{id}.md")),
+                format!("---\nname: {id}\nmetadata:\n  type: tech-debt\n---\n\n# {id}\n\n- **Area**: Backend\n- **Severity**: {severity}\n- **Status**: Verified in source\n"),
+            )
+            .unwrap();
+        }
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let list_url = format!("/api/projects/{pid}/audit/tds");
+
+        let (st, listed) = get_json(build_router_with_auth(state.clone(), false), &list_url).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(
+            listed["data"]["items"].as_array().unwrap().len(),
+            2,
+            "{listed}"
+        );
+        assert_eq!(listed["data"]["gate"]["met"], false);
+
+        let decide_url = format!("/api/projects/{pid}/audit/tds/decide");
+        let (_, refused) = post_json(
+            build_router_with_auth(state.clone(), false),
+            &decide_url,
+            serde_json::json!({ "items": [
+                { "td_id": "TD-20261001-a", "decision": "confirm" },
+                { "td_id": "TD-20261001-zz", "decision": "reject" }
+            ] }),
+        )
+        .await;
+        assert_eq!(refused["success"], false);
+        assert!(std::fs::read_to_string(td.join("TD-20261001-a.md"))
+            .unwrap()
+            .contains("Verified in source"));
+
+        let (_, decided) = post_json(
+            build_router_with_auth(state.clone(), false),
+            &decide_url,
+            serde_json::json!({ "items": [
+                { "td_id": "TD-20261001-a", "decision": "confirm" },
+                { "td_id": "TD-20261001-b", "decision": "defer", "reason": "plus tard" }
+            ] }),
+        )
+        .await;
+        assert_eq!(decided["success"], true, "{decided}");
+        assert_eq!(decided["data"]["gate"]["met"], true);
+
+        let (_, after) = get_json(build_router_with_auth(state, false), &list_url).await;
+        assert_eq!(after["data"]["counts"]["confirmed"], 1);
+        assert_eq!(after["data"]["counts"]["deferred"], 1);
+    }
+
+    // KT-1309 — over HTTP: a sheet whose history uses another indentation stays
+    // valid YAML after a decision, the typed reason is kept, and the review lists
+    // the detail files the card counts (a High one gates the validation).
+    #[tokio::test]
+    async fn td_review_keeps_the_front_matter_strictly_valid_and_lists_what_the_card_counts() {
+        let (_dir, repo) = seed_repo("td-review-kt1309");
+        let td = repo.join("docs/tech-debt");
+        std::fs::create_dir_all(&td).unwrap();
+        // The existing entry sits at 2 spaces under a 4-space metadata block.
+        std::fs::write(
+            td.join("TD-20261016-ssh-key-tracked.md"),
+            "---\nname: td-ssh-key-tracked\nmetadata:\n    type: tech-debt\n    audit_history:\n      - date: 2026-10-16\n        status: Verified in source\n        reviewer: Full audit\n---\n\n# TD-20261016-ssh-key-tracked\n\n- **Area**: Infra\n- **Severity**: Critical\n- **Status**: Verified in source\n\n## Impact\n\n**Critical** — a key is public.\n\n- anyone can read it\n- rotate it\n",
+        )
+        .unwrap();
+        std::fs::write(
+            td.join("CQ-001.md"),
+            "# CQ-001: Oversized controller\n\n## Problem\n\nIt grew.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            td.join("PERF-20261016-deep-clone.md"),
+            "# Deep clone on the hot path\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("docs/inconsistencies-tech-debt.md"),
+            "# Index\n\n## Current list\n\n| ID | Problem | Area | Severity | Status |\n|----|---------|------|----------|--------|\n| CQ-001 | Oversized controller | Backend | High | Open |\n",
+        )
+        .unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let list_url = format!("/api/projects/{pid}/audit/tds");
+        let decide_url = format!("/api/projects/{pid}/audit/tds/decide");
+
+        let (_, listed) = get_json(build_router_with_auth(state.clone(), false), &list_url).await;
+        let items = listed["data"]["items"].as_array().unwrap();
+        assert_eq!(items.len(), 3, "{listed}");
+        assert_eq!(
+            kronn::core::scanner::count_tech_debt(repo.to_str().unwrap()) as usize,
+            items.len(),
+            "the card and the review count the same debts"
+        );
+        let cq = items.iter().find(|i| i["id"] == "CQ-001").unwrap();
+        assert_eq!(cq["severity"], "High");
+        assert_eq!(listed["data"]["gate"]["blocking_total"], 2);
+        assert_eq!(
+            items
+                .iter()
+                .find(|i| i["id"] == "TD-20261016-ssh-key-tracked")
+                .unwrap()["impact"],
+            "**Critical** — a key is public.\n\n- anyone can read it\n- rotate it"
+        );
+
+        let (_, decided) = post_json(
+            build_router_with_auth(state.clone(), false),
+            &decide_url,
+            serde_json::json!({ "items": [
+                { "td_id": "TD-20261016-ssh-key-tracked", "decision": "confirm", "reason": "Seen in the git history: \"id_rsa\"" },
+                { "td_id": "CQ-001", "decision": "defer", "reason": "after the split" }
+            ] }),
+        )
+        .await;
+        assert_eq!(decided["success"], true, "{decided}");
+        assert_eq!(
+            decided["data"]["gate"]["met"], false,
+            "a deferred High does not count"
+        );
+
+        for (file, note) in [
+            (
+                "TD-20261016-ssh-key-tracked",
+                "Seen in the git history: \"id_rsa\"",
+            ),
+            ("CQ-001", "after the split"),
+        ] {
+            let sheet = std::fs::read_to_string(td.join(format!("{file}.md"))).unwrap();
+            let front = sheet.strip_prefix("---\n").unwrap();
+            let front: serde_yaml::Value =
+                serde_yaml::from_str(&front[..front.find("\n---").unwrap()])
+                    .unwrap_or_else(|e| panic!("{file}: strict YAML parse failed: {e}\n{sheet}"));
+            let history = front["metadata"]["audit_history"].as_sequence().unwrap();
+            assert_eq!(history.last().unwrap()["note"].as_str(), Some(note));
+        }
+        let ssh = std::fs::read_to_string(td.join("TD-20261016-ssh-key-tracked.md")).unwrap();
+        assert_eq!(
+            ssh.matches("- date:").count(),
+            2,
+            "the entry joined the list: {ssh}"
+        );
+
+        // A rejected sheet stays listed (the decision is visible) but is no
+        // longer debt: the card and the review's active count drop together.
+        let (_, rejected) = post_json(
+            build_router_with_auth(state.clone(), false),
+            &decide_url,
+            serde_json::json!({ "items": [
+                { "td_id": "PERF-20261016-deep-clone", "decision": "reject", "reason": "Measured: negligible" }
+            ] }),
+        )
+        .await;
+        assert_eq!(rejected["success"], true, "{rejected}");
+        let (_, listed) = get_json(build_router_with_auth(state, false), &list_url).await;
+        let counts = &listed["data"]["counts"];
+        let active = counts["pending"].as_u64().unwrap()
+            + counts["confirmed"].as_u64().unwrap()
+            + counts["deferred"].as_u64().unwrap();
+        assert_eq!(listed["data"]["items"].as_array().unwrap().len(), 3);
+        assert_eq!(counts["rejected"], 1);
+        assert_eq!(
+            kronn::core::scanner::count_tech_debt(repo.to_str().unwrap()) as u64,
+            active,
+            "card and review count the same active debts"
+        );
+        assert_eq!(active, 2);
+    }
+
+    // KT-1309 — over HTTP, two shapes that used to fail on save: a project
+    // with only the central index (no `docs/tech-debt/` yet) whose sheetless
+    // row is decided, and a flow `metadata` already holding `audit_history: []`.
+    #[tokio::test]
+    async fn td_review_decides_in_a_project_without_a_tech_debt_folder_and_with_flow_metadata() {
+        let (_dir, repo) = seed_repo("td-review-kt1309-shapes");
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        std::fs::write(
+            repo.join("docs/inconsistencies-tech-debt.md"),
+            "# Index\n\n## Current list\n\n| ID | Problem | Area | Severity | Status |\n|----|---------|------|----------|--------|\n| TD-20261016-rowonly | Row only | API | High | Open |\n",
+        )
+        .unwrap();
+        assert!(!repo.join("docs/tech-debt").exists());
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let list_url = format!("/api/projects/{pid}/audit/tds");
+        let decide_url = format!("/api/projects/{pid}/audit/tds/decide");
+        let strict = |path: std::path::PathBuf| -> serde_yaml::Value {
+            let sheet = std::fs::read_to_string(&path).unwrap();
+            let front = sheet.strip_prefix("---\n").unwrap();
+            serde_yaml::from_str(&front[..front.find("\n---").unwrap()])
+                .unwrap_or_else(|e| panic!("strict YAML parse failed: {e}\n{sheet}"))
+        };
+
+        let (_, listed) = get_json(build_router_with_auth(state.clone(), false), &list_url).await;
+        let items = listed["data"]["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1, "{listed}");
+        assert_eq!(
+            kronn::core::scanner::count_tech_debt(repo.to_str().unwrap()) as usize,
+            items.len()
+        );
+
+        let (_, decided) = post_json(
+            build_router_with_auth(state.clone(), false),
+            &decide_url,
+            serde_json::json!({ "items": [
+                { "td_id": "TD-20261016-rowonly", "decision": "confirm", "reason": "Seen in prod." }
+            ] }),
+        )
+        .await;
+        assert_eq!(decided["success"], true, "{decided}");
+        let front = strict(repo.join("docs/tech-debt/TD-20261016-rowonly.md"));
+        assert_eq!(
+            front["metadata"]["audit_history"][0]["note"].as_str(),
+            Some("Seen in prod.")
+        );
+
+        // A flow mapping that already lists an empty history.
+        std::fs::write(
+            repo.join("docs/tech-debt/TD-20261016-flow.md"),
+            "---\nname: td-flow\nmetadata: {type: tech-debt, audit_history: []}\n---\n\n# TD-20261016-flow\n\n- **Area**: API\n- **Severity**: Low\n- **Status**: Verified in source\n",
+        )
+        .unwrap();
+        let (_, decided) = post_json(
+            build_router_with_auth(state, false),
+            &decide_url,
+            serde_json::json!({ "items": [
+                { "td_id": "TD-20261016-flow", "decision": "defer", "reason": "later" }
+            ] }),
+        )
+        .await;
+        assert_eq!(decided["success"], true, "{decided}");
+        let front = strict(repo.join("docs/tech-debt/TD-20261016-flow.md"));
+        assert_eq!(front["metadata"]["type"].as_str(), Some("tech-debt"));
+        let history = front["metadata"]["audit_history"].as_sequence().unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0]["note"].as_str(), Some("later"));
+    }
+
+    envelope_get!(audit_tds_unknown_project, "/api/projects/nope/audit/tds");
+    envelope_post!(
+        audit_tds_decide_unknown_project,
+        "/api/projects/nope/audit/tds/decide",
+        serde_json::json!({ "items": [] })
+    );
 
     // ── audit briefing handlers ──────────────────────────────────────
     envelope_post!(
@@ -23249,6 +24723,11 @@ Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what 
         audit_runs_cleanup_with_threshold,
         "/api/audit-runs/cleanup",
         serde_json::json!({ "keep_recent": 5 })
+    );
+    envelope_post!(
+        accept_audit_step_unknown_project,
+        "/api/projects/nope/audit-runs/nope/steps/1/accept",
+        serde_json::json!({ "reason": "kept" })
     );
 
     // ── audit/run.rs cold paths (audit-status, audit-history, audit-latest, …) ─
@@ -23844,6 +25323,82 @@ Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what 
             data.is_object() || data.is_null(),
             "audit_latest data shape"
         );
+    }
+
+    #[tokio::test]
+    async fn audit_latest_reports_the_newest_run_of_any_status() {
+        let state = test_state();
+        let (project_id, completed_id) = seed_project_with_audit_run(&state).await;
+        let pid = project_id.clone();
+        state
+            .db
+            .with_conn(move |conn| {
+                let at = chrono::Utc::now();
+                kronn::db::audit_runs::insert_running(
+                    conn,
+                    "r-cut",
+                    &pid,
+                    "Full",
+                    "ClaudeCode",
+                    at,
+                )?;
+                kronn::db::audit_runs::update_last_completed_step(conn, "r-cut", 3)?;
+                kronn::db::audit_runs::mark_interrupted(conn, "r-cut", "restart")?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, json) = get_json(app, &format!("/api/projects/{project_id}/audit-latest")).await;
+        assert_eq!(st, StatusCode::OK);
+        let data = &json["data"];
+        assert_eq!(data["latest"]["id"], "r-cut");
+        assert_eq!(data["latest"]["status"], "Interrupted");
+        assert_eq!(data["latest_completed"]["id"], completed_id.as_str());
+        // No step row was recorded, so a resume redoes the whole chain.
+        let redo: Vec<u64> = data["steps_to_redo"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64().unwrap())
+            .collect();
+        assert!(!redo.is_empty());
+        assert_eq!(redo, (1..=redo.len() as u64).collect::<Vec<_>>());
+        assert_eq!(data["lease_orphaned"], false);
+
+        // A newer Cancelled run is the state now: nothing to resume, and an
+        // orphaned lease is named.
+        let pid = project_id.clone();
+        state
+            .db
+            .with_conn(move |conn| {
+                let at = chrono::Utc::now() + chrono::Duration::seconds(5);
+                kronn::db::audit_runs::insert_running(
+                    conn,
+                    "r-stop",
+                    &pid,
+                    "Full",
+                    "ClaudeCode",
+                    at,
+                )?;
+                kronn::db::audit_runs::mark_cancelled(conn, "r-stop")?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        {
+            let mut t = state.audit_tracker.lock().unwrap();
+            t.try_acquire_lease(&project_id);
+            t.orphaned_leases.insert(project_id.clone());
+        }
+        let app = build_router_with_auth(state, false);
+        let (_, json) = get_json(app, &format!("/api/projects/{project_id}/audit-latest")).await;
+        let data = &json["data"];
+        assert_eq!(data["latest"]["id"], "r-stop");
+        assert_eq!(data["latest"]["status"], "Cancelled");
+        assert_eq!(data["latest_completed"]["id"], completed_id.as_str());
+        assert_eq!(data["steps_to_redo"], serde_json::json!([]));
+        assert_eq!(data["lease_orphaned"], true);
     }
 
     #[tokio::test]

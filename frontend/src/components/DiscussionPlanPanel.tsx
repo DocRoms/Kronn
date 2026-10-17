@@ -37,6 +37,7 @@ import { PlanAllTasksView } from './PlanAllTasksView';
 import { PlanningProposalReview } from './PlanningProposalReview';
 import { TaskCampaignPanel } from './TaskCampaignPanel';
 import { TaskDescription } from './TaskDescription';
+import { TaskAssigneeChips, TaskAssigneePicker } from './TaskAssignees';
 import { TaskExecutionCard } from './TaskExecutionCard';
 import { TaskLaunchDialog } from './TaskLaunchDialog';
 import { orchestrationResolution } from './taskLaunchResolution';
@@ -536,6 +537,13 @@ export function DiscussionPlanPanel({
     }
   };
 
+  // KT-154 — an assignment changes the task row, the plan and (when open) the
+  // task sheet: reload all three from the backend rather than patching locally.
+  const afterAssigneeChange = (task: PlanningTaskDetail) => {
+    if (selectedTaskIdRef.current === task.id) setSelectedTask(task);
+    void refresh(true);
+  };
+
   const renderProgress = (status: PlanningTaskStatus) => status === 'in_progress' ? (
     <span className="plan-task-progress" role="img" aria-label={t('planning.status.in_progress')}>
       <Loader2 size={12} aria-hidden="true" />
@@ -587,6 +595,16 @@ export function DiscussionPlanPanel({
               <span>{relation.task.completed_subtasks}/{relation.task.total_subtasks}</span>
             )}
             {blocked && <span className="plan-blocked">{t('planning.blocked')}</span>}
+            <TaskAssigneeChips assignees={relation.task.assignees} />
+            <TaskAssigneePicker
+              taskId={relation.task.id}
+              discussionId={discussionId}
+              discussionAgent={discussion?.agent}
+              discussionConnectionId={discussion?.connection_id}
+              assignees={relation.task.assignees}
+              onChanged={afterAssigneeChange}
+              toast={toast}
+            />
           </span>
         </div>
         {subDiscussionByTaskId.get(relation.task.id) && onNavigateDiscussion && (
@@ -646,6 +664,15 @@ export function DiscussionPlanPanel({
               {t('planning.blockerCount', relation.active_blockers.length)}
             </span>
           )}
+          {(relation.task.live_checks?.length ?? 0) > 0 && (
+            <span
+              data-kind="live-check"
+              title={relation.task.live_checks?.map(check => check.sentence).join('\n')}
+            >
+              {t('planning.liveCheckCount', relation.task.live_checks?.length ?? 0)}
+            </span>
+          )}
+          <TaskAssigneeChips assignees={relation.task.assignees} max={2} />
         </span>
         {relation.task.parent_reference && (
           <span className="plan-all-task-parent">
@@ -1138,6 +1165,20 @@ export function DiscussionPlanPanel({
                 </div>
               </div>
             )}
+            <div className="plan-task-assignees">
+              <strong>{t('planning.assignee.title')}</strong>
+              <TaskAssigneeChips assignees={selectedTask.assignees} max={8} />
+              <TaskAssigneePicker
+                variant="inline"
+                taskId={selectedTask.id}
+                discussionId={discussionId}
+                discussionAgent={discussion?.agent}
+                discussionConnectionId={discussion?.connection_id}
+                assignees={selectedTask.assignees}
+                onChanged={afterAssigneeChange}
+                toast={toast}
+              />
+            </div>
             {(selectedTask.workspaces?.length ?? 0) > 0 && (
               <div className="plan-task-workspaces">
                 <strong>{t('planning.workspaces')}</strong>

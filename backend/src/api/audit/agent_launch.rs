@@ -59,6 +59,9 @@ impl HttpSettings {
 pub(super) struct RunTokens {
     total: u64,
     known: bool,
+    /// The highest running total shown so far: the live counter never goes down
+    /// (KT-1313).
+    shown: u64,
 }
 
 impl RunTokens {
@@ -75,9 +78,43 @@ impl RunTokens {
         self.known.then_some(self.total)
     }
 
-    /// The running total with the step in progress at its latest reading.
-    pub(super) fn with(&self, step: u64) -> u64 {
-        self.total.saturating_add(step)
+    /// The running total with the step in progress at its latest reading,
+    /// never below one already shown.
+    pub(super) fn with(&mut self, step: u64) -> u64 {
+        self.shown = self.total.saturating_add(step).max(self.shown);
+        self.shown
+    }
+}
+
+/// The usage of one attempt of a Claude stream-json step. Each model call
+/// (turn) reports its own usage; only the final `result` line states the
+/// whole run's. A step stopped mid-way never reaches that line, so the turns
+/// are summed as they come, and the final line replaces the sum when it
+/// arrives. The reading never goes down (KT-1313).
+#[derive(Debug, Default, Clone, Copy)]
+pub(super) struct StreamTurns {
+    summed: Option<crate::db::audit_runs::StepTokens>,
+}
+
+impl StreamTurns {
+    /// The attempt's usage once `reading` is folded into `current`.
+    pub(super) fn fold(
+        &mut self,
+        current: crate::db::audit_runs::StepTokens,
+        reading: crate::db::audit_runs::StepTokens,
+        is_final: bool,
+    ) -> crate::db::audit_runs::StepTokens {
+        let next = if is_final {
+            reading
+        } else {
+            let sum = self.summed.map_or(reading, |sum| sum.across_turns(reading));
+            self.summed = Some(sum);
+            sum
+        };
+        match (current.total(), next.total()) {
+            (Some(seen), Some(now)) if now < seen => current,
+            _ => next,
+        }
     }
 }
 
@@ -216,6 +253,34 @@ impl AuditAgentLauncher {
         self.http.is_some() || self.acp
     }
 
+    /// Which live version sources this run's agent reaches (KT-1000). Read
+    /// from the same `.mcp.json` the agent will be handed; `watch` says
+    /// whether a dependency watch result is stored.
+    pub(super) fn version_source_inputs(
+        &self,
+        agent: &AgentType,
+        project_path: &Path,
+        project_path_str: &str,
+        watch: bool,
+    ) -> crate::core::version_sources::VersionSourceInputs {
+        let reach = version_reach(self.http.is_some(), self.acp, self.full_access, agent);
+        let context7 = reach.mcp.is_some_and(|stdio_only| {
+            // Same lookup order as the runner gives Claude (KT-971 stand-in first).
+            let mcp_json = crate::core::mcp_scanner::outside_agent_files_dir(project_path_str)
+                .map(|dir| dir.join(".mcp.json"))
+                .filter(|path| !self.acp && path.is_file())
+                .unwrap_or_else(|| project_path.join(".mcp.json"));
+            std::fs::read_to_string(mcp_json).is_ok_and(|raw| {
+                crate::core::version_sources::context7_configured(&raw, stdio_only)
+            })
+        });
+        crate::core::version_sources::VersionSourceInputs {
+            context7,
+            web: reach.web,
+            watch,
+        }
+    }
+
     /// Spawn the agent of one step. `project_path` is the directory the pipeline
     /// resolved and validates; an HTTP agent's file tools are scoped to it and
     /// cannot leave it. `cancel` is honoured by an HTTP or ACP agent (see
@@ -277,6 +342,48 @@ impl AuditAgentLauncher {
             ..AgentStartConfig::new(agent_type, &resolved, prompt, tokens)
         })
         .await
+    }
+}
+
+/// What an audit agent can reach beyond its prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct VersionReach {
+    /// `Some(stdio_only)` when the agent mounts the project's MCP servers.
+    pub(super) mcp: Option<bool>,
+    /// A native web tool is available to it during an audit.
+    pub(super) web: bool,
+}
+
+/// Only what the launch code establishes: a direct Claude CLI gets the
+/// project's `.mcp.json` (`--mcp-config`) and, with full access, its own web
+/// tools; an ACP session gets the project's stdio servers; an HTTP agent has
+/// only `AUDIT_TOOLS`. Other CLIs are not known to mount either.
+pub(super) fn version_reach(
+    http: bool,
+    acp: bool,
+    full_access: bool,
+    agent: &AgentType,
+) -> VersionReach {
+    if http {
+        VersionReach {
+            mcp: None,
+            web: false,
+        }
+    } else if acp {
+        VersionReach {
+            mcp: Some(true),
+            web: false,
+        }
+    } else if *agent == AgentType::ClaudeCode {
+        VersionReach {
+            mcp: Some(false),
+            web: full_access,
+        }
+    } else {
+        VersionReach {
+            mcp: None,
+            web: false,
+        }
     }
 }
 

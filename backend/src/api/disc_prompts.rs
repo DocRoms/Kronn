@@ -334,6 +334,26 @@ fn isolated_worktree_notice(disc: &Discussion) -> String {
     }
 }
 
+/// Speaker label of an agent turn. A joined CLI session is named by its room
+/// alias so a native agent of the same provider never reads that session's
+/// turns as its own (KT-1201).
+fn transcript_agent_label(message: &DiscussionMessage) -> String {
+    let Some(agent) = message.agent_type.as_ref() else {
+        return "Agent".into();
+    };
+    let name = agent_display_name(agent);
+    match message.author_cli_ordinal {
+        Some(ordinal) => match crate::db::discussion_sessions::cli_session_alias(
+            &format!("{agent:?}"),
+            Some(ordinal),
+        ) {
+            Some(alias) => format!("{name} (joined CLI session {alias})"),
+            None => format!("{name} (joined CLI session)"),
+        },
+        None => name,
+    }
+}
+
 fn reply_context(message: &DiscussionMessage, messages: &[DiscussionMessage]) -> String {
     let Some(reply_id) = message.reply_to_message_id.as_deref() else {
         return String::new();
@@ -345,7 +365,7 @@ fn reply_context(message: &DiscussionMessage, messages: &[DiscussionMessage]) ->
     let author = target
         .agent_type
         .as_ref()
-        .map(agent_display_name)
+        .map(|_| transcript_agent_label(target))
         .or_else(|| target.author_pseudo.clone())
         .unwrap_or_else(|| match target.role {
             MessageRole::User => "User".into(),
@@ -455,7 +475,7 @@ fn build_agent_prompt_inner(
 
     // Every runtime can publish a fence, even when it has no question reader.
     let human_question_notice = concat!(
-        "Blocking human decision — use a closed `kronn-question` JSON fence, never prose alone.\n",
+        "Any decision the human must arbitrate (choice, trade-off, approval, ambiguous scope) — whether or not it blocks you — goes in a closed `kronn-question` JSON fence, never prose alone.\n",
         "`version` MUST be the JSON number 1; the string \"1\" is INVALID (do not copy the version type from delivery/review manifests).\n",
         "Complete minimal example (replace key/question with this real decision):\n",
         "```kronn-question\n",
@@ -671,9 +691,9 @@ fn build_agent_prompt_inner(
     // agents like Gemini detect -p mode and refuse to interact on the first message.
     let interactive_hint = if user_msgs.len() > 1 || disc.pin_first_message {
         match disc.language.as_str() {
-            "fr" => "NOTE: Tu es dans une conversation multi-tours geree par Kronn. Tu PEUX poser des questions et attendre des reponses. Chaque tour inclut la fenetre d'historique disponible ; si les outils d'historique sont indiques plus haut, utilise-les seulement lorsqu'un contexte plus ancien te manque.\n\n",
-            "es" => "NOTA: Estas en una conversacion multi-turno gestionada por Kronn. PUEDES hacer preguntas y esperar respuestas. Cada turno incluye la ventana de historial disponible; si las herramientas de historial aparecen arriba, úsalas solo cuando te falte contexto anterior.\n\n",
-            _ => "NOTE: You are in a multi-turn conversation managed by Kronn. You CAN ask questions and wait for answers. Each turn includes the available history window; when history tools are listed above, use them only when older context is missing.\n\n",
+            "fr" => "NOTE: Tu es dans une conversation multi-tours geree par Kronn. Tu PEUX poser des questions et attendre des reponses ; une decision que l'humain doit arbitrer se pose dans une carte `kronn-question` (voir plus haut), pas en prose. Chaque tour inclut la fenetre d'historique disponible ; si les outils d'historique sont indiques plus haut, utilise-les seulement lorsqu'un contexte plus ancien te manque.\n\n",
+            "es" => "NOTA: Estas en una conversacion multi-turno gestionada por Kronn. PUEDES hacer preguntas y esperar respuestas; una decision que el humano debe arbitrar va en una tarjeta `kronn-question` (ver arriba), no en prosa. Cada turno incluye la ventana de historial disponible; si las herramientas de historial aparecen arriba, úsalas solo cuando te falte contexto anterior.\n\n",
+            _ => "NOTE: You are in a multi-turn conversation managed by Kronn. You CAN ask questions and wait for answers; a decision the human must arbitrate goes in a `kronn-question` card (see above), not prose. Each turn includes the available history window; when history tools are listed above, use them only when older context is missing.\n\n",
         }
     } else {
         ""
@@ -784,11 +804,7 @@ fn build_agent_prompt_inner(
                 msg.content
             ),
             MessageRole::Agent => {
-                let agent_label = msg
-                    .agent_type
-                    .as_ref()
-                    .map(agent_display_name)
-                    .unwrap_or_else(|| "Agent".into());
+                let agent_label = transcript_agent_label(msg);
                 format!(
                     "{}: {}{}\n\n",
                     agent_label,
@@ -938,6 +954,7 @@ mod tests {
             recovered_partial: false,
             session_tokens_at_message: None,
             author_cli_ordinal: None,
+            session_continuity: None,
             model: None,
             lint_report: None,
             id: uuid::Uuid::new_v4().to_string(),
@@ -964,6 +981,7 @@ mod tests {
             recovered_partial: false,
             session_tokens_at_message: None,
             author_cli_ordinal: None,
+            session_continuity: None,
             model: None,
             lint_report: None,
             id: uuid::Uuid::new_v4().to_string(),
@@ -983,6 +1001,28 @@ mod tests {
             target_agent: None,
             reply_to_message_id: None,
         }
+    }
+
+    #[test]
+    fn a_joined_cli_turn_is_labelled_with_its_alias_not_as_the_native_agent() {
+        // KT-1201 — a punctual Claude read @claude-cli-2's turns, labelled
+        // "Claude Code", as its own and spoke as the lane lead.
+        let mut cli_turn = agent_msg("Je pilote le lot 2.", AgentType::ClaudeCode);
+        cli_turn.author_cli_ordinal = Some(2);
+        let mut reply = agent_msg("Relu.", AgentType::LiteLlm);
+        reply.reply_to_message_id = Some(cli_turn.id.clone());
+        let native = agent_msg("Réponse native.", AgentType::ClaudeCode);
+        let disc = disc_with_messages(
+            vec![user_msg("Go"), cli_turn, reply, native, user_msg("Suite")],
+            "fr",
+        );
+        let prompt = build_agent_prompt(&disc, &AgentType::ClaudeCode, 0);
+        assert!(
+            prompt.contains("Claude Code (joined CLI session @claude-cli-2): Je pilote le lot 2."),
+            "{prompt}"
+        );
+        assert!(prompt.contains("by Claude Code (joined CLI session @claude-cli-2):"));
+        assert!(prompt.contains("Claude Code: Réponse native."));
     }
 
     #[test]
@@ -1191,6 +1231,23 @@ mod tests {
                     assert_eq!(value["version"].as_u64(), Some(1));
                     assert!(!value["key"].as_str().unwrap().is_empty());
                     assert!(!value["question"].as_str().unwrap().is_empty());
+                    // KT-1329 — the trigger is any decision the human must
+                    // arbitrate, not only one that blocks the agent, and the
+                    // multi-turn "you CAN ask questions" hint points at the card.
+                    assert!(
+                        prompt.contains("Any decision the human must arbitrate"),
+                        "{agent:?}/{language}/{turns}: widened trigger"
+                    );
+                    if turns > 1 {
+                        let hint = prompt
+                            .lines()
+                            .find(|line| line.starts_with("NOTE:") || line.starts_with("NOTA:"))
+                            .unwrap_or_else(|| panic!("{agent:?}/{language}: multi-turn hint"));
+                        assert!(
+                            hint.contains("`kronn-question`"),
+                            "{agent:?}/{language}: the hint must point to the card: {hint}"
+                        );
+                    }
                     for contract in [
                         "the string \"1\" is INVALID",
                         "Only the human answers",

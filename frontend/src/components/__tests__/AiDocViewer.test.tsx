@@ -5,8 +5,10 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { buildApiMock } from '../../test/apiMock';
 import { projects } from '../../lib/api';
+import { I18nProvider } from '../../lib/I18nContext';
 
 // Tree is inlined in the factory (vi.mock is hoisted above module consts).
 vi.mock('../../lib/api', () => buildApiMock({
@@ -113,5 +115,60 @@ describe('AiDocViewer — docs/ root folder + project README', () => {
     });
     expect(screen.getByText('1 / 2')).toBeInTheDocument();
     expect(container.querySelector('.aidoc-search-results .text-dim')).toBeNull();
+  });
+
+  it('tree folders and files are reachable and activatable from the keyboard (KT-1072)', async () => {
+    render(<AiDocViewer projectId="p1" />);
+    const folder = (await screen.findByText('architecture')).closest('[role="button"]') as HTMLElement;
+    expect(folder).toHaveAttribute('tabindex', '0');
+    expect(folder).toHaveAttribute('aria-expanded', 'false');
+    folder.focus();
+    await userEvent.keyboard('{Enter}');
+    expect(folder).toHaveAttribute('aria-expanded', 'true');
+    const file = screen.getByText('overview.md').closest('[role="button"]') as HTMLElement;
+    expect(file).toHaveAttribute('tabindex', '0');
+    file.focus();
+    await userEvent.keyboard(' ');
+    await waitFor(() => expect(projects.readAiFile).toHaveBeenCalledWith('p1', 'docs/architecture/overview.md'));
+    expect(file).toHaveAttribute('aria-current', 'true');
+  });
+
+  it('opens a configured folder and selects its entry (KT-263)', async () => {
+    vi.mocked(projects.listAiFiles).mockResolvedValueOnce([
+      {
+        path: 'packages/x/docs', name: 'packages/x/docs', is_dir: true, children: [
+          { path: 'packages/x/docs/AGENTS.md', name: 'AGENTS.md', is_dir: false, children: [] },
+        ],
+      },
+    ]);
+    vi.mocked(projects.readAiFile).mockClear();
+    render(<AiDocViewer projectId="p2" />);
+    expect(await screen.findByText('AGENTS.md')).toBeInTheDocument();
+    await waitFor(() =>
+      expect(projects.readAiFile).toHaveBeenCalledWith('p2', 'packages/x/docs/AGENTS.md'));
+  });
+
+  it('explains why the selected doc is stale and opens the shared verification flow', async () => {
+    const onOpenDocState = vi.fn();
+    render(
+      <I18nProvider>
+        <AiDocViewer
+          projectId="p1"
+          staleSections={[{
+            ai_file: 'docs/AGENTS.md',
+            audit_step: 1,
+            changed_sources: ['src/lib.rs', 'Cargo.toml'],
+            missing_paths: [],
+          }]}
+          onOpenDocState={onOpenDocState}
+        />
+      </I18nProvider>,
+    );
+
+    const banner = await screen.findByTestId('aidoc-stale-banner');
+    expect(banner).toHaveTextContent('Le code cité par ces sections a changé depuis le dernier audit : la doc peut ne plus être exacte.');
+    expect(banner).toHaveTextContent('src/lib.rs, Cargo.toml');
+    fireEvent.click(screen.getByTestId('aidoc-open-doc-state'));
+    expect(onOpenDocState).toHaveBeenCalledTimes(1);
   });
 });

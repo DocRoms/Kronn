@@ -3,27 +3,42 @@
  * grouped as the pipeline runs them, validation, validated. Presentational:
  * every action is a handler the ProjectCard already owns.
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
   Check, ChevronDown, ChevronRight, FileText, Loader2, Play, RotateCcw,
   ShieldCheck, Sparkles, StopCircle, X, AlertTriangle,
 } from 'lucide-react';
 import { useT } from '../lib/I18nContext';
 import { projects as projectsApi, externalApi, type ExternalApiConnectionView } from '../lib/api';
+import { connectionAgent } from '../lib/auditLaunchChoice';
 import { AGENT_LABELS, MODEL_TIER_ICONS, isUsable } from '../lib/constants';
+import { stepRanges } from '../lib/stepRanges';
 import { canRunAudit } from '../lib/agentCapabilities';
 import { formatStepList } from '../lib/audit-resume';
 import { costReasonKey, formatUsd, summarizeAuditCost, tokenBreakdownTitle } from '../lib/audit-cost';
 import { BriefingForm } from './BriefingForm';
 import { AuditStepActivity } from './AuditStepActivity';
 import { activityCategoryLabel } from '../lib/activity-category';
+import { DocStateSummary } from './DocStateSummary';
+import type { DocStateCounts } from './docState';
 import type {
-  AgentDetection, AgentType, AuditEntry, AuditRecentActivity, AuditTimelineValidation, AuditTokenBreakdown,
-  ModelTier, ModelTiersConfig,
+  AgentDetection, AgentType, AuditEntry, AuditRecentActivity, AuditTimelineValidation, AuditTokenBreakdown, RepoAuditRun, ValidationBlock,
+  LinkedRepo, ModelTier, ModelTiersConfig,
 } from '../types/generated';
 import './AuditTimeline.css';
 
-type StepStatus = 'done' | 'failed' | 'warned' | 'running' | 'pending' | 'todo';
+type StepStatus = 'done' | 'unchanged' | 'accepted' | 'failed' | 'warned' | 'running' | 'pending' | 'todo';
+
+/** KT-1211 — what the timeline needs to say of the latest run. */
+interface LatestRunFacts {
+  id: string;
+  status: string;
+  endedAt: string | null;
+  /** The step in flight when the user cancelled (0 = before step 1). */
+  cancelledAtStep: number | null;
+  /** What moved in the sources during a resume. */
+  resumeDrift: string | null;
+}
 
 interface StepRow {
   step_index: number;
@@ -33,6 +48,14 @@ interface StepRow {
   duration_ms?: number | null;
   cli_success: boolean;
   step_warning?: string | null;
+  /** The target was already up to date: checked, nothing to fix (KT-1130). */
+  unchanged?: boolean;
+  /** A human accepted the failed step as it stands (KT-1131). */
+  accepted_at?: string | null;
+  accepted_by?: string | null;
+  accepted_reason?: string | null;
+  /** KT-1211 — what became of the target of a step that did not succeed. */
+  target_state?: string | null;
   step_tokens?: number | null;
   input_tokens?: number | null;
   output_tokens?: number | null;
@@ -49,16 +72,22 @@ interface StepRow {
 export interface AuditTimelineProps {
   projectId: string;
   auditStatus: string;
-  techDebtCount: number;
   agents: AgentDetection[];
   selectedAgent: AgentType | null;
   selectedTier: ModelTier;
+  /** The shown choice is the one of the run being retried or resumed (KT-1320). */
+  selectionFromRun?: boolean;
+  /** The run's own named connection was deleted: the launch uses the agent's default one. */
+  selectionConnectionGone?: boolean;
   modelTiers: ModelTiersConfig | null | undefined;
   /** Named external API connection of the selected HTTP agent, if any. */
   selectedConnectionId: string | null;
   onSelect: (agent: AgentType, tier: ModelTier, connectionId: string | null) => void;
   briefingDone: boolean;
   onBriefingSaved: () => void;
+  /** KT-999 — linked repos edited from the briefing form. */
+  linkedRepos?: LinkedRepo[];
+  onLinkedReposChange?: () => void;
   auditActive: boolean;
   liveStep: number;
   liveTotal: number;
@@ -80,27 +109,47 @@ export interface AuditTimelineProps {
   /** An older conversational briefing still open: resume it instead. */
   onResumeBriefingDiscussion: (() => void) | null;
   onCancel: () => void;
-  resumable: { id: string; steps_to_redo?: number[]; last_completed_step: number } | null;
+  /** The backend has not acknowledged the cancel yet: the audit may still run. */
+  cancelPending?: boolean;
+  resumable: { id: string; steps_to_redo?: number[]; last_completed_step: number; from_repository?: boolean } | null;
+  /** Whether a run can be resumed is not known: launching waits for it (KT-1169). */
+  resumableUnknown?: boolean;
+  onReloadResumable?: () => void;
+  /** The last launch stopped on this error; `retry` replays it (KT-1169). */
+  launchError?: { message: string; retry: () => void } | null;
+  onDismissLaunchError?: () => void;
   onLaunch: () => void;
+  /** Retry one failed step of the resumable run, alone (KT-1131). */
+  onRetryStep?: (step: number) => void;
+  /** Accept one failed step of the resumable run as it stands (KT-1131). */
+  onAcceptStep?: (step: number, reason: string | null, overrideUnsound?: boolean) => Promise<void>;
+  /** KT-1211 — redo steps the resumed run inherited, because the sources moved. */
+  onRedoSteps?: (steps: number[]) => void;
+  /** A fresh full audit, even though a run can be resumed. */
+  onRelaunchFull?: () => void;
+  /** Settle what no worker runs any more and release an orphaned lease (KT-1134). */
+  onCleanupLease?: () => Promise<void>;
   validationInProgress: boolean;
-  onValidate: () => void;
   /** Records the validation once the linked discussion has finished. */
   onMarkValid: () => Promise<void>;
   /** Opens a discussion, archived ones included. */
   onOpenValidation: (discussionId: string) => void;
-  onViewTechDebts: () => void;
+  /** Step 4's tech-debt control: the same review entry as the project overview, plus the raw-file link. */
+  techDebtEntry: ReactNode;
+  /** The same verifier opened from the compact project header and stale docs. */
+  onVerifyDocs?: () => void;
+  docStateCounts?: DocStateCounts | null;
   refreshTrigger: number;
   toast: (msg: string, kind: 'success' | 'error' | 'info' | 'warning') => void;
 }
+
+/** Prefix of the backend's refusal that asks for an explicit override (KT-1211). */
+export const OVERRIDE_REQUIRED_PREFIX = 'override_required:';
 
 const NEWS_KEY = 'kr.audit.timeline.news.0.14.2';
 const LOCAL_AGENTS = new Set<AgentType>(['Ollama']);
 const HTTP_AGENTS = new Set<AgentType>(['LiteLlm', 'Nvidia', 'Custom']);
 const TIERS: ModelTier[] = ['reasoning', 'default', 'economy'];
-
-const PRESET_AGENT: Record<string, AgentType> = {
-  lite_llm: 'LiteLlm', nvidia: 'Nvidia', open_router: 'Custom', other: 'Custom',
-};
 
 interface AgentChoice {
   key: string;
@@ -117,14 +166,28 @@ const TIER_KEY: Partial<Record<AgentType, keyof ModelTiersConfig>> = {
   Nvidia: 'nvidia',
 };
 
+/** A step that needs nothing more: written, checked unchanged, accepted, or warned. */
+function isDoneStatus(status: StepStatus): boolean {
+  return status === 'done' || status === 'unchanged' || status === 'accepted' || status === 'warned';
+}
+
 function readNewsDismissed(): boolean {
   try { return localStorage.getItem(NEWS_KEY) === '1'; } catch { return false; }
 }
 
-function stepStatus(row: StepRow | undefined, index: number, redo: Set<number>, active: boolean): StepStatus {
+function stepStatus(
+  row: StepRow | undefined, index: number, redo: Set<number>, active: boolean, cancelled = false,
+): StepStatus {
   if (!row) return redo.has(index) ? 'todo' : 'pending';
+  // Accepted by a human: done, whatever its failure was.
+  if (row.accepted_at) return 'accepted';
+  // The user cancelled the run in this step: it is not "interrupted", it is
+  // simply to run again (KT-1211) — the run's banner says what happened.
+  if (!row.ended_at && cancelled && !active) return 'pending';
   // Without a live audit, a step that never ended was interrupted.
   if (!row.ended_at) return active ? 'running' : 'failed';
+  // Neither written nor failed: a neutral outcome, whatever the run made of it.
+  if (row.unchanged) return 'unchanged';
   if (!row.cli_success) return 'failed';
   return row.step_warning ? 'warned' : 'done';
 }
@@ -177,7 +240,33 @@ export function AuditTimeline(props: AuditTimelineProps) {
   // Audits the branch's `.kronn.json` records: another instance, an attestation.
   const [recorded, setRecorded] = useState<AuditEntry[]>([]);
   const [linkedValidation, setLinkedValidation] = useState<AuditTimelineValidation | null>(null);
+  // KT-1122 — why the server would refuse a validation now (null = it accepts),
+  // and who opened / validated it, as `.kronn.json` records them.
+  const [validationBlock, setValidationBlock] = useState<ValidationBlock | null>(null);
+  const [validatedBy, setValidatedBy] = useState<string | null>(null);
+  const [recordedStartedBy, setRecordedStartedBy] = useState<string | null>(null);
+  const [recordedValidatedAt, setRecordedValidatedAt] = useState<string | null>(null);
+  // KT-1199 — the audit run the repository describes (a colleague's, after a
+  // fetch or a rebase) and whether the server would validate from it.
+  const [repoRun, setRepoRun] = useState<RepoAuditRun | null>(null);
+  const [repoCanValidate, setRepoCanValidate] = useState(false);
   const [marking, setMarking] = useState(false);
+  const [leaseOrphaned, setLeaseOrphaned] = useState(false);
+  const [releasing, setReleasing] = useState(false);
+  const [reloadTick, setReloadTick] = useState(0);
+  // The failed step whose acceptance form is open, and its reason.
+  const [accepting, setAccepting] = useState<number | null>(null);
+  const [acceptReason, setAcceptReason] = useState('');
+  const [acceptBusy, setAcceptBusy] = useState(false);
+  const [confirmRelaunch, setConfirmRelaunch] = useState(false);
+  const [acceptError, setAcceptError] = useState<string | null>(null);
+  // The recorded steps could not be read: never shown as "not started".
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [latestRunStatus, setLatestRunStatus] = useState<string | null>(null);
+  // KT-1211 — the latest run's cancel and source-drift facts.
+  const [latestRun, setLatestRun] = useState<LatestRunFacts | null>(null);
+  // KT-1211 — the refusal that asks for an explicit override, with its diff.
+  const [overrideDiff, setOverrideDiff] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -213,22 +302,40 @@ export function AuditTimeline(props: AuditTimelineProps) {
           if (!merged.has(row.step_index)) merged.set(row.step_index, row);
         }
       }
-      const latest = data.runs.find(run => run.kind === 'Full');
+      const latestFull = data.runs.find(run => run.kind === 'Full');
+      const latestRun = data.runs[0];
       return {
-        id: ids[0] ?? null, rows: [...merged.values()], td: latest?.td_total ?? 0,
+        id: ids[0] ?? null, rows: [...merged.values()], td: latestFull?.td_total ?? 0,
         recorded: data.recorded_audits, validation: data.latest_validation ?? null,
+        block: data.validation_block ?? null,
+        validatedBy: data.recorded_validated_by ?? null,
+        startedBy: data.recorded_validation_started_by ?? null,
+        validatedAt: data.recorded_validated_at ?? null,
+        orphaned: data.lease_orphaned === true,
+        latestStatus: latestRun?.status ?? null,
+        latestFacts: latestRun ? {
+          id: latestRun.id, status: latestRun.status, endedAt: latestRun.ended_at ?? null,
+          cancelledAtStep: latestRun.cancelled_at_step ?? null,
+          resumeDrift: latestRun.resume_drift ?? null,
+        } : null,
+        repo: data.repo ?? null,
+        repoCanValidate: data.repo_can_validate === true,
       };
     };
     load()
-      .then(({ id, rows, td, recorded: entries, validation }) => {
+      .then(({ id, rows, td, recorded: entries, validation, block, validatedBy: by, startedBy, validatedAt, orphaned, latestStatus, latestFacts, repo, repoCanValidate: canValidate }) => {
         if (alive) {
+          setLatestRun(latestFacts);
           setRunId(id); setSteps(rows); setTdTotal(td); setRecorded(entries);
-          setLinkedValidation(validation); setStepsLoaded(true);
+          setLinkedValidation(validation); setLeaseOrphaned(orphaned); setStepsLoaded(true); setLatestRunStatus(latestStatus);
+          setValidationBlock(block); setValidatedBy(by); setRecordedStartedBy(startedBy); setRecordedValidatedAt(validatedAt);
+          setRepoRun(repo); setRepoCanValidate(canValidate);
+          setLoadFailed(false);
         }
       })
-      .catch(() => { if (alive) { setSteps([]); setRecorded([]); setLinkedValidation(null); setStepsLoaded(true); } });
+      .catch(() => { if (alive) { setSteps([]); setRecorded([]); setLinkedValidation(null); setValidationBlock(null); setLatestRunStatus(null); setLatestRun(null); setRepoRun(null); setRepoCanValidate(false); setStepsLoaded(true); setLoadFailed(true); } });
     return () => { alive = false; };
-  }, [projectId, resumable, refreshTrigger, auditActive, liveStep]);
+  }, [projectId, resumable, refreshTrigger, auditActive, liveStep, reloadTick]);
 
   const redo = useMemo(() => new Set(resumable?.steps_to_redo ?? []), [resumable]);
   // Steps that never ran have no row: the run's length also comes from the
@@ -247,6 +354,12 @@ export function AuditTimeline(props: AuditTimelineProps) {
   }, [auditActive, plan, props.liveFile, liveStep]);
   const partialRun = auditActive && plan.size > 0 && props.liveTotal > 0 && props.liveTotal < plan.size;
 
+  // KT-1211 — the latest run was cancelled by the user. Settled `Cancelled` (no
+  // step completed) the only next action is a fresh launch; settled
+  // `Interrupted` it is resumable and still tells it was cancelled.
+  const cancelledRun = !auditActive && latestRun !== null && latestRun.cancelledAtStep !== null
+    && (latestRun.status === 'Cancelled' || latestRun.status === 'Interrupted');
+
   const rows = useMemo(() => {
     // A fresh full audit (not a resume) redoes every step: until it reaches
     // one, that step's older result is not this audit's. A partial run redoes
@@ -259,12 +372,12 @@ export function AuditTimeline(props: AuditTimelineProps) {
     return Array.from({ length: total }, (_, i) => {
       const index = i + 1;
       const row = byIndex.get(index);
-      let status = stepStatus(row, index, redo, auditActive);
+      let status = stepStatus(row, index, redo, auditActive, cancelledRun);
       if (auditActive && index === liveIndex) status = 'running';
       const file = row?.file_label ?? plan.get(index) ?? (auditActive && index === liveIndex ? props.liveFile : '');
       return { index, row, status, file, descriptionKey: stepDescriptionKey(file) };
     });
-  }, [steps, total, redo, auditActive, liveIndex, props.liveFile, plan, resumable, props.liveStartedAt, partialRun]);
+  }, [steps, total, redo, auditActive, liveIndex, props.liveFile, plan, resumable, props.liveStartedAt, partialRun, cancelledRun]);
 
   // Grouped by what each step produces, not by position: the consolidation's
   // place in the chain differs between versions.
@@ -281,7 +394,12 @@ export function AuditTimeline(props: AuditTimelineProps) {
 
   const cost = useMemo(() => summarizeAuditCost(rows.flatMap(r => (r.row ? [r.row] : []))), [rows]);
   const failed = rows.filter(r => r.status === 'failed' || r.status === 'todo').map(r => r.index);
-  const done = rows.filter(r => r.status === 'done' || r.status === 'warned').length;
+  const done = rows.filter(r => isDoneStatus(r.status)).length;
+  // KT-1211 (M6) — the done steps this run inherited from an earlier run: the
+  // ones a source drift makes worth redoing.
+  const inheritedDone = rows
+    .filter(r => isDoneStatus(r.status) && !!r.row?.carried_from_run_id)
+    .map(r => r.index);
   const consolidationIndex = rows.find(r => stepGroup(r.file) === 'consolidation')?.index;
   const consolidationRedone = consolidationIndex !== undefined && redo.has(consolidationIndex)
     && [...redo].some(i => i !== consolidationIndex);
@@ -290,7 +408,7 @@ export function AuditTimeline(props: AuditTimelineProps) {
     const kindOf = (agent: AgentType): AgentChoice['kind'] =>
       LOCAL_AGENTS.has(agent) ? 'local' : HTTP_AGENTS.has(agent) ? 'http' : 'cli';
     // A named connection replaces the bare provider slot of the same preset.
-    const connected = new Set(connections.map(c => PRESET_AGENT[c.origin_preset] ?? 'Custom'));
+    const connected = new Set(connections.map(c => connectionAgent(c)));
     const detected: AgentChoice[] = props.agents
       .filter(a => canRunAudit(a) || (!isUsable(a) && isCliCandidate(a.agent_type)))
       .filter(a => !(HTTP_AGENTS.has(a.agent_type) && connected.has(a.agent_type)))
@@ -299,7 +417,7 @@ export function AuditTimeline(props: AuditTimelineProps) {
         usable: canRunAudit(a), kind: kindOf(a.agent_type), connection: null,
       }));
     const named: AgentChoice[] = connections.map(c => ({
-      key: `conn:${c.id}`, agent: PRESET_AGENT[c.origin_preset] ?? 'Custom', label: c.display_name,
+      key: `conn:${c.id}`, agent: connectionAgent(c), label: c.display_name,
       usable: !!c.endpoint, kind: 'http', connection: c,
     }));
     const all = [...detected, ...named];
@@ -332,16 +450,66 @@ export function AuditTimeline(props: AuditTimelineProps) {
     try { localStorage.setItem(NEWS_KEY, '1'); } catch { /* per-viewer convenience only */ }
   };
 
-  const validated = auditStatus === 'Validated';
-  const audited = auditStatus === 'Audited' || validated;
+  const completedLocalRun = stepsLoaded && !loadFailed && latestRunStatus === 'Completed';
+  const validated = auditStatus === 'Validated' && completedLocalRun;
+  const audited = auditStatus === 'Audited' || auditStatus === 'Validated';
   const templateInstalled = auditStatus !== 'NoTemplate';
   const auditNodeStatus: StepStatus = auditActive ? 'running'
     : failed.length > 0 ? 'failed' : audited ? 'done' : 'pending';
   const launchLabel = auditActive ? t('auditTimeline.launch.running') : resumable
     ? (resumable.steps_to_redo && resumable.steps_to_redo.length > 0
       ? t('audit.resumeRedoSteps', formatStepList(resumable.steps_to_redo))
-      : t('audit.resumeFromStep', resumable.last_completed_step + 1))
-    : audited ? t('auditTimeline.relaunch') : t('audit.startFullAudit');
+      // Every failed step was accepted: the resume only finalizes the run.
+      : resumable.steps_to_redo ? t('auditTimeline.audit.finalize')
+        : t('audit.resumeFromStep', resumable.last_completed_step + 1))
+    : cancelledRun && latestRun?.status === 'Cancelled' ? t('auditTimeline.cancelled.relaunch')
+      : audited ? t('audit.revalidate.button') : t('audit.startFullAudit');
+  // Per-step actions exist only on the run a resume continues.
+  // A run still in the repository has no local row to retry or accept a step
+  // on: the resume adopts it first.
+  const stepActions = !auditActive && !!resumable && !resumable.from_repository && !leaseOrphaned;
+  // No launch while the state it must start from is unknown or locked.
+  // KT-1192 — no audit starts without a briefing; the backend refuses it too.
+  const launchBlocked = leaseOrphaned || !!props.resumableUnknown || !props.briefingDone;
+  // The latest run is interrupted: validating waits for its failed steps.
+  const runPending = !!resumable && !auditActive;
+  const validationRunning = completedLocalRun && linkedValidation !== null && !linkedValidation.finished && !auditActive;
+  const verifyEntry = audited && !resumable && props.onVerifyDocs !== undefined;
+
+  const submitAccept = async (step: number, overrideUnsound = false) => {
+    if (!props.onAcceptStep || acceptBusy) return;
+    setAcceptBusy(true);
+    setAcceptError(null);
+    try {
+      if (overrideUnsound) await props.onAcceptStep(step, acceptReason.trim() || null, true);
+      else await props.onAcceptStep(step, acceptReason.trim() || null);
+      setAccepting(null);
+      setAcceptReason('');
+      setOverrideDiff(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      // KT-1211 — a step known to leave an unsound document: the refusal
+      // carries what the step changed, and an explicit override is offered.
+      if (message.includes(OVERRIDE_REQUIRED_PREFIX)) {
+        setOverrideDiff(message.slice(message.indexOf(OVERRIDE_REQUIRED_PREFIX) + OVERRIDE_REQUIRED_PREFIX.length).trim());
+      } else {
+        setAcceptError(message);
+      }
+    } finally {
+      setAcceptBusy(false);
+    }
+  };
+
+  const releaseLease = async () => {
+    if (!props.onCleanupLease || releasing) return;
+    setReleasing(true);
+    try {
+      await props.onCleanupLease();
+      setReloadTick(n => n + 1);
+    } finally {
+      setReleasing(false);
+    }
+  };
 
   return (
     <div className="audit-tl" data-testid="audit-timeline">
@@ -362,17 +530,40 @@ export function AuditTimeline(props: AuditTimelineProps) {
         </section>
       )}
 
+      {audited && (
+        <section className="audit-tl-doc-state" data-testid="audit-timeline-doc-state">
+          <DocStateSummary counts={props.docStateCounts ?? null} variant="block" />
+          {props.onVerifyDocs && (
+            <button type="button" className="audit-tl-btn audit-tl-btn-primary" onClick={props.onVerifyDocs}>
+              <ShieldCheck size={12} /> {t('audit.revalidate.button')}
+            </button>
+          )}
+        </section>
+      )}
+
       <div className="audit-tl-layout">
         <ol className="audit-tl-phases" aria-label={t('auditTimeline.ariaPhases')}>
           <Phase
             status={props.briefingDone ? 'done' : 'pending'}
-            eyebrow={t('auditTimeline.phase.optional', 0)}
+            eyebrow={t('auditTimeline.phase.n', 0)}
             title={t('auditTimeline.briefing.title')}
             tag={props.briefingDone ? t('auditTimeline.status.saved') : t('auditTimeline.status.toFill')}
           >
-            {props.briefingDone ? (
-              <p className="audit-tl-muted">{t('auditTimeline.briefing.used')}</p>
-            ) : props.onResumeBriefingDiscussion ? (
+            {props.briefingDone && !briefingOpen ? (
+              <div className="audit-tl-row">
+                <p className="audit-tl-muted">{t('auditTimeline.briefing.used')}</p>
+                <button
+                  type="button"
+                  className="audit-tl-btn audit-tl-btn-small"
+                  onClick={() => setBriefingOpen(true)}
+                  disabled={auditActive}
+                  title={auditActive ? t('auditTimeline.briefing.lockedDuringAudit') : undefined}
+                  data-testid="audit-timeline-briefing-edit"
+                >
+                  <FileText size={12} /> {t('auditTimeline.briefing.edit')}
+                </button>
+              </div>
+            ) : !props.briefingDone && props.onResumeBriefingDiscussion ? (
               <div className="audit-tl-row">
                 <p className="audit-tl-muted">{t('auditTimeline.briefing.inDiscussion')}</p>
                 <button type="button" className="audit-tl-btn audit-tl-btn-small" onClick={props.onResumeBriefingDiscussion}>
@@ -388,10 +579,12 @@ export function AuditTimeline(props: AuditTimelineProps) {
                 onClose={() => setBriefingOpen(false)}
                 onSaved={() => { setBriefingOpen(false); props.onBriefingSaved(); }}
                 toast={props.toast}
+                linkedRepos={props.linkedRepos}
+                onLinkedReposChange={props.onLinkedReposChange}
               />
             ) : (
               <div className="audit-tl-row">
-                <p className="audit-tl-muted">{t('auditTimeline.briefing.intro')}</p>
+                <p className="audit-tl-muted" data-testid="audit-timeline-briefing-required">{t('auditTimeline.briefing.required')}</p>
                 <button
                   type="button"
                   className="audit-tl-btn audit-tl-btn-small"
@@ -443,6 +636,10 @@ export function AuditTimeline(props: AuditTimelineProps) {
                 </div>
               </>
             )}
+            {/* Mounted before the run starts so screen readers pick up the first step; only the step text changes. */}
+            <p className="audit-tl-sr-only" role="status" aria-live="polite" aria-atomic="true" data-testid="audit-timeline-step-announce">
+              {auditActive ? t('audit.step', liveIndex, partialRun ? total : props.liveTotal, props.liveFile) : ''}
+            </p>
             {auditActive && (
               <div className="audit-tl-live" data-testid="audit-timeline-live">
                 <Loader2 size={13} className="spin" aria-hidden="true" />
@@ -457,9 +654,105 @@ export function AuditTimeline(props: AuditTimelineProps) {
                 {props.liveTotalTokens != null && props.liveTotalTokens > 0 && (
                   <span className="audit-tl-muted" title={t('auditTimeline.tokens.freshTitle')}>{t('audit.totalTokens', formatTokens(props.liveTotalTokens, locale))}</span>
                 )}
-                <button type="button" className="audit-tl-btn audit-tl-btn-small" onClick={props.onCancel}>
-                  <StopCircle size={12} /> {t('audit.cancelAudit')}
+                <button type="button" className="audit-tl-btn audit-tl-btn-small" onClick={props.onCancel} data-testid="audit-timeline-cancel">
+                  <StopCircle size={12} /> {props.cancelPending ? t('auditTimeline.cancelRetry') : t('audit.cancelAudit')}
                 </button>
+              </div>
+            )}
+            {auditActive && props.cancelPending && (
+              <p className="audit-tl-note" role="status" data-testid="audit-timeline-cancel-pending">{t('auditTimeline.cancelPending')}</p>
+            )}
+            {cancelledRun && latestRun && (
+              <div className="audit-tl-note" role="status" data-testid="audit-timeline-cancelled">
+                <p>
+                  <strong>
+                    {latestRun.cancelledAtStep && latestRun.cancelledAtStep > 0
+                      ? t('auditTimeline.cancelled.during', formatStepDate(latestRun.endedAt ?? '', locale, true), latestRun.cancelledAtStep)
+                      : t('auditTimeline.cancelled.before', formatStepDate(latestRun.endedAt ?? '', locale, true))}
+                  </strong>
+                </p>
+                <p className="audit-tl-muted" data-testid="audit-timeline-cancelled-next">
+                  {resumable
+                    ? t('auditTimeline.cancelled.resumable', resumable.last_completed_step + 1)
+                    : props.briefingDone
+                      ? t('auditTimeline.cancelled.nextRelaunch')
+                      : t('auditTimeline.cancelled.nextBriefing')}
+                </p>
+              </div>
+            )}
+            {latestRun?.resumeDrift && !auditActive && (
+              <div className="audit-tl-warn" role="status" data-testid="audit-timeline-resume-drift">
+                <AlertTriangle size={13} aria-hidden="true" />
+                <div>
+                  <p>{latestRun.resumeDrift}</p>
+                  {props.onRedoSteps && resumable && stepActions && inheritedDone.length > 0 && (
+                    <button
+                      type="button"
+                      className="audit-tl-btn audit-tl-btn-small audit-tl-btn-warn"
+                      onClick={() => props.onRedoSteps?.(inheritedDone)}
+                      disabled={launchBlocked || !selected}
+                      data-testid="audit-timeline-redo-drifted"
+                    >
+                      <RotateCcw size={11} /> {t('auditTimeline.drift.redo', inheritedDone.length)}
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+            {leaseOrphaned && !auditActive && (
+              <div className="audit-tl-warn" role="alert" data-testid="audit-timeline-lease-orphaned">
+                <AlertTriangle size={13} aria-hidden="true" />
+                <div>
+                  <p>{t('auditTimeline.lease.stuck')}</p>
+                  {props.onCleanupLease && (
+                    <button type="button" className="audit-tl-btn audit-tl-btn-small" disabled={releasing} onClick={() => void releaseLease()} data-testid="audit-timeline-lease-release">
+                      {releasing ? <Loader2 size={12} className="spin" /> : <RotateCcw size={12} />} {t('auditTimeline.lease.release')}
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+            {props.launchError && !auditActive && (
+              <div className="audit-tl-warn" role="alert" data-testid="audit-timeline-launch-error">
+                <AlertTriangle size={13} aria-hidden="true" />
+                <div>
+                  <p><strong>{t('auditTimeline.error.title')}</strong></p>
+                  <p className="audit-tl-error-message">{props.launchError.message}</p>
+                  <div className="audit-tl-validation-actions">
+                    <button type="button" className="audit-tl-btn audit-tl-btn-small audit-tl-btn-warn" onClick={props.launchError.retry} data-testid="audit-timeline-launch-error-retry">
+                      <RotateCcw size={12} /> {t('auditTimeline.error.resume')}
+                    </button>
+                    {props.onDismissLaunchError && (
+                      <button type="button" className="audit-tl-btn audit-tl-btn-small" onClick={props.onDismissLaunchError}>
+                        {t('auditTimeline.error.dismiss')}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+            {props.resumableUnknown && !auditActive && (
+              <div className="audit-tl-warn" role="alert" data-testid="audit-timeline-resumable-unknown">
+                <AlertTriangle size={13} aria-hidden="true" />
+                <div>
+                  <p>{t('auditTimeline.error.resumableUnknown')}</p>
+                  {props.onReloadResumable && (
+                    <button type="button" className="audit-tl-btn audit-tl-btn-small" onClick={props.onReloadResumable} data-testid="audit-timeline-resumable-reload">
+                      <RotateCcw size={12} /> {t('auditTimeline.error.retry')}
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+            {loadFailed && (
+              <div className="audit-tl-warn" role="alert" data-testid="audit-timeline-load-error">
+                <AlertTriangle size={13} aria-hidden="true" />
+                <div>
+                  <p>{t('auditTimeline.error.timeline')}</p>
+                  <button type="button" className="audit-tl-btn audit-tl-btn-small" onClick={() => setReloadTick(n => n + 1)} data-testid="audit-timeline-load-retry">
+                    <RotateCcw size={12} /> {t('auditTimeline.error.retry')}
+                  </button>
+                </div>
               </div>
             )}
             {consolidationRedone && (
@@ -468,7 +761,7 @@ export function AuditTimeline(props: AuditTimelineProps) {
             {groups.map(group => {
               const groupFailed = group.rows.some(r => r.status === 'failed' || r.status === 'todo');
               const open = openGroups[group.key] ?? (groupFailed || group.rows.some(r => r.status === 'running'));
-              const groupDone = group.rows.filter(r => r.status === 'done' || r.status === 'warned').length;
+              const groupDone = group.rows.filter(r => isDoneStatus(r.status)).length;
               return (
                 <div key={group.key} className="audit-tl-group">
                   <div className="audit-tl-group-row">
@@ -485,7 +778,7 @@ export function AuditTimeline(props: AuditTimelineProps) {
                       </span>
                     </button>
                     {groupFailed && resumable && !auditActive && (
-                      <button type="button" className="audit-tl-btn audit-tl-btn-small audit-tl-btn-warn" onClick={props.onLaunch}>
+                      <button type="button" className="audit-tl-btn audit-tl-btn-small audit-tl-btn-warn" onClick={props.onLaunch} disabled={launchBlocked || !selected}>
                         <RotateCcw size={11} /> {t('auditTimeline.audit.resume')}
                       </button>
                     )}
@@ -506,12 +799,83 @@ export function AuditTimeline(props: AuditTimelineProps) {
                             {r.status === 'running' && (
                               <AuditStepActivity projectId={projectId} recent={props.liveActivity ?? null} />
                             )}
-                            {r.row?.step_warning ? (
+                            {r.status === 'accepted' && r.row ? (
+                              <span className="audit-tl-reason is-accepted" data-testid={`audit-timeline-step-accepted-${r.index}`} title={r.row.step_warning ?? undefined}>
+                                {r.row.accepted_reason
+                                  ? t('auditTimeline.reason.acceptedWhy', r.row.accepted_by ?? '', formatStepDate(r.row.accepted_at ?? '', locale, false), r.row.accepted_reason)
+                                  : t('auditTimeline.reason.accepted', r.row.accepted_by ?? '', formatStepDate(r.row.accepted_at ?? '', locale, false))}
+                              </span>
+                            ) : r.status === 'unchanged' ? (
+                              <span className="audit-tl-reason is-unchanged">{t('auditTimeline.reason.verified')}</span>
+                            ) : r.row?.step_warning ? (
                               <span className={`audit-tl-reason is-${r.status}`} title={r.row.step_warning}>
                                 {stepReason(r.row.step_warning, t)}
                               </span>
                             ) : r.row && !r.row.ended_at && !auditActive && (
-                              <span className="audit-tl-reason is-failed">{t('auditTimeline.reason.interrupted')}</span>
+                              cancelledRun
+                                ? <span className="audit-tl-reason" data-testid={`audit-timeline-step-cancelled-${r.index}`}>{t('auditTimeline.reason.cancelledHere')}</span>
+                                : <span className="audit-tl-reason is-failed">{t('auditTimeline.reason.interrupted')}</span>
+                            )}
+                            {r.row?.target_state && (
+                              <span className="audit-tl-reason is-failed" data-testid={`audit-timeline-step-target-${r.index}`}>
+                                {t(r.row.target_state === 'restored' ? 'auditTimeline.target.restored' : 'auditTimeline.target.partial')}
+                              </span>
+                            )}
+                            {stepActions && (r.status === 'failed' || r.status === 'todo') && (
+                              <span className="audit-tl-step-actions" data-testid={`audit-timeline-step-actions-${r.index}`}>
+                                {props.onRetryStep && (
+                                  <button type="button" className="audit-tl-btn audit-tl-btn-small audit-tl-btn-warn" onClick={() => props.onRetryStep?.(r.index)} disabled={launchBlocked || !selected} data-testid={`audit-timeline-step-retry-${r.index}`}>
+                                    <RotateCcw size={11} /> {t('auditTimeline.step.retry')}
+                                  </button>
+                                )}
+                                {props.onAcceptStep && accepting !== r.index && (
+                                  <button type="button" className="audit-tl-btn audit-tl-btn-small" onClick={() => { setAccepting(r.index); setAcceptReason(''); setAcceptError(null); setOverrideDiff(null); }} data-testid={`audit-timeline-step-accept-${r.index}`}>
+                                    <Check size={11} /> {t('auditTimeline.step.accept')}
+                                  </button>
+                                )}
+                              </span>
+                            )}
+                            {stepActions && accepting === r.index && (
+                              <span className="audit-tl-accept-form" data-testid={`audit-timeline-accept-form-${r.index}`}>
+                                <span className="audit-tl-muted">{t('auditTimeline.step.acceptHint')}</span>
+                                <textarea
+                                  className="audit-tl-accept-reason"
+                                  aria-label={t('auditTimeline.step.acceptReason')}
+                                  placeholder={t('auditTimeline.step.acceptReason')}
+                                  value={acceptReason}
+                                  maxLength={500}
+                                  rows={2}
+                                  onChange={e => setAcceptReason(e.target.value)}
+                                />
+                                {acceptError && (
+                                  <span className="audit-tl-reason is-failed" role="alert" data-testid={`audit-timeline-accept-error-${r.index}`}>
+                                    {t('auditTimeline.step.acceptFailed', acceptError)}
+                                  </span>
+                                )}
+                                {overrideDiff && (
+                                  <span className="audit-tl-warn" role="alert" data-testid={`audit-timeline-accept-override-${r.index}`}>
+                                    <AlertTriangle size={13} aria-hidden="true" />
+                                    <span>
+                                      <strong>{t('auditTimeline.step.overrideTitle')}</strong>
+                                      <pre className="audit-tl-accept-diff">{overrideDiff}</pre>
+                                    </span>
+                                  </span>
+                                )}
+                                <span className="audit-tl-row">
+                                  <button
+                                    type="button"
+                                    className={`audit-tl-btn audit-tl-btn-small${overrideDiff ? ' audit-tl-btn-warn' : ''}`}
+                                    disabled={acceptBusy}
+                                    onClick={() => void submitAccept(r.index, overrideDiff !== null)}
+                                    data-testid={`audit-timeline-accept-confirm-${r.index}`}
+                                  >
+                                    {acceptBusy ? <Loader2 size={11} className="spin" /> : <Check size={11} />} {overrideDiff ? t('auditTimeline.step.overrideConfirm') : t('auditTimeline.step.acceptConfirm')}
+                                  </button>
+                                  <button type="button" className="audit-tl-btn audit-tl-btn-small" onClick={() => { setAccepting(null); setAcceptError(null); setOverrideDiff(null); }}>
+                                    {t('auditTimeline.step.acceptCancel')}
+                                  </button>
+                                </span>
+                              </span>
                             )}
                           </span>
                           <span className="audit-tl-step-side">
@@ -608,37 +972,104 @@ export function AuditTimeline(props: AuditTimelineProps) {
                 </ul>
               </div>
             )}
-            {runId === null && total === 0 && !auditActive && recorded.length === 0 && (
+            {runId === null && total === 0 && !auditActive && recorded.length === 0 && !loadFailed && (
               <p className="audit-tl-muted">{t('auditTimeline.audit.notStarted')}</p>
             )}
           </Phase>
 
           <Phase
-            status={validated ? 'done' : props.validationInProgress ? 'running' : audited ? 'pending' : 'blocked'}
+            status={validated ? 'done' : validationRunning ? 'running' : completedLocalRun && !runPending && !auditActive ? 'pending' : 'blocked'}
             eyebrow={t('auditTimeline.phase.n', 3)}
             title={t('auditTimeline.validation.title')}
-            tag={validated ? t('auditTimeline.status.done') : props.validationInProgress ? t('auditTimeline.status.running')
-              : audited ? t('auditTimeline.status.todo') : t('auditTimeline.status.waitingAudit')}
+            tag={validated ? t('auditTimeline.status.done') : validationRunning ? t('auditTimeline.status.running')
+              : completedLocalRun && !runPending && !auditActive ? t('auditTimeline.status.todo') : t('auditTimeline.status.waitingAudit')}
           >
             <p className="audit-tl-muted">{t('auditTimeline.validation.desc')}</p>
             {audited && tdTotal > 0 && (
               <p className="audit-tl-muted" data-testid="audit-timeline-td-count">{t('auditTimeline.validation.tdCount', tdTotal)}</p>
             )}
-            {auditStatus === 'Audited' && linkedValidation?.finished ? (
-              // The finished discussion is auto-archived: validate from here, never start a new one.
-              <div className="audit-tl-validation-actions" data-testid="audit-timeline-validation-finished">
-                <p className="audit-tl-muted">{t('auditTimeline.validation.finished')}</p>
+            {repoRun?.newer_than_local && !auditActive && (
+              <div className="audit-tl-validation-actions" data-testid="audit-timeline-repo-run">
+                <p className="audit-tl-muted" data-testid="audit-timeline-repo-run-summary">
+                  {t(
+                    'auditTimeline.repo.summary',
+                    repoRun.started_by,
+                    new Date(repoRun.started_at).toLocaleDateString(),
+                    stepRanges(repoRun.done_steps) || t('auditTimeline.repo.none'),
+                    stepRanges(repoRun.resume_steps) || t('auditTimeline.repo.none'),
+                    stepRanges(repoRun.recheck_steps) || t('auditTimeline.repo.none'),
+                  )}
+                </p>
+                <p className="audit-tl-muted" data-testid="audit-timeline-repo-run-td">
+                  {t('auditTimeline.repo.td', repoRun.td_total, repoRun.td_settled)}
+                </p>
+                {!repoRun.committed && (
+                  <p className="audit-tl-muted" data-testid="audit-timeline-repo-run-uncommitted">{t('auditTimeline.repo.uncommitted')}</p>
+                )}
+                {repoRun.resumable && resumable?.id === repoRun.run_id && (
+                  <p className="audit-tl-muted" data-testid="audit-timeline-repo-run-resumable">{t('auditTimeline.repo.resumable')}</p>
+                )}
+                {repoCanValidate && !repoRun.validated_at ? (
+                  <button
+                    type="button"
+                    className="audit-tl-btn audit-tl-btn-small"
+                    disabled={marking}
+                    data-testid="audit-timeline-repo-run-validate"
+                    onClick={() => {
+                      setMarking(true);
+                      void props.onMarkValid().finally(() => setMarking(false));
+                    }}
+                  >
+                    {marking ? <Loader2 size={12} className="spin" /> : <ShieldCheck size={12} />} {t('auditTimeline.repo.validate')}
+                  </button>
+                ) : validationBlock && repoRun.status === 'Completed' && !repoRun.validated_at ? (
+                  <p className="audit-tl-muted" data-testid="audit-timeline-repo-run-block">
+                    {t(`auditTimeline.validation.block.${validationBlock}`)}
+                  </p>
+                ) : null}
+              </div>
+            )}
+            {!validated && !auditActive && (runPending || (!audited && runId !== null)) ? (
+              // The run is not finished: the action here is the audit's own.
+              <div className="audit-tl-validation-actions" data-testid="audit-timeline-validation-blocked">
+                {runPending && <p className="audit-tl-muted">{t('auditTimeline.validation.afterRun')}</p>}
                 <button
                   type="button"
                   className="audit-tl-btn audit-tl-btn-small"
-                  disabled={marking}
-                  onClick={() => {
-                    setMarking(true);
-                    void props.onMarkValid().finally(() => setMarking(false));
-                  }}
+                  onClick={props.onLaunch}
+                  disabled={launchBlocked || !selected}
+                  data-testid="audit-timeline-validation-launch"
                 >
-                  {marking ? <Loader2 size={12} className="spin" /> : <ShieldCheck size={12} />} {t('audit.validate')}
+                  {runPending ? <RotateCcw size={12} /> : <Play size={12} />} {launchLabel}
                 </button>
+              </div>
+            ) : auditStatus === 'Audited' && completedLocalRun && linkedValidation?.finished ? (
+              // The finished discussion is auto-archived: validate from here, never start a new one.
+              <div className="audit-tl-validation-actions" data-testid="audit-timeline-validation-finished">
+                <p className="audit-tl-muted">{t('auditTimeline.validation.finished')}</p>
+                {linkedValidation.started_by && (
+                  <p className="audit-tl-muted" data-testid="audit-timeline-validation-started-by">
+                    {t('auditTimeline.validation.startedBy', linkedValidation.started_by)}
+                  </p>
+                )}
+                {validationBlock ? (
+                  // The server would refuse: the reason, not a button that fails.
+                  <p className="audit-tl-muted" data-testid="audit-timeline-validation-block">
+                    {t(`auditTimeline.validation.block.${validationBlock}`)}
+                  </p>
+                ) : (
+                  <button
+                    type="button"
+                    className="audit-tl-btn audit-tl-btn-small"
+                    disabled={marking}
+                    onClick={() => {
+                      setMarking(true);
+                      void props.onMarkValid().finally(() => setMarking(false));
+                    }}
+                  >
+                    {marking ? <Loader2 size={12} className="spin" /> : <ShieldCheck size={12} />} {t('audit.validate')}
+                  </button>
+                )}
                 <button
                   type="button"
                   className="audit-tl-btn audit-tl-btn-small"
@@ -647,11 +1078,20 @@ export function AuditTimeline(props: AuditTimelineProps) {
                   <FileText size={12} /> {t('auditTimeline.validation.viewDiscussion')}
                 </button>
               </div>
-            ) : audited && !validated && (
-              <button type="button" className="audit-tl-btn audit-tl-btn-small" onClick={props.onValidate}>
-                <ShieldCheck size={12} /> {props.validationInProgress ? t('audit.resumeValidation') : t('audit.validate')}
+            ) : auditStatus === 'Audited' && completedLocalRun && linkedValidation && !linkedValidation.finished && !auditActive ? (
+              <button type="button" className="audit-tl-btn audit-tl-btn-small" onClick={() => props.onOpenValidation(linkedValidation.discussion_id)}>
+                <FileText size={12} /> {t('audit.resumeValidation')}
               </button>
-            )}
+            ) : auditStatus === 'Audited' && stepsLoaded && !loadFailed && !completedLocalRun && !runPending ? (
+              <p className="audit-tl-muted" data-testid="audit-timeline-validation-unavailable">
+                {/* A peer or clone that never ran the audit is read-only: say it. */}
+                {validationBlock === 'no_local_run'
+                  ? t('auditTimeline.validation.block.no_local_run')
+                  : t('auditTimeline.validation.noCompletedRun')}
+              </p>
+            ) : auditStatus === 'Audited' && completedLocalRun && linkedValidation === null ? (
+              <p className="audit-tl-muted" data-testid="audit-timeline-validation-unlinked">{t('auditTimeline.validation.unlinked')}</p>
+            ) : null}
           </Phase>
 
           <Phase
@@ -662,11 +1102,17 @@ export function AuditTimeline(props: AuditTimelineProps) {
             last
           >
             <p className="audit-tl-muted">{t('auditTimeline.validated.desc')}</p>
-            {validated && props.techDebtCount > 0 && (
-              <button type="button" className="audit-tl-btn audit-tl-btn-small" onClick={props.onViewTechDebts}>
-                {t('audit.viewTechDebts', props.techDebtCount)}
-              </button>
+            {validated && (validatedBy || recordedStartedBy) && (
+              <p className="audit-tl-muted" data-testid="audit-timeline-validated-by">
+                {[
+                  recordedStartedBy ? t('auditTimeline.validation.startedBy', recordedStartedBy) : null,
+                  validatedBy
+                    ? t('auditTimeline.validation.validatedBy', validatedBy, recordedValidatedAt ?? '')
+                    : null,
+                ].filter(Boolean).join(' · ')}
+              </p>
             )}
+            {validated && props.techDebtEntry}
           </Phase>
         </ol>
 
@@ -681,6 +1127,16 @@ export function AuditTimeline(props: AuditTimelineProps) {
                   `${MODEL_TIER_ICONS[selectedTier]} ${t(`disc.tier.${selectedTier}`)}`,
                   tierModel(selectedTier),
                 ].filter(Boolean).join(' · '))}
+              </p>
+            )}
+            {!locked && props.selectionFromRun && selected && selectedTier && (
+              <p className="audit-tl-note" data-testid="audit-timeline-selection-from-run">
+                {t('auditTimeline.agent.fromRun', `${MODEL_TIER_ICONS[selectedTier]} ${t(`disc.tier.${selectedTier}`)}`)}
+              </p>
+            )}
+            {!locked && props.selectionFromRun && props.selectionConnectionGone && selected && (
+              <p className="audit-tl-note" role="status" data-testid="audit-timeline-connection-gone">
+                {t('auditTimeline.agent.connectionGone', AGENT_LABELS[selected] ?? selected)}
               </p>
             )}
             {agentChoices.length === 0 && <p className="audit-tl-muted">{t('disc.noAgent')}</p>}
@@ -750,15 +1206,62 @@ export function AuditTimeline(props: AuditTimelineProps) {
                 </div>
               </div>
             )}
+            {audited && !resumable && !props.resumableUnknown && !auditActive && (
+              <p className="audit-tl-muted" data-testid="audit-timeline-reverify-hint">{t('auditTimeline.reverifyHint')}</p>
+            )}
             <button
               type="button"
               className="audit-tl-btn audit-tl-btn-primary"
-              onClick={props.onLaunch}
-              disabled={auditActive || !selected || !agentChoices.some(g => g.items.some(i => i.usable))}
+              onClick={verifyEntry ? (props.onVerifyDocs ?? props.onLaunch) : props.onLaunch}
+              disabled={verifyEntry
+                ? auditActive || !!props.resumableUnknown
+                : auditActive || launchBlocked || !selected || !agentChoices.some(g => g.items.some(i => i.usable))}
               data-testid="audit-timeline-launch"
             >
               {auditActive ? <Loader2 size={13} className="spin" aria-hidden="true" /> : <Play size={13} />} {launchLabel}
             </button>
+            {runPending && props.onRelaunchFull && !confirmRelaunch && (
+              <button
+                type="button"
+                className="audit-tl-btn audit-tl-btn-small"
+                onClick={() => setConfirmRelaunch(true)}
+                disabled={launchBlocked || !selected}
+                data-testid="audit-timeline-relaunch-full"
+              >
+                {t('auditTimeline.relaunchFull')}
+              </button>
+            )}
+            {runPending && confirmRelaunch && (
+              <div className="audit-tl-warn" role="dialog" aria-label={t('auditTimeline.confirmRelaunch.title')} data-testid="audit-timeline-relaunch-confirm">
+                <AlertTriangle size={13} aria-hidden="true" />
+                <div>
+                  <p><strong>{t('auditTimeline.confirmRelaunch.title')}</strong></p>
+                  <p>{t('auditTimeline.confirmRelaunch.body', failed.length)}</p>
+                  <div className="audit-tl-validation-actions">
+                    <button type="button" className="audit-tl-btn audit-tl-btn-small" onClick={() => { setConfirmRelaunch(false); props.onLaunch(); }} data-testid="audit-timeline-relaunch-confirm-resume">
+                      <RotateCcw size={12} /> {launchLabel}
+                    </button>
+                    <button
+                      type="button"
+                      className="audit-tl-btn audit-tl-btn-small"
+                      onClick={() => {
+                        setConfirmRelaunch(false);
+                        setOpenGroups(Object.fromEntries(groups.map(g => [g.key, g.rows.some(r => r.status === 'failed' || r.status === 'todo')])));
+                      }}
+                      data-testid="audit-timeline-relaunch-confirm-review"
+                    >
+                      {t('auditTimeline.confirmRelaunch.review')}
+                    </button>
+                    <button type="button" className="audit-tl-btn audit-tl-btn-small audit-tl-btn-warn" onClick={() => { setConfirmRelaunch(false); props.onRelaunchFull?.(); }} data-testid="audit-timeline-relaunch-confirm-full">
+                      {t('auditTimeline.confirmRelaunch.full')}
+                    </button>
+                    <button type="button" className="audit-tl-btn audit-tl-btn-small" onClick={() => setConfirmRelaunch(false)}>
+                      {t('auditTimeline.step.acceptCancel')}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </section>
         </aside>
       </div>
@@ -800,7 +1303,9 @@ function stepReason(warning: string, t: (key: string, ...args: (string | number)
   if (/placeholders remain/i.test(warning)) return t('auditTimeline.reason.unfilled');
   if (/tool rounds|round ceiling|budget reached/i.test(warning)) return t('auditTimeline.reason.rounds');
   if (/rate.?limit|quota|429/i.test(warning)) return t('auditTimeline.reason.quota');
+  if (/stopped during step/i.test(warning)) return t('auditTimeline.reason.stopped');
   if (/interrupt|cancel/i.test(warning)) return t('auditTimeline.reason.interrupted');
+  if (/looks truncated/i.test(warning)) return t('auditTimeline.reason.truncated');
   if (/rewrote nothing|unchanged from before/i.test(warning)) return t('auditTimeline.reason.unchanged');
   if (/no output|missing or empty/i.test(warning)) return t('auditTimeline.reason.noOutput');
   if (/broken citation|citation path|dimension coverage/i.test(warning)) return t('auditTimeline.reason.checks');

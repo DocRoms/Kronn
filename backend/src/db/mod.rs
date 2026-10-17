@@ -5,7 +5,11 @@ pub mod agent_jobs;
 pub mod api_access_policies;
 pub mod api_call_logs;
 pub mod assistant_conversations;
+pub mod audit_cross;
+pub mod audit_documents;
+pub mod audit_run_cost;
 pub mod audit_runs;
+pub mod audit_validation;
 pub mod cli_telemetry;
 pub(crate) mod cli_worker_bindings;
 pub mod compare;
@@ -21,6 +25,7 @@ pub mod discussion_important;
 pub(crate) mod discussion_launch_settings;
 pub mod discussion_monitor;
 pub mod discussion_questions;
+pub mod discussion_scope;
 pub mod discussion_sessions;
 pub mod discussion_video_sequences;
 pub mod discussion_weight;
@@ -278,10 +283,40 @@ impl Database {
         // row is a zombie — and the flip is resume-safe because
         // last_completed_step survives (see
         // `reconcile_stale_runs_preserves_last_completed_step`).
+        // KT-1211 (M5) — an agent the previous backend left running would
+        // keep writing the docs the freed lease lets a resume rewrite: kill
+        // it first (only a process whose start stamp still matches).
+        match crate::core::agent_orphans::reap_recorded_agents(&conn) {
+            Ok(0) => {}
+            Ok(n) => {
+                tracing::warn!("Killed {n} audit agent(s) left running by the previous backend")
+            }
+            Err(e) => tracing::warn!("Failed to reap orphaned audit agents: {e}"),
+        }
+        // KT-1211 — the step that agent was writing never ended: put its doc
+        // back from the pre-step snapshot (or mark it partial) now, so it is
+        // never left half-written and unmarked until the next launch.
+        match crate::api::audit::step_guard::settle_unfinished_at_boot(&conn) {
+            Ok(0) => {}
+            Ok(n) => tracing::warn!("Settled {n} audit step(s) cut off with the previous backend"),
+            Err(e) => tracing::warn!("Failed to settle audit steps cut off at boot: {e}"),
+        }
         match audit_runs::reconcile_stale_runs(&conn, 0) {
             Ok(0) => {}
             Ok(n) => tracing::info!("Reconciled {} zombie audit_runs left 'Running' by a previous process → Interrupted", n),
             Err(e) => tracing::warn!("Failed to reconcile stale audit_runs: {}", e),
+        }
+
+        // KT-1122 — recognise validations that already signalled completion
+        // and archive the stale ones an old audit left open. Idempotent.
+        match audit_validation::repair(&conn) {
+            Ok(audit_validation::RepairReport { completed: 0, archived: 0 }) => {}
+            Ok(report) => tracing::info!(
+                "Repaired audit validations: {} completion(s) recognised, {} stale discussion(s) archived",
+                report.completed,
+                report.archived
+            ),
+            Err(e) => tracing::warn!("Failed to repair audit validation state: {}", e),
         }
 
         // 0.8.11 (B5) — same reconcile for workflow_runs: a run that was in
@@ -386,6 +421,23 @@ impl Database {
         &self.path
     }
 
+    /// A second handle on the SAME connections, for work that must outlive the
+    /// request that started it (a detached task cannot borrow the caller's
+    /// `&Database`). Reads, writes, the change signal and the assistant guard
+    /// are shared; the boot-interrupted list and the catalogue refresh locks
+    /// are NOT — drain and lock them on the original only.
+    pub(crate) fn share_handle(&self) -> Database {
+        Database {
+            conn: Arc::clone(&self.conn),
+            read_conn: self.read_conn.clone(),
+            path: self.path.clone(),
+            boot_interrupted: Mutex::new(Vec::new()),
+            catalog_refresh_locks: Mutex::new(std::collections::HashMap::new()),
+            resource_changes: Arc::clone(&self.resource_changes),
+            assistant_guard: Arc::clone(&self.assistant_guard),
+        }
+    }
+
     pub(crate) async fn lock_catalog_refresh(
         &self,
         target: &str,
@@ -426,6 +478,25 @@ impl Database {
             None => self.conn.clone(),
         };
         Self::run_on(conn, self.assistant_guard.clone(), f).await
+    }
+
+    /// Runs a long read-only closure on a connection opened for it alone, so a
+    /// slow scan holds neither the writer nor the shared read connection.
+    /// Without a read companion (in-memory, WAL not effective) it falls back
+    /// to `with_read_conn`, for the same reason that companion is skipped.
+    pub async fn with_dedicated_read_conn<F, T>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&Connection) -> Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        if self.read_conn.is_none() {
+            return self.with_read_conn(f).await;
+        }
+        let path = self.path.clone();
+        let conn = tokio::task::spawn_blocking(move || Self::open_read_connection(&path))
+            .await
+            .map_err(|e| anyhow::anyhow!("dedicated read connection task failed: {e}"))??;
+        Self::run_on(Arc::new(Mutex::new(conn)), self.assistant_guard.clone(), f).await
     }
 
     /// Execute a blocking closure with the database connection.

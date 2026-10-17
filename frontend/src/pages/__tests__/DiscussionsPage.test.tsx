@@ -99,6 +99,7 @@ vi.mock('../../lib/api', () => ({
     // audit). Tests that need the running state override per-test.
     auditStatus: vi.fn().mockResolvedValue(null),
     validateAudit: vi.fn().mockResolvedValue('Validated'),
+    validationState: vi.fn().mockResolvedValue(null),
     // 0.8.4 (#294) — sidebar fetches this once per mount to decorate
     // disc rows with the "bound to X" badge. Empty = no bindings,
     // badge stays hidden.
@@ -226,9 +227,10 @@ import {
 } from '../../lib/api';
 import { DiscussionsPage } from '../DiscussionsPage';
 import { clearImportantMessages } from '../../lib/importantMessages';
+import { resetDiscussionQuestions } from '../../lib/discussionQuestions';
 import { discardImportantDraft } from '../../lib/importantMessageDraft';
 import { findRenderedTextRanges } from '../../lib/discussionMessageSearch';
-import type { ActiveAgentDispatch, AgentDetection, AgentType, AgentsConfig, AiAuditStatus, ContextFile, Discussion, Project, SharedRun, WsMessage } from '../../types/generated';
+import type { ActiveAgentDispatch, ActiveWorkflowStep, AgentDetection, AgentType, AgentsConfig, AiAuditStatus, ContextFile, Discussion, Project, SharedRun, WsMessage } from '../../types/generated';
 import type { ExternalApiConnectionView } from '../../lib/api';
 import type { ToastFn } from '../../hooks/useToast';
 
@@ -258,6 +260,8 @@ beforeEach(() => {
   vi.mocked(runsApi.list).mockResolvedValue([]);
   vi.mocked(projectsApi.validateAudit).mockReset();
   vi.mocked(projectsApi.validateAudit).mockResolvedValue('Validated');
+  vi.mocked(projectsApi.validationState).mockReset();
+  vi.mocked(projectsApi.validationState).mockResolvedValue(null as never);
   sessionStorage.clear();
   vi.mocked(planningApi.proposals).mockReset();
   vi.mocked(planningApi.proposals).mockResolvedValue({
@@ -302,6 +306,65 @@ const liftedProps = () => ({
 });
 
 /** List-view discussion: has message_count but messages is empty (like the real backend) */
+/**
+ * jsdom performs no layout. Model a long thread whose rows use
+ * `content-visibility: auto`: `targetSelector` sits at `offset` in the scrolled
+ * content, the container shows 800 px, and rows above take their real height
+ * only after the click. A native scrollIntoView aims once, at the layout
+ * measured when it fires.
+ */
+function installGrowingLayout(targetSelector: string) {
+  const rectDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'getBoundingClientRect');
+  const scrollDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollIntoView');
+  let offset = 2000;
+  const container = () => document.querySelector<HTMLElement>('.disc-messages');
+  const rect = (top: number, height: number) => ({
+    top, bottom: top + height, left: 0, right: 600, width: 600, height, x: 0, y: top, toJSON: () => ({}),
+  }) as DOMRect;
+  Object.defineProperty(HTMLElement.prototype, 'getBoundingClientRect', {
+    configurable: true,
+    value(this: HTMLElement) {
+      const box = container();
+      if (this === box) return rect(0, 800);
+      if (box && this.matches(targetSelector)) return rect(offset - box.scrollTop, 100);
+      return rect(0, 0);
+    },
+  });
+  Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+    configurable: true,
+    value(this: HTMLElement) {
+      const box = container();
+      if (!box) return;
+      const target = this.getBoundingClientRect();
+      box.scrollTop += (target.top + target.bottom) / 2 - 400;
+    },
+  });
+  const wait = (ms: number) => act(async () => { await new Promise(resolve => setTimeout(resolve, ms)); });
+  return {
+    async clickWhileGrowing(button: HTMLElement) {
+      // Let earlier pins (cold-load bottom, first search match) finish first.
+      await wait(800);
+      container()!.scrollTop = 0;
+      const grow = setInterval(() => { if (offset < 6000) offset += 1000; }, 16);
+      await act(async () => { fireEvent.click(button); });
+      await wait(300);
+      clearInterval(grow);
+      await wait(600);
+    },
+    expectTargetCentred() {
+      // Centred where the target finally sits, not where it was at the click.
+      expect(offset).toBe(6000);
+      expect(Math.abs(offset + 50 - container()!.scrollTop - 400)).toBeLessThan(1);
+    },
+    restore() {
+      if (rectDescriptor) Object.defineProperty(HTMLElement.prototype, 'getBoundingClientRect', rectDescriptor);
+      else delete (HTMLElement.prototype as { getBoundingClientRect?: unknown }).getBoundingClientRect;
+      if (scrollDescriptor) Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', scrollDescriptor);
+      else delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+    },
+  };
+}
+
 const makeListDiscussion = (id: string, msgCount: number): Discussion => ({
   id,
   project_id: null,
@@ -1979,12 +2042,6 @@ describe('DiscussionsPage', () => {
       ai_generation: null,
       created_at: '2026-01-01T00:01:00Z',
     }]);
-    const scrollIntoView = vi.fn();
-    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
-      configurable: true,
-      value: scrollIntoView,
-    });
-
     await wrap(
       <DiscussionsPage
         projects={[]}
@@ -2007,7 +2064,9 @@ describe('DiscussionsPage', () => {
     expect(screen.getByRole('complementary', { name: 'Assets' })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /Aller au message contenant source\.csv/ }));
 
-    await waitFor(() => expect(scrollIntoView).toHaveBeenCalled());
+    await waitFor(() => expect(
+      document.querySelector('[data-message-id="m-asset"]')?.getAttribute('data-search-current'),
+    ).toBe('true'));
     expect(screen.queryByRole('complementary', { name: 'Assets' })).toBeNull();
   });
 
@@ -2854,6 +2913,102 @@ describe('DiscussionsPage', () => {
     // measured when the click happened.
     expect(scrollHeight).toBe(9000);
     expect(container.scrollTop).toBe(9000);
+  });
+
+  const longThread = (id: string, contentFor: (i: number) => string | null = () => null) => {
+    const messages = Array.from({ length: 30 }, (_, i) => ({
+      id: `m${i}`,
+      role: (i % 2 === 0 ? 'User' : 'Agent') as 'User' | 'Agent',
+      channel: 'main' as const,
+      content: contentFor(i) ?? `message ${i}`,
+      agent_type: i % 2 === 0 ? null : ('ClaudeCode' as const),
+      timestamp: '2026-01-01T00:00:00Z',
+      tokens_used: 0,
+      auth_mode: null,
+    }));
+    return { ...makeListDiscussion(id, messages.length), messages };
+  };
+  const renderThread = (disc: Discussion) => wrap(
+    <DiscussionsPage
+      projects={[]}
+      agents={[]}
+      allDiscussions={[disc]}
+      configLanguage="fr"
+      agentAccess={null}
+      refetchDiscussions={noop}
+      refetchProjects={noop}
+      onNavigate={noop}
+      toast={toastFn}
+      initialActiveDiscussionId={disc.id}
+      {...liftedProps()}
+    />
+  );
+
+  it('opens the pending decision card in one click while rows above are still laying out', async () => {
+    // Reported bug: "je suis obligé de cliquer au moins 10 fois" on the
+    // arbitration banner.
+    resetDiscussionQuestions();
+    const disc = longThread('d-arb', i => (i === 3 ? '```kronn-question\n{"version":1,"key":"k"}\n```' : null));
+    vi.mocked(discussionsApi.get).mockResolvedValue(disc);
+    vi.mocked(discussionsApi.questions).mockResolvedValue({
+      questions: [{
+        id: 'q-arb', discussion_id: 'd-arb', source_message_id: 'm3', fence_index: 0, key: 'k',
+        question: 'Which policy?', context: null,
+        options: [{ id: 'a', label: 'A', description: null }], items: [], multiple: false,
+        recommended_option_ids: [], task_ref: null, requester_workflow_step: null, resume: null,
+        state: 'pending', answer: null,
+        created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+      }],
+      pending_count: 1,
+    } as never);
+    const layout = installGrowingLayout('[data-message-id="m3"], [data-testid="disc-question-q-arb"]');
+    try {
+      await renderThread(disc);
+      await screen.findByTestId('disc-question-q-arb');
+      await layout.clickWhileGrowing(await screen.findByTestId('disc-question-banner-go'));
+      layout.expectTargetCentred();
+    } finally {
+      layout.restore();
+      resetDiscussionQuestions();
+    }
+  });
+
+  it('jumps from the asset inventory to its message in one click while rows above are still laying out', async () => {
+    const disc = longThread('d-asset-jump');
+    vi.mocked(discussionsApi.get).mockResolvedValue(disc);
+    vi.mocked(discussionsApi.listContextFiles).mockResolvedValue([{
+      id: 'cf-jump', discussion_id: 'd-asset-jump', filename: 'source.csv', mime_type: 'text/csv',
+      original_size: 128, extracted_size: 128, disk_path: null, message_id: 'm3', ai_generation: null,
+      created_at: '2026-01-01T00:01:00Z',
+    }]);
+    const layout = installGrowingLayout('[data-message-id="m3"]');
+    try {
+      await renderThread(disc);
+      fireEvent.click(await screen.findByTestId('panel-open-toggle'));
+      fireEvent.click(await screen.findByRole('button', { name: /Parcourir tous les assets.*1/ }));
+      await layout.clickWhileGrowing(screen.getByRole('button', { name: /Aller au message contenant source\.csv/ }));
+      layout.expectTargetCentred();
+    } finally {
+      layout.restore();
+    }
+  });
+
+  it('reaches the next search match in one click while rows above are still laying out', async () => {
+    const disc = longThread('d-search-jump', i => (i === 3 || i === 5 ? `zebra ${i}` : null));
+    vi.mocked(discussionsApi.get).mockResolvedValue(disc);
+    const layout = installGrowingLayout('[data-message-id="m5"]');
+    try {
+      await renderThread(disc);
+      fireEvent.click(await screen.findByRole('button', { name: 'Rechercher dans les messages' }));
+      const input = await screen.findByRole('searchbox', { name: 'Rechercher dans cette discussion…' });
+      fireEvent.change(input, { target: { value: 'zebra' } });
+      await waitFor(() => expect(screen.getByText('1 / 2')).toBeTruthy());
+      await layout.clickWhileGrowing(screen.getByRole('button', { name: 'Occurrence suivante' }));
+      expect(screen.getByText('2 / 2')).toBeTruthy();
+      layout.expectTargetCentred();
+    } finally {
+      layout.restore();
+    }
   });
 
   it('optimistically promotes the streaming buffer to a real Agent message on stream end (no scroll jump)', async () => {
@@ -4749,6 +4904,15 @@ describe('DiscussionsPage', () => {
     open.mockRestore();
   });
 
+  // KT-1122 — the validation banners read the server's verdict for the
+  // project's latest run, not the title or the last message of the discussion.
+  const verdict = (projectId: string, discussionId: string | null, over: Record<string, unknown> = {}) => ({
+    project_id: projectId, run_id: 'r1', run_status: 'Completed', discussion_id: discussionId,
+    archived: false, finished: true, completed_at: '2026-01-01T00:01:00+00:00',
+    completed_message_id: 'm-agent', started_by: 'Romu', validated_by: null, validated_at: null,
+    can_validate: true, blocked: null, ...over,
+  });
+
   it('validation CTA validates, records the Audit deep-link, refreshes, and opens the project', async () => {
     const proj = makeProject('p-validation', 'Audited', 'context');
     const disc: Discussion = {
@@ -4761,6 +4925,7 @@ describe('DiscussionsPage', () => {
       non_system_message_count: 2,
     };
     vi.mocked(discussionsApi.get).mockResolvedValue(disc);
+    vi.mocked(projectsApi.validationState).mockResolvedValue(verdict(proj.id, disc.id) as never);
     const onNavigate = vi.fn();
     const refetchProjects = vi.fn();
     const refetchDiscussions = vi.fn();
@@ -4801,6 +4966,7 @@ describe('DiscussionsPage', () => {
       non_system_message_count: 2,
     };
     vi.mocked(discussionsApi.get).mockResolvedValue(disc);
+    vi.mocked(projectsApi.validationState).mockResolvedValue(verdict(proj.id, disc.id, { archived: true }) as never);
 
     await wrap(
       <DiscussionsPage
@@ -4820,6 +4986,93 @@ describe('DiscussionsPage', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: /Marquer l'audit comme valide/i }));
     await waitFor(() => expect(projectsApi.validateAudit).toHaveBeenCalledWith(proj.id));
+  });
+
+  it('validation CTA stays after later agent messages: the server verdict is durable (KT-1122)', async () => {
+    const proj = makeProject('p-durable', 'Audited', 'context');
+    const disc: Discussion = {
+      ...makeProjectDisc('d-durable', proj.id, 'Validation audit AI'),
+      archived: true,
+      messages: [
+        { id: 'm-user', role: 'User', channel: 'main', content: 'Validate', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'm-signal', role: 'Agent', channel: 'main', content: 'Fin.\nKRONN:VALIDATION_COMPLETE', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:01:00Z', tokens_used: 10, auth_mode: null },
+        { id: 'm-pr', role: 'Agent', channel: 'main', content: 'Commit pushed (PR #34)', agent_type: 'ClaudeCode', timestamp: '2026-01-02T00:01:00Z', tokens_used: 10, auth_mode: null },
+      ],
+      message_count: 3,
+      non_system_message_count: 3,
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(disc);
+    vi.mocked(projectsApi.validationState).mockResolvedValue(verdict(proj.id, disc.id, { archived: true }) as never);
+
+    await renderWithDisc(proj, disc);
+
+    expect(await screen.findByRole('button', { name: /Marquer l'audit comme valide/i })).toBeInTheDocument();
+  });
+
+  it('no validate CTA when the server has not finished the validation, even if the text mentions the marker', async () => {
+    const proj = makeProject('p-mention', 'Audited', 'context');
+    const disc: Discussion = {
+      ...makeProjectDisc('d-mention', proj.id, 'Validation audit AI'),
+      messages: [
+        { id: 'm-user', role: 'User', channel: 'main', content: 'Validate', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'm-agent', role: 'Agent', channel: 'main', content: 'I will end with KRONN:VALIDATION_COMPLETE once done', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:01:00Z', tokens_used: 10, auth_mode: null },
+      ],
+      message_count: 2,
+      non_system_message_count: 2,
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(disc);
+    vi.mocked(projectsApi.validationState).mockResolvedValue(
+      verdict(proj.id, disc.id, { finished: false, completed_at: null, can_validate: false, blocked: 'not_finished' }) as never,
+    );
+
+    await renderWithDisc(proj, disc);
+    await act(async () => { await new Promise(r => setTimeout(r, 50)); });
+
+    expect(screen.queryByRole('button', { name: /Marquer l'audit comme valide/i })).toBeNull();
+    expect(screen.queryByTestId('validation-blocked-banner')).toBeNull();
+  });
+
+  it('shows the reason instead of a validate button the server would refuse (KT-1122)', async () => {
+    const proj = makeProject('p-blocked', 'Audited', 'context');
+    const disc: Discussion = {
+      ...makeProjectDisc('d-blocked', proj.id, 'Validation audit AI'),
+      messages: [
+        { id: 'm-user', role: 'User', channel: 'main', content: 'Validate', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'm-agent', role: 'Agent', channel: 'main', content: 'KRONN:VALIDATION_COMPLETE', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:01:00Z', tokens_used: 10, auth_mode: null },
+      ],
+      message_count: 2,
+      non_system_message_count: 2,
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(disc);
+    vi.mocked(projectsApi.validationState).mockResolvedValue(
+      verdict(proj.id, disc.id, { can_validate: false, blocked: 'no_local_run' }) as never,
+    );
+
+    await renderWithDisc(proj, disc);
+
+    const banner = await screen.findByTestId('validation-blocked-banner');
+    expect(banner).toHaveTextContent(/Lecture seule/);
+    expect(screen.queryByRole('button', { name: /Marquer l'audit comme valide/i })).toBeNull();
+  });
+
+  it('flags a validation of an older audit run and offers the current one (KT-1122)', async () => {
+    const proj = makeProject('p-old', 'Audited', 'context');
+    const stale: Discussion = {
+      ...makeProjectDisc('d-april', proj.id, 'Validation audit AI'),
+      messages: [
+        { id: 'm-user', role: 'User', channel: 'main', content: 'Validate', agent_type: null, timestamp: '2026-04-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'm-agent', role: 'Agent', channel: 'main', content: 'KRONN:VALIDATION_COMPLETE', agent_type: 'ClaudeCode', timestamp: '2026-04-01T00:01:00Z', tokens_used: 10, auth_mode: null },
+      ],
+      message_count: 2,
+      non_system_message_count: 2,
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(stale);
+    vi.mocked(projectsApi.validationState).mockResolvedValue(verdict(proj.id, 'd-august', { archived: true }) as never);
+
+    await renderWithDisc(proj, stale);
+
+    expect(await screen.findByTestId('validation-superseded-banner')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Marquer l'audit comme valide/i })).toBeNull();
   });
 
   // ─── Audit-running MCP filter banner (0.8.3 #280) ────────────────────
@@ -5079,6 +5332,132 @@ describe('KT-1108 — live progress in the reply bubble', () => {
     });
     expect(screen.getByTestId('run-phase')).toHaveTextContent('Prompt envoyé, en attente du modèle');
     expect(screen.getByTestId('run-stopped')).toHaveTextContent('Kronn a arrêté Codex après 5 min 00 s sans activité.');
+  });
+});
+
+describe('KT-1252 — a workflow step working for the room', () => {
+  type ProgressFrame = Extract<WsMessage, { type: 'agent_run_progress' }>;
+  const stepFrame = (overrides: Partial<ProgressFrame['progress']> = {}, seq = 1): ProgressFrame => ({
+    type: 'agent_run_progress',
+    discussion_id: 'd-room',
+    dispatch_id: null,
+    trigger_message_id: null,
+    agent_type: 'ClaudeCode',
+    run_id: 'prog-1',
+    started_at: '2026-10-15T08:50:52Z',
+    seq,
+    progress: {
+      phase: 'starting_cli',
+      phase_ms: 1_000,
+      elapsed_ms: 2_000,
+      timeline: [{ phase: 'preparing', at_ms: 0 }, { phase: 'starting_cli', at_ms: 300 }],
+      mcp_servers: null,
+      activity: [],
+      tool_calls: 0,
+      silent_ms: 0,
+      idle_limit_ms: null,
+      stopped: null,
+      ...overrides,
+    },
+  });
+  const roomWith = (steps: ActiveWorkflowStep[]): Discussion => ({
+    ...makeListDiscussion('d-room', 1),
+    messages: [{
+      id: 'm1', role: 'User', channel: 'main', content: 'Cadrage EW-7853',
+      agent_type: null, timestamp: '2026-10-15T08:50:50Z', tokens_used: 0, auth_mode: null,
+    }],
+    active_workflow_steps: steps,
+  } as Discussion);
+  const step = (extra: Partial<ActiveWorkflowStep> = {}): ActiveWorkflowStep => ({
+    run_id: 'run-b4e247d5',
+    workflow_id: 'wf-framing',
+    workflow_name: 'Framing',
+    step_key: 'analyse',
+    step_name: 'analyse',
+    agent_type: 'ClaudeCode',
+    started_at: '2026-10-15T08:50:52Z',
+    ...extra,
+  });
+
+  let send: ((msg: WsMessage) => void) | undefined;
+  beforeEach(async () => {
+    const { resetLiveRuns } = await import('../../lib/agentRunProgress');
+    resetLiveRuns();
+    const { useWebSocket } = await import('../../hooks/useWebSocket');
+    vi.mocked(useWebSocket).mockImplementation(onMessage => {
+      send = msg => onMessage(msg);
+      return { connected: true, connectionState: 'connected' };
+    });
+    vi.mocked(discussionsApi.runProgress).mockReset();
+    vi.mocked(discussionsApi.runProgress).mockResolvedValue([]);
+  });
+  afterEach(async () => {
+    const { useWebSocket } = await import('../../hooks/useWebSocket');
+    vi.mocked(useWebSocket).mockImplementation(() => ({ connected: false, connectionState: 'connecting' }));
+  });
+
+  const renderRoom = async (disc: Discussion) => {
+    vi.mocked(discussionsApi.get).mockResolvedValue(disc);
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[disc]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d-room"
+        {...liftedProps()}
+      />,
+    );
+  };
+
+  it('shows the placeholder and the live activity at the push, not at the 5 s poll, and drops it at the end', async () => {
+    await renderRoom(roomWith([]));
+    expect(await screen.findByText('Cadrage EW-7853')).toBeInTheDocument();
+    expect(screen.queryByTestId('workflow-step-running-run-b4e247d5-analyse')).toBeNull();
+
+    // The step enters: the room is told, nothing else is awaited.
+    vi.mocked(discussionsApi.get).mockResolvedValue(roomWith([step({ progress_run_id: 'prog-1' })]));
+    vi.mocked(discussionsApi.runProgress).mockResolvedValue([stepFrame()]);
+    await act(async () => { send?.({ type: 'workflow_step_room_changed', discussion_id: 'd-room' }); });
+    const bubble = await screen.findByTestId('workflow-step-running-run-b4e247d5-analyse');
+    expect(bubble).toHaveTextContent('Framing');
+    await waitFor(() => expect(bubble.querySelector('[data-testid="agent-run-progress"]')).not.toBeNull());
+    expect(bubble.querySelector('[data-testid="agent-run-progress"]')).toHaveAttribute('data-phase', 'starting_cli');
+
+    // Its tool calls arrive as frames of the same run.
+    await act(async () => {
+      send?.(stepFrame({
+        phase: 'tool',
+        tool_calls: 3,
+        activity: [{ category: 'Read', at: new Date().toISOString() }],
+      }, 2));
+    });
+    expect(bubble.querySelector('[data-testid="agent-run-progress"]')).toHaveAttribute('data-phase', 'tool');
+    expect(screen.getByTestId('run-activity-toggle')).toHaveTextContent('Activité (3)');
+
+    // Another room's change leaves this one alone.
+    const pollsBefore = vi.mocked(discussionsApi.poll).mock.calls.length;
+    await act(async () => { send?.({ type: 'workflow_step_room_changed', discussion_id: 'd-other' }); });
+    expect(vi.mocked(discussionsApi.poll).mock.calls.length).toBe(pollsBefore);
+
+    // The step ends: the bubble goes without a manual reload.
+    vi.mocked(discussionsApi.get).mockResolvedValue(roomWith([]));
+    await act(async () => { send?.({ type: 'workflow_step_room_changed', discussion_id: 'd-room' }); });
+    await waitFor(() => expect(screen.queryByTestId('workflow-step-running-run-b4e247d5-analyse')).toBeNull());
+  });
+
+  it('shows the workflow and its step while the run prepares, before its agent enters', async () => {
+    await renderRoom(roomWith([step({ step_key: 'copie', step_name: 'copie des dépôts', preparing: true })]));
+    const bubble = await screen.findByTestId('workflow-step-running-run-b4e247d5-copie');
+    expect(bubble).toHaveAttribute('data-preparing', 'true');
+    expect(bubble).toHaveTextContent('Framing');
+    expect(bubble).toHaveTextContent('copie des dépôts');
+    expect(bubble).toHaveTextContent("n'est pas encore entré dans la salle");
   });
 });
 

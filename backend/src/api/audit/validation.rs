@@ -32,6 +32,7 @@
 //! survive as legacy fields so old recap rows still render — new
 //! runs always emit `false`.
 
+use crate::core::docs_location::DocsRoot;
 use std::path::{Path, PathBuf};
 
 /// The minimum dest/template size ratio (in %) below which a step's
@@ -90,12 +91,12 @@ pub struct StepValidationWarning {
     pub repaired: bool,
 }
 
-const COVERAGE_WARNING_PREFIX: &str = "dimension coverage incomplete";
+const COVERAGE_WARNING_PREFIX: &str = super::step_guard::COVERAGE_FRAGMENT;
 
 /// Recompute the coverage failure from the current index, including on resume.
 /// This is feedback for the agent, never a relaxation or an in-place repair.
 pub(crate) fn coverage_repair_feedback(project_path: &Path, target_file: &str) -> Option<String> {
-    if target_file != "docs/inconsistencies-tech-debt.md" {
+    if DocsRoot::of(project_path).strip(target_file) != Some("inconsistencies-tech-debt.md") {
         return None;
     }
     let (_, warning) = validate_step_output(true, project_path, target_file);
@@ -176,14 +177,14 @@ pub fn validate_step_output(
         return (cli_success, None);
     }
 
-    // We only validate paths that live under the project's `docs/`
-    // directory — other targets are out of scope.
-    if !target_file.starts_with("docs/") {
+    // We only validate paths that live under the project's docs root
+    // (KT-1192) — other targets are out of scope.
+    let Some(within_root) = DocsRoot::of(project_path).strip(target_file) else {
         return (cli_success, None);
-    }
+    };
 
     let dst_path = project_path.join(target_file);
-    let template_path = template_source_for(target_file);
+    let template_path = template_source_for(&DocsRoot::default_root().path(within_root));
 
     // Get the on-disk size, treating "missing" as 0.
     let dst_size = std::fs::metadata(&dst_path).map(|m| m.len()).unwrap_or(0);
@@ -229,10 +230,7 @@ pub fn validate_step_output(
                 target_file
             )
         } else {
-            format!(
-                "step output looks truncated: `{}` is {} B but template is {} B (< {}% threshold)",
-                target_file, dst_size, template_size, MIN_DEST_RATIO_PCT
-            )
+            truncated_reason(target_file, dst_size, template_size)
         };
         return (false, Some(StepValidationWarning { reason, repaired }));
     }
@@ -311,10 +309,7 @@ pub fn validate_step_output(
                 return (
                     false,
                     Some(StepValidationWarning {
-                        reason: format!(
-                            "{COVERAGE_WARNING_PREFIX} in `{}`: {} (Step 8 will be re-run)",
-                            target_file, reason
-                        ),
+                        reason: coverage_reason(target_file, &reason),
                         repaired: false,
                     }),
                 );
@@ -343,6 +338,23 @@ pub fn check_detector_disposition(
     project_path: &Path,
     signals: &[crate::core::audit_detectors::DetectedSignal],
 ) -> Option<StepValidationWarning> {
+    detector_disposition_gap(project_path, signals).map(|gap| gap.warning)
+}
+
+/// An undisposed-signals failure with the targeted correction the agent gets
+/// on a bounded retry (KT-1323), like every other Step-8 gate.
+pub struct DispositionGap {
+    pub warning: StepValidationWarning,
+    pub feedback: String,
+    pub count: usize,
+}
+
+/// [`check_detector_disposition`] with the retry feedback naming the signals
+/// still to dispose of.
+pub fn detector_disposition_gap(
+    project_path: &Path,
+    signals: &[crate::core::audit_detectors::DetectedSignal],
+) -> Option<DispositionGap> {
     if signals.is_empty() {
         return None;
     }
@@ -353,12 +365,13 @@ pub fn check_detector_disposition(
     // masking-by-history we're fighting (Codex 1b review 2026-06-04). We
     // gate the detail files through `parse_index_td_ids` so only the
     // current run's live findings contribute to disposition.
+    let docs_root = DocsRoot::of(project_path);
     let index_content =
-        std::fs::read_to_string(project_path.join("docs/inconsistencies-tech-debt.md"))
+        std::fs::read_to_string(docs_root.file(project_path, "inconsistencies-tech-debt.md"))
             .unwrap_or_default();
     let listed_ids = super::reconciliation::parse_index_td_ids(&index_content);
     let mut combined = index_content;
-    let td_dir = project_path.join("docs/tech-debt");
+    let td_dir = docs_root.file(project_path, "tech-debt");
     if let Ok(entries) = std::fs::read_dir(&td_dir) {
         for e in entries.flatten() {
             let p = e.path();
@@ -388,14 +401,51 @@ pub fn check_detector_disposition(
         .map(|s| format!("{} (`{}`)", s.title, s.evidence))
         .collect::<Vec<_>>()
         .join("; ");
-    Some(StepValidationWarning {
-        reason: format!(
-            "{} detector signal(s) injected but never addressed in the tech-debt output: {} — emit a TD, a baseline note, or a matrix citation for each (Step 8 will be re-run)",
-            undisposed.len(),
-            list
-        ),
-        repaired: false,
+    let feedback = format!(
+        "## Detector signals — targeted correction required\n\n\
+         Read `{index}` and the TD sheets it lists, then dispose of each detector signal \
+         below that is still unaddressed: {list}.\n\n\
+         For each one do ONE of: emit or refresh a TD, fold it into a baseline note, or cite \
+         its file path in the `## Dimension coverage` matrix with a verifiable reason. Keep the \
+         existing TD sheets and human-owned sections; correct only the missing dispositions, \
+         do not repeat the entire audit.\n",
+        index = docs_root.path("inconsistencies-tech-debt.md"),
+    );
+    Some(DispositionGap {
+        warning: StepValidationWarning {
+            reason: undisposed_reason(undisposed.len(), &list),
+            repaired: false,
+        },
+        feedback,
+        count: undisposed.len(),
     })
+}
+
+/// The reason of a step whose output is cut short (size floor).
+pub(crate) fn truncated_reason(target_file: &str, dst_size: u64, template_size: u64) -> String {
+    format!(
+        "step output {}: `{}` is {} B but template is {} B (< {}% threshold)",
+        super::step_guard::TRUNCATED_FRAGMENT,
+        target_file,
+        dst_size,
+        template_size,
+        MIN_DEST_RATIO_PCT
+    )
+}
+
+/// The reason of a step whose dimension coverage matrix is incomplete.
+pub(crate) fn coverage_reason(target_file: &str, detail: &str) -> String {
+    format!("{COVERAGE_WARNING_PREFIX} in `{target_file}`: {detail} (Step 8 will be re-run)")
+}
+
+/// The reason of a step that left detector signals undisposed.
+pub(crate) fn undisposed_reason(count: usize, list: &str) -> String {
+    format!(
+        "{} {} in the tech-debt output: {} — emit a TD, a baseline note, or a matrix citation for each (Step 8 will be re-run)",
+        count,
+        super::step_guard::DETECTOR_FRAGMENT,
+        list
+    )
 }
 
 /// Count `{{IDENT}}` shaped placeholders in a markdown body. Conservative:
@@ -459,7 +509,7 @@ pub(crate) fn fill_kronn_owned_placeholders(content: &str, today: &str) -> Strin
 
 /// Apply [`fill_kronn_owned_placeholders`] to this step's own target file.
 pub(crate) fn fill_step_owned_placeholders(project_path: &Path, target_file: &str, today: &str) {
-    if !target_file.starts_with("docs/") {
+    if !DocsRoot::of(project_path).contains(target_file) {
         return;
     }
     let path = project_path.join(target_file);
@@ -574,6 +624,8 @@ fn validate_dimension_coverage(content: &str) -> Result<(), String> {
         let valid_prefix = o.starts_with("findings")
             || o.starts_with("scanned — nothing substantiable")
             || o.starts_with("scanned - nothing substantiable")
+            || o.starts_with("scanned – nothing substantiable")
+            || o.starts_with("scanned -- nothing substantiable")
             || o.starts_with("n/a");
         if outcome.is_empty() || !valid_prefix {
             return Err(format!(
@@ -585,6 +637,11 @@ fn validate_dimension_coverage(content: &str) -> Result<(), String> {
             return Err(format!(
                 "dimension `{}`: evidence/reason cell is empty",
                 dim
+            ));
+        }
+        if *dim == "Dependencies" && !o.starts_with("n/a") && !states_version_source(row) {
+            return Err(format!(
+                "dimension `Dependencies`: {DEPENDENCIES_SOURCE_FORMS}"
             ));
         }
         if o.starts_with("n/a") {
@@ -609,6 +666,40 @@ fn validate_dimension_coverage(content: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// The forms a Dependencies row may state its source in, named in the refusal
+/// so the retry knows exactly what to write (KT-1295).
+const DEPENDENCIES_SOURCE_FORMS: &str = "evidence must state its source in one of these forms: \
+`source used: …` or `source: …` (any case), a `[src: deps: <manager>/<package>@<YYYY-MM-DD>]` \
+citation from the dependency watch table, or `not verified: no source`";
+
+/// KT-1000 — a Dependencies verdict names where its versions came from. A
+/// row Kronn's TD-index resync rewrote keeps the TDs, which carry the source.
+/// KT-1295 — the wording is not the test: a `source:` label or a well-formed
+/// `[src: deps: …]` citation states a source as well as `source used:` does.
+/// The citation is only parsed here; the citation gate checks it against the
+/// watch table and refuses a fabricated one.
+fn states_version_source(row: &str) -> bool {
+    let row_lc = row.to_lowercase();
+    has_source_label(&row_lc, "source used:")
+        || has_source_label(&row_lc, "source:")
+        || row_lc.contains("not verified")
+        || row_lc.contains("kronn resync:")
+        || crate::core::anti_halluc::extract_source_markers(row)
+            .iter()
+            .any(|marker| crate::core::anti_halluc::dep_citation(marker).is_some())
+}
+
+/// `label` (`source:`, `source used:`) as a word of its own: `resource:`,
+/// `resource used:` and `open-source:` are not a label.
+fn has_source_label(row_lc: &str, label: &str) -> bool {
+    row_lc.match_indices(label).any(|(at, _)| {
+        row_lc[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !(c.is_alphanumeric() || c == '-' || c == '_'))
+    })
 }
 
 /// Resolve the source-of-truth template path for a project-relative
@@ -728,7 +819,11 @@ mod tests {
             "## Dimension coverage\n\n| Dimension | Outcome | Evidence / reason |\n|---|---|---|\n",
         );
         for (dim, outcome, ev) in [
-            ("Dependencies", "findings", "TD-x"),
+            (
+                "Dependencies",
+                "findings",
+                "TD-x; source used: dependency watch dated 2026-10-04",
+            ),
             ("Security", "findings", "TD-y"),
             (
                 "Code quality",
@@ -933,6 +1028,120 @@ mod tests {
             validate_dimension_coverage(&m).is_ok(),
             "embellished labels must still match"
         );
+    }
+
+    /// KT-1000 — a Dependencies verdict without its version source is refused;
+    /// N/A (no manifest) needs none.
+    #[test]
+    fn coverage_matrix_dependencies_row_must_state_its_version_source() {
+        let row =
+            "| Dependencies | findings | TD-x; source used: dependency watch dated 2026-10-04 |";
+        let silent = valid_coverage_matrix().replace(row, "| Dependencies | findings | TD-x |");
+        let err = validate_dimension_coverage(&silent).unwrap_err();
+        assert!(
+            err.contains("Dependencies") && err.contains("source used"),
+            "{err}"
+        );
+
+        let unverified = valid_coverage_matrix().replace(
+            row,
+            "| Dependencies | scanned — nothing substantiable | Not verified: no source for latest versions |",
+        );
+        assert!(validate_dimension_coverage(&unverified).is_ok());
+
+        let not_applicable = valid_coverage_matrix().replace(
+            row,
+            "| Dependencies | N/A: no package manifest | ls: no lockfile |",
+        );
+        assert!(validate_dimension_coverage(&not_applicable).is_ok());
+
+        let resynced = valid_coverage_matrix().replace(
+            row,
+            "| Dependencies | findings | Kronn resync: 1 active TD on file after the dimension audits: TD-1 (previous outcome: scanned) |",
+        );
+        assert!(validate_dimension_coverage(&resynced).is_ok());
+    }
+
+    /// KT-1295 — the row the bench refused (a `source:` label, three `deps:`
+    /// citations) passes; so does a bare citation or a `Source:` in any case;
+    /// a cell with no source at all still fails, naming every accepted form.
+    #[test]
+    fn coverage_matrix_dependencies_source_is_accepted_in_every_stated_form() {
+        let row =
+            "| Dependencies | findings | TD-x; source used: dependency watch dated 2026-10-04 |";
+        let with = |cells: &str| valid_coverage_matrix().replace(row, cells);
+
+        let bench_row = "| Dependencies | findings: TD-20261016-outdated-dependencies | Declared dependencies significantly behind latest; source: [src: deps: JS / TS/argparse@2026-10-16], [src: deps: JS / TS/joi@2026-10-16], [src: deps: JS / TS/qs@2026-10-16] |";
+        assert!(validate_dimension_coverage(&with(bench_row)).is_ok());
+
+        for evidence in [
+            "TD-x; Source: dependency watch dated 2026-10-16",
+            "TD-x; SOURCE USED: dependency watch",
+            "TD-x behind latest [src: deps: npm/react@2026-10-16]",
+            "TD-x behind latest [SRC: deps: npm/@types/node@2026-10-16]",
+        ] {
+            let m = with(&format!("| Dependencies | findings | {evidence} |"));
+            assert!(validate_dimension_coverage(&m).is_ok(), "{evidence}");
+        }
+
+        for evidence in [
+            "TD-x behind latest",
+            "TD-x; resource: the lockfile; open-source: yes",
+            "TD-x; resource used: the lockfile",
+            "TD-x; open-source used: yes",
+            "TD-x [src: file: package.json:12]",
+            "TD-x [src: deps: npm/react]",
+            "TD-x; no source available",
+        ] {
+            let m = with(&format!("| Dependencies | findings | {evidence} |"));
+            let err = validate_dimension_coverage(&m).unwrap_err();
+            assert!(err.contains("Dependencies"), "{evidence}: {err}");
+            for form in [
+                "source used: …",
+                "source: …",
+                "[src: deps:",
+                "not verified: no source",
+            ] {
+                assert!(err.contains(form), "{evidence}: {err}");
+            }
+        }
+    }
+
+    /// KT-1295 — the retry feedback carries the accepted forms.
+    #[test]
+    #[serial]
+    #[serial(kronn_templates_env)]
+    fn coverage_feedback_names_the_accepted_dependencies_source_forms() {
+        let target = "docs/inconsistencies-tech-debt.md";
+        let (_tmp, project) = fixture(target, 0, 512);
+        let silent = valid_coverage_matrix().replace(
+            "| Dependencies | findings | TD-x; source used: dependency watch dated 2026-10-04 |",
+            "| Dependencies | findings | TD-x |",
+        );
+        std::fs::write(project.join(target), silent).unwrap();
+        let feedback = coverage_repair_feedback(&project, target).unwrap();
+        assert!(
+            feedback.contains("`source: …`")
+                && feedback.contains("[src: deps:")
+                && feedback.contains("not verified: no source"),
+            "{feedback}"
+        );
+    }
+
+    /// KT-1295 — the dash of `scanned — nothing substantiable` may be an
+    /// en-dash or a double hyphen; the phrase itself stays required.
+    #[test]
+    fn coverage_matrix_scanned_outcome_tolerates_dash_variants() {
+        let canonical = "| Code quality | scanned — nothing substantiable | read src/, clean |";
+        for dash in ["–", "--", "-"] {
+            let m = valid_coverage_matrix().replace(
+                canonical,
+                &format!(
+                    "| Code quality | scanned {dash} nothing substantiable | read src/, clean |"
+                ),
+            );
+            assert!(validate_dimension_coverage(&m).is_ok(), "{dash}");
+        }
     }
 
     #[test]

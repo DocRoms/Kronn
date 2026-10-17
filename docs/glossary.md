@@ -88,7 +88,7 @@ Project-specific terms. For deep dives, follow the linked `docs/architecture/` f
 
 **customized_contexts** — `Vec<String>` of `"slug:projectId"` pairs in `McpOverview` where the context file has been customized (not default template). Used by frontend to color FileText icons.
 
-**AgentType** — Enum: `ClaudeCode`, `Codex`, `OpenCode`, `Vibe`, `GeminiCli`, `Kiro`, `CopilotCli`, `Ollama`, `LiteLlm`, `Nvidia`, `Custom`. Determines which CLI/HTTP runtime to spawn. `DeepSeek` planned. Kiro uses `--trust-all-tools` (mandatory in `--no-interactive` mode) and `--wrap never` for clean output. `[src: file: backend/src/models/setup.rs:725-745]`
+**AgentType** — Enum: `ClaudeCode`, `Codex`, `OpenCode`, `Vibe`, `GeminiCli`, `Kiro`, `CopilotCli`, `Ollama`, `LiteLlm`, `Nvidia`, `Custom`. Determines which CLI/HTTP runtime to spawn. `DeepSeek` planned. Kiro uses `--trust-all-tools` (mandatory in `--no-interactive` mode, but not passed to a task worker) and `--wrap never` for clean output. `[src: file: backend/src/models/setup.rs:1021-1061#AgentType]` `[src: file: backend/src/agents/runner.rs:13102-13111#Kiro]`
 
 **scan_depth** — Configurable depth for git repository scanning (2–10, default 4). Stored in `ScanConfig.scan_depth` in config.toml. Adjustable via UI slider in Config page. API: `GET/POST /api/config/scan-depth`.
 
@@ -256,7 +256,7 @@ Cron and Watch take an optional IANA `timezone`; without one they follow Kronn's
 
 **ModelTier** — Enum: `economy`, `default`, `reasoning`. Selects the model quality/cost tier per agent. Configured globally in `ModelTiersConfig` (one `ModelTierConfig` per agent). Can be overridden per-message or per-workflow-step via `AgentSettings`. Stored in DB via migrations 015-016.
 
-**DriftCheckResponse** — Response from `GET /api/projects/:id/drift`. Contains `up_to_date: bool` and `stale_sections: Vec<DriftSection>`. Used by frontend to show amber badge on stale projects.
+**DriftCheckResponse** — Response from `GET /api/projects/:id/drift`. Contains `up_to_date: bool` and `stale_sections: Vec<DriftSection>`. Used by frontend to show amber badge on stale projects. Also lists `placeholder_docs` (`PlaceholderDoc`: path + owning step), the template docs still holding raw placeholders.
 
 **DriftSection** — A section of project documentation that has drifted from the source code. Contains section name, file path, and staleness indicator.
 

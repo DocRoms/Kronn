@@ -107,6 +107,42 @@ pub fn set_agent_files_policy(
     Ok(changed > 0)
 }
 
+/// The project's AI doc folder override (KT-263); `None` for an unknown
+/// project or no override.
+pub fn project_docs_dir(conn: &Connection, project_id: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT docs_dir FROM projects WHERE id = ?1",
+            params![project_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten())
+}
+
+/// Returns false when the project does not exist.
+pub fn set_project_docs_dir(
+    conn: &Connection,
+    project_id: &str,
+    docs_dir: Option<&str>,
+) -> Result<bool> {
+    let changed = conn.execute(
+        "UPDATE projects SET docs_dir = ?2, updated_at = ?3 WHERE id = ?1",
+        params![project_id, docs_dir, Utc::now().to_rfc3339()],
+    )?;
+    Ok(changed > 0)
+}
+
+/// `(project path, docs_dir)` for every project with an override.
+pub fn list_docs_dir_overrides(conn: &Connection) -> Result<Vec<(String, String)>> {
+    let mut stmt =
+        conn.prepare("SELECT path, docs_dir FROM projects WHERE docs_dir IS NOT NULL")?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 pub fn get_project(conn: &Connection, id: &str) -> Result<Option<Project>> {
     let mut stmt = conn.prepare(
         "SELECT id, name, path, repo_url, token_override_json, ai_config_json,

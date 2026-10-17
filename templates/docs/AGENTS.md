@@ -1,4 +1,4 @@
-<!-- kronn:doc-version="1.0" -->
+<!-- kronn:doc-version="1.1" -->
 <!-- kronn:spec="https://github.com/DocRoms/Kronn/blob/main/docs/conventions/agents-md-format-v1.md" local="docs/conventions/agents-md-format-v1.md" -->
 # AI agent context — Entry point
 
@@ -62,7 +62,9 @@ Full grammar and cascade: [`docs/conventions/agents-md-format-v1.md`](convention
 | Ticket/tracker conventions | [workflow/tickets](workflow/tickets.md) |
 | CI/CD pipeline | [workflow/ci-cd](workflow/ci-cd.md) |
 | Environments (staging, prod, …) | [environments](environments.md) |
+| Tracker, forge, people, process | [project](project.md) |
 | Worked examples | [examples/](examples/README.md) |
+| Known traps, team conventions, people | [gotchas/](gotchas/README.md), [conventions/](conventions/README.md), [people/](people/README.md) |
 
 If T0–T2 are insufficient, state which additional file you need and why. Never load every file.
 
@@ -79,9 +81,7 @@ If T0–T2 are insufficient, state which additional file you need and why. Never
 - **Guess tool versions** — if prerequisites are not filled below, ask.
 - **Guess languages or frameworks** — check § 6 Stack.
 - **Edit auto-generated files** — if a file is marked as generated (e.g., types exported from another language), never edit it by hand.
-- **Load all T2 files at once** — max 3, pick what you need.
 - **Modify business code** when the task is only about project documentation — edit `docs/` only.
-- **Skip the test policy** — see § Project parameters above and § 4.
 
 ---
 
@@ -94,6 +94,7 @@ If T0–T2 are insufficient, state which additional file you need and why. Never
 ## 4. Constraints
 
 - If no command output: ask user to paste it.
+- **Human decision** (trade-off, approval, ambiguous scope) in a Kronn room: post a closed `kronn-question` fence via `disc_append`, never prose alone; numeric `"version":1`, stable `key`; read back with `disc_question_list`; never answer for the human.
 - {{WORKFLOW_CONSTRAINT_1}}
 - {{WORKFLOW_CONSTRAINT_2}}
 
@@ -133,15 +134,13 @@ New code placement: see [repo-map](repo-map.md).
 - Large refactor needed → add entry to [inconsistencies-tech-debt](inconsistencies-tech-debt.md).
 - **Follow the test policy** — see § 4.
 - After task: update `docs/` if you learned something non-obvious. Prefer the agent-writable subfolders: `docs/conventions/`, `docs/gotchas/`, `docs/architecture/`, `docs/operations/`.
-- `docs/AGENTS.md` sections use `owner="audit"` or `owner="human"` (legacy `curated="human"` remains protected). Never rewrite a human-owned section in a full or partial audit; re-audits put the proposed change in a dated diff under `docs/reports/`.
+- `docs/AGENTS.md` sections use `owner="audit"` or `owner="human"` (legacy `curated="human"` too). In a human-owned section, correct only what the code contradicts: Kronn keeps the change and asks its owner to reconfirm it.
 
 ---
 
 ## 9. Multi-agent config
 
-Redirectors at the project root: `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.kiro/steering/instructions.md`, `.vibe/instructions.md`, `.cursorrules`, `.cursor/rules/repo-instructions.mdc`, `.github/copilot-instructions.md`, `.windsurfrules`, `.clinerules`.
-
-Redirectors are stubs pointing to [docs/AGENTS.md](AGENTS.md); all content lives in `docs/`.
+Root redirectors: `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.kiro/steering/instructions.md`, `.vibe/instructions.md`, `.cursorrules`, `.cursor/rules/repo-instructions.mdc`, `.github/copilot-instructions.md`, `.windsurfrules`, `.clinerules`. They are stubs pointing to [docs/AGENTS.md](AGENTS.md); all content lives in `docs/`.
 
 ---
 

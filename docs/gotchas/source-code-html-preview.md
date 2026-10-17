@@ -19,5 +19,6 @@ The viewer switches back to source when a non-HTML file is selected, and keeps
 its ordinary loading and error state rather than rendering a stale preview.
 
 [src: file: frontend/src/lib/html-preview.ts:1-53]
-[src: file: frontend/src/components/SourceCodeViewer.tsx:411-441]
-[src: file: frontend/src/components/SourceCodeViewer.tsx:573-577]
+[src: file: frontend/src/components/SourceCodeViewer.tsx:79#HTML_FILE_PATH]
+[src: file: frontend/src/components/SourceCodeViewer.tsx:671-700#isHtmlFile]
+[src: file: frontend/src/components/SourceCodeViewer.tsx:504-508#HTML_FILE_PATH]

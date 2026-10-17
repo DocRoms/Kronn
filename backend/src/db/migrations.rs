@@ -921,6 +921,62 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "244_trust_trigger_without_retention",
         include_str!("sql/244_trust_trigger_without_retention.sql"),
     ),
+    (
+        "245_audit_step_unchanged",
+        include_str!("sql/245_audit_step_unchanged.sql"),
+    ),
+    (
+        "246_audit_step_acceptance",
+        include_str!("sql/246_audit_step_acceptance.sql"),
+    ),
+    (
+        "252_audit_adr_baseline",
+        include_str!("sql/252_audit_adr_baseline.sql"),
+    ),
+    (
+        "257_audit_cross_findings",
+        include_str!("sql/257_audit_cross_findings.sql"),
+    ),
+    (
+        "258_project_docs_dir",
+        include_str!("sql/258_project_docs_dir.sql"),
+    ),
+    (
+        "259_message_session_continuity",
+        include_str!("sql/259_message_session_continuity.sql"),
+    ),
+    (
+        "260_audit_document_fingerprints",
+        include_str!("sql/260_audit_document_fingerprints.sql"),
+    ),
+    (
+        "262_audit_validation_provenance",
+        include_str!("sql/262_audit_validation_provenance.sql"),
+    ),
+    (
+        "263_planning_task_assignees",
+        include_str!("sql/263_planning_task_assignees.sql"),
+    ),
+    (
+        "264_planning_dod_post_integration",
+        include_str!("sql/264_planning_dod_post_integration.sql"),
+    ),
+    (
+        "265_audit_cancel_and_integrity",
+        include_str!("sql/265_audit_cancel_and_integrity.sql"),
+    ),
+    (
+        "266_audit_step_observed_output",
+        include_str!("sql/266_audit_step_observed_output.sql"),
+    ),
+    (
+        "267_discussion_project_grants",
+        include_str!("sql/267_discussion_project_grants.sql"),
+    ),
+    (
+        "268_audit_run_launch",
+        include_str!("sql/268_audit_run_launch.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup` (owner-only) without the auth
@@ -1409,7 +1465,40 @@ fn run_with_backup_checked(
     // older 025 that didn't include disk_path)
     let _ = conn.execute_batch("ALTER TABLE context_files ADD COLUMN disk_path TEXT;");
 
+    drop_retired_workflow_observer_column(conn);
+
     Ok(())
+}
+
+/// KT-1245 — the `workflow_observer` prototype (migration 261, KT-1225) was
+/// removed. A database that applied it keeps an unused `discussions` column; the
+/// runner ignores the `_migrations` row the code no longer knows, and that row
+/// stays. Idempotent: does nothing once the column is gone, or when it never
+/// existed. A failure is logged, never fatal: the column is inert.
+fn drop_retired_workflow_observer_column(conn: &Connection) {
+    let present = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('discussions') \
+         WHERE name = 'workflow_observer')",
+        [],
+        |row| row.get::<_, bool>(0),
+    );
+    match present {
+        Ok(true) => {
+            if let Err(error) =
+                conn.execute_batch("ALTER TABLE discussions DROP COLUMN workflow_observer;")
+            {
+                tracing::warn!(
+                    "could not drop the retired discussions.workflow_observer column: {error}"
+                );
+            }
+        }
+        Ok(false) => {}
+        Err(error) => {
+            tracing::warn!(
+                "could not inspect discussions for the retired workflow_observer column: {error}"
+            );
+        }
+    }
 }
 
 /// Test-only: apply migrations up to AND INCLUDING `stop_after` (by name), so a
@@ -3721,6 +3810,78 @@ mod tests {
         assert!(migration_is_applied(&conn, "113_session_alias_ordinal").unwrap());
         assert!(!migration_is_applied(&conn, "114_awareness_stalled_offers").unwrap());
         assert!(!migration_is_applied(&conn, "001_initial").unwrap());
+    }
+
+    fn discussions_has_workflow_observer(conn: &Connection) -> bool {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('discussions') \
+             WHERE name = 'workflow_observer')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    fn receipt_count(conn: &Connection, name: &str) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM _migrations WHERE name = ?1",
+            [name],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    /// A database that applied the retired 261 loses its column on the next
+    /// boot, keeps its receipt and its discussions, and a second boot is a no-op.
+    #[test]
+    fn the_retired_workflow_observer_column_is_dropped_and_its_receipt_kept() {
+        let conn = Connection::open_in_memory().unwrap();
+        run(&conn).unwrap();
+        // What the old 261 left behind, written by hand.
+        conn.execute_batch(
+            "ALTER TABLE discussions ADD COLUMN workflow_observer INTEGER NOT NULL DEFAULT 0;",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO _migrations (name) VALUES ('261_workflow_observer')",
+            [],
+        )
+        .unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO discussions (id, title, agent, language, participants_json, created_at, updated_at, workflow_observer)
+             VALUES ('d-observer', 'Kept', 'ClaudeCode', 'en', '[]', ?1, ?1, 1)",
+            [&now],
+        )
+        .unwrap();
+        assert!(discussions_has_workflow_observer(&conn));
+
+        run(&conn).unwrap();
+        assert!(!discussions_has_workflow_observer(&conn));
+        assert_eq!(receipt_count(&conn, "261_workflow_observer"), 1);
+        let title: String = conn
+            .query_row(
+                "SELECT title FROM discussions WHERE id = 'd-observer'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(title, "Kept");
+
+        run(&conn).unwrap();
+        assert!(!discussions_has_workflow_observer(&conn));
+        assert_eq!(receipt_count(&conn, "261_workflow_observer"), 1);
+    }
+
+    /// A fresh database never had the column and never records the receipt.
+    #[test]
+    fn a_fresh_database_has_no_workflow_observer_column_or_receipt() {
+        let conn = Connection::open_in_memory().unwrap();
+        run(&conn).unwrap();
+        assert!(!discussions_has_workflow_observer(&conn));
+        assert_eq!(receipt_count(&conn, "261_workflow_observer"), 0);
+        run(&conn).unwrap();
+        assert!(!discussions_has_workflow_observer(&conn));
     }
 
     /// An empty database file has nothing to save: no backup is written.

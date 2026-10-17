@@ -26,6 +26,7 @@ pub mod orchestration;
 pub(crate) mod routing;
 pub mod runtime;
 pub mod slash_markers;
+pub(crate) mod start_refusal;
 pub mod streaming;
 
 pub use context::*;
@@ -143,11 +144,17 @@ pub(crate) fn detect_terminal_signal(text: &str) -> Option<&'static str> {
 /// `contains` meant for live stream truncation — this cannot be satisfied
 /// by a quotation or an instruction that merely mentions the marker
 /// mid-sentence. Gate-grade: used by validate-audit.
+/// Markdown emphasis around the line (`**…**`, backticks) is tolerated: the
+/// stream truncates right after the signal, which leaves `**KRONN:…` behind.
 pub(crate) fn ends_with_terminal_signal(text: &str, signal: &str) -> bool {
     text.trim_end()
         .lines()
         .last()
-        .map(|line| line.trim().eq_ignore_ascii_case(signal))
+        .map(|line| {
+            line.trim()
+                .trim_matches(|c| matches!(c, '*' | '`' | '_'))
+                .eq_ignore_ascii_case(signal)
+        })
         .unwrap_or(false)
 }
 

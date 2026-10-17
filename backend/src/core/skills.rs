@@ -120,6 +120,11 @@ const BUILTIN_SKILLS: &[BuiltinSkill] = &[
         id: "kronn-doc-author",
         content: include_str!("../skills/kronn-doc-author.md"),
     },
+    // KT-1168 — attached to the agent pass of « Revalider l'audit ».
+    BuiltinSkill {
+        id: "audit-revalidation",
+        content: include_str!("../skills/audit-revalidation.md"),
+    },
     // Business
     BuiltinSkill {
         id: "seo",
@@ -2454,6 +2459,41 @@ body"#;
         // "I'll ask you some questions".
         assert!(c.contains("AgentQuestionForm") || c.contains("inline form"),
             "structured-questions must reference the `AgentQuestionForm` renderer or 'inline form' so the agent surfaces the UI affordance");
+    }
+
+    /// KT-1329 — two competing question syntaxes made agents ask a human
+    /// to arbitrate through a `{{var}}:` form field (no durable card, no
+    /// read-back). The skill must keep `{{var}}:` for facts and send every
+    /// decision to the `kronn-question` card.
+    #[test]
+    fn structured_questions_skill_sends_decisions_to_the_kronn_question_card() {
+        let skills = list_all_skills();
+        let s = skills
+            .iter()
+            .find(|s| s.id == "structured-questions")
+            .expect("structured-questions skill must exist");
+        let c = &s.content;
+        assert!(
+            c.contains("`kronn-question`") && c.contains("disc_append"),
+            "structured-questions must point a human decision to the kronn-question card"
+        );
+        assert!(
+            c.contains("\"version\":1") && c.contains("disc_question_list"),
+            "structured-questions must carry the card's valid shape and its schema pointer"
+        );
+        let do_not_apply = c
+            .split("## Do NOT apply when")
+            .nth(1)
+            .and_then(|rest| rest.split("## How to ask questions").next())
+            .expect("Do NOT apply section");
+        assert!(
+            do_not_apply.contains("kronn-question"),
+            "the card redirect must sit in the Do NOT apply section"
+        );
+        assert!(
+            s.description.contains("kronn-question"),
+            "the skill description must not advertise {{var}}: for decisions"
+        );
     }
 
     /// 0.8.5 guard — the `qp-improver` skill MUST be a registered builtin

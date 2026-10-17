@@ -21,6 +21,10 @@ name = "it"
 path = "tests/it.rs"
 
 [features]
+# Reads `KRONN_TEST_NO_REAL_AGENTS` (KT-1189). Off in every build a user runs:
+# only the dev-dependency on this package below turns it on, for the
+# integration test binary, so a release or debug `kronn` ignores the variable.
+test-support = []
 # `full-tests` (default) compiles every unit-test module. The macOS portability
 # job turns it off (`--no-default-features`) and compiles only the four suites
 # it runs: the full lib-test binary (9 200 tests) needs more memory than the
@@ -134,12 +138,19 @@ html5ever = "0.40.1"
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation"] }
 
 [dev-dependencies]
+# This package, with its `test-support` feature: the one way the integration
+# crates (tests/*) arm the real-agent guard. Dev-dependencies never reach
+# `cargo build`, so the feature is off for the shipped binary (KT-1189).
+kronn = { path = ".", features = ["test-support"] }
 # `test-util` only: it lets a test reach a 30-minute agent deadline on a paused
 # clock instead of waiting for it (KT-80). Dev-only, no production feature change.
 tokio = { version = "1", features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 serial_test = "3"
+# A strict YAML parser: it proves the front matter Kronn writes is valid YAML,
+# not just readable by Kronn's own lenient reader (KT-1309). Dev-only.
+serde_yaml = "0.9"
 tempfile = "3"
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 futures = "0.3"

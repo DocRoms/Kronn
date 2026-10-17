@@ -2,9 +2,34 @@
 //! here, so the library and its dependencies are linked once instead of once
 //! per file. Add a new file to this list; Cargo does not discover it.
 
+/// No test of this binary may start an agent CLI installed on the machine
+/// (KT-1189). The library arms its guard from `KRONN_TEST_NO_REAL_AGENTS`, a
+/// variable it reads only in a build with the `test-support` feature (this
+/// package's own dev-dependency turns it on for this binary and no other
+/// build). It is set here, before `main`, so every test of every module has it whatever
+/// helper it builds its state with — a flag each module had to remember to set
+/// would be missing the day a module forgets it.
+#[used]
+#[cfg_attr(
+    any(target_os = "linux", target_os = "android"),
+    link_section = ".init_array"
+)]
+#[cfg_attr(target_os = "macos", link_section = "__DATA,__mod_init_func")]
+#[cfg_attr(windows, link_section = ".CRT$XCU")]
+static ARM_THE_REAL_AGENT_GUARD: extern "C" fn() = {
+    extern "C" fn arm() {
+        kronn::core::child_env::set_var(kronn::core::cmd::NO_REAL_AGENTS_ENV, "1");
+    }
+    arm
+};
+
 /// Shared by the KT-619 router modules.
 #[path = "support/publication_fixture.rs"]
 mod fixture_env;
+
+/// A test that owns process-global state runs in its own process (KT-1186).
+#[path = "support/own_process.rs"]
+mod own_process;
 
 #[path = "adapter_worker_policy.rs"]
 mod adapter_worker_policy;
@@ -60,6 +85,8 @@ mod learnings_api;
 mod model_catalog_api;
 #[path = "model_catalog_migration.rs"]
 mod model_catalog_migration;
+#[path = "no_real_agent_cli.rs"]
+mod no_real_agent_cli;
 #[path = "ollama_model_catalog.rs"]
 mod ollama_model_catalog;
 #[path = "orchestration_handoff_e2e.rs"]
@@ -95,4 +122,19 @@ fn every_test_file_is_a_module_of_this_binary() {
             );
         }
     }
+}
+
+/// The guard is armed for this binary: it is what keeps `tests/*.rs` from
+/// starting the agent CLIs of the machine. A platform where the constructor
+/// above does not run fails here, not silently.
+#[test]
+fn the_real_agent_guard_is_armed_for_every_integration_test() {
+    assert!(
+        kronn::core::cmd::real_agents_forbidden(),
+        "KRONN_TEST_NO_REAL_AGENTS is not set in the integration test binary"
+    );
+    assert_eq!(
+        kronn::core::child_env::var(kronn::core::cmd::NO_REAL_AGENTS_ENV).as_deref(),
+        Ok("1")
+    );
 }

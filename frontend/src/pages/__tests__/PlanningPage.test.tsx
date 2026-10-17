@@ -47,6 +47,7 @@ function summary(overrides: Partial<PlanningTaskSummary> = {}): PlanningTaskSumm
     discussion_ids: [],
     tags: ['platform'],
     blocker_count: 0,
+    assignees: [],
     created_at: '2026-07-25T00:00:00Z',
     updated_at: '2026-07-25T00:00:00Z',
     ...overrides,
@@ -795,5 +796,46 @@ describe('PlanningPage', () => {
       'blocker-9',
     ));
     expect(mocks.update).not.toHaveBeenCalled();
+  });
+
+  // KT-1148 — the first load does not wait out the filter debounce, and the
+  // sidebar shows the shared loader rather than an empty backlog meanwhile.
+  it('starts the first load at once and shows the loader until it answers', async () => {
+    let answer: (value: { items: PlanningTaskSummary[]; next_cursor: null }) => void = () => {};
+    mocks.list.mockReturnValueOnce(new Promise(resolve => { answer = resolve; }));
+    render(
+      <PlanningPage projects={[]} discussions={[]} toast={vi.fn()} onNavigateDiscussion={vi.fn()} />,
+    );
+    expect(mocks.list).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('status')).toHaveTextContent('common.loading');
+    expect(screen.queryByText('planning.emptyBacklog')).toBeNull();
+
+    answer({ items: [], next_cursor: null });
+    expect(await screen.findByText('planning.emptyBacklog')).toBeInTheDocument();
+    expect(screen.queryByRole('status')).toBeNull();
+  });
+
+  it('drops the loader when the first load fails', async () => {
+    const toast = vi.fn();
+    mocks.list.mockRejectedValueOnce(new Error('down'));
+    render(<PlanningPage projects={[]} discussions={[]} toast={toast} onNavigateDiscussion={vi.fn()} />);
+    expect(await screen.findByText('planning.emptyBacklog')).toBeInTheDocument();
+    expect(toast).toHaveBeenCalledWith(expect.any(String), 'error');
+  });
+
+  it('still debounces the loads that follow a filter change', async () => {
+    render(<PlanningPage projects={[]} discussions={[]} toast={vi.fn()} onNavigateDiscussion={vi.fn()} />);
+    expect(await findCanonicalTaskRow('Upgrade PHP')).toBeInTheDocument();
+    expect(mocks.list).toHaveBeenCalledTimes(1);
+    vi.useFakeTimers();
+    try {
+      fireEvent.change(screen.getByRole('textbox', { name: 'planning.search' }), { target: { value: 'php' } });
+      expect(mocks.list).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(200);
+      expect(mocks.list).toHaveBeenCalledTimes(2);
+      expect(mocks.list).toHaveBeenLastCalledWith(expect.objectContaining({ search: 'php' }));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -573,13 +573,29 @@ pub async fn delete(
         }
     }
 
+    // The path keys the AI doc folder override that must go with the row.
+    let lookup = id.clone();
+    let stored_path = state
+        .db
+        .with_read_conn(move |conn| crate::db::projects::get_project(conn, &lookup))
+        .await
+        .ok()
+        .flatten()
+        .map(|p| p.path);
+
     // Delete project from DB
+    let deleted_id = id.clone();
     match state
         .db
         .with_conn(move |conn| crate::db::projects::delete_project(conn, &id))
         .await
     {
-        Ok(true) => Json(ApiResponse::ok(())),
+        Ok(true) => {
+            if let Some(path) = stored_path {
+                super::docs_location::rekey(&state, &deleted_id, &path, None).await;
+            }
+            Json(ApiResponse::ok(()))
+        }
         Ok(false) => Json(ApiResponse::err("Project not found")),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
@@ -740,6 +756,11 @@ pub async fn set_linked_repos(
         )));
     }
 
+    let _lease = match crate::api::audit::docs_write::DocsWriteLease::acquire(&state, &id).await {
+        Ok(lease) => lease,
+        Err(error) => return Json(ApiResponse::err(error)),
+    };
+
     let pid = id.clone();
     let list = payload.clone();
     match state
@@ -814,6 +835,22 @@ pub async fn set_linked_repos(
                             })
                             .await;
                         if let Ok(Some(target)) = target_proj {
+                            let _target_lease =
+                                match crate::api::audit::docs_write::DocsWriteLease::acquire(
+                                    &state, &target.id,
+                                )
+                                .await
+                                {
+                                    Ok(lease) => lease,
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            "Reverse linked-repo docs sync held for {}: {}",
+                                            target.id,
+                                            error
+                                        );
+                                        continue;
+                                    }
+                                };
                             let target_path = crate::core::scanner::resolve_host_path(&target.path);
                             if let Err(e) =
                                 super::sync_linked_repos_doc(&target_path, &upd.new_linked_repos)
@@ -1061,6 +1098,32 @@ pub async fn linked_repos_candidates(
     }
 }
 
+/// `GET /api/projects/:id/linked-repos/docs` — KT-999: the context entry
+/// point each linked repo really has, for the UI badges.
+pub async fn linked_repos_docs(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<Vec<LinkedRepoDocStatus>>> {
+    let project = state
+        .db
+        .with_conn(move |conn| crate::db::projects::get_project(conn, &id))
+        .await;
+    let repos = match project {
+        Ok(Some(project)) => project.linked_repos,
+        Ok(None) => return Json(ApiResponse::err("Project not found")),
+        Err(e) => return Json(ApiResponse::err(format!("DB error: {e}"))),
+    };
+    let statuses = tokio::task::spawn_blocking(move || {
+        repos
+            .iter()
+            .map(crate::core::linked_repo_docs::status_of)
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap_or_default();
+    Json(ApiResponse::ok(statuses))
+}
+
 /// PUT /api/projects/:id/default-profile
 pub async fn set_default_profile(
     State(state): State<AppState>,
@@ -1126,6 +1189,15 @@ pub async fn remap_path(
         return Json(ApiResponse::err("Path does not exist".to_string()));
     }
 
+    let lookup = id.clone();
+    let old_path = state
+        .db
+        .with_read_conn(move |conn| crate::db::projects::get_project(conn, &lookup))
+        .await
+        .ok()
+        .flatten()
+        .map(|p| p.path);
+
     let pid = id.clone();
     let np = new_path.clone();
     match state
@@ -1139,6 +1211,9 @@ pub async fn remap_path(
             // pointer — the freshly mapped folder never received the `.mcp.json`
             // / SKILL.md files the project is configured for, so an agent running
             // there saw none of its plugins. Best-effort (logs on failure).
+            if let Some(old_path) = old_path {
+                super::docs_location::rekey(&state, &id, &old_path, Some(&new_path)).await;
+            }
             super::resync_project_assets(&state, &id).await;
             Json(ApiResponse::ok(()))
         }

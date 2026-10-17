@@ -339,8 +339,8 @@ mod tests {
             "decisions.md must have 'Architecture decisions' header"
         );
         assert!(
-            content.contains("What NOT to do"),
-            "decisions.md must have 'What NOT to do' column"
+            content.contains("## ADR format") && content.contains("what NOT to do"),
+            "decisions.md must document the ADR format, consequences included"
         );
     }
 }

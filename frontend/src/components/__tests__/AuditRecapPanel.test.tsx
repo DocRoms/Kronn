@@ -16,6 +16,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { I18nProvider } from '../../lib/I18nContext';
 
 vi.mock('../../lib/api', async () => {
@@ -338,6 +339,45 @@ describe('AuditRecapPanel (0.8.4 #332 drawer)', () => {
     fireEvent.click(await screen.findByTestId('audit-recap-toggle'));
     await waitFor(() => {
       expect(screen.queryByTestId('audit-recap-kind-filter')).toBeNull();
+    });
+  });
+
+  describe('accessibility (KT-1072)', () => {
+    it('the drawer is modal, takes focus, keeps it, closes on Escape and returns focus to its trigger', async () => {
+      (projectsApi.auditHistory as ReturnType<typeof vi.fn>).mockResolvedValueOnce([fullRun, rgaaRun]);
+      wrap(<AuditRecapPanel projectId="p1" />);
+      const trigger = await screen.findByTestId('audit-recap-toggle');
+      await userEvent.click(trigger);
+      const drawer = await screen.findByTestId('audit-recap-drawer');
+      expect(drawer).toHaveAttribute('aria-modal', 'true');
+      expect(drawer.contains(document.activeElement)).toBe(true);
+      for (let i = 0; i < 8; i++) {
+        await userEvent.tab();
+        expect(drawer.contains(document.activeElement)).toBe(true);
+      }
+      await userEvent.keyboard('{Escape}');
+      expect(screen.queryByTestId('audit-recap-drawer')).toBeNull();
+      expect(trigger).toHaveFocus();
+    });
+
+    it('sortable columns expose aria-sort and sort from the keyboard', async () => {
+      (projectsApi.auditHistory as ReturnType<typeof vi.fn>).mockResolvedValueOnce([fullRun]);
+      (projectsApi.auditRunSteps as ReturnType<typeof vi.fn>).mockResolvedValueOnce(sampleSteps);
+      wrap(<AuditRecapPanel projectId="p1" />);
+      await userEvent.click(await screen.findByTestId('audit-recap-toggle'));
+      await userEvent.click(await screen.findByTestId('audit-recap-chip-run-42'));
+      const table = await screen.findByTestId('audit-recap-table');
+      const headers = Array.from(table.querySelectorAll('thead th'));
+      expect(headers.map(h => h.getAttribute('aria-sort'))).toEqual(['ascending', null, 'none', 'none']);
+
+      const durationSort = headers[2].querySelector('button') as HTMLButtonElement;
+      durationSort.focus();
+      await userEvent.keyboard('{Enter}');
+      expect(headers[2]).toHaveAttribute('aria-sort', 'descending');
+      expect(headers[0]).toHaveAttribute('aria-sort', 'none');
+      expect(table.querySelector('tbody tr')?.getAttribute('data-testid')).toBe('audit-recap-row-2');
+      await userEvent.keyboard(' ');
+      expect(headers[2]).toHaveAttribute('aria-sort', 'ascending');
     });
   });
 });

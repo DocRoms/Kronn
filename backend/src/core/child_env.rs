@@ -919,7 +919,7 @@ pub fn apply_agent_launch(
     let agent_tmpdir = work_dir.join(".kronn/tmp");
     let _ = std::fs::create_dir_all(&agent_tmpdir);
     if let Some(project_path) = work_dir.to_str() {
-        crate::core::mcp_scanner::ensure_gitignore_public(project_path, ".kronn/tmp/");
+        crate::core::mcp_scanner::ensure_local_exclude(project_path, ".kronn/tmp/");
     }
     command.env("TMPDIR", &agent_tmpdir);
     command.env("TEMP", &agent_tmpdir);
@@ -935,6 +935,12 @@ pub fn apply_agent_launch(
         let encoded = serde_json::to_string(context)
             .map_err(|error| format!("Unable to encode task worker context: {error}"))?;
         command.env("KRONN_TASK_WORKER_CONTEXT", encoded);
+        // KT-1266 — what the worker starts carries its dispatch, so it can be
+        // stopped when the dispatch ends wherever it ran in the process tree.
+        command.env(
+            crate::core::dispatch_reaper::DISPATCH_ENV,
+            &context.dispatch_job_id,
+        );
     }
     // A worker's capability excludes the room and step identities.
     if launch.task_worker.is_none() {

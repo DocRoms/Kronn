@@ -1,6 +1,9 @@
 /* KT-977 — audit timeline. Theme tokens only (--kr-*). */
 .audit-tl { display: flex; flex-direction: column; gap: var(--kr-sp-8); padding: var(--kr-sp-6) 0; }
 
+.audit-tl-doc-state { display: grid; gap: var(--kr-sp-3); }
+.audit-tl-doc-state > .audit-tl-btn { justify-self: start; }
+
 .audit-tl-news {
   display: grid; grid-template-columns: auto 1fr auto; gap: var(--kr-sp-6); align-items: start;
   padding: var(--kr-sp-6) var(--kr-sp-8); border-radius: var(--kr-r-xl);
@@ -38,6 +41,8 @@
 .audit-tl-dot.is-done { background: var(--kr-success); border-color: var(--kr-success); }
 .audit-tl-dot.is-failed, .audit-tl-dot.is-todo { background: var(--kr-error); border-color: var(--kr-error); }
 .audit-tl-dot.is-warned { background: var(--kr-warning); border-color: var(--kr-warning); }
+.audit-tl-dot.is-unchanged { background: var(--kr-text-muted); border-color: var(--kr-text-muted); }
+.audit-tl-dot.is-accepted { background: var(--kr-bg-base); border-color: var(--kr-success); }
 .audit-tl-dot.is-running { border-color: var(--kr-accent); box-shadow: 0 0 0 4px var(--kr-accent-bg-strong); }
 
 .audit-tl-tag { font-size: var(--kr-fs-sm); font-weight: 600; border-radius: 999px; padding: 2px var(--kr-sp-4); white-space: nowrap;
@@ -45,6 +50,7 @@
 .audit-tl-tag.is-done { background: rgba(var(--kr-success-rgb), 0.14); color: var(--kr-success); }
 .audit-tl-tag.is-failed, .audit-tl-tag.is-todo { background: rgba(var(--kr-error-rgb), 0.14); color: var(--kr-error); }
 .audit-tl-tag.is-warned { background: rgba(var(--kr-warning-rgb), 0.13); color: var(--kr-warning); }
+.audit-tl-tag.is-accepted { background: var(--kr-bg-active); color: var(--kr-success); }
 .audit-tl-tag.is-running, .audit-tl-tag.is-reco { background: var(--kr-accent-bg-strong); color: var(--kr-accent); }
 
 .audit-tl-progress { height: 6px; border-radius: 999px; background: var(--kr-bg-elevated); overflow: hidden; }
@@ -69,6 +75,11 @@
 .audit-tl-step-desc { font-size: var(--kr-fs-base); color: var(--kr-text-muted); }
 .audit-tl-reason.is-failed, .audit-tl-reason.is-todo { color: var(--kr-error); }
 .audit-tl-reason.is-warned { color: var(--kr-warning); }
+.audit-tl-reason.is-accepted { color: var(--kr-text-secondary); }
+.audit-tl-step-actions { display: flex; flex-wrap: wrap; gap: var(--kr-sp-4); margin-top: var(--kr-sp-2); }
+.audit-tl-accept-form { display: flex; flex-direction: column; gap: var(--kr-sp-3); margin-top: var(--kr-sp-3); }
+.audit-tl-accept-reason { font: inherit; font-size: var(--kr-fs-base); width: 100%; resize: vertical; padding: var(--kr-sp-3) var(--kr-sp-4);
+  border: 1px solid var(--kr-border); border-radius: var(--kr-r-md); background: var(--kr-bg-base); color: var(--kr-text-primary); }
 .audit-tl-step-side { display: flex; align-items: center; gap: var(--kr-sp-5); }
 
 .audit-tl-activity { display: flex; flex-direction: column; gap: var(--kr-sp-2); min-width: 0; }
@@ -107,6 +118,7 @@
   color: var(--kr-text-secondary); font-size: var(--kr-fs-md); }
 .audit-tl-warn > svg { color: var(--kr-warning); flex-shrink: 0; margin-top: 2px; }
 .audit-tl-warn p { margin: 0 0 var(--kr-sp-3); }
+.audit-tl-error-message { overflow-wrap: anywhere; }
 
 .audit-tl-btn { font: inherit; display: inline-flex; align-items: center; justify-content: center; gap: var(--kr-sp-3);
   min-height: 36px; padding: 0 var(--kr-sp-7); border-radius: var(--kr-r-md); cursor: pointer; font-size: var(--kr-fs-md); font-weight: 500;
@@ -130,3 +142,16 @@
 
 .audit-tl-recorded ul { list-style: none; margin: var(--kr-sp-3) 0 0; padding: 0; display: grid; gap: var(--kr-sp-2); }
 .audit-tl-recorded li { display: flex; flex-wrap: wrap; gap: var(--kr-sp-4); align-items: baseline; font-size: var(--kr-fs-md); }
+
+/* Screen-reader only: the polite live region announcing audit step changes. */
+.audit-tl-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}

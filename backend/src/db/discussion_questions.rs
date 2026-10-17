@@ -551,6 +551,7 @@ fn publish_human_resolution(
         recovered_partial: false,
         session_tokens_at_message: None,
         author_cli_ordinal: None,
+        session_continuity: None,
         model: None,
         lint_report: None,
     };
@@ -881,6 +882,14 @@ fn decline_inner(
                         sans elle, ou reformule-la si la décision reste nécessaire."
         )
     );
+    if let Some(mut target) = cross_dispute_of(conn, discussion_id, &question.key)? {
+        crate::core::cross_audit_decision::apply(
+            conn,
+            &mut target,
+            crate::core::cross_audit::HumanDecision::Declined,
+        )
+        .map_err(AnswerError::Invalid)?;
+    }
     // Refusing a ceiling question is keeping the partial answer.
     let ceiling = super::discussion_ceiling_requests::decide(
         conn,
@@ -919,6 +928,23 @@ fn decline_inner(
     Ok(question)
 }
 
+/// The cross-agent finding a card decides, when the card is a dispute card
+/// of the dispute discussion Kronn recorded.
+fn cross_dispute_of(
+    conn: &Connection,
+    discussion_id: &str,
+    key: &str,
+) -> Result<Option<crate::db::audit_cross::DisputeTarget>, AnswerError> {
+    if !key.starts_with(crate::core::cross_audit::QUESTION_KEY_PREFIX) {
+        return Ok(None);
+    }
+    Ok(crate::db::audit_cross::dispute_target(
+        conn,
+        discussion_id,
+        key,
+    )?)
+}
+
 pub fn answer(
     conn: &Connection,
     discussion_id: &str,
@@ -934,6 +960,7 @@ pub fn answer(
     }
     conn.execute_batch("SAVEPOINT answer_discussion_question")
         .map_err(anyhow::Error::from)?;
+    let mut briefing_after = None;
     let outcome = answer_inner(
         conn,
         discussion_id,
@@ -941,11 +968,19 @@ pub fn answer(
         request,
         author_pseudo,
         author_avatar_email,
+        &mut briefing_after,
     );
     match outcome {
         Ok(question) => {
             conn.execute_batch("RELEASE answer_discussion_question")
                 .map_err(anyhow::Error::from)?;
+            // A briefing's folder move and file run only once its rows are
+            // committed; a failure leaves the folder as it was (KT-1192).
+            if let Some(after) = briefing_after {
+                if let Err(e) = after.apply() {
+                    tracing::warn!("briefing saved, folder left as it was: {}", e.message());
+                }
+            }
             Ok(question)
         }
         Err(error) => {
@@ -964,6 +999,7 @@ fn answer_inner(
     request: &AnswerDiscussionQuestionRequest,
     author_pseudo: &str,
     author_avatar_email: Option<&str>,
+    briefing_after: &mut Option<crate::api::audit::briefing::BriefingAfterCommit>,
 ) -> Result<DiscussionQuestion, AnswerError> {
     let mut question = list(conn, discussion_id)?
         .questions
@@ -1081,6 +1117,22 @@ fn answer_inner(
         text.as_deref().unwrap_or("")
     );
 
+    // KT-1192 — a briefing card: saved with the others once all are answered.
+    if let Some(task_ref) = question
+        .task_ref
+        .as_deref()
+        .filter(|r| r.starts_with(crate::api::audit::briefing_cards::TASK_REF_PREFIX))
+    {
+        *briefing_after = crate::api::audit::briefing_cards::on_card_answered(
+            conn,
+            discussion_id,
+            task_ref,
+            &question,
+            selected.first().map(String::as_str),
+            text.as_deref(),
+        )
+        .map_err(AnswerError::Invalid)?;
+    }
     let audit_resolutions = if let Some(td_id) = question
         .task_ref
         .as_deref()
@@ -1111,6 +1163,17 @@ fn answer_inner(
     } else {
         None
     };
+    let cross_dispute = cross_dispute_of(conn, discussion_id, &question.key)?;
+    if let Some(mut target) = cross_dispute.clone() {
+        let decision = selected
+            .first()
+            .and_then(|id| crate::core::cross_audit::HumanDecision::from_option_id(id))
+            .ok_or_else(|| {
+                AnswerError::Invalid("Choose keep or dismiss for a cross-agent dispute".into())
+            })?;
+        crate::core::cross_audit_decision::apply(conn, &mut target, decision)
+            .map_err(AnswerError::Invalid)?;
+    }
     if let Some(resolutions) = audit_resolutions.as_ref() {
         crate::core::audit_validation::apply_td_resolutions(
             conn,
@@ -1133,7 +1196,10 @@ fn answer_inner(
              ce qui y est déjà établi.",
         );
     }
-    let dispatch = if audit_resolutions.is_some() {
+    // The decision is applied by Kronn: no agent turn follows a dispute card.
+    let dispatch = if cross_dispute.is_some() {
+        false
+    } else if audit_resolutions.is_some() {
         let pending: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM discussion_questions WHERE discussion_id=?1 AND state='pending'",

@@ -26,15 +26,16 @@ as a verified copy.
 Every encrypted column is listed in one registry, `keystore::ENCRYPTED_COLUMNS`;
 a test compares it with the schema, so a new `*_encrypted` / cipher column
 cannot be added without the reconciler seeing it.
-[src: file: backend/src/core/keystore.rs:44-61]
+[src: file: backend/src/core/keystore.rs:41-61#ENCRYPTED_COLUMNS]
+[src: file: backend/src/core/keystore.rs:4357-4394#encrypted_column_registry_matches_the_schema]
 
 The running process still reads `config.tokens.keys` and
 `config.server.auth_token`: the boot fills them from the table, and every
 `config::save` writes them back to the table (encrypted, read back) before it
 writes `config.toml` without them. A failure there fails the save and leaves
 the previous file untouched.
-[src: file: backend/src/core/credential_store.rs:332-387]
-[src: file: backend/src/core/config.rs:234-258]
+[src: file: backend/src/core/credential_store.rs:346-403#sync_for_save]
+[src: file: backend/src/core/config.rs:361-392#save]
 
 ## Boot order
 
@@ -100,7 +101,7 @@ the previous file untouched.
      and no key in memory (fail closed: nothing new is encrypted under a key
      no vault holds). Kronn keeps running so the key can be restored from
      Settings → Recovery.
-   [src: file: backend/src/core/keystore.rs:440-682]
+   [src: file: backend/src/core/keystore.rs:435-682#reconcile_with]
 3. The resolved key is mirrored into the **empty** writable vaults; a vault
    holding another key, or whose read failed, is never written. `config.toml`
    drops its copy only when the key decrypts at least one row of every
@@ -136,14 +137,14 @@ the previous file untouched.
    do"; Settings → Recovery shows the warnings, and the
    app-wide banner shows a locked key, `credentials_unavailable` and
    `config_set_aside`.
-   [src: file: backend/src/core/keystore.rs:284-332]
+   [src: file: backend/src/core/keystore.rs:278-332#settle_disk_copy] [src: file: backend/src/core/keystore.rs:407-413#enough_copies] [src: file: backend/src/core/keystore.rs:234-239#decrypts_every_column] [src: file: backend/src/core/keystore.rs:415-433#persist] [src: file: backend/src/core/keyvault.rs:403-422#mirror] [src: file: backend/src/core/keystore.rs:375-405#ensure_durable_copy]
 4. `credential_store::boot` loads the stored credentials, moves any still in
    `config.toml` into the table, and generates an auth token only when none
    exists anywhere. Locked key: the store stays off and `config.toml` is left
    as it is. If this step fails before loading the token while a token is
    stored, auth is locked (below), never open. The stored token row also
    records whether auth is enabled, so a lost `config.toml` does not turn
-   auth off. [src: file: backend/src/core/credential_store.rs:452-587]
+   auth off. [src: file: backend/src/core/credential_store.rs:465-612#boot] [src: file: backend/src/lib.rs:130-150#stored_auth_token_exists]
 
 An operator-set `KRONN_AUTH_TOKEN` is read and removed from the process
 environment before the database opens (`config::take_env_auth_token`). Step 4
@@ -213,7 +214,7 @@ Safe to interrupt at any point; a rerun converges:
    are reported together.
 
 `credential_store::read_backup(path, key)` decrypts the backup.
-[src: file: backend/src/core/credential_store.rs:699-702]
+[src: file: backend/src/core/credential_store.rs:723-727#read_backup]
 
 Not migrated in this release: rows that do not decrypt with the current key
 are kept untouched (logged as locked) and never deleted by later saves.
@@ -275,8 +276,9 @@ An import runs in one transaction: a failing project or MCP insert rolls it
 all back, so local MCP secrets are never lost to a half import. GitHub
 connections are not exported; those of projects that come back by id are
 kept (the `projects` cascade no longer drops their tokens), and the report
-names the ones whose project is gone.
-[src: file: backend/src/core/keystore.rs:1642-1703]
+counts the ones whose project is gone.
+[src: file: backend/src/api/setup.rs:2307-2455#import_clear_statements]
+[src: file: backend/src/db/github_connections.rs:84-107#restore_rows]
 
 ## Reset
 
@@ -355,4 +357,4 @@ rebuild, so macOS would prompt on every restart). To exercise the keychain
 path, including a denied prompt, start the dev backend with
 `KRONN_USE_KEYCHAIN=1`; `KRONN_USE_KEYCHAIN=0` forces the sidecar in a release
 build. Outside macOS and Windows the default is off (no keychain backend).
-[src: file: backend/src/core/keyvault.rs:298-307]
+[src: file: backend/src/core/keyvault.rs:289-307#use_os_keychain]

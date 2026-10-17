@@ -325,8 +325,12 @@ export const isRoomAgentDisabled = (
   return !det || !isUsable(det);
 };
 
-/** Check if a discussion title matches the validation audit title */
-export const isValidationDisc = (title: string) => title === 'Validation audit AI';
+/** Check if a discussion title is a generated validation title: the full
+ *  audit's "Validation audit AI" and the sub-audits' "Validation audit <kind>"
+ *  (same family as the backend's `is_validation_title`, KT-1122). The title is
+ *  only a display hint: which discussion validates a run is the server's link. */
+export const isValidationDisc = (title: string) =>
+  title === 'Validation audit AI' || /^Validation audit \S(.*\S)?$/.test(title);
 
 /** 0.8.2 — Tracker MCP name needles. Must stay in sync with backend
  *  `detect_issue_tracker_mcp` in `api/audit/helpers.rs`. The audit

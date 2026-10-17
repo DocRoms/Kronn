@@ -14,6 +14,18 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 #[path = "coverage_repair_tests.rs"]
 mod coverage_repair_tests;
 
+#[cfg(unix)]
+#[path = "detector_retry_tests.rs"]
+mod detector_retry_tests;
+
+#[cfg(unix)]
+#[path = "reaudit_unchanged_tests.rs"]
+mod reaudit_unchanged_tests;
+
+#[cfg(unix)]
+#[path = "cross_audit_e2e_tests.rs"]
+mod cross_audit_e2e_tests;
+
 fn sse(frames: &[String]) -> String {
     frames
         .iter()
@@ -67,6 +79,7 @@ async fn litellm_state(endpoint: &str) -> AppState {
     let mut config = crate::core::config::default_config();
     config.agents.lite_llm.base_url = Some(endpoint.to_string());
     config.agents.model_tiers.lite_llm.reasoning = Some("audit-model".into());
+    config.agents.model_tiers.lite_llm.economy = Some("economy-model".into());
     AppState::new_defaults(
         Arc::new(tokio::sync::RwLock::new(config)),
         Arc::new(crate::db::Database::open_in_memory().unwrap()),
@@ -238,6 +251,73 @@ async fn audit_launcher_writes_sixteen_real_findings_then_their_index() {
     );
 }
 
+/// A committed fixture, so `git status` after the run lists only what it wrote.
+fn commit_fixture(root: &Path) {
+    for args in [
+        &["init", "-q"][..],
+        &["add", "-A"],
+        &[
+            "-c",
+            "user.name=fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "fixture",
+        ],
+    ] {
+        let out = crate::core::cmd::git_cmd()
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    }
+}
+
+/// After an audit only documentation shows; Kronn's working state is ignored.
+fn assert_git_shows_only_docs(root: &Path) {
+    let out = crate::core::cmd::git_cmd()
+        .args([
+            "status",
+            "--porcelain",
+            "--ignored",
+            "--untracked-files=all",
+        ])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let status = String::from_utf8_lossy(&out.stdout);
+    for line in status.lines() {
+        let path = &line[3..];
+        // The run state is versioned on purpose (KT-1199): a colleague who
+        // fetches resumes or validates from it. Any other `.kronn-` file is
+        // leaked working state.
+        let versioned = path.ends_with(&format!(
+            "docs/{}",
+            crate::core::audit_run_state::RUN_STATE_FILENAME
+        ));
+        assert!(versioned || !path.contains(".kronn-"), "{status}");
+        if line.starts_with("!! ") {
+            // Template installation also excludes the documented scratch area.
+            assert!(
+                path.starts_with(".kronn/") || path.starts_with("docs/var/"),
+                "{status}"
+            );
+        } else {
+            // Documentation and its versioned metadata (`.kronn.json`, checksums).
+            assert!(
+                path.starts_with("docs/") || path.ends_with(".md"),
+                "{status}"
+            );
+        }
+    }
+    assert!(!root.join(".gitignore").exists(), "{status}");
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn http_resume_repairs_an_auxiliary_document_from_a_previously_successful_step() {
@@ -292,6 +372,26 @@ async fn http_resume_repairs_an_auxiliary_document_from_a_previously_successful_
             format!("# Finding\n[src: file: invented.rs:1]\n{human}"),
         )
         .unwrap();
+        commit_fixture(project.path());
+        // What an older version left in docs/: moved out on the first run.
+        let legacy = project.path().join("docs/.kronn-citation-originals");
+        std::fs::create_dir(&legacy).unwrap();
+        let legacy_original = b"# Earlier original\n";
+        let legacy_name = format!(
+            "{}.bak",
+            Sha256::digest(legacy_original)
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        );
+        std::fs::write(legacy.join(&legacy_name), legacy_original).unwrap();
+        std::fs::write(
+            project
+                .path()
+                .join("docs/.kronn-document-optimization.json"),
+            "{}\n",
+        )
+        .unwrap();
         let total =
             crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full).len() as u32;
         state
@@ -330,6 +430,9 @@ async fn http_resume_repairs_an_auxiliary_document_from_a_previously_successful_
                 kind: None,
                 custom_prompt: None,
                 resume_run_id: Some("before-repair".into()),
+                retry_steps: None,
+                redo_steps: None,
+                fresh: None,
             }),
         )
         .await
@@ -381,20 +484,53 @@ async fn http_resume_repairs_an_auxiliary_document_from_a_previously_successful_
         );
         let repaired =
             std::fs::read_to_string(project.path().join("docs/tech-debt/TD-repair.md")).unwrap();
+        // The rewrite that dropped the human section stays (KT-1079): the
+        // doc waits for its owner to reconfirm, with the human text as before.
         assert!(
-            repaired.contains(human.trim_end()),
-            "human section restored before validation: {repaired:?}"
+            !repaired.contains(human.trim_end()),
+            "never reverted: {repaired:?}"
         );
+        let provenance = crate::core::doc_provenance::report(project.path(), true).unwrap();
+        let marked = provenance
+            .docs
+            .iter()
+            .find(|d| d.doc == "docs/tech-debt/TD-repair.md")
+            .unwrap_or_else(|| panic!("{provenance:?}"));
+        assert!(marked.changes[0]
+            .before
+            .as_deref()
+            .unwrap()
+            .contains("Human decision remains."));
         assert_eq!(repaired.contains("invented.rs"), !correct);
         assert!(
-            std::fs::read_dir(project.path().join("docs/.kronn-citation-originals"))
-                .unwrap()
-                .any(
-                    |entry| std::fs::read_to_string(entry.unwrap().path()).unwrap()
-                        == format!("# Finding\n[src: file: invented.rs:1]\n{human}")
-                ),
+            std::fs::read_dir(
+                project
+                    .path()
+                    .join(crate::core::audit_state::CITATION_ORIGINALS_DIR)
+            )
+            .unwrap()
+            .any(
+                |entry| std::fs::read_to_string(entry.unwrap().path()).unwrap()
+                    == format!("# Finding\n[src: file: invented.rs:1]\n{human}")
+            ),
             "the original survives correction"
         );
+        assert_eq!(
+            std::fs::read(
+                project
+                    .path()
+                    .join(crate::core::audit_state::CITATION_ORIGINALS_DIR)
+                    .join(&legacy_name)
+            )
+            .unwrap(),
+            legacy_original,
+            "the legacy original moved with its content"
+        );
+        assert!(project
+            .path()
+            .join(crate::core::audit_state::REPORT_FILE)
+            .is_file());
+        assert_git_shows_only_docs(project.path());
         assert!(requests.lock().unwrap()[0]
             .to_string()
             .contains("targeted correction required"));
@@ -468,6 +604,7 @@ async fn assert_http_failure_is_persisted(after_write: bool) {
         "# Finding\n[src: file: invented.rs:1]\n",
     )
     .unwrap();
+    commit_fixture(project.path());
     let total =
         crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full).len() as u32;
     state
@@ -513,6 +650,9 @@ async fn assert_http_failure_is_persisted(after_write: bool) {
             kind: None,
             custom_prompt: None,
             resume_run_id: Some("before-unavailable".into()),
+            retry_steps: None,
+            redo_steps: None,
+            fresh: None,
         }),
     )
     .await
@@ -580,6 +720,7 @@ async fn assert_http_failure_is_persisted(after_write: bool) {
         crate::api::audit::full::already_succeeded_step_indices(&steps).len(),
         total as usize - 1
     );
+    assert_git_shows_only_docs(project.path());
 }
 
 #[tokio::test]
@@ -874,7 +1015,12 @@ async fn partial_audit_stream(
     let chain = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full);
     let step = chain
         .iter()
-        .position(crate::api::audit::partial_selectable)
+        .position(|step| {
+            crate::api::audit::partial_selectable(
+                step,
+                &crate::core::docs_location::DocsRoot::default(),
+            )
+        })
         .expect("a refreshable section")
         + 1;
     let response = crate::api::audit::drift::partial_audit(
@@ -1054,7 +1200,12 @@ fn refreshable_steps() -> Vec<usize> {
     crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full)
         .iter()
         .enumerate()
-        .filter(|(_, step)| crate::api::audit::partial_selectable(step))
+        .filter(|(_, step)| {
+            crate::api::audit::partial_selectable(
+                step,
+                &crate::core::docs_location::DocsRoot::default(),
+            )
+        })
         .map(|(index, _)| index + 1)
         .collect()
 }
@@ -1096,6 +1247,9 @@ async fn step_prompts_of(pipeline: &str, linked: bool) -> Vec<String> {
                 kind: None,
                 custom_prompt: None,
                 resume_run_id: None,
+                retry_steps: None,
+                redo_steps: None,
+                fresh: None,
             }),
         )
         .await
@@ -1179,6 +1333,67 @@ async fn an_audit_prompt_no_longer_reads_another_repos_docs_or_lists_the_machine
             assert!(
                 !prompt.contains("<repo-path>/docs/AGENTS.md"),
                 "{pipeline}: a prompt with no linked repo sends the agent to another repo's docs"
+            );
+        }
+    }
+}
+
+/// KT-1278 — over ACP the context and the step are one user message; a step
+/// that ends on a reference block (versions, briefing, rules, linked repos) is
+/// answered as a question. Read on what the agent was ACTUALLY handed by the two
+/// real pipelines (retries included: the scripted agent writes nothing, so every
+/// step runs its gates' attempts): each turn ends on one step's own directive,
+/// and the step numbers it names are those of the chain.
+#[cfg(unix)]
+#[tokio::test]
+async fn every_step_prompt_the_full_and_partial_pipelines_hand_the_agent_ends_on_its_directive() {
+    let docs_root = crate::core::docs_location::DocsRoot::default_root();
+    let steps = crate::api::audit::steps_for(crate::models::AuditKind::Full, &docs_root);
+    let directives: Vec<String> = steps
+        .iter()
+        .enumerate()
+        .map(|(i, step)| crate::api::audit::step_closing_directive(i + 1, step, &docs_root))
+        .collect();
+    for pipeline in ["full", "partial"] {
+        for linked in [false, true] {
+            let prompts = step_prompts_of(pipeline, linked).await;
+            assert!(prompts.len() >= expected_step_count(pipeline), "{pipeline}");
+            let mut covered = std::collections::BTreeSet::new();
+            for turn in &prompts {
+                // The recorder logs the prompt, then the CLI arguments on ONE
+                // line: the prompt ends where that line starts, and nothing but
+                // the arguments may follow the directive.
+                let prompt = match turn.rfind("--print --output-format") {
+                    Some(at) => {
+                        assert!(!turn[at..].contains('\n'), "{pipeline}: one argument line");
+                        &turn[..at]
+                    }
+                    None => turn.as_str(),
+                };
+                let step = directives
+                    .iter()
+                    .position(|d| prompt.ends_with(d.as_str()))
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{pipeline} (linked={linked}): a step prompt does not end on its directive:\n…{}",
+                            &prompt[prompt.len().saturating_sub(500)..]
+                        )
+                    });
+                covered.insert(step);
+                assert_eq!(
+                    prompt.matches("=== RUN THIS STEP NOW ===").count(),
+                    1,
+                    "{pipeline}: exactly one directive"
+                );
+            }
+            let wanted: std::collections::BTreeSet<usize> = if pipeline == "full" {
+                (0..steps.len()).collect()
+            } else {
+                refreshable_steps().into_iter().map(|n| n - 1).collect()
+            };
+            assert_eq!(
+                covered, wanted,
+                "{pipeline}: every step was handed to the agent"
             );
         }
     }
@@ -1310,6 +1525,9 @@ async fn a_resume_reruns_only_the_failed_step_and_the_partial_run_is_still_valid
             kind: None,
             custom_prompt: None,
             resume_run_id: Some("run-prev".into()),
+            retry_steps: None,
+            redo_steps: None,
+            fresh: None,
         }),
     )
     .await
@@ -1456,6 +1674,9 @@ async fn a_resume_that_loses_only_the_founding_step_gets_no_validation() {
             kind: None,
             custom_prompt: None,
             resume_run_id: Some("run-prev".into()),
+            retry_steps: None,
+            redo_steps: None,
+            fresh: None,
         }),
     )
     .await
@@ -1539,6 +1760,61 @@ fn a_step_cost_sums_its_attempts_and_one_silent_attempt_makes_it_unknown() {
         StepCost::Known(u64::MAX).with_attempt(Some(1)).usd_micros(),
         Some(u64::MAX)
     );
+}
+
+/// KT-1313 — a Claude step stopped between turns holds every turn it consumed,
+/// the final line replaces the sum, and no reading ever lowers the counter.
+#[test]
+fn a_stream_step_sums_its_turns_and_its_final_line_replaces_the_sum() {
+    use crate::db::audit_runs::StepTokens;
+    let agent = AgentType::ClaudeCode;
+    let turn = |input: u64, output: u64| {
+        StepTokens {
+            input: Some(input),
+            output: Some(output),
+            cache_read: None,
+            cache_write: None,
+            accounting: Default::default(),
+        }
+        .inclusive_for(&agent)
+    };
+    let mut turns = StreamTurns::default();
+    let mut usage = StepTokens::UNKNOWN;
+    let mut seen = Vec::new();
+    for reading in [turn(300, 30), turn(500, 47), turn(200, 16)] {
+        usage = turns.fold(usage, reading, false);
+        seen.push(usage.total().unwrap());
+    }
+    assert_eq!(seen, [330, 877, 1093], "a smaller turn still adds");
+    assert_eq!((usage.input, usage.output), (Some(1000), Some(93)));
+
+    // The final line states the whole run: it replaces the sum.
+    let done = turns.fold(usage, turn(1000, 100), true);
+    assert_eq!(done.total(), Some(1100));
+    // …unless it counts less than what was already seen.
+    assert_eq!(turns.fold(done, turn(10, 1), true), done);
+
+    assert!(runner::is_claude_result_line(
+        r#"{"type":"result","usage":{"input_tokens":1}}"#
+    ));
+    assert!(!runner::is_claude_result_line(
+        r#"{"type":"stream_event","event":{"type":"message_delta"}}"#
+    ));
+    assert!(!runner::is_claude_result_line("not json"));
+}
+
+#[test]
+fn the_runs_live_token_counter_never_goes_down() {
+    let mut run = RunTokens::default();
+    assert_eq!(run.total(), None);
+    assert_eq!(run.with(630), 630);
+    assert_eq!(run.with(877), 877);
+    // A stopped step whose tokens were never added, then a smaller reading.
+    assert_eq!(run.with(346), 877, "the shown total holds");
+    run.add(Some(877));
+    assert_eq!(run.total(), Some(877));
+    assert_eq!(run.with(0), 877);
+    assert_eq!(run.with(100), 977);
 }
 
 #[test]
@@ -1728,5 +2004,331 @@ fn an_http_run_feeds_the_recent_actions_and_its_label_by_category_only() {
     assert!(
         !all.contains("hunter2") && !all.contains("SENTINEL"),
         "{all}"
+    );
+}
+
+/// KT-1000 — the version-source cascade reads only what the launch establishes.
+#[test]
+fn version_reach_follows_what_each_launch_mounts() {
+    let claude = AgentType::ClaudeCode;
+    assert_eq!(
+        version_reach(true, false, true, &AgentType::LiteLlm),
+        VersionReach {
+            mcp: None,
+            web: false
+        }
+    );
+    assert_eq!(
+        version_reach(false, true, true, &claude),
+        VersionReach {
+            mcp: Some(true),
+            web: false
+        }
+    );
+    assert_eq!(
+        version_reach(false, false, true, &claude),
+        VersionReach {
+            mcp: Some(false),
+            web: true
+        }
+    );
+    assert_eq!(
+        version_reach(false, false, false, &claude),
+        VersionReach {
+            mcp: Some(false),
+            web: false
+        }
+    );
+    assert_eq!(
+        version_reach(false, false, true, &AgentType::Codex),
+        VersionReach {
+            mcp: None,
+            web: false
+        }
+    );
+}
+
+#[tokio::test]
+async fn version_source_inputs_read_the_mcp_config_the_agent_is_handed() {
+    use crate::core::version_sources::{select_version_source, VersionSource};
+    let state = litellm_state("http://127.0.0.1:1").await;
+    let project = tempfile::tempdir().unwrap();
+    let path = project.path();
+    let path_str = path.to_string_lossy().to_string();
+    let stdio =
+        r#"{"mcpServers":{"context7":{"command":"npx","args":["-y","@upstash/context7-mcp"]}}}"#;
+    let remote =
+        r#"{"mcpServers":{"context7":{"type":"http","url":"https://mcp.context7.com/mcp"}}}"#;
+
+    let acp = AuditAgentLauncher::with_route(
+        &state,
+        &AgentType::ClaudeCode,
+        crate::acp::AcpProductionRoute::AdaptedAcp,
+    )
+    .await;
+    let direct = AuditAgentLauncher::with_route(
+        &state,
+        &AgentType::ClaudeCode,
+        crate::acp::AcpProductionRoute::DirectCliMigration,
+    )
+    .await;
+    let http = AuditAgentLauncher::new(&state, &AgentType::LiteLlm).await;
+    let pick = |l: &AuditAgentLauncher, watch| {
+        select_version_source(l.version_source_inputs(
+            &AgentType::ClaudeCode,
+            path,
+            &path_str,
+            watch,
+        ))
+    };
+
+    std::fs::write(path.join(".mcp.json"), stdio).unwrap();
+    assert_eq!(pick(&acp, true), VersionSource::Context7);
+    assert_eq!(pick(&direct, true), VersionSource::Context7);
+    assert_eq!(
+        select_version_source(http.version_source_inputs(
+            &AgentType::LiteLlm,
+            path,
+            &path_str,
+            true
+        )),
+        VersionSource::DependencyWatch
+    );
+
+    std::fs::write(path.join(".mcp.json"), remote).unwrap();
+    assert_eq!(
+        pick(&acp, true),
+        VersionSource::DependencyWatch,
+        "an ACP session drops url-only servers"
+    );
+    assert_eq!(pick(&direct, false), VersionSource::Context7);
+
+    std::fs::remove_file(path.join(".mcp.json")).unwrap();
+    assert_eq!(pick(&direct, false), VersionSource::Web);
+    assert_eq!(pick(&acp, false), VersionSource::None);
+}
+
+/// KT-1320 — the connection a resumed run had may have been deleted since: the
+/// resume runs on the agent's default connection and says so, it is not refused.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_resume_whose_connection_was_deleted_falls_back_with_a_visible_note() {
+    resume_after_the_run_connection_was_deleted(None).await;
+}
+
+/// KT-1320 — the UI echoes the run's connection id back on a resume with an
+/// untouched picker: the server still recognises it as the run's own choice.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_resume_echoing_the_deleted_connection_of_its_run_falls_back_too() {
+    resume_after_the_run_connection_was_deleted(Some("deleted-conn")).await;
+}
+
+/// KT-1320 — the same fallback on an HTTP provider: the retried step reaches the
+/// agent's default endpoint on the run's economy model, not the reasoning one.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_resume_whose_connection_was_deleted_reaches_the_default_provider_on_the_run_tier() {
+    let prose = text("The documentation is unchanged.");
+    let (server, requests) = provider(prose.clone(), prose).await;
+    let state = litellm_state(&server.uri()).await;
+    let project = tempfile::tempdir().unwrap();
+    project_among_others(&state, project.path(), false).await;
+    seed_run_on_a_deleted_connection(&state, project.path(), "LiteLlm").await;
+
+    let stream = resume_run_gone(&state, AgentType::LiteLlm, Some("deleted-conn")).await;
+
+    assert!(!stream.contains("event: error"), "{stream}");
+    assert!(
+        sse_events(&stream, "warning").iter().any(|w| w["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("deleted-conn") && m.contains("no longer exists"))),
+        "{stream}"
+    );
+    let seen = requests.lock().unwrap().clone();
+    assert!(
+        !seen.is_empty(),
+        "the retried step reached the default endpoint: {stream}"
+    );
+    assert!(
+        seen.iter().all(|body| body["model"] == "economy-model"),
+        "the run's economy tier picks the model: {seen:?}"
+    );
+    let run = latest_run(&state).await;
+    assert_eq!(run.tier.as_deref(), Some("economy"));
+    assert_eq!(run.connection_id, None);
+}
+
+#[cfg(unix)]
+async fn resume_after_the_run_connection_was_deleted(requested_connection: Option<&str>) {
+    let tools = tempfile::tempdir().unwrap();
+    let (fixture, _log) = recording_claude(tools.path());
+    let state = fresh_state();
+    let project = tempfile::tempdir().unwrap();
+    project_among_others(&state, project.path(), false).await;
+    let _route = route_claude(project.path(), &fixture);
+    seed_run_on_a_deleted_connection(&state, project.path(), "ClaudeCode").await;
+
+    let stream = resume_run_gone(&state, AgentType::ClaudeCode, requested_connection).await;
+
+    assert!(!stream.contains("event: error"), "{stream}");
+    let warnings = sse_events(&stream, "warning");
+    assert!(
+        warnings.iter().any(|w| w["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("deleted-conn") && m.contains("no longer exists"))),
+        "{stream}"
+    );
+    let run = latest_run(&state).await;
+    assert_ne!(run.id, "run-gone");
+    assert_eq!(
+        run.tier.as_deref(),
+        Some("economy"),
+        "the tier is still the run's"
+    );
+    assert_eq!(run.connection_id, None);
+}
+
+/// An interrupted economy run on `agent` and on a connection that no longer
+/// exists, whose step 5 is the one left to retry.
+#[cfg(unix)]
+async fn seed_run_on_a_deleted_connection(state: &AppState, project: &Path, agent: &'static str) {
+    std::fs::create_dir_all(project.join("docs/conventions")).unwrap();
+    std::fs::write(project.join("docs/AGENTS.md"), "# Audited project\n").unwrap();
+    std::fs::write(
+        project.join("docs/conventions/agents-md-format-v1.md"),
+        "# AGENTS.md format\n",
+    )
+    .unwrap();
+    let total =
+        crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full).len() as u32;
+    state
+        .db
+        .with_conn(move |conn| {
+            use crate::db::audit_runs as runs;
+            let started = chrono::Utc::now() - chrono::Duration::hours(1);
+            runs::insert_running(conn, "run-gone", PROJECT_ID, "Full", agent, started)?;
+            runs::set_run_launch(conn, "run-gone", ModelTier::Economy, Some("deleted-conn"))?;
+            for step in 1..=total {
+                let label = format!("docs/step-{step}.md");
+                runs::insert_audit_step_start(conn, "run-gone", step, &label, started)?;
+                runs::finalize_audit_step(
+                    conn,
+                    "run-gone",
+                    step,
+                    started,
+                    10,
+                    &runs::StepTokens::UNKNOWN,
+                    None,
+                    step != 5,
+                    (step == 5).then_some("Mac went to sleep"),
+                    false,
+                )?;
+                if step != 5 {
+                    runs::update_last_completed_step(conn, "run-gone", step.min(4))?;
+                }
+            }
+            runs::mark_interrupted(conn, "run-gone", "warned steps: [5]")
+        })
+        .await
+        .unwrap();
+}
+
+/// Resumes `run-gone` the way the UI does, naming no tier, and returns the stream.
+#[cfg(unix)]
+async fn resume_run_gone(
+    state: &AppState,
+    agent: AgentType,
+    requested_connection: Option<&str>,
+) -> String {
+    use axum::response::IntoResponse;
+    let response = crate::api::audit::full::full_audit(
+        axum::extract::State(state.clone()),
+        axum::extract::Path(PROJECT_ID.to_string()),
+        axum::Json(crate::models::LaunchAuditRequest {
+            agent,
+            connection_id: requested_connection.map(str::to_string),
+            tier: None,
+            kind: None,
+            custom_prompt: None,
+            resume_run_id: Some("run-gone".into()),
+            retry_steps: None,
+            redo_steps: None,
+            fresh: None,
+        }),
+    )
+    .await
+    .into_response();
+    sse_body(response).await
+}
+
+#[cfg(unix)]
+async fn latest_run(state: &AppState) -> crate::models::AuditRun {
+    state
+        .db
+        .with_conn(|conn| {
+            Ok(crate::db::audit_runs::list_recent(conn, PROJECT_ID, 1)?
+                .into_iter()
+                .next())
+        })
+        .await
+        .unwrap()
+        .expect("the resumed run")
+}
+
+/// KT-1318 — a full audit writes a lot of files and builds: below the
+/// configured free space it is refused before anything is recorded or written,
+/// with the number and the setting named.
+#[tokio::test]
+async fn a_full_audit_under_disk_pressure_is_refused_before_it_creates_anything() {
+    use axum::response::IntoResponse;
+    // A petabyte: more than any test host has free, whatever its disk.
+    let _policy = crate::core::disk_usage::TestDiskPolicy::set(1_000_000, 6);
+    let state = fresh_state();
+    let project = tempfile::tempdir().unwrap();
+    project_among_others(&state, project.path(), false).await;
+
+    let response = crate::api::audit::full::full_audit(
+        axum::extract::State(state.clone()),
+        axum::extract::Path(PROJECT_ID.to_string()),
+        axum::Json(crate::models::LaunchAuditRequest {
+            agent: AgentType::ClaudeCode,
+            connection_id: None,
+            tier: None,
+            kind: None,
+            custom_prompt: None,
+            resume_run_id: None,
+            retry_steps: None,
+            redo_steps: None,
+            fresh: None,
+        }),
+    )
+    .await
+    .into_response();
+    let stream = sse_body(response).await;
+
+    let refusal = sse_events(&stream, "error").pop().expect("a refusal");
+    let reason = refusal["error"].as_str().unwrap_or_default();
+    assert!(
+        reason.contains("refusing to start a full audit"),
+        "{reason}"
+    );
+    assert!(
+        reason.contains("server.disk_launch_min_free_gib") && reason.contains("1000000 GiB"),
+        "{reason}"
+    );
+    assert!(
+        sse_events(&stream, "step_start").is_empty(),
+        "no step started: {stream}"
+    );
+    let runs: i64 = state
+        .db
+        .with_conn(|conn| Ok(conn.query_row("SELECT COUNT(*) FROM audit_runs", [], |r| r.get(0))?))
+        .await
+        .unwrap();
+    assert_eq!(runs, 0, "no audit run was recorded");
+    assert!(
+        !project.path().join("docs").exists(),
+        "nothing was written into the project"
     );
 }

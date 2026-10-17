@@ -114,6 +114,7 @@ impl WorkflowEngine {
                 tracing::error!("Workflow engine tick error: {}", e);
             }
             quota_wait::wake_due_runs(&self.state, Utc::now()).await;
+            crate::core::citation_drift::scheduled_tick(&self.state).await;
         }
     }
 

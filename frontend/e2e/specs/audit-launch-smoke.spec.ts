@@ -24,6 +24,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { execSync } from 'node:child_process';
+import { E2E_BACKEND_URL } from '../fixtures/backend-url';
 
 /**
  * Mirrors `AuditProgress` from `backend/src/models/projects.rs`. The
@@ -97,7 +98,7 @@ test.describe('Audit — SSE launch + cancel smoke', () => {
     // consume the SSE stream end-to-end — we just need it to START
     // (= the backend kicks off the audit pipeline) and then we
     // cancel.
-    const runPromise = fetch(`http://localhost:3140/api/projects/${projectId}/full-audit`, {
+    const runPromise = fetch(`${E2E_BACKEND_URL}/api/projects/${projectId}/full-audit`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ agent: 'ClaudeCode', briefing_notes: '' }),

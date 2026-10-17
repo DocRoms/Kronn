@@ -11,6 +11,9 @@ pub enum DependencyCheckStatus {
     Unavailable,
     Error,
     TimedOut,
+    /// A JS manifest whose dependencies are not installed: npm cannot know
+    /// the installed versions, so "nothing outdated" would be a guess.
+    NotInstalled,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, TS, PartialEq, Eq)]
@@ -20,6 +23,16 @@ pub struct DependencyUpdatePackage {
     pub current: String,
     pub latest: String,
     pub major: bool,
+    /// The package is declared but not installed (no `node_modules`): `current`
+    /// is empty because no installed version exists to report, and the row
+    /// only proves the declared range cannot reach `latest`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub declared_only: bool,
+    /// The lockfile `current` was read from when there is no installed tree
+    /// (KT-1325), e.g. `package-lock.json`. `None`: `current` is what the
+    /// package manager reports as installed (or the lock it was run against).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lockfile: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, TS, PartialEq, Eq)]
@@ -32,6 +45,10 @@ pub struct DependencyManagerUpdate {
     pub major: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub packages: Vec<DependencyUpdatePackage>,
+    /// Why the manifest could not be checked (missing binary, network, parse
+    /// error, timeout…). Set for every status that is not a verdict (KT-1325).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, TS)]

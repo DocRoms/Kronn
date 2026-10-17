@@ -7,8 +7,17 @@ their schema with a short pointer lost the one successful proposal observed in
 this bounded comparison: Gemma e2b's Quick Prompt card. The other five baseline
 cells also failed, so this is not evidence of general reliability for either
 prompt style.
-[src: file: backend/src/api/signal_catalog.rs:1]
-[src: file: docs/research/signal-catalogue-2026-09-22.json:1]
+[src: file: backend/src/api/signal_catalog.rs:10-64#catalogue]
+[src: file: backend/src/api/signal_catalog.rs:66-69#get]
+[src: file: backend/src/api/agent_tools.rs:4309-4311#signals]
+[src: file: backend/scripts/disc-introspection-mcp.py:10689-10690#signals]
+[src: file: docs/research/signal-catalogue-2026-09-22.json:579#decision]
+[src: file: docs/research/signal-catalogue-2026-09-22.json:275-339]
+[src: file: docs/research/signal-catalogue-2026-09-22.json:24-72]
+[src: file: docs/research/signal-catalogue-2026-09-22.json:144-189]
+[src: file: docs/research/signal-catalogue-2026-09-22.json:190-226]
+[src: file: docs/research/signal-catalogue-2026-09-22.json:428-479]
+[src: file: docs/research/signal-catalogue-2026-09-22.json:480-531]
 
 ## Protocol and instrument correction
 
@@ -24,8 +33,11 @@ The initial sandbox attempt could not reach localhost Ollama and produced no
 inference observations. No compilation or suite started by this agent overlapped
 the corrected host campaign; the reviewer had reported its heavy suites ended.
 Other host activity was not controlled.
-[src: file: backend/src/api/agent_signal_bench.rs:1]
-[src: file: docs/research/signal-catalogue-2026-09-22.json:1]
+[src: file: backend/src/api/agent_tools.rs:40-41#signal_bench]
+[src: file: backend/src/api/agent_signal_bench.rs:157-167#bench_native_signal_discovery]
+[src: file: backend/src/api/agent_signal_bench.rs:267-275#KRONN_BENCH_REPORT]
+[src: file: docs/research/signal-catalogue-2026-09-22.json:2-22#metadata]
+[src: file: docs/research/signal-catalogue-2026-09-22.json:577#source_commit]
 
 Both modes use the same full 59-tool native catalogue (42,775 serialized bytes),
 including the new manual entry, real native handlers and a temporary database.
@@ -35,8 +47,11 @@ runner with an isolated notice and request, not a complete real discussion
 history. The QP, QA and Workflow fixtures are real saved resources; their generated
 IDs and timestamps differ between cells. The within-pair order is reversed for
 QA. These are single observations, not randomized latency trials.
-[src: file: backend/src/api/agent_signal_bench.rs:1]
-[src: file: docs/research/signal-catalogue-2026-09-22.json:1]
+[src: file: backend/src/api/agent_signal_bench.rs:5-8#INLINE_NOTICE]
+[src: file: backend/src/api/agent_signal_bench.rs:49-79#proposal_fixture]
+[src: file: backend/src/api/agent_signal_bench.rs:185-200#catalogue_bytes]
+[src: file: docs/research/signal-catalogue-2026-09-22.json:54-63#catalogue_bytes]
+[src: file: docs/research/signal-catalogue-2026-09-22.json:95#notice_bytes]
 
 A guarded executor exposes the full catalogue, forwards the permitted reads to
 the real handler, and refuses mutations. Success requires target discovery,
@@ -45,7 +60,9 @@ value with agent-suggestion provenance, no rejected call and zero launches.
 The discovery mode also requires reading `tool_manual(signals)`. The response
 is passed unchanged through the actual message transaction and action parser;
 Markdown prose or a `json` fence is never repaired into a successful card.
-[src: file: backend/src/api/agent_signal_bench.rs:1]
+[src: file: backend/src/api/agent_signal_bench.rs:10-47#ProposalTools]
+[src: file: backend/src/api/agent_signal_bench.rs:81-93#ingest_proposal]
+[src: file: backend/src/api/agent_signal_bench.rs:238-263#target_read]
 
 The first instrument incorrectly refused three legitimate exploratory reads:
 `mcp_list`, `git_status` and `workflow_step_schema`. Its raw twelve observations
@@ -56,9 +73,9 @@ In the corrected campaign the only rejected calls were two `qa_run` attempts,
 both from Qwen's inline-mode cells. These are retained as proposal-only failures.
 Other calls outside the explicit read allowlist would still be refused; no
 claim of unrestricted agent-task performance is made.
-[src: file: backend/src/api/agent_signal_bench.rs:1]
-[src: file: docs/research/signal-catalogue-2026-09-22-attempt-1.json:1]
-[src: file: docs/research/signal-catalogue-2026-09-22.json:1]
+[src: file: backend/src/api/agent_signal_bench.rs:24-43#allowed]
+[src: file: backend/src/api/agent_signal_bench.rs:109-155#signal_benchmark_guard_preserves_exploratory_reads_and_refuses_launches]
+[src: file: docs/research/signal-catalogue-2026-09-22-attempt-1.json:552-553#instrument_limit]
 
 ## Corrected observations
 
@@ -81,16 +98,25 @@ Qwen read the new catalogue successfully in all three discovery cells, but
 produced no valid card. Gemma did not read it in any discovery cell and invented
 unsupported JSON fields. Its inline Quick Prompt cell did persist the requested
 card; its inline QA and Workflow cells did not. No automation ran in any cell.
-[src: file: docs/research/signal-catalogue-2026-09-22.json:1]
+[src: file: docs/research/signal-catalogue-2026-09-22.json:73-104]
+[src: file: docs/research/signal-catalogue-2026-09-22.json:105-143]
+[src: file: docs/research/signal-catalogue-2026-09-22.json:227-274]
+[src: file: docs/research/signal-catalogue-2026-09-22.json:340-383]
+[src: file: docs/research/signal-catalogue-2026-09-22.json:384-427]
+[src: file: docs/research/signal-catalogue-2026-09-22.json:532-575]
 
 The rejected short notice saved 109 reported first-request tokens on Qwen and
 113 on Gemma. Those savings are not shipped, and lower totals for unsuccessful
-one-turn replies are not a useful efficiency gain. The MCP declaration surface
-is 111 tools and 86,609 bytes, nine bytes below the preceding catalogue; no new
-tool declaration was added. The unchanged context bootstrap remains within its
-existing budget. No net workflow-token or latency improvement is claimed.
-[src: file: docs/research/signal-catalogue-2026-09-22.json:1]
-[src: file: backend/scripts/ci/mcp_surface_budget.py:1]
+one-turn replies are not a useful efficiency gain. At that commit the MCP declaration
+surface was 111 tools and 86,609 bytes, nine bytes below the preceding
+catalogue; no new tool declaration was added (a point-in-time figure: the
+budget gate now pins a lower ceiling). The unchanged context bootstrap remains
+within its existing budget. No net workflow-token or latency improvement is claimed.
+[src: file: docs/research/signal-catalogue-2026-09-22.json:59#first_prompt_tokens]
+[src: file: docs/research/signal-catalogue-2026-09-22.json:91#first_prompt_tokens]
+[src: file: docs/research/signal-catalogue-2026-09-22.json:326#first_prompt_tokens]
+[src: file: docs/research/signal-catalogue-2026-09-22.json:370#first_prompt_tokens]
+[src: file: backend/scripts/ci/mcp_surface_budget.py:140#CATALOGUE_MAX_BYTES]
 
 ## Functional checks and limits
 
@@ -101,8 +127,12 @@ secret provenance, project inheritance and historical terminal-signal checks
 pass. The full schema survives production history clamping under a 32,768-token
 cap. Discovery covers Automation cards in version 1; historical Planning, audit
 and QP-improvement parsers remain separate.
-[src: file: backend/tests/api_tests.rs:856]
-[src: file: backend/src/api/agent_quick_prompt_tests.rs:1]
-[src: file: backend/scripts/test_disc_introspection_mcp.py:11087]
-[src: file: backend/src/agents/runner_test.rs:1480]
-[src: file: backend/src/api/signal_catalog.rs:1]
+[src: file: backend/tests/api_tests.rs:1034-1152#discussion_action_ingests_all_four_target_families_through_the_real_message_transaction]
+[src: file: backend/src/api/agent_quick_prompt_tests.rs:58-85#native_signal_manual_reads_the_shared_registry_without_creating_an_action]
+[src: file: backend/scripts/test_disc_introspection_mcp.py:12770-12775#test_signal_catalogue_is_read_from_the_running_server_without_launching]
+[src: file: backend/tests/api_tests.rs:935-1029#discussion_action_http_contract_is_durable_and_idempotent]
+[src: file: backend/tests/api_tests.rs:1403-1458#discussion_action_invalid_proposals_are_actionable_through_the_real_message_transaction]
+[src: file: backend/tests/api_tests.rs:1303-1398#discussion_action_allow_manual_override_never_leaks_plaintext_through_the_api]
+[src: file: backend/tests/api_tests.rs:1157-1298#discussion_action_launch_context_resolves_project_env_for_a_global_target]
+[src: file: backend/src/agents/runner_test.rs:2274-2342#authoring_schemas_survive_clamping_when_tool_history_fills_the_window]
+[src: file: backend/src/api/signal_catalog.rs:10-64#catalogue]

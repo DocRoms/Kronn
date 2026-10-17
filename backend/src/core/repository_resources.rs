@@ -25,6 +25,11 @@ const INDEX_PATH: &str = "kronn/INDEX.md";
 const CONFIG_PATH: &str = "kronn/kronn.toml";
 const ROUTER_PATH: &str = ".agents/skills/kronn/SKILL.md";
 const AGENTS_PATH: &str = "docs/AGENTS.md";
+
+/// `AGENTS_PATH` under the project's docs root (KT-1192).
+fn agents_path(root: &Path) -> &'static str {
+    crate::core::docs_location::DocsRoot::of(root).relocate_static(AGENTS_PATH)
+}
 const AGENTS_LINE: &str = "Kronn resources → `kronn/INDEX.md`";
 /// Where every agent looks for skills, and so where Kronn writes them: `kronn/`
 /// only holds what has no native home (prompts, automations, artifacts).
@@ -1335,12 +1340,12 @@ fn router_skill() -> Vec<u8> {
 /// Whether `docs/AGENTS.md` already carries the Kronn pointer line — a
 /// missing read is treated the same as an absent line, never as "present".
 fn agents_line_present(root: &Path) -> bool {
-    std::fs::read_to_string(root.join(AGENTS_PATH))
+    std::fs::read_to_string(root.join(agents_path(root)))
         .is_ok_and(|current| current.lines().any(|line| line.trim() == AGENTS_LINE))
 }
 
 fn ensure_agents_line(root: &Path) -> Result<(), String> {
-    let path = root.join(AGENTS_PATH);
+    let path = root.join(agents_path(root));
     crate::core::fs_guard::assert_contained_no_symlink(root, &path)?;
     if agents_line_present(root) {
         return Ok(());
@@ -1355,7 +1360,7 @@ fn ensure_agents_line(root: &Path) -> Result<(), String> {
     } else {
         format!("{AGENTS_LINE}\n\n{current}")
     };
-    write_atomic(root, AGENTS_PATH, next.as_bytes())
+    write_atomic(root, agents_path(root), next.as_bytes())
 }
 
 /// Every path a publish writes beyond the resource's own files: the
@@ -1368,7 +1373,7 @@ pub fn publish_side_effect_paths(root: &Path) -> Vec<String> {
         ROUTER_PATH.to_string(),
     ];
     if !agents_line_present(root) {
-        paths.push(AGENTS_PATH.to_string());
+        paths.push(agents_path(root).to_string());
     }
     paths
 }

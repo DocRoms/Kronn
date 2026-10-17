@@ -61,6 +61,21 @@
   the feature is scheduled. No implementation is planned in the current UI
   iteration beyond improving the existing viewer's layout.
 
+## Status after KT-263 (0.15.1)
+
+- Shipped: `core::docs_location` resolves the folder (project override in
+  `projects.docs_dir`, migration 258 → `scan.default_docs_dir` in the config →
+  historical detection). Every `scanner::detect_docs_dir` caller reads it;
+  containment (relative, no `..`, no symlink out) is checked on save (HTTP 400)
+  and on each resolution (a refused override yields an unusable path).
+- KT-1192 made the audit pipeline relocatable: `docs_location::DocsRoot` is
+  resolved once per run and every artefact, step target and quoted prompt
+  path derives from it (`steps_for`, `DocsRoot::relocate`). `docs/` stays
+  the root of every project without an override, with identical prompts.
+- Residual: the human reading mode and doc-site generator adapters (delivery
+  steps 2-3), and `GET /api/audit/steps`, which has no project and lists the
+  default labels.
+
 ## Notes
 
 - Surfaced 2026-06-27 alongside a related fix: `AiDocViewer` used to render the

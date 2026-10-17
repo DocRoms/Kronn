@@ -340,6 +340,7 @@ class E2eContainerWorkflowTests(unittest.TestCase):
             # A skipped required check counts as passing: these always run.
             self.assertNotRegex(section, r"(?m)^    (if|needs|uses|strategy):", gate)
             self.assertIn("actions: write", section)
+            self.assertIn("checks: write", section)
             self.assertIn(
                 f"        if: \"!contains(github.event.pull_request.labels.*.name, '{label}')\"\n"
                 f"        run: |\n", section,
@@ -347,8 +348,19 @@ class E2eContainerWorkflowTests(unittest.TestCase):
             self.assertIn(f"run: scripts/ci/previous_gate_verdict.sh {path.name} {gate} {label}\n", section)
             for name in ("PR_NUMBER", "HEAD_SHA", "BASE_SHA"):
                 self.assertIn(f"          {name}: ${{{{ github.event.pull_request.", section)
-            # Only the label guard is conditional; the verdict always runs.
-            self.assertEqual(section.count("        if: "), 1, gate)
+            # Only the label guard and the superseding step are conditional;
+            # the verdict always runs. Superseding must not run on a cancel.
+            self.assertEqual(section.count("        if: "), 2, gate)
+            self.assertIn(
+                "        if: success() || failure()\n"
+                "        env:\n"
+                "          GH_TOKEN: ${{ github.token }}\n"
+                "          HEAD_SHA: ${{ github.event.pull_request.head.sha }}\n"
+                f"        run: scripts/ci/supersede_verdicts.sh {gate}\n", section,
+            )
+            self.assertLess(
+                section.index("previous_gate_verdict.sh"), section.index("supersede_verdicts.sh"), gate
+            )
 
     def test_a_push_to_main_only_builds_and_saves_the_rust_caches(self):
         # The merged tree was tested on its pull request: a push to main

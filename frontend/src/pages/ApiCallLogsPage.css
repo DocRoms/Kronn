@@ -168,7 +168,8 @@
   transition: background 0.1s;
 }
 
-.api-call-logs-row:hover {
+.api-call-logs-row:hover,
+.api-call-logs-row:focus-visible {
   background: var(--kr-bg-hover);
 }
 

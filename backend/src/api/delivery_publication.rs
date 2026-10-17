@@ -224,6 +224,8 @@ pub fn summary_from_manifest(
                 .map(|verification| DeliveryPrincipalVerification {
                     dod_id: verification.dod_id.clone(),
                     met: verification.met,
+                    live_check: verification.verification
+                        == Some(crate::models::PlanningDodVerification::PostIntegration),
                     evidence: verification.evidence.clone(),
                 })
                 .collect(),
@@ -430,6 +432,34 @@ async fn record_session(
     .await
 }
 
+/// What the worker's replies have cost so far, read from the child discussion.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct WorkerSpend {
+    tokens: Option<u64>,
+    /// `None` unless every reply has a cost: a partial sum would read as the
+    /// whole.
+    cost_usd_micros: Option<u64>,
+}
+
+fn worker_spend(
+    conn: &rusqlite::Connection,
+    child_discussion_id: &str,
+) -> anyhow::Result<WorkerSpend> {
+    let (replies, priced, tokens, cost): (i64, i64, i64, Option<f64>) = conn.query_row(
+        "SELECT COUNT(*), COUNT(cost_usd), COALESCE(SUM(tokens_used), 0), SUM(cost_usd) \
+           FROM messages \
+          WHERE discussion_id = ?1 AND role = 'Agent' AND channel = 'main'",
+        [child_discussion_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )?;
+    Ok(WorkerSpend {
+        tokens: u64::try_from(tokens).ok().filter(|tokens| *tokens > 0),
+        cost_usd_micros: cost
+            .filter(|_| replies > 0 && priced == replies)
+            .and_then(crate::agents::chat_codec::usd_to_micros),
+    })
+}
+
 /// Publish the accepted delivery's one report into the parent discussion.
 ///
 /// Called on the approve path, and again on a replayed approve: the record is
@@ -448,7 +478,8 @@ pub async fn publish_accepted_delivery(
     let attempt_no = execution.attempt_no;
     let task_id = execution.task_id.clone();
 
-    let (delivery, task, assignment_started_at, review, served_model) = db
+    let sub_discussion_id = execution.sub_discussion_id.clone();
+    let (delivery, task, assignment_started_at, review, served_model, spend) = db
         .with_conn(move |conn| {
             let delivery =
                 crate::db::worker_deliveries::get_delivery(conn, &execution_id, attempt_no)?;
@@ -465,7 +496,18 @@ pub async fn publish_accepted_delivery(
                 .map(|row| row.decision_json);
             let served_model =
                 crate::db::orchestration::get_worker_served_model(conn, &execution_id)?;
-            Ok((delivery, task, assignment_started_at, review, served_model))
+            let spend = match sub_discussion_id.as_deref() {
+                Some(child) => worker_spend(conn, child)?,
+                None => WorkerSpend::default(),
+            };
+            Ok((
+                delivery,
+                task,
+                assignment_started_at,
+                review,
+                served_model,
+                spend,
+            ))
         })
         .await?;
 
@@ -485,7 +527,9 @@ pub async fn publish_accepted_delivery(
         .unwrap_or(execution.created_at);
     let duration_ms = (delivered_at - started_at).num_milliseconds().max(0) as u64;
 
-    let facts = ExecutionFacts::from_execution(execution, served_model.as_deref(), duration_ms);
+    let mut facts = ExecutionFacts::from_execution(execution, served_model.as_deref(), duration_ms);
+    facts.tokens = spend.tokens;
+    facts.cost_usd_micros = spend.cost_usd_micros;
     // KT-613 — the review that accepted THIS attempt, and only it. A decision
     // that failed to parse leaves the report without principal evidence rather
     // than without a report: publication is total once a delivery is accepted.
@@ -606,6 +650,7 @@ mod tests {
             risks: vec!["touches a hot file".into()],
             limitations: vec!["no UI yet".into()],
             summary: "Wired the delivery contract to the approval path.".into(),
+            tests_executed: None,
         }
     }
 
@@ -614,6 +659,8 @@ mod tests {
             dod_id: dod_id.to_owned(),
             met,
             evidence: evidence.to_owned(),
+            verification: None,
+            carried_to: None,
         }
     }
 
@@ -734,6 +781,29 @@ mod tests {
         assert!(!summary.principal_verifications[0].met);
         let report = summary.render_markdown();
         assert!(report.contains("`dod-3` → not met"), "{report}");
+    }
+
+    /// KT-1254 — a declared live check reads as pending, not as a failure.
+    #[test]
+    fn a_declared_live_check_is_reported_as_pending_after_integration() {
+        let mut pending = verification("dod-4", false, "replay after restart");
+        pending.verification = Some(crate::models::PlanningDodVerification::PostIntegration);
+        let summary = summary_from_manifest(
+            "KT-1254",
+            "exec-1",
+            &manifest(),
+            &facts(),
+            &[pending],
+            at("2026-09-01T10:00:00Z"),
+        )
+        .expect("a complete manifest must produce a summary");
+
+        let report = summary.render_markdown();
+        assert!(
+            report.contains("`dod-4` → live check pending after integration"),
+            "{report}"
+        );
+        assert!(!report.contains("not met"), "{report}");
     }
 
     /// The publication path reads the decision persisted for the current
@@ -1321,6 +1391,41 @@ mod tests {
             assert!(!report.contains("**Model** unknown"), "{report}");
             assert!(!report.contains("**Model** opus\n"), "{report}");
         }
+    }
+
+    /// KT-1316 — the report carries what the worker's replies cost, and shows
+    /// nothing rather than a partial sum when one reply could not be priced.
+    #[tokio::test]
+    async fn the_delivery_report_shows_the_cost_of_the_workers_replies() {
+        async fn add_reply(db: &Database, id: &'static str, cost: Option<f64>) {
+            db.with_conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO messages (id, discussion_id, role, content, timestamp, \
+                         sort_order, tokens_used, cost_usd) \
+                     VALUES (?1, 'child-795', 'Agent', 'reply', '2026-09-25T09:01:00Z', \
+                         ?2, 1000, ?3)",
+                    rusqlite::params![id, if id == "reply-1" { 2 } else { 3 }, cost],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        }
+
+        let db = Database::open_in_memory().expect("in-memory database");
+        seed_claude_worker_delivery(&db, Some("haiku")).await;
+        add_reply(&db, "reply-1", Some(0.0125)).await;
+        add_reply(&db, "reply-2", Some(0.0075)).await;
+        let report = published_report(&db).await;
+        assert!(report.contains("- cost: $0.020000"), "{report}");
+        assert!(report.contains("- tokens: 2000"), "{report}");
+
+        let db = Database::open_in_memory().expect("in-memory database");
+        seed_claude_worker_delivery(&db, Some("haiku")).await;
+        add_reply(&db, "reply-1", Some(0.0125)).await;
+        add_reply(&db, "reply-2", None).await;
+        let report = published_report(&db).await;
+        assert!(!report.contains("- cost:"), "{report}");
     }
 
     #[tokio::test]

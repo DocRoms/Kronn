@@ -40,7 +40,7 @@ override changes the plumbing, not the process model.
 ### Bounded host check — September 8, 2026
 
 The native commands above match the compiled dispatch table.
-[src: file: backend/src/acp.rs:152-169]
+[src: file: backend/src/acp.rs:248-255#native_acp_command]
 These checks inspect help/version metadata, not authentication, negotiated
 capabilities, provider availability or successful prompts.
 
@@ -90,14 +90,14 @@ human-gated Automation proposals and the task-delegation lifecycle from the
 first turn; history-tool discovery remains deferred until the third user
 message. This instruction contract does not imply a live provider validation
 or change session-resume and pricing limitations.
-[src: file: backend/src/api/disc_prompts.rs:391]
-[src: file: backend/src/agents/runner.rs:3764]
+[src: file: backend/src/api/disc_prompts.rs:1123-1153#opencode_prompt_matches_its_injected_mcp_bridge_on_first_and_later_turns]
+[src: file: backend/src/acp.rs:1531-1570#native_session_mcp_servers]
 
 The orchestration database must also read back every native provider name it
 writes. OpenCode launch, reload and idempotent replay are covered as one native
 execution, with no fallback to Custom; unknown provider strings remain errors.
-[src: file: backend/src/db/orchestration.rs:244]
-[src: file: backend/src/db/orchestration_tests.rs:3029]
+[src: file: backend/src/db/orchestration.rs:244-258#agent_type_from_db]
+[src: file: backend/src/db/orchestration_tests.rs:4253-4286#opencode_worker_launch_reload_and_replay_keep_one_native_execution]
 
 ## Known asymmetries
 
@@ -116,18 +116,19 @@ the same job.
   not qualify live model behavior or KT-577's long-lived Claude process.
   See [native ACP continuity](../gotchas/native-acp-resume-continuity.md) for the
   negotiated `session/resume` contract and exact proof boundaries.
-  [src: file: backend/src/agents/runner.rs:3150-3224]
-  [src: file: backend/src/api/discussions/streaming.rs:1401-1502]
-  [src: file: backend/src/api/discussions/streaming.rs:5791-6085]
+  [src: file: backend/src/agents/runner.rs:2764-2824#load_completed_checkpoint]
+  [src: file: backend/src/api/discussions/streaming.rs:2593-2724#resume_with_delta_if_possible]
+  [src: file: backend/src/api/discussions/streaming.rs:8674-8995#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
 - **Kronn does not yet normalize ACP's optional session cost.** The current
   upstream v1 schema supports `usage_update.cost` as a cumulative amount with
-  an explicit currency; this is not a per-turn USD price. Kronn's normalized
-  ACP event currently retains token counts only, while its global spend report
+  an explicit currency; this is not a per-turn USD price. Kronn's native ACP
+  parser retains token counts only; a reported cost enters its ACP events
+  solely from the Claude adapter's own CLI result. Its global spend report
   reads Claude, Codex and Gemini logs. Missing cost therefore remains unknown,
   never free. This is an implementation limit, not a protocol prohibition.
   [ACP v1 UsageUpdate, checked 2026-09-08](https://agentclientprotocol.com/protocol/v1/schema#usageupdate)
-  [src: file: backend/src/acp.rs:352-365]
-  [src: file: backend/src/acp.rs:790-813]
+  [src: file: backend/src/acp.rs:1396-1418#usage_from_prompt_result]
+  [src: file: backend/src/acp/claude_adapter.rs:432-449#Cost]
 - **Statistics distinguish missing cost from a recorded zero.** Token-usage
   aggregates retain recorded amounts, fresh pricing estimates and unpriced
   tokens separately. A mixed total is partial; an existing recorded amount is
@@ -135,21 +136,22 @@ the same job.
   correction does not add cumulative/multicurrency ACP accounting or OpenCode
   collection to the separate global spend report. See
   [cost provenance](../gotchas/stats-cost-usd-not-always-measured.md).
-  [src: file: backend/src/models/stats.rs:19-95]
-  [src: file: backend/src/api/stats.rs:46-56]
+  [src: file: backend/src/models/stats.rs:7-94#CostAggregate]
+  [src: file: backend/src/api/stats.rs:282-291#unknown_cost_tokens]
 - **MCP servers holding a credential are dropped**, whole. A project mixing
   safe and credentialed entries loses the credentialed ones — silently from the
   agent's point of view, since it simply never sees them.
 - **Task workers use the same default adapter route**, retaining the direct
   builder's restrictive worktree/settings/tool policy and a fresh session.
   An explicit false override selects direct compatibility for that agent.
-  [src: file: backend/tests/adapter_worker_policy.rs:1]
+  [src: file: backend/tests/adapter_worker_policy.rs:184-192#adapted]
+  [src: file: backend/tests/adapter_worker_policy.rs:339-387#worker]
   Native ACP agents (OpenCode, Gemini, Copilot, Kiro, Vibe) cannot be
   launched as task workers: that route carries neither the delivery context
   nor the worker permission scope. `task_worker_route_policy` decides this for
   worker preparation and for every launch route; an exact joined CLI session
   of the same agent stays eligible.
-  [src: file: backend/src/agents/runner.rs:3407]
+  [src: file: backend/src/agents/runner.rs:3740-3758#task_worker_route_policy]
   The direct Copilot worker preflight keeps a four-second deadline and awaits
   process collection on timeout. Its [timeout regression](../gotchas/copilot-preflight-timeout.md)
   uses controlled time and an owned child, not a startup PID-file race.
@@ -169,9 +171,9 @@ successful run. The runner tests exercise this path with a fake ACP transport
 for creation, resume and its existing fallback, streaming, usage, cancellation,
 and prompt/persistence failures. They do not invoke an agent CLI, and ACP token
 usage still has no implied price.
-[src: file: backend/src/agents/runner.rs:3523-3758]
-[src: file: backend/src/agents/runner.rs:10020-10133]
-[src: file: backend/src/core/redact.rs:232-240]
+[src: file: backend/src/agents/runner.rs:5827-5837#acp_failure_diagnostic]
+[src: file: backend/src/agents/runner.rs:14921-15202#run_acp_session_streams_usage_through_agent_process]
+[src: file: backend/src/core/redact.rs:510-534#redact_for_audit_artifact]
 
 ## Settings catalogue correction (KT-531 / KT-597)
 
@@ -187,11 +189,11 @@ read; opening a selector additionally refreshes stale CLI targets in the
 background, preserving visible options and configuration. Claude's
 initialization-only SDK catalogue is independent of the ACP execution toggle.
 See [Claude discovery and freshness](../gotchas/claude-catalogue-discovery.md).
-[src: file: frontend/src/components/settings/AgentsSection.tsx:168-187]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:1229-1276]
-[src: file: frontend/src/lib/modelCatalogSelection.ts:33-70]
-[src: file: frontend/src/components/settings/ModelCatalogSection.tsx:67-72]
-[src: file: backend/src/core/model_catalog/codex_discovery.rs:75-158]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:197-198#useModelCatalogSnapshot]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:1306-1331#SearchableSelect]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:95-145#catalogModelOptions]
+[src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:32-74#useModelCatalogSnapshot]
+[src: file: backend/src/core/model_catalog/mod.rs:363-373#discover_inner]
 
 Saving a tier rereads the current settings and replaces only the selected
 field, preserving other agents' values and showing the new value only after
@@ -203,8 +205,8 @@ The later [consumer and migration inventory](../gotchas/model-catalogue-consumer
 covers the remaining custom selector/display paths and removal of the legacy
 HTTP runtime fallback. That source/contract inventory does not claim a live
 provider run for every selector.
-[src: file: frontend/src/lib/constants.ts:60-75]
-[src: file: frontend/src/components/AgentSwitchPicker.tsx:113-142]
+[src: file: frontend/src/lib/constants.ts:60-75#modelForAgentTier]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:12-49#resolveCatalogTier]
 
 Quick Prompt and workflow model editors also use a shared catalogue-backed
 searchable picker. Model IDs outside the snapshot remain an explicit operator
@@ -212,8 +214,8 @@ choice; known unavailable rows are disabled. Reasoning modes come from the
 effective model's metadata instead of a fixed list, and existing unadvertised
 values remain visible. QP saves preserve the existing token limit and chosen
 reasoning mode. See [form preservation](../gotchas/agent-tier-catalogue-settings.md).
-[src: file: frontend/src/components/ModelCatalogPicker.tsx:22-68]
-[src: file: frontend/src/components/workflows/QuickPromptForm.tsx:187-202]
+[src: file: frontend/src/components/ModelCatalogPicker.tsx:22-68#ModelCatalogPicker]
+[src: file: frontend/src/components/workflows/QuickPromptForm.tsx:187-202#max_tokens]
 
 Explicit QP/workflow target changes now clear old model/reasoning overrides,
 preserve the token limit and persist the exact selected connection. Named
@@ -224,7 +226,7 @@ discussion PATCH correction is backend-owned: it clears the persisted model
 only on an actual target/tier change, distinguishes an absent connection from
 explicit null, and preserves historical message models. Isolated API tests
 cover this path, not provider inference or a new browser qualification.
-[src: file: frontend/src/lib/agentSelection.ts:1-16]
-[src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1303-1333]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:1242-1263]
-[src: file: backend/tests/discussion_target_model.rs:94-211]
+[src: file: frontend/src/lib/agentSelection.ts:3-16#agentSettingsForSelection]
+[src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1363-1371#currentConnectionId]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1157-1174#agentSettingsForSelection]
+[src: file: backend/tests/discussion_target_model.rs:98-219#changing_agent_clears_the_previous_explicit_model]

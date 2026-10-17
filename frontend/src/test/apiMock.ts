@@ -178,6 +178,8 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       getScanPaths: resolve([]),
       getScanIgnore: resolve([]),
       getScanDepth: resolve(2),
+      getDefaultDocsDir: resolve(null),
+      saveDefaultDocsDir: resolve(null),
       getAgentAccess: resolve({ agents: {} }),
       getAgentAccessEffective: resolve([]),
       getModelTiers: resolve({ tiers: {} }),
@@ -209,6 +211,8 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       get: resolve(null),
       agentFiles: resolve({ policy: 'repo' }),
       setAgentFiles: resolve({ policy: 'repo' }),
+      docsLocation: resolve({ override_dir: null, default_dir: null, effective_dir: 'docs', source: 'detected', refused: null }),
+      setDocsLocation: resolve({ override_dir: null, default_dir: null, effective_dir: 'docs', source: 'detected', refused: null }),
       scan: resolve([]),
       create: resolve({}),
       addFolder: resolve({}),
@@ -223,6 +227,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       }),
       usedSkills: resolve([]),
       linkedReposCandidates: resolve([]),
+      linkedReposDocs: resolve([]),
       setLinkedRepos: resolve(true),
       dockerStatus: resolve({
         compose_present: false,
@@ -243,6 +248,12 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
         error: null,
       }),
       installTemplate: resolve({}),
+      templateMergePlan: resolve(null),
+      templateMergeStart: resolve(null),
+      templateMergeAccept: resolve(null),
+      templateMergeDiscard: resolve(undefined),
+      templateReinstallPlan: resolve(null),
+      templateReinstall: resolve(null),
       auditInfo: resolve({ files: [], todos: [] }),
       contextAudit: resolve({
         project_id: '',
@@ -271,8 +282,13 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
         resumable_after_step: null, state_in_history: null,
       }),
       validateAudit: resolve('NoTemplate'),
+      // KT-1122 — null = verdict unknown: banners offer nothing until a test sets one.
+      validationState: resolve(null),
       cancelAudit: resolve('NoTemplate'),
+      acceptAuditStep: resolve({ step: 1, accepted_by: 'operator', accepted_at: '2026-10-11T00:00:00Z', remaining_failed: [] }),
+      auditRunsCleanup: resolve(0),
       checkDrift: resolve({ stale_steps: [], checksums_outdated: false }),
+      acknowledgeDrift: resolve({ audit_date: null, stale_sections: [], fresh_sections: [], total_sections: 0, sources_state: 'unknown', broken_citations: 0 }),
       // Code view: source browsing.
       listSourceFiles: resolve({ entries: [], truncated: false }),
       readSourceFile: resolve({ path: '', content: '' }),
@@ -282,8 +298,23 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       gitBlame: resolve({ path: '', lines: [] }),
       gitCommitDetail: resolve(null),
       getBriefing: resolve(null),
+      savedBriefing: resolve(null),
       startBriefing: resolve({ discussion_id: '' }),
       saveBriefing: resolve({}),
+      crossAuditEstimate: resolve({ agents: 2, cross_checked_steps: ['docs/inconsistencies-security.md'], low_factor: 2, high_factor: 4, max_cross_checked: 30, estimated: true }),
+      briefingDocs: resolve([]),
+      checkBriefingDoc: resolve({ path: '', kind: 'docs', is_dir: true, last_commit: null }),
+      briefingDefaults: resolve({ docs_dir: 'docs', docs_dir_source: 'default', folder_exists: false, folder: { kind: 'missing' } }),
+      convertTdTasks: resolve({ created: 0, already_linked: 0, skipped: 0, themes: [], items: [] }),
+      auditTds: resolve({
+        items: [], counts: { pending: 0, confirmed: 0, accepted_decision: 0, deferred: 0, rejected: 0 },
+        by_severity: [], gate: { blocking_total: 0, blocking_settled: 0, met: false, open_disputes: 0 },
+        validated: false, audit_date: null, validation_discussion_id: null, dispute_discussion_id: null,
+      }),
+      decideTds: resolve({ results: [], gate: { blocking_total: 0, blocking_settled: 0, met: false, open_disputes: 0 } }),
+      createTdTask: resolve({ created: 0, already_linked: 0, skipped: 0, themes: [], items: [] }),
+      tdTalk: resolve({ validation_discussion_id: null, discussion_id: null, messages: [] }),
+      startTdTalk: resolve({ discussion_id: 'td-disc', created: true }),
       listAiFiles: resolve([]),
       readAiFile: resolve({ path: '', content: '' }),
       searchAiFiles: resolve([]),
@@ -339,14 +370,15 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       // = no resumable interrupted run, so the button stays "Lancer".
       // Tests can override per-case to simulate an interrupted audit.
       auditResumable: resolve(null),
-      // 0.8.4 (#298) — recap-panel inputs. Default to "no completed
-      // audit yet" so tests that don't care about the panel just see
-      // it stay hidden.
-      auditLatest: resolve(null),
+      // Default: no audit run yet.
+      auditLatest: resolve({ latest: null, latest_completed: null, steps_to_redo: [], lease_orphaned: false }),
       // 0.8.4 (#298) — recap chip strip. Default empty history; tests
       // override to seed the chip list.
       auditHistory: resolve([]),
-      auditTimeline: resolve({ runs: [], steps: [], recorded_audits: [], recorded_validated_at: null }),
+      auditTimeline: resolve({
+        runs: [], steps: [], recorded_audits: [], recorded_validated_at: null,
+        latest_validation: null, lease_orphaned: false,
+      }),
       restoreAuditState: resolve({
         project_id: '', status: 'Audited', kind: 'kronn_audit',
         state_file: 'docs/.kronn.json', runtime_workspace: '.kronn/',
@@ -354,6 +386,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
         resumable_after_step: null, state_in_history: null,
       }),
       auditRunSteps: resolve([]),
+      auditRunCost: resolve(null),
     auditSteps: resolve([]),
       // 0.8.4 (#294) — cross-agent memory bindings. Default "no
       // imported discs" so sidebar tests that don't care about the
@@ -365,11 +398,19 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       auditStatusAll: resolve([]),
       fullAuditStream: vi.fn(),
       partialAuditStream: vi.fn(),
+      // KT-1168 — « Revalider l'audit »: nothing to do by default.
+      revalidationPlan: resolve({ sources_state: 'unknown', sections: [], agent_steps: [], reanchor_count: 0, human_count: 0, unanchored: [], unanchored_docs: [], relevance: { sections: 0, anchors_intact: 0, outdated: 0, no_longer_relevant: 0, unanchored: 0, untouched_stale: 0, missing_references: 0, prose_missing: 0, anchored_intact_pct: null } }),
+      revalidateAuditStream: vi.fn(),
+      acknowledgeCitations: resolve({}),
+      // KT-1079 — nothing to reconfirm by default.
+      docProvenance: resolve({ docs: [], to_reconfirm: 0 }),
+      confirmDocProvenance: resolve({ docs: [], to_reconfirm: 0 }),
     },
 
     agents: {
       listAll: resolve([]),
       versionCheck: resolve([]),
+      reachability: resolve([]),
     },
 
     mcps: {
@@ -475,6 +516,8 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
         stats: { ready: 0, blocked: 0, in_progress: 0, ideas: 0, done: 0, later: 0 },
       }),
       addBlocker: resolve({}),
+      assign: resolve({}),
+      unassign: resolve({}),
       discussionPlan: resolve({
         discussion_id: '',
         primary_objective: null,

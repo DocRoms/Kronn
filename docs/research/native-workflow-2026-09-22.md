@@ -7,7 +7,7 @@ steps: emit `{"items":[1,2,3]}`, count those items, then copy the count into
 execute and produce `{"total":3}`. A successful create call alone does not pass.
 The harness calls the real JsonData and TransformData executors, while refusing
 to execute any other generated step type. It does not launch the full workflow
-scheduler or a child model. [src: file: backend/src/api/agent_quick_prompt_bench.rs:6]
+scheduler or a child model. [src: file: backend/src/api/agent_quick_prompt_bench.rs:4-115#bench_native_three_step_workflow]
 
 Each observation uses full native declarations, tiering disabled, and
 `KRONN_OLLAMA_NUM_CTX_CAP=32768`. These are development observations across
@@ -15,10 +15,10 @@ changing implementations, not randomized comparative trials or evidence of
 reliability across prompts. Token totals sum provider-reported prompt tokens
 across turns. Raw reports retain tool arguments, emitted text, persisted workflow
 and deterministic execution results.
-[src: file: docs/research/native-workflow-2026-09-22-attempt-1.json:1]
-[src: file: docs/research/native-workflow-2026-09-22-attempt-2.json:1]
-[src: file: docs/research/native-workflow-2026-09-22-attempt-3.json:1]
-[src: file: docs/research/native-workflow-2026-09-22-attempt-4.json:1]
+[src: file: docs/research/native-workflow-2026-09-22-attempt-1.json:1-44]
+[src: file: docs/research/native-workflow-2026-09-22-attempt-2.json:1-144]
+[src: file: docs/research/native-workflow-2026-09-22-attempt-3.json:1-206]
+[src: file: docs/research/native-workflow-2026-09-22-attempt-4.json:1-200]
 
 | Attempt | Local model | Schema behavior | Turns | Prompt tokens | Seconds | Result |
 | --- | --- | --- | ---: | ---: | ---: | --- |
@@ -33,9 +33,11 @@ count is 1. Its successful tool calls and confident prose therefore did not
 constitute functional success. The canonical contract now documents that
 fallback precedes the operation, preserves the requested payload shape, and
 requires listing existing workflows before choosing an example id.
-[src: file: docs/research/native-workflow-2026-09-22-attempt-3.json:1]
-[src: file: backend/src/workflows/transform_data_step.rs:77]
-[src: file: backend/src/api/workflow_step_schema.json:1]
+[src: file: docs/research/native-workflow-2026-09-22-attempt-3.json:2-95]
+[src: file: backend/src/workflows/transform_data_step.rs:71-114#evaluate_field]
+[src: file: backend/src/api/workflow_step_schema.json:113]
+[src: file: backend/src/api/workflow_step_schema.json:273]
+[src: file: backend/src/api/workflow_step_schema.json:414]
 
 The first two traces record calls at the executor boundary, not the complete
 provider request after clamping. Production already raises a tooled run to its
@@ -45,14 +47,14 @@ full window plus accumulated tool history, then the clamp-before-resize order.
 It verifies that the schema stays complete while ordinary output is trimmed.
 The model failures do not establish whether or when their schema was truncated,
 or whether clamping caused a particular mistaken argument.
-[src: file: backend/src/agents/runner_test.rs:1480]
+[src: file: backend/src/agents/runner_test.rs:2274-2342#authoring_schemas_survive_clamping_when_tool_history_fills_the_window]
 
 Attempt 4 read the JsonData and TransformData contracts separately, created the
 correct disabled draft and produced the requested result through all three
 real deterministic executors. This is one successful local-model fixture, not
 a cross-model success rate or evidence that the contract changes caused the
 improvement: both the implementation and the model changed.
-[src: file: docs/research/native-workflow-2026-09-22-attempt-4.json:1]
+[src: file: docs/research/native-workflow-2026-09-22-attempt-4.json:1-200]
 
 Frozen libtest executable SHA-256 values:
 
@@ -76,22 +78,31 @@ description. It reports serialized UTF-8 bytes, not tokenizer estimates:
 | Automations family | 6731 bytes, 10 tools | 9751 bytes, 15 tools | 3020 bytes |
 | Experimental tiered initial catalogue | 15203 bytes, 27 tools | 15322 bytes, 27 tools | 119 bytes |
 
-The existing six-model report records the earlier Quick Prompt increment; this
-measurement does not reconstruct or replace that historical experiment.
-[src: file: backend/src/api/agent_quick_prompt_bench.rs:199]
-[src: file: docs/research/native-tool-catalogue-2026-09-22.md:1]
+The table is what the static measurement printed on the tree of that day; the
+same ignored test prints other figures on today's tree (the catalogue has
+grown since: 48141 bytes and 64 tools for the full surface, a 3062-byte
+workflow increment). The existing six-model report records
+the earlier Quick Prompt increment; this measurement does not reconstruct or
+replace that historical experiment.
+[src: file: backend/src/api/agent_quick_prompt_bench.rs:217-267#measure_workflow_catalogue_surface]
+[src: file: docs/research/native-tool-catalogue-2026-09-22.md:134-141]
 
-The MCP declaration surface stays at 111 tools and 86618 bytes; moving its
-schema implementation into the shared backend endpoint adds no declaration.
-The 11 MCP budget tests and 637 bridge tests pass. Backend checks include 113
+When this report was written, the MCP declaration surface stayed at 111 tools
+and 86618 bytes; the budget script now pins 84,929 bytes. Moving the schema
+implementation into the shared backend endpoint adds no declaration: the bridge
+tool only reads that endpoint. The 11 MCP budget tests and 637 bridge tests
+passed then (both test files hold more tests today). Backend checks included 113
 workflow-filtered regressions, 6 clamping regressions, and all-target Clippy
-with warnings denied. [src: file: backend/scripts/ci/mcp_surface_budget.py:1]
-[src: file: backend/scripts/test_disc_introspection_mcp.py:6069]
-[src: file: backend/src/api/agent_workflow_tests.rs:1]
-[src: file: backend/src/agents/runner_test.rs:1480]
+with warnings denied.
+[src: file: backend/scripts/ci/mcp_surface_budget.py:140#CATALOGUE_MAX_BYTES]
+[src: file: backend/scripts/ci/test_mcp_surface_budget.py:40-212#McpSurfaceBudgetTests]
+[src: file: backend/scripts/disc-introspection-mcp.py:9532-9534#call_workflow_step_schema]
+[src: file: backend/scripts/test_disc_introspection_mcp.py:6970-6972#test_step_schema_reads_the_shared_backend_contract]
+[src: file: backend/src/api/agent_workflow_tests.rs:23-248#workflow_authoring_creates_a_disabled_draft_and_preserves_omitted_fields]
+[src: file: backend/src/agents/runner_test.rs:2223-2403#clamp_trims_the_biggest_tool_result_to_fit_the_cap]
 
 The [two-small-model growth check](native-catalogue-growth-2026-09-22.md)
 replays the seven existing non-workflow scenarios with the enlarged catalogue.
 All fourteen pass/fail outcomes match the earlier full-mode observations; the
 report preserves the added prompt-token cost and the historical-build limits.
-[src: file: docs/research/native-catalogue-growth-2026-09-22.json:1]
+[src: file: docs/research/native-catalogue-growth-2026-09-22.json:26-457]

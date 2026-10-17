@@ -15,6 +15,8 @@ vi.mock('../../lib/api', () => ({
   // Empty coverage is the honest neutral: no sessions, nothing claimed.
   telemetry: { coverage: vi.fn().mockResolvedValue([]) },
   measuredRatio: vi.fn(() => null),
+  // KT-1320 — ProjectCard lists the named connections the audit picker offers.
+  externalApi: { list: vi.fn().mockResolvedValue([]) },
   projects: {
     list: vi.fn().mockResolvedValue([]),
     scan: vi.fn().mockResolvedValue([]),
@@ -26,6 +28,7 @@ vi.mock('../../lib/api', () => ({
     // the mocked module returns undefined and the cards crash silently.
     auditStatus: vi.fn().mockResolvedValue(null),
     auditResumable: vi.fn().mockResolvedValue(null),
+    docProvenance: vi.fn().mockResolvedValue({ docs: [], to_reconfirm: 0 }),
     agentFiles: vi.fn().mockResolvedValue({ policy: 'repo' }),
     githubConnection: vi.fn().mockResolvedValue({
       project_id: '', mode: 'not_connected', state: 'not_connected', machine_token_available: false,
@@ -33,6 +36,7 @@ vi.mock('../../lib/api', () => ({
     }),
     auditStatusAll: vi.fn().mockResolvedValue([]),
     auditHistory: vi.fn().mockResolvedValue([]),
+    auditTimeline: vi.fn().mockResolvedValue([]),
     auditEvidence: vi.fn().mockResolvedValue({
       project_id: '', status: 'NoTemplate', kind: 'no_documentation',
       state_file: 'docs/.kronn.json', runtime_workspace: '.kronn/',

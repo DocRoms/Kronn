@@ -41,6 +41,8 @@ enum Turn {
     /// Calls this many tools, the usage growing with each, without a word of
     /// text; then works until stopped.
     ToolChain(u32),
+    /// Reports `REPORTED` usage and this cost, then works until stopped.
+    PricedHang { usd_micros: u64 },
 }
 
 struct ScriptedAgent {
@@ -48,6 +50,12 @@ struct ScriptedAgent {
     prompts: AtomicUsize,
     cancels: AtomicUsize,
     shutdowns: AtomicUsize,
+    /// A file the agent writes as soon as it is prompted (KT-1211: the write
+    /// a stopped step leaves behind).
+    writes: std::sync::Mutex<Option<(std::path::PathBuf, String)>>,
+    /// A directory the agent makes read-only right after its write: whatever
+    /// settles the target afterwards can neither put it back nor mark it.
+    locks: std::sync::Mutex<Option<std::path::PathBuf>>,
 }
 
 impl ScriptedAgent {
@@ -57,6 +65,8 @@ impl ScriptedAgent {
             prompts: AtomicUsize::new(0),
             cancels: AtomicUsize::new(0),
             shutdowns: AtomicUsize::new(0),
+            writes: std::sync::Mutex::new(None),
+            locks: std::sync::Mutex::new(None),
         })
     }
 }
@@ -97,6 +107,14 @@ impl AcpTransport for ScriptedAgent {
         _: &str,
         events: Sender<AcpSessionEvent>,
     ) -> Result<(), AcpError> {
+        if let Some((path, content)) = self.writes.lock().unwrap().clone() {
+            std::fs::write(path, content).unwrap();
+        }
+        #[cfg(unix)]
+        if let Some(dir) = self.locks.lock().unwrap().clone() {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        }
         self.prompts.fetch_add(1, Ordering::SeqCst);
         match self.turn {
             Turn::Hang => std::future::pending().await,
@@ -136,6 +154,17 @@ impl AcpTransport for ScriptedAgent {
                 }
                 let _ = events.send(AcpSessionEvent::Completed).await;
                 Ok(())
+            }
+            Turn::PricedHang { usd_micros } => {
+                let _ = events
+                    .send(AcpSessionEvent::Usage {
+                        input_tokens: REPORTED.input,
+                        output_tokens: REPORTED.output,
+                        prompt_cache: PromptCacheUsage::default(),
+                    })
+                    .await;
+                let _ = events.send(AcpSessionEvent::Cost { usd_micros }).await;
+                std::future::pending().await
             }
             Turn::ToolChain(calls) => {
                 for call in 1..=u64::from(calls) {
@@ -217,6 +246,23 @@ fn state_with(config: crate::models::AppConfig) -> AppState {
     )
 }
 
+/// The project's `docs/` as an earlier audit left it: recorded and marked, so
+/// the partial refresh is not held for the briefing's choice (KT-1299).
+fn kronn_docs(project: &Path) {
+    let docs = project.join("docs");
+    std::fs::create_dir_all(&docs).unwrap();
+    std::fs::write(
+        docs.join(".kronn.json"),
+        r#"{"audits":[{"date":"2026-05-01","kronn_version":"0.8.4","type":"full"}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        docs.join("audit-note.md"),
+        "<!-- kronn:generated=2026-05-01 -->\n",
+    )
+    .unwrap();
+}
+
 async fn add_project(state: &AppState, id: &str, path: &Path) {
     let row: crate::models::Project = serde_json::from_value(json!({
         "id": id, "name": id, "path": path.to_string_lossy(),
@@ -265,6 +311,9 @@ fn launch(
                     kind: Some(AuditKind::Docker),
                     custom_prompt: None,
                     resume_run_id: None,
+                    retry_steps: None,
+                    redo_steps: None,
+                    fresh: None,
                 }),
             )
             .await
@@ -273,7 +322,12 @@ fn launch(
                 let chain = crate::api::audit::assemble_chained_steps(AuditKind::Full);
                 let step = chain
                     .iter()
-                    .position(crate::api::audit::partial_selectable)
+                    .position(|step| {
+                        crate::api::audit::partial_selectable(
+                            step,
+                            &crate::core::docs_location::DocsRoot::default(),
+                        )
+                    })
                     .expect("a refreshable section")
                     + 1;
                 crate::api::audit::drift::partial_audit(
@@ -397,6 +451,567 @@ async fn a_stop_ends_an_acp_step_in_seconds(pipeline: Pipeline) {
     );
     let (status, _) = latest_run_steps(&state, "proj-stop").await;
     assert_eq!(status, "Cancelled", "{pipeline:?}");
+}
+
+/// KT-1211 — a Stop in the middle of a step that has already written its
+/// target never leaves that document half-written: it is put back as it was
+/// before the step, and the step says so.
+async fn a_stop_mid_write_puts_the_target_back(pipeline: Pipeline) {
+    let state = new_state();
+    let project = tempfile::tempdir().unwrap();
+    let target = match pipeline {
+        Pipeline::Full => {
+            crate::api::audit::assemble_chained_steps(AuditKind::Docker)[0].target_file
+        }
+        Pipeline::Partial => {
+            let chain = crate::api::audit::assemble_chained_steps(AuditKind::Full);
+            chain
+                .iter()
+                .find(|step| {
+                    crate::api::audit::partial_selectable(
+                        step,
+                        &crate::core::docs_location::DocsRoot::default(),
+                    )
+                })
+                .expect("a refreshable section")
+                .target_file
+        }
+    };
+    let path = project.path().join(target);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    const BEFORE: &str = "# The doc before the step\n\nOriginal, whole content.\n";
+    kronn_docs(project.path());
+    std::fs::write(&path, BEFORE).unwrap();
+
+    let agent = ScriptedAgent::new(Turn::Hang);
+    *agent.writes.lock().unwrap() = Some((path.clone(), "# Half writ".to_string()));
+    let _route = route(project.path(), &agent);
+    add_project(&state, "proj-half", project.path()).await;
+    let run = launch(&state, pipeline, "proj-half", AgentType::OpenCode);
+    until("the agent to be working on its step", || {
+        agent.prompts.load(Ordering::SeqCst) > 0
+    })
+    .await;
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "# Half writ",
+        "{pipeline:?}: the agent has written its half"
+    );
+
+    let response = crate::api::audit::full::cancel_audit(
+        axum::extract::State(state.clone()),
+        axum::extract::Path("proj-half".to_string()),
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(10), run)
+        .await
+        .unwrap_or_else(|_| panic!("{pipeline:?}: the stopped audit never ended"))
+        .unwrap();
+    assert!(response.0.success, "{pipeline:?}: {:?}", response.0.error);
+
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        BEFORE,
+        "{pipeline:?}: the killed step's write is undone"
+    );
+    let (status, steps) = latest_run_steps(&state, "proj-half").await;
+    assert_eq!(status, "Cancelled", "{pipeline:?}");
+    let stopped = steps
+        .iter()
+        .find(|row| row.target_state.is_some())
+        .unwrap_or_else(|| panic!("{pipeline:?}: no step recorded what became of its target"));
+    assert_eq!(stopped.target_state.as_deref(), Some("restored"));
+    assert!(
+        stopped.ended_at.is_some(),
+        "{pipeline:?}: the step is settled, not dangling"
+    );
+    assert!(
+        stopped
+            .step_warning
+            .as_deref()
+            .unwrap_or("")
+            .contains("stopped during step"),
+        "{pipeline:?}: {:?}",
+        stopped.step_warning
+    );
+}
+
+#[tokio::test]
+async fn a_stop_mid_write_of_a_full_audit_step_puts_its_target_back() {
+    a_stop_mid_write_puts_the_target_back(Pipeline::Full).await;
+}
+
+#[tokio::test]
+async fn a_stop_mid_write_of_a_partial_audit_step_puts_its_target_back() {
+    a_stop_mid_write_puts_the_target_back(Pipeline::Partial).await;
+}
+
+/// The directory a test made read-only, writable again when it ends (so the
+/// temp project can be removed even when an assertion panics).
+#[cfg(unix)]
+struct Unlock(std::path::PathBuf);
+
+#[cfg(unix)]
+impl Drop for Unlock {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+/// The chain target a pipeline's first step writes.
+fn first_target(pipeline: Pipeline) -> &'static str {
+    match pipeline {
+        Pipeline::Full => {
+            crate::api::audit::assemble_chained_steps(AuditKind::Docker)[0].target_file
+        }
+        Pipeline::Partial => {
+            let chain = crate::api::audit::assemble_chained_steps(AuditKind::Full);
+            chain
+                .iter()
+                .find(|step| {
+                    crate::api::audit::partial_selectable(
+                        step,
+                        &crate::core::docs_location::DocsRoot::default(),
+                    )
+                })
+                .expect("a refreshable section")
+                .target_file
+        }
+    }
+}
+
+/// Waits until the audit has recorded what the agent wrote to the target of
+/// the step in flight (what a crash can later vouch for).
+async fn until_observed(state: &AppState, project: &str, step_index: u32, expected: &str) {
+    let want = crate::api::audit::step_guard::fingerprint(Some(expected));
+    let run_id = latest_run(state, project).await.id;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let run_id = run_id.clone();
+            let seen = state
+                .db
+                .with_conn(move |conn| {
+                    crate::db::audit_runs::step_snapshot(conn, &run_id, step_index)
+                })
+                .await
+                .unwrap()
+                .and_then(|snapshot| snapshot.observed_hash);
+            if seen.as_deref() == Some(want.as_str()) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the audit never recorded what the agent wrote");
+}
+
+/// KT-1211 — the restore AND the partial marker both fail (the directory
+/// became read-only): the step is never recorded as `restored`, and accepting
+/// it asks for an override. This is the guard against the pipeline forcing
+/// `restored` onto a target that is in an unknown state.
+#[cfg(unix)]
+async fn a_stop_that_cannot_settle_the_target_is_not_recorded_as_restored(pipeline: Pipeline) {
+    let state = new_state();
+    let project = tempfile::tempdir().unwrap();
+    let path = project.path().join(first_target(pipeline));
+    let dir = path.parent().unwrap().to_path_buf();
+    std::fs::create_dir_all(&dir).unwrap();
+    const BEFORE: &str = "# The doc before the step\n\nOriginal, whole content.\n";
+    kronn_docs(project.path());
+    std::fs::write(&path, BEFORE).unwrap();
+
+    let agent = ScriptedAgent::new(Turn::Hang);
+    *agent.writes.lock().unwrap() = Some((path.clone(), "# Half writ".to_string()));
+    *agent.locks.lock().unwrap() = Some(dir.clone());
+    let _unlock = Unlock(dir.clone());
+    let _route = route(project.path(), &agent);
+    add_project(&state, "proj-stuck", project.path()).await;
+    let run = launch(&state, pipeline, "proj-stuck", AgentType::OpenCode);
+    until("the agent to be working on its step", || {
+        agent.prompts.load(Ordering::SeqCst) > 0
+    })
+    .await;
+
+    let response = crate::api::audit::full::cancel_audit(
+        axum::extract::State(state.clone()),
+        axum::extract::Path("proj-stuck".to_string()),
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(10), run)
+        .await
+        .unwrap_or_else(|_| panic!("{pipeline:?}: the stopped audit never ended"))
+        .unwrap();
+    assert!(response.0.success, "{pipeline:?}: {:?}", response.0.error);
+
+    // Nothing could be put back: the half document is still there.
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "# Half writ",
+        "{pipeline:?}"
+    );
+    let (_, steps) = latest_run_steps(&state, "proj-stuck").await;
+    let stuck = steps
+        .iter()
+        .find(|row| {
+            row.step_warning
+                .as_deref()
+                .is_some_and(|reason| reason.contains("stopped during step"))
+        })
+        .unwrap_or_else(|| panic!("{pipeline:?}: no stopped step: {steps:?}"));
+    assert_eq!(
+        stuck.target_state, None,
+        "{pipeline:?}: a target that could be neither restored nor marked is not `restored`"
+    );
+    assert!(
+        stuck
+            .step_warning
+            .as_deref()
+            .unwrap()
+            .contains("neither be put back nor marked"),
+        "{pipeline:?}: {:?}",
+        stuck.step_warning
+    );
+    assert!(stuck.ended_at.is_some());
+    assert_eq!(
+        crate::api::audit::accept::accept_blocker_of(stuck),
+        Some(crate::api::audit::step_guard::AcceptBlocker::Killed),
+        "{pipeline:?}: accepting it needs the override"
+    );
+    // Its snapshot is kept: the acceptance diff is built from it.
+    let run_id = latest_run(&state, "proj-stuck").await.id;
+    let step_index = stuck.step_index;
+    let snapshot = state
+        .db
+        .with_conn(move |conn| crate::db::audit_runs::step_snapshot(conn, &run_id, step_index))
+        .await
+        .unwrap();
+    assert_eq!(
+        snapshot.and_then(|s| s.content).as_deref(),
+        Some(BEFORE),
+        "{pipeline:?}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_stop_that_cannot_settle_a_full_audit_target_is_not_recorded_as_restored() {
+    a_stop_that_cannot_settle_the_target_is_not_recorded_as_restored(Pipeline::Full).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_stop_that_cannot_settle_a_partial_audit_target_is_not_recorded_as_restored() {
+    a_stop_that_cannot_settle_the_target_is_not_recorded_as_restored(Pipeline::Partial).await;
+}
+
+/// KT-1211 — the user edits the doc by hand between the crash and the next
+/// boot: boot never overwrites that edit; it flags the file and keeps the
+/// pre-step snapshot.
+async fn a_hand_edit_between_a_crash_and_boot_survives(pipeline: Pipeline) {
+    let state = new_state();
+    let project = tempfile::tempdir().unwrap();
+    let path = project.path().join(first_target(pipeline));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    const BEFORE: &str = "# The doc before the step\n\nOriginal, whole content.\n";
+    kronn_docs(project.path());
+    std::fs::write(&path, BEFORE).unwrap();
+
+    let agent = ScriptedAgent::new(Turn::Hang);
+    *agent.writes.lock().unwrap() = Some((path.clone(), "# Half writ".to_string()));
+    let _route = route(project.path(), &agent);
+    add_project(&state, "proj-hand", project.path()).await;
+    let run = launch(&state, pipeline, "proj-hand", AgentType::OpenCode);
+    until("the agent to be working on its step", || {
+        agent.prompts.load(Ordering::SeqCst) > 0
+    })
+    .await;
+    let (_, open) = latest_run_steps(&state, "proj-hand").await;
+    let step_index = open
+        .iter()
+        .find(|row| row.ended_at.is_none())
+        .expect("the step in flight")
+        .step_index;
+    // The audit saw the agent's write; then the backend died, and the user
+    // rewrote the doc by hand.
+    until_observed(&state, "proj-hand", step_index, "# Half writ").await;
+    const EDIT: &str = "# Mine\n\nA careful hand edit made after the crash.\n";
+    std::fs::write(&path, EDIT).unwrap();
+
+    let settled = state
+        .db
+        .with_conn(crate::api::audit::step_guard::settle_unfinished_at_boot)
+        .await
+        .unwrap();
+    assert_eq!(settled, 1, "{pipeline:?}");
+    let after = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        after.contains("A careful hand edit made after the crash."),
+        "{pipeline:?}: {after}"
+    );
+    assert!(
+        crate::api::audit::step_guard::has_partial_marker(&after),
+        "{pipeline:?}: {after}"
+    );
+    let (_, steps) = latest_run_steps(&state, "proj-hand").await;
+    let row = steps
+        .iter()
+        .find(|row| row.step_index == step_index)
+        .unwrap();
+    assert_eq!(row.target_state.as_deref(), Some("partial"), "{pipeline:?}");
+    let run_id = latest_run(&state, "proj-hand").await.id;
+    let snapshot = state
+        .db
+        .with_conn(move |conn| crate::db::audit_runs::step_snapshot(conn, &run_id, step_index))
+        .await
+        .unwrap();
+    assert_eq!(
+        snapshot.and_then(|s| s.content).as_deref(),
+        Some(BEFORE),
+        "{pipeline:?}"
+    );
+
+    let _ = crate::api::audit::full::cancel_audit(
+        axum::extract::State(state.clone()),
+        axum::extract::Path("proj-hand".to_string()),
+    )
+    .await;
+    let _ = tokio::time::timeout(Duration::from_secs(10), run).await;
+}
+
+#[tokio::test]
+async fn a_hand_edit_between_a_crash_and_boot_of_a_full_audit_survives() {
+    a_hand_edit_between_a_crash_and_boot_survives(Pipeline::Full).await;
+}
+
+#[tokio::test]
+async fn a_hand_edit_between_a_crash_and_boot_of_a_partial_audit_survives() {
+    a_hand_edit_between_a_crash_and_boot_survives(Pipeline::Partial).await;
+}
+
+/// KT-1211 — the backend dies while a step is rewriting its target: nothing in
+/// memory survives, so what boot sees is exactly the database as it stands
+/// during the step. Boot puts the doc back and gives the step a verdict,
+/// without waiting for the next launch.
+async fn a_backend_crash_mid_step_is_settled_at_boot(pipeline: Pipeline) {
+    let state = new_state();
+    let project = tempfile::tempdir().unwrap();
+    let target = match pipeline {
+        Pipeline::Full => {
+            crate::api::audit::assemble_chained_steps(AuditKind::Docker)[0].target_file
+        }
+        Pipeline::Partial => {
+            let chain = crate::api::audit::assemble_chained_steps(AuditKind::Full);
+            chain
+                .iter()
+                .find(|step| {
+                    crate::api::audit::partial_selectable(
+                        step,
+                        &crate::core::docs_location::DocsRoot::default(),
+                    )
+                })
+                .expect("a refreshable section")
+                .target_file
+        }
+    };
+    let path = project.path().join(target);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    const BEFORE: &str = "# The doc before the step\n\nOriginal, whole content.\n";
+    kronn_docs(project.path());
+    std::fs::write(&path, BEFORE).unwrap();
+
+    let agent = ScriptedAgent::new(Turn::Hang);
+    *agent.writes.lock().unwrap() = Some((path.clone(), "# Half writ".to_string()));
+    let _route = route(project.path(), &agent);
+    add_project(&state, "proj-crash", project.path()).await;
+    let run = launch(&state, pipeline, "proj-crash", AgentType::OpenCode);
+    until("the agent to be working on its step", || {
+        agent.prompts.load(Ordering::SeqCst) > 0
+    })
+    .await;
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Half writ");
+    let (_, open) = latest_run_steps(&state, "proj-crash").await;
+    let open = open
+        .iter()
+        .find(|row| row.ended_at.is_none())
+        .expect("the step in flight");
+    let step_index = open.step_index;
+    // Boot puts back only what the audit saw the agent write.
+    until_observed(&state, "proj-crash", step_index, "# Half writ").await;
+    let run_id = latest_run(&state, "proj-crash").await.id;
+    // The pre-step content is durable: that is what survives the crash.
+    let snapshot = {
+        let run_id = run_id.clone();
+        state
+            .db
+            .with_conn(move |conn| crate::db::audit_runs::step_snapshot(conn, &run_id, step_index))
+            .await
+            .unwrap()
+    };
+    assert_eq!(
+        snapshot.and_then(|s| s.content).as_deref(),
+        Some(BEFORE),
+        "{pipeline:?}: the pre-step content is persisted, not only in memory"
+    );
+
+    // Boot.
+    let settled = state
+        .db
+        .with_conn(crate::api::audit::step_guard::settle_unfinished_at_boot)
+        .await
+        .unwrap();
+    assert_eq!(settled, 1, "{pipeline:?}");
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        BEFORE,
+        "{pipeline:?}: the half-written doc is put back at boot"
+    );
+    let (_, steps) = latest_run_steps(&state, "proj-crash").await;
+    let row = steps
+        .iter()
+        .find(|row| row.step_index == step_index)
+        .unwrap();
+    assert!(
+        row.ended_at.is_some(),
+        "{pipeline:?}: the step has a verdict"
+    );
+    assert_eq!(
+        row.target_state.as_deref(),
+        Some("restored"),
+        "{pipeline:?}"
+    );
+    assert!(
+        row.step_warning
+            .as_deref()
+            .unwrap_or("")
+            .contains("stopped during step"),
+        "{pipeline:?}: {:?}",
+        row.step_warning
+    );
+
+    let _ = crate::api::audit::full::cancel_audit(
+        axum::extract::State(state.clone()),
+        axum::extract::Path("proj-crash".to_string()),
+    )
+    .await;
+    let _ = tokio::time::timeout(Duration::from_secs(10), run).await;
+}
+
+#[tokio::test]
+async fn a_backend_crash_mid_step_of_a_full_audit_is_settled_at_boot() {
+    a_backend_crash_mid_step_is_settled_at_boot(Pipeline::Full).await;
+}
+
+#[tokio::test]
+async fn a_backend_crash_mid_step_of_a_partial_audit_is_settled_at_boot() {
+    a_backend_crash_mid_step_is_settled_at_boot(Pipeline::Partial).await;
+}
+
+/// Puts a scripted `claude` first on `PATH` and forces the direct-CLI route
+/// for one test, and restores the environment afterwards.
+#[cfg(unix)]
+struct ScriptedDirectClaude(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+#[cfg(unix)]
+impl ScriptedDirectClaude {
+    fn install(bin: &Path) -> Self {
+        let saved: Vec<_> = ["PATH", "KRONN_ACP_ADAPTER_CLAUDE"]
+            .into_iter()
+            .map(|name| (name, crate::core::child_env::var_os(name)))
+            .collect();
+        let path = std::env::join_paths(std::iter::once(bin.to_path_buf()).chain(
+            std::env::split_paths(&crate::core::child_env::var_os("PATH").unwrap_or_default()),
+        ))
+        .unwrap();
+        crate::core::child_env::set_var("PATH", path);
+        crate::core::child_env::set_var("KRONN_ACP_ADAPTER_CLAUDE", "0");
+        Self(saved)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ScriptedDirectClaude {
+    fn drop(&mut self) {
+        for (name, value) in &self.0 {
+            match value {
+                Some(value) => crate::core::child_env::set_var(name, value),
+                None => crate::core::child_env::remove_var(name),
+            }
+        }
+    }
+}
+
+/// KT-1211 (M5) — a step run by a direct CLI agent records the agent's process
+/// group and start stamp on the run while it works (so a boot after a crash can
+/// kill it), and clears them once it is reaped. Both pipelines.
+#[cfg(unix)]
+async fn a_direct_cli_step_records_and_clears_its_process_group(pipeline: Pipeline) {
+    let bin = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let script = bin.path().join("claude");
+    std::fs::write(&script, "#!/bin/sh\nexec sleep 60\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let _environment = ScriptedDirectClaude::install(bin.path());
+    let state = new_state();
+    add_project(&state, "proj-pgid", project.path()).await;
+    let run = launch(&state, pipeline, "proj-pgid", AgentType::ClaudeCode);
+
+    let recorded = || {
+        state
+            .db
+            .with_conn(crate::db::audit_runs::recorded_agent_processes)
+    };
+    let mut found = Vec::new();
+    for _ in 0..500 {
+        found = recorded().await.unwrap();
+        if !found.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        found.len(),
+        1,
+        "{pipeline:?}: the agent's process group is recorded while it works"
+    );
+    let (run_id, pgid, stamp) = found.remove(0);
+    assert!(pgid > 1, "{pipeline:?}");
+    assert!(
+        stamp.is_some() && stamp == crate::core::agent_orphans::start_stamp(pgid as u32),
+        "{pipeline:?}: the leader's start stamp is the live process's: {stamp:?}"
+    );
+    assert_eq!(run_id, latest_run(&state, "proj-pgid").await.id);
+
+    let _ = crate::api::audit::full::cancel_audit(
+        axum::extract::State(state.clone()),
+        axum::extract::Path("proj-pgid".to_string()),
+    )
+    .await;
+    let _ = tokio::time::timeout(Duration::from_secs(15), run)
+        .await
+        .expect("the audit ends");
+    assert!(
+        recorded().await.unwrap().is_empty(),
+        "{pipeline:?}: a reaped agent leaves nothing for boot to kill"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial_test::serial(acp_adapter_env_toggle)]
+async fn a_direct_cli_step_of_a_full_audit_records_and_clears_its_process_group() {
+    a_direct_cli_step_records_and_clears_its_process_group(Pipeline::Full).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial_test::serial(acp_adapter_env_toggle)]
+async fn a_direct_cli_step_of_a_partial_audit_records_and_clears_its_process_group() {
+    a_direct_cli_step_records_and_clears_its_process_group(Pipeline::Partial).await;
 }
 
 #[tokio::test]
@@ -662,6 +1277,74 @@ async fn a_full_audit_step_without_a_reported_cost_stays_unknown() {
 #[tokio::test]
 async fn a_partial_audit_step_without_a_reported_cost_stays_unknown() {
     an_unreported_cost_stays_unknown(Pipeline::Partial).await;
+}
+
+/// KT-1313 DoD — a step stopped mid-way is recorded with the tokens and the cost
+/// it consumed, and the run's token counter never goes down.
+async fn a_stopped_step_records_the_tokens_and_cost_it_consumed(pipeline: Pipeline) {
+    let state = new_state();
+    let project = tempfile::tempdir().unwrap();
+    let agent = ScriptedAgent::new(Turn::PricedHang {
+        usd_micros: 420_000,
+    });
+    let _route = route(project.path(), &agent);
+    add_project(&state, "proj-spent", project.path()).await;
+    let run = launch(&state, pipeline, "proj-spent", AgentType::OpenCode);
+
+    let tracker = state.audit_tracker.clone();
+    until("the step's tokens to show on the audit's progress", || {
+        tracker
+            .lock()
+            .unwrap()
+            .progress
+            .get("proj-spent")
+            .is_some_and(|p| p.step_tokens == Some(120))
+    })
+    .await;
+    let response = crate::api::audit::full::cancel_audit(
+        axum::extract::State(state.clone()),
+        axum::extract::Path("proj-spent".to_string()),
+    )
+    .await;
+    assert!(response.0.success, "{pipeline:?}: {:?}", response.0.error);
+    let body = tokio::time::timeout(Duration::from_secs(10), run)
+        .await
+        .unwrap_or_else(|_| panic!("{pipeline:?}: the stopped audit never ended"))
+        .unwrap();
+
+    let (status, steps) = latest_run_steps(&state, "proj-spent").await;
+    assert_eq!(status, "Cancelled", "{pipeline:?}");
+    let stopped = steps.first().expect("the stopped step is recorded");
+    assert_eq!(stopped.step_tokens, Some(120), "{pipeline:?}: {body}");
+    assert_eq!(
+        stopped.cumulative_tokens,
+        Some(120),
+        "{pipeline:?}: the run's tally holds the stopped step"
+    );
+    assert_eq!(
+        stopped.cost_usd_micros,
+        Some(420_000),
+        "{pipeline:?}: the reported cost of what it consumed"
+    );
+    let shown: Vec<u64> = sse_events(&body)
+        .iter()
+        .filter(|(name, _)| name == "step_progress")
+        .filter_map(|(_, data)| data["total_tokens_so_far"].as_u64())
+        .collect();
+    assert!(
+        shown.windows(2).all(|pair| pair[0] <= pair[1]),
+        "{pipeline:?}: the counter went down: {shown:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_stopped_full_audit_step_records_the_tokens_and_cost_it_consumed() {
+    a_stopped_step_records_the_tokens_and_cost_it_consumed(Pipeline::Full).await;
+}
+
+#[tokio::test]
+async fn a_stopped_partial_audit_step_records_the_tokens_and_cost_it_consumed() {
+    a_stopped_step_records_the_tokens_and_cost_it_consumed(Pipeline::Partial).await;
 }
 
 /// KT-950 DoD — an ACP step that only calls tools, without a word of text,

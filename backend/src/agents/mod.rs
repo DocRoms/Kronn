@@ -1063,6 +1063,19 @@ async fn probe_npx_invocation(
         args.get(1).map(String::as_str),
         "",
     );
+    // A test that forbids real agents: the `npx` of the machine would download
+    // and start a real agent CLI. The injected answer is "no fallback runtime"
+    // (KT-1189).
+    if crate::core::cmd::real_agents_forbidden()
+        && crate::core::cmd::real_agent_guard::real_agent_binary(
+            std::ffi::OsStr::new(&executable),
+            crate::core::child_env::ChildRoute::Agent(family),
+            crate::core::child_env::var_os("PATH"),
+        )
+        .is_some()
+    {
+        return RuntimeProbe::default();
+    }
     let (executable, args, work_dir) =
         runner::platform_agent_invocation(executable, args, via_wsl, work_dir);
     let command: Vec<String> = std::iter::once(executable.clone())
@@ -1124,6 +1137,21 @@ pub struct BinaryLocation {
 /// so we check for the entry's existence in the directory listing
 /// rather than following the symlink.
 pub fn find_binary(name: &str) -> Option<BinaryLocation> {
+    let found = find_binary_on_machine(name);
+    // A test that forbids real agents: an agent CLI installed on the
+    // developer's machine is not one the test provided — it would make the
+    // result depend on the machine and start the real CLI at the version probe
+    // (KT-1189). Stubs the test wrote under the temporary directory are still
+    // found.
+    if !crate::core::cmd::real_agents_forbidden() {
+        return found;
+    }
+    found.filter(|location| {
+        !crate::core::cmd::real_agent_guard::is_machine_agent(name, &location.path)
+    })
+}
+
+fn find_binary_on_machine(name: &str) -> Option<BinaryLocation> {
     // Collect host-bin directories once (used to check if a PATH-resolved binary
     // actually lives on a host mount and should be flagged as host_managed).
     let host_dirs: Vec<std::path::PathBuf> = crate::core::child_env::var("KRONN_HOST_BIN")
@@ -2435,6 +2463,61 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
 
         assert!(result.is_some(), "Should find testbin via exact name");
+    }
+
+    /// KT-1189: detection in a test sees the stubs the test wrote and never an
+    /// agent CLI installed on the machine, so the result (and the version
+    /// probe that would start the real CLI) is the same on every machine.
+    #[test]
+    #[serial]
+    fn detection_in_a_test_never_finds_an_agent_cli_of_the_machine() {
+        for name in [
+            "claude", "codex", "gemini", "copilot", "vibe", "opencode", "kiro-cli", "ollama",
+        ] {
+            if let Some(found) = find_binary(name) {
+                assert!(
+                    crate::core::cmd::is_test_controlled(std::path::Path::new(&found.path)),
+                    "{name} resolved to {} outside the directories a test controls",
+                    found.path
+                );
+            }
+        }
+
+        let tmp =
+            std::env::temp_dir().join(format!("kronn-test-stub-agent-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let stub_path = tmp.join("claude");
+        std::fs::write(&stub_path, "#!/bin/sh\necho stub\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let previous_path = crate::core::child_env::var("PATH").ok();
+        let mut search = vec![tmp.clone()];
+        search.extend(std::env::split_paths(
+            &previous_path.clone().unwrap_or_default(),
+        ));
+        crate::core::child_env::set_var(
+            "PATH",
+            std::env::join_paths(search)
+                .unwrap()
+                .to_string_lossy()
+                .as_ref(),
+        );
+        let stub = find_binary("claude");
+        match previous_path {
+            Some(path) => crate::core::child_env::set_var("PATH", &path),
+            None => crate::core::child_env::remove_var("PATH"),
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let stub = stub.expect("a stub agent under the temporary directory is detected");
+        assert!(
+            stub.path.contains("kronn-test-stub-agent-"),
+            "{}",
+            stub.path
+        );
     }
 
     // ─── CopilotCli agent definitions ──────────────────────────────────────

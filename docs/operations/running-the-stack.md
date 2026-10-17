@@ -23,9 +23,11 @@ stack, not to start a task. Content verbatim.
   supervisor distinguishes a readiness timeout from an actual process exit;
   even exit 0 before readiness is a failed reload. An intentional stop does not
   create a backend-failure marker.
-  [src: file: scripts/dev-backend-supervisor.sh:66]
-  [src: file: lib/ui.sh:367]
-  [src: file: backend/src/main.rs:676]
+  [src: file: scripts/dev-backend-supervisor.sh:109-116#backend_ready]
+  [src: file: scripts/dev-backend-supervisor.sh:202-211#readiness_status]
+  [src: file: lib/ui.sh:381-400#wait_for_process_http_ready]
+  [src: file: backend/src/main.rs:719-739#sync_all_projects]
+  [src: file: backend/src/main.rs:938#TcpListener]
 - The desktop app and native CLI share configuration, but the desktop's free
   listener port is process-local (`ServerConfig.runtime_port`, excluded from
   serialization). The persisted `server.port` remains the CLI preference;
@@ -35,8 +37,9 @@ stack, not to start a task. Content verbatim.
   back up `config.toml` and restore `server.port = 3140` for the standard dev
   launcher; preserve all other settings and encryption keys. Install a fixed
   desktop build before switching back to desktop mode.
-  [src: file: backend/src/models/setup.rs:71]
-  [src: file: desktop/src-tauri/src/main.rs:546]
+  [src: file: backend/src/models/setup.rs:96-99#runtime_port]
+  [src: file: backend/src/models/setup.rs:336-339#listening_port]
+  [src: file: desktop/src-tauri/src/main.rs:583-588#configure_embedded_server]
 - After changing Rust models with `#[derive(TS)]`: run `make typegen` to regenerate `frontend/src/types/generated.ts`.
 - The project Docker tab reads the machine's hosts file to flag published
   domains that are missing or mapped away from loopback. `make start` snapshots
@@ -53,7 +56,7 @@ stack, not to start a task. Content verbatim.
 - After `docker compose build`, always restart the gateway: `docker compose restart gateway` or `docker compose down && docker compose up -d`.
 - **macOS Kiro login is opt-in (silent by default)**: `maybe_login_kiro` (`kronn`) says **nothing** about Kiro unless `KRONN_KIRO_LOGIN=1`, which makes it probe + run `make kiro-login`. Decision logic is the pure `kiro_startup_action(os, authenticated, available, opt_in)` in `lib/agents.sh` (tested in `tests/bats/agents.bats`). Non-macOS / no-opt-in both return `skip`. Kiro is no longer auto-installed at boot (see next bullet), so by default there's nothing to log into until the user installs it.
 - **macOS: only mirror agents the user actually installed; never pick a host-mounted Darwin binary.** The container `PATH` includes the host's `~/.local/bin` (`/host-bin/local`), so `which` can resolve a macOS (Mach-O) `claude`/`codex`/… that can't exec in the Linux container (symptom: a version reading "Exec format error"). Invariants:
-  1. `find_binary` (`backend/src/agents/mod.rs`) consults `should_skip_darwin_host_binary()` on **both** the `which` path and the dir-scan, so a Darwin binary is skipped in favour of the Linux copy / `npx` runtime. The guard applies **only inside a container**: a native macOS backend keeps a CLI found under `KRONN_HOST_BIN`, and in a container the `PATH` scan continues past a skipped host copy. See [Agent binary resolution](../gotchas/agent-binary-resolution.md). [src: file: backend/src/agents/mod.rs:168-176]
+  1. `find_binary` (`backend/src/agents/mod.rs`) consults `should_skip_darwin_host_binary()` on **both** the `which` path and the dir-scan, so a Darwin binary is skipped in favour of the Linux copy / `npx` runtime. The guard applies **only inside a container**: a native macOS backend keeps a CLI found under `KRONN_HOST_BIN`, and in a container the `PATH` scan continues past a skipped host copy. See [Agent binary resolution](../gotchas/agent-binary-resolution.md). [src: file: backend/src/agents/mod.rs:172-188#should_skip_darwin_host_binary] [src: file: backend/src/agents/mod.rs:1320-1332#should_skip_darwin_host_binary] [src: file: backend/src/agents/mod.rs:1360-1368#should_skip_darwin_host_binary]
   2. `entrypoint.sh` mirrors a Linux copy **only** when `host_darwin_needs_linux_copy()` is true — i.e. the agent resolves exclusively under `/host-bin/*` (the user has it on their Mac). It does **not** install agents that are absent everywhere; the UI offers an explicit Install for those. This is why a Claude-only Mac shows Claude installed and everything else (incl. Kiro) as "Install".
   3. **`runtime_available` (npx) ≠ installed in the UI.** Both the Setup Wizard (`SetupWizard.tsx`) and Settings → Agents (`AgentsSection.tsx`) show the enable/disable toggle only for `installed` agents; npx-only agents get the Install button, the `npx` command Kronn would run with its measured version, and a fallback warning, never "Activé".
   When adding an npm agent, extend `MACOS_HOST_BIN_SKIP`, `entrypoint.sh`, and the npx case in `probe_runtime` — `cross_agent_macos_skip_covers_npm_agents` enforces the first and `tests/bats/entrypoint_macos_mirror.bats` enforces the second (an agent in the skip list with no mirror here is silently stuck on the npx fallback — how OpenCode was missed). The npx case is still unguarded.

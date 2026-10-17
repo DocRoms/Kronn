@@ -542,8 +542,16 @@ pub async fn disc_append(
     // An explicit typed target or legacy one-shot target always wins. With no
     // explicit responder, replying to a CLI-authored message targets that
     // exact session — never the provider's native agent or a sibling CLI.
+    // A native runner's post with no explicit reply_to answers its job trigger
+    // (KT-1171), so that trigger's CLI author is the default target (KT-1201).
     if routing_candidate && requested_targets.is_empty() && legacy_requested_target.is_none() {
-        if let Some(reply_to_message_id) = req.messages[0].reply_to_message_id.clone() {
+        if let Some(reply_to_message_id) =
+            req.messages[0].reply_to_message_id.clone().or_else(|| {
+                native_turn
+                    .as_ref()
+                    .map(|turn| turn.trigger_message_id.clone())
+            })
+        {
             let did = req.disc_id.clone();
             requested_targets = match state
                 .db
@@ -667,6 +675,59 @@ pub async fn disc_append(
             ) || !turn.root_turn_agents.contains(&target.agent_type)
         });
     }
+    // KT-1201 — a native runner's short alias (`@claude`) names the joined CLI
+    // of that provider it is answering, or the only one: never a punctual spawn
+    // impersonating that session. Joined CLIs and humans keep KT-211 literal.
+    if let Some(turn) = native_turn.as_ref() {
+        if requested_targets
+            .iter()
+            .any(|target| target.kind == MessageTargetKind::Agent && target.connection_id.is_none())
+        {
+            let did = req.disc_id.clone();
+            let parent = req.messages[0]
+                .reply_to_message_id
+                .clone()
+                .unwrap_or_else(|| turn.trigger_message_id.clone());
+            let room_agent = disc.agent.clone();
+            let targets = std::mem::take(&mut requested_targets);
+            requested_targets = match state
+                .db
+                .with_read_conn(move |conn| {
+                    let author =
+                        crate::db::discussions::message_cli_author_target(conn, &did, &parent)?;
+                    let joined = crate::db::discussions::joined_cli_targets(conn, &did)?;
+                    let mut resolved: Vec<MessageTarget> = Vec::with_capacity(targets.len());
+                    for target in targets {
+                        let target = if target.kind == MessageTargetKind::Agent
+                            && target.connection_id.is_none()
+                        {
+                            crate::db::discussions::agent_alias_cli_target(
+                                &target.agent_type,
+                                author.as_ref(),
+                                &joined,
+                                &room_agent,
+                            )
+                            .unwrap_or(target)
+                        } else {
+                            target
+                        };
+                        if !resolved.contains(&target) {
+                            resolved.push(target);
+                        }
+                    }
+                    Ok(resolved)
+                })
+                .await
+            {
+                Ok(targets) => targets,
+                Err(error) => {
+                    return Json(ApiResponse::err(format!(
+                        "DB error resolving agent aliases: {error}"
+                    )))
+                }
+            };
+        }
+    }
     let legacy_requested_target = match native_turn.as_ref() {
         Some(turn) => {
             legacy_requested_target.filter(|target| !turn.root_turn_agents.contains(target))
@@ -679,38 +740,50 @@ pub async fn disc_append(
     // responders are worse than leaving the turn to peers that have the
     // message. This is deliberately asymmetric with the human HTTP path, where
     // no proven peer owner means falling back to the durable local runner.
-    let (no_agent_room, native_principal_is_eligible, legacy_target_is_eligible) =
-        if routing_candidate {
-            let did = req.disc_id.clone();
-            let native_agent = format!("{:?}", disc.agent);
-            let legacy_target = legacy_requested_target
-                .as_ref()
-                .map(|target| format!("{target:?}"));
-            state
-                .db
-                .with_conn(move |conn| {
-                    let no_agent = crate::db::discussions::disc_is_no_agent(conn, &did)?;
-                    let native_eligible =
+    let (
+        no_agent_room,
+        native_principal_is_eligible,
+        legacy_target_is_eligible,
+        author_is_workflow_step,
+    ) = if routing_candidate {
+        let did = req.disc_id.clone();
+        let native_agent = format!("{:?}", disc.agent);
+        let legacy_target = legacy_requested_target
+            .as_ref()
+            .map(|target| format!("{target:?}"));
+        let author = author_cli_session_id;
+        state
+            .db
+            .with_conn(move |conn| {
+                let no_agent = crate::db::discussions::disc_is_no_agent(conn, &did)?;
+                let native_eligible =
+                    crate::db::discussion_sessions::count_eligible_responders_for_agent(
+                        conn,
+                        &did,
+                        &native_agent,
+                    )? > 0;
+                let target_eligible = match legacy_target {
+                    Some(target) => {
                         crate::db::discussion_sessions::count_eligible_responders_for_agent(
-                            conn,
-                            &did,
-                            &native_agent,
-                        )? > 0;
-                    let target_eligible = match legacy_target {
-                        Some(target) => {
-                            crate::db::discussion_sessions::count_eligible_responders_for_agent(
-                                conn, &did, &target,
-                            )? > 0
-                        }
-                        None => false,
-                    };
-                    Ok((no_agent, native_eligible, target_eligible))
-                })
-                .await
-                .unwrap_or((true, false, true))
-        } else {
-            (true, false, false)
-        };
+                            conn, &did, &target,
+                        )? > 0
+                    }
+                    None => false,
+                };
+                let workflow_step = match author {
+                    Some(session_pk) => {
+                        crate::db::workflow_step_rooms::session_identity(conn, session_pk)?
+                            .is_some()
+                    }
+                    None => false,
+                };
+                Ok((no_agent, native_eligible, target_eligible, workflow_step))
+            })
+            .await
+            .unwrap_or((true, false, true, true))
+    } else {
+        (true, false, false, false)
+    };
     let dispatch_routes = if requested_targets.is_empty() {
         // A native runner also supplies its runtime session id to the MCP
         // bridge. Only a joined CLI author may implicitly hand the turn back
@@ -723,6 +796,7 @@ pub async fn disc_append(
             legacy_requested_target.as_ref(),
             legacy_target_is_eligible,
             native_principal_is_eligible,
+            author_is_workflow_step,
         )]
     } else {
         requested_targets
@@ -821,6 +895,7 @@ pub async fn disc_append(
             recovered_partial: false,
             session_tokens_at_message: None,
             author_cli_ordinal: None,
+            session_continuity: None,
             model: None,
             // Only a live single Agent append carries a report (loop runs once).
             lint_report: live_lint_report.take(),
@@ -2133,6 +2208,7 @@ mod tests {
                     recovered_partial: false,
                     session_tokens_at_message: None,
                     author_cli_ordinal: None,
+                    session_continuity: None,
                 };
                 crate::db::discussions::insert_message(conn, "d-lint", &user)?;
                 Ok(())
@@ -2324,6 +2400,7 @@ mod tests {
                     recovered_partial: false,
                     session_tokens_at_message: None,
                     author_cli_ordinal: None,
+                    session_continuity: None,
                 };
                 let cursor = crate::db::discussions::insert_message(conn, "d-lint", &old)?;
                 let mut note = old.clone();
@@ -2801,6 +2878,340 @@ mod tests {
         }
     }
 
+    // KT-1171 — which reply_to a native runner's plain MCP post is stored with.
+
+    fn judge_context(discussion_id: &str, job_id: &str, trigger: &str) -> RoomAgentAppendContext {
+        RoomAgentAppendContext {
+            discussion_id: discussion_id.into(),
+            agent_type: "OpenCode".into(),
+            dispatch_job_id: job_id.into(),
+            source_message_id: trigger.into(),
+        }
+    }
+
+    /// A mention-free OpenCode post; returns its stored reply_to.
+    async fn native_post_reply_to(
+        state: &crate::AppState,
+        room_agent: Option<RoomAgentAppendContext>,
+        explicit_reply_to: Option<&str>,
+    ) -> Option<String> {
+        let mut message = agent_msg("judge-plain-post", "Audience ouverte.");
+        message.agent_type = Some(AgentType::OpenCode);
+        message.reply_to_message_id = explicit_reply_to.map(str::to_owned);
+        let response = disc_append(
+            axum::extract::State(state.clone()),
+            Json(DiscAppendRequest {
+                disc_id: "d-lint".into(),
+                messages: vec![message],
+                session_id: Some("opencode-runtime-session".into()),
+                since_sort_order: None,
+                session_credential: None,
+                publication_grant: None,
+                publication_proof: None,
+                room_agent,
+            }),
+        )
+        .await;
+        assert_eq!(response.0.data.expect("append succeeds").appended, 1);
+        state
+            .db
+            .with_read_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT reply_to_message_id FROM messages
+                     WHERE source_msg_id = 'judge-plain-post'",
+                    [],
+                    |row| row.get::<_, Option<String>>(0),
+                )?)
+            })
+            .await
+            .unwrap()
+    }
+
+    /// KT-1201 — the native runner writes `@claude` (the bridge sends a
+    /// punctual target). Returns (job count, the post's targets).
+    async fn native_runner_claude_post(
+        state: &crate::AppState,
+        job_id: &str,
+    ) -> (i64, Vec<MessageTarget>) {
+        let mut message = agent_msg("judge-claude-post", "@claude relis ce verdict");
+        message.agent_type = Some(AgentType::OpenCode);
+        message.targets = vec![MessageTarget::agent(AgentType::ClaudeCode)];
+        let response = disc_append(
+            axum::extract::State(state.clone()),
+            Json(DiscAppendRequest {
+                disc_id: "d-lint".into(),
+                messages: vec![message],
+                session_id: Some("opencode-runtime-session".into()),
+                since_sort_order: None,
+                session_credential: None,
+                publication_grant: None,
+                publication_proof: None,
+                room_agent: Some(judge_context("d-lint", job_id, "root")),
+            }),
+        )
+        .await;
+        assert_eq!(response.0.data.expect("append succeeds").appended, 1);
+        state
+            .db
+            .with_read_conn(|conn| {
+                let jobs = conn.query_row(
+                    "SELECT COUNT(*) FROM agent_dispatch_jobs WHERE discussion_id = 'd-lint'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?;
+                let id: String = conn.query_row(
+                    "SELECT id FROM messages WHERE source_msg_id = 'judge-claude-post'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                Ok((
+                    jobs,
+                    crate::db::discussions::list_message_targets(conn, &id)?,
+                ))
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_native_runner_short_alias_reaches_the_only_joined_cli_of_that_provider() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        let job_id = judge_room(&state).await;
+        let cli = state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-lint",
+                    "ClaudeCode",
+                    Some("claude-joined"),
+                    "peer",
+                )
+            })
+            .await
+            .unwrap();
+
+        let (jobs, targets) = native_runner_claude_post(&state, &job_id).await;
+        assert_eq!(jobs, 3, "no punctual Claude is spawned in place of the CLI");
+        assert_eq!(
+            targets,
+            vec![MessageTarget::cli(AgentType::ClaudeCode, cli)]
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_native_runner_short_alias_spawns_when_no_cli_of_that_provider_is_joined() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        let job_id = judge_room(&state).await;
+
+        let (jobs, targets) = native_runner_claude_post(&state, &job_id).await;
+        assert_eq!(jobs, 4);
+        assert_eq!(targets, vec![MessageTarget::agent(AgentType::ClaudeCode)]);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_native_runner_post_inherits_its_job_trigger_as_reply_to() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        let job_id = judge_room(&state).await;
+        let reply_to =
+            native_post_reply_to(&state, Some(judge_context("d-lint", &job_id, "root")), None)
+                .await;
+        assert_eq!(reply_to.as_deref(), Some("root"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn an_explicit_reply_to_wins_over_the_job_trigger() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        let job_id = judge_room(&state).await;
+        state
+            .db
+            .with_conn(|conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO messages
+                     (id, discussion_id, role, content, agent_type, timestamp, sort_order,
+                      received_at, reply_to_message_id)
+                     VALUES ('codex-joke', 'd-lint', 'Agent', 'une blague', 'Codex', ?1, 2, ?1,
+                             'root')",
+                    [&now],
+                )?;
+                conn.execute(
+                    "UPDATE discussions SET next_message_seq = 3 WHERE id = 'd-lint'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let reply_to = native_post_reply_to(
+            &state,
+            Some(judge_context("d-lint", &job_id, "root")),
+            Some("codex-joke"),
+        )
+        .await;
+        assert_eq!(reply_to.as_deref(), Some("codex-joke"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn no_running_job_means_no_inherited_reply_to() {
+        crate::core::anti_halluc::set_mode("off");
+        for status in ["Completed", "Failed", "Cancelled", "Pending"] {
+            let (state, _tmp) = lint_state(false).await;
+            let job_id = judge_room(&state).await;
+            state
+                .db
+                .with_conn(move |conn| {
+                    conn.execute(
+                        "UPDATE agent_dispatch_jobs SET status = ?1 WHERE id = 'job-judge'",
+                        [status],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            let reply_to =
+                native_post_reply_to(&state, Some(judge_context("d-lint", &job_id, "root")), None)
+                    .await;
+            assert_eq!(reply_to, None, "status {status}: no running turn");
+        }
+        let (state, _tmp) = lint_state(false).await;
+        judge_room(&state).await;
+        let reply_to = native_post_reply_to(
+            &state,
+            Some(judge_context("d-lint", "job-missing", "root")),
+            None,
+        )
+        .await;
+        assert_eq!(reply_to, None, "an unknown job carries no turn");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_job_of_another_discussion_never_lends_its_trigger() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        judge_room(&state).await;
+        state
+            .db
+            .with_conn(|conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO discussions (id, title, agent, language, participants_json,
+                     created_at, updated_at, message_count, workspace_mode, no_agent,
+                     next_message_seq)
+                     VALUES ('d-other', 'O', 'OpenCode', 'fr', '[]', datetime('now'),
+                             datetime('now'), 1, 'Direct', 0, 2)",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO messages
+                     (id, discussion_id, role, content, timestamp, sort_order, received_at)
+                     VALUES ('root-other', 'd-other', 'User', '@opencode ailleurs', ?1, 1, ?1)",
+                    [&now],
+                )?;
+                crate::db::agent_dispatch::enqueue(
+                    conn,
+                    crate::db::agent_dispatch::NewAgentDispatchJob {
+                        id: "job-other",
+                        discussion_id: "d-other",
+                        trigger_message_id: "root-other",
+                        trigger_sort_order: 1,
+                        dedupe_key: "force:root-other:job-other",
+                        agent_override: None,
+                        chain_prompt_ids: &[],
+                        batch_item: None,
+                        group_id: None,
+                        group_concurrency_limit: None,
+                    },
+                )?;
+                crate::db::agent_dispatch::claim(conn, "job-other")?.expect("it runs");
+                Ok(())
+            })
+            .await
+            .unwrap();
+        // Another room's job, named honestly or claimed for this room, and a
+        // context naming another room: none carries a turn here.
+        for context in [
+            judge_context("d-other", "job-other", "root-other"),
+            judge_context("d-lint", "job-other", "root-other"),
+            judge_context("d-other", "job-judge", "root"),
+        ] {
+            let reply_to = native_post_reply_to(&state, Some(context), None).await;
+            assert_eq!(reply_to, None);
+            state
+                .db
+                .with_conn(|conn| {
+                    conn.execute(
+                        "DELETE FROM messages WHERE source_msg_id = 'judge-plain-post'",
+                        [],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_joined_cli_session_never_inherits_a_job_trigger() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        let job_id = judge_room(&state).await;
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-lint",
+                    "OpenCode",
+                    Some("opencode-runtime-session"),
+                    "peer",
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let reply_to =
+            native_post_reply_to(&state, Some(judge_context("d-lint", &job_id, "root")), None)
+                .await;
+        assert_eq!(reply_to, None, "a joined CLI is not the job's runner");
+    }
+
+    /// The point of the inheritance: the other agents of the turn see the post
+    /// in their frozen view of the trigger (KT-1153).
+    #[tokio::test]
+    #[serial]
+    async fn an_inherited_post_shows_in_the_frozen_thread_view() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        let job_id = judge_room(&state).await;
+        native_post_reply_to(&state, Some(judge_context("d-lint", &job_id, "root")), None).await;
+        let disc = state
+            .db
+            .with_read_conn(|conn| crate::db::discussions::get_discussion(conn, "d-lint"))
+            .await
+            .unwrap()
+            .expect("room exists");
+        let view =
+            crate::api::discussions::streaming::discussion_at_dispatch_trigger(&disc, Some("root"));
+        assert!(
+            view.messages
+                .iter()
+                .any(|message| message.content == "Audience ouverte."),
+            "the judge's post is in the turn's thread"
+        );
+    }
+
     #[tokio::test]
     #[serial]
     async fn unjoined_native_mcp_agent_can_still_address_an_explicit_responder() {
@@ -3084,6 +3495,101 @@ mod tests {
             targets,
             vec![MessageTarget::cli(AgentType::ClaudeCode, peer)],
             "a prose mention wakes the named joined peer, never the author itself"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_workflow_step_report_never_wakes_the_native_principal() {
+        // KT-1253: a Codex room with a Claude workflow step joined by room_id.
+        // No Codex session is present, so an ordinary joined CLI wakes Codex.
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        state
+            .db
+            .with_conn(|conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "UPDATE discussions SET agent = 'Codex', no_agent = 0 WHERE id = 'd-lint'",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO workflows (id, name, trigger_json, steps_json, created_at, updated_at)
+                     VALUES ('wf-1253', 'autoCode', '{}', '[]', ?1, ?1)",
+                    [&now],
+                )?;
+                conn.execute(
+                    "INSERT INTO workflow_runs (id, workflow_id, status, started_at)
+                     VALUES ('run-1253', 'wf-1253', 'Running', ?1)",
+                    [&now],
+                )?;
+                crate::db::workflow_step_rooms::begin_activity(
+                    conn,
+                    "run-1253",
+                    "orchestrateur",
+                    "orchestrateur",
+                    "d-lint",
+                    "ClaudeCode",
+                )?;
+                crate::db::workflow_step_rooms::join(
+                    conn,
+                    "run-1253",
+                    "orchestrateur",
+                    "d-lint",
+                    "ClaudeCode",
+                    "step-session",
+                )?;
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-lint",
+                    "ClaudeCode",
+                    Some("human-cli"),
+                    "peer",
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let jobs = |state: crate::AppState| async move {
+            state
+                .db
+                .with_read_conn(|conn| {
+                    Ok(conn.query_row(
+                        "SELECT COUNT(*) FROM agent_dispatch_jobs WHERE discussion_id = 'd-lint'",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )?)
+                })
+                .await
+                .unwrap()
+        };
+
+        let mut report = agent_msg("step-report", "Compte rendu : le plan est publié.");
+        report.agent_type = Some(AgentType::ClaudeCode);
+        append_as(&state, vec![report], Some("step-session")).await;
+        assert_eq!(
+            jobs(state.clone()).await,
+            0,
+            "an untargeted step report reaches the room without waking Codex"
+        );
+
+        let mut ask = agent_msg("step-asks-native", "Codex, relis ce plan.");
+        ask.agent_type = Some(AgentType::ClaudeCode);
+        ask.targets = vec![MessageTarget::discussion_agent(AgentType::Codex)];
+        append_as(&state, vec![ask], Some("step-session")).await;
+        assert_eq!(
+            jobs(state.clone()).await,
+            1,
+            "a step that targets the native principal still wakes it"
+        );
+
+        let mut handback = agent_msg("human-cli-handback", "À toi pour la suite.");
+        handback.agent_type = Some(AgentType::ClaudeCode);
+        append_as(&state, vec![handback], Some("human-cli")).await;
+        assert_eq!(
+            jobs(state.clone()).await,
+            2,
+            "an ordinary joined CLI still hands the turn back to the native principal"
         );
     }
 

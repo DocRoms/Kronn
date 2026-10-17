@@ -8,12 +8,12 @@ seen in October 2026, with their fixes:
   `git maintenance run --auto` that keeps writing inside `.git` after the
   command returns. A test that snapshots or walks `.git` races it. Fixture
   git helpers pass `-c maintenance.auto=false -c gc.auto=0`.
-  [src: file: backend/src/core/project_profile_test.rs:39-43]
+  [src: file: backend/src/core/project_profile_test.rs:38-53#git]
 - **Idempotent retries in concurrency tests.** A second approve that reads
   the execution while it is `Approved` (before the integration task claims
   `Integrating`) is a valid retry and succeeds. Assert the durable invariant
   (one review, one claim, one validation), not which transport won.
-  [src: file: backend/src/api/orchestration.rs:5552-5581]
+  [src: file: backend/src/api/orchestration.rs:31933-32032#concurrent_review_retries_share_one_durable_integration_claim]
 - **A copied git index loses its racy-entry protection.** `snapshot_tree`
   copied the real index with `std::fs::copy`. On Linux the copy gets a fresh
   mtime, so git no longer treats an entry as recent as the index as "racy"

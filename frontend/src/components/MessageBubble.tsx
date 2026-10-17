@@ -25,14 +25,14 @@ import { PlanningActionCard } from './PlanningActionCard';
 import { DiscussionQuestionCard } from './DiscussionQuestionCard';
 import { ImportantMessageCard } from './ImportantMessageCard';
 import { SourceCitationChip } from './SourceCitationChip';
-import { hasSourceCitation, splitSourceCitations } from '../lib/sourceCitations';
+import { hasSourceCitation, isCheckoutVerified, isLaneVerified, laneOf, splitSourceCitations } from '../lib/sourceCitations';
 import { DiscussionActionCard } from './DiscussionActionCard';
 import { parsePlanningProposal } from '../lib/planningProposal';
 import { MermaidDiagram } from './MermaidDiagram';
 import remarkGfm from 'remark-gfm';
 import remarkEmoji from 'remark-emoji';
 import '../pages/DiscussionsPage.css';
-import type { DiscussionMessage, AgentType, QuickPrompt, ContextFile, SourceCheck, MessageTarget, DiscussionAction, WorkflowStepIdentity } from '../types/generated';
+import type { DiscussionMessage, SessionContinuity, AgentType, QuickPrompt, ContextFile, SourceCheck, MessageTarget, DiscussionAction, WorkflowStepIdentity } from '../types/generated';
 import { MessageAttachments } from './MessageAttachments';
 import { AGENT_LABELS, AGENT_MENTIONS, MODEL_TIER_ICONS, USER_MENTION_TRIGGER, agentColor, agentTextColor } from '../lib/constants';
 import { externalAgentColor } from '../lib/externalAgentIdentity';
@@ -49,14 +49,27 @@ import { discussions as discussionsApi, executionVariables, projects as projects
 import { isPreviewableAttachment } from '../lib/mediaKind';
 import { attachmentForLink, fileLinkUrlTransform, linkKind, projectFileTarget, unavailableFileReason } from '../lib/localFileLinks';
 import { MessageFileLinkContext, type MessageFileLinkContextValue } from '../lib/messageFileLinkContext';
+import { endsWithValidationSignal } from '../lib/validationSignal';
 import {
   Cpu, AlertTriangle, Zap, Loader2, Pause, Play,
   Key, Settings, Send, Pencil, RotateCcw, Check, Copy, Clock, ShieldCheck,
   ChevronRight, ListTodo, User, Users, Trash2, Workflow,
-  Reply, Eye, EyeOff, Wrench, Paperclip, FileText, ArrowUpRight, Info,
+  Reply, Eye, EyeOff, Wrench, Paperclip, FileText, ArrowUpRight, Info, GitBranch,
 } from 'lucide-react';
 
 // Hoisted regexes (avoid creating new RegExp objects per message per render)
+/** Tooltip for the session-continuity marker: what happened, and why when known. */
+function sessionContinuityHint(
+  continuity: SessionContinuity,
+  t: (key: string, ...args: (string | number)[]) => string,
+): string {
+  if (continuity.status === 'resumed') return t('disc.session.resumedHint');
+  const reason = continuity.reason ? t(`disc.session.reason.${continuity.reason}`) : '?';
+  return continuity.status === 'fallback_full_history'
+    ? t('disc.session.fallbackHint', reason)
+    : t('disc.session.newHint', reason);
+}
+
 const RE_AUTH_ERROR = /api.?key|invalid.*key|key.*not.*config|authenticat|unauthori|login|sign.?in/i;
 const RE_PARTIAL_RESPONSE = /Réponse partielle.*interrompu|Timeout d'inactivité/i;
 const EDIT_TEXTAREA_MAX_HEIGHT = 160;
@@ -533,7 +546,10 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
   //                            'verified' so a reply with only `unchecked`
   //                            citations doesn't earn a green chip for free.
   //   - null                  — nothing to surface (no sources, no flags).
-  const verifiedCount = lint?.sources?.filter(s => s.status === 'verified').length ?? 0;
+  // KT-1184 — a file found only in an unmerged worktree is its own state:
+  // neither the green of the checkout nor the red of "not found".
+  const verifiedCount = lint?.sources?.filter(isCheckoutVerified).length ?? 0;
+  const laneCount = lint?.sources?.filter(isLaneVerified).length ?? 0;
   const unverifiedCount = lint?.unverified_count ?? 0;
   // Sources that CAN'T be machine-checked (URL / user-confirmed / inferred /
   // commit / hypothesis) — distinct from the inline anchors that DID fail
@@ -546,7 +562,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
   //   anchor) > unverified (soft amber, inline anchor didn't resolve) >
   //   verified (green) > unverifiable (NEUTRAL grey — cited but uncheckable;
   //   Option B: surfaced, never hidden — "warn about everything").
-  const lintSeverity: 'fabricated' | 'unsourced' | 'unverified' | 'verified' | 'unchecked' | null = lint
+  const lintSeverity: 'fabricated' | 'unsourced' | 'unverified' | 'verified' | 'lane' | 'unchecked' | null = lint
     ? (lint.fabricated_count > 0
         ? 'fabricated'
         : lint.unsourced_count > 0
@@ -555,7 +571,9 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             ? 'unverified'
             : verifiedCount > 0
               ? 'verified'
-              : unverifiableCount > 0
+              : laneCount > 0
+                ? 'lane'
+                : unverifiableCount > 0
                 ? 'unchecked'
                 : null)
     : null;
@@ -837,6 +855,18 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
                       title={msg.model ? `Modèle : ${msg.model}` : `Palier : ${msg.model_tier}`}
                     >
                       · {msg.model ?? msg.model_tier}
+                    </span>
+                  )}
+                  {/* KT-1202 — whether this turn continued the agent's conversation. */}
+                  {msg.session_continuity && (
+                    <span
+                      className="disc-msg-session-continuity"
+                      data-testid="disc-msg-session-continuity"
+                      data-status={msg.session_continuity.status}
+                      style={{ opacity: 0.6, fontWeight: 400 }}
+                      title={sessionContinuityHint(msg.session_continuity, t)}
+                    >
+                      {' '}· {t(`disc.session.${msg.session_continuity.status}`)}
                     </span>
                   )}
                   {msg.author_pseudo && (
@@ -1271,7 +1301,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             as the auth-error / timeout CTAs above (button below the
             bubble, before the footer). `onNavigate` lands on the
             project's own address, so no extra plumbing is needed. */}
-        {projectId && /KRONN:VALIDATION_COMPLETE/i.test(msg.content) && (
+        {projectId && endsWithValidationSignal(msg.content) && (
           <div className="disc-auth-error-cta">
             <button
               className="disc-scan-btn"
@@ -1351,10 +1381,14 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
                 onClick={() => setShowLint(v => !v)}
                 aria-expanded={showLint}
                 aria-controls={`lint-detail-${msg.id}`}
-                title={t(lintSeverity === 'verified' ? 'disc.lintPillHintVerified' : 'disc.lintPillHint')}
+                title={t(lintSeverity === 'verified'
+                  ? 'disc.lintPillHintVerified'
+                  : lintSeverity === 'lane' ? 'disc.lintPillHintLane' : 'disc.lintPillHint')}
                 data-testid="lint-pill"
               >
-                {lintSeverity === 'verified' ? <Check size={8} /> : <AlertTriangle size={8} />}{' '}
+                {lintSeverity === 'verified'
+                  ? <Check size={8} />
+                  : lintSeverity === 'lane' ? <GitBranch size={8} /> : <AlertTriangle size={8} />}{' '}
                 {lintSeverity === 'fabricated'
                   ? <>{lint.fabricated_count} {t('disc.lintFabricated')}</>
                   : lintSeverity === 'unsourced'
@@ -1363,7 +1397,9 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
                       ? <>{unverifiedCount} {t('disc.lintUnverified')}</>
                       : lintSeverity === 'unchecked'
                         ? <>{unverifiableCount} {t('disc.lintUnverifiable')}</>
-                        : <>{verifiedCount} {t('disc.lintVerified')}</>}
+                        : lintSeverity === 'lane'
+                          ? <>{laneCount} {t('disc.lintLane')}</>
+                          : <>{verifiedCount} {t('disc.lintVerified')}</>}
               </button>
             )}
             {/* When the headline pill is a WARNING but the reply also has
@@ -1382,6 +1418,20 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
                 data-testid="lint-pill-verified"
               >
                 <Check size={8} /> {verifiedCount} {t('disc.lintVerified')}
+              </button>
+            )}
+            {msg.role === 'Agent' && lint && lintSeverity && lintSeverity !== 'lane' && laneCount > 0 && (
+              <button
+                type="button"
+                className="disc-msg-lint-pill"
+                data-severity="lane"
+                onClick={() => setShowLint(v => !v)}
+                aria-expanded={showLint}
+                aria-controls={`lint-detail-${msg.id}`}
+                title={t('disc.lintPillHintLane')}
+                data-testid="lint-pill-lane"
+              >
+                <GitBranch size={8} /> {laneCount} {t('disc.lintLane')}
               </button>
             )}
           </div>
@@ -1502,10 +1552,24 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
               <div className="disc-lint-group" data-testid="lint-verified-group">
                 <div className="disc-lint-group-title">{t('disc.lintVerifiedTitle')}</div>
                 {lint.sources
-                  .filter(s => s.status === 'verified')
+                  .filter(isCheckoutVerified)
                   .map((s, i) => (
                     <div key={`vsrc-${i}`} className="disc-lint-item" data-status="verified">
                       <code>{s.raw}</code> — {s.detail}
+                    </div>
+                  ))}
+              </div>
+            )}
+            {laneCount > 0 && (
+              <div className="disc-lint-group" data-testid="lint-lane-group">
+                <div className="disc-lint-group-title">{t('disc.lintLaneTitle')}</div>
+                {lint.sources
+                  .filter(isLaneVerified)
+                  .map((s, i) => (
+                    <div key={`lane-${i}`} className="disc-lint-item" data-status="lane">
+                      <code>{s.raw}</code>{' '}
+                      <span className="disc-lint-lane-tag">{t('disc.srcOrigin.laneTag', laneOf(s) ?? '')}</span>
+                      {' — '}{s.detail}
                     </div>
                   ))}
               </div>

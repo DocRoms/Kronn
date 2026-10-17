@@ -9763,6 +9763,101 @@ Suite de la réponse.";
         );
     }
 
+    /// `<repo>/.kronn/worktrees/task-kt-1246-test0001`, canonical.
+    fn managed_task_worktree() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = repo_dir.path().canonicalize().unwrap();
+        let worktree = repo
+            .join(".kronn")
+            .join("worktrees")
+            .join("task-kt-1246-test0001");
+        std::fs::create_dir_all(&worktree).unwrap();
+        (repo_dir, repo, worktree)
+    }
+
+    #[test]
+    fn claude_task_worker_sandbox_allows_loopback_and_its_lane_without_a_network_domain() {
+        let (_repo_dir, repo, worktree) = managed_task_worktree();
+        let settings: serde_json::Value =
+            serde_json::from_str(&super::super::claude_task_worker_settings(&worktree).unwrap())
+                .unwrap();
+        let sandbox = &settings["sandbox"];
+
+        // Loopback only: the one network key is the binding switch.
+        assert_eq!(
+            sandbox["network"],
+            serde_json::json!({"allowLocalBinding": true})
+        );
+        let text = settings.to_string();
+        assert!(!text.contains("allowedDomains"), "{text}");
+        assert!(!text.contains("allowUnixSockets"), "{text}");
+        assert!(!text.contains("allowAllUnixSockets"), "{text}");
+
+        // The worker writes its worktree and its lane's private target, never
+        // the repo or the main checkout's own target.
+        assert_eq!(
+            sandbox["filesystem"]["allowWrite"],
+            serde_json::json!([worktree, repo.join("target").join("wt-kt-1246-test0001")])
+        );
+        let writes = sandbox["filesystem"]["allowWrite"].as_array().unwrap();
+        assert!(!writes.contains(&serde_json::json!(repo)));
+        assert!(!writes.contains(&serde_json::json!(repo.join("target"))));
+        // What it may only read never overlaps what it may write.
+        for read in sandbox["filesystem"]["allowRead"].as_array().unwrap() {
+            let read = std::path::PathBuf::from(read.as_str().unwrap());
+            for write in writes {
+                let write = std::path::PathBuf::from(write.as_str().unwrap());
+                assert!(
+                    !read.starts_with(&write),
+                    "{read:?} is writable via {write:?}"
+                );
+            }
+        }
+        assert!(super::super::claude_task_worker_allows_loopback_binding(
+            &worktree
+        ));
+    }
+
+    #[test]
+    fn claude_task_worker_sandbox_stays_fail_closed_after_the_widening() {
+        let (_repo_dir, _repo, worktree) = managed_task_worktree();
+        let settings: serde_json::Value =
+            serde_json::from_str(&super::super::claude_task_worker_settings(&worktree).unwrap())
+                .unwrap();
+        let sandbox = &settings["sandbox"];
+
+        assert_eq!(sandbox["enabled"], true);
+        assert_eq!(sandbox["failIfUnavailable"], true);
+        assert_eq!(sandbox["autoAllowBashIfSandboxed"], true);
+        assert_eq!(sandbox["allowUnsandboxedCommands"], false);
+        assert_eq!(sandbox["excludedCommands"], serde_json::json!([]));
+
+        // A worktree that cannot be resolved still produces no widened policy.
+        let args = super::super::agent_command_with_task_worker_policy(
+            &AgentType::ClaudeCode,
+            "p",
+            false,
+            "",
+            None,
+            None,
+            true,
+            Some(std::path::Path::new("/definitely/not/a/worktree")),
+            None,
+        )
+        .2;
+        let fallback = args
+            .get(args.iter().position(|arg| arg == "--settings").unwrap() + 1)
+            .unwrap();
+        let fallback: serde_json::Value = serde_json::from_str(fallback).unwrap();
+        assert_eq!(fallback["sandbox"]["failIfUnavailable"], true);
+        assert_eq!(fallback["sandbox"]["allowUnsandboxedCommands"], false);
+        assert_eq!(
+            fallback["sandbox"]["filesystem"]["allowWrite"],
+            serde_json::json!([])
+        );
+        assert!(fallback["sandbox"].get("network").is_none());
+    }
+
     #[test]
     fn claude_task_worker_receipt_proves_unrelated_catalogue_is_not_spawned() {
         let worktree = tempfile::tempdir().unwrap();
@@ -10585,6 +10680,90 @@ Suite de la réponse.";
         );
     }
 
+    /// What a spawned agent named `program` sees of the KT-1246 lane variables
+    /// when it runs in `work_dir` as a task worker.
+    #[cfg(unix)]
+    async fn lane_env_seen_by(program: &str, work_dir: &std::path::Path) -> String {
+        use std::os::unix::fs::PermissionsExt;
+
+        let bin = tempfile::tempdir().unwrap();
+        let path = bin.path().join(program);
+        std::fs::write(
+            &path,
+            "#!/bin/sh\nprintf '%s|%s|%s|%s' \"${KRONN_DATA_DIR-unset}\" \
+             \"${CARGO_TARGET_DIR-unset}\" \"${CARGO_NET_OFFLINE-unset}\" \"${CARGO_HOME-unset}\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let worker = worker_context();
+        let child = try_spawn(
+            path.to_str().unwrap(),
+            None,
+            &[],
+            work_dir,
+            "ANTHROPIC_API_KEY",
+            None,
+            SpawnIo::Direct(None),
+            None,
+            Some(&worker),
+            None,
+            None,
+            &[],
+            None,
+        )
+        .expect("the stand-in binary starts");
+        let output = child.wait_with_output().await.expect("the child exits");
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    /// A launched Claude task worker finds its lane in its environment, so no
+    /// `VAR=x cmd` prefix is ever needed to build or test (KT-1246).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_claude_task_worker_launches_with_its_lane_environment() {
+        let (_repo_dir, repo, worktree) = managed_task_worktree();
+        let seen = lane_env_seen_by("claude", &worktree).await;
+        let fields: Vec<&str> = seen.split('|').collect();
+
+        assert_eq!(
+            fields[0],
+            worktree.join(".kronn").join("data").to_string_lossy(),
+            "{seen}"
+        );
+        assert_eq!(
+            fields[1],
+            repo.join("target")
+                .join("wt-kt-1246-test0001")
+                .to_string_lossy(),
+            "{seen}"
+        );
+        assert_eq!(fields[2], "true", "{seen}");
+        assert!(
+            repo.join("target").join("wt-kt-1246-test0001").is_dir(),
+            "the lane target exists before the worker needs it"
+        );
+        assert!(worktree.join(".kronn").join("data").is_dir());
+    }
+
+    /// Only Claude Code's sandbox was widened: another runtime's task worker
+    /// keeps the environment it had.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn another_runtimes_task_worker_gets_no_lane_environment() {
+        let (_repo_dir, repo, worktree) = managed_task_worktree();
+        let seen = lane_env_seen_by("not-claude-agent", &worktree).await;
+        let fields: Vec<&str> = seen.split('|').collect();
+
+        assert_eq!(fields[2], "unset", "{seen}");
+        assert_ne!(
+            fields[1],
+            repo.join("target")
+                .join("wt-kt-1246-test0001")
+                .to_string_lossy()
+        );
+        assert!(!repo.join("target").join("wt-kt-1246-test0001").exists());
+    }
+
     fn worker_context() -> TaskWorkerBridgeContext {
         TaskWorkerBridgeContext {
             execution_id: "exec".into(),
@@ -10937,6 +11116,62 @@ Suite de la réponse.";
         .expect("existing Docker/script launch");
         assert_eq!(legacy.command, "python3");
         assert_eq!(legacy.args, ["/app/scripts/disc-introspection-mcp.py"]);
+    }
+
+    fn touch_bridge(root: &std::path::Path, relative: &str) -> String {
+        let script = root.join(relative).join("disc-introspection-mcp.py");
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        std::fs::write(&script, "# bridge").unwrap();
+        script.to_string_lossy().into_owned()
+    }
+
+    /// KT-1316 — the script is found from where the process runs, never from the
+    /// checkout the binary happened to be compiled in.
+    #[test]
+    fn the_bridge_script_is_found_from_the_running_process_not_the_build_checkout() {
+        let find = super::super::disc_introspection_mcp_path_near;
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(
+            find(Some(empty.path()), Some(empty.path())),
+            None,
+            "no script around the process: nothing, not the build checkout's"
+        );
+        assert_eq!(find(None, None), None);
+
+        // Run from a source checkout: its own script, whatever the binary's dir.
+        let checkout = tempfile::tempdir().unwrap();
+        let script = touch_bridge(checkout.path(), "backend/scripts");
+        let backend = checkout.path().join("backend");
+        assert_eq!(
+            find(Some(empty.path()), Some(&backend)),
+            Some(script.clone())
+        );
+        assert_eq!(
+            find(Some(empty.path()), Some(checkout.path())),
+            Some(script.clone())
+        );
+
+        // A binary in that checkout's target dir finds it too.
+        let target = checkout.path().join("target/lane/debug");
+        std::fs::create_dir_all(&target).unwrap();
+        assert_eq!(find(Some(&target), Some(empty.path())), Some(script));
+    }
+
+    #[test]
+    fn an_installed_bridge_wins_over_the_working_directory_checkout() {
+        let install = tempfile::tempdir().unwrap();
+        let installed = touch_bridge(install.path(), "scripts");
+        let bin = install.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let checkout = tempfile::tempdir().unwrap();
+        touch_bridge(checkout.path(), "backend/scripts");
+        let found =
+            super::super::disc_introspection_mcp_path_near(Some(&bin), Some(checkout.path()))
+                .expect("the installed script is found");
+        assert_eq!(
+            std::fs::canonicalize(found).unwrap(),
+            std::fs::canonicalize(installed).unwrap()
+        );
     }
 
     #[test]
@@ -13388,6 +13623,7 @@ Suite de la réponse.";
                 token_fragments: false,
                 activity_watched: false,
                 bridge_token: None,
+                resume_fallback: None,
             };
             let exit = process.wait().await.expect("leader exits");
             assert!(exit.success);
@@ -13516,6 +13752,7 @@ sleep 3600
             token_fragments: false,
             activity_watched: false,
             bridge_token: None,
+            resume_fallback: None,
         };
 
         // Call the production kill() method
@@ -13597,6 +13834,7 @@ sleep 3600
             token_fragments: false,
             activity_watched: false,
             bridge_token: None,
+            resume_fallback: None,
         };
 
         assert_eq!(process.reported_token_usage(), Some(8));

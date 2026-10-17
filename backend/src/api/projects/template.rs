@@ -30,35 +30,52 @@ pub async fn install_template(
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
+    let lease =
+        match crate::api::audit::docs_write::DocsWriteLease::acquire(&state, &project.id).await {
+            Ok(lease) => lease,
+            Err(error) => return Json(ApiResponse::err(error)),
+        };
     let project_path_str = project.path.clone();
+    // A Full run this instance recorded stands for the record, as at launch.
+    let recorded_run = {
+        let id = project.id.clone();
+        state
+            .db
+            .with_read_conn(move |conn| crate::db::audit_runs::has_any_full(conn, &id))
+            .await
+            .unwrap_or(false)
+    };
 
     // Run filesystem I/O on blocking thread pool
-    let install_result = tokio::task::spawn_blocking(move || -> Result<(), String> {
-        let project_path = scanner::resolve_host_path(&project_path_str);
-        if !project_path.exists() {
-            return Err(format!(
-                "Project path not found: {}",
-                project_path.display()
-            ));
-        }
-
-        // Snapshot target-specific agent integrations before Kronn creates
-        // any instruction file. The shared AGENTS.md is always installed;
-        // vendor adapters are created only for agents already declared by
-        // the repository.
-        let detected_adapters = crate::core::root_agent_files::detect_agent_adapters(&project_path);
-
-        // Permission check on whichever doc-folder the project already
-        // has (`docs/`, legacy `ai/`, or alt `doc/`). Fresh projects
-        // skip this — there's nothing to check yet.
-        let existing_docs = crate::core::scanner::detect_docs_dir(&project_path);
-        if existing_docs.exists() {
-            if let Err(e) = crate::api::audit::check_ai_dir_permissions(&existing_docs) {
-                let folder_name = existing_docs
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("docs");
+    let install_result = lease
+        .blocking(move || -> Result<(), String> {
+            let project_path = scanner::resolve_host_path(&project_path_str);
+            if !project_path.exists() {
                 return Err(format!(
+                    "Project path not found: {}",
+                    project_path.display()
+                ));
+            }
+
+            // Snapshot target-specific agent integrations before Kronn creates
+            // any instruction file. The shared AGENTS.md is always installed;
+            // vendor adapters are created only for agents already declared by
+            // the repository.
+            let detected_adapters =
+                crate::core::root_agent_files::detect_agent_adapters(&project_path);
+
+            // Permission check on whichever doc-folder the project already
+            // has (`docs/`, legacy `ai/`, or alt `doc/`). Fresh projects
+            // skip this — there's nothing to check yet.
+            // A configured folder that fails containment stops the install (KT-263).
+            let existing_docs = crate::core::docs_location::guard_write(&project_path)?;
+            if existing_docs.exists() {
+                if let Err(e) = crate::api::audit::check_ai_dir_permissions(&existing_docs) {
+                    let folder_name = existing_docs
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("docs");
+                    return Err(format!(
                     "{}/ directory exists but has permission issues that could not be fixed: {}. \
                      Run: sudo chown -R $(id -u):$(id -g) {}/{}/",
                     folder_name,
@@ -66,90 +83,126 @@ pub async fn install_template(
                     project_path.display(),
                     folder_name
                 ));
+                }
             }
-        }
 
-        let template_dir = resolve_templates_dir();
-        if !template_dir.exists() {
-            return Err(format!(
-                "Templates directory not found: {}",
-                template_dir.display()
+            let template_dir = resolve_templates_dir();
+            if !template_dir.exists() {
+                return Err(format!(
+                    "Templates directory not found: {}",
+                    template_dir.display()
+                ));
+            }
+
+            // 0.7.1+ : ship the modern `docs/AGENTS.md` convention. Fresh
+            // projects always get docs/; legacy `ai/` projects keep their
+            // layout until the operator clicks Migrate.
+            let docs_template = template_dir.join("docs");
+            // Unconfigured, a missing folder resolves to `docs/` (fresh project).
+            let docs_target = existing_docs;
+            let provenance_before = crate::core::doc_provenance::snapshot_tracked(&project_path)?;
+            let docs_root = crate::core::docs_location::DocsRoot::for_project(&project_path)?;
+            // A state file that cannot be rewritten stops the install before it
+            // writes anything: no Kronn file is ever left unrecorded (KT-1299).
+            crate::core::kronn_state::load_for_mutation(&project_path)?;
+            // A folder that is not a human's becomes Kronn's by this install:
+            // recorded first, so the files written below are never counted as
+            // docs Kronn did not write (KT-1299). A human's docs stay theirs
+            // until the briefing's choice.
+            let human_folder = matches!(
+                crate::core::docs_folder::folder_state_with_runs(
+                    &project_path,
+                    docs_root.rel(),
+                    recorded_run,
+                ),
+                crate::core::docs_folder::DocsFolderState::HumanDocs { .. }
+            );
+            if !human_folder {
+                crate::core::kronn_state::mark_template_installed(&project_path)?;
+            }
+            let renamed =
+                crate::core::template_manifest::apply_renames(&project_path, &docs_template)?;
+            let folder_before = crate::core::docs_folder::list_files(&docs_target);
+            let mut created_files = Vec::new();
+            if docs_template.is_dir() {
+                created_files.extend(copy_dir_nondestructive_in(
+                    &docs_template,
+                    &docs_target,
+                    &docs_root,
+                )?);
+            }
+            crate::core::template_manifest::record_install(&project_path, &docs_template)?;
+            ensure_agent_writable_subfolders(&project_path, &docs_target);
+            // Human-friendly landing page for `docs/`. Idempotent, best-effort.
+            if let Err(e) =
+                crate::core::docs_migration::ensure_docs_index(&project_path, &docs_target)
+            {
+                tracing::warn!("docs index not installed: {e}");
+            }
+
+            let adapter_report = crate::core::root_agent_files::install_detected_agent_files(
+                &project_path,
+                &template_dir,
+                &detected_adapters,
+            );
+            created_files.extend(crate::core::root_agent_files::created_agent_paths(
+                &project_path,
+                &adapter_report,
             ));
-        }
+            for failure in adapter_report.failed {
+                tracing::warn!("Agent instruction install failed: {failure}");
+            }
 
-        // 0.7.1+ : ship the modern `docs/AGENTS.md` convention. Fresh
-        // projects always get docs/; legacy `ai/` projects keep their
-        // layout until the operator clicks Migrate.
-        let docs_template = template_dir.join("docs");
-        let docs_target = if existing_docs.exists() {
-            existing_docs
-        } else {
-            project_path.join("docs")
-        };
-        let mut created_files = Vec::new();
-        if docs_template.is_dir() {
-            created_files.extend(copy_dir_nondestructive(&docs_template, &docs_target)?);
-        }
-        // 0.8.7 — copy the anti-hallu spec embedded in the binary into
-        // the project's `docs/conventions/` so any agent running on this
-        // project (with or without Kronn) can open the convention
-        // locally. Idempotent : skip if already present (re-install
-        // doesn't clobber user edits ; PR3 endpoint `/anti-hallu/inject`
-        // is the explicit re-sync path).
-        let conventions_dir = docs_target.join("conventions");
-        let spec_path = conventions_dir.join("agents-md-format-v1.md");
-        // no-follow primitive: a symlinked conventions/ (or dangling spec
-        // link) must never route this write outside the project.
-        if let Err(e) = crate::core::fs_guard::guarded_write_new(
-            &project_path,
-            &spec_path,
-            crate::core::anti_halluc::SPEC_AGENTS_MD_V1.as_bytes(),
-        ) {
-            tracing::warn!("anti-hallu spec not installed: {e}");
-        }
-        ensure_agent_writable_subfolders(&project_path, &docs_target);
-        // Human-friendly landing page for `docs/`. Idempotent, best-effort.
-        if let Err(e) = crate::core::docs_migration::ensure_docs_index(&project_path, &docs_target)
-        {
-            tracing::warn!("docs index not installed: {e}");
-        }
+            // Pre-fill template placeholders with filesystem-derived defaults —
+            // scoped EXCLUSIVELY to the files this very call created (ownership
+            // by construction, Codex A2): a pre-existing docs/ tree or root file
+            // is user content and is never walked.
+            let _ = crate::core::docs_migration::prefill_files(&project_path, &created_files);
+            crate::core::doc_provenance::note_snapshot_writes(
+                &project_path,
+                &provenance_before,
+                crate::core::doc_provenance::DocWriter::TemplateReinstall,
+            )
+            .map_err(|e| {
+                format!("Template files installed, but provenance could not be recorded: {e}")
+            })?;
+            // What this install wrote (the provenance file included) is Kronn's,
+            // whatever else the folder holds.
+            let written: Vec<String> = crate::core::docs_folder::list_files(&docs_target)
+                .difference(&folder_before)
+                .filter(|rel| !crate::core::docs_folder::is_kronn_state_file(rel))
+                .cloned()
+                .collect();
+            // A renamed template file is Kronn's under its new path.
+            let docs_prefix = format!("{}/", docs_root.rel());
+            let moved: Vec<(String, String)> = renamed
+                .iter()
+                .filter_map(|r| {
+                    Some((
+                        r.from.strip_prefix(&docs_prefix)?.to_string(),
+                        r.to.strip_prefix(&docs_prefix)?.to_string(),
+                    ))
+                })
+                .collect();
+            crate::core::kronn_state::record_kronn_moves(&project_path, &moved, &written)?;
 
-        let adapter_report = crate::core::root_agent_files::install_detected_agent_files(
-            &project_path,
-            &template_dir,
-            &detected_adapters,
-        );
-        created_files.extend(crate::core::root_agent_files::created_agent_paths(
-            &project_path,
-            &adapter_report,
-        ));
-        for failure in adapter_report.failed {
-            tracing::warn!("Agent instruction install failed: {failure}");
-        }
+            // KT-841 — no more "FIRST-RUN TASK" prompt injected into
+            // docs/AGENTS.md at install time: that block lived in the exact
+            // file every subsequent agent reads as "the tiered context loader",
+            // so a run that never reached Step 9/10's self-delete (interrupted
+            // audit, or a manually-invoked agent that never ran Kronn's audit
+            // at all) left it there permanently, confusing later reads. The
+            // Full audit's own Step 1 prompt (`ANALYSIS_STEPS[0]`, sent
+            // directly to the agent, never persisted to disk) is already
+            // self-sufficient — it doesn't depend on this block. Kronn still
+            // strips the LEGACY marker from projects installed before this fix
+            // (see `remove_bootstrap_block`, called at Full-audit Phase 2).
+            runner::fix_file_ownership(&project_path);
 
-        // Pre-fill template placeholders with filesystem-derived defaults —
-        // scoped EXCLUSIVELY to the files this very call created (ownership
-        // by construction, Codex A2): a pre-existing docs/ tree or root file
-        // is user content and is never walked.
-        let _ = crate::core::docs_migration::prefill_files(&project_path, &created_files);
-
-        // KT-841 — no more "FIRST-RUN TASK" prompt injected into
-        // docs/AGENTS.md at install time: that block lived in the exact
-        // file every subsequent agent reads as "the tiered context loader",
-        // so a run that never reached Step 9/10's self-delete (interrupted
-        // audit, or a manually-invoked agent that never ran Kronn's audit
-        // at all) left it there permanently, confusing later reads. The
-        // Full audit's own Step 1 prompt (`ANALYSIS_STEPS[0]`, sent
-        // directly to the agent, never persisted to disk) is already
-        // self-sufficient — it doesn't depend on this block. Kronn still
-        // strips the LEGACY marker from projects installed before this fix
-        // (see `remove_bootstrap_block`, called at Full-audit Phase 2).
-        runner::fix_file_ownership(&project_path);
-
-        Ok(())
-    })
-    .await
-    .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+            Ok(())
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     if let Err(e) = install_result {
         return Json(ApiResponse::err(e));
@@ -157,15 +210,12 @@ pub async fn install_template(
 
     // Ensure the docs/var/ scratch dir is gitignored (legacy ai/var/ path
     // stays gitignored too on projects that haven't migrated yet).
-    let docs_dir = crate::core::scanner::detect_docs_dir(&std::path::PathBuf::from(&project.path));
-    let docs_dir_name = docs_dir
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("docs");
-    crate::core::mcp_scanner::ensure_gitignore_public(
-        &project.path,
-        &format!("{}/var/", docs_dir_name),
-    );
+    let project_root = scanner::resolve_host_path(&project.path);
+    if let Some(docs_rel) =
+        crate::core::docs_location::resolution(&project_root).relative(&project_root)
+    {
+        crate::core::mcp_scanner::ensure_local_exclude(&project.path, &format!("{docs_rel}/var/"));
+    }
 
     let status = scanner::detect_audit_status(&project.path);
     Json(ApiResponse::ok(status))
@@ -221,45 +271,14 @@ pub(crate) fn ensure_agent_writable_subfolders(
         // bootstrap is in a degraded state.
         return;
     }
-    // The README copy below makes one point explicit: these folders
-    // are EMPTY by default after the audit. The audit pipeline does
-    // NOT seed them — they're discovery-time scratchpads filled by
-    // agents (and humans) as they encounter conventions / gotchas /
-    // contributors during real work. Without this notice, users
-    // open the empty folders after their first audit and assume
-    // something went wrong. 0.8.3 (F5).
-    static SUBFOLDERS: &[(&str, &str)] = &[
-        (
-            "conventions",
-            "# Conventions\n\n\
-             > **Empty by design after the initial audit.** This folder fills up over time, one file at a time, as agents and humans encounter project-specific conventions while doing real work. The audit pipeline does NOT seed it — only `coding-rules.md` (one level up) is filled at audit time.\n\n\
-             ## What goes here\n\
-             Project-specific conventions discovered at runtime — naming patterns, idioms agents must follow, micro-rules that don't fit `coding-rules.md`.\n\n\
-             One file per topic, e.g. `pnpm-vs-npm.md`, `git-signoff.md`, `commit-style.md`.\n\n\
-             Curated by humans + agents. Cross-ref with `[[wikilinks]]` for Obsidian graph.\n",
-        ),
-        (
-            "gotchas",
-            "# Gotchas\n\n\
-             > **Empty by design after the initial audit.** This folder fills up over time as agents (and humans) hit footguns during real work. The audit pipeline does NOT seed it — only generic `inconsistencies-tech-debt.md` (one level up) is filled at audit time.\n\n\
-             ## What goes here\n\
-             Sharp edges to know before touching code — runtime quirks, footguns, version-specific issues, MCP integration weirdness, framework bugs.\n\n\
-             One file per topic, e.g. `jira-mcp-escapes-panels.md`, `migration-locks-table.md`.\n",
-        ),
-        (
-            "people",
-            "# People\n\n\
-             > **Empty by design after the initial audit.** Optional folder. Skip if your project is solo or if collaborators don't need agent-tailored context.\n\n\
-             ## What goes here\n\
-             Team context — preferences, ownership areas, review style. Helps agents adapt to the human they're collaborating with.\n\n\
-             One file per person if useful: `alice.md`, `bob.md`.\n",
-        ),
-    ];
+    // KT-819 DoD 11 — the audit seeds these folders from what the team stated
+    // in the briefing (`api::audit::operating_seed`); they stay empty only when
+    // the briefing gave nothing to seed, and agents and humans add to them.
     // The trust root is the EXPLICIT project root, never inferred (same
     // class as ensure_docs_index): the lstat walk never checks the root
     // itself, so rooting at docs_dir would let a symlinked docs/ route
     // these writes outside the project.
-    for (name, readme) in SUBFOLDERS {
+    for (name, readme) in SUBFOLDER_READMES {
         let folder = docs_dir.join(name);
         // no-follow: a symlinked subfolder (conventions/gotchas/people →
         // external dir) or dangling README link is skipped, never traversed.
@@ -283,15 +302,60 @@ pub(crate) fn ensure_agent_writable_subfolders(
     }
 }
 
+/// The README each agent-writable subfolder starts with. Shipped as
+/// `templates/docs/<folder>/README.md` too: a test keeps both copies equal.
+pub(crate) const SUBFOLDER_READMES: &[(&str, &str)] = &[
+    (
+        "conventions",
+        "# Conventions\n\n\
+         > **Seeded by the audit** from the Git workflow the team stated in the briefing (`git-workflow.md`), when it did; empty otherwise. It then fills up one file at a time, as agents and humans meet project-specific conventions while doing real work.\n\n\
+         ## What goes here\n\
+         Project-specific conventions — naming patterns, idioms agents must follow, micro-rules that don't fit `coding-rules.md` (one level up).\n\n\
+         One file per topic, e.g. `pnpm-vs-npm.md`, `git-signoff.md`, `commit-style.md`.\n\n\
+         Curated by humans + agents. Cross-ref with `[[wikilinks]]` for Obsidian graph.\n",
+    ),
+    (
+        "gotchas",
+        "# Gotchas\n\n\
+         > **Seeded by the audit** from the traps the team listed in the briefing (`known-traps.md`), when it did; empty otherwise. It then fills up as agents (and humans) hit footguns during real work.\n\n\
+         ## What goes here\n\
+         Sharp edges to know before touching code — runtime quirks, footguns, version-specific issues, MCP integration weirdness, framework bugs.\n\n\
+         One file per topic, e.g. `jira-mcp-escapes-panels.md`, `migration-locks-table.md`.\n",
+    ),
+    (
+        "people",
+        "# People\n\n\
+         > **Seeded by the audit** from the roles, names and contacts the team entered in the briefing (`team.md`), when it did; empty otherwise. Skip the folder if your project is solo.\n\n\
+         ## What goes here\n\
+         Team context — preferences, ownership areas, review style. Helps agents adapt to the human they're collaborating with.\n\n\
+         One file per person if useful: `alice.md`, `bob.md`.\n",
+    ),
+];
+
 /// Recursively copy a directory, creating ONLY files that do not exist
 /// at the destination, and returning the exact list of paths created by
 /// THIS call — the only set downstream steps (placeholder prefill) are
 /// allowed to touch. Existing files are never inspected or rewritten:
 /// a 0-byte or placeholder-bearing destination is user state until a
 /// manifest proves otherwise (Codex A2).
+#[cfg(test)]
 pub(crate) fn copy_dir_nondestructive(
     src: &std::path::Path,
     dst: &std::path::Path,
+) -> Result<Vec<std::path::PathBuf>, String> {
+    copy_dir_nondestructive_in(
+        src,
+        dst,
+        &crate::core::docs_location::DocsRoot::default_root(),
+    )
+}
+
+/// `copy_dir_nondestructive` with the markdown templates' `docs/` references
+/// rewritten to `docs_root` (KT-1192); byte copies under the default root.
+pub(crate) fn copy_dir_nondestructive_in(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+    docs_root: &crate::core::docs_location::DocsRoot,
 ) -> Result<Vec<std::path::PathBuf>, String> {
     // The destination root itself must not be a symlink: `exists()` and
     // `create_dir_all` follow links, so a symlinked docs/ would route the
@@ -329,13 +393,21 @@ pub(crate) fn copy_dir_nondestructive(
         }
 
         if src_path.is_dir() {
-            created.extend(copy_dir_nondestructive(&src_path, &dst_path)?);
+            created.extend(copy_dir_nondestructive_in(&src_path, &dst_path, docs_root)?);
         } else if dst_lstat.is_err() {
             // An existing destination is NEVER touched (Codex A2) — not
             // even 0 B or placeholder-bearing: neither proves Kronn owns
             // the current content, and recovery of a corrupt skeleton is
             // an explicit operation, not an implicit side effect.
-            std::fs::copy(&src_path, &dst_path).map_err(|e| {
+            let markdown = src_path.extension().is_some_and(|ext| ext == "md");
+            let copied = if docs_root.is_default() || !markdown {
+                std::fs::copy(&src_path, &dst_path).map(|_| ())
+            } else {
+                std::fs::read_to_string(&src_path).and_then(|text| {
+                    std::fs::write(&dst_path, docs_root.relocate(&text).as_bytes())
+                })
+            };
+            copied.map_err(|e| {
                 format!(
                     "copy {} -> {}: {}",
                     src_path.display(),
@@ -381,22 +453,24 @@ mod tests {
     }
 
     #[test]
-    fn ensure_subfolders_readme_explicitly_says_empty_by_design() {
-        // 0.8.3 F5 — users opened conventions/gotchas/people after
-        // the first audit, saw only a tiny README, and assumed
-        // something failed. The README now states upfront that these
-        // folders are MEANT to be empty post-audit (they're filled
-        // at runtime by agents and humans, not by the audit pipeline).
+    fn subfolder_readmes_say_what_seeds_them_and_match_the_shipped_template() {
+        // KT-819 DoD 11 — the audit seeds these folders, so the README says
+        // what from and that an empty folder means the briefing was silent.
         let tmp = tempfile::TempDir::new().unwrap();
         let docs = tmp.path().join("docs");
         std::fs::create_dir(&docs).unwrap();
         ensure_agent_writable_subfolders(tmp.path(), &docs);
-        for sub in &["conventions", "gotchas", "people"] {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../templates/docs");
+        for (sub, _) in SUBFOLDER_READMES {
             let body = std::fs::read_to_string(docs.join(sub).join("README.md")).unwrap();
             assert!(
-                body.contains("Empty by design"),
-                "{sub}/README.md must explicitly call out the empty-by-design status (got: {body:?})"
+                body.contains("Seeded by the audit") && body.contains("empty otherwise"),
+                "{sub}/README.md must say what seeds the folder (got: {body:?})"
             );
+            assert!(!body.contains("Empty by design"), "{sub}: {body:?}");
+            let shipped = std::fs::read_to_string(root.join(sub).join("README.md"))
+                .unwrap_or_else(|e| panic!("templates/docs/{sub}/README.md: {e}"));
+            assert_eq!(shipped, body, "{sub}: template and installer copies differ");
         }
     }
 
@@ -713,7 +787,7 @@ mod tests {
             }
         }
         let _ = crate::core::docs_migration::prefill_files(&project, &created);
-        crate::core::mcp_scanner::ensure_gitignore_public(project.to_str().unwrap(), "docs/var/");
+        crate::core::mcp_scanner::ensure_local_exclude(project.to_str().unwrap(), "docs/var/");
 
         // ZERO bytes outside the root; every trap intact.
         assert!(

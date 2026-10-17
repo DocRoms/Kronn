@@ -27,8 +27,8 @@ use crate::{
         AddPlanningBlockerRequest, ApiErrorCode, ApiResponse, CreatePlanningDodItem,
         CreatePlanningTaskLink, CreatePlanningTaskRequest, Discussion, DiscussionMessage,
         LinkPlanningDiscussionRequest, PlanningActor, PlanningActorKind,
-        PlanningDiscussionRelation, PlanningPlacement, PlanningTaskDetail,
-        UpdatePlanningTaskRequest,
+        PlanningDiscussionRelation, PlanningDodVerification, PlanningPlacement, PlanningTaskDetail,
+        PlanningTaskStatus, UpdatePlanningTaskRequest,
     },
     AppState,
 };
@@ -461,29 +461,51 @@ fn imported_attachment_path(
     crate::core::context_files::save_file_to_disk(attachment_id, filename, &bytes).map(Some)
 }
 
+/// KT-1254 — a live check exported ticked comes back ticked with its evidence;
+/// one whose evidence is missing or unusable (a hand-edited file) comes back as
+/// a pending check rather than failing the whole import, and the task is not
+/// left `done` with a proof still owed. The `bool` says it happened.
 fn portable_task_request(
     task: &PlanningTaskDetail,
     project_ids: Vec<String>,
-) -> CreatePlanningTaskRequest {
-    CreatePlanningTaskRequest {
+) -> (CreatePlanningTaskRequest, Vec<Option<String>>, bool) {
+    let mut degraded = false;
+    let mut evidence = Vec::with_capacity(task.definition_of_done.len());
+    let mut definition_of_done = Vec::with_capacity(task.definition_of_done.len());
+    for item in &task.definition_of_done {
+        let live_check = item.verification == PlanningDodVerification::PostIntegration;
+        let proof = item
+            .evidence
+            .as_deref()
+            .map(str::trim)
+            .filter(|proof| !proof.is_empty() && proof.chars().count() <= 2_000)
+            .map(str::to_string);
+        let ticked = item.completed && (!live_check || proof.is_some());
+        degraded |= item.completed && !ticked;
+        evidence.push(if live_check && ticked { proof } else { None });
+        definition_of_done.push(CreatePlanningDodItem {
+            id: None,
+            sentence: item.sentence.clone(),
+            completed: ticked,
+            verification: Some(item.verification),
+        });
+    }
+    let status = if degraded && task.summary.status == PlanningTaskStatus::Done {
+        PlanningTaskStatus::InProgress
+    } else {
+        task.summary.status
+    };
+    let request = CreatePlanningTaskRequest {
         title: task.summary.title.clone(),
         discussion_id: None,
         idempotency_key: None,
         description: task.description.clone(),
-        status: task.summary.status,
+        status,
         priority: task.summary.priority,
         parent_id: None,
         project_ids,
         tags: task.summary.tags.clone(),
-        definition_of_done: task
-            .definition_of_done
-            .iter()
-            .map(|item| CreatePlanningDodItem {
-                id: None,
-                sentence: item.sentence.clone(),
-                completed: item.completed,
-            })
-            .collect(),
+        definition_of_done,
         links: task
             .links
             .iter()
@@ -498,7 +520,8 @@ fn portable_task_request(
             session_id: None,
             source_message_id: None,
         },
-    }
+    };
+    (request, evidence, degraded)
 }
 
 fn import_bundle(
@@ -717,10 +740,14 @@ fn import_bundle(
             .filter(|id| known_projects.contains(*id))
             .cloned()
             .collect();
-        let created = crate::db::planning::create_task(
-            &transaction,
-            &portable_task_request(&item.task, project_ids),
-        )?;
+        let (request, evidence, degraded) = portable_task_request(&item.task, project_ids);
+        if degraded {
+            warnings.push(format!(
+                "{}: a ticked post-integration check had no usable evidence and was imported pending",
+                item.task.summary.reference
+            ));
+        }
+        let created = crate::db::planning::import_task(&transaction, &request, &evidence)?;
         task_ids.insert(item.task.summary.id.clone(), created.summary.id);
     }
 
@@ -970,6 +997,7 @@ fn tour_demo_envelope(ui_language: &str) -> DiscussionExportEnvelope {
                 recovered_partial: false,
                 session_tokens_at_message: None,
                 author_cli_ordinal: None,
+                session_continuity: None,
                 id: user_message_id.clone(),
                 role: crate::models::MessageRole::User,
                 channel: crate::models::MessageChannel::Main,
@@ -993,6 +1021,7 @@ fn tour_demo_envelope(ui_language: &str) -> DiscussionExportEnvelope {
                 recovered_partial: false,
                 session_tokens_at_message: None,
                 author_cli_ordinal: None,
+                session_continuity: None,
                 id: preview_message_id,
                 role: crate::models::MessageRole::Agent,
                 channel: crate::models::MessageChannel::Main,
@@ -1371,6 +1400,126 @@ mod tests {
         );
     }
 
+    /// KT-1254 — a task holding one pending and one ticked live check exports
+    /// and imports (under the import's own agent actor, no session) with both
+    /// checks as they were; a ticked one with no usable evidence comes back
+    /// pending, with a warning, instead of rolling the whole import back.
+    #[tokio::test]
+    async fn live_checks_round_trip_through_export_and_import() {
+        let database = crate::db::Database::open_in_memory().unwrap();
+        database
+            .with_conn(|conn| {
+                let source_id = "live-check-source";
+                crate::db::discussions::insert_discussion(conn, &test_discussion(source_id))?;
+                let live = |sentence: &str| CreatePlanningDodItem {
+                    id: None,
+                    sentence: sentence.into(),
+                    completed: false,
+                    verification: Some(PlanningDodVerification::PostIntegration),
+                };
+                let human = PlanningActor {
+                    kind: PlanningActorKind::Human,
+                    id: Some("tester".into()),
+                    session_id: None,
+                    source_message_id: None,
+                };
+                let task = crate::db::planning::create_task(
+                    conn,
+                    &CreatePlanningTaskRequest {
+                        title: "Live checks".into(),
+                        discussion_id: None,
+                        idempotency_key: None,
+                        description: String::new(),
+                        status: crate::models::PlanningTaskStatus::InProgress,
+                        priority: crate::models::PlanningTaskPriority::High,
+                        parent_id: None,
+                        project_ids: vec![],
+                        tags: vec![],
+                        definition_of_done: vec![
+                            CreatePlanningDodItem {
+                                id: None,
+                                sentence: "Worker proves it".into(),
+                                completed: true,
+                                verification: None,
+                            },
+                            live("Replayed on a real framing"),
+                            live("Checked on the restarted backend"),
+                        ],
+                        links: vec![],
+                        actor: human.clone(),
+                    },
+                )?;
+                crate::db::planning::update_dod_item(
+                    conn,
+                    &task.summary.id,
+                    &task.definition_of_done[1].id,
+                    &crate::models::UpdatePlanningDodItemRequest {
+                        completed: true,
+                        actor: human,
+                        evidence: Some("replayed: ok".into()),
+                    },
+                )?;
+                crate::db::planning::link_discussion(
+                    conn,
+                    &task.summary.id,
+                    &LinkPlanningDiscussionRequest {
+                        discussion_id: source_id.into(),
+                        placement: PlanningPlacement::Active,
+                        is_primary: true,
+                        position: Some(0),
+                        actor: PlanningActor::default(),
+                    },
+                )?;
+
+                let envelope = build_export_envelope(conn, source_id, None)?;
+                let fingerprint = content_fingerprint(&envelope)?;
+                let report = import_bundle(conn, envelope.clone(), None, fingerprint)?;
+                assert_eq!(report.imported_tasks, 1);
+                assert!(report.warnings.is_empty());
+                let plan = crate::db::planning::get_discussion_plan(conn, &report.discussion_id)?;
+                let imported = crate::db::planning::get_task(conn, &plan.active[0].task.id)?
+                    .expect("imported task");
+                let dod = &imported.definition_of_done;
+                assert_eq!(dod[0].verification, PlanningDodVerification::Worker);
+                assert!(dod[0].completed);
+                assert_eq!(
+                    dod[1].verification,
+                    PlanningDodVerification::PostIntegration
+                );
+                assert!(dod[1].completed);
+                assert_eq!(dod[1].evidence.as_deref(), Some("replayed: ok"));
+                assert_eq!(
+                    dod[2].verification,
+                    PlanningDodVerification::PostIntegration
+                );
+                assert!(!dod[2].completed);
+                assert_eq!(dod[2].evidence, None);
+                assert_eq!(imported.summary.live_checks.len(), 1);
+                assert_eq!(imported.summary.live_checks[0].dod_id, dod[2].id);
+
+                // A hand-edited bundle: the ticked live check lost its evidence.
+                let mut stripped = envelope;
+                stripped.source_discussion_id = "live-check-source-stripped".into();
+                stripped.plan[0].task.definition_of_done[1].evidence = None;
+                stripped.plan[0].task.summary.status = crate::models::PlanningTaskStatus::Done;
+                let stripped_fingerprint = content_fingerprint(&stripped)?;
+                let degraded = import_bundle(conn, stripped, None, stripped_fingerprint)?;
+                assert_eq!(degraded.warnings.len(), 1);
+                let plan = crate::db::planning::get_discussion_plan(conn, &degraded.discussion_id)?;
+                let reimported = crate::db::planning::get_task(conn, &plan.active[0].task.id)?
+                    .expect("reimported task");
+                assert!(!reimported.definition_of_done[1].completed);
+                assert_eq!(reimported.summary.live_checks.len(), 2);
+                assert_eq!(
+                    reimported.summary.status,
+                    crate::models::PlanningTaskStatus::InProgress
+                );
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn rich_bundle_round_trips_idempotently_and_reports_conflict() {
         let database = crate::db::Database::open_in_memory().unwrap();
@@ -1382,6 +1531,7 @@ mod tests {
                     recovered_partial: false,
                     session_tokens_at_message: None,
                     author_cli_ordinal: None,
+                    session_continuity: None,
                     id: "portable-message".into(),
                     role: crate::models::MessageRole::User,
                     channel: crate::models::MessageChannel::Main,
@@ -1449,6 +1599,7 @@ mod tests {
                             id: None,
                             sentence: "Round-trip works".into(),
                             completed: true,
+                            verification: None,
                         }],
                         links: vec![CreatePlanningTaskLink {
                             label: "Spec".into(),

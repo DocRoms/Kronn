@@ -11,6 +11,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
 
+use crate::core::adr::StartOfRun;
 use crate::models::{AuditRun, AuditRunStep};
 
 /// Insert a new audit run with `status = Running` and zeroed counts.
@@ -27,6 +28,14 @@ pub fn insert_running(
         "INSERT INTO audit_runs (id, project_id, kind, agent_type, started_at, status)
          VALUES (?1, ?2, ?3, ?4, ?5, 'Running')",
         params![id, project_id, kind, agent_type, started_at.to_rfc3339()],
+    )?;
+    // KT-1211 — only the latest run of a project can be accepted from, so the
+    // pre-step snapshots of the runs this one supersedes have nothing left to
+    // protect or to diff against.
+    conn.execute(
+        "DELETE FROM audit_step_snapshots WHERE audit_run_id IN
+            (SELECT id FROM audit_runs WHERE project_id = ?1 AND id <> ?2)",
+        params![project_id, id],
     )?;
     Ok(())
 }
@@ -47,6 +56,16 @@ pub fn has_completed_full(conn: &Connection, project_id: &str) -> Result<bool> {
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM audit_runs
          WHERE project_id = ?1 AND kind = 'Full' AND status = 'Completed'",
+        [project_id],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+/// Whether this instance ever ran a Full audit of the project, finished or not.
+pub fn has_any_full(conn: &Connection, project_id: &str) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM audit_runs WHERE project_id = ?1 AND kind = 'Full'",
         [project_id],
         |row| row.get(0),
     )?;
@@ -156,15 +175,266 @@ pub fn mark_failed(conn: &Connection, id: &str, reason: &str) -> Result<()> {
     Ok(())
 }
 
-/// Mark as Cancelled (Ctrl+C / cancel button). Same shape as `mark_failed`.
+/// Mark as Cancelled (Ctrl+C / cancel button), before any step. See
+/// [`mark_cancelled_at_step`].
 pub fn mark_cancelled(conn: &Connection, id: &str) -> Result<()> {
-    conn.execute(
+    mark_cancelled_at_step(conn, id, 0).map(|_| ())
+}
+
+/// KT-1211 — settle a run the user cancelled while `step` was in flight (0 =
+/// before step 1). A run that already completed a step is settled
+/// `Interrupted`, resumable, and carries the cancel in `cancelled_at_step`:
+/// cancelling at step 12 must not mean running all 16 again. A run that
+/// completed nothing is `Cancelled` (a fresh launch is its only next action).
+/// Returns the status written, `None` when the row was not `Running`.
+pub fn mark_cancelled_at_step(conn: &Connection, id: &str, step: u32) -> Result<Option<String>> {
+    let affected = conn.execute(
         "UPDATE audit_runs SET
             ended_at = ?2,
             duration_ms = CAST(((julianday(?2) - julianday(started_at)) * 86400000) AS INTEGER),
-            status = 'Cancelled'
+            status = CASE WHEN last_completed_step >= 1 THEN 'Interrupted' ELSE 'Cancelled' END,
+            cancelled_at_step = ?3,
+            report_path = CASE WHEN last_completed_step >= 1
+                THEN COALESCE(report_path, 'cancelled: stopped by the user during step ' || ?3)
+                ELSE report_path END
          WHERE id = ?1 AND status = 'Running'",
-        params![id, Utc::now().to_rfc3339()],
+        params![id, Utc::now().to_rfc3339(), step as i64],
+    )?;
+    if affected == 0 {
+        return Ok(None);
+    }
+    Ok(conn
+        .query_row(
+            "SELECT status FROM audit_runs WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+/// KT-1211 (M6) — what moved in the sources since the run this one resumes.
+pub fn set_resume_drift(conn: &Connection, id: &str, message: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE audit_runs SET resume_drift = ?2 WHERE id = ?1",
+        params![id, message],
+    )?;
+    Ok(())
+}
+
+/// KT-1211 (M5) — the process group of the step's CLI agent, with the start
+/// stamp of its leader, persisted so a boot after a crash can kill it.
+pub fn set_agent_process(
+    conn: &Connection,
+    id: &str,
+    pgid: i64,
+    marker: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE audit_runs SET agent_pgid = ?2, agent_started_marker = ?3 WHERE id = ?1",
+        params![id, pgid, marker],
+    )?;
+    Ok(())
+}
+
+/// The agent of the run exited: nothing left to kill at boot.
+pub fn clear_agent_process(conn: &Connection, id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE audit_runs SET agent_pgid = NULL, agent_started_marker = NULL WHERE id = ?1",
+        params![id],
+    )?;
+    Ok(())
+}
+
+/// Agents a previous process left recorded: `(run id, pgid, start stamp)`.
+pub fn recorded_agent_processes(conn: &Connection) -> Result<Vec<(String, i64, Option<String>)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, agent_pgid, agent_started_marker FROM audit_runs WHERE agent_pgid IS NOT NULL",
+    )?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// KT-1211 — what the step's target was before its agent ran.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepSnapshot {
+    pub step_index: u32,
+    pub target_file: String,
+    /// `None`: the file was absent.
+    pub content: Option<String>,
+    /// Fingerprint of the last content Kronn saw the step's agent write to the
+    /// target (see `step_guard::TargetWatch`); `None` when it never saw it
+    /// move. A crash settles the target only if what is on disk is this.
+    pub observed_hash: Option<String>,
+}
+
+/// Largest target kept in a snapshot. An audit doc is a few KB; anything past
+/// this is not a doc the agent should be rewriting, and keeping it would only
+/// grow the database.
+pub const MAX_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
+
+/// Keep the target as it was before `step_index`'s agent ran. Replaces an
+/// earlier snapshot of the same step. Refused past [`MAX_SNAPSHOT_BYTES`].
+pub fn save_step_snapshot(
+    conn: &Connection,
+    run_id: &str,
+    step_index: u32,
+    target_file: &str,
+    content: Option<&str>,
+) -> Result<()> {
+    if let Some(content) = content.filter(|c| c.len() > MAX_SNAPSHOT_BYTES) {
+        anyhow::bail!(
+            "`{target_file}` is {} bytes: past the {MAX_SNAPSHOT_BYTES}-byte snapshot cap",
+            content.len()
+        );
+    }
+    conn.execute(
+        "INSERT OR REPLACE INTO audit_step_snapshots
+            (audit_run_id, step_index, target_file, existed, content, observed_hash)
+         VALUES (?1, ?2, ?3, ?4, ?5, NULL)",
+        params![
+            run_id,
+            step_index as i64,
+            target_file,
+            content.is_some() as i32,
+            content
+        ],
+    )?;
+    Ok(())
+}
+
+fn snapshot_of_row(row: &rusqlite::Row) -> rusqlite::Result<StepSnapshot> {
+    let existed: i64 = row.get(2)?;
+    Ok(StepSnapshot {
+        step_index: row.get::<_, i64>(0)?.max(0) as u32,
+        target_file: row.get(1)?,
+        content: if existed != 0 { row.get(3)? } else { None },
+        observed_hash: row.get(4)?,
+    })
+}
+
+pub fn step_snapshot(
+    conn: &Connection,
+    run_id: &str,
+    step_index: u32,
+) -> Result<Option<StepSnapshot>> {
+    Ok(conn
+        .query_row(
+            "SELECT step_index, target_file, existed, content, observed_hash FROM audit_step_snapshots
+              WHERE audit_run_id = ?1 AND step_index = ?2",
+            params![run_id, step_index as i64],
+            snapshot_of_row,
+        )
+        .optional()?)
+}
+
+/// The agent of `step_index` was seen writing `observed_hash` to the target:
+/// that is the content a crash may put back from. No-op for a step with no
+/// snapshot.
+pub fn record_observed_output(
+    conn: &Connection,
+    run_id: &str,
+    step_index: u32,
+    observed_hash: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE audit_step_snapshots SET observed_hash = ?3
+          WHERE audit_run_id = ?1 AND step_index = ?2",
+        params![run_id, step_index as i64, observed_hash],
+    )?;
+    Ok(())
+}
+
+/// The step is done (or accepted): its snapshot has nothing left to protect.
+pub fn delete_step_snapshot(conn: &Connection, run_id: &str, step_index: u32) -> Result<()> {
+    conn.execute(
+        "DELETE FROM audit_step_snapshots WHERE audit_run_id = ?1 AND step_index = ?2",
+        params![run_id, step_index as i64],
+    )?;
+    Ok(())
+}
+
+/// Snapshots of the steps that never ended: an agent killed with its backend.
+pub fn unfinished_step_snapshots(conn: &Connection, run_id: &str) -> Result<Vec<StepSnapshot>> {
+    let mut stmt = conn.prepare(
+        "SELECT p.step_index, p.target_file, p.existed, p.content, p.observed_hash
+           FROM audit_step_snapshots p
+           JOIN audit_run_steps s
+             ON s.audit_run_id = p.audit_run_id AND s.step_index = p.step_index
+          WHERE p.audit_run_id = ?1 AND s.ended_at IS NULL AND s.accepted_at IS NULL
+          ORDER BY p.step_index",
+    )?;
+    let rows = stmt
+        .query_map(params![run_id], snapshot_of_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Runs holding a step that never ended and has a snapshot: an agent killed
+/// with its backend. `(run id, project id)`.
+pub fn runs_with_unfinished_steps(conn: &Connection) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT r.id, r.project_id
+           FROM audit_step_snapshots p
+           JOIN audit_run_steps s
+             ON s.audit_run_id = p.audit_run_id AND s.step_index = p.step_index
+           JOIN audit_runs r ON r.id = p.audit_run_id
+          WHERE s.ended_at IS NULL AND s.accepted_at IS NULL",
+    )?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// KT-1211 — a step that never ended (its agent died with the backend) is
+/// settled failed, with what became of its target. Its snapshot is dropped
+/// unless `keep_snapshot`: a target that could not be put back keeps it for
+/// the diff an acceptance shows.
+pub fn settle_killed_step(
+    conn: &Connection,
+    run_id: &str,
+    step_index: u32,
+    reason: &str,
+    target_state: Option<&str>,
+    keep_snapshot: bool,
+    at: DateTime<Utc>,
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "UPDATE audit_run_steps SET ended_at = ?3, cli_success = 0, step_warning = ?4,
+                target_state = ?5
+          WHERE audit_run_id = ?1 AND step_index = ?2 AND ended_at IS NULL",
+        params![
+            run_id,
+            step_index as i64,
+            at.to_rfc3339(),
+            reason,
+            target_state
+        ],
+    )?;
+    if !keep_snapshot {
+        tx.execute(
+            "DELETE FROM audit_step_snapshots WHERE audit_run_id = ?1 AND step_index = ?2",
+            params![run_id, step_index as i64],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// `restored` or `partial`: what became of the target of a step that did not
+/// succeed.
+pub fn set_step_target_state(
+    conn: &Connection,
+    run_id: &str,
+    step_index: u32,
+    state: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE audit_run_steps SET target_state = ?3 WHERE audit_run_id = ?1 AND step_index = ?2",
+        params![run_id, step_index as i64, state],
     )?;
     Ok(())
 }
@@ -220,7 +490,8 @@ pub fn list_recent(conn: &Connection, project_id: &str, limit: u32) -> Result<Ve
                 td_resolved_since_last, td_new_since_last, td_carried_over,
                 health_score, report_path, recommendations_json, last_completed_step,
                 validation_discussion_id, step_outcomes_json,
-                head_sha, branch, source_fingerprint, model, project_profile_draft
+                head_sha, branch, source_fingerprint, model, project_profile_draft,
+                cancelled_at_step, resume_drift, tier, connection_id
          FROM audit_runs
          WHERE project_id = ?1
          ORDER BY started_at DESC, rowid DESC
@@ -244,7 +515,8 @@ pub fn latest_completed(conn: &Connection, project_id: &str) -> Result<Option<Au
                 td_resolved_since_last, td_new_since_last, td_carried_over,
                 health_score, report_path, recommendations_json, last_completed_step,
                 validation_discussion_id, step_outcomes_json,
-                head_sha, branch, source_fingerprint, model, project_profile_draft
+                head_sha, branch, source_fingerprint, model, project_profile_draft,
+                cancelled_at_step, resume_drift, tier, connection_id
          FROM audit_runs
          WHERE project_id = ?1 AND status = 'Completed'
          ORDER BY ended_at DESC
@@ -263,7 +535,15 @@ pub fn latest_completed(conn: &Connection, project_id: &str) -> Result<Option<Au
 /// trusts only this durable link, never title/date heuristics.
 pub fn set_validation_discussion(conn: &Connection, run_id: &str, disc_id: &str) -> Result<()> {
     let affected = conn.execute(
-        "UPDATE audit_runs SET validation_discussion_id = ?2 WHERE id = ?1",
+        // A different discussion starts a fresh validation: the completion
+        // stamped for the previous one (KT-1122) does not carry over.
+        "UPDATE audit_runs SET
+             validation_completed_at = CASE
+                 WHEN validation_discussion_id IS ?2 THEN validation_completed_at END,
+             validation_completed_message_id = CASE
+                 WHEN validation_discussion_id IS ?2 THEN validation_completed_message_id END,
+             validation_discussion_id = ?2
+         WHERE id = ?1",
         params![run_id, disc_id],
     )?;
     anyhow::ensure!(
@@ -322,7 +602,8 @@ pub fn get_by_id(conn: &Connection, id: &str) -> Result<Option<AuditRun>> {
                 td_resolved_since_last, td_new_since_last, td_carried_over,
                 health_score, report_path, recommendations_json, last_completed_step,
                 validation_discussion_id, step_outcomes_json,
-                head_sha, branch, source_fingerprint, model, project_profile_draft
+                head_sha, branch, source_fingerprint, model, project_profile_draft,
+                cancelled_at_step, resume_drift, tier, connection_id
          FROM audit_runs
          WHERE id = ?1
          LIMIT 1",
@@ -375,6 +656,13 @@ fn row_to_audit_run(row: &rusqlite::Row) -> rusqlite::Result<AuditRun> {
         source_fingerprint: row.get(24)?,
         model: row.get(25)?,
         project_profile_draft: row.get(26)?,
+        cancelled_at_step: row
+            .get::<_, Option<i64>>(27)
+            .unwrap_or(None)
+            .map(|step| step.max(0) as u32),
+        resume_drift: row.get(28).unwrap_or(None),
+        tier: row.get(29).unwrap_or(None),
+        connection_id: row.get(30).unwrap_or(None),
     })
 }
 
@@ -401,6 +689,60 @@ pub fn set_run_provenance(
         "UPDATE audit_runs SET head_sha = ?2, branch = ?3, source_fingerprint = ?4, model = ?5
          WHERE id = ?1",
         params![id, head_sha, branch, source_fingerprint, model],
+    )?;
+    Ok(())
+}
+
+/// Record the ADR baseline of run `id` and return it: its predecessor's when
+/// it resumes one that recorded a baseline, else `found` (`docs/decisions.md`
+/// and the TD sheets' `Decision record` lines as the run found them). A
+/// resume must not trust ADRs or record lines its predecessor wrote.
+pub fn record_adr_baseline(
+    conn: &Connection,
+    id: &str,
+    resumed_from: Option<&str>,
+    found: StartOfRun,
+) -> Result<StartOfRun> {
+    let inherited = match resumed_from {
+        Some(previous) => adr_baseline(conn, previous)?,
+        None => None,
+    };
+    let baseline = inherited.unwrap_or(found);
+    conn.execute(
+        "UPDATE audit_runs SET adr_baseline = ?2, adr_record_baseline = ?3 WHERE id = ?1",
+        params![id, baseline.decisions, baseline.records],
+    )?;
+    Ok(baseline)
+}
+
+/// What a run started from, if it recorded it. Record lines missing from a
+/// row that has a decisions baseline count as none (nothing honoured).
+pub fn adr_baseline(conn: &Connection, id: &str) -> Result<Option<StartOfRun>> {
+    Ok(conn
+        .query_row(
+            "SELECT adr_baseline, adr_record_baseline FROM audit_runs WHERE id = ?1",
+            params![id],
+            |row| {
+                let decisions = row.get::<_, Option<String>>(0)?;
+                let records = row.get::<_, Option<String>>(1)?.unwrap_or_default();
+                Ok(decisions.map(|decisions| StartOfRun { decisions, records }))
+            },
+        )
+        .optional()?
+        .flatten())
+}
+
+/// Record how the run was launched: its model tier and, for an HTTP agent, the
+/// named connection. A step retry or a resume reads them back (KT-1320).
+pub fn set_run_launch(
+    conn: &Connection,
+    id: &str,
+    tier: crate::models::ModelTier,
+    connection_id: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE audit_runs SET tier = ?2, connection_id = ?3 WHERE id = ?1",
+        params![id, tier.as_str(), connection_id],
     )?;
     Ok(())
 }
@@ -566,6 +908,43 @@ pub fn reconcile_all_running(conn: &Connection) -> Result<u64> {
     Ok(affected as u64)
 }
 
+/// KT-1134 — `reconcile_all_running`, sparing the projects whose audit is
+/// live in this process: the cleanup action never settles a run under its
+/// own worker. Returns the projects whose rows it settled, one per row.
+pub fn reconcile_running_except(
+    conn: &Connection,
+    live_projects: &[String],
+) -> Result<Vec<String>> {
+    let tx = conn.unchecked_transaction()?;
+    let running: Vec<(String, String)> = {
+        let mut statement =
+            tx.prepare("SELECT id, project_id FROM audit_runs WHERE status = 'Running'")?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    let now = Utc::now().to_rfc3339();
+    let mut settled = Vec::new();
+    for (id, project_id) in running {
+        if live_projects.contains(&project_id) {
+            continue;
+        }
+        tx.execute(
+            "UPDATE audit_runs SET
+                status = 'Interrupted',
+                ended_at = ?2,
+                duration_ms = CAST(((julianday(?2) - julianday(started_at)) * 86400000) AS INTEGER),
+                report_path = COALESCE(report_path, 'stale: cleared by user via admin cleanup')
+             WHERE id = ?1 AND status = 'Running'",
+            params![id, now],
+        )?;
+        settled.push(project_id);
+    }
+    tx.commit()?;
+    Ok(settled)
+}
+
 /// 0.8.3 (#311) — the project's resumable run, if any. Mirrors the launch
 /// rule EXACTLY: only the project's most recent run (any status, same
 /// ordering as `list_recent`) is eligible, and it must be `Interrupted`
@@ -627,11 +1006,15 @@ pub fn carry_over_steps(
             "INSERT OR IGNORE INTO audit_run_steps
                 (audit_run_id, step_index, file_label, started_at, ended_at, duration_ms,
                  step_tokens, cli_success, input_tokens, output_tokens, cache_read_tokens,
-                 cache_write_tokens, cost_usd_micros, carried_from_run_id, token_accounting)
+                 cache_write_tokens, cost_usd_micros, carried_from_run_id, token_accounting,
+                 unchanged, step_warning, accepted_at, accepted_by, accepted_reason)
              SELECT ?1, step_index, ?3, started_at, COALESCE(ended_at, ?4), duration_ms,
-                    step_tokens, 1, input_tokens, output_tokens, cache_read_tokens,
+                    step_tokens, CASE WHEN accepted_at IS NULL THEN 1 ELSE cli_success END,
+                    input_tokens, output_tokens, cache_read_tokens,
                     cache_write_tokens, cost_usd_micros, COALESCE(carried_from_run_id, ?5),
-                    token_accounting
+                    token_accounting, unchanged,
+                    CASE WHEN accepted_at IS NULL THEN NULL ELSE step_warning END,
+                    accepted_at, accepted_by, accepted_reason
                FROM audit_run_steps WHERE audit_run_id = ?5 AND step_index = ?2",
             params![
                 audit_run_id,
@@ -660,6 +1043,205 @@ pub fn carry_over_steps(
     update_last_completed_step(&tx, audit_run_id, steps.len() as u32)?;
     tx.commit()?;
     Ok(())
+}
+
+/// KT-1131 — a resume that retries only some steps keeps the other failed
+/// ones as they ended: their rows are copied verbatim (failure and reason
+/// included) so the timeline still shows why, and the next resume still finds
+/// them to redo. A step that never ran has no row to copy.
+pub fn carry_over_failed_steps(
+    conn: &Connection,
+    audit_run_id: &str,
+    from_run_id: &str,
+    steps: &[u32],
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    for step_index in steps {
+        tx.execute(
+            "INSERT OR IGNORE INTO audit_run_steps
+                (audit_run_id, step_index, file_label, started_at, ended_at, duration_ms,
+                 step_tokens, cli_success, step_warning, step_repaired_from_template,
+                 input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+                 cost_usd_micros, carried_from_run_id, token_accounting, unchanged)
+             SELECT ?1, step_index, file_label, started_at, ended_at, duration_ms,
+                    step_tokens, cli_success, step_warning, step_repaired_from_template,
+                    input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+                    cost_usd_micros, COALESCE(carried_from_run_id, ?3), token_accounting, 0
+               FROM audit_run_steps
+              WHERE audit_run_id = ?3 AND step_index = ?2 AND accepted_at IS NULL",
+            params![audit_run_id, *step_index as i64, from_run_id],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// KT-1131 — record a human's acceptance of a failed step. The step keeps its
+/// failure (`cli_success`, `step_warning`) and gains who, when and why; a step
+/// that never ran gets a finished row carrying only the acceptance. The run's
+/// count of done steps includes it. Returns `false` when the step is already
+/// done (succeeded or accepted): nothing is written.
+pub fn accept_step(
+    conn: &Connection,
+    audit_run_id: &str,
+    step_index: u32,
+    file_label: &str,
+    by: &str,
+    reason: Option<&str>,
+    at: DateTime<Utc>,
+) -> Result<bool> {
+    let tx = conn.unchecked_transaction()?;
+    let at = at.to_rfc3339();
+    let done: bool = tx
+        .query_row(
+            "SELECT (cli_success = 1 AND ended_at IS NOT NULL) OR accepted_at IS NOT NULL
+               FROM audit_run_steps WHERE audit_run_id = ?1 AND step_index = ?2",
+            params![audit_run_id, step_index as i64],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(false);
+    if done {
+        return Ok(false);
+    }
+    let updated = tx.execute(
+        "UPDATE audit_run_steps
+            SET accepted_at = ?3, accepted_by = ?4, accepted_reason = ?5,
+                ended_at = COALESCE(ended_at, ?3), cli_success = CASE
+                    WHEN ended_at IS NULL THEN 0 ELSE cli_success END
+          WHERE audit_run_id = ?1 AND step_index = ?2",
+        params![audit_run_id, step_index as i64, at, by, reason],
+    )?;
+    if updated == 0 {
+        tx.execute(
+            "INSERT INTO audit_run_steps
+                (audit_run_id, step_index, file_label, started_at, ended_at, cli_success,
+                 accepted_at, accepted_by, accepted_reason)
+             VALUES (?1, ?2, ?3, ?4, ?4, 0, ?4, ?5, ?6)",
+            params![audit_run_id, step_index as i64, file_label, at, by, reason],
+        )?;
+    }
+    tx.execute(
+        "UPDATE audit_runs SET last_completed_step = (
+            SELECT COUNT(*) FROM audit_run_steps WHERE audit_run_id = ?1 AND ended_at IS NOT NULL
+               AND (cli_success = 1 OR accepted_at IS NOT NULL)
+        ) WHERE id = ?1",
+        params![audit_run_id],
+    )?;
+    tx.commit()?;
+    Ok(true)
+}
+
+/// A step a run rebuilt from the repository state inherits (KT-1199).
+pub struct AdoptedStep {
+    pub index: u32,
+    pub label: String,
+    pub unchanged: bool,
+    /// Who accepted the step as it stands, for an accepted failure.
+    pub accepted_by: Option<String>,
+}
+
+/// KT-1199 — rebuild, on a clone, the local row of a run another machine
+/// committed: an `Interrupted` run under the repository's run id, the steps
+/// whose produced file still matches (finished rows, no cost: this machine
+/// did not run them) and the KT-1174 baseline as that run recorded it.
+/// All-or-nothing; refuses an id already used.
+#[allow(clippy::too_many_arguments)]
+pub fn adopt_repo_run(
+    conn: &Connection,
+    id: &str,
+    project_id: &str,
+    kind: &str,
+    started_at: DateTime<Utc>,
+    ended_at: DateTime<Utc>,
+    reason: &str,
+    steps: &[AdoptedStep],
+    baseline: Option<&StartOfRun>,
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "INSERT INTO audit_runs (id, project_id, kind, agent_type, started_at, ended_at,
+                                 duration_ms, status, report_path, last_completed_step)
+         VALUES (?1, ?2, ?3, 'repository', ?4, ?5, ?6, 'Interrupted', ?7, ?8)",
+        params![
+            id,
+            project_id,
+            kind,
+            started_at.to_rfc3339(),
+            ended_at.to_rfc3339(),
+            (ended_at - started_at).num_milliseconds().max(0),
+            format!("interrupted: {reason}"),
+            steps.len() as i64,
+        ],
+    )?;
+    let at = ended_at.to_rfc3339();
+    for step in steps {
+        match &step.accepted_by {
+            Some(by) => tx.execute(
+                "INSERT INTO audit_run_steps
+                    (audit_run_id, step_index, file_label, started_at, ended_at, cli_success,
+                     accepted_at, accepted_by, carried_from_run_id)
+                 VALUES (?1, ?2, ?3, ?4, ?4, 0, ?4, ?5, ?1)",
+                params![id, step.index as i64, step.label, at, by],
+            )?,
+            None => tx.execute(
+                "INSERT INTO audit_run_steps
+                    (audit_run_id, step_index, file_label, started_at, ended_at, cli_success,
+                     unchanged, carried_from_run_id)
+                 VALUES (?1, ?2, ?3, ?4, ?4, 1, ?5, ?1)",
+                params![id, step.index as i64, step.label, at, step.unchanged as i32],
+            )?,
+        };
+    }
+    if let Some(baseline) = baseline {
+        tx.execute(
+            "UPDATE audit_runs SET adr_baseline = ?2, adr_record_baseline = ?3 WHERE id = ?1",
+            params![id, baseline.decisions, baseline.records],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// KT-1134 — the project's run still recorded `Running`, if any: the run a
+/// cancel targets.
+pub fn running_run_id(conn: &Connection, project_id: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT id FROM audit_runs WHERE project_id = ?1 AND status = 'Running'
+             ORDER BY started_at DESC, rowid DESC LIMIT 1",
+            params![project_id],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+/// KT-1134 — validation discussions linked to the project's audit runs: the
+/// ones an audit agent may still be answering in.
+pub fn validation_discussion_ids(conn: &Connection, project_id: &str) -> Result<Vec<String>> {
+    let mut statement = conn.prepare(
+        "SELECT DISTINCT validation_discussion_id FROM audit_runs
+          WHERE project_id = ?1 AND validation_discussion_id IS NOT NULL",
+    )?;
+    let ids = statement
+        .query_map(params![project_id], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    Ok(ids)
+}
+
+/// KT-1134 — the project an audit validation discussion belongs to, when the
+/// discussion is linked to one of its runs.
+pub fn project_of_validation_discussion(
+    conn: &Connection,
+    discussion_id: &str,
+) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT project_id FROM audit_runs WHERE validation_discussion_id = ?1 LIMIT 1",
+            params![discussion_id],
+            |row| row.get(0),
+        )
+        .optional()?)
 }
 
 /// What one audit step consumed, as its agent reported it (KT-927). Every part
@@ -730,6 +1312,24 @@ impl StepTokens {
             },
         }
     }
+    /// Sum the usage of two turns of the same attempt. A turn that did not
+    /// report a component adds nothing to it (a sum over a turn is a floor that
+    /// is still consumed, unlike across attempts where a silent one makes it
+    /// unknown).
+    pub(crate) fn across_turns(self, other: Self) -> Self {
+        let sum = |a: Option<u64>, b: Option<u64>| match (a, b) {
+            (None, None) => None,
+            (a, b) => Some(a.unwrap_or(0).saturating_add(b.unwrap_or(0))),
+        };
+        Self {
+            input: sum(self.input, other.input),
+            output: sum(self.output, other.output),
+            cache_read: sum(self.cache_read, other.cache_read),
+            cache_write: sum(self.cache_write, other.cache_write),
+            accounting: other.accounting,
+        }
+    }
+
     /// The usage of a step's attempts so far, `previous` being `None` before
     /// the first one: no attempt yet is not an attempt that reported nothing.
     pub(crate) fn after_attempt(previous: Option<Self>, attempt: Self) -> Self {
@@ -864,7 +1464,7 @@ pub(crate) fn invalidate_documentary_steps(
 ) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
     for (step, warning) in warnings {
-        tx.execute("UPDATE audit_run_steps SET cli_success = 0,
+        tx.execute("UPDATE audit_run_steps SET cli_success = 0, unchanged = 0,
             step_warning = CASE WHEN step_warning IS NULL THEN ?3 ELSE step_warning || char(10) || ?3 END
             WHERE audit_run_id = ?1 AND step_index = ?2", params![run_id, step, warning])?;
     }
@@ -893,6 +1493,37 @@ pub fn finalize_audit_step(
     step_warning: Option<&str>,
     repaired: bool,
 ) -> Result<()> {
+    finalize_audit_step_with_outcome(
+        conn,
+        audit_run_id,
+        step_index,
+        ended_at,
+        duration_ms,
+        tokens,
+        cumulative_tokens,
+        cli_success,
+        step_warning,
+        repaired,
+        false,
+    )
+}
+
+/// `finalize_audit_step`, also recording whether the step ended `unchanged`:
+/// its target was already up to date and every gate passed (KT-1130).
+#[allow(clippy::too_many_arguments)]
+pub fn finalize_audit_step_with_outcome(
+    conn: &Connection,
+    audit_run_id: &str,
+    step_index: u32,
+    ended_at: DateTime<Utc>,
+    duration_ms: u64,
+    tokens: &StepTokens,
+    cumulative_tokens: Option<u64>,
+    cli_success: bool,
+    step_warning: Option<&str>,
+    repaired: bool,
+    unchanged: bool,
+) -> Result<()> {
     let as_sql = |value: Option<u64>| value.map(|value| value as i64);
     conn.execute(
         "UPDATE audit_run_steps SET
@@ -907,7 +1538,8 @@ pub fn finalize_audit_step(
             output_tokens = ?11,
             cache_read_tokens = ?12,
             cache_write_tokens = ?13,
-            token_accounting = ?14
+            token_accounting = ?14,
+            unchanged = ?15
          WHERE audit_run_id = ?1 AND step_index = ?2",
         params![
             audit_run_id,
@@ -924,6 +1556,7 @@ pub fn finalize_audit_step(
             as_sql(tokens.cache_read),
             as_sql(tokens.cache_write),
             tokens.accounting.as_str(),
+            unchanged as i32,
         ],
     )?;
     Ok(())
@@ -937,7 +1570,8 @@ pub fn list_audit_steps(conn: &Connection, audit_run_id: &str) -> Result<Vec<Aud
                 duration_ms, step_tokens, cumulative_tokens, cli_success,
                 step_warning, step_repaired_from_template,
                 input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-                cost_usd_micros, carried_from_run_id, token_accounting
+                cost_usd_micros, carried_from_run_id, token_accounting, unchanged,
+                accepted_at, accepted_by, accepted_reason, target_state
          FROM audit_run_steps
          WHERE audit_run_id = ?1
          ORDER BY step_index ASC",
@@ -973,6 +1607,15 @@ pub fn list_audit_steps(conn: &Connection, audit_run_id: &str) -> Result<Vec<Aud
             cost_unknown_reason: None,
             breakdown: None,
             token_accounting: row.get(17)?,
+            unchanged: row.get::<_, i64>(18)? != 0,
+            accepted_at: row.get::<_, Option<String>>(19)?.and_then(|s| {
+                DateTime::parse_from_rfc3339(&s)
+                    .ok()
+                    .map(|d| d.with_timezone(&Utc))
+            }),
+            accepted_by: row.get(20)?,
+            accepted_reason: row.get(21)?,
+            target_state: row.get(22)?,
         })
     })?;
     let mut out = Vec::new();
@@ -1052,6 +1695,74 @@ pub fn price_steps(conn: &Connection, steps: &mut [AuditRunStep]) -> Result<()> 
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_resume_keeps_the_adr_baseline_of_the_run_it_continues() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO projects (id, name, path, created_at, updated_at) VALUES ('p', 'p', '/p', 'now', 'now')",
+            [],
+        )
+        .unwrap();
+        for id in ["first", "second", "third"] {
+            insert_running(&conn, id, "p", "Full", "ClaudeCode", Utc::now()).unwrap();
+        }
+        let run_start = |decisions: &str, records: &str| StartOfRun {
+            decisions: decisions.to_string(),
+            records: records.to_string(),
+        };
+        let before = run_start(
+            "## ADR-0001: before\n- **Status**: accepted\n",
+            "TD-20261001-old ADR-0001\n",
+        );
+        assert_eq!(
+            record_adr_baseline(&conn, "first", None, before.clone()).unwrap(),
+            before
+        );
+        // The interrupted run's step 9 wrote an accepted ADR and its TD step a
+        // record line: the resume ignores both.
+        let after_step9 = run_start(
+            &format!(
+                "{}## ADR-0002: late\n- **Status**: accepted\n",
+                before.decisions
+            ),
+            "TD-20261001-old ADR-0001\nTD-20261011-new ADR-0001\n",
+        );
+        assert_eq!(
+            record_adr_baseline(&conn, "second", Some("first"), after_step9.clone()).unwrap(),
+            before
+        );
+        assert_eq!(adr_baseline(&conn, "second").unwrap(), Some(before.clone()));
+        // A predecessor without a baseline (older row): what the run finds.
+        assert_eq!(
+            record_adr_baseline(&conn, "third", Some("missing"), after_step9.clone()).unwrap(),
+            after_step9
+        );
+        assert_eq!(adr_baseline(&conn, "third").unwrap(), Some(after_step9));
+    }
+
+    #[test]
+    fn the_launch_tier_and_connection_are_kept_on_the_run() {
+        let conn = fresh_conn();
+        insert_running(&conn, "r1", "p1", "Full", "LiteLlm", Utc::now()).unwrap();
+        let fresh = get_by_id(&conn, "r1").unwrap().unwrap();
+        assert!(fresh.tier.is_none() && fresh.connection_id.is_none());
+        set_run_launch(
+            &conn,
+            "r1",
+            crate::models::ModelTier::Economy,
+            Some("conn-a"),
+        )
+        .unwrap();
+        let run = get_by_id(&conn, "r1").unwrap().unwrap();
+        assert_eq!(run.tier.as_deref(), Some("economy"));
+        assert_eq!(run.connection_id.as_deref(), Some("conn-a"));
+        assert_eq!(
+            crate::models::ModelTier::parse(run.tier.as_deref().unwrap()),
+            Some(crate::models::ModelTier::Economy)
+        );
+    }
+
     fn fresh_conn() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         // Project FK is checked at row insert time, so spin up the bare
@@ -1085,7 +1796,24 @@ mod tests {
                 branch TEXT,
                 source_fingerprint TEXT,
                 model TEXT,
-                project_profile_draft TEXT
+                project_profile_draft TEXT,
+                validation_completed_at TEXT,
+                validation_completed_message_id TEXT,
+                cancelled_at_step INTEGER,
+                resume_drift TEXT,
+                tier TEXT,
+                connection_id TEXT,
+                agent_pgid INTEGER,
+                agent_started_marker TEXT
+            );
+            CREATE TABLE audit_step_snapshots (
+                audit_run_id TEXT NOT NULL,
+                step_index INTEGER NOT NULL,
+                target_file TEXT NOT NULL,
+                existed INTEGER NOT NULL,
+                content TEXT,
+                observed_hash TEXT,
+                PRIMARY KEY (audit_run_id, step_index)
             );
             CREATE TABLE audit_run_steps (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1107,6 +1835,11 @@ mod tests {
                 cost_usd_micros INTEGER,
                 carried_from_run_id TEXT,
                 token_accounting TEXT,
+                unchanged INTEGER NOT NULL DEFAULT 0,
+                accepted_at TEXT,
+                accepted_by TEXT,
+                accepted_reason TEXT,
+                target_state TEXT,
                 FOREIGN KEY (audit_run_id) REFERENCES audit_runs(id) ON DELETE CASCADE
             );
             CREATE UNIQUE INDEX idx_audit_run_steps_run
@@ -1115,6 +1848,134 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    #[test]
+    fn an_accepted_step_keeps_its_failure_counts_done_and_is_carried_as_accepted() {
+        let conn = fresh_conn();
+        insert_running(&conn, "r1", "p1", "Full", "ClaudeCode", Utc::now()).unwrap();
+        insert_audit_step_start(&conn, "r1", 1, "docs/a.md", Utc::now()).unwrap();
+        finalize_audit_step(
+            &conn,
+            "r1",
+            1,
+            Utc::now(),
+            5,
+            &StepTokens::default(),
+            None,
+            true,
+            None,
+            false,
+        )
+        .unwrap();
+        insert_audit_step_start(&conn, "r1", 2, "docs/b.md", Utc::now()).unwrap();
+        finalize_audit_step(
+            &conn,
+            "r1",
+            2,
+            Utc::now(),
+            5,
+            &StepTokens::default(),
+            None,
+            false,
+            Some("placeholders remain"),
+            false,
+        )
+        .unwrap();
+        // Step 3 never ran; step 1 succeeded and cannot be accepted.
+        assert!(!accept_step(&conn, "r1", 1, "docs/a.md", "romu", None, Utc::now()).unwrap());
+        assert!(accept_step(
+            &conn,
+            "r1",
+            2,
+            "docs/b.md",
+            "romu",
+            Some("by hand"),
+            Utc::now()
+        )
+        .unwrap());
+        assert!(accept_step(&conn, "r1", 3, "docs/c.md", "romu", None, Utc::now()).unwrap());
+        assert!(!accept_step(&conn, "r1", 2, "docs/b.md", "romu", None, Utc::now()).unwrap());
+        let steps = list_audit_steps(&conn, "r1").unwrap();
+        assert!(!steps[1].cli_success);
+        assert_eq!(
+            steps[1].step_warning.as_deref(),
+            Some("placeholders remain")
+        );
+        assert_eq!(steps[1].accepted_by.as_deref(), Some("romu"));
+        assert_eq!(steps[1].accepted_reason.as_deref(), Some("by hand"));
+        assert!(steps[2].accepted_at.is_some() && steps[2].ended_at.is_some());
+        assert!(!steps[2].cli_success);
+        assert_eq!(
+            get_by_id(&conn, "r1").unwrap().unwrap().last_completed_step,
+            3
+        );
+
+        // A resume carries the acceptance, the failure and who decided.
+        insert_running(&conn, "r2", "p1", "Full", "ClaudeCode", Utc::now()).unwrap();
+        let carried: Vec<(u32, String)> = (1..=3).map(|i| (i, format!("docs/{i}.md"))).collect();
+        carry_over_steps(&conn, "r2", "r1", &carried, Utc::now()).unwrap();
+        let steps = list_audit_steps(&conn, "r2").unwrap();
+        assert!(steps[0].cli_success && steps[0].accepted_at.is_none());
+        assert!(steps[0].step_warning.is_none());
+        assert!(!steps[1].cli_success);
+        assert_eq!(
+            steps[1].step_warning.as_deref(),
+            Some("placeholders remain")
+        );
+        assert_eq!(steps[1].accepted_reason.as_deref(), Some("by hand"));
+        assert_eq!(steps[1].carried_from_run_id.as_deref(), Some("r1"));
+    }
+
+    #[test]
+    fn a_single_step_retry_carries_the_other_failures_verbatim() {
+        let conn = fresh_conn();
+        insert_running(&conn, "r1", "p1", "Full", "ClaudeCode", Utc::now()).unwrap();
+        for (step, ok) in [(1, false), (2, false)] {
+            insert_audit_step_start(&conn, "r1", step, "docs/x.md", Utc::now()).unwrap();
+            finalize_audit_step(
+                &conn,
+                "r1",
+                step,
+                Utc::now(),
+                5,
+                &StepTokens::default(),
+                None,
+                ok,
+                Some("rewrote nothing"),
+                false,
+            )
+            .unwrap();
+        }
+        insert_running(&conn, "r2", "p1", "Full", "ClaudeCode", Utc::now()).unwrap();
+        carry_over_failed_steps(&conn, "r2", "r1", &[2, 3]).unwrap();
+        let steps = list_audit_steps(&conn, "r2").unwrap();
+        assert_eq!(steps.len(), 1, "a step that never ran has no row to carry");
+        assert_eq!(steps[0].step_index, 2);
+        assert!(!steps[0].cli_success);
+        assert_eq!(steps[0].step_warning.as_deref(), Some("rewrote nothing"));
+        assert_eq!(steps[0].carried_from_run_id.as_deref(), Some("r1"));
+    }
+
+    #[test]
+    fn the_cleanup_spares_the_runs_of_live_audits() {
+        let conn = fresh_conn();
+        conn.execute(
+            "INSERT INTO projects (id, name, path) VALUES ('p2', 'Other', '/tmp/other')",
+            [],
+        )
+        .unwrap();
+        insert_running(&conn, "r1", "p1", "Full", "ClaudeCode", Utc::now()).unwrap();
+        insert_running(&conn, "r2", "p2", "Full", "ClaudeCode", Utc::now()).unwrap();
+        let settled = reconcile_running_except(&conn, &["p2".to_string()]).unwrap();
+        assert_eq!(settled, vec!["p1".to_string()]);
+        assert_eq!(
+            get_by_id(&conn, "r1").unwrap().unwrap().status,
+            "Interrupted"
+        );
+        assert_eq!(get_by_id(&conn, "r2").unwrap().unwrap().status, "Running");
+        assert_eq!(running_run_id(&conn, "p2").unwrap().as_deref(), Some("r2"));
+        assert_eq!(running_run_id(&conn, "p1").unwrap(), None);
     }
 
     #[test]
@@ -1220,6 +2081,52 @@ mod tests {
         assert_eq!(missing.step_tokens, None);
         assert_eq!(missing.cost_usd_micros, None);
         assert_eq!(missing.carried_from_run_id.as_deref(), Some("run-b"));
+    }
+
+    #[test]
+    fn an_unchanged_step_is_recorded_carried_and_cleared_by_a_documentary_reopen() {
+        let conn = fresh_conn();
+        let start = Utc::now();
+        insert_running(&conn, "run-a", "p1", "Full", "ClaudeCode", start).unwrap();
+        for (step, unchanged) in [(1, true), (2, false)] {
+            insert_audit_step_start(&conn, "run-a", step, "docs/x.md", start).unwrap();
+            finalize_audit_step_with_outcome(
+                &conn,
+                "run-a",
+                step,
+                start,
+                10,
+                &StepTokens::UNKNOWN,
+                None,
+                true,
+                None,
+                false,
+                unchanged,
+            )
+            .unwrap();
+        }
+        let steps = list_audit_steps(&conn, "run-a").unwrap();
+        assert!(steps[0].unchanged && steps[0].cli_success);
+        assert!(!steps[1].unchanged);
+
+        // A resume carries the flag with the step.
+        insert_running(&conn, "run-b", "p1", "Full", "ClaudeCode", start).unwrap();
+        carry_over_steps(
+            &conn,
+            "run-b",
+            "run-a",
+            &[(1, "docs/x.md".into()), (2, "docs/x.md".into())],
+            Utc::now(),
+        )
+        .unwrap();
+        let carried = list_audit_steps(&conn, "run-b").unwrap();
+        assert!(carried[0].unchanged);
+        assert!(!carried[1].unchanged);
+
+        // A later documentary blocker reopens it: failed, no longer unchanged.
+        invalidate_documentary_steps(&conn, "run-b", &[(1, "broken link".into())]).unwrap();
+        let reopened = &list_audit_steps(&conn, "run-b").unwrap()[0];
+        assert!(!reopened.cli_success && !reopened.unchanged);
     }
 
     #[test]
@@ -2496,5 +3403,278 @@ mod tests {
                 .last_completed_step,
             1
         );
+    }
+    // ---- KT-1211: cancel and failed steps keep the docs whole ----
+
+    #[test]
+    fn a_cancel_after_a_completed_step_settles_interrupted_and_stays_resumable() {
+        let conn = fresh_conn();
+        insert_running(&conn, "r1", "p1", "Full", "ClaudeCode", Utc::now()).unwrap();
+        update_last_completed_step(&conn, "r1", 11).unwrap();
+
+        let status = mark_cancelled_at_step(&conn, "r1", 12).unwrap();
+        assert_eq!(status.as_deref(), Some("Interrupted"));
+
+        let row = get_by_id(&conn, "r1").unwrap().unwrap();
+        assert_eq!(row.status, "Interrupted");
+        assert_eq!(
+            row.cancelled_at_step,
+            Some(12),
+            "the cancel is flagged on the run"
+        );
+        assert_eq!(
+            row.last_completed_step, 11,
+            "the checkpoint survives the cancel"
+        );
+        let resumable = latest_resumable(&conn, "p1")
+            .unwrap()
+            .expect("resumable after a cancel");
+        assert_eq!(resumable.id, "r1");
+    }
+
+    #[test]
+    fn a_cancel_before_any_step_is_cancelled_and_not_resumable() {
+        let conn = fresh_conn();
+        insert_running(&conn, "r1", "p1", "Full", "ClaudeCode", Utc::now()).unwrap();
+
+        let status = mark_cancelled_at_step(&conn, "r1", 1).unwrap();
+        assert_eq!(status.as_deref(), Some("Cancelled"));
+
+        let row = get_by_id(&conn, "r1").unwrap().unwrap();
+        assert_eq!(row.status, "Cancelled");
+        assert_eq!(row.cancelled_at_step, Some(1));
+        assert!(latest_resumable(&conn, "p1").unwrap().is_none());
+    }
+
+    #[test]
+    fn cancelling_a_run_that_is_not_running_changes_nothing() {
+        let conn = fresh_conn();
+        insert_running(&conn, "r1", "p1", "Full", "ClaudeCode", Utc::now()).unwrap();
+        update_last_completed_step(&conn, "r1", 3).unwrap();
+        mark_failed(&conn, "r1", "boom").unwrap();
+
+        assert_eq!(mark_cancelled_at_step(&conn, "r1", 4).unwrap(), None);
+        let row = get_by_id(&conn, "r1").unwrap().unwrap();
+        assert_eq!(row.status, "Failed");
+        assert_eq!(row.cancelled_at_step, None);
+    }
+
+    #[test]
+    fn a_step_snapshot_round_trips_absent_and_present_content() {
+        let conn = fresh_conn();
+        insert_running(&conn, "r1", "p1", "Full", "ClaudeCode", Utc::now()).unwrap();
+        save_step_snapshot(&conn, "r1", 2, "docs/a.md", Some("before\n")).unwrap();
+        save_step_snapshot(&conn, "r1", 3, "docs/b.md", None).unwrap();
+
+        let a = step_snapshot(&conn, "r1", 2).unwrap().unwrap();
+        assert_eq!(a.content.as_deref(), Some("before\n"));
+        let b = step_snapshot(&conn, "r1", 3).unwrap().unwrap();
+        assert_eq!(b.content, None, "an absent file is not an empty file");
+
+        // The later snapshot of the same step replaces the earlier one.
+        save_step_snapshot(&conn, "r1", 2, "docs/a.md", Some("again")).unwrap();
+        assert_eq!(
+            step_snapshot(&conn, "r1", 2)
+                .unwrap()
+                .unwrap()
+                .content
+                .as_deref(),
+            Some("again")
+        );
+        delete_step_snapshot(&conn, "r1", 2).unwrap();
+        assert!(step_snapshot(&conn, "r1", 2).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_target_past_the_snapshot_cap_is_refused_not_stored() {
+        let conn = fresh_conn();
+        insert_running(&conn, "r1", "p1", "Full", "ClaudeCode", Utc::now()).unwrap();
+        let huge = "x".repeat(MAX_SNAPSHOT_BYTES + 1);
+        let refused = save_step_snapshot(&conn, "r1", 2, "docs/a.md", Some(&huge)).unwrap_err();
+        assert!(refused.to_string().contains("snapshot cap"), "{refused}");
+        assert!(step_snapshot(&conn, "r1", 2).unwrap().is_none());
+        // The cap itself is still kept whole.
+        let at_cap = "y".repeat(MAX_SNAPSHOT_BYTES);
+        save_step_snapshot(&conn, "r1", 2, "docs/a.md", Some(&at_cap)).unwrap();
+        assert_eq!(
+            step_snapshot(&conn, "r1", 2)
+                .unwrap()
+                .unwrap()
+                .content
+                .map(|c| c.len()),
+            Some(MAX_SNAPSHOT_BYTES)
+        );
+    }
+
+    #[test]
+    fn the_observed_output_is_kept_with_the_snapshot_and_forgotten_when_it_is_retaken() {
+        let conn = fresh_conn();
+        insert_running(&conn, "r1", "p1", "Full", "ClaudeCode", Utc::now()).unwrap();
+        // No snapshot (a target past the cap): recording is a harmless no-op.
+        record_observed_output(&conn, "r1", 2, "abc").unwrap();
+        assert!(step_snapshot(&conn, "r1", 2).unwrap().is_none());
+
+        save_step_snapshot(&conn, "r1", 2, "docs/a.md", Some("before")).unwrap();
+        assert_eq!(
+            step_snapshot(&conn, "r1", 2)
+                .unwrap()
+                .unwrap()
+                .observed_hash,
+            None
+        );
+        record_observed_output(&conn, "r1", 2, "abc").unwrap();
+        record_observed_output(&conn, "r1", 2, "def").unwrap();
+        assert_eq!(
+            step_snapshot(&conn, "r1", 2)
+                .unwrap()
+                .unwrap()
+                .observed_hash
+                .as_deref(),
+            Some("def"),
+            "the latest sighting wins"
+        );
+        // A snapshot taken again (a new attempt) does not inherit a sighting
+        // of an earlier one.
+        save_step_snapshot(&conn, "r1", 2, "docs/a.md", Some("before")).unwrap();
+        assert_eq!(
+            step_snapshot(&conn, "r1", 2)
+                .unwrap()
+                .unwrap()
+                .observed_hash,
+            None
+        );
+    }
+
+    #[test]
+    fn a_new_run_drops_the_snapshots_of_the_runs_it_supersedes() {
+        let conn = fresh_conn();
+        insert_running(&conn, "old", "p1", "Full", "ClaudeCode", Utc::now()).unwrap();
+        save_step_snapshot(&conn, "old", 2, "docs/a.md", Some("a")).unwrap();
+        conn.execute(
+            "INSERT INTO projects (id, name, path) VALUES ('p2', 'Other', '/tmp/p2')",
+            [],
+        )
+        .unwrap();
+        insert_running(
+            &conn,
+            "other-project",
+            "p2",
+            "Full",
+            "ClaudeCode",
+            Utc::now(),
+        )
+        .unwrap();
+        save_step_snapshot(&conn, "other-project", 2, "docs/a.md", Some("a")).unwrap();
+
+        insert_running(&conn, "new", "p1", "Full", "ClaudeCode", Utc::now()).unwrap();
+        assert!(
+            step_snapshot(&conn, "old", 2).unwrap().is_none(),
+            "superseded"
+        );
+        assert!(
+            step_snapshot(&conn, "other-project", 2).unwrap().is_some(),
+            "another project's run is not superseded"
+        );
+    }
+
+    #[test]
+    fn deleting_a_run_deletes_its_snapshots() {
+        // The real schema: the cascade is the migration's, not the fixture's.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO projects (id, name, path, created_at, updated_at) VALUES ('p9', 'P', '/tmp/p9', ?1, ?1)",
+            params![now],
+        )
+        .unwrap();
+        insert_running(&conn, "r9", "p9", "Full", "ClaudeCode", Utc::now()).unwrap();
+        save_step_snapshot(&conn, "r9", 1, "docs/a.md", Some("a")).unwrap();
+        assert!(step_snapshot(&conn, "r9", 1).unwrap().is_some());
+        conn.execute("DELETE FROM audit_runs WHERE id = 'r9'", [])
+            .unwrap();
+        assert!(step_snapshot(&conn, "r9", 1).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_killed_step_is_settled_failed_with_its_target_state_and_loses_its_snapshot() {
+        let conn = fresh_conn();
+        insert_running(&conn, "r1", "p1", "Full", "ClaudeCode", Utc::now()).unwrap();
+        insert_audit_step_start(&conn, "r1", 1, "docs/a.md", Utc::now()).unwrap();
+        finalize_audit_step(
+            &conn,
+            "r1",
+            1,
+            Utc::now(),
+            5,
+            &StepTokens::default(),
+            None,
+            true,
+            None,
+            false,
+        )
+        .unwrap();
+        insert_audit_step_start(&conn, "r1", 2, "docs/b.md", Utc::now()).unwrap();
+        save_step_snapshot(&conn, "r1", 1, "docs/a.md", Some("a")).unwrap();
+        save_step_snapshot(&conn, "r1", 2, "docs/b.md", Some("b")).unwrap();
+
+        // Only the step that never ended is "unfinished".
+        let unfinished = unfinished_step_snapshots(&conn, "r1").unwrap();
+        assert_eq!(unfinished.len(), 1);
+        assert_eq!(unfinished[0].step_index, 2);
+
+        settle_killed_step(
+            &conn,
+            "r1",
+            2,
+            "stopped during step 2",
+            Some("restored"),
+            false,
+            Utc::now(),
+        )
+        .unwrap();
+        let steps = list_audit_steps(&conn, "r1").unwrap();
+        let killed = steps.iter().find(|s| s.step_index == 2).unwrap();
+        assert!(killed.ended_at.is_some());
+        assert!(!killed.cli_success);
+        assert_eq!(
+            killed.step_warning.as_deref(),
+            Some("stopped during step 2")
+        );
+        assert_eq!(killed.target_state.as_deref(), Some("restored"));
+        assert!(step_snapshot(&conn, "r1", 2).unwrap().is_none());
+        assert!(
+            step_snapshot(&conn, "r1", 1).unwrap().is_some(),
+            "a finished step's snapshot is not this function's to drop"
+        );
+    }
+
+    #[test]
+    fn the_drift_and_the_agent_process_are_recorded_and_cleared() {
+        let conn = fresh_conn();
+        insert_running(&conn, "r1", "p1", "Full", "ClaudeCode", Utc::now()).unwrap();
+        set_resume_drift(&conn, "r1", "sources changed since step 4").unwrap();
+        assert_eq!(
+            get_by_id(&conn, "r1")
+                .unwrap()
+                .unwrap()
+                .resume_drift
+                .as_deref(),
+            Some("sources changed since step 4")
+        );
+
+        set_agent_process(&conn, "r1", 4242, Some("Mon Oct 12 10:00:00 2026")).unwrap();
+        let recorded = recorded_agent_processes(&conn).unwrap();
+        assert_eq!(
+            recorded,
+            vec![(
+                "r1".to_string(),
+                4242,
+                Some("Mon Oct 12 10:00:00 2026".to_string())
+            )]
+        );
+        clear_agent_process(&conn, "r1").unwrap();
+        assert!(recorded_agent_processes(&conn).unwrap().is_empty());
     }
 }

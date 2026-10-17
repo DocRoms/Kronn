@@ -208,3 +208,82 @@ pub async fn readiness(
         agents::readiness::check_agents(&context, &request.agents).await,
     ))
 }
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ReachabilityTarget {
+    pub agent_type: AgentType,
+    #[serde(default)]
+    pub connection_id: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ReachabilityRequest {
+    pub targets: Vec<ReachabilityTarget>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct TargetReachability {
+    pub agent_type: AgentType,
+    pub connection_id: Option<String>,
+    /// `None` for a target without an address Kronn probes (CLI agents).
+    pub connectivity: Option<WorkerConnectivity>,
+}
+
+/// More targets than a composer can name are not probed.
+const MAX_REACHABILITY_TARGETS: usize = 16;
+
+/// POST /api/agents/reachability
+/// Transport state of the HTTP agents a draft names (KT-1154), from the KT-697
+/// probe and its 30 s cache: unauthenticated, bounded, no model called.
+pub async fn reachability(
+    State(state): State<AppState>,
+    Json(request): Json<ReachabilityRequest>,
+) -> Json<ApiResponse<Vec<TargetReachability>>> {
+    use crate::core::endpoint_reachability::{DEFAULT_BUDGET, SHARED};
+    let endpoints =
+        crate::models::setup::HttpEndpoints::from_agents(&state.config.read().await.agents);
+    let checks = request
+        .targets
+        .into_iter()
+        .take(MAX_REACHABILITY_TARGETS)
+        .map(|target| {
+            let state = state.clone();
+            let endpoints = &endpoints;
+            async move {
+                let external = match target.connection_id.clone() {
+                    Some(id) => state
+                        .db
+                        .with_read_conn(move |conn| {
+                            crate::db::external_api_connections::get(conn, &id)
+                        })
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|connection| connection.endpoint),
+                    None => None,
+                };
+                let endpoint = agents::runner::is_http_chat_agent(&target.agent_type)
+                    .then(|| {
+                        crate::api::discussions::start_refusal::launch_endpoint(
+                            &target.agent_type,
+                            external.as_deref(),
+                            endpoints,
+                        )
+                    })
+                    .flatten();
+                let connectivity = match endpoint {
+                    Some(endpoint) => Some(crate::api::orchestration::connection_connectivity(
+                        Some(&SHARED.observe(&endpoint, DEFAULT_BUDGET).await),
+                        chrono::Utc::now(),
+                    )),
+                    None => None,
+                };
+                TargetReachability {
+                    agent_type: target.agent_type,
+                    connection_id: target.connection_id,
+                    connectivity,
+                }
+            }
+        });
+    Json(ApiResponse::ok(futures::future::join_all(checks).await))
+}

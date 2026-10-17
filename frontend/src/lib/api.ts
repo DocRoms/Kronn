@@ -1,4 +1,12 @@
-import type { ArtifactBundle, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditStepInfo, AuditRecentActivity, AuditTokenBreakdown, EmbedOriginsChange } from '../types/generated';
+import type { AcceptAuditStepResponse, ArtifactBundle, AuditLatest, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditRunCost, AuditStepInfo, AuditRecentActivity, AuditTokenBreakdown, EmbedOriginsChange } from '../types/generated';
+import type { BriefingDetectedDoc, BriefingDocsAnswers, BriefingProjectAnswers, BriefingProjectRules, CrossAuditEstimate, LinkedRepoDocStatus, SavedBriefing } from '../types/generated';
+import type { WorkerConnectivity } from '../types/generated';
+import type {
+  DecideScopeRequest, DiscussionProjectGrant, DiscussionScope, GrantDiscussionProjectRequest,
+  RevokeDiscussionProjectRequest, RevokeWorkflowScopeRequest, SetWorkflowScopeRequest, WorkflowScope,
+} from '../types/generated';
+import type { DocProvenanceReport } from '../types/generated';
+import type { TemplateReinstallRequest, TemplateReinstallPlan, TemplateReinstallReport, MergeBase, TemplateMergeAccepted, TemplateMergeAcceptRequest, TemplateMergeRequest, TemplateMergeView } from '../types/generated';
 import { readTextAttachmentPreview } from './textAttachmentPreview';
 import type {
   AssistantConversation,
@@ -163,10 +171,23 @@ import type {
   DependencyUpdateSummary,
   AuditEvidenceResponse,
   AuditTimelineData,
+  ValidationState,
   ContextAuditResponse,
   ModelTier,
   ModelTiersConfig,
   DriftCheckResponse,
+  CitationDriftResponse,
+  RevalidateAuditRequest,
+  RevalidationPlan,
+  TdTasksOutcome,
+  TdReviewList,
+  TdDecisionItem,
+  TdDecideOutcome,
+  TdDecideRequest,
+  TdTalk,
+  TdTalkRequest,
+  TdTalkStart,
+  SectionCitations,
   AddContactResult,
   WorkflowSuggestion,
   ContextFile,
@@ -228,6 +249,8 @@ import type {
   ProposalDecisionResponse,
   ProposalListResponse,
   RemovePlanningBlockerRequest,
+  AssignPlanningTaskRequest,
+  UnassignPlanningTaskRequest,
   UpdatePlanningDodItemRequest,
   UpdatePlanningTaskRequest,
   TelemetryCoverage,
@@ -281,7 +304,7 @@ import { ApiRequestError } from './apiRequestError';
 import { looksLikeBackendDown, reportBackendSuspect } from './backendReachability';
 
 import type { SafetyCheckRequest, SafetyWarning, CronPreview, CronPreviewRequest } from '../types/generated';
-import type { AgentFilesPolicy, MigrateDocsResponse, ProjectAgentFiles, ReencryptResponse, RecoveryStatus, StartNewKeyResponse } from '../types/generated';
+import type { AgentFilesPolicy, BriefingDefaults, MigrateDocsResponse, ProjectAgentFiles, ProjectDocsLocation, ReencryptResponse, RecoveryStatus, StartNewKeyResponse } from '../types/generated';
 import type {
   CatalogModelEntry,
   DeleteManualModelRequest,
@@ -496,6 +519,12 @@ async function parseSSEStream(
  *  validate shape, the cast trusts the backend (which we own).
  */
 /** Terminal payload of a partial refresh (matrix v2). */
+/** KT-1168 — terminal of « Revalider l'audit »: re-anchoring alone, or the
+ *  bounded agent pass (same contract as a partial audit). */
+export type RevalidationDoneInfo =
+  | { kind: 'deterministic'; status: 'clean' | 'todo'; reanchored: number }
+  | { kind: 'agent'; info: PartialDoneInfo };
+
 export interface PartialDoneInfo {
   status: 'complete' | 'interrupted' | 'no_change';
   discussionId: string | null;
@@ -516,8 +545,9 @@ const isStepList = (v: unknown): v is number[] =>
  *  never coerced into a success:
  *  - the three lists partition `requestedSteps` exactly (disjoint, complete);
  *  - `complete`  ⇒ succeeded non-empty, failed empty, discussion + run ids;
- *  - `no_change` ⇒ only unchanged non-empty, no discussion;
- *  - `interrupted` ⇒ failed non-empty, no discussion. */
+ *  - `no_change` ⇒ only unchanged non-empty (re-verified, the run completed);
+ *    a discussion unless the validation came back (KT-1207);
+ *  - `interrupted` ⇒ failed non-empty; a discussion only for done steps. */
 function parsePartialDone(
   p: Record<string, unknown>,
   requestedSteps: number[],
@@ -570,16 +600,13 @@ function parsePartialDone(
       if (succeeded.length > 0 || failed.length > 0 || unchanged.length === 0) {
         return 'Malformed audit done event: no_change requires an all-unchanged partition';
       }
-      if (discussionId !== null) {
-        return 'Malformed audit done event: no_change cannot carry a discussion';
-      }
       break;
     case 'interrupted':
       if (failed.length === 0) {
         return 'Malformed audit done event: interrupted requires failed steps';
       }
-      if (discussionId !== null) {
-        return 'Malformed audit done event: interrupted cannot carry a discussion';
+      if (discussionId !== null && succeeded.length + unchanged.length === 0) {
+        return 'Malformed audit done event: an interrupted run without done steps cannot carry a discussion';
       }
       break;
   }
@@ -876,6 +903,9 @@ export const config = {
   changeEmbedOrigins: (change: EmbedOriginsChange) => api<string[]>('POST', '/config/embed-origins', change),
   getScanIgnore: () => api<string[]>('GET', '/config/scan-ignore'),
   setScanIgnore: (patterns: string[]) => api<void>('POST', '/config/scan-ignore', patterns),
+  /** Default AI doc folder, relative to every project root (KT-263); null = historical detection. */
+  getDefaultDocsDir: () => api<string | null>('GET', '/config/default-docs-dir'),
+  saveDefaultDocsDir: (dir: string | null) => api<string | null>('POST', '/config/default-docs-dir', dir),
   getScanDepth: () => api<number>('GET', '/config/scan-depth'),
   setScanDepth: (depth: number) => api<number>('POST', '/config/scan-depth', depth),
   getAgentAccess: () => api<AgentsConfig>('GET', '/config/agent-access'),
@@ -888,8 +918,10 @@ export const config = {
   setModelTiers: (tiers: ModelTiersConfig) => api<void>('POST', '/config/model-tiers', tiers),
   dbInfo: () => api<DbInfo>('GET', '/config/db-info'),
   /** Where the database's weight sits, one entry per table. Measured with
-   *  `dbstat` on demand — never on page load, since it reads the b-trees. */
-  dbUsage: () => api<DbUsage>('GET', '/config/db-usage'),
+   *  `dbstat` on demand — never on page load, since it reads the b-trees.
+   *  `sizeOnly` skips that walk and answers the file sizes with no table. */
+  dbUsage: (options: { sizeOnly?: boolean } = {}) =>
+    api<DbUsage>('GET', options.sizeOnly ? '/config/db-usage?tables=false' : '/config/db-usage'),
   /** SQLite online-backup snapshot. Backend writes to
    *  `<data_dir>/backups/kronn-YYYYMMDD-HHMMSS.db`. Returns the
    *  resulting path so the Settings UI can toast it. */
@@ -954,7 +986,7 @@ export const config = {
       'GET',
       `/discussion-weights?discussion_ids=${encodeURIComponent(discussionIds.join(','))}`,
     ),
-  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; agent_global_timeout_min?: number; local_agent_global_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; discussion_notes_enabled?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'OnDemand' | 'Off'; agent_handoffs_enabled?: boolean; agent_handoff_paid_limit?: number; agent_handoff_paid_unlimited?: boolean; agent_handoff_blocked_agents?: AgentType[]; discussion_weight?: DiscussionWeightConfig; execution_variable_retention_days?: number; run_payload_retention_days?: number; p2p_enabled?: boolean; frontend_origins?: string[]; timezone?: string }) => api<void>('POST', '/config/server', req),
+  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; agent_global_timeout_min?: number; local_agent_global_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; discussion_notes_enabled?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'OnDemand' | 'Off'; agent_handoffs_enabled?: boolean; agent_handoff_paid_limit?: number; agent_handoff_paid_unlimited?: boolean; agent_handoff_blocked_agents?: AgentType[]; discussion_weight?: DiscussionWeightConfig; execution_variable_retention_days?: number; run_payload_retention_days?: number; disk_launch_min_free_gib?: number; disk_sweep_idle_hours?: number; p2p_enabled?: boolean; frontend_origins?: string[]; timezone?: string }) => api<void>('POST', '/config/server', req),
   regenerateAuthToken: () => api<string>('POST', '/config/auth-token/regenerate'),
 };
 
@@ -983,6 +1015,11 @@ export const projects = {
     api<ProjectAgentFiles>('GET', `/projects/${encodeURIComponent(id)}/agent-files`),
   setAgentFiles: (id: string, policy: AgentFilesPolicy) =>
     api<ProjectAgentFiles>('PUT', `/projects/${encodeURIComponent(id)}/agent-files`, { policy }),
+  /** Where the project keeps its AI doc, and its own override (KT-263). */
+  docsLocation: (id: string) =>
+    api<ProjectDocsLocation>('GET', `/projects/${encodeURIComponent(id)}/docs-location`),
+  setDocsLocation: (id: string, dir: string | null) =>
+    api<ProjectDocsLocation>('PUT', `/projects/${encodeURIComponent(id)}/docs-location`, { dir }),
   repositoryResources: (id: string) =>
     api<ProjectRepositoryResources>('GET', `/projects/${encodeURIComponent(id)}/repository-resources`),
   /** The diffs behind one listed resource, built when its Compare sheet opens:
@@ -1037,6 +1074,25 @@ export const projects = {
   migrateDocs: (id: string, req: { create_symlink?: boolean }) =>
     api<MigrateDocsResponse>('POST', `/projects/${id}/migrate-docs`, req),
   delete: (id: string, hard?: boolean) => api<void>('DELETE', `/projects/${id}${hard ? '?hard=true' : ''}`),
+  /** Template v2 merge into an already-documented repo (KT-1172): the
+   *  read-only correspondence table, computed on the checkout. */
+  templateMergePlan: (id: string) =>
+    api<TemplateMergeView>('GET', `/projects/${encodeURIComponent(id)}/template-merge/plan`),
+  /** Apply the merge in its worktree; a second call resumes the same worktree. */
+  templateMergeStart: (id: string, base: MergeBase) =>
+    api<TemplateMergeView>('POST', `/projects/${encodeURIComponent(id)}/template-merge`, { base } satisfies TemplateMergeRequest),
+  /** Commit only these proposed files on the merge branch. */
+  templateMergeAccept: (id: string, paths: string[]) =>
+    api<TemplateMergeAccepted>('POST', `/projects/${encodeURIComponent(id)}/template-merge/accept`, { paths } satisfies TemplateMergeAcceptRequest),
+  /** Drop the merge worktree; the checkout is untouched. */
+  templateMergeDiscard: (id: string) =>
+    api<void>('DELETE', `/projects/${encodeURIComponent(id)}/template-merge`),
+  /** KT-1166 — what reinstalling the template files would replace (read-only). */
+  templateReinstallPlan: (id: string) =>
+    api<TemplateReinstallPlan>('GET', `/projects/${encodeURIComponent(id)}/template-reinstall/plan`),
+  /** Back up, then replace the template's own files; refused while an audit runs. */
+  templateReinstall: (id: string, paths: string[]) =>
+    api<TemplateReinstallReport>('POST', `/projects/${encodeURIComponent(id)}/template-reinstall`, { paths } satisfies TemplateReinstallRequest),
   clone: (req: CloneProjectRequest) => api<CloneProjectResponse>('POST', '/projects/clone', req),
   discoverRepos: (req?: DiscoverReposRequest) => api<DiscoverReposResponse>('POST', '/projects/discover-repos', req ?? { source_ids: [] }),
   installTemplate: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/install-template`),
@@ -1076,8 +1132,18 @@ export const projects = {
   /** Recent runs, their steps and the branch's recorded audits, in one request. */
   auditTimeline: (id: string) => api<AuditTimelineData>('GET', `/projects/${id}/audit-timeline`),
   validateAudit: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/validate-audit`),
+  /** KT-1122 — the server's verdict on validating the latest run (the one parser). */
+  validationState: (id: string) => api<ValidationState>('GET', `/projects/${id}/validation-state`),
   markBootstrapped: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/mark-bootstrapped`),
   cancelAudit: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/cancel-audit`),
+  /** KT-1131 — a human accepts a failed step of the latest interrupted run. */
+  acceptAuditStep: (id: string, runId: string, step: number, reason: string | null, overrideUnsound?: boolean) =>
+    api<AcceptAuditStepResponse>('POST', `/projects/${id}/audit-runs/${runId}/steps/${step}/accept`, {
+      reason,
+      ...(overrideUnsound ? { override_unsound: true } : {}),
+    }),
+  /** KT-1134 — settle runs no worker runs any more and release an orphaned lease. */
+  auditRunsCleanup: () => api<number>('POST', '/audit-runs/cleanup'),
   /**
    * Returns the live progress of an in-flight audit for this project, or
    * `null` when nothing is running. Polled by ProjectCard every 2 s when a
@@ -1110,27 +1176,21 @@ export const projects = {
        *  Absent from a backend that predates it. */
       steps_to_redo?: number[];
       started_at: string;
+      /** KT-1320 — how the run was launched: a retry or a resume runs on the
+       *  same agent, tier and connection unless the human picks another. */
+      agent_type?: string;
+      tier?: string;
+      connection_id?: string;
+      /** KT-1199 — the run is the one a colleague committed in the
+       *  repository, not a row of this instance: the launch adopts it. */
+      from_repository?: boolean;
     } | null>(
       'GET', `/projects/${id}/audit-resumable`,
     ),
-  /**
-   * 0.8.4 (#298) — most-recent completed audit for the project, or
-   * `null`. The ProjectCard recap panel uses this to find the
-   * `audit_run_id` to feed `auditRunSteps`.
-   */
+  /** Newest run of any status, newest Completed run, steps a resume redoes
+   *  and whether the lease is orphaned (KT-1210). */
   auditLatest: (id: string) =>
-    api<{
-      id: string;
-      project_id: string;
-      kind: string;
-      agent_type: string;
-      started_at: string;
-      ended_at?: string | null;
-      duration_ms?: number | null;
-      status: string;
-      td_total: number;
-      health_score?: number | null;
-    } | null>('GET', `/projects/${id}/audit-latest`),
+    api<AuditLatest>('GET', `/projects/${id}/audit-latest`),
   /**
    * 0.8.4 (#298) — recent audit history (Full + sub-audits combined),
    * newest first. Powers the chip strip on the recap panel so the user
@@ -1158,6 +1218,8 @@ export const projects = {
    */
   /** KT-977 — the Full audit's steps in run order, known before any run. */
   auditSteps: () => api<AuditStepInfo[]>('GET', '/audit/steps'),
+  /** KT-1084 — an audit run's tokens and cost per phase (briefing, audit, validation) and in total. */
+  auditRunCost: (runId: string) => api<AuditRunCost>('GET', `/audit-runs/${runId}/cost`),
   auditRunSteps: (runId: string) =>
     api<Array<{
       audit_run_id: string;
@@ -1171,6 +1233,10 @@ export const projects = {
       cli_success: boolean;
       step_warning?: string | null;
       step_repaired_from_template: boolean;
+      unchanged?: boolean;
+      accepted_at?: string | null;
+      accepted_by?: string | null;
+      accepted_reason?: string | null;
     }>>('GET', `/audit-runs/${runId}/steps`),
   /**
    * 0.8.4 (#294) — cross-agent memory source bindings.
@@ -1217,8 +1283,24 @@ export const projects = {
       }>;
     }>('GET', `/discussions/${id}/source`),
   checkDrift: (id: string) => api<DriftCheckResponse>('GET', `/projects/${id}/drift`),
+  /** KT-1207 — « Vérifié, inchangé »: these stale sections still hold. */
+  acknowledgeDrift: (id: string, sections: string[], shownPaths: { doc: string; section: string; path: string }[] = []) =>
+    api<DriftCheckResponse>('POST', `/projects/${id}/drift/acknowledge`, { sections, shown_paths: shownPaths }),
+  citationDrift: (id: string) => api<CitationDriftResponse>('GET', `/projects/${id}/citation-drift`),
+  acknowledgeCitations: (id: string, doc: string) =>
+    api<SectionCitations>('POST', `/projects/${id}/citation-drift/acknowledge`, { doc }),
+  /** KT-1079 — docs a human validated, and those Kronn changed since. */
+  docProvenance: (id: string, detail = false) =>
+    api<DocProvenanceReport>('GET', `/projects/${id}/doc-provenance${detail ? '?detail=true' : ''}`),
+  /** KT-1079 — « Confirmer »: an empty list confirms every doc to reconfirm. */
+  confirmDocProvenance: (id: string, docs: string[]) =>
+    api<DocProvenanceReport>('POST', `/projects/${id}/doc-provenance/confirm`, { docs }),
+  /** KT-1168 — what « Revalider l'audit » would do, computed without writing. */
+  revalidationPlan: (id: string) => api<RevalidationPlan>('GET', `/projects/${id}/revalidation`),
   getBriefing: (id: string) => api<string | null>('GET', `/projects/${id}/briefing`),
   setBriefing: (id: string, notes: string | null) => api<void>('PUT', `/projects/${id}/briefing`, { notes }),
+  /** KT-1196 — the saved briefing as the form's answers; `null` before the first save. */
+  savedBriefing: (id: string) => api<SavedBriefing | null>('GET', `/projects/${id}/briefing/answers`),
   startBriefing: (id: string, agent: AgentType, tier?: ModelTier) =>
     api<{ discussion_id: string }>('POST', `/projects/${id}/start-briefing`, { agent, tier }),
   /**
@@ -1229,7 +1311,44 @@ export const projects = {
   saveBriefing: (id: string, form: {
     purpose: string; team: string; maturity: string;
     dependencies: string; traps: string; additional: string;
+    /** KT-1173 — closed project cards, written to `docs/project.md` by the audit. */
+    project?: BriefingProjectAnswers;
+    /** KT-1167 — after a successful Full audit, turn the TDs into Kronn tasks. */
+    td_to_tasks?: boolean;
+    /** KT-1183 — experimental cross-agent audit: 2 or 3 agents, empty = off. */
+    cross_audit_agents?: AgentType[];
+    /** KT-999 — documentation locations, their state and sources of truth. */
+    existing_docs?: BriefingDocsAnswers;
+    /** KT-1193 — rules and bans, written to the coding-rules doc and checked by the audit. */
+    project_rules?: BriefingProjectRules;
+    /** KT-1192 — the AI doc folder, relative to the project root. */
+    docs_dir?: string;
+    /** KT-1192 — the human's explicit choice to move existing docs to `legacy/`. */
+    move_existing_to_legacy?: boolean;
   }) => api<boolean>('POST', `/projects/${id}/save-briefing`, form),
+  /** KT-1183 — the cross-agent audit's cost range, scaled from the last measured run. */
+  crossAuditEstimate: (id: string, agents: number) =>
+    api<CrossAuditEstimate>('GET', `/projects/${id}/audit/cross-estimate?agents=${agents}`),
+  /** KT-999 — documentation locations found in the repository, with their last commit date. */
+  briefingDocs: (id: string) => api<BriefingDetectedDoc[]>('GET', `/projects/${id}/briefing/docs`),
+  /** KT-999 — a location typed by hand; rejected (400) outside the repository or when missing. */
+  checkBriefingDoc: (id: string, path: string) =>
+    api<BriefingDetectedDoc>('POST', `/projects/${id}/briefing/docs/check`, { path }),
+  /** KT-1192 — the pre-filled « Dossier de la documentation IA ». */
+  briefingDefaults: (id: string) =>
+    api<BriefingDefaults>('GET', `/projects/${encodeURIComponent(id)}/briefing-defaults`),
+  /** KT-1167 — the project's TD sheets as Kronn tasks; a re-click creates nothing. */
+  convertTdTasks: (id: string) => api<TdTasksOutcome>('POST', `/projects/${id}/audit/td-tasks`),
+  /** KT-982 — the review of the audit's tech-debt sheets. */
+  auditTds: (id: string) => api<TdReviewList>('GET', `/projects/${id}/audit/tds`),
+  decideTds: (id: string, items: TdDecisionItem[]) =>
+    api<TdDecideOutcome>('POST', `/projects/${id}/audit/tds/decide`, { items } satisfies TdDecideRequest),
+  createTdTask: (id: string, tdId: string) =>
+    api<TdTasksOutcome>('POST', `/projects/${id}/audit/tds/${encodeURIComponent(tdId)}/task`),
+  tdTalk: (id: string, tdId: string) =>
+    api<TdTalk>('GET', `/projects/${id}/audit/tds/${encodeURIComponent(tdId)}/talk`),
+  startTdTalk: (id: string, tdId: string, request: TdTalkRequest) =>
+    api<TdTalkStart>('POST', `/projects/${id}/audit/tds/${encodeURIComponent(tdId)}/talk`, request),
   setDefaultSkills: (id: string, skillIds: string[]) => api<boolean>('PUT', `/projects/${id}/default-skills`, skillIds),
   setDefaultProfile: (id: string, profileId: string | null) => api<boolean>('PUT', `/projects/${id}/default-profile`, { profile_id: profileId }),
   /** 0.8.3 — Replace the project's linked_repos list. The backend
@@ -1248,6 +1367,8 @@ export const projects = {
    *  Kronn-known projects (excluding the current one) sorted by
    *  proximity (same-parent dir first, then alphabetical). Free-text
    *  location entry stays supported for off-Kronn repos. */
+  /** KT-999 — the AI doc each linked repo really has. */
+  linkedReposDocs: (id: string) => api<LinkedRepoDocStatus[]>('GET', `/projects/${id}/linked-repos/docs`),
   linkedReposCandidates: (id: string) =>
     api<Array<{ id: string; name: string; path: string; proximity_hint: string }>>('GET', `/projects/${id}/linked-repos/candidates`),
   listAiFiles: (id: string) => api<AiFileNode[]>('GET', `/projects/${id}/ai-files`),
@@ -1344,6 +1465,9 @@ export const projects = {
       /** NON-terminal warning after a committed run (e.g. baseline write
        * failed post-Completed) — `done` still follows and stays coherent. */
       onWarning?: (message: string) => void;
+      /** The briefing asks for the cross-agent audit, but a partial refresh
+       * runs every step single-agent. Informational, fired after `start`. */
+      onSingleAgent?: () => void;
       /** Typed terminal payload (matrix v2): `complete` | `interrupted` |
        * `no_change` + the exact requested-steps partition. Undefined on a
        * user abort (fetch cancelled before any done event). */
@@ -1394,6 +1518,7 @@ export const projects = {
             // the `done interrupted` that follows.
             case 'step_error': handlers.onStepError?.(p.error ?? 'Step error', p.step); break;
             case 'warning': handlers.onWarning?.(p.message ?? 'Audit warning'); break;
+            case 'single_agent': handlers.onSingleAgent?.(); break;
             case 'done': {
               // Runtime-validated: a malformed terminal payload must never
               // read as success.
@@ -1418,6 +1543,71 @@ export const projects = {
           fail('Audit stream closed before a terminal event');
         },
         onError: fail,
+      },
+    );
+  },
+  /** KT-1168 — « Revalider l'audit »: re-anchors moved citations, then runs
+   * the owning audit steps of the broken sections (partial pipeline). A
+   * relaunch resumes: the backend recomputes the plan every time. */
+  revalidateAuditStream: async (
+    id: string,
+    req: RevalidateAuditRequest & { deterministic_only?: boolean },
+    handlers: {
+      onReanchored?: (doc: string, count: number) => void;
+      onStepStart?: (step: number, total: number, file: string) => void;
+      onStepDone?: (step: number, success: boolean) => void;
+      onWarning?: (message: string) => void;
+      /** TERMINAL: the run was stopped; nothing else follows. */
+      onCancelled: () => void;
+      /** TERMINAL. Undefined on a user abort. */
+      onDone: (info?: RevalidationDoneInfo) => void;
+      /** TERMINAL. */
+      onError: (error: string) => void;
+    },
+    signal?: AbortSignal,
+  ) => {
+    let finished = false;
+    let canonicalSteps: number[] | null = null;
+    const seal = (f: () => void) => { if (!finished) { finished = true; f(); } };
+    await fetchAndParseSSE(
+      `${_apiBase}/api/projects/${id}/revalidate-audit`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify(req), signal },
+      {
+        onEvent: (type, payload) => {
+          const p = payload as Record<string, unknown>;
+          switch (type) {
+            case 'start':
+              if (isStepList(p.requested_steps)) canonicalSteps = p.requested_steps;
+              break;
+            case 'reanchored':
+              handlers.onReanchored?.(String(p.doc ?? ''), Number(p.count ?? 0));
+              break;
+            case 'step_start':
+              handlers.onStepStart?.(Number(p.progress ?? p.step), Number(p.total), String(p.file ?? ''));
+              break;
+            case 'step_done': handlers.onStepDone?.(Number(p.step), p.success === true); break;
+            case 'warning': handlers.onWarning?.(String(p.message ?? 'Revalidation warning')); break;
+            case 'cancelled': seal(handlers.onCancelled); break;
+            case 'done': {
+              if (p.status === 'clean' || p.status === 'todo') {
+                const status = p.status;
+                seal(() => handlers.onDone({ kind: 'deterministic', status, reanchored: Number(p.reanchored ?? 0) }));
+                break;
+              }
+              if (canonicalSteps === null) { seal(() => handlers.onError('Malformed revalidation stream: done before start')); break; }
+              const info = parsePartialDone(p, canonicalSteps);
+              if (typeof info === 'string') seal(() => handlers.onError(info));
+              else seal(() => handlers.onDone({ kind: 'agent', info }));
+              break;
+            }
+            case 'error': seal(() => handlers.onError(String(p.error ?? 'Unknown error'))); break;
+          }
+        },
+        onDone: () => {
+          if (signal?.aborted) { seal(() => handlers.onDone()); return; }
+          seal(() => handlers.onError('Revalidation stream closed before a terminal event'));
+        },
+        onError: (error) => seal(() => handlers.onError(error)),
       },
     );
   },
@@ -1474,6 +1664,9 @@ export const projects = {
        * surfaces the warning. Optional for backwards-compat.
        */
       onStepWarning?: (step: number, file: string, reason: string, repaired: boolean) => void;
+      /** KT-1130 — the step checked its target and found it already up to
+       * date: neither written nor failed. Its `step_done` follows. */
+      onStepUnchanged?: (step: number, file: string) => void;
       /** NON-terminal per-step failure (spawn error): the step closes with
        * its own `step_done success=false` and the loop continues. */
       onStepError?: (error: string, step?: number) => void;
@@ -1584,6 +1777,9 @@ export const projects = {
                 );
               }
               break;
+            case 'step_unchanged':
+              if (typeof p.step === 'number' && typeof p.file === 'string') handlers.onStepUnchanged?.(p.step, p.file);
+              break;
             // NON-terminal: the step closes with its own `step_done
             // success=false` and the pipeline continues — terminal cleanup
             // here would race the `done interrupted` that follows.
@@ -1619,7 +1815,22 @@ export const agents = {
   toggle: (agentType: AgentType) => api<boolean>('POST', '/agents/toggle', agentType),
   readiness: (request: AgentReadinessRequest) =>
     api<AgentReadiness[]>('POST', '/agents/readiness', request),
+  /** Transport state of the HTTP agents a draft names (KT-1154), probed and cached 30 s server-side. */
+  reachability: (targets: ReachabilityTarget[]) =>
+    api<TargetReachability[]>('POST', '/agents/reachability', { targets }),
 };
+
+export interface ReachabilityTarget {
+  agent_type: AgentType;
+  connection_id?: string | null;
+}
+
+export interface TargetReachability {
+  agent_type: AgentType;
+  connection_id: string | null;
+  /** `null` for an agent without an address Kronn probes. */
+  connectivity: WorkerConnectivity | null;
+}
 
 // ─── MCPs ───────────────────────────────────────────────────────────────────
 
@@ -2140,6 +2351,40 @@ export const discussions = {
       + (category ? `?category=${encodeURIComponent(category)}` : ''),
   ),
 
+  /** KT-1270 — the projects this room reaches besides its own, the pending
+   *  access requests of its agents, and the journal. */
+  scope: (id: string) => api<DiscussionScope>(
+    'GET',
+    `/discussions/${encodeURIComponent(id)}/scope`,
+  ),
+
+  /** Open a project (or every project) to the room. Every project in write
+   *  needs the typed confirmation and the fingerprint of the scope shown. */
+  grantScope: (id: string, request: GrantDiscussionProjectRequest) => api<DiscussionProjectGrant>(
+    'POST',
+    `/discussions/${encodeURIComponent(id)}/scope/grants`,
+    request,
+  ),
+
+  revokeScope: (id: string, grantId: string, request: RevokeDiscussionProjectRequest) => api<DiscussionScope>(
+    'POST',
+    `/discussions/${encodeURIComponent(id)}/scope/grants/${encodeURIComponent(grantId)}/revoke`,
+    request,
+  ),
+
+  /** Approve an agent's request, at most at the access it asked for. */
+  approveScopeRequest: (id: string, requestId: string, request: DecideScopeRequest) => api<DiscussionScope>(
+    'POST',
+    `/discussions/${encodeURIComponent(id)}/scope/requests/${encodeURIComponent(requestId)}/approve`,
+    request,
+  ),
+
+  declineScopeRequest: (id: string, requestId: string, request: DecideScopeRequest) => api<DiscussionScope>(
+    'POST',
+    `/discussions/${encodeURIComponent(id)}/scope/requests/${encodeURIComponent(requestId)}/decline`,
+    request,
+  ),
+
   /** KT-595 — the arbitration questions of a discussion, pending and past.
    *  Polled, so the backend checks the room exists without loading its
    *  transcript. */
@@ -2440,6 +2685,19 @@ export const planning = {
     `/planning/tasks/${encodeURIComponent(taskId)}/blockers/${encodeURIComponent(blockerTaskId)}`,
     request,
   ),
+  /** KT-154 — put an agent on a task (idempotent on its typed identity). */
+  assign: (taskId: string, request: AssignPlanningTaskRequest) =>
+    api<PlanningTaskDetail>(
+      'POST',
+      `/planning/tasks/${encodeURIComponent(taskId)}/assignees`,
+      request,
+    ),
+  unassign: (taskId: string, request: UnassignPlanningTaskRequest) =>
+    api<PlanningTaskDetail>(
+      'DELETE',
+      `/planning/tasks/${encodeURIComponent(taskId)}/assignees`,
+      request,
+    ),
   discussionPlan: (discussionId: string) =>
     api<DiscussionPlan>('GET', `/discussions/${encodeURIComponent(discussionId)}/plan`),
   proposals: (discussionId: string, pendingOnly = true) => {
@@ -2482,6 +2740,14 @@ export const workflows = {
   unsafeSteps: (id: string) => api<UnsafeExecStep[]>('GET', `/workflows/${id}/unsafe-steps`),
   /** KT-1138 — whether the saved workflow, its sub-workflows and rollbacks can start. */
   readiness: (id: string) => api<WorkflowReadiness>('GET', `/workflows/${id}/readiness`),
+  /** KT-1270 — the projects this workflow's runs reach, and whether the human
+   *  validation still holds (any change to the workflow suspends it). */
+  scope: (id: string) => api<WorkflowScope>('GET', `/workflows/${encodeURIComponent(id)}/scope`),
+  setScope: (id: string, request: SetWorkflowScopeRequest) =>
+    api<WorkflowScope>('PUT', `/workflows/${encodeURIComponent(id)}/scope`, request),
+  /** Withdraw one project (or all, `project_id: null`); always available. */
+  revokeScope: (id: string, request: RevokeWorkflowScopeRequest) =>
+    api<WorkflowScope>('POST', `/workflows/${encodeURIComponent(id)}/scope/revoke`, request),
   /** KT-1017 — whether a command line sends run values to an unmodelled program. */
   execLineCheck: (req: ExecLineCheckRequest) => api<ExecLineCheck>('POST', '/exec/line-check', req),
   /** KT-918 — where each declared script file stands against its approved hash. */
@@ -3761,6 +4027,89 @@ export const runsApi = {
     if (filters.offset) query.set('offset', String(filters.offset));
     return api<SharedRun[]>('GET', `/runs${query.size ? `?${query}` : ''}`);
   },
+};
+
+// ─── Disk (KT-1318) ───────────────────────────────────────────────────────────
+export type DiskKind = 'worktree' | 'lane_build_dir' | 'cache';
+export type DiskState = 'orphan' | 'reclaimable' | 'active' | 'kept' | 'foreign';
+
+export interface DiskOwner {
+  task_ref: string | null;
+  execution_id: string;
+  status: string;
+}
+
+export interface DiskEntry {
+  project_id: string;
+  kind: DiskKind;
+  path: string;
+  name: string;
+  /** A floor when `bytes_are_partial`. */
+  bytes: number;
+  bytes_are_partial: boolean;
+  idle_seconds: number | null;
+  owner: DiskOwner | null;
+  state: DiskState;
+  reason: string | null;
+  /** A confirmed per-entry delete may take it. */
+  purgeable: boolean;
+}
+
+export interface DiskKindTotal {
+  kind: DiskKind;
+  entries: number;
+  bytes: number;
+  bytes_are_partial: boolean;
+  orphan_bytes: number;
+}
+
+export interface DiskPolicy {
+  launch_min_free_gib: number;
+  sweep_idle_hours: number;
+  warning_gib: number;
+  critical_gib: number;
+}
+
+export interface DiskReport {
+  available_bytes: number | null;
+  under_pressure: boolean;
+  policy: DiskPolicy;
+  volumes: { project_id: string; project_name: string; path: string; available_bytes: number | null; total_bytes: number | null }[];
+  totals: DiskKindTotal[];
+  orphan_bytes: number;
+  orphan_count: number;
+  entries: DiskEntry[];
+}
+
+export interface DiskPurgeItem {
+  path: string;
+  purged: boolean;
+  bytes: number;
+  bytes_are_partial: boolean;
+  reason: string | null;
+}
+
+export interface DiskPurgeResult {
+  mode: 'orphans' | 'entries';
+  items: DiskPurgeItem[];
+  freed_bytes: number;
+  kept: number;
+  available_bytes_after: number | null;
+}
+
+/** What Kronn keeps on the disk, and the purge. Without `paths` the purge takes
+ *  orphans only; named `paths` are deleted only with `confirm`. */
+export const diskApi = {
+  report: (projectId?: string) =>
+    api<DiskReport>('GET', `/maintenance/disk${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ''}`),
+  purgeOrphans: (projectId?: string) =>
+    api<DiskPurgeResult>('POST', '/maintenance/disk/purge', projectId ? { project_id: projectId } : {}),
+  purgeEntries: (paths: string[], projectId?: string) =>
+    api<DiskPurgeResult>('POST', '/maintenance/disk/purge', {
+      paths,
+      confirm: true,
+      ...(projectId ? { project_id: projectId } : {}),
+    }),
 };
 
 /** Shared catalog consumed by discussion, QP/compare and workflow pickers. */

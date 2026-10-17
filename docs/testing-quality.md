@@ -35,7 +35,7 @@ ambiguity before approving, without deleting another worker's shared cache.
 For filter controls used by a memoized request callback, test changing only
 that filter while keeping the query and other inputs unchanged. Changing the
 query as well can rebuild the callback and hide a missing filter dependency.
-`[src: file: frontend/src/components/__tests__/GlobalSearchPanel.test.tsx:169-190]`
+`[src: file: frontend/src/components/__tests__/GlobalSearchPanel.test.tsx:170-188#global-search-scope]`
 
 ## Release gate
 
@@ -73,7 +73,7 @@ fixed path shared with another test or another run, so a test creates its own
 directory (a temporary one, or a fixed name suffixed with the process id), and
 `config_dir()` in a unit test without `KRONN_DATA_DIR` is a per-process
 temporary directory, never the real install.
-`[src: file: Makefile:352-390]` `[src: file: backend/.config/nextest.toml:1]`
+`[src: file: Makefile:352-390]` `[src: file: backend/.config/nextest.toml:1-21]`
 A local green does not prove a CI green for tests that read the machine
 (installed CLIs such as LiteLLM, RTK or `npx`, the agent preflight): reproduce
 a CI-only failure in `rust:1-bookworm` before concluding.
@@ -83,7 +83,7 @@ shell with `withDashboardRoutes(shell, initialPath)` from
 `src/test/routerWrapper.tsx`. It mounts the real route table on a browser
 router, preloads the route chunks and resets the address after each test;
 assert navigation on `window.location.pathname`.
-`[src: file: frontend/src/test/routerWrapper.tsx:34-39]`
+`[src: file: frontend/src/test/routerWrapper.tsx:8-31#PRELOADED_ROUTES]` `[src: file: frontend/src/test/routerWrapper.tsx:33-43#withDashboardRoutes]`
 
 `frontend/e2e/specs/routing-addresses.spec.ts` drives the addresses in a real
 browser against a sandbox backend: the dashboard pages (Artifacts aside, as it
@@ -104,15 +104,68 @@ zero-warning Oxlint gate passes. The `with_conn` safety scanner also reads
 standalone Rust test files; a `#[cfg(test)]` on their parent module does not
 exclude their contents. Propagate fallible fixture setup inside the closure
 and assert its result after awaiting it.
-`[src: file: backend/scripts/ci/lint_with_conn_unwrap.py:79-115]`
-`[src: file: .github/workflows/ci-test.yml:480-484]`
+`[src: file: backend/scripts/ci/lint_with_conn_unwrap.py:155-195#find_violations]`
+`[src: file: .github/workflows/ci-test.yml:497-501#with_conn]`
 
 Supervisor cleanup must also reap live shell jobs whose PID was not yet recorded:
 a termination signal can arrive between the fork and that assignment, leaving
 a child alive and keeping inherited test pipes open. The shell regression injects
 TERM at this boundary for both the backend and the watcher.
-`[src: file: scripts/dev-backend-supervisor.sh:54-62]`
-`[src: file: tests/bats/ui.bats:560-644]`
+`[src: file: scripts/dev-backend-supervisor.sh:62-73]`
+`[src: file: tests/bats/ui.bats:616-700]`
+
+Once its traps are set, the supervisor uses no `$(...)` or `<(...)`: bash 5.2
+can run a pending trap while it parses one, fail to parse the trap and drop the
+signal. Command output goes through files, and the build guard and Cargo run in
+the background behind `wait`, which a trap interrupts at once. A static check
+and a TERM-during-build test guard both.
+`[src: file: scripts/dev-backend-supervisor.sh:30-33]`
+`[src: file: scripts/dev-backend-supervisor.sh:90-103]`
+`[src: file: tests/bats/ui.bats:704-808]`
+
+### Doc citations in CI
+
+The citation check (`cargo test docs_citations`) is scoped on a pull request:
+CI lists the paths the pull request changes and the check blocks only on the
+docs among them; a pull request that changes no doc gets the result as a counted
+warning. A pull request that changes `VERSION`, a push and a manual run stay
+strict over every doc [src: file: backend/src/core/docs_citations.rs:31-33#CHANGED_ENV].
+`make docs-reanchor` repairs moved citations before a release.
+
+A merge no longer bounces on them (KT-1321). When Kronn merges the target into
+a task branch (the integration candidate, or the merge a worker finishes with
+`task_exec_commit`), it stops before the merge commit and settles the docs
+first, for any project that uses `[src: file: …]` citations. It touches only
+the citation corpus the gate reads (`docs/` and `backend/docs/`, `docs/releases`
+aside), never `CHANGELOG.md`, a README, templates, prompts or fixtures:
+
+- a conflict whose two sides differ only by the line numbers of file citations
+  is resolved to the target's text; any other conflict still bounces;
+- every citation to a file the merge changed that the merged tree leaves broken
+  is re-anchored by mapping its lines from the side it was written against (the
+  branch, the target or the merge base) to the merged file, the `#symbol` having
+  to lie in the mapped range. When a hunk changed the cited lines themselves,
+  the occurrence of the symbol nearest the mapped position wins, under the same
+  check, if it lies within `NEAREST_OCCURRENCE_LIMIT` (20) lines of it and no
+  other is as near. Past that the citation is not guessed and the merge
+  bounces on the doc (a worker's merge is refused, naming the citations). A
+  citation to a file the merge did not change, or that held against no side, is
+  left alone.
+
+Re-anchoring reads the merged index, never the working tree, and writes only
+docs the merge brought into question. When a doc it must rewrite, or a file
+that doc cites, carries unstaged changes, it writes nothing and refuses
+(integration: the candidate bounces; worker: `task_exec_commit` refuses and
+leaves the merge as it was) rather than sweep unnamed work in progress into the
+commit. A staged path that is neither the merge's nor named in `files` is
+refused before any doc is touched.
+
+Both land in the merge commit, which carries the sign-off of the configured git
+identity and a line counting what was settled. The same step runs inside the
+worker's `task_exec_commit` merge, so a worker needs no `make docs-reanchor` in
+its sandbox. The make target also works there: during an unfinished merge it
+maps from both sides of the merge and needs no base, and with no resolvable
+target-branch merge-base it re-points unique-symbol citations instead of exiting.
 
 ## Backend CI timing SLO
 
@@ -144,7 +197,8 @@ restore from the exact key or a same-OS fallback prefix; only `push` runs on
 directories and writes a versioned marker (`.kronn-backend-cache-v3`) when a
 complete bounded cache exists. Profraw files, the nextest store and other
 transient trees are never archived.
-[src: file: .github/workflows/ci-test.yml:102-261]
+[src: file: .github/workflows/ci-test.yml:102-116#cache-backend-hot] [src: file: .github/workflows/ci-test.yml:243-276#mark-backend-cache]
+[src: file: .github/workflows/ci-test.yml:208-227#archive] [src: file: .github/workflows/ci-test.yml:278-329#test-backend-shard] [src: file: .github/workflows/ci-test.yml:359-437#test-backend] [src: file: scripts/ci/backend_ci_slo.mjs:46-62#collapseBackendJobs]
 
 The clippy, e2e dev-profile, release and portability caches follow the same
 restore-on-pull-request, save-on-main model: Actions scopes a cache created by
@@ -163,8 +217,8 @@ aggregates accept those skips only for a push. A save runs only on
 `success()`: a half-built tree saved under the exact key would be restored
 as a hit, and never replaced, until the next `Cargo.lock` change. The
 backend save keeps its own verified `ready` marker instead.
-[src: file: .github/workflows/ci-test.yml:441-474] [src: file: .github/workflows/ci-test.yml:742-769]
-[src: file: .github/workflows/ci-build.yml:194-235] [src: file: .github/workflows/ci-build.yml:251-276]
+[src: file: .github/workflows/ci-test.yml:211-221#archive] [src: file: .github/workflows/ci-test.yml:458-491#cache-clippy] [src: file: .github/workflows/ci-test.yml:759-786#cache-e2e-dev]
+[src: file: .github/workflows/ci-build.yml:194-235#cache-portability] [src: file: .github/workflows/ci-build.yml:251-276#cache-release]
 
 The backend performance observer publishes the duration for every eligible run
 and reports a warning rather than failing a green functional run when a hot
@@ -180,9 +234,10 @@ artifacts, and are reported only for their current run. Historical hot
 statistics use only successful same-branch pull-request runs whose job records
 a verified restored compiled cache. The v3 key cannot restore the former
 debug layout, so the first run is an explicit warmup.
-[src: file: .cargo/config.toml:1-6] [src: file: scripts/ci/backend_ci_slo.mjs:1-176]
+[src: file: .cargo/config.toml:1-6] [src: file: scripts/ci/backend_ci_slo.mjs:166-191#main] [src: file: scripts/ci/backend_ci_slo.mjs:100-104#effectiveMeasurementMode] [src: file: scripts/ci/backend_ci_slo.mjs:83-94#comparableSuccessfulHotRuns]
+[src: file: .github/workflows/ci-test.yml:131-160#verify-backend-cache] [src: file: .github/workflows/ci-test.yml:195-206#cold] [src: file: .github/workflows/ci-test.yml:1006-1026#backend-ci-performance]
 The observer's Node unit test runs in the blocking `test-python` gate.
-[src: file: .github/workflows/ci-test.yml:576-597]
+[src: file: .github/workflows/ci-test.yml:608-615#SLO]
 
 Each shard fails its artifact step when nextest does not produce the expected
 JUnit report, then uploads it as `backend-junit-N` (N = 1 to 3). nextest writes its
@@ -207,7 +262,7 @@ for seconds, classname, name in sorted(cases, reverse=True)[:10]:
 PY
 ```
 
-[src: file: .github/workflows/ci-test.yml:278-340]
+[src: file: .github/workflows/ci-test.yml:346-357#junit]
 
 Run `CI Tests` manually with `cache_mode=hot` for a warmed compiled-artifact
 measurement or `cache_mode=cold` for a current-run-only cold measurement.
@@ -250,23 +305,27 @@ any blocking functional or quality gate.
 [src: user: 2026-08-31: escalation reports GitHub Actions runs 33378197164 and 33378199511 with cargo test 11m58, pre-test overhead 4m13, post-test staging 1m17]
 [src: commit: 87d41331]
 
-Ordinary jobs in the CI workflow have a 30-minute technical timeout.
-`test-backend` has 40 minutes to let a compiled-cache miss finish compiling and,
+Ordinary jobs in the CI workflow have a 30-minute technical timeout; the
+`test-backend` merge job has 20.
+`test-backend-build` has 40 minutes to let a compiled-cache miss finish compiling and,
 on `main`, save its cache; verified hot runs stay subject to the independent
 10-minute SLO.
-Coverage and E2E have 45 minutes for their instrumented and release builds.
-The macOS portability job also has 45 minutes: its lib-test rebuild took
+The E2E job (a dev-profile backend build) and the release build have 45 minutes.
+The macOS portability job has 75 minutes: its lib-test rebuild took
 29m13s in [run 36912793272](https://github.com/DocRoms/Kronn/actions/runs/36912793272/job/110539336655),
 then the first suite passed as the former 30-minute limit cancelled the job,
-leaving the maintenance and durable-cleanup suites unexecuted. The additional
-budget covers all three suites and cache saving; Windows retains 30 minutes.
+leaving the maintenance and durable-cleanup suites unexecuted; a later cold
+macOS build then outlived the 45 minutes set after that (runs 38620268259 and
+38595597764). The budget covers every suite and the cache saving; Windows
+retains 30 minutes.
 The required aggregate always runs,
 includes `require-ci-label`, and fails when the label is removed or any other
 gate is skipped or fails. A timeout is a functional failure; the SLO observer
 does not retry, sleep, or mask it. An SLO breach is a warning, while missing,
 duplicate, incomplete, or contradictory measurement evidence fails the
 observer instead of publishing a misleading timing.
-[src: file: .github/workflows/ci-test.yml:8-14] [src: file: .github/workflows/ci-test.yml:951-987]
+[src: file: .github/workflows/ci-test.yml:85#timeout-minutes] [src: file: .github/workflows/ci-test.yml:363#timeout-minutes] [src: file: .github/workflows/ci-test.yml:717#timeout-minutes] [src: file: .github/workflows/ci-build.yml:180-182#timeout-minutes] [src: file: .github/workflows/ci-build.yml:259#timeout-minutes]
+[src: file: .github/workflows/ci-test.yml:968-1004#ci-quality-gates] [src: file: scripts/ci/backend_ci_slo.mjs:111-135#requireCurrentBackendJob]
 
 ## Test placement
 
@@ -290,7 +349,7 @@ Agent access and tier controls are mounted only when their settings card is
 expanded. Browser specs should call `SettingsPage.openAgentConfiguration()`
 before inspecting those controls; it waits for the mounted body and leaves an
 already-open card open without changing any setting.
-[src: file: frontend/e2e/pages/SettingsPage.ts:16]
+[src: file: frontend/e2e/pages/SettingsPage.ts:23-33#openAgentConfiguration]
 
 Media browser specs use `openMediaLauncher()` to open the current panel rail
 and explicitly select the test's local provider slot. Restoring an already-open
@@ -317,8 +376,9 @@ inline `style={{ }}` objects alike.
 `dark`, `gotham` and `matrix`, re-measures the text axe leaves undecided behind
 gradients or pseudo-elements, and walks keyboard focus. It answers every non-GET
 with 503 and stubs the WebSocket, so it may run read-only against a live backend.
-`[src: file: frontend/src/styles/themeAudit.ts:1-60]`
-`[src: file: frontend/e2e/specs/a11y-dark-themes.spec.ts:1-60]`
+`[src: file: frontend/src/styles/themeAudit.ts:40-45#textFloor]` `[src: file: frontend/src/styles/themeAudit.ts:176-191#measureTextContrast]` `[src: file: frontend/src/styles/themeAudit.ts:201-214#undefinedTokenUsages]`
+`[src: file: frontend/src/styles/themeAudit.ts:219-235#forcedTextOnTokenBackground]` `[src: file: frontend/src/styles/themeAudit.ts:237-263#forcedTextInInlineStyles]` `[src: file: frontend/src/styles/themeAudit.ts:280-297#undeclaredCustomProperties]`
+`[src: file: frontend/e2e/specs/a11y-dark-themes.spec.ts:40-71#readOnly]` `[src: file: frontend/e2e/specs/a11y-dark-themes.spec.ts:73-76#REMEASURED]` `[src: file: frontend/e2e/specs/a11y-dark-themes.spec.ts:279-317#proposedAction]` `[src: file: frontend/e2e/specs/a11y-dark-themes.spec.ts:319-335#focusStops]`
 
 When a disposable backend runs in a container, run browser specs with local
 provider stubs in the same network namespace. Their loopback callbacks then

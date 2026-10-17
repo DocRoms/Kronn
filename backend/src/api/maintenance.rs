@@ -228,6 +228,174 @@ pub async fn reclaim_build_artifacts(
     Json(ApiResponse::ok(results))
 }
 
+/// One `target/wt-*` directory in the lane-target dry run (KT-1256).
+#[derive(Debug, Serialize)]
+pub struct LaneTargetEntry {
+    pub target_path: String,
+    /// `reclaimable`, `claimed`, `kept` or `unmarked`.
+    pub state: String,
+    /// Why a lane is claimed or kept, or what an unmarked directory is.
+    pub reason: Option<String>,
+    /// The execution Kronn provisioned the lane for, when it is marked.
+    pub execution_id: Option<String>,
+    /// Bytes measured (reclaimable lanes only), floored at the scan budget.
+    pub bytes: Option<u64>,
+    pub bytes_are_partial: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LaneTargetPlan {
+    pub project_id: String,
+    pub entries: Vec<LaneTargetEntry>,
+    pub available_gib: u64,
+}
+
+/// `GET /api/maintenance/lane-targets?project_id=…` — the dry run.
+///
+/// Lists every `target/wt-*` of the project, including the ones Kronn will
+/// never touch (no ownership marker) and the ones it keeps, each with why.
+/// Read-only: nothing is deleted and nothing is measured but reclaimable lanes.
+pub async fn list_lane_targets(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<ReclaimQuery>,
+) -> Json<ApiResponse<LaneTargetPlan>> {
+    let repo_path = match project_repo_path(&state, &query.project_id).await {
+        Ok(path) => path,
+        Err(error) => return Json(ApiResponse::err(error)),
+    };
+    let sweep = match crate::api::orchestration::sweep_project_lane_targets(
+        &state.db,
+        &query.project_id,
+        &repo_path,
+        worktree::LaneSweepScope::ReportOnly,
+    )
+    .await
+    {
+        Ok(sweep) => sweep,
+        Err(error) => return Json(ApiResponse::err(error)),
+    };
+
+    let mut entries = Vec::new();
+    for (owner, report) in sweep.would_remove {
+        entries.push(LaneTargetEntry {
+            target_path: report.target_path.to_string_lossy().to_string(),
+            state: "reclaimable".to_string(),
+            reason: None,
+            execution_id: Some(owner.execution_id),
+            bytes: Some(report.bytes_reclaimed),
+            bytes_are_partial: report.bytes_are_partial,
+        });
+    }
+    for (path, reason) in sweep.claimed {
+        entries.push(LaneTargetEntry {
+            target_path: path.to_string_lossy().to_string(),
+            state: "claimed".to_string(),
+            reason: Some(reason),
+            execution_id: None,
+            bytes: None,
+            bytes_are_partial: false,
+        });
+    }
+    for (path, reason) in sweep.kept {
+        entries.push(LaneTargetEntry {
+            target_path: path.to_string_lossy().to_string(),
+            state: "kept".to_string(),
+            reason: Some(reason),
+            execution_id: None,
+            bytes: None,
+            bytes_are_partial: false,
+        });
+    }
+    for path in sweep.unmarked {
+        entries.push(LaneTargetEntry {
+            target_path: path.to_string_lossy().to_string(),
+            state: "unmarked".to_string(),
+            reason: Some(format!(
+                "no {} marker: Kronn did not create it and never removes it",
+                worktree::LANE_OWNER_MARKER
+            )),
+            execution_id: None,
+            bytes: None,
+            bytes_are_partial: false,
+        });
+    }
+    entries.sort_by(|a, b| a.target_path.cmp(&b.target_path));
+
+    let available_gib = fs2::available_space(&repo_path).unwrap_or(0) / (1024 * 1024 * 1024);
+    Json(ApiResponse::ok(LaneTargetPlan {
+        project_id: query.project_id,
+        entries,
+        available_gib,
+    }))
+}
+
+/// `POST /api/maintenance/lane-targets/reclaim` — act on named lane targets only.
+///
+/// Each named path is re-judged now: marked by Kronn, its execution finished,
+/// its worktree gone or clean. Anything else is refused with its reason.
+pub async fn reclaim_lane_targets(
+    State(state): State<AppState>,
+    Json(request): Json<ReclaimRequest>,
+) -> Json<ApiResponse<Vec<ReclaimResult>>> {
+    let repo_path = match project_repo_path(&state, &request.project_id).await {
+        Ok(path) => path,
+        Err(error) => return Json(ApiResponse::err(error)),
+    };
+    let targets = request
+        .target_paths
+        .iter()
+        .map(std::path::PathBuf::from)
+        .collect();
+    let outcomes = match crate::api::orchestration::reclaim_named_lane_targets(
+        &state.db,
+        &request.project_id,
+        &repo_path,
+        targets,
+    )
+    .await
+    {
+        Ok(outcomes) => outcomes,
+        Err(error) => return Json(ApiResponse::err(error)),
+    };
+    let results = outcomes
+        .into_iter()
+        .map(|(path, outcome)| {
+            let target_path = path.to_string_lossy().to_string();
+            match outcome {
+                worktree::LaneTargetOutcome::Removed(_, report) => ReclaimResult {
+                    target_path,
+                    reclaimed: true,
+                    bytes: report.bytes_reclaimed,
+                    refused: None,
+                },
+                worktree::LaneTargetOutcome::WouldRemove(..) => ReclaimResult {
+                    target_path,
+                    reclaimed: false,
+                    bytes: 0,
+                    refused: Some("not removed: outside the reclaim scope".to_string()),
+                },
+                worktree::LaneTargetOutcome::Claimed(_, reason)
+                | worktree::LaneTargetOutcome::Kept(_, reason) => ReclaimResult {
+                    target_path,
+                    reclaimed: false,
+                    bytes: 0,
+                    refused: Some(reason),
+                },
+                worktree::LaneTargetOutcome::Unmarked => ReclaimResult {
+                    target_path,
+                    reclaimed: false,
+                    bytes: 0,
+                    refused: Some(format!(
+                        "no {} marker: Kronn did not create this directory",
+                        worktree::LANE_OWNER_MARKER
+                    )),
+                },
+            }
+        })
+        .collect();
+    Json(ApiResponse::ok(results))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

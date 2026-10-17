@@ -31,6 +31,8 @@ const BACKEND_PREFIXES = [
   // saw a generic "Une erreur est survenue. Réessayez." Keep these
   // verbatim so debugging is possible from the toast alone.
   'Server error (HTTP',
+  // KT-263 — AI doc folder refusals name the path that broke containment.
+  'AI doc folder',
 ];
 
 /** Extract a user-friendly error message from any thrown value. */

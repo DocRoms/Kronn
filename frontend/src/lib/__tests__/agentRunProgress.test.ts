@@ -4,6 +4,7 @@ import {
   applyRunSnapshot,
   idleRemainingMs,
   pruneStoppedRuns,
+  runById,
   runElapsedMs,
   runForReply,
   STOPPED_RUN_TTL_MS,
@@ -39,6 +40,40 @@ const frame = (
 });
 
 const reply = { id: 'job-1', agent: 'OpenCode' as const, triggerMessageId: 'u1' };
+
+describe('runById (KT-1252)', () => {
+  const stepRun = (overrides: Parameters<typeof frame>[0] = {}) => frame({
+    dispatch_id: null,
+    trigger_message_id: null,
+    agent_type: 'ClaudeCode',
+    run_id: 'step-run',
+    ...overrides,
+  });
+
+  it('finds a workflow step run that no reply selector can name', () => {
+    const runs = applyRunFrame({}, stepRun(), 1_000);
+    expect(runById(runs, 'd1', 'step-run')?.agent).toBe('ClaudeCode');
+    expect(runForReply(runs, 'd1', { id: 'x', agent: 'ClaudeCode', triggerMessageId: 'u1' }, {
+      claimed: new Set(), durable: new Set(),
+    })).toBeNull();
+  });
+
+  it('answers per room and per run, and never a retired run', () => {
+    const runs = applyRunFrame({}, stepRun(), 1_000);
+    expect(runById(runs, 'd2', 'step-run')).toBeNull();
+    expect(runById(runs, 'd1', 'other')).toBeNull();
+    const retired = pruneStoppedRuns(
+      applyRunFrame(runs, stepRun({ seq: 2, progress: { stopped: 'finished' } }), 2_000),
+      2_000 + STOPPED_RUN_TTL_MS + 1,
+    );
+    expect(runById(retired, 'd1', 'step-run')).toBeNull();
+  });
+
+  it('keeps the stop of a run visible until it is retired', () => {
+    const runs = applyRunFrame(applyRunFrame({}, stepRun(), 1_000), stepRun({ seq: 2, progress: { stopped: 'failed' } }), 2_000);
+    expect(runById(runs, 'd1', 'step-run')?.progress.stopped).toBe('failed');
+  });
+});
 
 describe('applyRunFrame', () => {
   it('ignores an older frame and anything after the stop', () => {

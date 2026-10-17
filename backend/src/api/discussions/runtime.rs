@@ -490,6 +490,11 @@ pub(crate) async fn stream_claimed_dispatch_job(
         }
     }
 
+    if hold_validation_during_audit(&state, &job).await {
+        handoff_guard.disarm();
+        return None;
+    }
+
     let power_lease = crate::core::power_guard::acquire();
     let target_tier = {
         let trigger_message_id = job.trigger_message_id.clone();
@@ -543,6 +548,9 @@ pub(crate) async fn stream_claimed_dispatch_job(
                 });
         // KT-1111 — this dispatch's reply is written: its turn values go.
         state.db.assistant_guard().end_turn(&job.id);
+        // KT-1266 — whatever a task worker started (a backend, a Vite) ends
+        // with its dispatch, however the dispatch ended.
+        reap_task_worker_processes(&state, &job.id).await;
         let status_id = job.id.clone();
         let cancelled = state
             .db
@@ -605,6 +613,24 @@ pub(crate) async fn stream_claimed_dispatch_job(
     });
     handoff_guard.disarm();
     Some(stream)
+}
+
+/// Stop the processes a task worker's dispatch left behind (KT-1266). Only a
+/// dispatch that is a worker's launch has any; an ordinary turn costs one read.
+pub(crate) async fn reap_task_worker_processes(state: &AppState, dispatch_job_id: &str) {
+    let lookup = dispatch_job_id.to_string();
+    let is_worker = state
+        .db
+        .with_read_conn(move |conn| {
+            crate::db::orchestration::get_execution_for_dispatch(conn, &lookup)
+        })
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+    if is_worker {
+        crate::core::dispatch_reaper::reap_dispatch_async(dispatch_job_id).await;
+    }
 }
 
 fn dispatch_target_tier(
@@ -886,6 +912,7 @@ async fn finish_dispatch_turn(
             recovered_partial: false,
             session_tokens_at_message: None,
             author_cli_ordinal: None,
+            session_continuity: None,
             model: None,
             lint_report: None,
             id: uuid::Uuid::new_v4().to_string(),
@@ -1149,6 +1176,68 @@ async fn fail_dispatch_job_with_outcome_kind(
         }
     }
     state.agent_dispatch_notify.notify_waiters();
+}
+
+/// KT-1134 — seconds an audit validation agent waits, queued, while an audit of
+/// its project runs.
+const VALIDATION_HOLD_RETRY_DELAY_SECONDS: i64 = 5;
+
+/// KT-1134 — an agent answering in a validation discussion linked to an audit
+/// run writes `docs/`: it never starts while an audit of the same project
+/// holds the documentation lease. The claimed job goes back to the queue, its attempts intact.
+async fn hold_validation_during_audit(
+    state: &AppState,
+    job: &crate::db::agent_dispatch::AgentDispatchJob,
+) -> bool {
+    let discussion_id = job.discussion_id.clone();
+    let project = state
+        .db
+        .with_read_conn(move |conn| {
+            crate::db::audit_runs::project_of_validation_discussion(conn, &discussion_id)
+        })
+        .await
+        .ok()
+        .flatten();
+    let Some(project_id) = project else {
+        return false;
+    };
+    let audit_running = state
+        .audit_tracker
+        .lock()
+        .map(|tracker| {
+            tracker.leased.contains(&project_id) || tracker.progress.contains_key(&project_id)
+        })
+        .unwrap_or(true);
+    if !audit_running {
+        return false;
+    }
+    let job_id = job.id.clone();
+    let held = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::agent_dispatch::defer_runtime_unavailable(
+                conn,
+                &job_id,
+                VALIDATION_HOLD_RETRY_DELAY_SECONDS,
+                "audit_running: an audit of this project is writing docs/",
+            )
+        })
+        .await;
+    match held {
+        Ok(true) => {
+            tracing::info!(
+                "Held validation dispatch {} for {}s: an audit of project {project_id} runs",
+                job.id,
+                VALIDATION_HOLD_RETRY_DELAY_SECONDS
+            );
+            true
+        }
+        Ok(false) => true,
+        Err(error) => {
+            tracing::error!("Unable to hold validation dispatch {}: {error}", job.id);
+            false
+        }
+    }
 }
 
 async fn defer_runtime_unavailable(

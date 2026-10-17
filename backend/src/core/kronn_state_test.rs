@@ -179,6 +179,22 @@ fn revoke_validated_neutralizes_a_legacy_marker_project() {
 }
 
 #[test]
+fn a_validation_with_an_unknown_opener_does_not_keep_the_previous_opener() {
+    let tmp = fresh_tmp("opener-replaced");
+    mark_validated_by(&tmp, "Validator-1", Some("Opener-1")).unwrap();
+    let first = read(&tmp).unwrap();
+    assert_eq!(first.validation_started_by.as_deref(), Some("Opener-1"));
+    assert_eq!(first.validated_by.as_deref(), Some("Validator-1"));
+    // The next audit revokes the sign-off; its validation has no recorded opener.
+    revoke_validated(&tmp).unwrap();
+    mark_validated_by(&tmp, "Validator-2", None).unwrap();
+    let second = read(&tmp).unwrap();
+    assert_eq!(second.validated_by.as_deref(), Some("Validator-2"));
+    assert_eq!(second.validation_started_by, None);
+    cleanup(&tmp);
+}
+
+#[test]
 fn mark_validated_preserves_original_date() {
     let tmp = fresh_tmp("validated-preserve");
     let mut state = KronnState {
@@ -468,5 +484,39 @@ fn restore_refuses_a_commit_without_a_valid_state_file() {
     let err = restore_from_git_history(&tmp, &found.commit).unwrap_err();
     assert!(err.contains("not a valid state file"), "{err}");
     assert!(!tmp.join("docs/.kronn.json").exists());
+    cleanup(&tmp);
+}
+
+#[test]
+fn a_renamed_file_is_recorded_under_its_new_path_and_the_old_entry_goes() {
+    let tmp = fresh_tmp("renamed");
+    std::fs::write(tmp.join("docs/old.md"), "# Template\n").unwrap();
+    record_kronn_written(&tmp, &["old.md".to_string()]).unwrap();
+    assert!(read(&tmp).unwrap().kronn_written.contains_key("old.md"));
+
+    std::fs::rename(tmp.join("docs/old.md"), tmp.join("docs/new.md")).unwrap();
+    record_kronn_moves(&tmp, &[("old.md".to_string(), "new.md".to_string())], &[]).unwrap();
+    let written = read(&tmp).unwrap().kronn_written;
+    assert_eq!(
+        written.keys().cloned().collect::<Vec<_>>(),
+        vec!["new.md".to_string()]
+    );
+    assert_eq!(
+        written["new.md"],
+        crate::core::docs_merge::sha256_hex(b"# Template\n")
+    );
+    cleanup(&tmp);
+}
+
+#[test]
+fn recording_written_files_aborts_on_a_corrupt_state_file() {
+    let tmp = fresh_tmp("written-corrupt");
+    std::fs::write(tmp.join("docs/a.md"), "# A\n").unwrap();
+    std::fs::write(tmp.join("docs/.kronn.json"), "{ torn").unwrap();
+    assert!(record_kronn_written(&tmp, &["a.md".to_string()]).is_err());
+    assert_eq!(
+        std::fs::read_to_string(tmp.join("docs/.kronn.json")).unwrap(),
+        "{ torn"
+    );
     cleanup(&tmp);
 }

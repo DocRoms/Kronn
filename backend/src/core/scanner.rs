@@ -463,63 +463,107 @@ pub(crate) fn host_home_aliases() -> Vec<String> {
     aliases
 }
 
-/// Detect or default the project's documentation directory.
+/// The project's documentation directory (KT-263).
 ///
-/// Preference order : `docs/` (post-0.7.1 convention, modern plural) →
-/// `doc/` (legacy singular, some Ruby/Rails projects) → `ai/` (Kronn 0.7.0
-/// and earlier). Discriminated by the entry-point file:
-///   - `docs/AGENTS.md` (post-pivot)
-///   - `doc/AGENTS.md` (post-pivot, singular projects)
-///   - `ai/index.md` (legacy)
-///
-/// When NONE exists, returns `docs/` so fresh bootstraps install the new
-/// convention. Caller is responsible for creating the directory if it
-/// doesn't exist (some flows only need to know "where to write" not "is
-/// it real yet").
-///
-/// Path-agnostic detect-and-adapt strategy : every site that hardcoded
-/// `ai/` should call this instead. Existing projects keep working,
-/// migration becomes a `git mv` away, and new projects ship the new
-/// convention without ceremony.
+/// Resolved by `core::docs_location`: the project's override, then the global
+/// default from the settings, then the historical order — `docs/AGENTS.md`,
+/// `doc/AGENTS.md`, `ai/index.md`, then whichever of those folders exists, and
+/// `docs/` for a fresh project. Callers create the folder when they need it.
 pub fn detect_docs_dir(project_path: &Path) -> PathBuf {
-    // Prefer the dir that has the canonical entry file — most reliable
-    // signal that an audit was actually completed there.
-    if project_path.join("docs/AGENTS.md").is_file() {
-        return project_path.join("docs");
-    }
-    if project_path.join("doc/AGENTS.md").is_file() {
-        return project_path.join("doc");
-    }
-    if project_path.join("ai/index.md").is_file() {
-        return project_path.join("ai");
-    }
-    // No entry file — fall back to whichever folder physically exists
-    // (e.g. half-finished bootstrap, audit started but never sealed).
-    // Without this fallback, `ensure_redirectors`-style helpers that
-    // check `dir.is_dir()` no-op on legacy projects whose template was
-    // copied but where `ai/index.md` was never written.
-    if project_path.join("docs").is_dir() {
-        return project_path.join("docs");
-    }
-    if project_path.join("doc").is_dir() {
-        return project_path.join("doc");
-    }
-    if project_path.join("ai").is_dir() {
-        return project_path.join("ai");
-    }
-    // Default for fresh projects.
-    project_path.join("docs")
+    crate::core::docs_location::docs_dir(project_path)
 }
 
 /// File path of the docs directory's entry point. `AGENTS.md` post-pivot,
 /// legacy `index.md` for projects that haven't migrated yet.
 pub fn detect_docs_entry(project_path: &Path) -> PathBuf {
     let dir = detect_docs_dir(project_path);
-    if dir.file_name().and_then(|n| n.to_str()) == Some("ai") {
+    // An audit run in an `ai/` folder writes `AGENTS.md` like any other root.
+    if dir.file_name().and_then(|n| n.to_str()) == Some("ai") && !dir.join("AGENTS.md").is_file() {
         dir.join("index.md")
     } else {
         dir.join("AGENTS.md")
     }
+}
+
+const BOOTSTRAP_START: &str = "KRONN:BOOTSTRAP:START";
+const BOOTSTRAP_END: &str = "KRONN:BOOTSTRAP:END";
+
+/// A marker comment on its own line, outside fenced code.
+fn is_bootstrap_marker(line: &str, marker: &str, other: &str) -> bool {
+    let line = line.trim();
+    line.starts_with("<!--")
+        && line.ends_with("-->")
+        && line.contains(marker)
+        && !line.contains(other)
+}
+
+/// `content` without the first-run bootstrap block older Kronn versions wrote
+/// at the top of the entry file ("FIRST-RUN TASK — … You must analyze the
+/// repository and fill in all files"), or `None` when there is no complete
+/// START…END block. An unmatched START is left alone: cutting to the end of
+/// the file would delete what a person wrote below it.
+pub fn without_legacy_bootstrap_block(content: &str) -> Option<String> {
+    // Segments keep their own terminator (`\n` or `\r\n`), so everything outside
+    // the block is written back byte for byte.
+    let segments: Vec<&str> = content.split_inclusive('\n').collect();
+    let mut in_fence = false;
+    let mut start = None;
+    let mut end = None;
+    for (index, segment) in segments.iter().enumerate() {
+        let line = segment.trim_end_matches(['\n', '\r']);
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        if start.is_none() {
+            if is_bootstrap_marker(line, BOOTSTRAP_START, BOOTSTRAP_END) {
+                start = Some(index);
+            }
+        } else if is_bootstrap_marker(line, BOOTSTRAP_END, BOOTSTRAP_START) {
+            end = Some(index);
+            break;
+        }
+    }
+    let (start, end) = (start?, end?);
+    // A block at the very top leaves its padding behind: drop the blank lines
+    // around it, and only those. A block further down leaves its neighbours as is.
+    let at_top = segments[..start].iter().all(|s| s.trim().is_empty());
+    let mut resume = end + 1;
+    if at_top {
+        while resume < segments.len() && segments[resume].trim().is_empty() {
+            resume += 1;
+        }
+    }
+    let head = if at_top { &[][..] } else { &segments[..start] };
+    Some(head.iter().chain(&segments[resume..]).copied().collect())
+}
+
+/// Removes the legacy bootstrap block from the project's docs entry file, so
+/// no agent that reads it is handed a "fill in all files" task, audited or not.
+/// `Ok(true)` when the file was rewritten. A symlinked path is refused. The
+/// rewrite is atomic (temp sibling + rename), keeps the file's permissions and
+/// is abandoned if the file changed since it was read.
+pub fn retire_legacy_bootstrap_block(project_path: &Path) -> Result<bool, String> {
+    let entry = detect_docs_entry(project_path);
+    let Ok(observed) = std::fs::read(&entry) else {
+        return Ok(false);
+    };
+    let Ok(content) = std::str::from_utf8(&observed) else {
+        return Ok(false);
+    };
+    let Some(cleaned) = without_legacy_bootstrap_block(content) else {
+        return Ok(false);
+    };
+    crate::core::fs_guard::assert_contained_no_symlink(project_path, &entry)?;
+    crate::core::mcp_scanner::atomic_write_if_unchanged_preserving_permissions(
+        &entry, &cleaned, &observed,
+    )
+    .map_err(|e| format!("Cannot rewrite {}: {e}", entry.display()))?;
+    Ok(true)
 }
 
 /// True when the project still has the legacy `ai/index.md` layout AND
@@ -531,13 +575,11 @@ pub fn detect_docs_entry(project_path: &Path) -> PathBuf {
 /// treat a symlinked `ai/` (created post-migration for retro-compat) as
 /// "needs migration" because the docs/AGENTS.md check short-circuits.
 pub fn needs_docs_migration(project_path: &Path) -> bool {
-    if project_path.join("docs/AGENTS.md").is_file() {
-        return false;
-    }
-    if project_path.join("doc/AGENTS.md").is_file() {
-        return false;
-    }
-    project_path.join("ai/index.md").is_file()
+    // A configured folder is the operator's choice: never offer to move it.
+    let resolved = crate::core::docs_location::resolution(project_path);
+    resolved.source == crate::core::docs_location::DocsDirSource::Detected
+        && resolved.dir == project_path.join("ai")
+        && project_path.join("ai/index.md").is_file()
 }
 
 /// True when `content` still has an unfilled template placeholder like
@@ -572,9 +614,8 @@ pub fn detect_audit_status_with_runs(
     // legacy (`ai/index.md`) conventions during the migration window.
     // A directory in EITHER shape with NO entry file = TemplateInstalled
     // (partial state, audit was started but never finished).
-    let any_docs_dir_exists =
-        path.join("docs").is_dir() || path.join("doc").is_dir() || path.join("ai").is_dir();
-    if !any_docs_dir_exists {
+    // Unconfigured, the resolved folder exists iff one of docs/doc/ai does.
+    if !detect_docs_dir(&path).is_dir() {
         return AiAuditStatus::NoTemplate;
     }
     let index_file = detect_docs_entry(&path);
@@ -801,74 +842,21 @@ pub fn count_ai_todos(project_path: &str) -> u32 {
     count
 }
 
-/// Count tech-debt entries in a project's documentation, deduplicated
-/// by ID. Sources:
-///   - `.md` file names directly under `docs/tech-debt/` (id = stem,
-///     e.g. `TD-20260314-openapi-coverage`).
-///   - Table rows in `docs/inconsistencies-tech-debt.md` that start
-///     with `| TD-` (id = the first `TD-...` token in the row).
-///
-/// An entry counted from both sources counts once. This matches user
-/// expectation: the badge "<N> TD" should equal the unique tech-debt
-/// items the user can actually open, not 2×N when both the index row
-/// and the detail file exist (the common case for well-documented
-/// projects). Path-agnostic like `count_ai_todos`.
+/// Count the active tech debts of a project: the entries of
+/// `td_index::debt_entries` that are not settled (a rejected finding or an
+/// accepted trade-off is not debt). The tech-debt review lists the very same
+/// entries, so the card and the review cannot count different debts; the
+/// health score's severity tally applies the same sheet rule.
 pub fn count_tech_debt(project_path: &str) -> u32 {
     let path = resolve_host_path(project_path);
     let docs_dir = detect_docs_dir(&path);
     if !docs_dir.is_dir() {
         return 0;
     }
-
-    let mut ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    // Detail files under tech-debt/
-    let td_dir = docs_dir.join("tech-debt");
-    if td_dir.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(&td_dir) {
-            for entry in entries.flatten() {
-                let p = entry.path();
-                // Only count top-level .md files; a README/TEMPLATE.md
-                // in the same folder is excluded so it doesn't inflate
-                // the badge.
-                if p.is_file()
-                    && p.extension().is_some_and(|ext| ext == "md")
-                    && p.file_name()
-                        .and_then(|n| n.to_str())
-                        .is_some_and(|n| !matches!(n, "README.md" | "TEMPLATE.md" | "_template.md"))
-                {
-                    if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
-                        ids.insert(stem.to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    // Index file table rows
-    let index_path = docs_dir.join("inconsistencies-tech-debt.md");
-    if let Ok(content) = std::fs::read_to_string(&index_path) {
-        for line in content.lines() {
-            let trimmed = line.trim_start();
-            // Markdown table rows starting with `| TD-`. We extract the
-            // ID (everything up to the next space, pipe, or end) so a
-            // row that mirrors an existing detail file is deduped.
-            if let Some(rest) = trimmed.strip_prefix('|') {
-                let cell = rest.trim_start();
-                if cell.starts_with("TD-") {
-                    let id: String = cell
-                        .chars()
-                        .take_while(|c| !c.is_whitespace() && *c != '|')
-                        .collect();
-                    if !id.is_empty() {
-                        ids.insert(id);
-                    }
-                }
-            }
-        }
-    }
-
-    ids.len() as u32
+    crate::core::td_index::debt_entries(&docs_dir)
+        .iter()
+        .filter(|entry| entry.is_active())
+        .count() as u32
 }
 
 /// Expand ~ in paths
@@ -897,6 +885,16 @@ pub fn is_wsl_unc_path_str(path: &str) -> bool {
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_ai_folder_audited_in_place_is_entered_by_its_agents_md() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("ai")).unwrap();
+        assert_eq!(detect_docs_entry(root), root.join("ai/index.md"));
+        std::fs::write(root.join("ai/AGENTS.md"), "# Project\n").unwrap();
+        assert_eq!(detect_docs_entry(root), root.join("ai/AGENTS.md"));
+    }
     use serial_test::serial;
 
     // ─── shellexpand ────────────────────────────────────────────────────────
@@ -1196,6 +1194,81 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join("docs")).unwrap();
         std::fs::create_dir_all(tmp.path().join("ai")).unwrap();
         assert_eq!(detect_docs_dir(tmp.path()), tmp.path().join("docs"));
+    }
+
+    // ─── KT-263: configured AI doc folder ───────────────────────────────────
+
+    #[test]
+    fn a_project_keeping_its_doc_in_dot_ai_is_detected_and_audited() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join(".ai")).unwrap();
+        std::fs::create_dir_all(root.join("ai")).unwrap();
+        std::fs::write(root.join("ai/index.md"), "# legacy\n").unwrap();
+        std::fs::write(root.join(".ai/AGENTS.md"), "# Project\n\n<!-- TODO x -->\n").unwrap();
+        let path = root.to_string_lossy().into_owned();
+
+        // Unconfigured: the legacy layout wins and `.ai/` is invisible.
+        assert_eq!(detect_docs_dir(&root), root.join("ai"));
+        assert!(needs_docs_migration(&root));
+
+        crate::core::docs_location::set_project_override(&path, Some(".ai"));
+        let dir = detect_docs_dir(&root);
+        let entry = detect_docs_entry(&root);
+        let migration = needs_docs_migration(&root);
+        let todos = count_ai_todos(&path);
+        let before_audit = detect_audit_status(&path);
+        let recorded = crate::core::kronn_state::record_audit(&root, "full");
+        let after_audit = detect_audit_status(&path);
+        crate::core::docs_location::set_project_override(&path, None);
+
+        assert_eq!(dir, root.join(".ai"));
+        assert_eq!(entry, root.join(".ai/AGENTS.md"));
+        assert!(
+            !migration,
+            "a configured folder is never offered a migration"
+        );
+        assert_eq!(todos, 1);
+        assert_eq!(
+            before_audit,
+            crate::models::AiAuditStatus::TemplateInstalled
+        );
+        recorded.unwrap();
+        assert!(root.join(".ai/.kronn.json").is_file());
+        assert!(!root.join("ai/.kronn.json").exists());
+        assert_eq!(after_audit, crate::models::AiAuditStatus::Audited);
+    }
+
+    #[test]
+    fn a_configured_folder_that_is_missing_reads_as_no_template() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/AGENTS.md"), "# filled\n").unwrap();
+        let path = root.to_string_lossy().into_owned();
+        crate::core::docs_location::set_project_override(&path, Some("context"));
+        let status = detect_audit_status(&path);
+        crate::core::docs_location::set_project_override(&path, None);
+        assert_eq!(status, crate::models::AiAuditStatus::NoTemplate);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_override_reads_nothing_and_writes_nothing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(outside.path().join("AGENTS.md"), "# outside\n").unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.join(".ai")).unwrap();
+        let path = root.to_string_lossy().into_owned();
+        crate::core::docs_location::set_project_override(&path, Some(".ai"));
+        let status = detect_audit_status(&path);
+        let write = crate::core::kronn_state::record_audit(&root, "full");
+        crate::core::docs_location::set_project_override(&path, None);
+        assert_eq!(status, crate::models::AiAuditStatus::NoTemplate);
+        assert!(write.unwrap_err().contains("symlink"));
+        assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 1);
     }
 
     // ─── scan_kronn_markers (0.8.3 Feasibility-Gated Implementation) ─────────
