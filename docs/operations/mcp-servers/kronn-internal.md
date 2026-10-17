@@ -37,7 +37,7 @@ and is told to hand the blocker to its principal. The card is also named in the
 `disc_append` description, the `disc_join` next steps, the native discussion
 prompt and the project `docs/AGENTS.md` template. The Python test
 `test_decision_card_survives_the_2048_char_client_cut` pins the cut.
-`[src: file: backend/scripts/disc-introspection-mcp.py:9903-9910#HUMAN_DECISION_CARD_BULLET]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:9942-9949#HUMAN_DECISION_CARD_BULLET]`
 
 The stable `key` is unique within the room. Repeating it preserves one immutable
 card, not a second card or a silent change behind an already-open human form.
@@ -630,13 +630,13 @@ A running audit does not defer the reload: it runs detached on the
 backend and the bridge only subscribes to its SSE. Retry the refused mutation once with the same idempotency
 key. If preflight, handoff or reexec fails, the bridge stops automatic attempts and
 reports one precise manual reconnect/recovery action instead.
-`[src: file: backend/scripts/disc-introspection-mcp.py:10678-10687#_require_fresh_bridge]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:11504-11561#_bridge_stale_result]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:11288-11353#_schedule_bridge_reload]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:11356-11475#_perform_scheduled_bridge_reload]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10697-10706#_require_fresh_bridge]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:11523-11580#_bridge_stale_result]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:11307-11372#_schedule_bridge_reload]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:11375-11494#_perform_scheduled_bridge_reload]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:2876-2948#_restore_reload_handoff]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:11478-11501#_close_inherited_reload_artifact]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:12129-12142#list_changed]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:11497-11520#_close_inherited_reload_artifact]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:12152-12165#list_changed]`
 `[src: file: backend/scripts/test_disc_introspection_mcp.py:8514-8530#test_reload_is_not_deferred_by_a_detached_full_audit]`
 
 The replacement process restores the room and durable read cursor through the
@@ -645,8 +645,8 @@ identical contents is not stale. `task_exec_status` remains available for
 recovery; every orchestration mutation stays fail-closed until the fresh bridge
 is ready.
 `[src: file: backend/scripts/disc-introspection-mcp.py:4057-4143#_attempt_resume]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:10676-10687#_bridge_freshness]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:10692-10703#_GUARDED_ORCHESTRATION_TOOLS]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10695-10706#_bridge_freshness]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10711-10722#_GUARDED_ORCHESTRATION_TOOLS]`
 
 The first transition to this fingerprinted bridge cannot be self-protected by a
 process that loaded the preceding schema. After upgrading to 0.11.0, reconnect
@@ -792,7 +792,7 @@ discussion/task capability reaches that run immediately without rewriting
 shared config or leaking unrelated host variables.
 `[src: file: backend/src/agents/runner.rs:12740-12790#claude_task_worker_mcp_config]` `[src: file: backend/src/agents/runner.rs:2640-2668#KRONN_INTERNAL_CODEX_ENV_VARS]`
 `[src: file: backend/src/api/discussions/streaming.rs:148-233#cli_task_worker_context]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:5836-5868#_spawned_task_worker_context]` `[src: file: backend/scripts/disc-introspection-mcp.py:11970-11983#_spawned_task_worker_mode]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:5836-5868#_spawned_task_worker_context]` `[src: file: backend/scripts/disc-introspection-mcp.py:11993-12006#_spawned_task_worker_mode]`
 
 Native HTTP workers can finish the Git side of that contract without receiving
 a shell. Their catalogue includes `git_commit`, but execution is refused unless
@@ -844,11 +844,11 @@ The MCP `initialize` instructions expose this contract before any room tool is
 called, and `disc_join` repeats it in the room protocol. The full document and
 diagram examples remain on demand in the Kronn Docs skill so the permanent MCP
 catalogue does not pay for a long manual.
-`[src: file: backend/scripts/disc-introspection-mcp.py:11898-11909#first_contact]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:11933-11939#first_contact]`
 `[src: file: frontend/src/components/MermaidDiagram.tsx:111-119#validRoots]`
 `[src: file: backend/src/api/disc_prompts.rs:469-474#rich_output_notice]`
 `[src: file: backend/src/api/disc_invite.rs:583-713#join_next_steps]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:11762-11871#initialize]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:11781-11890#initialize]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:4415-4431#MAX_DISC_APPEND_ATTACHMENTS] [src: file: backend/scripts/disc-introspection-mcp.py:53#MAX_DISC_APPEND_ATTACHMENTS]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:4514-4580#_attach_files_to_appended_message]`
 `[src: file: frontend/src/components/MessageAttachments.tsx:114-299#AttachmentThumb]`
@@ -1165,7 +1165,7 @@ The Python catalogue distinguishes bounded work from idle listening, and one
 shared orientation supplies the join manual, wait manual and initialize text.
 This is a source instruction contract, not a guarantee that a running host has
 loaded or follows it. See [the diagnosis and qualification](../../gotchas/joined-cli-work-loop.md).
-[src: file: backend/scripts/disc-introspection-mcp.py:9937-9941#ROOM_WORK_PROTOCOL]
+[src: file: backend/scripts/disc-introspection-mcp.py:9937-9960#ROOM_WORK_PROTOCOL]
 [src: file: backend/scripts/disc-introspection-mcp.py:10536-10540#TOOL_MANUALS]
 
 The bridge auto-derives your `agent_type` from the MCP `clientInfo.name` handshake (Claude Code → ClaudeCode, Codex → Codex, OpenCode → OpenCode, …), then from the parent command line, so no env-var prep is needed. An unidentified CLI joins as `Unknown`: it can read and post, but no implicit turn is routed to it. Set `KRONN_AGENT_TYPE` to name it explicitly.
@@ -1197,7 +1197,7 @@ durable event id and retain the revised transcript id separately in
 `target_message_id`.
 [src: file: backend/scripts/disc-introspection-mcp.py:3977-3997#_ack_pending_read_cursors] [src: file: backend/scripts/disc-introspection-mcp.py:7089-7106#delivered_message_ids]
 [src: file: backend/scripts/test_disc_introspection_mcp.py:10147-10195#test_wait_without_explicit_cursor_uses_and_advances_durable_read_cursor]
-[src: file: backend/src/api/disc_invite.rs:1086-1148#WaitForPeerMessage] [src: file: backend/src/api/disc_invite.rs:1201-1209#withheld_by_routing]
+[src: file: backend/src/api/disc_invite.rs:1093-1155#WaitForPeerMessage] [src: file: backend/src/api/disc_invite.rs:1208-1216#withheld_by_routing]
 
 Human turns use typed identities. `discussion_agent` means the configured
 native agent, `agent` means a punctual native invocation, and `cli` means one

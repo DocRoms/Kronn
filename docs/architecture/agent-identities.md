@@ -73,7 +73,7 @@ Awareness batches are bounded (20/wake), explicitly flagged
 `awareness: true`, delivered with a durable scan/offer/ack contract and
 never end a quiet wait. The bridge itself does not return merely because one
 server poll was quiet.
-[src: file: backend/src/api/disc_invite.rs:1064-1068#AWARENESS_MAX_MESSAGES] [src: file: backend/src/api/disc_invite.rs:1128-1135#awareness]
+[src: file: backend/src/api/disc_invite.rs:1071-1075#AWARENESS_MAX_MESSAGES] [src: file: backend/src/api/disc_invite.rs:1135-1142#awareness]
 [src: file: backend/src/api/disc_invite.rs:1716-1735#load_awareness_batch] [src: file: backend/scripts/disc-introspection-mcp.py:7219-7230#_WAIT_MIN_QUIET_POLL_SECS]
 [src: file: docs/architecture/discussion-agent-routing.md:87-99#awareness_offered_upto]
 
@@ -110,8 +110,8 @@ do not poll. A punctual agent is also told it is a one-off, not the
 joined CLI of its provider, whose turns its transcript labels with
 the CLI alias.
 [src: file: backend/src/db/discussions.rs:2083-2086#reply_author]
-[src: file: backend/src/api/disc_invite.rs:1972-1992#addressed_to_session]
-[src: file: backend/src/api/disc_invite.rs:1701-1711#addressed_to_caller]
+[src: file: backend/src/api/disc_invite.rs:1979-1999#addressed_to_session]
+[src: file: backend/src/api/disc_invite.rs:1708-1718#addressed_to_caller]
 [src: file: backend/scripts/disc-introspection-mcp.py:11073-11083#attention_required]
 [src: file: backend/src/api/discussions/streaming.rs:2382-2430#punctual_identity_notice]
 [src: file: backend/src/api/disc_prompts.rs:337-355#transcript_agent_label]
