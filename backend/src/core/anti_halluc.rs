@@ -319,6 +319,10 @@ impl SourceOrigin {
             name: Some(name.to_string()),
         }
     }
+
+    fn is_checkout(&self) -> bool {
+        self.kind == SourceOriginKind::Checkout
+    }
 }
 
 /// A worktree of the discussion's own project, consulted after the checkout.
@@ -1385,6 +1389,33 @@ pub(crate) fn is_presence_marker(after: &str) -> bool {
         .any(|marker| after.eq_ignore_ascii_case(marker))
 }
 
+/// Whether the presence marker claims the file is tracked by git, which the
+/// index must confirm: `exists` is settled by the file being there.
+pub(crate) fn is_tracked_marker(after: &str) -> bool {
+    after.trim().eq_ignore_ascii_case("tracked")
+}
+
+/// A `path:tracked` citation that no checkout root's git index backs.
+fn untracked_claim(reference: &str, roots: &[&Path]) -> bool {
+    let Some((path, after)) = clean_reference(reference).rsplit_once(':') else {
+        return false;
+    };
+    is_tracked_marker(after) && !roots.iter().any(|root| is_git_tracked(root, path.trim()))
+}
+
+/// Whether git tracks `rel` in the repository at `root`. Outside a repository,
+/// or without git, nothing is tracked.
+pub(crate) fn is_git_tracked(root: &Path, rel: &str) -> bool {
+    crate::core::cmd::git_cmd()
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "--error-unmatch", "--", rel])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 fn parse_line_spec(s: &str) -> Option<(usize, usize)> {
     if let Some((a, b)) = s.split_once('-') {
         let start = a.trim().parse::<usize>().ok()?;
@@ -1798,8 +1829,18 @@ pub fn verify_source_marker_lanes(raw: &str, roots: &[&Path], lanes: &[LaneRoot]
         }
         SourceKind::File => {
             let (st, detail, found_in) = verify_file_ref_located(&reference, roots, lanes);
+            let untracked = st == SourceStatus::Verified
+                && found_in.as_ref().is_some_and(SourceOrigin::is_checkout)
+                && untracked_claim(&reference, roots);
             origin = found_in;
-            (st, detail)
+            if untracked {
+                (
+                    SourceStatus::NotFound,
+                    format!("{detail} — but git does not track it"),
+                )
+            } else {
+                (st, detail)
+            }
         }
     };
 
@@ -3564,6 +3605,25 @@ mod tests {
         assert_eq!(found.status, SourceStatus::Verified, "{found:?}");
         let missing = verify_source_marker("file: src/gone.rs:exists", Some(&root));
         assert_eq!(missing.status, SourceStatus::NotFound, "{missing:?}");
+        // `tracked` is the index's word, not the disk's: this root is no repository yet.
+        let untracked = verify_source_marker("file: src/foo.rs:tracked", Some(&root));
+        assert_eq!(untracked.status, SourceStatus::NotFound, "{untracked:?}");
+        assert!(
+            untracked.detail.contains("git does not track it"),
+            "{untracked:?}"
+        );
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["add", "src/foo.rs"]);
+        let tracked = verify_source_marker("file: src/foo.rs:tracked", Some(&root));
+        assert_eq!(tracked.status, SourceStatus::Verified, "{tracked:?}");
         std::fs::remove_dir_all(&root).ok();
     }
 

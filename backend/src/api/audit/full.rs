@@ -339,7 +339,33 @@ pub async fn full_audit(
             .flatten(),
         None => None,
     };
-    let (audit_tier, requested_connection_id) = launch_footing(&req, resumed_run.as_ref());
+    let (audit_tier, mut requested_connection_id, connection_from_run) =
+        launch_footing(&req, resumed_run.as_ref());
+    // The run's connection may have been deleted since: the agent's default
+    // takes over, and the human is told, rather than the retry being refused.
+    let mut connection_note = None;
+    if let Some(id) = requested_connection_id
+        .clone()
+        .filter(|_| connection_from_run)
+    {
+        let lookup = id.clone();
+        let still_there = matches!(
+            state
+                .db
+                .with_read_conn(move |conn| {
+                    crate::db::external_api_connections::get(conn, &lookup)
+                })
+                .await,
+            Ok(Some(_))
+        );
+        if !still_there {
+            requested_connection_id = None;
+            connection_note = Some(format!(
+                "The external API connection {id} of the run you continue no longer exists: \
+                 this run uses the agent's default connection."
+            ));
+        }
+    }
     let agent_type = req.agent;
     if !super::agent_can_audit(&agent_type) {
         return sse_error(super::audit_refusal_message(&agent_type));
@@ -1290,6 +1316,11 @@ pub async fn full_audit(
             "started_at": audit_started_at.to_rfc3339(),
         });
         yield Event::default().event("start").data(start.to_string());
+        if let Some(note) = &connection_note {
+            yield Event::default().event("warning").data(
+                serde_json::json!({ "message": note }).to_string(),
+            );
+        }
 
         // 0.8.7 STEP 0 — anti-hallu canonical section maintenance.
         // Runs once at the start of every audit BEFORE the numbered
@@ -4096,11 +4127,12 @@ pub(crate) fn rewrite_proof_verdict(
 /// The model tier and named connection a launch runs on: the request's own
 /// choice, else the run it resumes (KT-1320), else the historical audit default
 /// (Reasoning, no connection). A resume that names nothing keeps what the run
-/// had, so a retry of an economy audit never drifts to the costliest tier.
+/// had, so a retry of an economy audit never drifts to the costliest tier. The
+/// third value says the connection comes from the run, not from the request.
 pub(crate) fn launch_footing(
     req: &crate::models::LaunchAuditRequest,
     resumed: Option<&crate::models::AuditRun>,
-) -> (crate::models::ModelTier, Option<String>) {
+) -> (crate::models::ModelTier, Option<String>, bool) {
     let recorded_tier = resumed
         .and_then(|run| run.tier.as_deref())
         .and_then(crate::models::ModelTier::parse);
@@ -4108,13 +4140,15 @@ pub(crate) fn launch_footing(
         .tier
         .or(recorded_tier)
         .unwrap_or(crate::models::ModelTier::Reasoning);
+    if let Some(connection) = req.connection_id.clone() {
+        return (tier, Some(connection), false);
+    }
     // A connection belongs to its agent: another agent does not inherit it.
-    let connection = req.connection_id.clone().or_else(|| {
-        resumed
-            .filter(|run| run.agent_type == format!("{:?}", req.agent))
-            .and_then(|run| run.connection_id.clone())
-    });
-    (tier, connection)
+    let inherited = resumed
+        .filter(|run| run.agent_type == format!("{:?}", req.agent))
+        .and_then(|run| run.connection_id.clone());
+    let from_run = inherited.is_some();
+    (tier, inherited, from_run)
 }
 
 pub(crate) fn resolve_resume_row(

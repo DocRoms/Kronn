@@ -567,6 +567,18 @@ fn inspect_citations(project: &Path, rel: &str, content: &str, out: &mut Vec<Dia
         // A presence citation (`path:exists`) claims the file is there, not what
         // it holds: no line to bound, and none to quote from a secret file.
         if crate::core::anti_halluc::is_presence_marker(line_part) {
+            if crate::core::anti_halluc::is_tracked_marker(line_part)
+                && !crate::core::anti_halluc::is_git_tracked(project, path_part)
+            {
+                out.push(diag(
+                    "broken_citation",
+                    rel,
+                    format!(
+                        "`{path_part}` is not tracked by git: write [src: file: {path_part}:exists] \
+                         if the claim is only that the file is there"
+                    ),
+                ));
+            }
             continue;
         }
         if crate::core::anti_halluc::is_binary_file(&path) {
@@ -1826,10 +1838,44 @@ mod tests {
         write(&project.join("yarn-error.log"), "Error: boom\n");
         let messages = citation_messages(
             &project,
-            "key [src: file: .ssh/deploy-key:exists] log [src: file: yarn-error.log:tracked] \
+            "key [src: file: .ssh/deploy-key:exists] log [src: file: yarn-error.log:exists] \
              and binary [src: file: brief.pdf:exists].",
         );
         assert!(messages.is_empty(), "{messages:#?}");
+    }
+
+    #[test]
+    fn a_tracked_citation_is_checked_against_the_git_index() {
+        let tmp = document_project();
+        let project = tmp.path().join("proj");
+        write(&project.join("yarn-error.log"), "Error: boom\n");
+        write(&project.join("local.log"), "Error: local\n");
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=Doc Test",
+                    "-c",
+                    "user.email=doc@example.invalid",
+                ])
+                .args(args)
+                .current_dir(&project)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["add", "yarn-error.log"]);
+        let text = "[src: file: yarn-error.log:tracked] [src: file: local.log:tracked]";
+        let messages = citation_messages(&project, text);
+        assert_eq!(messages.len(), 1, "{messages:#?}");
+        assert!(
+            messages[0].contains("local.log") && messages[0].contains("not tracked by git"),
+            "{}",
+            messages[0]
+        );
+        // The same file, claimed only to exist, needs no index entry.
+        assert!(citation_messages(&project, "[src: file: local.log:exists]").is_empty());
     }
 
     #[test]

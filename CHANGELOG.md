@@ -548,16 +548,22 @@ Release notes for 0.9.3 and earlier are available in the
 - Retrying a step, or resuming an audit, from the UI keeps the run's tier
   (KT-1320). The card's picker defaulted to `reasoning`, so the retry of a
   Haiku (economy) audit ran on Opus. The run now records its tier and
-  connection (migration 267, `audit_runs.tier` / `connection_id`); a retry or a
+  connection (migration 268, `audit_runs.tier` / `connection_id`); a retry or a
   resume sends the run's agent, tier and connection, and the panel shows the
   tier it will use, until the human picks another. A resume request that names
   no tier takes the run's, not Reasoning.
+  A connection is inherited only by the same agent; if the run's connection
+  was deleted since, the agent's default takes over and a warning says so. A
+  partial or fresh audit runs on the picker's choice, and a pick is forgotten
+  when the project or the run to continue changes.
 - A finding that a file exists or is tracked can be cited without a line
   (KT-1320): `[src: file: .ssh/key:exists]` (or `:tracked`) passes the
   documentary gate for a text file, so a tracked private key or a
   `yarn-error.log` no longer has to be cited `:1`, which invited quoting a
   secret. A bare path for a text file is still refused — a claim about its
   content needs a line — and the refusal now names the presence form.
+  `:tracked` is checked against the git index (`git ls-files`), not only
+  against the disk; a file that exists but is not tracked is refused.
 - A bridge-token 403 for a discussion outside the agent's scope now says why
   and what to do (KT-1320), instead of reaching a Vibe/ACP agent as a bare
   "the MCP tool returned an error": ask the human to attach the discussion, or

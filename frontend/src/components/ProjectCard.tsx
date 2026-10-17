@@ -516,6 +516,9 @@ export function ProjectCard({
     }).catch(() => { if (!cancelled) setResumableUnknown(true); });
     return () => { cancelled = true; };
   }, [proj.id, proj.audit_status, auditActive, auditCompletedTick, resumableReload]);
+  // KT-1320 — a pick belongs to the run it was made for: another project, or
+  // another run to continue, starts again from that run's own footing.
+  useEffect(() => { setAuditPickTouched(false); }, [proj.id, resumableAudit?.id]);
 
   // KT-1181 — a documented repo never merged gets the template v2 merge before its audit.
   const templateMerge = useTemplateMergeOffer(
@@ -637,6 +640,8 @@ export function ProjectCard({
     auditPickTouched,
     runChoice,
   );
+  // Only a resume of that run follows it (`handleFullAudit`): a fresh, partial
+  // or revalidation audit starts a run of its own, on what the picker holds.
   const selectedAuditAgent = launchChoice.agent;
   const selectedAuditTier = launchChoice.tier;
   const selectedAuditConnectionId = launchChoice.connectionId;
@@ -891,9 +896,12 @@ export function ProjectCard({
       stepIndex: 0, totalSteps: 16, currentFile: null,
     });
     try {
+      // KT-1320 — a resume keeps the run's footing; a fresh launch is a new run
+      // and runs on what the picker holds.
+      const onRun = resumeRunId !== null;
       await projectsApi.fullAuditStream(proj.id, {
-        agent: selectedAuditAgent,
-        tier: selectedAuditTier,
+        agent: onRun ? selectedAuditAgent : pickedAuditAgent,
+        tier: onRun ? selectedAuditTier : auditTierChoice,
         // A fresh launch always runs the complete 16-step chain. Resume sends
         // only the run id so the server remains authoritative for legacy runs.
         kind: resumeRunId ? null : 'Full',
@@ -904,7 +912,7 @@ export function ProjectCard({
         redo_steps: resumeRunId && options.redoSteps ? options.redoSteps : undefined,
         // KT-1169 — the confirmed choice to replay the whole audit.
         fresh: options.fresh ? true : undefined,
-        connection_id: selectedAuditConnectionId ?? undefined,
+        connection_id: (onRun ? selectedAuditConnectionId : auditConnectionId) ?? undefined,
       }, {
         onTemplateInstalled: () => {},
         // 0.8.3 TD #274 — backend-authoritative wallclock for the
@@ -1047,7 +1055,7 @@ export function ProjectCard({
     } finally {
       setAuditAbortController(null);
     }
-  }, [selectedAuditAgent, selectedAuditTier, selectedAuditConnectionId, proj.id, t, toast, onRefetch, onRefetchDiscussions, onAutoRunDiscussion, resumableAudit]);
+  }, [selectedAuditAgent, selectedAuditTier, selectedAuditConnectionId, pickedAuditAgent, auditTierChoice, auditConnectionId, proj.id, t, toast, onRefetch, onRefetchDiscussions, onAutoRunDiscussion, resumableAudit]);
 
   const launchPartialAudit = useCallback(async (steps: number[]) => {
     if (auditActiveRef.current) return;
@@ -1066,7 +1074,7 @@ export function ProjectCard({
       stepIndex: 0, totalSteps: steps.length, currentFile: null,
     });
     try {
-      await projectsApi.partialAuditStream(proj.id, { agent: selectedAuditAgent, tier: selectedAuditTier, steps, connection_id: selectedAuditConnectionId ?? undefined }, {
+      await projectsApi.partialAuditStream(proj.id, { agent: pickedAuditAgent, tier: auditTierChoice, steps, connection_id: auditConnectionId ?? undefined }, {
         onStepStart: (step, total, file) => {
           setAuditStep(step);
           setAuditTotalSteps(total);
@@ -1154,7 +1162,7 @@ export function ProjectCard({
     } finally {
       setAuditAbortController(null);
     }
-  }, [selectedAuditAgent, selectedAuditTier, selectedAuditConnectionId, proj.id, t, toast, onRefetch, onRefetchDrift, onRefetchDiscussions, onOpenDiscussion, onNavigate]);
+  }, [pickedAuditAgent, auditTierChoice, auditConnectionId, proj.id, t, toast, onRefetch, onRefetchDrift, onRefetchDiscussions, onOpenDiscussion, onNavigate]);
 
   const startPartialAudit = useCallback(async (steps: number[]) => {
     await gateTemplateLaunch(() => void launchPartialAudit(steps));
@@ -1795,9 +1803,9 @@ export function ProjectCard({
         gateLaunch={templateMerge.gateLaunch}
         project={proj}
         auditActive={auditActive}
-        agent={selectedAuditAgent}
-        tier={selectedAuditTier}
-        connectionId={selectedAuditConnectionId}
+        agent={pickedAuditAgent}
+        tier={auditTierChoice}
+        connectionId={auditConnectionId}
         toast={toast}
         onRefetch={() => { onRefetch(); setDocStateReload(value => value + 1); }}
         onRefetchDrift={(projectId) => { onRefetchDrift(projectId); setDocStateReload(value => value + 1); }}

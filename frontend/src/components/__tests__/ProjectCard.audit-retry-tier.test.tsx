@@ -14,6 +14,13 @@ vi.mock('../../lib/I18nContext', () => ({
 }));
 vi.mock('../../hooks/useMediaQuery', () => ({ useIsMobile: () => false }));
 
+// A partial audit is launched from this notice: a button stands for its run action.
+vi.mock('../TemplateUpdateNotice', () => ({
+  TemplateUpdateNotice: ({ onRunSteps }: { onRunSteps?: (steps: number[]) => void }) => (
+    <button data-testid="run-partial" onClick={() => onRunSteps?.([3])}>partial</button>
+  ),
+}));
+
 import { ProjectCard } from '../ProjectCard';
 import { projects as projectsApi } from '../../lib/api';
 import type { Project, AgentDetection } from '../../types/generated';
@@ -127,5 +134,29 @@ describe('ProjectCard — KT-1320 a retry runs on the tier of the run it continu
     await act(async () => { fireEvent.click(launch); });
     await waitFor(() => expect(launches()).toHaveLength(1));
     expect(launches()[0]).toMatchObject({ tier: 'reasoning' });
+  });
+
+  it("a partial audit runs on the picker's choice, not on the interrupted run's", async () => {
+    vi.mocked(projectsApi.partialAuditStream).mockResolvedValue(undefined as never);
+    renderCard();
+    await screen.findByTestId('audit-timeline-selection-from-run');
+    await act(async () => { fireEvent.click(await screen.findByTestId('run-partial')); });
+    await waitFor(() => expect(vi.mocked(projectsApi.partialAuditStream)).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(projectsApi.partialAuditStream).mock.calls[0][1]).toMatchObject({ agent: 'ClaudeCode', tier: 'reasoning', steps: [3] });
+  });
+
+  it("a pick made for one run does not follow the next run to continue", async () => {
+    const { container } = renderCard();
+    await openGroups(container);
+    await screen.findByTestId('audit-timeline-selection-from-run');
+    fireEvent.click(container.querySelectorAll<HTMLElement>('.audit-tl-tier')[0]);
+    await waitFor(() => expect(screen.queryByTestId('audit-timeline-selection-from-run')).toBeNull());
+    // The retry ends interrupted again, as another run: the picker starts over from its tier.
+    vi.mocked(projectsApi.auditResumable).mockResolvedValue({ ...RESUMABLE, id: 'run-y', tier: 'default' });
+    await act(async () => { fireEvent.click(await screen.findByTestId('audit-timeline-step-retry-3')); });
+    expect(await screen.findByTestId('audit-timeline-selection-from-run')).toHaveTextContent('disc.tier.default');
+    await act(async () => { fireEvent.click(await screen.findByTestId('audit-timeline-step-retry-3')); });
+    await waitFor(() => expect(launches()).toHaveLength(2));
+    expect(launches()[1]).toMatchObject({ resume_run_id: 'run-y', tier: 'default' });
   });
 });

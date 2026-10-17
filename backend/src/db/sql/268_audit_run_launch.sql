@@ -1,4 +1,4 @@
--- 267 (KT-1320): how the run was launched, so a step retry or a resume runs
+-- 268 (KT-1320): how the run was launched, so a step retry or a resume runs
 -- on the same footing unless the human changes it.
 --   tier           the model tier of the launch (`economy` / `default` /
 --                  `reasoning`); NULL on a run recorded before this column.

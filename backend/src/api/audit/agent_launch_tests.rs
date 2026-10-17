@@ -2047,3 +2047,102 @@ async fn version_source_inputs_read_the_mcp_config_the_agent_is_handed() {
     assert_eq!(pick(&direct, false), VersionSource::Web);
     assert_eq!(pick(&acp, false), VersionSource::None);
 }
+
+/// KT-1320 — the connection a resumed run had may have been deleted since: the
+/// resume runs on the agent's default connection and says so, it is not refused.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_resume_whose_connection_was_deleted_falls_back_with_a_visible_note() {
+    use axum::response::IntoResponse;
+    let tools = tempfile::tempdir().unwrap();
+    let (fixture, _log) = recording_claude(tools.path());
+    let state = fresh_state();
+    let project = tempfile::tempdir().unwrap();
+    project_among_others(&state, project.path(), false).await;
+    let _route = route_claude(project.path(), &fixture);
+    std::fs::create_dir_all(project.path().join("docs/conventions")).unwrap();
+    std::fs::write(project.path().join("docs/AGENTS.md"), "# Audited project\n").unwrap();
+    std::fs::write(
+        project
+            .path()
+            .join("docs/conventions/agents-md-format-v1.md"),
+        "# AGENTS.md format\n",
+    )
+    .unwrap();
+    let total =
+        crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full).len() as u32;
+    state
+        .db
+        .with_conn(move |conn| {
+            use crate::db::audit_runs as runs;
+            let started = chrono::Utc::now() - chrono::Duration::hours(1);
+            runs::insert_running(conn, "run-gone", PROJECT_ID, "Full", "ClaudeCode", started)?;
+            runs::set_run_launch(conn, "run-gone", ModelTier::Economy, Some("deleted-conn"))?;
+            for step in 1..=total {
+                let label = format!("docs/step-{step}.md");
+                runs::insert_audit_step_start(conn, "run-gone", step, &label, started)?;
+                runs::finalize_audit_step(
+                    conn,
+                    "run-gone",
+                    step,
+                    started,
+                    10,
+                    &runs::StepTokens::UNKNOWN,
+                    None,
+                    step != 5,
+                    (step == 5).then_some("Mac went to sleep"),
+                    false,
+                )?;
+                if step != 5 {
+                    runs::update_last_completed_step(conn, "run-gone", step.min(4))?;
+                }
+            }
+            runs::mark_interrupted(conn, "run-gone", "warned steps: [5]")
+        })
+        .await
+        .unwrap();
+
+    let response = crate::api::audit::full::full_audit(
+        axum::extract::State(state.clone()),
+        axum::extract::Path(PROJECT_ID.to_string()),
+        axum::Json(crate::models::LaunchAuditRequest {
+            agent: AgentType::ClaudeCode,
+            connection_id: None,
+            tier: None,
+            kind: None,
+            custom_prompt: None,
+            resume_run_id: Some("run-gone".into()),
+            retry_steps: None,
+            redo_steps: None,
+            fresh: None,
+        }),
+    )
+    .await
+    .into_response();
+    let stream = sse_body(response).await;
+    assert!(!stream.contains("event: error"), "{stream}");
+    let warnings = sse_events(&stream, "warning");
+    assert!(
+        warnings.iter().any(|w| w["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("deleted-conn") && m.contains("no longer exists"))),
+        "{stream}"
+    );
+    let run = state
+        .db
+        .with_conn(|conn| {
+            Ok(crate::db::audit_runs::list_recent(conn, PROJECT_ID, 1)?
+                .into_iter()
+                .next())
+        })
+        .await
+        .unwrap()
+        .expect("the resumed run");
+    assert_ne!(run.id, "run-gone");
+    assert_eq!(
+        run.tier.as_deref(),
+        Some("economy"),
+        "the tier is still the run's"
+    );
+    assert_eq!(run.connection_id, None);
+}
