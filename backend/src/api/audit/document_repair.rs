@@ -463,7 +463,7 @@ mod tests {
                      Comment [src: file: config.yml:Focused on x]\nEmpty [src: file: empty.txt]\n\
                      [td](../tech-debt/TD-1.md)\n";
         std::fs::write(root.join("docs/AGENTS.md"), first).unwrap();
-        let blocking = check_attempt(root, &before, &[]).unwrap();
+        let blocking = check_attempt(root, &before, &[], &[]).unwrap().blocking;
         let messages: Vec<_> = blocking.iter().map(|d| d.message.as_str()).collect();
         assert_eq!(messages.len(), 5, "{messages:#?}");
         assert!(!messages.iter().any(|m| m.contains("config.yml:1-3")));
@@ -480,7 +480,7 @@ mod tests {
                       Comment [src: file: config.yml:1]\nThe `empty.txt` file is empty.\n\
                       [td](tech-debt/TD-1.md)\n";
         std::fs::write(root.join("docs/AGENTS.md"), second).unwrap();
-        let blocking = check_attempt(root, &before, &blocking).unwrap();
+        let blocking = check_attempt(root, &before, &blocking, &[]).unwrap().blocking;
         assert!(blocking.is_empty(), "{blocking:#?}");
     }
 
