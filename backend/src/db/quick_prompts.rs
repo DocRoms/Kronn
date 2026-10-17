@@ -530,7 +530,7 @@ pub fn update_quick_prompt_invalidating(
     Ok(disabled)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::models::{AgentType, ModelTier, PromptVariable};

@@ -161,7 +161,7 @@ pub fn remediation_hint(config_dir: &Path) -> String {
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

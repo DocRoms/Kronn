@@ -343,6 +343,6 @@ fn finish(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "readiness_test.rs"]
 mod tests;

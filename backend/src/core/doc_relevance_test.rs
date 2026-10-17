@@ -692,6 +692,67 @@ fn only_a_proposal_phrase_makes_a_heading_a_proposal() {
     );
 }
 
+#[test]
+fn a_remediation_naming_a_file_to_create_is_not_judged_by_its_existence() {
+    for heading in [
+        "Remediation",
+        "Fix",
+        "Next steps",
+        "Proposed fix",
+        "Suggested fix",
+    ] {
+        assert!(is_proposal_heading(heading), "{heading} proposes work");
+    }
+    assert!(!is_proposal_heading("Hotfix handling"));
+
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    fs::create_dir_all(dir.join("helpers/lib")).unwrap();
+    fs::write(dir.join("helpers/lib/real.js"), "module.exports = {};\n").unwrap();
+
+    // The shapes a TD sheet and an inconsistencies file take: a heading, a
+    // field on the line, a field closing the line with the text under it.
+    let report = doc_with(
+        dir,
+        "docs/tech-debt/TD-20261016-plugin-factory.md",
+        "# CQ-001: duplicated plugin setup\n\
+         - **Where**: `helpers/lib/real.js:1`\n\
+         - **Problem**: every plugin repeats its setup\n\
+         ## Remediation\n\
+         Create `helpers/lib/plugin-factory.js` and call it from each plugin.\n",
+    );
+    assert!(report.sections.is_empty(), "{:?}", report.sections);
+
+    let report = doc_with(
+        dir,
+        "docs/inconsistencies-tech-debt.md",
+        "# Inconsistencies\n\
+         - **Problem**: setup is copied\n\
+         - **Remediation**: extract `helpers/lib/plugin-factory.js`\n\
+         - **Next steps**:\n  - add `helpers/lib/plugin-factory.test.js`\n\
+         - **Where**: `helpers/lib/gone.js`\n",
+    );
+    assert_eq!(
+        flagged(&report),
+        ["helpers/lib/gone.js"],
+        "only the claim is judged, not what the fix proposes"
+    );
+
+    // A section that proposes only is left unjudged, and says why.
+    let report = doc_with(
+        dir,
+        "docs/fix-plan.md",
+        "# Plan\n- **Suggested fix**: add `helpers/lib/plugin-factory.js`\n",
+    );
+    assert_eq!(report.of_doc("docs/fix-plan.md").count(), 0);
+    let plan = report
+        .unanchored
+        .iter()
+        .find(|s| s.doc == "docs/fix-plan.md");
+    let reason = &plan.expect("listed as unanchored").corrections[0].proposal;
+    assert!(reason.contains("proposes work"), "{reason}");
+}
+
 /// Run on demand against the repository's own docs:
 /// `cargo nextest run --offline --run-ignored only kronn_own_docs_report`.
 /// It prints the remaining prose-path hits so false positives can be audited.

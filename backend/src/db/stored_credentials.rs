@@ -133,7 +133,7 @@ pub fn delete_all(conn: &Connection) -> Result<usize> {
     Ok(conn.execute("DELETE FROM stored_credentials", [])?)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::db::Database;

@@ -300,6 +300,6 @@ pub fn blocking_findings(
         .collect())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "review_ledger_test.rs"]
 mod review_ledger_test;

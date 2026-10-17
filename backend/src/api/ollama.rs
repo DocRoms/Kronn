@@ -723,7 +723,7 @@ pub async fn set_context_override(
     }))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

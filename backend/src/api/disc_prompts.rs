@@ -905,7 +905,7 @@ fn build_agent_prompt_inner(
     prompt
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::models::{Discussion, DiscussionMessage, MessageRole, ModelTier};

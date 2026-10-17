@@ -590,7 +590,7 @@ pub fn mask_for_discussion(conn: &Connection, discussion_id: &str, text: &str) -
     Ok(crate::core::redact::redact_secrets(&set.scrub(text)))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::db::Database;

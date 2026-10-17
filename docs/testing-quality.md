@@ -104,7 +104,7 @@ zero-warning Oxlint gate passes. The `with_conn` safety scanner also reads
 standalone Rust test files; a `#[cfg(test)]` on their parent module does not
 exclude their contents. Propagate fallible fixture setup inside the closure
 and assert its result after awaiting it.
-`[src: file: backend/scripts/ci/lint_with_conn_unwrap.py:88-127#find_violations]`
+`[src: file: backend/scripts/ci/lint_with_conn_unwrap.py:155-195#find_violations]`
 `[src: file: .github/workflows/ci-test.yml:497-501#with_conn]`
 
 Supervisor cleanup must also reap live shell jobs whose PID was not yet recorded:
@@ -324,7 +324,7 @@ gate is skipped or fails. A timeout is a functional failure; the SLO observer
 does not retry, sleep, or mask it. An SLO breach is a warning, while missing,
 duplicate, incomplete, or contradictory measurement evidence fails the
 observer instead of publishing a misleading timing.
-[src: file: .github/workflows/ci-test.yml:85#timeout-minutes] [src: file: .github/workflows/ci-test.yml:363#timeout-minutes] [src: file: .github/workflows/ci-test.yml:717#timeout-minutes] [src: file: .github/workflows/ci-build.yml:180-182#timeout-minutes] [src: file: .github/workflows/ci-build.yml:244#timeout-minutes]
+[src: file: .github/workflows/ci-test.yml:85#timeout-minutes] [src: file: .github/workflows/ci-test.yml:363#timeout-minutes] [src: file: .github/workflows/ci-test.yml:717#timeout-minutes] [src: file: .github/workflows/ci-build.yml:180-182#timeout-minutes] [src: file: .github/workflows/ci-build.yml:259#timeout-minutes]
 [src: file: .github/workflows/ci-test.yml:968-1004#ci-quality-gates] [src: file: scripts/ci/backend_ci_slo.mjs:111-135#requireCurrentBackendJob]
 
 ## Test placement

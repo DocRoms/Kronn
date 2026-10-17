@@ -186,7 +186,7 @@ fn row_to_decision(row: &rusqlite::Row) -> rusqlite::Result<AgentDecision> {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::db::migrations;

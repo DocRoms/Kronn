@@ -2118,7 +2118,7 @@ pub fn default_pr_template(branch: &str) -> String {
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
 
     /// `gh` and `glab` start git in the repository: they get the git-host

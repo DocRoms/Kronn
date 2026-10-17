@@ -846,6 +846,6 @@ fn detected_validation_targets(repo: &Path) -> Vec<(String, String)> {
     out
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "project_profile_test.rs"]
 mod tests;

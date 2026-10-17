@@ -4,7 +4,7 @@ import {
   Activity, Archive, CheckCircle2, CheckSquare2, ChevronDown, ChevronRight,
   Braces, Clock3, Database, Download, ExternalLink, FileCode2, FileDown, GitCompare,
   History, ListChecks, Loader2, MessageSquare, Pencil, Play, RefreshCw,
-  PanelsTopLeft, RotateCcw, Save, Star, Table2, Trash2, Upload, Workflow, X,
+  PanelRight, PanelsTopLeft, RotateCcw, Save, Star, Table2, Trash2, Upload, Workflow, X,
 } from 'lucide-react';
 import type {
   LivePage, LivePageDatasetUsage, LivePageDetail, LivePageDiscussionLink, LivePagePublication,
@@ -61,6 +61,7 @@ import {
   standaloneLivePageUrl,
   type LivePageMosaicLayout,
 } from '../lib/live-page-navigation';
+import '../components/DiscussionToolPanel.css';
 import './DiscussionsPage.css';
 import './PagesPage.css';
 
@@ -70,6 +71,14 @@ const PAGE_COLLAPSED_STORAGE_KEY = 'kronn:pageCollapsedSections';
 
 interface PageNavigationPreference {
   resourceId: string | null;
+}
+
+// The last launch of a linked workflow, from this tab: what the side panel
+// shows per workflow, so "run all" reports each one on its own.
+interface WorkflowRun {
+  state: 'running' | 'success' | 'error';
+  message?: string;
+  card: RunStatusCardModel;
 }
 
 const NO_EMBEDS: LivePageEmbedPlacement[] = [];
@@ -133,6 +142,8 @@ function useDismissibleDetails<T extends HTMLDetailsElement>() {
       const el = ref.current;
       if (el?.open && event.key === 'Escape') {
         close();
+        // One Escape closes one thing: the sync panel behind it stays open.
+        event.preventDefault();
         // Keyboard users lose their place once the popover's content
         // collapses out from under a focused element inside it.
         el.querySelector('summary')?.focus();
@@ -186,7 +197,6 @@ export function PagesPage({
   const [error, setError] = useState<string | null>(null);
   const [linkedWorkflows, setLinkedWorkflows] = useState<LivePageWorkflowLink[]>([]);
   const [recentPublications, setRecentPublications] = useState<LivePagePublication[]>([]);
-  const [pageRunCard, setPageRunCard] = useState<RunStatusCardModel | null>(null);
   const [linkedDiscussions, setLinkedDiscussions] = useState<LivePageDiscussionLink[]>([]);
   const [revisions, setRevisions] = useState<LivePageRevision[]>([]);
   const [query, setQuery] = useState('');
@@ -200,12 +210,21 @@ export function PagesPage({
   const [htmlDraft, setHtmlDraft] = useState('');
   const [comparisonRevisionId, setComparisonRevisionId] = useState<string | null>(null);
   const [savingHtml, setSavingHtml] = useState(false);
-  const [runningWorkflowId, setRunningWorkflowId] = useState<string | null>(null);
-  const [workflowRunFeedback, setWorkflowRunFeedback] = useState<{
-    workflowId: string;
-    kind: 'success' | 'error';
-    message: string;
-  } | null>(null);
+  const [workflowRuns, setWorkflowRuns] = useState<Record<string, WorkflowRun>>({});
+  const [skippedWorkflowIds, setSkippedWorkflowIds] = useState<Set<string>>(() => new Set());
+  const [runAllProgress, setRunAllProgress] = useState<{ done: number; total: number } | null>(null);
+  // Synchronous per-workflow launch lock, shared by the single and run-all
+  // launches. State is stale between two synchronous clicks; this is not. It
+  // is independent of the selected Page, so an in-flight run stays locked
+  // when the user switches Page and comes back.
+  const workflowLocksRef = useRef<Set<string>>(new Set());
+  const [syncPanelOpen, setSyncPanelOpen] = useState(false);
+  const syncPanelRef = useRef<HTMLElement>(null);
+  const syncTriggerRef = useRef<HTMLButtonElement>(null);
+  const closeSyncPanel = useCallback(() => {
+    setSyncPanelOpen(false);
+    syncTriggerRef.current?.focus();
+  }, []);
   const [exportBusy, setExportBusy] = useState<'pdf' | 'docx' | 'json' | null>(null);
   const [exportResult, setExportResult] = useState<{ url: string; filename: string } | null>(null);
   const [importOpen, setImportOpen] = useState(false);
@@ -226,7 +245,6 @@ export function PagesPage({
     finally { artifactExportInFlight.current = false; setExportBusy(null); }
   };
   const exportMenuRef = useDismissibleDetails<HTMLDetailsElement>();
-  const refreshMenuRef = useDismissibleDetails<HTMLDetailsElement>();
   const mosaicMenuRef = useDismissibleDetails<HTMLDetailsElement>();
   const [selectedDatasetId, setSelectedDatasetId] = useState<string | null>(null);
   const [datasetUsage, setDatasetUsage] = useState<LivePageDatasetUsage[]>([]);
@@ -247,6 +265,8 @@ export function PagesPage({
     reload: reloadPageActions,
   } = useLivePageActions(() => setError(t('disc.action.unavailablePageAction')));
   const [bridgeChannel] = useState(channelId);
+  const selectedIdRef = useRef(selectedId);
+  useEffect(() => { selectedIdRef.current = selectedId; }, [selectedId]);
   const requestedPageIdRef = useRef(selectedPageId ?? initialSelectedPageId);
   const selectionConsumedRef = useRef(onInitialSelectionConsumed);
 
@@ -368,7 +388,12 @@ export function PagesPage({
 
   const select = useCallback(async (page: LivePage) => {
     setSelectedId(page.id);
-    setPageRunCard(null);
+    // Only the finished display state goes; a run still in flight keeps being
+    // tracked, or its lock and its updates would be lost.
+    setWorkflowRuns(current => Object.fromEntries(
+      Object.entries(current).filter(([, run]) => run.state === 'running'),
+    ));
+    setSkippedWorkflowIds(new Set());
     setLoading(true);
     try {
       await loadDetail(page.id);
@@ -383,43 +408,110 @@ export function PagesPage({
     }
   }, [loadDetail]);
 
-  const runLinkedWorkflow = useCallback(async (workflow: LivePageWorkflowLink) => {
-    if (!workflow.enabled || runningWorkflowId) return;
-    setRunningWorkflowId(workflow.id);
-    setWorkflowRunFeedback(null);
-    setPageRunCard({ id: workflow.id, kind: 'workflow', status: 'queued', freshness: 'unavailable' });
-    await workflowsApi.triggerStream(
-      workflow.id,
-      () => undefined,
-      () => undefined,
-      result => {
-        setRunningWorkflowId(null);
-        setPageRunCard(current => current);
-        setWorkflowRunFeedback({
-          workflowId: workflow.id,
-          kind: result.status === 'Success' ? 'success' : 'error',
-          message: result.status === 'Success'
-            ? t('pages.workflowRunSuccess')
-            : t('pages.workflowRunFailed', result.status),
-        });
-        if (selectedId) void loadDetail(selectedId);
+  const patchWorkflowRun = useCallback((workflowId: string, patch: (run: WorkflowRun) => WorkflowRun) => {
+    setWorkflowRuns(current => current[workflowId]
+      ? { ...current, [workflowId]: patch(current[workflowId]) }
+      : current);
+  }, []);
+
+  // Resolves once the run is over. The lock is taken before the first await
+  // and released in `finally`, so a second synchronous call is a no-op.
+  const runLinkedWorkflow = useCallback(async (workflow: LivePageWorkflowLink, pageId: string | null = selectedIdRef.current) => {
+    if (!workflow.enabled || workflowLocksRef.current.has(workflow.id)) return;
+    workflowLocksRef.current.add(workflow.id);
+    setWorkflowRuns(current => ({
+      ...current,
+      [workflow.id]: {
+        state: 'running',
+        card: { id: workflow.id, kind: 'workflow', status: 'queued', freshness: 'unavailable' },
       },
-      message => {
-        setRunningWorkflowId(null);
-        setPageRunCard(current => current ? { ...current, status: 'failed', diagnostic: message } : current);
-        setWorkflowRunFeedback({ workflowId: workflow.id, kind: 'error', message });
-      },
-      undefined,
-      undefined,
-      undefined,
-      runId => setPageRunCard(current => current ? {
-        ...current,
-        id: runId,
-        status: 'running',
-        freshness: 'rehydrated',
-      } : current),
-    );
-  }, [loadDetail, runningWorkflowId, selectedId, t]);
+    }));
+    // The Page the run was launched from, only if it is still the open one.
+    const reloadLaunchPage = () => {
+      if (pageId && selectedIdRef.current === pageId) void loadDetail(pageId);
+    };
+    try {
+      await workflowsApi.triggerStream(
+        workflow.id,
+        () => undefined,
+        () => undefined,
+        result => {
+          const success = result.status === 'Success';
+          patchWorkflowRun(workflow.id, run => ({
+            ...run,
+            state: success ? 'success' : 'error',
+            message: success ? t('pages.workflowRunSuccess') : t('pages.workflowRunFailed', result.status),
+          }));
+          reloadLaunchPage();
+        },
+        message => {
+          patchWorkflowRun(workflow.id, run => ({
+            state: 'error',
+            message,
+            card: { ...run.card, status: 'failed', diagnostic: message },
+          }));
+        },
+        undefined,
+        undefined,
+        undefined,
+        runId => patchWorkflowRun(workflow.id, run => ({
+          ...run,
+          card: { ...run.card, id: runId, status: 'running', freshness: 'rehydrated' },
+        })),
+      );
+    } finally {
+      workflowLocksRef.current.delete(workflow.id);
+    }
+  }, [loadDetail, patchWorkflowRun, t]);
+
+  const enabledWorkflows = useMemo(() => linkedWorkflows.filter(workflow => workflow.enabled), [linkedWorkflows]);
+  const anyWorkflowRunning = linkedWorkflows.some(workflow => workflowRuns[workflow.id]?.state === 'running');
+  // A run-all batch is global (its guard survives a Page switch), so it blocks
+  // the button on every Page until it ends.
+  const runAllBusy = runAllProgress !== null;
+
+  // Launches every enabled linked workflow that is not already running; the
+  // disabled ones are left alone and flagged as skipped. Each workflow reports
+  // its own state, and the button shows how many have finished.
+  const runAllWorkflows = useAsyncGuard(async () => {
+    const queue = enabledWorkflows.filter(workflow => !workflowLocksRef.current.has(workflow.id));
+    if (queue.length === 0) return;
+    setSkippedWorkflowIds(new Set(linkedWorkflows.filter(workflow => !workflow.enabled).map(workflow => workflow.id)));
+    setRunAllProgress({ done: 0, total: queue.length });
+    const pageId = selectedIdRef.current;
+    try {
+      await Promise.all(queue.map(async workflow => {
+        try {
+          await runLinkedWorkflow(workflow, pageId);
+        } finally {
+          setRunAllProgress(progress => progress && { ...progress, done: progress.done + 1 });
+        }
+      }));
+    } finally {
+      setRunAllProgress(null);
+    }
+  });
+
+  // `document` is the iframe markup in this component, hence window.document.
+  // The side panel closes on Escape and on a click outside it (the trigger
+  // toggles it on its own).
+  useEffect(() => {
+    if (!syncPanelOpen) return undefined;
+    const onPointerDown = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (syncPanelRef.current?.contains(target) || syncTriggerRef.current?.contains(target)) return;
+      setSyncPanelOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !event.defaultPrevented) closeSyncPanel();
+    };
+    window.document.addEventListener('mousedown', onPointerDown);
+    window.document.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.document.removeEventListener('mousedown', onPointerDown);
+      window.document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [syncPanelOpen, closeSyncPanel]);
 
   const persistHtml = useAsyncGuard(async (pageId: string, html: string) => {
     setSavingHtml(true);
@@ -1060,156 +1152,26 @@ export function PagesPage({
                     {exportResult && <a href={exportResult.url} download={exportResult.filename} target="_blank" rel="noopener noreferrer"><ExternalLink size={12} />{exportResult.filename}</a>}
                   </div>
                 </details>
-                <details className="live-pages-refresh-menu" data-testid="live-page-refresh-menu" ref={refreshMenuRef}>
-                  <summary
-                    aria-label={t('pages.autoRefresh')}
-                    data-state={latestPublication ? 'synced' : 'waiting'}
-                  >
-                    <CheckCircle2 size={14} />
-                    <span>{latestPublication ? t('pages.refreshSynced') : t('pages.refreshWaiting')}</span>
-                    {latestPublication && (
-                      <time title={new Date(latestPublication.published_at).toLocaleString(locale)}>
-                        {formatRelativeTime(latestPublication.published_at, locale)}
-                      </time>
-                    )}
-                    <ChevronDown size={13} className="live-pages-refresh-chevron" />
-                  </summary>
-                  <section className="live-pages-refresh-popover" data-testid="live-page-recent-refreshes">
-                    <header className="live-pages-refresh-popover-header">
-                      <span className="live-pages-refresh-title-icon"><History size={15} /></span>
-                      <div>
-                        <strong>{t('pages.autoRefresh')}</strong>
-                        <span>{t('pages.recentRefreshesHint')}</span>
-                      </div>
-                    </header>
-
-                    <div className="live-pages-refresh-workflows">
-                      <div><Workflow size={12} /><span>{t('pages.linkedWorkflows')}</span></div>
-                      {linkedWorkflows.length > 0 ? linkedWorkflows.map(workflow => (
-                        <span key={workflow.id} className="live-pages-linked-workflow">
-                          <AppLink
-                            to={workflowPath(workflow.id)}
-                            className="live-pages-linked-workflow-open"
-                            onNavigate={onNavigateWorkflow ? () => onNavigateWorkflow(workflow.id) : undefined}
-                          >
-                            {workflow.name}{workflow.enabled ? '' : ` ${t('pages.disabledSuffix')}`}
-                          </AppLink>
-                          <button
-                            type="button"
-                            className="live-pages-linked-workflow-run"
-                            onClick={() => void runLinkedWorkflow(workflow)}
-                            disabled={!workflow.enabled || runningWorkflowId !== null}
-                            data-state={runningWorkflowId === workflow.id
-                              ? 'running'
-                              : workflowRunFeedback?.workflowId === workflow.id
-                                ? workflowRunFeedback.kind
-                                : 'idle'}
-                            title={workflow.enabled ? t('pages.runLinkedWorkflow', workflow.name) : t('pages.runDisabledWorkflow')}
-                            aria-label={workflow.enabled ? t('pages.runLinkedWorkflow', workflow.name) : t('pages.runDisabledWorkflow')}
-                          >
-                            {runningWorkflowId === workflow.id
-                              ? <Loader2 size={12} className="spin" />
-                              : workflowRunFeedback?.workflowId === workflow.id
-                                ? workflowRunFeedback.kind === 'success'
-                                  ? <CheckCircle2 size={12} data-testid="live-page-sync-success-icon" />
-                                  : <X size={12} data-testid="live-page-sync-error-icon" />
-                                : <Play size={12} />}
-                          </button>
-                          {workflowRunFeedback?.workflowId === workflow.id && (
-                            <small
-                              data-kind={workflowRunFeedback.kind}
-                              role={workflowRunFeedback.kind === 'error' ? 'alert' : 'status'}
-                            >
-                              {workflowRunFeedback.kind === 'success'
-                                ? <CheckCircle2 size={11} aria-hidden="true" />
-                                : <X size={11} aria-hidden="true" />}
-                              {workflowRunFeedback.message}
-                            </small>
-                          )}
-                        </span>
-                      )) : <small>{t('pages.noLinkedWorkflows')}</small>}
-                    </div>
-                    {pageRunCard && <RunStatusCard runId={pageRunCard.id === runningWorkflowId ? undefined : pageRunCard.id} model={pageRunCard} />}
-
-                    <div className="live-pages-dataset-sizes">
-                      <div><Database size={12} /><span>{t('pages.datasetStorage')}</span></div>
-                      <div>
-                        {detail.datasets.map(dataset => (
-                          <button type="button" key={dataset.id} onClick={() => setSelectedDatasetId(dataset.id)} title={t('pages.datasetSizeTitle', dataset.name, formatBytes(dataset.data_size_bytes))}>
-                            <strong>{dataset.name}</strong>
-                            {formatBytes(dataset.data_size_bytes)}
-                            <LivePageDatasetUsageLine dataset={dataset} usage={datasetUsage.find(item => item.name === dataset.name)} />
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-
-                    <div className="live-pages-refresh-timeline">
-                      {recentPublications.length > 0 ? recentPublications.map(publication => {
-                        const workflowName = publication.workflow_name ?? t('pages.directPublication');
-                        const workflowId = publication.workflow_id;
-                        // Rolling upgrades may briefly serve the pre-delta Page
-                        // response. Treat its touched datasets as changed instead
-                        // of crashing or falsely claiming that they were equal.
-                        const contentChanged = publication.content_changed ?? true;
-                        const changedDatasets = publication.changed_datasets ?? publication.datasets_updated;
-                        const unchangedDatasets = publication.unchanged_datasets ?? [];
-                        const content = (
-                          <>
-                            <span className="live-pages-refresh-marker" data-changed={contentChanged} aria-hidden="true" />
-                            <span className="live-pages-refresh-event">
-                              <span className="live-pages-refresh-event-head">
-                                <strong>
-                                  {contentChanged
-                                    ? t('pages.refreshChanged')
-                                    : t('pages.refreshUnchanged')}
-                                </strong>
-                                <time title={new Date(publication.published_at).toLocaleString(locale)}>
-                                  {formatRelativeTime(publication.published_at, locale)}
-                                </time>
-                              </span>
-                              <span className="live-pages-refresh-event-meta">
-                                <span>{workflowName}</span>
-                                <span>data r{publication.data_revision}</span>
-                                {publication.workflow_run_id && <span>{t('pages.refreshRun')}</span>}
-                              </span>
-                              <span className="live-pages-refresh-deltas">
-                                {changedDatasets.map(dataset => (
-                                  <span key={`changed-${dataset}`} data-kind="changed">{dataset}</span>
-                                ))}
-                                {unchangedDatasets.map(dataset => (
-                                  <span key={`unchanged-${dataset}`} data-kind="unchanged">{t('pages.unchangedDataset', dataset)}</span>
-                                ))}
-                                {publication.points_added > 0 && (
-                                  <span data-kind="points">{t('pages.pointsAdded', publication.points_added)}</span>
-                                )}
-                                {publication.points_removed > 0 && (
-                                  <span data-kind="retention">{t('pages.pointsRemoved', publication.points_removed)}</span>
-                                )}
-                              </span>
-                            </span>
-                            {workflowId && <ChevronRight size={14} className="live-pages-refresh-open" />}
-                          </>
-                        );
-                        return workflowId ? (
-                          <AppLink
-                            key={publication.id}
-                            to={workflowPath(workflowId, publication.workflow_run_id)}
-                            className="live-pages-refresh-row"
-                            onNavigate={onNavigateWorkflow
-                              ? () => onNavigateWorkflow(workflowId, publication.workflow_run_id ?? undefined)
-                              : undefined}
-                            aria-label={t('pages.openRefreshRun', workflowName)}
-                          >
-                            {content}
-                          </AppLink>
-                        ) : (
-                          <div key={publication.id} className="live-pages-refresh-row">{content}</div>
-                        );
-                      }) : <small>{t('pages.noRecentRefreshes')}</small>}
-                    </div>
-                  </section>
-                </details>
+                <button
+                  type="button"
+                  className="live-pages-refresh-trigger"
+                  data-testid="live-page-refresh-menu"
+                  data-state={latestPublication ? 'synced' : 'waiting'}
+                  aria-label={t('pages.autoRefresh')}
+                  aria-expanded={syncPanelOpen}
+                  aria-controls="live-page-sync-panel"
+                  onClick={() => setSyncPanelOpen(open => !open)}
+                  ref={syncTriggerRef}
+                >
+                  <CheckCircle2 size={14} />
+                  <span>{latestPublication ? t('pages.refreshSynced') : t('pages.refreshWaiting')}</span>
+                  {latestPublication && (
+                    <time title={new Date(latestPublication.published_at).toLocaleString(locale)}>
+                      {formatRelativeTime(latestPublication.published_at, locale)}
+                    </time>
+                  )}
+                  <PanelRight size={13} />
+                </button>
                 <button
                   type="button"
                   className="live-pages-editor-toggle"
@@ -1377,6 +1339,210 @@ export function PagesPage({
           <div className="live-pages-empty">{t('pages.empty')}</div>
         )}
       </section>
+      {detail && syncPanelOpen && (
+        <aside
+          id="live-page-sync-panel"
+          ref={syncPanelRef}
+          className="disc-tool-panel live-pages-sync-panel"
+          data-testid="live-page-recent-refreshes"
+          aria-label={t('pages.autoRefresh')}
+        >
+          <header className="disc-tool-panel-header">
+            <div className="disc-tool-panel-title">
+              <History size={15} />
+              <span>{t('pages.autoRefresh')}</span>
+            </div>
+            <div className="disc-tool-panel-actions">
+              <button
+                type="button"
+                className="disc-tool-panel-icon"
+                onClick={closeSyncPanel}
+                aria-label={t('pages.closeSyncPanel')}
+                title={t('pages.closeSyncPanel')}
+              >
+                <X size={14} />
+              </button>
+            </div>
+          </header>
+          <div className="disc-tool-panel-body live-pages-sync-body">
+            <section className="live-pages-sync-section" data-testid="live-page-sync-workflows" aria-label={t('pages.linkedWorkflows')}>
+              <header>
+                <h3><Workflow size={12} />{t('pages.linkedWorkflows')}</h3>
+                <button
+                  type="button"
+                  className="live-pages-sync-run-all"
+                  onClick={() => void runAllWorkflows()}
+                  disabled={enabledWorkflows.length === 0 || anyWorkflowRunning || runAllBusy}
+                  title={enabledWorkflows.length === 0
+                    ? t('pages.runAllWorkflowsNone')
+                    : runAllBusy
+                      ? t('pages.runAllWorkflowsBusy')
+                      : t('pages.runAllWorkflowsTitle', enabledWorkflows.length)}
+                >
+                  {anyWorkflowRunning || runAllBusy ? <Loader2 size={12} className="spin" /> : <Play size={12} />}
+                  {runAllProgress && anyWorkflowRunning
+                    ? t('pages.runAllProgress', runAllProgress.done, runAllProgress.total)
+                    : t('pages.runAllWorkflows')}
+                </button>
+              </header>
+              {linkedWorkflows.length > 0 ? (
+                <ul className="live-pages-sync-workflows">
+                  {linkedWorkflows.map(workflow => {
+                    const run = workflowRuns[workflow.id];
+                    const lastPublication = recentPublications.find(publication => publication.workflow_id === workflow.id);
+                    const runLabel = workflow.enabled ? t('pages.runLinkedWorkflow', workflow.name) : t('pages.runDisabledWorkflow');
+                    return (
+                      <li key={workflow.id} className="live-pages-sync-workflow" data-enabled={workflow.enabled}>
+                        <div className="live-pages-sync-workflow-main">
+                          <AppLink
+                            to={workflowPath(workflow.id)}
+                            className="live-pages-linked-workflow-open"
+                            onNavigate={onNavigateWorkflow ? () => onNavigateWorkflow(workflow.id) : undefined}
+                          >
+                            {workflow.name}
+                          </AppLink>
+                          {!workflow.enabled && <span className="live-pages-sync-badge">{t('pages.workflowDisabled')}</span>}
+                          <button
+                            type="button"
+                            className="live-pages-linked-workflow-run"
+                            onClick={() => void runLinkedWorkflow(workflow)}
+                            disabled={!workflow.enabled || run?.state === 'running'}
+                            data-state={run?.state ?? 'idle'}
+                            title={runLabel}
+                            aria-label={runLabel}
+                          >
+                            {run?.state === 'running'
+                              ? <Loader2 size={12} className="spin" />
+                              : run?.state === 'success'
+                                ? <CheckCircle2 size={12} data-testid="live-page-sync-success-icon" />
+                                : run?.state === 'error'
+                                  ? <X size={12} data-testid="live-page-sync-error-icon" />
+                                  : <Play size={12} />}
+                          </button>
+                        </div>
+                        <div className="live-pages-sync-workflow-status">
+                          {run && run.state !== 'running' ? (
+                            <small
+                              data-kind={run.state}
+                              role={run.state === 'error' ? 'alert' : 'status'}
+                            >
+                              {run.state === 'success'
+                                ? <CheckCircle2 size={11} aria-hidden="true" />
+                                : <X size={11} aria-hidden="true" />}
+                              {run.message}
+                            </small>
+                          ) : run ? (
+                            <small data-kind="running">{t('pages.workflowRunning')}</small>
+                          ) : skippedWorkflowIds.has(workflow.id) ? (
+                            <small data-kind="skipped">{t('pages.workflowSkipped')}</small>
+                          ) : lastPublication ? (
+                            <small>
+                              {t('pages.workflowLastPublished')}{' '}
+                              <time title={new Date(lastPublication.published_at).toLocaleString(locale)}>
+                                {formatRelativeTime(lastPublication.published_at, locale)}
+                              </time>
+                            </small>
+                          ) : <small>{t('pages.workflowNeverPublished')}</small>}
+                        </div>
+                        {run && <RunStatusCard runId={run.card.id === workflow.id ? undefined : run.card.id} model={run.card} />}
+                      </li>
+                    );
+                  })}
+                </ul>
+              ) : <small className="live-pages-sync-empty">{t('pages.noLinkedWorkflows')}</small>}
+            </section>
+
+            <section className="live-pages-sync-section" data-testid="live-page-sync-datasets" aria-label={t('pages.datasetStorage')}>
+              <header>
+                <h3><Database size={12} />{t('pages.datasetStorage')}</h3>
+                <span className="live-pages-sync-total">{formatBytes(totalDatasetSize)}</span>
+              </header>
+              <ul className="live-pages-sync-datasets">
+                {detail.datasets.map(dataset => (
+                  <li key={dataset.id}>
+                    <button type="button" onClick={() => setSelectedDatasetId(dataset.id)} title={t('pages.datasetSizeTitle', dataset.name, formatBytes(dataset.data_size_bytes))}>
+                      <strong>{dataset.name}</strong>
+                      <span>{formatBytes(dataset.data_size_bytes)}</span>
+                      <LivePageDatasetUsageLine dataset={dataset} usage={datasetUsage.find(item => item.name === dataset.name)} />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </section>
+
+            <section className="live-pages-sync-section" data-testid="live-page-sync-history" aria-label={t('pages.syncHistory')}>
+              <header>
+                <h3><History size={12} />{t('pages.syncHistory')}</h3>
+                <span className="live-pages-sync-total">{t('pages.recentRefreshesHint')}</span>
+              </header>
+                    <div className="live-pages-refresh-timeline">
+                      {recentPublications.length > 0 ? recentPublications.map(publication => {
+                        const workflowName = publication.workflow_name ?? t('pages.directPublication');
+                        const workflowId = publication.workflow_id;
+                        // Rolling upgrades may briefly serve the pre-delta Page
+                        // response. Treat its touched datasets as changed instead
+                        // of crashing or falsely claiming that they were equal.
+                        const contentChanged = publication.content_changed ?? true;
+                        const changedDatasets = publication.changed_datasets ?? publication.datasets_updated;
+                        const unchangedDatasets = publication.unchanged_datasets ?? [];
+                        const content = (
+                          <>
+                            <span className="live-pages-refresh-marker" data-changed={contentChanged} aria-hidden="true" />
+                            <span className="live-pages-refresh-event">
+                              <span className="live-pages-refresh-event-head">
+                                <strong>
+                                  {contentChanged
+                                    ? t('pages.refreshChanged')
+                                    : t('pages.refreshUnchanged')}
+                                </strong>
+                                <time title={new Date(publication.published_at).toLocaleString(locale)}>
+                                  {formatRelativeTime(publication.published_at, locale)}
+                                </time>
+                              </span>
+                              <span className="live-pages-refresh-event-meta">
+                                <span>{workflowName}</span>
+                                <span>data r{publication.data_revision}</span>
+                                {publication.workflow_run_id && <span>{t('pages.refreshRun')}</span>}
+                              </span>
+                              <span className="live-pages-refresh-deltas">
+                                {changedDatasets.map(dataset => (
+                                  <span key={`changed-${dataset}`} data-kind="changed">{dataset}</span>
+                                ))}
+                                {unchangedDatasets.map(dataset => (
+                                  <span key={`unchanged-${dataset}`} data-kind="unchanged">{t('pages.unchangedDataset', dataset)}</span>
+                                ))}
+                                {publication.points_added > 0 && (
+                                  <span data-kind="points">{t('pages.pointsAdded', publication.points_added)}</span>
+                                )}
+                                {publication.points_removed > 0 && (
+                                  <span data-kind="retention">{t('pages.pointsRemoved', publication.points_removed)}</span>
+                                )}
+                              </span>
+                            </span>
+                            {workflowId && <ChevronRight size={14} className="live-pages-refresh-open" />}
+                          </>
+                        );
+                        return workflowId ? (
+                          <AppLink
+                            key={publication.id}
+                            to={workflowPath(workflowId, publication.workflow_run_id)}
+                            className="live-pages-refresh-row"
+                            onNavigate={onNavigateWorkflow
+                              ? () => onNavigateWorkflow(workflowId, publication.workflow_run_id ?? undefined)
+                              : undefined}
+                            aria-label={t('pages.openRefreshRun', workflowName)}
+                          >
+                            {content}
+                          </AppLink>
+                        ) : (
+                          <div key={publication.id} className="live-pages-refresh-row">{content}</div>
+                        );
+                      }) : <small>{t('pages.noRecentRefreshes')}</small>}
+                    </div>
+            </section>
+          </div>
+        </aside>
+      )}
       {importOpen && <ArtifactImportDialog onClose={closeImport} onImported={page => {
         setImportOpen(false);
         setPages(previous => [...previous, page]);

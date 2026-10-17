@@ -209,7 +209,7 @@ pub async fn check(State(_state): State<AppState>) -> Json<ApiResponse<VersionCh
     }))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

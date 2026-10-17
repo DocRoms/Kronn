@@ -137,6 +137,6 @@ pub fn unknown_cost_reasons(conn: &Connection, disc_id: &str) -> Result<Vec<Stri
     Ok(reasons)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "message_usage_test.rs"]
 mod message_usage_test;

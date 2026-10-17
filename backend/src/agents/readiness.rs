@@ -278,6 +278,6 @@ fn parse_login(agent: &AgentType, success: bool, stdout: &str, stderr: &str) -> 
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "readiness_tests.rs"]
 mod tests;

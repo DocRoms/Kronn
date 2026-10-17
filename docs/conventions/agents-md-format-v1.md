@@ -153,6 +153,11 @@ names, versions, behaviour). The grammar:
 - `[src: file: <path>.docx]` — file only. Required for a binary file (.docx,
   .pdf, images), which has no lines; detected by content, not extension. In audited `docs/`
   a text file always takes a line, and a binary file never does.
+- To cite an **absence** ("no audit step in `ci.yaml`"), cite the whole file as
+  `[src: file: <path>:1-N]` with `N` its line count and state the absence outside the brackets. En and
+  em dashes are accepted in ranges, and a `#symbol` anchor may follow a range (`path:1-2#name`). A
+  whole-file range backing a claim that is not an absence draws a non-blocking warning. Paths are
+  repository-root relative, never relative to the citing document.
 - Percent-encoded paths (`My%20File.docx`) are decoded before resolving.
 
 Mechanical verification is **path-jailed to the project root**: a citation that escapes the

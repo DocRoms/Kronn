@@ -533,7 +533,7 @@ impl ResumableAudit {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod resumable_tests {
     use super::ResumableAudit;
 
@@ -579,7 +579,7 @@ mod resumable_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod audit_steps_tests {
     #[tokio::test]
     async fn lists_the_full_chain_in_run_order() {
@@ -602,7 +602,7 @@ mod audit_steps_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod audit_status_tests {
     use super::*;
 

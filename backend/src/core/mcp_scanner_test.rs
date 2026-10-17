@@ -1,4 +1,4 @@
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use crate::core::mcp_scanner::*;
     use serial_test::serial;
@@ -3112,8 +3112,8 @@ args = ["@example/old-mcp"]
     // The bridge script must be findable on disk for any of these tests
     // to pass. In dev mode it lives at
     // `backend/scripts/disc-introspection-mcp.py`, which the dev-mode
-    // fallback in `disc_introspection_mcp_path` resolves via
-    // `CARGO_MANIFEST_DIR`. We assert that the helper actually finds
+    // fallback in `disc_introspection_mcp_path` resolves from the working
+    // directory (cargo runs tests from `backend/`). We assert that the helper actually finds
     // *something* before each injection assertion — if the script ever
     // gets renamed or relocated, these tests yell loudly instead of
     // silently passing on an empty no-op.

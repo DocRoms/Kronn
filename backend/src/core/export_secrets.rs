@@ -295,6 +295,6 @@ fn redact_steps<'a>(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "export_secrets_test.rs"]
 mod tests;

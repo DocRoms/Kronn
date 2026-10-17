@@ -4,7 +4,7 @@ An audit step can run on OpenCode, Gemini CLI, GitHub Copilot CLI, Kiro — the
 native ACP agents — and on Claude Code and Codex through their adapters. All of
 them run inside Kronn's ACP host, and the audit pipelines (Full and partial)
 start them through one launcher
-[src: file: backend/src/api/audit/agent_launch.rs:84-104#AuditAgentLauncher]. Three things went wrong there
+[src: file: backend/src/api/audit/agent_launch.rs:121-141#AuditAgentLauncher]. Three things went wrong there
 on the first real bench (OpenCode on Ollama, `front_apollo`), and were one
 assumption each: that the process `start` returns is the agent, that a refused
 read is a failed tool, and that usage is something only Claude's stream-json
@@ -80,7 +80,7 @@ Now an ACP agent is stopped like an HTTP agent (KT-924), through a token:
 1. Both pipelines register a cancellation token per step **before** the agent
    starts (the handshake and a cold model's first answer can take long), and
    register a PID only for a direct CLI agent. `stops_with_token()` says which
-   [src: file: backend/src/api/audit/agent_launch.rs:209-217#stops_with_token].
+   [src: file: backend/src/api/audit/agent_launch.rs:246-254#stops_with_token].
 2. `cancel_audit` trips the token. The ACP session writes `session/cancel`
    (bounded to five seconds, so a wedged agent cannot hold the stop hostage),
    drops the turn, and shuts the agent's process down
@@ -95,7 +95,7 @@ Now an ACP agent is stopped like an HTTP agent (KT-924), through a token:
 
 The partial audit now checks the stop between two steps and after each step's
 agent, finalises the run as `Cancelled` and releases the project lease, like the
-Full audit [src: file: backend/src/api/audit/drift.rs:785-812#mark_cancelled] [src: file: backend/src/api/audit/drift.rs:1211-1272#mark_cancelled_at_step]. A partial refresh that
+Full audit [src: file: backend/src/api/audit/drift.rs:785-812#mark_cancelled] [src: file: backend/src/api/audit/drift.rs:1212-1277#mark_cancelled_at_step]. A partial refresh that
 was cancelled does not refresh the baseline, so its sections stay reported as
 stale.
 
@@ -109,7 +109,9 @@ The step counter only read Claude's stream-json (`parse_claude_stream_line`).
 Every ACP step was recorded at 0 tokens, per step and per run. Now:
 
 - **Where the figure comes from.** Claude's stream-json is read as before
-  (largest reading, because Claude's usage is cumulative per call). Any agent
+  (each turn's usage is summed as it arrives, so a stopped step keeps what it
+  consumed; the final `result` line, which states the whole run, replaces the
+  sum — KT-1313). Any agent
   that streams text reports through the process's own usage counters: an ACP
   runtime puts them on the `session/prompt` response — OpenCode sends
   `inputTokens`, `outputTokens`, `cachedReadTokens`, `cachedWriteTokens`, which
@@ -143,17 +145,17 @@ not before.
 - **Where the cost comes from.** Only what a runtime reports itself: Claude
   Code's `total_cost_usd` (its stream-json `result` line, or the adapter's
   `Cost` event) and OpenRouter's `usage.cost`, summed per response
-  [src: file: backend/src/agents/chat_codec.rs:151-160#cost_usd_micros] [src: file: backend/src/agents/runner.rs:14031-14037#total_cost_usd] [src: file: backend/src/agents/runner.rs:5673-5675#usd_micros] [src: file: backend/src/agents/runner.rs:9804-9810#cost_usd_micros].
+  [src: file: backend/src/agents/chat_codec.rs:151-160#cost_usd_micros] [src: file: backend/src/agents/runner.rs:14051-14057#total_cost_usd] [src: file: backend/src/agents/runner.rs:5673-5675#usd_micros] [src: file: backend/src/agents/runner.rs:9824-9830#cost_usd_micros].
   The recorded cost is never recomputed from a rate table; a finished step
   whose agent reported none is priced on read by `core::pricing` for the served
   model and shown as an estimate, never as a reported cost
-  [src: file: backend/src/db/audit_runs.rs:1611-1657#price_steps].
+  [src: file: backend/src/db/audit_runs.rs:1629-1675#price_steps].
 - **Per step.** `audit_run_steps.cost_usd_micros` (integer micro-USD) sums the
   step's attempts. It stays `NULL` when any attempt that ran reported no cost:
   a sum over a silent attempt would be a floor shown as the whole. A reported
   zero is recorded as 0. `step_done` carries the same figure as
   `cost_usd_micros` (`null` when unknown)
-  [src: file: backend/src/api/audit/agent_launch.rs:492-519#StepCost].
+  [src: file: backend/src/api/audit/agent_launch.rs:529-556#StepCost].
 - **The run's model.** `audit_runs.model` is the model(s) the runtime reported
   serving, from the launch's provenance capture shared by every step (`a / b`
   when several). With none observed it is the model Settings or the named
@@ -173,7 +175,7 @@ not before.
   count on its run's usage; an ACP agent on the activity sink, which now counts
   the calls where they pass (`AgentActivity.calls`) so a reader polling it misses
   none. `AuditActivityProbe` reads either
-  [src: file: backend/src/api/audit/agent_launch.rs:357-386#AuditActivityProbe].
+  [src: file: backend/src/api/audit/agent_launch.rs:394-423#AuditActivityProbe].
 - **Ticks, not lines.** For an agent without stream-json, both pipelines look at
   the probe on every line and every `ACTIVITY_TICK` (1 s): a moved tool sends
   `tool_call` with `calls`, moved tokens send `step_progress`, and both update the
@@ -203,7 +205,7 @@ The broker auto-approves `fetch`-kind tool calls, so an ACP runtime may well
 reach the web; Kronn has no declaration of which runtimes expose such a tool,
 so it does not claim it. A `[src: deps: …]` citation is checked against the
 injected watch by the enforce gate (`lint_step_file_with_deps`).
-`[src: file: backend/src/api/audit/agent_launch.rs:320-351#version_reach]`
+`[src: file: backend/src/api/audit/agent_launch.rs:357-388#version_reach]`
 
 ## What this does not cover
 

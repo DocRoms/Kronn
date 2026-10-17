@@ -240,6 +240,6 @@ pub fn render(inventory: &StaticContextInventory) -> String {
     out
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "static_context_test.rs"]
 mod static_context_test;

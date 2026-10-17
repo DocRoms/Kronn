@@ -153,7 +153,7 @@ pub async fn reset_buckets() {
     BUCKETS.lock().await.clear();
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use serial_test::serial;

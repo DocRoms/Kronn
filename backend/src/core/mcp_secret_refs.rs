@@ -169,7 +169,7 @@ pub fn apply_to(command: &mut tokio::process::Command, work_dir: &Path) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

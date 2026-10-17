@@ -461,7 +461,7 @@ fn offset_is_valid(rest: &str) -> bool {
         && bytes[4..6].iter().all(u8::is_ascii_digit)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

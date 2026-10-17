@@ -1368,21 +1368,33 @@ fn split_path_and_lines(reference: &str) -> (&str, Option<(usize, usize)>) {
     (reference, None)
 }
 
-fn parse_line_spec(s: &str) -> Option<(usize, usize)> {
-    if let Some((a, b)) = s.split_once('-') {
-        let start = a.trim().parse::<usize>().ok()?;
-        let end = b.trim().parse::<usize>().ok()?;
-        if start == 0 || end < start {
-            return None;
-        }
-        Some((start, end))
-    } else {
-        let n = s.trim().parse::<usize>().ok()?;
-        if n == 0 {
-            return None;
-        }
-        Some((n, n))
+/// The en and em dash, which models write where a line range wants a hyphen.
+pub(crate) const RANGE_DASHES: [char; 2] = ['\u{2013}', '\u{2014}'];
+
+/// A line spec with its en/em dashes turned into the hyphen they stand for. The
+/// one place every gate (verifier, citation drift, documentary gate) reads a
+/// range through, so none of them disagrees on what a range is.
+pub(crate) fn normalize_range_dashes(s: &str) -> String {
+    s.replace(RANGE_DASHES, "-")
+}
+
+/// `12` or `12-20` as written, without judging the numbers: `None` when a bound
+/// is missing or not a number, so a caller can say "not a line number".
+pub(crate) fn parse_line_bounds(s: &str) -> Option<(usize, usize)> {
+    let normalized = normalize_range_dashes(s);
+    let bounds: Vec<_> = normalized
+        .split('-')
+        .map(|bound| bound.trim().parse::<usize>())
+        .collect();
+    match bounds.as_slice() {
+        [Ok(line)] => Some((*line, *line)),
+        [Ok(start), Ok(end)] => Some((*start, *end)),
+        _ => None,
     }
+}
+
+fn parse_line_spec(s: &str) -> Option<(usize, usize)> {
+    parse_line_bounds(s).filter(|&(start, end)| start != 0 && end >= start)
 }
 
 /// Peel a `#symbol` anchor off `path:line#symbol` / `path:start-end#symbol`.
@@ -1401,7 +1413,7 @@ fn split_anchor(reference: &str) -> (&str, Option<&str>) {
 }
 
 /// An identifier, optionally dotted or dashed (`fn_name`, `Type.method`, `check-version`).
-fn is_anchor_symbol(s: &str) -> bool {
+pub(crate) fn is_anchor_symbol(s: &str) -> bool {
     let mut chars = s.chars();
     chars
         .next()
@@ -2445,6 +2457,30 @@ fn foreign_worktree_path(cleaned: &str, roots: &[&Path]) -> Option<String> {
         .then(|| format!("{path_part} is in a worktree of another project — refused"))
 }
 
+/// The `.git` file a worktree registration (`<repo>/.git/worktrees/<name>/`)
+/// points at. Git may store that path relative to the registration directory
+/// (`../../../.kronn/worktrees/task-kt-9/.git`): such a path is joined to its
+/// directory and normalized here, not handed to `resolve_host_path`, which
+/// refuses every `..` and would log a warning per registered worktree. An
+/// absolute path is the host path it always was.
+fn registered_worktree_dot_git(registration: &Path, recorded: &str) -> PathBuf {
+    let recorded = Path::new(recorded);
+    if recorded.is_absolute() {
+        return crate::core::scanner::resolve_host_path(&recorded.to_string_lossy());
+    }
+    let mut normalized = PathBuf::new();
+    for component in registration.join(recorded).components() {
+        match component {
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
 /// The worktrees of the project checked out at `checkout`: every directory
 /// under its `.kronn/worktrees/`, plus the worktrees git registers for it
 /// (`.git/worktrees/*/gitdir`). Read from disk, no subprocess; symlinked
@@ -2460,7 +2496,7 @@ pub fn project_lane_roots(checkout: &Path) -> Vec<LaneRoot> {
             let Ok(gitdir) = std::fs::read_to_string(entry.path().join("gitdir")) else {
                 continue;
             };
-            let dot_git = crate::core::scanner::resolve_host_path(gitdir.trim());
+            let dot_git = registered_worktree_dot_git(&entry.path(), gitdir.trim());
             if let Some(worktree) = dot_git.parent() {
                 paths.push(worktree.to_path_buf());
             }
@@ -2744,7 +2780,7 @@ pub fn finalize_lint_report(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 
@@ -3547,6 +3583,51 @@ mod tests {
         assert_eq!(split_path_and_lines("weird:name"), ("weird:name", None));
         // Reversed range is rejected → treated as no line spec.
         assert_eq!(split_path_and_lines("foo.rs:20-10"), ("foo.rs:20-10", None));
+    }
+
+    // KT-1307: the en and em dash a model writes for a range hyphen are read the
+    // same way by every gate (verifier, citation drift, documentary gate).
+    #[test]
+    fn en_and_em_dash_ranges_are_line_ranges() {
+        assert_eq!(parse_line_bounds("17\u{2013}23"), Some((17, 23)));
+        assert_eq!(parse_line_bounds("17\u{2014}23"), Some((17, 23)));
+        assert_eq!(parse_line_bounds("17 \u{2013} 23"), Some((17, 23)));
+        assert_eq!(parse_line_bounds("9-3"), Some((9, 3)));
+        assert_eq!(parse_line_bounds("extends"), None);
+        assert_eq!(parse_line_bounds("5\u{2013}"), None);
+        assert_eq!(
+            split_path_and_lines("a/foo.rs:10\u{2013}20"),
+            ("a/foo.rs", Some((10, 20)))
+        );
+        assert_eq!(
+            split_path_and_lines("foo.rs:20\u{2014}10"),
+            ("foo.rs:20\u{2014}10", None)
+        );
+        assert_eq!(
+            file_citation("file: src/a.rs:2\u{2013}4"),
+            Some(("src/a.rs".into(), Some((2, 4))))
+        );
+        assert_eq!(
+            file_citation_anchored("file: src/a.rs:2\u{2014}4#retry_once"),
+            Some(("src/a.rs".into(), Some((2, 4)), Some("retry_once".into())))
+        );
+    }
+
+    #[test]
+    fn analyze_verifies_a_dash_range_like_a_hyphen_range() {
+        let root = temp_project(); // src/foo.rs = 5 lines
+        let green = analyze(
+            "Claim [src: file: src/foo.rs:2\u{2013}4] and [src: file: src/foo.rs:1\u{2014}5].",
+            Some(&root),
+        );
+        assert_eq!(green.sources.len(), 2, "{green:?}");
+        assert!(
+            green.sources.iter().all(|s| !s.status.is_fabricated()),
+            "{green:?}"
+        );
+        let red = analyze("Claim [src: file: src/foo.rs:4\u{2013}9].", Some(&root));
+        assert!(red.sources[0].status.is_fabricated(), "{red:?}");
+        std::fs::remove_dir_all(&root).ok();
     }
 
     // ── Niveau 1 — classification ─────────────────────────────────────
@@ -6273,6 +6354,31 @@ mod lane_origin {
         assert_eq!(c.origin, Some(SourceOrigin::worktree(&name)));
         std::fs::remove_dir_all(&checkout).ok();
         std::fs::remove_dir_all(&elsewhere).ok();
+    }
+
+    /// KT-1316 — git can record a worktree's `.git` relative to its registration;
+    /// that is a lane like any other, found without a `resolve_host_path` refusal.
+    #[test]
+    fn a_relative_worktree_registration_is_a_lane() {
+        let checkout = temp_dir("checkout");
+        write(&checkout, ".kronn/worktrees/task-kt-9/src/here.rs", 2);
+        let meta = checkout.join(".git/worktrees/task-kt-9");
+        std::fs::create_dir_all(&meta).unwrap();
+        std::fs::write(
+            meta.join("gitdir"),
+            "../../../.kronn/worktrees/task-kt-9/.git\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            registered_worktree_dot_git(&meta, "../../../.kronn/worktrees/task-kt-9/.git"),
+            checkout.join(".kronn/worktrees/task-kt-9/.git")
+        );
+        let lanes = project_lane_roots(&checkout);
+        // Found through both the directory listing and the registration: once.
+        assert_eq!(lanes.len(), 1, "{lanes:?}");
+        assert_eq!(lanes[0].name, "task-kt-9");
+        std::fs::remove_dir_all(&checkout).ok();
     }
 
     #[test]

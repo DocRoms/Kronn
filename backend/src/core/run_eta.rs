@@ -133,7 +133,7 @@ pub fn next_check_polling(expected_ms: Option<u64>, elapsed_ms: u64, samples: u3
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

@@ -402,7 +402,7 @@ pub(crate) fn trace_line(outcome: &ToolOutcome) -> String {
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

@@ -403,7 +403,7 @@ pub fn enforce_human_owned_sections(
     Some((out_lines.join("\n"), diffs))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use std::fs;
@@ -419,6 +419,22 @@ mod tests {
             verdict.is_clean(),
             "verified citation must not be fabricated"
         );
+    }
+
+    #[test]
+    fn a_dash_range_passes_the_enforce_gate_like_a_hyphen_range() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("long.md"), "x\n".repeat(30)).unwrap();
+        for ok in ["17\u{2013}23", "17\u{2014}23", "17-23", "1\u{2013}30"] {
+            let verdict =
+                lint_step_file(&format!("Claim [src: file: long.md:{ok}]."), &[dir.path()]);
+            assert!(verdict.is_clean(), "{ok}: {:?}", verdict.fabricated);
+        }
+        for bad in ["17\u{2013}31", "31\u{2014}40", "23\u{2013}17"] {
+            let verdict =
+                lint_step_file(&format!("Claim [src: file: long.md:{bad}]."), &[dir.path()]);
+            assert!(!verdict.is_clean(), "{bad} must still be refused");
+        }
     }
 
     #[test]
@@ -1048,7 +1064,7 @@ pub(crate) fn enforce_failure_reason(count: usize, max_attempts: usize) -> Strin
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod enforce_gate_tests {
     use super::*;
 
