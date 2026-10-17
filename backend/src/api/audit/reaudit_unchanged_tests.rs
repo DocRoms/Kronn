@@ -55,7 +55,7 @@ case "$prompt" in
     fi
     if [ "$(cat '{state}/mode')" = reverify ]; then
       printf '%s\n' "$prompt" | sed -n 's/^- `\([^`]*\)`: citation path does not exist `\([^`]*\)`$/\1 [src: file: \2:/p' > '{state}/drop'
-      printf '%s\n' "$prompt" | sed -n 's/^- `\([^`]*\)`: citation line `\([^`]*\)` is outside `\([^`]*\)`$/\1 [src: file: \3:\2]/p' >> '{state}/drop'
+      printf '%s\n' "$prompt" | sed -n 's/^- `\([^`]*\)`: citation line `\([^`]*\)` is outside `\([^`]*\)`.*$/\1 [src: file: \3:\2]/p' >> '{state}/drop'
       while read -r doc needle; do
         d='{project}'/"$doc"
         grep -vF "$needle" "$d" > "$d.next"
