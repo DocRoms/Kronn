@@ -1271,7 +1271,7 @@ pub(crate) async fn prepare_general_mcp(
     build_global_mcp_context(state).await
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::core::config::default_config;

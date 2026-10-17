@@ -76,7 +76,7 @@ pub(super) fn watch(conn: &Connection, changes: &Arc<ResourceChanges>) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

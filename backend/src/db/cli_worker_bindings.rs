@@ -9,7 +9,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use super::discussion_sessions::JoinViaTokenResult;
 use crate::models::{OrchestrationActor, PlanningActorKind};
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "cli_worker_bindings_tests.rs"]
 mod tests;
 

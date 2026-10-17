@@ -28,7 +28,7 @@ pub fn promotion_target(scope: LearningScope) -> &'static str {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

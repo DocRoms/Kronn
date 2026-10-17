@@ -1,4 +1,4 @@
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use crate::core::registry::*;
     use crate::models::{ApiAuthKind, McpTransport, TokenInjection};

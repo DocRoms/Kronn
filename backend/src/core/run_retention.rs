@@ -175,7 +175,7 @@ pub fn spawn(db: Arc<Database>, config: Arc<RwLock<AppConfig>>) {
     });
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

@@ -4543,7 +4543,7 @@ pub fn list_attachment_files(
     Ok(rows)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "discussions_test.rs"]
 mod discussions_test;
 

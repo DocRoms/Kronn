@@ -51,7 +51,7 @@ pub(crate) fn failure_summary(stderr: &[String]) -> Option<String> {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

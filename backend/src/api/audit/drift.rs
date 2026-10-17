@@ -2167,7 +2167,7 @@ fn complete_partial_run(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod partial_finalize_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};

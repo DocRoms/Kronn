@@ -94,7 +94,7 @@ pub fn set_order(conn: &Connection, tag: &str, task_ids: &[String]) -> Result<()
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::models::{CreatePlanningTaskRequest, PlanningTaskStatus};

@@ -252,5 +252,5 @@ pub async fn record(state: &AppState, run: &mut WorkflowRun) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests;

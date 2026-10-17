@@ -639,6 +639,6 @@ fn strip_query_keys(url: &mut Url, keys: &[String]) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "safe_http_tests.rs"]
 mod tests;

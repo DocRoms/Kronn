@@ -1194,6 +1194,18 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Changed
 
+- The macOS and Windows portability CI job compiles only the four suites it
+  runs. A new default Cargo feature, `full-tests`, gates every other
+  unit-test module; the job builds with `--no-default-features`. The full
+  lib-test binary (9 200 tests) made rustc peak above 13 GB while the
+  standard macOS runner has 7 GB, so the first step swapped for 45 to 55
+  minutes. The job also prints its rustc and machine facts, since two runner
+  images with different Rust releases rotate and invalidate the shared
+  cache. Every other job keeps the default feature set. The `with_conn`
+  unwrap lint exempts exactly the item carrying a `#[cfg(test)]` or
+  `#[cfg(all(test, …))]` attribute instead of cutting each file at its
+  first `#[cfg(test)]`, so production code after a `mod tests;` line is
+  scanned again. (KT-15)
 - Every view has its own address, and the browser's Back, Forward and reload
   follow it: the pages (`/projects`, `/discussions`, `/planning`,
   `/workflows`, `/pages`, `/plugins`, `/config`), what is open in them

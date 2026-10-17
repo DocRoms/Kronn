@@ -773,7 +773,7 @@ pub fn complete(conn: &Connection, id: &str, completion: ActionCompletion) -> Re
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::models::{

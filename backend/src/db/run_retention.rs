@@ -251,7 +251,7 @@ pub fn workflow_retentions(conn: &Connection) -> Result<Vec<(String, WorkflowRet
         .collect())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

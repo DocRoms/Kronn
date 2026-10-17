@@ -1370,7 +1370,7 @@ pub async fn import_plugin_bundle(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::models::{ApiConfigKey, ApiSpec, TokenInjection};

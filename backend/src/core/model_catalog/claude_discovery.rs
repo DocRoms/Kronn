@@ -269,7 +269,7 @@ async fn initialize<W: AsyncWrite + Unpin, R: AsyncBufRead + Unpin>(
     invalid()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use serde_json::json;

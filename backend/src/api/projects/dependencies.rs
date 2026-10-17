@@ -207,7 +207,7 @@ pub async fn set_dependency_monitoring(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

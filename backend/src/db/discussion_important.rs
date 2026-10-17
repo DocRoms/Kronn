@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use ts_rs::TS;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests;
 
 /// Contract version pinned by every [`ImportantSpec`]. Single source of truth:

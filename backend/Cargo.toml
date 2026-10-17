@@ -25,6 +25,12 @@ path = "tests/it.rs"
 # only the dev-dependency on this package below turns it on, for the
 # integration test binary, so a release or debug `kronn` ignores the variable.
 test-support = []
+# `full-tests` (default) compiles every unit-test module. The macOS portability
+# job turns it off (`--no-default-features`) and compiles only the four suites
+# it runs: the full lib-test binary (9 200 tests) needs more memory than the
+# 7 GB GitHub macOS runner has and spends its time swapping.
+default = ["full-tests"]
+full-tests = []
 
 [dependencies]
 # Web framework
@@ -109,7 +115,7 @@ proc-macro2 = { version = "1", features = ["span-locations"] }
 
 # Document extraction (context files: xlsx, docx, pptx, pdf)
 calamine = "0.36"                                           # Excel spreadsheets
-zip = { version = "2", default-features = false, features = ["deflate"] }  # Office XML (docx, pptx)
+zip = { version = "9", default-features = false, features = ["deflate"] }  # Office XML (docx, pptx)
 pdf-extract = "0.12"                                        # PDF text extraction (0.12 → lopdf ≥0.42, fixes RUSTSEC-2026-0187)
 
 # TypeScript type generation

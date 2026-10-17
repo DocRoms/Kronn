@@ -776,7 +776,7 @@ pub async fn pr_template(
     })))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::core::config::default_config;

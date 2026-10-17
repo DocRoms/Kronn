@@ -220,7 +220,7 @@ fn normalize_five_field_weekdays(field: &str) -> String {
     normalized.join(",")
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use chrono::Duration;

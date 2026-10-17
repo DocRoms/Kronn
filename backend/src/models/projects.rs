@@ -1378,7 +1378,7 @@ pub fn compute_health_score(critical: u32, high: u32, medium: u32, low: u32) -> 
     raw.clamp(0.0, 100.0) as u8
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod audit_kind_label_tests {
     use super::AuditKind;
 
@@ -1420,7 +1420,7 @@ mod audit_kind_label_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod health_score_tests {
     use super::compute_health_score;
 

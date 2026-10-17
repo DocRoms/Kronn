@@ -1,4 +1,4 @@
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use crate::core::mcp_scanner::*;
     use serial_test::serial;

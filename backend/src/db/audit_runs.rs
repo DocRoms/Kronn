@@ -1674,7 +1674,7 @@ pub fn price_steps(conn: &Connection, steps: &mut [AuditRunStep]) -> Result<()> 
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

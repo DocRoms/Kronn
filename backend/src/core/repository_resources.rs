@@ -2044,7 +2044,7 @@ pub fn ensure_quick_exec_execution_approved(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use crate::models::{AgentType, ModelTier};

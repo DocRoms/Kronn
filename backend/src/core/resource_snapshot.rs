@@ -100,7 +100,7 @@ impl Drop for RunSnapshotGuard {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

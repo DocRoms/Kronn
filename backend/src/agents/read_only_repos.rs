@@ -234,7 +234,7 @@ fn push_unique(roots: &mut Vec<PathBuf>, path: PathBuf) {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, unix, feature = "full-tests"))]
 mod tests {
     use super::*;
 

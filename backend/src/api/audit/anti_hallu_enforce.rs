@@ -403,7 +403,7 @@ pub fn enforce_human_owned_sections(
     Some((out_lines.join("\n"), diffs))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use std::fs;
@@ -1064,7 +1064,7 @@ pub(crate) fn enforce_failure_reason(count: usize, max_attempts: usize) -> Strin
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod enforce_gate_tests {
     use super::*;
 

@@ -4811,7 +4811,7 @@ pub(crate) fn compute_cluster_recommendations(
     recs
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod drop_guard_tests {
     use super::AuditDropGuard;
 
@@ -4964,7 +4964,7 @@ mod drop_guard_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod finalization_decision_tests {
     use super::{should_optimize_documents, should_write_full_baseline};
     use crate::models::AuditKind;
@@ -5096,7 +5096,7 @@ mod finalization_decision_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod cancel_ack_tests {
     use super::wait_for_cancel_ack;
     use std::sync::{Arc, Mutex};
@@ -5135,7 +5135,7 @@ mod cancel_ack_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod resume_resolution_tests {
     use super::{already_succeeded_step_indices, resolve_resume_row};
     use crate::models::{AuditKind, AuditRun, AuditRunStep};
@@ -5284,7 +5284,7 @@ mod resume_resolution_tests {
 }
 
 // KT-931 — a Full run some of whose steps failed no longer voids the others.
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod partial_run_tests {
     use super::{
         already_succeeded_step_indices, already_unchanged_step_indices, founding_step_index,
@@ -5941,7 +5941,7 @@ mod partial_run_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod rewrite_proof_tests {
     use super::{rewrite_proof_verdict, RewriteProofVerdict};
     use crate::api::audit::validation::TargetSnapshot;
@@ -6021,7 +6021,7 @@ mod rewrite_proof_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod cluster_tests {
     use super::*;
     use std::fs;
@@ -6617,7 +6617,7 @@ mod cluster_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod severity_tests {
     use super::*;
 

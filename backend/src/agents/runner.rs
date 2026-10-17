@@ -14372,15 +14372,15 @@ fn codex_token_count(marker: &str, count: &str) -> Option<u64> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "runner_test.rs"]
 mod runner_test;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "runner_idle_test.rs"]
 mod runner_idle_test;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "runner_vision_test.rs"]
 mod runner_vision_test;
 
@@ -14452,7 +14452,7 @@ fn read_gemini_settings_api_key() -> Option<String> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod acp_resume_tests {
     use super::*;
     use crate::acp::{
@@ -15413,7 +15413,7 @@ mod acp_resume_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod argv_log_tests {
     use super::loggable_argv;
 

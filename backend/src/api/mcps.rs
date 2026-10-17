@@ -2737,7 +2737,7 @@ fn is_well_known_mcp_command(cmd: &str) -> bool {
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod adopt_tests {
     use super::*;
     use crate::core::host_mcp_discovery::HostScope;
@@ -2866,7 +2866,7 @@ ATL_USER = "alice"
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod command_safety_tests {
     use super::is_well_known_mcp_command;
 
@@ -3283,7 +3283,7 @@ pub async fn import_custom_plugin_file(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 

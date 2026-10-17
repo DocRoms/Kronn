@@ -1134,7 +1134,7 @@ pub async fn workflow_wait_for_completion(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
     use chrono::Duration;
