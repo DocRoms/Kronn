@@ -135,10 +135,10 @@ without that tool asks the principal to relay it. This follows the accepted
 KT-635 brief policy, not a guarantee that every external host CLI obeys it.
 An unreviewed delivery never appears as an accepted report. After approval,
 Kronn derives one fixed-layout report; replay does not produce another.
-[src: file: backend/src/api/orchestration.rs:7915-7919#has_room_publication]
-[src: file: backend/src/api/orchestration.rs:7939-7964#parent_milestones]
-[src: file: backend/src/api/orchestration.rs:6777-6802#publish_accepted_delivery_or_warn]
-[src: file: backend/src/api/orchestration.rs:29537-29638#approving_a_delivery_publishes_one_derived_report_in_the_parent]
+[src: file: backend/src/api/orchestration.rs:8220-8224#has_room_publication]
+[src: file: backend/src/api/orchestration.rs:8268-8317#parent_milestones]
+[src: file: backend/src/api/orchestration.rs:6962-6986#publish_accepted_delivery_or_warn]
+[src: file: backend/src/api/orchestration.rs:30397-30498#approving_a_delivery_publishes_one_derived_report_in_the_parent]
 
 Native conversational handoffs are a separate opt-in from launching a planning
 task. Their paid/unknown allowance is configurable and shared by the originating
@@ -147,8 +147,8 @@ guards: only attached, not-already-scheduled targets can run, delegation depth
 remains bounded and local handoffs retain a fixed ceiling. A typed wake to a
 joined CLI never silently substitutes a native responder.
 [src: file: backend/src/models/setup.rs:285-301#agent_handoff_paid_limit]
-[src: file: backend/src/db/discussions.rs:1672-1673#MAX_AGENT_HANDOFF_DEPTH]
-[src: file: backend/src/db/discussions.rs:1681-1716#agent_handoff_root]
+[src: file: backend/src/db/discussions.rs:1684-1685#MAX_AGENT_HANDOFF_DEPTH]
+[src: file: backend/src/db/discussions.rs:1693-1728#agent_handoff_root]
 [src: file: backend/src/db/discussions.rs:1921-1961#cli_mention_targets]
 [src: file: backend/src/db/discussions.rs:2012-2055#already_scheduled]
 

@@ -321,9 +321,9 @@ clear the old override only when the persisted agent, tier or connection
 actually changes. Each setter updates its field and clears the model in the
 same SQL statement. Resending an unchanged selection preserves its override;
 ordinary title edits and historical message models remain untouched.
-[src: file: backend/src/db/discussions.rs:1093-1101#update_discussion_tier]
-[src: file: backend/src/db/discussions.rs:1141-1172#update_discussion_agent]
-[src: file: backend/src/db/discussions.rs:1187-1202#update_discussion_connection]
+[src: file: backend/src/db/discussions.rs:1105-1113#update_discussion_tier]
+[src: file: backend/src/db/discussions.rs:1153-1184#update_discussion_agent]
+[src: file: backend/src/db/discussions.rs:1199-1214#update_discussion_connection]
 
 An explicit JSON `connection_id: null` is distinct from an absent field.
 Clearing a connection is validated against the effective agent before any
@@ -334,7 +334,7 @@ merely to compare targets.
 [src: file: backend/src/models/discussions.rs:609-618#connection_id]
 [src: file: backend/src/api/discussions/crud.rs:787-817#validate_connection_target]
 [src: file: backend/src/api/discussions/crud.rs:859-883#invalidate_summary_cache]
-[src: file: backend/src/db/discussions.rs:1082-1091#get_discussion_agent]
+[src: file: backend/src/db/discussions.rs:1094-1103#get_discussion_agent]
 
 Seven isolated Router/SQLite regressions cover changed and unchanged targets,
 null versus absent, invalid-target refusal and historical answer preservation.
