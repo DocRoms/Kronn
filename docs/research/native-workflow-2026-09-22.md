@@ -94,7 +94,7 @@ tool only reads that endpoint. The 11 MCP budget tests and 637 bridge tests
 passed then (both test files hold more tests today). Backend checks included 113
 workflow-filtered regressions, 6 clamping regressions, and all-target Clippy
 with warnings denied.
-[src: file: backend/scripts/ci/mcp_surface_budget.py:126#CATALOGUE_MAX_BYTES]
+[src: file: backend/scripts/ci/mcp_surface_budget.py:130#CATALOGUE_MAX_BYTES]
 [src: file: backend/scripts/ci/test_mcp_surface_budget.py:40-212#McpSurfaceBudgetTests]
 [src: file: backend/scripts/disc-introspection-mcp.py:9449-9451#call_workflow_step_schema]
 [src: file: backend/scripts/test_disc_introspection_mcp.py:6890-6892#test_step_schema_reads_the_shared_backend_contract]

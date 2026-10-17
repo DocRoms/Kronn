@@ -123,7 +123,11 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # KT-1267: `task_exec_cancel` says the task status is left alone and how to
 # relaunch, inside the bytes of the text it replaces; ceiling lowered by 1 B
 # (84_967 -> 84_966).
-CATALOGUE_MAX_BYTES = 84_966
+# KT-1329: `disc_append` names the `kronn-question` card for a human decision
+# (the contract stays in `tool_manual disc_question_list`); paid for by
+# tightening its alias sentence and four schema descriptions, ceiling lowered
+# by 11 B (84_966 -> 84_955) and the heaviest declaration by 11 B.
+CATALOGUE_MAX_BYTES = 84_955
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is
@@ -132,7 +136,7 @@ CATALOGUE_MAX_BYTES = 84_966
 # Also corrected: this used to add raw `description` bytes to a separately
 # serialised schema, which counted neither the JSON envelope nor the escaping. It
 # now measures the whole declaration exactly as sent.
-DECLARATION_MAX_BYTES = 2_757
+DECLARATION_MAX_BYTES = 2_746
 
 # Tools allowed above DECLARATION_MAX_BYTES, with the reason. An entry here is a
 # debt acknowledged in writing, not an exemption to forget: shrink the tool and

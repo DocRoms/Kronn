@@ -545,6 +545,19 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- Agents now learn when and how to ask for a human arbitration (KT-1329).
+  Claude Code cuts the `kronn-internal` MCP `instructions` at 2 048 characters,
+  and the `kronn-question` guidance started at character 1 985 (cut to a single
+  sentence, no schema) or, on a first session, at 2 438 (cut entirely). It is
+  now a self-contained bullet with a valid inline example right after the intro
+  line, FIRST CONTACT moved to the end, and a Python test pins both onboarding
+  states. A workflow step that can `disc_append` gets the bullet too; a spawned
+  task worker is told why it cannot post a card and to ask its principal. The
+  card is also named in the `disc_append` description, the `disc_join` next
+  steps and the project template, the native prompt triggers on any decision
+  the human must arbitrate, and the `structured-questions` skill keeps
+  `{{var}}:` for facts only.
+
 - The audit's citation gate now says how to fix a citation (KT-1307). A path
   that only resolves under the docs root or next to the citing doc gets
   « paths are repository-root relative; did you mean `docs/AGENTS.md:94`? »,

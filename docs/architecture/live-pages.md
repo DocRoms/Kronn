@@ -615,8 +615,8 @@ Agents learn this contract where they write Page HTML: the MCP manuals of
 `data-kronn-action-state`, what the card shows), `page_update_html` adds that a
 block's reference must stay stable across revisions since it ties a button to
 its past launches, and the `workflow-architect` skill carries the same rules.
-`[src: file: backend/scripts/disc-introspection-mcp.py:9873-9908#_PAGE_ACTION_CONTRACT]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:10214-10223#page_update_html]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:9873-9927#_PAGE_ACTION_CONTRACT]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10233-10242#page_update_html]`
 `[src: file: backend/src/skills/workflow-architect.md:384-391#data-kronn-action-state]`
 Active and terminal execution rendering delegates to the common
 `RunStatusCard` contract used by Discussions. A Quick Prompt result records
