@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { useT } from '../lib/I18nContext';
 import { projects as projectsApi, externalApi, type ExternalApiConnectionView } from '../lib/api';
+import { connectionAgent } from '../lib/auditLaunchChoice';
 import { AGENT_LABELS, MODEL_TIER_ICONS, isUsable } from '../lib/constants';
 import { stepRanges } from '../lib/stepRanges';
 import { canRunAudit } from '../lib/agentCapabilities';
@@ -74,6 +75,10 @@ export interface AuditTimelineProps {
   agents: AgentDetection[];
   selectedAgent: AgentType | null;
   selectedTier: ModelTier;
+  /** The shown choice is the one of the run being retried or resumed (KT-1320). */
+  selectionFromRun?: boolean;
+  /** The run's own named connection was deleted: the launch uses the agent's default one. */
+  selectionConnectionGone?: boolean;
   modelTiers: ModelTiersConfig | null | undefined;
   /** Named external API connection of the selected HTTP agent, if any. */
   selectedConnectionId: string | null;
@@ -145,10 +150,6 @@ const NEWS_KEY = 'kr.audit.timeline.news.0.14.2';
 const LOCAL_AGENTS = new Set<AgentType>(['Ollama']);
 const HTTP_AGENTS = new Set<AgentType>(['LiteLlm', 'Nvidia', 'Custom']);
 const TIERS: ModelTier[] = ['reasoning', 'default', 'economy'];
-
-const PRESET_AGENT: Record<string, AgentType> = {
-  lite_llm: 'LiteLlm', nvidia: 'Nvidia', open_router: 'Custom', other: 'Custom',
-};
 
 interface AgentChoice {
   key: string;
@@ -407,7 +408,7 @@ export function AuditTimeline(props: AuditTimelineProps) {
     const kindOf = (agent: AgentType): AgentChoice['kind'] =>
       LOCAL_AGENTS.has(agent) ? 'local' : HTTP_AGENTS.has(agent) ? 'http' : 'cli';
     // A named connection replaces the bare provider slot of the same preset.
-    const connected = new Set(connections.map(c => PRESET_AGENT[c.origin_preset] ?? 'Custom'));
+    const connected = new Set(connections.map(c => connectionAgent(c)));
     const detected: AgentChoice[] = props.agents
       .filter(a => canRunAudit(a) || (!isUsable(a) && isCliCandidate(a.agent_type)))
       .filter(a => !(HTTP_AGENTS.has(a.agent_type) && connected.has(a.agent_type)))
@@ -416,7 +417,7 @@ export function AuditTimeline(props: AuditTimelineProps) {
         usable: canRunAudit(a), kind: kindOf(a.agent_type), connection: null,
       }));
     const named: AgentChoice[] = connections.map(c => ({
-      key: `conn:${c.id}`, agent: PRESET_AGENT[c.origin_preset] ?? 'Custom', label: c.display_name,
+      key: `conn:${c.id}`, agent: connectionAgent(c), label: c.display_name,
       usable: !!c.endpoint, kind: 'http', connection: c,
     }));
     const all = [...detected, ...named];
@@ -1126,6 +1127,16 @@ export function AuditTimeline(props: AuditTimelineProps) {
                   `${MODEL_TIER_ICONS[selectedTier]} ${t(`disc.tier.${selectedTier}`)}`,
                   tierModel(selectedTier),
                 ].filter(Boolean).join(' · '))}
+              </p>
+            )}
+            {!locked && props.selectionFromRun && selected && selectedTier && (
+              <p className="audit-tl-note" data-testid="audit-timeline-selection-from-run">
+                {t('auditTimeline.agent.fromRun', `${MODEL_TIER_ICONS[selectedTier]} ${t(`disc.tier.${selectedTier}`)}`)}
+              </p>
+            )}
+            {!locked && props.selectionFromRun && props.selectionConnectionGone && selected && (
+              <p className="audit-tl-note" role="status" data-testid="audit-timeline-connection-gone">
+                {t('auditTimeline.agent.connectionGone', AGENT_LABELS[selected] ?? selected)}
               </p>
             )}
             {agentChoices.length === 0 && <p className="audit-tl-muted">{t('disc.noAgent')}</p>}

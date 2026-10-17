@@ -1202,7 +1202,17 @@ cancelled_at_step?: number,
  * and the resume itself; saved so the timeline and the validation prompt
  * can say so after the one-off toast is gone.
  */
-resume_drift?: string, };
+resume_drift?: string,
+/**
+ * KT-1320 — the model tier the run was launched with (`economy`,
+ * `default`, `reasoning`); absent on a run recorded before it was kept.
+ * A step retry or a resume reuses it unless the human picks another.
+ */
+tier?: string,
+/**
+ * KT-1320 — the named API connection the run's HTTP agent used, if any.
+ */
+connection_id?: string, };
 
 /**
  * An audit run's tokens and cost per phase and in total (KT-1084).

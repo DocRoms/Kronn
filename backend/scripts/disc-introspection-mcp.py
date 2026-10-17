@@ -4292,6 +4292,29 @@ def _current_project_id():
     return meta.get("project_id") if meta else None
 
 
+# What the backend answers (403) when a request names a resource outside the
+# scope its bridge token was launched with (`core/bridge_token.rs`).
+_SCOPE_REFUSAL_MARKERS = (
+    "outside this bridge token's scope",
+    "outside this bridge token's project",
+)
+_SCOPE_REFUSAL_HINT = (
+    "this agent was launched with a scope, and the resource it asked for is "
+    "outside it: it is not a failure of the tool. Do not retry the same id. "
+    "Ask the human to attach that discussion to this one, or work with the "
+    "discussions of this project (disc_list)."
+)
+
+
+def _http_error(code, body):
+    """The error for a non-2xx reply. A scope refusal says why and what to do,
+    since an agent runtime relays a bare 403 as "the tool returned an error"."""
+    message = f"HTTP {code}: {body[:500]}"
+    if code == 403 and any(marker in body for marker in _SCOPE_REFUSAL_MARKERS):
+        message += f" — {_SCOPE_REFUSAL_HINT}"
+    return RuntimeError(message)
+
+
 def _http(method, path, body=None, timeout=180):
     url = f"{_backend_url()}{path}"
     data = json.dumps(body).encode() if body is not None else None
@@ -4305,7 +4328,7 @@ def _http(method, path, body=None, timeout=180):
             return json.load(resp)
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"HTTP {e.code}: {body[:500]}")
+        raise _http_error(e.code, body)
 
 
 def _http_transport_retry(
@@ -4362,7 +4385,7 @@ def _http_text(method, path):
             return resp.read().decode("utf-8")
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"HTTP {e.code}: {body[:500]}")
+        raise _http_error(e.code, body)
 
 
 def _unwrap(envelope):
@@ -4489,7 +4512,7 @@ def _http_upload_context_file(disc_id, file_path):
             return _unwrap(json.load(resp))
     except urllib.error.HTTPError as exc:
         response_body = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"HTTP {exc.code}: {response_body[:500]}")
+        raise _http_error(exc.code, response_body)
 
 
 def _rollback_uploaded_context_files(disc_id, uploaded):
