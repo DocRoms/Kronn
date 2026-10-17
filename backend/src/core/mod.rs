@@ -7,6 +7,7 @@ pub mod approved_scripts;
 pub mod argv_roles;
 pub mod audit_baseline;
 pub mod audit_detectors;
+pub mod generated_paths;
 pub mod audit_documents;
 pub mod audit_ecosystems;
 pub mod audit_mcp_filter;

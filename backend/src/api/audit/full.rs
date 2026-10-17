@@ -1784,7 +1784,11 @@ pub async fn full_audit(
                 _ => false,
             };
 
-            let max_attempts = if enforce_mode || documentary_snapshot.is_some() {
+            // The detector disposition gate retries too (KT-1323): the TD
+            // index step gets the bounded budget whenever signals fired.
+            let detector_gated = analysis_step.target_file.ends_with("inconsistencies-tech-debt.md")
+                && !detector_signals.is_empty();
+            let max_attempts = if enforce_mode || documentary_snapshot.is_some() || detector_gated {
                 super::anti_hallu_enforce::MAX_ATTEMPTS
             } else {
                 1
@@ -2361,10 +2365,27 @@ pub async fn full_audit(
                     // Only runs when the prior checks passed (no point gating a
                     // step that's already failing).
                     if success && analysis_step.target_file.ends_with("inconsistencies-tech-debt.md") {
-                        if let Some(w) = crate::api::audit::validation::check_detector_disposition(
+                        if let Some(gap) = crate::api::audit::validation::detector_disposition_gap(
                             &project_path,
                             &detector_signals,
                         ) {
+                            let w = gap.warning;
+                            if attempt < max_attempts {
+                                tracing::warn!(
+                                    "Audit step {} ({}) detector disposition gate: {} undisposed signal(s), retry {}/{}",
+                                    step, file_label, gap.count, attempt + 1, max_attempts
+                                );
+                                yield Event::default().event("step_retry").data(
+                                    serde_json::json!({
+                                        "step": step, "file": file_label,
+                                        "attempt": attempt, "max_attempts": max_attempts,
+                                        "undisposed_count": gap.count,
+                                        "reason": "detector_disposition",
+                                    }).to_string()
+                                );
+                                citation_feedback = Some(gap.feedback);
+                                continue 'attempts;
+                            }
                             success = false;
                             tracing::warn!(
                                 "Audit step {} ({}) detector disposition gate failed: {}",
