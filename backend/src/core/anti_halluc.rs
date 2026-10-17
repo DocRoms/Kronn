@@ -2445,6 +2445,30 @@ fn foreign_worktree_path(cleaned: &str, roots: &[&Path]) -> Option<String> {
         .then(|| format!("{path_part} is in a worktree of another project — refused"))
 }
 
+/// The `.git` file a worktree registration (`<repo>/.git/worktrees/<name>/`)
+/// points at. Git may store that path relative to the registration directory
+/// (`../../../.kronn/worktrees/task-kt-9/.git`): such a path is joined to its
+/// directory and normalized here, not handed to `resolve_host_path`, which
+/// refuses every `..` and would log a warning per registered worktree. An
+/// absolute path is the host path it always was.
+fn registered_worktree_dot_git(registration: &Path, recorded: &str) -> PathBuf {
+    let recorded = Path::new(recorded);
+    if recorded.is_absolute() {
+        return crate::core::scanner::resolve_host_path(&recorded.to_string_lossy());
+    }
+    let mut normalized = PathBuf::new();
+    for component in registration.join(recorded).components() {
+        match component {
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
 /// The worktrees of the project checked out at `checkout`: every directory
 /// under its `.kronn/worktrees/`, plus the worktrees git registers for it
 /// (`.git/worktrees/*/gitdir`). Read from disk, no subprocess; symlinked
@@ -2460,7 +2484,7 @@ pub fn project_lane_roots(checkout: &Path) -> Vec<LaneRoot> {
             let Ok(gitdir) = std::fs::read_to_string(entry.path().join("gitdir")) else {
                 continue;
             };
-            let dot_git = crate::core::scanner::resolve_host_path(gitdir.trim());
+            let dot_git = registered_worktree_dot_git(&entry.path(), gitdir.trim());
             if let Some(worktree) = dot_git.parent() {
                 paths.push(worktree.to_path_buf());
             }
@@ -6318,6 +6342,31 @@ mod lane_origin {
         assert_eq!(c.origin, Some(SourceOrigin::worktree(&name)));
         std::fs::remove_dir_all(&checkout).ok();
         std::fs::remove_dir_all(&elsewhere).ok();
+    }
+
+    /// KT-1316 — git can record a worktree's `.git` relative to its registration;
+    /// that is a lane like any other, found without a `resolve_host_path` refusal.
+    #[test]
+    fn a_relative_worktree_registration_is_a_lane() {
+        let checkout = temp_dir("checkout");
+        write(&checkout, ".kronn/worktrees/task-kt-9/src/here.rs", 2);
+        let meta = checkout.join(".git/worktrees/task-kt-9");
+        std::fs::create_dir_all(&meta).unwrap();
+        std::fs::write(
+            meta.join("gitdir"),
+            "../../../.kronn/worktrees/task-kt-9/.git\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            registered_worktree_dot_git(&meta, "../../../.kronn/worktrees/task-kt-9/.git"),
+            checkout.join(".kronn/worktrees/task-kt-9/.git")
+        );
+        let lanes = project_lane_roots(&checkout);
+        // Found through both the directory listing and the registration: once.
+        assert_eq!(lanes.len(), 1, "{lanes:?}");
+        assert_eq!(lanes[0].name, "task-kt-9");
+        std::fs::remove_dir_all(&checkout).ok();
     }
 
     #[test]
