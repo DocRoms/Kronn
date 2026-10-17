@@ -15,6 +15,10 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 mod coverage_repair_tests;
 
 #[cfg(unix)]
+#[path = "detector_retry_tests.rs"]
+mod detector_retry_tests;
+
+#[cfg(unix)]
 #[path = "reaudit_unchanged_tests.rs"]
 mod reaudit_unchanged_tests;
 

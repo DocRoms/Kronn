@@ -1229,6 +1229,62 @@ pub(crate) fn markers_at(prose: &str) -> Vec<(usize, String)> {
     out
 }
 
+/// `value` cut to `max` characters without ever cutting inside a
+/// `[src: …]` marker: when the limit lands in one, the cut moves back to just
+/// before its `[`. `ellipsis` appends `…` when something was dropped (it counts
+/// toward `max`). A marker that is already unclosed in `value` is left alone.
+/// Every Kronn-generated text that can carry a citation must truncate through
+/// this, never through a bare `chars().take(n)`.
+pub fn truncate_outside_markers(value: &str, max: usize, ellipsis: bool) -> String {
+    if value.chars().count() <= max {
+        return value.to_string();
+    }
+    let room = if ellipsis { max.saturating_sub(1) } else { max };
+    let chars: Vec<char> = value.chars().collect();
+    let mut cut = room;
+    let lower: Vec<char> = value.to_ascii_lowercase().chars().collect();
+    let needle: Vec<char> = "[src:".chars().collect();
+    let mut i = 0usize;
+    while i + needle.len() <= chars.len() && i < cut {
+        if lower[i..i + needle.len()] != needle[..] {
+            i += 1;
+            continue;
+        }
+        let mut depth = 1i32;
+        let mut j = i + needle.len();
+        let mut close = None;
+        while j < chars.len() {
+            match chars[j] {
+                '[' => depth += 1,
+                ']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(j);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        match close {
+            // The limit falls inside this closed marker: stop before it.
+            Some(end) if end >= cut => {
+                cut = i;
+                break;
+            }
+            Some(end) => i = end + 1,
+            None => break,
+        }
+    }
+    let mut out: String = chars[..cut].iter().collect();
+    if ellipsis {
+        out = out.trim_end().to_string();
+        out.push('…');
+    }
+    out
+}
+
 /// Classify a marker's inner content into a kind + the bare reference, stripping
 /// an optional `<type>:` prefix from the v1.1 grammar (`file:`, `url:`, …).
 fn classify_source(raw: &str) -> (SourceKind, String) {
@@ -2747,6 +2803,29 @@ pub fn finalize_lint_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncate_outside_markers_never_cuts_a_marker() {
+        let text = "aaaa [src: file: src/lib.rs:10] bbbb [src: file: x[0].rs:1] cccc";
+        for max in 1..=text.chars().count() + 2 {
+            for ellipsis in [false, true] {
+                let out = truncate_outside_markers(text, max, ellipsis);
+                assert!(out.chars().count() <= max, "max {max}: {out}");
+                let opened = out.to_ascii_lowercase().matches("[src:").count();
+                assert_eq!(
+                    opened,
+                    extract_source_markers(&out).len(),
+                    "max {max} ellipsis {ellipsis}: {out}"
+                );
+            }
+        }
+        // Under the limit: untouched. Cut before a marker: stops at its `[`.
+        assert_eq!(truncate_outside_markers("short", 40, true), "short");
+        assert_eq!(truncate_outside_markers("aaaa [src: file: a.rs:1] z", 12, false), "aaaa ");
+        assert_eq!(truncate_outside_markers("aaaa [src: file: a.rs:1] z", 12, true), "aaaa…");
+        // A marker already unclosed in the input is left to the plain cut.
+        assert_eq!(truncate_outside_markers("ab [src: file: a", 8, false), "ab [src:");
+    }
 
     #[test]
     fn strip_fenced_code_drops_closed_blocks_but_restores_unclosed_ones() {

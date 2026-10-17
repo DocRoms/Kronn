@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::core::audit_baseline::{read_walked, rel_display, Capped, MAX_WALKED_FILES};
-use crate::core::audit_detectors::{walk, DetectedSignal, Severity};
+use crate::core::audit_detectors::{walk_including_generated as walk, DetectedSignal, Severity};
 use crate::models::{ProjectRule, ProjectRuleKind, ProjectRulePattern, ProjectRulePatternKind};
 
 pub const DETECTOR_ID: &str = "project-ban";

@@ -232,12 +232,7 @@ fn clean(value: &str) -> String {
 }
 
 fn truncate(value: &str, max: usize) -> String {
-    if value.chars().count() <= max {
-        return value.to_string();
-    }
-    let mut out: String = value.chars().take(max - 1).collect();
-    out.push('…');
-    out
+    crate::core::anti_halluc::truncate_outside_markers(value, max, true)
 }
 
 fn cell(value: &str) -> String {

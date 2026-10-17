@@ -794,11 +794,30 @@ fn escape_markdown_table_cell(value: &str) -> String {
 
 /// Shared bounded, skip-aware walk. Files only; depth-capped; heavy dirs
 /// pruned. Matches `scanner::scan_kronn_markers` conventions.
+///
+/// Generated, vendored and scaffolding files are skipped too: a signal there
+/// would force a TD nobody can fix in this repository (KT-1323).
 pub(crate) fn walk(root: &Path) -> impl Iterator<Item = walkdir::DirEntry> {
+    walk_with(root, true)
+}
+
+/// [`walk`] that still visits generated and vendored files, for a team's own
+/// bans (a rule against committed `*.min.js` must see them).
+pub(crate) fn walk_including_generated(root: &Path) -> impl Iterator<Item = walkdir::DirEntry> {
+    walk_with(root, false)
+}
+
+fn walk_with(root: &Path, skip_generated: bool) -> impl Iterator<Item = walkdir::DirEntry> {
     // The project's own AI doc folder is Kronn output wherever it lives (KT-1192).
     let own_docs = crate::core::docs_location::DocsRoot::for_project(root)
         .ok()
         .map(|docs_root| docs_root.dir(root));
+    let generated = if skip_generated {
+        crate::core::generated_paths::GeneratedPaths::load(root)
+    } else {
+        crate::core::generated_paths::GeneratedPaths::none()
+    };
+    let base = root.to_path_buf();
     WalkDir::new(root)
         .max_depth(8)
         .into_iter()
@@ -808,6 +827,11 @@ pub(crate) fn walk(root: &Path) -> impl Iterator<Item = walkdir::DirEntry> {
                     .to_str()
                     .map(|name| !SKIP_DIRS.contains(&name))
                     .unwrap_or(true)
+                && e.path()
+                    .strip_prefix(&base)
+                    .ok()
+                    .and_then(|rel| rel.to_str())
+                    .is_none_or(|rel| !generated.is_generated(&rel.replace('\\', "/")))
         })
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
@@ -1434,5 +1458,29 @@ mod tests {
             .iter()
             .any(|p| p.to_string_lossy().contains("node_modules")));
         assert!(!files.iter().any(|p| p.to_string_lossy().contains("docs/")));
+    }
+
+    #[test]
+    fn walk_skips_generated_vendored_and_scaffolding_files() {
+        let t = proj();
+        let blank = "<a target=\"_blank\">x</a>";
+        write(t.path(), "src/a.html", blank);
+        write(t.path(), "sass/generated/icons.html", blank);
+        write(t.path(), "web/config.php", "<?php");
+        write(t.path(), "legacy/lib.html", blank);
+        write(t.path(), ".gitattributes", "legacy/** linguist-vendored\n");
+        let files: Vec<String> = walk(t.path())
+            .map(|e| {
+                let rel = e.path().strip_prefix(t.path()).unwrap();
+                rel.to_string_lossy().into_owned()
+            })
+            .collect();
+        assert!(files.contains(&"src/a.html".to_string()));
+        assert!(!files
+            .iter()
+            .any(|f| f.contains("generated") || f.contains("config.php") || f.contains("legacy")));
+        let signals = detect_blank_without_noopener(t.path());
+        assert_eq!(signals.len(), 1, "{signals:?}");
+        assert_eq!(signals[0].evidence, "src/a.html:1");
     }
 }

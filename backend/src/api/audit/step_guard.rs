@@ -28,7 +28,8 @@ const MAX_MARKER_REASON_CHARS: usize = 240;
 /// reason, never the agent's text.
 pub(crate) fn partial_banner(step: u32, reason: &str) -> String {
     let one_line = reason.split_whitespace().collect::<Vec<_>>().join(" ");
-    let bounded: String = one_line.chars().take(MAX_MARKER_REASON_CHARS).collect();
+    let bounded =
+        crate::core::anti_halluc::truncate_outside_markers(&one_line, MAX_MARKER_REASON_CHARS, false);
     let bounded = bounded.replace("-->", "—>");
     format!(
         "{PARTIAL_OPEN}\n> ⚠️ **Partial document** — audit step {step} did not complete ({bounded}). \
