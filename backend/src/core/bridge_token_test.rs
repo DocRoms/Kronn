@@ -557,8 +557,26 @@ fn creations_are_forced_into_the_bound_project() {
             .expect("null replaced");
         assert_ne!(null[field], serde_json::Value::Null, "{pattern}");
     }
-    let qa = route("POST", "/api/quick-apis");
-    assert!(prepare_body(qa, None, Some(&json!({"name": "x"}))).is_err());
+    // From a room without a project, a template, a saved call, a Page or a
+    // workflow is general, as when a human creates it there (KT-1346); nothing else is.
+    for pattern in [
+        "/api/quick-prompts",
+        "/api/quick-apis",
+        "/api/pages",
+        "/api/workflows",
+    ] {
+        // Only once a human granted the room « General · write ».
+        let refused = prepare_body(route("POST", pattern), None, Some(&json!({"name": "x"})));
+        assert!(refused.is_err(), "{pattern} needs the general grant");
+        let mut reach = Reach::bound_only(None);
+        reach.granted.general = true;
+        let prepared = prepare_body_in(route("POST", pattern), &reach, Some(&json!({"name": "x"})));
+        assert_eq!(prepared.unwrap(), None, "{pattern} stays general");
+    }
+    for pattern in ["/api/quick-execs", "/api/planning/tasks"] {
+        let prepared = prepare_body(route("POST", pattern), None, Some(&json!({"name": "x"})));
+        assert!(prepared.is_err(), "{pattern}");
+    }
     let disc = route("POST", "/api/disc/create");
     assert!(prepare_body(disc, None, Some(&json!({"title": "x"}))).is_ok());
 }

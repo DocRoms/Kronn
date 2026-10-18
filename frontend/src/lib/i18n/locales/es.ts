@@ -2327,7 +2327,13 @@ const es: TranslationDict = {
   'disc.settingsContext': 'Contexto y comportamiento',
   'disc.scopeTitle': 'Proyectos accesibles',
   'disc.scopeHint': 'La sala trabaja en su proyecto y solo usa sus credenciales. Una persona puede abrirle otros proyectos en lectura, o en escritura sobre su planificación; las configuraciones de API y credenciales de otro proyecto nunca se abren.',
-  'disc.scopeNeedsProject': 'Una sala sin proyecto no puede acceder a otros proyectos.',
+  'disc.scopeNeedsProject': 'Una sala sin proyecto no puede acceder a otros proyectos. Lee los recursos generales; una persona puede permitirle escribirlos.',
+  'disc.scopeGeneral': 'Recursos generales',
+  'disc.scopeGeneralWrite': 'General · escritura',
+  'disc.scopeGeneralTitle': 'Los agentes de esta sala pueden crear recursos generales y editar los que creó. Abre su configuración para revisar o revocar.',
+  'disc.scopeGeneralHint': 'Los Quick Prompts, Quick APIs, Pages y workflows generales los ven y ejecutan todos los proyectos. Por defecto, los agentes de esta sala solo los leen.',
+  'disc.scopeGeneralWarning': 'General en escritura: los agentes de esta sala podrán crear Quick Prompts, Quick APIs, Pages y workflows que ven todos los proyectos, y editar los que esta sala creó. El resto de los recursos generales solo lo edita una persona. Las credenciales y configuraciones de API de los proyectos siguen cerradas.',
+  'disc.scopeGeneralConfirm': 'Permitir escribir los recursos generales',
   'disc.scopeRead': 'lectura',
   'disc.scopeWrite': 'escritura (planificación)',
   'disc.scopeAllProjects': 'Todos los proyectos',
@@ -6911,6 +6917,8 @@ Termina con [SIGNAL: OK].`,
   "auditTimeline.step.overrideTitle": "Este paso dejó un documento que no es sólido. Lo que cambió:",
   "auditTimeline.step.overrideConfirm": "Aceptar de todos modos",
   "auditTimeline.drift.redo": "Repetir los {0} paso(s) heredado(s)",
+  "auditTimeline.docnotes.preexisting": "{0} problema(s) de citas preexistente(s) en docs que ningún paso posee",
+  "auditTimeline.docnotes.autofixes": "{0} reemplazo(s) exacto(s) de la puerta aplicado(s) por Kronn",
 };
 
 export default es;

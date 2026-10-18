@@ -1585,6 +1585,20 @@ pub(crate) fn is_git_tracked(root: &Path, rel: &str) -> bool {
         .is_ok_and(|status| status.success())
 }
 
+/// Whether git ignores `rel` in the repository at `root` (a vendored or generated
+/// path, absent from a clone), whether or not the file is on disk. Outside a
+/// repository, or without git, nothing is ignored.
+pub(crate) fn is_git_ignored(root: &Path, rel: &str) -> bool {
+    crate::core::cmd::git_cmd()
+        .arg("-C")
+        .arg(root)
+        .args(["check-ignore", "-q", "--", rel])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 /// The en and em dash, which models write where a line range wants a hyphen.
 pub(crate) const RANGE_DASHES: [char; 2] = ['\u{2013}', '\u{2014}'];
 

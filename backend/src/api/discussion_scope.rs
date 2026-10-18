@@ -13,7 +13,7 @@ use crate::models::discussion_scope::{
     DecideScopeRequest, DiscussionProjectGrant, DiscussionScope, DiscussionScopeRequest,
     FileScopeRequest, GrantDiscussionProjectRequest, RevokeDiscussionProjectRequest,
     RevokeWorkflowScopeRequest, ScopeAccess, ScopeGrantSource, SetWorkflowScopeRequest,
-    WorkflowScope, ALL_PROJECTS_WRITE_CONFIRMATION,
+    WorkflowScope, ALL_PROJECTS_WRITE_CONFIRMATION, GENERAL_WRITE_CONFIRMATION,
 };
 use crate::models::{ApiErrorCode, ApiResponse};
 use crate::AppState;
@@ -83,13 +83,29 @@ pub async fn grant(
     Path(discussion_id): Path<String>,
     Json(request): Json<GrantDiscussionProjectRequest>,
 ) -> Reply<DiscussionProjectGrant> {
-    let (project, source) = match (request.all, request.project_id) {
-        (true, None) => (None, ScopeGrantSource::All),
-        (false, Some(project)) if !project.trim().is_empty() => {
+    let (project, source) = match (request.all, request.general, request.project_id) {
+        (true, false, None) => (None, ScopeGrantSource::All),
+        (false, true, None) => (None, ScopeGrantSource::General),
+        (false, false, Some(project)) if !project.trim().is_empty() => {
             (Some(project), ScopeGrantSource::Link)
         }
-        _ => return refused("name one project_id, or set all: true"),
+        _ => return refused("name one project_id, or set all: true, or general: true"),
     };
+    // The general resources are seen by every project: writing them is the
+    // same kind of decision as every project in write.
+    if source == ScopeGrantSource::General {
+        if request.access != ScopeAccess::Write {
+            return refused("a room without a project already reads the general resources");
+        }
+        if request.confirm.as_deref() != Some(GENERAL_WRITE_CONFIRMATION) {
+            return refused(&format!(
+                "writing the general resources needs confirm: \"{GENERAL_WRITE_CONFIRMATION}\""
+            ));
+        }
+        if request.expected_fingerprint.is_none() {
+            return refused("writing the general resources needs the scope fingerprint you saw");
+        }
+    }
     if source == ScopeGrantSource::All && request.access == ScopeAccess::Write {
         if request.confirm.as_deref() != Some(ALL_PROJECTS_WRITE_CONFIRMATION) {
             return refused(&format!(

@@ -101,13 +101,15 @@ async fn workflow_scope_limits_reads_and_writes_and_cron_defaults_to_one() {
     let mut global = draft();
     global["project_id"] = Value::Null;
     global["trigger"] = json!({"type":"Cron","schedule":"0 8 * * *"});
+    // A null project is unset: the draft lands in the room's project, as
+    // through a CLI agent's bridge (KT-1346).
     let global = call(&local, "workflow_create_draft", global).await;
     assert!(global.ok, "{}", global.content);
+    assert_eq!(global.content["project_id"], "a");
     assert_eq!(global.content["concurrency_limit"], 1);
     let list = call(&general, "workflow_list", json!({})).await;
     assert!(list.ok);
-    assert_eq!(list.content["workflows"].as_array().unwrap().len(), 1);
-    assert_eq!(list.content["workflows"][0]["id"], global.content["id"]);
+    assert_eq!(list.content["workflows"].as_array().unwrap().len(), 0);
     for name in ["workflow_get", "workflow_update"] {
         let denied = call(
             &general,

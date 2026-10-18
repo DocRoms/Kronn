@@ -2327,7 +2327,13 @@ const en: TranslationDict = {
   'disc.settingsContext': 'Context and behaviour',
   'disc.scopeTitle': 'Projects reached',
   'disc.scopeHint': 'The room works in its own project and uses only its credentials. A human may let it read other projects, or write their planning; API configs and credentials of another project are never opened.',
-  'disc.scopeNeedsProject': 'A room without a project cannot reach other projects.',
+  'disc.scopeNeedsProject': 'A room without a project cannot reach other projects. It reads the general resources; a human may let it write them.',
+  'disc.scopeGeneral': 'General resources',
+  'disc.scopeGeneralWrite': 'General · write',
+  'disc.scopeGeneralTitle': 'Agents of this room may create general resources and edit the ones it created. Open its settings to review or revoke.',
+  'disc.scopeGeneralHint': 'General Quick Prompts, Quick APIs, Pages and workflows are seen and run by every project. By default, agents of this room only read them.',
+  'disc.scopeGeneralWarning': 'General in write: agents of this room may create Quick Prompts, Quick APIs, Pages and workflows every project sees, and edit the ones this room created. The rest of the general resources stays a human’s to edit. Credentials and API configs of the projects stay closed.',
+  'disc.scopeGeneralConfirm': 'Allow writing the general resources',
   'disc.scopeRead': 'read',
   'disc.scopeWrite': 'write (planning)',
   'disc.scopeAllProjects': 'Every project',
@@ -6911,6 +6917,8 @@ End with [SIGNAL: OK].`,
   "auditTimeline.step.overrideTitle": "This step left a document that is not sound. What it changed:",
   "auditTimeline.step.overrideConfirm": "Accept anyway",
   "auditTimeline.drift.redo": "Redo the {0} inherited step(s)",
+  "auditTimeline.docnotes.preexisting": "{0} pre-existing citation problem(s) in docs no step owns",
+  "auditTimeline.docnotes.autofixes": "{0} exact gate replacement(s) applied by Kronn",
 };
 
 export default en;

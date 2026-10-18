@@ -1588,9 +1588,28 @@ mod broker {
         bound: Option<&str>,
     ) -> crate::agents::tools::ToolOutcome {
         use crate::agents::tools::ToolCall;
+        // A native agent runs in a room; a project-less one runs no shared
+        // plugin, as through a CLI agent's bridge.
+        state
+            .db
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT OR IGNORE INTO projects (id,name,path,created_at,updated_at) \
+                     VALUES ('native-project','native','native','2026-10-18T00:00:00Z','2026-10-18T00:00:00Z')",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT OR IGNORE INTO discussions (id,title,project_id,created_at,updated_at) \
+                     VALUES ('native-room','Native','native-project','2026-10-18T00:00:00Z','2026-10-18T00:00:00Z')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
         let executor = crate::api::agent_tools::KronnToolExecutor::arc(
             state.clone(),
-            None,
+            Some("native-room".into()),
             AgentType::Ollama,
             None,
             None,

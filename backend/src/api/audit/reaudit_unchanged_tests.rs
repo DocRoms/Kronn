@@ -1080,6 +1080,43 @@ async fn an_accepted_step_completes_the_run_and_the_project_validates() {
     );
 }
 
+/// KT-1353 — the validation honours the run's exemption only while the document
+/// is as the run left it: a pre-existing blocker is let through, the same key
+/// after a later edit is refused.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn the_validation_waves_through_a_preexisting_blocker_only_while_its_document_is_unchanged() {
+    let fx = Audited::new().await;
+    let notes = fx.project.path().join("docs/notes.md");
+    std::fs::write(&notes, "# Notes\nGhost [src: file: ghost.rs:1]\n").unwrap();
+    arm(fx.tools.path(), "noop", &fx.targets);
+    settle_on_validation(fx.tools.path());
+    let second = run_full(&fx.state, None).await;
+    let done = sse_events(&second, "done").pop().expect("terminal done");
+    validation_settled(&fx.state, &done).await;
+    assert_eq!(done["status"], "complete", "{second}");
+
+    // Edited after the run, the citation still there: the exemption is gone.
+    std::fs::write(
+        &notes,
+        "# Notes\nGhost [src: file: ghost.rs:1]\nEdited since.\n",
+    )
+    .unwrap();
+    let refused = fx.validate().await;
+    assert!(!refused.success, "{refused:?}");
+    assert!(
+        refused.error.as_deref().unwrap_or("").contains("ghost.rs"),
+        "{:?}",
+        refused.error
+    );
+
+    // As the run left it, the problem is reported (run notes), not refused.
+    std::fs::write(&notes, "# Notes\nGhost [src: file: ghost.rs:1]\n").unwrap();
+    let validated = fx.validate().await;
+    assert!(validated.success, "{:?}", validated.error);
+}
+
 // ── KT-1169 — a launch never ignores an audit it could resume ────────────────
 
 /// Every file under `docs/`, by path, so a refused launch can prove it wrote nothing.
@@ -1739,8 +1776,11 @@ async fn a_final_blocker_is_charged_to_the_step_that_wrote_the_file() {
     );
 }
 
-/// KT-1306 — a blocker that was in a document before a step ran is reported,
-/// not charged to that step when it touches the document.
+/// KT-1306 + KT-1353 (africanews) — a blocker that was in a document before the
+/// run, and that a step touches without fixing (a re-verification appends to the
+/// document and leaves the citation), is neither that step's nor the founding
+/// step's: the step is not retried, the final gate reports it, the run completes,
+/// and the human is told in the run's notes and in the validation prompt.
 #[tokio::test]
 #[serial_test::serial]
 #[serial_test::serial(kronn_templates_env)]
@@ -1754,7 +1794,6 @@ async fn a_step_is_not_blocked_by_a_blocker_that_pre_dates_it() {
         .position(|s| s.target_file == "docs/glossary.md")
         .unwrap() as u32
         + 1;
-    let founding = crate::api::audit::full::founding_step_index(&chain).unwrap();
 
     arm(tools, "fill", &targets);
     let first = run_full(state, None).await;
@@ -1779,10 +1818,13 @@ async fn a_step_is_not_blocked_by_a_blocker_that_pre_dates_it() {
     validation_settled(state, &done).await;
 
     let reported = sse_events(&second, "documentary_preexisting");
-    assert_eq!(reported.len(), 1, "{second}");
-    assert_eq!(reported[0]["step"], touching, "{second}");
+    let in_step = reported
+        .iter()
+        .find(|e| e.get("phase").is_none())
+        .unwrap_or_else(|| panic!("{second}"));
+    assert_eq!(in_step["step"], touching, "{second}");
     assert_eq!(
-        reported[0]["diagnostics"][0]["path"], "docs/notes.md",
+        in_step["diagnostics"][0]["path"], "docs/notes.md",
         "{second}"
     );
     assert!(sse_events(&second, "step_retry").is_empty(), "{second}");
@@ -1791,10 +1833,125 @@ async fn a_step_is_not_blocked_by_a_blocker_that_pre_dates_it() {
         .find(|e| e["step"] == touching)
         .unwrap();
     assert_eq!(step_done["success"], true, "{step_done}");
-    // Nobody introduced it during this run: the run is still blocked on it
-    // (the entry point's step owns what no step wrote), but the toucher is not.
-    assert_eq!(done["status"], "interrupted", "{second}");
-    assert_eq!(done["steps_to_redo"], json!([founding]), "{second}");
+    assert!(std::fs::read_to_string(&notes)
+        .unwrap()
+        .contains("Another note."));
+    // The step rewrote the document and left the citation: still nobody's. The
+    // run is not interrupted and no step, the founding one included, is redone.
+    assert!(
+        reported.iter().any(|e| e["phase"] == "final_gate"),
+        "{second}"
+    );
+    assert_eq!(done["status"], "complete", "{second}");
+    assert!(sse_events(&second, "step_warning").is_empty(), "{second}");
+
+    // The human is told: on the run (audit timeline) and in the validation prompt.
+    let run_id = done["audit_run_id"].as_str().unwrap().to_string();
+    let (run, _, prompt) = persisted(state, &run_id).await;
+    let saved: Value = serde_json::from_str(run.documentary_notes.as_deref().unwrap_or("null"))
+        .unwrap_or_else(|_| panic!("{:?}", run.documentary_notes));
+    assert_eq!(saved["preexisting"][0]["path"], "docs/notes.md", "{saved}");
+    let prompt = prompt.expect("validation prompt");
+    assert!(prompt.contains("docs/notes.md"), "{prompt}");
+    assert!(prompt.contains("ghost.rs"), "{prompt}");
+}
+
+/// KT-1353 — a blocker the committed documents held before the run, in a
+/// document no step rewrote, is reported at the final gate and never charged to
+/// the founding step: the run completes (africanews: sheets citing vendor code).
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_blocker_in_a_document_the_run_never_rewrote_does_not_fail_the_run() {
+    let h = harness().await;
+    let (tools, state, project) = (h.tools.path(), &h.state, h.project.path());
+    let chain = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full);
+    let targets: Vec<&str> = chain.iter().map(|s| s.target_file).collect();
+
+    arm(tools, "fill", &targets);
+    let first = run_full(state, None).await;
+    let done = sse_events(&first, "done").pop().expect("terminal done");
+    validation_settled(state, &done).await;
+    assert_eq!(done["status"], "complete", "{first}");
+
+    let notes = project.join("docs/notes.md");
+    std::fs::write(&notes, "# Notes\nGhost [src: file: ghost.rs:1]\n").unwrap();
+    arm(tools, "noop", &targets);
+    let second = run_full(state, None).await;
+    let done = sse_events(&second, "done").pop().expect("terminal done");
+    validation_settled(state, &done).await;
+
+    let reported = sse_events(&second, "documentary_preexisting");
+    assert_eq!(reported.len(), 1, "{second}");
+    assert_eq!(reported[0]["phase"], "final_gate", "{second}");
+    assert_eq!(
+        reported[0]["diagnostics"][0]["path"], "docs/notes.md",
+        "{second}"
+    );
+    let optimization = sse_events(&second, "documentary_optimization")
+        .pop()
+        .unwrap();
+    assert_eq!(optimization["blocking_count"], 0, "{optimization}");
+    assert_eq!(optimization["preexisting_count"], 1, "{optimization}");
+    assert_eq!(done["status"], "complete", "{second}");
+    assert!(sse_events(&second, "step_warning").is_empty(), "{second}");
+}
+
+/// KT-1353 — a link the gate would refuse with an exact replacement is
+/// corrected before the step is judged, logged, and the step is not retried.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_step_whose_link_the_gate_can_fix_exactly_is_corrected_not_retried() {
+    let h = harness().await;
+    let (tools, state, project) = (h.tools.path(), &h.state, h.project.path());
+    let chain = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full);
+    let targets: Vec<&str> = chain.iter().map(|s| s.target_file).collect();
+    let touching = chain
+        .iter()
+        .position(|s| s.target_file == "docs/glossary.md")
+        .unwrap() as u32
+        + 1;
+
+    arm(tools, "fill", &targets);
+    let first = run_full(state, None).await;
+    let done = sse_events(&first, "done").pop().expect("terminal done");
+    validation_settled(state, &done).await;
+    assert_eq!(done["status"], "complete", "{first}");
+
+    // The step writes a repository-root link from inside docs/.
+    let notes = project.join("docs/notes.md");
+    std::fs::write(&notes, "# Notes\n").unwrap();
+    arm(tools, "noop", &targets);
+    after_each_step(
+        tools,
+        &format!(
+            "docs/glossary.md) printf 'See [glossary](docs/glossary.md).\\n' >> '{}' ;;",
+            notes.display()
+        ),
+    );
+    let second = run_full(state, None).await;
+    let done = sse_events(&second, "done").pop().expect("terminal done");
+    validation_settled(state, &done).await;
+
+    let fixed = sse_events(&second, "documentary_autofix");
+    assert_eq!(fixed.len(), 1, "{second}");
+    assert_eq!(fixed[0]["step"], touching, "{second}");
+    assert_eq!(fixed[0]["fixes"][0]["kind"], "link_base", "{second}");
+    assert_eq!(fixed[0]["fixes"][0]["to"], "glossary.md", "{second}");
+    assert!(sse_events(&second, "step_retry").is_empty(), "{second}");
+    assert!(std::fs::read_to_string(&notes)
+        .unwrap()
+        .contains("[glossary](glossary.md)"));
+    assert_eq!(done["status"], "complete", "{second}");
+    // The repair is kept on the run and said to the validation agent.
+    let run_id = done["audit_run_id"].as_str().unwrap().to_string();
+    let (run, _, prompt) = persisted(state, &run_id).await;
+    let saved: Value = serde_json::from_str(run.documentary_notes.as_deref().unwrap_or("null"))
+        .unwrap_or_else(|_| panic!("{:?}", run.documentary_notes));
+    assert_eq!(saved["autofixes"][0]["kind"], "link_base", "{saved}");
+    assert_eq!(saved["autofixes"][0]["step"], touching, "{saved}");
+    assert!(prompt.expect("validation prompt").contains("glossary.md"));
 }
 
 /// KT-1306 — the cross-agent path writes a step's documents itself, before any

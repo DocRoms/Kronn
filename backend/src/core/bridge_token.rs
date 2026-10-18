@@ -740,6 +740,51 @@ const CREATE_ROUTES: &[(&str, &str)] = &[
     ("/api/learnings/propose", "project_id"),
 ];
 
+/// Create routes a launch without a project may use once a human granted its
+/// room « General · write »: the resource is general, seen by every project (KT-1346).
+const GENERAL_WHEN_UNBOUND: &[&str] = &[
+    "/api/quick-prompts",
+    "/api/quick-apis",
+    "/api/pages",
+    "/api/workflows",
+];
+
+/// Why a project-less token's general write is refused, with the way out.
+pub const GENERAL_WRITE_NEEDS_GRANT: &str = "writing a general resource (seen by every project) needs a human to grant this room « General · write » in its Scope settings";
+
+/// The resources a token without a project may create and edit as general.
+const GENERAL_KINDS: &[Kind] = &[
+    Kind::QuickPrompt,
+    Kind::QuickApi,
+    Kind::Page,
+    Kind::Workflow,
+];
+
+/// How a general resource's kind is recorded in `general_resource_origins`.
+pub fn general_kind(kind: Kind) -> &'static str {
+    match kind {
+        Kind::QuickPrompt => "quick_prompt",
+        Kind::QuickApi => "quick_api",
+        Kind::Page => "page",
+        Kind::Workflow => "workflow",
+        _ => "other",
+    }
+}
+
+/// The general resource a creation route makes, for its provenance.
+pub fn general_created_kind(route: &BridgeRoute) -> Option<Kind> {
+    if route.method != "POST" {
+        return None;
+    }
+    match route.pattern {
+        "/api/quick-prompts" => Some(Kind::QuickPrompt),
+        "/api/quick-apis" => Some(Kind::QuickApi),
+        "/api/pages" => Some(Kind::Page),
+        "/api/workflows" => Some(Kind::Workflow),
+        _ => None,
+    }
+}
+
 /// Update routes whose handler resets or may drop the project when the body
 /// omits it: the token's project is sent explicitly.
 const KEEPS_PROJECT_ON_UPDATE: &[&str] = &[
@@ -851,8 +896,14 @@ pub fn prepare_body_in(
                         fields.insert(field.to_string(), serde_json::json!(project));
                         changed = true;
                     }
-                    // A project-less launch may create its own discussions only.
+                    // A project-less launch may create its own discussions, and
+                    // the general resources a human there would create.
                     (None, _) if route.pattern == "/api/disc/create" => {}
+                    (None, _) if GENERAL_WHEN_UNBOUND.contains(&route.pattern) => {
+                        if !reach.writes_general() {
+                            return Err(Refusal(GENERAL_WRITE_NEEDS_GRANT.into()));
+                        }
+                    }
                     (None, _) => {
                         return Err(Refusal(
                             "a bridge token without a project cannot create shared resources"
@@ -1515,6 +1566,12 @@ impl Reach {
         }
     }
 
+    /// Whether a token without a project may write the general resources: a
+    /// human granted its room « General · write » (KT-1346).
+    pub fn writes_general(&self) -> bool {
+        self.bound().is_none() && self.granted.general
+    }
+
     /// Whether the token may change `project`'s planning.
     pub fn writes(&self, project: &str) -> bool {
         use crate::models::discussion_scope::ScopeAccess;
@@ -1596,6 +1653,19 @@ fn mcp_config_visible(place: &Residence, bound: Option<&str>) -> bool {
 
 fn writable(grant: &BridgeGrant, kind: Kind, id: &str, place: &Residence, reach: &Reach) -> bool {
     if owns(grant, kind, id) || reach.bound().is_some_and(|project| place.only(project)) {
+        return true;
+    }
+    // Without a project, a human's « General · write » grant on the room lets
+    // its agents edit the general resources the room created (KT-1346); the
+    // rest stays the human's. A project's token never does.
+    if reach.writes_general()
+        && GENERAL_KINDS.contains(&kind)
+        && matches!(place, Residence::Global | Residence::General)
+        && reach
+            .granted
+            .general_own
+            .contains(&(general_kind(kind).to_owned(), id.to_owned()))
+    {
         return true;
     }
     // A granted project's planning: every project the task serves must be
@@ -1830,7 +1900,10 @@ pub fn residence(
             .map(|()| single_or_global(Some(id.to_owned())))),
         Kind::Connection => Ok(conn
             .query_row(
-                "SELECT 1 FROM external_api_connections WHERE id = ?1",
+                // The media route also takes a connection by alias or name.
+                "SELECT 1 FROM external_api_connections WHERE id = ?1 \
+                 OR lower(mention_alias) = lower(ltrim(?1, '@')) \
+                 OR lower(display_name) = lower(ltrim(?1, '@')) LIMIT 1",
                 [id],
                 |_| Ok(()),
             )

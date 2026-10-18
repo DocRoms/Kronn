@@ -2309,7 +2309,13 @@ const zh: TranslationDict = {
   "disc.settingsContext": "上下文和行为",
   "disc.scopeTitle": "可访问的项目",
   "disc.scopeHint": "房间在自己的项目中工作，只使用该项目的凭据。人可以允许它读取其他项目，或写入其规划；其他项目的 API 配置和凭据永远不会开放。",
-  "disc.scopeNeedsProject": "没有项目的房间无法访问其他项目。",
+  "disc.scopeNeedsProject": "没有项目的房间无法访问其他项目。它可以读取通用资源；人工可以允许它写入。",
+  "disc.scopeGeneral": "通用资源",
+  "disc.scopeGeneralWrite": "通用 · 写入",
+  "disc.scopeGeneralTitle": "此房间的代理可以创建通用资源，并编辑它创建的资源。打开设置以检查或撤销。",
+  "disc.scopeGeneralHint": "通用的 Quick Prompt、Quick API、页面和工作流会被所有项目看到并运行。默认情况下，此房间的代理只能读取它们。",
+  "disc.scopeGeneralWarning": "通用写入：此房间的代理可以创建所有项目都能看到的 Quick Prompt、Quick API、页面和工作流，并编辑此房间创建的那些。其余通用资源只能由人工编辑。各项目的凭据和 API 配置仍保持关闭。",
+  "disc.scopeGeneralConfirm": "允许写入通用资源",
   "disc.scopeRead": "读取",
   "disc.scopeWrite": "写入（规划）",
   "disc.scopeAllProjects": "所有项目",
@@ -6701,6 +6707,8 @@ const zh: TranslationDict = {
   "auditTimeline.step.overrideTitle": "此步骤留下了不可靠的文档。它修改了：",
   "auditTimeline.step.overrideConfirm": "仍然接受",
   "auditTimeline.drift.redo": "重做 {0} 个继承的步骤",
+  "auditTimeline.docnotes.preexisting": "{0} 个已有的引用问题（位于没有任何步骤负责的文档中）",
+  "auditTimeline.docnotes.autofixes": "Kronn 应用了 {0} 处检查给出的精确替换",
 };
 
 export default zh;

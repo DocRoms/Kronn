@@ -205,7 +205,7 @@ const OWNERSHIP_FENCE_CHARS: [char; 2] = ['`', '~'];
 /// An unclosed fence is read leniently (its lines stay visible, so a stray
 /// fence in a human's own document does not strip protection) — except when
 /// `strict_unclosed` is set, where it is CommonMark's block-to-end-of-file.
-pub(super) fn code_line_mask(text: &str, strict_unclosed: bool) -> FenceScan {
+pub(crate) fn code_line_mask(text: &str, strict_unclosed: bool) -> FenceScan {
     scan_fences(text, &OWNERSHIP_FENCE_CHARS, strict_unclosed)
 }
 

@@ -1383,8 +1383,27 @@ pub async fn full_audit(
         let mut doc_blame = if resume_run_id_req.is_some() {
             super::document_repair::Blame::load(&project_path)
         } else {
-            super::document_repair::Blame::reset(&project_path)
+            let mut blame = super::document_repair::Blame::reset(&project_path);
+            // KT-1353 — what the committed documents already got wrong is not
+            // the founding step's doing: it is recorded as pre-existing.
+            if should_optimize_documents(kind) {
+                // KT-1308 — against the run's provenance, as the step baseline is.
+                let run_provenance = crate::core::run_provenance::RunProvenance::of(&version_ctx.snapshot, &fetch_tracker);
+                match crate::core::document_optimization::analyze_with(&project_path, Some(&run_provenance)) {
+                    Ok(report) => {
+                        let held: Vec<_> = report.blocking_diagnostics().cloned().collect();
+                        blame.seed_preexisting(&project_path, &held);
+                    }
+                    Err(e) => tracing::warn!("Pre-run documentary blockers not recorded: {e}"),
+                }
+            }
+            blame
         };
+
+        // KT-1353 — the exact gate replacements Kronn applied during this run,
+        // and the problems it let through, kept to be said to the human.
+        let mut documentary_autofixes: Vec<(u32, crate::core::document_optimization::AppliedFix)> = Vec::new();
+        let mut documentary_preexisting: Vec<crate::core::document_optimization::Diagnostic> = Vec::new();
 
         for (step_num, analysis_step) in steps.iter().enumerate() {
             // KT-1199 — what the previous step left, before anything else runs.
@@ -2462,6 +2481,12 @@ pub async fn full_audit(
                             let run_provenance = crate::core::run_provenance::RunProvenance::of(&version_ctx.snapshot, &fetch_tracker);
                             let gate = super::document_repair::check_attempt(&project_path, before, &recovery_targets, &documentary_baseline, Some(&run_provenance));
                             if let Ok(check) = &gate {
+                                if !check.repaired.is_empty() {
+                                    documentary_autofixes.extend(check.repaired.iter().cloned().map(|fix| (step as u32, fix)));
+                                    yield Event::default().event("documentary_autofix").data(serde_json::json!({
+                                        "step":step,"file":file_label,"attempt":attempt,"fixes":check.repaired,
+                                    }).to_string());
+                                }
                                 if !check.preexisting.is_empty() && (check.blocking.is_empty() || attempt >= max_attempts) {
                                     tracing::info!(
                                         "Audit step {} ({}): {} documentary blocker(s) pre-date the step, reported without blocking it",
@@ -2895,6 +2920,7 @@ pub async fn full_audit(
                     Ok(report) => {
                         let after: Vec<_> = report.blocking_diagnostics().cloned().collect();
                         doc_blame.record_step(&project_path, step as u32, &documentary_baseline, &after);
+                        doc_blame.release(&project_path, step as u32, &recovery_targets);
                     }
                     Err(e) => tracing::warn!("Audit step {step} ({file_label}): documentary blame not recorded: {e}"),
                 }
@@ -3123,15 +3149,40 @@ pub async fn full_audit(
                     human_references = report.diagnostics.iter()
                         .filter(|d| d.code == crate::core::document_optimization::HUMAN_SECTION_REFERENCE)
                         .cloned().collect();
-                    let blocking: Vec<_> = report.blocking_diagnostics().cloned().collect();
+                    let all_blocking: Vec<_> = report.blocking_diagnostics().cloned().collect();
+                    // The gate's own deterministic write above is the run's: the
+                    // exemption is sealed on the documents as they stand now.
+                    doc_blame.seal(&project_path);
+                    // KT-1353 — what the committed documents held before the run
+                    // and the run left as it was is reported, never failing it.
+                    let (preexisting, blocking) = doc_blame.split_preexisting(&all_blocking);
                     yield Event::default().event("documentary_optimization").data(
                         serde_json::json!({
                             "phase": report.phase,
                             "agents": report.agents,
                             "diagnostics": report.diagnostics,
                             "blocking_count": blocking.len(),
+                            "preexisting_count": preexisting.len(),
                         }).to_string()
                     );
+                    if !preexisting.is_empty() {
+                        tracing::info!(
+                            "Audit final gate: {} documentary blocker(s) pre-date the run, reported without failing it",
+                            preexisting.len()
+                        );
+                        yield Event::default().event("documentary_preexisting").data(serde_json::json!({
+                            "step":0,"file":"","phase":"final_gate","diagnostics":preexisting,
+                        }).to_string());
+                    }
+                    if let Some(notes) = super::document_repair::notes_json(&preexisting, &documentary_autofixes) {
+                        let run_id = audit_run_id.clone();
+                        if let Err(error) = db.with_conn(move |conn|
+                            crate::db::audit_runs::set_documentary_notes(conn, &run_id, &notes)
+                        ).await {
+                            tracing::warn!("Documentary notes of {audit_run_id} not recorded: {error}");
+                        }
+                    }
+                    documentary_preexisting = preexisting.clone();
                     if !blocking.is_empty() {
                         docs_blocked = true;
                         let recovery = super::document_repair::recovery_plan(&blocking, &steps, &doc_blame);
@@ -3425,7 +3476,11 @@ pub async fn full_audit(
         let validation_prompt = format!(
             "{}{}{validation_prompt}",
             unchanged_steps_block(&unchanged_listed, total_steps as u32, &language),
-            super::helpers::human_references_block(&human_references, &language)
+            super::helpers::human_references_block(&human_references, &language),
+        );
+        let validation_prompt = format!(
+            "{}{validation_prompt}",
+            super::helpers::documentary_notes_block(&documentary_preexisting, &documentary_autofixes, &language)
         );
         let accepted_listed: Vec<super::helpers::AcceptedStepLine> = accepted_rows
             .iter()

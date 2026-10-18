@@ -1204,6 +1204,14 @@ cancelled_at_step?: number,
  */
 resume_drift?: string,
 /**
+ * KT-1353 — JSON of what the documentary gate let through (blockers the
+ * committed docs held before the run, in docs no step owns) and repaired
+ * by itself (exact gate replacements) during this run:
+ * `{"preexisting":[{path,message}],"autofixes":[{step,path,kind,from,to}]}`.
+ * Absent when there was nothing to report.
+ */
+documentary_notes?: string,
+/**
  * KT-1320 — the model tier the run was launched with (`economy`,
  * `default`, `reasoning`); absent on a run recorded before it was kept.
  * A step retry or a resume reuses it unless the human picks another.
@@ -4469,9 +4477,14 @@ export type GrantDiscussionProjectRequest = {
 /**
  * The project to open; omitted with `all: true`.
  */
-project_id?: string | null, all?: boolean, access: ScopeAccess,
+project_id?: string | null, all?: boolean,
 /**
- * Required for every project in write: [`ALL_PROJECTS_WRITE_CONFIRMATION`].
+ * The general resources, for a room without a project; write only.
+ */
+general?: boolean, access: ScopeAccess,
+/**
+ * Required for every project in write: [`ALL_PROJECTS_WRITE_CONFIRMATION`];
+ * for the general resources: [`GENERAL_WRITE_CONFIRMATION`].
  */
 confirm?: string | null,
 /**
@@ -8414,7 +8427,7 @@ export type ScheduledCheck = { checked_at: string, sources_state: SourcesState, 
 
 export type ScopeAccess = "read" | "write";
 
-export type ScopeGrantSource = "link" | "request" | "all";
+export type ScopeGrantSource = "link" | "request" | "all" | "general";
 
 export type ScopeRequestStatus = "pending" | "approved" | "declined";
 

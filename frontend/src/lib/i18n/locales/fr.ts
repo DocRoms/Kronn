@@ -2337,7 +2337,13 @@ const fr: TranslationDict = {
   'disc.settingsContext': 'Contexte et comportement',
   'disc.scopeTitle': 'Projets accessibles',
   'disc.scopeHint': 'La room travaille dans son projet et n’utilise que ses credentials. Un humain peut lui ouvrir d’autres projets en lecture, ou en écriture sur leur planning ; les configs API et credentials d’un autre projet ne sont jamais ouverts.',
-  'disc.scopeNeedsProject': 'Une room sans projet ne peut pas accéder à d’autres projets.',
+  'disc.scopeNeedsProject': 'Une room sans projet ne peut pas accéder à d’autres projets. Elle lit les ressources générales ; un humain peut l’autoriser à les écrire.',
+  'disc.scopeGeneral': 'Ressources générales',
+  'disc.scopeGeneralWrite': 'Général · écriture',
+  'disc.scopeGeneralTitle': 'Les agents de cette room peuvent créer des ressources générales et modifier celles qu’elle a créées. Ouvre ses réglages pour vérifier ou révoquer.',
+  'disc.scopeGeneralHint': 'Les Quick Prompts, Quick APIs, Pages et workflows généraux sont vus et lancés par tous les projets. Par défaut, les agents de cette room les lisent seulement.',
+  'disc.scopeGeneralWarning': 'Général en écriture : les agents de cette room pourront créer des Quick Prompts, Quick APIs, Pages et workflows que tous les projets voient, et modifier ceux que cette room a créés. Le reste du général reste modifiable par un humain seulement. Credentials et configs API des projets restent fermés.',
+  'disc.scopeGeneralConfirm': 'Autoriser l’écriture dans le général',
   'disc.scopeRead': 'lecture',
   'disc.scopeWrite': 'écriture (planning)',
   'disc.scopeAllProjects': 'Tous les projets',
@@ -6924,6 +6930,8 @@ Termine par [SIGNAL: OK].`,
   "auditTimeline.step.overrideTitle": "Cette étape a laissé un document qui n'est pas sain. Ce qu'elle a changé :",
   "auditTimeline.step.overrideConfirm": "Accepter quand même",
   "auditTimeline.drift.redo": "Rejouer les {0} étape(s) héritée(s)",
+  "auditTimeline.docnotes.preexisting": "{0} problème(s) de citation préexistant(s) dans des docs qu'aucune étape ne possède",
+  "auditTimeline.docnotes.autofixes": "{0} remplacement(s) exact(s) de la porte appliqué(s) par Kronn",
 };
 
 export default fr;
