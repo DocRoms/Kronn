@@ -891,12 +891,14 @@ These reads reuse the existing list endpoints and do not mutate the library.
 ## Disk usage
 
 `disk_usage` reports free disk and what Kronn itself keeps on it (worktrees,
-lane build dirs, caches) by kind and by task, the 25 largest entries first.
-`purge_orphans: true` takes the default purge — finished, idle, worktree-less,
-Kronn-marked lane build dirs — and nothing else: a named delete is a confirmed
-Settings action, and an active lane is never removed. Policy and rules:
-[`../disk-usage.md`](../disk-usage.md).
-[src: file: backend/scripts/disc-introspection-mcp.py:7733-7764#call_disk_usage]
+lane build dirs, caches) by kind, the 25 largest entries first. It is
+read-only and scoped (KT-1347): free space, policy, `totals` and `orphan_*`
+cover the instance, while `entries` (paths, lane names, task refs) are the
+token's own project's only (`scoped: true`). Purging deletes host files, so it
+is a human action in Settings > Disk: `POST /api/maintenance/disk/purge` is not
+on `BRIDGE_ROUTES`, the tool never calls it, and a `purge_orphans` argument only
+returns that explanation. Policy and rules: [`../disk-usage.md`](../disk-usage.md).
+[src: file: backend/scripts/disc-introspection-mcp.py:7710-7741#call_disk_usage]
 
 ## Workflow run detail
 

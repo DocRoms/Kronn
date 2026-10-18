@@ -48,7 +48,9 @@ Release notes for 0.9.3 and earlier are available in the
   `Blocked` and an alert in the principal room. **Settings → Disk**, the
   `GET /api/maintenance/disk` report and the `disk_usage` MCP tool show free
   space and Kronn's usage by kind and by task, with a Purge action that takes
-  orphans only (a named entry needs a confirmation). See
+  orphans only (a named entry needs a confirmation). The `disk_usage` MCP tool
+  is read-only and scoped to the agent's project; the purge is a human action
+  (the bridge token is refused on it). See
   `docs/operations/disk-usage.md`.
 
 - « Revalider l'audit » now re-reads the docs whose sections are all
