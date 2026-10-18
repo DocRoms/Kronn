@@ -127,8 +127,8 @@ caller still explicitly clears its old override when choosing a new agent/tier.
 [src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:32-93#useModelCatalogSnapshot]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:90-93#catalogModelProvenance]
 [src: file: frontend/src/components/ChatHeader.tsx:430-431#currentModel]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:1606-1637#changeQuickPromptAgent]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:3220-3221#currentModel]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1612-1643#changeQuickPromptAgent]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:3227-3228#currentModel]
 
 KT-627 separately removed the HTTP runner's embedded fallback and qualified
 production-library resolution/preflight. The final migration and cross-surface
@@ -284,8 +284,8 @@ same agent family and tier is still a real target change, not a no-op. Merely
 opening, editing or rereading the catalogue preserves the saved overrides.
 [src: file: frontend/src/lib/agentSelection.ts:3-16#agentSettingsForSelection]
 [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:297-326#renderAgentTierPicker]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:1153-1185#changeStepAgent]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:1606-1637#changeQuickPromptAgent]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1159-1191#changeStepAgent]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1612-1643#changeQuickPromptAgent]
 
 The creation wizard, full editor, inline inspector, pipeline and QP card receive
 the configured named targets. Their selectors display the saved explicit model
