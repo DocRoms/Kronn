@@ -456,3 +456,81 @@ async fn the_room_s_own_task_still_reaches_task_execution() {
     assert!(!refused(&outcome), "{}", outcome.content);
     assert_eq!(outcome.content["project_id"], "a", "{}", outcome.content);
 }
+
+#[tokio::test]
+async fn the_general_grant_edits_only_the_rooms_own_pages_workflows_and_saved_calls() {
+    let World { state, .. } = two_projects().await;
+    grant_general(&state).await;
+    state
+        .db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO workflows(id, name, trigger_json, steps_json, created_at, updated_at) \
+                 VALUES ('human-wf', 'human', '{\"type\":\"Manual\"}', '[]', '2026-10-18T00:00:00Z', '2026-10-18T00:00:00Z')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO quick_execs(id, name, project_id, command, created_at, updated_at) \
+                 VALUES ('human-qe', 'human', NULL, 'echo', '2026-10-18T00:00:00Z', '2026-10-18T00:00:00Z')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let agent = room_agent(&state, "general");
+    let earlier_launch = room_agent(&state, "general");
+    // A Page another launch of the room created is the room's; one written in
+    // the database by a human is not.
+    let page = call(
+        earlier_launch.as_ref(),
+        "page_create",
+        json!({"title": "Room", "slug": "room-page", "html": "<h1>x</h1>", "datasets": []}),
+    )
+    .await;
+    assert!(page.ok, "{}", page.content);
+    let edited = call(
+        agent.as_ref(),
+        "page_update_html",
+        json!({"page_id": "room-page", "html": "<h1>y</h1>"}),
+    )
+    .await;
+    assert!(edited.ok, "the room's own Page: {}", edited.content);
+
+    let workflow = call(
+        agent.as_ref(),
+        "workflow_create_draft",
+        json!({"name": "Mine", "trigger": {"type": "Manual"}, "steps": [{"name": "data", "step_type": {"type": "JsonData"}, "json_data_payload": {"items": [1]}}]}),
+    )
+    .await;
+    assert!(workflow.ok, "{}", workflow.content);
+    assert!(
+        workflow.content["project_id"].is_null(),
+        "{}",
+        workflow.content
+    );
+    let id = workflow.content["id"].as_str().unwrap().to_owned();
+    let own = call(
+        agent.as_ref(),
+        "workflow_update",
+        json!({"workflow_id": id, "name": "Renamed"}),
+    )
+    .await;
+    assert!(own.ok, "the room's own workflow: {}", own.content);
+    let foreign = call(
+        agent.as_ref(),
+        "workflow_update",
+        json!({"workflow_id": "human-wf", "name": "Taken"}),
+    )
+    .await;
+    assert!(refused(&foreign), "{}", foreign.content);
+
+    // A Quick Exec is never general from a room without a project.
+    let qe = call(
+        agent.as_ref(),
+        "qe_update",
+        json!({"quick_exec_id": "human-qe", "name": "Taken"}),
+    )
+    .await;
+    assert!(!qe.ok, "{}", qe.content);
+}
