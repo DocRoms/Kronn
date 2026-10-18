@@ -35,7 +35,7 @@ What the code does today:
   (`custom-<slug>`). Updating one rewrites the same file in place and
   atomically, so renaming keeps its id and a run that resolves it later still
   finds it
-  [src: file: backend/src/api/skills.rs:67-98#update]
+  [src: file: backend/src/api/skills.rs:85-116#update]
   [src: file: backend/src/core/skills.rs:831-892#update_custom_skill]
   [src: file: backend/src/core/directives.rs:345-380#update_custom_directive]
   [src: file: backend/src/core/profiles.rs:521-547#update_custom_profile].

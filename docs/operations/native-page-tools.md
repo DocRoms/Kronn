@@ -7,9 +7,9 @@ revisions and inert action ingestion. Dataset deletion (`page_delete_dataset`, K
 exists on the MCP bridge only; native discussion agents do not get it. See
 [Dataset lifecycle](../architecture/live-pages.md#dataset-lifecycle-kt-1104). The dispatcher returns real stored
 objects, not an HTML preview.
-[src: file: backend/src/api/agent_tools.rs:1745-1747#execute_page_tool]
+[src: file: backend/src/api/agent_tools.rs:1775-1777#execute_page_tool]
 [src: file: backend/src/api/agent_page_tools.rs:173-386#execute_page_tool]
-[src: file: backend/scripts/disc-introspection-mcp.py:7990-7996#call_page_delete_dataset]
+[src: file: backend/scripts/disc-introspection-mcp.py:7985-7991#call_page_delete_dataset]
 
 Native and bridge access are two policies, not one:
 
@@ -37,7 +37,7 @@ An unknown project or discussion fails through the shared foreign-key checks;
 a failed creation does not leave a partial Page.
 [src: file: backend/src/api/agent_page_tools.rs:86-118#page_in_scope]
 [src: file: backend/src/api/agent_page_tools.rs:120-171#scoped_links]
-[src: file: backend/src/api/agent_tools.rs:4358-4360#project_is_in_scope]
+[src: file: backend/src/api/agent_tools.rs:4441-4443#project_is_in_scope]
 [src: file: backend/src/api/agent_page_tests.rs:18-99#native_pages_follow_mcp_project_scope_inheritance_and_selector_contracts]
 [src: file: backend/src/api/agent_page_tests.rs:86-88#standalone]
 [src: file: backend/src/api/agent_page_tests.rs:110-173#native_page_validation_failures_leave_no_partial_page]
@@ -56,10 +56,10 @@ Workflows also publish data through the `PublishPageData` step.
 Rendering still uses the existing Page viewer and its network-denying CSP;
 persisting an action block never launches its automation.
 [src: file: backend/src/api/agent_tools.rs:355-360#TOOL_FAMILIES]
-[src: file: backend/src/api/agent_tools.rs:2355-2364#declarations_for_family]
-[src: file: backend/src/api/agent_tools.rs:1383-1407#workflow_tool_catalogue]
-[src: file: backend/src/api/agent_tools.rs:1745-1747#execute_page_tool]
-[src: file: backend/src/api/agent_tools.rs:5437-5495#workflow_catalogue_is_bounded_and_contains_no_planning_mutation]
+[src: file: backend/src/api/agent_tools.rs:2428-2437#declarations_for_family]
+[src: file: backend/src/api/agent_tools.rs:1405-1429#workflow_tool_catalogue]
+[src: file: backend/src/api/agent_tools.rs:1775-1777#execute_page_tool]
+[src: file: backend/src/api/agent_tools.rs:5521-5579#workflow_catalogue_is_bounded_and_contains_no_planning_mutation]
 [src: file: backend/src/api/agent_page_tests.rs:255-298#native_page_html_uses_shared_inert_action_ingestion]
 [src: file: backend/src/api/agent_page_tests.rs:362-493#native_workflow_page_tools_inherit_run_scope_and_execute_all_operations]
 [src: file: backend/src/api/agent_page_bench.rs:83-132#native_page_pipeline_publishes_through_the_real_workflow_runner]

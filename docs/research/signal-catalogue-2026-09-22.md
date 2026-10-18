@@ -9,8 +9,8 @@ cells also failed, so this is not evidence of general reliability for either
 prompt style.
 [src: file: backend/src/api/signal_catalog.rs:10-64#catalogue]
 [src: file: backend/src/api/signal_catalog.rs:66-69#get]
-[src: file: backend/src/api/agent_tools.rs:4335-4337#signals]
-[src: file: backend/scripts/disc-introspection-mcp.py:10689-10690#signals]
+[src: file: backend/src/api/agent_tools.rs:4418-4420#signals]
+[src: file: backend/scripts/disc-introspection-mcp.py:10706-10707#signals]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:579#decision]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:275-339]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:24-72]
@@ -33,7 +33,7 @@ The initial sandbox attempt could not reach localhost Ollama and produced no
 inference observations. No compilation or suite started by this agent overlapped
 the corrected host campaign; the reviewer had reported its heavy suites ended.
 Other host activity was not controlled.
-[src: file: backend/src/api/agent_tools.rs:40-41#signal_bench]
+[src: file: backend/src/api/agent_tools.rs:41-42#signal_bench]
 [src: file: backend/src/api/agent_signal_bench.rs:167-177#bench_native_signal_discovery]
 [src: file: backend/src/api/agent_signal_bench.rs:277-285#KRONN_BENCH_REPORT]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:2-22#metadata]
