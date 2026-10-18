@@ -102,12 +102,12 @@ a human's decision, like every project in write:
 - The grant is « General · write » (source `general`, no project, write only).
   A human grants it from the room's Scope settings by typing `GENERAL-WRITE`,
   together with the fingerprint of the scope they saw. The grant is shown in
-  red in the room header, recorded in the journal, and revocable. Migration 269
+  red in the room header, recorded in the journal, and revocable. Migration 270
   widens the grants table for it.
 - With it, the room's own agents (CLI and HTTP alike) may create general
   Quick Prompts, Quick APIs, Pages and workflows, and edit or delete the ones
   this room created. The gate records that provenance at creation
-  (`general_resource_origins`, migration 270), from the token, never from the
+  (`general_resource_origins`, migration 271), from the token, never from the
   request. Every other general resource stays a human's to edit. Without the
   grant, the bridge refuses with a message that names the grant to ask for.
 - A room with a project never gets it: its agents write their project, and a

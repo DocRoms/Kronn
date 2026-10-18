@@ -447,10 +447,10 @@ fn the_general_grant_is_named_as_the_general_resources_in_the_room() {
     );
 }
 
-/// Migration 269 rebuilds the grants table: rows and journal survive, and the
+/// Migration 270 rebuilds the grants table: rows and journal survive, and the
 /// widened CHECKs accept the general grant and nothing looser.
 #[test]
-fn migration_269_keeps_every_grant_and_accepts_only_a_general_write() {
+fn migration_270_keeps_every_grant_and_accepts_only_a_general_write() {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(include_str!("sql/267_discussion_project_grants.sql"))
         .unwrap();
@@ -461,7 +461,7 @@ fn migration_269_keeps_every_grant_and_accepts_only_a_general_write() {
         [],
     )
     .unwrap();
-    conn.execute_batch(include_str!("sql/269_discussion_general_grants.sql"))
+    conn.execute_batch(include_str!("sql/270_discussion_general_grants.sql"))
         .unwrap();
     let rows: Vec<(String, Option<String>)> = conn
         .prepare("SELECT id, revoked_at FROM discussion_project_grants ORDER BY id")

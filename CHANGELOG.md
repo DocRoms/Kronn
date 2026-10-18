@@ -615,10 +615,11 @@ Release notes for 0.9.3 and earlier are available in the
   room without a project reads the general resources; its agents (CLI and HTTP
   alike) create general Quick Prompts, Quick APIs, Pages and workflows only
   once a human granted it « General · write » in its Scope settings, behind a
-  typed confirmation, shown in red in the header and revocable (migration 269);
+  typed confirmation, shown in red in the header and revocable (migration 270);
   they then edit only what the room created, recorded at creation (migration
-  270), and every other general resource stays a human's to edit. A tool with no access rule is refused. A CLI agent may now name a media connection by its alias or
-  name, as the media route already allowed.
+  271), and every other general resource stays a human's to edit. A tool with
+  no access rule is refused. A CLI agent may now name a media connection by its
+  alias or name, as the media route already allowed.
 
 - Retrying a step, or resuming an audit, from the UI keeps the run's tier
   (KT-1320). The card's picker defaulted to `reasoning`, so the retry of a
