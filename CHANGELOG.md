@@ -640,6 +640,23 @@ Release notes for 0.9.3 and earlier are available in the
   install has written its root `AGENTS.md` pointer: taken before it, it
   differed from the next run's and every resume of a freshly started audit
   warned.
+- An audit TD card no longer fails for the whole batch when one TD cannot be
+  written (KT-1348, GitHub #258, reported by tarussio). A batch is now partial
+  by design: every TD that can be recorded is, and the card stays pending,
+  narrowed to the ones that were not, each named with its reason on the card.
+  Once the sheet is repaired, answering again applies only those (no TD is
+  written or accepted twice) and the validation resumes after the last one. A
+  card where nothing could be recorded stays pending whole and names each TD.
+  The reasons live in their own `td_errors` field on the card (the agent's
+  `context` is never cut or mixed with them, even at its 4000-character limit),
+  are replaced by each new partial, and disappear once the card is answered;
+  their history stays in the partial receipt messages.
+  A sheet whose status lives only
+  in `audit_history`, and a TD only the index lists, are resolved; and
+  answering one card no longer makes a later row-only TD of the same
+  validation unresolvable (the index resync keeps such a row as a bullet,
+  which is now read back).
+
 - Retrying a step, or resuming an audit, from the UI keeps the run's tier
   (KT-1320). The card's picker defaulted to `reasoning`, so the retry of a
   Haiku (economy) audit ran on Opus. The run now records its tier and
