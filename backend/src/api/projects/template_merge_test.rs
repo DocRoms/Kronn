@@ -643,3 +643,45 @@ fn an_integrated_merge_is_still_cleaned_when_origin_head_dangles() {
     assert!(!branch_exists(root));
     assert!(audit_launch_refusal(root).is_none());
 }
+
+/// KT-1359: Kronn excludes `docs/var/` locally, yet the template ships
+/// `docs/var/.gitkeep`. The merge writes it, git does not see it as untracked, so
+/// it was listed as proposed and then refused by the accept.
+#[test]
+fn every_proposed_file_can_be_accepted_even_with_a_locally_excluded_placeholder() {
+    let tmp = documented_git_repo();
+    let root = tmp.path();
+    crate::core::mcp_scanner::ensure_local_exclude(root.to_str().unwrap(), "docs/var/");
+    assert!(template_docs().join("var/.gitkeep").exists());
+
+    let started =
+        run_merge_in_worktree(root, "Fixture", MergeBase::Local, &template_docs()).unwrap();
+    let wt = PathBuf::from(started.worktree_path.clone().unwrap());
+    assert!(wt.join("docs/var/.gitkeep").exists());
+    let proposed: Vec<String> = started.files.iter().map(|f| f.path.clone()).collect();
+    assert!(!proposed.is_empty());
+    assert!(!proposed.iter().any(|p| p == "docs/var/.gitkeep"));
+    assert_eq!(started.merge.pending_files as usize, proposed.len());
+
+    let err = accept_merge(root, &["docs/var/.gitkeep".to_string()]).unwrap_err();
+    assert!(err.contains("docs/var/.gitkeep"));
+    let accepted = accept_merge(root, &proposed).unwrap();
+    assert_eq!(accepted.committed, proposed);
+
+    // Resumed after the accept: the committed files are no longer proposed either.
+    let again = run_merge_in_worktree(root, "Fixture", MergeBase::Local, &template_docs()).unwrap();
+    assert!(again.files.is_empty());
+    assert_eq!(again.merge.pending_files, 0);
+}
+
+/// Without the local exclude the placeholder is an ordinary untracked file: proposed and accepted.
+#[test]
+fn an_untracked_placeholder_is_proposed_and_accepted_like_any_file() {
+    let tmp = documented_git_repo();
+    let root = tmp.path();
+    let started =
+        run_merge_in_worktree(root, "Fixture", MergeBase::Local, &template_docs()).unwrap();
+    let proposed: Vec<String> = started.files.iter().map(|f| f.path.clone()).collect();
+    assert!(proposed.iter().any(|p| p == "docs/var/.gitkeep"));
+    accept_merge(root, &proposed).unwrap();
+}
