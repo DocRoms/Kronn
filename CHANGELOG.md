@@ -644,8 +644,14 @@ Release notes for 0.9.3 and earlier are available in the
   quoted, in a `#` comment or a heredoc body, or the value of an option
   (`curl -d` / `--proxy` / `--referer` / `-o <url>`, `wget -O <url>`) is text,
   not a fetch; a command with a heredoc, a quote left open, or an option the
-  reader does not know credits nothing, so a citation of its URL is blocked
-  with the "not verified" feedback. Only the full audit
+  reader does not know credits nothing, and so does a display-and-exit mode
+  (`curl --version` / `-V` / `--help` / `-h` / `--manual` / `-M`, `wget
+  --version` / `-V` / `--help` / `-h`), which transfers nothing. The options of
+  a wrapper (`sudo`, `env`, `xargs`, `timeout`, `nice`, `nohup`, `time`,
+  `command`, `exec`, `stdbuf`) are read with their values (`xargs -I curl
+  printf …`: `curl` is a replacement token, `printf` the command); a wrapper
+  option the reader does not know credits nothing. A citation of an uncredited
+  URL is blocked with the "not verified" feedback. Only the full audit
   pipeline checks the run's provenance: a partial audit does not.
   The pre-step baseline and the blame ledger of the documentary gate (KT-1306)
   use the same run-aware analysis: an unbacked citation already there is in the

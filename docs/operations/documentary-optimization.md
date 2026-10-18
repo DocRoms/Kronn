@@ -63,7 +63,11 @@ is conservative: a URL printed by `echo`, quoted, in a `#` comment or a heredoc 
 or given as the value of an option (`curl -d` / `--proxy` / `--referer` / `-o`,
 `wget -O`) is text, not a fetch, and a command that is not fully understood (a
 heredoc on it, a quote left open, a `curl` / `wget` option the reader does not
-know, which may take a URL as its value) credits nothing. The recorded URLs have one canonical
+know, which may take a URL as its value) credits nothing, as does a display-and-exit
+mode (`--version` / `-V`, `--help` / `-h`, `--manual` / `-M`), which transfers nothing.
+The options of a wrapper (`sudo`, `env`, `xargs`, `timeout`, `nice`, `nohup`, `time`,
+`command`, `exec`, `stdbuf`) are parsed with their values (`xargs -I curl printf …`
+runs `printf`); a wrapper option not known credits nothing. The recorded URLs have one canonical
 safe form, used on the stored and the cited side (`normalize_url`): no userinfo, a
 credential-style query value (`sig`, `X-Amz-Signature`, `access_token`…) masked as
 `name=***` after percent-decoding the name (`%73ig` is `sig`), vendor token shapes

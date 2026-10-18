@@ -131,7 +131,8 @@ that reached Kronn, possibly naming no page). The URLs are stored in one canonic
 safe form (no scheme, no userinfo, credential-style query values masked as `name=***`
 after percent-decoding the name); a `curl` / `wget` URL is recorded only when it is a destination
 argument of a real, fully understood invocation, never for text that merely mentions one
-(a comment, a heredoc, an option value such as `--proxy <url>`). Input masking covers sensitive JSON keys
+(a comment, a heredoc, an option value such as `--proxy <url>`, a `--version` / `--help` call, a
+wrapper option value such as `xargs -I curl`). Input masking covers sensitive JSON keys
 and the shared credential patterns before truncation; it is heuristic, not a
 guarantee that arbitrary user content is secret-free.
 [src: file: backend/src/agents/tool_trace.rs:1-15#MARKER]

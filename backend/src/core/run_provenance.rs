@@ -678,6 +678,185 @@ fn redirection(word: &str) -> Option<bool> {
     }
 }
 
+/// An option that makes `curl` / `wget` print something and exit: with it on
+/// the command line, whatever else is written (a URL included) transfers
+/// nothing.
+fn displays_and_exits(tool: Downloader, long: Option<&str>, short: Option<char>) -> bool {
+    match tool {
+        Downloader::Curl => {
+            matches!(long, Some("version" | "help" | "manual"))
+                || matches!(short, Some('V' | 'h' | 'M'))
+        }
+        Downloader::Wget => {
+            matches!(long, Some("version" | "help")) || matches!(short, Some('V' | 'h'))
+        }
+    }
+}
+
+/// The options a wrapper command (`sudo`, `env`, `xargs`, `timeout`…) takes
+/// before the command it runs.
+struct WrapperOptions {
+    /// Short switches.
+    flags: &'static str,
+    /// Short options whose value is the next word (or the rest of their word).
+    values: &'static str,
+    /// Short options whose value, if any, is written in their own word
+    /// (`xargs -i{}`).
+    attached: &'static str,
+    long_flags: &'static [&'static str],
+    long_values: &'static [&'static str],
+    /// Long options whose value, if any, follows an `=`.
+    long_attached: &'static [&'static str],
+    /// `nice -10`: a number is an option.
+    numeric: bool,
+}
+
+const NO_OPTIONS: WrapperOptions = WrapperOptions {
+    flags: "",
+    values: "",
+    attached: "",
+    long_flags: &[],
+    long_values: &[],
+    long_attached: &[],
+    numeric: false,
+};
+
+/// The options of a wrapper, or `None` when `name` is not a wrapper this reader
+/// looks through. `--help` / `--version` (and any option not listed) are not
+/// there: a wrapper invoked with them is not read.
+fn wrapper_options(name: &str) -> Option<WrapperOptions> {
+    Some(match name {
+        "sudo" => WrapperOptions {
+            flags: "AbEHnPS",
+            values: "CDgpRrTtUu",
+            long_flags: &["non-interactive", "stdin", "set-home", "background"],
+            long_values: &["user", "group", "chdir", "prompt", "role", "type"],
+            long_attached: &["preserve-env"],
+            ..NO_OPTIONS
+        },
+        "env" => WrapperOptions {
+            flags: "i0v",
+            values: "uC",
+            long_flags: &["ignore-environment", "null", "debug"],
+            long_values: &["unset", "chdir"],
+            ..NO_OPTIONS
+        },
+        "command" => WrapperOptions {
+            flags: "p",
+            ..NO_OPTIONS
+        },
+        "exec" => WrapperOptions {
+            flags: "cl",
+            values: "a",
+            ..NO_OPTIONS
+        },
+        "nohup" => NO_OPTIONS,
+        "time" => WrapperOptions {
+            flags: "pav",
+            values: "fo",
+            long_flags: &["portability", "verbose", "append"],
+            long_values: &["format", "output"],
+            ..NO_OPTIONS
+        },
+        "nice" => WrapperOptions {
+            values: "n",
+            long_values: &["adjustment"],
+            numeric: true,
+            ..NO_OPTIONS
+        },
+        "timeout" => WrapperOptions {
+            flags: "v",
+            values: "ks",
+            long_flags: &["foreground", "preserve-status", "verbose"],
+            long_values: &["kill-after", "signal"],
+            ..NO_OPTIONS
+        },
+        "xargs" => WrapperOptions {
+            flags: "0prtxo",
+            values: "adEILnPsJ",
+            attached: "ile",
+            long_flags: &[
+                "null",
+                "no-run-if-empty",
+                "verbose",
+                "interactive",
+                "open-tty",
+                "exit",
+            ],
+            long_values: &[
+                "arg-file",
+                "delimiter",
+                "max-args",
+                "max-procs",
+                "max-chars",
+            ],
+            long_attached: &["replace", "eof", "max-lines"],
+            numeric: false,
+        },
+        "stdbuf" => WrapperOptions {
+            values: "ioe",
+            long_values: &["input", "output", "error"],
+            ..NO_OPTIONS
+        },
+        _ => return None,
+    })
+}
+
+/// The words of a wrapper invocation that follow its options (the command it
+/// runs), or `None` when an option is not one this wrapper is known to take: its
+/// value could be taken for the command.
+fn after_wrapper_options<'a>(
+    spec: &WrapperOptions,
+    mut rest: &'a [String],
+) -> Option<&'a [String]> {
+    while let Some(arg) = rest.first().map(String::as_str) {
+        if arg == "--" {
+            return Some(&rest[1..]);
+        }
+        if !arg.starts_with('-') {
+            return Some(rest);
+        }
+        rest = &rest[1..];
+        if let Some(long) = arg.strip_prefix("--") {
+            let (name, attached) = match long.split_once('=') {
+                Some((name, value)) => (name, Some(value)),
+                None => (long, None),
+            };
+            let known = (spec.long_flags.contains(&name) && attached.is_none())
+                || spec.long_attached.contains(&name);
+            if !known {
+                if !spec.long_values.contains(&name) {
+                    return None;
+                }
+                if attached.is_none() {
+                    rest = rest.get(1..)?;
+                }
+            }
+            continue;
+        }
+        let cluster = &arg[1..];
+        if cluster.is_empty() {
+            return None;
+        }
+        for (at, c) in cluster.char_indices() {
+            if spec.flags.contains(c) || (spec.numeric && c.is_ascii_digit()) {
+                continue;
+            }
+            if spec.attached.contains(c) {
+                break;
+            }
+            if spec.values.contains(c) {
+                if at + c.len_utf8() == cluster.len() {
+                    rest = rest.get(1..)?;
+                }
+                break;
+            }
+            return None;
+        }
+    }
+    Some(rest)
+}
+
 fn is_http_url(word: &str) -> bool {
     let lower = word.to_ascii_lowercase();
     lower.starts_with("http://") || lower.starts_with("https://")
@@ -718,6 +897,9 @@ fn destination_urls(tool: Downloader, args: &[String]) -> Option<Vec<String>> {
                 }
                 continue;
             }
+            if displays_and_exits(tool, Some(name), None) {
+                return None;
+            }
             match long_option(tool, name)? {
                 OptionKind::Flag if attached.is_some() => return None,
                 OptionKind::Flag => {}
@@ -730,6 +912,9 @@ fn destination_urls(tool: Downloader, args: &[String]) -> Option<Vec<String>> {
         } else if arg.len() > 1 && arg.starts_with('-') {
             let cluster = &arg[1..];
             for (at, c) in cluster.char_indices() {
+                if displays_and_exits(tool, None, Some(c)) {
+                    return None;
+                }
                 match short_option(tool, c)? {
                     OptionKind::Flag => {}
                     OptionKind::Rest => break,
@@ -775,24 +960,24 @@ fn download_urls(words: &[String], opaque: bool, depth: usize) -> Vec<String> {
         let assignment = first.split_once('=').is_some_and(|(key, _)| {
             !key.is_empty() && key.chars().all(|c| c.is_alphanumeric() || c == '_')
         });
-        let wrapper = matches!(
-            name,
-            "sudo" | "env" | "command" | "exec" | "nohup" | "time" | "nice" | "xargs" | "stdbuf"
-        );
-        if assignment || wrapper || name == "timeout" {
+        if assignment {
             rest = &rest[1..];
-            // `command -v curl <url>` looks a command up, it runs nothing.
-            if name == "command" && rest.first().is_some_and(|w| w.starts_with('-')) {
+            continue;
+        }
+        if let Some(spec) = wrapper_options(name) {
+            // The options of the wrapper are read, values included
+            // (`xargs -I curl`: `curl` is a replacement token, not the
+            // command). An option it is not known to take, `--help` and
+            // `command -v` (a lookup, not a run) among them: nothing is read.
+            let Some(after) = after_wrapper_options(&spec, &rest[1..]) else {
                 return Vec::new();
-            }
-            // Options of a wrapper (`sudo -E`, `xargs -n1`, `env -i`).
-            while rest.first().is_some_and(|w| w.starts_with('-')) {
-                rest = &rest[1..];
-            }
-            if name == "timeout" {
-                // The duration.
-                rest = rest.get(1..).unwrap_or(&[]);
-            }
+            };
+            // `timeout` takes the duration before its command.
+            rest = if name == "timeout" {
+                after.get(1..).unwrap_or(&[])
+            } else {
+                after
+            };
             continue;
         }
         if matches!(name, "sh" | "bash" | "zsh" | "dash" | "ksh") {
@@ -1924,6 +2109,102 @@ mod tests {
                         "{route}: {command} must credit {url} nothing"
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn a_display_and_exit_mode_transfers_nothing() {
+        let page = "https://download.example.test/current";
+        for command in [
+            format!("curl --version '{page}'"),
+            format!("curl -V '{page}'"),
+            format!("curl -sV '{page}'"),
+            format!("curl '{page}' --version"),
+            format!("curl --help '{page}'"),
+            format!("curl -h '{page}'"),
+            format!("curl --manual '{page}'"),
+            format!("curl -M '{page}'"),
+            format!("wget --version '{page}'"),
+            format!("wget -V '{page}'"),
+            format!("wget --help '{page}'"),
+            format!("wget -h '{page}'"),
+            format!("sudo curl --version '{page}'"),
+        ] {
+            for (route, run) in read_by_command_on_both_routes("display", &command) {
+                assert_eq!(
+                    run.problems(&cites(page)).len(),
+                    1,
+                    "{route}: {command} must credit {page} nothing"
+                );
+            }
+        }
+        // After `--`, a word that looks like the option is a positional.
+        let after_separator = format!("curl -s -- '{page}'");
+        for (route, run) in read_by_command_on_both_routes("separator", &after_separator) {
+            assert!(run.problems(&cites(page)).is_empty(), "{route}");
+        }
+    }
+
+    #[test]
+    fn a_wrapper_option_value_is_not_the_command() {
+        let page = "https://download.example.test/current";
+        for command in [
+            // `-I` takes `curl` as its replacement token: `printf` is the command.
+            format!("printf x | xargs -I curl printf '%s\\n' '{page}'"),
+            format!("printf x | xargs -Icurl printf '%s\\n' '{page}'"),
+            format!("printf x | xargs --arg-file curl printf '%s\\n' '{page}'"),
+            format!("sudo -u curl printf '%s\\n' '{page}'"),
+            format!("nice -n curl printf '%s\\n' '{page}'"),
+            format!("env -u curl printf '%s\\n' '{page}'"),
+            format!("timeout -s curl 5 printf '%s\\n' '{page}'"),
+            format!("stdbuf -o curl printf '%s\\n' '{page}'"),
+            // A wrapper option this reader does not know, or a mode that runs nothing.
+            format!("sudo --version curl '{page}'"),
+            format!("sudo -V curl '{page}'"),
+            format!("sudo --some-future-option curl '{page}'"),
+            format!("env -S 'curl {page}'"),
+            format!("env --version curl '{page}'"),
+            format!("nohup --help curl '{page}'"),
+            format!("timeout --help curl '{page}'"),
+            format!("xargs --show-limits curl '{page}'"),
+            format!("xargs -Y curl '{page}'"),
+            format!("nice -z curl '{page}'"),
+        ] {
+            for (route, run) in read_by_command_on_both_routes("wrapper", &command) {
+                assert_eq!(
+                    run.problems(&cites(page)).len(),
+                    1,
+                    "{route}: {command} must credit {page} nothing"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_wrapper_with_known_options_still_runs_the_download() {
+        let page = "https://download.example.test/current";
+        for command in [
+            format!("xargs -n1 curl -s '{page}'"),
+            format!("printf x | xargs -I{{}} curl -s '{page}'"),
+            format!("printf x | xargs -I @ -P 2 curl -s '{page}'"),
+            format!("xargs -i curl -s '{page}'"),
+            format!("sudo -n -u root curl -s '{page}'"),
+            format!("sudo -E -- curl -s '{page}'"),
+            format!("env -i -u HOME LANG=C curl -s '{page}'"),
+            format!("nohup curl -s '{page}'"),
+            format!("nice curl -s '{page}'"),
+            format!("nice -n 10 curl -s '{page}'"),
+            format!("nice -10 curl -s '{page}'"),
+            format!("timeout 30 curl -s '{page}'"),
+            format!("timeout -k 5 --signal=TERM 30 curl -s '{page}'"),
+            format!("stdbuf -oL curl -s '{page}'"),
+            format!("time -p wget -q '{page}'"),
+            format!("command -p curl -s '{page}'"),
+            format!("exec -a name curl -s '{page}'"),
+        ] {
+            for (route, run) in read_by_command_on_both_routes("known", &command) {
+                assert!(run.problems(&cites(page)).is_empty(), "{route}: {command}");
             }
         }
     }
