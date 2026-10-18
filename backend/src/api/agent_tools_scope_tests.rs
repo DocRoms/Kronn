@@ -637,6 +637,40 @@ fn a_project_refusal_names_the_way_out_for_its_caller() {
         "{for_step}"
     );
     assert!(!for_step.contains("room_scope"), "{for_step}");
+    // The editor's « Test step »: a project, no room, run or task.
+    let test_step = BridgeScope {
+        project_id: Some("a".into()),
+        ..Default::default()
+    };
+    let for_test = project_refusal(&test_step, false);
+    assert!(
+        for_test.contains("its project only") && for_test.contains("Projects accessible"),
+        "{for_test}"
+    );
+    assert!(
+        !for_test.contains("principal") && !for_test.contains("room_scope"),
+        "{for_test}"
+    );
     let for_worker = project_refusal(&worker, false);
     assert!(!for_worker.contains("room_scope"), "{for_worker}");
+}
+
+#[tokio::test]
+async fn the_step_test_button_is_told_about_the_workflow_scope() {
+    let World { state, .. } = two_projects().await;
+    let step = KronnToolExecutor::workflow_arc(
+        state.clone(),
+        Some("a".into()),
+        TEST_STEP_RUN_ID.into(),
+        "step".into(),
+    );
+    // A step test may not create tasks; the gate's refusal on another project
+    // is checked on a read it may do.
+    let refused = call(step.as_ref(), "task_list", json!({"project_id": "b"})).await;
+    let text = refused.content.to_string();
+    assert!(!refused.ok, "{text}");
+    assert!(
+        text.contains("Projects accessible") && !text.contains("principal"),
+        "{text}"
+    );
 }

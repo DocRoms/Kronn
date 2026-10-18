@@ -760,7 +760,10 @@ pub fn project_refusal(scope: &BridgeScope, read_only: bool) -> String {
     } else {
         "the project the request names is outside this launch's reach"
     };
-    if scope.workflow_run_id.is_some() {
+    if scope.owns_nothing() {
+        // No room, run or task: the editor's « Test step », an audit, a document agent.
+        format!("{what}: this launch reaches its project only; a workflow's real runs also reach the workflow's scope, which a human sets on the workflow page (Projects accessible)")
+    } else if scope.workflow_run_id.is_some() {
         format!("{what}: a workflow step reaches another project only through its workflow's scope, which a human sets on the workflow page (Projects accessible)")
     } else if scope.room_grant_discussions.is_empty() {
         format!("{what}: a worker reaches its task's project only; the principal asks for more")
