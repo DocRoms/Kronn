@@ -382,8 +382,14 @@ mod tests {
             {"id":"confirm","label":"Confirm"},{"id":"reject","label":"Reject"},
             {"id":"accept_decision","label":"Accepted decision"},{"id":"defer","label":"Defer"}
         ]);
+        // An ordinary warning inside a context that already fills the limit:
+        // the failure note must neither cut it nor be cut by it.
+        let prefix =
+            "Audit findings. ⚠ This intentional trade-off must be reviewed with the owner.";
+        let context = format!("{prefix}{}", "x".repeat(4000 - prefix.chars().count()));
         let card = serde_json::json!({
             "version":1,"key":"td-batch","question":"TD outcomes?","options":options,
+            "context":context,
             "items":[{"id":"TD-20261018-good","label":"good"},{"id":"TD-20261018-bad","label":"bad"}],
             "task_ref":"audit-td-batch"
         });
@@ -449,13 +455,13 @@ mod tests {
         let left = partial["data"]["items"].as_array().unwrap();
         assert_eq!(left.len(), 1);
         assert_eq!(left[0]["id"], "TD-20261018-bad");
-        assert!(
-            partial["data"]["context"]
-                .as_str()
-                .unwrap()
-                .contains("- TD-20261018-bad:"),
-            "{partial}"
+        assert_eq!(
+            partial["data"]["context"], context,
+            "the agent's context is intact"
         );
+        let alert = partial["data"]["td_errors"].as_str().unwrap();
+        assert!(alert.contains("- TD-20261018-bad:"), "{partial}");
+        assert!(!alert.contains("- TD-20261018-good:"), "{partial}");
         let (_, listed) = send(
             state.clone(),
             false,
@@ -491,6 +497,8 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{done}");
         assert_eq!(done["data"]["state"], "answered", "{done}");
+        assert_eq!(done["data"]["td_errors"], Value::Null, "{done}");
+        assert_eq!(done["data"]["context"], context, "{done}");
         assert_eq!(
             dispatches().await,
             1,
@@ -511,6 +519,12 @@ mod tests {
         )
         .await;
         assert_eq!(listed["data"]["pending_count"], 0);
+        assert_eq!(
+            listed["data"]["questions"][0]["td_errors"],
+            Value::Null,
+            "the stored, answered card carries no stale alert"
+        );
+        assert_eq!(listed["data"]["questions"][0]["context"], context);
     }
 
     /// End to end: a run stops on a ceiling, Kronn asks, the human

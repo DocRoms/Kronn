@@ -609,6 +609,10 @@ Release notes for 0.9.3 and earlier are available in the
   Once the sheet is repaired, answering again applies only those (no TD is
   written or accepted twice) and the validation resumes after the last one. A
   card where nothing could be recorded stays pending whole and names each TD.
+  The reasons live in their own `td_errors` field on the card (the agent's
+  `context` is never cut or mixed with them, even at its 4000-character limit),
+  are replaced by each new partial, and disappear once the card is answered;
+  their history stays in the partial receipt messages.
   A sheet whose status lives only
   in `audit_history`, and a TD only the index lists, are resolved; and
   answering one card no longer makes a later row-only TD of the same

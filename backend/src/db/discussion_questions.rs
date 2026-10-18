@@ -41,6 +41,11 @@ struct QuestionSpec {
     task_ref: Option<String>,
     #[serde(default)]
     resume: Option<QuestionResumeSpec>,
+    /// KT-1348 — the TDs a partial audit card could not record. Written by
+    /// Kronn only (an agent's fence carrying it is refused), so it never mixes
+    /// with the agent's `context` nor eats its length budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    td_errors: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -142,6 +147,9 @@ pub struct DiscussionQuestion {
     pub key: String,
     pub question: String,
     pub context: Option<String>,
+    /// The TDs a partial audit card could not record, with the reason for each;
+    /// cleared once the card is fully answered.
+    pub td_errors: Option<String>,
     pub options: Vec<DiscussionQuestionOption>,
     pub items: Vec<DiscussionQuestionItem>,
     pub multiple: bool,
@@ -253,6 +261,7 @@ fn parse_spec(body: &str) -> Option<QuestionSpec> {
         .map(|item| item.id.as_str())
         .collect::<std::collections::HashSet<_>>();
     (spec.version == 1
+        && spec.td_errors.is_none()
         && stable_key(&spec.key)
         && nonempty_bounded(&spec.question, 1000)
         && spec
@@ -478,6 +487,7 @@ pub fn list(conn: &Connection, discussion_id: &str) -> Result<DiscussionQuestion
             key: spec.key,
             question: spec.question,
             context: spec.context,
+            td_errors: spec.td_errors,
             options: spec.options,
             items: spec.items,
             multiple: spec.multiple,
@@ -992,17 +1002,18 @@ pub fn answer(
     }
 }
 
-/// Marks the failure note a partial TD card appends to its context, so the next
-/// partial replaces it instead of stacking.
-const PARTIAL_NOTE_MARK: &str = "⚠ ";
+/// Bound on the failure note a partial TD card carries.
+const TD_ERRORS_LIMIT: usize = 8000;
 
-/// Keeps only the failed items on a pending card and writes the reasons on it.
-/// Returns the card's new context.
+/// Keeps only the failed items on a pending card and writes the reasons in its
+/// own `td_errors` field, replacing the previous partial's; `context` is the
+/// agent's and stays as it was. `note: None` clears the field (the card is
+/// complete). Returns the card's new `td_errors`.
 fn narrow_to_failed(
     conn: &Connection,
     question_id: &str,
     failed_ids: &[&str],
-    note: &str,
+    note: Option<&str>,
 ) -> Result<Option<String>, AnswerError> {
     let payload: String = conn
         .query_row(
@@ -1014,18 +1025,13 @@ fn narrow_to_failed(
     let mut spec: QuestionSpec = serde_json::from_str(&payload).map_err(anyhow::Error::from)?;
     spec.items
         .retain(|item| failed_ids.contains(&item.id.as_str()));
-    let base = spec.context.take().unwrap_or_default();
-    let base = base
-        .split(PARTIAL_NOTE_MARK)
-        .next()
-        .unwrap_or("")
-        .trim_end();
-    let separator = if base.is_empty() { "" } else { "\n\n" };
-    let mut context = format!("{base}{separator}{PARTIAL_NOTE_MARK}{note}");
-    if context.chars().count() > 4000 {
-        context = context.chars().take(3999).collect::<String>() + "…";
-    }
-    spec.context = Some(context);
+    spec.td_errors = note.map(|note| {
+        if note.chars().count() > TD_ERRORS_LIMIT {
+            note.chars().take(TD_ERRORS_LIMIT - 1).collect::<String>() + "…"
+        } else {
+            note.to_string()
+        }
+    });
     conn.execute(
         "UPDATE discussion_questions SET payload_json=?2 WHERE id=?1 AND state='pending'",
         params![
@@ -1034,7 +1040,7 @@ fn narrow_to_failed(
         ],
     )
     .map_err(anyhow::Error::from)?;
-    Ok(spec.context)
+    Ok(spec.td_errors)
 }
 
 fn answer_inner(
@@ -1261,7 +1267,7 @@ fn answer_inner(
                 .iter()
                 .map(|(td_id, _)| td_id.as_str())
                 .collect::<Vec<_>>();
-            question.context = narrow_to_failed(conn, question_id, &failed_ids, &note)?;
+            question.td_errors = narrow_to_failed(conn, question_id, &failed_ids, Some(&note))?;
             question
                 .items
                 .retain(|item| failed_ids.contains(&item.id.as_str()));
@@ -1288,6 +1294,18 @@ fn answer_inner(
             question.updated_at = answer.answered_at;
             return Ok(question);
         }
+    }
+    // The card is complete: a failure note left by an earlier partial is
+    // resolved, so the answered card must not keep alerting about it (its
+    // history stays in the partial receipts).
+    if question.td_errors.is_some() {
+        let item_ids = question
+            .items
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>();
+        narrow_to_failed(conn, question_id, &item_ids, None)?;
+        question.td_errors = None;
     }
     let ceiling =
         super::discussion_ceiling_requests::decide(conn, discussion_id, &question.key, &selected)?;

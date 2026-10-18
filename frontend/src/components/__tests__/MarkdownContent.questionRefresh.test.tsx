@@ -18,7 +18,7 @@ import { refreshDiscussionQuestions, resetDiscussionQuestions } from '../../lib/
 const question: DiscussionQuestion = {
   id: 'q-refresh', discussion_id: 'd-refresh', source_message_id: 'm-refresh',
   fence_index: 0, key: 'refresh-proof', question: 'Choisir sans perdre le formulaire',
-  context: 'Diagnostic local, sans réseau.',
+  context: 'Diagnostic local, sans réseau.', td_errors: null,
   options: [{ id: 'a', label: 'Continuer', description: null }],
   items: [],
   multiple: false, recommended_option_ids: [], task_ref: null,

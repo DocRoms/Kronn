@@ -31,6 +31,7 @@ function question(over: Partial<Record<string, unknown>> = {}) {
     key: 'quota-policy',
     question: 'Comment fermer une escalade ?',
     context: 'Huit exécutions bloquent la délégation.',
+    td_errors: null,
     options: [
       { id: 'a', label: 'Suivre le statut de la tâche', description: 'done/archived libère' },
       { id: 'b', label: 'Réarmement explicite', description: null },
@@ -256,11 +257,19 @@ describe('DiscussionQuestionCard', () => {
       questions: [question({ items, options, task_ref: 'audit-td-batch' })],
       pending_count: 1,
     });
+    // The agent's own context keeps its ordinary warning and fills the limit:
+    // the failure note is a separate field, so neither cuts the other.
+    const agentContext = `Audit findings. ⚠ This intentional trade-off must be reviewed with the owner.${'x'.repeat(3900)}`;
+    questionsMock.mockResolvedValue({
+      questions: [question({ items, options, task_ref: 'audit-td-batch', context: agentContext })],
+      pending_count: 1,
+    });
     const partial = question({
       items: [items[1]],
       options,
       task_ref: 'audit-td-batch',
-      context: '⚠ Kronn could not record 1 of 2 TD decision(s); the others are saved:\n- TD-2: cannot read sheet',
+      context: agentContext,
+      td_errors: 'Kronn could not record 1 of 2 TD decision(s); the others are saved:\n- TD-2: cannot read sheet',
     });
     answerMock.mockResolvedValueOnce(partial);
 
@@ -274,7 +283,8 @@ describe('DiscussionQuestionCard', () => {
     const card = await screen.findByTestId('disc-question-q-1');
     await waitFor(() => expect(card).toHaveTextContent('could not record 1 of 2'));
     expect(card).toHaveAttribute('data-state', 'pending');
-    expect(card).toHaveTextContent('TD-2: cannot read sheet');
+    expect(screen.getByTestId('disc-question-td-errors')).toHaveTextContent('TD-2: cannot read sheet');
+    expect(card).toHaveTextContent('This intentional trade-off must be reviewed with the owner.');
     expect(screen.queryByTestId('disc-question-item-TD-1-confirm')).toBeNull();
     expect(screen.queryByTestId('disc-question-answer')).toBeNull();
 
@@ -282,6 +292,8 @@ describe('DiscussionQuestionCard', () => {
       items: [items[1]],
       options,
       task_ref: 'audit-td-batch',
+      context: agentContext,
+      td_errors: null,
       state: 'answered',
       answer: {
         selected_option_ids: [],
@@ -298,6 +310,10 @@ describe('DiscussionQuestionCard', () => {
       item_answers: [{ item_id: 'TD-2', selected_option_id: 'reject' }],
     })));
     expect(await screen.findByTestId('disc-question-answer')).toHaveTextContent('Second TD: Reject');
+    // Repaired and answered: the resolved alert is gone, the context is not.
+    expect(screen.queryByTestId('disc-question-td-errors')).toBeNull();
+    expect(screen.getByTestId('disc-question-q-1')).not.toHaveTextContent('could not record');
+    expect(screen.getByTestId('disc-question-q-1')).toHaveTextContent('Audit findings.');
   });
 
   /// Free text is always offered, options or not — the right answer is

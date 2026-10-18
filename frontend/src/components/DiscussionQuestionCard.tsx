@@ -247,7 +247,17 @@ function QuestionBody({
 
       <p className="disc-question-text">{question.question}</p>
       {question.context && <p className="disc-question-context">{question.context}</p>}
-      {question.requester_workflow_step && !question.requester_workflow_step.active && (
+      {question.td_errors && (
+        <p
+          className="disc-question-unread-warning disc-question-td-errors"
+          data-testid="disc-question-td-errors"
+          role="alert"
+        >
+          <AlertOctagon size={13} aria-hidden="true" />
+          <span className="disc-question-td-errors-text">{question.td_errors}</span>
+        </p>
+      )}
+      {question.requester_workflow_step &&!question.requester_workflow_step.active && (
         <p
           className="disc-question-unread-warning"
           data-testid="disc-question-finished-step-warning"

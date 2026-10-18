@@ -504,7 +504,8 @@ fn one_bad_td_never_blocks_the_others_of_a_batch_and_is_named() {
     assert!(question.answer.is_none());
     let left: Vec<_> = question.items.iter().map(|i| i.id.as_str()).collect();
     assert_eq!(left, ["TD-20261016-broken", "TD-20261016-ghost"]);
-    let shown = question.context.as_deref().expect("reasons on the card");
+    assert_eq!(question.context, None, "the reasons are not mixed into it");
+    let shown = question.td_errors.as_deref().expect("reasons on the card");
     assert!(shown.contains("could not record 2 of 4"), "{shown}");
     assert!(shown.contains("- TD-20261016-broken:"), "{shown}");
     assert!(shown.contains("- TD-20261016-ghost:"), "{shown}");
@@ -582,6 +583,8 @@ fn one_bad_td_never_blocks_the_others_of_a_batch_and_is_named() {
     )
     .unwrap();
     assert_eq!(done.state, DiscussionQuestionState::Answered);
+    assert_eq!(done.td_errors, None, "a repaired TD no longer alerts");
+    assert_eq!(list(&conn, "d").unwrap().questions[0].td_errors, None);
     assert_eq!(list(&conn, "d").unwrap().pending_count, 0);
     assert_eq!(dispatch_count(&conn), 1, "the validation resumes once");
     assert_eq!(
@@ -627,6 +630,104 @@ fn one_bad_td_never_blocks_the_others_of_a_batch_and_is_named() {
     )
     .unwrap();
     assert_eq!(dispatch_count(&conn), 1);
+}
+
+/// KT-1348 review — the failure note lives in its own field: the agent's
+/// context keeps its ordinary warning and its full length, the reasons survive
+/// a context at the limit, and a repair removes the resolved alert while the
+/// partial receipt keeps its history.
+#[test]
+fn the_failure_note_is_its_own_field_and_goes_away_once_repaired() {
+    let (conn, project) = audit_database();
+    let docs = project.path().join("docs");
+    let broken = docs.join("tech-debt/TD-20261016-broken.md");
+    std::fs::write(&broken, "---\nname: broken\n\n# TD broken\n").unwrap();
+    std::fs::write(
+        docs.join("tech-debt/TD-20261016-good.md"),
+        td_fixture("Inferred", "Low"),
+    )
+    .unwrap();
+    let prefix = "Audit findings. ⚠ This intentional trade-off must be reviewed with the owner.";
+    let full_context = format!("{prefix}{}", "x".repeat(4000 - prefix.chars().count()));
+    assert_eq!(full_context.chars().count(), 4000);
+    insert(
+        &conn,
+        "ctx",
+        serde_json::json!({
+            "version": 1, "key": "k-ctx", "question": "TD outcomes?",
+            "context": full_context,
+            "options": [{"id":"confirm","label":"Confirm"}],
+            "items": [
+                {"id": "TD-20261016-good", "label": "good"},
+                {"id": "TD-20261016-broken", "label": "broken"}
+            ],
+            "task_ref": "audit-td-batch"
+        }),
+    );
+    let partial = answer(
+        &conn,
+        "d",
+        "question:ctx:0",
+        &batch_answer(
+            &[
+                ("TD-20261016-good", "confirm"),
+                ("TD-20261016-broken", "confirm"),
+            ],
+            "first",
+        ),
+        "Human",
+        None,
+    )
+    .unwrap();
+    assert_eq!(partial.context.as_deref(), Some(full_context.as_str()));
+    let shown = partial.td_errors.as_deref().expect("reasons on the card");
+    assert!(shown.contains("- TD-20261016-broken:"), "{shown}");
+    assert!(shown.contains("unterminated YAML frontmatter"), "{shown}");
+
+    // A second failure replaces the note instead of stacking on it.
+    let again = answer(
+        &conn,
+        "d",
+        "question:ctx:0",
+        &batch_answer(&[("TD-20261016-broken", "confirm")], "second"),
+        "Human",
+        None,
+    );
+    assert!(again.is_err(), "nothing recordable: refused, card kept");
+    let kept = list(&conn, "d").unwrap().questions.remove(0);
+    assert_eq!(kept.state, DiscussionQuestionState::Pending);
+    assert_eq!(kept.td_errors, partial.td_errors);
+
+    std::fs::write(&broken, td_fixture("Inferred", "Low")).unwrap();
+    let done = answer(
+        &conn,
+        "d",
+        "question:ctx:0",
+        &batch_answer(&[("TD-20261016-broken", "confirm")], "third"),
+        "Human",
+        None,
+    )
+    .unwrap();
+    assert_eq!(done.state, DiscussionQuestionState::Answered);
+    assert_eq!(done.td_errors, None);
+    assert_eq!(done.context.as_deref(), Some(full_context.as_str()));
+    let stored = list(&conn, "d").unwrap().questions.remove(0);
+    assert_eq!(stored.td_errors, None, "the stored card no longer alerts");
+    assert_eq!(stored.context.as_deref(), Some(full_context.as_str()));
+    let receipt: String = conn
+        .query_row(
+            "SELECT content FROM messages WHERE id LIKE 'question-answer:question:ctx:0:partial:%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(receipt.contains("- TD-20261016-broken:"), "{receipt}");
+}
+
+#[test]
+fn an_agent_fence_cannot_write_the_failure_note() {
+    let fence = r#"{"version":1,"key":"k","question":"Q?","td_errors":"forged","options":[{"id":"a","label":"A"}]}"#;
+    assert!(super::parse_spec(fence).is_none());
 }
 
 const GHOST_ROW: &str = "# Index\n\n## Current list\n\n| ID | Problem | Area | Severity | Status |\n|----|---------|------|----------|--------|\n| TD-20261016-ghost | Ghost one-liner | API | High | Open |\n";
