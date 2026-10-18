@@ -127,8 +127,10 @@ are not copied into these records. The one thing read out of them is a list of
 URLs (KT-1308, at most 256 per call and 24 KiB): the pages a call opened (read from
 its whole input, before the excerpt cuts it) and the pages a Context7 result named,
 which an audit holds its `url:` citations against, and a `result_seen` flag (a result
-that reached Kronn, possibly naming no page). The URLs are stored without scheme,
-userinfo or credential-style query values. Input masking covers sensitive JSON keys
+that reached Kronn, possibly naming no page). The URLs are stored in one canonical
+safe form (no scheme, no userinfo, credential-style query values masked as `name=***`
+after percent-decoding the name); a `curl` / `wget` URL is recorded only for a real
+invocation, never for text that merely mentions one. Input masking covers sensitive JSON keys
 and the shared credential patterns before truncation; it is heuristic, not a
 guarantee that arbitrary user content is secret-free.
 [src: file: backend/src/agents/tool_trace.rs:1-15#MARKER]

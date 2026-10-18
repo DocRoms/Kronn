@@ -65,11 +65,14 @@ impl RunProvenance {
     }
 }
 
-/// Scheme, userinfo, host case, a leading `www.`, fragment and trailing `/`
-/// removed, and the value of a credential-style query parameter masked: two
-/// spellings of one page compare equal, and what is stored holds no secret
-/// (the scheme is gone, so the connection-string redaction can no longer see
-/// `user:pass@`; a signed URL's `sig=` is not an assignment it knows).
+/// The one safe, canonical form of a page address, used on the stored side
+/// (what a run fetched) and on the cited side (what a doc cites): scheme,
+/// userinfo, host case, a leading `www.`, fragment and trailing `/` removed,
+/// the value of a credential-style query parameter masked as `name=***` (the
+/// name is judged after percent-decoding, so `%73ig` is `sig`), and vendor
+/// token shapes redacted. Non-secret parameters are kept as written. Two
+/// spellings of one page compare equal, nothing stored holds a secret, and the
+/// form is idempotent: a stored URL normalizes to itself.
 pub fn normalize_url(url: &str) -> String {
     let url = url.trim().split('#').next().unwrap_or("");
     let lower = url.to_ascii_lowercase();
@@ -96,24 +99,73 @@ pub fn normalize_url(url: &str) -> String {
         out.push('?');
         out.push_str(&query);
     }
-    out
+    crate::core::redact::redact_secrets(&out)
 }
 
 /// A query string whose credential-style values (signatures, tokens, keys,
 /// passwords) are replaced by `***`: `sig`, `X-Amz-Signature`, `access_token`…
+/// A parameter is read after percent-decoding, so an encoded name or an
+/// encoded `=` hides nothing; the masked parameter is written decoded.
 fn mask_credential_params(query: &str) -> String {
-    query
-        .split('&')
-        .map(|pair| match pair.split_once('=') {
-            Some((key, _)) if is_credential_param(key) => format!("{key}=***"),
-            _ => pair.to_owned(),
-        })
-        .collect::<Vec<_>>()
-        .join("&")
+    let mut out = String::with_capacity(query.len());
+    let mut start = 0;
+    for (index, ch) in query.char_indices() {
+        if ch == '&' || ch == ';' {
+            out.push_str(&mask_param(&query[start..index]));
+            out.push(ch);
+            start = index + 1;
+        }
+    }
+    out.push_str(&mask_param(&query[start..]));
+    out
+}
+
+fn mask_param(pair: &str) -> String {
+    let decoded = percent_decode(pair);
+    match decoded.split_once('=') {
+        Some((key, _)) if is_credential_param(key) => format!("{}=***", key.trim()),
+        _ => pair.to_owned(),
+    }
+}
+
+/// `%XX` and `+` decoded, repeatedly (`%2573` is `%73` is `s`): a name hidden
+/// behind two layers of encoding is still read.
+fn percent_decode(text: &str) -> String {
+    let mut current = text.to_owned();
+    for _ in 0..3 {
+        let bytes = current.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut index = 0;
+        while index < bytes.len() {
+            let hex = |at: usize| bytes.get(at).and_then(|b| (*b as char).to_digit(16));
+            match bytes[index] {
+                b'%' if hex(index + 1).is_some() && hex(index + 2).is_some() => {
+                    let high = hex(index + 1).unwrap_or(0);
+                    let low = hex(index + 2).unwrap_or(0);
+                    out.push((high * 16 + low) as u8);
+                    index += 3;
+                }
+                b'+' => {
+                    out.push(b' ');
+                    index += 1;
+                }
+                byte => {
+                    out.push(byte);
+                    index += 1;
+                }
+            }
+        }
+        let next = String::from_utf8_lossy(&out).into_owned();
+        if next == current {
+            break;
+        }
+        current = next;
+    }
+    current
 }
 
 fn is_credential_param(key: &str) -> bool {
-    let key = key.to_ascii_lowercase().replace(['_', '-'], "");
+    let key = key.to_ascii_lowercase().replace(['_', '-', ' '], "");
     matches!(key.as_str(), "sig" | "key" | "code" | "sas" | "auth")
         || [
             "signature",
@@ -153,9 +205,203 @@ fn is_subagent(name: &str) -> bool {
     matches!(name.to_ascii_lowercase().as_str(), "task" | "agent")
 }
 
-/// Whether a shell command downloads a page.
-fn downloads(command: &str) -> bool {
-    command.contains("curl") || command.contains("wget")
+/// The words of every simple command of a shell `script`, split at the control
+/// operators (`;` `&` `|` newline, parentheses, backticks). Quotes group a
+/// word and are dropped: what a quoted string says is one word, not a command.
+fn simple_commands(script: &str) -> Vec<Vec<String>> {
+    let mut commands: Vec<Vec<String>> = Vec::new();
+    let mut words: Vec<String> = Vec::new();
+    let mut word = String::new();
+    let mut in_word = false;
+    let mut quote: Option<char> = None;
+    let mut chars = script.chars();
+    let end_word = |words: &mut Vec<String>, word: &mut String, in_word: &mut bool| {
+        if *in_word {
+            words.push(std::mem::take(word));
+            *in_word = false;
+        }
+    };
+    while let Some(ch) = chars.next() {
+        match quote {
+            Some('\'') => {
+                if ch == '\'' {
+                    quote = None;
+                } else {
+                    word.push(ch);
+                }
+            }
+            Some(_) => match ch {
+                '"' => quote = None,
+                '\\' => match chars.next() {
+                    Some(next @ ('"' | '\\' | '$' | '`')) => word.push(next),
+                    Some(next) => {
+                        word.push('\\');
+                        word.push(next);
+                    }
+                    None => {}
+                },
+                _ => word.push(ch),
+            },
+            None => match ch {
+                '\'' | '"' => {
+                    quote = Some(ch);
+                    in_word = true;
+                }
+                '\\' => {
+                    if let Some(next) = chars.next() {
+                        if next != '\n' {
+                            word.push(next);
+                            in_word = true;
+                        }
+                    }
+                }
+                ';' | '&' | '|' | '\n' | '(' | ')' | '`' => {
+                    end_word(&mut words, &mut word, &mut in_word);
+                    if !words.is_empty() {
+                        commands.push(std::mem::take(&mut words));
+                    }
+                }
+                c if c.is_whitespace() => end_word(&mut words, &mut word, &mut in_word),
+                c => {
+                    word.push(c);
+                    in_word = true;
+                }
+            },
+        }
+    }
+    end_word(&mut words, &mut word, &mut in_word);
+    if !words.is_empty() {
+        commands.push(words);
+    }
+    commands
+}
+
+/// The options of `curl` / `wget` whose next word is a value, never a page.
+const VALUE_OPTIONS: &[&str] = &[
+    "-d",
+    "--data",
+    "--data-raw",
+    "--data-binary",
+    "--data-urlencode",
+    "--post-data",
+    "-H",
+    "--header",
+    "-o",
+    "--output",
+    "-X",
+    "--request",
+    "-A",
+    "--user-agent",
+    "-U",
+    "-e",
+    "--referer",
+    "-u",
+    "--user",
+    "-F",
+    "--form",
+    "-w",
+    "--write-out",
+    "-P",
+];
+
+fn is_http_url(word: &str) -> bool {
+    let lower = word.to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://")
+}
+
+/// The pages one simple command downloads: only a real `curl` / `wget`
+/// invocation counts, and only the `http(s)` addresses given to it as
+/// arguments. A URL that is printed, quoted or passed to another program is
+/// text, not a fetch. Wrappers (`sudo`, `env`, `xargs`…) are looked through,
+/// and the script of `sh -c` is read in turn.
+fn download_urls(words: &[String], depth: usize) -> Vec<String> {
+    let mut rest = words;
+    loop {
+        let Some(first) = rest.first() else {
+            return Vec::new();
+        };
+        let name = first.rsplit('/').next().unwrap_or(first);
+        let assignment = first.split_once('=').is_some_and(|(key, _)| {
+            !key.is_empty() && key.chars().all(|c| c.is_alphanumeric() || c == '_')
+        });
+        let wrapper = matches!(
+            name,
+            "sudo" | "env" | "command" | "exec" | "nohup" | "time" | "nice" | "xargs" | "stdbuf"
+        );
+        if assignment || wrapper || name == "timeout" {
+            rest = &rest[1..];
+            // Options of a wrapper (`sudo -E`, `xargs -n1`, `env -i`).
+            while rest.first().is_some_and(|w| w.starts_with('-')) {
+                rest = &rest[1..];
+            }
+            if name == "timeout" {
+                // The duration.
+                rest = rest.get(1..).unwrap_or(&[]);
+            }
+            continue;
+        }
+        if matches!(name, "sh" | "bash" | "zsh" | "dash" | "ksh") {
+            let flag = rest
+                .iter()
+                .position(|w| w.starts_with('-') && !w.starts_with("--") && w.contains('c'));
+            return match (flag, depth < 4) {
+                (Some(at), true) => rest
+                    .get(at + 1)
+                    .map(|script| command_urls(script, depth + 1))
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            };
+        }
+        if !matches!(name, "curl" | "wget" | "curl.exe" | "wget.exe") {
+            return Vec::new();
+        }
+        break;
+    }
+    let mut urls = Vec::new();
+    let mut args = rest[1..].iter();
+    while let Some(arg) = args.next() {
+        let arg = match arg.get(..6) {
+            Some(prefix) if prefix.eq_ignore_ascii_case("--url=") => &arg[6..],
+            _ => arg.as_str(),
+        };
+        if is_http_url(arg) {
+            urls.push(normalize_url(arg));
+        } else if VALUE_OPTIONS.contains(&arg) {
+            args.next();
+        }
+    }
+    urls.retain(|u| !u.is_empty());
+    urls
+}
+
+/// The pages the `curl` / `wget` invocations of a shell `script` download.
+fn command_urls(script: &str, depth: usize) -> Vec<String> {
+    simple_commands(script)
+        .iter()
+        .flat_map(|words| download_urls(words, depth))
+        .collect()
+}
+
+/// The `command` string of a tool input excerpt that was cut before its JSON
+/// closed: the part of the script that is still there.
+fn salvaged_command(input: &str) -> Option<String> {
+    let tail = input.split("\"command\":").nth(1)?.trim_start();
+    let body = tail.strip_prefix('"')?;
+    let mut end = body.len();
+    let mut escaped = false;
+    for (index, ch) in body.char_indices() {
+        match (escaped, ch) {
+            (true, _) => escaped = false,
+            (false, '\\') => escaped = true,
+            (false, '"') => {
+                end = index;
+                break;
+            }
+            _ => {}
+        }
+    }
+    let body = &body[..end];
+    Some(serde_json::from_str::<String>(&format!("\"{body}\"")).unwrap_or_else(|_| body.to_owned()))
 }
 
 fn url_pattern() -> &'static regex_lite::Regex {
@@ -209,16 +455,16 @@ pub(crate) fn input_urls(opens: bool, input: &serde_json::Value) -> Vec<String> 
                 .filter(|u| !u.is_empty()),
         );
     }
-    let command = input.get("command").map(|command| match command {
-        serde_json::Value::Array(parts) => parts
-            .iter()
-            .filter_map(|part| part.as_str())
-            .collect::<Vec<_>>()
-            .join(" "),
-        other => other.as_str().unwrap_or_default().to_owned(),
-    });
-    if let Some(command) = command.filter(|c| downloads(c)) {
-        urls.extend(urls_in(&command));
+    match input.get("command") {
+        Some(serde_json::Value::Array(parts)) => {
+            let words: Vec<String> = parts
+                .iter()
+                .filter_map(|part| part.as_str().map(str::to_owned))
+                .collect();
+            urls.extend(download_urls(&words, 0));
+        }
+        Some(serde_json::Value::String(script)) => urls.extend(command_urls(script, 0)),
+        _ => {}
     }
     urls
 }
@@ -237,8 +483,8 @@ fn call_urls(name: &str, input: &str) -> Vec<String> {
             .and_then(|tail| tail.split('"').next());
         urls.extend(url.map(normalize_url).filter(|u| !u.is_empty()));
     }
-    if input.contains("\"command\"") && downloads(input) {
-        urls.extend(urls_in(input));
+    if let Some(script) = salvaged_command(input) {
+        urls.extend(command_urls(&script, 0));
     }
     urls
 }
@@ -985,5 +1231,152 @@ mod tests {
             run.problems(&cites("https://docs.example.com/p/200")).len(),
             1
         );
+    }
+
+    /// The URLs a `command_execution` of Codex records as read.
+    fn read_by_command(command: serde_json::Value) -> RunProvenance {
+        let item = json!({"id": "c", "type": "command_execution", "command": command,
+            "status": "completed", "exit_code": 0});
+        let mut tracker = FetchTracker::default();
+        tracker.ingest_traces(&[crate::agents::tool_trace::from_codex(&item)
+            .unwrap()
+            .marker()]);
+        run_of(&tracker)
+    }
+
+    #[test]
+    fn a_printed_or_quoted_curl_is_text_not_a_fetch() {
+        let url = "https://never-read.invalid/latest-stable";
+        for command in [
+            format!("printf '%s\\n' 'Documentation example: curl {url}'"),
+            format!("echo curl {url}"),
+            format!("echo \"wget {url}\""),
+            format!("cat notes.md # curl {url}"),
+            format!("grep -n curl {url}"),
+            format!("git clone {url}"),
+            format!("curl -d {url} https://api.example.com/post"),
+        ] {
+            let run = read_by_command(json!(command));
+            assert_eq!(run.problems(&cites(url)).len(), 1, "{command}");
+        }
+    }
+
+    #[test]
+    fn a_real_curl_or_wget_invocation_is_a_fetch() {
+        let page = "https://download.example.com/releases";
+        for command in [
+            json!(format!("curl -sL {page}")),
+            json!(format!("curl --url={page} -o out.html")),
+            json!(format!("cd /tmp && wget -q '{page}' && ls")),
+            json!(format!("sudo -E env A=1 curl {page} | head")),
+            json!(format!("FOO=1 /usr/bin/curl -H 'X: y' \"{page}\"")),
+            json!(format!("cat urls | xargs curl {page}")),
+            json!(["/bin/zsh", "-lc", format!("cd repo && curl -s {page}")]),
+            json!(["curl", "-s", page]),
+            json!(format!("bash -c \"echo hi; wget {page}\"")),
+        ] {
+            let run = read_by_command(command.clone());
+            assert!(run.problems(&cites(page)).is_empty(), "{command}");
+        }
+    }
+
+    #[test]
+    fn a_cut_command_excerpt_keeps_the_download_it_still_holds() {
+        let mut tracker = FetchTracker::default();
+        tracker.record(
+            "Bash",
+            r#"{"command":"cd /repo && curl -sL https://files.example.com/a.json -o a.json && echo this is cut off befo"#,
+        );
+        let run = run_of(&tracker);
+        assert!(run
+            .problems(&cites("https://files.example.com/a.json"))
+            .is_empty());
+        let mut printed = FetchTracker::default();
+        printed.record(
+            "Bash",
+            r#"{"command":"echo 'curl https://never.example.com/x' && sleep 1 and the rest is cut"#,
+        );
+        assert_eq!(
+            run_of(&printed)
+                .problems(&cites("https://never.example.com/x"))
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn an_encoded_credential_name_is_masked_in_the_persisted_trace() {
+        for (key, secret) in [
+            ("%73ig", "fixture-encoded-sig"),
+            ("access%5Ftoken", "fixture-encoded-token"),
+            ("X-Amz-%53ignature", "fixture-encoded-signature"),
+            ("api%2Dkey", "fixture-encoded-key"),
+            ("%2573ig", "fixture-double-encoded"),
+            ("sig%3Dfixture-encoded-eq", "fixture-encoded-eq"),
+            ("API%5fKEY", "fixture-upper-key"),
+        ] {
+            let url = if key.contains("%3D") {
+                format!("https://docs.example.com/release?{key}&page=2")
+            } else {
+                format!("https://docs.example.com/release?{key}={secret}&page=2")
+            };
+            let lines = claude_traces(&[
+                assistant_call("q", "mcp__context7__query-docs", r#"{"query":"x"}"#),
+                user_result("q", &json!(url).to_string()),
+            ]);
+            let stored: Vec<String> = crate::agents::tool_trace::collect(&lines)
+                .iter()
+                .flat_map(|trace| trace.urls.clone())
+                .collect();
+            let stored = stored.join("\n");
+            assert!(!stored.contains(secret), "{key}: {stored}");
+            assert!(stored.contains("page=2"), "{key}: a plain param is kept");
+            assert!(stored.contains("=***"), "{key}: {stored}");
+        }
+        assert_eq!(
+            normalize_url("https://a.dev/f?note=a%26b&x%3D1=2"),
+            "a.dev/f?note=a%26b&x%3D1=2",
+            "a plain parameter is kept as written"
+        );
+    }
+
+    #[test]
+    fn one_canonical_form_on_the_stored_and_the_cited_side() {
+        let source = "https://user:fixture-password@docs.example.test/v3?X-Amz-Credential=fixture-credential\
+            &X-Amz-Signature=fixture-signature&access_token=fixture-token&page=2";
+        let lines = claude_traces(&[
+            assistant_call("q", "mcp__context7__query-docs", r#"{"query":"x"}"#),
+            user_result("q", &json!(source).to_string()),
+        ]);
+        let stored = lines.join("\n");
+        for secret in [
+            "fixture-password",
+            "fixture-credential",
+            "fixture-signature",
+            "fixture-token",
+        ] {
+            assert!(!stored.contains(secret), "{stored}");
+        }
+        let mut tracker = FetchTracker::default();
+        tracker.ingest_traces(&lines);
+        let run = run_of(&tracker);
+        let fetched = run.fetched.clone().unwrap();
+        assert_eq!(
+            fetched.into_iter().collect::<Vec<_>>(),
+            vec![normalize_url(source)],
+            "the stored form is the cited form, secrets masked and `page` kept"
+        );
+        assert!(run.problems(&cites(source)).is_empty());
+        assert!(run
+            .problems(&cites(&source.replace("fixture-signature", "renewed")))
+            .is_empty());
+        assert_eq!(
+            run.problems(&cites(&source.replace("page=2", "page=3")))
+                .len(),
+            1
+        );
+        // Normalizing a stored form changes nothing.
+        let once = normalize_url(source);
+        assert_eq!(normalize_url(&once), once);
     }
 }

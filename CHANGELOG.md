@@ -630,10 +630,17 @@ Release notes for 0.9.3 and earlier are available in the
   the normal resolve → query flow keeps `url:` citations checked on the ACP
   route as on the direct one. A trace keeps up to 256 URLs per call within
   24 KiB; a URL over 1000 characters is dropped, never cut. The URLs kept are
-  normalized without their scheme, their userinfo (`user:pass@`) and the value
-  of a credential-style query parameter (`sig`, `X-Amz-Signature`,
-  `access_token`, `api-key`…), the same on the citation side, so a signed page
-  still matches and no secret is stored. Only the full audit
+  put in one canonical, safe form, the same on the stored and the cited side:
+  no scheme, no userinfo (`user:pass@`), the value of a credential-style query
+  parameter masked as `name=***` (the name is judged after percent-decoding, so
+  `%73ig`, `access%5Ftoken`, `api%2Dkey` or a doubly-encoded name are masked
+  too; non-secret parameters such as `page=2` are kept), vendor token shapes
+  redacted. A signed page still matches its citation, a page with another
+  `page=` does not, and no secret is stored. Only a real `curl` / `wget`
+  invocation counts as a download, and only the `http(s)` addresses it is given
+  as arguments (through `sudo` / `env` / `xargs`, a `;` `&&` `|` chain, or
+  `sh -c`): a URL that is printed (`echo curl <url>`), quoted, or passed as the
+  value of another option (`curl -d <url>`) is text, not a fetch. Only the full audit
   pipeline checks the run's provenance: a partial audit does not.
   The pre-step baseline and the blame ledger of the documentary gate (KT-1306)
   use the same run-aware analysis: an unbacked citation already there is in the

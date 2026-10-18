@@ -37,7 +37,9 @@ fn bounded_urls(urls: impl IntoIterator<Item = String>) -> Vec<String> {
     let mut bytes = 0usize;
     urls.into_iter()
         .filter(|url| url.chars().count() <= MAX_URL_CHARS)
-        .map(|url| crate::core::redact::redact_for_audit_artifact(&url).0)
+        // The canonical safe form, which is idempotent: a further assignment
+        // redaction would swallow the rest of a masked query (`sig=***&page=2`).
+        .map(|url| crate::core::run_provenance::normalize_url(&url))
         .filter(|url| seen.insert(url.clone()))
         .take(MAX_URLS)
         .take_while(|url| {
