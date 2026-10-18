@@ -54,6 +54,10 @@ fn repo() -> tempfile::TempDir {
     dir
 }
 
+fn paths(report: &RemitReport) -> Vec<&str> {
+    report.reverted.iter().map(|r| r.path.as_str()).collect()
+}
+
 fn root(rel: &str) -> DocsRoot {
     DocsRoot::from_rel(rel).unwrap()
 }
@@ -224,25 +228,152 @@ fn a_deleted_tracked_file_outside_the_root_comes_back() {
     std::fs::remove_file(dir.path().join("docs/tech-debt/TD-1.md")).unwrap();
     let report = remit.settle_blocking();
     assert_eq!(read(dir.path(), "docs/tech-debt/TD-1.md"), "td one\n");
-    assert_eq!(report.reverted, vec!["docs/tech-debt/TD-1.md".to_string()]);
+    assert_eq!(paths(&report), vec!["docs/tech-debt/TD-1.md"]);
 }
 
 #[test]
-fn a_users_uncommitted_edit_outside_the_root_survives_the_step() {
+fn a_users_uncommitted_edit_in_another_ai_folder_is_restored_to_what_it_was() {
     let dir = repo();
-    write(dir.path(), "src/main.rs", "fn main() { /* user wip */ }\n");
+    write(dir.path(), "docs/tech-debt/TD-1.md", "td one, user wip\n");
     let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
 
     // Untouched by the agent: left exactly as the user had it.
     let report = remit.settle_blocking();
     assert!(report.is_empty(), "{report:?}");
-    assert_eq!(read(dir.path(), "src/main.rs"), "fn main() { /* user wip */ }\n");
 
     // Changed again by the agent: back to the user's content, not to HEAD.
-    write(dir.path(), "src/main.rs", "fn main() { agent() }\n");
+    write(dir.path(), "docs/tech-debt/TD-1.md", "td one, agent\n");
     let report = remit.settle_blocking();
-    assert_eq!(report.reverted, vec!["src/main.rs".to_string()]);
-    assert_eq!(read(dir.path(), "src/main.rs"), "fn main() { /* user wip */ }\n");
+    assert_eq!(paths(&report), vec!["docs/tech-debt/TD-1.md"]);
+    assert_eq!(read(dir.path(), "docs/tech-debt/TD-1.md"), "td one, user wip\n");
+}
+
+#[test]
+fn a_source_file_changed_during_the_step_is_never_touched_only_reported() {
+    let dir = repo();
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    // The user keeps coding while the audit runs.
+    write(dir.path(), "src/main.rs", "fn main() { /* edited during the audit */ }\n");
+    git(dir.path(), &["add", "src/main.rs"]);
+
+    let report = remit.settle_blocking();
+
+    assert_eq!(read(dir.path(), "src/main.rs"), "fn main() { /* edited during the audit */ }\n");
+    assert!(git(dir.path(), &["status", "--porcelain"]).contains("M  src/main.rs"), "index untouched");
+    assert!(report.reverted.is_empty());
+    assert!(
+        report.warnings.iter().any(|w| w.contains("src/main.rs") && w.contains("left untouched")),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn a_source_file_the_user_already_had_dirty_is_reported_only_when_it_changes_again() {
+    let dir = repo();
+    write(dir.path(), "src/main.rs", "wip\n");
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    assert!(remit.settle_blocking().is_empty());
+    write(dir.path(), "src/main.rs", "wip, more\n");
+    let report = remit.settle_blocking();
+    assert_eq!(read(dir.path(), "src/main.rs"), "wip, more\n");
+    assert!(report.warnings.iter().any(|w| w.contains("src/main.rs")), "{report:?}");
+}
+
+#[test]
+fn a_nested_agents_md_does_not_make_a_source_folder_an_ai_folder() {
+    let dir = repo();
+    write(dir.path(), "src/AGENTS.md", "# my own notes for the agent\n");
+    git(dir.path(), &["add", "-A"]);
+    git(dir.path(), &["commit", "-q", "-m", "notes"]);
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    write(dir.path(), "src/main.rs", "changed\n");
+    let report = remit.settle_blocking();
+    assert!(report.reverted.is_empty(), "{report:?}");
+    assert_eq!(read(dir.path(), "src/main.rs"), "changed\n");
+}
+
+#[test]
+fn what_a_restore_overwrites_stays_readable_as_a_blob() {
+    let dir = repo();
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    write(dir.path(), "docs/tech-debt/TD-1.md", "td one\nedited during the step\n");
+
+    let report = remit.settle_blocking();
+
+    assert_eq!(read(dir.path(), "docs/tech-debt/TD-1.md"), "td one\n");
+    let blob = report.reverted[0].blob.clone().expect("a blob is reported");
+    assert_eq!(git(dir.path(), &["cat-file", "-p", &blob]), "td one\nedited during the step");
+    let text = report.messages().join("\n");
+    assert!(text.contains(&blob) && text.contains("git cat-file -p"), "{text}");
+}
+
+#[test]
+fn a_restore_of_a_user_dirty_ai_file_keeps_the_newer_bytes_as_a_blob() {
+    let dir = repo();
+    write(dir.path(), "docs/tech-debt/TD-1.md", "user wip\n");
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    write(dir.path(), "docs/tech-debt/TD-1.md", "user wip\nlater edit\n");
+
+    let report = remit.settle_blocking();
+
+    assert_eq!(read(dir.path(), "docs/tech-debt/TD-1.md"), "user wip\n");
+    let blob = report.reverted[0].blob.clone().unwrap();
+    assert_eq!(git(dir.path(), &["cat-file", "-p", &blob]), "user wip\nlater edit");
+}
+
+#[test]
+fn a_commit_touching_source_is_kept_with_a_warning() {
+    let dir = repo();
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    // Authored during the step, plain, linear — but it changes src/.
+    write(dir.path(), "src/main.rs", "fn main() { fix_typo() }\n");
+    git(dir.path(), &["add", "-A"]);
+    git(dir.path(), &["commit", "-q", "-m", "fix: typo in src/"]);
+    let head = git(dir.path(), &["rev-parse", "HEAD"]);
+
+    let report = remit.settle_blocking();
+
+    assert_eq!(git(dir.path(), &["rev-parse", "HEAD"]), head, "history untouched");
+    assert!(report.commits_undone.is_empty());
+    assert!(
+        report.warnings.iter().any(|w| w.contains("src/main.rs") && w.contains("may be yours")),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn a_range_with_one_source_commit_is_left_whole() {
+    let dir = repo();
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    write(dir.path(), ".ai/a.md", "a\n");
+    git(dir.path(), &["add", "-A"]);
+    git(dir.path(), &["commit", "-q", "-m", "audit"]);
+    write(dir.path(), "src/main.rs", "// user\n");
+    git(dir.path(), &["add", "-A"]);
+    git(dir.path(), &["commit", "-q", "-m", "user"]);
+    let head = git(dir.path(), &["rev-parse", "HEAD"]);
+
+    let report = remit.settle_blocking();
+
+    assert_eq!(git(dir.path(), &["rev-parse", "HEAD"]), head);
+    assert!(report.commits_undone.is_empty());
+}
+
+#[test]
+fn a_commit_touching_only_the_root_and_a_pointer_is_still_undone() {
+    let dir = repo();
+    let before = git(dir.path(), &["rev-parse", "HEAD"]);
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    write(dir.path(), ".ai/a.md", "a\n");
+    write(dir.path(), "CLAUDE.md", "pointer\nKronn block\n");
+    git(dir.path(), &["add", "-A"]);
+    git(dir.path(), &["commit", "-q", "-m", "DOPS-0: audit"]);
+
+    let report = remit.settle_blocking();
+
+    assert_eq!(git(dir.path(), &["rev-parse", "HEAD"]), before);
+    assert_eq!(report.commits_undone.len(), 1, "{report:?}");
+    assert!(report.warnings.is_empty(), "{report:?}");
 }
 
 #[test]
@@ -282,6 +413,7 @@ fn a_project_below_the_repository_top_is_guarded_in_its_own_paths() {
     let dir = tempfile::tempdir().unwrap();
     git(dir.path(), &["init", "-q", "-b", "main"]);
     write(dir.path(), "app/docs/a.md", "a\n");
+    write(dir.path(), "app/docs/.kronn.json", "{}\n");
     write(dir.path(), "app/.ai/b.md", "b\n");
     write(dir.path(), "other/c.md", "c\n");
     git(dir.path(), &["add", "-A"]);
@@ -291,7 +423,7 @@ fn a_project_below_the_repository_top_is_guarded_in_its_own_paths() {
     write(dir.path(), "app/docs/a.md", "a changed\n");
     write(dir.path(), "app/.ai/b.md", "b changed\n");
     let report = remit.settle_blocking();
-    assert_eq!(report.reverted, vec!["docs/a.md".to_string()]);
+    assert_eq!(paths(&report), vec!["docs/a.md"]);
     assert_eq!(read(&project, "docs/a.md"), "a\n");
     assert_eq!(read(&project, ".ai/b.md"), "b changed\n");
 }
@@ -325,12 +457,16 @@ fn the_step_prompt_forbids_commits_and_marks_the_old_folder_read_only() {
 fn the_report_reads_as_one_line_per_finding() {
     let report = RemitReport {
         commits_undone: vec!["abc123 DOPS-0: x".into()],
-        reverted: vec!["docs/a.md".into(), "docs/b.md".into()],
+        reverted: vec![
+            Reverted { path: "docs/a.md".into(), blob: Some("deadbeef".into()) },
+            Reverted { path: "docs/b.md".into(), blob: None },
+        ],
         warnings: vec!["w".into()],
     };
     let lines = report.messages();
     assert_eq!(lines.len(), 3);
     assert!(lines[0].contains("soft reset") && lines[0].contains("abc123 DOPS-0: x"));
-    assert!(lines[1].contains("docs/a.md, docs/b.md"));
+    assert!(lines[1].contains("docs/a.md (the version before the restore is blob deadbeef: `git cat-file -p deadbeef`)"));
+    assert!(lines[1].contains("docs/b.md (deleted by the step)"));
     assert_eq!(lines[2], "w");
 }
