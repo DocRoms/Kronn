@@ -15,9 +15,13 @@ Release notes for 0.9.3 and earlier are available in the
 
 - A full audit no longer ends Interrupted on what the audit could not fix
   (KT-1353, audit matrix africanews/apollo). The documentary blockers the
-  committed documents held before the run, in documents no step rewrote, are
-  reported (`documentary_preexisting`, `phase: final_gate`) and never charged to
-  the founding step, nor refused at validation; the blame ledger follows a
+  committed documents held before the run are reported
+  (`documentary_preexisting`, `phase: final_gate`) and never charged to the
+  founding step, even when a step rewrites the document around them (a
+  re-verification appending to its history); the validation lets them through
+  only while the document is unchanged since the run. They are stored on the
+  run (`documentary_notes`), listed in the audit timeline and at the top of the
+  validation prompt, with the replacements Kronn applied; the blame ledger follows a
   blocker through the rewording of its message, so a bare sheet citation written
   by step 8 stays step 8's when step 10 grows the sheet. Where the gate's own
   message carries the one replacement (a link relative to the document's folder,

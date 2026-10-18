@@ -6918,6 +6918,8 @@ Termine par [SIGNAL: OK].`,
   "auditTimeline.step.overrideTitle": "Cette étape a laissé un document qui n'est pas sain. Ce qu'elle a changé :",
   "auditTimeline.step.overrideConfirm": "Accepter quand même",
   "auditTimeline.drift.redo": "Rejouer les {0} étape(s) héritée(s)",
+  "auditTimeline.docnotes.preexisting": "{0} problème(s) de citation préexistant(s) dans des docs qu'aucune étape ne possède",
+  "auditTimeline.docnotes.autofixes": "{0} remplacement(s) exact(s) de la porte appliqué(s) par Kronn",
 };
 
 export default fr;

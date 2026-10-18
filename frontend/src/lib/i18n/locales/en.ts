@@ -6905,6 +6905,8 @@ End with [SIGNAL: OK].`,
   "auditTimeline.step.overrideTitle": "This step left a document that is not sound. What it changed:",
   "auditTimeline.step.overrideConfirm": "Accept anyway",
   "auditTimeline.drift.redo": "Redo the {0} inherited step(s)",
+  "auditTimeline.docnotes.preexisting": "{0} pre-existing citation problem(s) in docs no step owns",
+  "auditTimeline.docnotes.autofixes": "{0} exact gate replacement(s) applied by Kronn",
 };
 
 export default en;

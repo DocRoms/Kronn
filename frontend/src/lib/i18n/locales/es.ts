@@ -6905,6 +6905,8 @@ Termina con [SIGNAL: OK].`,
   "auditTimeline.step.overrideTitle": "Este paso dejó un documento que no es sólido. Lo que cambió:",
   "auditTimeline.step.overrideConfirm": "Aceptar de todos modos",
   "auditTimeline.drift.redo": "Repetir los {0} paso(s) heredado(s)",
+  "auditTimeline.docnotes.preexisting": "{0} problema(s) de citas preexistente(s) en docs que ningún paso posee",
+  "auditTimeline.docnotes.autofixes": "{0} reemplazo(s) exacto(s) de la puerta aplicado(s) por Kronn",
 };
 
 export default es;

@@ -607,6 +607,10 @@ pub async fn validate_audit(
             ));
         }
 
+        // KT-1353 — which documents are still exactly as the run left them, read
+        // before anything below rewrites one.
+        let ledger = super::document_repair::Blame::load(&project_path);
+        let unchanged = ledger.unchanged_since_run(&project_path);
         let report = if optimize_documents {
             crate::core::document_optimization::analyze_and_write(&project_path)?
         } else {
@@ -614,10 +618,16 @@ pub async fn validate_audit(
         };
         if optimize_documents {
             // KT-1353 — the blockers the committed documents held before the
-            // audit ran were let through by its own gate: not refused here either.
+            // audit ran were let through by its own gate: not refused here either,
+            // unless the document was edited since (the exemption is the run's).
             let held: Vec<_> = report.blocking_diagnostics().cloned().collect();
-            let (_, own) =
-                super::document_repair::Blame::load(&project_path).split_preexisting(&held);
+            let (waved, own) = ledger.split_preexisting_in(&held, &unchanged);
+            if !waved.is_empty() {
+                tracing::info!(
+                    "Validation: {} pre-existing documentary blocker(s) not refused, listed in the run's documentary notes",
+                    waved.len()
+                );
+            }
             let blocking: Vec<String> = own
                 .iter()
                 .map(|d| format!("{}: {} ({})", d.code, d.message, d.path))

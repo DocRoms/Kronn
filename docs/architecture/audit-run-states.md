@@ -68,13 +68,31 @@ by a human (KT-1131). An accepted step keeps its failure on record:
   `0`) before step 1. The final gate reports them in a `documentary_preexisting`
   event (`phase: final_gate`) and a `preexisting_count`, and neither charges
   them to the founding step nor sets the run `Interrupted`; the recovery plan of
-  a resume skips them, and the validation gate does not refuse them either. The
-  exemption covers only documents the run did not rewrite: once a step rewrites
-  such a document, or is handed the blocker, the blocker is released from the
-  pre-existing set and the KT-1306 attribution applies again (the toucher is not
-  blamed; the entry point's step owns what no step wrote), so the run is
-  blocked on it.
-  [src: file: backend/src/api/audit/document_repair.rs:154-165#seed_preexisting] [src: file: backend/src/api/audit/document_repair.rs:182-196#release] [src: file: backend/src/api/audit/full.rs:1390#seed_preexisting] [src: file: backend/src/api/audit/full.rs:3124#split_preexisting] [src: file: backend/src/api/audit/validate.rs:620#split_preexisting]
+  a resume skips them. The exemption follows the blocker, not the document: a
+  step that rewrites the document and leaves the citation as it was (a
+  re-verification appending to `audit_history`, the africanews shape) did not
+  bring it, so the blocker stays pre-existing. Only a step *handed* the blocker
+  to fix is charged with it afterwards (`release`), and is then retried and
+  redone like any other.
+  [src: file: backend/src/api/audit/document_repair.rs:175#seed_preexisting] [src: file: backend/src/api/audit/document_repair.rs:244#release] [src: file: backend/src/api/audit/full.rs:3130#split_preexisting]
+- **The exemption is the run's, not the ledger's** (KT-1353). The ledger stores
+  the content hash of each pre-existing blocker's document as the run last left
+  it (`seal`, after every step and after the final gate's own write). The
+  validation reads the hashes before it rewrites anything and waves a blocker
+  through only while its document is unchanged: an edit between the run and the
+  validation (a validation agent's, a human's) hands that document's blockers
+  back, so a citation fixed then brought back is refused. A ledger written
+  without hashes honours nothing.
+  [src: file: backend/src/api/audit/document_repair.rs:205#unchanged_since_run] [src: file: backend/src/api/audit/validate.rs:624#split_preexisting_in]
+- **What the gate let through or repaired reaches the human** (KT-1353). The
+  pre-existing blockers of the final gate and the exact replacements applied
+  during the run are stored on the run (`audit_runs.documentary_notes`, JSON
+  `{preexisting, autofixes}`), shown in the audit timeline ("N pre-existing
+  citation problems in docs no step owns", "N exact gate replacements applied by
+  Kronn", both with their list), and prepended to the validation discussion's
+  first prompt, which tells the agent to list them to the user and that editing
+  such a document makes its problems blocking again.
+  [src: file: backend/src/api/audit/document_repair.rs:349#notes_json] [src: file: backend/src/api/audit/helpers.rs:463#documentary_notes_block] [src: file: backend/src/db/audit_runs.rs:225#set_documentary_notes] [src: file: frontend/src/components/AuditTimeline.tsx:51#parseDocumentaryNotes]
 - **The blame ledger follows the blocker, not its wording** (KT-1353). A gate
   message restates the cited file's line count or a suggested path, so it
   changes when a later step rewrites that file. Two blockers are the same when

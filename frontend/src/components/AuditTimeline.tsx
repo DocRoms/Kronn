@@ -38,6 +38,28 @@ interface LatestRunFacts {
   cancelledAtStep: number | null;
   /** What moved in the sources during a resume. */
   resumeDrift: string | null;
+  /** KT-1353 — what the documentary gate let through or repaired (JSON). */
+  documentaryNotes: string | null;
+}
+
+/** KT-1353 — `audit_runs.documentary_notes`: unreadable or empty reads as none. */
+interface DocumentaryNotes {
+  preexisting: { path: string; message: string }[];
+  autofixes: { step: number; path: string; kind: string; from: string; to: string }[];
+}
+
+function parseDocumentaryNotes(raw: string | null): DocumentaryNotes | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<DocumentaryNotes>;
+    const notes = {
+      preexisting: Array.isArray(parsed.preexisting) ? parsed.preexisting : [],
+      autofixes: Array.isArray(parsed.autofixes) ? parsed.autofixes : [],
+    };
+    return notes.preexisting.length || notes.autofixes.length ? notes : null;
+  } catch {
+    return null;
+  }
 }
 
 interface StepRow {
@@ -323,6 +345,7 @@ export function AuditTimeline(props: AuditTimelineProps) {
           id: latestRun.id, status: latestRun.status, endedAt: latestRun.ended_at ?? null,
           cancelledAtStep: latestRun.cancelled_at_step ?? null,
           resumeDrift: latestRun.resume_drift ?? null,
+          documentaryNotes: latestRun.documentary_notes ?? null,
         } : null,
         repo: data.repo ?? null,
         repoCanValidate: data.repo_can_validate === true,
@@ -363,6 +386,7 @@ export function AuditTimeline(props: AuditTimelineProps) {
   // KT-1211 — the latest run was cancelled by the user. Settled `Cancelled` (no
   // step completed) the only next action is a fresh launch; settled
   // `Interrupted` it is resumable and still tells it was cancelled.
+  const docNotes = useMemo(() => parseDocumentaryNotes(latestRun?.documentaryNotes ?? null), [latestRun]);
   const cancelledRun = !auditActive && latestRun !== null && latestRun.cancelledAtStep !== null
     && (latestRun.status === 'Cancelled' || latestRun.status === 'Interrupted');
 
@@ -701,6 +725,35 @@ export function AuditTimeline(props: AuditTimelineProps) {
                     >
                       <RotateCcw size={11} /> {t('auditTimeline.drift.redo', inheritedDone.length)}
                     </button>
+                  )}
+                </div>
+              </div>
+            )}
+            {docNotes && !auditActive && (
+              <div className="audit-tl-warn" role="status" data-testid="audit-timeline-documentary-notes">
+                <AlertTriangle size={13} aria-hidden="true" />
+                <div>
+                  {docNotes.preexisting.length > 0 && (
+                    <details data-testid="audit-timeline-documentary-preexisting">
+                      <summary>{t('auditTimeline.docnotes.preexisting', docNotes.preexisting.length)}</summary>
+                      <ul>
+                        {docNotes.preexisting.map((item, i) => (
+                          <li key={`${item.path}-${i}`}><code>{item.path}</code> — {item.message}</li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
+                  {docNotes.autofixes.length > 0 && (
+                    <details data-testid="audit-timeline-documentary-autofixes">
+                      <summary>{t('auditTimeline.docnotes.autofixes', docNotes.autofixes.length)}</summary>
+                      <ul>
+                        {docNotes.autofixes.map((fix, i) => (
+                          <li key={`${fix.path}-${i}`}>
+                            <code>{fix.path}</code> — {fix.kind}: <code>{fix.from}</code> → <code>{fix.to}</code>
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
                   )}
                 </div>
               </div>

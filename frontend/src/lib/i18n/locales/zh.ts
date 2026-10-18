@@ -6695,6 +6695,8 @@ const zh: TranslationDict = {
   "auditTimeline.step.overrideTitle": "此步骤留下了不可靠的文档。它修改了：",
   "auditTimeline.step.overrideConfirm": "仍然接受",
   "auditTimeline.drift.redo": "重做 {0} 个继承的步骤",
+  "auditTimeline.docnotes.preexisting": "{0} 个已有的引用问题（位于没有任何步骤负责的文档中）",
+  "auditTimeline.docnotes.autofixes": "Kronn 应用了 {0} 处检查给出的精确替换",
 };
 
 export default zh;

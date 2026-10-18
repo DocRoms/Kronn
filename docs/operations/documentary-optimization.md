@@ -61,4 +61,14 @@ with no closing newline, clamped to the last line. Never applied: a comma
 bundle that is not fully verified, a comment inside a marker, several candidate
 paths, a text file cited without a line, a range farther out of the file, and
 anything inside fenced or inline code.
-[src: file: backend/src/core/document_optimization/mechanical_fix.rs:37-80#mechanical_repair] [src: file: backend/src/api/audit/document_repair.rs:431-470#check_attempt]
+[src: file: backend/src/core/document_optimization/mechanical_fix.rs:36#mechanical_repair] [src: file: backend/src/api/audit/document_repair.rs:504#check_attempt]
+
+**What the committed documents already got wrong is reported, not charged**
+(KT-1353). A fresh Full run records the blockers its documents hold before step
+1. As long as a blocker is unchanged (same code, document and cited subject) it
+fails neither a step nor the run, even if a step rewrites the document around
+it; it is listed in the final gate's `documentary_preexisting` event, stored on
+the run, shown in the audit timeline and put at the top of the validation
+prompt. The validation honours the exemption only while the document is exactly
+as the run left it (content hash): edit the document and its problems block
+again. See [audit run states](../architecture/audit-run-states.md).

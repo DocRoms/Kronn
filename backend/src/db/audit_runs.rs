@@ -221,6 +221,15 @@ pub fn set_resume_drift(conn: &Connection, id: &str, message: &str) -> Result<()
     Ok(())
 }
 
+/// KT-1353 — what the documentary gate let through or repaired during the run.
+pub fn set_documentary_notes(conn: &Connection, id: &str, notes: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE audit_runs SET documentary_notes = ?2 WHERE id = ?1",
+        params![id, notes],
+    )?;
+    Ok(())
+}
+
 /// KT-1211 (M5) — the process group of the step's CLI agent, with the start
 /// stamp of its leader, persisted so a boot after a crash can kill it.
 pub fn set_agent_process(
@@ -532,7 +541,7 @@ pub fn list_recent(conn: &Connection, project_id: &str, limit: u32) -> Result<Ve
                 health_score, report_path, recommendations_json, last_completed_step,
                 validation_discussion_id, step_outcomes_json,
                 head_sha, branch, source_fingerprint, model, project_profile_draft,
-                cancelled_at_step, resume_drift, tier, connection_id
+                cancelled_at_step, resume_drift, tier, connection_id, documentary_notes
          FROM audit_runs
          WHERE project_id = ?1
          ORDER BY started_at DESC, rowid DESC
@@ -557,7 +566,7 @@ pub fn latest_completed(conn: &Connection, project_id: &str) -> Result<Option<Au
                 health_score, report_path, recommendations_json, last_completed_step,
                 validation_discussion_id, step_outcomes_json,
                 head_sha, branch, source_fingerprint, model, project_profile_draft,
-                cancelled_at_step, resume_drift, tier, connection_id
+                cancelled_at_step, resume_drift, tier, connection_id, documentary_notes
          FROM audit_runs
          WHERE project_id = ?1 AND status = 'Completed'
          ORDER BY ended_at DESC
@@ -644,7 +653,7 @@ pub fn get_by_id(conn: &Connection, id: &str) -> Result<Option<AuditRun>> {
                 health_score, report_path, recommendations_json, last_completed_step,
                 validation_discussion_id, step_outcomes_json,
                 head_sha, branch, source_fingerprint, model, project_profile_draft,
-                cancelled_at_step, resume_drift, tier, connection_id
+                cancelled_at_step, resume_drift, tier, connection_id, documentary_notes
          FROM audit_runs
          WHERE id = ?1
          LIMIT 1",
@@ -704,6 +713,7 @@ fn row_to_audit_run(row: &rusqlite::Row) -> rusqlite::Result<AuditRun> {
         resume_drift: row.get(28).unwrap_or(None),
         tier: row.get(29).unwrap_or(None),
         connection_id: row.get(30).unwrap_or(None),
+        documentary_notes: row.get(31).unwrap_or(None),
     })
 }
 
@@ -1844,6 +1854,7 @@ mod tests {
                 resume_drift TEXT,
                 tier TEXT,
                 connection_id TEXT,
+                documentary_notes TEXT,
                 agent_pgid INTEGER,
                 agent_started_marker TEXT
             );
