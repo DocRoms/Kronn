@@ -24,7 +24,7 @@ room: `@claude` is the discussion agent in a ClaudeCode-configured room
 and a punctual spawn everywhere else. This is intentional and the
 autocomplete must always show which one is being picked (KT-211).
 [src: file: frontend/src/lib/messageTargets.ts:54-68#isPrincipal]
-[src: file: backend/scripts/disc-introspection-mcp.py:5209-5217#principal]
+[src: file: backend/scripts/disc-introspection-mcp.py:5206-5214#principal]
 
 ## 2. Alias resolution, exactly
 
@@ -41,7 +41,7 @@ autocomplete must always show which one is being picked (KT-211).
   identify a joined CLI — an agent cannot invent a session. A short
   alias resolves to `discussion_agent` when principal, else `agent`.
   Multiple mentions fan out once per identity, in textual order.
-  [src: file: backend/scripts/disc-introspection-mcp.py:5132-5218#_structured_message_targets]
+  [src: file: backend/scripts/disc-introspection-mcp.py:5129-5215#_structured_message_targets]
 - **No presence-based substitution.** A short alias never silently
   reroutes to a joined CLI (and never refuses to spawn) just because a
   same-provider CLI is present: the punctual agent and the CLI are
@@ -132,7 +132,7 @@ the author or alias cannot be verified, with a refusal that never
 fabricates an ordinal. A deliberate fan-out that lists the exact replied
 CLI alongside its native identity passes untouched, and outside a reply
 context the short alias stays free (both identities may be wanted).
-[src: file: backend/scripts/disc-introspection-mcp.py:5308-5391#_reject_short_alias_reply_to_cli_author]
+[src: file: backend/scripts/disc-introspection-mcp.py:5305-5388#_reject_short_alias_reply_to_cli_author]
 
 ## 6. Presence, fallback, reload
 
