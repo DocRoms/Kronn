@@ -28,6 +28,9 @@ pub struct GrantedProjects {
     pub all: Option<ScopeAccess>,
     /// A room without a project may write the general resources.
     pub general: bool,
+    /// The general resources these rooms created, as `(kind, id)`: the only
+    /// ones « General · write » lets their agents edit.
+    pub general_own: HashSet<(String, String)>,
 }
 
 impl GrantedProjects {
@@ -36,6 +39,7 @@ impl GrantedProjects {
         self.read.extend(other.read);
         self.write.extend(other.write);
         self.general |= other.general;
+        self.general_own.extend(other.general_own);
         self.all = match (self.all, other.all) {
             (Some(ScopeAccess::Write), _) | (_, Some(ScopeAccess::Write)) => {
                 Some(ScopeAccess::Write)
@@ -151,7 +155,32 @@ pub fn granted_projects(conn: &Connection, discussion_ids: &[String]) -> Result<
             }
         }
     }
+    let mut statement = conn.prepare(&format!(
+        "SELECT kind, resource_id FROM general_resource_origins \
+         WHERE discussion_id IN ({placeholders})"
+    ))?;
+    let own = statement.query_map(rusqlite::params_from_iter(discussion_ids), |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in own {
+        granted.general_own.insert(row?);
+    }
     Ok(granted)
+}
+
+/// Record the room a general resource was created from (KT-1346).
+pub fn record_general_origin(
+    conn: &Connection,
+    kind: &str,
+    resource_id: &str,
+    discussion_id: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO general_resource_origins(kind, resource_id, discussion_id, created_at) \
+         VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![kind, resource_id, discussion_id, Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
 }
 
 fn primary_project(conn: &Connection, discussion_id: &str) -> Result<Option<Option<String>>> {

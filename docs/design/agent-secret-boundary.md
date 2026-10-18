@@ -148,9 +148,10 @@ discussion (or one task execution, or one workflow run) and to its project.
   runner has bound the launch's model. A worker's token carries its room, not
   its execution id: delivery tools check the dispatch themselves.
 - From a room **without a project**, a token reads the general resources.
-  Creating or editing a general Quick Prompt, Quick API, Page or workflow
-  needs the room's « General · write » grant, which a human gives behind a
-  typed confirmation (`docs/design/discussion-project-scope.md`). A token
+  Creating a general Quick Prompt, Quick API, Page or workflow needs the
+  room's « General · write » grant, which a human gives behind a typed
+  confirmation (`docs/design/discussion-project-scope.md`); the room's agents
+  then edit only what the room created, the rest stays a human's. A token
   bound to a project never writes a general resource.
 
 **Human proof per action.** Every secret-class route (section 3 rows 3 and 4,

@@ -216,6 +216,30 @@ pub async fn scope_json(
             grant.adopt_discussion(id);
         }
     }
+    // A general resource a project-less room created is the room's to edit:
+    // the provenance comes from the token, never from the request.
+    if let (Some(kind), true) = (
+        bridge_token::general_created_kind(route),
+        admitted.reach.writes_general(),
+    ) {
+        let created = envelope["data"]["id"].as_str().map(str::to_owned);
+        if let (Some(id), true) = (created, envelope["success"] == true) {
+            let rooms = grant.scope.room_grant_discussions.clone();
+            db.with_conn(move |conn| {
+                for room in &rooms {
+                    crate::db::discussion_scope::record_general_origin(
+                        conn,
+                        bridge_token::general_kind(kind),
+                        &id,
+                        room,
+                    )?;
+                }
+                Ok(())
+            })
+            .await
+            .map_err(|_| denied(StatusCode::SERVICE_UNAVAILABLE, "bridge scope check failed"))?;
+        }
+    }
     // An `ApiResponse` envelope is scoped through its `data`; any other JSON
     // body is scoped as a whole.
     let is_envelope = envelope

@@ -756,6 +756,31 @@ const GENERAL_KINDS: &[Kind] = &[
     Kind::Workflow,
 ];
 
+/// How a general resource's kind is recorded in `general_resource_origins`.
+pub fn general_kind(kind: Kind) -> &'static str {
+    match kind {
+        Kind::QuickPrompt => "quick_prompt",
+        Kind::QuickApi => "quick_api",
+        Kind::Page => "page",
+        Kind::Workflow => "workflow",
+        _ => "other",
+    }
+}
+
+/// The general resource a creation route makes, for its provenance.
+pub fn general_created_kind(route: &BridgeRoute) -> Option<Kind> {
+    if route.method != "POST" {
+        return None;
+    }
+    match route.pattern {
+        "/api/quick-prompts" => Some(Kind::QuickPrompt),
+        "/api/quick-apis" => Some(Kind::QuickApi),
+        "/api/pages" => Some(Kind::Page),
+        "/api/workflows" => Some(Kind::Workflow),
+        _ => None,
+    }
+}
+
 /// Update routes whose handler resets or may drop the project when the body
 /// omits it: the token's project is sent explicitly.
 const KEEPS_PROJECT_ON_UPDATE: &[&str] = &[
@@ -1627,10 +1652,15 @@ fn writable(grant: &BridgeGrant, kind: Kind, id: &str, place: &Residence, reach:
         return true;
     }
     // Without a project, a human's « General · write » grant on the room lets
-    // its agents edit the general resources (KT-1346). A project's token never does.
+    // its agents edit the general resources the room created (KT-1346); the
+    // rest stays the human's. A project's token never does.
     if reach.writes_general()
         && GENERAL_KINDS.contains(&kind)
         && matches!(place, Residence::Global | Residence::General)
+        && reach
+            .granted
+            .general_own
+            .contains(&(general_kind(kind).to_owned(), id.to_owned()))
     {
         return true;
     }

@@ -386,6 +386,26 @@ async fn a_room_without_a_project_writes_the_general_resources_only_once_a_human
     )
     .await;
     assert!(edited.ok, "{}", edited.content);
+    // A general resource the room did not create stays the human's.
+    state
+        .db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO quick_prompts(id, name, prompt_template, project_id, created_at, updated_at) \
+                 VALUES ('human-qp', 'human', 'x', NULL, '2026-10-18T00:00:00Z', '2026-10-18T00:00:00Z')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let foreign = call(
+        agent.as_ref(),
+        "qp_update",
+        json!({"qp_id": "human-qp", "name": "taken"}),
+    )
+    .await;
+    assert!(refused(&foreign), "{}", foreign.content);
     // A project room never gets the general grant.
     let denied = state
         .db

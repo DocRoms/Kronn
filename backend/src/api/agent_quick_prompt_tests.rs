@@ -128,16 +128,19 @@ async fn quick_prompt_authoring_filters_overrides_and_merges_the_stored_definiti
     );
     assert_eq!(created.variables[0].label, "Sujet");
 
-    // From a room without a project the general templates are editable; a
-    // project room's agent edits only its project's (KT-1346).
+    // With « General · write » a room without a project edits the general
+    // templates it created; one it did not create, like a project room's
+    // agent, it never edits (KT-1346).
     let local = KronnToolExecutor::new(state.clone(), Some("room-a".into()));
-    let mut shared = attempted_overrides();
-    shared["qp_id"] = json!("global");
-    let refused = call(&local, "qp_update", shared).await;
-    assert!(!refused.ok, "{}", refused.content);
-    let before = saved_prompt("global", None);
+    for editor in [&local, &executor] {
+        let mut shared = attempted_overrides();
+        shared["qp_id"] = json!("global");
+        let refused = call(editor, "qp_update", shared).await;
+        assert!(!refused.ok, "{}", refused.content);
+    }
+    let before = created.clone();
     let mut arguments = attempted_overrides();
-    arguments["qp_id"] = json!("global");
+    arguments["qp_id"] = json!(created.id);
     arguments.as_object_mut().unwrap().remove("variables");
     let updated = call(&executor, "qp_update", arguments).await;
     assert!(updated.ok, "{}", updated.content);
@@ -155,13 +158,13 @@ async fn quick_prompt_authoring_filters_overrides_and_merges_the_stored_definiti
     assert_eq!(updated.profile_ids, before.profile_ids);
     assert_eq!(updated.directive_ids, before.directive_ids);
     assert_eq!(
-        updated.variables[0].label, "Topic",
+        updated.variables[0].label, before.variables[0].label,
         "omitted variables survive"
     );
     let replaced = call(
         &executor,
         "qp_update",
-        json!({"qp_id":"global", "variables":[]}),
+        json!({"qp_id":created.id, "variables":[]}),
     )
     .await;
     assert!(replaced.ok, "{}", replaced.content);

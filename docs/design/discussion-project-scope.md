@@ -104,9 +104,12 @@ a human's decision, like every project in write:
   together with the fingerprint of the scope they saw. The grant is shown in
   red in the room header, recorded in the journal, and revocable. Migration 269
   widens the grants table for it.
-- With it, the room's own agents (CLI and HTTP alike) may create and edit
-  general Quick Prompts, Quick APIs, Pages and workflows. Without it, the bridge
-  refuses with a message that names the grant to ask for.
+- With it, the room's own agents (CLI and HTTP alike) may create general
+  Quick Prompts, Quick APIs, Pages and workflows, and edit or delete the ones
+  this room created. The gate records that provenance at creation
+  (`general_resource_origins`, migration 270), from the token, never from the
+  request. Every other general resource stays a human's to edit. Without the
+  grant, the bridge refuses with a message that names the grant to ask for.
 - A room with a project never gets it: its agents write their project, and a
   creation without a project lands there. A worker, a workflow step or a run
   without a project never holds a room's grant.

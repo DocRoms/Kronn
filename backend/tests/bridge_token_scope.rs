@@ -105,7 +105,7 @@ async fn fixture_with_db() -> (Router, tempfile::TempDir, Arc<kronn::db::Databas
         // session, invite and offer, a cross-project blocker, a replay binding.
         conn.execute(
             "INSERT INTO discussions(id, title, project_id, created_at, updated_at) \
-             VALUES ('room-g', 'room-g', NULL, ?1, ?1)",
+             VALUES ('room-g', 'room-g', NULL, ?1, ?1), ('room-g2', 'room-g2', NULL, ?1, ?1)",
             [&now],
         )?;
         conn.execute(
@@ -3525,6 +3525,12 @@ async fn a_room_without_a_project_writes_the_general_resources_only_once_a_human
     let (app, _repos) = fixture().await;
     let guard = bridge_for("room-g");
     let token = guard.value().to_owned();
+    // A second project-less room, granted too, for the provenance check.
+    let (_, other_scope) = call(&app, "GET", "/api/discussions/room-g2/scope", None, None).await;
+    let other_seen = other_scope["data"]["fingerprint"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
     let draft = json!({"name": "General", "prompt_template": "Hi"});
     let (status, body) = call(
         &app,
@@ -3600,6 +3606,13 @@ async fn a_room_without_a_project_writes_the_general_resources_only_once_a_human
     )
     .await;
     assert_eq!(status, 200, "{granted}");
+    let (status, response) = grant_scope(
+        &app,
+        "room-g2",
+        json!({"general": true, "access": "write", "confirm": "GENERAL-WRITE", "expected_fingerprint": other_seen}),
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
     let (status, body) = call(
         &app,
         "POST",
@@ -3620,6 +3633,33 @@ async fn a_room_without_a_project_writes_the_general_resources_only_once_a_human
     )
     .await;
     assert_eq!(status, 200, "{body}");
+
+    // A general resource the room did not create stays the human's.
+    let (status, body) = call(
+        &app,
+        "PUT",
+        "/api/quick-prompts/qp-global",
+        Some(&token),
+        Some(json!({"name": "Taken", "prompt_template": "x"})),
+    )
+    .await;
+    assert_eq!(status, 403, "{body}");
+    // Nor can another project-less room edit what this one created.
+    let other = mint(BridgeScope {
+        discussion_ids: vec!["room-g2".into()],
+        room_grant_discussions: vec!["room-g2".into()],
+        ..Default::default()
+    })
+    .unwrap();
+    let (status, body) = call(
+        &app,
+        "PUT",
+        &format!("/api/quick-prompts/{id}"),
+        Some(other.value()),
+        Some(json!({"name": "Taken", "prompt_template": "Hi"})),
+    )
+    .await;
+    assert_eq!(status, 403, "{body}");
 
     // Revoked: the next call is refused again.
     let grant_id = granted["data"]["id"].as_str().unwrap().to_owned();
