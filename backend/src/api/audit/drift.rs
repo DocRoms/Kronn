@@ -436,6 +436,7 @@ pub async fn partial_audit(
 /// The partial pipeline over canonical chain steps: lease, run row, revoked
 /// validation, per-step gates, cancel, terminal write. A revalidation
 /// (KT-1168) runs through it with its findings and its own restore rules.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_partial_pipeline(
     state: AppState,
     project: Project,

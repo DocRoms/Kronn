@@ -12,11 +12,11 @@ cancelled) or the watchdog finds its run gone, the processes carrying that id
 get SIGTERM, then SIGKILL, and the table is re-read for what was started
 meanwhile. Only the ended dispatch's id is matched.
 [src: file: backend/src/core/dispatch_reaper.rs:29-30#DISPATCH_ENV]
-[src: file: backend/src/core/child_env.rs:938-943#DISPATCH_ENV]
+[src: file: backend/src/core/child_env.rs:941-953#DISPATCH_ENV]
 [src: file: backend/src/api/discussions/runtime.rs:551-553#reap_task_worker_processes]
 [src: file: backend/src/api/orchestration.rs:791-793#reap_task_worker_processes]
 [src: file: backend/src/api/discussions/runtime.rs:618-634#reap_task_worker_processes]
-[src: file: backend/src/core/dispatch_reaper.rs:442-487#reap_dispatch]
+[src: file: backend/src/core/dispatch_reaper.rs:574-628#reap_dispatch]
 
 What is taken, and what is not:
 
@@ -38,9 +38,9 @@ What is taken, and what is not:
   (`agent_orphans::start_stamp`) is compared at kill time, and the tag or the
   session is read again right before each signal (SIGTERM and SIGKILL).
   A process whose stamp could not be read is never a target.
-[src: file: backend/src/core/dispatch_reaper.rs:71-111#run_processes]
-[src: file: backend/src/core/dispatch_reaper.rs:274-310#macos_procargs]
-[src: file: backend/src/core/dispatch_reaper.rs:387-420#is_still_ours]
+[src: file: backend/src/core/dispatch_reaper.rs:144-184#run_processes]
+[src: file: backend/src/core/dispatch_reaper.rs:406-442#macos_procargs]
+[src: file: backend/src/core/dispatch_reaper.rs:519-552#is_still_ours]
 
 - macOS hides the environment of platform binaries (`/bin/sh`, `/bin/sleep`,
   `/usr/bin/*`), as `ps eww` does: such a process is found only as a descendant
@@ -48,8 +48,8 @@ What is taken, and what is not:
   visible. A test that needs a tagged process must not use a system binary.
 - The table is read with libproc and `KERN_PROCARGS2` on macOS and `/proc` on
   Linux: no `ps`, which the worker sandbox refuses to execute.
-  [src: file: backend/src/core/dispatch_reaper.rs:194-227#process_table]
-  [src: file: backend/src/core/dispatch_reaper.rs:229-272#process_table]
+  [src: file: backend/src/core/dispatch_reaper.rs:303-336#process_table]
+  [src: file: backend/src/core/dispatch_reaper.rs:361-404#process_table]
 [src: file: backend/src/core/dispatch_reaper_test.rs:183-187#start_python_under_shell]
 - Nothing sweeps at boot: a lane's own backend (started by a worker, with its
   own scratch database) would otherwise kill every worker of the host.
