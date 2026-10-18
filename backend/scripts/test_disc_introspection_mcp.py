@@ -7862,6 +7862,50 @@ class HttpAuthHeaderTests(unittest.TestCase):
         self.assertEqual(req.get_header("Authorization"), "Bearer tok2")
 
 
+class ScopeRefusalMessageTests(unittest.TestCase):
+    """KT-1320 — a 403 for a resource outside the bridge token's scope says why
+    and what to do, because the agent runtime only relays "the tool returned an
+    error" otherwise."""
+
+    def setUp(self):
+        self.mod = _load_module(isolate_http=False)
+
+    def _refusal(self, status, error):
+        body = json.dumps({"success": False, "data": None, "error": error}).encode()
+        return urllib.error.HTTPError(
+            "http://127.0.0.1:3140/api/x", status, "Forbidden", {}, io.BytesIO(body))
+
+    def test_a_scope_refusal_tells_the_agent_what_to_do(self):
+        refusal = self._refusal(403, "a Discussion the request names is outside this bridge token's scope")
+        with mock.patch.dict(os.environ, {"KRONN_BACKEND_URL": "http://127.0.0.1:3140"}, clear=True), \
+             mock.patch("urllib.request.urlopen", side_effect=refusal):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.mod._http("GET", "/api/discussions/other")
+        msg = str(ctx.exception)
+        self.assertIn("HTTP 403", msg)
+        self.assertIn("outside this bridge token's scope", msg)
+        self.assertIn("Ask the human to attach that discussion", msg)
+        self.assertIn("disc_list", msg)
+
+    def test_the_text_variant_says_it_too(self):
+        refusal = self._refusal(403, "a Discussion the request names is outside this bridge token's scope")
+        with mock.patch.dict(os.environ, {"KRONN_BACKEND_URL": "http://127.0.0.1:3140"}, clear=True), \
+             mock.patch("urllib.request.urlopen", side_effect=refusal):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.mod._http_text("GET", "/api/x")
+        self.assertIn("Ask the human to attach that discussion", str(ctx.exception))
+
+    def test_other_errors_are_left_as_they_were(self):
+        for status, error in ((404, "not found"), (403, "this route is not available to a Kronn-launched agent's bridge token")):
+            with mock.patch.dict(os.environ, {"KRONN_BACKEND_URL": "http://127.0.0.1:3140"}, clear=True), \
+                 mock.patch("urllib.request.urlopen", side_effect=self._refusal(status, error)):
+                with self.assertRaises(RuntimeError) as ctx:
+                    self.mod._http("GET", "/api/x")
+            msg = str(ctx.exception)
+            self.assertTrue(msg.startswith(f"HTTP {status}: "), msg)
+            self.assertNotIn("Ask the human", msg)
+
+
 class AuditToolsTests(unittest.TestCase):
     """0.8.12 PR A — audit_prepare / audit_launch / audit_status.
 
