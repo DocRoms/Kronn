@@ -13,6 +13,20 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- One guide for building automations, read the same way by every agent
+  (KT-1341). The built-in workflow architect is served section by section
+  through `tool_manual({tool: "workflow-architect", section})` to CLI agents
+  (MCP) and HTTP agents alike, and gains a « Reach » section: the workflow's
+  own project, the workflow scope a human sets (Projects accessible, every
+  project in red), why a step never inherits its room's grants, the parent
+  task over several repositories, and the general resources. HTTP agents get
+  `room_scope`. A refusal on another project now names the right way out for
+  its caller: `room_scope` for a room's agent, the workflow's scope for a step,
+  the principal for a worker (it used to name a `scope_request` tool that does
+  not exist). A test fails when a tool exists for one audience only, in either
+  direction, unless it is listed with its reason; the tools HTTP agents do not
+  have yet are deferred to KT-1356. The MCP catalogue does not grow.
+
 - A full audit no longer ends Interrupted on what the audit could not fix
   (KT-1353, audit matrix africanews/apollo). The documentary blockers the
   committed documents held before the run are reported

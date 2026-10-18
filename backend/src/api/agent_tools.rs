@@ -11,6 +11,7 @@
 //! task context honest.
 
 use crate::agents::tools::{ToolCall, ToolExecutor, ToolOutcome};
+use crate::core::skill_guide::WORKFLOW_GUIDE;
 use crate::models::{
     AddPlanningBlockerRequest, AgentType, CreatePlanningTaskRequest, LinkPlanningDiscussionRequest,
     PlanningActor, PlanningActorKind, PlanningTaskListQuery, RemovePlanningBlockerRequest,
@@ -43,6 +44,10 @@ mod signal_bench;
 #[cfg(all(test, feature = "full-tests"))]
 #[path = "agent_tools_scope_tests.rs"]
 mod tools_scope_tests;
+
+#[cfg(test)]
+#[path = "agent_tool_parity_tests.rs"]
+mod tool_parity_tests;
 
 #[path = "agent_tool_gate.rs"]
 mod tool_gate;
@@ -806,11 +811,12 @@ fn build_tool_catalogue() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "tool_manual",
-                "description": "Read one tool's contract, or `signals` for proposal schemas and UI actions. Omit `tool` to list manuals.",
+                "description": "Read one tool's contract, `signals` for proposal schemas and UI actions, or `workflow-architect`: the guide to read before building a workflow or a Page, by `section`. Omit `tool` to list manuals.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "tool": { "type": "string", "description": "Tool name or signals; omit to list." },
+                        "tool": { "type": "string", "description": "Tool name, signals or workflow-architect; omit to list." },
+                        "section": { "type": "string", "description": "workflow-architect only: a title from its contents." },
                     },
                     "required": [],
                 },
@@ -841,6 +847,22 @@ fn build_tool_catalogue() -> Vec<Value> {
                         },
                     },
                     "required": ["api_plugin_slug", "endpoint_path"],
+                },
+            },
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "room_scope",
+                "description": "This room's project reach. Without `project`: what it reaches and the pending requests. With `project`: ask a human for that project. See tool_manual.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "project": { "type": "string", "description": "Project name or id to ask for." },
+                        "access": { "type": "string", "enum": ["read", "write"] },
+                        "reason": { "type": "string", "description": "Why, for the human deciding." },
+                    },
+                    "required": [],
                 },
             },
         }),
@@ -1418,6 +1440,8 @@ fn workflow_tool_catalogue(has_project: bool) -> Vec<Value> {
 /// stays: reading its own task's DoD is legitimate.
 fn worker_room_catalogue(catalogue: Vec<Value>) -> Vec<Value> {
     const NOT_FOR_A_WORKER: &[&str] = &[
+        // A worker's room is not a room it is the agent of: no grants to ask for.
+        "room_scope",
         // Backlog browsing and shaping — the principal owns the plan.
         "task_list",
         "task_create",
@@ -1741,7 +1765,13 @@ impl ToolExecutor for KronnToolExecutor {
                     _ => fail(call, res.error.unwrap_or_else(|| "call failed".into())),
                 }
             }
-            "tool_manual" => ok(call, tool_manual(call.arguments["tool"].as_str())),
+            "tool_manual" => ok(
+                call,
+                tool_manual(
+                    call.arguments["tool"].as_str(),
+                    call.arguments["section"].as_str(),
+                ),
+            ),
             "page_list" | "page_get" | "page_create" | "page_update_html" | "page_add_dataset" => {
                 self.execute_page_tool(call).await
             }
@@ -2084,6 +2114,49 @@ impl ToolExecutor for KronnToolExecutor {
                 )
                 .await;
                 unwrap_api(call, res.success, res.data, res.error)
+            }
+            "room_scope" => {
+                // Only a room's own agent holds or asks for the room's reach; a
+                // step or a worker reaches what its workflow or task allows.
+                let Some(discussion_id) = self.disc_id.clone().filter(|_| {
+                    !self.worker_room && self.workflow_run_id.is_none()
+                }) else {
+                    return fail(call, ROOM_SCOPE_NOT_HERE);
+                };
+                match required_string(call, "project") {
+                    None => {
+                        let (_, Json(res)) = crate::api::discussion_scope::get_scope(
+                            State(self.state.clone()),
+                            Path(discussion_id),
+                        )
+                        .await;
+                        unwrap_api(call, res.success, res.data, res.error)
+                    }
+                    Some(project) => {
+                        let request = match serde_json::from_value::<
+                            crate::models::discussion_scope::FileScopeRequest,
+                        >(json!({
+                            "project": project,
+                            "access": call.arguments.get("access").cloned().unwrap_or(json!("read")),
+                            "reason": call.arguments.get("reason").cloned().unwrap_or(json!("")),
+                        })) {
+                            Ok(request) => request,
+                            Err(error) => return fail(call, format!("invalid room_scope fields: {error}")),
+                        };
+                        let caller = gated
+                            .admitted
+                            .as_ref()
+                            .map(|admitted| axum::Extension(admitted.caller.clone()));
+                        let (_, Json(res)) = crate::api::discussion_scope::file_request(
+                            State(self.state.clone()),
+                            caller,
+                            Path(discussion_id),
+                            Json(request),
+                        )
+                        .await;
+                        unwrap_api(call, res.success, res.data, res.error)
+                    }
+                }
             }
             "plan_get" => {
                 let Some(disc_id) = self.discussion_id(call) else {
@@ -4175,13 +4248,21 @@ fn merged_definition<T: serde::Serialize, R: serde::de::DeserializeOwned>(
 /// this with `tool_manual` and so does this surface: the declaration carries
 /// the contract, the manual carries the detail, and only an agent that is
 /// about to author something pays for it.
-fn tool_manual(name: Option<&str>) -> Value {
+/// Why `room_scope` is refused to a workflow step or a worker.
+const ROOM_SCOPE_NOT_HERE: &str = "room_scope is for a room's own agent. A workflow step reaches other projects only through its workflow's scope, which a human sets on the workflow page (Projects accessible); a worker reaches its task's project only.";
+
+/// Both reaches, as an agent needs them (KT-1341).
+pub(crate) const ROOM_SCOPE_MANUAL: &str = "A room has one primary project: its working directory, where what it creates lands, and the only project whose API configs and credentials it may use. A human may also grant the room other projects: read (tasks, rooms, runs, pages), write (planning only: create and edit tasks there, `project_ids` naming it), or every project. room_scope() returns the grants, the pending requests and the journal. When a call is refused as outside this room's project, ask with room_scope({project, access, reason}): it files a request the human approves, narrows or declines in the room, and grants nothing by itself; do not wait or retry, continue with what you can do. A grant never opens another project's credentials, never runs its workflows, and never reaches a workflow step or a worker posting in the room. A workflow step reaches other projects only through its workflow's scope, which a human sets on the workflow page (Projects accessible); a room without a project writes general resources only once a human granted it « General · write ». Full doctrine: tool_manual({tool: \"workflow-architect\", section: \"Reach\"}).";
+
+fn tool_manual(name: Option<&str>, section: Option<&str>) -> Value {
     const MANUALS: &[(&str, &str)] = &[
+        ("room_scope", ROOM_SCOPE_MANUAL),
         ("page_create", page_tools::CREATE_MANUAL),
         ("page_update_html", page_tools::UPDATE_MANUAL),
         (
             "workflow_create_draft",
-            "Read workflow_step_schema for the canonical step contracts; step_type narrows the result. \
+            "Before composing, read the workflow guide: tool_manual({tool: \"workflow-architect\"}), then the sections you need. \
+             Read workflow_step_schema for the canonical step contracts; step_type narrows the result. \
              Shared templating and data pipeline contracts are available by section. \
              Read workflow_get on an accessible example. Send name, trigger (e.g. {type: Manual}) \
              and 1–20 steps; each has name and step_type:{type: ...}. Optional authoring fields: \
@@ -4329,9 +4410,11 @@ fn tool_manual(name: Option<&str>) -> Value {
 
     match name.map(str::trim).filter(|name| !name.is_empty()) {
         None => json!({
-            "available": MANUALS.iter().map(|(name, _)| *name).chain(std::iter::once("signals")).collect::<Vec<_>>(),
-            "hint": "Pass `tool` to read one. signals lists structured proposal contracts; other entries document the named tool.",
+            "available": MANUALS.iter().map(|(name, _)| *name).chain(["signals", WORKFLOW_GUIDE]).collect::<Vec<_>>(),
+            "hint": "Pass `tool` to read one. signals lists structured proposal contracts; workflow-architect is the guide to build workflows and Pages, read by `section`; other entries document the named tool.",
         }),
+        Some(WORKFLOW_GUIDE) => crate::core::skill_guide::guide(WORKFLOW_GUIDE, section)
+            .unwrap_or_else(|| json!({"error": "the workflow guide is unavailable"})),
         Some("signals") => {
             json!({"tool": "signals", "catalogue": crate::api::signal_catalog::catalogue()})
         }
@@ -4339,7 +4422,7 @@ fn tool_manual(name: Option<&str>) -> Value {
             Some((name, manual)) => json!({ "tool": name, "manual": manual }),
             None => json!({
                 "error": format!("no manual for `{wanted}`"),
-                "available": MANUALS.iter().map(|(name, _)| *name).chain(std::iter::once("signals")).collect::<Vec<_>>(),
+                "available": MANUALS.iter().map(|(name, _)| *name).chain(["signals", WORKFLOW_GUIDE]).collect::<Vec<_>>(),
             }),
         },
     }
@@ -5394,6 +5477,7 @@ mod tests {
             "qe_update",
             "tool_manual",
             "api_call",
+            "room_scope",
             "plan_get",
             "task_list",
             "task_get",
@@ -5721,11 +5805,11 @@ mod tests {
         // The catalogue is re-sent every turn, so the contract stays in the
         // declaration and the detail moves here — paid only by an agent that
         // is about to author something.
-        let listed = tool_manual(None);
+        let listed = tool_manual(None, None);
         let available = listed["available"].as_array().expect("available");
         assert!(!available.is_empty());
 
-        let page = tool_manual(Some("qe_create_draft"));
+        let page = tool_manual(Some("qe_create_draft"), None);
         let text = page["manual"].as_str().expect("manual text");
         assert!(
             text.contains("NO shell"),
@@ -5737,11 +5821,11 @@ mod tests {
         );
 
         assert!(
-            tool_manual(Some("task_list"))["error"].is_string(),
+            tool_manual(Some("task_list"), None)["error"].is_string(),
             "a tool whose description is its whole contract has no page"
         );
         assert_eq!(
-            tool_manual(Some("  "))["available"],
+            tool_manual(Some("  "), None)["available"],
             listed["available"],
             "a blank name lists rather than erroring"
         );
@@ -5751,7 +5835,7 @@ mod tests {
     /// because nothing told a principal that they run without a shell.
     #[test]
     fn the_task_exec_manual_states_how_a_validation_actually_runs() {
-        let page = tool_manual(Some("task_exec_prepare"));
+        let page = tool_manual(Some("task_exec_prepare"), None);
         let text = page["manual"].as_str().expect("task_exec_prepare manual");
         for fact in [
             "NOT run by a shell",
@@ -5789,11 +5873,11 @@ mod tests {
             );
         }
 
-        assert!(tool_manual(Some("task_exec_launch"))["manual"]
+        assert!(tool_manual(Some("task_exec_launch"), None)["manual"]
             .as_str()
             .expect("launch page")
             .contains("tool_manual({tool: \"task_exec_prepare\"})"));
-        let update = tool_manual(Some("task_exec_reassign"));
+        let update = tool_manual(Some("task_exec_reassign"), None);
         let update = update["manual"].as_str().expect("reassign page");
         for fact in [
             "ONE change per call",
@@ -5819,12 +5903,18 @@ mod tests {
             .iter()
             .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_string))
             .collect();
-        for page in tool_manual(None)["available"].as_array().unwrap() {
+        for page in tool_manual(None, None)["available"].as_array().unwrap() {
             let name = page.as_str().unwrap();
             if name == "signals" {
                 // This entry documents response fences, not a callable tool.
                 assert!(!declared.iter().any(|tool| tool == name));
-                assert!(tool_manual(Some(name))["catalogue"]["signals"].is_array());
+                assert!(tool_manual(Some(name), None)["catalogue"]["signals"].is_array());
+                continue;
+            }
+            if name == WORKFLOW_GUIDE {
+                // The guide to building workflows and Pages, not a callable tool.
+                assert!(!declared.iter().any(|tool| tool == name));
+                assert!(tool_manual(Some(name), None)["contents"].is_array());
                 continue;
             }
             assert!(

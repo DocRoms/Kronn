@@ -13706,3 +13706,26 @@ class BridgeSecretEnvFileTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WorkflowGuideThroughToolManualTests(unittest.TestCase):
+    """KT-1341 — the workflow architect is read through tool_manual, by section."""
+
+    def setUp(self):
+        self.mod = _load_module()
+
+    def test_the_guide_is_listed_and_read_by_section(self):
+        listed = self.mod.call_tool_manual({})
+        self.assertIn("workflow-architect", listed["available"])
+        with mock.patch.object(self.mod, "_http", return_value={"success": True, "data": {"skill": "workflow-architect", "content": "## Reach"}}) as http:
+            reach = self.mod.call_tool_manual({"tool": "workflow-architect", "section": "Reach — projects"})
+        http.assert_called_once_with("GET", "/api/skills/workflow-architect/guide?section=Reach%20%E2%80%94%20projects")
+        self.assertEqual(reach["content"], "## Reach")
+        with mock.patch.object(self.mod, "_http", return_value={"success": True, "data": {"contents": []}}) as http:
+            self.mod.call_tool_manual({"tool": "workflow-architect"})
+        http.assert_called_once_with("GET", "/api/skills/workflow-architect/guide")
+
+    def test_the_room_scope_manual_names_the_workflow_scope(self):
+        manual = self.mod.TOOL_MANUALS["room_scope"]
+        self.assertIn("workflow's scope", manual)
+        self.assertIn("Projects accessible", manual)
