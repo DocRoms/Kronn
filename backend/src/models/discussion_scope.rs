@@ -38,6 +38,9 @@ pub enum ScopeGrantSource {
     Request,
     /// Every project.
     All,
+    /// The general resources (KT-1346): a room without a project writes the
+    /// Quick Prompts, Quick APIs, Pages and workflows every project sees.
+    General,
 }
 
 impl ScopeGrantSource {
@@ -46,6 +49,7 @@ impl ScopeGrantSource {
             Self::Link => "link",
             Self::Request => "request",
             Self::All => "all",
+            Self::General => "general",
         }
     }
 
@@ -54,6 +58,7 @@ impl ScopeGrantSource {
             "link" => Ok(Self::Link),
             "request" => Ok(Self::Request),
             "all" => Ok(Self::All),
+            "general" => Ok(Self::General),
             _ => anyhow::bail!("unknown scope grant source: {value}"),
         }
     }
@@ -144,6 +149,10 @@ pub struct DiscussionScope {
 /// The confirmation a human types to grant write access to every project.
 pub const ALL_PROJECTS_WRITE_CONFIRMATION: &str = "ALL-PROJECTS-WRITE";
 
+/// The confirmation a human types to let a room without a project write the
+/// general resources.
+pub const GENERAL_WRITE_CONFIRMATION: &str = "GENERAL-WRITE";
+
 #[derive(Debug, Clone, Deserialize, TS)]
 #[ts(export)]
 pub struct GrantDiscussionProjectRequest {
@@ -152,8 +161,12 @@ pub struct GrantDiscussionProjectRequest {
     pub project_id: Option<String>,
     #[serde(default)]
     pub all: bool,
+    /// The general resources, for a room without a project; write only.
+    #[serde(default)]
+    pub general: bool,
     pub access: ScopeAccess,
-    /// Required for every project in write: [`ALL_PROJECTS_WRITE_CONFIRMATION`].
+    /// Required for every project in write: [`ALL_PROJECTS_WRITE_CONFIRMATION`];
+    /// for the general resources: [`GENERAL_WRITE_CONFIRMATION`].
     #[serde(default)]
     pub confirm: Option<String>,
     /// The scope fingerprint the human's screen showed.

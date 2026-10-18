@@ -5264,7 +5264,7 @@ pub async fn test_step(
     let native_tools = Some(crate::api::agent_tools::KronnToolExecutor::workflow_arc(
         state.clone(),
         req.project_id.clone(),
-        "test-step".to_string(),
+        crate::api::agent_tools::TEST_STEP_RUN_ID.to_string(),
         req.step.name.clone(),
     ));
 

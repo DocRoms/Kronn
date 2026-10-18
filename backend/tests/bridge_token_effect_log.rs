@@ -36,6 +36,9 @@ async fn an_effect_is_logged_with_the_token_id_only() {
         .with_max_level(tracing::Level::INFO)
         .finish();
     let _default = tracing::subscriber::set_default(subscriber);
+    // Tests on other threads may have cached the gate's callsites as disabled
+    // before this subscriber existed.
+    tracing::callsite::rebuild_interest_cache();
 
     let db = Arc::new(kronn::db::Database::open_in_memory().unwrap());
     db.with_conn(|conn| {
@@ -90,14 +93,15 @@ async fn an_effect_is_logged_with_the_token_id_only() {
     request
         .extensions_mut()
         .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4243))));
-    app.oneshot(request).await.unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    let status = response.status();
 
     let log = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
     let effects: Vec<&str> = log
         .lines()
         .filter(|line| line.contains("bridge token effect"))
         .collect();
-    assert_eq!(effects.len(), 1, "{log}");
+    assert_eq!(effects.len(), 1, "status {status}, log: {log}");
     assert!(
         effects[0].contains(&format!("token={}", guard.id())),
         "{}",

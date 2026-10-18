@@ -730,6 +730,24 @@ Release notes for 0.9.3 and earlier are available in the
   answering one card no longer makes a later row-only TD of the same
   validation unresolvable (the index resync keeps such a row as a bullet,
   which is now read back).
+- HTTP agents (LiteLLM, OpenRouter, NVIDIA, Ollama…) obey the same access rule
+  as CLI agents (KT-1346). Their native tools ran in process without the bridge
+  token's gate: one could create, edit, block or read the planning tasks of any
+  project, save a Quick API or Quick Exec in another project or move one there,
+  and read any media job. Their run now holds a bridge token, and each tool
+  that touches a Kronn object is decided and scoped by the same code as the
+  route it mirrors: its room's project, the room's grants for the room's own
+  agent, the validated workflow scope for a step, nothing more for a worker.
+  A creation with no project lands in the room's project, as for a CLI agent,
+  and a project room's agent no longer edits a general workflow or Page. A
+  room without a project reads the general resources; its agents (CLI and HTTP
+  alike) create general Quick Prompts, Quick APIs, Pages and workflows only
+  once a human granted it « General · write » in its Scope settings, behind a
+  typed confirmation, shown in red in the header and revocable (migration 270);
+  they then edit only what the room created, recorded at creation (migration
+  271), and every other general resource stays a human's to edit. A tool with
+  no access rule is refused. A CLI agent may now name a media connection by its
+  alias or name, as the media route already allowed.
 
 - Retrying a step, or resuming an audit, from the UI keeps the run's tier
   (KT-1320). The card's picker defaulted to `reasoning`, so the retry of a

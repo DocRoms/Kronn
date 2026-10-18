@@ -25,7 +25,7 @@ async fn native_pages_follow_mcp_project_scope_inheritance_and_selector_contract
         None,
         None,
     );
-    let general = KronnToolExecutor::new(state.clone(), None);
+    let general = KronnToolExecutor::new(state.clone(), Some("general".into()));
     let mut request = page();
     request["created_by_agent"] = json!("Forged");
     request["source_message_id"] = json!("not-an-authoring-field");
@@ -85,7 +85,8 @@ async fn native_pages_follow_mcp_project_scope_inheritance_and_selector_contract
     let mut standalone = page();
     standalone["slug"] = json!("standalone");
     standalone["datasets"] = json!([]);
-    assert!(call(&general, "page_create", standalone).await.ok);
+    let created = call(&general, "page_create", standalone).await;
+    assert!(created.ok, "{}", created.content);
     let standalone = call(&general, "page_get", json!({"page_id":"standalone"})).await;
     assert_eq!(standalone.content["project_id"], Value::Null);
     // A project-less Page stays reachable from a project scope.
@@ -94,7 +95,15 @@ async fn native_pages_follow_mcp_project_scope_inheritance_and_selector_contract
             .await
             .ok
     );
-    assert_eq!(standalone.content["discussions"], json!([]));
+    // Created from the room it was asked in, like any agent's Page.
+    assert_eq!(
+        standalone.content["discussions"][0]["discussion_id"],
+        "general"
+    );
+    assert_eq!(
+        standalone.content["discussions"][0]["relation"],
+        "created_from"
+    );
     assert_eq!(standalone.content["datasets"], json!([]));
 }
 
@@ -246,7 +255,7 @@ async fn native_page_revisions_and_dataset_conflicts_preserve_history() {
 #[tokio::test]
 async fn native_page_html_uses_shared_inert_action_ingestion() {
     let state = super::super::quick_prompt_tests::state_with_prompts().await;
-    let executor = KronnToolExecutor::new(state.clone(), None);
+    let executor = KronnToolExecutor::new(state.clone(), Some("general".into()));
     let mut request = page();
     let html = r#"<button data-kronn-action="run">Run</button><script type="application/kronn-action" data-action-id="run">{"kind":"quick_prompt","target_id":"global"}</script><script type="application/kronn-action" data-action-id="bad">{"kind":"workflow","target_id":"missing"}</script><script>fetch('https://example.com')</script>"#;
     request["html"] = json!(html);
@@ -354,6 +363,24 @@ fn native_page_surface_has_a_bounded_measured_cost() {
 async fn native_workflow_page_tools_inherit_run_scope_and_execute_all_operations() {
     for project in [Some("a".to_owned()), None] {
         let state = super::super::quick_prompt_tests::state_with_prompts().await;
+        // A real run: the step's bridge token is bound to it.
+        let workflow_project = project.clone();
+        state
+            .db
+            .with_conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO workflows(id, name, project_id, trigger_json, steps_json, created_at, updated_at) \
+                     VALUES ('wf', 'wf', ?1, '{\"type\":\"Manual\"}', '[]', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                    [&workflow_project],
+                )?;
+                conn.execute(
+                    "INSERT INTO workflow_runs(id, workflow_id, project_id, started_at) VALUES ('fixture-run', 'wf', ?1, '2026-01-01T00:00:00Z')",
+                    [&workflow_project],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
         let executor = KronnToolExecutor::workflow_arc(
             state.clone(),
             project.clone(),
@@ -375,6 +402,11 @@ async fn native_workflow_page_tools_inherit_run_scope_and_execute_all_operations
         }
 
         let created = call(executor.as_ref(), "page_create", page()).await;
+        if project.is_none() {
+            // A run without a project has no room to hold « General · write ».
+            assert!(!created.ok, "{}", created.content);
+            continue;
+        }
         assert!(created.ok, "{}", created.content);
         assert_eq!(created.content["project_id"], json!(project));
         let id = created.content["id"].clone();

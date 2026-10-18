@@ -981,6 +981,14 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "269_audit_documentary_notes",
         include_str!("sql/269_audit_documentary_notes.sql"),
     ),
+    (
+        "270_discussion_general_grants",
+        include_str!("sql/270_discussion_general_grants.sql"),
+    ),
+    (
+        "271_general_resource_origins",
+        include_str!("sql/271_general_resource_origins.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup` (owner-only) without the auth

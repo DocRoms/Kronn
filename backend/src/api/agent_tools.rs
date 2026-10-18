@@ -40,6 +40,14 @@ mod quick_prompt_bench;
 #[path = "agent_signal_bench.rs"]
 mod signal_bench;
 
+#[cfg(all(test, feature = "full-tests"))]
+#[path = "agent_tools_scope_tests.rs"]
+mod tools_scope_tests;
+
+#[path = "agent_tool_gate.rs"]
+mod tool_gate;
+pub(crate) use tool_gate::TEST_STEP_RUN_ID;
+
 #[path = "agent_workflow_tools.rs"]
 mod workflow_tools;
 
@@ -87,6 +95,9 @@ pub struct KronnToolExecutor {
     /// The agent and model the runner resolved for this launch, for API
     /// access policies; never re-read from the discussion afterwards.
     launch_identity: std::sync::Mutex<Option<crate::core::api_access::AgentIdentity>>,
+    /// This run's bridge token (KT-1346): minted on first use, held as long
+    /// as the executor, so its tools cross the same gate as a CLI agent's.
+    bridge_token: std::sync::Mutex<Option<crate::core::bridge_token::BridgeTokenGuard>>,
 }
 
 impl KronnToolExecutor {
@@ -105,6 +116,7 @@ impl KronnToolExecutor {
             audit_workspace: None,
             audit_step_target: None,
             launch_identity: Default::default(),
+            bridge_token: Default::default(),
         }
     }
 
@@ -131,6 +143,7 @@ impl KronnToolExecutor {
             audit_workspace: None,
             audit_step_target: None,
             launch_identity: Default::default(),
+            bridge_token: Default::default(),
         })
     }
 
@@ -160,6 +173,7 @@ impl KronnToolExecutor {
             audit_workspace: None,
             audit_step_target: None,
             launch_identity: Default::default(),
+            bridge_token: Default::default(),
         })
     }
 
@@ -186,6 +200,7 @@ impl KronnToolExecutor {
             audit_workspace: None,
             audit_step_target: None,
             launch_identity: Default::default(),
+            bridge_token: Default::default(),
         })
     }
 
@@ -264,6 +279,7 @@ impl KronnToolExecutor {
             audit_workspace: Some(workspace),
             audit_step_target: step_target.map(str::to_string),
             launch_identity: Default::default(),
+            bridge_token: Default::default(),
         })
     }
 }
@@ -612,7 +628,7 @@ fn build_tool_catalogue() -> Vec<Value> {
                         "api_query": { "type": "object", "additionalProperties": { "type": "string" } },
                         "api_path_params": { "type": "object", "additionalProperties": { "type": "string" } },
                         "api_body": { "type": "object" },
-                        "project_id": { "type": "string", "description": "Omit to make it general." },
+                        "project_id": { "type": "string", "description": "Omit: this room's project." },
                         "variables": {
                             "type": "array",
                             "items": { "type": "object" },
@@ -747,7 +763,7 @@ fn build_tool_catalogue() -> Vec<Value> {
                             "enum": ["text", "json", "csv", "lines"],
                             "description": "How the output is parsed for a caller.",
                         },
-                        "project_id": { "type": "string", "description": "Omit to make it general." },
+                        "project_id": { "type": "string", "description": "Omit: this room's project." },
                         "variables": {
                             "type": "array",
                             "items": { "type": "object" },
@@ -1612,6 +1628,13 @@ impl ToolExecutor for KronnToolExecutor {
     }
 
     async fn execute(&self, call: &ToolCall) -> ToolOutcome {
+        // KT-1346 — the same gate as a CLI agent's bridge call, before the tool runs.
+        let gated = match self.gate(call).await {
+            Ok(gated) => gated,
+            Err(refusal) => return fail(call, refusal),
+        };
+        let call = gated.call.as_ref().unwrap_or(call);
+        let outcome = async {
         // A model can name a tool it was never offered. In an audit the catalogue
         // is the whole contract, so anything outside it is refused before dispatch
         // reaches a handler that would honour it (`api_call`, plan writes…).
@@ -2275,6 +2298,9 @@ impl ToolExecutor for KronnToolExecutor {
                 format!("unknown tool `{other}` — call only the tools you were given"),
             ),
         }
+            }
+        .await;
+        self.scope_outcome(gated.admitted, outcome).await
     }
 }
 
@@ -4208,7 +4234,7 @@ fn tool_manual(name: Option<&str>) -> Value {
         ),
         (
             "qa_create_draft",
-            "A Quick API is a saved, replayable call through a configured plugin.              Kronn injects the credential server-side at run time — never put a key,              a token or an Authorization header in the definition.\n\n             Discovery order: `mcp_list` gives `api_plugin_slug` and `api_config_id`;              `api_endpoints` gives the exact `api_endpoint_path` for that plugin. Both              must come from those calls; a guessed path is a 404 at run time, not a              validation error here.\n\n             Variables are `{{name}}` placeholders anywhere in the path, query, headers              or body. Declare each one as `{\"name\": \"service_id\", \"label\":              \"Service\", \"placeholder\": \"abc123\", \"required\": true}`; `label`              and `placeholder` are what a human sees in the launcher, so write them for              a human. A variable used but not declared fails the launch.\n\n             `project_id` scopes it: set it and only that project's rooms see it, omit it              and every room does. A draft is saved disabled-safe — it runs only when              someone calls `qa_run` with it.",
+            "A Quick API is a saved, replayable call through a configured plugin.              Kronn injects the credential server-side at run time — never put a key,              a token or an Authorization header in the definition.\n\n             Discovery order: `mcp_list` gives `api_plugin_slug` and `api_config_id`;              `api_endpoints` gives the exact `api_endpoint_path` for that plugin. Both              must come from those calls; a guessed path is a 404 at run time, not a              validation error here.\n\n             Variables are `{{name}}` placeholders anywhere in the path, query, headers              or body. Declare each one as `{\"name\": \"service_id\", \"label\":              \"Service\", \"placeholder\": \"abc123\", \"required\": true}`; `label`              and `placeholder` are what a human sees in the launcher, so write them for              a human. A variable used but not declared fails the launch.\n\n             `project_id` scopes it to that project's rooms. Omitted, it takes this room's              project; only a room without a project saves a general one, seen by every room. A draft is saved disabled-safe — it runs only when              someone calls `qa_run` with it.",
         ),
         (
             "qe_create_draft",
@@ -5085,6 +5111,22 @@ mod tests {
             db.clone(),
             crate::DEFAULT_MAX_CONCURRENT_AGENTS,
         );
+        // A real room and task: the gate refuses a dead room before any schema check.
+        let reference = db
+            .with_conn(|conn| {
+                conn.execute("INSERT INTO projects (id,name,path,created_at,updated_at) VALUES ('p','p','p','2026-10-18T00:00:00Z','2026-10-18T00:00:00Z')", [])?;
+                conn.execute("INSERT INTO discussions (id,title,project_id,created_at,updated_at) VALUES ('disc-parent','parent','p','2026-10-18T00:00:00Z','2026-10-18T00:00:00Z')", [])?;
+                let request: CreatePlanningTaskRequest =
+                    serde_json::from_value(json!({"title": "t", "project_ids": ["p"]}))?;
+                let task = crate::db::planning::create_task(conn, &request)?;
+                Ok(conn.query_row(
+                    "SELECT 'KT-' || task_number FROM planning_tasks WHERE id = ?1",
+                    [&task.summary.id],
+                    |row| row.get::<_, String>(0),
+                )?)
+            })
+            .await
+            .unwrap();
         let executor = KronnToolExecutor::arc(
             state,
             Some("disc-parent".into()),
@@ -5097,7 +5139,7 @@ mod tests {
                 id: "stale-host-schema".into(),
                 name: "task_exec_launch".into(),
                 arguments: json!({
-                    "task_reference": "KT-466",
+                    "task_reference": reference,
                     "worker": {
                         "kind": "discussion_agent",
                         "agent_type": "Ollama"
