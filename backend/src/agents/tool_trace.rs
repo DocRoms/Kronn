@@ -9,10 +9,12 @@ use crate::core::run_provenance::{input_urls, opens_url, result_text, returns_ur
 
 pub const MARKER: &str = "[acp-tool-trace] ";
 const MAX_INPUT_CHARS: usize = 2000;
-/// URLs kept per call, and the longest one kept: a bound, not a cut: a URL cut
-/// short would name another page.
-const MAX_URLS: usize = 64;
+/// URLs kept per call, the longest one kept, and the bytes they take together:
+/// bounds, not cuts (a URL cut short would name another page). A documentation
+/// result names a few dozen pages; the byte bound keeps a runaway one cheap.
+const MAX_URLS: usize = 256;
 const MAX_URL_CHARS: usize = 1000;
+const MAX_URL_BYTES: usize = 24 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolTraceUpdate {
@@ -24,15 +26,24 @@ pub struct ToolTraceUpdate {
     /// from the whole input or result before the bounded excerpt cuts it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub urls: Vec<String>,
+    /// The call's result reached Kronn (its content is never kept). A result
+    /// seen with no URL in it is a lookup that named no page, not a blind spot.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub result_seen: bool,
 }
 
 fn bounded_urls(urls: impl IntoIterator<Item = String>) -> Vec<String> {
     let mut seen = BTreeSet::new();
+    let mut bytes = 0usize;
     urls.into_iter()
         .filter(|url| url.chars().count() <= MAX_URL_CHARS)
         .map(|url| crate::core::redact::redact_for_audit_artifact(&url).0)
         .filter(|url| seen.insert(url.clone()))
         .take(MAX_URLS)
+        .take_while(|url| {
+            bytes += url.len();
+            bytes <= MAX_URL_BYTES
+        })
         .collect()
 }
 
@@ -125,11 +136,17 @@ impl ToolTraceUpdate {
             input: input.map(input_excerpt),
             status: status(state),
             urls: Vec::new(),
+            result_seen: false,
         }
     }
 
     fn with_urls(mut self, urls: Vec<String>) -> Self {
         self.urls = bounded_urls(urls);
+        self
+    }
+
+    fn with_result_seen(mut self, seen: bool) -> Self {
+        self.result_seen = seen;
         self
     }
 
@@ -156,13 +173,12 @@ pub fn from_acp(update: &Value) -> Option<ToolTraceUpdate> {
     if fetches {
         urls.extend(title.map(urls_in).unwrap_or_default());
     }
+    let mut result_seen = false;
     if title.is_some_and(returns_urls) {
         for output in ["rawOutput", "content"] {
-            urls.extend(
-                call.get(output)
-                    .map(|v| urls_in(&v.to_string()))
-                    .unwrap_or_default(),
-            );
+            let output = call.get(output).filter(|v| !v.is_null());
+            result_seen |= output.is_some();
+            urls.extend(output.map(|v| urls_in(&v.to_string())).unwrap_or_default());
         }
     }
     Some(
@@ -172,7 +188,8 @@ pub fn from_acp(update: &Value) -> Option<ToolTraceUpdate> {
             call.get("rawInput"),
             call.get("status").and_then(Value::as_str),
         )
-        .with_urls(urls),
+        .with_urls(urls)
+        .with_result_seen(result_seen),
     )
 }
 
@@ -227,14 +244,19 @@ pub fn from_codex(item: &Value) -> Option<ToolTraceUpdate> {
         .as_ref()
         .map(|input| input_urls(opens_url(&name), input))
         .unwrap_or_default();
+    let result = item.get("result").filter(|v| !v.is_null());
     if returns_urls(&name) {
         urls.extend(
-            item.get("result")
+            result
                 .map(|result| urls_in(&result.to_string()))
                 .unwrap_or_default(),
         );
     }
-    Some(ToolTraceUpdate::new(id, Some(&name), input.as_ref(), state).with_urls(urls))
+    Some(
+        ToolTraceUpdate::new(id, Some(&name), input.as_ref(), state)
+            .with_urls(urls)
+            .with_result_seen(result.is_some()),
+    )
 }
 
 /// Claude snapshots provide the complete input, and user tool_result blocks
@@ -304,7 +326,8 @@ impl ClaudeTraceReader {
                                 },
                             ),
                         )
-                        .with_urls(urls),
+                        .with_urls(urls)
+                        .with_result_seen(true),
                     )
                 }
                 _ => None,
@@ -337,6 +360,7 @@ pub fn collect(lines: &[String]) -> Vec<ToolTraceUpdate> {
                 record.input = update.input;
             }
             record.urls = bounded_urls(record.urls.drain(..).chain(update.urls));
+            record.result_seen |= update.result_seen;
             // A cumulative snapshot cannot reopen a terminal call.
             if !matches!(
                 record.status.as_deref(),

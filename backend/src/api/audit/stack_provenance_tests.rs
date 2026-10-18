@@ -38,6 +38,19 @@ fn context7_stream(result: &str) -> String {
         + &(json!({"type": "user", "message": {"content": [result]}}).to_string() + "\n")
 }
 
+/// The normal Context7 flow: `resolve-library-id` (its result names a library,
+/// no page), then `query-docs` (its result names the pages it read).
+fn context7_resolve_then_query_stream(result: &str) -> String {
+    let resolve = json!({"type": "tool_use", "id": "c7r",
+        "name": "mcp__context7__resolve-library-id",
+        "input": {"libraryName": "jest", "query": "latest version"}});
+    let resolved = json!({"type": "tool_result", "tool_use_id": "c7r",
+        "content": [{"type": "text", "text": "- Title: Jest\n- Context7-compatible library ID: /facebook/jest\n- Code Snippets: 120"}]});
+    assistant_line(resolve)
+        + &(json!({"type": "user", "message": {"content": [resolved]}}).to_string() + "\n")
+        + &context7_stream(result)
+}
+
 /// The dependency watch the audit injects: `joi` and `jest` of the `JS / TS` manager.
 async fn watch_dependencies(state: &AppState) {
     let package = |name: &str| crate::models::DependencyUpdatePackage {
@@ -301,6 +314,47 @@ async fn warn_mode_accepts_a_fetch_whose_input_exceeds_the_trace_bound() {
         &format!("22.11.0 [src: url: {fetched}] (read {date})"),
         &format!("30.0.0 [src: url: {downloaded}] (read {date})"),
     );
+    let step = index_step_with_stream(&h, table, Some(stream), false).await;
+    assert!(step.retries.is_empty(), "{:?}", step.retries);
+    assert!(step.success, "{:?}", step.warnings);
+}
+
+/// `resolve-library-id` comes first and names no page: it must not switch the
+/// run's `url:` check off, or an invented page would pass on the default route.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn warn_mode_still_refuses_an_invented_page_after_resolve_library_id() {
+    let h = harness().await;
+    let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let table = stack_table(
+        &date,
+        "not verified: no source",
+        &format!("30.0.0 [src: url: https://jestjs.io/blog/invented] (read {date})"),
+    );
+    let stream =
+        context7_resolve_then_query_stream("Source: https://jestjs.io/docs/getting-started");
+    let step = index_step_with_stream(&h, table, Some(stream), false).await;
+    assert!(!step.success, "{:?}", step.warnings);
+    assert!(step.retries[0]["diagnostics"]
+        .to_string()
+        .contains("never fetched"));
+}
+
+/// The same flow, citing the page the `query-docs` result named.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn warn_mode_accepts_a_page_named_after_resolve_library_id() {
+    let h = harness().await;
+    let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let page = "https://jestjs.io/docs/getting-started";
+    let table = stack_table(
+        &date,
+        "not verified: no source",
+        &format!("30.0.0 [src: url: {page}] (read {date})"),
+    );
+    let stream = context7_resolve_then_query_stream(&format!("Source: {page}"));
     let step = index_step_with_stream(&h, table, Some(stream), false).await;
     assert!(step.retries.is_empty(), "{:?}", step.retries);
     assert!(step.success, "{:?}", step.warnings);

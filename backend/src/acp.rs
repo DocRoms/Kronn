@@ -3285,6 +3285,7 @@ mod tests {
                     input: None,
                     status: None,
                     urls: vec![],
+                    result_seen: false,
                 }),
                 AcpSessionEvent::TextDelta("Bonjour 🦀".into()),
                 AcpSessionEvent::Usage {
@@ -3368,6 +3369,7 @@ mod tests {
                         input: None,
                         status: Some(status.into()),
                         urls: vec![],
+                        result_seen: false,
                     }),
                 ],
                 "{status}"
@@ -3396,6 +3398,7 @@ mod tests {
                         input: None,
                         status: Some("in_progress".into()),
                         urls: vec![],
+                        result_seen: false,
                     }),
                 ],
                 "{status} is still the tool call in progress, not its end"
@@ -3424,6 +3427,7 @@ mod tests {
                     input: None,
                     status: None,
                     urls: vec![],
+                    result_seen: false,
                 }),
             ]
         );

@@ -54,7 +54,10 @@ sees the result (the output itself is never copied); a native ACP tool is a fetc
 by its `kind: "fetch"` as well as by its title. When the run used a channel Kronn
 cannot observe — an agent that reports no tool inputs (an HTTP model), a
 sub-agent (`Task`), or a documentation call whose result was not seen — `url:`
-citations are left unchecked, never blocked. Outside a run (`analyze`) neither
+citations are left unchecked, never blocked; a result that was seen and named no
+page (Context7's `resolve-library-id`) is not such a channel. The recorded URLs
+carry no userinfo and no credential-style query value (`sig`, `X-Amz-Signature`,
+`access_token`…), on the citation side as well, so a signed page still matches. Outside a run (`analyze`) neither
 kind is checked, and only the full audit pipeline builds the run's provenance:
 a partial audit checks neither. The pre-step baseline and the blame ledger
 are computed with the same run-aware analysis (`analyze_with`), so an unbacked

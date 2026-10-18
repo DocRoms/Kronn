@@ -65,8 +65,11 @@ impl RunProvenance {
     }
 }
 
-/// Scheme, host case, a leading `www.`, fragment and trailing `/` removed: two
-/// spellings of one page compare equal.
+/// Scheme, userinfo, host case, a leading `www.`, fragment and trailing `/`
+/// removed, and the value of a credential-style query parameter masked: two
+/// spellings of one page compare equal, and what is stored holds no secret
+/// (the scheme is gone, so the connection-string redaction can no longer see
+/// `user:pass@`; a signed URL's `sig=` is not an assignment it knows).
 pub fn normalize_url(url: &str) -> String {
     let url = url.trim().split('#').next().unwrap_or("");
     let lower = url.to_ascii_lowercase();
@@ -74,15 +77,56 @@ pub fn normalize_url(url: &str) -> String {
         .iter()
         .find_map(|scheme| lower.starts_with(scheme).then(|| &url[scheme.len()..]))
         .unwrap_or(url);
-    let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
-    let path = path.trim_end_matches('/');
+    let authority_end = rest.find(['/', '?']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(authority_end);
+    let host = authority.rsplit('@').next().unwrap_or(authority);
     let host = host.to_ascii_lowercase();
     let host = host.strip_prefix("www.").unwrap_or(&host);
-    if path.is_empty() {
-        host.to_owned()
-    } else {
-        format!("{host}/{path}")
+    let (path, query) = match tail.split_once('?') {
+        Some((path, query)) => (path, Some(mask_credential_params(query))),
+        None => (tail, None),
+    };
+    let path = path.trim_start_matches('/').trim_end_matches('/');
+    let mut out = host.to_owned();
+    if !path.is_empty() {
+        out.push('/');
+        out.push_str(path);
     }
+    if let Some(query) = query.filter(|q| !q.is_empty()) {
+        out.push('?');
+        out.push_str(&query);
+    }
+    out
+}
+
+/// A query string whose credential-style values (signatures, tokens, keys,
+/// passwords) are replaced by `***`: `sig`, `X-Amz-Signature`, `access_token`…
+fn mask_credential_params(query: &str) -> String {
+    query
+        .split('&')
+        .map(|pair| match pair.split_once('=') {
+            Some((key, _)) if is_credential_param(key) => format!("{key}=***"),
+            _ => pair.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+fn is_credential_param(key: &str) -> bool {
+    let key = key.to_ascii_lowercase().replace(['_', '-'], "");
+    matches!(key.as_str(), "sig" | "key" | "code" | "sas" | "auth")
+        || [
+            "signature",
+            "token",
+            "secret",
+            "password",
+            "passwd",
+            "apikey",
+            "credential",
+            "authorization",
+        ]
+        .iter()
+        .any(|word| key.contains(word))
 }
 
 /// Whether a tool, by the name its runtime reports, opens a page by the `url`
@@ -303,7 +347,9 @@ impl FetchTracker {
                 self.urls.extend(trace.urls);
                 continue;
             };
-            if returns_urls(name) && trace.urls.is_empty() {
+            // A lookup whose result was seen and named no page (Context7's
+            // `resolve-library-id`) is no blind spot; one never seen is.
+            if returns_urls(name) && trace.urls.is_empty() && !trace.result_seen {
                 self.observable = false;
             }
             self.urls.extend(trace.urls.iter().cloned());
@@ -444,6 +490,7 @@ mod tests {
                 input: Some(input.into()),
                 status: Some("in_progress".into()),
                 urls: vec![],
+                result_seen: false,
             }
             .marker()
         };
@@ -645,6 +692,7 @@ mod tests {
                 input: Some(input.into()),
                 status: Some("in_progress".into()),
                 urls: vec![],
+                result_seen: false,
             }
             .marker()
         };
@@ -772,5 +820,170 @@ mod tests {
             .problems(&cites("https://jestjs.io/docs/api"))
             .is_empty());
         assert_eq!(run.problems(&cites("https://jestjs.io/blog")).len(), 1);
+    }
+
+    #[test]
+    fn a_resolved_library_id_names_no_page_and_is_no_blind_spot() {
+        let page = "https://jestjs.io/docs/getting-started";
+        let mut tracker = FetchTracker::default();
+        tracker.ingest_traces(&claude_traces(&[
+            assistant_call(
+                "r1",
+                "mcp__context7__resolve-library-id",
+                r#"{"libraryName":"jest","query":"latest"}"#,
+            ),
+            user_result(
+                "r1",
+                r#"[{"type":"text","text":"- Title: Jest\n- Context7-compatible library ID: /facebook/jest\n- Code Snippets: 120\n- Benchmark Score: 91"}]"#,
+            ),
+            assistant_call(
+                "q1",
+                "mcp__context7__query-docs",
+                r#"{"libraryId":"/facebook/jest","query":"latest"}"#,
+            ),
+            user_result(
+                "q1",
+                &format!(r#"[{{"type":"text","text":"Source: {page}"}}]"#),
+            ),
+        ]));
+        let run = run_of(&tracker);
+        assert!(run.fetched.is_some(), "the resolve result was seen");
+        assert!(run.problems(&cites(page)).is_empty());
+        assert_eq!(run.problems(&cites("https://jestjs.io/blog")).len(), 1);
+
+        // A resolve alone: still checked, the invented page is refused.
+        let mut tracker = FetchTracker::default();
+        tracker.ingest_traces(&claude_traces(&[
+            assistant_call(
+                "r1",
+                "mcp__context7__resolve-library-id",
+                r#"{"libraryName":"jest"}"#,
+            ),
+            user_result(
+                "r1",
+                r#""- Context7-compatible library ID: /facebook/jest""#,
+            ),
+        ]));
+        assert_eq!(
+            run_of(&tracker)
+                .problems(&cites("https://jestjs.io/blog"))
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_documentation_call_whose_result_never_arrived_leaves_the_citations_unchecked() {
+        let mut tracker = FetchTracker::default();
+        tracker.ingest_traces(&claude_traces(&[assistant_call(
+            "q1",
+            "mcp__context7__query-docs",
+            r#"{"query":"jest"}"#,
+        )]));
+        assert!(run_of(&tracker).fetched.is_none());
+    }
+
+    #[test]
+    fn a_native_acp_resolve_with_a_seen_result_is_no_blind_spot() {
+        use crate::agents::tool_trace::from_acp;
+        let frame = json!({"toolCallId":"n1","title":"mcp__context7__resolve-library-id",
+            "status":"completed","rawOutput":{"id":"/facebook/jest","snippets":120}});
+        let mut tracker = FetchTracker::default();
+        tracker.ingest_traces(&[from_acp(&frame).unwrap().marker()]);
+        assert!(run_of(&tracker).fetched.is_some());
+        let unseen = json!({"toolCallId":"n2","title":"mcp__context7__resolve-library-id",
+            "status":"in_progress"});
+        tracker.ingest_traces(&[from_acp(&unseen).unwrap().marker()]);
+        assert!(run_of(&tracker).fetched.is_none());
+    }
+
+    #[test]
+    fn a_url_keeps_no_userinfo_and_no_signature() {
+        assert_eq!(
+            normalize_url("https://deploy:hunter2@Files.example.com/a.json"),
+            "files.example.com/a.json"
+        );
+        assert_eq!(
+            normalize_url("https://u@x.dev?z=1"),
+            "x.dev?z=1",
+            "a query with no path"
+        );
+        let signed = "https://bucket.s3.amazonaws.com/a.json?X-Amz-Algorithm=AWS4-HMAC-SHA256\
+            &X-Amz-Credential=AKIAFAKE%2F20261018&X-Amz-Signature=deadbeef01&version=3";
+        let n = normalize_url(signed);
+        assert!(!n.contains("deadbeef01") && !n.contains("AKIAFAKE"), "{n}");
+        assert!(n.contains("version=3"), "{n}");
+        for (url, secret) in [
+            (
+                "https://a.blob.core.windows.net/c/f?sv=1&sig=s3cr3tsig",
+                "s3cr3tsig",
+            ),
+            ("https://a.dev/f?access_token=tok123abc", "tok123abc"),
+            ("https://a.dev/f?api-key=key123abc&page=2", "key123abc"),
+        ] {
+            assert!(!normalize_url(url).contains(secret), "{url}");
+        }
+        // Two spellings of one signed page still compare equal.
+        assert_eq!(
+            normalize_url("https://a.dev/f?sig=one&v=1"),
+            normalize_url("https://www.a.dev/f?sig=two&v=1")
+        );
+    }
+
+    #[test]
+    fn the_stored_trace_urls_hold_no_secret() {
+        let mut tracker = FetchTracker::default();
+        let lines = claude_traces(&[
+            assistant_call(
+                "f1",
+                "WebFetch",
+                r#"{"url":"https://ci:hunter2@dl.example.com/a?sig=abc123secret&v=2","prompt":"x"}"#,
+            ),
+            assistant_call("t1", "mcp__context7__query-docs", r#"{"query":"q"}"#),
+            user_result(
+                "t1",
+                r#""Docs https://docs.example.com/x?X-Amz-Signature=feedface99&p=1""#,
+            ),
+        ]);
+        // The URL list the trace records (the input excerpt is redacted by its
+        // own, older rules).
+        let stored: String = crate::agents::tool_trace::collect(&lines)
+            .iter()
+            .flat_map(|trace| trace.urls.iter().cloned())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!stored.is_empty());
+        for secret in ["hunter2", "abc123secret", "feedface99"] {
+            assert!(!stored.contains(secret), "{secret} in {stored}");
+        }
+        tracker.ingest_traces(&lines);
+        let run = run_of(&tracker);
+        // The citation, written with or without the secret, matches the page.
+        assert!(run
+            .problems(&cites("https://dl.example.com/a?sig=other&v=2"))
+            .is_empty());
+        assert!(run
+            .problems(&cites("https://docs.example.com/x?X-Amz-Signature=zz&p=1"))
+            .is_empty());
+    }
+
+    #[test]
+    fn a_large_documentation_result_still_backs_a_late_citation() {
+        let text: String = (0..200)
+            .map(|i| format!("Page https://docs.example.com/p/{i}\n"))
+            .collect();
+        let mut tracker = FetchTracker::default();
+        tracker.ingest_traces(&claude_traces(&[
+            assistant_call("q1", "mcp__context7__query-docs", r#"{"query":"all"}"#),
+            user_result("q1", &json!([{"type":"text","text":text}]).to_string()),
+        ]));
+        let run = run_of(&tracker);
+        assert!(run
+            .problems(&cites("https://docs.example.com/p/199"))
+            .is_empty());
+        assert_eq!(
+            run.problems(&cites("https://docs.example.com/p/200")).len(),
+            1
+        );
     }
 }

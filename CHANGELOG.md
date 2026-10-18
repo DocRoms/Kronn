@@ -622,7 +622,16 @@ Release notes for 0.9.3 and earlier are available in the
   tool is a fetch by its `kind: "fetch"` too, even when the runtime retitles it
   to its URL. A run whose agent reports no tool inputs (an HTTP model), that used
   a sub-agent, or that called a documentation tool whose result Kronn never saw
-  leaves its `url:` citations unchecked, never blocked. Only the full audit
+  leaves its `url:` citations unchecked, never blocked. A result that was seen
+  and named no page (Context7's `resolve-library-id`, which comes before every
+  `query-docs`) is not a blind spot: the trace carries a `result_seen` flag, so
+  the normal resolve → query flow keeps `url:` citations checked on the ACP
+  route as on the direct one. A trace keeps up to 256 URLs per call within
+  24 KiB; a URL over 1000 characters is dropped, never cut. The URLs kept are
+  normalized without their scheme, their userinfo (`user:pass@`) and the value
+  of a credential-style query parameter (`sig`, `X-Amz-Signature`,
+  `access_token`, `api-key`…), the same on the citation side, so a signed page
+  still matches and no secret is stored. Only the full audit
   pipeline checks the run's provenance: a partial audit does not.
   The pre-step baseline and the blame ledger of the documentary gate (KT-1306)
   use the same run-aware analysis: an unbacked citation already there is in the
