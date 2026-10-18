@@ -62,6 +62,27 @@ by a human (KT-1131). An accepted step keeps its failure on record:
   document, so a blocker left in it ends the run `Interrupted` until the
   document is fixed.
   [src: file: backend/src/api/audit/full.rs:622-625#documentary_recovery]
+- **A blocker the documents held before the run never fails it** (KT-1353). A
+  fresh Full run records the blocking diagnostics of the committed documents as
+  *pre-existing* in the blame ledger (`.kronn/audit/document-blame.json`, step
+  `0`) before step 1. The final gate reports them in a `documentary_preexisting`
+  event (`phase: final_gate`) and a `preexisting_count`, and neither charges
+  them to the founding step nor sets the run `Interrupted`; the recovery plan of
+  a resume skips them, and the validation gate does not refuse them either. The
+  exemption covers only documents the run did not rewrite: once a step rewrites
+  such a document, or is handed the blocker, the blocker is released from the
+  pre-existing set and the KT-1306 attribution applies again (the toucher is not
+  blamed; the entry point's step owns what no step wrote), so the run is
+  blocked on it.
+  [src: file: backend/src/api/audit/document_repair.rs:154-165#seed_preexisting] [src: file: backend/src/api/audit/document_repair.rs:182-196#release] [src: file: backend/src/api/audit/full.rs:1390#seed_preexisting] [src: file: backend/src/api/audit/full.rs:3124#split_preexisting] [src: file: backend/src/api/audit/validate.rs:620#split_preexisting]
+- **The blame ledger follows the blocker, not its wording** (KT-1353). A gate
+  message restates the cited file's line count or a suggested path, so it
+  changes when a later step rewrites that file. Two blockers are the same when
+  their code, document and first quoted subject match (the cited path, and for
+  an out-of-range line the file too); the step that first wrote the citation
+  keeps the charge, so a final blocker written by step 8 is never reported
+  against step 10.
+  [src: file: backend/src/api/audit/document_repair.rs:31-50#stable_message]
 - **A run whose failed steps are all accepted no longer blocks a refresh or a
   revalidation** (KT-1312): a resume would only finalize it. Any step still
   failed or never run keeps the refusal.

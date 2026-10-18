@@ -36,3 +36,29 @@ row without its `Latest stable` or `Support end` source and date (or
 [src: file: backend/src/core/document_optimization.rs:1272-1287#inspect_stack_currency]
 [src: file: backend/src/core/document_optimization.rs:1299-1371#stack_currency_problems]
 [src: file: backend/src/core/document_optimization.rs:1373-1390#diag]
+
+A citation into a path git ignores (a vendored dependency, a build output) that
+is absent from the checkout is refused as before, but the message says the path
+is git-ignored and cannot be verified from a fresh clone, instead of leaving a
+bare "does not exist". [src: file: backend/src/core/document_optimization.rs:726-736#ignored_citation_message]
+
+A tech-debt sheet is referenced from prose with a markdown link relative to the
+document, or with the `:exists` presence form of a file citation; the rows Kronn
+generates in `docs/inconsistencies-tech-debt.md` always use the link. The bare
+form (the sheet's path with no line) is refused like any text file cited without
+a line, and the step 8 prompt shows the accepted forms.
+
+**Exact replacements are applied by Kronn** (KT-1353). When the gate's own
+message carries the one replacement, the step's documents are corrected before
+they are judged, the original is kept with the other citation originals, the
+edit is logged and sent as a `documentary_autofix` event (`kind`, `from`, `to`
+per fix). Applied: a link written from the repository root rewritten relative
+to the document's folder (`docs/operations/` becomes `operations`); a bare
+secret file (and a bare tech-debt sheet) given its `:exists` presence form; a
+citation whose path resolves to exactly one other file that holds the cited
+lines (the "did you mean" path); a range ending one line past the end of a file
+with no closing newline, clamped to the last line. Never applied: a comma
+bundle that is not fully verified, a comment inside a marker, several candidate
+paths, a text file cited without a line, a range farther out of the file, and
+anything inside fenced or inline code.
+[src: file: backend/src/core/document_optimization/mechanical_fix.rs:37-80#mechanical_repair] [src: file: backend/src/api/audit/document_repair.rs:431-470#check_attempt]

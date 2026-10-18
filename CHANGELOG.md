@@ -13,6 +13,20 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- A full audit no longer ends Interrupted on what the audit could not fix
+  (KT-1353, audit matrix africanews/apollo). The documentary blockers the
+  committed documents held before the run, in documents no step rewrote, are
+  reported (`documentary_preexisting`, `phase: final_gate`) and never charged to
+  the founding step, nor refused at validation; the blame ledger follows a
+  blocker through the rewording of its message, so a bare sheet citation written
+  by step 8 stays step 8's when step 10 grows the sheet. Where the gate's own
+  message carries the one replacement (a link relative to the document's folder,
+  the presence form of a secret file or of a tech-debt sheet, the single
+  did-you-mean path, a range one line past the end), Kronn applies it before the
+  step is judged and logs it (`documentary_autofix`); ambiguous suggestions are
+  never applied. A citation into a git-ignored path says so instead of
+  "does not exist", and the step 8 prompt shows how a sheet is cited.
+
 - A workflow's project scope can open every project (KT-1336): read, or
   planning write behind the same typed confirmation as a room, shown in red on
   the workflow page and the launch card, pinned to the validated revision and

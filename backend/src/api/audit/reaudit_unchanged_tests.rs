@@ -1793,6 +1793,96 @@ async fn a_step_is_not_blocked_by_a_blocker_that_pre_dates_it() {
     assert_eq!(done["steps_to_redo"], json!([founding]), "{second}");
 }
 
+/// KT-1353 — a blocker the committed documents held before the run, in a
+/// document no step rewrote, is reported at the final gate and never charged to
+/// the founding step: the run completes (africanews: sheets citing vendor code).
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_blocker_in_a_document_the_run_never_rewrote_does_not_fail_the_run() {
+    let h = harness().await;
+    let (tools, state, project) = (h.tools.path(), &h.state, h.project.path());
+    let chain = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full);
+    let targets: Vec<&str> = chain.iter().map(|s| s.target_file).collect();
+
+    arm(tools, "fill", &targets);
+    let first = run_full(state, None).await;
+    let done = sse_events(&first, "done").pop().expect("terminal done");
+    validation_settled(state, &done).await;
+    assert_eq!(done["status"], "complete", "{first}");
+
+    let notes = project.join("docs/notes.md");
+    std::fs::write(&notes, "# Notes\nGhost [src: file: ghost.rs:1]\n").unwrap();
+    arm(tools, "noop", &targets);
+    let second = run_full(state, None).await;
+    let done = sse_events(&second, "done").pop().expect("terminal done");
+    validation_settled(state, &done).await;
+
+    let reported = sse_events(&second, "documentary_preexisting");
+    assert_eq!(reported.len(), 1, "{second}");
+    assert_eq!(reported[0]["phase"], "final_gate", "{second}");
+    assert_eq!(
+        reported[0]["diagnostics"][0]["path"], "docs/notes.md",
+        "{second}"
+    );
+    let optimization = sse_events(&second, "documentary_optimization")
+        .pop()
+        .unwrap();
+    assert_eq!(optimization["blocking_count"], 0, "{optimization}");
+    assert_eq!(optimization["preexisting_count"], 1, "{optimization}");
+    assert_eq!(done["status"], "complete", "{second}");
+    assert!(sse_events(&second, "step_warning").is_empty(), "{second}");
+}
+
+/// KT-1353 — a link the gate would refuse with an exact replacement is
+/// corrected before the step is judged, logged, and the step is not retried.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_step_whose_link_the_gate_can_fix_exactly_is_corrected_not_retried() {
+    let h = harness().await;
+    let (tools, state, project) = (h.tools.path(), &h.state, h.project.path());
+    let chain = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full);
+    let targets: Vec<&str> = chain.iter().map(|s| s.target_file).collect();
+    let touching = chain
+        .iter()
+        .position(|s| s.target_file == "docs/glossary.md")
+        .unwrap() as u32
+        + 1;
+
+    arm(tools, "fill", &targets);
+    let first = run_full(state, None).await;
+    let done = sse_events(&first, "done").pop().expect("terminal done");
+    validation_settled(state, &done).await;
+    assert_eq!(done["status"], "complete", "{first}");
+
+    // The step writes a repository-root link from inside docs/.
+    let notes = project.join("docs/notes.md");
+    std::fs::write(&notes, "# Notes\n").unwrap();
+    arm(tools, "noop", &targets);
+    after_each_step(
+        tools,
+        &format!(
+            "docs/glossary.md) printf 'See [glossary](docs/glossary.md).\\n' >> '{}' ;;",
+            notes.display()
+        ),
+    );
+    let second = run_full(state, None).await;
+    let done = sse_events(&second, "done").pop().expect("terminal done");
+    validation_settled(state, &done).await;
+
+    let fixed = sse_events(&second, "documentary_autofix");
+    assert_eq!(fixed.len(), 1, "{second}");
+    assert_eq!(fixed[0]["step"], touching, "{second}");
+    assert_eq!(fixed[0]["fixes"][0]["kind"], "link_base", "{second}");
+    assert_eq!(fixed[0]["fixes"][0]["to"], "glossary.md", "{second}");
+    assert!(sse_events(&second, "step_retry").is_empty(), "{second}");
+    assert!(std::fs::read_to_string(&notes)
+        .unwrap()
+        .contains("[glossary](glossary.md)"));
+    assert_eq!(done["status"], "complete", "{second}");
+}
+
 /// KT-1306 — the cross-agent path writes a step's documents itself, before any
 /// agent prompt: what it writes is that step's, so a blocker in a sheet it
 /// wrote is charged to it, not to the founding step.

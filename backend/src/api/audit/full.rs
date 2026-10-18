@@ -1380,7 +1380,19 @@ pub async fn full_audit(
         let mut doc_blame = if resume_run_id_req.is_some() {
             super::document_repair::Blame::load(&project_path)
         } else {
-            super::document_repair::Blame::reset(&project_path)
+            let mut blame = super::document_repair::Blame::reset(&project_path);
+            // KT-1353 — what the committed documents already got wrong is not
+            // the founding step's doing: it is recorded as pre-existing.
+            if should_optimize_documents(kind) {
+                match crate::core::document_optimization::analyze(&project_path) {
+                    Ok(report) => {
+                        let held: Vec<_> = report.blocking_diagnostics().cloned().collect();
+                        blame.seed_preexisting(&project_path, &held);
+                    }
+                    Err(e) => tracing::warn!("Pre-run documentary blockers not recorded: {e}"),
+                }
+            }
+            blame
         };
 
         for (step_num, analysis_step) in steps.iter().enumerate() {
@@ -2439,6 +2451,11 @@ pub async fn full_audit(
                         if let Some(before) = &documentary_snapshot {
                             let gate = super::document_repair::check_attempt(&project_path, before, &recovery_targets, &documentary_baseline);
                             if let Ok(check) = &gate {
+                                if !check.repaired.is_empty() {
+                                    yield Event::default().event("documentary_autofix").data(serde_json::json!({
+                                        "step":step,"file":file_label,"attempt":attempt,"fixes":check.repaired,
+                                    }).to_string());
+                                }
                                 if !check.preexisting.is_empty() && (check.blocking.is_empty() || attempt >= max_attempts) {
                                     tracing::info!(
                                         "Audit step {} ({}): {} documentary blocker(s) pre-date the step, reported without blocking it",
@@ -2869,6 +2886,10 @@ pub async fn full_audit(
                     Ok(report) => {
                         let after: Vec<_> = report.blocking_diagnostics().cloned().collect();
                         doc_blame.record_step(&project_path, step as u32, &documentary_baseline, &after);
+                        if let Some(before) = &documentary_snapshot {
+                            let rewritten = super::document_repair::rewritten_paths(&project_path, before);
+                            doc_blame.release(&project_path, &rewritten, &recovery_targets);
+                        }
                     }
                     Err(e) => tracing::warn!("Audit step {step} ({file_label}): documentary blame not recorded: {e}"),
                 }
@@ -3097,15 +3118,28 @@ pub async fn full_audit(
                     human_references = report.diagnostics.iter()
                         .filter(|d| d.code == crate::core::document_optimization::HUMAN_SECTION_REFERENCE)
                         .cloned().collect();
-                    let blocking: Vec<_> = report.blocking_diagnostics().cloned().collect();
+                    let all_blocking: Vec<_> = report.blocking_diagnostics().cloned().collect();
+                    // KT-1353 — what the documents held before the run, in files
+                    // no step rewrote, is reported and never fails the run.
+                    let (preexisting, blocking) = doc_blame.split_preexisting(&all_blocking);
                     yield Event::default().event("documentary_optimization").data(
                         serde_json::json!({
                             "phase": report.phase,
                             "agents": report.agents,
                             "diagnostics": report.diagnostics,
                             "blocking_count": blocking.len(),
+                            "preexisting_count": preexisting.len(),
                         }).to_string()
                     );
+                    if !preexisting.is_empty() {
+                        tracing::info!(
+                            "Audit final gate: {} documentary blocker(s) pre-date the run, reported without failing it",
+                            preexisting.len()
+                        );
+                        yield Event::default().event("documentary_preexisting").data(serde_json::json!({
+                            "step":0,"file":"","phase":"final_gate","diagnostics":preexisting,
+                        }).to_string());
+                    }
                     if !blocking.is_empty() {
                         docs_blocked = true;
                         let recovery = super::document_repair::recovery_plan(&blocking, &steps, &doc_blame);

@@ -2627,14 +2627,16 @@ mod prompt_tests {
     #[test]
     fn step8_prompt_stays_within_its_budget() {
         // KT-152 measured 19,941 bytes before and 10,6xx after; the ceiling
-        // keeps the baseline from growing back into the prompt.
+        // keeps the baseline from growing back into the prompt. KT-1353 added
+        // the accepted forms of a sheet citation (+158 B, measured 11,114): the
+        // ceiling moved by 200 B for that one sentence, not for new baseline.
         let prompt = ANALYSIS_STEPS
             .iter()
             .find(|s| s.target_file == "docs/inconsistencies-tech-debt.md")
             .unwrap()
             .prompt;
         assert!(
-            prompt.len() <= 11_000,
+            prompt.len() <= 11_200,
             "Step 8 prompt is {} bytes",
             prompt.len()
         );

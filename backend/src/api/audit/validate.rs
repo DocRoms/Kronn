@@ -613,8 +613,13 @@ pub async fn validate_audit(
             crate::core::document_optimization::analyze(&project_path)?
         };
         if optimize_documents {
-            let blocking: Vec<String> = report
-                .blocking_diagnostics()
+            // KT-1353 — the blockers the committed documents held before the
+            // audit ran were let through by its own gate: not refused here either.
+            let held: Vec<_> = report.blocking_diagnostics().cloned().collect();
+            let (_, own) =
+                super::document_repair::Blame::load(&project_path).split_preexisting(&held);
+            let blocking: Vec<String> = own
+                .iter()
                 .map(|d| format!("{}: {} ({})", d.code, d.message, d.path))
                 .collect();
             if !blocking.is_empty() {

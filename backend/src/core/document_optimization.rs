@@ -7,6 +7,9 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::core::anti_halluc::parse_line_bounds;
 
+mod mechanical_fix;
+pub use mechanical_fix::{mechanical_repair, AppliedFix, Repaired};
+
 const CONFIG_FILE: &str = "docs/.kronn-document-budgets.json";
 pub use crate::core::audit_state::REPORT_FILE;
 
@@ -642,6 +645,10 @@ fn check_citation(project: &Path, rel: &str, raw: &str) -> CitationCheck {
                      [src: file: {raw}:exists] and do not quote its content"
                 ),
             },
+            None if ignored_path(project, raw) => format!(
+                "malformed file citation `{raw}`: {}",
+                ignored_citation_message(raw)
+            ),
             None => format!(
                 "malformed file citation `{raw}`: expected [src: file: path:line], \
                  or a bare path for an existing binary file{}",
@@ -654,6 +661,11 @@ fn check_citation(project: &Path, rel: &str, raw: &str) -> CitationCheck {
         // Run O7: `helpers/hbs/:1` was reported as a path that does not exist.
         return Defect(if is_project_dir(project, path_part) {
             directory_citation_message(path_part)
+        } else if ignored_path(project, path_part) {
+            format!(
+                "citation path does not exist `{path_part}`: {}",
+                ignored_citation_message(path_part)
+            )
         } else {
             format!(
                 "citation path does not exist `{path_part}`{}",
@@ -708,6 +720,22 @@ fn check_citation(project: &Path, rel: &str, raw: &str) -> CitationCheck {
     }
 }
 
+/// KT-1353 — a path git ignores (a vendored dependency, a build output) is
+/// absent from a fresh clone, so "does not exist" would be the clone's accident,
+/// not a fault of the citation: say why it cannot be checked.
+fn ignored_path(project: &Path, cited: &str) -> bool {
+    !Path::new(cited).is_absolute() && crate::core::anti_halluc::is_git_ignored(project, cited)
+}
+
+fn ignored_citation_message(cited: &str) -> String {
+    format!(
+        "`{cited}` is git-ignored (vendored or generated), so a fresh clone does not have it \
+         and the citation cannot be verified. Cite a tracked file that shows the same fact \
+         (a manifest, a lockfile, your own source), or name `{cited}` in backticks outside any \
+         [src:] marker"
+    )
+}
+
 /// A whole-file range this long is rarely the line that proves a claim.
 const WHOLE_FILE_WARN_LINES: usize = 30;
 
@@ -753,40 +781,10 @@ fn last_line_of(path: &Path) -> usize {
 /// root-relative form of that other file so the next attempt fixes the path. A
 /// candidate is proposed only if it holds the cited lines.
 fn did_you_mean(project: &Path, citing: &str, cited: &str, line: Option<&str>) -> String {
-    if Path::new(cited).is_absolute() {
-        return String::new();
-    }
-    let docs_dir = docs_root(project).path("");
-    let citing_dir = Path::new(citing)
-        .parent()
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_default();
     let spec = line.map(|l| parse_line_bounds(without_anchor(l)));
-    let own = repo_relative(cited);
-    let hint = [docs_dir.trim_end_matches('/').to_string(), citing_dir]
+    let hint = did_you_mean_candidates(project, citing, cited, spec)
         .into_iter()
-        .filter(|dir| !dir.is_empty())
-        .filter_map(|dir| repo_relative(&format!("{dir}/{cited}")))
-        .filter(|candidate| own.as_ref() != Some(candidate))
-        .find(|candidate| {
-            let full = project.join(candidate);
-            full.is_file()
-                && !outside_project(project, &full)
-                && contained_path(project, &full)
-                && !crate::acp::secret_files::is_secret_file(&full)
-                && match spec {
-                    Some(Some((start, end))) => {
-                        !crate::core::anti_halluc::is_binary_file(&full)
-                            && crate::core::anti_halluc::range_is_citable(
-                                line_count(&full),
-                                last_line_of(&full),
-                                start,
-                                end,
-                            )
-                    }
-                    _ => true,
-                }
-        });
+        .next();
     match (hint, spec, line) {
         (Some(path), Some(Some(_)), Some(line)) => {
             format!(". Paths are repository-root relative; did you mean `{path}:{line}`?")
@@ -802,6 +800,55 @@ fn did_you_mean(project: &Path, citing: &str, cited: &str, line: Option<&str>) -
         }
         (None, _, _) => String::new(),
     }
+}
+
+/// Every other root-relative file the cited path may have meant (docs root, then
+/// the citing document's folder), distinct and in that order. With a line spec
+/// only a text file that holds the lines qualifies.
+fn did_you_mean_candidates(
+    project: &Path,
+    citing: &str,
+    cited: &str,
+    spec: Option<Option<(usize, usize)>>,
+) -> Vec<String> {
+    if Path::new(cited).is_absolute() {
+        return Vec::new();
+    }
+    let docs_dir = docs_root(project).path("");
+    let citing_dir = Path::new(citing)
+        .parent()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default();
+    let own = repo_relative(cited);
+    let mut found: Vec<String> = Vec::new();
+    for candidate in [docs_dir.trim_end_matches('/').to_string(), citing_dir]
+        .into_iter()
+        .filter(|dir| !dir.is_empty())
+        .filter_map(|dir| repo_relative(&format!("{dir}/{cited}")))
+        .filter(|candidate| own.as_ref() != Some(candidate))
+    {
+        let full = project.join(&candidate);
+        let holds = full.is_file()
+            && !outside_project(project, &full)
+            && contained_path(project, &full)
+            && !crate::acp::secret_files::is_secret_file(&full)
+            && match spec {
+                Some(Some((start, end))) => {
+                    !crate::core::anti_halluc::is_binary_file(&full)
+                        && crate::core::anti_halluc::range_is_citable(
+                            line_count(&full),
+                            last_line_of(&full),
+                            start,
+                            end,
+                        )
+                }
+                _ => true,
+            };
+        if holds && !found.contains(&candidate) {
+            found.push(candidate);
+        }
+    }
+    found
 }
 
 /// How to cite `path` when the model gave it without a line: only a binary file
@@ -1066,36 +1113,39 @@ fn collect_valid_links(
         }
         let clean = target.split('#').next().unwrap_or("");
         let base = source.parent().unwrap_or(project);
-        let unresolved =
-            |path: &Path| outside_project(project, path) || !contained_path(project, path);
-        let mut resolved = base.join(clean);
-        if unresolved(&resolved) {
-            // Markdown encodes spaces in link targets: `My%20File.docx`.
-            if let Some(decoded) = crate::core::anti_halluc::percent_decoded_relative(clean) {
-                resolved = base.join(decoded);
-            }
-        }
-        if unresolved(&resolved) {
-            if let Some(out) = diagnostics.as_deref_mut() {
-                out.push(diag(
-                    "broken_link",
-                    &relative(project, source),
-                    match root_relative_fix(project, source, clean) {
-                        Some(fix) => format!(
-                            "broken link target `{target}`: links resolve from this document's \
-                             folder, and `{clean}` exists from the repository root — write `{fix}`"
-                        ),
-                        None => format!(
-                            "broken link target `{target}`{}",
-                            link_resolution_hint(project, source, clean)
-                        ),
-                    },
-                ));
-            }
-        } else {
+        if let Some(resolved) = link_resolution(project, base, clean) {
             linked.insert(normalize(&resolved));
+        } else if let Some(out) = diagnostics.as_deref_mut() {
+            out.push(diag(
+                "broken_link",
+                &relative(project, source),
+                match root_relative_fix(project, source, clean) {
+                    Some(fix) => format!(
+                        "broken link target `{target}`: links resolve from this document's \
+                         folder, and `{clean}` exists from the repository root — write `{fix}`"
+                    ),
+                    None => format!(
+                        "broken link target `{target}`{}",
+                        link_resolution_hint(project, source, clean)
+                    ),
+                },
+            ));
         }
     }
+}
+
+/// Where a link target lands when it resolves from `base` (as written, then
+/// percent-decoded); `None` when it leaves the project or does not exist.
+fn link_resolution(project: &Path, base: &Path, clean: &str) -> Option<PathBuf> {
+    let unresolved = |path: &Path| outside_project(project, path) || !contained_path(project, path);
+    let mut resolved = base.join(clean);
+    if unresolved(&resolved) {
+        // Markdown encodes spaces in link targets: `My%20File.docx`.
+        if let Some(decoded) = crate::core::anti_halluc::percent_decoded_relative(clean) {
+            resolved = base.join(decoded);
+        }
+    }
+    (!unresolved(&resolved)).then_some(resolved)
 }
 
 /// The link a model meant when it wrote a repository-root path from inside a
@@ -2148,6 +2198,43 @@ mod tests {
             "{}",
             messages[0]
         );
+    }
+
+    #[test]
+    fn a_citation_into_a_git_ignored_path_is_told_why_it_cannot_be_checked() {
+        // KT-1353 (africanews): committed sheets cite `application/vendor/...`,
+        // which git ignores and a clone does not have.
+        let tmp = document_project();
+        let project = tmp.path().join("proj");
+        write(&project.join(".gitignore"), "application/vendor/\n");
+        write(&project.join("notes.md"), "one\ntwo\n");
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&project)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let vendor = "application/vendor/symfony/symfony/src/Route.php";
+        let messages = citation_messages(&project, &format!("[src: file: {vendor}:12]"));
+        assert_eq!(messages.len(), 1, "{messages:#?}");
+        assert!(
+            messages[0].contains(&format!("citation path does not exist `{vendor}`"))
+                && messages[0].contains("git-ignored")
+                && messages[0].contains("fresh clone"),
+            "{}",
+            messages[0]
+        );
+        // The bare form gets the same verdict, and a path git does not ignore is
+        // still the plain "does not exist".
+        let bare = citation_messages(&project, &format!("[src: file: {vendor}]"));
+        assert!(bare[0].contains("git-ignored"), "{bare:#?}");
+        let missing = citation_messages(&project, "[src: file: application/src/Nope.php:3]");
+        assert_eq!(missing.len(), 1, "{missing:#?}");
+        assert!(!missing[0].contains("git-ignored"), "{}", missing[0]);
+        // Present in the author's checkout, the ignored file still resolves:
+        // the verdict on the line stays the one the citation always got.
+        write(&project.join(vendor), "a\nb\nc\n");
+        assert!(citation_messages(&project, &format!("[src: file: {vendor}:2]")).is_empty());
     }
 
     #[test]

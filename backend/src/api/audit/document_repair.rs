@@ -23,6 +23,36 @@ pub(super) fn snapshot(project: &Path) -> Result<Snapshot, String> {
         .collect()
 }
 
+/// What identifies a blocker from one step to the next: the code, the document
+/// and the thing the message names, not the text after it. A message restates
+/// the target's line count or a suggested replacement, which change whenever a
+/// later step rewrites the cited file; compared whole, the same bare citation
+/// would be "new" and charged to that later step (KT-1353).
+fn stable_message(message: &str) -> &str {
+    let Some(open) = message.find('`') else {
+        return message;
+    };
+    let Some(close) = message[open + 1..].find('`').map(|i| open + 1 + i) else {
+        return message;
+    };
+    let mut end = close + 1;
+    const OUTSIDE: &str = " is outside `";
+    if let Some(rest) = message[end..].strip_prefix(OUTSIDE) {
+        if let Some(i) = rest.find('`') {
+            end += OUTSIDE.len() + i + 1;
+        }
+    }
+    &message[..end]
+}
+
+pub(super) fn same_blocker(a: &Diagnostic, b: &Diagnostic) -> bool {
+    a.code == b.code && a.path == b.path && stable_message(&a.message) == stable_message(&b.message)
+}
+
+/// The "step" under which a blocker is recorded when the document held it
+/// before the run began (KT-1353): no step introduced it, so none is charged.
+const PREEXISTING: u32 = 0;
+
 /// Which step introduced each blocking diagnostic (KT-1306). A diagnostic is
 /// charged to the step whose run made it appear, so a document no step targets
 /// (a tech-debt detail sheet, a workflow page) is blamed on the step that wrote
@@ -98,8 +128,11 @@ impl Blame {
             .iter()
             .filter(|d| d.blocking)
             .filter_map(|d| {
-                if before.contains(d) {
-                    prior.iter().find(|(p, _)| p == d).cloned()
+                if before.iter().any(|b| same_blocker(b, d)) {
+                    prior
+                        .iter()
+                        .find(|(p, _)| same_blocker(p, d))
+                        .map(|(_, charged)| (d.clone(), *charged))
                 } else {
                     Some((d.clone(), step))
                 }
@@ -111,8 +144,55 @@ impl Blame {
     pub(super) fn charge(&self, diagnostic: &Diagnostic) -> Option<u32> {
         self.0
             .iter()
-            .find(|(d, _)| d == diagnostic)
+            .find(|(d, _)| same_blocker(d, diagnostic))
             .map(|(_, step)| *step)
+    }
+
+    /// KT-1353 — the blockers the documents held before the run began. They are
+    /// reported, never charged to a step and never failing the run, unless a step
+    /// rewrites their document or is handed them ([`Self::release`]).
+    pub(super) fn seed_preexisting(&mut self, project: &Path, blocking: &[Diagnostic]) {
+        self.0 = blocking
+            .iter()
+            .filter(|d| d.blocking)
+            .map(|d| (d.clone(), PREEXISTING))
+            .collect();
+        self.save(project);
+    }
+
+    pub(super) fn is_preexisting(&self, diagnostic: &Diagnostic) -> bool {
+        self.charge(diagnostic) == Some(PREEXISTING)
+    }
+
+    /// `(pre-existing, the run's own)` among `diagnostics`.
+    pub(super) fn split_preexisting(
+        &self,
+        diagnostics: &[Diagnostic],
+    ) -> (Vec<Diagnostic>, Vec<Diagnostic>) {
+        diagnostics
+            .iter()
+            .cloned()
+            .partition(|d| self.is_preexisting(d))
+    }
+
+    /// A pre-existing blocker in a document a step rewrote, or that it was handed
+    /// to fix, is no longer "untouched by the run": it goes back to the KT-1306
+    /// attribution (nobody introduced it, the target's owner answers), so the run
+    /// is blocked on it again while the toucher stays unblamed.
+    pub(super) fn release(
+        &mut self,
+        project: &Path,
+        rewritten: &BTreeSet<String>,
+        handed: &[Diagnostic],
+    ) {
+        let before = self.0.len();
+        self.0.retain(|(d, charged)| {
+            *charged != PREEXISTING
+                || !(rewritten.contains(&d.path) || handed.iter().any(|h| same_blocker(h, d)))
+        });
+        if self.0.len() != before {
+            self.save(project);
+        }
     }
 
     fn save(&self, project: &Path) {
@@ -150,7 +230,11 @@ pub(super) fn recovery_plan(
     let mut plan = BTreeMap::<u32, Vec<Diagnostic>>::new();
     // Only blocking diagnostics, and `analyze` never marks a human-owned
     // document blocking: no step is asked to rewrite one.
-    for diagnostic in diagnostics.iter().filter(|d| d.blocking) {
+    // A blocker the documents held before the run began is nobody's to redo.
+    for diagnostic in diagnostics
+        .iter()
+        .filter(|d| d.blocking && !blame.is_preexisting(d))
+    {
         let owner = blame
             .charge(diagnostic)
             .filter(|step| (1..=steps.len() as u32).contains(step))
@@ -195,6 +279,20 @@ pub(super) fn feedback(diagnostics: &[Diagnostic]) -> String {
     }
     text.push_str("\nRead and correct EACH named document, including auxiliary findings. Use ONE `[src: file: path:line]` or `[src: file: path:start-end]` marker per reference; never bundle paths with commas. A binary file (.docx, .pdf, image) has no lines: cite it by bare path, `[src: file: path]`. Read the actual source before correcting a missing path or invalid line. If the evidence cannot be established, remove the unsupported claim entirely; do not invent a path or merely hide the citation. In a human-owned section, correct only what is wrong; Kronn asks its owner to reconfirm. A resolvable citation proves existence, not the truth of its claim.\n");
     text
+}
+
+/// The documents whose content differs from `before` (KT-1353): what a step
+/// rewrote, whatever it was asked to do.
+pub(super) fn rewritten_paths(project: &Path, before: &Snapshot) -> BTreeSet<String> {
+    snapshot(project)
+        .map(|after| {
+            after
+                .into_iter()
+                .filter(|(path, text)| before.get(path) != Some(text))
+                .map(|(path, _)| path)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 pub(super) fn recovery_changed(project: &Path, before: &Snapshot, recovery: &[Diagnostic]) -> bool {
@@ -320,6 +418,9 @@ pub(super) struct AttemptCheck {
     pub blocking: Vec<Diagnostic>,
     /// Already there before the step ran: reported, never blocking it.
     pub preexisting: Vec<Diagnostic>,
+    /// The gate's own exact replacements Kronn applied to the step's documents
+    /// before judging them (KT-1353).
+    pub repaired: Vec<document_optimization::AppliedFix>,
 }
 
 /// Check changed documents plus explicit recovery targets. The original step
@@ -344,11 +445,36 @@ pub(super) fn check_attempt(
     // Legacy docs and root files with their author's own content are not
     // Kronn's docs: reported, never rewritten.
     targets.retain(|path| document_optimization::kronn_owns(project, path));
+    let mut repaired = Vec::new();
     for path in &targets {
         let Some(content) = after.get(path) else {
             continue;
         };
-        if let Some(corrected) = split_verified_citations(project, content) {
+        // Bundles first: each reference then stands alone for the exact fixes.
+        let split = split_verified_citations(project, content);
+        let exact = document_optimization::mechanical_repair(
+            project,
+            path,
+            split.as_deref().unwrap_or(content),
+        );
+        let corrected = match (split, exact) {
+            (None, None) => None,
+            (split, None) => split,
+            (_, Some(exact)) => {
+                for fix in &exact.fixes {
+                    tracing::info!(
+                        "Documentary gate suggestion applied in {}: {} `{}` -> `{}`",
+                        fix.path,
+                        fix.kind,
+                        fix.from,
+                        fix.to
+                    );
+                }
+                repaired.extend(exact.fixes);
+                Some(exact.content)
+            }
+        };
+        if let Some(corrected) = corrected {
             if !project
                 .join(path)
                 .canonicalize()
@@ -376,7 +502,10 @@ pub(super) fn check_attempt(
         .blocking_diagnostics()
         .filter(|d| targets.contains(&d.path))
         .cloned()
-        .partition(|d| baseline.contains(d) && !recovery.contains(d));
+        .partition(|d| {
+            baseline.iter().any(|b| same_blocker(b, d))
+                && !recovery.iter().any(|r| same_blocker(r, d))
+        });
     for diagnostic in &blocking {
         if let Some(content) = after.get(&diagnostic.path) {
             preserve_original(project, content)?;
@@ -385,6 +514,7 @@ pub(super) fn check_attempt(
     Ok(AttemptCheck {
         blocking,
         preexisting,
+        repaired,
     })
 }
 
@@ -700,5 +830,232 @@ mod tests {
         let handed = check_attempt(root, &before, &baseline, &baseline).unwrap();
         assert_eq!(handed.blocking.len(), 2);
         assert!(handed.preexisting.is_empty());
+    }
+
+    fn put(root: &std::path::Path, rel: &str, body: &str) {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+
+    fn held(root: &std::path::Path) -> Vec<Diagnostic> {
+        document_optimization::analyze(root)
+            .unwrap()
+            .blocking_diagnostics()
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn a_sheet_cited_bare_stays_charged_to_the_step_that_wrote_the_citation() {
+        // KT-1353, africanews: step 8 wrote the index with bare sheet citations;
+        // step 10 then grew a sheet, so the gate's message (it restates the line
+        // count) changed and the same citation was charged to step 10.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let (index, sheet) = (
+            "docs/inconsistencies-tech-debt.md",
+            "docs/tech-debt/TD-20261018-email-header-injection.md",
+        );
+        put(root, "docs/AGENTS.md", "# P\n");
+        put(root, sheet, "# TD\n\nMail header injection.\n");
+        let mut blame = Blame::reset(root);
+        let step8_before = held(root);
+        put(
+            root,
+            index,
+            "# Debt\n\nHeader injection [src: file: docs/tech-debt/TD-20261018-email-header-injection.md]\n",
+        );
+        let after8 = held(root);
+        blame.record_step(root, 8, &step8_before, &after8);
+        let wrote = after8
+            .iter()
+            .find(|d| d.path == index)
+            .expect("the bare sheet citation blocks")
+            .clone();
+        assert!(wrote.message.contains(":1-3]"), "{}", wrote.message);
+
+        put(
+            root,
+            sheet,
+            "# TD\n\nMail header injection.\n\n## Fix\nValidate.\n\nMore.\n",
+        );
+        let after10 = held(root);
+        blame.record_step(root, 10, &after8, &after10);
+        let grown = after10.iter().find(|d| d.path == index).unwrap();
+        assert_ne!(grown.message, wrote.message, "the line count moved");
+        assert_eq!(blame.charge(grown), Some(8));
+        let steps = super::super::assemble_chained_steps(crate::models::AuditKind::Full);
+        let plan = recovery_plan(&after10, &steps, &blame);
+        assert!(plan[&8].iter().any(|d| d.path == index), "{plan:#?}");
+        assert!(!plan.contains_key(&10), "{plan:#?}");
+    }
+
+    #[test]
+    fn the_blockers_of_the_committed_docs_never_fail_the_run_until_a_step_rewrites_them() {
+        // KT-1353, africanews: TD-20260828-* sheets cite a gitignored vendor path
+        // and an out-of-range line; the final gate charged them to step 1.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let sheet = "docs/tech-debt/TD-20260828-api-json-contract-inconsistent.md";
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root)
+            .status()
+            .unwrap();
+        put(root, ".gitignore", "application/vendor/\n");
+        put(
+            root,
+            "application/src/LocalLiveRoutingTest.php",
+            &"x\n".repeat(29),
+        );
+        put(root, "docs/AGENTS.md", "# P\n");
+        put(root, "docs/glossary.md", "# G\n");
+        put(
+            root,
+            sheet,
+            "# TD\n\nSymfony [src: file: application/vendor/symfony/symfony/src/Response.php:10]\n\
+             Test [src: file: application/src/LocalLiveRoutingTest.php:35-40]\n",
+        );
+        let committed = held(root);
+        assert_eq!(committed.len(), 2, "{committed:#?}");
+        assert!(committed.iter().any(|d| d.message.contains("git-ignored")));
+
+        let steps = super::super::assemble_chained_steps(crate::models::AuditKind::Full);
+        let mut blame = Blame::reset(root);
+        blame.seed_preexisting(root, &committed);
+        // Step 1 rewrites only AGENTS.md; the sheets are not its doing.
+        let before = snapshot(root).unwrap();
+        put(root, "docs/AGENTS.md", "# P\n\nRewritten.\n");
+        blame.record_step(root, 1, &committed, &held(root));
+        blame.release(root, &rewritten_paths(root, &before), &[]);
+        let (preexisting, own) = blame.split_preexisting(&held(root));
+        assert_eq!((preexisting.len(), own.len()), (2, 0));
+        assert!(recovery_plan(&held(root), &steps, &blame).is_empty());
+        // A resume reads the same record back.
+        assert!(recovery_plan(&held(root), &steps, &Blame::load(root)).is_empty());
+
+        // Step 2 brings a blocker of its own: that one is charged to it.
+        put(
+            root,
+            "docs/glossary.md",
+            "# G\n[src: file: invented.rs:1]\n",
+        );
+        let after2 = held(root);
+        blame.record_step(root, 2, &committed, &after2);
+        let plan = recovery_plan(&after2, &steps, &blame);
+        assert_eq!(plan.keys().copied().collect::<Vec<_>>(), vec![2]);
+
+        // Step 8 rewrites the sheet and leaves its citations: the run touched the
+        // document, so the KT-1306 attribution applies again (the toucher is not
+        // blamed, the entry point's step owns what no step wrote).
+        let before = snapshot(root).unwrap();
+        let text = std::fs::read_to_string(root.join(sheet)).unwrap();
+        put(root, sheet, &format!("{text}Re-verified.\n"));
+        let after8 = held(root);
+        blame.record_step(root, 8, &after2, &after8);
+        blame.release(root, &rewritten_paths(root, &before), &[]);
+        let plan = recovery_plan(&after8, &steps, &blame);
+        assert_eq!(plan.keys().copied().collect::<Vec<_>>(), vec![1, 2]);
+        assert_eq!(plan[&1].len(), 2);
+        assert_eq!(Blame::load(root).charge(&plan[&1][0]), None);
+    }
+
+    #[test]
+    fn a_step_gets_the_exact_replacements_of_the_gate_applied_before_it_fails() {
+        // KT-1353, apollo step 10 (link base, secret file) and africanews step 8
+        // (sheet cited bare): applied at once, recorded, the original preserved.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        put(root, "docs/AGENTS.md", "# P\n");
+        put(root, "docs/operations/http.md", "# Http\n");
+        put(
+            root,
+            ".ssh/vr-v2njs01-s",
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nx\n",
+        );
+        put(
+            root,
+            "docs/tech-debt/TD-20261018-ssh-key-tracked.md",
+            "# TD\n",
+        );
+        put(root, "tests/x.js", "a\nb\n");
+        let before = snapshot(root).unwrap();
+
+        let security = "# Security\n[ops](docs/operations/)\n";
+        let sheet = "# TD\nTracked key [src: file: .ssh/vr-v2njs01-s]\n";
+        let index = "# Debt\nSheet [src: file: docs/tech-debt/TD-20261018-ssh-key-tracked.md]\n\
+                     Ambiguous [src: file: tests/x.js:1, invented.rs:2]\n";
+        put(root, "docs/inconsistencies-security.md", security);
+        put(root, "docs/tech-debt/TD-20261018-ssh-key-tracked.md", sheet);
+        put(root, "docs/inconsistencies-tech-debt.md", index);
+
+        let check = check_attempt(root, &before, &[], &[]).unwrap();
+        let kinds: Vec<_> = check.repaired.iter().map(|f| f.kind).collect();
+        assert_eq!(kinds.len(), 3, "{:#?}", check.repaired);
+        for kind in ["link_base", "secret_presence", "td_sheet_presence"] {
+            assert!(kinds.contains(&kind), "{kind} in {kinds:?}");
+        }
+        let read = |rel: &str| std::fs::read_to_string(root.join(rel)).unwrap();
+        assert!(read("docs/inconsistencies-security.md").contains("[ops](operations)"));
+        assert!(read("docs/tech-debt/TD-20261018-ssh-key-tracked.md")
+            .contains("[src: file: .ssh/vr-v2njs01-s:exists]"));
+        assert!(read("docs/inconsistencies-tech-debt.md")
+            .contains("TD-20261018-ssh-key-tracked.md:exists]"));
+        // The comma bundle with an invented path is ambiguous: still blocking.
+        assert_eq!(check.blocking.len(), 1, "{:#?}", check.blocking);
+        assert!(check.blocking[0]
+            .message
+            .contains("one [src: file: path:line] marker"));
+        assert!(read("docs/inconsistencies-tech-debt.md").contains("tests/x.js:1, invented.rs:2"));
+        // Every original is kept, as for the bundle repair.
+        let originals =
+            std::fs::read_dir(root.join(crate::core::audit_state::CITATION_ORIGINALS_DIR))
+                .unwrap()
+                .map(|e| std::fs::read_to_string(e.unwrap().path()).unwrap())
+                .collect::<Vec<_>>();
+        for original in [security, sheet, index] {
+            assert!(originals.iter().any(|o| o == original), "{original}");
+        }
+    }
+
+    #[test]
+    fn the_index_kronn_generates_passes_the_gate() {
+        // KT-1353: whatever the sheets say, the rows Kronn writes link to them.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        put(root, "docs/AGENTS.md", "# P\n");
+        let sheet = |id: &str| {
+            format!(
+                "---\nname: {}\ndescription: Finding {id}\nmetadata:\n  type: tech-debt\n  audit_history:\n    - date: 2026-10-01\n      status: Open\n      reviewer: Full audit\n---\n\n# {id}\n\n- **Area**: Backend\n- **Severity**: High\n- **Status**: Open\n\n## Problem (fact)\nSomething.\n",
+                id.to_lowercase()
+            )
+        };
+        for id in ["TD-20261001-a", "TD-20261001-b"] {
+            put(root, &format!("docs/tech-debt/{id}.md"), &sheet(id));
+        }
+        put(
+            root,
+            "docs/inconsistencies-tech-debt.md",
+            "# Tech debt (index)\n\n## Current list\n\n| ID | Problem | Area | Severity |\n|----|---------|------|----------|\n| TD-20261001-a | Finding A | Backend | High |\n",
+        );
+        let outcome = crate::core::td_index::resync(
+            &root.join("docs"),
+            crate::core::adr::Trust::RunBaseline {
+                decisions: "",
+                records: "",
+            },
+        )
+        .unwrap();
+        assert_eq!(outcome.listed, 2);
+        let index =
+            std::fs::read_to_string(root.join("docs/inconsistencies-tech-debt.md")).unwrap();
+        assert!(
+            index.contains("[sheet](tech-debt/TD-20261001-b.md)"),
+            "{index}"
+        );
+        assert!(!index.contains("[src: file: docs/tech-debt/"), "{index}");
+        let blocking = held(root);
+        assert!(blocking.is_empty(), "{blocking:#?}");
     }
 }
