@@ -388,6 +388,47 @@ pub fn runs_with_unfinished_steps(conn: &Connection) -> Result<Vec<(String, Stri
     Ok(rows)
 }
 
+/// KT-1324 — the runs a boot may find agents of: still `Running`, or holding a
+/// step that never ended. Agents carry their run's tag, so this scopes a boot's
+/// reap to this database's own runs (another backend's agents are never named).
+pub fn runs_that_may_have_agents(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT id FROM audit_runs WHERE status = 'Running'
+         UNION
+         SELECT p.audit_run_id
+           FROM audit_step_snapshots p
+           JOIN audit_run_steps s
+             ON s.audit_run_id = p.audit_run_id AND s.step_index = p.step_index
+          WHERE s.ended_at IS NULL AND s.accepted_at IS NULL",
+    )?;
+    let rows = stmt
+        .query_map([], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    Ok(rows)
+}
+
+/// KT-1324 — [`runs_that_may_have_agents`] of one project: what a launch on it
+/// must stop and settle before it takes snapshots of the project's docs.
+pub fn project_runs_that_may_have_agents(
+    conn: &Connection,
+    project_id: &str,
+) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT id FROM audit_runs WHERE project_id = ?1 AND status = 'Running'
+         UNION
+         SELECT p.audit_run_id
+           FROM audit_step_snapshots p
+           JOIN audit_run_steps s
+             ON s.audit_run_id = p.audit_run_id AND s.step_index = p.step_index
+           JOIN audit_runs r ON r.id = p.audit_run_id
+          WHERE r.project_id = ?1 AND s.ended_at IS NULL AND s.accepted_at IS NULL",
+    )?;
+    let rows = stmt
+        .query_map([project_id], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    Ok(rows)
+}
+
 /// KT-1211 — a step that never ended (its agent died with the backend) is
 /// settled failed, with what became of its target. Its snapshot is dropped
 /// unless `keep_snapshot`: a target that could not be put back keeps it for

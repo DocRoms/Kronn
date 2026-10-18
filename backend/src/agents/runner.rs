@@ -3056,6 +3056,9 @@ pub struct AgentStartConfig<'a> {
     pub room_agent_context: Option<&'a RoomAgentBridgeContext>,
     /// A workflow step's room capability. Ignored when a worker context is present.
     pub workflow_step_context: Option<&'a WorkflowStepBridgeContext>,
+    /// The audit run this agent works for (KT-1324): its processes carry the
+    /// run's tag so boot can stop them after a backend stop.
+    pub audit_run_id: Option<&'a str>,
     /// Ollama-only: a JSON Schema (a `TypedSchema` step's schema, already
     /// wrapped in the canonical envelope shape by the caller) forwarded as
     /// the `/api/chat` `format` param — grammar-constrained decoding +
@@ -3175,6 +3178,7 @@ impl<'a> AgentStartConfig<'a> {
             task_worker_context: None,
             room_agent_context: None,
             workflow_step_context: None,
+            audit_run_id: None,
             ollama_format: None,
             model_override: None,
             reasoning_effort_override: None,
@@ -4354,6 +4358,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 discussion_id: config.discussion_id.map(str::to_owned),
                 room_agent: config.room_agent_context.cloned(),
                 workflow_step: config.workflow_step_context.cloned(),
+                audit_run_id: config.audit_run_id.map(str::to_owned),
                 api_key: crate::core::child_env::AgentFamily::from_agent_type(config.agent_type)
                     .provider_key_env()
                     .and_then(|env_key| get_api_key(env_key, config.tokens)),
@@ -4442,6 +4447,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 worker_context: config.task_worker_context.cloned(),
                 room_agent_context: config.room_agent_context.cloned(),
                 workflow_step_context: config.workflow_step_context.cloned(),
+                audit_run_id: config.audit_run_id.map(str::to_owned),
                 worker_args,
                 api_key: get_api_key(env_key, config.tokens),
                 step_tools: config.step_tools.cloned(),
@@ -4587,6 +4593,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         config.task_worker_context,
         config.room_agent_context,
         config.workflow_step_context,
+        config.audit_run_id,
         &github_env,
         bridge_value.as_deref(),
     ) {
@@ -4619,6 +4626,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                     config.task_worker_context,
                     config.room_agent_context,
                     config.workflow_step_context,
+                    config.audit_run_id,
                     &github_env,
                     bridge_value.as_deref(),
                 )
@@ -4839,6 +4847,8 @@ pub(crate) struct AdapterLaunchOptions {
     pub(crate) worker_context: Option<TaskWorkerBridgeContext>,
     pub(crate) room_agent_context: Option<RoomAgentBridgeContext>,
     pub(crate) workflow_step_context: Option<WorkflowStepBridgeContext>,
+    /// The audit run the launch works for (KT-1324): its process is tagged.
+    pub(crate) audit_run_id: Option<String>,
     /// Complete invocation policy for task workers or read-only workflow repos.
     pub(crate) worker_args: Option<Vec<String>>,
     pub(crate) api_key: Option<String>,
@@ -13661,6 +13671,7 @@ pub(crate) fn try_spawn(
     task_worker_context: Option<&TaskWorkerBridgeContext>,
     room_agent_context: Option<&RoomAgentBridgeContext>,
     workflow_step_context: Option<&WorkflowStepBridgeContext>,
+    audit_run_id: Option<&str>,
     github_env: &[(String, String)],
     bridge_token: Option<&str>,
 ) -> Result<tokio::process::Child, String> {
@@ -13795,6 +13806,7 @@ pub(crate) fn try_spawn(
         task_worker: task_worker_context,
         room_agent: room_agent_context,
         workflow_step: workflow_step_context,
+        audit_run: audit_run_id,
         bridge_token,
         api_key: api_key.map(|key| (env_key, key)),
     };

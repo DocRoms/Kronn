@@ -1644,6 +1644,15 @@ pub struct LaunchAuditRequest {
     #[serde(default)]
     #[ts(optional)]
     pub fresh: Option<bool>,
+    /// KT-1324 — a launch first stops the agents the project's previous runs
+    /// left and settles their unfinished steps. When Kronn cannot read the
+    /// process table (a restricted `/proc`) it cannot tell that none is still
+    /// running and refuses; this is the human's word that none is, and the
+    /// steps are settled without the check. It never overrides a process Kronn
+    /// saw and could not stop: that one is stopped by hand.
+    #[serde(default)]
+    #[ts(optional)]
+    pub accept_unverified_agents: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, TS)]
@@ -2216,6 +2225,10 @@ pub struct RevalidateAuditRequest {
     #[serde(default)]
     #[ts(optional)]
     pub deterministic_only: Option<bool>,
+    /// KT-1324 — see [`LaunchAuditRequest::accept_unverified_agents`].
+    #[serde(default)]
+    #[ts(optional)]
+    pub accept_unverified_agents: Option<bool>,
     #[serde(default)]
     #[ts(optional)]
     pub connection_id: Option<String>,
@@ -2237,6 +2250,10 @@ pub struct PartialAuditRequest {
     #[serde(default)]
     pub tier: Option<crate::models::ModelTier>,
     pub steps: Vec<usize>,
+    /// KT-1324 — see [`LaunchAuditRequest::accept_unverified_agents`].
+    #[serde(default)]
+    #[ts(optional)]
+    pub accept_unverified_agents: Option<bool>,
 }
 
 /// KT-977 — one step of the Full audit, known before any run: lets the UI

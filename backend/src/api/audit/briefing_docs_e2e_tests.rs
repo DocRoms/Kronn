@@ -120,6 +120,7 @@ async fn partial_step_8_prompt(setting: bool, env: bool) -> String {
             connection_id: None,
             tier: None,
             steps: vec![step],
+            accept_unverified_agents: None,
         }),
     )
     .await

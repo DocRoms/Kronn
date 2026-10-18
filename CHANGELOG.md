@@ -602,6 +602,42 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- An audit agent that outlived a backend stop no longer keeps writing after
+  boot settled its step, and a resume no longer warns that « the sources
+  changed » when they did not (KT-1324). Agents run through the ACP adapter
+  (Claude and Codex by default) have no pid recorded on their run, so boot had
+  nothing to stop: it settled the step as « it had written nothing » and the
+  orphan then edited `docs/` for minutes. Every process an audit run starts now
+  carries the run's tag in `KRONN_TASK_DISPATCH_ID`
+  (`audit-run:<instance>:<run id>`, the variable `core::dispatch_reaper`
+  already stops task workers by; the instance is a hash of the data directory,
+  so a bench backend on a copy of the database never stops the live agents),
+  whichever route launched it. Boot stops what carries the tag of one of its
+  own runs (the recorded group first), and only then settles the steps that
+  never ended; a run something of which survived the reap, or could not be
+  looked for (on Linux, a process of the user's own that `/proc` will not
+  show), is left unsettled rather than judged on a file still being written.
+  Agents started under the former tag (`audit-run:<run id>`) are looked for
+  too, so an upgrade does not let one write past a settlement.
+  Every launch that takes snapshots or rewrites docs (full audit, partial
+  refresh, revalidation, including a revalidation that only re-anchors
+  citations) first stops the agents of all the project's open runs and
+  settles their unfinished steps, and refuses to launch while one may still be
+  alive. The refusal names the process and how to stop it (`kill -9 <pid>`);
+  when Kronn cannot read the process table (a restricted `/proc`) it says so
+  and offers an « I'm sure none is running: continue » action, on the audit
+  timeline and in the revalidation panel, that repeats the launch with
+  `accept_unverified_agents: true`, the human's word that none runs, which
+  never covers a process Kronn saw. The flag is a human-only API field: no MCP
+  tool carries it. The refusal's SSE `error` event carries a typed `error_code`
+  (`agents_unverified` for the unreadable table, `agents_still_running` for a
+  process that was seen) on every path, and the UI reads that code, not the
+  message text; a retry never resends the flag, even after a confirmed launch
+  that failed again. The
+  sources' print a run records is now read once Kronn's own
+  install has written its root `AGENTS.md` pointer: taken before it, it
+  differed from the next run's and every resume of a freshly started audit
+  warned.
 - Retrying a step, or resuming an audit, from the UI keeps the run's tier
   (KT-1320). The card's picker defaulted to `reasoning`, so the retry of a
   Haiku (economy) audit ran on Opus. The run now records its tier and

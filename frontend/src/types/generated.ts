@@ -4830,7 +4830,16 @@ redo_steps?: Array<number>,
  * project's latest run can be resumed, unless this explicit choice says
  * to run the whole audit again.
  */
-fresh?: boolean, };
+fresh?: boolean,
+/**
+ * KT-1324 — a launch first stops the agents the project's previous runs
+ * left and settles their unfinished steps. When Kronn cannot read the
+ * process table (a restricted `/proc`) it cannot tell that none is still
+ * running and refuses; this is the human's word that none is, and the
+ * steps are settled without the check. It never overrides a process Kronn
+ * saw and could not stop: that one is stopped by hand.
+ */
+accept_unverified_agents?: boolean, };
 
 export type LaunchDiscussionActionRequest = { variables?: Record<string, string>,
 /**
@@ -6199,7 +6208,11 @@ connection_id?: string,
  * Model capability selected by the shared agent picker. Missing values
  * keep the historical partial-audit behaviour (Reasoning).
  */
-tier?: ModelTier | null, steps: Array<number>, };
+tier?: ModelTier | null, steps: Array<number>,
+/**
+ * KT-1324 — see [`LaunchAuditRequest::accept_unverified_agents`].
+ */
+accept_unverified_agents?: boolean, };
 
 /**
  * A participant enriched with the honest-presence contract (0.9.2-G). Carries
@@ -7947,7 +7960,11 @@ export type RevalidateAuditRequest = { agent: AgentType,
  * Apply only deterministic citation repairs, even when agent work remains.
  * Omitted or false preserves the existing combined reverification flow.
  */
-deterministic_only?: boolean, connection_id?: string, tier?: ModelTier | null, };
+deterministic_only?: boolean,
+/**
+ * KT-1324 — see [`LaunchAuditRequest::accept_unverified_agents`].
+ */
+accept_unverified_agents?: boolean, connection_id?: string, tier?: ModelTier | null, };
 
 /**
  * What "Revalider l'audit" does with one section (KT-1168).

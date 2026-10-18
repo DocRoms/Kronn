@@ -283,20 +283,14 @@ impl Database {
         // row is a zombie — and the flip is resume-safe because
         // last_completed_step survives (see
         // `reconcile_stale_runs_preserves_last_completed_step`).
-        // KT-1211 (M5) — an agent the previous backend left running would
-        // keep writing the docs the freed lease lets a resume rewrite: kill
-        // it first (only a process whose start stamp still matches).
-        match crate::core::agent_orphans::reap_recorded_agents(&conn) {
-            Ok(0) => {}
-            Ok(n) => {
-                tracing::warn!("Killed {n} audit agent(s) left running by the previous backend")
-            }
-            Err(e) => tracing::warn!("Failed to reap orphaned audit agents: {e}"),
-        }
-        // KT-1211 — the step that agent was writing never ended: put its doc
-        // back from the pre-step snapshot (or mark it partial) now, so it is
-        // never left half-written and unmarked until the next launch.
-        match crate::api::audit::step_guard::settle_unfinished_at_boot(&conn) {
+        // KT-1211 (M5), KT-1324 — an agent the previous backend left running
+        // would keep writing the docs the freed lease lets a resume rewrite:
+        // stop them all first (the recorded one, then whatever carries a run's
+        // tag). Then the step each was writing, which never ended, is put back
+        // from its pre-step snapshot (or marked partial) now — never before
+        // the agent is gone, and never left half-written and unmarked until
+        // the next launch.
+        match crate::api::audit::step_guard::stop_agents_and_settle_at_boot(&conn) {
             Ok(0) => {}
             Ok(n) => tracing::warn!("Settled {n} audit step(s) cut off with the previous backend"),
             Err(e) => tracing::warn!("Failed to settle audit steps cut off at boot: {e}"),

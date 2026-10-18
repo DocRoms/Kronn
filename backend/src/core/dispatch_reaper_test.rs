@@ -381,3 +381,71 @@ mod processes {
         assert_eq!(reap_dispatch("  "), ReapReport::default());
     }
 }
+
+/// KT-1324 — a second backend on a copy of this database (a bench, a lane)
+/// knows the same run ids: the tag must tell the two instances apart, or its
+/// boot would stop the agents of the one that really runs them.
+#[test]
+fn the_audit_tag_names_the_instance_and_the_run() {
+    let live = instance_id_of(std::path::Path::new("/srv/kronn/live"));
+    let bench = instance_id_of(std::path::Path::new("/srv/kronn/bench-copy"));
+    assert_ne!(live, bench, "two data directories are two instances");
+    assert_eq!(
+        live,
+        instance_id_of(std::path::Path::new("/srv/kronn/live")),
+        "the same directory keeps its name across restarts"
+    );
+    assert_ne!(
+        audit_run_tag_in(&live, "run-1"),
+        audit_run_tag_in(&bench, "run-1"),
+        "the same run id, in two instances, is two tags"
+    );
+    assert_ne!(
+        audit_run_tag_in(&live, "run-1"),
+        audit_run_tag_in(&live, "run-2")
+    );
+    assert!(audit_run_tag("run-1").contains(instance_id()));
+    assert!(audit_run_tag("run-1").ends_with(":run-1"));
+}
+
+/// KT-1324 — an agent started before the tag named an instance carries the
+/// former tag: a run is reaped under both, and what the two reaps found is told
+/// together (a pid once, whatever tag it was found by).
+#[test]
+fn a_run_is_reaped_under_its_current_and_its_former_tag() {
+    let asked = std::cell::RefCell::new(Vec::<String>::new());
+    let reap = |tag: &str| {
+        asked.borrow_mut().push(tag.to_string());
+        ReapReport {
+            signalled: 1,
+            survivors: vec![42],
+            unverified: tag == legacy_audit_run_tag("run-1"),
+        }
+    };
+    let report = reap_audit_run("run-1", &reap);
+    assert_eq!(
+        asked.borrow().as_slice(),
+        [audit_run_tag("run-1"), "audit-run:run-1".to_string()]
+    );
+    assert_eq!(report.signalled, 2);
+    assert_eq!(report.survivors, vec![42]);
+    assert!(
+        report.unverified,
+        "one blind reap leaves the run unverified"
+    );
+    assert_ne!(
+        legacy_audit_run_tag("run-1"),
+        audit_run_tag("run-1"),
+        "the former tag is not matched by the current one, nor the reverse"
+    );
+}
+
+/// An entry of `/proc` that cannot be read counts only when it could be the
+/// run's: another user's processes are always unreadable to this one.
+#[test]
+fn an_unreadable_process_matters_only_if_it_could_be_ours() {
+    assert!(could_be_ours(Some(1000), 1000));
+    assert!(!could_be_ours(Some(0), 1000));
+    // The owner itself could not be read: it cannot be ruled out.
+    assert!(could_be_ours(None, 1000));
+}

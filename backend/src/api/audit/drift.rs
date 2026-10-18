@@ -428,6 +428,7 @@ pub async fn partial_audit(
         req.tier,
         req.connection_id,
         None,
+        req.accept_unverified_agents.unwrap_or(false),
     )
     .await
 }
@@ -443,6 +444,7 @@ pub(crate) async fn run_partial_pipeline(
     tier: Option<crate::models::ModelTier>,
     connection_id: Option<String>,
     revalidation: Option<super::revalidate::RevalidationRun>,
+    accept_unverified_agents: bool,
 ) -> Sse<SseStream> {
     let id = project.id.clone();
     let project_path_str = project.path.clone();
@@ -594,6 +596,16 @@ pub(crate) async fn run_partial_pipeline(
             return;
         }
 
+        // KT-1324 — what a previous run's agent left is stopped and settled
+        // before this run snapshots its targets: a survivor still writing them
+        // would be snapshotted as if it were the document's own text.
+        if let Err(error) = super::step_guard::settle_open_runs_before_launch(
+            &state.db, &project_id_for_progress, &project_path, accept_unverified_agents,
+        ).await {
+            yield Event::default().event("error").data(error.event_data());
+            return;
+        }
+
         // A3 — partial runs get their own audit_runs row: history and the
         // resume/validate rules must see a failed or newer partial, not
         // skip it. Mandatory, like the full pipeline.
@@ -617,6 +629,7 @@ pub(crate) async fn run_partial_pipeline(
             return;
         }
         drop_guard.set_run_id(audit_run_id.clone());
+        agent_launcher.bind_run(&audit_run_id);
         super::full::stop_validation_agents(&state, &project_id_for_progress).await;
         let provenance_writer = if revalidation.is_some() {
             crate::core::doc_provenance::DocWriter::Revalidation
