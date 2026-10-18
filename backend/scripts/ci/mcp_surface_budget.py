@@ -137,7 +137,10 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # lives in its manual. Ceiling lowered by 24 B on top of KT-1270 (84_929 -> 84_905).
 # KT-1329: the decision-card guidance moved inside the first 2048 chars of the
 # instructions; re-measured on the merged tree.
-CATALOGUE_MAX_BYTES = 84_894
+# KT-1347: `disk_usage` no longer exposes `purge_orphans` (the purge is a human
+# action; the route is not on the bridge), so its description and schema shrink;
+# re-measured on the tree merged with KT-1329/KT-1320 (84_894 -> 84_860).
+CATALOGUE_MAX_BYTES = 84_860
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is

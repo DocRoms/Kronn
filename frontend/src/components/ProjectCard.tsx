@@ -3,6 +3,7 @@ import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { planning, projects as projectsApi, externalApi, type ExternalApiConnectionView } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import { userError } from '../lib/userError';
+import { isUnverifiedAgentsRefusal } from '../lib/auditRefusal';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { isValidationDisc, isBriefingDisc, isBootstrapDisc, isTrackerMcp } from '../lib/constants';
 import { canRunAudit } from '../lib/agentCapabilities';
@@ -60,6 +61,15 @@ import { PAGE_PATHS, PROJECT_VIEWS, discussionPath, projectPath, type ProjectLoc
 import { newTabClickProps } from '../lib/newTabNavigation';
 
 type ProjectDetailView = ProjectView;
+
+/** What a full-audit launch is asked to do beyond resuming the run. */
+interface FullAuditOptions {
+  retrySteps?: number[];
+  redoSteps?: number[];
+  fresh?: boolean;
+  /** KT-1324 — the human confirmed no agent of a previous run is still running. */
+  acceptUnverifiedAgents?: boolean;
+}
 
 const PROJECT_DETAIL_VIEWS = PROJECT_VIEWS;
 const PROJECT_DETAIL_VIEW_STORAGE_KEY = 'kronn:projectDetailView';
@@ -442,10 +452,10 @@ export function ProjectCard({
   // KT-1134 — a cancel the backend has not acknowledged: the run may still go on.
   const [cancelPending, setCancelPending] = useState(false);
   // KT-1169 — the last launch that stopped on an error, and how to replay it.
-  const [auditLaunchError, setAuditLaunchError] = useState<{ message: string; retry: () => void } | null>(null);
+  const [auditLaunchError, setAuditLaunchError] = useState<{ message: string; retry: () => void; confirmUnverified?: () => void } | null>(null);
   // A "Reprendre" replays the launch with the state of the moment it is clicked.
-  const handleFullAuditRef = useRef<(options?: { retrySteps?: number[]; redoSteps?: number[]; fresh?: boolean }) => Promise<void>>(async () => {});
-  const startPartialAuditRef = useRef<(steps: number[]) => Promise<void>>(async () => {});
+  const handleFullAuditRef = useRef<(options?: FullAuditOptions) => Promise<void>>(async () => {});
+  const startPartialAuditRef = useRef<(steps: number[], acceptUnverifiedAgents?: boolean) => Promise<void>>(async () => {});
   // Re-arms the status poll: an external launch, or a cancel left pending.
   const [externalAdoptTick, setExternalAdoptTick] = useState(0);
   const [auditAgentChoice, setAuditAgentChoice] = useState<AgentType | undefined>(undefined);
@@ -861,7 +871,7 @@ export function ProjectCard({
     onRefetchDiscussions();
   }, [auditAbortController, proj.id, toast, t, onRefetch, onRefetchDiscussions, stopAuditPolling]);
 
-  const handleFullAudit = useCallback(async (options: { retrySteps?: number[]; redoSteps?: number[]; fresh?: boolean } = {}) => {
+  const handleFullAudit = useCallback(async (options: FullAuditOptions = {}) => {
     // Guard against double-click — `setAuditActive(true)` flips the UI to
     // the progress panel synchronously, but a fast double-click can call
     // this handler twice before React re-renders, spawning two concurrent
@@ -876,7 +886,10 @@ export function ProjectCard({
     // so client state can never graft onto the wrong pipeline (Codex #3).
     // A fresh full audit ignores the resumable run on purpose (confirmed).
     const resumeRunId = options.fresh ? null : resumableAudit?.id ?? null;
-    const retry = () => { void handleFullAuditRef.current(options); };
+    // KT-1324 — the human's word that no agent runs covers the one launch it
+    // was given for: a retry never carries it, whatever launch it follows.
+    const { acceptUnverifiedAgents: _spent, ...retryOptions } = options;
+    const retry = () => { void handleFullAuditRef.current(retryOptions); };
     // A step retried alone needs its run: never fall back to a whole audit.
     if (options.retrySteps && !resumeRunId) {
       setAuditLaunchError({ message: t('audit.retryNeedsRun'), retry: () => setResumableReload(n => n + 1) });
@@ -932,6 +945,9 @@ export function ProjectCard({
         redo_steps: resumeRunId && options.redoSteps ? options.redoSteps : undefined,
         // KT-1169 — the confirmed choice to replay the whole audit.
         fresh: options.fresh ? true : undefined,
+        // KT-1324 — the human's word that no agent runs, after a refusal for a
+        // process table Kronn could not read.
+        accept_unverified_agents: options.acceptUnverifiedAgents ? true : undefined,
         // The run's own connection is the server's to inherit when it resumes
         // that run (it falls back to the agent's default if that connection was
         // deleted since); any other launch sends the connection the panel shows.
@@ -1049,7 +1065,7 @@ export function ProjectCard({
             onAutoRunDiscussion(discussionId);
           }
         },
-        onError: (error) => {
+        onError: (error, errorCode) => {
           // SSE `event: error` from the backend (agent crash, install
           // failure, etc.). Pre-fix this only logged + cleared the
           // checkpoint, leaving `auditActive=true` so the spinner
@@ -1062,7 +1078,13 @@ export function ProjectCard({
           setAuditAbortController(null);
           clearAuditCheckpoint(proj.id);
           toast(t('audit.streamError', error || 'unknown error'), 'error');
-          setAuditLaunchError({ message: t('audit.streamError', error || 'unknown error'), retry });
+          setAuditLaunchError({
+            message: t('audit.streamError', error || 'unknown error'),
+            retry,
+            confirmUnverified: isUnverifiedAgentsRefusal(errorCode)
+              ? () => { void handleFullAuditRef.current({ ...retryOptions, acceptUnverifiedAgents: true }); }
+              : undefined,
+          });
           setAuditCompletedTick((t) => t + 1);
           onRefetch();
         },
@@ -1080,7 +1102,7 @@ export function ProjectCard({
     }
   }, [selectedAuditAgent, selectedAuditTier, selectedAuditConnectionId, launchFromRun, proj.id, t, toast, onRefetch, onRefetchDiscussions, onAutoRunDiscussion, resumableAudit]);
 
-  const launchPartialAudit = useCallback(async (steps: number[]) => {
+  const launchPartialAudit = useCallback(async (steps: number[], acceptUnverifiedAgents = false) => {
     if (auditActiveRef.current) return;
     auditActiveRef.current = true;
     setAuditLaunchError(null);
@@ -1097,7 +1119,10 @@ export function ProjectCard({
       stepIndex: 0, totalSteps: steps.length, currentFile: null,
     });
     try {
-      await projectsApi.partialAuditStream(proj.id, { agent: selectedAuditAgent, tier: selectedAuditTier, steps, connection_id: selectedAuditConnectionId ?? undefined }, {
+      await projectsApi.partialAuditStream(proj.id, {
+        agent: selectedAuditAgent, tier: selectedAuditTier, steps, connection_id: selectedAuditConnectionId ?? undefined,
+        accept_unverified_agents: acceptUnverifiedAgents ? true : undefined,
+      }, {
         onStepStart: (step, total, file) => {
           setAuditStep(step);
           setAuditTotalSteps(total);
@@ -1160,7 +1185,7 @@ export function ProjectCard({
             toast(t('audit.partialInterrupted'), 'error');
           }
         },
-        onError: (error) => {
+        onError: (error, errorCode) => {
           // Same fix as `handleFullAudit.onError` — without resetting
           // `auditActive`, the spinner stays on a dead run.
           console.warn('Partial audit error:', error);
@@ -1169,7 +1194,13 @@ export function ProjectCard({
           setAuditAbortController(null);
           clearAuditCheckpoint(proj.id);
           toast(t('audit.partialStreamError', error || 'unknown error'), 'error');
-          setAuditLaunchError({ message: t('audit.partialStreamError', error || 'unknown error'), retry });
+          setAuditLaunchError({
+            message: t('audit.partialStreamError', error || 'unknown error'),
+            retry,
+            confirmUnverified: isUnverifiedAgentsRefusal(errorCode)
+              ? () => { void startPartialAuditRef.current(steps, true); }
+              : undefined,
+          });
           setAuditCompletedTick((t) => t + 1);
           onRefetch();
         },
@@ -1187,8 +1218,8 @@ export function ProjectCard({
     }
   }, [selectedAuditAgent, selectedAuditTier, selectedAuditConnectionId, proj.id, t, toast, onRefetch, onRefetchDrift, onRefetchDiscussions, onOpenDiscussion, onNavigate]);
 
-  const startPartialAudit = useCallback(async (steps: number[]) => {
-    await gateTemplateLaunch(() => void launchPartialAudit(steps));
+  const startPartialAudit = useCallback(async (steps: number[], acceptUnverifiedAgents = false) => {
+    await gateTemplateLaunch(() => void launchPartialAudit(steps, acceptUnverifiedAgents));
   }, [gateTemplateLaunch, launchPartialAudit]);
 
   const acknowledgeDrift = useCallback(async (drift: DriftCheckResponse) => {

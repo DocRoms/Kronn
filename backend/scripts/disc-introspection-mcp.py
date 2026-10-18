@@ -1435,15 +1435,12 @@ TOOLS = [
     {
         "name": "disk_usage",
         "description": (
-            "Free disk and Kronn's own artefacts by kind/task. `purge_orphans` "
-            "removes only finished, idle, worktree-less lanes: tool_manual."
+            "Free disk and Kronn's disk usage by kind; lane detail for your own "
+            "project only. Read-only: purging is a human action (tool_manual)."
         ),
         "inputSchema": {
             "type": "object",
-            "properties": {
-                "project_id": {"type": "string"},
-                "purge_orphans": {"type": "boolean"},
-            },
+            "properties": {"project_id": {"type": "string"}},
         },
     },
     {
@@ -7731,21 +7728,19 @@ def call_workflow_active_runs(_args):
 
 
 def call_disk_usage(args):
-    """KT-1318 - free disk and Kronn's own artefacts, compact; optionally purge
-    the orphans (finished, idle, worktree-less, Kronn-marked lanes only). A named
-    delete is a confirmed UI action, deliberately not offered here."""
+    """KT-1318/KT-1347 - free disk and Kronn's own artefacts, compact and
+    read-only. The backend scopes the view to the token's project (aggregates
+    beyond it); the purge is a human action in Settings > Disk, never called from
+    here: the route is not on the bridge's list."""
     project_id = args.get("project_id")
     query = "?project_id=" + urllib.parse.quote(str(project_id)) if project_id else ""
     limit = 25
     out = {}
     if args.get("purge_orphans") is True:
-        body = {"project_id": project_id} if project_id else {}
-        purged = _unwrap(_http("POST", "/api/maintenance/disk/purge", body))
-        out["purged"] = {
-            "freed_bytes": purged.get("freed_bytes"),
-            "removed": [item.get("path") for item in purged.get("items", []) if item.get("purged")],
-            "kept": purged.get("kept"),
-        }
+        out["purged"] = (
+            "not done: purging is a human action (Settings > Disk), not an agent's; "
+            "ask the user"
+        )
     report = _unwrap(_http("GET", "/api/maintenance/disk" + query))
     entries = report.get("entries") or []
     out.update({
@@ -7758,6 +7753,8 @@ def call_disk_usage(args):
         "entries_total": len(entries),
         "entries": entries[:limit],
     })
+    if report.get("scoped"):
+        out["scoped"] = True
     return out
 
 
@@ -10610,18 +10607,14 @@ TOOL_MANUALS["workflow_trigger"] = (
     "Discovery first: `workflow_list` gives the `workflow_id`. The workflow must be enabled — a disabled draft is refused with a clear error.\n\n`next_check` has the form `{wait_seconds, reason, confidence}`. The first wait is always at least 30s, a sanity check that the run actually started. `confidence: baseline` means the average duration is reliable; `confidence: no_baseline` means this workflow has never run, so check every 60s.\n\nWhen the workflow declares manual launch variables, pass them as `variables: {name: value, …}`. Required ones must be non-empty — the same validation the UI form applies.\n\n`step_agents` changes the agent of some Agent steps for this run only: `{\"<step id or name>\": {\"agent\": \"Codex\", \"model\": \"…\", \"reasoning_effort\": \"…\"}}`. Omitted model or effort means the agent's default. The workflow is never modified; the step keeps its budget and tools. An unknown step, a non-Agent step, an agent not installed or enabled, or tools/budget the agent cannot apply is refused before the run starts."
 )
 TOOL_MANUALS["disk_usage"] = (
-    "Answers: how much disk is free, and what Kronn itself holds on it. `totals` groups bytes by "
-    "kind (`worktree`, `lane_build_dir`, `cache`); `entries` lists the largest first with their "
-    "owner (`task_ref`, `execution_id`, `status`), `idle_seconds` and a `state`: `orphan` "
-    "(finished, no live worktree, idle past `policy.sweep_idle_hours`: the default purge removes "
-    "it), `reclaimable` (finished but recent, or its clean worktree is kept: only a confirmed "
-    "delete in Settings > Disk takes it), `active` (a live execution claims it: never removed), "
-    "`kept` and `foreign` (not created by Kronn: never touched, whatever its name). Sizes are "
-    "floors when `bytes_are_partial`.\n\n"
-    "`purge_orphans: true` removes the orphans and only them, then returns the fresh report. "
-    "Below `policy.launch_min_free_gib` Kronn already sweeps them before it refuses a worker "
-    "launch or a full audit, and says so in the principal room.\n\n"
-    "`entries` is capped at 25 (largest first); `entries_total` is the full count."
+    "How much disk is free, and what Kronn holds on it. `totals` (bytes by kind: `worktree`, "
+    "`lane_build_dir`, `cache`), `orphan_*` and `available_bytes` cover the whole instance. "
+    "`entries` (largest first, 25 max; `entries_total` is the count) are your own project's "
+    "only, with `task_ref`, `execution_id`, `status`, `idle_seconds` and a `state`: `orphan` "
+    "(finished, no live worktree, idle), `reclaimable`, `active`, `kept`, `foreign`; sizes are "
+    "floors when `bytes_are_partial`. `scoped: true` = this view.\n\n"
+    "Read-only: purging is a human action in Settings > Disk. Tell the user when "
+    "`under_pressure` or `orphan_bytes` is large; do not try to purge. Another project's id is refused."
 )
 TOOL_MANUALS["task_exec_launch"] = TOOL_MANUALS["task_exec_prepare"]
 TOOL_MANUALS["task_assign"] = (

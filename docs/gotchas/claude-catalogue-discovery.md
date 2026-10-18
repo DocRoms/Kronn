@@ -57,7 +57,7 @@ refresh; their existing explicit boundaries remain unchanged.
 [src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:32-93#useModelCatalogSnapshot]
 [src: file: backend/src/core/model_catalog/mod.rs:940-982#refresh_if_stale]
 [src: file: backend/src/core/model_catalog/mod.rs:37-41#LIVE_CATALOG_TTL]
-[src: file: backend/src/db/mod.rs:440-452#lock_catalog_refresh]
+[src: file: backend/src/db/mod.rs:434-446#lock_catalog_refresh]
 
 Failures retain the last good catalogue and its timestamp with an explicit
 error. A successful empty catalogue marks previous live entries unavailable;

@@ -51,7 +51,7 @@ capability they appear to have is a **tool Kronn executes server-side on their b
 
 The MCP bridge is deliberately not one of those capabilities. The HTTP path returns before
 any MCP environment is built [src: file: backend/src/agents/runner.rs:4251-4272#start_ollama_http_with_idle], and
-`--mcp-config` is a CLI-only argument [src: file: backend/src/agents/runner.rs:4489-4506#insert_claude_mcp_config].
+`--mcp-config` is a CLI-only argument [src: file: backend/src/agents/runner.rs:4495-4512#insert_claude_mcp_config].
 So "add a tool to the MCP server" never reaches an HTTP agent. Anything they must be able to
 do has to exist as a **native tool in Kronn's own catalogue**.
 
@@ -243,7 +243,7 @@ context fitting; an explicit thinking request removes Kronn's older Qwen
 round trips, rather than defining a total run budget. The provider may refuse
 a setting its selected model does not support. Kronn does not retry by dropping
 the saved control. [src: file: backend/src/agents/generation_settings.rs:39-71#apply_http]
-[src: file: backend/src/agents/runner.rs:9341#apply_http]
+[src: file: backend/src/agents/runner.rs:9351#apply_http]
 [src: url: https://docs.ollama.com/api/chat]
 [src: url: https://docs.ollama.com/capabilities/thinking]
 [src: url: https://docs.litellm.ai/docs/completion/input]
@@ -289,7 +289,7 @@ Tiering reduces the initial declaration text, not the context capacity required
 to reach every family. Window reservation counts the whole reachable catalogue,
 including JSON separators, before loading a family. A regression test checks
 exact byte counts and an unchanged window through every family load.
-[src: file: backend/src/agents/runner.rs:6865-6895#reachable_tools_bytes]
+[src: file: backend/src/agents/runner.rs:6875-6905#reachable_tools_bytes]
 [src: file: backend/src/agents/runner_test.rs:1586-1624#the_window_does_not_move_when_a_run_loads_a_tool_family]
 
 ## Audits (KT-924)
@@ -347,7 +347,7 @@ briefing are discussions). The only
 other repos a step names are those the user linked to the project
 (`Project.linked_repos`), a voluntary declaration that stays in every step
 [src: file: backend/src/api/audit/full.rs:337-338#format_linked_repos_for_prompt]
-[src: file: backend/src/api/audit/drift.rs:464-465#format_linked_repos_for_prompt]. What remains: the block for a
+[src: file: backend/src/api/audit/drift.rs:466-467#format_linked_repos_for_prompt]. What remains: the block for a
 linked repo still says to start with `<repo-path>/docs/AGENTS.md`, a path an HTTP
 agent's tools refuse because it is outside the project, so for that agent the
 block is information, not something it can follow. Making that block
@@ -366,8 +366,8 @@ one.
 **Stopping.** An HTTP agent's request and tool loop are a task, not a process:
 killing the lifeline PID does not stop it. A Full audit therefore registers a
 cancellation token per step, and `cancel_audit` trips it
-[src: file: backend/src/api/audit/full.rs:1867-1872#agent_cancels]
-[src: file: backend/src/api/audit/full.rs:4529-4532#agent_cancels]. Since KT-927 the partial audit does
+[src: file: backend/src/api/audit/full.rs:1845-1850#agent_cancels]
+[src: file: backend/src/api/audit/full.rs:4507-4510#agent_cancels]. Since KT-927 the partial audit does
 the same, and so does an ACP agent, whose PID is a lifeline too: see
 [auditing with an ACP agent](audit-acp-agents.md).
 
@@ -415,8 +415,8 @@ shipping it. Three things changed:
   on a later turn keeps it. A result that was already an extract gets no paths,
   which would not apply to the response the next `extract` runs on, and is told to
   select less. Other tools are shortened exactly as before
-  [src: file: backend/src/agents/runner.rs:7121-7149#shape_of]
-  [src: file: backend/src/agents/runner.rs:7151-7191#working_extract_examples].
+  [src: file: backend/src/agents/runner.rs:7131-7159#shape_of]
+  [src: file: backend/src/agents/runner.rs:7161-7201#working_extract_examples].
 - **A call that differs only by its `extract` or its query is not a repeat.** The
   duplicate guard compares the tool name and every argument, sorted by key, so an
   identical call is still replayed once and then refused, and a call with another
@@ -463,7 +463,7 @@ contract and can request one step type or shared section. This avoids paying
 the full schema on every turn while keeping both interfaces on the same source.
 The examples are deserialized as real `WorkflowStep` values in regression tests.
 [src: file: backend/src/api/workflow_step_schema.json:1-467#fields_by_type]
-[src: file: backend/scripts/disc-introspection-mcp.py:9532-9534#call_workflow_step_schema]
+[src: file: backend/scripts/disc-introspection-mcp.py:9529-9531#call_workflow_step_schema]
 [src: file: backend/src/api/agent_workflow_tests.rs:146-170#workflow_schema_sections_preserve_the_canonical_contract]
 
 Ollama tool-result clamping preserves this authoring contract as complete JSON

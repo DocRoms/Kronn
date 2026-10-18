@@ -813,6 +813,8 @@ pub struct NativeLaunchEnv {
     pub discussion_id: Option<String>,
     pub room_agent: Option<crate::agents::runner::RoomAgentBridgeContext>,
     pub workflow_step: Option<crate::agents::runner::WorkflowStepBridgeContext>,
+    /// The audit run the launch works for (KT-1324): its process is tagged.
+    pub audit_run_id: Option<String>,
     /// This agent's configured provider key, set under its own variable.
     pub api_key: Option<String>,
     /// The launch's scoped bridge token (layer B).
@@ -856,6 +858,7 @@ fn native_command(
         task_worker: None,
         room_agent: launch.room_agent.as_ref(),
         workflow_step: launch.workflow_step.as_ref(),
+        audit_run: launch.audit_run_id.as_deref(),
         bridge_token: launch.bridge_token.as_deref(),
         api_key: family.provider_key_env().zip(launch.api_key.as_deref()),
     };
@@ -1996,6 +1999,37 @@ mod tests {
     }
 
     #[test]
+    fn a_native_acp_agent_of_an_audit_run_carries_the_run_tag() {
+        let project = tempfile::tempdir().unwrap();
+        let stubs = tempfile::tempdir().unwrap();
+        let vibe = agent_stub(stubs.path(), "vibe-acp", "exit 0");
+        let launch = NativeLaunchEnv {
+            audit_run_id: Some("run-1324".into()),
+            ..Default::default()
+        };
+        let command = crate::core::child_env::with_parent_env(&[("PATH", "/usr/bin")], || {
+            native_command(
+                AcpAgent::Vibe,
+                &vibe,
+                &[],
+                &project.path().to_string_lossy(),
+                &launch,
+            )
+            .unwrap()
+        });
+        let tag = command
+            .as_std()
+            .get_envs()
+            .find(|(name, _)| *name == crate::core::dispatch_reaper::DISPATCH_ENV)
+            .and_then(|(_, value)| value)
+            .map(|value| value.to_string_lossy().into_owned());
+        assert_eq!(
+            tag.as_deref(),
+            Some(crate::core::dispatch_reaper::audit_run_tag("run-1324").as_str())
+        );
+    }
+
+    #[test]
     fn vibe_declares_the_bridge_environment_without_its_secrets() {
         let project = tempfile::tempdir().unwrap();
         let stubs = tempfile::tempdir().unwrap();
@@ -2122,6 +2156,7 @@ mod tests {
                 source_message_id: "msg-1".into(),
             }),
             workflow_step: None,
+            audit_run_id: None,
             api_key: Some("kronn-stored-gemini-key".into()),
             bridge_token: Some("kbt_native".into()),
             github_env: Vec::new(),

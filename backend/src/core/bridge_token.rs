@@ -661,6 +661,10 @@ pub const BRIDGE_ROUTES: &[BridgeRoute] = &[
         Effect,
         &[("id", P)],
     ),
+    // KT-1347: free space and aggregates, with the lanes of the token's own
+    // project only (`disk::scoped_for_bridge`). The purge
+    // (`POST /api/maintenance/disk/purge`) is a human action: not listed.
+    r("GET", "/api/maintenance/disk", Read, &[]),
     r("GET", "/api/skills", Read, &[]),
     r("POST", "/api/skills", Denied, &[]),
     r("PUT", "/api/skills/{id}", Denied, &[]),

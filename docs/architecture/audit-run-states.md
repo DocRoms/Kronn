@@ -17,14 +17,14 @@ reads "running" once the run has stopped.
 
 Sources:
 
-- The lease is the single gate of every launch. [src: file: backend/src/api/audit/full.rs:432-439#try_acquire_lease]
+- The lease is the single gate of every launch. [src: file: backend/src/api/audit/full.rs:433-440#try_acquire_lease]
 - The row is inserted `Running`. [src: file: backend/src/db/audit_runs.rs:17-19#insert_running]
-- The drift baseline is written before the terminal write, and only by a Full run; a baseline failure keeps the run `Interrupted`. [src: file: backend/src/api/audit/full.rs:3223-3229#baseline_ok] [src: file: backend/src/api/audit/full.rs:3523-3528#baseline_ok] [src: file: backend/src/api/audit/full.rs:4280-4286#should_write_full_baseline]
-- `Completed` or `Interrupted`, with the validation discussion, is one transaction. [src: file: backend/src/api/audit/full.rs:3987-3993#write_terminal_state]
-- `Interrupted` only moves a `Running` row. [src: file: backend/src/db/audit_runs.rs:842-849#mark_interrupted]
+- The drift baseline is written before the terminal write, and only by a Full run; a baseline failure keeps the run `Interrupted`. [src: file: backend/src/api/audit/full.rs:3201-3207#baseline_ok] [src: file: backend/src/api/audit/full.rs:3501-3506#baseline_ok] [src: file: backend/src/api/audit/full.rs:4258-4264#should_write_full_baseline]
+- `Completed` or `Interrupted`, with the validation discussion, is one transaction. [src: file: backend/src/api/audit/full.rs:3965-3971#write_terminal_state]
+- `Interrupted` only moves a `Running` row. [src: file: backend/src/db/audit_runs.rs:883-890#mark_interrupted]
 - The worker marks a cancel before it acknowledges it. [src: file: backend/src/api/audit/full.rs:1400-1431#mark_cancelled_at_step] [src: file: backend/src/db/audit_runs.rs:184-213#mark_cancelled_at_step]
-- At boot, every `Running` row is a zombie and becomes `Interrupted`. [src: file: backend/src/db/mod.rs:276-308#reconcile_stale_runs] [src: file: backend/src/db/audit_runs.rs:859-890#reconcile_stale_runs]
-- A run is resumable when it is the project's latest, `Interrupted`, with at least one done step. [src: file: backend/src/db/audit_runs.rs:955-957#latest_resumable]
+- At boot, every `Running` row is a zombie and becomes `Interrupted`. [src: file: backend/src/db/mod.rs:276-308#reconcile_stale_runs] [src: file: backend/src/db/audit_runs.rs:900-931#reconcile_stale_runs]
+- A run is resumable when it is the project's latest, `Interrupted`, with at least one done step. [src: file: backend/src/db/audit_runs.rs:996-998#latest_resumable]
 
 ## What counts as a done step
 
@@ -33,8 +33,8 @@ by a human (KT-1131). An accepted step keeps its failure on record:
 `cli_success` stays false and `step_warning` keeps the reason. It gains
 `accepted_at`, `accepted_by` and `accepted_reason`.
 
-- Done steps, as a resume reads them. [src: file: backend/src/api/audit/full.rs:4058-4080#already_succeeded_step_indices]
-- Per-run outcomes keep `succeeded`, `unchanged`, `accepted` and `failed` apart. [src: file: backend/src/api/audit/full.rs:3771-3789#RunProgress]
+- Done steps, as a resume reads them. [src: file: backend/src/api/audit/full.rs:4036-4058#already_succeeded_step_indices]
+- Per-run outcomes keep `succeeded`, `unchanged`, `accepted` and `failed` apart. [src: file: backend/src/api/audit/full.rs:3749-3767#RunProgress]
 
 ## Recovering from failed steps
 
@@ -43,7 +43,7 @@ by a human (KT-1131). An accepted step keeps its failure on record:
 - **Retry one step** (`retry_steps` with `resume_run_id`) replays only the
   named steps. The other failed steps are copied as they ended and are not
   run (`step_skipped`, reason `not_retried`).
-  [src: file: backend/src/api/audit/full.rs:4142-4167#retry_selection] [src: file: backend/src/api/audit/full.rs:1484-1495#not_retried] [src: file: backend/src/db/audit_runs.rs:1048-1075#carry_over_failed_steps]
+  [src: file: backend/src/api/audit/full.rs:4120-4145#retry_selection] [src: file: backend/src/api/audit/full.rs:1462-1473#not_retried] [src: file: backend/src/db/audit_runs.rs:1089-1116#carry_over_failed_steps]
 - **Accept as it stands** is
   `POST /api/projects/{id}/audit-runs/{run_id}/steps/{step}/accept`. It is a
   human action only: the route is not on the bridge list, and the handler
@@ -65,12 +65,12 @@ by a human (KT-1131). An accepted step keeps its failure on record:
 - **A run whose failed steps are all accepted no longer blocks a refresh or a
   revalidation** (KT-1312): a resume would only finalize it. Any step still
   failed or never run keeps the refusal.
-  [src: file: backend/src/api/audit/full.rs:4127-4140#resume_has_steps_left] [src: file: backend/src/api/audit/drift.rs:569-589#resume_has_steps_left]
+  [src: file: backend/src/api/audit/full.rs:4105-4118#resume_has_steps_left] [src: file: backend/src/api/audit/drift.rs:569-589#resume_has_steps_left]
 - **Fingerprints follow the steps** (KT-1312): the docs a step rewrote are
   re-fingerprinted as soon as it ends, so a chain of resumed runs leaves no
   rewritten doc with the fingerprints of an earlier audit, whichever run
   finishes the chain.
-  [src: file: backend/src/api/audit/full.rs:2898-2909#record_after_audit]
+  [src: file: backend/src/api/audit/full.rs:2876-2887#record_after_audit]
 - **A doc under a partial banner stays in the plan** (KT-1312): the revalidation
   plan queues its owning step (or lists it as manual when no step owns it)
   and the badge stays raised, even when relevance sees nothing wrong with its
@@ -86,18 +86,18 @@ by a human (KT-1131). An accepted step keeps its failure on record:
   `lease_orphaned`. The cleanup action (`POST /api/audit-runs/cleanup`) never
   touches a live audit. It settles the stale `Running` rows and releases the
   orphaned leases.
-  [src: file: backend/src/api/audit/full.rs:125-165#orphaned_leases] [src: file: backend/src/lib.rs:282#lease_orphaned] [src: file: backend/src/api/audit/run.rs:293#lease_orphaned] [src: file: backend/src/api/audit/run.rs:165-197#audit_runs_cleanup] [src: file: backend/src/db/audit_runs.rs:911-952#reconcile_running_except]
+  [src: file: backend/src/api/audit/full.rs:125-165#orphaned_leases] [src: file: backend/src/lib.rs:282#lease_orphaned] [src: file: backend/src/api/audit/run.rs:293#lease_orphaned] [src: file: backend/src/api/audit/run.rs:165-197#audit_runs_cleanup] [src: file: backend/src/db/audit_runs.rs:952-993#reconcile_running_except]
 - **Validation agents.** Before an audit touches `docs/`, it stops any agent
   still answering in a validation discussion linked to one of the project's
   runs. While an audit of the project shows progress, such an agent is not
   started: its dispatch goes back to the queue with its attempts intact. A
   run clears its progress before it spawns its own validation agent.
-  [src: file: backend/src/api/audit/full.rs:840-842#stop_validation_agents] [src: file: backend/src/api/audit/full.rs:223-258#stop_validation_agents] [src: file: backend/src/api/discussions/runtime.rs:493#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1185-1188#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1204-1225#progress] [src: file: backend/src/api/audit/full.rs:3643-3646#clear_progress]
+  [src: file: backend/src/api/audit/full.rs:770-772#stop_validation_agents] [src: file: backend/src/api/audit/full.rs:223-258#stop_validation_agents] [src: file: backend/src/api/discussions/runtime.rs:493#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1185-1188#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1204-1225#progress] [src: file: backend/src/api/audit/full.rs:3621-3624#clear_progress]
 - **Cancel.** A cancel waits for the worker to acknowledge it. Without that
   acknowledgement it answers with an error, and the UI keeps the audit shown,
   marked "cancel pending". It deletes only the validation discussion linked to
   the run it cancelled, never one an earlier run left behind.
-  [src: file: backend/src/api/audit/full.rs:4456-4480#delete_run_validation_discussion] [src: file: backend/src/api/audit/full.rs:4542-4564#wait_for_cancel_ack]
+  [src: file: backend/src/api/audit/full.rs:4434-4458#delete_run_validation_discussion] [src: file: backend/src/api/audit/full.rs:4520-4542#wait_for_cancel_ack]
 
 ## Launching from the existing state (KT-1169)
 
@@ -109,7 +109,7 @@ by a human (KT-1131). An accepted step keeps its failure on record:
   step is accepted. The refusal names the
   run, so a bridge agent knows what to resume. A partial run, which the Full
   launch cannot resume, never refuses a launch.
-  [src: file: backend/src/api/audit/full.rs:563-569#fresh_launch_refusal] [src: file: backend/src/api/audit/full.rs:4110-4140#fresh_launch_refusal] [src: file: backend/src/api/audit/drift.rs:586-593#fresh_launch_refusal]
+  [src: file: backend/src/api/audit/full.rs:563-569#fresh_launch_refusal] [src: file: backend/src/api/audit/full.rs:4088-4118#fresh_launch_refusal] [src: file: backend/src/api/audit/drift.rs:586-593#fresh_launch_refusal]
 - **The existing docs are never injected again.** The template is installed
   only into an empty AI doc folder, decided from its content rather than the
   displayed status; Kronn's own docs only get the template files they lack.
@@ -120,12 +120,12 @@ by a human (KT-1131). An accepted step keeps its failure on record:
   re-verification prompt (KT-1132). A documented repository that never had the
   template v2 merge is offered that merge before its first launch from the
   card (KT-1181), and never before a resume.
-  [src: file: backend/src/api/audit/full.rs:964-976#template_installed] [src: file: backend/src/api/audit/full.rs:402-433#sse_refusal] [src: file: backend/src/api/audit/full.rs:1530#reverifies_target]
+  [src: file: backend/src/api/audit/full.rs:894-906#template_installed] [src: file: backend/src/api/audit/full.rs:402-433#sse_refusal] [src: file: backend/src/api/audit/full.rs:1508#reverifies_target]
 - **Unknown is not "nothing to resume".** When the card cannot read whether a
   run is resumable, it says so and offers "Retry". Every launch button stays
   disabled until it knows. A step retried alone never falls back to a whole
   audit when its run is no longer resumable.
-  [src: file: frontend/src/components/ProjectCard.tsx:519-528#resumableUnknown] [src: file: frontend/src/components/ProjectCard.tsx:878-881#retrySteps] [src: file: frontend/src/components/AuditTimeline.tsx:471-473#launchBlocked]
+  [src: file: frontend/src/components/ProjectCard.tsx:529-538#resumableUnknown] [src: file: frontend/src/components/ProjectCard.tsx:888-894#retrySteps] [src: file: frontend/src/components/AuditTimeline.tsx:477-479#launchBlocked]
 
 ## Every error carries its action (KT-1169)
 
@@ -143,19 +143,19 @@ by a human (KT-1131). An accepted step keeps its failure on record:
 | Verify-docs dialog | A stale-sections refresh failed. | The stale section stays in the single doc-state block. “Update affected steps” retries the partial run; “Verified, unchanged” settles it without an agent. Both remain unavailable while a resumable run takes priority. |
 | Toasts during a run | A step failed or warned. | Informational: the run ends with that step's "Retry this step" and "Accept as it stands". |
 
-- Launch error banner. [src: file: frontend/src/components/AuditTimeline.tsx:714-732#launchError] [src: file: frontend/src/components/ProjectCard.tsx:1058-1075#setAuditLaunchError] [src: file: frontend/src/components/ProjectCard.tsx:445#auditLaunchError]
-- Unknown resumable state, unreadable timeline. [src: file: frontend/src/components/AuditTimeline.tsx:733-745#resumableUnknown] [src: file: frontend/src/components/AuditTimeline.tsx:746-756#loadFailed]
-- Refused acceptance. [src: file: frontend/src/components/AuditTimeline.tsx:478-500#setAcceptError] [src: file: frontend/src/components/AuditTimeline.tsx:849-852#acceptError]
+- Launch error banner. [src: file: frontend/src/components/AuditTimeline.tsx:714-732#launchError] [src: file: frontend/src/components/ProjectCard.tsx:1074-1097#setAuditLaunchError] [src: file: frontend/src/components/ProjectCard.tsx:455#auditLaunchError]
+- Unknown resumable state, unreadable timeline. [src: file: frontend/src/components/AuditTimeline.tsx:747-759#resumableUnknown] [src: file: frontend/src/components/AuditTimeline.tsx:760-770#loadFailed]
+- Refused acceptance. [src: file: frontend/src/components/AuditTimeline.tsx:478-500#setAcceptError] [src: file: frontend/src/components/AuditTimeline.tsx:863-866#acceptError]
 - Validation prerequisites and linked actions. [src: file: frontend/src/components/AuditTimeline.tsx:1031-1093#completedLocalRun]
-- Verify-docs actions and resumable priority. [src: file: frontend/src/components/RevalidateAudit.tsx:379-410#onUpdateStale] [src: file: frontend/src/components/ProjectCard.tsx:1492-1504#primaryAuditAction]
+- Verify-docs actions and resumable priority. [src: file: frontend/src/components/RevalidateAudit.tsx:395-426#onUpdateStale] [src: file: frontend/src/components/ProjectCard.tsx:1523-1535#primaryAuditAction]
 - Recap read error. [src: file: frontend/src/components/AuditRecapPanel.tsx:363-368#errorBlock]
 
 ## “Verify docs” escalation (KT-1168, KT-1206, KT-1218)
 
 “Verify docs” is the single entry point in the project header, the audit
 timeline and a stale document's viewer. It has no lifecycle of its own.
-[src: file: frontend/src/components/ProjectCard.tsx:1569-1583#project-audit-primary]
-[src: file: frontend/src/components/AuditTimeline.tsx:533-538#onVerifyDocs]
+[src: file: frontend/src/components/ProjectCard.tsx:1600-1614#project-audit-primary]
+[src: file: frontend/src/components/AuditTimeline.tsx:539-544#onVerifyDocs]
 [src: file: frontend/src/components/AiDocViewer.tsx:529-538#onOpenDocState]
 
 - **Fail-closed doc state.** One block reports four counts: broken citations,
@@ -163,7 +163,7 @@ timeline and a stale document's viewer. It has no lifecycle of its own.
   human-validated docs to reconfirm. Template placeholders keep their separate
   targeted fill action below the block. A missing drift, revalidation-plan or
   provenance response is shown as unknown, never clean or validated.
-  [src: file: frontend/src/components/ProjectCard.tsx:1422-1437#docStateUnknown]
+  [src: file: frontend/src/components/ProjectCard.tsx:1453-1468#docStateUnknown]
   [src: file: frontend/src/components/DocStateSummary.tsx:67-84#doc-state-counts]
 - **Deterministic first.** Opening the entry point computes the citation plan
   without an agent. Re-anchoring moved citations is also deterministic.
@@ -176,16 +176,16 @@ timeline and a stale document's viewer. It has no lifecycle of its own.
   unknown, but do not block targeted agent steps returned by the plan. A full
   audit remains folded under an explicit advanced option with the last
   measured cost and duration, or an honest “not measured”.
-  [src: file: frontend/src/components/RevalidateAudit.tsx:247-250#revalidate-prose-changed]
-  [src: file: frontend/src/components/RevalidateAudit.tsx:329-337#hasTargetedAgentWork]
-  [src: file: frontend/src/components/RevalidateAudit.tsx:338-348#docStateCounts]
-  [src: file: frontend/src/components/RevalidateAudit.tsx:379-410#onUpdateStale]
-  [src: file: frontend/src/components/RevalidateAudit.tsx:567-574#onFullAudit]
+  [src: file: frontend/src/components/RevalidateAudit.tsx:250-253#revalidate-prose-changed]
+  [src: file: frontend/src/components/RevalidateAudit.tsx:345-353#hasTargetedAgentWork]
+  [src: file: frontend/src/components/RevalidateAudit.tsx:354-364#docStateCounts]
+  [src: file: frontend/src/components/RevalidateAudit.tsx:395-426#onUpdateStale]
+  [src: file: frontend/src/components/RevalidateAudit.tsx:583-590#onFullAudit]
 - **Human text survives.** A partial update reuses the saved briefing. A Kronn
   write to human-validated text applies the correction and marks that text
   “to reconfirm”; it does not silently replace the human decision.
   [src: file: backend/src/api/audit/drift.rs:447-474#briefing_notes]
-  [src: file: backend/src/api/audit/drift.rs:1220-1228#mark_validated_doc_writes]
+  [src: file: backend/src/api/audit/drift.rs:1233-1241#mark_validated_doc_writes]
 - **One explanation, three doors.** The header summary and primary action, the
   timeline's doc-state block and launch entry, and the banner of a stale
   document all open the same dialog: why the sections are stale, each doc
@@ -196,7 +196,7 @@ timeline and a stale document's viewer. It has no lifecycle of its own.
 - **One name on every surface.** The MCP descriptions and manuals say
   “Verify docs” like the English label, present the full audit as an advanced
   option, and carry none of the retired CTA names.
-  [src: file: backend/scripts/test_disc_introspection_mcp.py:7998-8024#test_audit_surface_uses_the_verify_docs_vocabulary_of_the_ui]
+  [src: file: backend/scripts/test_disc_introspection_mcp.py:7985-8011#test_audit_surface_uses_the_verify_docs_vocabulary_of_the_ui]
 - **Header layout.** The compact header keeps the status, one next action, the
   doc-state summary and the « Détails » disclosure without overlap at 360, 768
   and 1440 px, closed and open.
@@ -218,7 +218,7 @@ timeline and a stale document's viewer. It has no lifecycle of its own.
 Sources:
 
 - The plan and the re-anchoring. [src: file: backend/src/api/audit/revalidate.rs:90-156#plan] [src: file: backend/src/api/audit/revalidate.rs:363-403#apply_reanchors]
-- The partial pipeline the agent part reuses. [src: file: backend/src/api/audit/revalidate.rs:748-761#run_partial_pipeline]
+- The partial pipeline the agent part reuses. [src: file: backend/src/api/audit/revalidate.rs:753-766#run_partial_pipeline]
 
 ## Refreshing stale sections (KT-1207)
 
@@ -229,23 +229,23 @@ sections.
   unchanged step re-verified its section. The drift baseline is merged for
   the done steps, whatever the run's status, after the terminal commit. A
   failed step's section stays stale.
-  [src: file: backend/src/api/audit/drift.rs:1677-1685#done_steps] [src: file: backend/src/api/audit/drift.rs:2003-2011#compute_merged_baseline]
+  [src: file: backend/src/api/audit/drift.rs:1690-1698#done_steps] [src: file: backend/src/api/audit/drift.rs:2016-2024#compute_merged_baseline]
 - **Status.** Without a failed step the run is `Completed`. The SSE `done`
   reads `complete` when a step rewrote its target, `no_change` when none did.
   With a failed step it is `Interrupted`.
-  [src: file: backend/src/api/audit/drift.rs:2042-2072#done_status_of]
+  [src: file: backend/src/api/audit/drift.rs:2061-2091#done_status_of]
 - **Validation.** The done steps get a validation discussion scoped to them,
   linked in the terminal transaction, on an `Interrupted` run too: the
   validate gate still refuses that run. A run that rewrote nothing, every
   step unchanged or stopped before its first write, restores the
   `validated_at` it revoked at launch, and then opens no discussion.
-  [src: file: backend/src/api/audit/drift.rs:1713-1719#restore_validation_if_untouched] [src: file: backend/src/api/audit/drift.rs:1758#pending_validation] [src: file: backend/src/api/audit/drift.rs:2110-2125#Interrupted]
+  [src: file: backend/src/api/audit/drift.rs:1726-1732#restore_validation_if_untouched] [src: file: backend/src/api/audit/drift.rs:1772#pending_validation] [src: file: backend/src/api/audit/drift.rs:2123-2138#Interrupted]
 - **Citations.** A section with recorded citations is judged by them. A
   normal refresh re-fingerprints both rewritten and re-verified unchanged
   sections after the terminal commit; failed sections keep their previous
   fingerprints. Revalidation retains its explicit human acknowledgement for
   unchanged citations.
-  [src: file: backend/src/api/audit/drift.rs:1891-1914#citation_docs]
+  [src: file: backend/src/api/audit/drift.rs:1904-1927#citation_docs]
 - **« Vérifié, inchangé ».**
   `POST /api/projects/{id}/drift/acknowledge` refreshes the named sections'
   baseline mappings, and their citation fingerprints when recorded. It runs
@@ -259,8 +259,8 @@ sections.
 The compact header exposes only the honest status, its primary next action and
 the doc-state summary. One “Details” disclosure contains secondary metadata and
 actions. Three pre-audit cases override the legacy `TemplateInstalled` label:
-[src: file: frontend/src/components/ProjectCard.tsx:1452-1485#humanDocsDetected]
-[src: file: frontend/src/components/ProjectCard.tsx:1659-1677#project-audit-details]
+[src: file: frontend/src/components/ProjectCard.tsx:1483-1516#humanDocsDetected]
+[src: file: frontend/src/components/ProjectCard.tsx:1690-1708#project-audit-details]
 
 - a human-owned docs folder asks the user to choose where Kronn writes;
 - a cancelled first run names its cancellation date and offers a relaunch;
@@ -288,18 +288,18 @@ The validation phase never reads "running" while an audit runs. It derives its
 action from the latest local run of any kind and that run's `latest_validation`;
 an older completed Full or Partial run cannot authorize Validate after a newer
 specialized run. Discussion-title guesses never authorize Validate.
-[src: file: frontend/src/components/ProjectCard.tsx:573-579#latest]
-[src: file: frontend/src/components/AuditTimeline.tsx:304-314#latestRun]
+[src: file: frontend/src/components/ProjectCard.tsx:583-589#latest]
+[src: file: frontend/src/components/AuditTimeline.tsx:310-320#latestRun]
 [src: file: frontend/src/components/AuditTimeline.tsx:1031-1093#linkedValidation]
 
-- Step status, accepted included. [src: file: frontend/src/components/AuditTimeline.tsx:177-192#stepStatus]
-- Launch label: resume, finalize, run again. [src: file: frontend/src/components/AuditTimeline.tsx:458-465#launchLabel]
-- Per-step actions only on the resumable run. [src: file: frontend/src/components/AuditTimeline.tsx:470#stepActions]
-- Validation phase is not running during an audit. [src: file: frontend/src/components/AuditTimeline.tsx:475-476#validationRunning] [src: file: frontend/src/components/ProjectCard.tsx:668-673#validationInProgress]
-- Validation phase hands over to the run. [src: file: frontend/src/components/AuditTimeline.tsx:1031-1044#runPending]
+- Step status, accepted included. [src: file: frontend/src/components/AuditTimeline.tsx:183-198#stepStatus]
+- Launch label: resume, finalize, run again. [src: file: frontend/src/components/AuditTimeline.tsx:464-471#launchLabel]
+- Per-step actions only on the resumable run. [src: file: frontend/src/components/AuditTimeline.tsx:476#stepActions]
+- Validation phase is not running during an audit. [src: file: frontend/src/components/AuditTimeline.tsx:481-482#validationRunning] [src: file: frontend/src/components/ProjectCard.tsx:678-683#validationInProgress]
+- Validation phase hands over to the run. [src: file: frontend/src/components/AuditTimeline.tsx:1045-1058#runPending]
 - Confirmation before a fresh full audit. [src: file: frontend/src/components/AuditTimeline.tsx:1216-1257#confirmRelaunch]
 - Orphaned lease banner. [src: file: frontend/src/components/AuditTimeline.tsx:701-713#leaseOrphaned]
-- Cancel pending. [src: file: frontend/src/components/AuditTimeline.tsx:661-662#cancelPending] [src: file: frontend/src/components/ProjectCard.tsx:443#cancelPending]
+- Cancel pending. [src: file: frontend/src/components/AuditTimeline.tsx:667-668#cancelPending] [src: file: frontend/src/components/ProjectCard.tsx:453#cancelPending]
 
 ## Validation and document trust (KT-1206)
 
@@ -334,7 +334,7 @@ The explicit re-anchor action sends `deterministic_only: true`. It returns the
 remaining plan without launching an agent, even when other sections still need
 agent work; retry retains this mode. A later general fix is a separate choice.
 [src: file: backend/src/api/audit/revalidate.rs:745-747#deterministic_only]
-[src: file: frontend/src/components/RevalidateAudit.tsx:157-168#deterministicOnlyRef] [src: file: frontend/src/components/RevalidateAudit.tsx:213-220#deterministicOnlyRef]
+[src: file: frontend/src/components/RevalidateAudit.tsx:157-168#deterministicOnlyRef] [src: file: frontend/src/components/RevalidateAudit.tsx:216-223#deterministicOnlyRef]
 
 Local TD decisions and deterministic citation repairs advance this proof only
 for documents whose contents still matched it before the operation. Explicit
@@ -548,7 +548,7 @@ category.
   (the backend stopped)` reason. Until then the doc would sit half-written
   with no marker. A step that never ended and has no verdict is a blocker of
   its own (`NeverEnded`): accepting it needs the override too.
-  [src: file: backend/src/api/audit/step_guard.rs:587-614#settle_unfinished_at_boot] [src: file: backend/src/db/mod.rs:295-302#settle_unfinished_at_boot] [src: file: backend/src/api/audit/step_guard.rs:619-634#AcceptBlocker]
+  [src: file: backend/src/api/audit/step_guard.rs:587-614#settle_unfinished_at_boot] [src: file: backend/src/db/mod.rs:293-297#stop_agents_and_settle_at_boot] [src: file: backend/src/api/audit/step_guard.rs:926-941#AcceptBlocker]
 - **Settling never destroys what the agent did not write.** The audit
   watches the target on the activity tick and keeps the fingerprint of what it
   saw the agent write (`audit_step_snapshots.observed_hash`, migration 264).
@@ -582,7 +582,7 @@ category.
   coverage, or a stop is accepted only with `override_unsound: true`. The
   refusal starts with `override_required:` and carries a bounded diff against
   the pre-step content. The override is recorded in the acceptance reason.
-  [src: file: backend/src/api/audit/step_guard.rs:616-634#AcceptBlocker] [src: file: backend/src/api/audit/accept.rs:34-36#OVERRIDE_REQUIRED_PREFIX] [src: file: backend/src/api/audit/accept.rs:261-275#OVERRIDE_REQUIRED_PREFIX]
+  [src: file: backend/src/api/audit/step_guard.rs:923-941#AcceptBlocker] [src: file: backend/src/api/audit/accept.rs:34-36#OVERRIDE_REQUIRED_PREFIX] [src: file: backend/src/api/audit/accept.rs:261-275#OVERRIDE_REQUIRED_PREFIX]
 - **Boot kills an agent the previous backend left.** The run records the
   agent's process group and the start stamp of its leader (`agent_pgid`,
   `agent_started_marker`). At boot, before the lease is freed, the group is
@@ -596,4 +596,4 @@ category.
   moved between the run a resume continues and the resume. The timeline shows
   it, the validation prompt carries it, and `redo_steps` (with
   `resume_run_id`) redoes the inherited steps it affects.
-  [src: file: backend/src/api/audit/full.rs:823-837#set_resume_drift] [src: file: backend/src/api/audit/full.rs:608-634#redo_steps_req]
+  [src: file: backend/src/api/audit/full.rs:1102-1116#set_resume_drift] [src: file: backend/src/api/audit/full.rs:608-634#redo_steps_req]

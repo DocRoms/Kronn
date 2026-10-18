@@ -327,6 +327,35 @@ fn a_worker_launch_carries_no_room_or_step_identity() {
 }
 
 #[test]
+fn an_audit_agent_carries_its_run_tag_so_boot_can_stop_it() {
+    let work = tempfile::tempdir().unwrap();
+    let mut command = std::process::Command::new("claude");
+    command.env_clear();
+    let launch = AgentLaunch {
+        audit_run: Some("run-9"),
+        ..Default::default()
+    };
+    apply_agent_launch(&mut command, work.path(), &launch, None).unwrap();
+    let set = env_of(&command);
+    assert_eq!(
+        set[crate::core::dispatch_reaper::DISPATCH_ENV],
+        crate::core::dispatch_reaper::audit_run_tag("run-9")
+    );
+    // The tag names the run, so it can never be another run's dispatch id.
+    assert_ne!(
+        crate::core::dispatch_reaper::audit_run_tag("job"),
+        "job",
+        "a worker's dispatch id and an audit run's tag never collide"
+    );
+
+    // No audit run, no tag.
+    let mut plain = std::process::Command::new("claude");
+    plain.env_clear();
+    apply_agent_launch(&mut plain, work.path(), &AgentLaunch::default(), None).unwrap();
+    assert!(!env_of(&plain).contains_key(crate::core::dispatch_reaper::DISPATCH_ENV));
+}
+
+#[test]
 fn wslenv_still_lists_every_injected_name() {
     let work = tempfile::tempdir().unwrap();
     let route = ChildRoute::Agent(AgentFamily::Claude);
@@ -486,6 +515,7 @@ async fn a_direct_launch_spawns_with_the_built_environment_only() {
                 None,
                 None,
                 None,
+                None,
                 &[],
                 Some("kbt_direct"),
             )
@@ -563,6 +593,7 @@ async fn an_adapter_launch_env_cannot_reinject_forbidden_names() {
             "OPENAI_API_KEY",
             None,
             crate::agents::runner::SpawnIo::Adapter(&adapter_env),
+            None,
             None,
             None,
             None,

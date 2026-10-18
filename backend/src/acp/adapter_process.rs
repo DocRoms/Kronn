@@ -320,6 +320,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             &[],
             None,
         )
@@ -356,6 +357,7 @@ mod tests {
             "",
             None,
             crate::agents::runner::SpawnIo::Adapter(&[]),
+            None,
             None,
             None,
             None,

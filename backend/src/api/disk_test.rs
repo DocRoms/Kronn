@@ -108,6 +108,66 @@ fn totals_group_by_kind_and_count_only_orphans_as_reclaimable() {
     assert_eq!((cache.entries, cache.bytes), (0, 0));
 }
 
+fn report_of_two_projects() -> DiskReport {
+    let mut mine = entry(DiskKind::LaneBuildDir, DiskState::Orphan, 30, false);
+    mine.project_id = "p1".into();
+    let mut theirs = entry(DiskKind::Worktree, DiskState::Active, 70, false);
+    theirs.project_id = "p2".into();
+    theirs.owner = Some(DiskOwner {
+        task_ref: Some("KT-9002".into()),
+        execution_id: "exec-b".into(),
+        status: "running".into(),
+    });
+    let entries = vec![theirs, mine];
+    let volume = |id: &str| DiskVolume {
+        project_id: id.into(),
+        project_name: id.into(),
+        path: format!("/repos/{id}"),
+        available_bytes: Some(10),
+        total_bytes: Some(100),
+    };
+    DiskReport {
+        available_bytes: Some(10),
+        under_pressure: false,
+        policy: thresholds_policy(),
+        volumes: vec![volume("p1"), volume("p2")],
+        totals: totals_by_kind(&entries),
+        orphan_bytes: 30,
+        orphan_count: 1,
+        entries,
+        scoped: false,
+    }
+}
+
+/// KT-1347 — a bridge token keeps the aggregates but sees no other project's
+/// lanes, worktrees, paths or task refs.
+#[test]
+fn a_bridge_view_keeps_the_aggregates_and_its_own_project_s_detail_only() {
+    let scoped = scoped_for_bridge(report_of_two_projects(), Some("p1"));
+    assert!(scoped.scoped);
+    assert_eq!(scoped.available_bytes, Some(10));
+    assert_eq!((scoped.orphan_bytes, scoped.orphan_count), (30, 1));
+    let totals: u64 = scoped.totals.iter().map(|total| total.bytes).sum();
+    assert_eq!(totals, 100, "totals by kind stay whole-instance aggregates");
+    assert_eq!(scoped.entries.len(), 1);
+    assert_eq!(scoped.entries[0].project_id, "p1");
+    assert_eq!(scoped.volumes.len(), 1);
+    let json = serde_json::to_string(&scoped).unwrap();
+    for hidden in ["p2", "KT-9002", "exec-b", "/repos/p2"] {
+        assert!(!json.contains(hidden), "{hidden} leaked: {json}");
+    }
+}
+
+#[test]
+fn a_projectless_bridge_view_is_aggregates_only_and_the_full_view_is_unflagged() {
+    let scoped = scoped_for_bridge(report_of_two_projects(), None);
+    assert!(scoped.entries.is_empty() && scoped.volumes.is_empty());
+    assert_eq!(scoped.orphan_count, 1);
+    let full = serde_json::to_value(report_of_two_projects()).unwrap();
+    assert!(full.get("scoped").is_none(), "the UI's report is unchanged");
+    assert_eq!(full["entries"].as_array().unwrap().len(), 2);
+}
+
 #[test]
 fn the_refusal_names_the_number_the_setting_and_what_was_swept() {
     let reason = DiskPressure {

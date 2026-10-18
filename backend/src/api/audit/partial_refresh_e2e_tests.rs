@@ -143,6 +143,7 @@ async fn an_unvalidated_project_re_verified_unchanged_can_be_validated() {
             connection_id: None,
             tier: None,
             steps: vec![fx.step_of(AGENTS) as usize],
+            accept_unverified_agents: None,
         }),
     )
     .await
@@ -466,6 +467,7 @@ async fn full_and_partial_launches_record_who_opened_and_who_validated() {
             connection_id: None,
             tier: None,
             steps: vec![step],
+            accept_unverified_agents: None,
         }),
     )
     .await

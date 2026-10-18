@@ -432,6 +432,7 @@ async fn http_resume_repairs_an_auxiliary_document_from_a_previously_successful_
                 resume_run_id: Some("before-repair".into()),
                 retry_steps: None,
                 redo_steps: None,
+                accept_unverified_agents: None,
                 fresh: None,
             }),
         )
@@ -652,6 +653,7 @@ async fn assert_http_failure_is_persisted(after_write: bool) {
             resume_run_id: Some("before-unavailable".into()),
             retry_steps: None,
             redo_steps: None,
+            accept_unverified_agents: None,
             fresh: None,
         }),
     )
@@ -1031,6 +1033,7 @@ async fn partial_audit_stream(
             connection_id: connection.map(str::to_string),
             tier: None,
             steps: vec![step],
+            accept_unverified_agents: None,
         }),
     )
     .await
@@ -1249,6 +1252,7 @@ async fn step_prompts_of(pipeline: &str, linked: bool) -> Vec<String> {
                 resume_run_id: None,
                 retry_steps: None,
                 redo_steps: None,
+                accept_unverified_agents: None,
                 fresh: None,
             }),
         )
@@ -1263,6 +1267,7 @@ async fn step_prompts_of(pipeline: &str, linked: bool) -> Vec<String> {
                 connection_id: None,
                 tier: None,
                 steps: refreshable_steps(),
+                accept_unverified_agents: None,
             }),
         )
         .await
@@ -1527,6 +1532,7 @@ async fn a_resume_reruns_only_the_failed_step_and_the_partial_run_is_still_valid
             resume_run_id: Some("run-prev".into()),
             retry_steps: None,
             redo_steps: None,
+            accept_unverified_agents: None,
             fresh: None,
         }),
     )
@@ -1676,6 +1682,7 @@ async fn a_resume_that_loses_only_the_founding_step_gets_no_validation() {
             resume_run_id: Some("run-prev".into()),
             retry_steps: None,
             redo_steps: None,
+            accept_unverified_agents: None,
             fresh: None,
         }),
     )
@@ -2255,6 +2262,7 @@ async fn resume_run_gone(
             retry_steps: None,
             redo_steps: None,
             fresh: None,
+            accept_unverified_agents: None,
         }),
     )
     .await
@@ -2300,6 +2308,7 @@ async fn a_full_audit_under_disk_pressure_is_refused_before_it_creates_anything(
             resume_run_id: None,
             retry_steps: None,
             redo_steps: None,
+            accept_unverified_agents: None,
             fresh: None,
         }),
     )
