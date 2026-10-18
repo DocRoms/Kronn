@@ -279,16 +279,22 @@ fn is_public_config(spec: &ApiSpec, trusted: bool, key: &str, value: &str) -> bo
             .iter()
             .any(|config| config.env_key == key && config.public);
     if declared {
-        // A declared value is never taken on trust: no credential marker, ever,
-        // and anything that can parse as a URL (a `:` or `/`) goes through the
-        // full raw URL check. Only a plain token (host, workspace id) is taken
-        // as is.
-        if has_credential_marker(value) {
-            return false;
-        }
-        return !value.contains([':', '/']) || is_credential_free_url(value, true);
+        return config_value_is_clean(value);
     }
     spec.base_url.contains(&format!("{{{key}}}")) && is_credential_free_url(value, false)
+}
+
+/// Whether a declared configuration value carries no credential: the check a
+/// public key's value passes before it is shown unmasked, and before an export
+/// treats it as plain (KT-1331). A declared value is never taken on trust: no
+/// credential marker, ever, and anything that can parse as a URL (a `:` or `/`)
+/// goes through the full raw URL check. Only a plain token (host, workspace
+/// id) is taken as is.
+pub(crate) fn config_value_is_clean(value: &str) -> bool {
+    if has_credential_marker(value) {
+        return false;
+    }
+    !value.contains([':', '/']) || is_credential_free_url(value, true)
 }
 
 /// Text that can carry or hide a credential in a URL-ish value, whatever the

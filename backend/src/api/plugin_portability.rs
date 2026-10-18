@@ -231,9 +231,12 @@ fn auth_secret_keys(auth: &ApiAuthKind) -> HashSet<String> {
     }
 }
 
+/// `values`, when known, also decide: a configuration key whose value carries
+/// a credential (user info, query, fragment…) is sensitive like an auth key.
 fn plugin_value_descriptors(
     server: &McpServer,
     config: &McpConfig,
+    values: Option<&HashMap<String, String>>,
 ) -> Vec<PluginBundleValueDescriptor> {
     let cli_credential = server
         .api_spec
@@ -259,7 +262,12 @@ fn plugin_value_descriptors(
         .env_keys
         .iter()
         .map(|key| {
-            let sensitive = auth_keys.contains(key) || !config_keys.contains(key);
+            let dirty = values
+                .and_then(|values| values.get(key))
+                .is_some_and(|value| {
+                    !crate::workflows::api_call_executor::config_value_is_clean(value)
+                });
+            let sensitive = auth_keys.contains(key) || !config_keys.contains(key) || dirty;
             PluginBundleValueDescriptor {
                 key: key.clone(),
                 sensitive,
@@ -320,7 +328,7 @@ fn build_preview(selection: &[(McpConfig, McpServer, PluginInterface)]) -> Plugi
                 label: config.label.clone(),
                 server_name: server.name.clone(),
                 cli_credential,
-                values: plugin_value_descriptors(server, config),
+                values: plugin_value_descriptors(server, config, None),
             }
         })
         .collect::<Vec<_>>();
@@ -414,26 +422,27 @@ fn build_export(
 
     let mut portable = Vec::with_capacity(selection.len());
     for (config, server, preference) in &selection {
-        let descriptors = plugin_value_descriptors(server, config);
-        let values = if request.include_values {
-            let decrypted =
+        let decrypted = if request.include_values {
+            Some(
                 db::mcps::decrypt_env(&config.env_encrypted, instance_secret).map_err(|error| {
                     anyhow::anyhow!("Cannot decrypt values for `{}`: {error}", config.label)
-                })?;
-            Some(
-                descriptors
-                    .iter()
-                    .filter(|descriptor| descriptor.exportable)
-                    .filter_map(|descriptor| {
-                        decrypted
-                            .get(&descriptor.key)
-                            .map(|value| (descriptor.key.clone(), value.clone()))
-                    })
-                    .collect(),
+                })?,
             )
         } else {
             None
         };
+        let descriptors = plugin_value_descriptors(server, config, decrypted.as_ref());
+        let values = decrypted.map(|decrypted| {
+            descriptors
+                .iter()
+                .filter(|descriptor| descriptor.exportable)
+                .filter_map(|descriptor| {
+                    decrypted
+                        .get(&descriptor.key)
+                        .map(|value| (descriptor.key.clone(), value.clone()))
+                })
+                .collect()
+        });
         portable.push(PortablePluginConfig {
             source_config_id: config.id.clone(),
             server: server.clone(),
@@ -870,6 +879,10 @@ fn import_payload(
             continue;
         }
 
+        let supplied_values: Option<HashMap<String, String>> = portable
+            .values
+            .as_ref()
+            .map(|values| values.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
         let descriptors = plugin_value_descriptors(
             &server,
             &McpConfig {
@@ -887,6 +900,7 @@ fn import_payload(
                 // below — never inserted, so `host_sync` here is inert.
                 host_sync: HostSyncMode::None,
             },
+            supplied_values.as_ref(),
         );
         let allowed_keys: HashSet<_> = descriptors
             .iter()
@@ -1439,7 +1453,7 @@ mod tests {
                 env_key: "API_TOKEN".into(),
             },
         );
-        let values = plugin_value_descriptors(&server, &test_config(&server.id));
+        let values = plugin_value_descriptors(&server, &test_config(&server.id), None);
         assert_eq!(values.len(), 2);
         assert!(
             values
@@ -1457,6 +1471,41 @@ mod tests {
         );
     }
 
+    /// KT-1331 — a configuration key is plain only while its value carries no
+    /// credential: the same check as the unmasking of a public key.
+    #[test]
+    fn a_configuration_value_with_a_credential_is_sensitive() {
+        let server = test_server(
+            "custom-portable",
+            ApiAuthKind::Bearer {
+                env_key: "API_TOKEN".into(),
+            },
+        );
+        let config = test_config(&server.id);
+        let sensitive = |value: &str| {
+            let values = HashMap::from([("SITE_ID".to_string(), value.to_string())]);
+            plugin_value_descriptors(&server, &config, Some(&values))
+                .into_iter()
+                .find(|descriptor| descriptor.key == "SITE_ID")
+                .unwrap()
+                .sensitive
+        };
+        for dirty in [
+            "https://u:t@acme.atlassian.net/wiki",
+            "https://acme.atlassian.net/wiki?token=abc",
+            "https://acme.atlassian.net/wiki#t",
+        ] {
+            assert!(sensitive(dirty), "{dirty}");
+        }
+        for clean in [
+            "https://acme.atlassian.net/wiki",
+            "https://acme.atlassian.net",
+            "site-42",
+        ] {
+            assert!(!sensitive(clean), "{clean}");
+        }
+    }
+
     #[test]
     fn cli_credentials_are_never_exportable() {
         let server = test_server(
@@ -1468,7 +1517,7 @@ mod tests {
                 fallback_env_key: Some("API_TOKEN".into()),
             },
         );
-        let values = plugin_value_descriptors(&server, &test_config(&server.id));
+        let values = plugin_value_descriptors(&server, &test_config(&server.id), None);
         assert!(
             !values
                 .iter()
