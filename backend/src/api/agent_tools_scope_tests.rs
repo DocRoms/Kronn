@@ -407,3 +407,32 @@ async fn a_room_without_a_project_writes_the_general_resources_only_once_a_human
         "a project room writes its project, not the general resources"
     );
 }
+
+#[tokio::test]
+async fn the_room_s_own_task_still_reaches_task_execution() {
+    let World { state, task_a, .. } = two_projects().await;
+    let reference: String = state
+        .db
+        .with_conn(move |conn| {
+            Ok(conn.query_row(
+                "SELECT 'KT-' || task_number FROM planning_tasks WHERE id = ?1",
+                [&task_a],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    let agent = room_agent(&state, "room-a");
+    let outcome = call(
+        agent.as_ref(),
+        "task_exec_prepare",
+        json!({
+            "task_reference": &reference,
+            "worker_scope_intent": "generic",
+            "worker": {"kind": "agent", "agent_type": "ClaudeCode"},
+        }),
+    )
+    .await;
+    assert!(!refused(&outcome), "{}", outcome.content);
+    assert_eq!(outcome.content["project_id"], "a", "{}", outcome.content);
+}

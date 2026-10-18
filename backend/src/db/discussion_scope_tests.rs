@@ -399,3 +399,97 @@ fn deleting_the_room_keeps_its_journal() {
         .unwrap();
     assert_eq!(kept, 1);
 }
+
+#[test]
+fn the_general_grant_is_named_as_the_general_resources_in_the_room() {
+    let conn = connection();
+    let granted = grant(
+        &conn,
+        "general",
+        None,
+        ScopeAccess::Write,
+        ScopeGrantSource::General,
+        "romu",
+    )
+    .unwrap();
+    assert!(
+        granted_projects(&conn, &["general".to_owned()])
+            .unwrap()
+            .general
+    );
+    revoke(&conn, "general", &granted.id, "romu", None).unwrap();
+    assert!(
+        !granted_projects(&conn, &["general".to_owned()])
+            .unwrap()
+            .general
+    );
+    let receipts: Vec<String> = crate::db::discussions::list_messages(&conn, "general")
+        .unwrap()
+        .into_iter()
+        .map(|message| message.content)
+        .collect();
+    assert_eq!(receipts.len(), 2, "{receipts:?}");
+    for receipt in &receipts {
+        assert!(receipt.contains("the general resources"), "{receipt}");
+        assert!(!receipt.contains("to every project"), "{receipt}");
+    }
+    assert!(
+        grant(
+            &conn,
+            "room",
+            None,
+            ScopeAccess::Write,
+            ScopeGrantSource::General,
+            "romu"
+        )
+        .is_err(),
+        "a project's room never writes the general resources"
+    );
+}
+
+/// Migration 269 rebuilds the grants table: rows and journal survive, and the
+/// widened CHECKs accept the general grant and nothing looser.
+#[test]
+fn migration_269_keeps_every_grant_and_accepts_only_a_general_write() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(include_str!("sql/267_discussion_project_grants.sql"))
+        .unwrap();
+    conn.execute(
+        "INSERT INTO discussion_project_grants(id, discussion_id, project_id, access, source, granted_by, granted_at, revoked_by, revoked_at) \
+         VALUES ('g-all', 'room', NULL, 'write', 'all', 'romu', 't', 'romu', 't2'), \
+                ('g-p2', 'room', 'p2', 'read', 'link', 'romu', 't', NULL, NULL)",
+        [],
+    )
+    .unwrap();
+    conn.execute_batch(include_str!("sql/269_discussion_general_grants.sql"))
+        .unwrap();
+    let rows: Vec<(String, Option<String>)> = conn
+        .prepare("SELECT id, revoked_at FROM discussion_project_grants ORDER BY id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![("g-all".into(), Some("t2".into())), ("g-p2".into(), None)]
+    );
+    let insert = |id: &str, project: Option<&str>, access: &str, source: &str| {
+        conn.execute(
+            "INSERT INTO discussion_project_grants(id, discussion_id, project_id, access, source, granted_by, granted_at) \
+             VALUES (?1, 'general', ?2, ?3, ?4, 'romu', 't')",
+            params![id, project, access, source],
+        )
+    };
+    assert!(insert("g1", None, "write", "general").is_ok());
+    assert!(
+        insert("g2", None, "read", "general").is_err(),
+        "general is write only"
+    );
+    assert!(
+        insert("g3", Some("p2"), "write", "general").is_err(),
+        "general names no project"
+    );
+    // The active-grant index survived the rebuild.
+    assert!(insert("g4", None, "write", "general").is_err());
+}

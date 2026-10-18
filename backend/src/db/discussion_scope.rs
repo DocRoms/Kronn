@@ -357,6 +357,13 @@ fn insert_grant(
     Ok(id)
 }
 
+fn grant_target(conn: &Connection, grant: &DiscussionProjectGrant) -> Result<String> {
+    if grant.source == ScopeGrantSource::General {
+        return Ok("the general resources (seen by every project)".into());
+    }
+    project_label(conn, grant.project_id.as_deref())
+}
+
 fn project_label(conn: &Connection, project: Option<&str>) -> Result<String> {
     let Some(project) = project else {
         return Ok("every project".into());
@@ -403,18 +410,24 @@ fn receipt(conn: &Connection, discussion_id: &str, receipt_id: String, body: Str
 }
 
 fn grant_receipt(conn: &Connection, grant: &DiscussionProjectGrant) -> Result<()> {
-    let target = project_label(conn, grant.project_id.as_deref())?;
-    let what = match grant.access {
-        ScopeAccess::Read => "read",
-        ScopeAccess::Write => "write (planning)",
+    let target = grant_target(conn, grant)?;
+    let what = match (grant.source, grant.access) {
+        (ScopeGrantSource::General, _) => "write",
+        (_, ScopeAccess::Read) => "read",
+        (_, ScopeAccess::Write) => "write (planning)",
     };
     receipt(
         conn,
         &grant.discussion_id,
         format!("scope-grant:{}", grant.id),
         format!(
-            "{} granted {what} access to {target} — credentials and API configs stay this room's own project's",
-            grant.granted_by
+            "{} granted {what} access to {target} — {}",
+            grant.granted_by,
+            if grant.source == ScopeGrantSource::General {
+                "no project's credentials or API configs"
+            } else {
+                "credentials and API configs stay this room's own project's"
+            }
         ),
     )
 }
@@ -482,7 +495,7 @@ pub fn revoke(
         );
     }
     let revoked = grant_by_id(&tx, grant_id)?;
-    let target = project_label(&tx, revoked.project_id.as_deref())?;
+    let target = grant_target(&tx, &revoked)?;
     receipt(
         &tx,
         discussion_id,
