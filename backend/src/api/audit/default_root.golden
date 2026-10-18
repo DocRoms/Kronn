@@ -38,7 +38,7 @@ volatile  docs/checksums.json
 volatile  docs/citations.json
 072acac446c5b13d76eed1e1f397559377515a650d1c4ce6125072821ec91eab  docs/coding-rules.md
 b389b0e31a416199ec5e6115081e48a5965d4ab2f83351f20795466c2722235b  docs/conventions/README.md
-7a985ccdbbbb77fbd879253e104cfc65c3403ff70f2d65f763fb5843751cbe8b  docs/conventions/agents-md-format-v1.md
+6a8c6cf66613acf244c9665a35ef090c43793aadd04b21003ccb2dba818d38de  docs/conventions/agents-md-format-v1.md
 d5328c9144505a665cbf8634d48d9a8645c414e717971bb8a8363c1c6e44d4d4  docs/decisions.md
 77aaaecf9eb45e0a4ae17373be38b40820a8d0420adfa54d531430b961e955e8  docs/environments.md
 5cc52ebd8358e991bae08bd5619ea04aa90cee4d25115a5c00f8f16feb046ce4  docs/examples/README.md

@@ -135,12 +135,12 @@ argument of a real, fully understood invocation, never for text that merely ment
 wrapper option value such as `xargs -I curl`). Input masking covers sensitive JSON keys
 and the shared credential patterns before truncation; it is heuristic, not a
 guarantee that arbitrary user content is secret-free.
-[src: file: backend/src/agents/tool_trace.rs:1-15#MARKER]
-[src: file: backend/src/agents/tool_trace.rs:17-74#safe_excerpt]
-[src: file: backend/src/agents/tool_trace.rs:116-126#from_acp]
-[src: file: backend/src/agents/tool_trace.rs:128-176#from_codex]
-[src: file: backend/src/agents/tool_trace.rs:178-217#from_claude_line]
-[src: file: backend/src/agents/tool_trace.rs:219-256#collect]
+[src: file: backend/src/agents/tool_trace.rs:10-24#MARKER]
+[src: file: backend/src/agents/tool_trace.rs:52-109#safe_excerpt]
+[src: file: backend/src/agents/tool_trace.rs:163-196#from_acp]
+[src: file: backend/src/agents/tool_trace.rs:198-262#from_codex]
+[src: file: backend/src/agents/tool_trace.rs:264-339#from_claude_line]
+[src: file: backend/src/agents/tool_trace.rs:341-380#collect]
 [src: file: backend/src/api/discussions/streaming.rs:807-855#lift_acp_tool_calls]
 
 Native ACP sessions receive Kronn's bridge even when no project is attached.
