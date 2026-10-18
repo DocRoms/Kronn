@@ -557,13 +557,18 @@ fn creations_are_forced_into_the_bound_project() {
             .expect("null replaced");
         assert_ne!(null[field], serde_json::Value::Null, "{pattern}");
     }
-    // From a room without a project, a template, a saved call or a Page is
-    // general, as when a human creates it there (KT-1346); nothing else is.
-    for pattern in ["/api/quick-prompts", "/api/quick-apis", "/api/pages"] {
+    // From a room without a project, a template, a saved call, a Page or a
+    // workflow is general, as when a human creates it there (KT-1346); nothing else is.
+    for pattern in [
+        "/api/quick-prompts",
+        "/api/quick-apis",
+        "/api/pages",
+        "/api/workflows",
+    ] {
         let prepared = prepare_body(route("POST", pattern), None, Some(&json!({"name": "x"})));
         assert_eq!(prepared.unwrap(), None, "{pattern} stays general");
     }
-    for pattern in ["/api/workflows", "/api/quick-execs", "/api/planning/tasks"] {
+    for pattern in ["/api/quick-execs", "/api/planning/tasks"] {
         let prepared = prepare_body(route("POST", pattern), None, Some(&json!({"name": "x"})));
         assert!(prepared.is_err(), "{pattern}");
     }

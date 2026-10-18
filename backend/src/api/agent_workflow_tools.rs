@@ -45,26 +45,29 @@ fn schema_section(arguments: &Value) -> Result<Value, String> {
     Ok(schema)
 }
 
+/// What an agent may author on a workflow; anything else is dropped.
+pub(super) const AUTHORED_FIELDS: &[&str] = &[
+    "name",
+    "trigger",
+    "steps",
+    "actions",
+    "safety",
+    "workspace_config",
+    "concurrency_limit",
+    "concurrency_key",
+    "guards",
+    "artifacts",
+    "on_failure",
+    "exec_allowlist",
+    "variables",
+];
+
 fn draft_patch(
     arguments: &Value,
     project_id: Option<&str>,
     creating: bool,
 ) -> Result<Value, String> {
-    let fields = [
-        "name",
-        "trigger",
-        "steps",
-        "actions",
-        "safety",
-        "workspace_config",
-        "concurrency_limit",
-        "concurrency_key",
-        "guards",
-        "artifacts",
-        "on_failure",
-        "exec_allowlist",
-        "variables",
-    ];
+    let fields = AUTHORED_FIELDS;
     let mut patch = Value::Object(
         arguments
             .as_object()

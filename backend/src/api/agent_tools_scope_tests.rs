@@ -248,3 +248,58 @@ async fn a_saved_call_cannot_be_moved_or_created_in_another_project() {
         assert!(refused(&moved), "{project}: {}", moved.content);
     }
 }
+
+#[tokio::test]
+async fn a_shared_workflow_or_page_is_read_only_to_a_project_room() {
+    let World { state, .. } = two_projects().await;
+    state
+        .db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO workflows(id, name, trigger_json, steps_json, created_at, updated_at) \
+                 VALUES ('shared-wf', 'shared', '{\"type\":\"Manual\"}', '[]', '2026-10-18T00:00:00Z', '2026-10-18T00:00:00Z')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let general = room_agent(&state, "general");
+    let page = call(
+        general.as_ref(),
+        "page_create",
+        json!({"title": "Shared", "slug": "shared", "html": "<h1>x</h1>", "datasets": []}),
+    )
+    .await;
+    assert!(page.ok, "{}", page.content);
+    assert!(page.content["project_id"].is_null(), "{}", page.content);
+    let agent = room_agent(&state, "room-a");
+    let cases = [
+        (
+            "workflow_update",
+            json!({"workflow_id": "shared-wf", "name": "taken"}),
+        ),
+        (
+            "page_update_html",
+            json!({"page_id": "shared", "html": "<h1>taken</h1>"}),
+        ),
+        (
+            "page_add_dataset",
+            json!({"page_id": "shared", "name": "x", "kind": "snapshot"}),
+        ),
+    ];
+    for (tool, arguments) in cases {
+        let outcome = call(agent.as_ref(), tool, arguments.clone()).await;
+        assert!(refused(&outcome), "{tool} {arguments}: {}", outcome.content);
+    }
+    let read = call(agent.as_ref(), "page_get", json!({"page_id": "shared"})).await;
+    assert!(read.ok, "{}", read.content);
+}
+
+#[tokio::test]
+async fn a_tool_without_an_access_rule_is_refused() {
+    let World { state, .. } = two_projects().await;
+    let agent = room_agent(&state, "room-a");
+    let outcome = call(agent.as_ref(), "task_unknown_write", json!({})).await;
+    assert!(refused(&outcome), "{}", outcome.content);
+}

@@ -141,13 +141,17 @@ discussion (or one task execution, or one workflow run) and to its project.
   run for a workflow step). Each tool that reads or writes a Kronn object is
   decided as the route it mirrors, by the same `admit` and `scope_json`
   functions the HTTP middleware calls (`backend/src/core/bridge_admit.rs`), so
-  the two paths cannot drift. Tools with a stricter rule of their own
-  (`disc_read`, `disc_list`, `task_exec_*`) or no Kronn object (files, web,
-  manuals) keep it.
-- From a room or run **without a project**, a Quick Prompt, a Quick API or a
-  Page may be created: it is general, as when a human creates it there. Every
-  other creation still needs a project, and a shared resource stays
-  read-only to any agent.
+  the two paths cannot drift. A tool is either routed or listed in
+  `UNGATED_TOOLS` with its reason (no Kronn object, or a stricter rule of its
+  own such as `disc_read` or `task_exec_*`); any other tool is refused, and a
+  test fails when a declared tool is in neither. The token is minted once the
+  runner has bound the launch's model. A worker's token carries its room, not
+  its execution id: delivery tools check the dispatch themselves.
+- From a room or run **without a project**, the general resources are the
+  token's home: it may create and edit general Quick Prompts, Quick APIs,
+  Pages and workflows, as a human in that room would. A token bound to a
+  project never writes a general resource; every other creation needs a
+  project.
 
 **Human proof per action.** Every secret-class route (section 3 rows 3 and 4,
 plus human-credential administration) requires a **proof bound to one action**:

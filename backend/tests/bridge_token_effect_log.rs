@@ -36,6 +36,9 @@ async fn an_effect_is_logged_with_the_token_id_only() {
         .with_max_level(tracing::Level::INFO)
         .finish();
     let _default = tracing::subscriber::set_default(subscriber);
+    // Tests on other threads may have cached the gate's callsites as disabled
+    // before this subscriber existed.
+    tracing::callsite::rebuild_interest_cache();
 
     let db = Arc::new(kronn::db::Database::open_in_memory().unwrap());
     db.with_conn(|conn| {

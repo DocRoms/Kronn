@@ -119,18 +119,18 @@ async fn quick_prompt_authoring_filters_overrides_and_merges_the_stored_definiti
     );
     assert_eq!(created.variables[0].label, "Sujet");
 
-    // A shared template is read-only to an agent, as to a CLI agent's bridge
-    // token: the edit is made from the project that owns it.
+    // From a room without a project the general templates are editable; a
+    // project room's agent edits only its project's (KT-1346).
+    let local = KronnToolExecutor::new(state.clone(), Some("room-a".into()));
     let mut shared = attempted_overrides();
     shared["qp_id"] = json!("global");
-    let refused = call(&executor, "qp_update", shared).await;
+    let refused = call(&local, "qp_update", shared).await;
     assert!(!refused.ok, "{}", refused.content);
-    let owner = KronnToolExecutor::new(state.clone(), Some("room-a".into()));
-    let before = saved_prompt("qp-a", Some("a"));
+    let before = saved_prompt("global", None);
     let mut arguments = attempted_overrides();
-    arguments["qp_id"] = json!("qp-a");
+    arguments["qp_id"] = json!("global");
     arguments.as_object_mut().unwrap().remove("variables");
-    let updated = call(&owner, "qp_update", arguments).await;
+    let updated = call(&executor, "qp_update", arguments).await;
     assert!(updated.ok, "{}", updated.content);
     let updated: QuickPrompt = serde_json::from_value(updated.content).unwrap();
     assert_eq!(updated.name, "Nouveau");
@@ -149,7 +149,12 @@ async fn quick_prompt_authoring_filters_overrides_and_merges_the_stored_definiti
         updated.variables[0].label, "Topic",
         "omitted variables survive"
     );
-    let replaced = call(&owner, "qp_update", json!({"qp_id":"qp-a", "variables":[]})).await;
+    let replaced = call(
+        &executor,
+        "qp_update",
+        json!({"qp_id":"global", "variables":[]}),
+    )
+    .await;
     assert!(replaced.ok, "{}", replaced.content);
     assert_eq!(replaced.content["variables"], json!([]));
 }

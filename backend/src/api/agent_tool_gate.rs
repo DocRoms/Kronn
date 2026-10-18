@@ -97,6 +97,90 @@ fn only(arguments: &Value, keys: &[&str]) -> Value {
     )
 }
 
+/// Tools that touch no Kronn object, or keep a rule of their own at least as
+/// strict as the gate's; every other tool is decided by the gate.
+pub(super) const UNGATED_TOOLS: &[(&str, &str)] = &[
+    (
+        "read_file",
+        "workspace files, bounded to the run's workspace",
+    ),
+    (
+        "write_file",
+        "workspace files, bounded to the run's workspace",
+    ),
+    (
+        "edit_file",
+        "workspace files, bounded to the run's workspace",
+    ),
+    (
+        "edit_lines",
+        "workspace files, bounded to the run's workspace",
+    ),
+    (
+        "insert_after_line",
+        "workspace files, bounded to the run's workspace",
+    ),
+    (
+        "list_files",
+        "workspace files, bounded to the run's workspace",
+    ),
+    (
+        "find_files",
+        "workspace files, bounded to the run's workspace",
+    ),
+    (
+        "search_text",
+        "workspace files, bounded to the run's workspace",
+    ),
+    ("git_status", "the workspace's git, read-only"),
+    ("git_diff", "the workspace's git, read-only"),
+    ("git_log", "the workspace's git, read-only"),
+    ("git_commit", "the workspace's git, discussion runs only"),
+    ("web_fetch", "the public web, behind the SSRF check"),
+    ("tool_manual", "static manuals"),
+    ("workflow_step_schema", "static schema"),
+    ("tools_load", "tool declarations"),
+    (
+        "disc_read",
+        "rooms of the same project only, stricter than the gate",
+    ),
+    (
+        "disc_list",
+        "rooms of the same project only, stricter than the gate",
+    ),
+    (
+        "page_list",
+        "filtered to the run's project; the bridge has no list route",
+    ),
+    ("agent_list", "the room's own agents and connections"),
+    (
+        "task_exec_prepare",
+        "the task's project must be the room's; principal only",
+    ),
+    (
+        "task_exec_launch",
+        "the task's project must be the room's; principal only",
+    ),
+    (
+        "task_exec_status",
+        "the execution's principal or worker only",
+    ),
+    (
+        "task_exec_cancel",
+        "the execution's principal or worker only",
+    ),
+    (
+        "task_exec_reassign",
+        "the execution's principal or worker only",
+    ),
+    ("task_exec_deliver", "the worker's own dispatch only"),
+    ("task_exec_review", "the execution's principal only"),
+    ("agent_job_start", "the room's own job, in its workspace"),
+    ("agent_schedule_wake", "the room's own wake-up"),
+    ("agent_resume_status", "the room's own jobs only"),
+    ("agent_resume_cancel", "the room's own jobs only"),
+];
+
 /// The fields the gate may force or keep in a body, written back to the call.
 const GATE_OWNED_FIELDS: &[&str] = &["project_id", "project_ids"];
 
@@ -184,6 +268,12 @@ impl KronnToolExecutor {
         };
         let id = |key: &str| text(args, key).unwrap_or_default();
         let task = || vec![("id".to_string(), id("task_id"))];
+        // A Page is named by id or slug; the gate resolves either.
+        let page = || {
+            text(args, "page_id")
+                .or_else(|| text(args, "id"))
+                .unwrap_or_default()
+        };
         match call.name.as_str() {
             "plan_get" => {
                 let disc = own_disc.or_else(|| text(args, "discussion_id"))?;
@@ -325,6 +415,30 @@ impl KronnToolExecutor {
                 }
                 send("POST", "/api/pages", Vec::new(), body)
             }
+            "workflow_create_draft" => {
+                let mut fields: Vec<&str> = super::workflow_tools::AUTHORED_FIELDS.to_vec();
+                fields.push("project_id");
+                send("POST", "/api/workflows", Vec::new(), only(args, &fields))
+            }
+            "workflow_update" => send(
+                "PUT",
+                "/api/workflows/{id}",
+                vec![("id".into(), id("workflow_id"))],
+                only(args, super::workflow_tools::AUTHORED_FIELDS),
+            ),
+            "page_get" => get("/api/pages/{id}", vec![("id".into(), page())], None),
+            "page_update_html" => send(
+                "PUT",
+                "/api/pages/{id}/html",
+                vec![("id".into(), page())],
+                only(args, &["html", "slug"]),
+            ),
+            "page_add_dataset" => send(
+                "POST",
+                "/api/pages/{id}/datasets",
+                vec![("id".into(), page())],
+                only(args, &["name", "kind"]),
+            ),
             "workflow_list" => get("/api/workflows", Vec::new(), None),
             "workflow_get" => get(
                 "/api/workflows/{id}",
@@ -335,7 +449,8 @@ impl KronnToolExecutor {
         }
     }
 
-    /// Decide one call before it runs. Tools with no Kronn object pass as is.
+    /// Decide one call before it runs. A tool that is neither routed nor in
+    /// [`UNGATED_TOOLS`] is refused: a new tool cannot slip past the gate.
     pub(super) async fn gate(&self, call: &ToolCall) -> Result<Gated, String> {
         // An audit's catalogue is files only, bounded to its workspace.
         if self.audit_workspace.is_some() {
@@ -344,11 +459,17 @@ impl KronnToolExecutor {
                 admitted: None,
             });
         }
-        let Some(request) = self.gate_request(call) else {
+        if UNGATED_TOOLS.iter().any(|(name, _)| *name == call.name) {
             return Ok(Gated {
                 call: None,
                 admitted: None,
             });
+        }
+        let Some(request) = self.gate_request(call) else {
+            return Err(format!(
+                "Kronn refused `{}`: this tool has no access rule",
+                call.name
+            ));
         };
         let route = bridge_token::route_for(request.method, request.pattern)
             .ok_or_else(|| format!("`{}` has no Kronn route to be checked against", call.name))?;
@@ -417,5 +538,64 @@ impl KronnToolExecutor {
                 ..outcome
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::*;
+    use super::UNGATED_TOOLS;
+
+    fn every_tool() -> Vec<String> {
+        let mut all = full_discussion_catalogue();
+        all.extend(workflow_tool_catalogue(true));
+        all.extend(workflow_workspace_tool_catalogue());
+        all.push(tools_load_declaration());
+        let mut names: Vec<String> = all
+            .iter()
+            .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_owned))
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// A tool an agent can be given is either decided by the gate on a real
+    /// bridge route or listed, with its reason, as touching no Kronn object.
+    #[tokio::test]
+    async fn every_tool_has_an_access_rule() {
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let state = AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db,
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let executor = KronnToolExecutor::new(state, Some("room".into()));
+        let mut unclassified = Vec::new();
+        for name in every_tool() {
+            if UNGATED_TOOLS.iter().any(|(tool, _)| *tool == name) {
+                continue;
+            }
+            let call = ToolCall {
+                id: name.clone(),
+                name: name.clone(),
+                arguments: json!({}),
+            };
+            match executor.gate_request(&call) {
+                Some(request) => assert!(
+                    crate::core::bridge_token::route_for(request.method, request.pattern).is_some(),
+                    "{name} names {} {}, which is not a bridge route",
+                    request.method,
+                    request.pattern
+                ),
+                None => unclassified.push(name),
+            }
+        }
+        assert!(
+            unclassified.is_empty(),
+            "no access rule for {unclassified:?}"
+        );
     }
 }

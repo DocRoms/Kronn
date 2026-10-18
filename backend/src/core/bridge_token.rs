@@ -736,10 +736,23 @@ const CREATE_ROUTES: &[(&str, &str)] = &[
     ("/api/learnings/propose", "project_id"),
 ];
 
-/// Create routes a launch with a discussion but no project may use: the
-/// resource is general, visible from every project, as when a human creates
-/// it from that room (KT-1346).
-const GENERAL_WHEN_UNBOUND: &[&str] = &["/api/quick-prompts", "/api/quick-apis", "/api/pages"];
+/// Create routes a launch with a discussion or run but no project may use:
+/// the resource is general, visible from every project, as when a human
+/// creates it from that room (KT-1346).
+const GENERAL_WHEN_UNBOUND: &[&str] = &[
+    "/api/quick-prompts",
+    "/api/quick-apis",
+    "/api/pages",
+    "/api/workflows",
+];
+
+/// The resources a token without a project may create and edit as general.
+const GENERAL_KINDS: &[Kind] = &[
+    Kind::QuickPrompt,
+    Kind::QuickApi,
+    Kind::Page,
+    Kind::Workflow,
+];
 
 /// Update routes whose handler resets or may drop the project when the body
 /// omits it: the token's project is sent explicitly.
@@ -1600,6 +1613,14 @@ fn mcp_config_visible(place: &Residence, bound: Option<&str>) -> bool {
 
 fn writable(grant: &BridgeGrant, kind: Kind, id: &str, place: &Residence, reach: &Reach) -> bool {
     if owns(grant, kind, id) || reach.bound().is_some_and(|project| place.only(project)) {
+        return true;
+    }
+    // Without a project, the general resources are the token's home: it edits
+    // them as a human in that room would (KT-1346). A project's token never does.
+    if reach.bound().is_none()
+        && GENERAL_KINDS.contains(&kind)
+        && matches!(place, Residence::Global | Residence::General)
+    {
         return true;
     }
     // A granted project's planning: every project the task serves must be
