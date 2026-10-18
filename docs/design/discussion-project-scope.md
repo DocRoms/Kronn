@@ -117,6 +117,14 @@ a human's decision, like every project in write:
 
 ## Enforcement
 
+- A refusal on another project names the way out that fits its caller
+  (`project_refusal` in `backend/src/core/bridge_token.rs`): `room_scope` for a
+  room's own agent, the workflow's scope (workflow page, Projects accessible)
+  for a workflow step, the principal for a worker. HTTP agents have the same
+  `room_scope` tool as CLI agents; a step or a worker is refused it. The
+  workflow guide (`workflow-architect` skill, section Reach) teaches this to
+  every agent.
+
 - The token's frozen project does not change (`freeze`). A token whose own
   discussions disagree on their primary project is still refused.
 - On every bridge request the gate reads the active grants of the rooms the

@@ -166,17 +166,12 @@ TOOLS = [
     {
         "name": "tool_manual",
         "description": (
-            "Read one tool's contract, or `signals` for proposal schemas and UI "
-            "actions. Omit `tool` to list manuals."
+            "A tool's contract, `signals`, or `workflow-architect` (by `section`): "
+            "read it before building a workflow or Page."
         ),
         "inputSchema": {
             "type": "object",
-            "properties": {
-                "tool": {
-                    "type": "string",
-                    "description": "Tool name or signals.",
-                }
-            },
+            "properties": {"tool": {"type": "string"}, "section": {"type": "string"}},
         },
     },
     {
@@ -10301,6 +10296,8 @@ TOOL_MANUALS = {
         "is still required."
     ),
     "page_create": (
+        "Before composing, read the workflow guide: tool_manual({tool: \"workflow-architect\"}), "
+        "then the sections you need. "
         "Live Page HTML is a complete, self-contained document rendered without network "
         "access. Declare named datasets as snapshot, time_series or collection contracts; "
         "an empty array creates standalone HTML, while `initial` values support mock design "
@@ -10322,6 +10319,8 @@ TOOL_MANUALS = {
         "older revision.\n\n" + _PAGE_ACTION_CONTRACT
     ),
     "workflow_create_draft": (
+        "Before composing, read the workflow guide: tool_manual({tool: \"workflow-architect\"}), "
+        "then the sections you need. "
         "The workflow always lands with `enabled:false`; no cron fires until the user "
         "reviews and enables it. Use autonomous creation only after the conversation has "
         "converged. The payload mirrors CreateWorkflowRequest: required name, tagged trigger "
@@ -10558,7 +10557,9 @@ TOOL_MANUALS["task_create"] = (
     "Pass `idempotency_key` for a stable retry identity; omitted, `source_message_id` "
     "derives one, so several tasks from one message need distinct explicit keys. "
     "Titles are never identities. A task lands in the room's project unless "
-    "`project_ids` names a project the room holds a write grant on (`room_scope`)."
+    "`project_ids` names a project the room holds a write grant on (`room_scope`); "
+    "a workflow step names another project only when its workflow's scope, set by a "
+    "human, opens it in write."
 )
 TOOL_MANUALS["room_scope"] = (
     "A room has one primary project: its working directory, where what it creates "
@@ -10571,8 +10572,12 @@ TOOL_MANUALS["room_scope"] = (
     "narrows or declines in the room, and grants nothing by itself. Do not wait or "
     "retry: continue with what you can do; the decision and every grant or revoke "
     "appear in the room as a kronn-scope line, and apply on the next call. A grant never "
-    "opens another project's credentials, never runs its workflows, and never passes "
-    "to worker rooms."
+    "opens another project's credentials, never runs its workflows, and never reaches a "
+    "workflow step or a worker posting in the room. A workflow step reaches other "
+    "projects only through its workflow's scope, which a human sets on the workflow "
+    "page (Projects accessible); a room without a project writes general resources only "
+    "once a human granted it « General · write ». Full doctrine: "
+    "tool_manual({tool: \"workflow-architect\", section: \"Reach\"})."
 )
 TOOL_MANUALS["disc_update"] = (
     "**What it changes** — `title` (rename), `pinned`, `archived`. Nothing "
@@ -10670,15 +10675,27 @@ TOOL_MANUALS["media_generate"] = (
 )
 
 
+# The built-in skill every agent reads before composing a workflow or a Page.
+WORKFLOW_GUIDE = "workflow-architect"
+
+
 def call_tool_manual(args):
     """Return one tool's authoring guide, or the list of what exists."""
     name = (args or {}).get("tool")
     if not isinstance(name, str) or not name.strip():
         return {
-            "available": sorted([*TOOL_MANUALS, "signals"]),
-            "hint": "Pass `tool` to read one of these.",
+            "available": sorted([*TOOL_MANUALS, "signals", WORKFLOW_GUIDE]),
+            "hint": (
+                "Pass `tool` to read one of these. workflow-architect is the guide "
+                "to read before building a workflow or a Page, by `section`."
+            ),
         }
     name = name.strip()
+    if name == WORKFLOW_GUIDE:
+        # One guide for every agent, read in parts: contents, then sections.
+        section = (args or {}).get("section")
+        query = f"?section={urllib.parse.quote(section)}" if isinstance(section, str) and section.strip() else ""
+        return {"tool": name, **_unwrap(_http("GET", f"/api/skills/{WORKFLOW_GUIDE}/guide{query}"))}
     if name == "signals":
         return {"tool": name, "catalogue": _unwrap(_http("GET", "/api/signals/catalog"))}
     manual = TOOL_MANUALS.get(name)
@@ -10687,7 +10704,7 @@ def call_tool_manual(args):
         # the name is one hop from the right one.
         return {
             "error": f"No manual for {name!r}.",
-            "available": sorted([*TOOL_MANUALS, "signals"]),
+            "available": sorted([*TOOL_MANUALS, "signals", WORKFLOW_GUIDE]),
             "hint": (
                 "Only tools whose description points at `tool_manual` have one. "
                 "For everything else the description IS the whole contract."

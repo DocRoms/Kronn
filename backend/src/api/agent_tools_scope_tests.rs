@@ -534,3 +534,109 @@ async fn the_general_grant_edits_only_the_rooms_own_pages_workflows_and_saved_ca
     .await;
     assert!(!qe.ok, "{}", qe.content);
 }
+
+#[tokio::test]
+async fn a_room_agent_reads_its_reach_and_asks_a_human_with_room_scope() {
+    let World { state, .. } = two_projects().await;
+    let agent = room_agent(&state, "room-a");
+    let reach = call(agent.as_ref(), "room_scope", json!({})).await;
+    assert!(reach.ok, "{}", reach.content);
+    assert_eq!(
+        reach.content["primary_project_id"], "a",
+        "{}",
+        reach.content
+    );
+    let asked = call(
+        agent.as_ref(),
+        "room_scope",
+        json!({"project": "b", "access": "write", "reason": "the parent task spans b"}),
+    )
+    .await;
+    assert!(asked.ok, "{}", asked.content);
+    let pending: i64 = state
+        .db
+        .with_conn(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM discussion_scope_requests WHERE discussion_id = 'room-a' AND status = 'pending'",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        pending, 1,
+        "the request waits for a human; nothing is granted"
+    );
+    // The refusal on another project names the way out for a room agent.
+    let refused_task = call(
+        agent.as_ref(),
+        "task_create",
+        json!({"title": "x", "project_ids": ["b"]}),
+    )
+    .await;
+    assert!(
+        refused_task.content.to_string().contains("room_scope"),
+        "{}",
+        refused_task.content
+    );
+}
+
+#[tokio::test]
+async fn a_worker_or_a_step_is_told_room_scope_is_not_theirs() {
+    let World { state, .. } = two_projects().await;
+    let worker = KronnToolExecutor::arc_for_worker_room(
+        state.clone(),
+        Some("room-a".into()),
+        AgentType::Ollama,
+        None,
+        None,
+        None,
+    );
+    assert!(!worker
+        .catalogue()
+        .iter()
+        .any(|tool| tool["function"]["name"] == "room_scope"));
+    let step = KronnToolExecutor::workflow_arc(
+        state.clone(),
+        Some("a".into()),
+        TEST_STEP_RUN_ID.into(),
+        "step".into(),
+    );
+    assert!(!step
+        .catalogue()
+        .iter()
+        .any(|tool| tool["function"]["name"] == "room_scope"));
+    let direct = call(worker.as_ref(), "room_scope", json!({"project": "b"})).await;
+    assert!(!direct.ok, "{}", direct.content);
+}
+
+#[test]
+fn a_project_refusal_names_the_way_out_for_its_caller() {
+    use crate::core::bridge_token::{project_refusal, BridgeScope};
+    let room = BridgeScope {
+        discussion_ids: vec!["room".into()],
+        room_grant_discussions: vec!["room".into()],
+        ..Default::default()
+    };
+    let step = BridgeScope {
+        discussion_ids: vec!["room".into()],
+        workflow_run_id: Some("run".into()),
+        ..Default::default()
+    };
+    let worker = BridgeScope {
+        discussion_ids: vec!["child".into()],
+        task_execution_id: Some("exec".into()),
+        ..Default::default()
+    };
+    assert!(project_refusal(&room, false).contains("room_scope"));
+    assert!(project_refusal(&room, true).contains("write"));
+    let for_step = project_refusal(&step, false);
+    assert!(
+        for_step.contains("workflow's scope") && for_step.contains("Projects accessible"),
+        "{for_step}"
+    );
+    assert!(!for_step.contains("room_scope"), "{for_step}");
+    let for_worker = project_refusal(&worker, false);
+    assert!(!for_worker.contains("room_scope"), "{for_worker}");
+}

@@ -364,6 +364,10 @@ owning public object is the addressable boundary.
   project's credentials or workflows, and reach only the room's own agents: a
   workflow step reaches another project only through the scope a human
   validated on its workflow (`docs/design/discussion-project-scope.md`).
+  HTTP agents (LiteLLM, OpenRouter, Ollama…) have the same `room_scope` tool.
+  A refusal on another project names the way out for its caller: `room_scope`
+  for a room's agent, the workflow page (Projects accessible) for a step, the
+  principal for a worker.
 - Immediately before a direct `task_create`, call `plan_get` again so another
   agent's recent write is visible. Direct create links the task atomically to
   the MCP runtime's current discussion by default. Pass an explicit
@@ -923,6 +927,20 @@ support atomic admission per launch-variable key, within that workflow.
 [src: file: backend/src/db/discussion_questions.rs:634-693#claim_resume]
 [src: file: backend/src/api/discussion_questions.rs:64-135#launch_question_resume]
 [src: file: backend/src/workflows/concurrency.rs:106-140#insert_run_within_limit]
+
+## Building workflows and Pages: the workflow guide
+
+Every agent reads one guide before composing a workflow, a Page, its actions or
+its datasets: the built-in `workflow-architect` skill. CLI agents (MCP) and HTTP
+agents load it through the same tool, `tool_manual({tool: "workflow-architect"})`,
+which returns its role and table of contents; `section` returns one section
+(`backend/src/core/skill_guide.rs`, route `GET /api/skills/{id}/guide`). Tool
+descriptions stay short and point at it: the doctrine lives in the guide only.
+
+The two catalogues stay aligned by a test: a tool declared for one audience only
+fails `backend/src/api/agent_tool_parity_tests.rs` until it is listed there with
+the reason, in both directions. The tools HTTP agents do not have yet are
+listed as deferred to KT-1356.
 
 ## Workflow readiness
 
