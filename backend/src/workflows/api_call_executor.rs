@@ -6158,6 +6158,41 @@ mod tests {
     /// KT-1249 — a declared-public value is checked whatever its shape: a value
     /// with no `/` is not exempt, and a non-ASCII character never folds into
     /// the host.
+    /// KT-1331 — the Confluence base URL is configuration, not a secret: a
+    /// masked one turned every Confluence link read from Jira into
+    /// `***spaces/…`, which a workflow then wrote back.
+    #[test]
+    fn the_atlassian_confluence_url_is_public_configuration() {
+        let registry = crate::core::registry::builtin_registry();
+        let atlassian = registry
+            .iter()
+            .find(|def| def.id == "mcp-atlassian")
+            .expect("atlassian in the registry");
+        let spec = atlassian.api_spec.as_ref().expect("api spec");
+        for (key, value) in [
+            ("JIRA_URL", "https://acme.atlassian.net"),
+            ("CONFLUENCE_URL", "https://acme.atlassian.net/wiki/"),
+            ("CONFLUENCE_URL", "https://acme.atlassian.net/wiki"),
+        ] {
+            assert!(is_public_config(spec, true, key, value), "{key}={value}");
+        }
+        // Declared public, still never a credential, nor public from an
+        // untrusted copy of the definition.
+        assert!(!is_public_config(
+            spec,
+            true,
+            "CONFLUENCE_URL",
+            "https://user:tok@acme.atlassian.net/wiki"
+        ));
+        assert!(!is_public_config(
+            spec,
+            false,
+            "CONFLUENCE_URL",
+            "https://acme.atlassian.net/wiki/"
+        ));
+        assert!(!is_public_config(spec, true, "CONFLUENCE_API_TOKEN", "abc"));
+    }
+
     #[test]
     fn every_declared_public_value_is_checked() {
         let mut plugin = mk_plugin("{SITE}", ApiAuthKind::None, vec![]);
