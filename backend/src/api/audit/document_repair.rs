@@ -431,15 +431,28 @@ fn split_verified_citations(project: &Path, content: &str) -> Option<String> {
             };
             let marker = &rest[..=end];
             let raw = &rest[11..end];
-            let parts: Vec<_> = raw
+            // KT-1357: `deploy.yml:210,214,218` lists lines of the first path.
+            let first_path = raw.split(',').next().and_then(|first| {
+                let (path, _) = first.trim().rsplit_once(':')?;
+                Some(path.trim())
+            });
+            let parts: Vec<String> = raw
                 .split(',')
                 .enumerate()
                 .map(|(index, part)| {
                     let part = part.trim();
-                    if index > 0 {
-                        part.strip_prefix("file:").map(str::trim).unwrap_or(part)
-                    } else {
-                        part
+                    if index == 0 {
+                        return part.to_string();
+                    }
+                    let part = part.strip_prefix("file:").map(str::trim).unwrap_or(part);
+                    match first_path {
+                        Some(path)
+                            if !part.contains(':')
+                                && crate::core::anti_halluc::parse_line_bounds(part).is_some() =>
+                        {
+                            format!("{path}:{part}")
+                        }
+                        _ => part.to_string(),
                     }
                 })
                 .collect();
@@ -658,6 +671,7 @@ mod tests {
         // KT-1322, through the step gate: attempt 1 cites the Read tool's last
         // (empty) line, writes a parenthesised citation, a comment inside a
         // marker and a dead relative link; attempt 2 does what the feedback says.
+        // The citation of an empty file is named in backticks by Kronn (KT-1357).
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::create_dir_all(root.join("docs/tech-debt")).unwrap();
@@ -676,13 +690,16 @@ mod tests {
             .unwrap()
             .blocking;
         let messages: Vec<_> = blocking.iter().map(|d| d.message.as_str()).collect();
-        assert_eq!(messages.len(), 5, "{messages:#?}");
+        assert_eq!(messages.len(), 4, "{messages:#?}");
         assert!(!messages.iter().any(|m| m.contains("config.yml:1-3")));
         assert!(messages
             .iter()
             .any(|m| m.contains("write [src: file: config.yml:2]")));
         assert!(messages.iter().any(|m| m.contains("is not a line number")));
-        assert!(messages.iter().any(|m| m.contains("the file is empty")));
+        assert!(!messages.iter().any(|m| m.contains("the file is empty")));
+        assert!(std::fs::read_to_string(root.join("docs/AGENTS.md"))
+            .unwrap()
+            .contains("Empty `empty.txt` (empty)\n"));
         assert!(messages
             .iter()
             .any(|m| m.ends_with("did you mean `tech-debt/TD-1.md`?")));
@@ -714,6 +731,33 @@ mod tests {
         ] {
             let text = format!("[src: file: code.rs:1, file: {reference}]\n");
             assert!(split_verified_citations(dir.path(), &text).is_none());
+        }
+    }
+
+    #[test]
+    fn a_list_of_bare_lines_of_one_file_becomes_one_marker_per_line() {
+        // Africanews step 11: `[src: file: .github/workflows/deploy.yml:210,214,218]`.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("deploy.yml"), "a\nb\nc\nd\ne\n").unwrap();
+        assert_eq!(
+            split_verified_citations(dir.path(), "Deploys [src: file: deploy.yml:1,3, 5]\n")
+                .as_deref(),
+            Some("Deploys [src: file: deploy.yml:1] [src: file: deploy.yml:3] [src: file: deploy.yml:5]\n")
+        );
+        assert_eq!(
+            split_verified_citations(dir.path(), "[src: file: deploy.yml:1, 2-3]\n").as_deref(),
+            Some("[src: file: deploy.yml:1] [src: file: deploy.yml:2-3]\n")
+        );
+        // One line out of range, or not a line: nothing is split.
+        for text in [
+            "[src: file: deploy.yml:1,9]\n",
+            "[src: file: deploy.yml:1,x]\n",
+            "[src: file: deploy.yml,1,2]\n",
+        ] {
+            assert!(
+                split_verified_citations(dir.path(), text).is_none(),
+                "{text}"
+            );
         }
     }
 

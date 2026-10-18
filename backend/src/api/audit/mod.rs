@@ -251,7 +251,9 @@ pub(crate) const ANALYSIS_STEPS: &[AnalysisStep] = &[
     AnalysisStep {
         target_file: "docs/glossary.md",
         prompt: include_str!("prompts/step2-glossary.md"),
-        sources: &[],
+        // The vocabulary of the code: the baseline records the tree it was
+        // written from, so a refresh of an unchanged tree is known unchanged.
+        sources: &["__GIT_SOURCE_TREE__"],
     },
     // Step 3: Repo map
     AnalysisStep {

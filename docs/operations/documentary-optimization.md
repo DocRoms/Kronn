@@ -57,11 +57,42 @@ to the document's folder (`docs/operations/` becomes `operations`); a bare
 secret file (and a bare tech-debt sheet) given its `:exists` presence form; a
 citation whose path resolves to exactly one other file that holds the cited
 lines (the "did you mean" path); a range ending one line past the end of a file
-with no closing newline, clamped to the last line. Never applied: a comma
-bundle that is not fully verified, a comment inside a marker, several candidate
-paths, a text file cited without a line, a range farther out of the file, and
-anything inside fenced or inline code.
+with no closing newline, clamped to the last line. Also applied (KT-1357, from
+the 18/10 matrix): a list of lines of one file (`[src: file: deploy.yml:210,214,218]`)
+split into one marker per line when every line is in range; a comment after a
+`path:line` the gate accepts as written
+(`[src: file: docs/AGENTS.md:38-39: never edit generated files]`) moved out of the
+marker, after it, in parentheses; a bare citation of an empty text file replaced
+by the backticked path followed by `(empty)`. Never applied: a comma bundle that
+is not fully verified (one line out of range, a path that is not there), a
+comment after a reference the gate refuses, a comment holding a backtick, a
+bracket or a parenthesis, a list with a comment, several candidate paths, a text
+file cited without a line, an empty file cited with a line, a range farther out
+of the file, and anything inside fenced or inline code.
 [src: file: backend/src/core/document_optimization/mechanical_fix.rs:36#mechanical_repair] [src: file: backend/src/api/audit/document_repair.rs:509#check_attempt]
+
+**Detector signals the agent never addressed** (KT-1357). Step 8 must dispose of
+each deterministic detector signal: the index, or a TD sheet the index lists,
+names the flagged file's path (any case), or the file's name followed by the
+flagged line (`poc.html.twig:6`). The retry feedback now names each signal still
+open with the exact text to write, and says a count ("all 12 signals"), a TD id or
+a bare file name does not stand for it. When the last attempt still leaves some,
+Kronn no longer fails the step and the run: it appends an
+`## Unaddressed detector signals` section to the index (severity, dimension,
+signal, evidence, one row each), replacing an earlier one, and sends a non-fatal
+`warning` event. The section is the human's to triage; the step counts as done.
+The same applies to the partial refresh of step 8, which also gives a malformed
+coverage matrix back to the agent (three attempts) instead of failing on the
+first.
+
+**A refresh of an unchanged section runs no agent** (KT-1357). A partial refresh
+asked for a section built from the whole source tree (repo map, glossary, TD
+index, decisions, and the performance, accessibility, database, API and code
+quality sub-audits) ends `unchanged`, with a
+`step_unchanged` event and no agent, when the tree fingerprint is the one its
+baseline recorded, no cited line is stale and its prose names no vanished path.
+A revalidation always runs its agents. A step ending `unchanged` is recorded as
+done (as in the Full pipeline), so a resume carries it.
 
 **What the committed documents already got wrong is reported, not charged**
 (KT-1353). A fresh Full run records the blockers its documents hold before step

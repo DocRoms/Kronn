@@ -13,6 +13,21 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- The audit repairs more of what it used to fail on, and tells a human the rest
+  (KT-1357, 18/10 audit matrix). Kronn splits a list of lines of one file
+  (`deploy.yml:210,214,218`) into one marker per line, moves the comment that
+  trails a `path:line` out of the marker, and names an empty file in backticks
+  instead of citing it; the retry feedback for step 8 names each unaddressed
+  detector signal with the exact text to write (the flagged file's path, or its
+  name with the flagged line), and when the attempts are spent Kronn appends an
+  `## Unaddressed detector signals` section to the tech-debt index and sends a
+  `warning` instead of failing the run. The partial refresh of the TD index now
+  gives a malformed coverage matrix back to the agent, as the Full audit does
+  (apollo's revalidation lost step 8 to its first attempt), and a refresh of a
+  section built from the whole source tree ends `unchanged`, with no agent, while
+  that tree is the one its baseline recorded; the glossary joins them (its
+  baseline now records the tree). An `unchanged` partial step is stored as done.
+
 - A full audit no longer ends Interrupted on what the audit could not fix
   (KT-1353, audit matrix africanews/apollo). The documentary blockers the
   committed documents held before the run are reported

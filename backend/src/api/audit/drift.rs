@@ -814,6 +814,18 @@ pub(crate) async fn run_partial_pipeline(
         let mut run_tokens = super::agent_launch::RunTokens::default();
         // The model last written on the run row, so a step writes it only when it changes.
         let mut recorded_model: Option<String> = None;
+        // KT-1357 — the sections whose cited lines and mapped sources are as the
+        // last baseline recorded them. A refresh asked for such a step has
+        // nothing to refresh: it ends `unchanged` without launching an agent.
+        // A revalidation always runs its agents (it exists to re-check them).
+        let fresh_sections: std::collections::HashSet<String> = if revalidation.is_none() {
+            let path = project_path.clone();
+            tokio::task::spawn_blocking(move || fresh_section_keys(&path))
+                .await
+                .unwrap_or_default()
+        } else {
+            Default::default()
+        };
 
         for (progress_idx, &step) in requested_steps.iter().enumerate() {
             // KT-927 — a Stop between two steps. The partial pipeline had no
@@ -980,9 +992,76 @@ pub(crate) async fn run_partial_pipeline(
                 }
             }
 
+            // KT-1357 — the section is as its last baseline recorded it and its
+            // document is filled: there is nothing to refresh, so the step is
+            // verified `unchanged` without an agent (a second refresh right after a
+            // successful one used to rewrite the document again, apollo's glossary).
+            if fresh_sections.contains(&format!("{}#step{}", analysis_step.target_file, step))
+                && super::step_guard::read_target(&project_path, analysis_step.target_file)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|content| {
+                        !content.trim().is_empty()
+                            && !super::step_guard::has_partial_marker(&content)
+                            && super::validation::count_raw_placeholders(&content) == 0
+                    })
+            {
+                tracing::info!(
+                    "Partial audit step {step} ({file_label}) unchanged: sources as recorded at the last audit"
+                );
+                unchanged_steps.push(step);
+                yield Event::default().event("step_unchanged").data(
+                    serde_json::json!({ "step": step, "file": file_label }).to_string(),
+                );
+                yield Event::default().event("step_done").data(
+                    serde_json::json!({
+                        "step": step,
+                        "success": true,
+                        "outcome": "unchanged",
+                        "file": file_label,
+                        "tokens": serde_json::Value::Null,
+                        "duration_ms": step_started_at.elapsed().as_millis() as u64,
+                        "total_tokens": run_tokens.total(),
+                        "cost_usd_micros": serde_json::Value::Null,
+                    }).to_string()
+                );
+                let run_id = audit_run_id.clone();
+                let recorded_total = run_tokens.total();
+                let duration_ms = step_started_at.elapsed().as_millis() as u64;
+                let writer = run_state_writer.clone();
+                if let Err(e) = state.db.with_conn(move |conn| {
+                    let finalized = crate::db::audit_runs::finalize_audit_step_with_outcome(
+                        conn,
+                        &run_id,
+                        step as u32,
+                        Utc::now(),
+                        duration_ms,
+                        &crate::db::audit_runs::StepTokens::UNKNOWN,
+                        recorded_total,
+                        true,
+                        None,
+                        false,
+                        true,
+                    );
+                    writer.sync(conn, false);
+                    finalized?;
+                    crate::db::audit_runs::delete_step_snapshot(conn, &run_id, step as u32)?;
+                    crate::db::audit_runs::set_step_target_state(conn, &run_id, step as u32, None)
+                }).await {
+                    tracing::error!("Failed to finalize partial audit step {step} for run {audit_run_id}: {e}");
+                }
+                continue;
+            }
+
             let detector_gated = analysis_step.target_file.ends_with("inconsistencies-tech-debt.md")
                 && !detector_signals.is_empty();
-            let max_attempts = if enforce_mode || revalidation.is_some() || detector_gated {
+            // The tech-debt step also owns the coverage matrix, which is given
+            // back to the agent on a miss (KT-1357).
+            let max_attempts = if enforce_mode
+                || revalidation.is_some()
+                || detector_gated
+                || analysis_step.target_file.ends_with("inconsistencies-tech-debt.md")
+            {
                 super::anti_hallu_enforce::MAX_ATTEMPTS
             } else {
                 1
@@ -1333,6 +1412,26 @@ pub(crate) async fn run_partial_pipeline(
                         super::validation::validate_step_output(
                             cli_success, &project_path, analysis_step.target_file,
                         );
+                    // KT-1357 — Full parity: a model that finished normally with an
+                    // incomplete coverage matrix gets that exact failure back within
+                    // the attempt budget (apollo's revalidation lost step 8 to its
+                    // first attempt). Never after a provider failure.
+                    if cli_success && !success && attempt < max_attempts {
+                        if let Some(feedback) = super::validation::coverage_repair_feedback(
+                            &project_path, analysis_step.target_file,
+                        ) {
+                            yield Event::default().event("step_retry").data(
+                                serde_json::json!({
+                                    "step": step, "file": file_label,
+                                    "attempt": attempt, "max_attempts": max_attempts,
+                                    "reason": "dimension_coverage",
+                                    "diagnostic": validation_warning.as_ref().map(|w| &w.reason),
+                                }).to_string()
+                            );
+                            citation_feedback = Some(feedback);
+                            continue 'attempts;
+                        }
+                    }
                     let validation_warning = super::validation::with_http_diagnostics(
                         success, validation_warning, &process.captured_stderr(),
                     );
@@ -1360,13 +1459,30 @@ pub(crate) async fn run_partial_pipeline(
                                 citation_feedback = Some(gap.feedback);
                                 continue 'attempts;
                             }
-                            success = false;
-                            yield Event::default().event("step_warning").data(
-                                serde_json::json!({
-                                    "step": step, "file": file_label,
-                                    "reason": gap.warning.reason, "repaired_from_template": false,
-                                }).to_string()
-                            );
+                            // KT-1357 — the attempts are spent: Kronn lists what is
+                            // left for a human to triage instead of failing the step.
+                            if let Some(listed) = super::validation::settle_unaddressed_signals(
+                                &project_path, &detector_signals,
+                            ) {
+                                tracing::warn!(
+                                    "Partial audit step {step} ({file_label}): {listed} detector signal(s) listed for triage"
+                                );
+                                yield Event::default().event("warning").data(
+                                    serde_json::json!({
+                                        "message": format!(
+                                            "Step {step} ({file_label}): {listed} detector signal(s) were left unaddressed by the agent; Kronn listed them under \"Unaddressed detector signals\" for triage"
+                                        ),
+                                    }).to_string()
+                                );
+                            } else {
+                                success = false;
+                                yield Event::default().event("step_warning").data(
+                                    serde_json::json!({
+                                        "step": step, "file": file_label,
+                                        "reason": gap.warning.reason, "repaired_from_template": false,
+                                    }).to_string()
+                                );
+                            }
                         }
                     }
 
@@ -1533,7 +1649,7 @@ pub(crate) async fn run_partial_pipeline(
                     }
                     let step_done = serde_json::json!({
                         "step": step,
-                        "success": step_succeeded,
+                        "success": step_succeeded || outcome == "unchanged",
                         "outcome": outcome,
                         "file": file_label,
                         // `null` — not 0 — when the agent reported no usage.
@@ -1559,7 +1675,9 @@ pub(crate) async fn run_partial_pipeline(
                                 duration_ms,
                                 &recorded_usage,
                                 recorded_total,
-                                step_succeeded,
+                                // An `unchanged` step is done, as in the Full
+                                // pipeline: a resume carries it only so (KT-1357).
+                                step_succeeded || step_unchanged,
                                 None,
                                 false,
                                 step_unchanged,
@@ -1568,7 +1686,7 @@ pub(crate) async fn run_partial_pipeline(
                             finalized?;
                             // A done step has nothing left to restore; a failed
                             // one keeps its snapshot (acceptance diff).
-                            if step_succeeded {
+                            if step_succeeded || step_unchanged {
                                 crate::db::audit_runs::delete_step_snapshot(conn, &run_id, step as u32)?;
                             }
                             crate::db::audit_runs::set_step_target_state(conn, &run_id, step as u32, target_state)
@@ -2007,6 +2125,22 @@ pub(crate) async fn run_partial_pipeline(
     });
 
     detached_partial_audit_response(stream)
+}
+
+/// `doc#stepN` of every section built from the whole source tree, when that tree
+/// is exactly the one the last baseline recorded, no cited line is stale and the
+/// prose names no path that is gone (KT-1357): the sections a refresh has nothing
+/// to do for.
+fn fresh_section_keys(project: &std::path::Path) -> std::collections::HashSet<String> {
+    crate::core::checksums::unchanged_tree_sections(project)
+        .into_iter()
+        .filter(|key| {
+            let doc = key
+                .rsplit_once("#step")
+                .map_or(key.as_str(), |(doc, _)| doc);
+            crate::core::doc_relevance::vanished_paths(project, doc).is_empty()
+        })
+        .collect()
 }
 
 fn detached_partial_audit_response(stream: SseStream) -> Sse<SseStream> {

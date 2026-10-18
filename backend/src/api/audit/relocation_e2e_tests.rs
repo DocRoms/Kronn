@@ -215,6 +215,9 @@ async fn a_partial_refresh_of_a_dot_ai_project_rewrites_its_section_there() {
     let glossary = ".ai/glossary.md";
     let step = targets.iter().position(|t| *t == glossary).unwrap() + 1;
     let before = std::fs::read_to_string(project.join(glossary)).unwrap();
+    // The source tree differs from the one the audit recorded (KT-1357: an
+    // unchanged tree would end the refresh `unchanged`, with no agent).
+    std::fs::write(project.join("README.md"), "# Fixture\n\nA new paragraph.\n").unwrap();
     arm(h.tools.path(), "fill", &[glossary]);
     let response = crate::api::audit::drift::partial_audit(
         axum::extract::State(h.state.clone()),

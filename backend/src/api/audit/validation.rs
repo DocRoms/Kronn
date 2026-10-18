@@ -349,14 +349,13 @@ pub struct DispositionGap {
     pub count: usize,
 }
 
-/// [`check_detector_disposition`] with the retry feedback naming the signals
-/// still to dispose of.
-pub fn detector_disposition_gap(
+/// The signals the Step-8 output surface does not address.
+fn undisposed_in_output<'a>(
     project_path: &Path,
-    signals: &[crate::core::audit_detectors::DetectedSignal],
-) -> Option<DispositionGap> {
+    signals: &'a [crate::core::audit_detectors::DetectedSignal],
+) -> Vec<&'a crate::core::audit_detectors::DetectedSignal> {
     if signals.is_empty() {
-        return None;
+        return Vec::new();
     }
     // Combined Step-8 output surface = the current index + ONLY the TD
     // detail files still listed in it. On an in-place re-audit, an orphan
@@ -392,7 +391,16 @@ pub fn detector_disposition_gap(
         }
     }
 
-    let undisposed = crate::core::audit_detectors::undisposed_signals(signals, &combined);
+    crate::core::audit_detectors::undisposed_signals(signals, &combined)
+}
+
+/// [`check_detector_disposition`] with the retry feedback naming the signals
+/// still to dispose of.
+pub fn detector_disposition_gap(
+    project_path: &Path,
+    signals: &[crate::core::audit_detectors::DetectedSignal],
+) -> Option<DispositionGap> {
+    let undisposed = undisposed_in_output(project_path, signals);
     if undisposed.is_empty() {
         return None;
     }
@@ -401,6 +409,16 @@ pub fn detector_disposition_gap(
         .map(|s| format!("{} (`{}`)", s.title, s.evidence))
         .collect::<Vec<_>>()
         .join("; ");
+    // KT-1357 — each signal with the exact text the check looks for: docroms'
+    // agent wrote `poc.html.twig:6` and "all accounted for in TD-…" three times.
+    let wanted = undisposed
+        .iter()
+        .map(|s| match crate::core::audit_detectors::disposition_key(s) {
+            Some(key) => format!("- {} (`{}`): write `{key}`", s.title, s.evidence),
+            None => format!("- {} (`{}`)", s.title, s.evidence),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     let feedback = format!(
         "## Detector signals — targeted correction required\n\n\
          Read `{index}` and the TD sheets it lists, then dispose of each detector signal \
@@ -408,8 +426,12 @@ pub fn detector_disposition_gap(
          For each one do ONE of: emit or refresh a TD, fold it into a baseline note, or cite \
          its file path in the `## Dimension coverage` matrix with a verifiable reason. Keep the \
          existing TD sheets and human-owned sections; correct only the missing dispositions, \
-         do not repeat the entire audit.\n",
-        index = docs_root.path("inconsistencies-tech-debt.md"),
+         do not repeat the entire audit.\n\n\
+         The check reads the index and the TD sheets the index lists (a sheet missing from the \
+         index is not read) and looks for this text, in any case. A count (\"all 12 signals\"), \
+         a TD id or a bare file name does not stand for it; the file name followed by the \
+         flagged line (`name.ext:12`) does:\n{wanted}\n",
+        index = DocsRoot::of(project_path).path("inconsistencies-tech-debt.md"),
     );
     Some(DispositionGap {
         warning: StepValidationWarning {
@@ -419,6 +441,43 @@ pub fn detector_disposition_gap(
         feedback,
         count: undisposed.len(),
     })
+}
+
+/// KT-1357 — the attempts are spent and the agent still left signals
+/// unaddressed: Kronn appends a deterministic `## Unaddressed detector signals`
+/// section to the tech-debt index, listing each one for a human to triage, and
+/// the step stands instead of failing the whole run over an omission. Returns
+/// how many signals it listed; `None` when nothing was left unaddressed or the
+/// index could not be written (the caller then keeps the failure).
+pub fn settle_unaddressed_signals(
+    project_path: &Path,
+    signals: &[crate::core::audit_detectors::DetectedSignal],
+) -> Option<usize> {
+    let undisposed = undisposed_in_output(project_path, signals);
+    if undisposed.is_empty() {
+        return None;
+    }
+    let index = DocsRoot::of(project_path).file(project_path, "inconsistencies-tech-debt.md");
+    let content = std::fs::read_to_string(&index).ok()?;
+    let heading = crate::core::audit_detectors::UNADDRESSED_HEADING;
+    // A previous settlement is replaced, never stacked.
+    let kept = match content.find(heading) {
+        Some(at) => {
+            let tail = &content[at + heading.len()..];
+            let end = tail
+                .find("\n## ")
+                .map_or(content.len(), |n| at + heading.len() + n + 1);
+            format!("{}{}", &content[..at], &content[end..])
+        }
+        None => content,
+    };
+    let section = crate::core::audit_detectors::render_unaddressed_section(&undisposed);
+    let written = format!("{}\n\n{section}", kept.trim_end());
+    crate::core::mcp_scanner::atomic_write(&index, &written).ok()?;
+    // The listing must actually dispose of them, or the failure stands.
+    undisposed_in_output(project_path, signals)
+        .is_empty()
+        .then_some(undisposed.len())
 }
 
 /// The reason of a step whose output is cut short (size floor).
@@ -957,6 +1016,88 @@ mod tests {
         let w = check_detector_disposition(tmp.path(), &signals)
             .expect("orphan TD not in the index must NOT dispose the signal");
         assert!(w.reason.contains("projets.html.twig"), "got: {}", w.reason);
+    }
+
+    #[test]
+    fn the_retry_feedback_names_each_signal_with_the_text_the_gate_looks_for() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let docs = tmp.path().join("docs");
+        std::fs::create_dir_all(docs.join("tech-debt")).unwrap();
+        std::fs::write(docs.join("inconsistencies-tech-debt.md"), "## Baseline\n").unwrap();
+        let signals = vec![
+            mk_signal(
+                "csp-unsafe",
+                "templates/Home/poc.html.twig:6",
+                "CSP unsafe-eval",
+            ),
+            mk_signal(
+                "inline-script",
+                "templates/home/index.html.twig:14",
+                "Inline script",
+            ),
+        ];
+        let gap = detector_disposition_gap(tmp.path(), &signals).expect("two signals");
+        assert_eq!(gap.count, 2);
+        assert!(gap
+            .feedback
+            .contains("CSP unsafe-eval (`templates/Home/poc.html.twig:6`): write `templates/home/poc.html.twig`"));
+        assert!(gap
+            .feedback
+            .contains("Inline script (`templates/home/index.html.twig:14`): write `templates/home/index.html.twig`"));
+        assert!(gap
+            .feedback
+            .contains("a sheet missing from the index is not read"));
+
+        // The file name with the flagged line is the other form the gate reads.
+        std::fs::write(
+            docs.join("inconsistencies-tech-debt.md"),
+            "- poc.html.twig:6 and index.html.twig:14 are covered by the CSP note\n",
+        )
+        .unwrap();
+        assert!(detector_disposition_gap(tmp.path(), &signals).is_none());
+    }
+
+    #[test]
+    fn unaddressed_signals_are_listed_for_triage_once_and_the_gate_then_passes() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let docs = tmp.path().join("docs");
+        std::fs::create_dir_all(docs.join("tech-debt")).unwrap();
+        let index = docs.join("inconsistencies-tech-debt.md");
+        let original = "# Debt\n\n## Dimension coverage\n\n| a | b | c |\n\n## Notes\nKept.\n";
+        std::fs::write(&index, original).unwrap();
+        let signals = vec![
+            mk_signal("csp-unsafe", "src/Headers.php:87", "CSP unsafe-eval"),
+            mk_signal("blank-noopener", "templates/projets.html.twig:12", "_blank"),
+        ];
+        assert_eq!(settle_unaddressed_signals(tmp.path(), &signals), Some(2));
+        let written = std::fs::read_to_string(&index).unwrap();
+        assert!(written.starts_with(original.trim_end()), "{written}");
+        assert!(
+            written.contains("## Unaddressed detector signals"),
+            "{written}"
+        );
+        assert!(written.contains("src/Headers.php:87"), "{written}");
+        assert!(check_detector_disposition(tmp.path(), &signals).is_none());
+        // Nothing left to list, nothing rewritten.
+        assert_eq!(settle_unaddressed_signals(tmp.path(), &signals), None);
+        assert_eq!(std::fs::read_to_string(&index).unwrap(), written);
+        // A later signal replaces the section instead of stacking another.
+        let more = vec![mk_signal(
+            "csp-unsafe",
+            "src/Other.php:3",
+            "CSP unsafe-eval",
+        )];
+        assert_eq!(settle_unaddressed_signals(tmp.path(), &more), Some(1));
+        let replaced = std::fs::read_to_string(&index).unwrap();
+        assert_eq!(
+            replaced.matches("## Unaddressed detector signals").count(),
+            1
+        );
+        assert!(replaced.contains("src/Other.php:3"));
+        assert!(!replaced.contains("src/Headers.php:87"));
+        // No index to append to: the failure stands.
+        let empty = tempfile::TempDir::new().unwrap();
+        assert_eq!(settle_unaddressed_signals(empty.path(), &signals), None);
     }
 
     #[test]

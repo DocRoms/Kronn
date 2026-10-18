@@ -2447,6 +2447,24 @@ pub async fn full_audit(
                                 citation_feedback = Some(gap.feedback);
                                 continue 'attempts;
                             }
+                            // KT-1357 — the attempts are spent: Kronn lists what is
+                            // left for a human to triage instead of failing the run.
+                            if let Some(listed) = crate::api::audit::validation::settle_unaddressed_signals(
+                                &project_path,
+                                &detector_signals,
+                            ) {
+                                tracing::warn!(
+                                    "Audit step {} ({}): {} detector signal(s) listed for triage: {}",
+                                    step, file_label, listed, w.reason
+                                );
+                                yield Event::default().event("warning").data(
+                                    serde_json::json!({
+                                        "message": format!(
+                                            "Step {step} ({file_label}): {listed} detector signal(s) were left unaddressed by the agent; Kronn listed them under \"Unaddressed detector signals\" for triage"
+                                        ),
+                                    }).to_string()
+                                );
+                            } else {
                             success = false;
                             tracing::warn!(
                                 "Audit step {} ({}) detector disposition gate failed: {}",
@@ -2467,6 +2485,7 @@ pub async fn full_audit(
                             // only runs when `success` was still true, i.e. the
                             // validation pass produced no warning.
                             warning = Some(w);
+                            }
                         }
                     }
 

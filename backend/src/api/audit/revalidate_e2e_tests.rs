@@ -1095,6 +1095,17 @@ async fn a_partial_refresh_after_a_stop_runs_to_its_end() {
     let fx = Validated::new(|_| {}).await;
     let step = fx.step_of(GLOSSARY) as usize;
 
+    // A tree the baseline did not record: an unchanged one would end the
+    // refresh `unchanged` without an agent (KT-1357), here and before the Stop.
+    let change_tree = |paragraph: &str| {
+        std::fs::write(
+            fx.project().join("README.md"),
+            format!("# Fixture\n\n{paragraph}\n"),
+        )
+        .unwrap()
+    };
+    change_tree("A new paragraph.");
+
     // A Stop nobody acknowledged leaves the flag set.
     fx.stop();
     arm(fx.h.tools.path(), "fill", &[GLOSSARY]);
@@ -1108,6 +1119,7 @@ async fn a_partial_refresh_after_a_stop_runs_to_its_end() {
 
     // A Stop pressed during the refresh still stops it.
     std::fs::write(fx.h.tools.path().join("steps.log"), "").unwrap();
+    change_tree("Another paragraph.");
     arm(fx.h.tools.path(), "noop", &[GLOSSARY]);
     let body = fx.stopped_during_step(fx.partial(vec![step])).await;
     assert_eq!(sse_events(&body, "cancelled").len(), 1, "{body}");

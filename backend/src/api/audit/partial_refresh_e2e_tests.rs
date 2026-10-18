@@ -174,6 +174,13 @@ async fn an_unvalidated_project_re_verified_unchanged_can_be_validated() {
 async fn a_refresh_stopped_before_any_write_gives_the_validation_back() {
     let fx = Validated::new(|_| {}).await;
     let before = validated_at(fx.project()).expect("validated");
+    // A tree the baseline did not record, or the refresh would end `unchanged`
+    // without ever starting the agent that is stopped here (KT-1357).
+    std::fs::write(
+        fx.project().join("README.md"),
+        "# Fixture\n\nA new paragraph.\n",
+    )
+    .unwrap();
     arm(fx.h.tools.path(), "noop", &[GLOSSARY]);
     let body = fx
         .stopped_during_step(fx.partial(vec![fx.step_of(GLOSSARY) as usize]))
@@ -502,4 +509,75 @@ async fn full_and_partial_launches_record_who_opened_and_who_validated() {
     let shown = shown_validation(state).await;
     assert_eq!(shown.started_by.as_deref(), Some("Launcher-Partial"));
     assert_eq!(shown.validated_by.as_deref(), Some("Validator-Partial"));
+}
+
+/// KT-1357 — apollo's second refresh of the glossary rewrote it again: a section
+/// built from the whole source tree is `unchanged` while that tree is the one its
+/// baseline recorded, with no agent launched, and an agent runs again as soon as
+/// the tree differs.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_refresh_of_a_section_whose_source_tree_is_unchanged_launches_no_agent() {
+    const GLOSSARY: &str = "docs/glossary.md";
+    let fx = Audited::new().await;
+    let step = fx.step_of(GLOSSARY) as usize;
+    let refresh = || async {
+        let response = crate::api::audit::drift::partial_audit(
+            axum::extract::State(fx.state.clone()),
+            axum::extract::Path(PROJECT_ID.to_string()),
+            axum::Json(crate::models::PartialAuditRequest {
+                agent: AgentType::ClaudeCode,
+                connection_id: None,
+                tier: None,
+                steps: vec![step],
+                accept_unverified_agents: None,
+            }),
+        )
+        .await
+        .into_response();
+        sse_body(response).await
+    };
+    let before = std::fs::read(fx.project.path().join(GLOSSARY)).unwrap();
+
+    // A `fill` agent would append a line: it must not even be started.
+    arm(fx.tools.path(), "fill", &[GLOSSARY]);
+    let body = refresh().await;
+    let done = sse_events(&body, "done").pop().expect("terminal done");
+    assert_eq!(done["status"], "no_change", "{body}");
+    assert_eq!(done["unchanged_steps"], json!([step]), "{body}");
+    assert_eq!(sse_events(&body, "step_unchanged").len(), 1, "{body}");
+    let finished = sse_events(&body, "step_done").pop().unwrap();
+    assert_eq!(finished["outcome"], "unchanged", "{body}");
+    assert_eq!(finished["success"], true, "{body}");
+    assert_eq!(launched(fx.tools.path()), 0, "{body}");
+    assert_eq!(
+        std::fs::read(fx.project.path().join(GLOSSARY)).unwrap(),
+        before
+    );
+    let (_, steps, _) = persisted(&fx.state, done["audit_run_id"].as_str().unwrap()).await;
+    let row = steps
+        .iter()
+        .find(|s| s.step_index as usize == step)
+        .unwrap();
+    assert!(row.cli_success && row.unchanged, "{row:?}");
+
+    // The tree changed: the baseline no longer describes it, the agent runs.
+    std::fs::write(
+        fx.project.path().join("README.md"),
+        "# Fixture\n\nA new paragraph.\n",
+    )
+    .unwrap();
+    arm(fx.tools.path(), "noop", &[GLOSSARY]);
+    let body = refresh().await;
+    assert_eq!(launched(fx.tools.path()), 1, "{body}");
+}
+
+/// How many step prompts the scripted agent has received since `arm`.
+fn launched(tools: &Path) -> u32 {
+    std::fs::read_to_string(tools.join("counter"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
 }

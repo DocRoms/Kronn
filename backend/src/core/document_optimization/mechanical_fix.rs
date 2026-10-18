@@ -92,7 +92,7 @@ fn fix_citations(
         output.push_str(&rest[..start]);
         match citations.get(raw) {
             Some((kind, to)) if !in_code => {
-                output.push_str(&format!("{OPEN} {to}]"));
+                output.push_str(to);
                 applied.push(AppliedFix {
                     path: rel.to_string(),
                     kind,
@@ -167,12 +167,73 @@ fn link_fix(project: &Path, source: &Path, target: &str) -> Option<String> {
     Some(format!("{fix}{}", &target[clean.len()..]))
 }
 
-/// The marker content the gate would accept in place of `raw`, with the kind of
-/// fix. Only exact cases: `raw` carries no comment, no list, no placeholder.
+/// The text the gate would accept in place of the whole marker
+/// `[src: file: raw]`, with the kind of fix. Only exact cases: no list (the
+/// bundle split owns those), no placeholder, and a comment only when it trails
+/// a `path:line` the gate accepts as written (KT-1357).
 fn citation_fix(project: &Path, rel: &str, raw: &str) -> Option<(&'static str, String)> {
-    if raw.is_empty() || raw.contains(['<', '>', ',']) || raw.contains(char::is_whitespace) {
+    if raw.is_empty() || raw.contains(['<', '>', ',']) {
         return None;
     }
+    if raw.contains(char::is_whitespace) {
+        return prose_fix(project, rel, raw);
+    }
+    if let Some(fix) = empty_file_fix(project, raw) {
+        return Some(fix);
+    }
+    let (kind, content) = marker_fix(project, rel, raw)?;
+    Some((kind, format!("[src: file: {content}]")))
+}
+
+/// `path:12: never edit generated files` — a marker holds only `path:line`
+/// (docroms step 3). The reference stays in the marker, the comment follows it
+/// in parentheses. A reference the gate refuses as written, and a comment
+/// holding a bracket, a parenthesis or a backtick, are left alone.
+fn prose_fix(project: &Path, rel: &str, raw: &str) -> Option<(&'static str, String)> {
+    let (token, comment) = raw.split_once(char::is_whitespace)?;
+    let reference = token.trim_end_matches([':', ';', '—', '–']);
+    let comment = comment
+        .trim()
+        .trim_start_matches(['—', '–', '-', ':'])
+        .trim();
+    let (_, line_part) = reference.rsplit_once(':')?;
+    if comment.is_empty()
+        || comment.contains(['`', '[', ']', '(', ')'])
+        || crate::core::anti_halluc::parse_line_bounds(line_part).is_none()
+    {
+        return None;
+    }
+    matches!(
+        super::check_citation(project, rel, reference),
+        super::CitationCheck::Valid { .. }
+    )
+    .then(|| {
+        (
+            "marker_prose",
+            format!("[src: file: {reference}] ({comment})"),
+        )
+    })
+}
+
+/// A text file with no line at all cannot be cited: the gate says to name it in
+/// backticks outside any marker, which is also all the claim can mean.
+fn empty_file_fix(project: &Path, raw: &str) -> Option<(&'static str, String)> {
+    if is_project_dir(project, raw) {
+        return None;
+    }
+    let path = cited_file(project, raw)?;
+    if crate::core::anti_halluc::is_binary_file(&path)
+        || crate::acp::secret_files::is_secret_file(&path)
+        || line_count(&path) > 0
+        || last_line_of(&path) > 0
+    {
+        return None;
+    }
+    Some(("empty_file", format!("`{raw}` (empty)")))
+}
+
+/// The marker content the gate would accept in place of `raw` (no comment).
+fn marker_fix(project: &Path, rel: &str, raw: &str) -> Option<(&'static str, String)> {
     let Some((path_part, line_part)) = raw.rsplit_once(':') else {
         return bare_fix(project, raw);
     };

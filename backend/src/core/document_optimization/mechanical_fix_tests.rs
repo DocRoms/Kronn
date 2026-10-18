@@ -175,3 +175,75 @@ fn ambiguous_or_quoted_references_are_never_touched() {
         "Write `[src: file: .ssh/vr-v2njs01-s]`; here [src: file: .ssh/vr-v2njs01-s:exists].\n"
     );
 }
+
+#[test]
+fn prose_trailing_a_valid_reference_moves_out_of_the_marker() {
+    // Docroms step 3: `[src: file: docs/AGENTS.md:38-39: never edit … files]`.
+    let dir = project();
+    write(dir.path(), "docs/AGENTS.md", &"rule\n".repeat(40));
+    let doc = "docs/coding-rules.md";
+    let fixed = repair(
+        dir.path(),
+        doc,
+        "Rule [src: file: docs/AGENTS.md:38-39: never edit application/web/ generated files].\n\
+         Also [src: file: notes.md:1 — only the first line].\n",
+    )
+    .unwrap();
+    assert_eq!(
+        fixed.content,
+        "Rule [src: file: docs/AGENTS.md:38-39] (never edit application/web/ generated files).\n\
+         Also [src: file: notes.md:1] (only the first line).\n"
+    );
+    assert!(fixed.fixes.iter().all(|f| f.kind == "marker_prose"));
+    assert_eq!(fixed.fixes.len(), 2);
+}
+
+#[test]
+fn prose_after_a_refused_reference_or_with_brackets_is_never_moved() {
+    let dir = project();
+    let doc = "docs/AGENTS.md";
+    for text in [
+        // The reference itself is out of range, or names no file.
+        "[src: file: notes.md:9: the third line]\n",
+        "[src: file: invented.rs:1: a comment]\n",
+        // No line at all: not a `path:line` reference.
+        "[src: file: notes.md the first file]\n",
+        // A comment that would unbalance the surrounding text.
+        "[src: file: notes.md:1: see `x`]\n",
+        "[src: file: notes.md:1: see (x)]\n",
+        // A comma list with prose is ambiguous.
+        "[src: file: notes.md:1,2 both lines]\n",
+    ] {
+        assert!(repair(dir.path(), doc, text).is_none(), "{text}");
+    }
+}
+
+#[test]
+fn an_empty_file_is_named_in_backticks_instead_of_cited() {
+    // Docroms step 3: `[src: file: tests/.gitignore]` on an empty file.
+    let dir = project();
+    write(dir.path(), "tests/.gitignore", "");
+    write(dir.path(), "tests/blank.txt", "\n");
+    let doc = "docs/coding-rules.md";
+    let fixed = repair(
+        dir.path(),
+        doc,
+        "The folder ignores nothing [src: file: tests/.gitignore].\n",
+    )
+    .unwrap();
+    assert_eq!(
+        fixed.content,
+        "The folder ignores nothing `tests/.gitignore` (empty).\n"
+    );
+    assert_eq!(fixed.fixes[0].kind, "empty_file");
+    // A file with one blank line is not empty to the gate; a quoted example,
+    // a directory and a line-bearing citation are left alone.
+    for text in [
+        "[src: file: tests/blank.txt]\n",
+        "`[src: file: tests/.gitignore]`\n",
+        "[src: file: tests]\n",
+        "[src: file: tests/.gitignore:1]\n",
+    ] {
+        assert!(repair(dir.path(), doc, text).is_none(), "{text}");
+    }
+}

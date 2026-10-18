@@ -723,12 +723,87 @@ pub fn undisposed_signals<'a>(
         if !seen_anchors.insert(rendered_anchor.clone()) {
             continue; // already accounted for this file/keyword
         }
-        if !haystack.contains(&rendered_anchor) {
+        if !haystack.contains(&rendered_anchor) && !names_file_and_line(&haystack, signals, sig) {
             out.push(sig);
         }
     }
     out
 }
+
+/// The exact text whose presence in the tech-debt output disposes of the
+/// signal (lower-cased by the gate, so any case counts).
+pub fn disposition_key(sig: &DetectedSignal) -> Option<String> {
+    disposition_anchor(sig).map(|anchor| escape_markdown_table_cell(&anchor))
+}
+
+/// KT-1357 — a TD that writes the finding as `poc.html.twig:6` (the file's name
+/// and the very line the detector flagged) addresses the signal as surely as the
+/// full path does: docroms' agent wrote exactly that three times and was refused.
+/// Only for a `path:line` signal, only the file name directly followed by one
+/// of the flagged lines of that path, and not as the tail of a longer name.
+fn names_file_and_line(haystack: &str, signals: &[DetectedSignal], sig: &DetectedSignal) -> bool {
+    let Some(path) = line_signal_path(sig) else {
+        return false;
+    };
+    let Some(name) = path.rsplit('/').next().filter(|name| !name.is_empty()) else {
+        return false;
+    };
+    signals
+        .iter()
+        .filter(|other| line_signal_path(other).as_deref() == Some(path.as_str()))
+        .filter_map(|other| {
+            other
+                .evidence
+                .rsplit_once(':')
+                .map(|(_, line)| line.to_string())
+        })
+        .any(|line| {
+            let needle = format!("{name}:{line}");
+            haystack.match_indices(&needle).any(|(at, _)| {
+                let before = haystack[..at].chars().next_back();
+                let after = haystack[at + needle.len()..].chars().next();
+                !before.is_some_and(|c| c.is_alphanumeric() || matches!(c, '.' | '_' | '-'))
+                    && !after.is_some_and(|c| c.is_ascii_digit())
+            })
+        })
+}
+
+/// The lower-cased path of a `path:line` signal.
+fn line_signal_path(sig: &DetectedSignal) -> Option<String> {
+    if sig.evidence.starts_with('+') {
+        return None;
+    }
+    let (path, line) = sig.evidence.rsplit_once(':')?;
+    (!line.is_empty() && line.bytes().all(|b| b.is_ascii_digit())).then(|| path.to_lowercase())
+}
+
+/// KT-1357 — the section Kronn appends when the agent still left signals
+/// unaddressed after every attempt: each one with the text that disposes of
+/// it, so a human triages it instead of the whole run failing.
+pub fn render_unaddressed_section(signals: &[&DetectedSignal]) -> String {
+    let mut out = String::from(UNADDRESSED_HEADING);
+    out.push_str(
+        "\n\nThe audit agent did not address these detector signals after every attempt. \
+         Kronn lists them here, unchanged, for a human to triage: emit a TD, fold it into a \
+         baseline note, or dismiss it with a reason.\n\n\
+         | Severity | Dimension | Signal | Evidence |\n|----------|-----------|--------|----------|\n",
+    );
+    for sig in signals {
+        let key = disposition_key(sig).unwrap_or_default();
+        out.push_str(&format!(
+            "| {} | {} | {} | `{}` — {} |\n",
+            escape_markdown_table_cell(sig.severity.label()),
+            escape_markdown_table_cell(sig.dimension),
+            escape_markdown_table_cell(&sig.title),
+            escape_markdown_table_cell(&sig.evidence),
+            key,
+        ));
+    }
+    out
+}
+
+/// Heading of the section [`render_unaddressed_section`] writes.
+pub const UNADDRESSED_HEADING: &str = "## Unaddressed detector signals";
 
 // ─── Rendering ───────────────────────────────────────────────────────────
 
@@ -1305,6 +1380,77 @@ mod tests {
         let un = undisposed_signals(&signals, output);
         assert_eq!(un.len(), 1, "only the unmentioned file is undisposed");
         assert_eq!(un[0].detector_id, "blank-noopener");
+    }
+
+    #[test]
+    fn a_file_name_with_the_flagged_line_disposes_of_the_signal() {
+        // Docroms step 8: "…and poc.html.twig:6, poc-skiing.html.twig:6 — all
+        // accounted for in TD-…" was refused three times.
+        let signals = vec![
+            sig(
+                "csp-unsafe",
+                "Security",
+                Severity::Medium,
+                "CSP weakened with `unsafe-eval`",
+                "templates/home/poc.html.twig:6",
+            ),
+            sig(
+                "inline-script",
+                "Performance",
+                Severity::Low,
+                "Inline `<script>` block",
+                "templates/home/index.html.twig:14",
+            ),
+        ];
+        let output =
+            "Lines 73, 84 and poc.html.twig:6 are accounted for; so is index.html.twig:14.";
+        assert!(undisposed_signals(&signals, output).is_empty());
+        // Another line, a longer name, a bare name or a TD id do not stand for it.
+        for output in [
+            "poc.html.twig:7 and index.html.twig:14",
+            "mypoc.html.twig:6 and index.html.twig:14",
+            "poc.html.twig:61 and index.html.twig:14",
+            "poc.html.twig and index.html.twig:14",
+            "all 12 signals are accounted for in TD-20260719-csp-unsafe-eval-inline",
+        ] {
+            assert!(!undisposed_signals(&signals, output).is_empty(), "{output}");
+        }
+    }
+
+    #[test]
+    fn the_triage_section_disposes_of_every_signal_it_lists() {
+        let signals = vec![
+            sig(
+                "csp-unsafe",
+                "Security",
+                Severity::Medium,
+                "CSP weakened with `unsafe-eval`",
+                "templates/Home/poc.html.twig:6",
+            ),
+            sig(
+                "zero-tests",
+                "Maintainability",
+                Severity::High,
+                "No tests",
+                "0 test files",
+            ),
+            sig(
+                "missing-community-files",
+                "Compliance",
+                Severity::Low,
+                "No SECURITY.md",
+                "SECURITY.md",
+            ),
+        ];
+        let listed: Vec<_> = signals.iter().collect();
+        let section = render_unaddressed_section(&listed);
+        assert!(section.starts_with(UNADDRESSED_HEADING));
+        assert!(section.contains("templates/Home/poc.html.twig:6"));
+        assert!(
+            undisposed_signals(&signals, &section).is_empty(),
+            "{section}"
+        );
+        assert_eq!(undisposed_signals(&signals, "nothing").len(), 3);
     }
 
     #[test]
