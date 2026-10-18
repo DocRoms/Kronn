@@ -44,7 +44,7 @@ The pre-migration copy is a file copy of the checkpointed database to
 `kronn.db.backup.tmp`, synced, then renamed over `kronn.db.backup`. If the
 disk lacks room or the copy fails, boot stops before any migration with a
 message saying so. `KRONN_MIGRATION_BACKUP=0` upgrades without a backup; use
-it only after taking a copy by hand. `[src: file: backend/src/db/migrations.rs:1203-1266#backup_before_migration]`
+it only after taking a copy by hand. `[src: file: backend/src/db/migrations.rs:1211-1274#backup_before_migration]`
 The copy is taken only when a migration is pending, after the WAL is folded in
 and pinned. `[src: file: backend/src/db/migrations.rs:1383-1414#has_pending]`
 

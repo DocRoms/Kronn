@@ -4,6 +4,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, act, fireEvent, screen, waitFor } from '@testing-library/react';
 import { buildApiMock } from '../../test/apiMock';
+import type * as TemplateUpdateNoticeModule from '../TemplateUpdateNotice';
 
 vi.mock('../../lib/api', () => buildApiMock());
 vi.mock('../../lib/I18nContext', () => ({
@@ -16,7 +17,7 @@ vi.mock('../../hooks/useMediaQuery', () => ({ useIsMobile: () => false }));
 
 // A partial refresh is launched from this notice: a button stands for its run action.
 vi.mock('../TemplateUpdateNotice', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../TemplateUpdateNotice')>()),
+  ...(await importOriginal<typeof TemplateUpdateNoticeModule>()),
   TemplateUpdateNotice: ({ onRunSteps }: { onRunSteps?: (steps: number[]) => void }) => (
     <button data-testid="run-partial" onClick={() => onRunSteps?.([3])}>partial</button>
   ),

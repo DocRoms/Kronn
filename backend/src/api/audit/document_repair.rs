@@ -2,7 +2,8 @@
 //! Only unambiguous comma-bundled references are normalized automatically.
 //! Real missing paths/invalid lines require an agent retry and remain blocking.
 
-use crate::core::document_optimization::{self, Diagnostic};
+use crate::core::document_optimization::{self, Diagnostic, UNBACKED_PROVENANCE};
+use crate::core::run_provenance::RunProvenance;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -340,6 +341,9 @@ pub(super) fn feedback(diagnostics: &[Diagnostic]) -> String {
         text.push_str(&format!("- `{}`: {}\n", d.path, d.message));
     }
     text.push_str("\nRead and correct EACH named document, including auxiliary findings. Use ONE `[src: file: path:line]` or `[src: file: path:start-end]` marker per reference; never bundle paths with commas. A binary file (.docx, .pdf, image) has no lines: cite it by bare path, `[src: file: path]`. Read the actual source before correcting a missing path or invalid line. If the evidence cannot be established, remove the unsupported claim entirely; do not invent a path or merely hide the citation. In a human-owned section, correct only what is wrong; Kronn asks its owner to reconfirm. A resolvable citation proves existence, not the truth of its claim.\n");
+    if diagnostics.iter().any(|d| d.code == UNBACKED_PROVENANCE) {
+        text.push_str("A `[src: deps: …]` row must be one the dependency watch holds, and a `[src: url: …]` page one you fetched in this run. For each one flagged above, fetch the page or keep the watch row; otherwise replace the value AND its citation with `not verified: no source`. Never write a version, date or support end from memory, and never attach a citation to it.\n");
+    }
     text
 }
 
@@ -500,12 +504,14 @@ pub(super) struct AttemptCheck {
 /// snapshot stays fixed across retries so an unchanged bad file cannot vanish
 /// from the gate simply because the second attempt ignored it. `baseline` is
 /// the blocking set before the step ran: a diagnostic in it blocks only when
-/// the step was explicitly asked to fix it (`recovery`).
+/// the step was explicitly asked to fix it (`recovery`). `run` is what the
+/// audit run read, against which `deps:` / `url:` citations are held (KT-1308).
 pub(super) fn check_attempt(
     project: &Path,
     before: &Snapshot,
     recovery: &[Diagnostic],
     baseline: &[Diagnostic],
+    run: Option<&RunProvenance>,
 ) -> Result<AttemptCheck, String> {
     let after = snapshot(project)?;
     let root = project.canonicalize().map_err(|e| e.to_string())?;
@@ -570,7 +576,7 @@ pub(super) fn check_attempt(
             }
         }
     }
-    let report = document_optimization::analyze(project)?;
+    let report = document_optimization::analyze_with(project, run)?;
     let (preexisting, blocking): (Vec<_>, Vec<_>) = report
         .blocking_diagnostics()
         .filter(|d| targets.contains(&d.path))
@@ -603,7 +609,7 @@ mod tests {
         let before = snapshot(dir.path()).unwrap();
         let original = "# Facts\nÉvidence [src: file: code.rs:1, code.rs:2]\nMissing [src: file: invented.rs:1]\nInvalid [src: file: code.rs:9]\n";
         std::fs::write(dir.path().join("docs/a.md"), original).unwrap();
-        let blocking = check_attempt(dir.path(), &before, &[], &[])
+        let blocking = check_attempt(dir.path(), &before, &[], &[], None)
             .unwrap()
             .blocking;
         let repaired = std::fs::read_to_string(dir.path().join("docs/a.md")).unwrap();
@@ -625,7 +631,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(backup).unwrap(), original);
         // An unchanged bad document stays a retry target.
         assert_eq!(
-            check_attempt(dir.path(), &before, &[], &[])
+            check_attempt(dir.path(), &before, &[], &[], None)
                 .unwrap()
                 .blocking
                 .len(),
@@ -636,7 +642,7 @@ mod tests {
             "# Facts\nVerified [src: file: code.rs:1-2]\n",
         )
         .unwrap();
-        assert!(check_attempt(dir.path(), &before, &blocking, &[])
+        assert!(check_attempt(dir.path(), &before, &blocking, &[], None)
             .unwrap()
             .blocking
             .is_empty());
@@ -666,7 +672,9 @@ mod tests {
                      Comment [src: file: config.yml:Focused on x]\nEmpty [src: file: empty.txt]\n\
                      [td](../tech-debt/TD-1.md)\n";
         std::fs::write(root.join("docs/AGENTS.md"), first).unwrap();
-        let blocking = check_attempt(root, &before, &[], &[]).unwrap().blocking;
+        let blocking = check_attempt(root, &before, &[], &[], None)
+            .unwrap()
+            .blocking;
         let messages: Vec<_> = blocking.iter().map(|d| d.message.as_str()).collect();
         assert_eq!(messages.len(), 5, "{messages:#?}");
         assert!(!messages.iter().any(|m| m.contains("config.yml:1-3")));
@@ -683,7 +691,7 @@ mod tests {
                       Comment [src: file: config.yml:1]\nThe `empty.txt` file is empty.\n\
                       [td](tech-debt/TD-1.md)\n";
         std::fs::write(root.join("docs/AGENTS.md"), second).unwrap();
-        let blocking = check_attempt(root, &before, &blocking, &[])
+        let blocking = check_attempt(root, &before, &blocking, &[], None)
             .unwrap()
             .blocking;
         assert!(blocking.is_empty(), "{blocking:#?}");
@@ -736,7 +744,7 @@ mod tests {
         let human = "# P\n<!-- kronn:section name=\"team\" owner=\"human\" -->\nRule [src: file: code.rs:1, code.rs:2]\n<!-- kronn:section:end -->\n";
         std::fs::write(root.join("docs/AGENTS.md"), human).unwrap();
 
-        check_attempt(root, &before, &[], &[]).unwrap();
+        check_attempt(root, &before, &[], &[], None).unwrap();
 
         let repaired = std::fs::read_to_string(root.join("docs/AGENTS.md")).unwrap();
         assert!(
@@ -767,7 +775,7 @@ mod tests {
         let report = document_optimization::analyze(root).unwrap();
         let steps = super::super::assemble_chained_steps(crate::models::AuditKind::Full);
         assert!(recovery_plan(&report.diagnostics, &steps, &Blame::default()).is_empty());
-        let blocking = check_attempt(root, &before, &report.diagnostics, &[])
+        let blocking = check_attempt(root, &before, &report.diagnostics, &[], None)
             .unwrap()
             .blocking;
         assert!(blocking.is_empty());
@@ -894,13 +902,13 @@ mod tests {
         )
         .unwrap();
 
-        let check = check_attempt(root, &before, &[], &baseline).unwrap();
+        let check = check_attempt(root, &before, &[], &baseline, None).unwrap();
         assert_eq!(check.blocking.len(), 1, "{:?}", check.blocking);
         assert_eq!(check.blocking[0].path, "docs/new.md");
         assert_eq!(check.preexisting, baseline);
 
         // Handed to the step explicitly, the pre-existing blocker blocks it.
-        let handed = check_attempt(root, &before, &baseline, &baseline).unwrap();
+        let handed = check_attempt(root, &before, &baseline, &baseline, None).unwrap();
         assert_eq!(handed.blocking.len(), 2);
         assert!(handed.preexisting.is_empty());
     }
@@ -1168,7 +1176,7 @@ mod tests {
         put(root, "docs/tech-debt/TD-20261018-ssh-key-tracked.md", sheet);
         put(root, "docs/inconsistencies-tech-debt.md", index);
 
-        let check = check_attempt(root, &before, &[], &[]).unwrap();
+        let check = check_attempt(root, &before, &[], &[], None).unwrap();
         let kinds: Vec<_> = check.repaired.iter().map(|f| f.kind).collect();
         assert_eq!(kinds.len(), 3, "{:#?}", check.repaired);
         for kind in ["link_base", "secret_presence", "td_sheet_presence"] {
@@ -1235,5 +1243,89 @@ mod tests {
         assert!(!index.contains("[src: file: docs/tech-debt/"), "{index}");
         let blocking = held(root);
         assert!(blocking.is_empty(), "{blocking:#?}");
+    }
+
+    /// KT-1308 x KT-1306 — an unbacked `deps:` citation is a blocker like any
+    /// other: when it was already there it is in the baseline and does not
+    /// block the step, when the step wrote it, it blocks and is charged to it.
+    #[test]
+    fn an_unbacked_provenance_follows_the_baseline_and_the_blame() {
+        use crate::core::version_sources::{DependencySnapshot, WatchedPackage};
+        let run = RunProvenance {
+            deps: Some(DependencySnapshot {
+                checked_on: "2026-10-16".into(),
+                packages: vec![WatchedPackage {
+                    manager: "JS / TS".into(),
+                    manifest: "package.json".into(),
+                    name: "joi".into(),
+                    current: "1.0.0".into(),
+                    latest: "2.0.0".into(),
+                    major: true,
+                    declared_only: false,
+                    lockfile: None,
+                }],
+                unchecked: vec![],
+                up_to_date: vec![],
+            }),
+            fetched: None,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("code.rs"), "first\nsecond\n").unwrap();
+        let invented =
+            |name: &str| format!("| {name} | 9.9.9 [src: deps: JS / TS/{name}@2026-10-16] |\n");
+        std::fs::write(
+            root.join("docs/old.md"),
+            format!("# Old\n{}", invented("prettier")),
+        )
+        .unwrap();
+        // Outside a run nothing can hold the citation: no baseline.
+        assert!(document_optimization::analyze(root)
+            .unwrap()
+            .blocking_diagnostics()
+            .next()
+            .is_none());
+        let baseline = document_optimization::analyze_with(root, Some(&run))
+            .unwrap()
+            .blocking_diagnostics()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(baseline.len(), 1, "{baseline:?}");
+        assert_eq!(baseline[0].code, UNBACKED_PROVENANCE);
+        let before = snapshot(root).unwrap();
+        // The step touches the same document with a true claim and writes a
+        // new one with its own invented version.
+        std::fs::write(
+            root.join("docs/old.md"),
+            format!(
+                "# Old\n{}True [src: file: code.rs:1]\n",
+                invented("prettier")
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("docs/new.md"),
+            format!("# New\n{}", invented("jest")),
+        )
+        .unwrap();
+
+        let check = check_attempt(root, &before, &[], &baseline, Some(&run)).unwrap();
+        assert_eq!(check.blocking.len(), 1, "{:?}", check.blocking);
+        assert_eq!(check.blocking[0].path, "docs/new.md");
+        assert_eq!(check.blocking[0].code, UNBACKED_PROVENANCE);
+        assert_eq!(check.preexisting, baseline);
+
+        // The ledger charges the new one to the step, keeps the old one's owner.
+        let after = document_optimization::analyze_with(root, Some(&run))
+            .unwrap()
+            .blocking_diagnostics()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut blame = Blame::reset(root);
+        blame.record_step(root, 4, &[], &baseline);
+        blame.record_step(root, 7, &baseline, &after);
+        assert_eq!(blame.charge(&baseline[0]), Some(4));
+        assert_eq!(blame.charge(&check.blocking[0]), Some(7));
     }
 }

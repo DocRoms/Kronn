@@ -43,9 +43,9 @@ A FIFO read through `tokio::fs` was tried first and rejected: it is delegated to
 red run could pin a blocking-pool thread for the rest of the suite. The timeouts
 that remain are anti-hang bounds, never waits — every one of them resolves on a
 socket event.
-[src: file: backend/src/acp.rs:4195-4212#FixtureLink]
-[src: file: backend/src/acp.rs:4232-4267#command]
-[src: file: backend/src/acp.rs:4214-4217#FIXTURE_GUARD]
+[src: file: backend/src/acp.rs:4203-4220#FixtureLink]
+[src: file: backend/src/acp.rs:4240-4275#command]
+[src: file: backend/src/acp.rs:4222-4225#FIXTURE_GUARD]
 
 The in-process tests pin the ownership rules without a subprocess and without
 timing, including that a PANICKING drain is reported as an error rather than
@@ -53,9 +53,9 @@ folded into the non-fatal cancellation policy: the drained task holds a `oneshot
 the event that the task was dropped. The cancellation test polls the `shutdown`
 future once before dropping it — an unpolled `async fn` has not run its body, so
 dropping it would exercise nothing and pass for the wrong reason.
-[src: file: backend/src/acp.rs:4077-4094#dropping_the_dispatcher_owner_cancels_the_drain]
-[src: file: backend/src/acp.rs:4140-4162#a_panicking_drain_is_reported_as_an_error]
-[src: file: backend/src/acp.rs:4164-4193#cancelling_a_shutdown_in_flight_still_cancels_the_drain]
+[src: file: backend/src/acp.rs:4085-4102#dropping_the_dispatcher_owner_cancels_the_drain]
+[src: file: backend/src/acp.rs:4148-4170#a_panicking_drain_is_reported_as_an_error]
+[src: file: backend/src/acp.rs:4172-4201#cancelling_a_shutdown_in_flight_still_cancels_the_drain]
 
 Before the runner hands ownership to its turn task, every startup failure must
 finish the ACP host: each error return goes through `acp_start_failure`, none

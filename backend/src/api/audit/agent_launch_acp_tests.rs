@@ -1784,7 +1784,7 @@ async fn a_boot_stops_the_tagged_agent_a_dead_backend_left_writing(pipeline: Pip
     // and the tag is read from it.
     // Its absolute path goes in the shebang: the agent's own PATH is not ours.
     let Some(python) = ["python3", "python"].into_iter().find_map(|name| {
-        let output = std::process::Command::new(name)
+        let output = crate::core::cmd::sync_cmd(name, crate::core::child_env::ChildRoute::Tool)
             .args(["-c", "import sys; print(sys.executable)"])
             .stderr(std::process::Stdio::null())
             .output()

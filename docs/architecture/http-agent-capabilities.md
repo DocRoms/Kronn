@@ -314,7 +314,7 @@ A hosted HTTP agent (NVIDIA, a Custom endpoint) receives the repository content 
 audit reads, so choosing one is choosing what leaves the machine.
 
 **How an audit step reaches the project.** Both pipelines start the step's agent
-through one launcher [src: file: backend/src/api/audit/agent_launch.rs:290-345#start]. A CLI
+through one launcher [src: file: backend/src/api/audit/agent_launch.rs:301-356#start]. A CLI
 agent is spawned exactly as before. An HTTP agent gets a
 `KronnToolExecutor::audit_arc_for_step`, scoped to the project directory the pipeline
 already resolved (`resolve_host_path`, so it is right inside a container) rather
@@ -366,8 +366,8 @@ one.
 **Stopping.** An HTTP agent's request and tool loop are a task, not a process:
 killing the lifeline PID does not stop it. A Full audit therefore registers a
 cancellation token per step, and `cancel_audit` trips it
-[src: file: backend/src/api/audit/full.rs:1845-1850#agent_cancels]
-[src: file: backend/src/api/audit/full.rs:4507-4510#agent_cancels]. Since KT-927 the partial audit does
+[src: file: backend/src/api/audit/full.rs:1870-1875#agent_cancels]
+[src: file: backend/src/api/audit/full.rs:4588-4591#agent_cancels]. Since KT-927 the partial audit does
 the same, and so does an ACP agent, whose PID is a lifeline too: see
 [auditing with an ACP agent](audit-acp-agents.md).
 

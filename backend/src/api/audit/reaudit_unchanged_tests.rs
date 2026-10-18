@@ -90,8 +90,12 @@ case "$prompt" in
         printf '\nChecked by the audit: scanned — nothing substantiable.\n' >> "$f.next"
       fi
       mv "$f.next" "$f"
+      if [ "$target" = docs/AGENTS.md ] && [ -f '{state}/stack-table' ]; then
+        cat '{state}/stack-table' >> "$f"
+      fi
     fi
     if [ -f '{state}/after' ]; then sh '{state}/after' "$target"; fi
+    if [ -f '{state}/stream-extra' ]; then cat '{state}/stream-extra'; fi
     ;;
   *)
     while [ -f '{state}/validation-hold' ]; do sleep 0.1; done
@@ -2056,3 +2060,6 @@ async fn a_blocker_written_by_the_cross_agent_path_is_charged_to_its_step() {
         "{ledger}"
     );
 }
+
+#[path = "stack_provenance_tests.rs"]
+mod stack_provenance;

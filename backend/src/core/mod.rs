@@ -105,6 +105,7 @@ pub mod rtk_detect;
 pub mod rtk_state;
 pub mod run_eta;
 pub mod run_notify;
+pub mod run_provenance;
 pub mod run_retention;
 pub mod safe_http;
 pub mod scanner;

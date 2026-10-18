@@ -622,6 +622,62 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- An audit no longer lets a fabricated `deps:` or `url:` provenance reach the
+  Stack table in the default (warn) mode (KT-1308). A `[src: deps: …]`
+  citation the injected dependency watch does not hold, and a
+  `[src: url: …]` citation of a page the run's agent never fetched, are now
+  blocking in the always-on documentary check, whatever the anti-hallucination
+  mode. The step is retried with feedback telling the model to write
+  `not verified: no source` instead of a « latest stable » it did not read; held
+  and fetched citations, and `not verified`, pass. A page counts as fetched when
+  the agent sent it to a fetch tool, opened it in a browser (`browser_navigate`,
+  `navigate_page`), downloaded it with `curl` / `wget`, or was handed it by a
+  documentation tool (the URLs a Context7 result names, so the citation the
+  Context7 prompt asks for is not refused); a leading `www.` is ignored. This
+  holds on the default ACP route too: the tool trace of a call now carries the
+  URLs it opened, read from the whole input before the 2000-character excerpt
+  cuts it (a long `WebFetch` prompt, a `curl` at the end of a long command), and
+  the URLs a Context7 result named (Claude and Codex adapters; a native ACP
+  agent when its update names the tool and carries its output). A native ACP
+  tool is a fetch by its `kind: "fetch"` too, even when the runtime retitles it
+  to its URL. A run whose agent reports no tool inputs (an HTTP model), that used
+  a sub-agent, or that called a documentation tool whose result Kronn never saw
+  leaves its `url:` citations unchecked, never blocked. A result that was seen
+  and named no page (Context7's `resolve-library-id`, which comes before every
+  `query-docs`) is not a blind spot: the trace carries a `result_seen` flag, so
+  the normal resolve → query flow keeps `url:` citations checked on the ACP
+  route as on the direct one. A trace keeps up to 256 URLs per call within
+  24 KiB; a URL over 1000 characters is dropped, never cut. The URLs kept are
+  put in one canonical, safe form, the same on the stored and the cited side:
+  no scheme, no userinfo (`user:pass@`), the value of a credential-style query
+  parameter masked as `name=***` (the name is judged after percent-decoding, so
+  `%73ig`, `access%5Ftoken`, `api%2Dkey` or a doubly-encoded name are masked
+  too; non-secret parameters such as `page=2` are kept), vendor token shapes
+  redacted. A signed page still matches its citation, a page with another
+  `page=` does not, and no secret is stored. The shell-download rule is
+  conservative: only a real `curl` / `wget` invocation that is fully understood
+  counts as a download, and only an `http(s)` address that is a destination of it
+  (a positional argument, or `curl --url`), through `sudo` / `env` / `xargs`, a
+  `;` `&&` `|` chain, or `sh -c`. A URL that is printed (`echo curl <url>`),
+  quoted, in a `#` comment or a heredoc body, or the value of an option
+  (`curl -d` / `--proxy` / `--referer` / `-o <url>`, `wget -O <url>`) is text,
+  not a fetch; a command with a heredoc, a quote left open, or an option the
+  reader does not know credits nothing, and so does a display-and-exit mode
+  (`curl --version` / `-V` / `--help` / `-h` / `--manual` / `-M`, `wget
+  --version` / `-V` / `--help` / `-h`), which transfers nothing. The options of
+  a wrapper (`sudo`, `env`, `xargs`, `timeout`, `nice`, `nohup`, `time`,
+  `command`, `exec`, `stdbuf`) are read with their values (`xargs -I curl
+  printf …`: `curl` is a replacement token, `printf` the command); a wrapper
+  option the reader does not know credits nothing. A citation of an uncredited
+  URL is blocked with the "not verified" feedback. Only the full audit
+  pipeline checks the run's provenance: a partial audit does not.
+  The pre-step baseline and the blame ledger of the documentary gate (KT-1306)
+  use the same run-aware analysis: an unbacked citation already there is in the
+  baseline and does not block the step, one the step wrote blocks it and is
+  charged to it. The parenthesised-citation check of KT-1322 now reads a
+  document without Kronn's own partial-step banner, whose quoted gate reason
+  (`[src: file: path:line]` turned round and cut at its limit) was refused as a
+  `(src: file: …)` the step never wrote.
 - An audit agent that outlived a backend stop no longer keeps writing after
   boot settled its step, and a resume no longer warns that « the sources
   changed » when they did not (KT-1324). Agents run through the ACP adapter
@@ -658,6 +714,23 @@ Release notes for 0.9.3 and earlier are available in the
   install has written its root `AGENTS.md` pointer: taken before it, it
   differed from the next run's and every resume of a freshly started audit
   warned.
+- An audit TD card no longer fails for the whole batch when one TD cannot be
+  written (KT-1348, GitHub #258, reported by tarussio). A batch is now partial
+  by design: every TD that can be recorded is, and the card stays pending,
+  narrowed to the ones that were not, each named with its reason on the card.
+  Once the sheet is repaired, answering again applies only those (no TD is
+  written or accepted twice) and the validation resumes after the last one. A
+  card where nothing could be recorded stays pending whole and names each TD.
+  The reasons live in their own `td_errors` field on the card (the agent's
+  `context` is never cut or mixed with them, even at its 4000-character limit),
+  are replaced by each new partial, and disappear once the card is answered;
+  their history stays in the partial receipt messages.
+  A sheet whose status lives only
+  in `audit_history`, and a TD only the index lists, are resolved; and
+  answering one card no longer makes a later row-only TD of the same
+  validation unresolvable (the index resync keeps such a row as a bullet,
+  which is now read back).
+
 - Retrying a step, or resuming an audit, from the UI keeps the run's tier
   (KT-1320). The card's picker defaulted to `reasoning`, so the retry of a
   Haiku (economy) audit ran on Opus. The run now records its tier and

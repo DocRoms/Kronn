@@ -123,15 +123,24 @@ Codex exec items by `id`, and Claude stream snapshots by `tool_use_id`. Repeated
 calls with the same tool name remain separate. Completion is recorded only
 when the runtime reports it; missing metadata remains `unknown` or
 `arguments not reported`. Command output, MCP results and file patch bodies
-are not copied into these records. Input masking covers sensitive JSON keys
+are not copied into these records. The one thing read out of them is a list of
+URLs (KT-1308, at most 256 per call and 24 KiB): the pages a call opened (read from
+its whole input, before the excerpt cuts it) and the pages a Context7 result named,
+which an audit holds its `url:` citations against, and a `result_seen` flag (a result
+that reached Kronn, possibly naming no page). The URLs are stored in one canonical
+safe form (no scheme, no userinfo, credential-style query values masked as `name=***`
+after percent-decoding the name); a `curl` / `wget` URL is recorded only when it is a destination
+argument of a real, fully understood invocation, never for text that merely mentions one
+(a comment, a heredoc, an option value such as `--proxy <url>`, a `--version` / `--help` call, a
+wrapper option value such as `xargs -I curl`). Input masking covers sensitive JSON keys
 and the shared credential patterns before truncation; it is heuristic, not a
 guarantee that arbitrary user content is secret-free.
-[src: file: backend/src/agents/tool_trace.rs:1-15#MARKER]
-[src: file: backend/src/agents/tool_trace.rs:17-74#safe_excerpt]
-[src: file: backend/src/agents/tool_trace.rs:116-126#from_acp]
-[src: file: backend/src/agents/tool_trace.rs:128-176#from_codex]
-[src: file: backend/src/agents/tool_trace.rs:178-217#from_claude_line]
-[src: file: backend/src/agents/tool_trace.rs:219-256#collect]
+[src: file: backend/src/agents/tool_trace.rs:10-24#MARKER]
+[src: file: backend/src/agents/tool_trace.rs:52-109#safe_excerpt]
+[src: file: backend/src/agents/tool_trace.rs:163-196#from_acp]
+[src: file: backend/src/agents/tool_trace.rs:198-262#from_codex]
+[src: file: backend/src/agents/tool_trace.rs:264-339#from_claude_line]
+[src: file: backend/src/agents/tool_trace.rs:341-380#collect]
 [src: file: backend/src/api/discussions/streaming.rs:807-855#lift_acp_tool_calls]
 
 Native ACP sessions receive Kronn's bridge even when no project is attached.

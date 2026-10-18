@@ -149,13 +149,13 @@ not before.
   The recorded cost is never recomputed from a rate table; a finished step
   whose agent reported none is priced on read by `core::pricing` for the served
   model and shown as an estimate, never as a reported cost
-  [src: file: backend/src/db/audit_runs.rs:1687-1733#price_steps].
+  [src: file: backend/src/db/audit_runs.rs:1697-1743#price_steps].
 - **Per step.** `audit_run_steps.cost_usd_micros` (integer micro-USD) sums the
   step's attempts. It stays `NULL` when any attempt that ran reported no cost:
   a sum over a silent attempt would be a floor shown as the whole. A reported
   zero is recorded as 0. `step_done` carries the same figure as
   `cost_usd_micros` (`null` when unknown)
-  [src: file: backend/src/api/audit/agent_launch.rs:541-568#StepCost].
+  [src: file: backend/src/api/audit/agent_launch.rs:547-574#StepCost].
 - **The run's model.** `audit_runs.model` is the model(s) the runtime reported
   serving, from the launch's provenance capture shared by every step (`a / b`
   when several). With none observed it is the model Settings or the named
@@ -175,7 +175,7 @@ not before.
   count on its run's usage; an ACP agent on the activity sink, which now counts
   the calls where they pass (`AgentActivity.calls`) so a reader polling it misses
   none. `AuditActivityProbe` reads either
-  [src: file: backend/src/api/audit/agent_launch.rs:406-435#AuditActivityProbe].
+  [src: file: backend/src/api/audit/agent_launch.rs:412-441#AuditActivityProbe].
 - **Ticks, not lines.** For an agent without stream-json, both pipelines look at
   the probe on every line and every `ACTIVITY_TICK` (1 s): a moved tool sends
   `tool_call` with `calls`, moved tokens send `step_progress`, and both update the
@@ -205,7 +205,7 @@ The broker auto-approves `fetch`-kind tool calls, so an ACP runtime may well
 reach the web; Kronn has no declaration of which runtimes expose such a tool,
 so it does not claim it. A `[src: deps: …]` citation is checked against the
 injected watch by the enforce gate (`lint_step_file_with_deps`).
-`[src: file: backend/src/api/audit/agent_launch.rs:369-400#version_reach]`
+`[src: file: backend/src/api/audit/agent_launch.rs:375-406#version_reach]`
 
 ## What this does not cover
 
