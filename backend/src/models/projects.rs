@@ -1115,6 +1115,16 @@ pub struct AuditRun {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub resume_drift: Option<String>,
+    /// KT-1320 — the model tier the run was launched with (`economy`,
+    /// `default`, `reasoning`); absent on a run recorded before it was kept.
+    /// A step retry or a resume reuses it unless the human picks another.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub tier: Option<String>,
+    /// KT-1320 — the named API connection the run's HTTP agent used, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub connection_id: Option<String>,
 }
 
 /// 0.8.4 (#298) — Per-step metrics for the post-audit recap panel.
