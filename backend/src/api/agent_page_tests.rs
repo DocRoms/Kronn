@@ -402,6 +402,11 @@ async fn native_workflow_page_tools_inherit_run_scope_and_execute_all_operations
         }
 
         let created = call(executor.as_ref(), "page_create", page()).await;
+        if project.is_none() {
+            // A run without a project has no room to hold « General · write ».
+            assert!(!created.ok, "{}", created.content);
+            continue;
+        }
         assert!(created.ok, "{}", created.content);
         assert_eq!(created.content["project_id"], json!(project));
         let id = created.content["id"].clone();

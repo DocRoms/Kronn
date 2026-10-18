@@ -736,15 +736,17 @@ const CREATE_ROUTES: &[(&str, &str)] = &[
     ("/api/learnings/propose", "project_id"),
 ];
 
-/// Create routes a launch with a discussion or run but no project may use:
-/// the resource is general, visible from every project, as when a human
-/// creates it from that room (KT-1346).
+/// Create routes a launch without a project may use once a human granted its
+/// room « General · write »: the resource is general, seen by every project (KT-1346).
 const GENERAL_WHEN_UNBOUND: &[&str] = &[
     "/api/quick-prompts",
     "/api/quick-apis",
     "/api/pages",
     "/api/workflows",
 ];
+
+/// Why a project-less token's general write is refused, with the way out.
+pub const GENERAL_WRITE_NEEDS_GRANT: &str = "writing a general resource (seen by every project) needs a human to grant this room « General · write » in its Scope settings";
 
 /// The resources a token without a project may create and edit as general.
 const GENERAL_KINDS: &[Kind] = &[
@@ -867,9 +869,12 @@ pub fn prepare_body_in(
                     }
                     // A project-less launch may create its own discussions, and
                     // the general resources a human there would create.
-                    (None, _)
-                        if route.pattern == "/api/disc/create"
-                            || GENERAL_WHEN_UNBOUND.contains(&route.pattern) => {}
+                    (None, _) if route.pattern == "/api/disc/create" => {}
+                    (None, _) if GENERAL_WHEN_UNBOUND.contains(&route.pattern) => {
+                        if !reach.writes_general() {
+                            return Err(Refusal(GENERAL_WRITE_NEEDS_GRANT.into()));
+                        }
+                    }
                     (None, _) => {
                         return Err(Refusal(
                             "a bridge token without a project cannot create shared resources"
@@ -1532,6 +1537,12 @@ impl Reach {
         }
     }
 
+    /// Whether a token without a project may write the general resources: a
+    /// human granted its room « General · write » (KT-1346).
+    pub fn writes_general(&self) -> bool {
+        self.bound().is_none() && self.granted.general
+    }
+
     /// Whether the token may change `project`'s planning.
     pub fn writes(&self, project: &str) -> bool {
         use crate::models::discussion_scope::ScopeAccess;
@@ -1615,9 +1626,9 @@ fn writable(grant: &BridgeGrant, kind: Kind, id: &str, place: &Residence, reach:
     if owns(grant, kind, id) || reach.bound().is_some_and(|project| place.only(project)) {
         return true;
     }
-    // Without a project, the general resources are the token's home: it edits
-    // them as a human in that room would (KT-1346). A project's token never does.
-    if reach.bound().is_none()
+    // Without a project, a human's « General · write » grant on the room lets
+    // its agents edit the general resources (KT-1346). A project's token never does.
+    if reach.writes_general()
         && GENERAL_KINDS.contains(&kind)
         && matches!(place, Residence::Global | Residence::General)
     {

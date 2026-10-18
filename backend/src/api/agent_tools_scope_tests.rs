@@ -83,6 +83,24 @@ async fn grant_write(state: &AppState, room: &str, project: &str) {
         .unwrap();
 }
 
+async fn grant_general(state: &AppState) {
+    state
+        .db
+        .with_conn(|conn| {
+            crate::db::discussion_scope::grant(
+                conn,
+                "general",
+                None,
+                crate::models::discussion_scope::ScopeAccess::Write,
+                crate::models::discussion_scope::ScopeGrantSource::General,
+                "human",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
 fn refused(outcome: &ToolOutcome) -> bool {
     !outcome.ok && outcome.content.to_string().contains("Kronn refused")
 }
@@ -264,6 +282,7 @@ async fn a_shared_workflow_or_page_is_read_only_to_a_project_room() {
         })
         .await
         .unwrap();
+    grant_general(&state).await;
     let general = room_agent(&state, "general");
     let page = call(
         general.as_ref(),
@@ -339,4 +358,52 @@ async fn a_task_execution_never_reads_another_projects_task() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn a_room_without_a_project_writes_the_general_resources_only_once_a_human_allowed_it() {
+    let World { state, .. } = two_projects().await;
+    let agent = room_agent(&state, "general");
+    let page = json!({"title": "G", "slug": "g", "html": "<h1>x</h1>", "datasets": []});
+    let refused_page = call(agent.as_ref(), "page_create", page.clone()).await;
+    assert!(refused(&refused_page), "{}", refused_page.content);
+    assert!(refused_page.content.to_string().contains("General · write"));
+    let refused_qp = call(
+        agent.as_ref(),
+        "qp_create_draft",
+        json!({"name": "x", "prompt_template": "Hi"}),
+    )
+    .await;
+    assert!(refused(&refused_qp), "{}", refused_qp.content);
+    grant_general(&state).await;
+    // The grant is read on every call: the same run may write now.
+    let created = call(agent.as_ref(), "page_create", page).await;
+    assert!(created.ok, "{}", created.content);
+    let edited = call(
+        agent.as_ref(),
+        "page_update_html",
+        json!({"page_id": "g", "html": "<h1>y</h1>"}),
+    )
+    .await;
+    assert!(edited.ok, "{}", edited.content);
+    // A project room never gets the general grant.
+    let denied = state
+        .db
+        .with_conn(|conn| {
+            Ok(crate::db::discussion_scope::grant(
+                conn,
+                "room-a",
+                None,
+                crate::models::discussion_scope::ScopeAccess::Write,
+                crate::models::discussion_scope::ScopeGrantSource::General,
+                "human",
+            )
+            .is_err())
+        })
+        .await
+        .unwrap();
+    assert!(
+        denied,
+        "a project room writes its project, not the general resources"
+    );
 }

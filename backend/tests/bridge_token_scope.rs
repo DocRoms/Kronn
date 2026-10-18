@@ -3518,6 +3518,131 @@ async fn every_project_in_write_needs_a_typed_confirmation_and_the_seen_scope() 
     assert_eq!(status, 200, "{body}");
 }
 
+/// KT-1346 — a room without a project reads the general resources; writing
+/// them, which every project sees, needs a human's typed « General · write ».
+#[tokio::test]
+async fn a_room_without_a_project_writes_the_general_resources_only_once_a_human_allowed_it() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-g");
+    let token = guard.value().to_owned();
+    let draft = json!({"name": "General", "prompt_template": "Hi"});
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/api/quick-prompts",
+        Some(&token),
+        Some(draft.clone()),
+    )
+    .await;
+    assert_eq!(status, 403, "{body}");
+    assert!(body.to_string().contains("General · write"), "{body}");
+
+    let (_, scope) = call(&app, "GET", "/api/discussions/room-g/scope", None, None).await;
+    let seen = scope["data"]["fingerprint"].as_str().unwrap().to_owned();
+    for (room, body, expected) in [
+        ("room-g", json!({"general": true, "access": "write"}), 400),
+        (
+            "room-g",
+            json!({"general": true, "access": "read", "confirm": "GENERAL-WRITE", "expected_fingerprint": seen}),
+            400,
+        ),
+        (
+            "room-g",
+            json!({"general": true, "access": "write", "confirm": "ALL-PROJECTS-WRITE", "expected_fingerprint": seen}),
+            400,
+        ),
+        (
+            "room-g",
+            json!({"general": true, "access": "write", "confirm": "GENERAL-WRITE"}),
+            400,
+        ),
+        (
+            "room-g",
+            json!({"general": true, "access": "write", "confirm": "GENERAL-WRITE", "expected_fingerprint": "stale"}),
+            409,
+        ),
+        (
+            "room-g",
+            json!({"general": true, "all": true, "access": "write", "confirm": "GENERAL-WRITE", "expected_fingerprint": seen}),
+            400,
+        ),
+    ] {
+        let (status, response) = grant_scope(&app, room, body.clone()).await;
+        assert_eq!(status, expected, "{body}: {response}");
+    }
+    // A project's room writes its project, never the general resources.
+    let (_, project_scope) = call(&app, "GET", "/api/discussions/room-a/scope", None, None).await;
+    let project_seen = project_scope["data"]["fingerprint"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (status, response) = grant_scope(
+        &app,
+        "room-a",
+        json!({"general": true, "access": "write", "confirm": "GENERAL-WRITE", "expected_fingerprint": project_seen}),
+    )
+    .await;
+    assert_eq!(status, 400, "{response}");
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/api/quick-prompts",
+        Some(&token),
+        Some(draft.clone()),
+    )
+    .await;
+    assert_eq!(status, 403, "no refused attempt widened anything: {body}");
+
+    let (status, granted) = grant_scope(
+        &app,
+        "room-g",
+        json!({"general": true, "access": "write", "confirm": "GENERAL-WRITE", "expected_fingerprint": seen}),
+    )
+    .await;
+    assert_eq!(status, 200, "{granted}");
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/api/quick-prompts",
+        Some(&token),
+        Some(draft),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body["data"]["project_id"].is_null(), "{body}");
+    let id = body["data"]["id"].as_str().unwrap().to_owned();
+    let (status, body) = call(
+        &app,
+        "PUT",
+        &format!("/api/quick-prompts/{id}"),
+        Some(&token),
+        Some(json!({"name": "Edited", "prompt_template": "Hi"})),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+
+    // Revoked: the next call is refused again.
+    let grant_id = granted["data"]["id"].as_str().unwrap().to_owned();
+    let (status, _) = call(
+        &app,
+        "POST",
+        &format!("/api/discussions/room-g/scope/grants/{grant_id}/revoke"),
+        None,
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let (status, body) = call(
+        &app,
+        "PUT",
+        &format!("/api/quick-prompts/{id}"),
+        Some(&token),
+        Some(json!({"name": "Again", "prompt_template": "Hi"})),
+    )
+    .await;
+    assert_eq!(status, 403, "{body}");
+}
+
 #[tokio::test]
 async fn only_a_human_opens_or_closes_a_room_s_scope() {
     let (app, _repos) = fixture().await;

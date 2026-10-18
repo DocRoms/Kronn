@@ -611,10 +611,12 @@ Release notes for 0.9.3 and earlier are available in the
   route it mirrors: its room's project, the room's grants for the room's own
   agent, the validated workflow scope for a step, nothing more for a worker.
   A creation with no project lands in the room's project, as for a CLI agent,
-  and a project room's agent no longer edits a general workflow or Page. From
-  a room without a project, agents (CLI and HTTP alike) create and edit
-  general Quick Prompts, Quick APIs, Pages and workflows. A tool with no access
-  rule is refused. A CLI agent may now name a media connection by its alias or
+  and a project room's agent no longer edits a general workflow or Page. A
+  room without a project reads the general resources; its agents (CLI and HTTP
+  alike) create and edit general Quick Prompts, Quick APIs, Pages and
+  workflows only once a human granted it « General · write » in its Scope
+  settings, behind a typed confirmation, shown in red in the header and
+  revocable (migration 269). A tool with no access rule is refused. A CLI agent may now name a media connection by its alias or
   name, as the media route already allowed.
 
 - Retrying a step, or resuming an audit, from the UI keeps the run's tier

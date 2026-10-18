@@ -565,7 +565,12 @@ fn creations_are_forced_into_the_bound_project() {
         "/api/pages",
         "/api/workflows",
     ] {
-        let prepared = prepare_body(route("POST", pattern), None, Some(&json!({"name": "x"})));
+        // Only once a human granted the room « General · write ».
+        let refused = prepare_body(route("POST", pattern), None, Some(&json!({"name": "x"})));
+        assert!(refused.is_err(), "{pattern} needs the general grant");
+        let mut reach = Reach::bound_only(None);
+        reach.granted.general = true;
+        let prepared = prepare_body_in(route("POST", pattern), &reach, Some(&json!({"name": "x"})));
         assert_eq!(prepared.unwrap(), None, "{pattern} stays general");
     }
     for pattern in ["/api/quick-execs", "/api/planning/tasks"] {

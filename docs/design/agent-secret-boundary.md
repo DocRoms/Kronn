@@ -147,11 +147,11 @@ discussion (or one task execution, or one workflow run) and to its project.
   test fails when a declared tool is in neither. The token is minted once the
   runner has bound the launch's model. A worker's token carries its room, not
   its execution id: delivery tools check the dispatch themselves.
-- From a room or run **without a project**, the general resources are the
-  token's home: it may create and edit general Quick Prompts, Quick APIs,
-  Pages and workflows, as a human in that room would. A token bound to a
-  project never writes a general resource; every other creation needs a
-  project.
+- From a room **without a project**, a token reads the general resources.
+  Creating or editing a general Quick Prompt, Quick API, Page or workflow
+  needs the room's « General · write » grant, which a human gives behind a
+  typed confirmation (`docs/design/discussion-project-scope.md`). A token
+  bound to a project never writes a general resource.
 
 **Human proof per action.** Every secret-class route (section 3 rows 3 and 4,
 plus human-credential administration) requires a **proof bound to one action**:

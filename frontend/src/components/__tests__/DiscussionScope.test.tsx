@@ -65,9 +65,15 @@ describe('DiscussionScopeChip', () => {
     expect(screen.getByTestId('disc-scope-pending').textContent).toBe('disc.scopePending:1');
   });
 
-  it('never asks for a room without a project', () => {
+  it('shows the general resources in write in red for a room without a project', async () => {
+    api.scope.mockResolvedValue(scope({
+      primary_project_id: null,
+      grants: [grant({ project_id: null, project_name: null, source: 'general', access: 'write' })],
+    }));
     render(<DiscussionScopeChip discussionId="d1" hasProject={false} t={t} />);
-    expect(api.scope).not.toHaveBeenCalled();
+    const red = await screen.findByTestId('disc-scope-general');
+    expect(red.className).toContain('badge-error');
+    expect(screen.queryByText('disc.scopeAllWrite')).toBeNull();
   });
 });
 
@@ -104,9 +110,34 @@ describe('DiscussionScopeSection', () => {
     await waitFor(() => expect(api.approveScopeRequest).toHaveBeenCalledWith('d1', 'r1', expect.objectContaining({ access: 'read' })));
   });
 
-  it('offers no other project to a room without one', () => {
+  it('lets a room without a project write the general resources only after the typed confirmation', async () => {
+    api.scope.mockResolvedValue(scope({ primary_project_id: null, fingerprint: 'fp-g' }));
+    api.grantScope.mockResolvedValue(grant({ project_id: null, access: 'write', source: 'general' }));
     render(<DiscussionScopeSection discussionId="d1" primaryProjectId={null} projects={projects} toast={toast} t={t} />);
     expect(screen.getByText('disc.scopeNeedsProject')).toBeTruthy();
-    expect(api.scope).not.toHaveBeenCalled();
+    expect(screen.queryByLabelText('disc.scopeAddProject')).toBeNull();
+    await waitFor(() => expect(api.scope).toHaveBeenCalled());
+    fireEvent.click(await screen.findByText('disc.scopeGeneralWrite'));
+    const confirm = screen.getByText('disc.scopeGeneralConfirm').closest('button')!;
+    expect(confirm.disabled).toBe(true);
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'ALL-PROJECTS-WRITE' } });
+    expect(confirm.disabled).toBe(true);
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'GENERAL-WRITE' } });
+    fireEvent.click(confirm);
+    await waitFor(() => expect(api.grantScope).toHaveBeenCalledWith('d1', expect.objectContaining({
+      general: true, all: false, project_id: null, access: 'write', confirm: 'GENERAL-WRITE', expected_fingerprint: 'fp-g',
+    })));
+  });
+
+  it('shows a granted general write with its revoke', async () => {
+    api.scope.mockResolvedValue(scope({
+      primary_project_id: null,
+      grants: [grant({ id: 'gg', project_id: null, project_name: null, source: 'general', access: 'write' })],
+    }));
+    api.revokeScope.mockResolvedValue(scope({ primary_project_id: null }));
+    render(<DiscussionScopeSection discussionId="d1" primaryProjectId={null} projects={projects} toast={toast} t={t} />);
+    expect(await screen.findByText('disc.scopeGeneral')).toBeTruthy();
+    fireEvent.click(screen.getByText('disc.scopeRevoke'));
+    await waitFor(() => expect(api.revokeScope).toHaveBeenCalledWith('d1', 'gg', { reason: null }));
   });
 });

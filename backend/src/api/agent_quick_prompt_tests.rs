@@ -34,6 +34,15 @@ pub(super) async fn state_with_prompts() -> AppState {
         for (id, project) in [("global", None), ("qp-a", Some("a")), ("qp-b", Some("b"))] {
             crate::db::quick_prompts::insert_quick_prompt(conn, &saved_prompt(id, project))?;
         }
+        // A human let the room without a project write the general resources.
+        crate::db::discussion_scope::grant(
+            conn,
+            "general",
+            None,
+            crate::models::discussion_scope::ScopeAccess::Write,
+            crate::models::discussion_scope::ScopeGrantSource::General,
+            "human",
+        )?;
         Ok(())
     }).await.unwrap();
     let mut config = crate::core::config::default_config();

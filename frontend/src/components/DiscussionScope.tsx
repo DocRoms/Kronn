@@ -14,6 +14,10 @@ import './DiscussionScope.css';
 const SCOPE_CHANGED = 'kronn:discussion-scope-changed';
 const POLL_MS = 20_000;
 const ALL_WRITE_CONFIRMATION = 'ALL-PROJECTS-WRITE';
+const GENERAL_WRITE_CONFIRMATION = 'GENERAL-WRITE';
+
+const isGeneral = (grant: DiscussionProjectGrant) => grant.source === 'general';
+const isAll = (grant: DiscussionProjectGrant) => grant.project_id === null && !isGeneral(grant);
 
 type T = (key: string, ...args: (string | number)[]) => string;
 
@@ -56,21 +60,30 @@ function projectName(projects: Project[], id: string | null | undefined, fallbac
   return projects.find(project => project.id === id)?.name ?? fallback ?? id;
 }
 
+function grantLabel(t: T, projects: Project[], grant: DiscussionProjectGrant) {
+  if (isGeneral(grant)) return t('disc.scopeGeneral');
+  if (grant.project_id === null) return t('disc.scopeAllProjects');
+  return projectName(projects, grant.project_id, grant.project_name);
+}
+
 function accessLabel(t: T, access: ScopeAccess) {
   return access === 'write' ? t('disc.scopeWrite') : t('disc.scopeRead');
 }
 
 /** Header chip: nothing for a room on its own project; otherwise the extra
- *  projects, a red badge for every project, and the requests waiting. */
+ *  projects, a red badge for every project or for the general resources in
+ *  write, and the requests waiting. */
 export function DiscussionScopeChip({
-  discussionId, hasProject, onOpen, t,
-}: { discussionId: string; hasProject: boolean; onOpen?: () => void; t: T }) {
-  const { scope } = useDiscussionScope(discussionId, hasProject);
+  discussionId, onOpen, t,
+}: { discussionId: string; hasProject?: boolean; onOpen?: () => void; t: T }) {
+  // A room without a project may hold « General · write »: always read it.
+  const { scope } = useDiscussionScope(discussionId);
   if (!scope) return null;
-  const all = scope.grants.find(grant => grant.project_id === null);
+  const all = scope.grants.find(isAll);
+  const general = scope.grants.find(isGeneral);
   const extra = scope.grants.filter(grant => grant.project_id !== null);
   const pending = scope.requests.filter(request => request.status === 'pending').length;
-  if (!all && extra.length === 0 && pending === 0) return null;
+  if (!all && !general && extra.length === 0 && pending === 0) return null;
   const writes = extra.some(grant => grant.access === 'write');
   return (
     <span className="disc-scope-chips" data-testid="disc-scope-chip">
@@ -82,6 +95,17 @@ export function DiscussionScopeChip({
           title={t('disc.scopeAllTitle')}
         >
           <ShieldAlert size={10} /> {all.access === 'write' ? t('disc.scopeAllWrite') : t('disc.scopeAllRead')}
+        </button>
+      )}
+      {general && (
+        <button
+          type="button"
+          className="badge badge-error disc-scope-chip"
+          onClick={onOpen}
+          title={t('disc.scopeGeneralTitle')}
+          data-testid="disc-scope-general"
+        >
+          <ShieldAlert size={10} /> {t('disc.scopeGeneralWrite')}
         </button>
       )}
       {extra.length > 0 && (
@@ -117,7 +141,7 @@ function GrantRow({
     <li className="disc-scope-row" data-all={all} data-access={grant.access}>
       <span className="disc-scope-row-main">
         {all ? <Globe2 size={11} /> : <Link2 size={11} />}
-        <strong>{all ? t('disc.scopeAllProjects') : projectName(projects, grant.project_id, grant.project_name)}</strong>
+        <strong>{grantLabel(t, projects, grant)}</strong>
         <span className="disc-scope-access">{accessLabel(t, grant.access)}</span>
       </span>
       <span className="disc-scope-meta">
@@ -178,16 +202,12 @@ export function DiscussionScopeSection({
   toast: ToastFn;
   t: T;
 }) {
-  const { scope, refresh } = useDiscussionScope(discussionId, !!primaryProjectId);
+  const { scope, refresh } = useDiscussionScope(discussionId);
   const [project, setProject] = useState('');
   const [access, setAccess] = useState<ScopeAccess>('read');
   const [confirmingAllWrite, setConfirmingAllWrite] = useState(false);
   const [typed, setTyped] = useState('');
   const [busy, setBusy] = useState(false);
-
-  if (!primaryProjectId) {
-    return <p className="disc-scope-hint">{t('disc.scopeNeedsProject')}</p>;
-  }
 
   const run = async (action: () => Promise<unknown>, done: string) => {
     setBusy(true);
@@ -203,9 +223,30 @@ export function DiscussionScopeSection({
     }
   };
 
+  if (!primaryProjectId) {
+    return (
+      <GeneralScope
+        scope={scope}
+        projects={projects}
+        busy={busy}
+        t={t}
+        onGrant={(confirm, fingerprint) => run(
+          () => discussionsApi.grantScope(discussionId, {
+            project_id: null, all: false, general: true, access: 'write', confirm, expected_fingerprint: fingerprint,
+          }),
+          t('disc.scopeGranted'),
+        )}
+        onRevoke={grant => void run(
+          () => discussionsApi.revokeScope(discussionId, grant.id, { reason: null }),
+          t('disc.scopeRevoked'),
+        )}
+      />
+    );
+  }
+
   const grants = scope?.grants ?? [];
   const pending = (scope?.requests ?? []).filter(request => request.status === 'pending');
-  const all = grants.find(grant => grant.project_id === null);
+  const all = grants.find(isAll);
   const granted = new Set(grants.map(grant => grant.project_id));
   const candidates = projects.filter(p => p.id !== primaryProjectId && !granted.has(p.id));
 
@@ -277,7 +318,7 @@ export function DiscussionScopeSection({
           disabled={!project || busy}
           onClick={() => void run(
             () => discussionsApi.grantScope(discussionId, {
-              project_id: project, all: false, access, confirm: null, expected_fingerprint: null,
+              project_id: project, all: false, general: false, access, confirm: null, expected_fingerprint: null,
             }).then(() => setProject('')),
             t('disc.scopeGranted'),
           )}
@@ -295,7 +336,7 @@ export function DiscussionScopeSection({
             disabled={busy}
             onClick={() => void run(
               () => discussionsApi.grantScope(discussionId, {
-                project_id: null, all: true, access: 'read', confirm: null, expected_fingerprint: null,
+                project_id: null, all: true, general: false, access: 'read', confirm: null, expected_fingerprint: null,
               }),
               t('disc.scopeGranted'),
             )}
@@ -334,6 +375,7 @@ export function DiscussionScopeSection({
                 () => discussionsApi.grantScope(discussionId, {
                   project_id: null,
                   all: true,
+                  general: false,
                   access: 'write',
                   confirm: typed,
                   expected_fingerprint: scope.fingerprint,
@@ -356,8 +398,90 @@ export function DiscussionScopeSection({
           <ul>
             {scope?.revoked.map(grant => (
               <li key={grant.id}>
-                {grant.project_id === null ? t('disc.scopeAllProjects') : projectName(projects, grant.project_id, grant.project_name)}
+                {grantLabel(t, projects, grant)}
                 {' · '}{accessLabel(t, grant.access)}{' · '}
+                {t('disc.scopeRevokedBy', grant.revoked_by ?? '?', grant.revoked_at ? new Date(grant.revoked_at).toLocaleString() : '?')}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+    </div>
+  );
+}
+
+/** A room without a project: it reads the general resources; writing them,
+ *  which every project sees, is a human's decision behind a typed
+ *  confirmation, shown in red and revocable (KT-1346). */
+function GeneralScope({
+  scope, projects, busy, onGrant, onRevoke, t,
+}: {
+  scope: DiscussionScope | null;
+  projects: Project[];
+  busy: boolean;
+  onGrant: (confirm: string, fingerprint: string) => Promise<void>;
+  onRevoke: (grant: DiscussionProjectGrant) => void;
+  t: T;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const [typed, setTyped] = useState('');
+  const general = scope?.grants.find(isGeneral);
+  const revoked = (scope?.revoked ?? []).filter(isGeneral);
+  return (
+    <div className="disc-scope" data-testid="disc-scope-section">
+      <p className="disc-scope-hint">{t('disc.scopeNeedsProject')}</p>
+      <p className="disc-scope-hint">{t('disc.scopeGeneralHint')}</p>
+      {general ? (
+        <ul className="disc-scope-list" aria-label={t('disc.scopeGrants')}>
+          <GrantRow grant={general} projects={projects} t={t} onRevoke={() => onRevoke(general)} />
+        </ul>
+      ) : (
+        <div className="disc-scope-all">
+          <span className="disc-scope-all-title"><ShieldAlert size={11} /> {t('disc.scopeGeneral')}</span>
+          {!confirming && (
+            <button
+              type="button"
+              className="btn-danger disc-scope-btn"
+              disabled={busy || !scope}
+              onClick={() => { setConfirming(true); setTyped(''); }}
+            >
+              {t('disc.scopeGeneralWrite')}
+            </button>
+          )}
+        </div>
+      )}
+      {confirming && !general && scope && (
+        <div className="disc-scope-confirm" role="alertdialog" aria-label={t('disc.scopeGeneralWrite')}>
+          <p>{t('disc.scopeGeneralWarning')}</p>
+          <p>{t('disc.scopeAllWriteType', GENERAL_WRITE_CONFIRMATION)}</p>
+          <input
+            className="disc-popover-select"
+            value={typed}
+            onChange={event => setTyped(event.target.value)}
+            aria-label={t('disc.scopeAllWriteType', GENERAL_WRITE_CONFIRMATION)}
+          />
+          <span className="disc-scope-actions">
+            <button
+              type="button"
+              className="btn-danger disc-scope-btn"
+              disabled={busy || typed !== GENERAL_WRITE_CONFIRMATION}
+              onClick={() => void onGrant(typed, scope.fingerprint).then(() => setConfirming(false))}
+            >
+              {t('disc.scopeGeneralConfirm')}
+            </button>
+            <button type="button" className="disc-scope-btn" onClick={() => setConfirming(false)}>
+              {t('disc.scopeCancel')}
+            </button>
+          </span>
+        </div>
+      )}
+      {revoked.length > 0 && (
+        <details className="disc-scope-journal">
+          <summary>{t('disc.scopeJournal', revoked.length)}</summary>
+          <ul>
+            {revoked.map(grant => (
+              <li key={grant.id}>
+                {t('disc.scopeGeneral')}{' · '}{accessLabel(t, grant.access)}{' · '}
                 {t('disc.scopeRevokedBy', grant.revoked_by ?? '?', grant.revoked_at ? new Date(grant.revoked_at).toLocaleString() : '?')}
               </li>
             ))}

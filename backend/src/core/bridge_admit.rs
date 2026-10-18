@@ -85,7 +85,8 @@ pub async fn admit(
     }
     // The room grants (KT-1270), re-read on every call: a revoke applies to
     // the next request, and a failed read refuses rather than guessing.
-    let reach = if project.is_some() {
+    // Without a project only the room's « General · write » grant applies.
+    let reach = if project.is_some() || !grant.scope.room_grant_discussions.is_empty() {
         let owned = grant.scope.room_grant_discussions.clone();
         let run = grant.scope.workflow_run_id.clone();
         let granted = db

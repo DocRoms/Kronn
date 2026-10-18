@@ -26,6 +26,8 @@ pub struct GrantedProjects {
     pub read: HashSet<String>,
     pub write: HashSet<String>,
     pub all: Option<ScopeAccess>,
+    /// A room without a project may write the general resources.
+    pub general: bool,
 }
 
 impl GrantedProjects {
@@ -33,6 +35,7 @@ impl GrantedProjects {
     pub fn merge(&mut self, other: GrantedProjects) {
         self.read.extend(other.read);
         self.write.extend(other.write);
+        self.general |= other.general;
         self.all = match (self.all, other.all) {
             (Some(ScopeAccess::Write), _) | (_, Some(ScopeAccess::Write)) => {
                 Some(ScopeAccess::Write)
@@ -115,16 +118,24 @@ pub fn granted_projects(conn: &Connection, discussion_ids: &[String]) -> Result<
     }
     let placeholders = vec!["?"; discussion_ids.len()].join(", ");
     let sql = format!(
-        "SELECT project_id, access FROM discussion_project_grants \
+        "SELECT project_id, access, source FROM discussion_project_grants \
          WHERE revoked_at IS NULL AND discussion_id IN ({placeholders})"
     );
     let mut statement = conn.prepare(&sql)?;
     let rows = statement.query_map(rusqlite::params_from_iter(discussion_ids), |row| {
-        Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?))
+        Ok((
+            row.get::<_, Option<String>>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
     })?;
     for row in rows {
-        let (project, access) = row?;
+        let (project, access, source) = row?;
         let access = ScopeAccess::parse(&access)?;
+        if ScopeGrantSource::parse(&source)? == ScopeGrantSource::General {
+            granted.general |= access == ScopeAccess::Write;
+            continue;
+        }
         match project {
             None => {
                 granted.all = Some(match (granted.all, access) {
@@ -201,10 +212,11 @@ pub fn fingerprint(grants: &[DiscussionProjectGrant]) -> String {
         .iter()
         .map(|grant| {
             format!(
-                "{}|{}|{}",
+                "{}|{}|{}|{}",
                 grant.id,
                 grant.project_id.as_deref().unwrap_or("*"),
-                grant.access.as_str()
+                grant.access.as_str(),
+                grant.source.as_str()
             )
         })
         .collect();
@@ -276,6 +288,18 @@ fn check_target(
     let Some(primary) = primary_project(conn, discussion_id)? else {
         return Err(ScopeError::NotFound("discussion not found".into()).into());
     };
+    // The general resources are a room without a project's own reach; a
+    // project's room writes its project.
+    match (primary.as_deref(), source) {
+        (None, ScopeGrantSource::General) if project.is_none() => return Ok(()),
+        (None, ScopeGrantSource::General) => {
+            return invalid("the general resources are granted without a project")
+        }
+        (Some(_), ScopeGrantSource::General) => {
+            return invalid("a room with a project writes its project, not the general resources")
+        }
+        _ => {}
+    }
     let Some(primary) = primary else {
         return invalid("a discussion without a project cannot reach other projects");
     };
