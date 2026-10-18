@@ -350,9 +350,14 @@ pub struct DispositionGap {
 }
 
 /// The signals the Step-8 output surface does not address.
+///
+/// Kronn's own `## Unaddressed detector signals` section never disposes of
+/// anything (KT-1357): it is the record of what the agent left open, so it is
+/// read only when `count_fallback` is set, to verify a section just written.
 fn undisposed_in_output<'a>(
     project_path: &Path,
     signals: &'a [crate::core::audit_detectors::DetectedSignal],
+    count_fallback: bool,
 ) -> Vec<&'a crate::core::audit_detectors::DetectedSignal> {
     if signals.is_empty() {
         return Vec::new();
@@ -365,9 +370,12 @@ fn undisposed_in_output<'a>(
     // gate the detail files through `parse_index_td_ids` so only the
     // current run's live findings contribute to disposition.
     let docs_root = DocsRoot::of(project_path);
-    let index_content =
+    let mut index_content =
         std::fs::read_to_string(docs_root.file(project_path, "inconsistencies-tech-debt.md"))
             .unwrap_or_default();
+    if !count_fallback {
+        index_content = crate::core::audit_detectors::without_unaddressed_section(&index_content);
+    }
     let listed_ids = super::reconciliation::parse_index_td_ids(&index_content);
     let mut combined = index_content;
     let td_dir = docs_root.file(project_path, "tech-debt");
@@ -400,7 +408,7 @@ pub fn detector_disposition_gap(
     project_path: &Path,
     signals: &[crate::core::audit_detectors::DetectedSignal],
 ) -> Option<DispositionGap> {
-    let undisposed = undisposed_in_output(project_path, signals);
+    let undisposed = undisposed_in_output(project_path, signals, false);
     if undisposed.is_empty() {
         return None;
     }
@@ -453,29 +461,22 @@ pub fn settle_unaddressed_signals(
     project_path: &Path,
     signals: &[crate::core::audit_detectors::DetectedSignal],
 ) -> Option<usize> {
-    let undisposed = undisposed_in_output(project_path, signals);
+    // Every current signal still lacking a disposition from the agent, whatever
+    // an earlier settlement listed: the section is rebuilt, never accumulated.
+    let undisposed = undisposed_in_output(project_path, signals, false);
     if undisposed.is_empty() {
         return None;
     }
     let index = DocsRoot::of(project_path).file(project_path, "inconsistencies-tech-debt.md");
     let content = std::fs::read_to_string(&index).ok()?;
-    let heading = crate::core::audit_detectors::UNADDRESSED_HEADING;
-    // A previous settlement is replaced, never stacked.
-    let kept = match content.find(heading) {
-        Some(at) => {
-            let tail = &content[at + heading.len()..];
-            let end = tail
-                .find("\n## ")
-                .map_or(content.len(), |n| at + heading.len() + n + 1);
-            format!("{}{}", &content[..at], &content[end..])
-        }
-        None => content,
-    };
+    let kept = crate::core::audit_detectors::without_unaddressed_section(&content);
     let section = crate::core::audit_detectors::render_unaddressed_section(&undisposed);
     let written = format!("{}\n\n{section}", kept.trim_end());
-    crate::core::mcp_scanner::atomic_write(&index, &written).ok()?;
+    if written != content {
+        crate::core::mcp_scanner::atomic_write(&index, &written).ok()?;
+    }
     // The listing must actually dispose of them, or the failure stands.
-    undisposed_in_output(project_path, signals)
+    undisposed_in_output(project_path, signals, true)
         .is_empty()
         .then_some(undisposed.len())
 }
@@ -1077,9 +1078,10 @@ mod tests {
             "{written}"
         );
         assert!(written.contains("src/Headers.php:87"), "{written}");
-        assert!(check_detector_disposition(tmp.path(), &signals).is_none());
-        // Nothing left to list, nothing rewritten.
-        assert_eq!(settle_unaddressed_signals(tmp.path(), &signals), None);
+        // Kronn's own record of the omissions is not a disposition by the agent.
+        assert!(check_detector_disposition(tmp.path(), &signals).is_some());
+        // Settling again rebuilds the same section: nothing is rewritten.
+        assert_eq!(settle_unaddressed_signals(tmp.path(), &signals), Some(2));
         assert_eq!(std::fs::read_to_string(&index).unwrap(), written);
         // A later signal replaces the section instead of stacking another.
         let more = vec![mk_signal(
@@ -1098,6 +1100,46 @@ mod tests {
         // No index to append to: the failure stands.
         let empty = tempfile::TempDir::new().unwrap();
         assert_eq!(settle_unaddressed_signals(empty.path(), &signals), None);
+    }
+
+    #[test]
+    fn a_later_settlement_lists_every_signal_still_open_not_only_the_new_one() {
+        // Review of 41b23d78d: settle([A]) then settle([A, B]) kept only B and
+        // the recheck found A open again.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let docs = tmp.path().join("docs");
+        std::fs::create_dir_all(docs.join("tech-debt")).unwrap();
+        let index = docs.join("inconsistencies-tech-debt.md");
+        std::fs::write(&index, "# Debt\n\n## Notes\nKept.\n").unwrap();
+        let a = mk_signal("csp-unsafe", "src/Headers.php:87", "CSP unsafe-eval");
+        let b = mk_signal("blank-noopener", "templates/p.html.twig:12", "_blank");
+        assert_eq!(
+            settle_unaddressed_signals(tmp.path(), std::slice::from_ref(&a)),
+            Some(1)
+        );
+        let both = vec![a.clone(), b.clone()];
+        assert_eq!(settle_unaddressed_signals(tmp.path(), &both), Some(2));
+        let written = std::fs::read_to_string(&index).unwrap();
+        assert_eq!(
+            written.matches("## Unaddressed detector signals").count(),
+            1
+        );
+        assert!(written.contains("src/Headers.php:87"), "{written}");
+        assert!(written.contains("templates/p.html.twig:12"), "{written}");
+        assert!(written.contains("## Notes\nKept."), "{written}");
+        // The agent's own disposition of A still removes it from the listing.
+        std::fs::write(
+            &index,
+            format!(
+                "# Debt\n\nsrc/Headers.php:87 is a TD.\n\n{}",
+                &written[written.find("## Unaddressed").unwrap()..]
+            ),
+        )
+        .unwrap();
+        assert_eq!(settle_unaddressed_signals(tmp.path(), &both), Some(1));
+        let narrowed = std::fs::read_to_string(&index).unwrap();
+        assert!(!narrowed.contains("| `src/Headers.php:87`"), "{narrowed}");
+        assert!(narrowed.contains("templates/p.html.twig:12"), "{narrowed}");
     }
 
     #[test]

@@ -431,10 +431,32 @@ fn split_verified_citations(project: &Path, content: &str) -> Option<String> {
             };
             let marker = &rest[..=end];
             let raw = &rest[11..end];
+            // A marker quoted inside an inline code span is an example: kept as is.
+            let offset = line.len() - rest.len();
+            if line[..offset].matches('`').count() % 2 == 1 {
+                output.push_str(marker);
+                rest = &rest[end + 1..];
+                continue;
+            }
+            let pieces: Vec<&str> = raw
+                .split(',')
+                .map(|part| {
+                    let part = part.trim();
+                    part.strip_prefix("file:").map(str::trim).unwrap_or(part)
+                })
+                .collect();
             // KT-1357: `deploy.yml:210,214,218` lists lines of the first path.
-            let first_path = raw.split(',').next().and_then(|first| {
-                let (path, _) = first.trim().rsplit_once(':')?;
+            // A bare line is only attributed when the list names a single path:
+            // with several, nothing says which one the number belongs to.
+            let first_path = pieces.first().and_then(|first| {
+                let (path, _) = first.rsplit_once(':')?;
                 Some(path.trim())
+            });
+            let single_path = first_path.is_some_and(|only| {
+                pieces
+                    .iter()
+                    .filter_map(|piece| piece.rsplit_once(':'))
+                    .all(|(path, _)| path.trim() == only)
             });
             let parts: Vec<String> = raw
                 .split(',')
@@ -447,7 +469,8 @@ fn split_verified_citations(project: &Path, content: &str) -> Option<String> {
                     let part = part.strip_prefix("file:").map(str::trim).unwrap_or(part);
                     match first_path {
                         Some(path)
-                            if !part.contains(':')
+                            if single_path
+                                && !part.contains(':')
                                 && crate::core::anti_halluc::parse_line_bounds(part).is_some() =>
                         {
                             format!("{path}:{part}")
@@ -759,6 +782,79 @@ mod tests {
                 "{text}"
             );
         }
+    }
+
+    #[test]
+    fn the_comma_lists_of_the_matrix_split_and_an_ambiguous_mix_is_left_alone() {
+        // Bc matrix 682170025: apollo step 5, docroms step 8, africanews step 8.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".github/workflows")).unwrap();
+        std::fs::create_dir_all(root.join("templates/partials")).unwrap();
+        let lines = (1..=220).map(|n| format!("l{n}\n")).collect::<String>();
+        for file in ["CI_Quality-test.yaml", "deploy.yml", "ops.yml"] {
+            std::fs::write(root.join(".github/workflows").join(file), &lines).unwrap();
+        }
+        std::fs::write(root.join("templates/partials/footer.html.twig"), &lines).unwrap();
+        assert_eq!(
+            split_verified_citations(
+                root,
+                "[src: file: .github/workflows/CI_Quality-test.yaml:19,25]\n"
+            )
+            .as_deref(),
+            Some("[src: file: .github/workflows/CI_Quality-test.yaml:19] [src: file: .github/workflows/CI_Quality-test.yaml:25]\n")
+        );
+        assert_eq!(
+            split_verified_citations(root, "[src: file: .github/workflows/ops.yml:96,156,195]\n")
+                .as_deref(),
+            Some("[src: file: .github/workflows/ops.yml:96] [src: file: .github/workflows/ops.yml:156] [src: file: .github/workflows/ops.yml:195]\n")
+        );
+        assert_eq!(
+            split_verified_citations(root, "[src: file: templates/partials/footer.html.twig:31,43]\n")
+                .as_deref(),
+            Some("[src: file: templates/partials/footer.html.twig:31] [src: file: templates/partials/footer.html.twig:43]\n")
+        );
+        // Two paths that both resolve: each keeps its own line, nothing is guessed.
+        assert_eq!(
+            split_verified_citations(
+                root,
+                "[src: file: .github/workflows/deploy.yml:210, .github/workflows/ops.yml:96]\n"
+            )
+            .as_deref(),
+            Some("[src: file: .github/workflows/deploy.yml:210] [src: file: .github/workflows/ops.yml:96]\n")
+        );
+        // A bare number after several paths belongs to none of them in particular.
+        std::fs::write(root.join("a.rs"), "1\n2\n3\n").unwrap();
+        std::fs::write(root.join("b.rs"), "1\n2\n3\n").unwrap();
+        for text in [
+            "[src: file: a.rs:1, b.rs:2, 3]\n",
+            "[src: file: a.rs:1, 3, b.rs:2]\n",
+            "[src: file: a.rs:1, b.rs:2, file: 3]\n",
+        ] {
+            assert!(split_verified_citations(root, text).is_none(), "{text}");
+        }
+        // One path named again keeps the shortcut.
+        assert_eq!(
+            split_verified_citations(root, "[src: file: a.rs:1, a.rs:2, 3]\n").as_deref(),
+            Some("[src: file: a.rs:1] [src: file: a.rs:2] [src: file: a.rs:3]\n")
+        );
+    }
+
+    #[test]
+    fn a_list_quoted_in_an_inline_code_span_is_an_example_and_stays_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "1\n2\n3\n").unwrap();
+        let quoted = "The form `[src: file: a.rs:1,2]` is split by Kronn.\n";
+        assert!(split_verified_citations(dir.path(), quoted).is_none());
+        // The real list on the same line is still split; the quoted one is not.
+        assert_eq!(
+            split_verified_citations(
+                dir.path(),
+                "Write `[src: file: a.rs:1,2]` not [src: file: a.rs:1,3]\n"
+            )
+            .as_deref(),
+            Some("Write `[src: file: a.rs:1,2]` not [src: file: a.rs:1] [src: file: a.rs:3]\n")
+        );
     }
 
     #[test]

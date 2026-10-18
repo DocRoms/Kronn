@@ -748,6 +748,15 @@ fn names_file_and_line(haystack: &str, signals: &[DetectedSignal], sig: &Detecte
     let Some(name) = path.rsplit('/').next().filter(|name| !name.is_empty()) else {
         return false;
     };
+    // A bare name stands for the path only when no other flagged path shares it.
+    let shared = signals.iter().any(|other| {
+        line_signal_path(other).is_some_and(|other_path| {
+            other_path != path && other_path.rsplit('/').next() == Some(name)
+        })
+    });
+    if shared {
+        return false;
+    }
     signals
         .iter()
         .filter(|other| line_signal_path(other).as_deref() == Some(path.as_str()))
@@ -762,7 +771,7 @@ fn names_file_and_line(haystack: &str, signals: &[DetectedSignal], sig: &Detecte
             haystack.match_indices(&needle).any(|(at, _)| {
                 let before = haystack[..at].chars().next_back();
                 let after = haystack[at + needle.len()..].chars().next();
-                !before.is_some_and(|c| c.is_alphanumeric() || matches!(c, '.' | '_' | '-'))
+                !before.is_some_and(|c| c.is_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
                     && !after.is_some_and(|c| c.is_ascii_digit())
             })
         })
@@ -804,6 +813,19 @@ pub fn render_unaddressed_section(signals: &[&DetectedSignal]) -> String {
 
 /// Heading of the section [`render_unaddressed_section`] writes.
 pub const UNADDRESSED_HEADING: &str = "## Unaddressed detector signals";
+
+/// `content` without Kronn's own unaddressed-signals section (up to the next
+/// `## ` heading): what the agent wrote, minus the record of its omissions.
+pub fn without_unaddressed_section(content: &str) -> String {
+    let Some(at) = content.find(UNADDRESSED_HEADING) else {
+        return content.to_string();
+    };
+    let tail = &content[at + UNADDRESSED_HEADING.len()..];
+    let end = tail
+        .find("\n## ")
+        .map_or(content.len(), |n| at + UNADDRESSED_HEADING.len() + n + 1);
+    format!("{}{}", &content[..at], &content[end..])
+}
 
 // ─── Rendering ───────────────────────────────────────────────────────────
 
@@ -1415,6 +1437,40 @@ mod tests {
         ] {
             assert!(!undisposed_signals(&signals, output).is_empty(), "{output}");
         }
+    }
+
+    #[test]
+    fn a_shared_file_name_never_hides_the_signal_of_the_other_path() {
+        let signals = vec![
+            sig(
+                "csp-unsafe",
+                "Security",
+                Severity::Medium,
+                "CSP weakened with `unsafe-eval`",
+                "templates/public/index.html.twig:6",
+            ),
+            sig(
+                "csp-unsafe",
+                "Security",
+                Severity::Medium,
+                "CSP weakened with `unsafe-eval`",
+                "templates/admin/index.html.twig:6",
+            ),
+        ];
+        // Only the public path is named: the admin one stays open.
+        let un = undisposed_signals(&signals, "see templates/public/index.html.twig:6");
+        assert_eq!(un.len(), 1);
+        assert_eq!(un[0].evidence, "templates/admin/index.html.twig:6");
+        // The bare name is ambiguous between the two: it stands for neither.
+        assert_eq!(undisposed_signals(&signals, "index.html.twig:6").len(), 2);
+        // Both full paths dispose of both.
+        let both = "templates/public/index.html.twig:6 and templates/admin/index.html.twig:6";
+        assert!(undisposed_signals(&signals, both).is_empty());
+        // A name unique among the signals still stands for its path, but not as
+        // the tail of another directory's file.
+        let one = &signals[..1];
+        assert!(undisposed_signals(one, "index.html.twig:6").is_empty());
+        assert_eq!(undisposed_signals(one, "vendor/index.html.twig:6").len(), 1);
     }
 
     #[test]
