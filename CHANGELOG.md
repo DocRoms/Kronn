@@ -640,6 +640,13 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- Confluence links read from Jira no longer come back as `***spaces/…`
+  (KT-1331, the rest of KT-1249). The Atlassian plugin declares
+  `CONFLUENCE_URL` as public configuration, like `JIRA_URL`: it was masked as a
+  secret in every API response, so a workflow that rewrote a Jira description
+  wrote the masked links back. The registry definition updates installed
+  plugins at the next start.
+
 - An audit no longer lets a fabricated `deps:` or `url:` provenance reach the
   Stack table in the default (warn) mode (KT-1308). A `[src: deps: …]`
   citation the injected dependency watch does not hold, and a
