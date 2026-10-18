@@ -604,9 +604,12 @@ Release notes for 0.9.3 and earlier are available in the
 
 - An audit TD card no longer fails for the whole batch when one TD cannot be
   written (KT-1348, GitHub #258, reported by tarussio). A batch is now partial
-  by design: every TD that can be recorded is, and the answer lists the ones
-  that were not, each named with its reason (a card where nothing could be
-  recorded stays pending and names each TD). A sheet whose status lives only
+  by design: every TD that can be recorded is, and the card stays pending,
+  narrowed to the ones that were not, each named with its reason on the card.
+  Once the sheet is repaired, answering again applies only those (no TD is
+  written or accepted twice) and the validation resumes after the last one. A
+  card where nothing could be recorded stays pending whole and names each TD.
+  A sheet whose status lives only
   in `audit_history`, and a TD only the index lists, are resolved; and
   answering one card no longer makes a later row-only TD of the same
   validation unresolvable (the index resync keeps such a row as a bullet,

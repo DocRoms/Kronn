@@ -364,7 +364,12 @@ fn single_card_resolves_a_history_only_sheet_and_an_index_only_td() {
     )
     .unwrap();
     std::fs::write(docs.join("inconsistencies-tech-debt.md"), INDEX_ONLY_ROWS).unwrap();
-    insert_audit_card(&conn, "single-history", "k-history", &["TD-20261016-history"]);
+    insert_audit_card(
+        &conn,
+        "single-history",
+        "k-history",
+        &["TD-20261016-history"],
+    );
     insert_audit_card(&conn, "single-legacy", "k-legacy", &["TD-20261016-legacy"]);
 
     let request = |key: &str| AnswerDiscussionQuestionRequest {
@@ -373,17 +378,39 @@ fn single_card_resolves_a_history_only_sheet_and_an_index_only_td() {
         text: None,
         idempotency_key: key.into(),
     };
-    answer(&conn, "d", "question:single-history:0", &request("a"), "Human", None).unwrap();
-    answer(&conn, "d", "question:single-legacy:0", &request("b"), "Human", None).unwrap();
+    answer(
+        &conn,
+        "d",
+        "question:single-history:0",
+        &request("a"),
+        "Human",
+        None,
+    )
+    .unwrap();
+    answer(
+        &conn,
+        "d",
+        "question:single-legacy:0",
+        &request("b"),
+        "Human",
+        None,
+    )
+    .unwrap();
 
     let history = std::fs::read_to_string(docs.join("tech-debt/TD-20261016-history.md")).unwrap();
-    assert!(history.contains("- **Status**: Confirmed by user"), "{history}");
+    assert!(
+        history.contains("- **Status**: Confirmed by user"),
+        "{history}"
+    );
     assert_eq!(
         strict_statuses(&history),
         ["Verified in source", "Confirmed by user"]
     );
     let legacy = std::fs::read_to_string(docs.join("tech-debt/TD-20261016-legacy.md")).unwrap();
-    assert!(legacy.contains("- **Status**: Confirmed by user"), "{legacy}");
+    assert!(
+        legacy.contains("- **Status**: Confirmed by user"),
+        "{legacy}"
+    );
     assert_eq!(strict_statuses(&legacy), ["Confirmed by user"]);
 }
 
@@ -408,7 +435,10 @@ fn batch_card_resolves_both_shapes_together() {
         "d",
         "question:batch-shapes:0",
         &batch_answer(
-            &[("TD-20261016-history", "defer"), ("TD-20261016-legacy", "reject")],
+            &[
+                ("TD-20261016-history", "defer"),
+                ("TD-20261016-legacy", "reject"),
+            ],
             "shapes",
         ),
         "Human",
@@ -469,12 +499,41 @@ fn one_bad_td_never_blocks_the_others_of_a_batch_and_is_named() {
         None,
     )
     .unwrap();
-    assert_eq!(question.state, DiscussionQuestionState::Answered);
+    // The card is not closed: it keeps only the TDs that were not recorded.
+    assert_eq!(question.state, DiscussionQuestionState::Pending);
+    assert!(question.answer.is_none());
+    let left: Vec<_> = question.items.iter().map(|i| i.id.as_str()).collect();
+    assert_eq!(left, ["TD-20261016-broken", "TD-20261016-ghost"]);
+    let shown = question.context.as_deref().expect("reasons on the card");
+    assert!(shown.contains("could not record 2 of 4"), "{shown}");
+    assert!(shown.contains("- TD-20261016-broken:"), "{shown}");
+    assert!(shown.contains("- TD-20261016-ghost:"), "{shown}");
+    assert!(!shown.contains("- TD-20261016-good:"), "{shown}");
+    assert!(!shown.contains("- TD-20261016-history:"), "{shown}");
+    let stored = list(&conn, "d").unwrap();
+    assert_eq!(stored.pending_count, 1);
+    assert_eq!(
+        stored.questions[0].items, question.items,
+        "durable, not just returned"
+    );
+    assert_eq!(dispatch_count(&conn), 0, "no resume while a TD is pending");
+    assert!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE id='question-answer:question:batch-mixed:0'",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap()
+            == 0,
+        "the card has no final answer yet"
+    );
 
     let good_sheet = std::fs::read_to_string(&good).unwrap();
-    assert_eq!(strict_statuses(&good_sheet), ["Inferred", "Confirmed by user"]);
-    let history =
-        std::fs::read_to_string(docs.join("tech-debt/TD-20261016-history.md")).unwrap();
+    assert_eq!(
+        strict_statuses(&good_sheet),
+        ["Inferred", "Confirmed by user"]
+    );
+    let history = std::fs::read_to_string(docs.join("tech-debt/TD-20261016-history.md")).unwrap();
     assert_eq!(
         strict_statuses(&history),
         ["Verified in source", "Confirmed by user"]
@@ -486,13 +545,97 @@ fn one_bad_td_never_blocks_the_others_of_a_batch_and_is_named() {
     );
     assert!(!docs.join("tech-debt/TD-20261016-ghost.md").exists());
 
-    let message = answer_message(&conn, "question:batch-mixed:0");
-    let shown = &message[message.find("could not record").expect(&message)..];
-    assert!(shown.contains("could not record 2 of 4"), "{shown}");
-    assert!(shown.contains("- TD-20261016-broken:"), "{shown}");
-    assert!(shown.contains("- TD-20261016-ghost:"), "{shown}");
-    assert!(!shown.contains("- TD-20261016-good:"), "{shown}");
-    assert!(!shown.contains("- TD-20261016-history:"), "{shown}");
+    // Repair both, then answer again: only the two left are applied.
+    std::fs::write(&broken, td_fixture("Inferred", "Low")).unwrap();
+    std::fs::write(docs.join("inconsistencies-tech-debt.md"), GHOST_ROW).unwrap();
+    // A stale full answer is refused: the card no longer carries those TDs.
+    assert!(answer(
+        &conn,
+        "d",
+        "question:batch-mixed:0",
+        &batch_answer(
+            &[
+                ("TD-20261016-good", "reject"),
+                ("TD-20261016-broken", "accept_decision"),
+                ("TD-20261016-ghost", "confirm"),
+                ("TD-20261016-history", "reject"),
+            ],
+            "stale",
+        ),
+        "Human",
+        None,
+    )
+    .is_err());
+    let done = answer(
+        &conn,
+        "d",
+        "question:batch-mixed:0",
+        &batch_answer(
+            &[
+                ("TD-20261016-broken", "accept_decision"),
+                ("TD-20261016-ghost", "confirm"),
+            ],
+            "repair",
+        ),
+        "Human",
+        None,
+    )
+    .unwrap();
+    assert_eq!(done.state, DiscussionQuestionState::Answered);
+    assert_eq!(list(&conn, "d").unwrap().pending_count, 0);
+    assert_eq!(dispatch_count(&conn), 1, "the validation resumes once");
+    assert_eq!(
+        strict_statuses(&std::fs::read_to_string(&good).unwrap()),
+        ["Inferred", "Confirmed by user"],
+        "an applied TD is not written twice"
+    );
+    assert_eq!(
+        strict_statuses(
+            &std::fs::read_to_string(docs.join("tech-debt/TD-20261016-history.md")).unwrap()
+        ),
+        ["Verified in source", "Confirmed by user"]
+    );
+    let repaired = std::fs::read_to_string(&broken).unwrap();
+    // The ADR settle step appends its own history entry after the card's.
+    assert_eq!(
+        strict_statuses(&repaired)[..2],
+        ["Inferred", "Accepted decision"]
+    );
+    assert_eq!(
+        repaired.matches("- **Decision record**: ADR-0001").count(),
+        1,
+        "{repaired}"
+    );
+    let ghost = std::fs::read_to_string(docs.join("tech-debt/TD-20261016-ghost.md")).unwrap();
+    assert_eq!(strict_statuses(&ghost), ["Confirmed by user"]);
+    let decisions = std::fs::read_to_string(docs.join("decisions.md")).unwrap();
+    assert_eq!(decisions.matches("## ADR-").count(), 1, "{decisions}");
+    // Replaying the final answer is idempotent.
+    answer(
+        &conn,
+        "d",
+        "question:batch-mixed:0",
+        &batch_answer(
+            &[
+                ("TD-20261016-broken", "accept_decision"),
+                ("TD-20261016-ghost", "confirm"),
+            ],
+            "repair",
+        ),
+        "Human",
+        None,
+    )
+    .unwrap();
+    assert_eq!(dispatch_count(&conn), 1);
+}
+
+const GHOST_ROW: &str = "# Index\n\n## Current list\n\n| ID | Problem | Area | Severity | Status |\n|----|---------|------|----------|--------|\n| TD-20261016-ghost | Ghost one-liner | API | High | Open |\n";
+
+fn dispatch_count(conn: &Connection) -> i64 {
+    conn.query_row("SELECT COUNT(*) FROM agent_dispatch_jobs", [], |row| {
+        row.get(0)
+    })
+    .unwrap()
 }
 
 #[test]
@@ -532,8 +675,19 @@ fn a_card_where_no_td_can_be_recorded_stays_pending_and_names_each_td() {
         text: None,
         idempotency_key: "ghost".into(),
     };
-    let error = answer(&conn, "d", "question:single-ghost:0", &single, "Human", None).unwrap_err();
-    assert!(format!("{error:?}").contains("TD-20261016-ghost-c"), "{error:?}");
+    let error = answer(
+        &conn,
+        "d",
+        "question:single-ghost:0",
+        &single,
+        "Human",
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        format!("{error:?}").contains("TD-20261016-ghost-c"),
+        "{error:?}"
+    );
 }
 
 #[test]

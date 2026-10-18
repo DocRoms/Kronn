@@ -992,6 +992,51 @@ pub fn answer(
     }
 }
 
+/// Marks the failure note a partial TD card appends to its context, so the next
+/// partial replaces it instead of stacking.
+const PARTIAL_NOTE_MARK: &str = "⚠ ";
+
+/// Keeps only the failed items on a pending card and writes the reasons on it.
+/// Returns the card's new context.
+fn narrow_to_failed(
+    conn: &Connection,
+    question_id: &str,
+    failed_ids: &[&str],
+    note: &str,
+) -> Result<Option<String>, AnswerError> {
+    let payload: String = conn
+        .query_row(
+            "SELECT payload_json FROM discussion_questions WHERE id=?1",
+            [question_id],
+            |row| row.get(0),
+        )
+        .map_err(anyhow::Error::from)?;
+    let mut spec: QuestionSpec = serde_json::from_str(&payload).map_err(anyhow::Error::from)?;
+    spec.items
+        .retain(|item| failed_ids.contains(&item.id.as_str()));
+    let base = spec.context.take().unwrap_or_default();
+    let base = base
+        .split(PARTIAL_NOTE_MARK)
+        .next()
+        .unwrap_or("")
+        .trim_end();
+    let separator = if base.is_empty() { "" } else { "\n\n" };
+    let mut context = format!("{base}{separator}{PARTIAL_NOTE_MARK}{note}");
+    if context.chars().count() > 4000 {
+        context = context.chars().take(3999).collect::<String>() + "…";
+    }
+    spec.context = Some(context);
+    conn.execute(
+        "UPDATE discussion_questions SET payload_json=?2 WHERE id=?1 AND state='pending'",
+        params![
+            question_id,
+            serde_json::to_string(&spec).map_err(anyhow::Error::from)?
+        ],
+    )
+    .map_err(anyhow::Error::from)?;
+    Ok(spec.context)
+}
+
 fn answer_inner(
     conn: &Connection,
     discussion_id: &str,
@@ -1182,13 +1227,66 @@ fn answer_inner(
             text.as_deref(),
         )
         .map_err(|error| AnswerError::Invalid(error.to_string()))?;
-        // KT-1348 — a TD that could not be written is named on the card's
-        // answer, not silently dropped, and does not undo the others.
+        // KT-1348 — a TD that could not be written does not undo the others,
+        // and it is not closed with them: the card stays pending, narrowed to
+        // the failed TDs with the reason on it, so a retry after the repair
+        // applies only those and the validation resumes once none is left.
         let note = outcome.failure_note();
         if !note.is_empty() {
             tracing::warn!("Audit TD card partially recorded: {note}");
-            content.push_str("\n\n");
-            content.push_str(&note);
+            let applied_labels = item_answers
+                .iter()
+                .filter(|answer| outcome.applied.contains(&answer.item_id))
+                .filter_map(|answer| {
+                    let item = question.items.iter().find(|i| i.id == answer.item_id)?;
+                    let option = question
+                        .options
+                        .iter()
+                        .find(|o| o.id == answer.selected_option_id)?;
+                    Some(format!("- {}: {}", item.label, option.label))
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let partial = format!(
+                "Décision humaine — {}\n\n{}\n\n{}{}",
+                question.question,
+                applied_labels,
+                text.as_deref()
+                    .map(|t| format!("{t}\n\n"))
+                    .unwrap_or_default(),
+                note
+            );
+            let failed_ids = outcome
+                .failed
+                .iter()
+                .map(|(td_id, _)| td_id.as_str())
+                .collect::<Vec<_>>();
+            question.context = narrow_to_failed(conn, question_id, &failed_ids, &note)?;
+            question
+                .items
+                .retain(|item| failed_ids.contains(&item.id.as_str()));
+            publish_human_resolution(
+                conn,
+                discussion_id,
+                &question,
+                &format!(
+                    "question-answer:{question_id}:partial:{}",
+                    now.timestamp_micros()
+                ),
+                partial,
+                &format!("question-answer:{question_id}"),
+                now,
+                author_pseudo,
+                author_avatar_email,
+                false,
+            )?;
+            conn.execute(
+                "UPDATE discussion_questions SET updated_at=?2 WHERE id=?1 AND state='pending'",
+                params![question_id, answer.answered_at],
+            )
+            .map_err(anyhow::Error::from)?;
+            question.updated_at = answer.answered_at;
+            return Ok(question);
         }
     }
     let ceiling =
