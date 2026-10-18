@@ -205,118 +205,569 @@ fn is_subagent(name: &str) -> bool {
     matches!(name.to_ascii_lowercase().as_str(), "task" | "agent")
 }
 
-/// The words of every simple command of a shell `script`, split at the control
-/// operators (`;` `&` `|` newline, parentheses, backticks). Quotes group a
-/// word and are dropped: what a quoted string says is one word, not a command.
-fn simple_commands(script: &str) -> Vec<Vec<String>> {
-    let mut commands: Vec<Vec<String>> = Vec::new();
-    let mut words: Vec<String> = Vec::new();
-    let mut word = String::new();
-    let mut in_word = false;
-    let mut quote: Option<char> = None;
-    let mut chars = script.chars();
-    let end_word = |words: &mut Vec<String>, word: &mut String, in_word: &mut bool| {
-        if *in_word {
-            words.push(std::mem::take(word));
-            *in_word = false;
+/// One simple command of a shell script: its words, and whether the lexer
+/// could not read it with certainty (a heredoc, a quote left open).
+struct Segment {
+    words: Vec<String>,
+    opaque: bool,
+}
+
+/// Accumulates the words and commands of a shell script.
+#[derive(Default)]
+struct Lexer {
+    commands: Vec<Segment>,
+    words: Vec<String>,
+    word: String,
+    in_word: bool,
+    opaque: bool,
+    /// Set right after `<<`: the next word is the heredoc delimiter
+    /// (`true` when the operator was `<<-`, which strips leading tabs).
+    delimiter: Option<bool>,
+    /// Heredocs whose body starts on the next line.
+    bodies: Vec<(String, bool)>,
+}
+
+impl Lexer {
+    fn end_word(&mut self) {
+        if !self.in_word {
+            return;
         }
-    };
-    while let Some(ch) = chars.next() {
+        self.in_word = false;
+        let word = std::mem::take(&mut self.word);
+        if let Some(strip) = self.delimiter.take() {
+            self.bodies.push((word.clone(), strip));
+        }
+        self.words.push(word);
+    }
+
+    fn end_command(&mut self) {
+        self.end_word();
+        if !self.words.is_empty() || self.opaque {
+            self.commands.push(Segment {
+                words: std::mem::take(&mut self.words),
+                opaque: self.opaque,
+            });
+        }
+        self.opaque = false;
+    }
+}
+
+/// The simple commands of a shell `script`, split at the control operators
+/// (`;` `&` `|` newline, parentheses, backticks). Quotes group a word and are
+/// dropped: what a quoted string says is one word, not a command. A `#`
+/// comment (through the end of the line) and a heredoc body are data, never
+/// commands. A command that holds a heredoc, or a quote left open, is marked
+/// opaque: it is not read with certainty.
+fn simple_commands(script: &str) -> Vec<Segment> {
+    let chars: Vec<char> = script.chars().collect();
+    let mut lexer = Lexer::default();
+    let mut quote: Option<char> = None;
+    let mut i = 0;
+    while i < chars.len() {
+        let ch = chars[i];
+        i += 1;
         match quote {
             Some('\'') => {
                 if ch == '\'' {
                     quote = None;
                 } else {
-                    word.push(ch);
+                    lexer.word.push(ch);
                 }
             }
             Some(_) => match ch {
                 '"' => quote = None,
-                '\\' => match chars.next() {
-                    Some(next @ ('"' | '\\' | '$' | '`')) => word.push(next),
+                '\\' => match chars.get(i).copied() {
+                    Some(next @ ('"' | '\\' | '$' | '`')) => {
+                        lexer.word.push(next);
+                        i += 1;
+                    }
                     Some(next) => {
-                        word.push('\\');
-                        word.push(next);
+                        lexer.word.push('\\');
+                        lexer.word.push(next);
+                        i += 1;
                     }
                     None => {}
                 },
-                _ => word.push(ch),
+                _ => lexer.word.push(ch),
             },
             None => match ch {
                 '\'' | '"' => {
                     quote = Some(ch);
-                    in_word = true;
+                    lexer.in_word = true;
                 }
                 '\\' => {
-                    if let Some(next) = chars.next() {
+                    if let Some(next) = chars.get(i).copied() {
+                        i += 1;
                         if next != '\n' {
-                            word.push(next);
-                            in_word = true;
+                            lexer.word.push(next);
+                            lexer.in_word = true;
                         }
                     }
                 }
-                ';' | '&' | '|' | '\n' | '(' | ')' | '`' => {
-                    end_word(&mut words, &mut word, &mut in_word);
-                    if !words.is_empty() {
-                        commands.push(std::mem::take(&mut words));
+                '#' if !lexer.in_word => {
+                    while i < chars.len() && chars[i] != '\n' {
+                        i += 1;
                     }
                 }
-                c if c.is_whitespace() => end_word(&mut words, &mut word, &mut in_word),
+                '<' if chars.get(i) == Some(&'<') && chars.get(i + 1) != Some(&'<') => {
+                    lexer.end_word();
+                    lexer.opaque = true;
+                    i += 1;
+                    let strip = chars.get(i) == Some(&'-');
+                    if strip {
+                        i += 1;
+                    }
+                    lexer.delimiter = Some(strip);
+                }
+                ';' | '&' | '|' | '\n' | '(' | ')' | '`' => {
+                    lexer.end_command();
+                    if ch == '\n' && !lexer.bodies.is_empty() {
+                        for (delimiter, strip) in std::mem::take(&mut lexer.bodies) {
+                            while i < chars.len() {
+                                let end = chars[i..]
+                                    .iter()
+                                    .position(|c| *c == '\n')
+                                    .map_or(chars.len(), |at| i + at);
+                                let line: String = chars[i..end].iter().collect();
+                                i = (end + 1).min(chars.len());
+                                let line = if strip {
+                                    line.trim_start_matches('\t')
+                                } else {
+                                    line.as_str()
+                                };
+                                if line == delimiter {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                c if c.is_whitespace() => lexer.end_word(),
                 c => {
-                    word.push(c);
-                    in_word = true;
+                    lexer.word.push(c);
+                    lexer.in_word = true;
                 }
             },
         }
     }
-    end_word(&mut words, &mut word, &mut in_word);
-    if !words.is_empty() {
-        commands.push(words);
+    if quote.is_some() {
+        lexer.opaque = true;
     }
-    commands
+    lexer.end_command();
+    lexer.commands
 }
 
-/// The options of `curl` / `wget` whose next word is a value, never a page.
-const VALUE_OPTIONS: &[&str] = &[
-    "-d",
-    "--data",
-    "--data-raw",
-    "--data-binary",
-    "--data-urlencode",
-    "--post-data",
-    "-H",
-    "--header",
-    "-o",
-    "--output",
-    "-X",
-    "--request",
-    "-A",
-    "--user-agent",
-    "-U",
-    "-e",
-    "--referer",
-    "-u",
-    "--user",
-    "-F",
-    "--form",
-    "-w",
-    "--write-out",
-    "-P",
+#[derive(Clone, Copy, PartialEq)]
+enum Downloader {
+    Curl,
+    Wget,
+}
+
+/// What a `curl` / `wget` option takes.
+enum OptionKind {
+    /// A switch: it takes nothing.
+    Flag,
+    /// The next word (or the rest of the word it is written in) is its value.
+    Value,
+    /// It swallows the rest of the word it is written in (`wget -nv`).
+    Rest,
+}
+
+const CURL_SHORT_FLAGS: &str = "0123456#:aBfgGhiIjJkLMnNOpqRsSvVZ";
+const CURL_SHORT_VALUES: &str = "AbcCdDeEFHKmoPQrtTuUwxXyYz";
+const WGET_SHORT_FLAGS: &str = "VhbdqvFcNSr46kKpmxEHL";
+const WGET_SHORT_VALUES: &str = "eoaiBtOTwQlARDIXPUY";
+
+const CURL_LONG_FLAGS: &[&str] = &[
+    "silent",
+    "show-error",
+    "fail",
+    "fail-with-body",
+    "fail-early",
+    "location",
+    "location-trusted",
+    "insecure",
+    "verbose",
+    "include",
+    "head",
+    "compressed",
+    "globoff",
+    "get",
+    "remote-name",
+    "remote-name-all",
+    "remote-header-name",
+    "remote-time",
+    "progress-bar",
+    "no-progress-meter",
+    "http1.0",
+    "http1.1",
+    "http2",
+    "http2-prior-knowledge",
+    "http3",
+    "ipv4",
+    "ipv6",
+    "netrc",
+    "no-buffer",
+    "raw",
+    "tr-encoding",
+    "show-headers",
+    "create-dirs",
+    "parallel",
+    "no-keepalive",
+    "anyauth",
+    "basic",
+    "digest",
+    "negotiate",
+    "ntlm",
+    "tlsv1",
+    "tlsv1.0",
+    "tlsv1.1",
+    "tlsv1.2",
+    "tlsv1.3",
+    "ssl",
+    "ssl-reqd",
+    "ssl-no-revoke",
+    "no-sessionid",
+    "retry-connrefused",
+    "retry-all-errors",
+    "next",
+    "no-clobber",
+    "junk-session-cookies",
+    "post301",
+    "post302",
+    "post303",
+    "path-as-is",
+    "styled-output",
+    "disable",
+    "version",
+    "help",
+    "manual",
+    "append",
+    "use-ascii",
+    "list-only",
+    "proxytunnel",
+    "proxy-insecure",
+    "tcp-nodelay",
+    "tcp-fastopen",
+    "ignore-content-length",
+    "disallow-username-in-url",
+    "trace-time",
 ];
+
+const CURL_LONG_VALUES: &[&str] = &[
+    "data",
+    "data-raw",
+    "data-binary",
+    "data-ascii",
+    "data-urlencode",
+    "json",
+    "header",
+    "output",
+    "output-dir",
+    "request",
+    "request-target",
+    "user-agent",
+    "referer",
+    "user",
+    "form",
+    "form-string",
+    "write-out",
+    "proxy",
+    "proxy-user",
+    "proxy-header",
+    "preproxy",
+    "cookie",
+    "cookie-jar",
+    "connect-timeout",
+    "max-time",
+    "retry",
+    "retry-delay",
+    "retry-max-time",
+    "limit-rate",
+    "range",
+    "upload-file",
+    "cacert",
+    "capath",
+    "cert",
+    "cert-type",
+    "key",
+    "key-type",
+    "resolve",
+    "connect-to",
+    "dump-header",
+    "config",
+    "oauth2-bearer",
+    "max-redirs",
+    "max-filesize",
+    "time-cond",
+    "noproxy",
+    "interface",
+    "continue-at",
+    "ftp-port",
+    "stderr",
+    "trace",
+    "trace-ascii",
+    "unix-socket",
+    "ciphers",
+    "tls13-ciphers",
+    "pinnedpubkey",
+    "speed-limit",
+    "speed-time",
+    "keepalive-time",
+    "local-port",
+    "alt-svc",
+    "hsts",
+    "doh-url",
+    "aws-sigv4",
+    "netrc-file",
+    "quote",
+    "socks4",
+    "socks4a",
+    "socks5",
+    "socks5-hostname",
+    "url-query",
+    "variable",
+];
+
+const WGET_LONG_FLAGS: &[&str] = &[
+    "quiet",
+    "verbose",
+    "no-verbose",
+    "debug",
+    "continue",
+    "timestamping",
+    "no-clobber",
+    "no-check-certificate",
+    "check-certificate",
+    "content-disposition",
+    "trust-server-names",
+    "spider",
+    "server-response",
+    "no-cache",
+    "no-cookies",
+    "keep-session-cookies",
+    "no-parent",
+    "recursive",
+    "page-requisites",
+    "convert-links",
+    "backup-converted",
+    "mirror",
+    "no-directories",
+    "force-directories",
+    "no-host-directories",
+    "background",
+    "inet4-only",
+    "inet6-only",
+    "show-progress",
+    "no-proxy",
+    "no-dns-cache",
+    "ignore-length",
+    "retry-connrefused",
+    "no-http-keep-alive",
+    "span-hosts",
+    "relative",
+    "delete-after",
+    "html-extension",
+    "adjust-extension",
+    "no-hsts",
+    "no-config",
+    "force-html",
+    "version",
+    "help",
+    "no-glob",
+    "passive-ftp",
+    "content-on-error",
+];
+
+const WGET_LONG_VALUES: &[&str] = &[
+    "output-document",
+    "output-file",
+    "append-output",
+    "user-agent",
+    "referer",
+    "header",
+    "post-data",
+    "post-file",
+    "user",
+    "password",
+    "http-user",
+    "http-password",
+    "ftp-user",
+    "ftp-password",
+    "proxy-user",
+    "proxy-password",
+    "tries",
+    "timeout",
+    "dns-timeout",
+    "connect-timeout",
+    "read-timeout",
+    "wait",
+    "waitretry",
+    "limit-rate",
+    "directory-prefix",
+    "input-file",
+    "base",
+    "execute",
+    "level",
+    "accept",
+    "reject",
+    "accept-regex",
+    "reject-regex",
+    "domains",
+    "exclude-domains",
+    "include-directories",
+    "exclude-directories",
+    "load-cookies",
+    "save-cookies",
+    "ca-certificate",
+    "ca-directory",
+    "certificate",
+    "certificate-type",
+    "private-key",
+    "private-key-type",
+    "bind-address",
+    "method",
+    "body-data",
+    "body-file",
+    "quota",
+    "secure-protocol",
+    "progress",
+    "restrict-file-names",
+    "default-page",
+];
+
+fn short_option(tool: Downloader, c: char) -> Option<OptionKind> {
+    let (flags, values) = match tool {
+        Downloader::Curl => (CURL_SHORT_FLAGS, CURL_SHORT_VALUES),
+        Downloader::Wget => (WGET_SHORT_FLAGS, WGET_SHORT_VALUES),
+    };
+    if tool == Downloader::Wget && c == 'n' {
+        // `-nv` `-nc` `-nd` `-nH` `-np`: `n` and what follows it is one option.
+        Some(OptionKind::Rest)
+    } else if flags.contains(c) {
+        Some(OptionKind::Flag)
+    } else if values.contains(c) {
+        Some(OptionKind::Value)
+    } else {
+        None
+    }
+}
+
+fn long_option(tool: Downloader, name: &str) -> Option<OptionKind> {
+    let (flags, values) = match tool {
+        Downloader::Curl => (CURL_LONG_FLAGS, CURL_LONG_VALUES),
+        Downloader::Wget => (WGET_LONG_FLAGS, WGET_LONG_VALUES),
+    };
+    if flags.contains(&name) {
+        Some(OptionKind::Flag)
+    } else if values.contains(&name) {
+        Some(OptionKind::Value)
+    } else {
+        None
+    }
+}
+
+/// A shell redirection written as a word: whether its target is the next word
+/// (`>` `2>>` `<`) or part of the word (`>out`). `None` for any other word.
+fn redirection(word: &str) -> Option<bool> {
+    let rest = word.trim_start_matches(|c: char| c.is_ascii_digit());
+    if rest.starts_with(['<', '>']) {
+        Some(rest.trim_start_matches(['<', '>']).is_empty())
+    } else {
+        None
+    }
+}
 
 fn is_http_url(word: &str) -> bool {
     let lower = word.to_ascii_lowercase();
     lower.starts_with("http://") || lower.starts_with("https://")
 }
 
-/// The pages one simple command downloads: only a real `curl` / `wget`
-/// invocation counts, and only the `http(s)` addresses given to it as
-/// arguments. A URL that is printed, quoted or passed to another program is
-/// text, not a fetch. Wrappers (`sudo`, `env`, `xargs`…) are looked through,
-/// and the script of `sh -c` is read in turn.
-fn download_urls(words: &[String], depth: usize) -> Vec<String> {
+/// The destination URLs of one `curl` / `wget` invocation, or `None` when the
+/// invocation is not fully understood: an option this reader does not know (it
+/// may take a value, and that value may be a URL that is not a destination), so
+/// nothing of it is credited.
+fn destination_urls(tool: Downloader, args: &[String]) -> Option<Vec<String>> {
+    let mut urls: Vec<&str> = Vec::new();
+    let mut positional_only = false;
+    let mut next = 0;
+    while next < args.len() {
+        let arg = args[next].as_str();
+        next += 1;
+        if positional_only {
+            urls.push(arg);
+        } else if let Some(target_is_next) = redirection(arg) {
+            if target_is_next {
+                next += 1;
+            }
+        } else if arg == "--" {
+            positional_only = true;
+        } else if let Some(long) = arg.strip_prefix("--") {
+            let (name, attached) = match long.split_once('=') {
+                Some((name, value)) => (name, Some(value)),
+                None => (long, None),
+            };
+            if tool == Downloader::Curl && name == "url" {
+                // The destination, as a value.
+                match attached {
+                    Some(value) => urls.push(value),
+                    None => {
+                        urls.extend(args.get(next).map(String::as_str));
+                        next += 1;
+                    }
+                }
+                continue;
+            }
+            match long_option(tool, name)? {
+                OptionKind::Flag if attached.is_some() => return None,
+                OptionKind::Flag => {}
+                OptionKind::Value | OptionKind::Rest => {
+                    if attached.is_none() {
+                        next += 1;
+                    }
+                }
+            }
+        } else if arg.len() > 1 && arg.starts_with('-') {
+            let cluster = &arg[1..];
+            for (at, c) in cluster.char_indices() {
+                match short_option(tool, c)? {
+                    OptionKind::Flag => {}
+                    OptionKind::Rest => break,
+                    OptionKind::Value => {
+                        if at + c.len_utf8() == cluster.len() {
+                            next += 1;
+                        }
+                        break;
+                    }
+                }
+            }
+        } else {
+            urls.push(arg);
+        }
+    }
+    Some(
+        urls.into_iter()
+            .filter(|word| is_http_url(word))
+            .map(normalize_url)
+            .filter(|url| !url.is_empty())
+            .collect(),
+    )
+}
+
+/// The pages one simple command downloads. Conservative: a URL is credited
+/// only when the command is a real `curl` / `wget` invocation that is fully
+/// understood (no heredoc, no quote left open, no option this reader does not
+/// know) and the URL is a destination argument of it. A URL that is printed,
+/// quoted, a comment, a heredoc line, or the value of an option (`--proxy`,
+/// `-o`, `-O`, `--referer`…) is text, not a fetch; a command that is not fully
+/// understood credits nothing. Wrappers (`sudo`, `env`, `xargs`…) are looked
+/// through, and the script of `sh -c` is read in turn.
+fn download_urls(words: &[String], opaque: bool, depth: usize) -> Vec<String> {
+    if opaque {
+        return Vec::new();
+    }
     let mut rest = words;
-    loop {
+    let tool = loop {
         let Some(first) = rest.first() else {
             return Vec::new();
         };
@@ -330,6 +781,10 @@ fn download_urls(words: &[String], depth: usize) -> Vec<String> {
         );
         if assignment || wrapper || name == "timeout" {
             rest = &rest[1..];
+            // `command -v curl <url>` looks a command up, it runs nothing.
+            if name == "command" && rest.first().is_some_and(|w| w.starts_with('-')) {
+                return Vec::new();
+            }
             // Options of a wrapper (`sudo -E`, `xargs -n1`, `env -i`).
             while rest.first().is_some_and(|w| w.starts_with('-')) {
                 rest = &rest[1..];
@@ -352,33 +807,20 @@ fn download_urls(words: &[String], depth: usize) -> Vec<String> {
                 _ => Vec::new(),
             };
         }
-        if !matches!(name, "curl" | "wget" | "curl.exe" | "wget.exe") {
-            return Vec::new();
-        }
-        break;
-    }
-    let mut urls = Vec::new();
-    let mut args = rest[1..].iter();
-    while let Some(arg) = args.next() {
-        let arg = match arg.get(..6) {
-            Some(prefix) if prefix.eq_ignore_ascii_case("--url=") => &arg[6..],
-            _ => arg.as_str(),
+        break match name {
+            "curl" | "curl.exe" => Downloader::Curl,
+            "wget" | "wget.exe" => Downloader::Wget,
+            _ => return Vec::new(),
         };
-        if is_http_url(arg) {
-            urls.push(normalize_url(arg));
-        } else if VALUE_OPTIONS.contains(&arg) {
-            args.next();
-        }
-    }
-    urls.retain(|u| !u.is_empty());
-    urls
+    };
+    destination_urls(tool, &rest[1..]).unwrap_or_default()
 }
 
 /// The pages the `curl` / `wget` invocations of a shell `script` download.
 fn command_urls(script: &str, depth: usize) -> Vec<String> {
     simple_commands(script)
         .iter()
-        .flat_map(|words| download_urls(words, depth))
+        .flat_map(|segment| download_urls(&segment.words, segment.opaque, depth))
         .collect()
 }
 
@@ -461,7 +903,7 @@ pub(crate) fn input_urls(opens: bool, input: &serde_json::Value) -> Vec<String> 
                 .iter()
                 .filter_map(|part| part.as_str().map(str::to_owned))
                 .collect();
-            urls.extend(download_urls(&words, 0));
+            urls.extend(download_urls(&words, false, 0));
         }
         Some(serde_json::Value::String(script)) => urls.extend(command_urls(script, 0)),
         _ => {}
@@ -1302,6 +1744,217 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    /// The provenance of a shell `command` on both routes: Codex through the
+    /// ACP trace, Claude through the direct stream.
+    fn read_by_command_on_both_routes(
+        label: &str,
+        command: &str,
+    ) -> [(&'static str, RunProvenance); 2] {
+        let acp = read_by_command(json!(command));
+        let mut tracker = FetchTracker::default();
+        tracker.ingest_line(&assistant_call(
+            label,
+            "Bash",
+            &json!({ "command": command }).to_string(),
+        ));
+        tracker.ingest_line(&user_result(label, r#""fixture command completed""#));
+        [("Codex/ACP", acp), ("Claude/direct", run_of(&tracker))]
+    }
+
+    #[test]
+    fn only_a_destination_argument_of_a_fully_understood_download_counts() {
+        let page = "https://download.example.test/current";
+        let noise = "https://never-read.invalid/only-text";
+        // (label, command, the page is credited, the noise URL is credited)
+        let cases = [
+            ("plain curl", format!("curl -fsSL '{page}'"), true, false),
+            ("wget", format!("wget -qO- '{page}'"), true, false),
+            (
+                "absolute curl",
+                format!("/usr/bin/curl -s '{page}'"),
+                true,
+                false,
+            ),
+            (
+                "env wrapper",
+                format!("env LANG=C curl -s '{page}'"),
+                true,
+                false,
+            ),
+            (
+                "sudo wrapper",
+                format!("sudo -n curl -s '{page}'"),
+                true,
+                false,
+            ),
+            (
+                "assignment prefix",
+                format!("LANG=C curl -s '{page}'"),
+                true,
+                false,
+            ),
+            ("url flag", format!("curl --url '{page}'"), true, false),
+            ("pipeline", format!("curl -s '{page}' | cat"), true, false),
+            (
+                "printed example",
+                format!("printf '%s\\n' 'Documentation example: curl {noise}'"),
+                false,
+                false,
+            ),
+            (
+                "comment only",
+                format!("# curl {noise}\nprintf ok"),
+                false,
+                false,
+            ),
+            (
+                "other command",
+                format!("curl -s '{page}'; printf '%s\\n' '{noise}'"),
+                true,
+                false,
+            ),
+            (
+                "trailing comment",
+                format!("curl -s '{page}' # {noise}"),
+                true,
+                false,
+            ),
+            (
+                "header argument",
+                format!("curl -H 'X-Documentation: {noise}' '{page}'"),
+                true,
+                false,
+            ),
+            (
+                "request data",
+                format!("curl --data 'source={noise}' '{page}'"),
+                true,
+                false,
+            ),
+            (
+                "referer argument",
+                format!("curl --referer '{noise}' '{page}'"),
+                true,
+                false,
+            ),
+            (
+                "wget referer",
+                format!("wget --referer='{noise}' '{page}'"),
+                true,
+                false,
+            ),
+            (
+                "output filename",
+                format!("curl --output '{noise}' '{page}'"),
+                true,
+                false,
+            ),
+            (
+                "variable mentions curl",
+                format!("EXAMPLE=curl printf '%s\\n' '{noise}'"),
+                false,
+                false,
+            ),
+            (
+                "command inside comment",
+                format!("printf ok # ; curl '{noise}'"),
+                false,
+                false,
+            ),
+            (
+                "heredoc example",
+                format!("cat <<'DOC'\ncurl '{noise}'\nDOC"),
+                false,
+                false,
+            ),
+            (
+                "proxy option",
+                format!("curl --proxy '{noise}' '{page}'"),
+                true,
+                false,
+            ),
+            (
+                "wget output filename",
+                format!("wget -O '{noise}' '{page}'"),
+                true,
+                false,
+            ),
+        ];
+        let mut mismatches = Vec::new();
+        for (label, command, page_credited, noise_credited) in &cases {
+            for (route, run) in read_by_command_on_both_routes(label, command) {
+                for (url, expected) in [(page, page_credited), (noise, noise_credited)] {
+                    let accepted = run.problems(&cites(url)).is_empty();
+                    if accepted != *expected {
+                        mismatches.push(format!(
+                            "{label}/{route}: accepted={accepted}, expected={expected}, url={url}"
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+    }
+
+    #[test]
+    fn a_command_that_is_not_fully_understood_credits_nothing() {
+        let page = "https://download.example.test/current";
+        let noise = "https://never-read.invalid/only-text";
+        for command in [
+            // An option this reader does not know may take a URL as its value.
+            format!("curl --some-future-option '{noise}' '{page}'"),
+            format!("curl -Y '{noise}' --not-an-option '{page}'"),
+            format!("wget --proxy '{noise}' '{page}'"),
+            // A short option it does not know, inside a cluster.
+            format!("curl -sJ@ '{page}'"),
+            // A quote left open: the end of the command is not known.
+            format!("curl -s '{page}' 'unterminated"),
+            // A heredoc feeding the download itself.
+            format!("curl -s '{page}' <<EOF\nbody\nEOF"),
+            // A lookup, not a run.
+            format!("command -v curl {page}"),
+        ] {
+            for (route, run) in read_by_command_on_both_routes("opaque", &command) {
+                for url in [page, noise] {
+                    assert_eq!(
+                        run.problems(&cites(url)).len(),
+                        1,
+                        "{route}: {command} must credit {url} nothing"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_heredoc_or_a_comment_hides_text_but_not_the_commands_around_it() {
+        let page = "https://download.example.test/current";
+        let noise = "https://never-read.invalid/only-text";
+        let script = format!(
+            "cat <<-EOF\n\tcurl '{noise}'\n\tEOF\ncurl -s '{page}' # curl {noise}\necho ok"
+        );
+        for (route, run) in read_by_command_on_both_routes("mixed", &script) {
+            assert!(run.problems(&cites(page)).is_empty(), "{route}");
+            assert_eq!(run.problems(&cites(noise)).len(), 1, "{route}");
+        }
+    }
+
+    #[test]
+    fn a_redirection_target_and_a_wget_cluster_are_read_as_such() {
+        let page = "https://download.example.test/current";
+        let noise = "https://never-read.invalid/only-text";
+        for command in [
+            format!("curl -s '{page}' > '{noise}'"),
+            format!("curl -s '{page}' 2>'{noise}'"),
+            format!("wget -nv -q -P /tmp '{page}'"),
+            format!("wget -nv '{page}' >/dev/null"),
+        ] {
+            let run = read_by_command(json!(command));
+            assert!(run.problems(&cites(page)).is_empty(), "{command}");
+            assert_eq!(run.problems(&cites(noise)).len(), 1, "{command}");
+        }
     }
 
     #[test]

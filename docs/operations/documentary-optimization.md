@@ -57,9 +57,13 @@ sub-agent (`Task`), or a documentation call whose result was not seen — `url:`
 citations are left unchecked, never blocked; a result that was seen and named no
 page (Context7's `resolve-library-id`) is not such a channel. A shell command
 is a download only for a real `curl` / `wget` invocation (looking through `sudo`,
-`env`, `xargs`, `;` / `&&` / `|` chains and `sh -c`), and only its `http(s)`
-arguments count: a URL printed by `echo`, quoted, or given as the value of another
-option (`curl -d <url>`) is text, not a fetch. The recorded URLs have one canonical
+`env`, `xargs`, `;` / `&&` / `|` chains and `sh -c`), and only an `http(s)` argument
+that is a destination of it counts (a positional argument, or `curl --url`). The rule
+is conservative: a URL printed by `echo`, quoted, in a `#` comment or a heredoc body,
+or given as the value of an option (`curl -d` / `--proxy` / `--referer` / `-o`,
+`wget -O`) is text, not a fetch, and a command that is not fully understood (a
+heredoc on it, a quote left open, a `curl` / `wget` option the reader does not
+know, which may take a URL as its value) credits nothing. The recorded URLs have one canonical
 safe form, used on the stored and the cited side (`normalize_url`): no userinfo, a
 credential-style query value (`sig`, `X-Amz-Signature`, `access_token`…) masked as
 `name=***` after percent-decoding the name (`%73ig` is `sig`), vendor token shapes

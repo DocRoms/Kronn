@@ -636,11 +636,16 @@ Release notes for 0.9.3 and earlier are available in the
   `%73ig`, `access%5Ftoken`, `api%2Dkey` or a doubly-encoded name are masked
   too; non-secret parameters such as `page=2` are kept), vendor token shapes
   redacted. A signed page still matches its citation, a page with another
-  `page=` does not, and no secret is stored. Only a real `curl` / `wget`
-  invocation counts as a download, and only the `http(s)` addresses it is given
-  as arguments (through `sudo` / `env` / `xargs`, a `;` `&&` `|` chain, or
-  `sh -c`): a URL that is printed (`echo curl <url>`), quoted, or passed as the
-  value of another option (`curl -d <url>`) is text, not a fetch. Only the full audit
+  `page=` does not, and no secret is stored. The shell-download rule is
+  conservative: only a real `curl` / `wget` invocation that is fully understood
+  counts as a download, and only an `http(s)` address that is a destination of it
+  (a positional argument, or `curl --url`), through `sudo` / `env` / `xargs`, a
+  `;` `&&` `|` chain, or `sh -c`. A URL that is printed (`echo curl <url>`),
+  quoted, in a `#` comment or a heredoc body, or the value of an option
+  (`curl -d` / `--proxy` / `--referer` / `-o <url>`, `wget -O <url>`) is text,
+  not a fetch; a command with a heredoc, a quote left open, or an option the
+  reader does not know credits nothing, so a citation of its URL is blocked
+  with the "not verified" feedback. Only the full audit
   pipeline checks the run's provenance: a partial audit does not.
   The pre-step baseline and the blame ledger of the documentary gate (KT-1306)
   use the same run-aware analysis: an unbacked citation already there is in the
