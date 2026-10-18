@@ -1,6 +1,10 @@
 /* KT-1270 / KT-1336 — a workflow's project scope, in the audit timeline's
    visual language. Theme tokens only (--kr-*). */
 .wfs {
+  /* Warning ink for small text: the bare warning colour is 3.65:1 on its own
+     13% tint in the light theme; mixing in the primary text colour keeps the
+     amber hue and clears 4.5:1 in every theme. */
+  --wfs-warn-ink: color-mix(in srgb, var(--kr-warning) 55%, var(--kr-text-primary));
   display: flex;
   flex-direction: column;
   gap: var(--kr-sp-5);
@@ -17,9 +21,9 @@
 /* Folded: one line — title, granted access chips, Details toggle */
 .wfs[data-open="false"] { gap: 0; margin: var(--kr-sp-4) 0; padding: var(--kr-sp-4) var(--kr-sp-6); }
 .wfs[data-open="false"] .wfs-head { align-items: center; flex-wrap: wrap; gap: var(--kr-sp-4); }
-.wfs-head-end { display: inline-flex; align-items: center; gap: var(--kr-sp-4); margin-left: auto; }
+.wfs-head-end { display: inline-flex; flex: none; align-items: center; gap: var(--kr-sp-4); margin-left: auto; }
 .wfs-body { display: flex; flex-direction: column; gap: var(--kr-sp-5); margin-top: var(--kr-sp-5); }
-.wfs-chips { display: flex; flex: 1; flex-wrap: wrap; align-items: center; gap: var(--kr-sp-2); min-width: 0; margin: 0; padding: 0; list-style: none; }
+.wfs-chips { display: flex; flex: 1 1 12rem; flex-wrap: wrap; align-items: center; gap: var(--kr-sp-2); min-width: 0; margin: 0; padding: 0; list-style: none; }
 .wfs-chip {
   display: inline-flex;
   align-items: center;
@@ -29,14 +33,19 @@
   font-size: var(--kr-fs-sm);
   font-weight: 600;
   white-space: nowrap;
+  min-width: 0;
+  max-width: 100%;
   background: rgba(var(--kr-info-rgb), 0.14);
   color: var(--kr-info);
 }
-.wfs-chip[data-access="write"] { background: rgba(var(--kr-warning-rgb), 0.13); color: var(--kr-warning); }
+.wfs-chip svg { flex: none; }
+/* A long project name is cut with an ellipsis (the full text is the title) */
+.wfs-chip-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wfs-chip[data-access="write"] { background: rgba(var(--kr-warning-rgb), 0.13); color: var(--wfs-warn-ink); }
 .wfs-chip[data-kind="all"] { background: rgba(var(--kr-error-rgb), 0.12); color: var(--kr-error); }
 .wfs-chip[data-kind="none"],
 .wfs-chip[data-kind="more"] { background: var(--kr-bg-active); color: var(--kr-text-muted); }
-.wfs-chip[data-kind="status"] { background: rgba(var(--kr-warning-rgb), 0.13); color: var(--kr-warning); }
+.wfs-chip[data-kind="status"] { background: rgba(var(--kr-warning-rgb), 0.13); color: var(--wfs-warn-ink); }
 .wfs-chip[data-kind="status"][data-status="unsupported"] { background: rgba(var(--kr-error-rgb), 0.12); color: var(--kr-error); }
 
 /* Same pattern as the discussion header's Details toggle */
@@ -77,7 +86,7 @@
 }
 .wfs-status[data-status="valid"] { background: rgba(var(--kr-success-rgb), 0.14); color: var(--kr-success); }
 .wfs-status[data-status="suspended"],
-.wfs-status[data-status="pending"] { background: rgba(var(--kr-warning-rgb), 0.13); color: var(--kr-warning); }
+.wfs-status[data-status="pending"] { background: rgba(var(--kr-warning-rgb), 0.13); color: var(--wfs-warn-ink); }
 .wfs-status[data-status="unsupported"] { background: rgba(var(--kr-error-rgb), 0.12); color: var(--kr-error); }
 
 .wfs-hint { margin: 0; font-size: var(--kr-fs-md); line-height: 1.55; color: var(--kr-text-secondary); }

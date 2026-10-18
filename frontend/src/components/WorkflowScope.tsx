@@ -1,7 +1,7 @@
 // KT-1270 / KT-1336 — the projects a workflow's runs reach beyond their own:
 // chosen in one view, validated once by a human, suspended as soon as the
 // workflow changes, every project in red behind a typed confirmation.
-import { useCallback, useEffect, useId, useMemo, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { CheckCircle2, ChevronDown, Globe2, Link2, Search, ShieldAlert } from 'lucide-react';
 import { workflows as workflowsApi } from '../lib/api';
 import { userError } from '../lib/userError';
@@ -14,7 +14,8 @@ type Level = 'none' | ScopeAccess;
 
 const ALL_WRITE_CONFIRMATION = 'ALL-PROJECTS-WRITE';
 // More grants than this fold into a "+N" chip: the line stays one line.
-const MAX_CHIPS = 6;
+// The folded line stays one short row: the rest is a "+k" chip, the full list is in the editor.
+const MAX_CHIPS = 3;
 
 function useWorkflowScope(workflowId: string) {
   const [loaded, setLoaded] = useState<{ id: string; scope: WorkflowScopeData | null } | null>(null);
@@ -179,6 +180,18 @@ export function WorkflowScopeEditor({
   const [manualOpen, setManualOpen] = useState<{ id: string; open: boolean } | null>(null);
   const open = manualOpen?.id === workflowId ? manualOpen.open : needsAction;
   const bodyId = useId();
+  // Validating an auto-opened scope folds it away under the focused button:
+  // hand the focus back to Details instead of dropping it on <body>.
+  const toggleRef = useRef<HTMLButtonElement>(null);
+  const wasOpen = useRef({ id: workflowId, open });
+  useEffect(() => {
+    const before = wasOpen.current;
+    wasOpen.current = { id: workflowId, open };
+    const active = document.activeElement;
+    if (before.id === workflowId && before.open && !open && (!active || active === document.body)) {
+      toggleRef.current?.focus();
+    }
+  }, [open, workflowId]);
 
   const grants: Array<{ key: string; label: string; all: boolean; access: ScopeAccess }> = [];
   if (scope?.all) grants.push({ key: 'all', label: t('disc.scopeAllProjects'), all: true, access: scope.all });
@@ -200,7 +213,7 @@ export function WorkflowScopeEditor({
             {attention && (
               <li className="wfs-chip" data-kind="status" data-status={status}>
                 <ShieldAlert size={12} />
-                {t(status === 'suspended' ? 'wf.scopeChipSuspended' : `wf.scopeStatus.${status}`)}
+                <span className="wfs-chip-label">{t(status === 'suspended' ? 'wf.scopeChipSuspended' : `wf.scopeStatus.${status}`)}</span>
               </li>
             )}
             {!hasScope && !attention && (
@@ -209,7 +222,9 @@ export function WorkflowScopeEditor({
             {shown.map(grant => (
               <li key={grant.key} className="wfs-chip" data-kind={grant.all ? 'all' : 'project'} data-access={grant.access}>
                 {grant.all ? <Globe2 size={12} /> : <Link2 size={12} />}
-                {grant.label} · {chipAccess(t, grant.access)}
+                <span className="wfs-chip-label" title={`${grant.label} · ${chipAccess(t, grant.access)}`}>
+                  {grant.label} · {chipAccess(t, grant.access)}
+                </span>
               </li>
             ))}
             {grants.length > shown.length && (
@@ -226,6 +241,7 @@ export function WorkflowScopeEditor({
             </span>
           )}
           <button
+            ref={toggleRef}
             type="button"
             className="wfs-toggle"
             data-testid="workflow-scope-toggle"

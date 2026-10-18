@@ -1,6 +1,8 @@
 // KT-1270 — a workflow's scope is shown on the launch card, suspended once the
 // workflow changed, and saving it is the human's validation.
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import type { Project, WorkflowScope } from '../../types/generated';
 
@@ -136,13 +138,73 @@ describe('WorkflowScopeEditor — folded line (KT-1355)', () => {
     expect(screen.queryByText('wf.scopeUnsupported')).toBeNull();
   });
 
-  it('folds grants past six into a +N chip', async () => {
+  it('folds grants past three into a +N chip, the full list staying in the editor', async () => {
     const entries = Array.from({ length: 8 }, (_, i) => ({ project_id: `x${i}`, project_name: `proj${i}`, access: 'read' as const }));
     api.scope.mockResolvedValue(scope({ entries }));
     renderEditor();
     const items = await chips();
-    expect(items).toHaveLength(7);
-    expect(items[6].textContent).toBe('+2');
+    expect(items).toHaveLength(4);
+    expect(items[3].textContent).toBe('+5');
+  });
+
+  it('keeps a long project name whole in the chip title, for the ellipsis to cut it', async () => {
+    const name = 'a-very-long-project-name-'.repeat(8);
+    api.scope.mockResolvedValue(scope({ entries: [{ project_id: 'x', project_name: name, access: 'write' }] }));
+    renderEditor();
+    const label = (await chips())[0].querySelector('.wfs-chip-label');
+    expect(label?.getAttribute('title')).toBe(`${name} · write`);
+  });
+
+  it('gives the focus back to Details when validating folds the editor away', async () => {
+    api.scope.mockResolvedValue(scope({ valid: false }));
+    api.setScope.mockResolvedValue(scope());
+    renderEditor();
+    const validate = await screen.findByText('wf.scopeRevalidate');
+    validate.focus();
+    expect(document.activeElement).toBe(validate);
+    fireEvent.click(validate);
+    const toggle = await screen.findByTestId('workflow-scope-toggle');
+    await waitFor(() => expect(toggle.getAttribute('aria-expanded')).toBe('false'));
+    expect(document.activeElement).toBe(toggle);
+  });
+
+  it('leaves the focus alone when folding with Details itself', async () => {
+    api.scope.mockResolvedValue(scope());
+    renderEditor();
+    const toggle = await screen.findByTestId('workflow-scope-toggle');
+    fireEvent.click(toggle);
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+  });
+});
+
+// jsdom does no layout: the narrow-screen contract is pinned on the stylesheet
+// (the folded line wraps instead of overflowing, chips cut long names, Details
+// keeps its own room, the warning ink is mixed toward the text colour).
+describe('WorkflowScope.css — folded line on a narrow screen (KT-1355)', () => {
+  const css = readFileSync(resolve(__dirname, '../WorkflowScope.css'), 'utf8');
+  const rule = (selector: string) => {
+    const match = css.match(new RegExp(`(?:^|\\n)${selector.replace(/[.[\]="]/g, '\\$&')}\\s*\\{([^}]*)\\}`));
+    return match?.[1] ?? '';
+  };
+
+  it('lets the chip list shrink and wrap, and reserves Details its own room', () => {
+    expect(rule('.wfs-chips')).toMatch(/flex:\s*1 1 12rem/);
+    expect(rule('.wfs-chips')).toMatch(/min-width:\s*0/);
+    expect(rule('.wfs-head-end')).toMatch(/flex:\s*none/);
+    expect(rule('.wfs[data-open="false"] .wfs-head')).toMatch(/flex-wrap:\s*wrap/);
+  });
+
+  it('cuts a long chip label with an ellipsis instead of widening the page', () => {
+    expect(rule('.wfs-chip')).toMatch(/max-width:\s*100%/);
+    expect(rule('.wfs-chip-label')).toMatch(/text-overflow:\s*ellipsis/);
+    expect(rule('.wfs-chip-label')).toMatch(/overflow:\s*hidden/);
+  });
+
+  it('never sets small warning text in the bare warning colour', () => {
+    expect(css).toMatch(/--wfs-warn-ink:\s*color-mix\(/);
+    expect(rule('.wfs-chip[data-access="write"]')).toContain('var(--wfs-warn-ink)');
+    expect(rule('.wfs-chip[data-kind="status"]')).toContain('var(--wfs-warn-ink)');
   });
 });
 
