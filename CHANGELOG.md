@@ -18,7 +18,11 @@ Release notes for 0.9.3 and earlier are available in the
   the workflow page and the launch card, pinned to the validated revision and
   withdrawn on its own. The scope editor is redone: every project in one
   searchable view with a None / Read / Write picker, the projects already
-  opened first, and one « Validate the scope » action.
+  opened first, and one « Validate the scope » action. The editor is folded to
+  one line by default (KT-1355): the title, the granted access as chips (or the
+  red « Every project » badge, « No project access »), and a Details toggle that
+  opens the full editor. It opens by itself when a human has something to do:
+  a scope never validated, or suspended by an edit of the workflow.
 
 - A merge no longer bounces on doc citation line anchors (KT-1321). The
   integration merge, and the merge a worker finishes through `task_exec_commit`,

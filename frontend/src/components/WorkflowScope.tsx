@@ -1,8 +1,8 @@
 // KT-1270 / KT-1336 — the projects a workflow's runs reach beyond their own:
 // chosen in one view, validated once by a human, suspended as soon as the
 // workflow changes, every project in red behind a typed confirmation.
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { CheckCircle2, Globe2, Link2, Search, ShieldAlert } from 'lucide-react';
+import { useCallback, useEffect, useId, useMemo, useState } from 'react';
+import { CheckCircle2, ChevronDown, Globe2, Link2, Search, ShieldAlert } from 'lucide-react';
 import { workflows as workflowsApi } from '../lib/api';
 import { userError } from '../lib/userError';
 import type { ToastFn } from '../hooks/useToast';
@@ -13,6 +13,8 @@ type T = (key: string, ...args: (string | number)[]) => string;
 type Level = 'none' | ScopeAccess;
 
 const ALL_WRITE_CONFIRMATION = 'ALL-PROJECTS-WRITE';
+// More grants than this fold into a "+N" chip: the line stays one line.
+const MAX_CHIPS = 6;
 
 function useWorkflowScope(workflowId: string) {
   const [loaded, setLoaded] = useState<{ id: string; scope: WorkflowScopeData | null } | null>(null);
@@ -28,6 +30,10 @@ function useWorkflowScope(workflowId: string) {
 
 function accessLabel(t: T, access: ScopeAccess) {
   return access === 'write' ? t('disc.scopeWrite') : t('disc.scopeRead');
+}
+
+function chipAccess(t: T, access: ScopeAccess) {
+  return (access === 'write' ? t('wf.scopeLevelWrite') : t('wf.scopeLevelRead')).toLocaleLowerCase();
 }
 
 /** On a launch card: what this workflow's run will reach, and whether the
@@ -160,120 +166,182 @@ export function WorkflowScopeEditor({
     t('disc.scopeRevoked'),
   );
 
-  const status = !supported ? 'unsupported' : !hasScope ? 'unset' : valid ? 'valid' : 'suspended';
+  // Never validated, or suspended by an edit of the workflow.
+  const status = !supported
+    ? 'unsupported'
+    : !hasScope ? 'unset'
+      : valid ? 'valid'
+        : scope?.validated_by ? 'suspended' : 'pending';
+  // Folded unless a human has something to do: validate the scope, or revoke
+  // what a workflow that can no longer carry one still holds. A manual toggle
+  // wins over this default for the workflow it was made on.
+  const needsAction = status === 'pending' || status === 'suspended' || (status === 'unsupported' && hasScope);
+  const [manualOpen, setManualOpen] = useState<{ id: string; open: boolean } | null>(null);
+  const open = manualOpen?.id === workflowId ? manualOpen.open : needsAction;
+  const bodyId = useId();
+
+  const grants: Array<{ key: string; label: string; all: boolean; access: ScopeAccess }> = [];
+  if (scope?.all) grants.push({ key: 'all', label: t('disc.scopeAllProjects'), all: true, access: scope.all });
+  for (const entry of scope?.entries ?? []) {
+    grants.push({ key: entry.project_id, label: entry.project_name ?? entry.project_id, all: false, access: entry.access });
+  }
+  const shown = grants.slice(0, MAX_CHIPS);
+  const attention = status === 'pending' || status === 'suspended' || status === 'unsupported';
 
   return (
-    <section className="wfs" data-testid="workflow-scope-editor" data-status={status}>
+    <section className="wfs" data-testid="workflow-scope-editor" data-status={status} data-open={open}>
       <header className="wfs-head">
         <div className="wfs-head-text">
-          <span className="wfs-eyebrow">{t('wf.scopeEyebrow')}</span>
+          {open && <span className="wfs-eyebrow">{t('wf.scopeEyebrow')}</span>}
           <h3>{t('wf.scopeTitle')}</h3>
         </div>
-        <span className="wfs-status" data-status={status}>
-          {status === 'valid' && <CheckCircle2 size={13} />}
-          {(status === 'suspended' || status === 'unsupported') && <ShieldAlert size={13} />}
-          {t(`wf.scopeStatus.${status}`)}
-        </span>
-      </header>
-      <p className="wfs-hint">{supported ? t('wf.scopeHint') : t('wf.scopeUnsupported')}</p>
-      {status === 'suspended' && <p className="wfs-note" data-tone="warning">{t('wf.scopeNeedsValidation')}</p>}
-
-      {!supported ? (
-        hasScope && (
-          <ul className="wfs-kept">
-            {scope?.all && (
-              <li data-all="true">
-                <Globe2 size={13} /> <strong>{t('disc.scopeAllProjects')}</strong>
-                <span className="wfs-tag" data-access={scope.all}>{accessLabel(t, scope.all)}</span>
-                <button type="button" className="wfs-btn" data-tone="danger" disabled={busy} onClick={() => void revoke(null)}>
-                  {t('disc.scopeRevoke')}
-                </button>
+        {!open && (
+          <ul className="wfs-chips" data-testid="workflow-scope-chips" aria-label={t('wf.scopeTitle')}>
+            {attention && (
+              <li className="wfs-chip" data-kind="status" data-status={status}>
+                <ShieldAlert size={12} />
+                {t(status === 'suspended' ? 'wf.scopeChipSuspended' : `wf.scopeStatus.${status}`)}
               </li>
             )}
-            {scope?.entries.map(entry => (
-              <li key={entry.project_id}>
-                <Link2 size={13} /> <strong>{entry.project_name ?? entry.project_id}</strong>
-                <span className="wfs-tag" data-access={entry.access}>{accessLabel(t, entry.access)}</span>
-                <button type="button" className="wfs-btn" data-tone="danger" disabled={busy} onClick={() => void revoke(entry.project_id)}>
-                  {t('disc.scopeRevoke')}
-                </button>
+            {!hasScope && !attention && (
+              <li className="wfs-chip" data-kind="none">{t('wf.scopeNoAccess')}</li>
+            )}
+            {shown.map(grant => (
+              <li key={grant.key} className="wfs-chip" data-kind={grant.all ? 'all' : 'project'} data-access={grant.access}>
+                {grant.all ? <Globe2 size={12} /> : <Link2 size={12} />}
+                {grant.label} · {chipAccess(t, grant.access)}
               </li>
             ))}
+            {grants.length > shown.length && (
+              <li className="wfs-chip" data-kind="more">+{grants.length - shown.length}</li>
+            )}
           </ul>
-        )
-      ) : (
-        <>
-          <div className="wfs-all" data-level={current.all}>
-            <div className="wfs-all-text">
-              <span className="wfs-all-title"><Globe2 size={14} /> {t('disc.scopeAllProjects')}</span>
-              <span className="wfs-all-hint">{t('wf.scopeAllHint')}</span>
-            </div>
-            <LevelPicker value={current.all} onChange={setAll} disabled={busy} label={t('disc.scopeAllProjects')} t={t} />
-          </div>
-          {needsConfirm && (
-            <div className="wfs-confirm" role="alert">
-              <p>{t('wf.scopeAllWriteWarning')}</p>
-              <label>
-                {t('disc.scopeAllWriteType', ALL_WRITE_CONFIRMATION)}
-                <input value={typed} onChange={event => setTyped(event.target.value)} spellCheck={false} />
-              </label>
-            </div>
+        )}
+        <div className="wfs-head-end">
+          {open && (
+            <span className="wfs-status" data-status={status}>
+              {status === 'valid' && <CheckCircle2 size={13} />}
+              {(status === 'suspended' || status === 'pending' || status === 'unsupported') && <ShieldAlert size={13} />}
+              {t(`wf.scopeStatus.${status}`)}
+            </span>
           )}
+          <button
+            type="button"
+            className="wfs-toggle"
+            data-testid="workflow-scope-toggle"
+            onClick={() => setManualOpen({ id: workflowId, open: !open })}
+            aria-expanded={open}
+            aria-controls={bodyId}
+            title={t(open ? 'wf.scopeDetailsHide' : 'wf.scopeDetailsShow')}
+          >
+            <ChevronDown size={12} aria-hidden="true" />
+            <span>{t('wf.scopeDetails')}</span>
+          </button>
+        </div>
+      </header>
+      {open && (
+        <div className="wfs-body" id={bodyId}>
+          <p className="wfs-hint">{supported ? t('wf.scopeHint') : t('wf.scopeUnsupported')}</p>
+          {status === 'suspended' && <p className="wfs-note" data-tone="warning">{t('wf.scopeNeedsValidation')}</p>}
 
-          <div className="wfs-toolbar">
-            <label className="wfs-search">
-              <Search size={14} aria-hidden="true" />
-              <input
-                type="search"
-                value={query}
-                onChange={event => setQuery(event.target.value)}
-                placeholder={t('wf.scopeSearch')}
-                aria-label={t('wf.scopeSearch')}
-              />
-            </label>
-            <span className="wfs-count">{t('wf.scopeChosen', chosen)}</span>
-          </div>
-          <ul className="wfs-grid">
-            {candidates.map(project => {
-              const level: Level = current.levels[project.id] ?? 'none';
-              return (
-                <li key={project.id} className="wfs-project" data-level={level}>
-                  <span className="wfs-project-name" title={project.path}>{project.name}</span>
-                  <LevelPicker
-                    value={level}
-                    onChange={next => setLevel(project.id, next)}
-                    disabled={busy}
-                    label={project.name}
-                    t={t}
+          {!supported ? (
+            hasScope && (
+              <ul className="wfs-kept">
+                {scope?.all && (
+                  <li data-all="true">
+                    <Globe2 size={13} /> <strong>{t('disc.scopeAllProjects')}</strong>
+                    <span className="wfs-tag" data-access={scope.all}>{accessLabel(t, scope.all)}</span>
+                    <button type="button" className="wfs-btn" data-tone="danger" disabled={busy} onClick={() => void revoke(null)}>
+                      {t('disc.scopeRevoke')}
+                    </button>
+                  </li>
+                )}
+                {scope?.entries.map(entry => (
+                  <li key={entry.project_id}>
+                    <Link2 size={13} /> <strong>{entry.project_name ?? entry.project_id}</strong>
+                    <span className="wfs-tag" data-access={entry.access}>{accessLabel(t, entry.access)}</span>
+                    <button type="button" className="wfs-btn" data-tone="danger" disabled={busy} onClick={() => void revoke(entry.project_id)}>
+                      {t('disc.scopeRevoke')}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )
+          ) : (
+            <>
+              <div className="wfs-all" data-level={current.all}>
+                <div className="wfs-all-text">
+                  <span className="wfs-all-title"><Globe2 size={14} /> {t('disc.scopeAllProjects')}</span>
+                  <span className="wfs-all-hint">{t('wf.scopeAllHint')}</span>
+                </div>
+                <LevelPicker value={current.all} onChange={setAll} disabled={busy} label={t('disc.scopeAllProjects')} t={t} />
+              </div>
+              {needsConfirm && (
+                <div className="wfs-confirm" role="alert">
+                  <p>{t('wf.scopeAllWriteWarning')}</p>
+                  <label>
+                    {t('disc.scopeAllWriteType', ALL_WRITE_CONFIRMATION)}
+                    <input value={typed} onChange={event => setTyped(event.target.value)} spellCheck={false} />
+                  </label>
+                </div>
+              )}
+
+              <div className="wfs-toolbar">
+                <label className="wfs-search">
+                  <Search size={14} aria-hidden="true" />
+                  <input
+                    type="search"
+                    value={query}
+                    onChange={event => setQuery(event.target.value)}
+                    placeholder={t('wf.scopeSearch')}
+                    aria-label={t('wf.scopeSearch')}
                   />
-                </li>
-              );
-            })}
-            {candidates.length === 0 && <li className="wfs-empty">{t('wf.scopeNoProject')}</li>}
-          </ul>
+                </label>
+                <span className="wfs-count">{t('wf.scopeChosen', chosen)}</span>
+              </div>
+              <ul className="wfs-grid">
+                {candidates.map(project => {
+                  const level: Level = current.levels[project.id] ?? 'none';
+                  return (
+                    <li key={project.id} className="wfs-project" data-level={level}>
+                      <span className="wfs-project-name" title={project.path}>{project.name}</span>
+                      <LevelPicker
+                        value={level}
+                        onChange={next => setLevel(project.id, next)}
+                        disabled={busy}
+                        label={project.name}
+                        t={t}
+                      />
+                    </li>
+                  );
+                })}
+                {candidates.length === 0 && <li className="wfs-empty">{t('wf.scopeNoProject')}</li>}
+              </ul>
 
-          <footer className="wfs-actions">
-            {scope?.validated_by && (
-              <span className="wfs-meta">
-                {t('wf.scopeValidatedBy', scope.validated_by, scope.validated_at ? new Date(scope.validated_at).toLocaleString() : '?')}
-              </span>
-            )}
-            {changed && (
-              <button type="button" className="wfs-btn" disabled={busy} onClick={() => { setDraft(null); setTyped(''); }}>
-                {t('disc.scopeCancel')}
-              </button>
-            )}
-            <button
-              type="button"
-              className="wfs-btn"
-              data-tone={allWrite ? 'danger-fill' : 'primary'}
-              disabled={busy || blockedByConfirm || (!changed && valid) || (!changed && !hasScope)}
-              onClick={() => void validate()}
-            >
-              {changed || !hasScope ? t('wf.scopeValidate') : valid ? t('wf.scopeUpToDate') : t('wf.scopeRevalidate')}
-            </button>
-          </footer>
-        </>
+              <footer className="wfs-actions">
+                {scope?.validated_by && (
+                  <span className="wfs-meta">
+                    {t('wf.scopeValidatedBy', scope.validated_by, scope.validated_at ? new Date(scope.validated_at).toLocaleString() : '?')}
+                  </span>
+                )}
+                {changed && (
+                  <button type="button" className="wfs-btn" disabled={busy} onClick={() => { setDraft(null); setTyped(''); }}>
+                    {t('disc.scopeCancel')}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="wfs-btn"
+                  data-tone={allWrite ? 'danger-fill' : 'primary'}
+                  disabled={busy || blockedByConfirm || (!changed && valid) || (!changed && !hasScope)}
+                  onClick={() => void validate()}
+                >
+                  {changed || !hasScope ? t('wf.scopeValidate') : valid ? t('wf.scopeUpToDate') : t('wf.scopeRevalidate')}
+                </button>
+              </footer>
+            </>
+          )}
+        </div>
       )}
     </section>
   );

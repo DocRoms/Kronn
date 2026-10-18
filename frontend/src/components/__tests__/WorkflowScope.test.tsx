@@ -47,6 +47,105 @@ describe('WorkflowScopeSummary', () => {
   });
 });
 
+describe('WorkflowScopeEditor — folded line (KT-1355)', () => {
+  // The levels read as words, as in the real catalogue, so the chips can be compared.
+  const words: Record<string, string> = { 'wf.scopeLevelRead': 'Read', 'wf.scopeLevelWrite': 'Write' };
+  const tw = (key: string, ...args: (string | number)[]) => words[key] ?? t(key, ...args);
+  const renderEditor = () => render(
+    <WorkflowScopeEditor workflowId="wf" ownProjectId="p1" projects={projects} toast={vi.fn()} t={tw} />,
+  );
+  const chips = async () => (await screen.findByTestId('workflow-scope-chips')).querySelectorAll('li');
+
+  it('folds a validated scope to its title and one chip per grant, the editor behind Details', async () => {
+    api.scope.mockResolvedValue(scope({
+      entries: [
+        { project_id: 'p2', project_name: 'front_api', access: 'write' },
+        { project_id: 'p3', project_name: 'front_apollo', access: 'read' },
+      ],
+    }));
+    renderEditor();
+    const items = await chips();
+    expect([...items].map(li => li.textContent)).toEqual(['front_api · write', 'front_apollo · read']);
+    expect(screen.getByRole('heading', { name: 'wf.scopeTitle' })).toBeTruthy();
+    expect(screen.queryByRole('radiogroup')).toBeNull();
+    expect(screen.queryByText('wf.scopeHint')).toBeNull();
+    expect(screen.getByTestId('workflow-scope-editor').getAttribute('data-open')).toBe('false');
+    const toggle = screen.getByTestId('workflow-scope-toggle');
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(toggle.getAttribute('aria-controls')).toBe(screen.getByText('wf.scopeHint').parentElement!.id);
+    expect(screen.getByRole('radiogroup', { name: 'disc.scopeAllProjects' })).toBeTruthy();
+    expect(screen.queryByTestId('workflow-scope-chips')).toBeNull();
+
+    fireEvent.click(toggle);
+    expect(await chips()).toHaveLength(2);
+    expect(screen.queryByRole('radiogroup')).toBeNull();
+  });
+
+  it('shows the global-access badge for every project', async () => {
+    api.scope.mockResolvedValue(scope({ entries: [], all: 'write' }));
+    renderEditor();
+    const [badge] = await chips();
+    expect(badge.textContent).toBe('disc.scopeAllProjects · write');
+    expect(badge.getAttribute('data-kind')).toBe('all');
+    expect(screen.queryByRole('radiogroup')).toBeNull();
+  });
+
+  it('says there is no project access, folded, when nothing is granted', async () => {
+    api.scope.mockResolvedValue(scope({ entries: [], valid: false, validated_by: null, validated_at: null }));
+    renderEditor();
+    const items = await chips();
+    expect([...items].map(li => li.textContent)).toEqual(['wf.scopeNoAccess']);
+    expect(screen.queryByRole('radiogroup')).toBeNull();
+  });
+
+  it('opens by itself when the scope was never validated', async () => {
+    api.scope.mockResolvedValue(scope({ valid: false, validated_by: null, validated_at: null }));
+    renderEditor();
+    expect(await screen.findByRole('radiogroup', { name: 'api' })).toBeTruthy();
+    expect(screen.getByTestId('workflow-scope-editor').getAttribute('data-status')).toBe('pending');
+    expect(screen.getByText('wf.scopeStatus.pending')).toBeTruthy();
+    expect(screen.getByTestId('workflow-scope-toggle').getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('opens by itself when an edit of the workflow suspended the scope, and can be folded', async () => {
+    api.scope.mockResolvedValue(scope({ valid: false }));
+    renderEditor();
+    expect(await screen.findByText('wf.scopeNeedsValidation')).toBeTruthy();
+    fireEvent.click(screen.getByTestId('workflow-scope-toggle'));
+    const items = await chips();
+    expect(items[0].textContent).toBe('wf.scopeChipSuspended');
+    expect(items[1].textContent).toBe('api · write');
+  });
+
+  it('folds back by itself once the human validated a scope that was waiting for it', async () => {
+    api.scope.mockResolvedValue(scope({ valid: false }));
+    api.setScope.mockResolvedValue(scope());
+    renderEditor();
+    fireEvent.click(await screen.findByText('wf.scopeRevalidate'));
+    expect((await chips())[0].textContent).toBe('api · write');
+  });
+
+  it('keeps an unsupported workflow\'s revocable grants open, and an empty one folded', async () => {
+    api.scope.mockResolvedValue(scope({ supported: false, valid: false, entries: [] }));
+    renderEditor();
+    const items = await chips();
+    expect([...items].map(li => li.textContent)).toEqual(['wf.scopeStatus.unsupported']);
+    expect(screen.queryByText('wf.scopeUnsupported')).toBeNull();
+  });
+
+  it('folds grants past six into a +N chip', async () => {
+    const entries = Array.from({ length: 8 }, (_, i) => ({ project_id: `x${i}`, project_name: `proj${i}`, access: 'read' as const }));
+    api.scope.mockResolvedValue(scope({ entries }));
+    renderEditor();
+    const items = await chips();
+    expect(items).toHaveLength(7);
+    expect(items[6].textContent).toBe('+2');
+  });
+});
+
 describe('WorkflowScopeEditor', () => {
   it('revalidates a suspended scope as it is', async () => {
     api.scope.mockResolvedValue(scope({ valid: false }));
@@ -75,6 +174,7 @@ describe('WorkflowScopeEditor', () => {
     api.scope.mockResolvedValue(scope({ entries: [], valid: false, validated_by: null, validated_at: null }));
     api.setScope.mockResolvedValue(scope({ entries: [], all: 'write' }));
     render(<WorkflowScopeEditor workflowId="wf" ownProjectId="p1" projects={projects} toast={vi.fn()} t={t} />);
+    fireEvent.click(await screen.findByTestId('workflow-scope-toggle'));
     const allGroup = await screen.findByRole('radiogroup', { name: 'disc.scopeAllProjects' });
     fireEvent.click(allGroup.querySelector('[data-level="write"]')!);
     const validate = screen.getByText('wf.scopeValidate').closest('button')!;
@@ -94,6 +194,7 @@ describe('WorkflowScopeEditor', () => {
     api.scope.mockResolvedValue(scope({ entries: [], valid: false, validated_by: null, validated_at: null }));
     api.setScope.mockResolvedValue(scope());
     render(<WorkflowScopeEditor workflowId="wf" ownProjectId="p1" projects={projects} toast={vi.fn()} t={t} />);
+    fireEvent.click(await screen.findByTestId('workflow-scope-toggle'));
     const apiGroup = await screen.findByRole('radiogroup', { name: 'api' });
     fireEvent.click(apiGroup.querySelector('[data-level="read"]')!);
     expect(screen.queryByRole('radiogroup', { name: 'front' })).toBeNull();
