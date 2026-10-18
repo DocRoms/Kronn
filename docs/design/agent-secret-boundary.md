@@ -133,6 +133,21 @@ discussion (or one task execution, or one workflow run) and to its project.
   (no bridge token); an agent may only file a request a human decides. No bridge
   response carries a credential field such as `token_override`. Details and
   refused attacks: `docs/design/discussion-project-scope.md`.
+- **HTTP agents cross the same gate (KT-1346).** LiteLLM, OpenRouter, NVIDIA,
+  Ollama and other HTTP agents run their native tools in process, without a
+  bridge script. Their run now holds a bridge token too, minted on its first
+  Kronn tool call with the scope a CLI launch at the same place gets (the
+  room's grants for the room's own agent, none for a worker or a step, the
+  run for a workflow step). Each tool that reads or writes a Kronn object is
+  decided as the route it mirrors, by the same `admit` and `scope_json`
+  functions the HTTP middleware calls (`backend/src/core/bridge_admit.rs`), so
+  the two paths cannot drift. Tools with a stricter rule of their own
+  (`disc_read`, `disc_list`, `task_exec_*`) or no Kronn object (files, web,
+  manuals) keep it.
+- From a room or run **without a project**, a Quick Prompt, a Quick API or a
+  Page may be created: it is general, as when a human creates it there. Every
+  other creation still needs a project, and a shared resource stays
+  read-only to any agent.
 
 **Human proof per action.** Every secret-class route (section 3 rows 3 and 4,
 plus human-credential administration) requires a **proof bound to one action**:

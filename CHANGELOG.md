@@ -602,6 +602,19 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- HTTP agents (LiteLLM, OpenRouter, NVIDIA, Ollama…) obey the same access rule
+  as CLI agents (KT-1346). Their native tools ran in process without the bridge
+  token's gate: one could create, edit, block or read the planning tasks of any
+  project, save a Quick API or Quick Exec in another project or move one there,
+  and read any media job. Their run now holds a bridge token, and each tool
+  that touches a Kronn object is decided and scoped by the same code as the
+  route it mirrors: its room's project, the room's grants for the room's own
+  agent, the validated workflow scope for a step, nothing more for a worker.
+  A creation with no project lands in the room's project, as for a CLI agent;
+  from a room without a project, a Quick Prompt, a Quick API or a Page is saved
+  general, for CLI and HTTP agents alike. A CLI agent may now name a media
+  connection by its alias or name, as the media route already allowed.
+
 - Retrying a step, or resuming an audit, from the UI keeps the run's tier
   (KT-1320). The card's picker defaulted to `reasoning`, so the retry of a
   Haiku (economy) audit ran on Opus. The run now records its tier and

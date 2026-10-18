@@ -119,11 +119,18 @@ async fn quick_prompt_authoring_filters_overrides_and_merges_the_stored_definiti
     );
     assert_eq!(created.variables[0].label, "Sujet");
 
-    let before = saved_prompt("global", None);
+    // A shared template is read-only to an agent, as to a CLI agent's bridge
+    // token: the edit is made from the project that owns it.
+    let mut shared = attempted_overrides();
+    shared["qp_id"] = json!("global");
+    let refused = call(&executor, "qp_update", shared).await;
+    assert!(!refused.ok, "{}", refused.content);
+    let owner = KronnToolExecutor::new(state.clone(), Some("room-a".into()));
+    let before = saved_prompt("qp-a", Some("a"));
     let mut arguments = attempted_overrides();
-    arguments["qp_id"] = json!("global");
+    arguments["qp_id"] = json!("qp-a");
     arguments.as_object_mut().unwrap().remove("variables");
-    let updated = call(&executor, "qp_update", arguments).await;
+    let updated = call(&owner, "qp_update", arguments).await;
     assert!(updated.ok, "{}", updated.content);
     let updated: QuickPrompt = serde_json::from_value(updated.content).unwrap();
     assert_eq!(updated.name, "Nouveau");
@@ -142,12 +149,7 @@ async fn quick_prompt_authoring_filters_overrides_and_merges_the_stored_definiti
         updated.variables[0].label, "Topic",
         "omitted variables survive"
     );
-    let replaced = call(
-        &executor,
-        "qp_update",
-        json!({"qp_id":"global", "variables":[]}),
-    )
-    .await;
+    let replaced = call(&owner, "qp_update", json!({"qp_id":"qp-a", "variables":[]})).await;
     assert!(replaced.ok, "{}", replaced.content);
     assert_eq!(replaced.content["variables"], json!([]));
 }
@@ -208,8 +210,10 @@ async fn quick_prompt_scope_applies_to_list_create_update_and_run() {
         json!({"name":"General","prompt_template":"Hello","project_id":null}),
     )
     .await;
+    // A project room's agent saves in its project, as a CLI agent does: a
+    // general template is saved from a room without a project (KT-1346).
     assert!(
-        general.ok && general.content["project_id"].is_null(),
+        general.ok && general.content["project_id"] == "a",
         "{}",
         general.content
     );

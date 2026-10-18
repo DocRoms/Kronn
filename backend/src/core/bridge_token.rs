@@ -736,6 +736,11 @@ const CREATE_ROUTES: &[(&str, &str)] = &[
     ("/api/learnings/propose", "project_id"),
 ];
 
+/// Create routes a launch with a discussion but no project may use: the
+/// resource is general, visible from every project, as when a human creates
+/// it from that room (KT-1346).
+const GENERAL_WHEN_UNBOUND: &[&str] = &["/api/quick-prompts", "/api/quick-apis", "/api/pages"];
+
 /// Update routes whose handler resets or may drop the project when the body
 /// omits it: the token's project is sent explicitly.
 const KEEPS_PROJECT_ON_UPDATE: &[&str] = &[
@@ -847,8 +852,11 @@ pub fn prepare_body_in(
                         fields.insert(field.to_string(), serde_json::json!(project));
                         changed = true;
                     }
-                    // A project-less launch may create its own discussions only.
-                    (None, _) if route.pattern == "/api/disc/create" => {}
+                    // A project-less launch may create its own discussions, and
+                    // the general resources a human there would create.
+                    (None, _)
+                        if route.pattern == "/api/disc/create"
+                            || GENERAL_WHEN_UNBOUND.contains(&route.pattern) => {}
                     (None, _) => {
                         return Err(Refusal(
                             "a bridge token without a project cannot create shared resources"
@@ -1826,7 +1834,10 @@ pub fn residence(
             .map(|()| single_or_global(Some(id.to_owned())))),
         Kind::Connection => Ok(conn
             .query_row(
-                "SELECT 1 FROM external_api_connections WHERE id = ?1",
+                // The media route also takes a connection by alias or name.
+                "SELECT 1 FROM external_api_connections WHERE id = ?1 \
+                 OR lower(mention_alias) = lower(ltrim(?1, '@')) \
+                 OR lower(display_name) = lower(ltrim(?1, '@')) LIMIT 1",
                 [id],
                 |_| Ok(()),
             )
