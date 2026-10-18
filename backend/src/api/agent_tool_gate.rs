@@ -154,14 +154,6 @@ pub(super) const UNGATED_TOOLS: &[(&str, &str)] = &[
     ),
     ("agent_list", "the room's own agents and connections"),
     (
-        "task_exec_prepare",
-        "the task's project must be the room's; principal only",
-    ),
-    (
-        "task_exec_launch",
-        "the task's project must be the room's; principal only",
-    ),
-    (
         "task_exec_status",
         "the execution's principal or worker only",
     ),
@@ -404,6 +396,20 @@ impl KronnToolExecutor {
                 json!({
                     "connection_id": text(args, "connection_id"),
                     "discussion_id": own_disc,
+                }),
+            ),
+            // A task of another project is refused before its plan is read.
+            "task_exec_prepare" | "task_exec_launch" => send(
+                "POST",
+                if call.name == "task_exec_prepare" {
+                    "/api/orchestration/tool/prepare"
+                } else {
+                    "/api/orchestration/tool/launch"
+                },
+                Vec::new(),
+                json!({
+                    "task_reference": text(args, "task_reference"),
+                    "parent_discussion_id": own_disc,
                 }),
             ),
             "page_create" => {

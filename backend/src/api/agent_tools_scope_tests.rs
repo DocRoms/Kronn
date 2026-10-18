@@ -303,3 +303,40 @@ async fn a_tool_without_an_access_rule_is_refused() {
     let outcome = call(agent.as_ref(), "task_unknown_write", json!({})).await;
     assert!(refused(&outcome), "{}", outcome.content);
 }
+
+#[tokio::test]
+async fn a_task_execution_never_reads_another_projects_task() {
+    let World { state, task_b, .. } = two_projects().await;
+    let reference: String = state
+        .db
+        .with_conn(move |conn| {
+            Ok(conn.query_row(
+                "SELECT 'KT-' || task_number FROM planning_tasks WHERE id = ?1",
+                [&task_b],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    for room in ["room-a", "general"] {
+        let agent = room_agent(&state, room);
+        for tool in ["task_exec_prepare", "task_exec_launch"] {
+            let outcome = call(
+                agent.as_ref(),
+                tool,
+                json!({
+                    "task_reference": &reference,
+                    "worker_scope_intent": "generic",
+                    "worker": {"kind": "agent", "agent_type": "ClaudeCode"},
+                }),
+            )
+            .await;
+            assert!(refused(&outcome), "{room} {tool}: {}", outcome.content);
+            assert!(
+                !outcome.content.to_string().contains("task-b"),
+                "{}",
+                outcome.content
+            );
+        }
+    }
+}

@@ -5111,6 +5111,22 @@ mod tests {
             db.clone(),
             crate::DEFAULT_MAX_CONCURRENT_AGENTS,
         );
+        // A real room and task: the gate refuses a dead room before any schema check.
+        let reference = db
+            .with_conn(|conn| {
+                conn.execute("INSERT INTO projects (id,name,path,created_at,updated_at) VALUES ('p','p','p','2026-10-18T00:00:00Z','2026-10-18T00:00:00Z')", [])?;
+                conn.execute("INSERT INTO discussions (id,title,project_id,created_at,updated_at) VALUES ('disc-parent','parent','p','2026-10-18T00:00:00Z','2026-10-18T00:00:00Z')", [])?;
+                let request: CreatePlanningTaskRequest =
+                    serde_json::from_value(json!({"title": "t", "project_ids": ["p"]}))?;
+                let task = crate::db::planning::create_task(conn, &request)?;
+                Ok(conn.query_row(
+                    "SELECT 'KT-' || task_number FROM planning_tasks WHERE id = ?1",
+                    [&task.summary.id],
+                    |row| row.get::<_, String>(0),
+                )?)
+            })
+            .await
+            .unwrap();
         let executor = KronnToolExecutor::arc(
             state,
             Some("disc-parent".into()),
@@ -5123,7 +5139,7 @@ mod tests {
                 id: "stale-host-schema".into(),
                 name: "task_exec_launch".into(),
                 arguments: json!({
-                    "task_reference": "KT-466",
+                    "task_reference": reference,
                     "worker": {
                         "kind": "discussion_agent",
                         "agent_type": "Ollama"
