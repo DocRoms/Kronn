@@ -55,7 +55,7 @@ does not resolve the question and does not start it. The declaration accepts at
 most 16 variables. Workflow ids are non-empty and at most 128 characters;
 variable names are 1–64 ASCII letters, digits, `_`, `-`, or `.`, and each value
 is a control-free string of at most 8,000 characters.
-`[src: file: backend/src/db/discussion_questions.rs:231-238#valid_resume_variable] [src: file: backend/src/db/discussion_questions.rs:291-298#nonempty_bounded]`
+`[src: file: backend/src/db/discussion_questions.rs:239-246#valid_resume_variable] [src: file: backend/src/db/discussion_questions.rs:300-307#nonempty_bounded]`
 `[src: file: backend/src/api/discussion_questions.rs:64-135#launch_question_resume] [src: file: backend/src/api/discussion_questions.rs:137-164#resume_and_reload]`
 
 Pause execution, delegation and completion of the affected lot until the human
@@ -101,7 +101,7 @@ as a message that says it is not a decision, and the question stays pending.
 In the card, a checked option can be clicked again to take it back.
 Discussion list items expose `pending_question_count`, including pagination.
 `[src: file: backend/src/lib.rs:2809-2857#decline]`
-`[src: file: backend/src/db/discussion_questions.rs:504-609#publish_human_resolution]`
+`[src: file: backend/src/db/discussion_questions.rs:514-619#publish_human_resolution]`
 `[src: file: backend/src/db/discussion_questions.rs:166-193#pending_question_count]`
 `[src: file: backend/src/api/discussions/crud.rs:22-88#with_pending_counts]`
 
@@ -691,7 +691,7 @@ one, it has no influence. The regression test uses two real concurrent
 executions and forges B's valid id in worker A's call to prove that A remains
 the only target.
 `[src: file: backend/src/api/agent_tools.rs:3850-3872#native_worker_execution_for_trusted_dispatch]`
-`[src: file: backend/src/api_tests.rs:6765-6904#worker_delivery_ignores_a_forged_valid_execution_id_and_uses_its_dispatch]`
+`[src: file: backend/src/api_tests.rs:6954-7093#worker_delivery_ignores_a_forged_valid_execution_id_and_uses_its_dispatch]`
 
 Accepting a CLI worker control offer (`task_exec_accept_worker_offer`) crosses
 two deliberately distinct identity domains. The live
@@ -913,14 +913,14 @@ A recorded arbitration answer does not by itself restart its originating
 workflow: without a declared `resume`, no follow-up run is launched. When
 debugging a failed run, compare its output with the answer timestamps; the
 current decision history does not prove the earlier result incorporated it.
-[src: file: backend/src/db/discussion_questions.rs:624-683#claim_resume]
+[src: file: backend/src/db/discussion_questions.rs:634-693#claim_resume]
 
 Question `resume` starts a new run of the declared workflow, once per card;
 it does not resume a failed run in place or wait for every other question to
 be resolved. The target workflow must check its remaining decisions and
 domain prerequisites before proceeding. Workflow concurrency limits already
 support atomic admission per launch-variable key, within that workflow.
-[src: file: backend/src/db/discussion_questions.rs:624-683#claim_resume]
+[src: file: backend/src/db/discussion_questions.rs:634-693#claim_resume]
 [src: file: backend/src/api/discussion_questions.rs:64-135#launch_question_resume]
 [src: file: backend/src/workflows/concurrency.rs:106-140#insert_run_within_limit]
 

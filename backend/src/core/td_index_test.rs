@@ -546,3 +546,15 @@ fn a_resync_keeps_the_severity_of_a_detail_file_the_index_row_gave() {
     // A second pass changes nothing.
     assert!(!resync(&fx.docs, NO_ADR).unwrap().changed);
 }
+
+#[test]
+fn a_bullet_kept_for_a_row_without_sheet_still_names_the_debt() {
+    // KT-1348: a resync turns a row-only TD into this bullet; the next card
+    // must still find the debt.
+    let rows = index_rows("## Current list\n\n- `TD-20261016-legacy` — Legacy one-liner\n");
+    assert_eq!(
+        rows["TD-20261016-legacy"].title.as_deref(),
+        Some("Legacy one-liner")
+    );
+    assert!(index_rows("```\n- `TD-20261016-fenced` — x\n```\n").is_empty());
+}

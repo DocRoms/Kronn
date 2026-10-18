@@ -338,6 +338,195 @@ mod tests {
         assert_eq!(gone["data"], serde_json::Value::Null);
     }
 
+    /// KT-1348 (#258) — a partial TD card over HTTP: the recorded TDs are
+    /// saved, the card stays pending with only the failed TD and its reason,
+    /// the validation does not resume, and the retry after the repair applies
+    /// that one TD alone.
+    #[tokio::test]
+    async fn a_partial_td_card_stays_pending_for_the_failed_td_over_http() {
+        let state = test_state();
+        let project = tempfile::tempdir().unwrap();
+        let docs = project.path().join("docs");
+        std::fs::create_dir_all(docs.join("tech-debt")).unwrap();
+        std::fs::write(docs.join("decisions.md"), "# Decisions\n").unwrap();
+        let sheet = |status: &str| {
+            format!("---\nname: td\nmetadata:\n  type: tech-debt\n  audit_history:\n    - date: 2026-09-01\n      status: {status}\n      reviewer: Full audit\n---\n\n# Title\n\n- **Severity**: High\n- **Status**: {status}\n")
+        };
+        std::fs::write(
+            docs.join("tech-debt/TD-20261018-good.md"),
+            sheet("Inferred"),
+        )
+        .unwrap();
+        let broken = docs.join("tech-debt/TD-20261018-bad.md");
+        std::fs::write(&broken, "---\nname: broken\n").unwrap();
+        insert_test_discussion(&state, "td-room", "Validation").await;
+        let path = project.path().to_string_lossy().into_owned();
+        state
+            .db
+            .with_conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO projects (id,name,path,created_at,updated_at) VALUES ('p','P',?1,'now','now')",
+                    [path],
+                )?;
+                conn.execute("UPDATE discussions SET project_id='p' WHERE id='td-room'", [])?;
+                crate::db::audit_runs::insert_running(conn, "run", "p", "Full", "Codex", chrono::Utc::now())?;
+                crate::db::audit_runs::complete(
+                    conn, "run", chrono::Utc::now(), "Completed", 1, 0, 1, 0, 0, 2, 0, 80, None, None,
+                )?;
+                crate::db::audit_runs::set_validation_discussion(conn, "run", "td-room")?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let options = serde_json::json!([
+            {"id":"confirm","label":"Confirm"},{"id":"reject","label":"Reject"},
+            {"id":"accept_decision","label":"Accepted decision"},{"id":"defer","label":"Defer"}
+        ]);
+        // An ordinary warning inside a context that already fills the limit:
+        // the failure note must neither cut it nor be cut by it.
+        let prefix =
+            "Audit findings. ⚠ This intentional trade-off must be reviewed with the owner.";
+        let context = format!("{prefix}{}", "x".repeat(4000 - prefix.chars().count()));
+        let card = serde_json::json!({
+            "version":1,"key":"td-batch","question":"TD outcomes?","options":options,
+            "context":context,
+            "items":[{"id":"TD-20261018-good","label":"good"},{"id":"TD-20261018-bad","label":"bad"}],
+            "task_ref":"audit-td-batch"
+        });
+        insert_test_message(
+            &state,
+            "td-room",
+            "Agent",
+            &format!("```kronn-question\n{card}\n```"),
+        )
+        .await;
+        let get = |uri: &str| Request::builder().uri(uri).body(Body::empty()).unwrap();
+        let (_, listed) = send(
+            state.clone(),
+            false,
+            get("/api/discussions/td-room/questions"),
+        )
+        .await;
+        let id = listed["data"]["questions"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let uri = format!("/api/discussions/td-room/questions/{id}/answer");
+        let post = |body: Value| {
+            Request::builder()
+                .method("POST")
+                .uri(&uri)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        let items = |pairs: &[(&str, &str)]| {
+            serde_json::json!({
+                "item_answers": pairs.iter().map(|(i, o)| serde_json::json!({"item_id":i,"selected_option_id":o})).collect::<Vec<_>>(),
+                "idempotency_key": "click"
+            })
+        };
+        let dispatches = || async {
+            state
+                .db
+                .with_conn(|conn| {
+                    Ok(
+                        conn.query_row("SELECT COUNT(*) FROM agent_dispatch_jobs", [], |r| {
+                            r.get::<_, i64>(0)
+                        })?,
+                    )
+                })
+                .await
+                .unwrap()
+        };
+
+        let (status, partial) = send(
+            state.clone(),
+            false,
+            post(items(&[
+                ("TD-20261018-good", "confirm"),
+                ("TD-20261018-bad", "accept_decision"),
+            ])),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{partial}");
+        assert_eq!(partial["data"]["state"], "pending", "{partial}");
+        assert_eq!(partial["data"]["answer"], Value::Null);
+        let left = partial["data"]["items"].as_array().unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0]["id"], "TD-20261018-bad");
+        assert_eq!(
+            partial["data"]["context"], context,
+            "the agent's context is intact"
+        );
+        let alert = partial["data"]["td_errors"].as_str().unwrap();
+        assert!(alert.contains("- TD-20261018-bad:"), "{partial}");
+        assert!(!alert.contains("- TD-20261018-good:"), "{partial}");
+        let (_, listed) = send(
+            state.clone(),
+            false,
+            get("/api/discussions/td-room/questions"),
+        )
+        .await;
+        assert_eq!(listed["data"]["pending_count"], 1);
+        assert_eq!(listed["data"]["questions"][0], partial["data"]);
+        let (_, rooms) = send(state.clone(), false, get("/api/discussions")).await;
+        assert_eq!(
+            rooms["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["id"] == "td-room")
+                .unwrap()["pending_question_count"],
+            1
+        );
+        assert_eq!(dispatches().await, 0, "no resume while a TD is pending");
+        assert!(
+            std::fs::read_to_string(docs.join("tech-debt/TD-20261018-good.md"))
+                .unwrap()
+                .contains("Confirmed by user")
+        );
+
+        // Repair, then retry with the same key: only the failed TD is applied.
+        std::fs::write(&broken, sheet("Inferred")).unwrap();
+        let (status, done) = send(
+            state.clone(),
+            false,
+            post(items(&[("TD-20261018-bad", "accept_decision")])),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{done}");
+        assert_eq!(done["data"]["state"], "answered", "{done}");
+        assert_eq!(done["data"]["td_errors"], Value::Null, "{done}");
+        assert_eq!(done["data"]["context"], context, "{done}");
+        assert_eq!(
+            dispatches().await,
+            1,
+            "the validation resumes once, after the last TD"
+        );
+        let good = std::fs::read_to_string(docs.join("tech-debt/TD-20261018-good.md")).unwrap();
+        assert_eq!(
+            good.matches("Confirmed by user").count(),
+            2,
+            "one body line, one history entry:\n{good}"
+        );
+        let decisions = std::fs::read_to_string(docs.join("decisions.md")).unwrap();
+        assert_eq!(decisions.matches("## ADR-").count(), 1, "{decisions}");
+        let (_, listed) = send(
+            state.clone(),
+            false,
+            get("/api/discussions/td-room/questions"),
+        )
+        .await;
+        assert_eq!(listed["data"]["pending_count"], 0);
+        assert_eq!(
+            listed["data"]["questions"][0]["td_errors"],
+            Value::Null,
+            "the stored, answered card carries no stale alert"
+        );
+        assert_eq!(listed["data"]["questions"][0]["context"], context);
+    }
+
     /// End to end: a run stops on a ceiling, Kronn asks, the human
     /// grants, and the agent is woken with the budget raised — once.
     #[tokio::test]
