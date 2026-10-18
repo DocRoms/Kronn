@@ -755,19 +755,82 @@ The audit records this finding as a decision, not debt. Reopen it only with new 
     updated
 }
 
+/// What a TD card recorded: the TDs written, and the ones that could not be,
+/// each with the reason (KT-1348).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct TdCardOutcome {
+    pub(crate) applied: Vec<String>,
+    pub(crate) failed: Vec<(String, String)>,
+}
+
+fn failure_lines(failed: &[(String, String)]) -> String {
+    failed
+        .iter()
+        .map(|(td_id, reason)| format!("- {td_id}: {reason}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+impl TdCardOutcome {
+    /// The lines a card answer shows for the TDs that were not recorded; empty
+    /// when every one was.
+    pub(crate) fn failure_note(&self) -> String {
+        if self.failed.is_empty() {
+            return String::new();
+        }
+        format!(
+            "Kronn could not record {} of {} TD decision(s); the others are saved:\n{}",
+            self.failed.len(),
+            self.failed.len() + self.applied.len(),
+            failure_lines(&self.failed)
+        )
+    }
+}
+
+/// Records a TD card. A batch is partial by design (KT-1348): one TD that
+/// cannot be written (a malformed sheet, a TD with neither sheet nor index row)
+/// never blocks the others, and its error names it. The whole batch is tried as
+/// one atomic write first; only when that fails is each TD tried on its own.
+/// Fails only when no TD at all could be recorded.
 pub(crate) fn apply_td_resolutions(
     conn: &Connection,
     discussion_id: &str,
     resolutions: &[TdResolution],
     rationale: Option<&str>,
-) -> Result<()> {
+) -> Result<TdCardOutcome> {
     if resolutions.is_empty() {
         return Err(anyhow!("An audit TD card must resolve at least one TD"));
     }
     let project_path = linked_project_path(conn, discussion_id)?;
     let items: Vec<(&TdResolution, Option<&str>)> =
         resolutions.iter().map(|r| (r, rationale)).collect();
-    apply_td_resolutions_at(&project_path, &items, TdDecisionOrigin::Card)?;
+    let mut outcome = TdCardOutcome::default();
+    match apply_td_resolutions_at(&project_path, &items, TdDecisionOrigin::Card) {
+        Ok(()) => outcome.applied = resolutions.iter().map(|r| r.td_id.clone()).collect(),
+        Err(error) if resolutions.len() == 1 => outcome
+            .failed
+            .push((resolutions[0].td_id.clone(), format!("{error:#}"))),
+        Err(_) => {
+            for item in &items {
+                match apply_td_resolutions_at(
+                    &project_path,
+                    std::slice::from_ref(item),
+                    TdDecisionOrigin::Card,
+                ) {
+                    Ok(()) => outcome.applied.push(item.0.td_id.clone()),
+                    Err(error) => outcome
+                        .failed
+                        .push((item.0.td_id.clone(), format!("{error:#}"))),
+                }
+            }
+        }
+    }
+    if outcome.applied.is_empty() {
+        return Err(anyhow!(
+            "No TD decision could be recorded:\n{}",
+            failure_lines(&outcome.failed)
+        ));
+    }
     let project_id: Option<String> = conn
         .query_row(
             "SELECT project_id FROM discussions WHERE id = ?1",
@@ -784,7 +847,7 @@ pub(crate) fn apply_td_resolutions(
             "audit validation card",
         );
     }
-    Ok(())
+    Ok(outcome)
 }
 
 /// Writes human TD decisions on the sheets of `project_path`. Every id is

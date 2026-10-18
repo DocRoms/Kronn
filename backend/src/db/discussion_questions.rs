@@ -1175,13 +1175,21 @@ fn answer_inner(
             .map_err(AnswerError::Invalid)?;
     }
     if let Some(resolutions) = audit_resolutions.as_ref() {
-        crate::core::audit_validation::apply_td_resolutions(
+        let outcome = crate::core::audit_validation::apply_td_resolutions(
             conn,
             discussion_id,
             resolutions,
             text.as_deref(),
         )
         .map_err(|error| AnswerError::Invalid(error.to_string()))?;
+        // KT-1348 — a TD that could not be written is named on the card's
+        // answer, not silently dropped, and does not undo the others.
+        let note = outcome.failure_note();
+        if !note.is_empty() {
+            tracing::warn!("Audit TD card partially recorded: {note}");
+            content.push_str("\n\n");
+            content.push_str(&note);
+        }
     }
     let ceiling =
         super::discussion_ceiling_requests::decide(conn, discussion_id, &question.key, &selected)?;

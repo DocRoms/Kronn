@@ -602,6 +602,16 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- An audit TD card no longer fails for the whole batch when one TD cannot be
+  written (KT-1348, GitHub #258, reported by tarussio). A batch is now partial
+  by design: every TD that can be recorded is, and the answer lists the ones
+  that were not, each named with its reason (a card where nothing could be
+  recorded stays pending and names each TD). A sheet whose status lives only
+  in `audit_history`, and a TD only the index lists, are resolved; and
+  answering one card no longer makes a later row-only TD of the same
+  validation unresolvable (the index resync keeps such a row as a bullet,
+  which is now read back).
+
 - Retrying a step, or resuming an audit, from the UI keeps the run's tier
   (KT-1320). The card's picker defaulted to `reasoning`, so the retry of a
   Haiku (economy) audit ran on Opus. The run now records its tier and
