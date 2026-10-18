@@ -100,7 +100,7 @@ routing and idempotency guarantees as an answered one — they cannot drift apar
 as a message that says it is not a decision, and the question stays pending.
 In the card, a checked option can be clicked again to take it back.
 Discussion list items expose `pending_question_count`, including pagination.
-`[src: file: backend/src/lib.rs:2809-2857#decline]`
+`[src: file: backend/src/lib.rs:2652-2700#decline]`
 `[src: file: backend/src/db/discussion_questions.rs:514-619#publish_human_resolution]`
 `[src: file: backend/src/db/discussion_questions.rs:166-193#pending_question_count]`
 `[src: file: backend/src/api/discussions/crud.rs:22-88#with_pending_counts]`
@@ -404,7 +404,7 @@ Planning catalogue natively and executes it through the same HTTP handlers,
 with the discussion scope and actor provenance supplied server-side. Vibe's
 programmatic runner deliberately disables MCP; its supported Planning write
 path is the human-gated `kronn-plan-action` fence.
-`[src: file: backend/src/api/agent_tools.rs:498-505#tool_catalogue]`
+`[src: file: backend/src/api/agent_tools.rs:514-521#tool_catalogue]`
 `[src: file: backend/scripts/vibe-runner.py:2-6#run_programmatic]`
 
 ## Task execution lifecycle
@@ -680,7 +680,7 @@ concurrent sessions of the same provider remain distinguishable in the audit
 trail.
 `[src: file: backend/scripts/disc-introspection-mcp.py:5753-5768#_task_exec_identity]`
 `[src: file: backend/src/api/orchestration.rs:11776-11786#principal_cli_is_authorized]`
-`[src: file: backend/src/api/agent_tools.rs:3812-3848#native_execution_for_caller]`
+`[src: file: backend/src/api/agent_tools.rs:3838-3874#native_execution_for_caller]`
 `[src: file: backend/src/db/sql/136_planning_actor_session.sql:1-5#actor_session_id]`
 
 For a native HTTP worker, the execution id is also server-derived. The executor
@@ -690,7 +690,7 @@ worker schema contains no execution-id field; if a client nevertheless injects
 one, it has no influence. The regression test uses two real concurrent
 executions and forges B's valid id in worker A's call to prove that A remains
 the only target.
-`[src: file: backend/src/api/agent_tools.rs:3850-3872#native_worker_execution_for_trusted_dispatch]`
+`[src: file: backend/src/api/agent_tools.rs:3876-3898#native_worker_execution_for_trusted_dispatch]`
 `[src: file: backend/src/api_tests.rs:6954-7093#worker_delivery_ignores_a_forged_valid_execution_id_and_uses_its_dispatch]`
 
 Accepting a CLI worker control offer (`task_exec_accept_worker_offer`) crosses
@@ -805,7 +805,7 @@ local Ollama/LiteLLM/NVIDIA worker capable of producing the clean committed HEAD
 required by `task_exec_deliver` without turning the HTTP tool catalogue into
 arbitrary Git access.
 `[src: file: backend/src/api/agent_workspace_tools.rs:567-574#git_commit_payload] [src: file: backend/src/api/agent_workspace_tools.rs:615-692#git_commit_payload_with_data_dir_lock]`
-`[src: file: backend/src/api/agent_tools.rs:3492-3564#git_commit]` `[src: file: backend/src/api/agent_tools.rs:1352-1363#DISCUSSION_ONLY]`
+`[src: file: backend/src/api/agent_tools.rs:3492-3564#git_commit]` `[src: file: backend/src/api/agent_tools.rs:1368-1379#DISCUSSION_ONLY]`
 `[src: file: backend/src/db/orchestration.rs:823-855#managed_working_execution_for_workspace]`
 
 ## Rich discussion output

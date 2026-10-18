@@ -76,13 +76,13 @@ The workspace catalogue, thirteen tools [src: file: backend/src/api/agent_worksp
 | `git_commit` | Commit named files, only for the active native worker in its task worktree |
 
 Plus Kronn's internal catalogue — plan and task tools, `qa_list`/`qa_run`, and `api_call`
-against configured REST plugins [src: file: backend/src/api/agent_tools.rs:507-988#build_tool_catalogue].
+against configured REST plugins [src: file: backend/src/api/agent_tools.rs:523-1004#build_tool_catalogue].
 
 And, since 0.13.0, media generation: `media_generate` and `media_job_status`
-[src: file: backend/src/api/agent_tools.rs:1083-1178#orchestration_tool_catalogue]. These sit in the orchestration
+[src: file: backend/src/api/agent_tools.rs:1099-1194#orchestration_tool_catalogue]. These sit in the orchestration
 catalogue, so an HTTP agent replying in a discussion has them, and a bounded worker keeps
 them — they are deliberately absent from the principal-only list a worker room strips
-[src: file: backend/src/api/agent_tools.rs:1403-1454#NOT_FOR_A_WORKER]. A Workflow Agent step does not: only a
+[src: file: backend/src/api/agent_tools.rs:1419-1470#NOT_FOR_A_WORKER]. A Workflow Agent step does not: only a
 discussion run adds the orchestration tools [src: file: backend/src/api/agent_tools.rs:1532-1566#orchestration_tool_catalogue].
 
 Until then only CLI agents could generate an image or a video, because the tools were
@@ -123,7 +123,7 @@ implementation detail:
   `..` or by symlink. The root is the discussion's `managed` workspace row (else its first
   declared row) when it has one, otherwise the path of the project the discussion belongs
   to; a workflow step has no discussion and resolves straight to its project's path
-  [src: file: backend/src/api/agent_tools.rs:3129-3196#workspace_root]. The project fallback is the common
+  [src: file: backend/src/api/agent_tools.rs:3155-3222#workspace_root]. The project fallback is the common
   case, not the exception: a workspace row is only created by orchestration, so on
   2026-08-19 just 16 of 395 discussions had one. Requiring such a row before granting the
   file tools was the original bug — the path was reachable all along.
@@ -254,7 +254,7 @@ with an instruction to clear the setting or choose an HTTP provider. An explicit
 effort on an unsupported transport is also refused. The runner applies the same
 validation to explicit workflow Agent-step controls. Legacy batch/compare target
 overrides are outside this single-launch snapshot change.
-[src: file: backend/src/api/agent_quick_prompt_tests.rs:550-603#quick_prompt_unsupported_saved_limit_refuses_without_a_child_or_dispatch_job]
+[src: file: backend/src/api/agent_quick_prompt_tests.rs:571-624#quick_prompt_unsupported_saved_limit_refuses_without_a_child_or_dispatch_job]
 [src: file: backend/src/agents/generation_settings.rs:5-28#validate]
 [src: file: backend/src/workflows/steps.rs:1356-1360#reasoning_effort_override]
 [src: file: backend/src/agents/runner.rs:3790-3794#validate]
@@ -264,7 +264,7 @@ stream, edits the template while the job is queued, then inspects both requests
 received by a loopback provider. A separate Ollama fixture checks the actual
 request after context fitting. These fixtures prove transport and persistence,
 not live hosted-provider availability or model quality.
-[src: file: backend/src/api/agent_quick_prompt_tests.rs:470-548#quick_prompt_saved_http_settings_reach_each_provider_turn_after_template_edit]
+[src: file: backend/src/api/agent_quick_prompt_tests.rs:491-569#quick_prompt_saved_http_settings_reach_each_provider_turn_after_template_edit]
 [src: file: backend/src/agents/generation_settings.rs:119-188#ollama_generation_controls_reach_the_actual_http_request_after_context_fitting]
 
 ## Full catalogue by default; progressive loading is experimental (KT-685)
@@ -273,8 +273,8 @@ HTTP discussion agents receive the full native catalogue by default. Explicitly
 setting `KRONN_TIERED_TOOLS=1` starts with the core tools and an index of the
 `pages`, `media`, `delegation`, `edit` and `automations` families. `tools_load` adds a family
 for the remainder of the run. Bounded workers cannot expand their catalogue.
-[src: file: backend/src/api/agent_tools.rs:333-411#TOOL_FAMILIES]
-[src: file: backend/src/api/agent_tools.rs:2327-2335#tools_load]
+[src: file: backend/src/api/agent_tools.rs:349-427#TOOL_FAMILIES]
+[src: file: backend/src/api/agent_tools.rs:2353-2361#tools_load]
 
 The native dispatcher now routes `tools_load` correctly. Earlier benchmarks used
 a substitute dispatcher and their claimed savings did not validate this path.
@@ -319,7 +319,7 @@ agent is spawned exactly as before. An HTTP agent gets a
 `KronnToolExecutor::audit_arc_for_step`, scoped to the project directory the pipeline
 already resolved (`resolve_host_path`, so it is right inside a container) rather
 than a workspace row or a project looked up by id
-[src: file: backend/src/api/agent_tools.rs:246-268#audit_arc_for_step]. The bounds are KT-338's, unchanged:
+[src: file: backend/src/api/agent_tools.rs:261-284#audit_arc_for_step]. The bounds are KT-338's, unchanged:
 every path is canonicalised against that root and refused when it leaves it, by
 `..`, by an absolute path or by a symlink; there is no shell; a truncated read
 says so.
@@ -327,12 +327,12 @@ says so.
 **What the audit's tools are.** Narrower than a workflow Agent step's:
 `read_file`, `list_files`, `find_files`, `search_text`, `git_status`, `git_diff`,
 `git_log` to read, and `write_file`, `edit_file`, `edit_lines`,
-`insert_after_line` to write [src: file: backend/src/api/agent_tools.rs:284-301#AUDIT_TOOLS].
+`insert_after_line` to write [src: file: backend/src/api/agent_tools.rs:300-317#AUDIT_TOOLS].
 No `web_fetch` (it would send the model off the project), no `git_commit` (the
 audit never commits), no plan, REST-plugin or discussion tools. A call to any
 other name is refused before a handler sees it, and so is a write to the
 target document of another step of the chain (the consolidation step excepted)
-[src: file: backend/src/api/agent_tools.rs:1615-1629#AUDIT_TOOLS]
+[src: file: backend/src/api/agent_tools.rs:1638-1652#AUDIT_TOOLS]
 [src: file: backend/src/api/agent_tools.rs:206-237#foreign_step_target_refusal].
 
 **What the audit prompt says about other repos (KT-926).** An audit's file tools
@@ -453,8 +453,8 @@ returns an explicit alternative: disable it in the Workflows UI or create a new
 disabled draft. Neither enabling, triggering nor deletion is exposed here.
 Cron and Tracker drafts default to concurrency 1. The existing workflow HTTP
 handlers validate steps, references, allowlists and stored command bindings.
-[src: file: backend/src/api/agent_workflow_tools.rs:48-119#draft_patch]
-[src: file: backend/src/api/agent_workflow_tools.rs:206-208#enabled]
+[src: file: backend/src/api/agent_workflow_tools.rs:65-122#draft_patch]
+[src: file: backend/src/api/agent_workflow_tools.rs:209-211#enabled]
 [src: file: backend/src/api/workflows.rs:2580-2640#validate_step_references]
 
 The canonical schema lives in `workflow_step_schema.json`. MCP reads the complete

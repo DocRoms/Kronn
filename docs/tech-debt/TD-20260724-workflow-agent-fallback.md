@@ -231,7 +231,7 @@ This matters today because HTTP agents have a different execution path: since
 project/run-scoped catalogue without Planning mutations, and no per-model
 capability gate checks that the model can call tools. A local Ollama
 model therefore cannot safely replace every CLI step merely because the model
-is pulled. [src: file: backend/src/api/agent_tools.rs:165-186#workflow_arc]
+is pulled. [src: file: backend/src/api/agent_tools.rs:179-200#workflow_arc]
 [src: file: backend/src/workflows/runner.rs:2542-2547#workflow_arc]
 [src: file: docs/tech-debt/TD-20260808-http-agents-no-tool-calling.md:51-53#capability]
 
