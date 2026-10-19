@@ -610,6 +610,15 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
                         placeholder: "https://acme.atlassian.net".into(),
                         description: "Your Atlassian Cloud workspace URL — no trailing slash. Each Kronn project can wire one workspace; duplicate the plugin to track several.".into(),
                     },
+                    // Confluence links live in Jira content: masked, they were
+                    // written back as `***spaces/…` (KT-1249, KT-1331).
+                    ApiConfigKey {
+                        public: true,
+                        env_key: "CONFLUENCE_URL".into(),
+                        label: "Confluence URL".into(),
+                        placeholder: "https://acme.atlassian.net/wiki".into(),
+                        description: "Your Confluence base URL, as it appears in links (usually the workspace URL followed by /wiki).".into(),
+                    },
                 ],
                 endpoints: vec![
                     // ── Sanity check ────────────────────────────────────

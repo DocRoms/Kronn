@@ -891,10 +891,10 @@ bearer, OAuth2 client id and secret, token-exchange credentials and a
 public config unmasked too.
 [src: file: backend/src/workflows/api_call_executor.rs:232-255#add_url_parts]
 [src: file: backend/src/workflows/api_call_executor.rs:257-292#is_public_config]
-[src: file: backend/src/workflows/api_call_executor.rs:294-308#has_credential_marker]
-[src: file: backend/src/workflows/api_call_executor.rs:310-346#is_credential_free_url]
-[src: file: backend/src/workflows/api_call_executor.rs:348-372#auth_env_keys]
-[src: file: backend/src/api/plugin_portability.rs:663-672#without_public_flags]
+[src: file: backend/src/workflows/api_call_executor.rs:300-314#has_credential_marker]
+[src: file: backend/src/workflows/api_call_executor.rs:316-352#is_credential_free_url]
+[src: file: backend/src/workflows/api_call_executor.rs:354-378#auth_env_keys]
+[src: file: backend/src/api/plugin_portability.rs:672-681#without_public_flags]
 
 Every automatic disable is recorded on the workflow (reason, who, when, a
 short summary; migration 223) and listed on the Automations page for review;
