@@ -367,7 +367,7 @@ one.
 killing the lifeline PID does not stop it. A Full audit therefore registers a
 cancellation token per step, and `cancel_audit` trips it
 [src: file: backend/src/api/audit/full.rs:1881-1886#agent_cancels]
-[src: file: backend/src/api/audit/full.rs:4632-4635#agent_cancels]. Since KT-927 the partial audit does
+[src: file: backend/src/api/audit/full.rs:4640-4643#agent_cancels]. Since KT-927 the partial audit does
 the same, and so does an ACP agent, whose PID is a lifeline too: see
 [auditing with an ACP agent](audit-acp-agents.md).
 
