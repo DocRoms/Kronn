@@ -2113,6 +2113,33 @@ fn clean_reference(reference: &str) -> &str {
     s
 }
 
+/// The verdict for a line or range cited into a secret file.
+fn secret_line_verdict() -> (SourceStatus, String) {
+    (
+        SourceStatus::Rejected,
+        "this file may hold secrets, so no line of it is cited — state that it exists \
+         with `path:exists` and do not quote its content"
+            .into(),
+    )
+}
+
+/// Refusal for a line or range cited into a secret file, judged on the written
+/// path (`rel` under `root`) AND on `resolved`, the file the jail settled on:
+/// `.env -> settings-data` is secret by its name although its target is not.
+/// `None` for presence-only citations and ordinary files.
+pub(crate) fn secret_line_refusal(
+    root: &Path,
+    rel: &Path,
+    resolved: &Path,
+    line_spec: Option<(usize, usize)>,
+) -> Option<(SourceStatus, String)> {
+    line_spec?;
+    let secret = crate::acp::secret_files::is_secret_file(rel)
+        || crate::acp::secret_files::is_secret_path(&root.join(rel))
+        || crate::acp::secret_files::is_secret_path(resolved);
+    secret.then(secret_line_verdict)
+}
+
 /// Line-bounds verdict for an existing candidate file.
 pub(crate) fn line_bounds_status(
     candidate: &Path,
@@ -2120,15 +2147,12 @@ pub(crate) fn line_bounds_status(
 ) -> (SourceStatus, String) {
     match line_spec {
         None => (SourceStatus::Verified, "file exists".into()),
-        // The one gate every line check goes through (verifier, documentary
-        // gate, step lint): a line of a secret file, written or reached through
-        // a symlink, is a pointer into its content. Only presence may be cited.
-        Some(_) if crate::acp::secret_files::is_secret_path(candidate) => (
-            SourceStatus::Rejected,
-            "this file may hold secrets, so no line of it is cited — state that it exists \
-             with `path:exists` and do not quote its content"
-                .into(),
-        ),
+        // The gate every line check ends in (verifier, documentary gate, step
+        // lint): a line of a secret file, written or reached through a symlink,
+        // is a pointer into its content. Only presence may be cited. Callers that
+        // hold the written path check it first (`secret_line_refusal`), since
+        // `candidate` is already resolved.
+        Some(_) if crate::acp::secret_files::is_secret_path(candidate) => secret_line_verdict(),
         Some(_) if is_binary_file(candidate) => (
             SourceStatus::OutOfBounds,
             "binary file has no lines — cite it by bare path, without a line".into(),
@@ -2493,7 +2517,8 @@ fn verify_file_ref_as_written(
             );
         };
         return match resolve_in_root(root, &rel) {
-            Jailed::Inside(found) => anchored_bounds_status(&found, line_spec, anchor),
+            Jailed::Inside(found) => secret_line_refusal(root, &rel, &found, line_spec)
+                .unwrap_or_else(|| anchored_bounds_status(&found, line_spec, anchor)),
             Jailed::Missing => (
                 SourceStatus::NotFound,
                 format!("file not found: {}", path_str),
@@ -2517,7 +2542,10 @@ fn verify_file_ref_as_written(
         }
         all_escaped = false;
         match resolve_in_root(root, path) {
-            Jailed::Inside(found) => return anchored_bounds_status(&found, line_spec, anchor),
+            Jailed::Inside(found) => {
+                return secret_line_refusal(root, path, &found, line_spec)
+                    .unwrap_or_else(|| anchored_bounds_status(&found, line_spec, anchor))
+            }
             Jailed::Missing => continue,
             Jailed::Escapes => {
                 return (

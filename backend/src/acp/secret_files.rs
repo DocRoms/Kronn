@@ -90,12 +90,31 @@ pub fn is_secret_file(path: &Path) -> bool {
 /// .ssh/review-key` is as secret as its target; a directory link (`keys -> .ssh`)
 /// is caught by the resolved components. A path that does not resolve (missing,
 /// dangling) has nothing to read and is judged by its written name alone.
+///
+/// Both directions of a link count: `.env -> settings-data` is secret by its
+/// written name although its target is ordinary, and so is every name a chain of
+/// links passes through (`view.txt -> .env -> settings-data`).
 pub fn is_secret_path(path: &Path) -> bool {
-    is_secret_file(path)
-        || std::fs::canonicalize(path)
-            .ok()
-            .is_some_and(|resolved| is_secret_file(&resolved))
+    let mut current = path.to_path_buf();
+    for _ in 0..MAX_LINK_HOPS {
+        if is_secret_file(&current) {
+            return true;
+        }
+        let Ok(target) = std::fs::read_link(&current) else {
+            break;
+        };
+        current = match current.parent() {
+            Some(parent) => parent.join(target),
+            None => target,
+        };
+    }
+    std::fs::canonicalize(path)
+        .ok()
+        .is_some_and(|resolved| is_secret_file(&resolved))
 }
+
+/// Cap on the links followed to name-check a chain (loops included).
+const MAX_LINK_HOPS: usize = 40;
 
 /// Files Kronn itself writes that hold the encryption key, credentials or
 /// decrypted MCP environments.
@@ -312,6 +331,23 @@ mod tests {
         assert!(!is_secret_path(&root.join("notes-link.txt")));
         assert!(!is_secret_path(&root.join("dangling.txt")));
         assert!(!is_secret_path(&root.join("missing.txt")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_secret_written_name_is_a_secret_path_whatever_it_resolves_to() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join(".ssh")).unwrap();
+        std::fs::write(root.join("settings-data"), "plain\n").unwrap();
+        std::os::unix::fs::symlink("settings-data", root.join(".env")).unwrap();
+        std::os::unix::fs::symlink("../settings-data", root.join(".ssh/settings-view")).unwrap();
+        std::os::unix::fs::symlink(".env", root.join("view.txt")).unwrap();
+        assert!(is_secret_path(&root.join(".env")));
+        assert!(is_secret_path(&root.join(".ssh/settings-view")));
+        // A chain keeps the names it passes through.
+        assert!(is_secret_path(&root.join("view.txt")));
+        assert!(!is_secret_path(&root.join("settings-data")));
     }
 
     #[test]

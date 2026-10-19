@@ -436,6 +436,46 @@ mod tests {
         dir
     }
 
+    /// `.env -> settings-data`, `.ssh/settings-view -> ../settings-data` and
+    /// `view.txt -> .env`: the written name is secret although the target is not.
+    #[cfg(unix)]
+    #[test]
+    fn a_secret_written_name_remains_secret_after_resolving_to_an_ordinary_name() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("settings-data"), "a=1\nb=2\nc=3\n").unwrap();
+        fs::create_dir_all(dir.path().join(".ssh")).unwrap();
+        std::os::unix::fs::symlink("settings-data", dir.path().join(".env")).unwrap();
+        std::os::unix::fs::symlink("../settings-data", dir.path().join(".ssh/settings-view"))
+            .unwrap();
+        std::os::unix::fs::symlink(".env", dir.path().join("view.txt")).unwrap();
+        for path in [".env", ".ssh/settings-view", "view.txt"] {
+            for cite in [
+                format!("[src: file: {path}:2]"),
+                format!("[src: file: {path}:1-3]"),
+                format!("[src: file: {path}:1-3#PRIVATE]"),
+                format!("[src: code-comment: {path}:2]"),
+            ] {
+                let verdict = lint_step_file(&format!("Claim {cite}."), &[dir.path()]);
+                assert_eq!(
+                    verdict.fabricated.len(),
+                    1,
+                    "{cite}: {:?}",
+                    verdict.fabricated
+                );
+                let check = anti_halluc::verify_source_marker(
+                    cite.trim_start_matches("[src: ").trim_end_matches(']'),
+                    Some(dir.path()),
+                );
+                assert!(check.status.is_fabricated(), "{cite}: {check:?}");
+            }
+            let verdict =
+                lint_step_file(&format!("Claim [src: file: {path}:exists]."), &[dir.path()]);
+            assert!(verdict.is_clean(), "{path}: {:?}", verdict.fabricated);
+        }
+        let verdict = lint_step_file("Claim [src: file: settings-data:2].", &[dir.path()]);
+        assert!(verdict.is_clean(), "{:?}", verdict.fabricated);
+    }
+
     #[test]
     fn a_line_of_a_secret_file_is_fabricated_whatever_the_form() {
         let dir = secret_repo();
