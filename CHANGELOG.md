@@ -676,6 +676,15 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- LiteLLM image generation works (KT-1214). Kronn sent images to
+  `/v1/images`, a route a LiteLLM proxy does not have, and reported the 404 as
+  "image response carries no b64_json payload"; it now uses
+  `/v1/images/generations` with the OpenAI body (checked with
+  `vertex_ai/gemini-3-pro-image`). A provider `usage` that states tokens but
+  no price no longer records a 0 $ cost. A failed generation's bubble names
+  the model that ran and offers « Relancer… », which opens the Assets
+  Creator with the same prompt and kind. Opening a media room from the New
+  discussion entry no longer stores an empty first message.
 - A comment on an arbitration card whose workflow step has ended is answered
   by the room's own agent instead of nobody. It used to go to the step's
   closed CLI session and wake no one ("personne ne lira cette réponse

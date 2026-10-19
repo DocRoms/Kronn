@@ -5704,7 +5704,11 @@ reference_asset_ids?: Array<string>,
  * Single-image form of the field above, kept readable for runs published
  * before a generation could start from several pictures.
  */
-reference_asset_id?: string | null, reference_mode?: MediaReferenceMode | null, };
+reference_asset_id?: string | null, reference_mode?: MediaReferenceMode | null,
+/**
+ * The model that ran, so a failed bubble says what failed (KT-1214).
+ */
+model?: string | null, };
 
 export type MergeBase = "local" | "remote";
 

@@ -2013,6 +2013,8 @@ const en: TranslationDict = {
   'disc.media.estimate': 'Estimated cost: ${0} (from {1} billed generation(s))',
   'disc.media.estimateUnknown': 'Unknown cost: nothing billed yet for this model',
   'disc.media.localNoCost': 'Local generation on ComfyUI: no cost.',
+  'disc.media.retry': 'Retry…',
+  'disc.media.failedModel': 'Model used:',
   'disc.media.generate': 'Generate',
   'disc.media.generateFromImage.image': 'Generate an image from this picture',
   'disc.media.generateFromImage.video': 'Generate a video from this picture',

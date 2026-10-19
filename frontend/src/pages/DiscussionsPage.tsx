@@ -977,6 +977,16 @@ export function DiscussionsPage({
     setShowAssetsPanel(true);
     setAssetOpenRequest(current => ({ assetId, nonce: (current?.nonce ?? 0) + 1 }));
   }, []);
+  // KT-1214 — a failed generation reopens the Creator with what was asked.
+  const [mediaRetryRequest, setMediaRetryRequest] = useState<{ prompt: string; modality: 'image' | 'video'; nonce: number } | null>(null);
+  const retryMediaGeneration = useCallback((prompt: string, modality: 'image' | 'video') => {
+    setShowGitPanel(false);
+    setShowTerminalPanel(false);
+    setShowPlanPanel(false);
+    setShowSettingsPanel(false);
+    setShowAssetsPanel(true);
+    setMediaRetryRequest(current => ({ prompt, modality, nonce: (current?.nonce ?? 0) + 1 }));
+  }, []);
   const mediaJobsRelistTimer = useRef<{ id: number; discId: string } | null>(null);
   const scheduleMediaJobsRelist = useCallback((discId: string) => {
     // Every event pushes the deadline back, so the relist always runs after
@@ -4088,6 +4098,7 @@ export function DiscussionsPage({
                   prompt={msg.content}
                   run={mediaRun}
                   onOpenAsset={openMediaAsset}
+                  onRetry={retryMediaGeneration}
                 />
                 {pending}
               </Fragment>
@@ -5889,6 +5900,7 @@ export function DiscussionsPage({
                   reloadDiscussion(activeDiscussion.id);
                 }}
                 openAssetRequest={showAssetsPanel ? assetOpenRequest : null}
+                retryRequest={showAssetsPanel ? mediaRetryRequest : null}
                 onAssetDeleted={(fileId) => {
                   // Dropped from the discussion's own inventory, which every
                   // surface reads: the grid, the counters, the carousel and a

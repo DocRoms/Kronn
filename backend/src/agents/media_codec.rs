@@ -144,8 +144,11 @@ pub trait MediaCodec: Send + Sync {
 /// a BYOK call bills zero here while the real spend sits with the upstream
 /// account, and averaging that zero into an estimate would understate it.
 fn usage_cost(value: &Value) -> Option<MediaCost> {
-    value.get("usage").map(|usage| MediaCost {
-        cost_usd: usage.get("cost").and_then(Value::as_f64).unwrap_or(0.0),
+    // A `usage` without a `cost` (LiteLLM reports tokens only) says nothing
+    // about price: a fabricated 0.0 would drag every estimate down.
+    let usage = value.get("usage")?;
+    Some(MediaCost {
+        cost_usd: usage.get("cost").and_then(Value::as_f64)?,
         is_byok: usage
             .get("is_byok")
             .and_then(Value::as_bool)
@@ -574,6 +577,100 @@ impl MediaCodec for NvidiaMediaCodec {
     }
 }
 
+/// LiteLLM proxy (KT-1214): images go through the OpenAI route
+/// `/v1/images/generations` (`/v1/images`, OpenRouter's, answers 404 there)
+/// with the OpenAI body only. Measured on 2026-10-20 with
+/// `vertex_ai/gemini-3-pro-image`: `data[0].b64_json`, `usage` in tokens and
+/// no cost. Videos keep the shared route: not measured on LiteLLM yet.
+pub struct LiteLlmMediaCodec;
+
+impl MediaCodec for LiteLlmMediaCodec {
+    fn supports(&self, modality: MediaModality) -> bool {
+        OpenRouterMediaCodec.supports(modality)
+    }
+    fn accepts_reference_images(&self) -> bool {
+        // An image edit is a multipart `/v1/images/edits` call nobody measured
+        // here; refusing beats a billed request built on a guess.
+        false
+    }
+    fn image_url(&self, base: &str) -> String {
+        format!("{}/v1/images/generations", base_without_v1(base))
+    }
+    fn video_submit_url(&self, base: &str) -> String {
+        OpenRouterMediaCodec.video_submit_url(base)
+    }
+    fn video_poll_url(&self, base: &str, provider_job_id: &str) -> String {
+        OpenRouterMediaCodec.video_poll_url(base, provider_job_id)
+    }
+    fn video_content_url(&self, base: &str, provider_job_id: &str, index: u32) -> String {
+        OpenRouterMediaCodec.video_content_url(base, provider_job_id, index)
+    }
+    fn image_body(
+        &self,
+        model: &str,
+        prompt: &str,
+        _params: &MediaParams,
+        references: &[MediaReferenceImage],
+    ) -> Result<Value> {
+        if !references.is_empty() {
+            bail!("this LiteLLM image route takes no source image");
+        }
+        Ok(json!({ "model": model, "prompt": prompt, "n": 1 }))
+    }
+    fn video_body(
+        &self,
+        model: &str,
+        prompt: &str,
+        params: &MediaParams,
+        reference: Option<&MediaReferenceImage>,
+    ) -> Result<Value> {
+        OpenRouterMediaCodec.video_body(model, prompt, params, reference)
+    }
+    fn parse_image_response(&self, body: &str) -> Result<MediaImageResponse> {
+        let value: Value = serde_json::from_str(body)?;
+        if let Some(message) = provider_error(&value) {
+            bail!("{}", bounded(&message));
+        }
+        // OpenAI shape: `b64_json`, or a `url` that may be a `data:` URI.
+        let images: Vec<String> = value["data"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| {
+                item["b64_json"].as_str().map(str::to_string).or_else(|| {
+                    item["url"]
+                        .as_str()
+                        .and_then(|url| url.split_once(";base64,"))
+                        .filter(|(scheme, _)| scheme.starts_with("data:image/"))
+                        .map(|(_, payload)| payload.to_string())
+                })
+            })
+            .collect();
+        if images.is_empty() {
+            let remote = value["data"][0]["url"].as_str().is_some();
+            bail!(if remote {
+                "the image came back as a remote URL, which this route does not fetch"
+            } else {
+                "image response carries no image"
+            });
+        }
+        Ok(MediaImageResponse {
+            images,
+            cost: usage_cost(&value),
+            generation_id: value.get("id").and_then(Value::as_str).map(str::to_string),
+        })
+    }
+    fn parse_submit_response(&self, body: &str) -> Result<MediaSubmitAck> {
+        OpenRouterMediaCodec.parse_submit_response(body)
+    }
+    fn parse_poll_response(&self, body: &str) -> Result<MediaPollState> {
+        OpenRouterMediaCodec.parse_poll_response(body)
+    }
+    fn asset_host_policy(&self) -> AssetHostPolicy {
+        OpenRouterMediaCodec.asset_host_policy()
+    }
+}
+
 /// Local ComfyUI (KT-1381): every generation is a queued workflow, submitted
 /// to `/prompt`, polled on `/history/<id>` and fetched from `/view` on the
 /// same origin. Nothing is billed.
@@ -710,6 +807,7 @@ impl MediaCodec for ComfyUiMediaCodec {
 pub fn codec_for(preset: crate::models::ExternalApiConnectionPreset) -> Box<dyn MediaCodec> {
     match preset {
         crate::models::ExternalApiConnectionPreset::Nvidia => Box::new(NvidiaMediaCodec),
+        crate::models::ExternalApiConnectionPreset::LiteLlm => Box::new(LiteLlmMediaCodec),
         _ => Box::new(OpenRouterMediaCodec),
     }
 }
@@ -746,6 +844,60 @@ mod tests {
                 "https://openrouter.ai/api/v1/videos"
             );
         }
+    }
+
+    /// KT-1214 — captured from LiteLLM (stg proxy) on 2026-10-20 with
+    /// `vertex_ai/gemini-3-pro-image`, payload shortened to a 1x1 PNG.
+    const LITELLM_IMAGE: &str = r#"{"created":1792448665,"background":null,"data":[{"b64_json":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8AAAwAB/wD/2v0AAAAASUVORK5CYII=","revised_prompt":null,"url":null}],"output_format":null,"quality":null,"size":null,"usage":{"total_tokens":1378,"input_tokens":9,"input_tokens_details":{"image_tokens":0,"text_tokens":9},"output_tokens":1120}}"#;
+
+    #[test]
+    fn litellm_images_use_the_openai_route_and_body() {
+        let codec = codec_for(crate::models::ExternalApiConnectionPreset::LiteLlm);
+        // `/v1/images` answers 404 on a LiteLLM proxy: that was the bug.
+        assert_eq!(
+            codec.image_url("http://litellm.stg.euronews.internal"),
+            "http://litellm.stg.euronews.internal/v1/images/generations"
+        );
+        let params = MediaParams {
+            aspect_ratio: Some("16:9".into()),
+            resolution: Some("720p".into()),
+            ..Default::default()
+        };
+        let body = codec
+            .image_body("vertex_ai/gemini-3-pro-image", "a fox", &params, &[])
+            .unwrap();
+        assert_eq!(
+            body,
+            json!({"model": "vertex_ai/gemini-3-pro-image", "prompt": "a fox", "n": 1})
+        );
+        assert!(!codec.accepts_reference_images());
+    }
+
+    #[test]
+    fn litellm_gemini_images_are_read_and_a_token_usage_is_not_a_price() {
+        let codec = LiteLlmMediaCodec;
+        let response = codec.parse_image_response(LITELLM_IMAGE).unwrap();
+        assert_eq!(response.images.len(), 1);
+        assert!(response.images[0].starts_with("iVBOR"));
+        // Tokens only: no price was declared, so none is recorded.
+        assert_eq!(response.cost, None);
+        let data_uri = codec
+            .parse_image_response(r#"{"data":[{"url":"data:image/png;base64,iVBORw0KGgo="}]}"#)
+            .unwrap();
+        assert_eq!(data_uri.images, vec!["iVBORw0KGgo=".to_string()]);
+        let remote = codec
+            .parse_image_response(r#"{"data":[{"url":"https://cdn.example/x.png"}]}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(remote.contains("remote URL"), "{remote}");
+        let not_found = codec
+            .parse_image_response(r#"{"detail":"Not Found"}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            not_found.contains("no image") || not_found.contains("Not Found"),
+            "{not_found}"
+        );
     }
 
     fn comfy(companions: bool) -> ComfyUiMediaCodec {
@@ -1317,5 +1469,6 @@ mod tests {
         assert!(!codec_for(ExternalApiConnectionPreset::Nvidia).accepts_reference_images());
         assert!(codec_for(ExternalApiConnectionPreset::OpenRouter).accepts_reference_images());
         assert!(codec_for(ExternalApiConnectionPreset::Other).accepts_reference_images());
+        assert!(!codec_for(ExternalApiConnectionPreset::LiteLlm).accepts_reference_images());
     }
 }

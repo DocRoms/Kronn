@@ -105,6 +105,8 @@ export function MediaGenerateForm({
   onImageAttached,
   initialSlotKey,
   initialReference,
+  initialPrompt,
+  initialModality,
 }: {
   /** Existing room, or a creator used by the New discussion media entry. */
   discussionId?: string;
@@ -127,10 +129,14 @@ export function MediaGenerateForm({
    * slot and keep its current image attached while this form loads again. */
   initialSlotKey?: string;
   initialReference?: { assetId: string; mode: MediaReferenceMode } | null;
+  /** KT-1214 — a failed generation relaunched from its bubble: its prompt, and
+   * the first source of its modality unless a slot is named. */
+  initialPrompt?: string;
+  initialModality?: MediaModality;
 }) {
   const slots = useMemo(() => slotsOf(connections), [connections]);
   const [selectedKey, setSelectedKey] = useState<string>('');
-  const [prompt, setPrompt] = useState('');
+  const [prompt, setPrompt] = useState(initialPrompt ?? '');
   // What the operator picked, which the model in front of them may not accept.
   // `null` means "never chose", so the model's own default applies.
   const [storedDuration, setStoredDuration] = useState<number | null>(null);
@@ -194,6 +200,7 @@ export function MediaGenerateForm({
   // render late and made the form flicker through an invalid state.
   const selected = slots.find(slot => slot.key === selectedKey)
     ?? slots.find(slot => slot.key === initialSlotKey)
+    ?? (initialModality ? slots.find(slot => slot.modality === initialModality) : undefined)
     ?? slots[0]
     ?? null;
   const activeKey = selected?.key ?? '';

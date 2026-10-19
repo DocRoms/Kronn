@@ -58,6 +58,12 @@ appended to one base, because the media host can differ from the chat host.
 * OpenRouter videos: `POST /api/v1/videos` answers `202` with a handle, then
   polling until `completed`, then a content URL.
 * NVIDIA: its own visual routes, results under `data[]`.
+* LiteLLM (KT-1214): images on the OpenAI route `/v1/images/generations`
+  (`/v1/images` answers 404 on a LiteLLM proxy), OpenAI body only, answer
+  `data[].b64_json` (or a `data:` URI in `url`). Measured on 2026-10-20 with
+  `vertex_ai/gemini-3-pro-image`: `usage` carries tokens and no cost, so no
+  cost is recorded — a `usage` without `cost` is never stored as 0. Source
+  images and LiteLLM video are not measured yet; the former is refused.
 
 Codec tests replay captured real payloads. Provider error text is kept but
 bounded to 300 characters so a raw payload never reaches storage or the UI.

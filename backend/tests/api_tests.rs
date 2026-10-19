@@ -26473,6 +26473,48 @@ async fn comfyui_status_reports_models_and_slots_refuse_the_wrong_kind() {
     );
 }
 
+/// KT-1214 — the media entry opens a human-only room with no prompt. It must
+/// start empty: the empty User message it used to store showed up as a blank
+/// turn right above the generation.
+#[tokio::test]
+async fn a_human_only_room_opened_without_a_prompt_starts_with_no_message() {
+    let state = test_state();
+    let app = build_router_with_auth(state.clone(), false);
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/discussions",
+        serde_json::json!({
+            "title": "Génération de média", "agent": "ClaudeCode", "initial_prompt": "  ",
+            "language": "fr", "no_agent": true
+        }),
+    )
+    .await;
+    assert_eq!(created["success"], true, "{created}");
+    let id = created["data"]["id"].as_str().unwrap().to_owned();
+    let (_, read) = get_json(app.clone(), &format!("/api/discussions/{id}")).await;
+    assert_eq!(
+        read["data"]["messages"].as_array().map(Vec::len),
+        Some(0),
+        "{read}"
+    );
+
+    // A room that does say something still keeps its first message.
+    let (_, spoken) = post_json(
+        app,
+        "/api/discussions",
+        serde_json::json!({
+            "title": "Note", "agent": "ClaudeCode", "initial_prompt": "bonjour",
+            "language": "fr", "no_agent": true
+        }),
+    )
+    .await;
+    assert_eq!(
+        spoken["data"]["messages"].as_array().map(Vec::len),
+        Some(1),
+        "{spoken}"
+    );
+}
+
 /// KT-1381 — the local ComfyUI is a media source with no stored row: refused
 /// while no model is chosen, then reached by its alias or by omission, and
 /// held to the sizes its workflows were measured at.
