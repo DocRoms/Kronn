@@ -6715,6 +6715,7 @@ const zh: TranslationDict = {
   "auditTimeline.drift.redo": "重做 {0} 个继承的步骤",
   "auditTimeline.docnotes.preexisting": "{0} 个已有的引用问题（位于没有任何步骤负责的文档中）",
   "auditTimeline.docnotes.autofixes": "Kronn 应用了 {0} 处检查给出的精确替换",
+  "auditTimeline.docnotes.unverified": "{0} 个未验证的引用：多次尝试后仍无法生效的引用标记，现已改为带标记的反引号路径",
 };
 
 export default zh;

@@ -1712,7 +1712,7 @@ async fn a_final_blocker_is_charged_to_the_step_that_wrote_the_file() {
     let founding = crate::api::audit::full::founding_step_index(&chain).unwrap();
     assert!(![writer_a, writer_b].contains(&founding));
 
-    // Two steps each leave a document no step targets, citing a file that does
+    // Two steps each leave a document no step targets, linking a page that does
     // not exist. A step that fails its gate retries: one scripted line per attempt.
     let mut targets: Vec<&str> = Vec::new();
     for (index, step) in chain.iter().enumerate() {
@@ -1728,8 +1728,8 @@ async fn a_final_blocker_is_charged_to_the_step_that_wrote_the_file() {
     after_each_step(
         tools,
         &format!(
-            "docs/coding-rules.md) printf '# A\\nGhost [src: file: ghost-a.rs:1]\\n' > '{root}/docs/extra-a.md' ;;\n\
-             docs/glossary.md) mkdir -p '{root}/docs/workflow'; printf '# B\\nGhost [src: file: ghost-b.rs:1]\\n' > '{root}/docs/workflow/extra-b.md' ;;"
+            "docs/coding-rules.md) printf '# A\\nGhost [page](nowhere/ghost-a.md)\\n' > '{root}/docs/extra-a.md' ;;\n\
+             docs/glossary.md) mkdir -p '{root}/docs/workflow'; printf '# B\\nGhost [page](nowhere/ghost-b.md)\\n' > '{root}/docs/workflow/extra-b.md' ;;"
         ),
     );
     let run = run_full(state, None).await;

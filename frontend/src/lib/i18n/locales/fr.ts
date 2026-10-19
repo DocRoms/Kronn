@@ -6938,6 +6938,7 @@ Termine par [SIGNAL: OK].`,
   "auditTimeline.drift.redo": "Rejouer les {0} étape(s) héritée(s)",
   "auditTimeline.docnotes.preexisting": "{0} problème(s) de citation préexistant(s) dans des docs qu'aucune étape ne possède",
   "auditTimeline.docnotes.autofixes": "{0} remplacement(s) exact(s) de la porte appliqué(s) par Kronn",
+  "auditTimeline.docnotes.unverified": "{0} référence(s) non vérifiée(s) : marqueurs de citation qu'aucune tentative n'a pu rendre valides, désormais des chemins entre accents graves signalés",
 };
 
 export default fr;

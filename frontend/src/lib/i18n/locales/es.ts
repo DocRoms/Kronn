@@ -6925,6 +6925,7 @@ Termina con [SIGNAL: OK].`,
   "auditTimeline.drift.redo": "Repetir los {0} paso(s) heredado(s)",
   "auditTimeline.docnotes.preexisting": "{0} problema(s) de citas preexistente(s) en docs que ningún paso posee",
   "auditTimeline.docnotes.autofixes": "{0} reemplazo(s) exacto(s) de la puerta aplicado(s) por Kronn",
+  "auditTimeline.docnotes.unverified": "{0} referencia(s) no verificada(s): marcadores de cita que ningún intento logró validar, ahora rutas entre comillas invertidas señaladas",
 };
 
 export default es;

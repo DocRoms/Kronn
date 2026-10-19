@@ -440,20 +440,18 @@ async fn http_resume_repairs_an_auxiliary_document_from_a_previously_successful_
         .into_response();
         let stream = sse_body(response).await;
         let done = sse_events(&stream, "done").pop().expect("terminal outcome");
-        assert_eq!(
-            done["status"],
-            if correct { "complete" } else { "interrupted" },
-            "{stream}"
-        );
-        assert_eq!(
-            done["steps_to_redo"],
-            if correct { json!([]) } else { json!([1]) },
-            "{stream}"
-        );
-        assert_eq!(
+        // KT-1370: an invented path the agent still leaves after its last
+        // attempt is demoted to a flagged backticked path: the run completes.
+        assert_eq!(done["status"], "complete", "{stream}");
+        assert_eq!(done["steps_to_redo"], json!([]), "{stream}");
+        assert!(
             done["discussion_id"].is_string(),
-            correct,
             "validation requires a clean gate: {stream}"
+        );
+        assert_eq!(
+            done["unverified_references"],
+            u8::from(!correct),
+            "{stream}"
         );
         if !correct {
             assert_eq!(
@@ -503,6 +501,16 @@ async fn http_resume_repairs_an_auxiliary_document_from_a_previously_successful_
             .unwrap()
             .contains("Human decision remains."));
         assert_eq!(repaired.contains("invented.rs"), !correct);
+        if !correct {
+            assert!(
+                repaired.contains("`invented.rs` (unverified reference)"),
+                "{repaired:?}"
+            );
+            assert!(
+                !repaired.contains("[src: file: invented.rs"),
+                "{repaired:?}"
+            );
+        }
         assert!(
             std::fs::read_dir(
                 project

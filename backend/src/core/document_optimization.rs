@@ -8,7 +8,9 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::core::anti_halluc::parse_line_bounds;
 
+mod demotion;
 mod mechanical_fix;
+pub use demotion::{demote_unverifiable, DemotedReference, Demotion, UNVERIFIED_FLAG};
 pub use mechanical_fix::{mechanical_repair, AppliedFix, Repaired};
 
 const CONFIG_FILE: &str = "docs/.kronn-document-budgets.json";

@@ -463,9 +463,10 @@ pub(crate) fn human_references_block(
 pub(crate) fn documentary_notes_block(
     preexisting: &[crate::core::document_optimization::Diagnostic],
     autofixes: &[(u32, crate::core::document_optimization::AppliedFix)],
+    unverified: &[(u32, crate::core::document_optimization::DemotedReference)],
     language: &str,
 ) -> String {
-    if preexisting.is_empty() && autofixes.is_empty() {
+    if preexisting.is_empty() && autofixes.is_empty() && unverified.is_empty() {
         return String::new();
     }
     const SHOWN: usize = 30;
@@ -499,6 +500,12 @@ pub(crate) fn documentary_notes_block(
             })
             .collect(),
     );
+    let demoted = lines(
+        unverified
+            .iter()
+            .map(|(step, r)| format!("- step {step}, `{}` — {}", r.doc, r.marker))
+            .collect(),
+    );
     let (title, held_title, held_rule, fixed_title) = match language {
         "en" => (
             "## DOCUMENTARY GATE — what it let through and what it repaired",
@@ -526,10 +533,18 @@ pub(crate) fn documentary_notes_block(
     if !autofixes.is_empty() {
         out.push_str(&format!("{fixed_title}\n{fixed}\n\n"));
     }
+    if !unverified.is_empty() {
+        let demoted_title = match language {
+            "en" => format!("{} unverified reference(s): citation markers that no attempt could make valid, now written as backticked paths flagged (unverified reference) in the documents, so they are no longer citations:", unverified.len()),
+            "es" => format!("{} referencia(s) no verificada(s): marcadores de cita que ningún intento logró validar, ahora escritos como rutas entre comillas invertidas marcadas (unverified reference) en los documentos, por lo que ya no son citas:", unverified.len()),
+            _ => format!("{} référence(s) non vérifiée(s) : marqueurs de citation qu'aucune tentative n'a pu rendre valides, désormais écrits comme chemins entre accents graves marqués (unverified reference) dans les documents, ce ne sont plus des citations :", unverified.len()),
+        };
+        out.push_str(&format!("{demoted_title}\n{demoted}\n\n"));
+    }
     let rule = match language {
-        "en" => "List both to the user in a separate section of your first message; they are not yours to hide.",
-        "es" => "Enumera ambos al usuario en una sección aparte de tu primer mensaje; no te corresponde ocultarlos.",
-        _ => "Liste les deux à l'utilisateur dans une section à part de ton premier message ; ce n'est pas à toi de les cacher.",
+        "en" => "List all of it to the user in a separate section of your first message; none of it is yours to hide.",
+        "es" => "Enumera todo al usuario en una sección aparte de tu primer mensaje; no te corresponde ocultar nada.",
+        _ => "Liste tout à l'utilisateur dans une section à part de ton premier message ; ce n'est pas à toi de le cacher.",
     };
     out.push_str(rule);
     out.push_str("\n\n");

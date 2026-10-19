@@ -36,6 +36,55 @@ by a human (KT-1131). An accepted step keeps its failure on record:
 - Done steps, as a resume reads them. [src: file: backend/src/api/audit/full.rs:4169-4191#already_succeeded_step_indices]
 - Per-run outcomes keep `succeeded`, `unchanged`, `accepted` and `failed` apart. [src: file: backend/src/api/audit/full.rs:3882-3900#RunProgress]
 
+## Citation markers left after the last attempt (KT-1370)
+
+A step that still holds citation markers after its last attempt, which neither
+the agent nor the exact fixes of KT-1353 could repair, no longer ends the run
+`Interrupted`. docroms step 8 showed the cost: `[src: file: config/packages/prod/monolog.yaml]`
+(a text file cited without a line, which Kronn never guesses a line for)
+survived three attempts, `fresh_full` was interrupted, and validate,
+revalidate and partial were refused downstream. Romu decided (19/10) that
+this degrades and continues.
+
+- **When.** Only on the last attempt (`attempt >= max_attempts`), and only
+  when every blocker of the step is a `broken_citation` (a malformed,
+  unresolvable or out-of-range `[src: file: …]` marker). A missing or empty
+  output, a raw placeholder, the coverage matrix, a detector signal, the remit,
+  a broken link or an unbacked `deps:` / `url:` provenance keeps today's
+  behaviour: the step fails and the run is interrupted. All or nothing: if one
+  marker cannot be demoted, or the document still fails after demoting, the
+  originals are put back and the step fails as before.
+  [src: file: backend/src/api/audit/document_repair.rs:408-480#demote_last_attempt]
+- **What it writes.** `[src: file: X]` becomes `` `X` (unverified reference) ``
+  (line, range, anchor and `:exists` dropped; a bundle becomes one flagged list;
+  a comment the agent put inside the marker follows the flag). Inline code and
+  fenced code are untouched, as in `mechanical_fix`. The flag is plain text:
+  a backticked path is not a citation, so the gate never reads it and a
+  revalidation reports the demoted references as they stand, never failing on
+  the flag.
+  [src: file: backend/src/core/document_optimization/demotion.rs:37-52#demote_unverifiable]
+- **A secret file is never written.** Its bare path or line is already repaired
+  to `:exists` by KT-1353. If a marker of a secret file is still there, it is
+  removed entirely: no path, no line, no comment that could carry content. It
+  is listed as `[src: file: <secret file>]`.
+  [src: file: backend/src/core/document_optimization/demotion.rs:19#SECRET_MARKER]
+- **The step is done with a warning**, not failed and without a partial banner:
+  `cli_success` stays true and `step_warning` lists every demoted reference
+  (document, original marker). The step emits `documentary_demoted` and its
+  `step_done` carries `unverified_references`.
+  [src: file: backend/src/api/audit/document_repair.rs:384-399#demotion_notes]
+- **The run says how many.** The `done` event carries `unverified_references`;
+  `audit_runs.documentary_notes` gains `unverified` (step, document, marker),
+  which the audit timeline lists next to the other documentary notes, and the
+  validation prompt names them for the human.
+  [src: file: backend/src/api/audit/document_repair.rs:354-380#notes_json]
+- **Both pipelines.** The Full pipeline demotes where its documentary gate
+  would fail the step. The partial pipeline has no per-attempt documentary
+  gate: it demotes where it fails a step for the citations left on its target,
+  that is the enforce gate (enforce mode) and the stale-target check of a
+  revalidation.
+  [src: file: backend/src/api/audit/full.rs:2582-2584#demote_last_attempt] [src: file: backend/src/api/audit/drift.rs:1555#demote_last_attempt] [src: file: backend/src/api/audit/drift.rs:1611#demote_last_attempt]
+
 ## Recovering from failed steps
 
 - **Resume** replays every failed step of the latest interrupted run in a new
