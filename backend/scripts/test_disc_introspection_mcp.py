@@ -63,6 +63,14 @@ def setUpModule():
     guard = mock.patch("urllib.request.urlopen", _AMBIENT_URLOPEN)
     guard.start()
     unittest.addModuleCleanup(guard.stop)
+    # A shell owned by a Kronn room agent exports KRONN_* (backend URL, bridge
+    # token, discussion id, room-agent context). The bridge reads them when a
+    # test loads it, so the suite would inherit that session's identity: start
+    # every module load from an environment without them.
+    ambient = {k: v for k, v in os.environ.items() if not k.startswith("KRONN_")}
+    environment = mock.patch.dict(os.environ, ambient, clear=True)
+    environment.start()
+    unittest.addModuleCleanup(environment.stop)
 
 
 def tearDownModule():

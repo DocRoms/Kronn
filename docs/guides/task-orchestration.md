@@ -138,7 +138,7 @@ Kronn derives one fixed-layout report; replay does not produce another.
 [src: file: backend/src/api/orchestration.rs:8981-8985#has_room_publication]
 [src: file: backend/src/api/orchestration.rs:9003-9052#parent_milestones]
 [src: file: backend/src/api/orchestration.rs:7682-7706#publish_accepted_delivery_or_warn]
-[src: file: backend/src/api/orchestration.rs:32572-32673#approving_a_delivery_publishes_one_derived_report_in_the_parent]
+[src: file: backend/src/api/orchestration.rs:32611-32712#approving_a_delivery_publishes_one_derived_report_in_the_parent]
 
 Native conversational handoffs are a separate opt-in from launching a planning
 task. Their paid/unknown allowance is configurable and shared by the originating
