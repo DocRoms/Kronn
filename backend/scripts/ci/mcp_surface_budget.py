@@ -140,7 +140,9 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # KT-1347: `disk_usage` no longer exposes `purge_orphans` (the purge is a human
 # action; the route is not on the bridge), so its description and schema shrink;
 # re-measured on the tree merged with KT-1329/KT-1320 (84_894 -> 84_860).
-CATALOGUE_MAX_BYTES = 84_860
+# KT-1381: `media_generate` says "media source" (the local ComfyUI counts),
+# 3 B shorter than "HTTP connection"; the ComfyUI detail lives in its manual.
+CATALOGUE_MAX_BYTES = 84_857
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is

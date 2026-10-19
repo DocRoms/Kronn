@@ -2381,7 +2381,7 @@ TOOLS = [
     {
         "name": "media_generate",
         "description": (
-            "Generate an image/video on a configured HTTP connection; returns "
+            "Generate an image/video on a configured media source; returns "
             "`{job_id, status, model}`. The configured slot fixes the model; a "
             "missing one is refused with setup guidance. Billed: video per "
             "second, image per picture; audio (on unless `generate_audio: "
@@ -10644,6 +10644,11 @@ TOOL_MANUALS["media_generate"] = (
     "`agent_list` entry whose `media` has that modality — `agent_list` answers in "
     "every discussion — or pass its alias (`openrouter`) or display name. The "
     "answer says which connection was billed.\n\n"
+    "Local ComfyUI. When the operator set a ComfyUI model, `agent_list` also "
+    "lists `local:comfyui` (alias `comfyui`): images and videos generated on "
+    "this machine, billed nothing, with no source image (`reference_asset_ids` "
+    "is refused there). It is slow: about a minute for an image, around ten "
+    "for two seconds of video, so prefer `wake_when_ready` over `wait`.\n\n"
     "Parameters come from the model, not from habit. `agent_list` returns one "
     "entry per configured media slot, each carrying the `capabilities` the "
     "provider advertises: `durations_secs`, `resolutions`, `aspect_ratios`, "

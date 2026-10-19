@@ -670,6 +670,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
     comfyui: {
       status: resolve({ state: 'not_found', endpoint: 'http://127.0.0.1:8188', version: null, models: [], image_model: null, video_model: null, video_blocker: null, install_command: null, download_url: 'https://www.comfy.org/download' }),
       setSlots: resolve({}),
+      source: resolve(null),
     },
 
     ollama: {

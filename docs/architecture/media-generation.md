@@ -398,3 +398,34 @@ make the film, in what order, and plays them through.
   be loaded is announced with a button to skip it. No file is produced:
   cutting and exporting a single video are separate work.
   [src: file: frontend/src/components/VideoSequenceEditor.tsx:460-541#SequencePlayer] [src: file: frontend/src/components/VideoSequenceEditor.tsx:519-523#clipUnavailable]
+
+## Local ComfyUI (KT-1381)
+
+A local ComfyUI is a media source like a connection, but never a row of
+`external_api_connections`: a row would make it a chat agent and a mention
+target. Config › Agents › Local holds a ComfyUI card next to Ollama (server
+state, installed models, an Image and a Video picker) that saves `[comfyui]`
+in config.toml. While a slot is set, `local_connection` builds an in-memory
+connection with the reserved id `local:comfyui` (alias `comfyui`, no
+credential, no text tier), and every media path resolves it: generation and
+its preflights, `/api/media/models`, the estimate, the worker, the bridge
+guard and the `agent_list` catalogue.
+[src: file: backend/src/api/comfyui.rs:295-319#local_connection]
+[src: file: backend/src/api/orchestration.rs:12702-12708#with_local_media_source]
+
+ComfyUI runs a node graph, so a model is usable only when Kronn has a
+measured workflow for its family (FLUX.1 schnell, SDXL such as RealVisXL,
+Wan 2.1 text-to-video). The family comes from the architecture a checkpoint's
+header declares, else from its exact file name in the measured list — never
+from what a name suggests. Anything else is listed on the card, disabled,
+with the reason. A Wan job also needs its text encoder and VAE; one missing is
+refused before submission.
+[src: file: backend/src/core/comfyui.rs:92-103#family_of]
+
+Images are queued like videos: `POST /prompt` records ComfyUI's prompt id as
+the provider handle, `/history/<id>` is polled, and the file is fetched from
+`/view` on the configured origin. A local job stores no cost, so it never
+enters an estimate or the spend; the Creator form says it costs nothing.
+Source images are not taken yet. Measurements: `docs/research/comfyui-local-media-2026-10-19.md`.
+[src: file: backend/src/agents/media_codec.rs:580-586#ComfyUiMediaCodec]
+[src: file: backend/src/agents/media_runner.rs:767-812#advance_local_comfyui]

@@ -20,6 +20,9 @@ import type {
 import type { ContextFile } from '../types/generated';
 import './MediaGenerateForm.css';
 
+/** The local ComfyUI media source (KT-1381). */
+const LOCAL_COMFYUI_ID = 'local:comfyui';
+
 type T = (key: string, ...args: (string | number)[]) => string;
 
 // Fallbacks, used ONLY when the provider advertises nothing — NVIDIA serves no
@@ -433,8 +436,10 @@ export function MediaGenerateForm({
   // Price of the click, derived from what this model was actually billed
   // before. Absent on a first run, and said so rather than shown as free.
   const estimateKey = selected ? `${selected.key}:${durationSecs}` : '';
+  // KT-1381 — the local ComfyUI bills nothing: no price to estimate.
+  const isLocalSource = selected?.connectionId === LOCAL_COMFYUI_ID;
   useEffect(() => {
-    if (!selected) return;
+    if (!selected || selected.connectionId === LOCAL_COMFYUI_ID) return;
     let cancelled = false;
     media
       .estimate(
@@ -771,9 +776,11 @@ export function MediaGenerateForm({
       </label>
 
       <p className="media-generate-estimate">
-        {estimate && estimate.usd !== null && estimate.samples > 0
-          ? t('disc.media.estimate', estimate.usd.toFixed(4), estimate.samples)
-          : t('disc.media.estimateUnknown')}
+        {isLocalSource
+          ? t('disc.media.localNoCost')
+          : estimate && estimate.usd !== null && estimate.samples > 0
+            ? t('disc.media.estimate', estimate.usd.toFixed(4), estimate.samples)
+            : t('disc.media.estimateUnknown')}
       </p>
 
       {error && <p className="media-generate-error" role="alert">{error}</p>}

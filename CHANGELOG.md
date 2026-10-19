@@ -13,6 +13,15 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- Local image and video generation through ComfyUI (KT-1381). Config ›
+  Agents › Local gains a ComfyUI card next to Ollama: server state and
+  version, the one-command install on macOS (`brew install --cask comfy`), and
+  Image / Video pickers listing the installed models Kronn has a measured
+  workflow for (FLUX.1 schnell, SDXL such as RealVisXL, Wan 2.1). Once a model
+  is chosen, ComfyUI is offered wherever media is generated (new
+  conversation, the Assets Creator) and in `agent_list` as `local:comfyui`,
+  so agents generate on it through `media_generate`. Local generations cost
+  nothing and never enter estimates; ComfyUI never appears as a chat agent.
 - Decision models are recognised (KT-1366). Kronn reads what Ollama's
   `/api/show` says each local model can do, so a decision model such as
   `clef-flash:9b` (which answers typed questions and cannot chat) is no longer

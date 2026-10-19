@@ -2022,6 +2022,7 @@ const fr: TranslationDict = {
   'disc.media.aspectRatio': 'Format',
   'disc.media.estimate': 'Coût estimé : {0} $ (sur {1} génération(s) facturée(s))',
   'disc.media.estimateUnknown': 'Coût inconnu : aucune génération facturée pour ce modèle',
+  'disc.media.localNoCost': 'Génération locale sur ComfyUI : aucun coût.',
   'disc.media.generate': 'Générer',
   'disc.media.generateFromImage.image': 'Générer une image depuis cette image',
   'disc.media.generateFromImage.video': 'Générer une vidéo depuis cette image',

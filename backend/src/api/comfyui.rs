@@ -227,6 +227,13 @@ pub async fn status(State(state): State<AppState>) -> Json<ApiResponse<ComfyUiSt
     }))
 }
 
+/// GET /api/comfyui/source — the local media source the media surfaces list
+/// next to the HTTP connections, read from the config only (no network), or
+/// `null` while no slot is set.
+pub async fn source(State(state): State<AppState>) -> Json<ApiResponse<Option<ExternalApiConnection>>> {
+    Json(ApiResponse::ok(local_connection(&state.config.read().await.comfyui)))
+}
+
 /// Whether `file` may fill the `modality` slot: a model of a measured family
 /// of that modality.
 fn check_slot(file: &str, modality: MediaModality) -> Result<(), String> {

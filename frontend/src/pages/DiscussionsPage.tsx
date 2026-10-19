@@ -20,7 +20,7 @@ import { MessageDateSeparator } from '../components/MessageDateSeparator';
 import { groupMessagesWithToolFold } from '../lib/discussionMessageGrouping';
 import { localCalendarDayKey } from '../lib/discussionDates';
 import { ChatInput } from '../components/ChatInput';
-import { discussions as discussionsApi, discussionActions as discussionActionsApi, projects as projectsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, contacts as contactsApi, workflows as workflowsApi, quickPrompts as quickPromptsApi, planning as planningApi, orchestration as orchestrationApi, externalApi as externalApiConnections, runsApi, publicationCredentials } from '../lib/api';
+import { discussions as discussionsApi, discussionActions as discussionActionsApi, projects as projectsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, contacts as contactsApi, workflows as workflowsApi, quickPrompts as quickPromptsApi, planning as planningApi, orchestration as orchestrationApi, externalApi as externalApiConnections, comfyui as comfyuiApi, runsApi, publicationCredentials } from '../lib/api';
 import type { ExternalApiConnectionView } from '../lib/api';
 import { GitPanel } from '../components/GitPanel';
 import { TerminalPanel } from '../components/TerminalPanel';
@@ -865,6 +865,13 @@ export function DiscussionsPage({
   const [availableProfiles, setAvailableProfiles] = useState<AgentProfile[]>([]);
   const [availableDirectives, setAvailableDirectives] = useState<Directive[]>([]);
   const [externalConnections, setExternalConnections] = useState<ExternalApiConnectionView[]>([]);
+  // KT-1381 — the local ComfyUI, shaped like a connection, offered only where
+  // media is generated (never as an agent or a mention target).
+  const [localMediaSource, setLocalMediaSource] = useState<ExternalApiConnectionView | null>(null);
+  const mediaConnections = useMemo(
+    () => (localMediaSource ? [...externalConnections, localMediaSource] : externalConnections),
+    [externalConnections, localMediaSource],
+  );
   const [expandedSummaryMsgId, setExpandedSummaryMsgId] = useState<string | null>(null);
   const [worktreeError, setWorktreeError] = useState<string | null>(null);
   // KT-1107 — the agent check of each room started from this page, until dismissed.
@@ -1707,6 +1714,9 @@ export function DiscussionsPage({
     directivesApi.list().then(setAvailableDirectives).catch(() => {});
     contactsApi.list().then(setContactsList).catch(() => {});
     externalApiConnections.list().then(setExternalConnections).catch(() => {});
+    comfyuiApi.source()
+      .then(source => setLocalMediaSource(source ? { ...source, has_credential: false } : null))
+      .catch(() => {});
     refetchBatchSummaries();
     window.addEventListener('kronn:profiles-changed', refetchProfiles);
     return () => window.removeEventListener('kronn:profiles-changed', refetchProfiles);
@@ -4357,6 +4367,7 @@ export function DiscussionsPage({
             configLanguage={configLanguage}
             agentAccess={agentAccess}
             externalConnections={externalConnections}
+            mediaConnections={mediaConnections}
             prefill={prefill}
             onSubmit={handleCreateDiscussion}
             onCreateMediaDiscussion={handleCreateMediaDiscussion}
@@ -5864,7 +5875,7 @@ export function DiscussionsPage({
               <DiscussionAssetsPanel
                 discussionId={activeDiscussion.id}
                 files={activeContextFiles}
-                connections={externalConnections}
+                connections={mediaConnections}
                 onClose={() => setShowAssetsPanel(false)}
                 onMediaLaunched={(jobId) => {
                   const launchedDiscussionId = activeDiscussion.id;
