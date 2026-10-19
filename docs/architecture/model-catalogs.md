@@ -61,10 +61,10 @@ does not make a hidden hard-coded fallback reappear.
 [src: file: backend/src/core/model_catalog/codex_discovery.rs:95-121#discover]
 [src: file: backend/src/core/model_catalog/codex_discovery.rs:123-208#run_handshake_and_list]
 [src: file: backend/src/api/external_api_connections.rs:274-441#probe_models]
-[src: file: backend/src/api/external_api_connections.rs:1306-1336#fetch_capability_catalogue]
-[src: file: backend/src/api/external_api_connections.rs:1338-1350#catalog_declares_modality]
-[src: file: backend/src/api/external_api_connections.rs:1352-1405#catalog_models_from_body]
-[src: file: backend/src/api/external_api_connections.rs:1407-1422#merge_catalog]
+[src: file: backend/src/api/external_api_connections.rs:1319-1349#fetch_capability_catalogue]
+[src: file: backend/src/api/external_api_connections.rs:1351-1363#catalog_declares_modality]
+[src: file: backend/src/api/external_api_connections.rs:1365-1419#catalog_models_from_body]
+[src: file: backend/src/api/external_api_connections.rs:1421-1436#merge_catalog]
 [src: file: backend/src/core/model_catalog/mod.rs:705-720#reconcile_http_catalog]
 
 ## Where OpenCode's models come from (KT-928)
