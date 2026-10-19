@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { CatalogModelEntry, ModelCatalogView } from '../../types/generated';
-import { catalogModelOptions, catalogModelProvenance, catalogTierEntry, modelCallVerdict, modelRuntimeTargetId, modelSweepCounts, resolveCatalogTier } from '../modelCatalogSelection';
+import { catalogModelOptions, catalogModelProvenance, catalogTierEntry, hasDecisionModel, isChatCapable, modelCallVerdict, modelRuntimeTargetId, modelSweepCounts, resolveCatalogTier } from '../modelCatalogSelection';
 
 function entry(id: string, patch: Partial<CatalogModelEntry> = {}): CatalogModelEntry {
   return {
@@ -206,5 +206,41 @@ describe('catalogue selection contract', () => {
     expect(option.keywords).toContain('provider/canonical');
     expect(option.keywords).toContain('replacement/id');
     expect(catalogModelOptions(undefined, '', key => key, () => '')).toEqual([]);
+  });
+});
+
+// KT-1366 — a decision model (capabilities without `chat`) is never offered
+// where a chat model is chosen; a saved one stays visible, disabled, with why.
+describe('decision models in chat pickers', () => {
+  const catalogue = view([
+    entry('qwen3:8b'),
+    entry('clef-flash:9b', { capabilities: ['decision', 'vision'] }),
+    entry('legacy', { capabilities: [] }),
+  ]);
+
+  it('leaves decision models out of the chat options', () => {
+    const values = catalogModelOptions(catalogue, '', key => key, () => '').map(option => option.value);
+    expect(values).toEqual(['qwen3:8b', 'legacy']);
+  });
+
+  it('keeps a saved decision model visible but disabled, saying it cannot chat', () => {
+    const options = catalogModelOptions(catalogue, 'clef-flash:9b', key => key, () => '');
+    const saved = options.find(option => option.value === 'clef-flash:9b');
+    expect(saved?.disabled).toBe(true);
+    expect(saved?.label).toContain('modelCatalog.notChatModel');
+    expect(saved?.label).not.toContain('modelCatalog.notInCatalog');
+    expect(options.filter(option => option.value === 'clef-flash:9b')).toHaveLength(1);
+  });
+
+  it('treats an entry without capability tags as a chat model', () => {
+    expect(isChatCapable([])).toBe(true);
+    expect(isChatCapable(undefined)).toBe(true);
+    expect(isChatCapable(['video'])).toBe(false);
+  });
+
+  it('tells whether any local or HTTP catalogue holds a decision model', () => {
+    expect(hasDecisionModel({ targets: [view([entry('qwen3:8b')])] })).toBe(false);
+    expect(hasDecisionModel({ targets: [view([entry('qwen3:8b')]), view([entry('jev', { capabilities: ['decision'] })])] })).toBe(true);
+    expect(hasDecisionModel(null)).toBe(false);
   });
 });

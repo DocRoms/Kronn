@@ -193,3 +193,31 @@ describe('OllamaCard shared catalogue and safe persistence (KT-531)', () => {
     expect(setTiers).not.toHaveBeenCalled();
   });
 });
+
+// KT-1366 — decision models are shown as their own kind on the card and are
+// never offered in the chat tier pickers.
+describe('OllamaCard decision models (KT-1366)', () => {
+  const installed = (name: string, capabilities: string[]) => ({
+    name, size: '12 GB', modified: checkedAt, advertised_context: 8192,
+    context_ceiling: 8192, context_override: null, context_origin: 'model_window', capabilities,
+  });
+
+  it('lists an installed decision model apart and keeps it out of the tier picker', async () => {
+    models.mockResolvedValue({ models: [installed('current', ['chat']), installed('clef-flash:9b', ['decision', 'vision'])] });
+    list.mockResolvedValue(snapshot(target([model('current'), model('clef-flash:9b', { capabilities: ['decision', 'vision'] })])));
+    const input = await show();
+    const section = await screen.findByRole('region', { name: 'ollama.decisionTitle' });
+    expect(section).toHaveTextContent('clef-flash:9b');
+    expect(section).toHaveTextContent('ollama.decisionHint');
+    expect(section).not.toHaveTextContent('ollama.decisionEmpty');
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: 'clef' } });
+    await waitFor(() => expect(screen.queryByRole('option', { name: /clef-flash/ })).not.toBeInTheDocument());
+  });
+
+  it('says no decision model is installed when none declares the capability', async () => {
+    await show();
+    const section = await screen.findByRole('region', { name: 'ollama.decisionTitle' });
+    expect(section).toHaveTextContent('ollama.decisionEmpty');
+  });
+});

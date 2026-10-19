@@ -38,6 +38,11 @@ pub struct OllamaModel {
     /// into the API surface and a frontend has no reason to know Rust
     /// variant names.
     pub context_origin: String,
+    /// What the catalogue says this model can do (`chat`, `vision`,
+    /// `decision`…), read from Ollama's `/api/show`. A model without `chat`
+    /// is never offered where a chat model is chosen.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]

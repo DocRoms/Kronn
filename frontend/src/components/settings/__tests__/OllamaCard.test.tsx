@@ -52,6 +52,7 @@ const installedModel = (name: string, overrides: Partial<OllamaModel> = {}): Oll
   context_ceiling: 65_536,
   context_override: null,
   context_origin: 'machine_ceiling',
+  capabilities: ['chat'],
   ...overrides,
 });
 

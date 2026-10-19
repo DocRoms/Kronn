@@ -6363,6 +6363,29 @@
 .set-ollama-fresh-unknown { background: transparent; color: var(--kr-text-muted); font-weight: 400; }
 .set-ollama-fresh-unknown { cursor: help; }
 
+.set-ollama-decision-badge { background: rgba(var(--kr-accent-rgb), 0.10); color: var(--kr-text-secondary); }
+
+.set-ollama-decision {
+  margin-top: var(--kr-sp-4);
+  padding-top: var(--kr-sp-4);
+  border-top: 1px solid var(--kr-border);
+}
+
+.set-ollama-decision-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-1);
+}
+
+.set-ollama-decision-list li {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+}
+
 .set-ollama-installed {
   margin-top: var(--kr-sp-6);
   padding-top: var(--kr-sp-4);

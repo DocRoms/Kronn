@@ -6093,7 +6093,13 @@ context_override: number | null,
  * into the API surface and a frontend has no reason to know Rust
  * variant names.
  */
-context_origin: string, };
+context_origin: string,
+/**
+ * What the catalogue says this model can do (`chat`, `vision`,
+ * `decision`…), read from Ollama's `/api/show`. A model without `chat`
+ * is never offered where a chat model is chosen.
+ */
+capabilities: Array<string>, };
 
 /**
  * One installed model's freshness.

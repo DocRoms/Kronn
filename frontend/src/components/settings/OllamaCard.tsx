@@ -17,7 +17,7 @@ import { useState, useEffect, useCallback, useRef, type ReactNode } from 'react'
 import { ollama as ollamaApi, config as configApi, modelCatalogApi, type OllamaPullProgress } from '../../lib/api';
 import { useApi } from '../../hooks/useApi';
 import { usePersistentFold } from '../../hooks/usePersistentFold';
-import { catalogModelOptions, catalogTierEntry, modelRuntimeTargetId } from '../../lib/modelCatalogSelection';
+import { catalogModelOptions, catalogTierEntry, isDecisionCapable, modelRuntimeTargetId } from '../../lib/modelCatalogSelection';
 import type { OllamaHealthResponse, OllamaModel, OllamaRegistryResponse, OllamaUpdateStatus, ModelTiersConfig } from '../../types/generated';
 import { RefreshCw, ExternalLink, Download, AlertTriangle, Loader2, Save, RotateCcw, ChevronRight } from 'lucide-react';
 import { suggestedModelsFor } from './ollamaModels';
@@ -453,6 +453,7 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory, title }: Ollam
   const sizeOf = (name: string): string | undefined =>
     registry?.suggestions.find(item => item.name === name)?.size;
   const updatesAvailable = models.filter(model => freshnessOf(model.name) === 'update_available').length;
+  const decisionModels = models.filter(model => isDecisionCapable(model.capabilities));
 
   const savedTarget = catalog.data?.targets.find(view => view.runtime_target_id === modelRuntimeTargetId('Ollama'));
   const target = savedTarget && (!savedTarget.live_refresh_ok || catalog.error || catalog.loading || health?.status !== 'online')
@@ -605,6 +606,9 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory, title }: Ollam
                         <div className="set-ollama-suggestion-head">
                           <code className="set-ollama-cmd">{model.name}</code>
                           <span className="set-ollama-suggestion-desc">{model.size}</span>
+                          {isDecisionCapable(model.capabilities) && (
+                            <span className="set-ollama-fresh set-ollama-decision-badge">{t('ollama.decisionBadge')}</span>
+                          )}
                           <FreshnessBadge status={freshnessOf(model.name)} t={t} />
                           {/* A model the registry confirmed current has nothing to update;
                               "not checked" keeps the action, since nothing was confirmed. */}
@@ -681,6 +685,24 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory, title }: Ollam
             {/* Bench-based guidance (2026-07) — which local model fits which
                 job, so users don't put a weak model on a demanding step. */}
             <div className="set-ollama-tier-guidance">💡 {t('ollama.tierGuidance')}</div>
+            {health.status === 'online' && (
+              <section className="set-ollama-decision" aria-label={t('ollama.decisionTitle')}>
+                <div className="set-ollama-installed-title">{t('ollama.decisionTitle')}</div>
+                {decisionModels.length > 0 ? (
+                  <ul className="set-ollama-decision-list">
+                    {decisionModels.map(model => (
+                      <li key={model.name}>
+                        <code className="set-ollama-model-name">{model.name}</code>
+                        <span className="text-2xs text-muted">{model.size}</span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="set-hint">{t('ollama.decisionEmpty')}</p>
+                )}
+                <p className="set-ollama-tier-guidance">{t('ollama.decisionHint')}</p>
+              </section>
+            )}
             {health.status === 'online' && models.length > 0 && <details className="set-ollama-context-section">
               <summary className="set-ollama-context-summary text-xs text-muted">
                 {t('ollama.contextTitle')}

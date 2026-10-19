@@ -813,6 +813,32 @@ where Ollama runs. [src: file: backend/src/api/ollama.rs:62-84#fetch_server_vers
 When it is, the `-mlx` builds are listed first with an "Optimized for Mac" mark,
 then the portable list. Everywhere else the list is exactly the portable one.
 
+## Decision models (KT-1366)
+
+A decision model (for example `clef-flash:9b`) answers typed questions (yes/no,
+choice, score) with a probability through Ollama's `POST /v1/systemone`; it
+cannot chat. Ollama says so in `/api/show`: `capabilities` lists `decision`
+without `completion`. [src: url: https://docs.ollama.com/capabilities/decision]
+
+- The catalogue refresh reads `/api/show` for every listed tag and stores its
+  capabilities in the catalogue's words (`completion` becomes `chat`; `vision`,
+  `decision` and `embedding` are kept). A tag whose probe fails keeps the
+  capabilities already saved for it, and a tag never probed stays `chat`.
+  [src: file: backend/src/core/model_catalog/ollama_discovery.rs:137-152#catalog_capabilities]
+  [src: file: backend/src/core/model_catalog/mod.rs:661-703#ollama_capabilities]
+- A catalogue entry without `chat` is refused by the chat preflight, and the
+  pickers leave it out; a saved choice stays visible, disabled, saying it is a
+  decision model. An entry with no capability list stays usable.
+  [src: file: backend/src/http_transport.rs:49-51#entry_supports_capability]
+  [src: file: frontend/src/lib/modelCatalogSelection.ts:97-99#isChatCapable]
+- The Ollama card lists installed decision models in their own block, and the
+  manual catalogue form offers the `decision` capability for HTTP entries.
+  `hasDecisionModel` tells the UI whether any catalogue holds one.
+  [src: file: frontend/src/lib/modelCatalogSelection.ts:106-108#hasDecisionModel]
+- Ollama 0.34.2 refuses to pull `clef-flash` with `412 … requires a newer
+  version of Ollama`; the card now says to update Ollama. Measured on
+  0.40.6: first call 8.5 s (load), then 0.2–0.6 s.
+
 ## Bench snapshot (M5 Max 64 GB, Q4_K_M, informational)
 
 | Model | tok/s (warm) | Note |
