@@ -58,10 +58,10 @@ secret file (and a bare tech-debt sheet) given its `:exists` presence form; a
 citation whose path resolves to exactly one other file that holds the cited
 lines (the "did you mean" path); a range ending one line past the end of a file
 with no closing newline, clamped to the last line. Also applied (KT-1357, from
-the 18/10 matrix): a list of lines of one file (`[src: file: deploy.yml:210,214,218]`)
+the 18/10 matrix): a list of lines of one file in one marker (`deploy.yml:210,214,218`)
 split into one marker per line when every line is in range; a comment after a
 `path:line` the gate accepts as written
-(`[src: file: docs/AGENTS.md:38-39: never edit generated files]`) moved out of the
+(`docs/AGENTS.md:38-39: never edit generated files` inside the marker) moved out of the
 marker, after it, in parentheses; a bare citation of an empty text file replaced
 by the backticked path followed by `(empty)`. Never applied: a comma bundle that
 is not fully verified (one line out of range, a path that is not there), a

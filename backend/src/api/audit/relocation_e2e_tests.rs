@@ -146,12 +146,14 @@ async fn a_full_audit_of_a_dot_ai_project_writes_everything_there_and_nothing_in
         // KT-1360 — the remit block names the root and the leftover folders
         // itself: it is built per root, not rewritten.
         let expected = ai
-            .relocate(
-                &default
-                    .replace(&reference_path, &path)
-                    .replace(&crate::api::audit::step_remit::remit_prompt_block(&DocsRoot::default_root()), "\u{0}"),
-            )
-            .replace('\u{0}', &crate::api::audit::step_remit::remit_prompt_block(&ai));
+            .relocate(&default.replace(&reference_path, &path).replace(
+                &crate::api::audit::step_remit::remit_prompt_block(&DocsRoot::default_root()),
+                "\u{0}",
+            ))
+            .replace(
+                '\u{0}',
+                &crate::api::audit::step_remit::remit_prompt_block(&ai),
+            );
         assert_eq!(relocated, &expected);
     }
     assert!(prompts[0].contains("`.ai/AGENTS.md`"));
