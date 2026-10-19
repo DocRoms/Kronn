@@ -775,7 +775,7 @@ async fn a_dead_citation_is_named_before_the_agent_and_never_ends_unchanged() {
     let demoted = sse_events(&body, "documentary_demoted");
     assert_eq!(demoted.len(), 1, "{body}");
     assert_eq!(
-        demoted[0]["references"][0]["marker"], "[src: file: src/legacy.rs:1]",
+        demoted[0]["references"][0]["marker"], "[src: file: src/legacy.rs]",
         "{body}"
     );
     let after = std::fs::read_to_string(fx.project().join(RULES)).unwrap();

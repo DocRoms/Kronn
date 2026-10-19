@@ -56,8 +56,12 @@ this degrades and continues.
   originals are put back and the step fails as before.
   [src: file: backend/src/api/audit/document_repair.rs:433-505#demote_last_attempt]
 - **What it writes.** `[src: file: X]` becomes `` `X` (unverified reference) ``
-  (line, range, anchor and `:exists` dropped; a bundle becomes one flagged list;
-  a comment the agent put inside the marker follows the flag). Inline code and
+  (line, range, anchor and `:exists` dropped; a bundle becomes one flagged list).
+  Nothing else of the marker survives: a comment the agent put inside it is
+  dropped for every file, never carried after the flag, and a later piece of a
+  bundle is kept only when it is cited like a path (line, range, `:exists`) or
+  is a file of the project. The list (event, `step_warning`, notes, prompt)
+  records only the path part, `[src: file: X]`, never the line or the comment. Inline code and
   fenced code are untouched, as in `mechanical_fix`. The flag is plain text:
   a backticked path is not a citation, so the gate never reads it and a
   revalidation reports the demoted references as they stand, never failing on
@@ -67,14 +71,16 @@ this degrades and continues.
   to `:exists` by KT-1353. If a marker of a secret file is still there, it is
   removed entirely: no path, no line, no comment that could carry content. A
   marker counts as secret when it names or resolves to a secret file ANYWHERE
-  in it: any comma piece, any word of a piece (a comment may quote one), in the
-  written, the percent-decoded (several rounds) and the line-less form, judged
+  in it: every stretch that starts at the beginning or after a space, a comma
+  or a colon and ends at a space, a comma, a colon or the end (so any word of a
+  comment, and any quoted path with a space), stripped of quotes, brackets and
+  the like, in the written, the percent-decoded (several rounds) and the
+  line-less form, judged
   by `is_secret_path` on the project-relative path, so a link
   (`key-view.txt -> ../.ssh/key`) or a chain of links through a secret
   directory (`keys -> .ssh -> vault`) is as secret as its target. The whole
-  cited path is judged before any word-by-word scan: every prefix of the marker
-  that ends at a `:`, a space or its end is resolved as a path, so a link whose
-  name holds a space (`key view.txt -> ../.ssh/key`) is caught too. One secret
+  cited path is judged, spaces included, so a link whose name holds a space
+  (`key view.txt -> ../.ssh/key`), quoted or not, is caught too. One secret
   piece drops the whole marker, bundle remainder included. It is listed, in the
   `documentary_demoted` event, `step_warning` and the notes, only as the fixed
   placeholder `[src: file: <secret file>]`.
@@ -87,7 +93,7 @@ this degrades and continues.
   [src: file: backend/src/api/audit/document_repair.rs:538#preserve_original]
 - **The step is done with a warning**, not failed and without a partial banner:
   `cli_success` stays true and `step_warning` lists every demoted reference
-  (document, original marker). The step emits `documentary_demoted` and its
+  (document, path part of the marker). The step emits `documentary_demoted` and its
   `step_done` carries `unverified_references`.
   [src: file: backend/src/api/audit/document_repair.rs:416-431#demotion_notes]
 - **The run says how many.** The `done` event carries `unverified_references`;

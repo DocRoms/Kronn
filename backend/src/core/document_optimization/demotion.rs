@@ -103,44 +103,55 @@ fn rewrite_line(line: &str, replace: &mut impl FnMut(&str) -> Option<String>) ->
     output
 }
 
-/// Whether a marker names, or resolves to, a secret file ANYWHERE in it: any
-/// comma piece, any word of a piece (a comment may quote one), in the written,
-/// the percent-decoded and the line-less form, judged by the names the path
+/// What surrounds a path in prose without being part of it.
+const DELIMITERS: [char; 14] = [
+    '`', '"', '\'', '(', ')', '[', ']', '<', '>', '{', '}', ';', '—', '–',
+];
+
+/// More candidate starts than this and the marker is not a citation anyone
+/// wrote by hand: it is judged secret rather than scanned.
+const MAX_CANDIDATE_STARTS: usize = 48;
+
+/// Whether a marker names, or resolves to, a secret file ANYWHERE in it. Every
+/// stretch of the marker that starts at its beginning or after a space, a comma
+/// or a colon and ends at a space, a comma, a colon or its end is a candidate
+/// path (spaces included: `docs/key view.txt` may be a link to a secret; quotes,
+/// brackets and the like stripped, as for any word of a comment), judged in the
+/// written, the percent-decoded and the line-less form by the names the path
 /// walks and every link it passes through (`is_secret_path`).
 fn names_secret(project: &Path, raw: &str) -> bool {
-    if prefixes_name_secret(project, raw) {
+    let is_boundary = |c: char| c.is_whitespace() || c == ',' || c == ':';
+    let starts: Vec<usize> = std::iter::once(0)
+        .chain(
+            raw.char_indices()
+                .filter(|(_, c)| is_boundary(*c))
+                .map(|(index, c)| index + c.len_utf8()),
+        )
+        .collect();
+    if starts.len() > MAX_CANDIDATE_STARTS {
         return true;
     }
-    raw.split(',').any(|piece| {
-        prefixes_name_secret(project, piece)
-            || piece.split_whitespace().any(|word| {
-                let word = word.trim_matches(['`', '"', '\'', '(', ')', ';', '—', '–']);
-                let word = word.strip_prefix("file:").unwrap_or(word);
-                word_forms(word)
-                    .iter()
-                    .any(|form| path_is_secret(project, form))
-            })
+    let ends: Vec<usize> = raw
+        .char_indices()
+        .filter(|(_, c)| is_boundary(*c))
+        .map(|(index, _)| index)
+        .chain(std::iter::once(raw.len()))
+        .collect();
+    starts.iter().any(|&start| {
+        ends.iter()
+            .filter(|&&end| end > start)
+            .any(|&end| candidate_is_secret(project, &raw[start..end]))
     })
 }
 
-/// The whole cited path, spaces included, before any word-by-word scan: every
-/// prefix of the text that ends at a `:`, at a space or at its end is judged as
-/// a path (`docs/key view.txt` may be a link to a secret whose name has a space).
-fn prefixes_name_secret(project: &Path, text: &str) -> bool {
-    let text = text.trim();
-    let text = text.strip_prefix("file:").map(str::trim).unwrap_or(text);
-    let ends = text
-        .char_indices()
-        .filter(|(_, c)| *c == ':' || c.is_whitespace())
-        .map(|(index, _)| index)
-        .chain(std::iter::once(text.len()));
-    ends.map(|end| text[..end].trim())
-        .filter(|prefix| !prefix.is_empty())
-        .any(|prefix| {
-            word_forms(prefix)
-                .iter()
-                .any(|form| path_is_secret(project, form))
-        })
+fn candidate_is_secret(project: &Path, candidate: &str) -> bool {
+    let candidate = candidate.trim().trim_matches(DELIMITERS);
+    let candidate = candidate.strip_prefix("file:").unwrap_or(candidate);
+    let candidate = candidate.trim().trim_matches(DELIMITERS);
+    !candidate.is_empty()
+        && word_forms(candidate)
+            .iter()
+            .any(|form| path_is_secret(project, form))
 }
 
 /// What a word may stand for as a path: itself and without its line, then each
@@ -170,8 +181,10 @@ fn path_is_secret(project: &Path, path: &str) -> bool {
 }
 
 /// What replaces the marker whose content is `raw`, and how the marker is
-/// listed. A bundle (`a:1, b:2`) becomes one flagged list; a comment the agent
-/// put inside the marker follows the flag instead of vanishing with it.
+/// listed. A bundle (`a:1, b:2`) becomes one flagged list. Whatever else the
+/// agent wrote inside the marker (a comment, a quote of a file) is dropped:
+/// a demoted marker carries its path(s) and nothing else, in the text and in
+/// the list alike.
 ///
 /// A marker that names a secret file anywhere is removed entirely: no path, no
 /// comment, no remainder of its bundle, and only a fixed placeholder is listed.
@@ -180,42 +193,37 @@ fn demoted_text(project: &Path, raw: &str) -> (String, String) {
         return (String::new(), SECRET_MARKER.to_string());
     }
     let mut paths: Vec<String> = Vec::new();
-    let mut comment = None;
-    for piece in raw.split(',') {
+    for (index, piece) in raw.split(',').enumerate() {
         let piece = piece.trim();
         let piece = piece.strip_prefix("file:").map(str::trim).unwrap_or(piece);
-        let (token, rest) = match piece.split_once(char::is_whitespace) {
-            Some((token, rest)) => (token, Some(rest.trim())),
-            None => (piece, None),
+        let token = match piece.chars().next() {
+            Some(quote @ ('"' | '\'')) => piece[1..].split(quote).next().unwrap_or_default(),
+            _ => piece.split_whitespace().next().unwrap_or_default(),
         };
-        let path = cited_path(token.trim_end_matches([':', ';', '—', '–']));
-        if path.is_empty() || path.contains('`') {
+        let token = token.trim_end_matches([':', ';', '—', '–']);
+        let cited = cited_path(token);
+        let path = cited.trim_matches(DELIMITERS);
+        // Past the first piece, a word is a path only when it is cited like one
+        // (a line, a range, `:exists`) or is a file of the project: the rest is
+        // the agent's comment.
+        let cited_like_a_path = cited != token || project.join(path).exists();
+        if path.is_empty() || (index > 0 && !cited_like_a_path) {
             continue;
-        }
-        if let Some(rest) = rest {
-            let rest = rest.trim_start_matches(['—', '–', '-', ':']).trim();
-            if !rest.is_empty() && !rest.contains(['`', '[', ']']) && comment.is_none() {
-                comment = Some(rest.to_string());
-            }
         }
         if !paths.iter().any(|known| known == path) {
             paths.push(path.to_string());
         }
     }
-    let marker = format!("[src: file: {raw}]");
     if paths.is_empty() {
-        return (String::new(), marker);
+        return (String::new(), "[src: file: <no path>]".to_string());
     }
+    let marker = format!("[src: file: {}]", paths.join(", "));
     let list = paths
         .iter()
         .map(|path| format!("`{path}`"))
         .collect::<Vec<_>>()
         .join(", ");
-    let text = match comment {
-        Some(comment) => format!("{list} {UNVERIFIED_FLAG} — {comment}"),
-        None => format!("{list} {UNVERIFIED_FLAG}"),
-    };
-    (text, marker)
+    (format!("{list} {UNVERIFIED_FLAG}"), marker)
 }
 
 /// The path a reference names: without its line, range, anchor or `:exists`.

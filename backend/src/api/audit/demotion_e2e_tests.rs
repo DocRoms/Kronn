@@ -202,7 +202,8 @@ async fn a_secret_marker_survives_nowhere_after_a_demotion() {
         project,
         "Set it [src: file: .env:1 safe_word, SYNTHETIC_COMMENT_7731] and \
          [src: file: %2eenv:1 SYNTHETIC_COMMENT_7731] and \
-         [src: file: refs/key view.txt:1 SYNTHETIC_COMMENT_7731] first.",
+         [src: file: refs/key view.txt:1 SYNTHETIC_COMMENT_7731] and \
+         [src: file: \"refs/key view.txt:1\" SYNTHETIC_COMMENT_7731] first.",
         &alias,
     );
     let body = run_full(state, None).await;
@@ -212,7 +213,7 @@ async fn a_secret_marker_survives_nowhere_after_a_demotion() {
     validation_settled(state, &done).await;
 
     assert_eq!(done["status"], "complete", "{body}");
-    assert_eq!(done["unverified_references"], 3, "{done}");
+    assert_eq!(done["unverified_references"], 4, "{done}");
     let mut found = Vec::new();
     files_holding(project, "SYNTHETIC_COMMENT_7731", &mut found);
     assert!(
@@ -349,10 +350,7 @@ async fn a_revalidation_demotes_what_its_agent_left_stale_and_completes() {
         warning.contains(&format!("[src: file: {MONOLOG}]")),
         "{warning}"
     );
-    assert!(
-        warning.contains("[src: file: src/legacy.rs:1]"),
-        "{warning}"
-    );
+    assert!(warning.contains("[src: file: src/legacy.rs]"), "{warning}");
     // Revalidating again reports the references as they are: no marker is left
     // to fail on, and the flag is not read by the gate.
     assert!(
@@ -398,7 +396,7 @@ async fn a_partial_step_demotes_what_the_enforce_gate_still_refuses_and_complete
     let demoted = sse_events(&body, "documentary_demoted");
     assert_eq!(demoted.len(), 1, "{body}");
     assert_eq!(
-        demoted[0]["references"][0]["marker"], "[src: file: src/kept.rs:999]",
+        demoted[0]["references"][0]["marker"], "[src: file: src/kept.rs]",
         "{body}"
     );
     assert!(sse_events(&body, "step_warning").is_empty(), "{body}");
@@ -422,7 +420,7 @@ async fn a_partial_step_demotes_what_the_enforce_gate_still_refuses_and_complete
     );
     assert_eq!(saved["unverified"][0]["doc"], RULES, "{saved}");
     assert_eq!(
-        saved["unverified"][0]["marker"], "[src: file: src/kept.rs:999]",
+        saved["unverified"][0]["marker"], "[src: file: src/kept.rs]",
         "{saved}"
     );
     let step = steps.first().expect("the refreshed step");
@@ -430,7 +428,7 @@ async fn a_partial_step_demotes_what_the_enforce_gate_still_refuses_and_complete
     assert!(
         step.step_warning
             .as_deref()
-            .is_some_and(|w| w.contains("[src: file: src/kept.rs:999]")),
+            .is_some_and(|w| w.contains("[src: file: src/kept.rs]")),
         "{step:?}"
     );
 }

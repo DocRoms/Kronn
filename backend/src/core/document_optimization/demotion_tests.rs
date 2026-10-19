@@ -66,13 +66,48 @@ fn an_accepted_marker_inline_code_and_fences_are_left_as_they_are() {
 }
 
 #[test]
-fn a_comment_inside_the_marker_follows_the_flag() {
+fn a_comment_inside_the_marker_is_dropped_from_the_text_and_the_list() {
     let dir = project();
     let text = "X [src: file: config/packages/prod/monolog.yaml — handlers are empty]\n";
     let demoted = demote_unverifiable(dir.path(), DOC, text).unwrap();
     assert_eq!(
         demoted.content,
-        "X `config/packages/prod/monolog.yaml` (unverified reference) — handlers are empty\n"
+        "X `config/packages/prod/monolog.yaml` (unverified reference)\n"
+    );
+    assert_eq!(
+        demoted.references[0].marker,
+        "[src: file: config/packages/prod/monolog.yaml]"
+    );
+    // A later piece that is no path is a comment, whatever it looks like.
+    let text = "X [src: file: src/lib.rs:99 note, SYNTHETIC_COMMENT, src/gone.rs:1, see foo.bar]\n";
+    let demoted = demote_unverifiable(dir.path(), DOC, text).unwrap();
+    assert_eq!(
+        demoted.content,
+        "X `src/lib.rs`, `src/gone.rs` (unverified reference)\n"
+    );
+    assert_eq!(
+        demoted.references[0].marker,
+        "[src: file: src/lib.rs, src/gone.rs]"
+    );
+}
+
+#[test]
+fn a_quoted_path_with_a_space_is_one_path() {
+    let dir = project();
+    write(dir.path(), "docs/my notes.md", "# n\n");
+    let demoted = demote_unverifiable(
+        dir.path(),
+        DOC,
+        "X [src: file: \"docs/my notes.md:99\" SYNTHETIC_COMMENT]\n",
+    )
+    .unwrap();
+    assert_eq!(
+        demoted.content,
+        "X `docs/my notes.md` (unverified reference)\n"
+    );
+    assert_eq!(
+        demoted.references[0].marker,
+        "[src: file: docs/my notes.md]"
     );
 }
 
@@ -157,6 +192,25 @@ fn a_marker_resolving_to_a_secret_through_a_link_is_removed_entirely() {
     assert_secret_marker_removed(&dir, "docs/key view.txt:1 SYNTHETIC_COMMENT");
     assert_secret_marker_removed(&dir, "docs/key view.txt");
     assert_secret_marker_removed(&dir, "src/gone.rs:1, docs/key view.txt:1 SYNTHETIC_COMMENT");
+    // The same alias quoted or bracketed, or quoted after other words.
+    for raw in [
+        "\"docs/key view.txt:1\" SYNTHETIC_COMMENT",
+        "'docs/key view.txt:1' SYNTHETIC_COMMENT",
+        "`docs/key view.txt` SYNTHETIC_COMMENT",
+        "(docs/key view.txt:1) SYNTHETIC_COMMENT",
+        "see \"docs/key view.txt:1\" SYNTHETIC_COMMENT",
+        "src/gone.rs:1, \"docs/key view.txt\" SYNTHETIC_COMMENT",
+        "\"docs/key%20view.txt:1\" SYNTHETIC_COMMENT",
+    ] {
+        assert_secret_marker_removed(&dir, raw);
+    }
+    // The backup copy is scrubbed whatever the gate says of the marker.
+    let text = "A [src: file: \"docs/key view.txt:1\" SYNTHETIC_COMMENT] B \
+                [src: file: <docs/key view.txt> SYNTHETIC_COMMENT]\n";
+    assert_eq!(
+        scrub_secret_markers(dir.path(), text),
+        "A [src: file: <secret file>] B [src: file: <secret file>]\n"
+    );
     let text = "A [src: file: docs/key view.txt:1 SYNTHETIC_COMMENT] B\n";
     let scrubbed = scrub_secret_markers(dir.path(), text);
     assert_eq!(scrubbed, "A [src: file: <secret file>] B\n");
