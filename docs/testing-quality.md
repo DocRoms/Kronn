@@ -105,7 +105,7 @@ standalone Rust test files; a `#[cfg(test)]` on their parent module does not
 exclude their contents. Propagate fallible fixture setup inside the closure
 and assert its result after awaiting it.
 `[src: file: backend/scripts/ci/lint_with_conn_unwrap.py:155-195#find_violations]`
-`[src: file: .github/workflows/ci-test.yml:497-501#with_conn]`
+`[src: file: .github/workflows/ci-test.yml:511-515#with_conn]`
 
 Supervisor cleanup must also reap live shell jobs whose PID was not yet recorded:
 a termination signal can arrive between the fork and that assignment, leaving
@@ -198,7 +198,7 @@ directories and writes a versioned marker (`.kronn-backend-cache-v3`) when a
 complete bounded cache exists. Profraw files, the nextest store and other
 transient trees are never archived.
 [src: file: .github/workflows/ci-test.yml:102-116#cache-backend-hot] [src: file: .github/workflows/ci-test.yml:243-276#mark-backend-cache]
-[src: file: .github/workflows/ci-test.yml:208-227#archive] [src: file: .github/workflows/ci-test.yml:278-329#test-backend-shard] [src: file: .github/workflows/ci-test.yml:359-437#test-backend] [src: file: scripts/ci/backend_ci_slo.mjs:46-62#collapseBackendJobs]
+[src: file: .github/workflows/ci-test.yml:208-241#archive] [src: file: .github/workflows/ci-test.yml:278-329#test-backend-shard] [src: file: .github/workflows/ci-test.yml:359-437#test-backend] [src: file: scripts/ci/backend_ci_slo.mjs:46-62#collapseBackendJobs]
 
 The clippy, e2e dev-profile, release and portability caches follow the same
 restore-on-pull-request, save-on-main model: Actions scopes a cache created by
@@ -217,7 +217,7 @@ aggregates accept those skips only for a push. A save runs only on
 `success()`: a half-built tree saved under the exact key would be restored
 as a hit, and never replaced, until the next `Cargo.lock` change. The
 backend save keeps its own verified `ready` marker instead.
-[src: file: .github/workflows/ci-test.yml:211-221#archive] [src: file: .github/workflows/ci-test.yml:458-491#cache-clippy] [src: file: .github/workflows/ci-test.yml:759-786#cache-e2e-dev]
+[src: file: .github/workflows/ci-test.yml:225-235#archive] [src: file: .github/workflows/ci-test.yml:458-491#cache-clippy] [src: file: .github/workflows/ci-test.yml:759-786#cache-e2e-dev]
 [src: file: .github/workflows/ci-build.yml:194-235#cache-portability] [src: file: .github/workflows/ci-build.yml:251-276#cache-release]
 
 The backend performance observer publishes the duration for every eligible run
@@ -237,7 +237,7 @@ debug layout, so the first run is an explicit warmup.
 [src: file: .cargo/config.toml:1-6] [src: file: scripts/ci/backend_ci_slo.mjs:166-191#main] [src: file: scripts/ci/backend_ci_slo.mjs:100-104#effectiveMeasurementMode] [src: file: scripts/ci/backend_ci_slo.mjs:83-94#comparableSuccessfulHotRuns]
 [src: file: .github/workflows/ci-test.yml:131-160#verify-backend-cache] [src: file: .github/workflows/ci-test.yml:195-206#cold] [src: file: .github/workflows/ci-test.yml:1006-1026#backend-ci-performance]
 The observer's Node unit test runs in the blocking `test-python` gate.
-[src: file: .github/workflows/ci-test.yml:608-615#SLO]
+[src: file: .github/workflows/ci-test.yml:622-629#SLO]
 
 Each shard fails its artifact step when nextest does not produce the expected
 JUnit report, then uploads it as `backend-junit-N` (N = 1 to 3). nextest writes its
@@ -262,7 +262,7 @@ for seconds, classname, name in sorted(cases, reverse=True)[:10]:
 PY
 ```
 
-[src: file: .github/workflows/ci-test.yml:346-357#junit]
+[src: file: .github/workflows/ci-test.yml:360-371#junit]
 
 Run `CI Tests` manually with `cache_mode=hot` for a warmed compiled-artifact
 measurement or `cache_mode=cold` for a current-run-only cold measurement.
@@ -324,7 +324,7 @@ gate is skipped or fails. A timeout is a functional failure; the SLO observer
 does not retry, sleep, or mask it. An SLO breach is a warning, while missing,
 duplicate, incomplete, or contradictory measurement evidence fails the
 observer instead of publishing a misleading timing.
-[src: file: .github/workflows/ci-test.yml:85#timeout-minutes] [src: file: .github/workflows/ci-test.yml:363#timeout-minutes] [src: file: .github/workflows/ci-test.yml:717#timeout-minutes] [src: file: .github/workflows/ci-build.yml:180-182#timeout-minutes] [src: file: .github/workflows/ci-build.yml:263#timeout-minutes]
+[src: file: .github/workflows/ci-test.yml:85#timeout-minutes] [src: file: .github/workflows/ci-test.yml:377#timeout-minutes] [src: file: .github/workflows/ci-test.yml:731#timeout-minutes] [src: file: .github/workflows/ci-build.yml:180-182#timeout-minutes] [src: file: .github/workflows/ci-build.yml:263#timeout-minutes]
 [src: file: .github/workflows/ci-test.yml:968-1004#ci-quality-gates] [src: file: scripts/ci/backend_ci_slo.mjs:111-135#requireCurrentBackendJob]
 
 ## Test placement

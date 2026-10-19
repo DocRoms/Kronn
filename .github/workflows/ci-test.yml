@@ -209,6 +209,20 @@ jobs:
         if: github.event_name != 'push'
         run: cargo fmt --all -- --check
 
+      # The instrumented kronn lib, lib tests and integration tests compile in
+      # parallel and peak above the runner's 16 GB: without swap the VM dies
+      # ("runner has received a shutdown signal", about 1 run in 2 on 0.15.1).
+      - name: Add swap for the instrumented build
+        working-directory: .
+        run: |
+          free -m
+          sudo swapoff -a || true
+          sudo fallocate -l 16G /mnt/kronn-swap
+          sudo chmod 600 /mnt/kronn-swap
+          sudo mkswap /mnt/kronn-swap
+          sudo swapon /mnt/kronn-swap
+          free -m
+
       # Build once, on pull requests and on a push to main alike, so the
       # cache main saves is exactly what a pull request compiles.
       # CARGO_TARGET_DIR keeps the instrumented tree where the hot cache
