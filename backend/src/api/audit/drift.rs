@@ -1420,6 +1420,13 @@ pub(crate) async fn run_partial_pipeline(
                             analysis_step.target_file,
                             &chrono::Utc::now().format("%Y-%m-%d").to_string(),
                         );
+                        // KT-1364 — Full parity: an outcome and its evidence merged
+                        // in one cell is split here, not sent back once per row.
+                        if super::validation::repair_coverage_rows(
+                            &project_path, analysis_step.target_file,
+                        ) {
+                            tracing::info!("Partial audit step {step} ({file_label}): split merged coverage matrix rows");
+                        }
                     }
                     let (mut success, validation_warning) =
                         super::validation::validate_step_output(
