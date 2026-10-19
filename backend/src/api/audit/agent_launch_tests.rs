@@ -2287,6 +2287,7 @@ async fn latest_run(state: &AppState) -> crate::models::AuditRun {
 /// KT-1318 — a full audit writes a lot of files and builds: below the
 /// configured free space it is refused before anything is recorded or written,
 /// with the number and the setting named.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_full_audit_under_disk_pressure_is_refused_before_it_creates_anything() {
     use axum::response::IntoResponse;
