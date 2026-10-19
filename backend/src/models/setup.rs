@@ -769,6 +769,10 @@ pub struct ModelTierConfig {
     pub default: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
+    /// KT-1366 — the model Decision steps call (a decision model, not a chat
+    /// model). Not a tier: no `ModelTier` resolves to it. Only Ollama sets it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<String>,
     /// KT-646 — optional reasoning-effort preset for the `economy` slot.
     /// `None` means "pass no effort flag, the runtime's own CLI default
     /// applies" — never a silently assigned `high`/`max`. Only consumed for

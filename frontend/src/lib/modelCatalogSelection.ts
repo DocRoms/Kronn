@@ -107,16 +107,21 @@ export function hasDecisionModel(snapshot: ModelCatalogSnapshot | null | undefin
   return Boolean(snapshot?.targets.some(target => target.models.some(model => isDecisionCapable(model.capabilities))));
 }
 
+/** Options for a model picker. `chat` (the tiers) lists chat models;
+ *  `decision` (the Decision slot) lists decision models only. */
 export function catalogModelOptions(
   target: ModelCatalogView | undefined,
   configured: string,
   t: (key: string, ...args: (string | number)[]) => string,
   observedCost: (model: string) => string,
+  kind: 'chat' | 'decision' = 'chat',
 ): SearchableSelectOption[] {
   const listed = (target?.models ?? [])
     .filter(model => model.runtime_target_id === target?.runtime_target_id);
+  const fits = (capabilities: readonly string[]) =>
+    kind === 'chat' ? isChatCapable(capabilities) : isDecisionCapable(capabilities);
   const options = listed
-    .filter(model => isChatCapable(model.capabilities))
+    .filter(model => fits(model.capabilities))
     .map(model => {
       const unavailable = model.availability === 'unavailable';
       const provenance = catalogModelProvenance(model, target);
@@ -150,7 +155,8 @@ export function catalogModelOptions(
         disabled: unavailable,
       };
     });
-  const nonChat = configured ? listed.find(model => model.model_id === configured && !isChatCapable(model.capabilities)) : undefined;
+  const nonChat = kind === 'chat' && configured
+    ? listed.find(model => model.model_id === configured && !isChatCapable(model.capabilities)) : undefined;
   if (nonChat) {
     // Keep a saved choice visible so the user sees why it cannot run.
     options.push({

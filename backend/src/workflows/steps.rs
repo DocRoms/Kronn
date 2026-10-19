@@ -2464,6 +2464,7 @@ mod tests {
                 updated_at: now,
                 image_model: None,
                 video_model: None,
+                decision_model: None,
                 media_endpoint: None,
             }
         }
@@ -2512,6 +2513,7 @@ mod tests {
             updated_at: now,
             image_model: None,
             video_model: None,
+            decision_model: None,
             media_endpoint: None,
         }
     }
@@ -3394,6 +3396,7 @@ mod http_native_tool_step_tests {
             updated_at: now,
             image_model: None,
             video_model: None,
+            decision_model: None,
             media_endpoint: None,
         }
     }

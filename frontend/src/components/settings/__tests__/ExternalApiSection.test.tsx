@@ -105,6 +105,7 @@ beforeEach(() => {
       { id: 'model-b', display_name: 'Model B', capabilities: ['chat'] },
       { id: 'image-a', display_name: 'Image A', capabilities: ['image'] },
       { id: 'video-a', display_name: 'Video A', capabilities: ['video'] },
+      { id: 'clef-flash', display_name: 'Clef Flash', capabilities: ['decision'] },
     ],
     hint: null,
   });
@@ -415,6 +416,7 @@ describe('ExternalApiSection', () => {
       // an advanced override the form does not expose, so it is not sent.
       image_model: null,
       video_model: null,
+      decision_model: null,
       api_key: 'sk-together',
     });
     // The list is reloaded after a successful create.
@@ -748,6 +750,24 @@ describe('ExternalApiSection', () => {
     expect((screen.getByTestId('ext-api-media-video') as HTMLInputElement).value).toBe('Video A');
     fireEvent.focus(screen.getByTestId('ext-api-media-image'));
     expect(screen.queryByRole('option', { name: 'model-a' })).toBeNull();
+  });
+
+  // KT-1366 — the Decision slot is picked like image and video: only models
+  // the catalogue tags `decision`, and never a chat model.
+  it('offers only decision models in the Decision slot', async () => {
+    renderSection();
+    fireEvent.click(await screen.findByTestId('ext-api-add-connection'));
+    fireEvent.click(screen.getByTestId('ext-api-test'));
+    const decision = screen.getByTestId('ext-api-media-decision') as HTMLInputElement;
+    await waitFor(() => expect(decision).not.toBeDisabled());
+    fireEvent.focus(decision);
+    fireEvent.change(decision, { target: { value: 'Clef' } });
+    fireEvent.click(screen.getByRole('option', { name: 'Clef Flash' }));
+    expect((screen.getByTestId('ext-api-media-decision') as HTMLInputElement).value).toBe('Clef Flash');
+    fireEvent.focus(screen.getByTestId('ext-api-media-decision'));
+    fireEvent.change(screen.getByTestId('ext-api-media-decision'), { target: { value: '' } });
+    expect(screen.queryByRole('option', { name: 'model-a' })).toBeNull();
+    expect(screen.queryByRole('option', { name: 'Image A' })).toBeNull();
   });
 
   it('keeps a saved but undetected media model visible as unavailable', async () => {

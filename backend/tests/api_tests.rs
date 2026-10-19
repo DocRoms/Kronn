@@ -13102,6 +13102,7 @@ async fn external_api_test_state(endpoint: String) -> AppState {
         updated_at: chrono::Utc::now(),
         image_model: None,
         video_model: None,
+        decision_model: None,
         media_endpoint: None,
     };
     let insert = connection.clone();
@@ -13160,6 +13161,7 @@ async fn external_api_nvidia_update_refreshes_the_models_used_by_global_selector
         updated_at: chrono::Utc::now(),
         image_model: None,
         video_model: None,
+        decision_model: None,
         media_endpoint: None,
     };
     state
@@ -14164,6 +14166,7 @@ async fn litellm_saved_connection_state(endpoint: String) -> AppState {
         updated_at: chrono::Utc::now(),
         image_model: None,
         video_model: None,
+        decision_model: None,
         media_endpoint: None,
     };
     let insert = connection.clone();
@@ -26447,7 +26450,8 @@ async fn media_model_slots_round_trip_through_the_connection_api() {
             "origin_preset": "open_router",
             "api_key": "sk-or-v1-testkeyforintegrationtests",
             "image_model": "meta/muse-image",
-            "video_model": "bytedance/seedance-2.0-mini"
+            "video_model": "bytedance/seedance-2.0-mini",
+            "decision_model": "clef-flash"
         }),
     )
     .await;
@@ -26461,6 +26465,7 @@ async fn media_model_slots_round_trip_through_the_connection_api() {
         .expect("connection listed");
     assert_eq!(mine["image_model"], "meta/muse-image");
     assert_eq!(mine["video_model"], "bytedance/seedance-2.0-mini");
+    assert_eq!(mine["decision_model"], "clef-flash");
 }
 
 #[tokio::test]

@@ -194,30 +194,34 @@ describe('OllamaCard shared catalogue and safe persistence (KT-531)', () => {
   });
 });
 
-// KT-1366 — decision models are shown as their own kind on the card and are
-// never offered in the chat tier pickers.
-describe('OllamaCard decision models (KT-1366)', () => {
-  const installed = (name: string, capabilities: string[]) => ({
-    name, size: '12 GB', modified: checkedAt, advertised_context: 8192,
-    context_ceiling: 8192, context_override: null, context_origin: 'model_window', capabilities,
+// KT-1366 — the Decision slot is a picker like the tiers: it lists only
+// decision models and saves the choice; the tiers never offer them.
+describe('OllamaCard Decision slot (KT-1366)', () => {
+  const decisionCatalogue = () => snapshot(target([
+    model('current'),
+    model('clef-flash:9b', { capabilities: ['decision', 'vision'] }),
+    model('jev:2b', { capabilities: ['decision'] }),
+  ]));
+
+  it('lists only decision models and saves the chosen one', async () => {
+    list.mockResolvedValue(decisionCatalogue());
+    await show();
+    const slot = screen.getByLabelText('ollama.decisionSlot') as HTMLInputElement;
+    fireEvent.focus(slot);
+    expect(await screen.findByRole('option', { name: 'clef-flash:9b' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'jev:2b' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'current' })).not.toBeInTheDocument();
+    await act(async () => { fireEvent.click(screen.getByRole('option', { name: 'jev:2b' })); });
+    await waitFor(() => expect(setTiers).toHaveBeenCalledWith(expect.objectContaining({
+      ollama: expect.objectContaining({ decision: 'jev:2b', default: 'current' }),
+    })));
   });
 
-  it('lists an installed decision model apart and keeps it out of the tier picker', async () => {
-    models.mockResolvedValue({ models: [installed('current', ['chat']), installed('clef-flash:9b', ['decision', 'vision'])] });
-    list.mockResolvedValue(snapshot(target([model('current'), model('clef-flash:9b', { capabilities: ['decision', 'vision'] })])));
+  it('keeps decision models out of the tier pickers', async () => {
+    list.mockResolvedValue(decisionCatalogue());
     const input = await show();
-    const section = await screen.findByRole('region', { name: 'ollama.decisionTitle' });
-    expect(section).toHaveTextContent('clef-flash:9b');
-    expect(section).toHaveTextContent('ollama.decisionHint');
-    expect(section).not.toHaveTextContent('ollama.decisionEmpty');
     fireEvent.focus(input);
     fireEvent.change(input, { target: { value: 'clef' } });
     await waitFor(() => expect(screen.queryByRole('option', { name: /clef-flash/ })).not.toBeInTheDocument());
-  });
-
-  it('says no decision model is installed when none declares the capability', async () => {
-    await show();
-    const section = await screen.findByRole('region', { name: 'ollama.decisionTitle' });
-    expect(section).toHaveTextContent('ollama.decisionEmpty');
   });
 });
