@@ -108,7 +108,7 @@ pub fn is_secret_path(path: &Path) -> bool {
     let mut hops = 0;
     while let Some(step) = pending.pop_front() {
         match step {
-            Step::Root(root) => walked = PathBuf::from(root),
+            Step::Prefix(_) | Step::RootDir(_) => walked = reroot(walked, &step),
             Step::Up => {
                 walked.pop();
             }
@@ -142,16 +142,33 @@ const MAX_LINK_HOPS: usize = 40;
 
 /// One step of the walk [`is_secret_path`] makes.
 enum Step {
-    Root(OsString),
+    /// A Windows drive or UNC share (`D:`, `\\host\share`); never produced on Unix.
+    Prefix(OsString),
+    /// The root separator, which follows the prefix on Windows.
+    RootDir(OsString),
     Up,
     Name(OsString),
 }
 
+/// Where the walk stands after a root step. A prefix starts over; the root
+/// separator keeps the drive or share the walk is on (`D:` + `\` is `D:\`, not
+/// `\`), which `PathBuf::push` does for a prefix-less root.
+fn reroot(walked: PathBuf, step: &Step) -> PathBuf {
+    match step {
+        Step::Prefix(prefix) => PathBuf::from(prefix),
+        Step::RootDir(root) => {
+            let mut rooted = walked;
+            rooted.push(root);
+            rooted
+        }
+        Step::Up | Step::Name(_) => walked,
+    }
+}
+
 fn steps(path: &Path) -> impl Iterator<Item = Step> + '_ {
     path.components().filter_map(|component| match component {
-        Component::Prefix(_) | Component::RootDir => {
-            Some(Step::Root(component.as_os_str().to_os_string()))
-        }
+        Component::Prefix(_) => Some(Step::Prefix(component.as_os_str().to_os_string())),
+        Component::RootDir => Some(Step::RootDir(component.as_os_str().to_os_string())),
         Component::CurDir => None,
         Component::ParentDir => Some(Step::Up),
         Component::Normal(name) => Some(Step::Name(name.to_os_string())),
@@ -418,6 +435,59 @@ mod tests {
         assert!(is_secret_path(&root.join("loop-a/x")));
         assert!(!is_secret_path(&root.join("docs-view/notes.txt")));
         assert!(!is_secret_path(&root.join("plain/notes.txt")));
+    }
+
+    /// The walk's starting point for `path`: its root steps composed in order.
+    fn walked_root(path: &Path) -> PathBuf {
+        steps(path)
+            .filter(|step| matches!(step, Step::Prefix(_) | Step::RootDir(_)))
+            .fold(PathBuf::new(), |walked, step| reroot(walked, &step))
+    }
+
+    #[test]
+    fn a_root_step_replaces_a_relative_walk_and_a_prefix_starts_over() {
+        let rooted = reroot(
+            PathBuf::from("repo/keys"),
+            &Step::RootDir(OsString::from(std::path::MAIN_SEPARATOR_STR)),
+        );
+        assert_eq!(rooted, PathBuf::from(std::path::MAIN_SEPARATOR_STR));
+        let restarted = reroot(
+            PathBuf::from("repo/keys"),
+            &Step::Prefix(OsString::from("D:")),
+        );
+        assert_eq!(restarted, PathBuf::from("D:"));
+        let kept = reroot(PathBuf::from("repo"), &Step::Up);
+        assert_eq!(kept, PathBuf::from("repo"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_unix_absolute_path_walks_from_the_root() {
+        assert_eq!(walked_root(Path::new("/repo/keys/key")), PathBuf::from("/"));
+        assert_eq!(walked_root(Path::new("repo/keys/key")), PathBuf::new());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_drive_or_share_survives_the_root_dir() {
+        assert_eq!(
+            walked_root(Path::new(r"D:\repo\keys\key")),
+            PathBuf::from(r"D:\")
+        );
+        assert_eq!(
+            walked_root(Path::new(r"\\host\share\repo\key")),
+            PathBuf::from(r"\\host\share\")
+        );
+        assert_eq!(
+            walked_root(Path::new(r"\\?\D:\repo\key")),
+            PathBuf::from(r"\\?\D:\")
+        );
+        // A link target rooted without a drive keeps the drive the walk is on.
+        let on_d = reroot(
+            PathBuf::from(r"D:\repo\keys"),
+            &Step::RootDir(OsString::from(r"\")),
+        );
+        assert_eq!(on_d, PathBuf::from(r"D:\"));
     }
 
     #[test]
