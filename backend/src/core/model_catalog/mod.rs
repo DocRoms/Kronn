@@ -1990,7 +1990,10 @@ mod tests {
                 .map(|entry| entry.capabilities.clone())
                 .unwrap_or_else(|| panic!("{model} is catalogued"))
         };
-        assert_eq!(capabilities_of(&view, "clef-flash:9b"), vec!["decision", "vision"]);
+        assert_eq!(
+            capabilities_of(&view, "clef-flash:9b"),
+            vec!["decision", "vision"]
+        );
         assert_eq!(capabilities_of(&view, "qwen3:8b"), vec!["chat"]);
 
         let refused = preflight_check(
@@ -2021,7 +2024,10 @@ mod tests {
             mock_ollama_catalog(&["clef-flash:9b", "qwen3:8b"], HashMap::new(), true).await;
         let (view, _) = refresh_ollama_catalog_at(&db, &failing).await.unwrap();
         server.abort();
-        assert_eq!(capabilities_of(&view, "clef-flash:9b"), vec!["decision", "vision"]);
+        assert_eq!(
+            capabilities_of(&view, "clef-flash:9b"),
+            vec!["decision", "vision"]
+        );
         assert_eq!(capabilities_of(&view, "qwen3:8b"), vec!["chat"]);
     }
 

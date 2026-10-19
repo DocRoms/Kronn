@@ -219,7 +219,10 @@ mod tests {
             ("clef-flash:9b".to_string(), words(&["decision", "vision"])),
             ("odd:1b".to_string(), Vec::new()),
         ]);
-        let models = discovered_models(&[tag("clef-flash:9b"), tag("qwen3:8b"), tag("odd:1b")], &known);
+        let models = discovered_models(
+            &[tag("clef-flash:9b"), tag("qwen3:8b"), tag("odd:1b")],
+            &known,
+        );
         assert_eq!(models[0].capabilities, words(&["decision", "vision"]));
         assert_eq!(models[1].capabilities, words(&["chat"]));
         assert_eq!(models[2].capabilities, words(&["chat"]));

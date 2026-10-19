@@ -65,7 +65,7 @@ does not make a hidden hard-coded fallback reappear.
 [src: file: backend/src/api/external_api_connections.rs:1338-1350#catalog_declares_modality]
 [src: file: backend/src/api/external_api_connections.rs:1352-1405#catalog_models_from_body]
 [src: file: backend/src/api/external_api_connections.rs:1407-1422#merge_catalog]
-[src: file: backend/src/core/model_catalog/mod.rs:657-672#reconcile_http_catalog]
+[src: file: backend/src/core/model_catalog/mod.rs:705-720#reconcile_http_catalog]
 
 ## Where OpenCode's models come from (KT-928)
 
@@ -95,7 +95,7 @@ a project's own config — typically a local Ollama — was offered to every run
 that project and appeared in no selector. This, not a filter or a cache, is why
 models were missing: the Config UI applies no filter to what the catalogue
 holds (`catalogModelOptions`).
-[src: file: frontend/src/lib/modelCatalogSelection.ts:95-146#catalogModelOptions]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:110-173#catalogModelOptions]
 
 OpenCode discovery now runs in two kinds of directory at once, inside the
 single 20 s discovery bound: the neutral one, and every registered project that
@@ -147,7 +147,7 @@ model still recorded `Available`. The cached provenance and error remain visible
 this is permission to attempt execution, not proof of account access. Missing CLI,
 authentication failures and unavailable/unknown identities are not covered by
 that exception, and other runtimes keep their existing failure policy.
-[src: file: backend/src/core/model_catalog/mod.rs:1083-1114#retained_claude_model]
+[src: file: backend/src/core/model_catalog/mod.rs:1131-1162#retained_claude_model]
 [src: file: backend/src/api/discussions/streaming.rs:4150-4196#preflight_resolve]
 [src: file: backend/src/workflows/runner.rs:1884-1969#preflight_resolve]
 [src: file: backend/src/workflows/steps.rs:1174-1227#preflight_workflow_launch]
@@ -217,8 +217,8 @@ adapter supports thread resume. Claude supports resume on both routes. Effort
 is transmitted on every supported fresh/resumed invocation; this feature does
 not add resume to the direct Codex runner. Delegated task workers take the
 same route as ordinary turns, with their isolated worker arguments.
-[src: file: backend/src/agents/runner.rs:12885-12902#reasoning_effort]
-[src: file: backend/src/agents/runner.rs:12955-12986#model_reasoning_effort]
+[src: file: backend/src/agents/runner.rs:12902-12919#reasoning_effort]
+[src: file: backend/src/agents/runner.rs:12972-13003#model_reasoning_effort]
 [src: file: backend/src/acp/claude_adapter.rs:311-324#reasoning_effort]
 [src: file: backend/src/acp/codex_adapter.rs:462-501#model_reasoning_effort]
 [src: file: backend/src/agents/runner.rs:4863-4891#adapter_task_worker_args]

@@ -70,7 +70,7 @@ Three Docker services behind nginx gateway:
   content is withheld even when tags are split across chunks or never closed;
   once visible answer content starts, identically named literal tags are
   preserved. The same final sanitizer runs on persisted discussion output.
-  [src: file: backend/src/agents/runner.rs:8252-8362#LeadingThinkingFilter]
+  [src: file: backend/src/agents/runner.rs:8269-8379#LeadingThinkingFilter]
   [src: file: backend/src/api/discussions/streaming.rs:5333-5334#strip_leading_thinking_blocks]
 
 ### Discussions

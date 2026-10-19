@@ -743,10 +743,15 @@ mod tests {
         let message = classify_pull_error(
             "{\"error\":\"pull model manifest: 412: \\nThe model you are attempting to pull requires a newer version of Ollama.\\nPlease download the latest version at:\\n\\thttps://ollama.com/download\"}",
         );
-        assert!(message.contains("needs a newer version of Ollama"), "{message}");
+        assert!(
+            message.contains("needs a newer version of Ollama"),
+            "{message}"
+        );
         assert!(message.contains("Update Ollama"), "{message}");
-        assert!(classify_pull_error("pull model manifest: file does not exist")
-            .starts_with("Ollama could not download the model"));
+        assert!(
+            classify_pull_error("pull model manifest: file does not exist")
+                .starts_with("Ollama could not download the model")
+        );
     }
 
     #[test]

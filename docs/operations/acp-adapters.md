@@ -50,7 +50,7 @@ the permissive container marker from workers.
 [src: file: backend/src/agents/runner.rs:4863-4891#adapter_task_worker_args]
 [src: file: backend/src/agents/runner.rs:3740-3758#task_worker_route_policy]
 [src: file: backend/src/agents/runner.rs:4322-4322#acp_resume_id]
-[src: file: backend/src/agents/runner.rs:13870-13880#CLAUDE_CODE_BUBBLEWRAP]
+[src: file: backend/src/agents/runner.rs:13887-13897#CLAUDE_CODE_BUBBLEWRAP]
 [src: file: backend/tests/adapter_worker_policy.rs:335-446#worker]
 
 Each adapter permits one active prompt at a time; sequential turns still resume
@@ -90,7 +90,7 @@ with a specific diagnostic; this does not disable ordinary Claude discussions
 or relax worker isolation. Workers run through WSL instead; the boundary
 (`WSLENV`, translated paths, backend URL in NAT mode, native ACP refusal) is in
 [`windows-wsl-agents.md`](windows-wsl-agents.md).
-[src: file: backend/src/agents/runner.rs:12431-12439#claude_task_worker_platform_check]
+[src: file: backend/src/agents/runner.rs:12448-12456#claude_task_worker_platform_check]
 [Claude sandbox platform support](https://code.claude.com/docs/en/sandboxing)
 
 After replacing a frozen bridge, reconnect the MCP session. Frozen and Windows
