@@ -419,19 +419,31 @@ pub fn clone_tree(source: &Path, destination: &Path) -> io::Result<()> {
 /// rather than copying, which is exactly the fallback this needs).
 #[cfg(all(unix, not(target_os = "macos")))]
 pub fn clone_tree(source: &Path, destination: &Path) -> io::Result<()> {
-    let output = crate::core::cmd::sync_cmd("cp", crate::core::child_env::ChildRoute::Tool)
+    cp_reflink_tree(std::ffi::OsStr::new("cp"), source, destination)
+}
+
+/// [`clone_tree`] through the `cp` at `cp` (a test gives a stand-in).
+#[cfg(any(all(unix, not(target_os = "macos")), all(unix, test)))]
+fn cp_reflink_tree(cp: &std::ffi::OsStr, source: &Path, destination: &Path) -> io::Result<()> {
+    // Like `clonefile(2)`: `cp` would copy into an existing directory.
+    if destination.symlink_metadata().is_ok() {
+        return Err(io::Error::from(io::ErrorKind::AlreadyExists));
+    }
+    let output = crate::core::cmd::sync_cmd(cp, crate::core::child_env::ChildRoute::Tool)
         .args(["-a", "--reflink=always", "--"])
         .arg(source)
         .arg(destination)
         .output()?;
     if output.status.success() {
-        Ok(())
-    } else {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        ))
+        return Ok(());
     }
+    // `cp` creates the directories before its first reflink fails: a failed
+    // clone must leave nothing, as `clonefile(2)` does.
+    let _ = std::fs::remove_dir_all(destination);
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        String::from_utf8_lossy(&output.stderr).trim().to_string(),
+    ))
 }
 
 #[cfg(not(unix))]
