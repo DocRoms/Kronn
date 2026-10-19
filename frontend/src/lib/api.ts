@@ -1,6 +1,7 @@
 import type { AcceptAuditStepResponse, ArtifactBundle, AuditLatest, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditRunCost, AuditStepInfo, AuditRecentActivity, AuditTokenBreakdown, EmbedOriginsChange } from '../types/generated';
 import type { BriefingDetectedDoc, BriefingDocsAnswers, BriefingProjectAnswers, BriefingProjectRules, CrossAuditEstimate, LinkedRepoDocStatus, SavedBriefing } from '../types/generated';
 import type { WorkerConnectivity } from '../types/generated';
+import type { ComfyUiConfig, ComfyUiStatus, SetComfyUiSlotsRequest } from '../types/generated';
 import type {
   DecideScopeRequest, DiscussionProjectGrant, DiscussionScope, GrantDiscussionProjectRequest,
   RevokeDiscussionProjectRequest, RevokeWorkflowScopeRequest, SetWorkflowScopeRequest, WorkflowScope,
@@ -3386,6 +3387,12 @@ export const usage = {
 };
 
 // ─── Ollama (local LLM) ────────────────────────────────────────────────────
+
+/** KT-1381 — local ComfyUI as a media source (Settings card). */
+export const comfyui = {
+  status: () => api<ComfyUiStatus>('GET', '/comfyui/status'),
+  setSlots: (body: SetComfyUiSlotsRequest) => api<ComfyUiConfig>('PUT', '/comfyui/slots', body),
+};
 
 export const ollama = {
   health: () => api<OllamaHealthResponse>('GET', '/ollama/health'),

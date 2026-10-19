@@ -5,6 +5,7 @@ import { userError } from '../../lib/userError';
 import { useAsyncGuard } from '../../hooks/useAsyncGuard';
 import { useIsMobile } from '../../hooks/useMediaQuery';
 import { OllamaCard } from './OllamaCard';
+import { ComfyUiCard } from './ComfyUiCard';
 import { ExternalApiSection } from './ExternalApiSection';
 import { ModelCatalogSection } from './ModelCatalogSection';
 import { CompressionSection } from './CompressionSection';
@@ -1782,6 +1783,10 @@ export function AgentsSection({
                 />
               </div>
             ))}
+            {/* KT-1381 — local images and videos, next to the local chat models. */}
+            <div className="set-agent-row set-agent-row-ollama" data-agent-type="ComfyUI">
+              <ComfyUiCard t={t} />
+            </div>
           </div>
         </section>
 
