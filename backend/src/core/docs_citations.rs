@@ -845,6 +845,26 @@ mod tests {
         assert!(reasons("[src: file: settings-data:2]", root).is_empty());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn chain_directory_component_keeps_secret_names() {
+        let tmp = repo();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("vault")).unwrap();
+        std::fs::write(root.join("vault/review-key"), "k1\nk2\nk3\n").unwrap();
+        std::os::unix::fs::symlink("vault", root.join(".ssh")).unwrap();
+        std::os::unix::fs::symlink(".ssh", root.join("keys")).unwrap();
+        for cite in [
+            "keys/review-key:2",
+            "keys/review-key:1-3",
+            "keys/review-key:1-3#PRIVATE",
+        ] {
+            let found = reasons(&format!("[src: file: {cite}]"), root);
+            assert_eq!(found.len(), 1, "{cite}: {found:?}");
+            assert!(found[0].contains("path:exists"), "{cite}: {found:?}");
+        }
+    }
+
     #[test]
     fn resolving_citations_pass() {
         let tmp = repo();

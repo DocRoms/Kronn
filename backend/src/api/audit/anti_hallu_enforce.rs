@@ -476,6 +476,39 @@ mod tests {
         assert!(verdict.is_clean(), "{:?}", verdict.fabricated);
     }
 
+    /// `.ssh -> vault`, `keys -> .ssh`: the canonical `vault/review-key` has lost the
+    /// `.ssh` name the chain passed through.
+    #[cfg(unix)]
+    #[test]
+    fn chain_directory_component_keeps_secret_names() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("vault")).unwrap();
+        fs::write(dir.path().join("vault/review-key"), "k1\nk2\nk3\n").unwrap();
+        std::os::unix::fs::symlink("vault", dir.path().join(".ssh")).unwrap();
+        std::os::unix::fs::symlink(".ssh", dir.path().join("keys")).unwrap();
+        for cite in [
+            "[src: file: keys/review-key:2]",
+            "[src: file: keys/review-key:1-3]",
+            "[src: file: keys/review-key:1-3#PRIVATE]",
+            "[src: code-comment: keys/review-key:2]",
+        ] {
+            let verdict = lint_step_file(&format!("Claim {cite}."), &[dir.path()]);
+            assert_eq!(
+                verdict.fabricated.len(),
+                1,
+                "{cite}: {:?}",
+                verdict.fabricated
+            );
+            let check = anti_halluc::verify_source_marker(
+                cite.trim_start_matches("[src: ").trim_end_matches(']'),
+                Some(dir.path()),
+            );
+            assert!(check.status.is_fabricated(), "{cite}: {check:?}");
+        }
+        let verdict = lint_step_file("Claim [src: file: keys/review-key:exists].", &[dir.path()]);
+        assert!(verdict.is_clean(), "{:?}", verdict.fabricated);
+    }
+
     #[test]
     fn a_line_of_a_secret_file_is_fabricated_whatever_the_form() {
         let dir = secret_repo();

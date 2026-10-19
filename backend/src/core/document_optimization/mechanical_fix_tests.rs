@@ -119,6 +119,29 @@ fn a_symlink_to_a_secret_file_gets_its_presence_form() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn a_directory_link_chain_to_a_secret_gets_its_presence_form() {
+    // `keys -> .aws -> vault`: the canonical file `vault/review-key` lost `.aws`.
+    let dir = project();
+    let root = dir.path();
+    write(root, "vault/review-key", "k1\nk2\nk3\n");
+    std::os::unix::fs::symlink("vault", root.join(".aws")).unwrap();
+    std::os::unix::fs::symlink(".aws", root.join("keys")).unwrap();
+    let doc = "docs/tech-debt/TD-20261019-ssh-private-key-tracked.md";
+    let fixed = repair(
+        root,
+        doc,
+        "Key [src: file: keys/review-key:2] is tracked.\n",
+    )
+    .unwrap();
+    assert_eq!(
+        fixed.content,
+        "Key [src: file: keys/review-key:exists] is tracked.\n"
+    );
+    assert_eq!(fixed.fixes[0].kind, "secret_presence");
+}
+
 #[test]
 fn a_tech_debt_sheet_cited_bare_is_a_presence_citation() {
     // Africanews steps 8 and 10: the index cites the sheets by bare path.

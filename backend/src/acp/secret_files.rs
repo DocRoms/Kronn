@@ -14,7 +14,9 @@
 //!   asks about a `read` WITHOUT its path — the broker sees "a read" and nothing
 //!   else, so the decision has to be made inside OpenCode, by pattern.
 
-use std::path::{Component, Path};
+use std::collections::VecDeque;
+use std::ffi::OsString;
+use std::path::{Component, Path, PathBuf};
 
 /// Suffixes that make an environment file a template.
 pub(super) const TEMPLATE_SUFFIXES: [&str; 4] = ["dist", "example", "sample", "template"];
@@ -86,35 +88,75 @@ pub fn is_secret_file(path: &Path) -> bool {
 }
 
 /// [`is_secret_file`] for a path a reader is about to FOLLOW: the written path, or
-/// the file it resolves to once symlinks are followed. A link `key-view.txt ->
-/// .ssh/review-key` is as secret as its target; a directory link (`keys -> .ssh`)
-/// is caught by the resolved components. A path that does not resolve (missing,
-/// dangling) has nothing to read and is judged by its written name alone.
+/// anything it passes through once symlinks are followed. A link `key-view.txt ->
+/// .ssh/review-key` is as secret as its target. A path that does not resolve
+/// (missing, dangling) has nothing to read and is judged by the names it walks.
 ///
-/// Both directions of a link count: `.env -> settings-data` is secret by its
-/// written name although its target is ordinary, and so is every name a chain of
-/// links passes through (`view.txt -> .env -> settings-data`).
+/// Every name counts, at every level: the walk goes component by component and
+/// name-checks each prefix as the OS would reach it, following each link (file or
+/// directory) it meets. `.env -> settings-data` is secret by its written name
+/// although its target is ordinary; `view.txt -> .env -> settings-data` by the name
+/// in the middle of the chain; `keys/review-key` with `keys -> .ssh -> vault` by
+/// the `.ssh` the directory chain passes through, although the canonical path
+/// (`vault/review-key`) no longer says so.
 pub fn is_secret_path(path: &Path) -> bool {
-    let mut current = path.to_path_buf();
-    for _ in 0..MAX_LINK_HOPS {
-        if is_secret_file(&current) {
-            return true;
+    if is_secret_file(path) {
+        return true;
+    }
+    let mut pending: VecDeque<Step> = steps(path).collect();
+    let mut walked = PathBuf::new();
+    let mut hops = 0;
+    while let Some(step) = pending.pop_front() {
+        match step {
+            Step::Root(root) => walked = PathBuf::from(root),
+            Step::Up => {
+                walked.pop();
+            }
+            Step::Name(name) => {
+                walked.push(name);
+                if is_secret_file(&walked) {
+                    return true;
+                }
+                let Ok(target) = std::fs::read_link(&walked) else {
+                    continue;
+                };
+                hops += 1;
+                if hops > MAX_LINK_HOPS {
+                    // A loop, or a chain too deep to trust: refuse to read it.
+                    return true;
+                }
+                walked.pop();
+                for step in steps(&target).collect::<Vec<_>>().into_iter().rev() {
+                    pending.push_front(step);
+                }
+            }
         }
-        let Ok(target) = std::fs::read_link(&current) else {
-            break;
-        };
-        current = match current.parent() {
-            Some(parent) => parent.join(target),
-            None => target,
-        };
     }
     std::fs::canonicalize(path)
         .ok()
         .is_some_and(|resolved| is_secret_file(&resolved))
 }
 
-/// Cap on the links followed to name-check a chain (loops included).
+/// Cap on the links followed to name-check a path (loops included).
 const MAX_LINK_HOPS: usize = 40;
+
+/// One step of the walk [`is_secret_path`] makes.
+enum Step {
+    Root(OsString),
+    Up,
+    Name(OsString),
+}
+
+fn steps(path: &Path) -> impl Iterator<Item = Step> + '_ {
+    path.components().filter_map(|component| match component {
+        Component::Prefix(_) | Component::RootDir => {
+            Some(Step::Root(component.as_os_str().to_os_string()))
+        }
+        Component::CurDir => None,
+        Component::ParentDir => Some(Step::Up),
+        Component::Normal(name) => Some(Step::Name(name.to_os_string())),
+    })
+}
 
 /// Files Kronn itself writes that hold the encryption key, credentials or
 /// decrypted MCP environments.
@@ -348,6 +390,34 @@ mod tests {
         // A chain keeps the names it passes through.
         assert!(is_secret_path(&root.join("view.txt")));
         assert!(!is_secret_path(&root.join("settings-data")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn chain_directory_component_keeps_secret_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("vault")).unwrap();
+        std::fs::write(root.join("vault/review-key"), "synthetic\n").unwrap();
+        std::fs::create_dir_all(root.join("plain")).unwrap();
+        std::fs::write(root.join("plain/notes.txt"), "plain\n").unwrap();
+        std::os::unix::fs::symlink("vault", root.join(".ssh")).unwrap();
+        std::os::unix::fs::symlink(".ssh", root.join("keys")).unwrap();
+        std::os::unix::fs::symlink("keys", root.join("shortcut")).unwrap();
+        std::os::unix::fs::symlink("plain", root.join("docs-view")).unwrap();
+        std::os::unix::fs::symlink("../keys", root.join("plain/back")).unwrap();
+        std::os::unix::fs::symlink("loop-b", root.join("loop-a")).unwrap();
+        std::os::unix::fs::symlink("loop-a", root.join("loop-b")).unwrap();
+        // The canonical target has lost the `.ssh` name.
+        let canonical = std::fs::canonicalize(root.join("keys/review-key")).unwrap();
+        assert!(!is_secret_file(&canonical));
+        assert!(is_secret_path(&root.join("keys/review-key")));
+        assert!(is_secret_path(&root.join("shortcut/review-key")));
+        assert!(is_secret_path(&root.join("docs-view/back/review-key")));
+        assert!(is_secret_path(&root.join("plain/../keys/review-key")));
+        assert!(is_secret_path(&root.join("loop-a/x")));
+        assert!(!is_secret_path(&root.join("docs-view/notes.txt")));
+        assert!(!is_secret_path(&root.join("plain/notes.txt")));
     }
 
     #[test]
