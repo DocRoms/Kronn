@@ -108,15 +108,39 @@ fn rewrite_line(line: &str, replace: &mut impl FnMut(&str) -> Option<String>) ->
 /// the percent-decoded and the line-less form, judged by the names the path
 /// walks and every link it passes through (`is_secret_path`).
 fn names_secret(project: &Path, raw: &str) -> bool {
+    if prefixes_name_secret(project, raw) {
+        return true;
+    }
     raw.split(',').any(|piece| {
-        piece.split_whitespace().any(|word| {
-            let word = word.trim_matches(['`', '"', '\'', '(', ')', ';', '—', '–']);
-            let word = word.strip_prefix("file:").unwrap_or(word);
-            word_forms(word)
+        prefixes_name_secret(project, piece)
+            || piece.split_whitespace().any(|word| {
+                let word = word.trim_matches(['`', '"', '\'', '(', ')', ';', '—', '–']);
+                let word = word.strip_prefix("file:").unwrap_or(word);
+                word_forms(word)
+                    .iter()
+                    .any(|form| path_is_secret(project, form))
+            })
+    })
+}
+
+/// The whole cited path, spaces included, before any word-by-word scan: every
+/// prefix of the text that ends at a `:`, at a space or at its end is judged as
+/// a path (`docs/key view.txt` may be a link to a secret whose name has a space).
+fn prefixes_name_secret(project: &Path, text: &str) -> bool {
+    let text = text.trim();
+    let text = text.strip_prefix("file:").map(str::trim).unwrap_or(text);
+    let ends = text
+        .char_indices()
+        .filter(|(_, c)| *c == ':' || c.is_whitespace())
+        .map(|(index, _)| index)
+        .chain(std::iter::once(text.len()));
+    ends.map(|end| text[..end].trim())
+        .filter(|prefix| !prefix.is_empty())
+        .any(|prefix| {
+            word_forms(prefix)
                 .iter()
                 .any(|form| path_is_secret(project, form))
         })
-    })
 }
 
 /// What a word may stand for as a path: itself and without its line, then each

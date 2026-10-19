@@ -71,7 +71,10 @@ this degrades and continues.
   written, the percent-decoded (several rounds) and the line-less form, judged
   by `is_secret_path` on the project-relative path, so a link
   (`key-view.txt -> ../.ssh/key`) or a chain of links through a secret
-  directory (`keys -> .ssh -> vault`) is as secret as its target. One secret
+  directory (`keys -> .ssh -> vault`) is as secret as its target. The whole
+  cited path is judged before any word-by-word scan: every prefix of the marker
+  that ends at a `:`, a space or its end is resolved as a path, so a link whose
+  name holds a space (`key view.txt -> ../.ssh/key`) is caught too. One secret
   piece drops the whole marker, bundle remainder included. It is listed, in the
   `documentary_demoted` event, `step_warning` and the notes, only as the fixed
   placeholder `[src: file: <secret file>]`.

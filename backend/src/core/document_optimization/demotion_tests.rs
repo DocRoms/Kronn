@@ -148,6 +148,19 @@ fn a_marker_resolving_to_a_secret_through_a_link_is_removed_entirely() {
     assert_secret_marker_removed(&dir, "docs/key-view.txt:1 SYNTHETIC_COMMENT");
     assert_secret_marker_removed(&dir, "docs/key-view.txt");
 
+    // A name with a space is judged whole, not word by word.
+    std::os::unix::fs::symlink(
+        "../.ssh/synthetic-key",
+        dir.path().join("docs/key view.txt"),
+    )
+    .unwrap();
+    assert_secret_marker_removed(&dir, "docs/key view.txt:1 SYNTHETIC_COMMENT");
+    assert_secret_marker_removed(&dir, "docs/key view.txt");
+    assert_secret_marker_removed(&dir, "src/gone.rs:1, docs/key view.txt:1 SYNTHETIC_COMMENT");
+    let text = "A [src: file: docs/key view.txt:1 SYNTHETIC_COMMENT] B\n";
+    let scrubbed = scrub_secret_markers(dir.path(), text);
+    assert_eq!(scrubbed, "A [src: file: <secret file>] B\n");
+
     // `keys -> .ssh -> vault`: the canonical path no longer says `.ssh`.
     let dir = project();
     write(dir.path(), "vault/review-key", "SYNTHETIC_KEY_BODY\n");

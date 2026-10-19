@@ -19,6 +19,11 @@ fn write_monolog(project: &Path) {
 /// The project index (step 1) gets three prompts, its three attempts; the rest
 /// of the chain follows. The agent leaves `line` in the index on every attempt.
 fn arm_index_step(tools: &Path, project: &Path, line: &str) {
+    arm_index_step_with(tools, project, line, "");
+}
+
+/// As `arm_index_step`, the agent also runs `extra` (shell) before its edit.
+fn arm_index_step_with(tools: &Path, project: &Path, line: &str, extra: &str) {
     let chain = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full);
     let chain: Vec<&str> = chain.iter().map(|s| s.target_file).collect();
     assert_eq!(chain[0], AGENTS);
@@ -29,7 +34,7 @@ fn arm_index_step(tools: &Path, project: &Path, line: &str) {
     after_each_step(
         tools,
         &format!(
-            "{AGENTS}) grep -qF 'KT1370' '{p}' || printf '\\n<!-- KT1370 -->\\n%s\\n' '{line}' >> '{p}' ;;",
+            "{AGENTS}) {extra} grep -qF 'KT1370' '{p}' || printf '\\n<!-- KT1370 -->\\n%s\\n' '{line}' >> '{p}' ;;",
             p = index.display()
         ),
     );
@@ -184,18 +189,30 @@ async fn a_secret_marker_survives_nowhere_after_a_demotion() {
     std::fs::write(project.join(".env"), "TOKEN=hunter2\n").unwrap();
     // The comma turns the comment into a would-be path; the encoded name is an
     // alias of `.env`. Both are removed with the marker, never copied anywhere.
-    arm_index_step(
+    // A link whose NAME holds a space resolves to a secret too; the agent makes
+    // it (a link present before the run cannot be snapshotted).
+    std::fs::create_dir_all(project.join(".ssh")).unwrap();
+    std::fs::write(project.join(".ssh/synthetic-key"), "SYNTHETIC_KEY_BODY\n").unwrap();
+    let alias = format!(
+        "mkdir -p '{p}/refs'; ln -sfn ../.ssh/synthetic-key '{p}/refs/key view.txt';",
+        p = project.display()
+    );
+    arm_index_step_with(
         tools,
         project,
         "Set it [src: file: .env:1 safe_word, SYNTHETIC_COMMENT_7731] and \
-         [src: file: %2eenv:1 SYNTHETIC_COMMENT_7731] first.",
+         [src: file: %2eenv:1 SYNTHETIC_COMMENT_7731] and \
+         [src: file: refs/key view.txt:1 SYNTHETIC_COMMENT_7731] first.",
+        &alias,
     );
     let body = run_full(state, None).await;
-    let done = sse_events(&body, "done").pop().expect("terminal done");
+    let done = sse_events(&body, "done")
+        .pop()
+        .unwrap_or_else(|| panic!("no done: {body}"));
     validation_settled(state, &done).await;
 
     assert_eq!(done["status"], "complete", "{body}");
-    assert_eq!(done["unverified_references"], 2, "{done}");
+    assert_eq!(done["unverified_references"], 3, "{done}");
     let mut found = Vec::new();
     files_holding(project, "SYNTHETIC_COMMENT_7731", &mut found);
     assert!(
@@ -216,6 +233,7 @@ async fn a_secret_marker_survives_nowhere_after_a_demotion() {
     );
     assert!(!recorded.contains("SYNTHETIC_COMMENT_7731"), "{recorded}");
     assert!(!recorded.contains(".env"), "{recorded}");
+    assert!(!recorded.contains("key view"), "{recorded}");
     assert!(
         recorded.contains("[src: file: <secret file>]"),
         "{recorded}"
