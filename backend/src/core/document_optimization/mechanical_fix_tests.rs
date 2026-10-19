@@ -176,7 +176,6 @@ fn ambiguous_or_quoted_references_are_never_touched() {
         "[src: file: .ssh/vr-v2njs01-s — the tracked key]\n",
         "```md\n[src: file: .ssh/vr-v2njs01-s]\n[bad](docs/operations/)\n```\n",
         "Write `[src: file: .ssh/vr-v2njs01-s]` and `[x](docs/operations/)`.\n",
-        "[src: file: docs/operations:1]\n",
         "[src: file: invented.rs:1]\n",
     ] {
         assert!(repair(dir.path(), doc, text).is_none(), "{text}");
@@ -329,12 +328,12 @@ fn a_directory_cited_in_a_marker_is_named_in_backticks() {
     let fixed = repair(
         dir.path(),
         doc,
-        "Details live in [src: file: docs/tech-debt/] and [src: file: tests].\n",
+        "Details live in [src: file: docs/tech-debt/] and [src: file: tests]; see [src: file: tests:12].\n",
     )
     .unwrap();
     assert_eq!(
         fixed.content,
-        "Details live in `docs/tech-debt/` and `tests`.\n"
+        "Details live in `docs/tech-debt/` and `tests`; see `tests`.\n"
     );
     assert!(fixed.fixes.iter().all(|f| f.kind == "directory_backticks"));
     // Inside inline code it is a quoted example.
